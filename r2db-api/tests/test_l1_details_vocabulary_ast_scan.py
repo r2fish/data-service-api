@@ -45,7 +45,14 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 #: `postgres.py` is the backend storage layer UNDERNEATH the data-plane
 #: surface (`layer_rule`'s defence-in-depth exemption) -- included in
 #: the scan below via the allowlist, never silently skipped.
-SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py")
+#: R-37 WP-1e (2026-09-14): `inmemory_predicate.py` holds `_wildcard_
+#: pattern`, extracted from `structured.py` -- it carries the 1 `fail(
+#: "VALIDATION_FAILED", ...)` call site that function moved with (already
+#: 4-key, moved verbatim) and must stay in `SCANNED_MODULES` for the same
+#: reason `postgres_value_domain.py`/`request_limits.py` do on the
+#: MitateDB side (this was the exact gap the R-37 WP-1 fix closed: a leaf
+#: extracted without being added here).
+SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py")
 
 _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED"}
 
@@ -316,7 +323,7 @@ def test_every_choke_point_denial_carries_details_ast_full_count():
 def test_ast_full_count_matches_the_audit_site_count():
     """Non-空振り: the scan actually visits at least the 76 sites D-1
     counted (plus every VALIDATION_FAILED/IDENTIFIER_INVALID/
-    CAPABILITY_UNSUPPORTED site in these 4 files that already carried
+    CAPABILITY_UNSUPPORTED site in these 5 files that already carried
     `violated_declaration` before this rework -- the audit's own 76 was
     only the GAP count, not the total) -- a scanner that silently matched
     0 calls (e.g. because `fail` were imported under an alias, or the
@@ -327,8 +334,18 @@ def test_ast_full_count_matches_the_audit_site_count():
     R-8/M-8: re-pinned to the measured post-merge count (`limits.py`'s
     4 inline budget denials were folded into 1 `_budget_denied` helper by
     the R-5/R-6 pair-closing merge, `violated_declaration` preserved)."""
-    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py")}
-    assert counts == {"structured.py": 93, "service.py": 10, "limits.py": 5, "http.py": 8}, counts
+    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py")}
+    assert counts == {
+        # R-37 WP-1e (2026-09-14): -1 -- `_wildcard_pattern`'s own bare
+        # trailing-backslash `fail("VALIDATION_FAILED", ...)` site
+        # (already 4-key) moved verbatim to `inmemory_predicate.py`
+        # (93 -> 92); see that module's own count below.
+        "structured.py": 92, "service.py": 10, "limits.py": 5, "http.py": 8,
+        # R-37 WP-1e (2026-09-14): the 1 site `_wildcard_pattern` carried
+        # in `structured.py` before the move, unchanged in wording or
+        # `details=` shape.
+        "inmemory_predicate.py": 1,
+    }, counts
     assert sum(counts.values()) >= 76, counts
 
 
@@ -397,11 +414,13 @@ def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
     legitimately sit on this allowlist; it belongs at the choke-point/
     request-shape layer with the same 4-key `details` its sibling already
     carries (exactly what R-2 did for the 5 former allowlist entries this
-    left behind). This scans `structured.py`'s FULL fail-message
-    vocabulary (any code, not just the 3 in-scope ones -- see `_all_fail_
-    messages`), so a match against a `NOT_FOUND`/`CONFLICT` message would
-    be caught too."""
-    in_memory_messages = _all_fail_messages(SRC / "structured.py")
+    left behind). This scans `structured.py`'s and `inmemory_predicate.py`'s
+    (its extracted leaf, R-37 WP-1e) FULL fail-message vocabulary (any
+    code, not just the 3 in-scope ones -- see `_all_fail_messages`), so a
+    match against a `NOT_FOUND`/`CONFLICT` message would be caught too."""
+    in_memory_messages: set[str] = set()
+    for module in ("structured.py", "inmemory_predicate.py"):
+        in_memory_messages |= _all_fail_messages(SRC / module)
     shared = []
     for module, lineno in sorted(_BACKEND_LAYER_ALLOWLIST):
         message = _fail_message_at(SRC / module, lineno)

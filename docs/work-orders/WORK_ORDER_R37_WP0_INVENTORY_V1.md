@@ -313,6 +313,8 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 
 **監督裁定 (WP-1d コードレビュー)**: WP-1d は dict 分岐・循環検出を直接呼ぶテストに価値があるとして新規テスト 6 本を残した (facade 1、変異 2・3b・4・5a・5b の各 1)。C-2 の「新規 1 件」は WP-1d には適用されず、root の差は新規 6 件である。§5.6 の完了条件表・実測はこの前提で読む。
 
+**監督裁定 (WP-1e コードレビュー)**: §5.7 の完了条件 7 の予想 test id は float を経由せず赤にならないため、実装担当が新規テスト `test_matches_applies_float8out_formatting_to_a_typed_number_column` を足した。新規テストは合計 2 本 (facade 1、上記 1)。C-2 の「新規 1 件」は WP-1e には適用されず、root の差は新規 2 件である。§5.7 の完了条件表・実測はこの前提で読む。
+
 ### 5.6 WP-1d — MitateDB 要求の大きさと深さの検査 (CE2)
 
 **目的**: `cell.py` の `_measure_request_bytes` と `_check_operation_depth` を leaf `MitateDB-api/src/mitatedb_api/request_limits.py` へ移す。`_limit_gate` の呼出し順と facade は変えない。
@@ -403,6 +405,8 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | 17 | leaf に `from __future__ import annotations` がある (V-2) | `inmemory_predicate.py`: その行を消す | `r2db-api/tests/test_foundation.py` の収集エラー (`structured` の import 時に `_matches` の定義が NameError。Python 3.11) |
 | 18 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、MitateDB `src/` の同名 def 0 件 | — |
 | 19 | 既知の穴を記録する (V-2) | **監査照合**: 型検査 (pyflakes / ruff 等) を導入すると `Predicate` が未定義名 F821 になることが、完了時の実施記録に載っていること | — |
+
+**監督裁定 (WP-1e コードレビュー)**: 完了条件 7 の予想 test id `test_contains_and_matches_apply_to_typed_non_string_columns_via_text_form` は float を経由しないため赤にならない。実装担当が新規テスト `test_matches_applies_float8out_formatting_to_a_typed_number_column` を足し、これを赤の根拠とした。新規テストは合計 2 本 (facade 1、上記 1)。C-2 の「新規 1 件」は WP-1e には適用されず、root の差は新規 2 件である。本節の完了条件 1・7 の実測はこの前提で読む。
 
 - 共通の C-1〜C-3 (§5.5) を末尾に付ける。
 

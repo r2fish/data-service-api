@@ -4,8 +4,8 @@ This is a pure leaf: every function is a total, deterministic string
 transform of an already-typed Python value. It opens no connection, reads
 no catalog, and consults no request/limits/principal state; the choke
 points that decide *which* of these functions applies to a given column
-(`PostgresCell._text_expression`, `structured._predicate_text`) remain in
-their own modules.
+(`PostgresCell._text_expression`, `inmemory_predicate._predicate_text`)
+remain in their own modules.
 """
 from __future__ import annotations
 
@@ -82,10 +82,10 @@ def _jsonb_scalar_text(value: Any) -> str:
 
 def _jsonb_text(value: Any) -> str:
     """PostgreSQL's own `jsonb` text-output rendering for a dict/list value
-    (WP-3 review N-1/N-2), used both directly (`_predicate_text`, below (in `structured.py`))
-    and recursively for a nested dict/list. Object key order is
-    PostgreSQL's own storage order -- *not* the order the keys were
-    written in JSON source, and not Python's default string sort either:
+    (WP-3 review N-1/N-2), used both directly (`_predicate_text`, below (in
+    `inmemory_predicate.py`)) and recursively for a nested dict/list. Object
+    key order is PostgreSQL's own storage order -- *not* the order the keys
+    were written in JSON source, and not Python's default string sort either:
     `(byte length, byte value)`, ascending (confirmed empirically against a
     real server). Nested strings are quoted (`json.dumps`, `ensure_ascii=
     False` to keep non-ASCII characters literal like PostgreSQL's own jsonb

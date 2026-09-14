@@ -97,6 +97,7 @@ LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("value_nul.py", frozenset({"typing"})),
         ("pg_text_format.py", frozenset({"json", "decimal", "typing"})),
         ("inmemory_sort.py", frozenset({"json", "typing"})),
+        ("inmemory_predicate.py", frozenset({"re", "typing", ".errors", ".pg_text_format"})),
     ],
     "mitatedb": [
         ("postgres_value_domain.py", frozenset({".errors"})),
