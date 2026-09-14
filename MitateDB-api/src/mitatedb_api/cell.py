@@ -154,7 +154,7 @@ _TRANSACT_DELETE_KEYS = {"type", "collection", "values", "filters", "destructive
 # VOCABULARY (which declared type names this API accepts at all) -- the
 # mapping from one of these names to a backend's own NATIVE column type
 # syntax is each backend's own concern (`backend_sqlite._TYPES` /
-# `backend_postgres._TYPES`), since the two engines' native type systems
+# `backend_postgres._TYPES`) (in `postgres_types.py`), since the two engines' native type systems
 # differ (R-3: execution, including physical schema, is backend-specific;
 # only the request-level vocabulary is shared).
 _FIELD_TYPE_VOCABULARY = frozenset({"text", "integer", "real", "boolean", "json"})

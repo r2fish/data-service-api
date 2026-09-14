@@ -27,7 +27,7 @@ def _check_domain(value, domain, *, field=None, declared_type=None):
     callee, `field`/`declared_type` pass straight through unchanged)."""
     if domain in ("string", "object", "array", "json"):
         # See `_TEXT_DOMAIN_BY_DECLARED_TYPE`'s own comment (in
-        # `backend_postgres.py`): the real object-vs-array-vs-json shape
+        # `postgres_types.py`): the real object-vs-array-vs-json shape
         # check already ran at the cell layer (design G3) -- by this
         # point every one of these four declared types is physically a
         # plain `str` (JSON text for the three non-`string` members).

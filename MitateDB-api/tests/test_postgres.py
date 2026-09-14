@@ -1224,7 +1224,7 @@ def test_type_mismatched_values_are_rejected_deterministically_and_never_poison_
             runtime.insert("typed", {"n": 10 ** 30})
         # (c) boolean field given a string (this foundation's `boolean`
         # field type -> physically `INTEGER`, per `backend_postgres.
-        # PostgresBackend`'s own `_TYPES` comment).
+        # PostgresBackend`'s own `_TYPES` comment) (in `postgres_types.py`).
         with pytest.raises(ValidationError, match="does not match the declared field type"):
             runtime.insert("typed", {"flag": "not-a-bool"})
         # (d) real field given a non-numeric string.
@@ -1566,6 +1566,41 @@ def test_check_domain_range_boundaries_at_the_mechanism_level() -> None:
     # `field_domains` caller only ever passes one of the domain names it
     # itself produces.
     assert _check_domain("anything", "not-a-real-domain") == "anything"
+
+
+# --- BP1 (R-37 WP-1m): PostgreSQL type-mapping constants, connection- ------
+# --- independent unit tests of the mechanism itself -------------------------
+
+
+def test_postgres_types_pin_native_column_types_and_domains() -> None:
+    """Pins the three type-mapping tables in `postgres_types.py`
+    (`_TYPES` via `_TYPE_SQL`; `backend_postgres.py` does not re-export
+    `_TYPES`, Y-7) as literal values, no live PostgreSQL server needed. `_TYPE_SQL`'s values are
+    real `sql.SQL` constants (m-7), never a bare Python string or a
+    `sql.Identifier` (that distinction matters: a column TYPE keyword is
+    composed via `sql.SQL`, a catalog object name via `sql.Identifier`)."""
+    from mitatedb_api.postgres_types import (_TYPE_SQL, _DOMAIN_BY_DATA_TYPE,
+                                              _TEXT_DOMAIN_BY_DECLARED_TYPE)
+
+    assert _TYPE_SQL == {
+        "text": sql.SQL("TEXT"),
+        "integer": sql.SQL("BIGINT"),
+        "real": sql.SQL("DOUBLE PRECISION"),
+        "boolean": sql.SQL("INTEGER"),
+        "json": sql.SQL("TEXT"),
+    }
+    assert all(type(value) is sql.SQL for value in _TYPE_SQL.values())
+    assert _DOMAIN_BY_DATA_TYPE == {
+        "bigint": "int64",
+        "integer": "int32",
+        "double precision": "float",
+    }
+    assert _TEXT_DOMAIN_BY_DECLARED_TYPE == {
+        "string": "string",
+        "object": "object",
+        "array": "array",
+        "json": "json",
+    }
 
 
 # --- BP4 (R-37 WP-1l): PostgreSQL reserved-name checks, connection- --------
