@@ -1866,6 +1866,46 @@ def _numbered_cell(count: int) -> ApplicationCell:
     return cell
 
 
+def test_inmemory_sort_leaf_preserves_structured_facade_and_null_rank():
+    from r2db_api.structured import _JSON_TYPE_RANK, _sort_key, _sort_rows
+    from r2db_api.inmemory_sort import (
+        _JSON_TYPE_RANK as leaf_json_type_rank,
+        _sort_key as leaf_sort_key,
+        _sort_rows as leaf_sort_rows,
+    )
+
+    assert _JSON_TYPE_RANK is leaf_json_type_rank
+    assert _sort_key is leaf_sort_key
+    assert _sort_rows is leaf_sort_rows
+
+    # NULL sorts as if larger than any non-null value, regardless of the
+    # non-null value's own JSON type.
+    assert _sort_key(None) > _sort_key(0)
+    assert _sort_key(None) > _sort_key("")
+
+    # jsonb cross-type order is String < Number < Boolean < Array < Object.
+    assert _sort_key("x") < _sort_key(1)
+    assert _sort_key(1) < _sort_key(True)
+    assert _sort_key(True) < _sort_key([1])
+    assert _sort_key([1]) < _sort_key({"k": 1})
+
+    # Multiple order_by fields sort back-to-front (the LAST spec entry
+    # sorts first), so the FIRST spec entry ends up the dominant key of
+    # the final, stable result.
+    rows = [
+        {"a": 1, "b": 2},
+        {"a": 0, "b": 1},
+        {"a": 1, "b": 1},
+        {"a": 0, "b": 2},
+    ]
+    assert _sort_rows(rows, [("a", "asc"), ("b", "asc")]) == [
+        {"a": 0, "b": 1},
+        {"a": 0, "b": 2},
+        {"a": 1, "b": 1},
+        {"a": 1, "b": 2},
+    ]
+
+
 def test_order_by_sorts_and_appends_id_when_absent():
     cell = _numbered_cell(3)  # n = 0, 1, 2 with id = 1, 2, 3 respectively
     descending = cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "desc"}])
