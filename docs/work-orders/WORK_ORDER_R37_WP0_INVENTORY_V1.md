@@ -609,7 +609,7 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | 件数 pin | `structured.py` 78 → 67、`value_types.py` 11 |
 | 行番号 allowlist | 本 WP による差分 0 |
 | sib 集合 | 固定 tuple に `value_types.py` を足す |
-| 移動範囲外の位置参照 (40c) | `structured.py` L555「`_check_type` below」、L561「this file's own `_check_type`」、L596「(`_check_type` below)」、L763「`_declared_type_label` below」、L2296「(`_validate_predicate_types`, below and in `query`)」、L2312「`_check_type` below」、WP-1g の leaf の「`_INT64_MAX` below in this same module」(W-2)。範囲内の L1383「`_ENUM_ELIGIBLE_TYPES` gate above」は指す先が `structured.py` に残るので、leaf 側で「above」の直後に「(in `structured.py`)」を付ける。`postgres.py` L1559 の `r2db_api.structured._check_type` は facade で成り立つので直さない |
+| 移動範囲外の位置参照 (40c) | `structured.py` L555「`_check_type` below」、L561「this file's own `_check_type`」、L596「(`_check_type` below)」、L763「`_declared_type_label` below」、WP-1g の leaf の「`_INT64_MAX` below in this same module」(W-2)。範囲内の L1383「`_ENUM_ELIGIBLE_TYPES` gate above」は指す先が `structured.py` に残るので、leaf 側で「above」の直後に「(in `structured.py`)」を付ける。`postgres.py` L1559 の `r2db_api.structured._check_type` は facade で成り立つので直さない。L2296「(`_validate_predicate_types`, below and in `query`)」と L2312「`_check_type` below」は `_apply` の中で下にある呼出しを指し、呼出しは `structured.py` に残るので直さない (コードレビューの訂正) |
 
 | 触るファイル | 触らないファイル |
 |---|---|
@@ -638,7 +638,7 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | 18 | leaf の import が許可リストの内だけ | `value_types.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
 | 19 | 新 leaf が分類される | 一覧から `value_types.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
 | 20 | 未使用になった import の扱い | **監査照合**: `structured.py` で未使用になる名前は `_contains_nul` だけで、facade テストのために残したこと | — |
-| 21 | 逐語移動と位置参照の括弧書き (40c) | **監査照合**: 説明コメント、節見出し、docstring が逐語。括弧書きは `structured.py` の 6 箇所 (L555、L561、L596、L763、L2296、L2312)、`delete_confirmation.py` の 1 箇所 (W-2)、leaf 内の L1383 の 1 箇所の計 8 箇所だけ | — |
+| 21 | 逐語移動と位置参照の括弧書き (40c) | **監査照合**: 説明コメント、節見出し、docstring が逐語。括弧書きは `structured.py` の 4 箇所 (L555、L561、L596、L763)、`delete_confirmation.py` の 1 箇所 (W-2)、leaf 内の L1383 の 1 箇所の計 6 箇所だけ | — |
 | 22 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、MitateDB `src/` の同名 def 0 件 | — |
 | 23 | `_TEXT_ONLY_OPERATORS` は facade 経由で同じ object (W-1 裁定) | `structured.py`: import から `_TEXT_ONLY_OPERATORS` を外す | `r2db-api/tests/test_foundation.py::test_value_types_leaf_preserves_structured_facade` (新規。`structured._TEXT_ONLY_OPERATORS is value_types._TEXT_ONLY_OPERATORS` を確かめる) |
 | 24 | マージ時点で `_INT64_MAX` の参照が正しい (W-2 裁定) | **監査照合**: `delete_confirmation.py` の括弧書きが `(in \`value_types.py\`)` に直り、`_INT64_MAX` が `value_types.py` に在ること | — |

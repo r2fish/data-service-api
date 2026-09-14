@@ -47,7 +47,7 @@ from .identifier_rules import MAX_IDENTIFIER_LENGTH
 # `identifier_rules.py`)), not a contract figure -- used only to assert the
 # worst-case phrase length stays bounded.
 _PHRASE_MAX_LENGTH = 256
-# int64 (`_INT64_MAX` below in this same module (in `structured.py`)) has at most 19 decimal
+# int64 (`_INT64_MAX` below in this same module (in `value_types.py`)) has at most 19 decimal
 # digits; `schema_revision` is a monotonic counter starting at 0 and is
 # always representable in that range for the lifetime of any real
 # deployment, so 20 digits (one more than the true worst case) is a safe,
