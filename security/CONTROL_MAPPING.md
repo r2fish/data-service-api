@@ -2,50 +2,1090 @@
 
 Status: **Implementation mapping template**
 
+Version: **2.0** (2026-09-14; structure only, content unchanged -- docs/design/CONTROL_MAPPING_RESTRUCTURE_V1.md)
+
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
+
+Each claim is one bullet under its invariant, subsection (r2db-api / MitateDB-api / Common) and axis (Control / Evidence / Status); `- —` marks an axis with no claim.
 
 **Update convention** (phase 7 WP-7 (i), requester ruling 4 --
 `docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` §5):
 「訂正は現行行を書き換え、旧文は履歴へ移す」-- a correction rewrites the
-current row below in place, and the superseded text it replaces is moved,
+current claim below in place, and the superseded text it replaces is moved,
 verbatim and unedited, into the per-ID companion file
 `CONTROL_MAPPING_HISTORY.md` (headings there are the bare ID only, e.g.
-`## SI-14`, so a row's own `[history](CONTROL_MAPPING_HISTORY.md#si-14)`
-link resolves to a real GitHub anchor). Each row keeps only today's control
+`## SI-14`, so a section's own `[history](CONTROL_MAPPING_HISTORY.md#si-14)`
+link resolves to a real GitHub anchor). Each section keeps only today's control
 and its evidence -- test names, `file:line`, and any disclosed scope limits
 -- plus that one link; it is not a place to re-accumulate the next
-correction's own narrative. This file holds exactly one `|`-started table
+correction's own narrative. This file holds no `|`-started table
 (`conformance-tests/test_control_mapping_register.py` parses on that
-assumption); do not add a second one, and keep every cell as one continuous
-line (no raw `|` or embedded newline inside a cell).
+assumption); do not add one, and keep every claim as one bullet on one
+line (no embedded newline inside a claim).
 
-**Cell-length cap measurement** (差し戻し rework round 3, 監督裁定 2026-09-06 item
-C-1/B-2; re-measured 2026-09-10, WP-9): this file's longest cell is still
-SI-14's r2db-api control/evidence cell, now 15,122 characters (15,065 on
+**Length cap measurement** (差し戻し rework round 3, 監督裁定 2026-09-06 item
+C-1/B-2; re-measured 2026-09-10, WP-9): this file's longest (SI, subsection) block is still
+SI-14's r2db-api block, now 15,122 characters (15,065 on
 2026-09-06, the figure `conformance-tests/test_control_mapping_register.py`'s
-own comment records). Its `MAX_CELL_LENGTH = 15200` is that 2026-09-06
+own comment records). Its `MAX_BLOCK_LENGTH = 15200` is that 2026-09-06
 measurement plus a 135-char margin, unchanged (78 left today), set independently
 of `conformance-tests/CONDITIONS.md`'s own cap (per C-1: a shared cap left that
-file's own guard nearly inert; design section 13/WP-8 keeps its own copy).
+file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A block is one subsection's claims (r2db-api, MitateDB-api or Common) joined by single spaces. Each physical line is also capped at `MAX_LINE_LENGTH = 1400`.
 
-| Invariant | r2db-api control/evidence | MitateDB-api control/evidence | Common conformance evidence |
-|---|---|---|---|
-| SI-00 Single-Compromise Containment | `authority-topology.yaml` provides a deny-by-default plane skeleton, verified by negative reachability tests (`test_topology.py`). Per-application database isolation is structural, PostgreSQL-enforced (migrations 0001-0004): `0003_provision_application.sql` creates each application's DB from `template0`, `REVOKE CONNECT ... FROM PUBLIC`, grants `CONNECT` only to that application's 2 dedicated roles -- crossing is impossible without FDW/dblink, not merely grant discipline; RLS is retained as defence-in-depth (SI-01/02/03) -- `test_cross_database_connect_is_refused_at_the_database_level`. CCR-14 adds a co-located control-plane HTTP process with 3 checked isolation points: (a) structurally separate credential stores/tables, distinct HMAC peppers required to differ at startup -- `test_cross_store_leakage_secret_added_to_one_store_never_authenticates_the_other`, `test_validate_control_pepper_separation_rejects_equal_peppers`; (b) distinct login roles -- `r2dbsvc_api` has no grant on `control_credentials`/`control_audit` and only `INSERT` on `application_audit` (no SELECT/UPDATE/DELETE); a third SELECT-only `r2dbsvc_auditreader` role reads both audit tables -- `test_controlplane_role_grants_match_the_design`, `test_auditreader_role_can_select_both_audit_tables_and_nothing_else`; (c) `AuthorityTopology` registers the control-plane HTTP process as its own node with a structural unreachability check -- `test_control_plane_http_reaches_only_control_and_audit`. A data-plane host declaring `control_plane: enabled` with no control-credential store fails `AUTH_INVALID` for any control/audit credential on its `/v1/audit/query` alias -- separation working as designed (contract's `audit_query` obligation binds the control surface's own endpoint, not this alias; also recorded on SI-14). **Realization**: the data-plane composition root neither constructs nor imports the control-credential store, pinned by an AST-based check (parses `main.py`'s `Import`/`ImportFrom`/`Name`/`Attribute` nodes, not substring match) -- `test_data_plane_composition_root_does_not_import_the_control_credential_store`; resulting wire behavior is exactly what the contract permits: `AUTH_INVALID` because no verifier exists at all, never `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/5xx (all non-conforming). **Acceptance boundary**: r2db Stage 1, contract 1.6.0, was installed on the VPS on 2026-09-05 -- migrations 0001, 0002, 0005, 0006, 0007 and 0003 were applied in that order (0004 is the deprovision script and is never applied at install), `pg_hba`/`pg_ident` posture B was configured, and external reachability on port 8443 was verified (`docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12); no later contract version has been deployed to that VPS since, and no production credential-store/role/grant listing beyond the runbook's own steps is recorded -- this row's own containment checks (a)-(c) remain unexercised against that instance. | Control-plane/data-plane separation (design R-4/R-6): (a) structurally separate credential tables (`credentials` vs. `control_credentials`), distinct HMAC peppers required to differ at startup -- `test_pepper_separation_detects_the_two_env_vars_configured_identically`. (b) two disjoint least-privilege PostgreSQL roles, verified with bare `psycopg` connections -- `test_application_plane_role_has_no_privilege_on_control_credentials`. `mitatedbsvc_api` additionally holds only `INSERT` on `application_audit` (no SELECT/UPDATE/DELETE); `mitatedbsvc_controlplane` gets nothing on it; a third SELECT-only reader role `mitatedbsvc_auditreader` reads both audit tables -- `test_auditreader_role_can_select_both_audit_tables_and_nothing_else`. Contract 1.4.0's `audit_query` obligation binds the control surface's own endpoint, not the data host's alias (this peer's data service declares `control_plane` enabled while holding no control-credential store, so that alias answers `AUTH_INVALID`; also on SI-00's r2db column). MitateDB has no Python topology-declaration class equivalent to r2db's `AuthorityTopology`; `docker/authority-topology.yaml` is a non-secret intent skeleton only, not evidence. (c) `mitatedbsvc_provision` (CREATEDB/CREATEROLE) is held only by operator/deploy tooling and the out-of-band CLI, never by either process. **Deployment precondition (R-1, cloudsqlsuperuser bypass)**: every application-facing role must be created only via migration SQL's `CREATE ROLE` (never Cloud SQL's Users API, which grants `cloudsqlsuperuser` membership and bypasses `REVOKE CONNECT ... FROM PUBLIC`) -- the fail-closed backstop is verified locally by `test_provisioning_guard_detects_an_unexpected_group_membership`; runbook/real-Cloud-SQL verification is `docs/cloud-run-cloud-sql.md` §3.3/§9. **Realization**: structurally identical to r2db-api -- the data-plane composition root neither imports the control-credential store, pinned by an AST check on identifiers, not string literals -- `test_data_plane_composition_root_does_not_import_the_control_credential_store`. **Acceptance boundary**: local-cluster evidence only -- on the one real Cloud SQL deployment, role/database DDL and `log_statement=none` have passed, but the deprovision path and the cloudsqlsuperuser probe remain unexercised, production evidence stays open. That AST check does not cover this peer's data-plane env still naming the control-credential pepper -- a separate, still-open asymmetry (ledger item L4-13, still open). | lateral/control-plane tests; CCR-14's control-plane authority boundary is additionally covered by `conformance-tests/test_c14_authority_boundary.py` (condition C-14, SI-00/SI-02/SI-03/SI-08) -- all four adapters (`r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http`) currently take the PROVIDED branch: each declares a real control-plane surface as `enabled`, checked for real fail-closed behavior in both directions. The data-host side of obligation (b) is exercised in the common suite by `conformance-tests/test_c09_audit_evidence.py::test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted` (unconditional, all four plugs, conformance port v1.9). Co-hosting is judged by `adapter.surfaces_cohosted(document)` (`conformance-tests/adapter.py`), a plain module-level port helper that derives the answer purely from a 1.6.0+ peer's own declared `surfaces.data.base_url`/`surfaces.control.base_url` origins, never from an adapter's own self-report; `conformance-tests/test_c09_audit_evidence.py::test_surfaces_cohosted_resolves_true_only_for_matching_origins_and_false_otherwise` exercises `surfaces_cohosted`'s own `True` branch directly against synthetic `CapabilityDocument` fixtures, independent of whether any real deployment ever co-hosts. All four registered plugs currently resolve `False` there (no currently-registered deployment co-hosts both surfaces on the same origin), so the `provided` branch of `test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted` remains unreached by any registered plug -- this residual limit is restated, not closed, in the C-09 row of `conformance-tests/CONDITIONS.md`. [history](CONTROL_MAPPING_HISTORY.md#si-00) |
-| SI-01 Application Isolation | `r2db-api/src/r2db_api/service.py` resolves cell from `AuthContext.application_id`; `r2db-api/tests/test_foundation.py::test_server_bound_scope_and_isolation`; `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell` additionally confines each application to its own PostgreSQL database (architecture §8 "D-3 改訂", database-per-application: the database name is assigned by the control plane, never derived from client input, and the cell only ever connects over that application's own `runtime`/`developer` DSNs) and verifies every identifier against that database's live `information_schema` catalog (`_load_catalog`) before composing SQL, so a request cannot reach another application's tables even if an identifier happens to collide by name; exercised against a real local PostgreSQL 16 cluster by `r2db-api/tests/test_postgres.py`, including `test_cross_database_connect_is_refused_at_the_database_level` (application A's roles cannot even open a raw connection to application B's database) and `test_pool_never_leaks_role_or_schema_across_applications`. This is local/test-cluster evidence; r2db Stage 1, contract 1.6.0, was installed on the VPS on 2026-09-05 with migrations 0001, 0002, 0005, 0006, 0007 and 0003 applied in that order (0004 is the deprovision script and is never applied at install) (`docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12), so the same database-per-application `REVOKE CONNECT ... FROM PUBLIC` grant now exists there for the one provisioned application (`sandbox`); cross-application connect-refusal itself has not been re-exercised against that instance (only one application is provisioned there), so production database-grant isolation is configured but not yet verified. | `MitateDB-api/src/mitatedb_api/service.py` resolves the cell only from authenticated Principal (`MitateDB-api/tests/test_foundation.py::test_application_scope_is_server_bound`, SQLite backend). Database-per-application (design R-1): `MitateDB-api/src/mitatedb_api/backend_postgres.py` confines each application to its own PostgreSQL database, named/allocated by the control plane and never derived from client input; `MitateDB-api/migrations/0003_provision_application.sql` issues `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` and grants `CONNECT` only to that application's own `runtime`/`developer` roles, `0004_deprovision_application.sql` reverses it. Verified against a real local PostgreSQL 16 cluster by `MitateDB-api/tests/test_postgres.py::test_cross_database_connect_is_refused_at_the_database_level` (application A's roles cannot open even a raw connection to application B's database). **Deployment precondition (cloudsqlsuperuser bypass, shared with the SI-00 row above)**: this isolation is a PostgreSQL `CONNECT`-grant boundary, which a Cloud-SQL-Users-API-created role bypasses entirely (Cloud SQL's own `cloudsqlsuperuser` membership) -- `cloud-run-cloud-sql.md` §3.3 states this as a hard runbook rule, and the fail-closed backstop is `MitateDB-api/tests/test_postgres.py::test_provisioning_guard_detects_an_unexpected_group_membership`. Local/test-cluster evidence only -- Cloud SQL production database-grant isolation is `absent` until `cloud-run-cloud-sql.md` §9 is run once; on the one real deployment made so far, the DDL itself passed but the cross-database-connect-refused behavior has not been re-exercised against that instance and deprovision remains unexercised, so this isolation stays open, not confirmed, in production. | `conformance-tests/test_c01_scope_binding.py::test_positive_control_scope_is_bound_and_legitimate_access_succeeds`, `::test_cross_application_entity_is_unreachable`, `::test_cross_application_denial_does_not_disclose_existence` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-01). [history](CONTROL_MAPPING_HISTORY.md#si-01) |
-| SI-02 Control Plane Isolation | `AuthorityTopology` denies application/developer reachability to control/provisioning (`test_topology.py`). `0001_bootstrap_control_plane.sql` creates provisioning authority (`r2dbsvc_control`) as a distinct `NOSUPERUSER`/`NOINHERIT` role only an operator holds a credential for (it deliberately carries `CREATEDB`/`CREATEROLE` for database-per-application provisioning, §5.3 C-2 -- exactly why the API process never holds it); `PostgresCell` never embeds a control-plane DSN, only ever opens connections as an application's already-provisioned `runtime`/`developer` role. CCR-14's `/control/v1` surface shares SI-00's 3 isolation points identically; SI-02's own concern (an app-facing API must not route to control-plane data/capability) is additionally C-14's own vectors 1/2 (app credential fail-closed on every control endpoint, control credential fail-closed on every data endpoint), a structural consequence of the separate-store design: an application credential's verifier does not exist in `control_credentials` at all, so cross-plane authentication fails at lookup, not a secondary authorization check that could be misconfigured away. **Acceptance boundary**: r2db Stage 1, contract 1.6.0, was installed on the VPS on 2026-09-05 -- provisioning (migrations 0001, 0002, 0005, 0006, 0007 and 0003, applied in that order; 0004 is the deprovision script and is never applied at install) has run, `pg_hba`/`pg_ident` posture B was configured, and external reachability on port 8443 was verified (`docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12); socket-binding/credential-file-access evidence beyond the runbook's own steps is not separately recorded, and no later contract version has been deployed there since. Within the control plane, `role="control"` is separated from `role="audit"` (read-only) structurally, fail-closed by enumeration: every one of the 8 remaining operations refuses an `audit` principal with `FORBIDDEN` -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, with a real-wire-route-table completeness guarantee via `test_audit_role_http_authorization_matrix_all_13_endpoints`. The per-application platform-upgrade bulk apply (`upgrade-applications`/`upgrade-status`) and the 4 declaration subcommands are one more operation inside this row's provisioning boundary, not a new route out of an app-facing API: they reach each application's database only as `r2dbsvc_control` over `R2DB_CONTROL_DSN`; no API process holds that DSN -- `test_upgrade_applications_exit_codes`, `test_set_platform_timeouts_places_the_same_two_values_on_both_writer_roles`. | The same separate-store design recorded on SI-00 (distinct `credentials`/`control_credentials` tables and roles, distinct peppers) means an application credential's verifier does not exist in `control_credentials` and vice versa -- cross-plane authentication fails at the lookup itself (`ControlPlaneService._locate_credential`), never a secondary check that could be misconfigured away. `ControlPlaneService`'s own fixed evaluation order (rate-limit -> authenticate -> must_rotate -> role=control capability denial -> shape -> target-existence -> bounds -> destructive-confirmation -> execute+audit) guarantees an unauthenticated/wrong-plane request never reaches target resolution; `issue_credential` refuses `role="control"` unconditionally, before resolving whether the named application even exists -- `test_issue_credential_role_shape_is_validated_before_capability_check`, and against real PostgreSQL, `test_role_control_refused_before_target_resolution_against_real_postgres`. Two Cloud Run services by default put this isolation at the network layer too (separate IAM invoker bindings) on top of credential-store separation; **acceptance boundary**: production network/IAM evidence for that split is absent until deployed, local/test-cluster evidence only. The `audit` role is narrowed symmetrically with r2db's own bundle -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, and against real PostgreSQL `test_audit_role_accepted_on_read_endpoints_and_forbidden_on_a_write_endpoint_against_real_postgres`. `upgrade-applications`/`upgrade-status` and the 4 declaration subcommands all require `MITATEDB_PROVISION_DSN`; the Cloud Run services' own environments never carry it, so the control service cannot invoke this path either. `list-applications` is unchanged; per-application upgrade state is deliberately not published on any HTTP surface (requester ruling U-1, design §5). Evidence: `test_upgrade_applications_usage_error_without_provision_dsn`, `test_all_four_subcommands_require_provision_dsn`. | control-plane denial tests; CCR-14's cross-plane fail-closed boundary is additionally covered by `conformance-tests/test_c14_authority_boundary.py` (condition C-14) -- see the SI-00 row above for the adapter-state detail (all four adapters currently take the provided branch). [history](CONTROL_MAPPING_HISTORY.md#si-02) |
-| SI-03 Runtime/Developer Separation | `ApplicationCell.apply_schema` requires developer context; schema catalog rejects unknown runtime entity/fields; `test_runtime_developer_separation_and_structured_validation`, `test_runtime_unknown_entity_and_failed_mutation_leave_no_ghost`; topology has distinct data/development planes; `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell.apply_schema` checks the same `developer: bool` flag and additionally executes every schema-changing statement only over the `developer_dsn` connection pool -- the DML-only `runtime` role has no `CREATE` grant on the schema at all (`migrations/0003_provision_application.sql`'s `REVOKE ALL ON SCHEMA public FROM PUBLIC`, `USAGE`-only grant to the runtime role, and `ALTER DEFAULT PRIVILEGES`), a second, DB-enforced layer under the application-level check. Exercised locally by `r2db-api/tests/test_postgres.py`; the distinct production Runtime/Developer DB authority itself was realized on the VPS by the same 2026-09-05 Stage 1 install (migrations 0001, 0002, 0005, 0006, 0007 and 0003, applied in that order -- 0004 is the deprovision script and is never applied at install; `docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12), though the runtime-role-has-no-CREATE-grant behavior has not been separately re-exercised against that instance. | Preliminary local API method/role-check evidence: `ApplicationRuntime` has no schema mutation method and `ApplicationCell._require_developer`; `test_developer_schema_and_runtime_crud`; distinct production Runtime/Developer DB authority TBD. | privilege tests; the `role=control` in-band issuance refusal (a third, non-runtime/developer role never silently granted) is additionally covered by `conformance-tests/test_c14_authority_boundary.py` (condition C-14) -- see the SI-00 row above for the adapter-state detail. [history](CONTROL_MAPPING_HISTORY.md#si-03) |
-| SI-04 No Arbitrary DB Commands | `structured.py` exposes only enumerated operations and no native command API; `test_runtime_developer_separation_and_structured_validation`; contract surface review; `r2db-api/src/r2db_api/postgres.py`'s `_run` is the single execution choke point every statement passes through and is typed to accept only `psycopg.sql.Composed`/`psycopg.sql.SQL`, raising `TypeError` on any `str` -- no method on `PostgresCell`, public or private, can pass a raw command string to PostgreSQL. Exercised against a real PostgreSQL cluster by `r2db-api/tests/test_postgres.py` and the `r2db-api-http` conformance adapter. | Structured-only methods in `MitateDB-api/src/mitatedb_api/cell.py`; no command-text execution method; `test_no_arbitrary_sql_and_identifier_validation`. | `conformance-tests/test_c03_structured_injection.py::test_no_native_command_surface_is_exposed` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-03). [history](CONTROL_MAPPING_HISTORY.md#si-04) |
-| SI-05 Validated Structured Operations | `validate_identifier`, operator allowlist, typed mutation shape, and service tests in `r2db-api/src/r2db_api/structured.py`; `r2db-api/src/r2db_api/postgres.py` composes identifiers only via `psycopg.sql.Identifier`, after both the shared `structured.py` syntax allowlist and a second check against the schema's live `information_schema` catalog (`_load_catalog`), and binds every value as a server-side parameter (`psycopg.sql.Placeholder`/`Jsonb`) rather than string interpolation; `r2db-api/tests/test_postgres.py` covers this for query/mutation paths and the DDL paths (`create_entity`/`add_field`), where the catalog cannot reject an identifier that does not exist yet. CCR-13 (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-7) extends validation from identifiers/shapes to value domains -- typed-column values (`bigint`/`double precision`/`boolean`/`text`) are checked against the declared type and bound natively, with a shared range/NUL-byte check ahead of execution so a value PostgreSQL would reject at runtime fails deterministically instead. Exercised against a real local PostgreSQL 16 cluster only -- no production evidence. | `identifiers.py` validation, quoted identifiers and bound values in `cell.py`; `test_no_arbitrary_sql_and_identifier_validation`. | `conformance-tests/test_c03_structured_injection.py::test_identifier_positions_reject_every_payload`, `::test_value_positions_round_trip_or_deny`, `::test_structural_integrity_across_corpus` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-03); CCR-13 declaration/behavior agreement is additionally covered by `test_c12_capability_agreement.py` (condition C-12) and `test_c17_declaration_agreement.py` (condition C-17), both executable on all four adapters. **Phase 10 socket plugs -- disclosed**: C-03's corpus now also runs on the two real-socket plugs, where a URL-path-carried identifier payload can be refused by the client's own HTTP/1.1 layer (h11) before any byte reaches the peer; the suite counts that wire refusal as a rejection, so for the `entity` position on a socket plug the denial is not always the peer's own validation. The branch is narrow by construction -- `transport_kind == "socket"` only, only for wire-carried positions, and only for `httpx.LocalProtocolError` (or an `UNCLASSIFIED` non-problem+json failure), never for an unreachable peer -- and body-carried positions still demand a genuine contract-coded denial on every plug -- `conformance-tests/test_c03_structured_injection.py::test_c03_wire_rejection_never_applies_to_a_body_carried_position`, `::test_c03_wire_rejection_never_applies_to_a_reachability_failure`. [history](CONTROL_MAPPING_HISTORY.md#si-05) |
-| SI-06 Server-Bound Credential Scope | `CredentialStore.authenticate/assert_active` derives immutable `AuthContext` -- `test_server_bound_scope_and_isolation`. **CCR-14 extends server-bound scope to the control credential type**: `ControlCredentialStore`/`PostgresControlCredentialStore` derive an immutable `ControlAuthContext` (`credential_id`/`must_rotate`) from stored verifier state alone, never a client-supplied field, rejecting disabled/revoked/must-rotate-exceeded state like the application-plane store; the secret is bound server-side to its own dedicated HMAC pepper (required to differ from the application pepper) and exposed only as an opaque handle, never a raw secret past authentication -- `test_control_credential_parity_add_authenticate_rotate_must_rotate_both_impls`, `test_control_authenticate_fails_closed_when_platform_db_unreachable`. **`must_rotate` exposure**: `list_credentials` rows for a control-table credential carry their real `must_rotate` value (application rows never carry the key -- the concept does not exist for them) -- `test_issued_secret_appears_only_in_the_response`. **`audit` role**: a second, weaker, distributable control-credential scope (`control_credentials.role` CHECK constraint) narrowed to the 3 read-only endpoints; issuance is ceremony-only (out-of-band CLI, single tx = issue+rotate, distributed already `must_rotate=false`), never in-band; fail-closed on the other 8 write operations, durably audited -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, `test_audit_role_http_authorization_matrix_all_11_endpoints` (derives its own enumeration from the real wire route table). **Revoke-gate role filter**: the "sole remaining control credential" gate (SI-09) filters to `role=="control"` rows only, so an `audit` row can neither mask nor be mistaken for the last administrative credential; revoking an `audit` credential itself is never gated -- `test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_credential`. **Per-application issuance freeze**: `applications.issuance_frozen`, CLI-only, non-destructive; `issue_credential` against a frozen application refused `FORBIDDEN` (evaluated after the `role=control` capability refusal, per the fixed evaluation order) -- `test_issuance_freeze_forbids_then_unfreeze_allows_again`, `test_issuance_freeze_precedence_role_control_refused_before_freeze_check`. | `CredentialStore.authenticate` derives Application/role from stored credential state -- `test_application_scope_is_server_bound`. **Control credential**: `control_auth.ControlCredentialStore`/`PostgresControlCredentialStore` (same call-surface-parity convention as the application-credential pair) derive an immutable `ControlPrincipal` (`credential_id`/`must_rotate`) from stored verifier state alone, bound to its own dedicated pepper (required to differ from the application pepper); parity verified across both implementations -- `test_issue_then_authenticate_succeeds`, `test_revoke_is_terminal_enable_cannot_resurrect_it`. **`must_rotate` exposure**: `list_credentials` merges application and control rows so a control-table credential's real `must_rotate` value is exposed, symmetric with r2db -- `test_list_credentials_merges_application_and_control_rows`. **`audit` role**: ceremony-only issuance (single tx = issue+rotate), fail-closed with durable audit on the 8 write endpoints, allowed on exactly the 3 read endpoints -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, and against real PostgreSQL `test_audit_role_accepted_on_read_endpoints_and_forbidden_on_a_write_endpoint_against_real_postgres`. **Revoke-gate role filter and issuance freeze**, applied from the start on this peer, symmetric with r2db's own bundle -- `test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_credential`, `test_issuance_freeze_precedence_role_control_refused_before_freeze_check`; also verified via the CLI (`test_ops.py::test_cli_freeze_issuance_then_unfreeze_round_trips`) and, uniquely on this peer, an in-memory rollback path -- `test_in_memory_issuance_freeze_rolls_back_with_its_own_unit_of_work`. | `conformance-tests/test_c01_scope_binding.py::test_must_deny_vectors_are_denied_with_contract_codes`, `::test_must_ignore_vectors_leave_scope_and_other_app_unchanged`, `::test_structurally_absent_vectors_have_no_forbidden_parameters`, `::test_runtime_credential_cannot_self_elevate_to_schema_authority` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-01). Both peers' bearer is the locator form `<credential_id>.<secret_part>` (an opaque complete bearer at the contract level); authentication looks up the row by the locator's `credential_id` and then compares the verifier with `hmac.compare_digest` -- **the verifier is never used as a lookup key** (r2db's `_SELECT_BY_VERIFIER` has been removed; `auth.split_bearer_locator` / MitateDB's `credential_wire.split_bearer_locator` split the bearer exactly once, inside the store). A malformed bearer (no `.`, an empty half, or a NUL) fails closed before any lookup (`AUTH_INVALID` uniformly, SI-10) and is durably audited as `authentication_denied` with an unknown actor (SI-14). An unknown credential id still runs `compare_digest` against a dummy verifier so no timing difference leaks (pinned on both peers by `test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest`). [history](CONTROL_MAPPING_HISTORY.md#si-06) |
-| SI-07 Compromised Credential Containment | Topology deny rules plus per-credential role/scope records; negative topology and isolation tests; production containment evidence not yet present. | **Control-credential-scoped compromise containment** (application-credential compromise containment is the SI-13/SI-06 rows above): a compromised control credential is bounded to (i) application credentials it issued/rotated during the compromise window, (ii) an availability harm from any application credential it revoked (ungated -- `ControlPlaneService.revoke_credential` applies no confirmation to an application-credential target, `MitateDB-api/tests/test_control_plane_service.py::test_revoke_application_credential_is_never_gated`), and never reaches Application data or the `mitatedbsvc_provision` provisioning/deprovisioning surface (a wholly separate DSN no control credential or control-plane process holds). `role=control` issuance has exactly one path, the out-of-band `bootstrap`/`reset` ceremony -- no in-band operation reaches it (`_deny_role_control`, evaluated before target resolution, `MitateDB-api/tests/test_control_plane_service.py::test_issue_credential_role_shape_is_validated_before_capability_check`); `reset` revokes every existing control credential unconditionally and mints exactly one new one atomically, verified against real PostgreSQL by `MitateDB-api/tests/test_ops.py::test_reset_with_the_echoed_phrase_revokes_everything_and_mints_one_new_credential`. Full recovery procedure: `MitateDB-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`. **`audit`-credential compromise** is a strictly narrower containment class: bounded to read-only disclosure of `list_applications`/`list_credentials`/`control_capabilities` (see the SI-06/SI-10 rows for the exact exposure and the SI-02 row for the authority-class distinction) -- an `audit` credential cannot issue, rotate, revoke, register, enable, or disable anything (fail-closed on all 8 write endpoints, `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`), so its compromise carries none of the (i)/(ii) harms above; `reset`'s unconditional revoke-all also covers every live `audit` row, same ceremony, same test. | stolen-credential scenario tests [history](CONTROL_MAPPING_HISTORY.md#si-07) |
-| SI-08 Bounded Resource Consumption | finite `ResourceLimits` across required classes; atomic credential-rate window, iterative request/depth checks, structured batch/result/schema checks, wall-clock deadline -- `test_every_advertised_resource_limit_has_a_deterministic_boundary`, `test_rate_limit_is_atomic_for_concurrent_requests`. `RequestByteBoundMiddleware` enforces the byte bound in the ASGI receive loop, measured from actual bytes received (not `Content-Length`), before Starlette's parser runs -- the real request path, unexercised on the VPS under real traffic; `postgres.py` also maps `execution_ms` onto PostgreSQL's own `statement_timeout`/`lock_timeout` (`SET LOCAL`, per-transaction), a real second enforcement layer. **CCR-14 adds 3 control-plane resource classes**: `applications`, `credentials_per_application` (revoked rows never count), `control_requests_per_minute` (single global sliding 60s window, not per-credential) -- enforced by `ControlPlaneService`, published `enforced`. The rate check runs before authentication and before any durable audit write -- a flood cannot generate unbounded audit rows, and is the one denial category never durably audited (SI-14) -- `test_applications_limit_at_exact_bound`, `test_rate_limit_precedes_authentication_and_is_not_audited`. `request_bytes` declaration is two-layer: the service layer alone declares `unavailable` (no HTTP boundary there), `control_http.py` overrides to `enforced` once the real middleware mounts, both reading the SAME limits source -- `test_l4_request_bytes_single_source_mutating_limit_changes_both_bound_and_discovery`. **`audit_requests_per_minute`**: a 5th control-plane class, default 60, env-overridable, `enforced`; accepted range is any positive integer, no upper bound (checks only `> 0`, matching MitateDB); a separate counter, not a renamed view of `control_requests_per_minute` -- `audit_query` (canonical path + `/v1/audit/query` alias) consumes only this window, so polling for evidence cannot exhaust the window `revoke_credential` depends on; checked pre-auth like the control window, so an unauthenticated flood cannot generate audit rows. Overage is `LIMIT_EXCEEDED` with `limit_class=="audit_requests_per_minute"` -- `test_audit_query_over_its_own_window_is_limit_exceeded_with_limit_class_audit_requests_per_minute`. **Not bound by this window**: the application plane's durable denial writes are on a different plane/host, bounded by D-3 coalescing + row-length CHECKs -- deliberately no data-plane pre-auth window. **Phase 10 (WP-4/WP-6/WP-8, 2026-09-10) -- declared process ceilings, DB-side count bounds, derived connection capacity, pre-authentication concurrency**: (a) `process_ceilings` (`{"data": N, "control": M}`) is a platform-declaration row read at startup from the declaration table alone (no env fallback), and it is what decides `limit_enforcement`: ceiling 1 publishes the per-process in-memory classes (`requests_per_minute`/`concurrency` on the data plane, `control_requests_per_minute`/`audit_requests_per_minute` on the control plane) as `enforced`, ceiling >= 2 publishes exactly those as `deployment_required` -- an in-process counter is not a deployment-wide bound once more than one process serves the same base URL; request-scoped classes (`request_bytes`, `batch_items`, `result_items`, `query_complexity`, `schema_objects`, `operation_depth`, `enum_members`) and DB-side-bound classes stay `enforced` at every ceiling, `execution_ms` stays `reference_wall_clock`, and each plane reads its OWN key -- `r2db-api/tests/test_process_ceilings_declaration.py::test_ceiling_one_maps_in_memory_classes_to_enforced`, `::test_ceiling_two_maps_in_memory_classes_to_deployment_required`, `::test_control_plane_ceiling_mapping_reads_control_not_data_through_build_control_app`, `::test_declaration_table_is_the_only_source_no_env_fallback`; a missing or malformed row stops startup and `ops verify-declarations` reports F-15 with exit code 14 -- `::test_missing_row_fails_fast_through_build_app`, `::test_verify_declarations_f15_when_process_ceilings_row_is_absent`, `::test_verify_declarations_exit_code_table_maps_f15_to_14`. (b) `applications` and `credentials_per_application` are bounded in the DATABASE rather than in the process: `_take_bound_advisory_lock` (`r2db-api/src/r2db_api/credential_store.py`) takes `pg_advisory_xact_lock(hashtext('<schema>.<table>'))` in the same transaction as the count-then-insert, so two concurrent writers cannot both pass a bound -- `::test_db_side_bounds_hold_under_concurrent_writers_applications`, `::test_db_side_bounds_hold_under_concurrent_writers_credentials_per_application`, and the barrier-synchronized two-writer forms `::test_applications_bound_holds_under_barrier_synchronized_concurrent_registration`, `::test_credentials_per_application_bound_holds_under_barrier_synchronized_concurrent_issuance`. (c) Connection capacity is derived from the declared `concurrency`, not fixed: `role_pool_size(limits) == limits.concurrency` (`r2db-api/src/r2db_api/limits.py`) sizes every served application's runtime/developer pool and both platform pools (credential store + durable audit sink) -- `r2db-api/tests/test_threadpool_offload.py::test_role_pool_size_derives_from_declared_concurrency`, `::test_main_composition_root_wires_pool_size_from_role_pool_size`, `::test_role_pool_sized_to_declared_concurrency_avoids_premature_503`, `r2db-api/tests/test_credential_persistence.py::test_platform_pool_sized_to_declared_concurrency_avoids_premature_503`; `r2db-api/migrations/0013_role_connection_limits.sql` raises each role's PostgreSQL `CONNECTION LIMIT` to its own pool composition plus a 4-connection operator margin, and F-16 (`check_role_connection_limits`, roles identified by their REAL grants and never by name, floor = the maximum over every matching role class, the schema owner excluded, register-only applications with NULL role names skipped) fails `ops verify-declarations` with exit code 15 and stops each composition root at startup when its own role is below that floor -- `r2db-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f16_passes_after_migration_0013`, `::test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_below_its_pool_composition_floor`, `::test_f16_floor_for_a_role_matching_multiple_classes_is_the_max_not_the_last_assigned`, `::test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_every_class`, `::test_0013_migration_tolerates_a_registered_only_application_and_still_raises_a_provisioned_applications_role_limits`, `r2db-api/tests/test_credential_persistence.py::test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_below_the_pool_composition_floor`, `r2db-api/tests/test_surfaces_env.py::test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_limit_is_lowered_below_the_pool_composition_floor`. (d) On the HTTP plane the deployment-wide `concurrency` slot is taken BEFORE authentication, so an unauthenticated flood is bounded before it reaches the credential store; this surface's order is BYTE BOUND -> CONCURRENCY SLOT -> AUTHENTICATION -> body -> rate/business (the per-credential `requests_per_minute` window stays reachable only after authentication succeeds, so a both-exhausted request is denied `concurrency` here -- the opposite of the cell-level order, an explicit HTTP-plane ruling, not an implementation accident), and the slot is held across authentication and dispatch and released on every exit path -- `r2db-api/tests/test_preauth_concurrency_bound.py::test_unauthenticated_flood_is_bounded_by_concurrency`, `::test_http_plane_denies_concurrency_before_requests_per_minute`, `::test_concurrency_hold_spans_the_gap_between_authentication_and_dispatch`, `::test_slot_is_released_after_a_401_ending_request`, `::test_slot_is_released_after_a_validation_failed_ending_request`, `::test_concurrency_slot_is_acquired_exactly_once_per_handler`. (e) Async handlers delegate their synchronous section to the threadpool, so more than one request is genuinely in flight and these bounds are exercised under real parallelism; the limiter state and the pools are lock-guarded, pinned lexically (source shape) rather than by a race -- `r2db-api/tests/test_threadpool_offload.py::test_sync_section_runs_off_the_event_loop`, `::test_control_sync_section_runs_off_the_event_loop`, `::test_body_read_stays_on_the_loop`, `::test_limiter_state_is_thread_safe`, `::test_pool_acquire_is_thread_safe`, `::test_slot_check_then_increment_is_lexically_inside_the_active_lock`, `::test_rate_window_check_then_append_is_lexically_inside_the_rate_lock`, `::test_role_pool_reservation_is_lexically_inside_the_pool_lock`, `::test_authenticate_delegation_pinned_for_every_body_first_handler`, `::test_service_call_delegation_pinned_for_query_mutate_cross_entity_schema`, `::test_control_service_call_delegation_pinned_for_rotate_and_issue_credential`. | Local bounds for batch/result/fields/filters/schema/request-size in `FoundationConfig`/`MITATEDB_*` config -- `test_batch_and_request_size_limits_and_empty_filters_shape_check`. **`request_bytes`**: ASGI receive-loop middleware measures actual received bytes (never `Content-Length`), rejects before Starlette's parser runs, sized from the SAME `FoundationConfig.max_request_bytes` the declaration publishes -- `test_byte_bound_is_measured_from_actual_received_bytes_not_content_length_header`, `test_request_over_byte_limit_is_limit_exceeded_before_parsing`. **Control-plane's own 3 classes plus its own `request_bytes` bound** (`applications`/`credentials_per_application`/`control_requests_per_minute`): all enforced by `ControlPlaneService`, published `enforced`; `credentials_per_application` excludes revoked rows -- `test_register_application_enforces_the_applications_bound`, `test_rate_limit_denial_is_never_durably_audited` (matching r2db's identical pre-auth/never-audited rule). **Application-plane resource bounds** (Phase 8 WP-1a, rework 1, 2026-09-06): `requests_per_minute` and `concurrency` are `enforced` -- `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py:744`, `:775-782`, `:785-794`), declared in `__build_capabilities_document`'s `limit_enforcement` dict (`cell.py:3811`, `:4051`, `:4055`); `execution_ms` is declared `reference_wall_clock`, not `enforced` (`cell.py:4044`) -- a wall-clock deadline (`time.monotonic() + max_execution_ms`) handed to the backend, `backend_postgres.py` converts it into a real `SET LOCAL statement_timeout`/`lock_timeout` (`backend_postgres.py:1658-1661`), matching r2db-api's own identical declaration. **`batch_entities`**: a 4th enforced class bounding distinct entity names a `cross_entity_mutation` unit may name (repeats don't count twice; `batch_items` is the separate total-operation-count bound); default 10, counted before any operation executes, `enforced` -- `test_transact_batch_entities_boundary_and_distinct_count_ignores_repeats`, real-HTTP `test_cross_entity_mutation_batch_entities_boundary`; common-suite coverage is C-16's own V3 (see SI-11 row). **`audit_requests_per_minute`**: same default 60, same separate-counter/pre-auth/never-shared-with-`control_requests_per_minute` properties and `LIMIT_EXCEEDED`/`limit_class` shape as r2db's own entry -- `test_audit_query_over_its_own_window_is_limit_exceeded_with_limit_class_audit_requests_per_minute`. **Symmetric with r2db**: all 4 control-plane request-count classes accept any positive integer with no upper bound; the contract declares no range -- an operator responsibility, published as-declared -- removing the ceiling also removes the deployment-misconfiguration guardrail it incidentally provided (nothing stops an operator from declaring an implausibly large value), a deliberate trade recorded in `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2c / `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15 -- `test_limits_reject_out_of_range_values`. **Deployment caveat**: like `control_requests_per_minute`, this is an in-process counter, inheriting the `--max-instances=1` requirement on the control service. The application plane's own durable-denial writes are NOT governed by this window (SI-14 point 6). **Phase 10 (WP-4/WP-6/WP-8, 2026-09-10), peer-symmetric with r2db-api's own entry**: (a) the same `process_ceilings` declaration row and the same `limit_enforcement` mapping (ceiling 1 -> `enforced`, ceiling >= 2 -> `deployment_required`, per plane, request-scoped and DB-side-bound classes unaffected), read from the declaration table alone -- `MitateDB-api/tests/test_process_ceilings_declaration.py::test_ceiling_one_maps_data_plane_in_memory_classes_to_enforced`, `::test_ceiling_two_maps_data_plane_in_memory_classes_to_deployment_required`, `::test_ceiling_one_maps_control_plane_in_memory_classes_to_enforced`, `::test_ceiling_two_maps_control_plane_in_memory_classes_to_deployment_required`, `::test_region_i_classes_are_unaffected_by_ceiling`, `::test_declaration_table_is_the_only_source`, and through a real composition root with an asymmetric declaration `::test_ceiling_asymmetric_declaration_maps_through_a_real_composition_root_data_plane`; a missing row fails startup fast on both planes and F-15 exits 14 -- `::test_missing_row_fails_fast_at_startup_data_plane`, `::test_missing_row_fails_fast_at_startup_control_plane`, `::test_verify_declarations_f15_exit_code`. (b) `applications`/`credentials_per_application` are bounded in the database by the same-named `_take_bound_advisory_lock` helper (`MitateDB-api/src/mitatedb_api/control_plane.py`, same `pg_advisory_xact_lock(hashtext('<schema>.<table>'))` derivation, pinned textually isomorphic to r2db-api's own by `_ISOMORPHIC_TARGETS`) -- `::test_db_side_bounds_hold_under_concurrent_writers_applications`, `::test_db_side_bounds_hold_under_concurrent_writers_credentials_per_application`, `::test_db_side_lock_holds_under_barrier_synchronized_two_writers_applications`, `::test_db_side_lock_holds_under_barrier_synchronized_two_writers_credentials_per_application`. (c) `role_pool_size(config) == config.max_concurrency` (`MitateDB-api/src/mitatedb_api/config.py`) is the platform pool's default in `main.build_app`; this peer's per-application `PostgresBackend` pools nothing, so it has no per-application counterpart -- `MitateDB-api/tests/test_threadpool_offload.py::test_platform_pool_sized_to_declared_concurrency_avoids_premature_503`; `MitateDB-api/migrations/0012_role_connection_limits.sql` and F-16 are the same control as r2db-api's own (same formula, exit code 15, startup fail-fast) -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f16_passes_after_migration_0012`, `::test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_below_its_pool_composition_floor`, `::test_f16_floor_for_a_role_matching_multiple_classes_is_the_max_not_the_last_assigned`, `::test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_every_class`, `::test_0012_migration_tolerates_a_registered_only_application_and_still_raises_a_provisioned_applications_role_limits`, `MitateDB-api/tests/test_application_audit.py::test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_below_the_pool_composition_floor`, `MitateDB-api/tests/test_control_main.py::test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_limit_is_lowered_below_the_pool_composition_floor`. (d) The same pre-authentication `concurrency` slot and the same HTTP-plane order (byte bound -> concurrency slot -> authentication -> body -> rate/business). `HttpService` is fail-closed here: its constructor raises unless BOTH the shared `_LimitStateHolder` and the declared `max_concurrency` are supplied (`MitateDB-api/src/mitatedb_api/http.py`; the former no-op branch is removed, so a miswired composition cannot serve unbounded), and the composition root's own wiring is pinned by `MitateDB-api/tests/test_main.py::test_build_app_wires_the_preauth_concurrency_slot`. One holder is shared by every application in the process, so the bound is deployment-wide, not per-application -- `MitateDB-api/tests/test_application_plane_limits.py::test_limit_holder_is_shared_across_applications_in_one_process`, `MitateDB-api/tests/test_preauth_concurrency_bound.py::test_unauthenticated_flood_is_bounded_by_concurrency`, `::test_http_plane_denies_concurrency_before_requests_per_minute`, `::test_concurrency_hold_spans_the_gap_between_authentication_and_dispatch`, `::test_slot_is_released_after_a_401_ending_request`, `::test_slot_is_released_after_a_validation_failed_ending_request`, `::test_concurrency_slot_is_acquired_exactly_once_per_handler`. (e) Handlers delegate the synchronous section to the threadpool, and `ApplicationCell._lock` now covers the WHOLE lookup -> pass-1 -> pass-2 sequence inside that slot (the separate `_idempotency_lock_scope` helper is gone: the outer cell lock is the in-process serializer, `_idempotency_pg_scope` the cross-process one). That lock is per `ApplicationCell`, so requests against the SAME application serialize while different applications hold different locks -- `MitateDB-api/tests/test_threadpool_offload.py::test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_race`, `::test_sync_section_runs_off_the_event_loop`, `::test_post_query_sync_section_runs_off_the_event_loop`, `::test_post_mutate_sync_section_runs_off_the_event_loop`, `::test_post_cross_entity_mutate_sync_section_runs_off_the_event_loop`, `::test_control_post_issue_credential_sync_section_runs_off_the_event_loop`, `::test_body_read_stays_on_the_loop`, `::test_limiter_state_is_thread_safe`, `::test_pool_acquire_is_thread_safe`, `::test_concurrency_slot_check_then_increment_is_inside_the_active_lock`, and the concurrent same-key idempotency forms `MitateDB-api/tests/test_idempotency_concurrency.py::test_memory_same_key_same_digest_concurrent_executes_exactly_once`, `::test_postgres_same_key_same_digest_concurrent_executes_exactly_once`. | resource boundary tests; the three control-plane SI-08 classes' publish-and-enforce agreement is additionally covered by `conformance-tests/test_c14_authority_boundary.py`'s vector 5 (condition C-14) -- see the SI-00 row above for the adapter-state detail. `batch_entities`' publish-and-enforce agreement is additionally covered by `conformance-tests/test_c16_cross_entity_atomicity.py` (condition C-16, executable on all four adapters -- see the SI-11 row below). **Phase 10 (2026-09-10)**: two real-socket plugs (`r2db-api-socket`/`MitateDB-api-socket`: a separate uvicorn process behind a real nginx) join the registry, so C-05's V2 vector is driven over a real wire as well as in process -- `conformance-tests/test_c05_limit_declaration_agreement.py::test_c05_v2_declaration_and_position_agree` drives `concurrency` through the port's own `hold_in_flight` on every registered plug, and what decides whether a plug's own readiness probe already consumed a unit of the bound is `adapter.transport_kind`, never the adapter's name -- `::test_c05_l7_21_v2_drivers_do_not_gate_drive_or_not_on_peer_name`, `::test_c05_all_plug_names_match_the_registry`, `conformance-tests/test_socket_harness.py::test_every_registered_adapter_declares_transport_kind`. The declared `process_ceilings` value is additionally observed against a REAL deployment by condition C-26: a restart between ceiling 1 and ceiling 2, started from each peer's own documented composition root, exhibits the `limit_enforcement` mapping those ceilings imply on both planes -- `conformance-tests/test_c26_composition_root.py::test_c26_ceiling_maps_to_limit_enforcement`, with `::test_c26_missing_declaration_fails_fast` (F-15) and `::test_c26_role_connection_limit_below_pool_floor_fails_fast` (F-16) as the two fail-fast halves. **Disclosed limits, carried from the C-05 and C-26 rows of `conformance-tests/CONDITIONS.md`**: this suite still cannot distinguish a deployment-wide counter from a credential-scoped one; `execution_ms`/`idempotency_retention_ms` are never driven; and C-26 starts exactly ONE process per declared base URL, so agreement between a declared ceiling and a deployment's real process count rests on runbook discipline and the post-deployment check, not on this evidence. [history](CONTROL_MAPPING_HISTORY.md#si-08) |
-| SI-09 Controlled Destructive Operations | `structured.py` requires operation-specific confirmation for delete/drop, including `drop_index` (CCR-13 R-5: dropping a declared unique index is effectively irreversible once duplicate data has entered, treated as schema deletion like `drop_entity`); the check runs before any revision-precondition evaluation on `update`/`delete` (R-4, failure-before-execution) -- `test_atomic_rollback_and_explicit_destructive_operation`, `test_drop_index_requires_destructive_confirmation`. Phrase construction for all 4 gated surfaces (`delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential`) is defined exactly once in the shared module `structured.py`, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- fixed by an object-identity assertion, `test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases`. All 6 data/schema call sites declare the same 4 machine-readable keys via `require_destructive_confirmation`'s `details` synthesis. The control-plane gate (`ControlPlaneService.revoke_credential`) determines "sole remaining enabled control credential" and performs the state change together, inside the SAME transaction (row-locked scan) -- closing the TOCTOU window a judgment made outside the open transaction would leave open -- `test_revoke_credential_gate_judgment_is_made_inside_the_open_transaction`, `test_control_credentials_locked_scan_serializes_against_a_concurrent_scan`. The out-of-band ritual CLI gates on the identical declare-and-echo protocol before any store/DSN is constructed, so a wrong `--confirm` never touches the database -- `test_cli_reset_without_confirm_declares_and_touches_nothing`, `test_cli_delete_credential_without_confirm_declares_and_touches_nothing`. `destructive`/`confirm(ation)` are type-checked (non-`bool`/non-`str` refused `VALIDATION_FAILED` before the confirmation check itself, never truthy-accepted) at all 4 gated surfaces, including over the real HTTP wire -- `test_delete_rejects_truthy_non_boolean_destructive_before_confirmation`, `test_revoke_last_control_credential_with_wire_truthy_non_boolean_destructive_is_validation_failed`. | `delete` implements contract 1.2.0 declare-and-echo (`ApplicationCell.delete`; peer declares `contract_version=1.3.0`, unaffected by the later additive flip) -- a valid confirmation requires `destructive is True` AND `confirm` to exactly equal the server's recomputed `DELETE <collection> @where=<digest16>` phrase (SHA-256 of the canonically-serialized filter list, no state fingerprint needed since this peer has no drop/recreate path for a collection); a non-bool `destructive`/non-str `confirm` is refused as a shape defect, never truthy-accepted (`DestructiveConfirmationRequired` carries the contract's 4 keys, `reversible_alternative`/`recovery` both null -- no durable audit or soft-delete, mirrors r2db) -- `test_delete_without_confirmation_is_gated_not_conflated_with_empty_filters`, `test_delete_rejects_non_boolean_destructive_and_non_string_confirm`; `test_c06_destructive_confirmation.py` exercises the full strict-branch vector set (V1-V5/V8; V6/V7 use the shared absence mechanism -- no `drop_entity`/control-plane surface here). `add_field`/schema-revision fingerprint: the `delete` phrase carries an `@schema_revision=<n>` fingerprint alongside `@where=<digest16>` (same reasoning as r2db -- once a second schema-changing operation exists, drop-then-recreate-under-the-same-name could leave a stale phrase valid) -- `test_canonical_where_json_key_sorts_each_filter_preserves_list_order_never_stringifies`. Control-plane `revoke_credential` last-active gate: gated exactly like r2db's -- target-set scan and state change happen inside the SAME transaction, closing the TOCTOU window -- `test_revoke_credential_confirmation_denial_is_durably_audited`, real-PostgreSQL `test_revoke_last_active_control_credential_gate_against_real_postgres`. Break-glass CLI: `revoke-credential` reuses this SAME gate rather than reimplementing it; `deprovision <application_id>` is this peer's own second genuinely destructive CLI subcommand (provisioning-level, against `MITATEDB_PROVISION_DSN`), gated by a NEW phrase fingerprinted on `applications.registered_at` (phrase must go stale across a deprovision-then-reregister cycle) -- `test_deprovision_without_confirm_declares_the_phrase_and_touches_nothing`, `test_deprovision_with_the_echoed_phrase_removes_the_registration`. | destructive misuse tests; CCR-13's destructive-confirmation-before-precondition ordering is additionally covered by `conformance-tests/test_c18_revision_precondition_semantics.py` (condition C-18, executable on all four adapters). Q-1's declare-and-echo protocol itself (contract 1.2.0) has its own dedicated common suite, `conformance-tests/test_c06_destructive_confirmation.py` (condition C-06, executable four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http`): all four registered adapters declare `contract_version >= 1.2.0` and take the strict branch (vectors V1-V8: unconfirmed-denial, full-match adversarial checks, phrase determinism, probe-then-echo, state-fingerprint invalidation, the in-band last-control-credential revoke gate, and payload-echo absence) for real; the baseline (<1.2.0) branch is retained, deliberately unremoved, as a disclosed and currently-unexercised acceptance floor for any future <1.2.0 peer (`conformance-tests/CONDITIONS.md` C-06 row). [history](CONTROL_MAPPING_HISTORY.md#si-09) |
-| SI-10 Error/Information Non-Disclosure | `FoundationError` emits a safe problem shape; malformed/deep/cyclic input tests verify structured safe failures; no internal exception is serialized; audit tests check secret absence. `r2db-api/src/r2db_api/http.py` renders every `FoundationError` as `application/problem+json` and collapses any uncaught exception (Starlette routing, or a `PostgresCell`/psycopg failure) to a generic `SERVICE_UNAVAILABLE` with a static message, deliberately discarding the real exception rather than interpolating or logging it at this layer (`_generic_service_unavailable`); `r2db-api/src/r2db_api/postgres.py` itself maps `psycopg.Error` to that same generic denial rather than letting a driver error/message reach the caller. Exercised locally by `r2db-api/tests/test_http.py` and `test_postgres.py`; production log/observability handling of the discarded exception is not yet defined or evidenced. Under the Q4 design (`docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §3.8), exactly one fail-fast message reaches a client and it carries no configuration state: F-1..F-11/F-3c/F-13 are startup-time output only (they may quote a declared value, a role name, or a DSN env-var NAME, so they are never copied onto a readiness/health surface), while F-12 alone is raised at cell-open time and becomes an API response -- `PostgresCell.verify_platform_upgrades_applied` re-raises `platform_upgrades.PlatformUpgradeError` as a `FoundationError("SERVICE_UNAVAILABLE", str(exc))`, and `platform_upgrades._f12_message` is built from the missing upgrade numbers, the application id, and the `ops upgrade-applications` command only -- no DSN, credential, internal hostname, or declared value. Evidence: `r2db-api/tests/test_platform_upgrade_ledger_scan.py::test_f12_message_matches_design_section_3_8_verbatim`, `r2db-api/tests/test_postgres.py::test_verify_platform_upgrades_applied_raises_service_unavailable_when_a_number_is_missing`, `::test_verify_platform_upgrades_applied_raises_when_the_ledger_table_is_entirely_absent`, `r2db-api/tests/test_application_audit.py::test_build_app_h1_logs_the_f12_message_verbatim_at_cell_open_time`. | Application-plane HTTP: `http.py` renders every `FoundationError` as `application/problem+json` and collapses any uncaught exception (routing, a `backend_postgres`/psycopg failure) to a generic `SERVICE_UNAVAILABLE` with a static message, discarding the real exception rather than logging/interpolating it here -- `test_problem_response_never_leaks_the_underlying_exception_message`, `test_authorization_state_unavailable_is_reported`. Control-plane HTTP: `control_http.py` reuses the same generic-collapse pattern with its own error-classification table, exercised end-to-end including a dedicated negative test that injects a raw `RuntimeError` (secret-shaped marker) into the authentication path and asserts the marker is absent from the entire response body -- `test_control_problem_response_never_leaks_the_underlying_exception_message`. **Disclosed gap**: production log/observability handling of the discarded exception is not yet defined or evidenced for either plane. **Intended operational visibility, not a disclosure gap**: `list_credentials` is readable by the strictly weaker `audit` role (SI-02/SI-06), so a distributable, ceremony-issued `audit` credential can enumerate `must_rotate`/`enabled`/`revoked` state for every control credential, not only its own -- deliberate, not a regression: `CredentialsResult`'s "never returns secrets or verifiers" applies identically regardless of role (same schema-exactness assertions as SI-12), and the point of a weaker distributable role is observing rotation/enable/revoke state without being able to change anything (SI-02's fail-closed enumeration keeps it read-only). Under Q4, this peer narrows the same carve-out by TYPE, not by code: the problem-body builder replaces every other error's message with a fixed generic string; the sole exception is `isinstance(exc, PlatformUpgradePending)` (a dedicated subclass, not the classified `SERVICE_UNAVAILABLE` code every other storage-configuration failure maps to), so the carve-out cannot silently widen to a future error site. The surfaced text is the same fixed F-12 message (missing upgrade numbers + the `ops upgrade-applications` command, nothing else) -- `test_f12_message_matches_design_section_3_8_verbatim`, `test_build_app_h1_serves_every_application_and_refuses_only_the_one_with_a_pending_upgrade`. | error probing tests [history](CONTROL_MAPPING_HISTORY.md#si-10) |
-| SI-11 Atomic Integrity | `ApplicationCell.transact` snapshots and restores on failure; `test_atomic_rollback_and_explicit_destructive_operation`; `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell.transact` maps one HTTP request to one real PostgreSQL transaction (design D-5): every operation in a batch runs inside a single `conn.transaction()` block, and any exception -- including a `FoundationError` raised by a later operation in the batch -- rolls back the whole batch via PostgreSQL itself rather than an in-memory snapshot/restore; CCR-13 (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-4) additionally makes an `expected_revision` precondition part of the same atomic unit -- the predicate and the revision comparison are combined into one `WHERE` clause of the single `UPDATE`/`DELETE` statement (`_r2db_revision::text = $expected`), never a separate read followed by a conditional write, so the compare-and-swap cannot race with a concurrent mutation of the same row. Exercised against a real local PostgreSQL 16 cluster by `r2db-api/tests/test_postgres.py`; no production evidence. r2db's own `cross_entity_mutation` remains `unavailable` (P35-D1, `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §0) -- no cross-entity atomic unit exists on this peer to evidence. | `ApplicationCell.transact` uses one local transaction with rollback on rejected operation -- `test_transaction_rolls_back`. Cross-entity atomic unit (design §2 R-1): `transact()` is a two-pass choke -- pass 1 (`_plan_operation`, side-effect-free) validates the WHOLE unit before pass 2 executes any of it, so a later operation's validation failure voids every earlier operation's effect too; shared by both single-entity and cross-entity call paths (no second implementation) -- `test_transact_two_pass_structure_zero_backend_calls_when_a_later_operation_fails_validation` (wrapped backend proving zero execution calls when a later op fails). Rollback on a pass-2 failure is unconditional regardless of exception type, with deterministic pre-execution rejection of lone UTF-16 surrogates in `encode_value` (both backends, same treatment as pre-existing NUL-byte rejection) -- `test_transact_lone_surrogate_value_is_deterministic_validation_failure_and_earlier_entity_unchanged`, `test_transact_rollback_is_unconditional_for_a_non_foundation_error_raised_mid_pass_2`. The PostgreSQL-specific validate/execute pass-boundary window (pass 1 runs outside `self._lock`; a schema change could land between passes) is exercised by wrapping `begin()` and dropping the target table mid-window -- `test_transact_pass_boundary_schema_change_window_yields_not_found_and_sibling_entity_unchanged` (affected entity surfaces `NotFoundError`, a sibling entity in the same batch is left unchanged). Common-suite coverage: `test_c16_v1_two_entity_insert_commits_as_one_unit` (positive), `test_c16_v2_invalid_operation_on_one_entity_voids_the_whole_unit` (atomicity) -- MitateDB pair takes PROVIDED, r2db pair takes the documented ABSENT branch (SI-11's r2db-api cell above). | rollback/fault tests; CCR-13's revision-precondition atomicity/semantics are additionally covered by `conformance-tests/test_c18_revision_precondition_semantics.py` (condition C-18, executable on all four adapters). Cross-entity atomic-unit agreement (declared vs. observed, both entities voided together on a mixed-validity unit) is additionally covered by `conformance-tests/test_c16_cross_entity_atomicity.py` (condition C-16, executable on all four adapters -- vectors V1/V2 for the two PROVIDED MitateDB adapters, V5's evidence-form check for the two ABSENT r2db adapters) [history](CONTROL_MAPPING_HISTORY.md#si-11) |
-| SI-12 No Data-Service Bypass | Structured package has no credential/connection/native-command response; topology denies privileged egress; contract smoke test. Under the Q4 design (`docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-2/D-3, §3.9, requester ruling U-2), two new bookkeeping tables exist, neither reachable from an application-facing API: (a) `r2dbsvc_registry.platform_declarations` (migration `0008`) lives in the platform database, which no application `runtime`/`developer` role ever connects to; both platform process roles (`r2dbsvc_api`, `r2dbsvc_controlplane`) hold `SELECT` only and every write goes through the provision DSN (`ops`/migration). (b) `public._r2db_platform_upgrades` (revised `0003` template, retrofit script `0009`) lives inside each application's own database, is OWNED by that application's developer role -- the same scope `_r2db_schema_revision` already has, closed inside that one database -- and grants the `runtime` role `SELECT` only (requester ruling U-2), which is what the cell-open completeness check reads; the provision role holds `SELECT` plus schema `USAGE` so `upgrade-status` can report without assuming the developer role. Reading one bookkeeping row is not the exercise of a privilege SI-12 forbids (no DB credential, no unbounded connection, no privileged private endpoint, no key that bypasses authorization), and the table name is unreachable through the API at all: `structured.py`'s `_reject_reserved_prefix` refuses any `_`-prefixed identifier. Stated limit (design §3.9): the ledger is an operational record, not tamper-proof evidence -- inside the threat model's own "one application-facing defect" case its rows are as reachable as any other bookkeeping row in that same database. Evidence: `r2db-api/tests/test_postgres.py::test_runtime_role_can_select_but_not_write_the_ledger`, `::test_provision_role_can_read_the_ledger_after_the_script_ends`, `::test_ledger_table_has_no_row_level_security`, `::test_template_seeds_the_ledger_with_the_current_platform_upgrade_numbers`, `::test_0009_upgrades_a_legacy_application_to_match_a_freshly_provisioned_ledger`, `::test_backend_excludes_the_ledger_from_catalog_and_schema_objects_accounting`, `::test_missing_rls_view_stays_empty_on_both_a_new_and_an_upgraded_application`, `r2db-api/tests/test_ops_declarations.py::test_migration_0008_grants_select_to_both_writer_roles_and_nothing_to_public`, `::test_migration_0008_seeds_window_default_but_not_surfaces`, `::test_migration_0008_key_check_constraint_is_named`. | `cell.py`/`backend.py`/`backend_postgres.py`/`backend_sqlite.py` expose only the structured operation set (query/insert/update/delete/create_entity/add_field) -- no method returns a raw connection, DSN, or credential/verifier value, and the single execution choke point (`_execute`, R-2) is typed to reject any `str` statement with `TypeError` -- `test_no_arbitrary_sql_and_identifier_validation`, real-PostgreSQL coverage in `test_postgres.py` (shared with SI-04/SI-05). `/control/v1`'s own responses likewise never echo a DSN, pepper, or another credential's secret -- `list_credentials`/`list_applications` return only `credential_id`/`application_id`/`role`/`enabled`/`revoked` (schema-exact per `test_control_capabilities_result_matches_schema_exactly_and_declares_request_bytes`). Under Q4 (design D-2/D-3 §3.9, ruling U-2), this peer is isomorphic: `platform_declarations` (migration 0007) sits in the platform database with `SELECT` for both service roles and writes only through `MITATEDB_PROVISION_DSN`; `_mdb_platform_upgrades` (revised 0003, retrofit 0008) sits in each application database, owned by that application's developer role, `SELECT`-only for the runtime role, excluded from `schema_count()`'s accounting and never listed as an entity. `_`-prefixed identifiers are unreachable through the API here too. Same stated limit: an operational record, not tamper-proof evidence -- `test_runtime_role_has_select_only_on_the_ledger`, `test_0007_grants_select_to_both_roles_and_nothing_to_public`. | exposure/config review [history](CONTROL_MAPPING_HISTORY.md#si-12) |
-| SI-13 Revocation/Disable Effectiveness | `CredentialStore.assert_active` re-checks each operation and `DataService` checks application state; `test_revoke_disable_and_unavailable_state_fail_closed`; propagation bound remains deployment evidence. CCR-14 extends immediate revoke/disable effectiveness to control credentials (`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` R-2/R-5/R-10/R-13): the same request-time, no-cache credential lookup the application plane uses -- the row is resolved by the locator's `credential_id` and `compare_digest` against the stored verifier is the authoritative check (Phase 6 D-1, contract 1.6.0; the verifier is never the lookup key) (`authorization_propagation_bound_ms: 0`) applies to `ControlCredentialStore`/`PostgresControlCredentialStore` -- a revoked or disabled control credential stops authenticating on its very next request, verified end-to-end by `r2db-api/tests/test_control_plane_store.py::test_reset_revokes_all_and_issues_one_new_credential_atomically_and_touches_nothing_else` (old secret `AUTH_REVOKED` immediately after `reset`, new secret live, Application data/application credentials untouched). Deliberate, permanent design choice, not a gap: an *un-revoke* of a control credential is never offered by any code path (`set_state(revoked=False)` is refused with `VALIDATION_FAILED` by both store implementations, matching the pre-existing application-credential un-revoke refusal) -- reversing a revocation would make a durably-recorded revocation event false, which SI-13 itself would then have to call a propagation failure; the canonical recovery from a revoked control credential is always the out-of-band `reset` ritual, never an un-revoke, verified by `r2db-api/tests/test_control_plane_store.py::test_control_credential_parity_un_revoke_refused_both_impls`, `::test_break_glass_never_offers_un_revoke`. The first-issued credential's own non-permanence (contract `bootstrap[5]`, "expires or requires rotation") is satisfied by a `must_rotate` gate rather than a time-based expiry -- the credential authorizes nothing but `GET /control/v1/capabilities` and self-rotate until one real rotation completes, verified by `r2db-api/tests/test_control_plane_store.py::test_control_credential_locked_by_must_rotate_still_authenticates_and_rotate_clears_it`. | `CredentialStore.assert_active` re-checks revocation/application state on every session operation; `test_disable_revoke_and_unavailable_state_fail_closed`. Control credential: the same request-time, no-cache credential lookup (row resolved by the locator's `credential_id`, `compare_digest` against the stored verifier as the authoritative check; Phase 6 D-1) applies to `control_auth.ControlCredentialStore`/`control_credential_store_postgres.PostgresControlCredentialStore` (`authorization_propagation_bound_ms: 0`, `ControlPlaneService.control_capabilities`, schema-checked by `test_control_plane_service.py::test_control_capabilities_result_matches_schema_exactly_and_declares_request_bytes`) -- a revoked or disabled control credential stops authenticating on its very next call, verified by `MitateDB-api/tests/test_control_credentials.py::test_revoke_is_terminal_enable_cannot_resurrect_it`, `::test_disable_then_enable_restores_authentication`, and end-to-end (real reset ceremony) by `MitateDB-api/tests/test_ops.py::test_reset_with_the_echoed_phrase_revokes_everything_and_mints_one_new_credential`. Un-revoke is refused, not merely absent: both `set_credential_state`/`set_control_credential_state` call paths only ever set `revoked=True`, never `False` -- `ControlPlaneService` has no method parameter that could request it, and the C-13 conformance vector (below) exercises the real `enable(True)`-after-`revoke` sequence as a `must_deny` case, not a `structurally_absent` one. Production propagation bound (network/co-location latency beyond the in-process guarantee above) remains deployment evidence for both credential kinds. | `conformance-tests/test_c08_revocation_boundary.py::test_revoked_credential_stops_existing_session_and_reauth`, `::test_disable_propagates_contains_and_enable_is_selective`, `::test_double_revoke_and_double_disable_do_not_loosen_denial`, `::test_propagation_bound_is_finite_and_non_negative` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-08); the bootstrap/reset lifecycle's own revocation-effectiveness/non-permanence properties are additionally covered by `conformance-tests/test_c15_bootstrap_reset_lifecycle.py` (condition C-15) -- all four adapters take the PROVIDED branch [history](CONTROL_MAPPING_HISTORY.md#si-13) |
-| SI-14 Security-Relevant Auditability | `ControlAuthority` emits canonical lifecycle/control-failure events including denied audit deletion; application facade exposes no audit accessor; `AuditSink` immutable snapshots and forbidden-field guard; `test_control_lifecycle_and_failures_are_canonical_audit_events`, `test_audit_is_append_only_and_secret_free`. `r2dbsvc_registry.control_audit` (`0006_control_plane_http.sql`) is a real, durable PostgreSQL table carrying the contract `audit.fields`' 13 named columns plus `recorded_at`. State-changing control-plane operations write their audit row in the same transaction as the state change (`unit_of_work()`), so a durable-write failure aborts the state change too -- fail-closed by construction -- verified by `r2db-api/tests/test_control_plane_service.py::test_each_state_change_adds_exactly_one_audit_row`, `::test_state_change_sink_fault_injection_aborts_the_state_change`. `target_id` (the contract's 13th `audit.fields` member) names the single target credential/application a lifecycle event acted on, populated at every emission site (`control_plane.py`, `ops.py`, the bootstrap/reset ritual) -- verified by `r2db-api/tests/test_control_plane_service.py::test_issued_secret_appears_only_in_the_response`, `::test_target_id_populated_for_application_and_credential_lifecycle_events`, and for the CLI emission path by `r2db-api/tests/test_control_plane_store.py::test_cli_freeze_issuance_writes_control_audit_row`. The compromise-window playbook reads `target_id` directly off `issue_credential`/`rotate_credential` audit rows. Denial events are durably recorded too (contract `audit.sink_failure_policy` lists authentication/authorization denial first, ahead of state changes), including `AUTH_REQUIRED` (no credential presented at all) so even the cheapest probe leaves a trace -- `r2db-api/tests/test_control_plane_service.py::test_authentication_denials_are_durably_audited_with_truthful_attribution`, `::test_denial_audit_insert_failure_becomes_503_for_every_denial_kind` (1 more attribution pin: companion history). **Disclosed limit -- three denial categories are exempted from durable audit**: (i) `control_requests_per_minute` rate-limit refusals -- runs before authentication (no `credential_id` yet) and before any durable write, so a flood cannot generate unbounded audit rows; (ii) `AUTH_STATE_UNAVAILABLE` (the credential store itself is unreachable) -- a service-health outcome where the audit attempt would itself fail, compounding one outage into a second 503 for no benefit; the HTTP response is already fail-closed regardless; (iii) phase 10's pre-authentication `concurrency` refusals on the application HTTP plane -- the slot is taken before `_authenticate`, so the denial has no authenticated actor to attribute and writes no durable row (SI-08). (i)/(ii): `r2db-api/tests/test_control_plane_service.py::test_rate_limit_precedes_authentication_and_is_not_audited`; (iii): `r2db-api/tests/test_preauth_concurrency_bound.py::test_preauth_concurrency_denial_is_never_durably_audited`. **Runtime role holds no privilege beyond insert**: `GRANT INSERT`-only on `control_audit` holds from the control-plane process' own role (`r2dbsvc_controlplane`); the schema owner (`r2dbsvc_control`) retains ordinary owner privilege -- `r2db-api/tests/test_control_plane_store.py::test_controlplane_role_grants_match_the_design` (INSERT only, never SELECT/UPDATE/DELETE its own writes back). The out-of-band CLI (`python -m r2db_api.ops`) writes to the same table, same-transaction-as-state-change, for every state-changing subcommand (`r2db-api/tests/test_control_plane_store.py::test_cli_issue_credential_writes_control_audit_row_with_no_secret_anywhere`, `::test_cli_revoke_credential_writes_control_audit_row`; 1 more subcommand pin: companion history); CLI denials are reported via stderr/exit code rather than durably audited (an OS-access-gated tool, not the public surface's untraceable-probe risk). `r2dbsvc_registry.application_audit` (`migrations/0007_application_audit.sql`) carries the same 13 contract `audit.fields` columns `control_audit` does, plus `recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()`, `audit_seq bigserial`, per-column `length` CHECKs, and a `count` column (a coalesced-denial summary row or buffer-overflow alert row sets it; never `0`/`1`) -- `r2db-api/tests/test_application_audit.py::test_coalesced_summary_row_with_exactly_one_repeat_writes_no_literal_count_of_one`, `::test_buffer_overflow_alert_row_with_exactly_one_drop_writes_no_literal_count_of_one`. **Fail-closed by construction**: the durable row is INSERTed/committed on a separate platform connection before the data transaction commits; a sink failure rolls the data transaction back, answers `SERVICE_UNAVAILABLE` -- `::test_destructive_mutate_is_service_unavailable_when_the_durable_sink_fails`, `::test_schema_operation_is_service_unavailable_when_the_durable_sink_fails`. `outcome="allow"` means "authorized and submitted", not "committed": a clean commit failure writes a second `outcome="error"` row for the SAME `request_id` (`::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`), that error row is itself fail-closed; a simulated process loss deliberately leaves the `allow` row standing alone, per spec (`::test_simulated_process_loss_leaves_the_allow_row_alone`). **Append-only by grant**: `r2dbsvc_api` gains INSERT (plus sequence USAGE) on `application_audit` and nothing else; `r2dbsvc_auditreader` holds SELECT-only on BOTH audit tables; `r2dbsvc_controlplane` has no privilege on `application_audit` at all -- verified over bare `psycopg` connections by `::test_api_role_cannot_select_update_or_delete_application_audit`, `::test_auditreader_role_can_select_both_audit_tables_and_nothing_else` (1 more grant pin: companion history). **Which denials are durable**: an inclusion list of exactly six reason codes -- `AUTH_REQUIRED`, `AUTH_INVALID`, `AUTH_REVOKED`, `FORBIDDEN`, `APPLICATION_DISABLED`, `DESTRUCTIVE_CONFIRMATION_REQUIRED` (`_DURABLE_DENIAL_CODES`, `src/r2db_api/service.py`); every other reason code is non-durable and does not enter the bounded buffer -- `::test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry`, `::test_capability_unsupported_and_not_found_denials_add_no_durable_row`. These codes are out of scope because they sit outside SI-14's own minimal event class (authentication/authorization denial, credential/Application lifecycle change, destructive or privilege-sensitive operation, control-plane administrative change, security-control failure), not because they are uninteresting -- and this rests on the same ground as, but does not resolve or excuse, the control plane's own two exemptions above (pre-auth rate refusal, `AUTH_STATE_UNAVAILABLE`): the two lines differ in content; neither settles the other. **Coalescing**: the key is `(application_id, actor_id or "unknown", operation, reason_code)` over a 60s window; the first occurrence is a synchronous INSERT+commit; repeats are counted in memory and flushed at window end as one aggregate row -- ceiling of two rows per key per window per process -- both the coalescing counters and the bounded buffer below are process-local, so a deployment's real ceiling is `2 x <windows> x M` and `<buffer capacity> x M` for M = the deployment's maximum instance count; folding M into the capacity thresholds is runbook work (`POSTGRES_PROVISIONING_RUNBOOK.md` §15) -- `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n`, `::test_different_denial_keys_do_not_coalesce_together` (1 more concurrency pin: companion history). **Disclosed limit**: `AUTH_REQUIRED` durability is a genuinely new unauthenticated-write path; bounded only by coalescing and length CHECKs, not any rate window (`audit_requests_per_minute` governs `audit_query` on the control host only). **Bounded buffer for ordinary successes**: capacity 1000 by default (`R2DB_AUDIT_BUFFER_CAPACITY`), flushed on threshold and periodically, on a separate connection so a buffer failure never blocks a fail-closed operation; overflow emits a fixed `logging.error` plus a durable `security_control_failure` row, rate-limited to one per flush interval (3 buffer-bound/overflow/rate-limit pins: companion history). The `failing` flag means the result of the LAST COMPLETED flush attempt -- clears on success regardless of remaining backlog; concurrent flushes resolve by completion order (2 `failing`-flag pins: companion history). One data operation adds at most one durable row (`::test_each_data_operation_adds_exactly_one_application_audit_row`); dispatch between fail-closed and buffered classes is by request structure at the destructive-confirmation choke, never by `event_class` (`::test_dispatch_point_is_the_destructive_confirmation_choke`). The `request_id` the HTTP layer returns is the one written to the durable row (`::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`). A denial row's `application_id` comes from the authenticated `AuthContext`, never a client-declared value; an unauthenticated denial carries `application_id = NULL`, keyed on `actor_id or "unknown"`. `POST /control/v1/audit/query` and the `POST /v1/audit/query` alias resolve to ONE handler on the control app; the reader is `r2dbsvc_auditreader` (SELECT-only) over the UNION of `control_audit` and `application_audit`; `plane` derives from the source table, never writer-settable; total order is `(recorded_at, plane, event_id)`; `after` is an opaque keyset cursor, `VALIDATION_FAILED` when undecodable; rows newer than `visibility_lag_ms` are withheld -- `r2db-api/tests/test_audit_query.py::test_control_host_serves_both_audit_query_paths_with_one_handler`, `::test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writes` (3 more endpoint-behavior pins: companion history). The data-plane host's own `/v1/audit/query` is unchanged and still answers `CAPABILITY_UNSUPPORTED` (`::test_data_plane_host_audit_query_still_refuses_with_capability_unsupported`). `visibility_lag_ms` (`statement_timeout + idle_in_transaction_session_timeout + 1000ms`, `11000ms` at shipped defaults) is derived by both processes from ONE shared ground -- the platform catalog (`pg_db_role_setting`) -- each process checks at startup that its own effective value agrees with it (declared writer, both settings present, neither zero/negative, no per-database override, writer connection matches catalog); any failure stops that process before it declares or serves anything -- `r2db-api/tests/test_audit_query.py::test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts`, `r2db-api/tests/test_ops_declarations.py::test_derive_visibility_lag_ms_default_is_11000` (5 more startup-guard message pins: companion history); operational instruction `POSTGRES_PROVISIONING_RUNBOOK.md` §16. **Two limits disclosed, not overstated**: (i) that both processes point at the SAME platform database is itself unverified -- neither knows the other's DSN, so a stale platform DSN on the control process reproduces the old drift; detection stays at post-deploy comparison of the two capability documents; (ii) a process can effective-check only its OWN role, only at startup -- role settings apply at login, so the control process cannot check `r2dbsvc_api` (that peer's own job), and pool connections opened after startup are not re-checked; changing the declaration means `ops` plus a restart of BOTH processes. The same measurement technique (reading the two `SHOW` timeouts off the sink's own writer connection) also covers the HTTP conformance adapters' `PostgresApplicationAuditSink` writer connection -- `r2db-api/tests/test_conformance_adapter_r2db_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_no_explicit_session_override`, `MitateDB-api/tests/test_conformance_adapter_mitatedb_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle_timeouts_set`; deliberately peer-local (the port carries no method for it). `capabilities().audit_query.operations` (27 members) and `.target_kinds` (5 members) are published `sorted()` off declared constants -- the same declare-the-hazard posture `event_class` has, with no enum in the contract; the data-plane host declares `audit_query` `unavailable` and carries neither key (`::test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable`). **Declared `event_class`/`operation`/`target_kind` vocabulary is exactly the emitted one**, machine-guaranteed by a single AST scanner over the whole package, no hand-maintained list: each `<field>=` keyword argument must be a string constant, an `IfExp` of constants, or a genuinely-bound forward parameter -- no smuggling via a dict literal, subscript/attribute assignment, or passthrough of a client-supplied dict; every function taking the field declares it keyword-only. With the literal set thereby completely enumerable, the scanner pins `U == D ∪ N` and `D ∩ N == ∅` per field, where `N` is an explicitly-named, runtime-measured non-durable exclusion set. Peer numbers: `event_class` (legacy in-memory-sink-only classes only: `authentication`/`control_failure`/`control_state`, reached only through `ControlAuthority._control_event`); `operation` U 31 = D 27 + N 4 (`delete_audit`/`set_authorization_state_available`/`set_credential_state`, plus `control_capabilities` (its 2 emit sites can never reach a deny branch) -- `::test_control_capabilities_operation_has_no_reachable_deny_branch`); `target_kind` U 6 = D 5 + N 1 (`application_or_credential`). Non-durability is measured, not assumed: `::test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durable_tables` drives each excluded word through its real path and asserts no durable row appears. `::test_declared_event_classes_cover_every_emittable_class`, `::test_every_field_keyword_argument_is_a_string_literal_ifexp_or_forward` (7 more AST-scanner structural pins: companion history). **Disclosed limit**: the equality check cannot see a SHRINKING declaration (moving a durable word from `D` into `N` in the same step keeps `U == D ∪ N` true); the only detector is a per-field snapshot test pinning `DECLARED_AUDIT_OPERATIONS`/`DECLARED_AUDIT_TARGET_KINDS`/`DECLARED_AUDIT_EVENT_CLASSES` against a fixture `frozenset` -- `::test_declared_audit_event_classes_change_only_deliberately`, `::test_declared_audit_operations_change_only_deliberately` (1 more snapshot pin: companion history). `::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` reads the sibling peer's test file by path (never imports it), asserting the loaded path is the sibling's. Contract 1.4.0 obligation (b)'s scope is settled by contract text (same-label addendum): a data-plane host need not authenticate control/audit credentials merely by declaring `control_plane` other than `unavailable`; the control-credential-against-data-host case is now a common, unconditional vector (this row's Common evidence cell). Why this peer's data-plane host holds no control-credential store at all belongs to SI-00, not this row. | **Application-plane audit, pre-durable-sink foundation**: `AuditSink` uses immutable snapshots + detail/event allowlists; representative test: `test_audit_events_are_append_only_and_secret_free`. This 6-field in-memory sink is no longer the only record -- see the durable-sink paragraph below. `mitatedb_registry.control_audit` (migration `0002`) is a real, durable PostgreSQL table carrying the contract `audit.fields`' 13 named columns plus a monotonic `audit_seq` bigserial (`recorded_at` alone is not a total order under concurrent same-timestamp writes, needed for C-15's prefix-strict comparison). State-changing operations write their audit row in the SAME transaction as the state change (`unit_of_work()`), so a durable-write failure aborts the state change too -- `MitateDB-api/tests/test_control_plane_service.py::test_audit_write_fault_rolls_back_an_accompanying_application_registration`, `::test_audit_write_fault_rolls_back_an_accompanying_credential_revoke` (1 more rollback pin: companion history). Field-set match is fixed by `::test_control_audit_fields_matches_the_contract_audit_fields_exactly`. `target_id` (the contract's 13th `audit.fields` member) names the single target credential/application a lifecycle event acted on -- `::test_target_id_populated_for_application_and_credential_lifecycle_events`, `::test_target_id_populated_for_control_credential_lifecycle_events` (1 more emission-site pin: companion history). Denials are durably recorded too, with the same three exemptions r2db documents (rate-limit pre-authentication, `AUTH_STATE_UNAVAILABLE`, and phase 10's pre-authentication `concurrency` refusal on the application HTTP plane, taken before `_authenticate` and therefore carrying no authenticated actor) -- `::test_rate_limit_denial_is_never_durably_audited`, `::test_auth_state_unavailable_is_never_durably_audited` (2 more denial-kind pins: companion history), and `MitateDB-api/tests/test_preauth_concurrency_bound.py::test_preauth_concurrency_denial_is_never_durably_audited`. **Runtime role holds no privilege beyond insert**: `mitatedbsvc_controlplane` has `INSERT`-only privilege on `control_audit` (no `SELECT`/`UPDATE`/`DELETE` for that role) -- bare-connection verified: `MitateDB-api/tests/test_control_plane_postgres.py::test_control_plane_role_cannot_select_its_own_audit_table`, `::test_control_plane_role_can_insert_into_its_own_audit_table`; the schema owner (`mitatedbsvc_provision`) is a separate reader role required to read this table back (used by the HTTP conformance adapter and the break-glass `audit-report` CLI subcommand). The out-of-band ritual CLI (`ops.py`) writes to the same table for `bootstrap`/`reset`; the break-glass command family's state-changing subcommands write through the SAME `ControlPlaneService` methods, therefore the same same-transaction audit guarantee, never a second CLI-specific path. `mitatedb_registry.application_audit` (`migrations/0005_application_audit.sql`, `event_id text` PRIMARY KEY) carries the identical 13 contract columns + `count` + `audit_seq` + `recorded_at DEFAULT clock_timestamp()` + the same length CHECKs; `mitatedbsvc_api` INSERT-only, `mitatedbsvc_auditreader` SELECT-only on both audit tables, `mitatedbsvc_controlplane` nothing -- `MitateDB-api/tests/test_application_audit.py::test_api_role_cannot_select_update_or_delete_application_audit`, `::test_auditreader_role_can_select_both_audit_tables_and_nothing_else` (2 more grant pins: companion history). `test_application_plane_role_has_no_privilege_on_control_audit` remains green unchanged. Fail-closed by construction: `::test_destructive_delete_is_service_unavailable_when_the_durable_sink_fails_sqlite`/`_postgres`, `::test_schema_operation_is_service_unavailable_when_the_durable_sink_fails_sqlite`/`_postgres`, with the `error`-row rule at `::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`, `::test_simulated_process_loss_leaves_the_allow_row_alone`. Same 6-code inclusion list, key, 60s window, and 2-rows-per-key-per-window-per-process ceiling as r2db: `::test_durable_denial_codes_match_the_design_d3_table`, `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n` (2 more coalescing pins: companion history). Same bounded buffer + rate-limited overflow alert: `::test_buffer_does_not_grow_past_its_configured_bound`, `::test_buffer_overflow_emits_logging_error_and_exactly_one_security_control_failure_row` (2 more buffer pins: companion history). **MitateDB-specific**: the legacy 6-field in-memory sink's rounding (out-of-vocabulary values silently mapped to `"unclassified"`/`"unspecified"`) never reaches the durable path -- a separate 13-column emitter is used there -- `::test_durable_path_never_passes_through_the_six_field_rounding_sink`, `::test_declared_event_class_values_are_disjoint_from_the_six_field_sink_rounding_fallbacks`. **`commit()` runs inside `try`**: `backend_postgres`'s `create_collection`/`add_field`/`delete` commit inside the classified block (both backends; SQLite's DDL runs under an explicit pseudo-transaction) so a commit raise is never left unclassified -- `::test_backend_commit_failure_is_classified_and_produces_an_error_row`, `::test_in_memory_and_postgres_backends_have_pre_commit_hook_parity`. query/insert/update successes are emitted/buffered like r2db's own -- `::test_query_insert_and_update_success_events_are_durably_recorded`, `::test_each_data_operation_adds_exactly_one_application_audit_row` (1 more dispatch pin: companion history). `request_id` is threaded from HTTP through auth/cell/backends so the wire id matches the durable row's id -- `::test_http_response_request_id_matches_the_durable_audit_row`. A `FORBIDDEN` row's `application_id` is the TARGET cell's own id (victim side), never caller-declared -- `::test_application_scope_denied_is_durably_recorded`, `::test_role_denied_is_durably_recorded` (1 more denial-kind pin: companion history). `audit_query` is served on the control host at both paths with one handler, reader `mitatedbsvc_auditreader`, `plane` from the source table, `(recorded_at, plane, event_id)` order, opaque cursor, derived `visibility_lag_ms` -- `MitateDB-api/tests/test_audit_query.py::test_control_host_serves_both_audit_query_paths_with_one_handler`, `::test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writes` (3 more endpoint-behavior pins: companion history). The two-process `visibility_lag_ms` premise is grounded the same way as r2db's cell: one shared catalog (`pg_db_role_setting`) grounds both the declaration and the effective value, the same startup double-check, the same removed/rejected env vars. **Two limits, identical to r2db's cell**: (i) both processes reading the same platform database is itself unverified; (ii) a process can effective-check only its own role, only at startup. Derivation pinned by `::test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts`; catalog-grounded checks by `MitateDB-api/tests/test_platform_declarations.py::test_f7_missing_declaration` (4 more startup-guard pins: companion history); real writer connections by `test_application_audit.py::test_application_audit_writer_connection_reflects_the_api_roles_own_setting`, `::test_control_audit_writer_connection_reflects_the_controlplane_roles_own_setting`; removed env vars by `test_main.py::test_build_app_rejects_every_removed_env_var_through_the_real_composition_root`; operational instruction `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2b. Both `operation` and `target_kind` are declared, alongside `event_class`, by the same single AST scanner r2db's cell describes, no hand-maintained list. `capabilities().audit_query.operations` (29 members) and `.target_kinds` (5 members) are published `sorted()`, each the union of the control half and the application half -- a mutation in either half turns the same equality check red. Peer numbers: `operation` U 30 = D 29 + N 1 (`control_capabilities`, excluded for the same structurally-unreachable-deny-branch reason as r2db's literal -- `::test_control_capabilities_operation_has_no_reachable_deny_branch`); `target_kind` U = D = 5, N = ∅; `event_class` N = ∅. `auth.py`'s and `credential_store_postgres.py`'s `operation="authenticate"`/`"assert_active"` and `target_kind="credential"` sites are measured to reach the durable tables (`::test_authenticate_and_assert_active_denials_are_durable_not_excluded`, and against real PostgreSQL `::test_postgres_authenticate_and_assert_active_denials_are_durable_not_excluded`), so they are `D`, not `N`. This peer's exclusion list has 1 definition. **Disclosed limit, identical to r2db's cell**: the equality check cannot see a shrinking declaration; the only detector is a per-field snapshot test. Contract 1.4.0 obligation (b) is settled by contract text, as in r2db's cell; see SI-00 for this peer's realization (no control-credential store on the data-plane composition root). | audit evidence tests; CCR-14's control-plane durable-audit and non-permanence properties are additionally covered by `conformance-tests/test_c15_bootstrap_reset_lifecycle.py` (condition C-15) -- all four adapters take the PROVIDED branch. The application-plane durable sink and `audit_query` are additionally covered by `conformance-tests/test_c09_audit_evidence.py` (condition C-09) and by `AuditResult` reverse-validation in `conformance-tests/test_c11_response_schema_conformance.py` (condition C-11) -- all four registered adapters take the PROVIDED branch, and the whole-registry vacuity guard `test_c09_every_control_surface_adapter_takes_the_provided_branch` is green with no `xfail`, requiring EVERY registered adapter with a control surface to have taken it (see the C-09 row of `conformance-tests/CONDITIONS.md`). The declared-vocabulary property is checked from the common side too, by three isomorphic declaration-agreement vectors in `conformance-tests/test_c09_audit_evidence.py` -- `::test_c09_declaration_agreement_event_class`, `::test_c09_declaration_agreement_operation`, `::test_c09_declaration_agreement_target_kind` -- each of which raises a known durable event, polls within the declared visibility lag and asserts a NON-EMPTY observation before checking that every returned value is drawn from the declaration, plus `::test_c09_every_control_surface_adapter_declares_1_5_0` as the whole-registry vacuity guard. **Disclosed limit**: the common side only checks "returned ⊆ declared" -- the reverse half (a word declared but never returned) stays outside the common suite and is carried by each peer's own cell alone. Contract 1.4.0 obligation (b)'s scope is exercised unconditionally by `::test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted` on all four plugs, over conformance port v1.9 (co-hosting judged by `adapter.surfaces_cohosted(document)`, derived from a peer's own declared `surfaces` origins). **Disclosed limit**: the `provided` branch's own real-world co-hosted case remains unexercised by any currently-registered deployment (no registered plug currently co-hosts both surfaces on the same origin) -- restated in the C-09 row. **Phase 10 (2026-09-10)**: C-25's leg (3) -- a mutation's own `request_id` is the one its own audit event carries -- is now driven from the plug's own CONTROL-plane discovery (`control_capabilities()`), not the data-plane document every plug declares `audit_query: unavailable` on by product-code constant, which is what made the leg vacuously undriven before; the status is read off the SAME isolated surface the mutation was made through, asserted to agree with the session adapter's own reading, with an in-test whole-registry guard requiring at least one registered plug to declare `audit_query` enabled/partial -- `conformance-tests/test_c25_result_request_id.py::test_c25_result_request_id`, parametrized once per registered plug (six since the two socket plugs landed). Condition C-26 adds real-startup evidence: each peer's documented composition root runs as real OS processes in front of a real nginx and is observed to serve exactly the surfaces it declared, on both planes, to a brand-new client; a root with no declaration row fails fast instead of starting on a default; and shutdown leaves no process, no bound port, no temporary directory and no throwaway database or role behind -- `conformance-tests/test_c26_composition_root.py::test_c26_declared_surfaces_are_served`, `::test_c26_deploy_smoke_is_green`, `::test_c26_missing_declaration_fails_fast`, `::test_c26_no_residue_after_shutdown`, `::test_c26_start_failure_leaves_no_residue`, with the registry non-vacuity guards `::test_c26_composition_roots_registry_has_at_least_two` and `::test_c26_items_are_grouped_per_launcher`. [history](CONTROL_MAPPING_HISTORY.md#si-14) |
-| SI-15 Fail-Closed Authorization | `CredentialStore` rejects unavailable/unknown/disabled/revoked state; `DataService._check`; `test_revoke_disable_and_unavailable_state_fail_closed`; CCR-13's declaration-completeness guard is the same fail-closed shape applied to capability declarations rather than credential state: `PostgresCell._load_catalog` (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-1) fails the whole call closed with `SERVICE_UNAVAILABLE` if even one entity lacks the `id`/`_r2db_revision` columns a `mutable`/`revision_preconditions: enabled` declaration requires, rather than silently publishing a false declaration for it. `audit`-role denial: an `audit` credential attempting any of the 8 write control operations is refused `FORBIDDEN` and the denial is durably audited in the same assertion, not merely fail-closed with no trace -- `r2db-api/tests/test_control_plane_service.py::test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint` asserts both `exc.value.code == "FORBIDDEN"` and `exc.value.details.get("audited") is True` (plus a durable audit-row-count increment) for every one of the 8, parametrized over both the in-memory and real-PostgreSQL backends -- the PostgreSQL parametrization is this row's own durable read-back evidence for r2db. | `CredentialStore` rejects unavailable auth state and missing/disabled credentials; `test_disable_revoke_and_unavailable_state_fail_closed`. `audit`-role denial: same fail-closed-with-durable-trace property, `MitateDB-api/tests/test_control_plane_service.py::test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint` (asserts a durable audit-row-count increment plus `reason_code == "FORBIDDEN"` for every one of the 8 write operations), with dedicated real-PostgreSQL durable read-back evidence (a genuine post-commit SELECT, not an in-process snapshot) by `MitateDB-api/tests/test_control_plane_postgres.py::test_audit_role_accepted_on_read_endpoints_and_forbidden_on_a_write_endpoint_against_real_postgres`. | `conformance-tests/test_c08_revocation_boundary.py::test_authorization_state_unavailable_fails_closed_then_recovers`, `::test_disable_propagates_contains_and_enable_is_selective` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-08); an undeclared capability executing anyway (the reverse fail-closed direction) is additionally covered by `test_c12_capability_agreement.py` (condition C-12) and `test_c17_declaration_agreement.py` (condition C-17), both executable on all four adapters [history](CONTROL_MAPPING_HISTORY.md#si-15) |
+## SI-00 Single-Compromise Containment
+
+[history](CONTROL_MAPPING_HISTORY.md#si-00)
+
+### r2db-api
+
+#### Control
+
+- `authority-topology.yaml` provides a deny-by-default plane skeleton, verified by negative reachability tests (`test_topology.py`).
+- Per-application database isolation is structural, PostgreSQL-enforced (migrations 0001-0004): `0003_provision_application.sql` creates each application's DB from `template0`, `REVOKE CONNECT ... FROM PUBLIC`, grants `CONNECT` only to that application's 2 dedicated roles -- crossing is impossible without FDW/dblink, not merely grant discipline;
+- RLS is retained as defence-in-depth (SI-01/02/03) -- `test_cross_database_connect_is_refused_at_the_database_level`.
+- CCR-14 adds a co-located control-plane HTTP process with 3 checked isolation points: (a) structurally separate credential stores/tables, distinct HMAC peppers required to differ at startup -- `test_cross_store_leakage_secret_added_to_one_store_never_authenticates_the_other`, `test_validate_control_pepper_separation_rejects_equal_peppers`;
+- (b) distinct login roles -- `r2dbsvc_api` has no grant on `control_credentials`/`control_audit` and only `INSERT` on `application_audit` (no SELECT/UPDATE/DELETE);
+- a third SELECT-only `r2dbsvc_auditreader` role reads both audit tables -- `test_controlplane_role_grants_match_the_design`, `test_auditreader_role_can_select_both_audit_tables_and_nothing_else`;
+- (c) `AuthorityTopology` registers the control-plane HTTP process as its own node with a structural unreachability check -- `test_control_plane_http_reaches_only_control_and_audit`.
+- A data-plane host declaring `control_plane: enabled` with no control-credential store fails `AUTH_INVALID` for any control/audit credential on its `/v1/audit/query` alias -- separation working as designed (contract's `audit_query` obligation binds the control surface's own endpoint, not this alias; also recorded on SI-14).
+- **Realization**: the data-plane composition root neither constructs nor imports the control-credential store, pinned by an AST-based check (parses `main.py`'s `Import`/`ImportFrom`/`Name`/`Attribute` nodes, not substring match) -- `test_data_plane_composition_root_does_not_import_the_control_credential_store`;
+- resulting wire behavior is exactly what the contract permits: `AUTH_INVALID` because no verifier exists at all, never `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/5xx (all non-conforming).
+
+#### Evidence
+
+- —
+
+#### Status
+
+- **Acceptance boundary**: r2db Stage 1, contract 1.6.0, was installed on the VPS on 2026-09-05 -- migrations 0001, 0002, 0005, 0006, 0007 and 0003 were applied in that order (0004 is the deprovision script and is never applied at install), `pg_hba`/`pg_ident` posture B was configured, and external reachability on port 8443 was verified (`docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12);
+- no later contract version has been deployed to that VPS since, and no production credential-store/role/grant listing beyond the runbook's own steps is recorded -- this row's own containment checks (a)-(c) remain unexercised against that instance.
+
+### MitateDB-api
+
+#### Control
+
+- Control-plane/data-plane separation (design R-4/R-6): (a) structurally separate credential tables (`credentials` vs. `control_credentials`), distinct HMAC peppers required to differ at startup -- `test_pepper_separation_detects_the_two_env_vars_configured_identically`.
+- (b) two disjoint least-privilege PostgreSQL roles, verified with bare `psycopg` connections -- `test_application_plane_role_has_no_privilege_on_control_credentials`.
+- `mitatedbsvc_api` additionally holds only `INSERT` on `application_audit` (no SELECT/UPDATE/DELETE);
+- `mitatedbsvc_controlplane` gets nothing on it;
+- a third SELECT-only reader role `mitatedbsvc_auditreader` reads both audit tables -- `test_auditreader_role_can_select_both_audit_tables_and_nothing_else`.
+- Contract 1.4.0's `audit_query` obligation binds the control surface's own endpoint, not the data host's alias (this peer's data service declares `control_plane` enabled while holding no control-credential store, so that alias answers `AUTH_INVALID`; also on SI-00's r2db column).
+- (c) `mitatedbsvc_provision` (CREATEDB/CREATEROLE) is held only by operator/deploy tooling and the out-of-band CLI, never by either process.
+- **Realization**: structurally identical to r2db-api -- the data-plane composition root neither imports the control-credential store, pinned by an AST check on identifiers, not string literals -- `test_data_plane_composition_root_does_not_import_the_control_credential_store`.
+
+#### Evidence
+
+- —
+
+#### Status
+
+- MitateDB has no Python topology-declaration class equivalent to r2db's `AuthorityTopology`;
+- `docker/authority-topology.yaml` is a non-secret intent skeleton only, not evidence.
+- **Deployment precondition (R-1, cloudsqlsuperuser bypass)**: every application-facing role must be created only via migration SQL's `CREATE ROLE` (never Cloud SQL's Users API, which grants `cloudsqlsuperuser` membership and bypasses `REVOKE CONNECT ... FROM PUBLIC`) -- the fail-closed backstop is verified locally by `test_provisioning_guard_detects_an_unexpected_group_membership`;
+- runbook/real-Cloud-SQL verification is `docs/cloud-run-cloud-sql.md` §3.3/§9.
+- **Acceptance boundary**: local-cluster evidence only -- on the one real Cloud SQL deployment, role/database DDL and `log_statement=none` have passed, but the deprovision path and the cloudsqlsuperuser probe remain unexercised, production evidence stays open.
+- That AST check does not cover this peer's data-plane env still naming the control-credential pepper -- a separate, still-open asymmetry (ledger item L4-13, still open).
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- lateral/control-plane tests;
+- CCR-14's control-plane authority boundary is additionally covered by `conformance-tests/test_c14_authority_boundary.py` (condition C-14, SI-00/SI-02/SI-03/SI-08) -- all four adapters (`r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http`) currently take the PROVIDED branch: each declares a real control-plane surface as `enabled`, checked for real fail-closed behavior in both directions.
+- The data-host side of obligation (b) is exercised in the common suite by `conformance-tests/test_c09_audit_evidence.py::test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted` (unconditional, all four plugs, conformance port v1.9).
+- Co-hosting is judged by `adapter.surfaces_cohosted(document)` (`conformance-tests/adapter.py`), a plain module-level port helper that derives the answer purely from a 1.6.0+ peer's own declared `surfaces.data.base_url`/`surfaces.control.base_url` origins, never from an adapter's own self-report;
+- `conformance-tests/test_c09_audit_evidence.py::test_surfaces_cohosted_resolves_true_only_for_matching_origins_and_false_otherwise` exercises `surfaces_cohosted`'s own `True` branch directly against synthetic `CapabilityDocument` fixtures, independent of whether any real deployment ever co-hosts.
+
+#### Status
+
+- All four registered plugs currently resolve `False` there (no currently-registered deployment co-hosts both surfaces on the same origin), so the `provided` branch of `test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted` remains unreached by any registered plug -- this residual limit is restated, not closed, in the C-09 row of `conformance-tests/CONDITIONS.md`.
+
+## SI-01 Application Isolation
+
+[history](CONTROL_MAPPING_HISTORY.md#si-01)
+
+### r2db-api
+
+#### Control
+
+- `r2db-api/src/r2db_api/service.py` resolves cell from `AuthContext.application_id`;
+- `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell` additionally confines each application to its own PostgreSQL database (architecture §8 "D-3 改訂", database-per-application: the database name is assigned by the control plane, never derived from client input, and the cell only ever connects over that application's own `runtime`/`developer` DSNs) and verifies every identifier against that database's live `information_schema` catalog (`_load_catalog`) before composing SQL, so a request cannot reach another application's tables even if an identifier happens to collide by name;
+
+#### Evidence
+
+- `r2db-api/tests/test_foundation.py::test_server_bound_scope_and_isolation`;
+- exercised against a real local PostgreSQL 16 cluster by `r2db-api/tests/test_postgres.py`, including `test_cross_database_connect_is_refused_at_the_database_level` (application A's roles cannot even open a raw connection to application B's database) and `test_pool_never_leaks_role_or_schema_across_applications`.
+
+#### Status
+
+- This is local/test-cluster evidence;
+- r2db Stage 1, contract 1.6.0, was installed on the VPS on 2026-09-05 with migrations 0001, 0002, 0005, 0006, 0007 and 0003 applied in that order (0004 is the deprovision script and is never applied at install) (`docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12), so the same database-per-application `REVOKE CONNECT ... FROM PUBLIC` grant now exists there for the one provisioned application (`sandbox`);
+- cross-application connect-refusal itself has not been re-exercised against that instance (only one application is provisioned there), so production database-grant isolation is configured but not yet verified.
+
+### MitateDB-api
+
+#### Control
+
+- `MitateDB-api/src/mitatedb_api/service.py` resolves the cell only from authenticated Principal (`MitateDB-api/tests/test_foundation.py::test_application_scope_is_server_bound`, SQLite backend).
+- Database-per-application (design R-1): `MitateDB-api/src/mitatedb_api/backend_postgres.py` confines each application to its own PostgreSQL database, named/allocated by the control plane and never derived from client input;
+- `MitateDB-api/migrations/0003_provision_application.sql` issues `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` and grants `CONNECT` only to that application's own `runtime`/`developer` roles, `0004_deprovision_application.sql` reverses it.
+
+#### Evidence
+
+- Verified against a real local PostgreSQL 16 cluster by `MitateDB-api/tests/test_postgres.py::test_cross_database_connect_is_refused_at_the_database_level` (application A's roles cannot open even a raw connection to application B's database).
+
+#### Status
+
+- **Deployment precondition (cloudsqlsuperuser bypass, shared with the SI-00 row above)**: this isolation is a PostgreSQL `CONNECT`-grant boundary, which a Cloud-SQL-Users-API-created role bypasses entirely (Cloud SQL's own `cloudsqlsuperuser` membership) -- `cloud-run-cloud-sql.md` §3.3 states this as a hard runbook rule, and the fail-closed backstop is `MitateDB-api/tests/test_postgres.py::test_provisioning_guard_detects_an_unexpected_group_membership`.
+- Local/test-cluster evidence only -- Cloud SQL production database-grant isolation is `absent` until `cloud-run-cloud-sql.md` §9 is run once;
+- on the one real deployment made so far, the DDL itself passed but the cross-database-connect-refused behavior has not been re-exercised against that instance and deprovision remains unexercised, so this isolation stays open, not confirmed, in production.
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- `conformance-tests/test_c01_scope_binding.py::test_positive_control_scope_is_bound_and_legitimate_access_succeeds`, `::test_cross_application_entity_is_unreachable`, `::test_cross_application_denial_does_not_disclose_existence` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-01).
+
+#### Status
+
+- —
+
+## SI-02 Control Plane Isolation
+
+[history](CONTROL_MAPPING_HISTORY.md#si-02)
+
+### r2db-api
+
+#### Control
+
+- `AuthorityTopology` denies application/developer reachability to control/provisioning (`test_topology.py`).
+- `0001_bootstrap_control_plane.sql` creates provisioning authority (`r2dbsvc_control`) as a distinct `NOSUPERUSER`/`NOINHERIT` role only an operator holds a credential for (it deliberately carries `CREATEDB`/`CREATEROLE` for database-per-application provisioning, §5.3 C-2 -- exactly why the API process never holds it);
+- `PostgresCell` never embeds a control-plane DSN, only ever opens connections as an application's already-provisioned `runtime`/`developer` role.
+- CCR-14's `/control/v1` surface shares SI-00's 3 isolation points identically;
+- Within the control plane, `role="control"` is separated from `role="audit"` (read-only) structurally, fail-closed by enumeration: every one of the 8 remaining operations refuses an `audit` principal with `FORBIDDEN` -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, with a real-wire-route-table completeness guarantee via `test_audit_role_http_authorization_matrix_all_13_endpoints`.
+- The per-application platform-upgrade bulk apply (`upgrade-applications`/`upgrade-status`) and the 4 declaration subcommands are one more operation inside this row's provisioning boundary, not a new route out of an app-facing API: they reach each application's database only as `r2dbsvc_control` over `R2DB_CONTROL_DSN`;
+- no API process holds that DSN -- `test_upgrade_applications_exit_codes`, `test_set_platform_timeouts_places_the_same_two_values_on_both_writer_roles`.
+
+#### Evidence
+
+- SI-02's own concern (an app-facing API must not route to control-plane data/capability) is additionally C-14's own vectors 1/2 (app credential fail-closed on every control endpoint, control credential fail-closed on every data endpoint), a structural consequence of the separate-store design: an application credential's verifier does not exist in `control_credentials` at all, so cross-plane authentication fails at lookup, not a secondary authorization check that could be misconfigured away.
+
+#### Status
+
+- **Acceptance boundary**: r2db Stage 1, contract 1.6.0, was installed on the VPS on 2026-09-05 -- provisioning (migrations 0001, 0002, 0005, 0006, 0007 and 0003, applied in that order; 0004 is the deprovision script and is never applied at install) has run, `pg_hba`/`pg_ident` posture B was configured, and external reachability on port 8443 was verified (`docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12);
+- socket-binding/credential-file-access evidence beyond the runbook's own steps is not separately recorded, and no later contract version has been deployed there since.
+
+### MitateDB-api
+
+#### Control
+
+- The same separate-store design recorded on SI-00 (distinct `credentials`/`control_credentials` tables and roles, distinct peppers) means an application credential's verifier does not exist in `control_credentials` and vice versa -- cross-plane authentication fails at the lookup itself (`ControlPlaneService._locate_credential`), never a secondary check that could be misconfigured away.
+- `ControlPlaneService`'s own fixed evaluation order (rate-limit -> authenticate -> must_rotate -> role=control capability denial -> shape -> target-existence -> bounds -> destructive-confirmation -> execute+audit) guarantees an unauthenticated/wrong-plane request never reaches target resolution;
+- `issue_credential` refuses `role="control"` unconditionally, before resolving whether the named application even exists -- `test_issue_credential_role_shape_is_validated_before_capability_check`, and against real PostgreSQL, `test_role_control_refused_before_target_resolution_against_real_postgres`.
+- Two Cloud Run services by default put this isolation at the network layer too (separate IAM invoker bindings) on top of credential-store separation;
+- The `audit` role is narrowed symmetrically with r2db's own bundle -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, and against real PostgreSQL `test_audit_role_accepted_on_read_endpoints_and_forbidden_on_a_write_endpoint_against_real_postgres`.
+- `upgrade-applications`/`upgrade-status` and the 4 declaration subcommands all require `MITATEDB_PROVISION_DSN`;
+- the Cloud Run services' own environments never carry it, so the control service cannot invoke this path either.
+- `list-applications` is unchanged;
+- per-application upgrade state is deliberately not published on any HTTP surface (requester ruling U-1, design §5).
+
+#### Evidence
+
+- Evidence: `test_upgrade_applications_usage_error_without_provision_dsn`, `test_all_four_subcommands_require_provision_dsn`.
+
+#### Status
+
+- **acceptance boundary**: production network/IAM evidence for that split is absent until deployed, local/test-cluster evidence only.
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- control-plane denial tests;
+- CCR-14's cross-plane fail-closed boundary is additionally covered by `conformance-tests/test_c14_authority_boundary.py` (condition C-14) -- see the SI-00 row above for the adapter-state detail (all four adapters currently take the provided branch).
+
+#### Status
+
+- —
+
+## SI-03 Runtime/Developer Separation
+
+[history](CONTROL_MAPPING_HISTORY.md#si-03)
+
+### r2db-api
+
+#### Control
+
+- `ApplicationCell.apply_schema` requires developer context;
+- schema catalog rejects unknown runtime entity/fields;
+- topology has distinct data/development planes;
+- `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell.apply_schema` checks the same `developer: bool` flag and additionally executes every schema-changing statement only over the `developer_dsn` connection pool -- the DML-only `runtime` role has no `CREATE` grant on the schema at all (`migrations/0003_provision_application.sql`'s `REVOKE ALL ON SCHEMA public FROM PUBLIC`, `USAGE`-only grant to the runtime role, and `ALTER DEFAULT PRIVILEGES`), a second, DB-enforced layer under the application-level check.
+
+#### Evidence
+
+- `test_runtime_developer_separation_and_structured_validation`, `test_runtime_unknown_entity_and_failed_mutation_leave_no_ghost`;
+- Exercised locally by `r2db-api/tests/test_postgres.py`;
+
+#### Status
+
+- the distinct production Runtime/Developer DB authority itself was realized on the VPS by the same 2026-09-05 Stage 1 install (migrations 0001, 0002, 0005, 0006, 0007 and 0003, applied in that order -- 0004 is the deprovision script and is never applied at install; `docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12), though the runtime-role-has-no-CREATE-grant behavior has not been separately re-exercised against that instance.
+
+### MitateDB-api
+
+#### Control
+
+- Preliminary local API method/role-check evidence: `ApplicationRuntime` has no schema mutation method and `ApplicationCell._require_developer`;
+
+#### Evidence
+
+- `test_developer_schema_and_runtime_crud`;
+
+#### Status
+
+- distinct production Runtime/Developer DB authority TBD.
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- privilege tests;
+- the `role=control` in-band issuance refusal (a third, non-runtime/developer role never silently granted) is additionally covered by `conformance-tests/test_c14_authority_boundary.py` (condition C-14) -- see the SI-00 row above for the adapter-state detail.
+
+#### Status
+
+- —
+
+## SI-04 No Arbitrary DB Commands
+
+[history](CONTROL_MAPPING_HISTORY.md#si-04)
+
+### r2db-api
+
+#### Control
+
+- `structured.py` exposes only enumerated operations and no native command API;
+- `r2db-api/src/r2db_api/postgres.py`'s `_run` is the single execution choke point every statement passes through and is typed to accept only `psycopg.sql.Composed`/`psycopg.sql.SQL`, raising `TypeError` on any `str` -- no method on `PostgresCell`, public or private, can pass a raw command string to PostgreSQL.
+
+#### Evidence
+
+- `test_runtime_developer_separation_and_structured_validation`;
+- contract surface review;
+- Exercised against a real PostgreSQL cluster by `r2db-api/tests/test_postgres.py` and the `r2db-api-http` conformance adapter.
+
+#### Status
+
+- —
+
+### MitateDB-api
+
+#### Control
+
+- Structured-only methods in `MitateDB-api/src/mitatedb_api/cell.py`;
+- no command-text execution method;
+
+#### Evidence
+
+- `test_no_arbitrary_sql_and_identifier_validation`.
+
+#### Status
+
+- —
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- `conformance-tests/test_c03_structured_injection.py::test_no_native_command_surface_is_exposed` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-03).
+
+#### Status
+
+- —
+
+## SI-05 Validated Structured Operations
+
+[history](CONTROL_MAPPING_HISTORY.md#si-05)
+
+### r2db-api
+
+#### Control
+
+- `validate_identifier`, operator allowlist, typed mutation shape, and service tests in `r2db-api/src/r2db_api/structured.py`;
+- `r2db-api/src/r2db_api/postgres.py` composes identifiers only via `psycopg.sql.Identifier`, after both the shared `structured.py` syntax allowlist and a second check against the schema's live `information_schema` catalog (`_load_catalog`), and binds every value as a server-side parameter (`psycopg.sql.Placeholder`/`Jsonb`) rather than string interpolation;
+- CCR-13 (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-7) extends validation from identifiers/shapes to value domains -- typed-column values (`bigint`/`double precision`/`boolean`/`text`) are checked against the declared type and bound natively, with a shared range/NUL-byte check ahead of execution so a value PostgreSQL would reject at runtime fails deterministically instead.
+
+#### Evidence
+
+- `r2db-api/tests/test_postgres.py` covers this for query/mutation paths and the DDL paths (`create_entity`/`add_field`), where the catalog cannot reject an identifier that does not exist yet.
+
+#### Status
+
+- Exercised against a real local PostgreSQL 16 cluster only -- no production evidence.
+
+### MitateDB-api
+
+#### Control
+
+- `identifiers.py` validation, quoted identifiers and bound values in `cell.py`;
+
+#### Evidence
+
+- `test_no_arbitrary_sql_and_identifier_validation`.
+
+#### Status
+
+- —
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- `conformance-tests/test_c03_structured_injection.py::test_identifier_positions_reject_every_payload`, `::test_value_positions_round_trip_or_deny`, `::test_structural_integrity_across_corpus` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-03);
+- CCR-13 declaration/behavior agreement is additionally covered by `test_c12_capability_agreement.py` (condition C-12) and `test_c17_declaration_agreement.py` (condition C-17), both executable on all four adapters.
+- The branch is narrow by construction -- `transport_kind == "socket"` only, only for wire-carried positions, and only for `httpx.LocalProtocolError` (or an `UNCLASSIFIED` non-problem+json failure), never for an unreachable peer -- and body-carried positions still demand a genuine contract-coded denial on every plug -- `conformance-tests/test_c03_structured_injection.py::test_c03_wire_rejection_never_applies_to_a_body_carried_position`, `::test_c03_wire_rejection_never_applies_to_a_reachability_failure`.
+
+#### Status
+
+- **Phase 10 socket plugs -- disclosed**: C-03's corpus now also runs on the two real-socket plugs, where a URL-path-carried identifier payload can be refused by the client's own HTTP/1.1 layer (h11) before any byte reaches the peer;
+- the suite counts that wire refusal as a rejection, so for the `entity` position on a socket plug the denial is not always the peer's own validation.
+
+## SI-06 Server-Bound Credential Scope
+
+[history](CONTROL_MAPPING_HISTORY.md#si-06)
+
+### r2db-api
+
+#### Control
+
+- `CredentialStore.authenticate/assert_active` derives immutable `AuthContext` -- `test_server_bound_scope_and_isolation`.
+- **CCR-14 extends server-bound scope to the control credential type**: `ControlCredentialStore`/`PostgresControlCredentialStore` derive an immutable `ControlAuthContext` (`credential_id`/`must_rotate`) from stored verifier state alone, never a client-supplied field, rejecting disabled/revoked/must-rotate-exceeded state like the application-plane store;
+- the secret is bound server-side to its own dedicated HMAC pepper (required to differ from the application pepper) and exposed only as an opaque handle, never a raw secret past authentication -- `test_control_credential_parity_add_authenticate_rotate_must_rotate_both_impls`, `test_control_authenticate_fails_closed_when_platform_db_unreachable`.
+- **`must_rotate` exposure**: `list_credentials` rows for a control-table credential carry their real `must_rotate` value (application rows never carry the key -- the concept does not exist for them) -- `test_issued_secret_appears_only_in_the_response`.
+- **`audit` role**: a second, weaker, distributable control-credential scope (`control_credentials.role` CHECK constraint) narrowed to the 3 read-only endpoints;
+- issuance is ceremony-only (out-of-band CLI, single tx = issue+rotate, distributed already `must_rotate=false`), never in-band;
+- fail-closed on the other 8 write operations, durably audited -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, `test_audit_role_http_authorization_matrix_all_11_endpoints` (derives its own enumeration from the real wire route table).
+- **Revoke-gate role filter**: the "sole remaining control credential" gate (SI-09) filters to `role=="control"` rows only, so an `audit` row can neither mask nor be mistaken for the last administrative credential;
+- revoking an `audit` credential itself is never gated -- `test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_credential`.
+- **Per-application issuance freeze**: `applications.issuance_frozen`, CLI-only, non-destructive;
+- `issue_credential` against a frozen application refused `FORBIDDEN` (evaluated after the `role=control` capability refusal, per the fixed evaluation order) -- `test_issuance_freeze_forbids_then_unfreeze_allows_again`, `test_issuance_freeze_precedence_role_control_refused_before_freeze_check`.
+
+#### Evidence
+
+- —
+
+#### Status
+
+- —
+
+### MitateDB-api
+
+#### Control
+
+- `CredentialStore.authenticate` derives Application/role from stored credential state -- `test_application_scope_is_server_bound`.
+- **Control credential**: `control_auth.ControlCredentialStore`/`PostgresControlCredentialStore` (same call-surface-parity convention as the application-credential pair) derive an immutable `ControlPrincipal` (`credential_id`/`must_rotate`) from stored verifier state alone, bound to its own dedicated pepper (required to differ from the application pepper);
+- **`must_rotate` exposure**: `list_credentials` merges application and control rows so a control-table credential's real `must_rotate` value is exposed, symmetric with r2db -- `test_list_credentials_merges_application_and_control_rows`.
+- **`audit` role**: ceremony-only issuance (single tx = issue+rotate), fail-closed with durable audit on the 8 write endpoints, allowed on exactly the 3 read endpoints -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, and against real PostgreSQL `test_audit_role_accepted_on_read_endpoints_and_forbidden_on_a_write_endpoint_against_real_postgres`.
+- **Revoke-gate role filter and issuance freeze**, applied from the start on this peer, symmetric with r2db's own bundle -- `test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_credential`, `test_issuance_freeze_precedence_role_control_refused_before_freeze_check`;
+
+#### Evidence
+
+- parity verified across both implementations -- `test_issue_then_authenticate_succeeds`, `test_revoke_is_terminal_enable_cannot_resurrect_it`.
+- also verified via the CLI (`test_ops.py::test_cli_freeze_issuance_then_unfreeze_round_trips`) and, uniquely on this peer, an in-memory rollback path -- `test_in_memory_issuance_freeze_rolls_back_with_its_own_unit_of_work`.
+
+#### Status
+
+- —
+
+### Common
+
+#### Control
+
+- Both peers' bearer is the locator form `<credential_id>.<secret_part>` (an opaque complete bearer at the contract level);
+- authentication looks up the row by the locator's `credential_id` and then compares the verifier with `hmac.compare_digest` -- **the verifier is never used as a lookup key** (r2db's `_SELECT_BY_VERIFIER` has been removed; `auth.split_bearer_locator` / MitateDB's `credential_wire.split_bearer_locator` split the bearer exactly once, inside the store).
+- A malformed bearer (no `.`, an empty half, or a NUL) fails closed before any lookup (`AUTH_INVALID` uniformly, SI-10) and is durably audited as `authentication_denied` with an unknown actor (SI-14).
+- An unknown credential id still runs `compare_digest` against a dummy verifier so no timing difference leaks (pinned on both peers by `test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest`).
+
+#### Evidence
+
+- `conformance-tests/test_c01_scope_binding.py::test_must_deny_vectors_are_denied_with_contract_codes`, `::test_must_ignore_vectors_leave_scope_and_other_app_unchanged`, `::test_structurally_absent_vectors_have_no_forbidden_parameters`, `::test_runtime_credential_cannot_self_elevate_to_schema_authority` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-01).
+
+#### Status
+
+- —
+
+## SI-07 Compromised Credential Containment
+
+[history](CONTROL_MAPPING_HISTORY.md#si-07)
+
+### r2db-api
+
+#### Control
+
+- Topology deny rules plus per-credential role/scope records;
+
+#### Evidence
+
+- negative topology and isolation tests;
+
+#### Status
+
+- production containment evidence not yet present.
+
+### MitateDB-api
+
+#### Control
+
+- **Control-credential-scoped compromise containment** (application-credential compromise containment is the SI-13/SI-06 rows above): a compromised control credential is bounded to (i) application credentials it issued/rotated during the compromise window, (ii) an availability harm from any application credential it revoked (ungated -- `ControlPlaneService.revoke_credential` applies no confirmation to an application-credential target, `MitateDB-api/tests/test_control_plane_service.py::test_revoke_application_credential_is_never_gated`), and never reaches Application data or the `mitatedbsvc_provision` provisioning/deprovisioning surface (a wholly separate DSN no control credential or control-plane process holds).
+- `role=control` issuance has exactly one path, the out-of-band `bootstrap`/`reset` ceremony -- no in-band operation reaches it (`_deny_role_control`, evaluated before target resolution, `MitateDB-api/tests/test_control_plane_service.py::test_issue_credential_role_shape_is_validated_before_capability_check`);
+- `reset` revokes every existing control credential unconditionally and mints exactly one new one atomically, verified against real PostgreSQL by `MitateDB-api/tests/test_ops.py::test_reset_with_the_echoed_phrase_revokes_everything_and_mints_one_new_credential`.
+- Full recovery procedure: `MitateDB-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`.
+- **`audit`-credential compromise** is a strictly narrower containment class: bounded to read-only disclosure of `list_applications`/`list_credentials`/`control_capabilities` (see the SI-06/SI-10 rows for the exact exposure and the SI-02 row for the authority-class distinction) -- an `audit` credential cannot issue, rotate, revoke, register, enable, or disable anything (fail-closed on all 8 write endpoints, `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`), so its compromise carries none of the (i)/(ii) harms above;
+- `reset`'s unconditional revoke-all also covers every live `audit` row, same ceremony, same test.
+
+#### Evidence
+
+- —
+
+#### Status
+
+- —
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- stolen-credential scenario tests
+
+#### Status
+
+- —
+
+## SI-08 Bounded Resource Consumption
+
+[history](CONTROL_MAPPING_HISTORY.md#si-08)
+
+### r2db-api
+
+#### Control
+
+- finite `ResourceLimits` across required classes;
+- atomic credential-rate window, iterative request/depth checks, structured batch/result/schema checks, wall-clock deadline -- `test_every_advertised_resource_limit_has_a_deterministic_boundary`, `test_rate_limit_is_atomic_for_concurrent_requests`.
+- `RequestByteBoundMiddleware` enforces the byte bound in the ASGI receive loop, measured from actual bytes received (not `Content-Length`), before Starlette's parser runs -- the real request path, unexercised on the VPS under real traffic;
+- `postgres.py` also maps `execution_ms` onto PostgreSQL's own `statement_timeout`/`lock_timeout` (`SET LOCAL`, per-transaction), a real second enforcement layer.
+- **CCR-14 adds 3 control-plane resource classes**: `applications`, `credentials_per_application` (revoked rows never count), `control_requests_per_minute` (single global sliding 60s window, not per-credential) -- enforced by `ControlPlaneService`, published `enforced`.
+- The rate check runs before authentication and before any durable audit write -- a flood cannot generate unbounded audit rows, and is the one denial category never durably audited (SI-14) -- `test_applications_limit_at_exact_bound`, `test_rate_limit_precedes_authentication_and_is_not_audited`.
+- `request_bytes` declaration is two-layer: the service layer alone declares `unavailable` (no HTTP boundary there), `control_http.py` overrides to `enforced` once the real middleware mounts, both reading the SAME limits source -- `test_l4_request_bytes_single_source_mutating_limit_changes_both_bound_and_discovery`.
+- **`audit_requests_per_minute`**: a 5th control-plane class, default 60, env-overridable, `enforced`;
+- accepted range is any positive integer, no upper bound (checks only `> 0`, matching MitateDB);
+- a separate counter, not a renamed view of `control_requests_per_minute` -- `audit_query` (canonical path + `/v1/audit/query` alias) consumes only this window, so polling for evidence cannot exhaust the window `revoke_credential` depends on;
+- checked pre-auth like the control window, so an unauthenticated flood cannot generate audit rows.
+- Overage is `LIMIT_EXCEEDED` with `limit_class=="audit_requests_per_minute"` -- `test_audit_query_over_its_own_window_is_limit_exceeded_with_limit_class_audit_requests_per_minute`.
+- **Phase 10 (WP-4/WP-6/WP-8, 2026-09-10) -- declared process ceilings, DB-side count bounds, derived connection capacity, pre-authentication concurrency**: (a) `process_ceilings` (`{"data": N, "control": M}`) is a platform-declaration row read at startup from the declaration table alone (no env fallback), and it is what decides `limit_enforcement`: ceiling 1 publishes the per-process in-memory classes (`requests_per_minute`/`concurrency` on the data plane, `control_requests_per_minute`/`audit_requests_per_minute` on the control plane) as `enforced`, ceiling >= 2 publishes exactly those as `deployment_required` -- an in-process counter is not a deployment-wide bound once more than one process serves the same base URL;
+- request-scoped classes (`request_bytes`, `batch_items`, `result_items`, `query_complexity`, `schema_objects`, `operation_depth`, `enum_members`) and DB-side-bound classes stay `enforced` at every ceiling, `execution_ms` stays `reference_wall_clock`, and each plane reads its OWN key -- `r2db-api/tests/test_process_ceilings_declaration.py::test_ceiling_one_maps_in_memory_classes_to_enforced`, `::test_ceiling_two_maps_in_memory_classes_to_deployment_required`, `::test_control_plane_ceiling_mapping_reads_control_not_data_through_build_control_app`, `::test_declaration_table_is_the_only_source_no_env_fallback`;
+- a missing or malformed row stops startup and `ops verify-declarations` reports F-15 with exit code 14 -- `::test_missing_row_fails_fast_through_build_app`, `::test_verify_declarations_f15_when_process_ceilings_row_is_absent`, `::test_verify_declarations_exit_code_table_maps_f15_to_14`.
+- (b) `applications` and `credentials_per_application` are bounded in the DATABASE rather than in the process: `_take_bound_advisory_lock` (`r2db-api/src/r2db_api/credential_store.py`) takes `pg_advisory_xact_lock(hashtext('<schema>.<table>'))` in the same transaction as the count-then-insert, so two concurrent writers cannot both pass a bound -- `::test_db_side_bounds_hold_under_concurrent_writers_applications`, `::test_db_side_bounds_hold_under_concurrent_writers_credentials_per_application`, and the barrier-synchronized two-writer forms `::test_applications_bound_holds_under_barrier_synchronized_concurrent_registration`, `::test_credentials_per_application_bound_holds_under_barrier_synchronized_concurrent_issuance`.
+- (c) Connection capacity is derived from the declared `concurrency`, not fixed: `role_pool_size(limits) == limits.concurrency` (`r2db-api/src/r2db_api/limits.py`) sizes every served application's runtime/developer pool and both platform pools (credential store + durable audit sink) -- `r2db-api/tests/test_threadpool_offload.py::test_role_pool_size_derives_from_declared_concurrency`, `::test_main_composition_root_wires_pool_size_from_role_pool_size`, `::test_role_pool_sized_to_declared_concurrency_avoids_premature_503`, `r2db-api/tests/test_credential_persistence.py::test_platform_pool_sized_to_declared_concurrency_avoids_premature_503`;
+- `r2db-api/migrations/0013_role_connection_limits.sql` raises each role's PostgreSQL `CONNECTION LIMIT` to its own pool composition plus a 4-connection operator margin, and F-16 (`check_role_connection_limits`, roles identified by their REAL grants and never by name, floor = the maximum over every matching role class, the schema owner excluded, register-only applications with NULL role names skipped) fails `ops verify-declarations` with exit code 15 and stops each composition root at startup when its own role is below that floor -- `r2db-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f16_passes_after_migration_0013`, `::test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_below_its_pool_composition_floor`, `::test_f16_floor_for_a_role_matching_multiple_classes_is_the_max_not_the_last_assigned`, `::test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_every_class`, `::test_0013_migration_tolerates_a_registered_only_application_and_still_raises_a_provisioned_applications_role_limits`, `r2db-api/tests/test_credential_persistence.py::test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_below_the_pool_composition_floor`, `r2db-api/tests/test_surfaces_env.py::test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_limit_is_lowered_below_the_pool_composition_floor`.
+- (d) On the HTTP plane the deployment-wide `concurrency` slot is taken BEFORE authentication, so an unauthenticated flood is bounded before it reaches the credential store;
+- this surface's order is BYTE BOUND -> CONCURRENCY SLOT -> AUTHENTICATION -> body -> rate/business (the per-credential `requests_per_minute` window stays reachable only after authentication succeeds, so a both-exhausted request is denied `concurrency` here -- the opposite of the cell-level order, an explicit HTTP-plane ruling, not an implementation accident), and the slot is held across authentication and dispatch and released on every exit path -- `r2db-api/tests/test_preauth_concurrency_bound.py::test_unauthenticated_flood_is_bounded_by_concurrency`, `::test_http_plane_denies_concurrency_before_requests_per_minute`, `::test_concurrency_hold_spans_the_gap_between_authentication_and_dispatch`, `::test_slot_is_released_after_a_401_ending_request`, `::test_slot_is_released_after_a_validation_failed_ending_request`, `::test_concurrency_slot_is_acquired_exactly_once_per_handler`.
+- (e) Async handlers delegate their synchronous section to the threadpool, so more than one request is genuinely in flight and these bounds are exercised under real parallelism;
+- the limiter state and the pools are lock-guarded, pinned lexically (source shape) rather than by a race -- `r2db-api/tests/test_threadpool_offload.py::test_sync_section_runs_off_the_event_loop`, `::test_control_sync_section_runs_off_the_event_loop`, `::test_body_read_stays_on_the_loop`, `::test_limiter_state_is_thread_safe`, `::test_pool_acquire_is_thread_safe`, `::test_slot_check_then_increment_is_lexically_inside_the_active_lock`, `::test_rate_window_check_then_append_is_lexically_inside_the_rate_lock`, `::test_role_pool_reservation_is_lexically_inside_the_pool_lock`, `::test_authenticate_delegation_pinned_for_every_body_first_handler`, `::test_service_call_delegation_pinned_for_query_mutate_cross_entity_schema`, `::test_control_service_call_delegation_pinned_for_rotate_and_issue_credential`.
+
+#### Evidence
+
+- —
+
+#### Status
+
+- **Not bound by this window**: the application plane's durable denial writes are on a different plane/host, bounded by D-3 coalescing + row-length CHECKs -- deliberately no data-plane pre-auth window.
+
+### MitateDB-api
+
+#### Control
+
+- Local bounds for batch/result/fields/filters/schema/request-size in `FoundationConfig`/`MITATEDB_*` config -- `test_batch_and_request_size_limits_and_empty_filters_shape_check`.
+- **`request_bytes`**: ASGI receive-loop middleware measures actual received bytes (never `Content-Length`), rejects before Starlette's parser runs, sized from the SAME `FoundationConfig.max_request_bytes` the declaration publishes -- `test_byte_bound_is_measured_from_actual_received_bytes_not_content_length_header`, `test_request_over_byte_limit_is_limit_exceeded_before_parsing`.
+- **Control-plane's own 3 classes plus its own `request_bytes` bound** (`applications`/`credentials_per_application`/`control_requests_per_minute`): all enforced by `ControlPlaneService`, published `enforced`;
+- `credentials_per_application` excludes revoked rows -- `test_register_application_enforces_the_applications_bound`, `test_rate_limit_denial_is_never_durably_audited` (matching r2db's identical pre-auth/never-audited rule).
+- **Application-plane resource bounds** (Phase 8 WP-1a, rework 1, 2026-09-06): `requests_per_minute` and `concurrency` are `enforced` -- `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py:744`, `:775-782`, `:785-794`), declared in `__build_capabilities_document`'s `limit_enforcement` dict (`cell.py:3811`, `:4051`, `:4055`);
+- `execution_ms` is declared `reference_wall_clock`, not `enforced` (`cell.py:4044`) -- a wall-clock deadline (`time.monotonic() + max_execution_ms`) handed to the backend, `backend_postgres.py` converts it into a real `SET LOCAL statement_timeout`/`lock_timeout` (`backend_postgres.py:1658-1661`), matching r2db-api's own identical declaration.
+- **`batch_entities`**: a 4th enforced class bounding distinct entity names a `cross_entity_mutation` unit may name (repeats don't count twice; `batch_items` is the separate total-operation-count bound);
+- default 10, counted before any operation executes, `enforced` -- `test_transact_batch_entities_boundary_and_distinct_count_ignores_repeats`, real-HTTP `test_cross_entity_mutation_batch_entities_boundary`;
+- **`audit_requests_per_minute`**: same default 60, same separate-counter/pre-auth/never-shared-with-`control_requests_per_minute` properties and `LIMIT_EXCEEDED`/`limit_class` shape as r2db's own entry -- `test_audit_query_over_its_own_window_is_limit_exceeded_with_limit_class_audit_requests_per_minute`.
+- **Symmetric with r2db**: all 4 control-plane request-count classes accept any positive integer with no upper bound;
+- **Phase 10 (WP-4/WP-6/WP-8, 2026-09-10), peer-symmetric with r2db-api's own entry**: (a) the same `process_ceilings` declaration row and the same `limit_enforcement` mapping (ceiling 1 -> `enforced`, ceiling >= 2 -> `deployment_required`, per plane, request-scoped and DB-side-bound classes unaffected), read from the declaration table alone -- `MitateDB-api/tests/test_process_ceilings_declaration.py::test_ceiling_one_maps_data_plane_in_memory_classes_to_enforced`, `::test_ceiling_two_maps_data_plane_in_memory_classes_to_deployment_required`, `::test_ceiling_one_maps_control_plane_in_memory_classes_to_enforced`, `::test_ceiling_two_maps_control_plane_in_memory_classes_to_deployment_required`, `::test_region_i_classes_are_unaffected_by_ceiling`, `::test_declaration_table_is_the_only_source`, and through a real composition root with an asymmetric declaration `::test_ceiling_asymmetric_declaration_maps_through_a_real_composition_root_data_plane`;
+- a missing row fails startup fast on both planes and F-15 exits 14 -- `::test_missing_row_fails_fast_at_startup_data_plane`, `::test_missing_row_fails_fast_at_startup_control_plane`, `::test_verify_declarations_f15_exit_code`.
+- (b) `applications`/`credentials_per_application` are bounded in the database by the same-named `_take_bound_advisory_lock` helper (`MitateDB-api/src/mitatedb_api/control_plane.py`, same `pg_advisory_xact_lock(hashtext('<schema>.<table>'))` derivation, pinned textually isomorphic to r2db-api's own by `_ISOMORPHIC_TARGETS`) -- `::test_db_side_bounds_hold_under_concurrent_writers_applications`, `::test_db_side_bounds_hold_under_concurrent_writers_credentials_per_application`, `::test_db_side_lock_holds_under_barrier_synchronized_two_writers_applications`, `::test_db_side_lock_holds_under_barrier_synchronized_two_writers_credentials_per_application`.
+- (c) `role_pool_size(config) == config.max_concurrency` (`MitateDB-api/src/mitatedb_api/config.py`) is the platform pool's default in `main.build_app`;
+- this peer's per-application `PostgresBackend` pools nothing, so it has no per-application counterpart -- `MitateDB-api/tests/test_threadpool_offload.py::test_platform_pool_sized_to_declared_concurrency_avoids_premature_503`;
+- `MitateDB-api/migrations/0012_role_connection_limits.sql` and F-16 are the same control as r2db-api's own (same formula, exit code 15, startup fail-fast) -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f16_passes_after_migration_0012`, `::test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_below_its_pool_composition_floor`, `::test_f16_floor_for_a_role_matching_multiple_classes_is_the_max_not_the_last_assigned`, `::test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_every_class`, `::test_0012_migration_tolerates_a_registered_only_application_and_still_raises_a_provisioned_applications_role_limits`, `MitateDB-api/tests/test_application_audit.py::test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_below_the_pool_composition_floor`, `MitateDB-api/tests/test_control_main.py::test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_limit_is_lowered_below_the_pool_composition_floor`.
+- (d) The same pre-authentication `concurrency` slot and the same HTTP-plane order (byte bound -> concurrency slot -> authentication -> body -> rate/business).
+- `HttpService` is fail-closed here: its constructor raises unless BOTH the shared `_LimitStateHolder` and the declared `max_concurrency` are supplied (`MitateDB-api/src/mitatedb_api/http.py`; the former no-op branch is removed, so a miswired composition cannot serve unbounded), and the composition root's own wiring is pinned by `MitateDB-api/tests/test_main.py::test_build_app_wires_the_preauth_concurrency_slot`.
+- One holder is shared by every application in the process, so the bound is deployment-wide, not per-application -- `MitateDB-api/tests/test_application_plane_limits.py::test_limit_holder_is_shared_across_applications_in_one_process`, `MitateDB-api/tests/test_preauth_concurrency_bound.py::test_unauthenticated_flood_is_bounded_by_concurrency`, `::test_http_plane_denies_concurrency_before_requests_per_minute`, `::test_concurrency_hold_spans_the_gap_between_authentication_and_dispatch`, `::test_slot_is_released_after_a_401_ending_request`, `::test_slot_is_released_after_a_validation_failed_ending_request`, `::test_concurrency_slot_is_acquired_exactly_once_per_handler`.
+- (e) Handlers delegate the synchronous section to the threadpool, and `ApplicationCell._lock` now covers the WHOLE lookup -> pass-1 -> pass-2 sequence inside that slot (the separate `_idempotency_lock_scope` helper is gone: the outer cell lock is the in-process serializer, `_idempotency_pg_scope` the cross-process one).
+- That lock is per `ApplicationCell`, so requests against the SAME application serialize while different applications hold different locks -- `MitateDB-api/tests/test_threadpool_offload.py::test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_race`, `::test_sync_section_runs_off_the_event_loop`, `::test_post_query_sync_section_runs_off_the_event_loop`, `::test_post_mutate_sync_section_runs_off_the_event_loop`, `::test_post_cross_entity_mutate_sync_section_runs_off_the_event_loop`, `::test_control_post_issue_credential_sync_section_runs_off_the_event_loop`, `::test_body_read_stays_on_the_loop`, `::test_limiter_state_is_thread_safe`, `::test_pool_acquire_is_thread_safe`, `::test_concurrency_slot_check_then_increment_is_inside_the_active_lock`, and the concurrent same-key idempotency forms `MitateDB-api/tests/test_idempotency_concurrency.py::test_memory_same_key_same_digest_concurrent_executes_exactly_once`, `::test_postgres_same_key_same_digest_concurrent_executes_exactly_once`.
+
+#### Evidence
+
+- common-suite coverage is C-16's own V3 (see SI-11 row).
+
+#### Status
+
+- the contract declares no range -- an operator responsibility, published as-declared -- removing the ceiling also removes the deployment-misconfiguration guardrail it incidentally provided (nothing stops an operator from declaring an implausibly large value), a deliberate trade recorded in `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2c / `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15 -- `test_limits_reject_out_of_range_values`.
+- **Deployment caveat**: like `control_requests_per_minute`, this is an in-process counter, inheriting the `--max-instances=1` requirement on the control service.
+- The application plane's own durable-denial writes are NOT governed by this window (SI-14 point 6).
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- resource boundary tests;
+- the three control-plane SI-08 classes' publish-and-enforce agreement is additionally covered by `conformance-tests/test_c14_authority_boundary.py`'s vector 5 (condition C-14) -- see the SI-00 row above for the adapter-state detail.
+- `batch_entities`' publish-and-enforce agreement is additionally covered by `conformance-tests/test_c16_cross_entity_atomicity.py` (condition C-16, executable on all four adapters -- see the SI-11 row below).
+- **Phase 10 (2026-09-10)**: two real-socket plugs (`r2db-api-socket`/`MitateDB-api-socket`: a separate uvicorn process behind a real nginx) join the registry, so C-05's V2 vector is driven over a real wire as well as in process -- `conformance-tests/test_c05_limit_declaration_agreement.py::test_c05_v2_declaration_and_position_agree` drives `concurrency` through the port's own `hold_in_flight` on every registered plug, and what decides whether a plug's own readiness probe already consumed a unit of the bound is `adapter.transport_kind`, never the adapter's name -- `::test_c05_l7_21_v2_drivers_do_not_gate_drive_or_not_on_peer_name`, `::test_c05_all_plug_names_match_the_registry`, `conformance-tests/test_socket_harness.py::test_every_registered_adapter_declares_transport_kind`.
+- The declared `process_ceilings` value is additionally observed against a REAL deployment by condition C-26: a restart between ceiling 1 and ceiling 2, started from each peer's own documented composition root, exhibits the `limit_enforcement` mapping those ceilings imply on both planes -- `conformance-tests/test_c26_composition_root.py::test_c26_ceiling_maps_to_limit_enforcement`, with `::test_c26_missing_declaration_fails_fast` (F-15) and `::test_c26_role_connection_limit_below_pool_floor_fails_fast` (F-16) as the two fail-fast halves.
+
+#### Status
+
+- **Disclosed limits, carried from the C-05 and C-26 rows of `conformance-tests/CONDITIONS.md`**: this suite still cannot distinguish a deployment-wide counter from a credential-scoped one;
+- `execution_ms`/`idempotency_retention_ms` are never driven;
+- and C-26 starts exactly ONE process per declared base URL, so agreement between a declared ceiling and a deployment's real process count rests on runbook discipline and the post-deployment check, not on this evidence.
+
+## SI-09 Controlled Destructive Operations
+
+[history](CONTROL_MAPPING_HISTORY.md#si-09)
+
+### r2db-api
+
+#### Control
+
+- `structured.py` requires operation-specific confirmation for delete/drop, including `drop_index` (CCR-13 R-5: dropping a declared unique index is effectively irreversible once duplicate data has entered, treated as schema deletion like `drop_entity`);
+- the check runs before any revision-precondition evaluation on `update`/`delete` (R-4, failure-before-execution) -- `test_atomic_rollback_and_explicit_destructive_operation`, `test_drop_index_requires_destructive_confirmation`.
+- Phrase construction for all 4 gated surfaces (`delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential`) is defined exactly once in the shared module `structured.py`, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- fixed by an object-identity assertion, `test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases`.
+- All 6 data/schema call sites declare the same 4 machine-readable keys via `require_destructive_confirmation`'s `details` synthesis.
+- The control-plane gate (`ControlPlaneService.revoke_credential`) determines "sole remaining enabled control credential" and performs the state change together, inside the SAME transaction (row-locked scan) -- closing the TOCTOU window a judgment made outside the open transaction would leave open -- `test_revoke_credential_gate_judgment_is_made_inside_the_open_transaction`, `test_control_credentials_locked_scan_serializes_against_a_concurrent_scan`.
+- The out-of-band ritual CLI gates on the identical declare-and-echo protocol before any store/DSN is constructed, so a wrong `--confirm` never touches the database -- `test_cli_reset_without_confirm_declares_and_touches_nothing`, `test_cli_delete_credential_without_confirm_declares_and_touches_nothing`.
+- `destructive`/`confirm(ation)` are type-checked (non-`bool`/non-`str` refused `VALIDATION_FAILED` before the confirmation check itself, never truthy-accepted) at all 4 gated surfaces, including over the real HTTP wire -- `test_delete_rejects_truthy_non_boolean_destructive_before_confirmation`, `test_revoke_last_control_credential_with_wire_truthy_non_boolean_destructive_is_validation_failed`.
+
+#### Evidence
+
+- —
+
+#### Status
+
+- —
+
+### MitateDB-api
+
+#### Control
+
+- `delete` implements contract 1.2.0 declare-and-echo (`ApplicationCell.delete`; peer declares `contract_version=1.3.0`, unaffected by the later additive flip) -- a valid confirmation requires `destructive is True` AND `confirm` to exactly equal the server's recomputed `DELETE <collection> @where=<digest16>` phrase (SHA-256 of the canonically-serialized filter list, no state fingerprint needed since this peer has no drop/recreate path for a collection);
+- a non-bool `destructive`/non-str `confirm` is refused as a shape defect, never truthy-accepted (`DestructiveConfirmationRequired` carries the contract's 4 keys, `reversible_alternative`/`recovery` both null -- no durable audit or soft-delete, mirrors r2db) -- `test_delete_without_confirmation_is_gated_not_conflated_with_empty_filters`, `test_delete_rejects_non_boolean_destructive_and_non_string_confirm`;
+- `add_field`/schema-revision fingerprint: the `delete` phrase carries an `@schema_revision=<n>` fingerprint alongside `@where=<digest16>` (same reasoning as r2db -- once a second schema-changing operation exists, drop-then-recreate-under-the-same-name could leave a stale phrase valid) -- `test_canonical_where_json_key_sorts_each_filter_preserves_list_order_never_stringifies`.
+- Control-plane `revoke_credential` last-active gate: gated exactly like r2db's -- target-set scan and state change happen inside the SAME transaction, closing the TOCTOU window -- `test_revoke_credential_confirmation_denial_is_durably_audited`, real-PostgreSQL `test_revoke_last_active_control_credential_gate_against_real_postgres`.
+- Break-glass CLI: `revoke-credential` reuses this SAME gate rather than reimplementing it;
+- `deprovision <application_id>` is this peer's own second genuinely destructive CLI subcommand (provisioning-level, against `MITATEDB_PROVISION_DSN`), gated by a NEW phrase fingerprinted on `applications.registered_at` (phrase must go stale across a deprovision-then-reregister cycle) -- `test_deprovision_without_confirm_declares_the_phrase_and_touches_nothing`, `test_deprovision_with_the_echoed_phrase_removes_the_registration`.
+
+#### Evidence
+
+- `test_c06_destructive_confirmation.py` exercises the full strict-branch vector set (V1-V5/V8; V6/V7 use the shared absence mechanism -- no `drop_entity`/control-plane surface here).
+
+#### Status
+
+- —
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- destructive misuse tests;
+- CCR-13's destructive-confirmation-before-precondition ordering is additionally covered by `conformance-tests/test_c18_revision_precondition_semantics.py` (condition C-18, executable on all four adapters).
+- Q-1's declare-and-echo protocol itself (contract 1.2.0) has its own dedicated common suite, `conformance-tests/test_c06_destructive_confirmation.py` (condition C-06, executable four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http`): all four registered adapters declare `contract_version >= 1.2.0` and take the strict branch (vectors V1-V8: unconfirmed-denial, full-match adversarial checks, phrase determinism, probe-then-echo, state-fingerprint invalidation, the in-band last-control-credential revoke gate, and payload-echo absence) for real;
+
+#### Status
+
+- the baseline (<1.2.0) branch is retained, deliberately unremoved, as a disclosed and currently-unexercised acceptance floor for any future <1.2.0 peer (`conformance-tests/CONDITIONS.md` C-06 row).
+
+## SI-10 Error/Information Non-Disclosure
+
+[history](CONTROL_MAPPING_HISTORY.md#si-10)
+
+### r2db-api
+
+#### Control
+
+- `FoundationError` emits a safe problem shape;
+- no internal exception is serialized;
+- `r2db-api/src/r2db_api/http.py` renders every `FoundationError` as `application/problem+json` and collapses any uncaught exception (Starlette routing, or a `PostgresCell`/psycopg failure) to a generic `SERVICE_UNAVAILABLE` with a static message, deliberately discarding the real exception rather than interpolating or logging it at this layer (`_generic_service_unavailable`);
+- `r2db-api/src/r2db_api/postgres.py` itself maps `psycopg.Error` to that same generic denial rather than letting a driver error/message reach the caller.
+- Under the Q4 design (`docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §3.8), exactly one fail-fast message reaches a client and it carries no configuration state: F-1..F-11/F-3c/F-13 are startup-time output only (they may quote a declared value, a role name, or a DSN env-var NAME, so they are never copied onto a readiness/health surface), while F-12 alone is raised at cell-open time and becomes an API response -- `PostgresCell.verify_platform_upgrades_applied` re-raises `platform_upgrades.PlatformUpgradeError` as a `FoundationError("SERVICE_UNAVAILABLE", str(exc))`, and `platform_upgrades._f12_message` is built from the missing upgrade numbers, the application id, and the `ops upgrade-applications` command only -- no DSN, credential, internal hostname, or declared value.
+
+#### Evidence
+
+- malformed/deep/cyclic input tests verify structured safe failures;
+- audit tests check secret absence.
+- Exercised locally by `r2db-api/tests/test_http.py` and `test_postgres.py`;
+- Evidence: `r2db-api/tests/test_platform_upgrade_ledger_scan.py::test_f12_message_matches_design_section_3_8_verbatim`, `r2db-api/tests/test_postgres.py::test_verify_platform_upgrades_applied_raises_service_unavailable_when_a_number_is_missing`, `::test_verify_platform_upgrades_applied_raises_when_the_ledger_table_is_entirely_absent`, `r2db-api/tests/test_application_audit.py::test_build_app_h1_logs_the_f12_message_verbatim_at_cell_open_time`.
+
+#### Status
+
+- production log/observability handling of the discarded exception is not yet defined or evidenced.
+
+### MitateDB-api
+
+#### Control
+
+- Application-plane HTTP: `http.py` renders every `FoundationError` as `application/problem+json` and collapses any uncaught exception (routing, a `backend_postgres`/psycopg failure) to a generic `SERVICE_UNAVAILABLE` with a static message, discarding the real exception rather than logging/interpolating it here -- `test_problem_response_never_leaks_the_underlying_exception_message`, `test_authorization_state_unavailable_is_reported`.
+- Control-plane HTTP: `control_http.py` reuses the same generic-collapse pattern with its own error-classification table, exercised end-to-end including a dedicated negative test that injects a raw `RuntimeError` (secret-shaped marker) into the authentication path and asserts the marker is absent from the entire response body -- `test_control_problem_response_never_leaks_the_underlying_exception_message`.
+- **Intended operational visibility, not a disclosure gap**: `list_credentials` is readable by the strictly weaker `audit` role (SI-02/SI-06), so a distributable, ceremony-issued `audit` credential can enumerate `must_rotate`/`enabled`/`revoked` state for every control credential, not only its own -- deliberate, not a regression: `CredentialsResult`'s "never returns secrets or verifiers" applies identically regardless of role (same schema-exactness assertions as SI-12), and the point of a weaker distributable role is observing rotation/enable/revoke state without being able to change anything (SI-02's fail-closed enumeration keeps it read-only).
+- Under Q4, this peer narrows the same carve-out by TYPE, not by code: the problem-body builder replaces every other error's message with a fixed generic string;
+- the sole exception is `isinstance(exc, PlatformUpgradePending)` (a dedicated subclass, not the classified `SERVICE_UNAVAILABLE` code every other storage-configuration failure maps to), so the carve-out cannot silently widen to a future error site.
+- The surfaced text is the same fixed F-12 message (missing upgrade numbers + the `ops upgrade-applications` command, nothing else) -- `test_f12_message_matches_design_section_3_8_verbatim`, `test_build_app_h1_serves_every_application_and_refuses_only_the_one_with_a_pending_upgrade`.
+
+#### Evidence
+
+- —
+
+#### Status
+
+- **Disclosed gap**: production log/observability handling of the discarded exception is not yet defined or evidenced for either plane.
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- error probing tests
+
+#### Status
+
+- —
+
+## SI-11 Atomic Integrity
+
+[history](CONTROL_MAPPING_HISTORY.md#si-11)
+
+### r2db-api
+
+#### Control
+
+- `ApplicationCell.transact` snapshots and restores on failure;
+- `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell.transact` maps one HTTP request to one real PostgreSQL transaction (design D-5): every operation in a batch runs inside a single `conn.transaction()` block, and any exception -- including a `FoundationError` raised by a later operation in the batch -- rolls back the whole batch via PostgreSQL itself rather than an in-memory snapshot/restore;
+- CCR-13 (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-4) additionally makes an `expected_revision` precondition part of the same atomic unit -- the predicate and the revision comparison are combined into one `WHERE` clause of the single `UPDATE`/`DELETE` statement (`_r2db_revision::text = $expected`), never a separate read followed by a conditional write, so the compare-and-swap cannot race with a concurrent mutation of the same row.
+
+#### Evidence
+
+- `test_atomic_rollback_and_explicit_destructive_operation`;
+- Exercised against a real local PostgreSQL 16 cluster by `r2db-api/tests/test_postgres.py`;
+
+#### Status
+
+- no production evidence.
+- r2db's own `cross_entity_mutation` remains `unavailable` (P35-D1, `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §0) -- no cross-entity atomic unit exists on this peer to evidence.
+
+### MitateDB-api
+
+#### Control
+
+- `ApplicationCell.transact` uses one local transaction with rollback on rejected operation -- `test_transaction_rolls_back`.
+- Cross-entity atomic unit (design §2 R-1): `transact()` is a two-pass choke -- pass 1 (`_plan_operation`, side-effect-free) validates the WHOLE unit before pass 2 executes any of it, so a later operation's validation failure voids every earlier operation's effect too;
+- shared by both single-entity and cross-entity call paths (no second implementation) -- `test_transact_two_pass_structure_zero_backend_calls_when_a_later_operation_fails_validation` (wrapped backend proving zero execution calls when a later op fails).
+- Rollback on a pass-2 failure is unconditional regardless of exception type, with deterministic pre-execution rejection of lone UTF-16 surrogates in `encode_value` (both backends, same treatment as pre-existing NUL-byte rejection) -- `test_transact_lone_surrogate_value_is_deterministic_validation_failure_and_earlier_entity_unchanged`, `test_transact_rollback_is_unconditional_for_a_non_foundation_error_raised_mid_pass_2`.
+
+#### Evidence
+
+- The PostgreSQL-specific validate/execute pass-boundary window (pass 1 runs outside `self._lock`; a schema change could land between passes) is exercised by wrapping `begin()` and dropping the target table mid-window -- `test_transact_pass_boundary_schema_change_window_yields_not_found_and_sibling_entity_unchanged` (affected entity surfaces `NotFoundError`, a sibling entity in the same batch is left unchanged).
+- Common-suite coverage: `test_c16_v1_two_entity_insert_commits_as_one_unit` (positive), `test_c16_v2_invalid_operation_on_one_entity_voids_the_whole_unit` (atomicity) -- MitateDB pair takes PROVIDED, r2db pair takes the documented ABSENT branch (SI-11's r2db-api cell above).
+
+#### Status
+
+- —
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- rollback/fault tests;
+- CCR-13's revision-precondition atomicity/semantics are additionally covered by `conformance-tests/test_c18_revision_precondition_semantics.py` (condition C-18, executable on all four adapters).
+- Cross-entity atomic-unit agreement (declared vs. observed, both entities voided together on a mixed-validity unit) is additionally covered by `conformance-tests/test_c16_cross_entity_atomicity.py` (condition C-16, executable on all four adapters -- vectors V1/V2 for the two PROVIDED MitateDB adapters, V5's evidence-form check for the two ABSENT r2db adapters)
+
+#### Status
+
+- —
+
+## SI-12 No Data-Service Bypass
+
+[history](CONTROL_MAPPING_HISTORY.md#si-12)
+
+### r2db-api
+
+#### Control
+
+- Structured package has no credential/connection/native-command response;
+- topology denies privileged egress;
+- Under the Q4 design (`docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-2/D-3, §3.9, requester ruling U-2), two new bookkeeping tables exist, neither reachable from an application-facing API: (a) `r2dbsvc_registry.platform_declarations` (migration `0008`) lives in the platform database, which no application `runtime`/`developer` role ever connects to;
+- both platform process roles (`r2dbsvc_api`, `r2dbsvc_controlplane`) hold `SELECT` only and every write goes through the provision DSN (`ops`/migration).
+- (b) `public._r2db_platform_upgrades` (revised `0003` template, retrofit script `0009`) lives inside each application's own database, is OWNED by that application's developer role -- the same scope `_r2db_schema_revision` already has, closed inside that one database -- and grants the `runtime` role `SELECT` only (requester ruling U-2), which is what the cell-open completeness check reads;
+- the provision role holds `SELECT` plus schema `USAGE` so `upgrade-status` can report without assuming the developer role.
+- Reading one bookkeeping row is not the exercise of a privilege SI-12 forbids (no DB credential, no unbounded connection, no privileged private endpoint, no key that bypasses authorization), and the table name is unreachable through the API at all: `structured.py`'s `_reject_reserved_prefix` refuses any `_`-prefixed identifier.
+
+#### Evidence
+
+- contract smoke test.
+- Evidence: `r2db-api/tests/test_postgres.py::test_runtime_role_can_select_but_not_write_the_ledger`, `::test_provision_role_can_read_the_ledger_after_the_script_ends`, `::test_ledger_table_has_no_row_level_security`, `::test_template_seeds_the_ledger_with_the_current_platform_upgrade_numbers`, `::test_0009_upgrades_a_legacy_application_to_match_a_freshly_provisioned_ledger`, `::test_backend_excludes_the_ledger_from_catalog_and_schema_objects_accounting`, `::test_missing_rls_view_stays_empty_on_both_a_new_and_an_upgraded_application`, `r2db-api/tests/test_ops_declarations.py::test_migration_0008_grants_select_to_both_writer_roles_and_nothing_to_public`, `::test_migration_0008_seeds_window_default_but_not_surfaces`, `::test_migration_0008_key_check_constraint_is_named`.
+
+#### Status
+
+- Stated limit (design §3.9): the ledger is an operational record, not tamper-proof evidence -- inside the threat model's own "one application-facing defect" case its rows are as reachable as any other bookkeeping row in that same database.
+
+### MitateDB-api
+
+#### Control
+
+- `cell.py`/`backend.py`/`backend_postgres.py`/`backend_sqlite.py` expose only the structured operation set (query/insert/update/delete/create_entity/add_field) -- no method returns a raw connection, DSN, or credential/verifier value, and the single execution choke point (`_execute`, R-2) is typed to reject any `str` statement with `TypeError` -- `test_no_arbitrary_sql_and_identifier_validation`, real-PostgreSQL coverage in `test_postgres.py` (shared with SI-04/SI-05).
+- `/control/v1`'s own responses likewise never echo a DSN, pepper, or another credential's secret -- `list_credentials`/`list_applications` return only `credential_id`/`application_id`/`role`/`enabled`/`revoked` (schema-exact per `test_control_capabilities_result_matches_schema_exactly_and_declares_request_bytes`).
+- Under Q4 (design D-2/D-3 §3.9, ruling U-2), this peer is isomorphic: `platform_declarations` (migration 0007) sits in the platform database with `SELECT` for both service roles and writes only through `MITATEDB_PROVISION_DSN`;
+- `_mdb_platform_upgrades` (revised 0003, retrofit 0008) sits in each application database, owned by that application's developer role, `SELECT`-only for the runtime role, excluded from `schema_count()`'s accounting and never listed as an entity.
+- `_`-prefixed identifiers are unreachable through the API here too.
+
+#### Evidence
+
+- —
+
+#### Status
+
+- Same stated limit: an operational record, not tamper-proof evidence -- `test_runtime_role_has_select_only_on_the_ledger`, `test_0007_grants_select_to_both_roles_and_nothing_to_public`.
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- exposure/config review
+
+#### Status
+
+- —
+
+## SI-13 Revocation/Disable Effectiveness
+
+[history](CONTROL_MAPPING_HISTORY.md#si-13)
+
+### r2db-api
+
+#### Control
+
+- `CredentialStore.assert_active` re-checks each operation and `DataService` checks application state;
+- CCR-14 extends immediate revoke/disable effectiveness to control credentials (`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` R-2/R-5/R-10/R-13): the same request-time, no-cache credential lookup the application plane uses -- the row is resolved by the locator's `credential_id` and `compare_digest` against the stored verifier is the authoritative check (Phase 6 D-1, contract 1.6.0; the verifier is never the lookup key) (`authorization_propagation_bound_ms: 0`) applies to `ControlCredentialStore`/`PostgresControlCredentialStore` -- a revoked or disabled control credential stops authenticating on its very next request, verified end-to-end by `r2db-api/tests/test_control_plane_store.py::test_reset_revokes_all_and_issues_one_new_credential_atomically_and_touches_nothing_else` (old secret `AUTH_REVOKED` immediately after `reset`, new secret live, Application data/application credentials untouched).
+- Deliberate, permanent design choice, not a gap: an *un-revoke* of a control credential is never offered by any code path (`set_state(revoked=False)` is refused with `VALIDATION_FAILED` by both store implementations, matching the pre-existing application-credential un-revoke refusal) -- reversing a revocation would make a durably-recorded revocation event false, which SI-13 itself would then have to call a propagation failure;
+- the canonical recovery from a revoked control credential is always the out-of-band `reset` ritual, never an un-revoke, verified by `r2db-api/tests/test_control_plane_store.py::test_control_credential_parity_un_revoke_refused_both_impls`, `::test_break_glass_never_offers_un_revoke`.
+- The first-issued credential's own non-permanence (contract `bootstrap[5]`, "expires or requires rotation") is satisfied by a `must_rotate` gate rather than a time-based expiry -- the credential authorizes nothing but `GET /control/v1/capabilities` and self-rotate until one real rotation completes, verified by `r2db-api/tests/test_control_plane_store.py::test_control_credential_locked_by_must_rotate_still_authenticates_and_rotate_clears_it`.
+
+#### Evidence
+
+- `test_revoke_disable_and_unavailable_state_fail_closed`;
+
+#### Status
+
+- propagation bound remains deployment evidence.
+
+### MitateDB-api
+
+#### Control
+
+- `CredentialStore.assert_active` re-checks revocation/application state on every session operation;
+- Control credential: the same request-time, no-cache credential lookup (row resolved by the locator's `credential_id`, `compare_digest` against the stored verifier as the authoritative check; Phase 6 D-1) applies to `control_auth.ControlCredentialStore`/`control_credential_store_postgres.PostgresControlCredentialStore` (`authorization_propagation_bound_ms: 0`, `ControlPlaneService.control_capabilities`, schema-checked by `test_control_plane_service.py::test_control_capabilities_result_matches_schema_exactly_and_declares_request_bytes`) -- a revoked or disabled control credential stops authenticating on its very next call, verified by `MitateDB-api/tests/test_control_credentials.py::test_revoke_is_terminal_enable_cannot_resurrect_it`, `::test_disable_then_enable_restores_authentication`, and end-to-end (real reset ceremony) by `MitateDB-api/tests/test_ops.py::test_reset_with_the_echoed_phrase_revokes_everything_and_mints_one_new_credential`.
+- Un-revoke is refused, not merely absent: both `set_credential_state`/`set_control_credential_state` call paths only ever set `revoked=True`, never `False` -- `ControlPlaneService` has no method parameter that could request it, and the C-13 conformance vector (below) exercises the real `enable(True)`-after-`revoke` sequence as a `must_deny` case, not a `structurally_absent` one.
+
+#### Evidence
+
+- `test_disable_revoke_and_unavailable_state_fail_closed`.
+
+#### Status
+
+- Production propagation bound (network/co-location latency beyond the in-process guarantee above) remains deployment evidence for both credential kinds.
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- `conformance-tests/test_c08_revocation_boundary.py::test_revoked_credential_stops_existing_session_and_reauth`, `::test_disable_propagates_contains_and_enable_is_selective`, `::test_double_revoke_and_double_disable_do_not_loosen_denial`, `::test_propagation_bound_is_finite_and_non_negative` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-08);
+- the bootstrap/reset lifecycle's own revocation-effectiveness/non-permanence properties are additionally covered by `conformance-tests/test_c15_bootstrap_reset_lifecycle.py` (condition C-15) -- all four adapters take the PROVIDED branch
+
+#### Status
+
+- —
+
+## SI-14 Security-Relevant Auditability
+
+[history](CONTROL_MAPPING_HISTORY.md#si-14)
+
+### r2db-api
+
+#### Control
+
+- `ControlAuthority` emits canonical lifecycle/control-failure events including denied audit deletion;
+- application facade exposes no audit accessor;
+- `AuditSink` immutable snapshots and forbidden-field guard;
+- `r2dbsvc_registry.control_audit` (`0006_control_plane_http.sql`) is a real, durable PostgreSQL table carrying the contract `audit.fields`' 13 named columns plus `recorded_at`.
+- State-changing control-plane operations write their audit row in the same transaction as the state change (`unit_of_work()`), so a durable-write failure aborts the state change too -- fail-closed by construction -- verified by `r2db-api/tests/test_control_plane_service.py::test_each_state_change_adds_exactly_one_audit_row`, `::test_state_change_sink_fault_injection_aborts_the_state_change`.
+- `target_id` (the contract's 13th `audit.fields` member) names the single target credential/application a lifecycle event acted on, populated at every emission site (`control_plane.py`, `ops.py`, the bootstrap/reset ritual) -- verified by `r2db-api/tests/test_control_plane_service.py::test_issued_secret_appears_only_in_the_response`, `::test_target_id_populated_for_application_and_credential_lifecycle_events`, and for the CLI emission path by `r2db-api/tests/test_control_plane_store.py::test_cli_freeze_issuance_writes_control_audit_row`.
+- The compromise-window playbook reads `target_id` directly off `issue_credential`/`rotate_credential` audit rows.
+- Denial events are durably recorded too (contract `audit.sink_failure_policy` lists authentication/authorization denial first, ahead of state changes), including `AUTH_REQUIRED` (no credential presented at all) so even the cheapest probe leaves a trace -- `r2db-api/tests/test_control_plane_service.py::test_authentication_denials_are_durably_audited_with_truthful_attribution`, `::test_denial_audit_insert_failure_becomes_503_for_every_denial_kind` (1 more attribution pin: companion history).
+- **Runtime role holds no privilege beyond insert**: `GRANT INSERT`-only on `control_audit` holds from the control-plane process' own role (`r2dbsvc_controlplane`);
+- the schema owner (`r2dbsvc_control`) retains ordinary owner privilege -- `r2db-api/tests/test_control_plane_store.py::test_controlplane_role_grants_match_the_design` (INSERT only, never SELECT/UPDATE/DELETE its own writes back).
+- The out-of-band CLI (`python -m r2db_api.ops`) writes to the same table, same-transaction-as-state-change, for every state-changing subcommand (`r2db-api/tests/test_control_plane_store.py::test_cli_issue_credential_writes_control_audit_row_with_no_secret_anywhere`, `::test_cli_revoke_credential_writes_control_audit_row`; 1 more subcommand pin: companion history);
+- CLI denials are reported via stderr/exit code rather than durably audited (an OS-access-gated tool, not the public surface's untraceable-probe risk).
+- `r2dbsvc_registry.application_audit` (`migrations/0007_application_audit.sql`) carries the same 13 contract `audit.fields` columns `control_audit` does, plus `recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()`, `audit_seq bigserial`, per-column `length` CHECKs, and a `count` column (a coalesced-denial summary row or buffer-overflow alert row sets it; never `0`/`1`) -- `r2db-api/tests/test_application_audit.py::test_coalesced_summary_row_with_exactly_one_repeat_writes_no_literal_count_of_one`, `::test_buffer_overflow_alert_row_with_exactly_one_drop_writes_no_literal_count_of_one`.
+- **Fail-closed by construction**: the durable row is INSERTed/committed on a separate platform connection before the data transaction commits;
+- a sink failure rolls the data transaction back, answers `SERVICE_UNAVAILABLE` -- `::test_destructive_mutate_is_service_unavailable_when_the_durable_sink_fails`, `::test_schema_operation_is_service_unavailable_when_the_durable_sink_fails`.
+- `outcome="allow"` means "authorized and submitted", not "committed": a clean commit failure writes a second `outcome="error"` row for the SAME `request_id` (`::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`), that error row is itself fail-closed;
+- a simulated process loss deliberately leaves the `allow` row standing alone, per spec (`::test_simulated_process_loss_leaves_the_allow_row_alone`).
+- **Append-only by grant**: `r2dbsvc_api` gains INSERT (plus sequence USAGE) on `application_audit` and nothing else;
+- `r2dbsvc_auditreader` holds SELECT-only on BOTH audit tables;
+- `r2dbsvc_controlplane` has no privilege on `application_audit` at all -- verified over bare `psycopg` connections by `::test_api_role_cannot_select_update_or_delete_application_audit`, `::test_auditreader_role_can_select_both_audit_tables_and_nothing_else` (1 more grant pin: companion history).
+- **Which denials are durable**: an inclusion list of exactly six reason codes -- `AUTH_REQUIRED`, `AUTH_INVALID`, `AUTH_REVOKED`, `FORBIDDEN`, `APPLICATION_DISABLED`, `DESTRUCTIVE_CONFIRMATION_REQUIRED` (`_DURABLE_DENIAL_CODES`, `src/r2db_api/service.py`);
+- every other reason code is non-durable and does not enter the bounded buffer -- `::test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry`, `::test_capability_unsupported_and_not_found_denials_add_no_durable_row`.
+- **Coalescing**: the key is `(application_id, actor_id or "unknown", operation, reason_code)` over a 60s window;
+- the first occurrence is a synchronous INSERT+commit;
+- repeats are counted in memory and flushed at window end as one aggregate row -- ceiling of two rows per key per window per process -- both the coalescing counters and the bounded buffer below are process-local, so a deployment's real ceiling is `2 x <windows> x M` and `<buffer capacity> x M` for M = the deployment's maximum instance count;
+- **Bounded buffer for ordinary successes**: capacity 1000 by default (`R2DB_AUDIT_BUFFER_CAPACITY`), flushed on threshold and periodically, on a separate connection so a buffer failure never blocks a fail-closed operation;
+- overflow emits a fixed `logging.error` plus a durable `security_control_failure` row, rate-limited to one per flush interval (3 buffer-bound/overflow/rate-limit pins: companion history).
+- The `failing` flag means the result of the LAST COMPLETED flush attempt -- clears on success regardless of remaining backlog;
+- concurrent flushes resolve by completion order (2 `failing`-flag pins: companion history).
+- One data operation adds at most one durable row (`::test_each_data_operation_adds_exactly_one_application_audit_row`);
+- dispatch between fail-closed and buffered classes is by request structure at the destructive-confirmation choke, never by `event_class` (`::test_dispatch_point_is_the_destructive_confirmation_choke`).
+- The `request_id` the HTTP layer returns is the one written to the durable row (`::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`).
+- A denial row's `application_id` comes from the authenticated `AuthContext`, never a client-declared value;
+- an unauthenticated denial carries `application_id = NULL`, keyed on `actor_id or "unknown"`.
+- `POST /control/v1/audit/query` and the `POST /v1/audit/query` alias resolve to ONE handler on the control app;
+- the reader is `r2dbsvc_auditreader` (SELECT-only) over the UNION of `control_audit` and `application_audit`;
+- `plane` derives from the source table, never writer-settable;
+- total order is `(recorded_at, plane, event_id)`;
+- `after` is an opaque keyset cursor, `VALIDATION_FAILED` when undecodable;
+- rows newer than `visibility_lag_ms` are withheld -- `r2db-api/tests/test_audit_query.py::test_control_host_serves_both_audit_query_paths_with_one_handler`, `::test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writes` (3 more endpoint-behavior pins: companion history).
+- The data-plane host's own `/v1/audit/query` is unchanged and still answers `CAPABILITY_UNSUPPORTED` (`::test_data_plane_host_audit_query_still_refuses_with_capability_unsupported`).
+- `visibility_lag_ms` (`statement_timeout + idle_in_transaction_session_timeout + 1000ms`, `11000ms` at shipped defaults) is derived by both processes from ONE shared ground -- the platform catalog (`pg_db_role_setting`) -- each process checks at startup that its own effective value agrees with it (declared writer, both settings present, neither zero/negative, no per-database override, writer connection matches catalog);
+- any failure stops that process before it declares or serves anything -- `r2db-api/tests/test_audit_query.py::test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts`, `r2db-api/tests/test_ops_declarations.py::test_derive_visibility_lag_ms_default_is_11000` (5 more startup-guard message pins: companion history);
+- `capabilities().audit_query.operations` (27 members) and `.target_kinds` (5 members) are published `sorted()` off declared constants -- the same declare-the-hazard posture `event_class` has, with no enum in the contract;
+- the data-plane host declares `audit_query` `unavailable` and carries neither key (`::test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable`).
+- **Declared `event_class`/`operation`/`target_kind` vocabulary is exactly the emitted one**, machine-guaranteed by a single AST scanner over the whole package, no hand-maintained list: each `<field>=` keyword argument must be a string constant, an `IfExp` of constants, or a genuinely-bound forward parameter -- no smuggling via a dict literal, subscript/attribute assignment, or passthrough of a client-supplied dict;
+- every function taking the field declares it keyword-only.
+- With the literal set thereby completely enumerable, the scanner pins `U == D ∪ N` and `D ∩ N == ∅` per field, where `N` is an explicitly-named, runtime-measured non-durable exclusion set.
+- Peer numbers: `event_class` (legacy in-memory-sink-only classes only: `authentication`/`control_failure`/`control_state`, reached only through `ControlAuthority._control_event`);
+- `operation` U 31 = D 27 + N 4 (`delete_audit`/`set_authorization_state_available`/`set_credential_state`, plus `control_capabilities` (its 2 emit sites can never reach a deny branch) -- `::test_control_capabilities_operation_has_no_reachable_deny_branch`);
+- `target_kind` U 6 = D 5 + N 1 (`application_or_credential`).
+- Contract 1.4.0 obligation (b)'s scope is settled by contract text (same-label addendum): a data-plane host need not authenticate control/audit credentials merely by declaring `control_plane` other than `unavailable`;
+- Why this peer's data-plane host holds no control-credential store at all belongs to SI-00, not this row.
+
+#### Evidence
+
+- `test_control_lifecycle_and_failures_are_canonical_audit_events`, `test_audit_is_append_only_and_secret_free`.
+- (i)/(ii): `r2db-api/tests/test_control_plane_service.py::test_rate_limit_precedes_authentication_and_is_not_audited`;
+- (iii): `r2db-api/tests/test_preauth_concurrency_bound.py::test_preauth_concurrency_denial_is_never_durably_audited`.
+- The same measurement technique (reading the two `SHOW` timeouts off the sink's own writer connection) also covers the HTTP conformance adapters' `PostgresApplicationAuditSink` writer connection -- `r2db-api/tests/test_conformance_adapter_r2db_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_no_explicit_session_override`, `MitateDB-api/tests/test_conformance_adapter_mitatedb_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle_timeouts_set`;
+- Non-durability is measured, not assumed: `::test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durable_tables` drives each excluded word through its real path and asserts no durable row appears.
+- `::test_declared_event_classes_cover_every_emittable_class`, `::test_every_field_keyword_argument_is_a_string_literal_ifexp_or_forward` (7 more AST-scanner structural pins: companion history).
+- `::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` reads the sibling peer's test file by path (never imports it), asserting the loaded path is the sibling's.
+- the control-credential-against-data-host case is now a common, unconditional vector (this row's Common evidence cell).
+
+#### Status
+
+- **Disclosed limit -- three denial categories are exempted from durable audit**: (i) `control_requests_per_minute` rate-limit refusals -- runs before authentication (no `credential_id` yet) and before any durable write, so a flood cannot generate unbounded audit rows;
+- (ii) `AUTH_STATE_UNAVAILABLE` (the credential store itself is unreachable) -- a service-health outcome where the audit attempt would itself fail, compounding one outage into a second 503 for no benefit;
+- the HTTP response is already fail-closed regardless;
+- (iii) phase 10's pre-authentication `concurrency` refusals on the application HTTP plane -- the slot is taken before `_authenticate`, so the denial has no authenticated actor to attribute and writes no durable row (SI-08).
+- These codes are out of scope because they sit outside SI-14's own minimal event class (authentication/authorization denial, credential/Application lifecycle change, destructive or privilege-sensitive operation, control-plane administrative change, security-control failure), not because they are uninteresting -- and this rests on the same ground as, but does not resolve or excuse, the control plane's own two exemptions above (pre-auth rate refusal, `AUTH_STATE_UNAVAILABLE`): the two lines differ in content;
+- neither settles the other.
+- folding M into the capacity thresholds is runbook work (`POSTGRES_PROVISIONING_RUNBOOK.md` §15) -- `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n`, `::test_different_denial_keys_do_not_coalesce_together` (1 more concurrency pin: companion history).
+- **Disclosed limit**: `AUTH_REQUIRED` durability is a genuinely new unauthenticated-write path;
+- bounded only by coalescing and length CHECKs, not any rate window (`audit_requests_per_minute` governs `audit_query` on the control host only).
+- operational instruction `POSTGRES_PROVISIONING_RUNBOOK.md` §16.
+- **Two limits disclosed, not overstated**: (i) that both processes point at the SAME platform database is itself unverified -- neither knows the other's DSN, so a stale platform DSN on the control process reproduces the old drift;
+- detection stays at post-deploy comparison of the two capability documents;
+- (ii) a process can effective-check only its OWN role, only at startup -- role settings apply at login, so the control process cannot check `r2dbsvc_api` (that peer's own job), and pool connections opened after startup are not re-checked;
+- changing the declaration means `ops` plus a restart of BOTH processes.
+- deliberately peer-local (the port carries no method for it).
+- **Disclosed limit**: the equality check cannot see a SHRINKING declaration (moving a durable word from `D` into `N` in the same step keeps `U == D ∪ N` true);
+- the only detector is a per-field snapshot test pinning `DECLARED_AUDIT_OPERATIONS`/`DECLARED_AUDIT_TARGET_KINDS`/`DECLARED_AUDIT_EVENT_CLASSES` against a fixture `frozenset` -- `::test_declared_audit_event_classes_change_only_deliberately`, `::test_declared_audit_operations_change_only_deliberately` (1 more snapshot pin: companion history).
+
+### MitateDB-api
+
+#### Control
+
+- **Application-plane audit, pre-durable-sink foundation**: `AuditSink` uses immutable snapshots + detail/event allowlists;
+- This 6-field in-memory sink is no longer the only record -- see the durable-sink paragraph below.
+- `mitatedb_registry.control_audit` (migration `0002`) is a real, durable PostgreSQL table carrying the contract `audit.fields`' 13 named columns plus a monotonic `audit_seq` bigserial (`recorded_at` alone is not a total order under concurrent same-timestamp writes, needed for C-15's prefix-strict comparison).
+- State-changing operations write their audit row in the SAME transaction as the state change (`unit_of_work()`), so a durable-write failure aborts the state change too -- `MitateDB-api/tests/test_control_plane_service.py::test_audit_write_fault_rolls_back_an_accompanying_application_registration`, `::test_audit_write_fault_rolls_back_an_accompanying_credential_revoke` (1 more rollback pin: companion history).
+- `target_id` (the contract's 13th `audit.fields` member) names the single target credential/application a lifecycle event acted on -- `::test_target_id_populated_for_application_and_credential_lifecycle_events`, `::test_target_id_populated_for_control_credential_lifecycle_events` (1 more emission-site pin: companion history).
+- Denials are durably recorded too, with the same three exemptions r2db documents (rate-limit pre-authentication, `AUTH_STATE_UNAVAILABLE`, and phase 10's pre-authentication `concurrency` refusal on the application HTTP plane, taken before `_authenticate` and therefore carrying no authenticated actor) -- `::test_rate_limit_denial_is_never_durably_audited`, `::test_auth_state_unavailable_is_never_durably_audited` (2 more denial-kind pins: companion history), and `MitateDB-api/tests/test_preauth_concurrency_bound.py::test_preauth_concurrency_denial_is_never_durably_audited`.
+- **Runtime role holds no privilege beyond insert**: `mitatedbsvc_controlplane` has `INSERT`-only privilege on `control_audit` (no `SELECT`/`UPDATE`/`DELETE` for that role) -- bare-connection verified: `MitateDB-api/tests/test_control_plane_postgres.py::test_control_plane_role_cannot_select_its_own_audit_table`, `::test_control_plane_role_can_insert_into_its_own_audit_table`;
+- the schema owner (`mitatedbsvc_provision`) is a separate reader role required to read this table back (used by the HTTP conformance adapter and the break-glass `audit-report` CLI subcommand).
+- The out-of-band ritual CLI (`ops.py`) writes to the same table for `bootstrap`/`reset`;
+- the break-glass command family's state-changing subcommands write through the SAME `ControlPlaneService` methods, therefore the same same-transaction audit guarantee, never a second CLI-specific path.
+- `mitatedb_registry.application_audit` (`migrations/0005_application_audit.sql`, `event_id text` PRIMARY KEY) carries the identical 13 contract columns + `count` + `audit_seq` + `recorded_at DEFAULT clock_timestamp()` + the same length CHECKs;
+- `mitatedbsvc_api` INSERT-only, `mitatedbsvc_auditreader` SELECT-only on both audit tables, `mitatedbsvc_controlplane` nothing -- `MitateDB-api/tests/test_application_audit.py::test_api_role_cannot_select_update_or_delete_application_audit`, `::test_auditreader_role_can_select_both_audit_tables_and_nothing_else` (2 more grant pins: companion history).
+- Same 6-code inclusion list, key, 60s window, and 2-rows-per-key-per-window-per-process ceiling as r2db: `::test_durable_denial_codes_match_the_design_d3_table`, `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n` (2 more coalescing pins: companion history).
+- Same bounded buffer + rate-limited overflow alert: `::test_buffer_does_not_grow_past_its_configured_bound`, `::test_buffer_overflow_emits_logging_error_and_exactly_one_security_control_failure_row` (2 more buffer pins: companion history).
+- **MitateDB-specific**: the legacy 6-field in-memory sink's rounding (out-of-vocabulary values silently mapped to `"unclassified"`/`"unspecified"`) never reaches the durable path -- a separate 13-column emitter is used there -- `::test_durable_path_never_passes_through_the_six_field_rounding_sink`, `::test_declared_event_class_values_are_disjoint_from_the_six_field_sink_rounding_fallbacks`.
+- **`commit()` runs inside `try`**: `backend_postgres`'s `create_collection`/`add_field`/`delete` commit inside the classified block (both backends; SQLite's DDL runs under an explicit pseudo-transaction) so a commit raise is never left unclassified -- `::test_backend_commit_failure_is_classified_and_produces_an_error_row`, `::test_in_memory_and_postgres_backends_have_pre_commit_hook_parity`.
+- query/insert/update successes are emitted/buffered like r2db's own -- `::test_query_insert_and_update_success_events_are_durably_recorded`, `::test_each_data_operation_adds_exactly_one_application_audit_row` (1 more dispatch pin: companion history).
+- `request_id` is threaded from HTTP through auth/cell/backends so the wire id matches the durable row's id -- `::test_http_response_request_id_matches_the_durable_audit_row`.
+- A `FORBIDDEN` row's `application_id` is the TARGET cell's own id (victim side), never caller-declared -- `::test_application_scope_denied_is_durably_recorded`, `::test_role_denied_is_durably_recorded` (1 more denial-kind pin: companion history).
+- `audit_query` is served on the control host at both paths with one handler, reader `mitatedbsvc_auditreader`, `plane` from the source table, `(recorded_at, plane, event_id)` order, opaque cursor, derived `visibility_lag_ms` -- `MitateDB-api/tests/test_audit_query.py::test_control_host_serves_both_audit_query_paths_with_one_handler`, `::test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writes` (3 more endpoint-behavior pins: companion history).
+- The two-process `visibility_lag_ms` premise is grounded the same way as r2db's cell: one shared catalog (`pg_db_role_setting`) grounds both the declaration and the effective value, the same startup double-check, the same removed/rejected env vars.
+- Both `operation` and `target_kind` are declared, alongside `event_class`, by the same single AST scanner r2db's cell describes, no hand-maintained list.
+- `capabilities().audit_query.operations` (29 members) and `.target_kinds` (5 members) are published `sorted()`, each the union of the control half and the application half -- a mutation in either half turns the same equality check red.
+- Peer numbers: `operation` U 30 = D 29 + N 1 (`control_capabilities`, excluded for the same structurally-unreachable-deny-branch reason as r2db's literal -- `::test_control_capabilities_operation_has_no_reachable_deny_branch`);
+- `target_kind` U = D = 5, N = ∅;
+- `event_class` N = ∅.
+- This peer's exclusion list has 1 definition.
+- Contract 1.4.0 obligation (b) is settled by contract text, as in r2db's cell;
+- see SI-00 for this peer's realization (no control-credential store on the data-plane composition root).
+
+#### Evidence
+
+- representative test: `test_audit_events_are_append_only_and_secret_free`.
+- Field-set match is fixed by `::test_control_audit_fields_matches_the_contract_audit_fields_exactly`.
+- `test_application_plane_role_has_no_privilege_on_control_audit` remains green unchanged.
+- Fail-closed by construction: `::test_destructive_delete_is_service_unavailable_when_the_durable_sink_fails_sqlite`/`_postgres`, `::test_schema_operation_is_service_unavailable_when_the_durable_sink_fails_sqlite`/`_postgres`, with the `error`-row rule at `::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`, `::test_simulated_process_loss_leaves_the_allow_row_alone`.
+- Derivation pinned by `::test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts`;
+- catalog-grounded checks by `MitateDB-api/tests/test_platform_declarations.py::test_f7_missing_declaration` (4 more startup-guard pins: companion history);
+- real writer connections by `test_application_audit.py::test_application_audit_writer_connection_reflects_the_api_roles_own_setting`, `::test_control_audit_writer_connection_reflects_the_controlplane_roles_own_setting`;
+- removed env vars by `test_main.py::test_build_app_rejects_every_removed_env_var_through_the_real_composition_root`;
+- `auth.py`'s and `credential_store_postgres.py`'s `operation="authenticate"`/`"assert_active"` and `target_kind="credential"` sites are measured to reach the durable tables (`::test_authenticate_and_assert_active_denials_are_durable_not_excluded`, and against real PostgreSQL `::test_postgres_authenticate_and_assert_active_denials_are_durable_not_excluded`), so they are `D`, not `N`.
+
+#### Status
+
+- **Two limits, identical to r2db's cell**: (i) both processes reading the same platform database is itself unverified;
+- (ii) a process can effective-check only its own role, only at startup.
+- operational instruction `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2b.
+- **Disclosed limit, identical to r2db's cell**: the equality check cannot see a shrinking declaration;
+- the only detector is a per-field snapshot test.
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- audit evidence tests;
+- CCR-14's control-plane durable-audit and non-permanence properties are additionally covered by `conformance-tests/test_c15_bootstrap_reset_lifecycle.py` (condition C-15) -- all four adapters take the PROVIDED branch.
+- The application-plane durable sink and `audit_query` are additionally covered by `conformance-tests/test_c09_audit_evidence.py` (condition C-09) and by `AuditResult` reverse-validation in `conformance-tests/test_c11_response_schema_conformance.py` (condition C-11) -- all four registered adapters take the PROVIDED branch, and the whole-registry vacuity guard `test_c09_every_control_surface_adapter_takes_the_provided_branch` is green with no `xfail`, requiring EVERY registered adapter with a control surface to have taken it (see the C-09 row of `conformance-tests/CONDITIONS.md`).
+- The declared-vocabulary property is checked from the common side too, by three isomorphic declaration-agreement vectors in `conformance-tests/test_c09_audit_evidence.py` -- `::test_c09_declaration_agreement_event_class`, `::test_c09_declaration_agreement_operation`, `::test_c09_declaration_agreement_target_kind` -- each of which raises a known durable event, polls within the declared visibility lag and asserts a NON-EMPTY observation before checking that every returned value is drawn from the declaration, plus `::test_c09_every_control_surface_adapter_declares_1_5_0` as the whole-registry vacuity guard.
+- Contract 1.4.0 obligation (b)'s scope is exercised unconditionally by `::test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted` on all four plugs, over conformance port v1.9 (co-hosting judged by `adapter.surfaces_cohosted(document)`, derived from a peer's own declared `surfaces` origins).
+- **Phase 10 (2026-09-10)**: C-25's leg (3) -- a mutation's own `request_id` is the one its own audit event carries -- is now driven from the plug's own CONTROL-plane discovery (`control_capabilities()`), not the data-plane document every plug declares `audit_query: unavailable` on by product-code constant, which is what made the leg vacuously undriven before;
+- the status is read off the SAME isolated surface the mutation was made through, asserted to agree with the session adapter's own reading, with an in-test whole-registry guard requiring at least one registered plug to declare `audit_query` enabled/partial -- `conformance-tests/test_c25_result_request_id.py::test_c25_result_request_id`, parametrized once per registered plug (six since the two socket plugs landed).
+- Condition C-26 adds real-startup evidence: each peer's documented composition root runs as real OS processes in front of a real nginx and is observed to serve exactly the surfaces it declared, on both planes, to a brand-new client;
+- a root with no declaration row fails fast instead of starting on a default;
+- and shutdown leaves no process, no bound port, no temporary directory and no throwaway database or role behind -- `conformance-tests/test_c26_composition_root.py::test_c26_declared_surfaces_are_served`, `::test_c26_deploy_smoke_is_green`, `::test_c26_missing_declaration_fails_fast`, `::test_c26_no_residue_after_shutdown`, `::test_c26_start_failure_leaves_no_residue`, with the registry non-vacuity guards `::test_c26_composition_roots_registry_has_at_least_two` and `::test_c26_items_are_grouped_per_launcher`.
+
+#### Status
+
+- **Disclosed limit**: the common side only checks "returned ⊆ declared" -- the reverse half (a word declared but never returned) stays outside the common suite and is carried by each peer's own cell alone.
+- **Disclosed limit**: the `provided` branch's own real-world co-hosted case remains unexercised by any currently-registered deployment (no registered plug currently co-hosts both surfaces on the same origin) -- restated in the C-09 row.
+
+## SI-15 Fail-Closed Authorization
+
+[history](CONTROL_MAPPING_HISTORY.md#si-15)
+
+### r2db-api
+
+#### Control
+
+- `CredentialStore` rejects unavailable/unknown/disabled/revoked state;
+- `DataService._check`;
+- CCR-13's declaration-completeness guard is the same fail-closed shape applied to capability declarations rather than credential state: `PostgresCell._load_catalog` (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-1) fails the whole call closed with `SERVICE_UNAVAILABLE` if even one entity lacks the `id`/`_r2db_revision` columns a `mutable`/`revision_preconditions: enabled` declaration requires, rather than silently publishing a false declaration for it.
+- `audit`-role denial: an `audit` credential attempting any of the 8 write control operations is refused `FORBIDDEN` and the denial is durably audited in the same assertion, not merely fail-closed with no trace -- `r2db-api/tests/test_control_plane_service.py::test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint` asserts both `exc.value.code == "FORBIDDEN"` and `exc.value.details.get("audited") is True` (plus a durable audit-row-count increment) for every one of the 8, parametrized over both the in-memory and real-PostgreSQL backends -- the PostgreSQL parametrization is this row's own durable read-back evidence for r2db.
+
+#### Evidence
+
+- `test_revoke_disable_and_unavailable_state_fail_closed`;
+
+#### Status
+
+- —
+
+### MitateDB-api
+
+#### Control
+
+- `CredentialStore` rejects unavailable auth state and missing/disabled credentials;
+- `audit`-role denial: same fail-closed-with-durable-trace property, `MitateDB-api/tests/test_control_plane_service.py::test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint` (asserts a durable audit-row-count increment plus `reason_code == "FORBIDDEN"` for every one of the 8 write operations), with dedicated real-PostgreSQL durable read-back evidence (a genuine post-commit SELECT, not an in-process snapshot) by `MitateDB-api/tests/test_control_plane_postgres.py::test_audit_role_accepted_on_read_endpoints_and_forbidden_on_a_write_endpoint_against_real_postgres`.
+
+#### Evidence
+
+- `test_disable_revoke_and_unavailable_state_fail_closed`.
+
+#### Status
+
+- —
+
+### Common
+
+#### Control
+
+- —
+
+#### Evidence
+
+- `conformance-tests/test_c08_revocation_boundary.py::test_authorization_state_unavailable_fails_closed_then_recovers`, `::test_disable_propagates_contains_and_enable_is_selective` (four adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`, `MitateDB-api-http` -- condition C-08);
+- an undeclared capability executing anyway (the reverse fail-closed direction) is additionally covered by `test_c12_capability_agreement.py` (condition C-12) and `test_c17_declaration_agreement.py` (condition C-17), both executable on all four adapters
+
+#### Status
+
+- —
 
 ## CCR-14 control-plane compromise boundedness (R-11)
 

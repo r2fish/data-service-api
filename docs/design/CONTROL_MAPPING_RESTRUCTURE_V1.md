@@ -2,8 +2,9 @@
 
 ## 0. 版数・位置づけ
 
-- **現行版: v0.3 (2026-09-14)。** 設計レビュー 2 回目 (最終) の指摘を、監督裁定によりすべて反映した。
-- 旧版: v0.2 (2026-09-14) は設計レビュー 1 回目と目標形の裁定を反映した版。v0.1 (同日) は初稿。
+- **現行版: v1.0 (2026-09-14)。** WP-3 監査の合格 (3 回目) と root suite ゲート (`3340 passed`) を経て確定した。
+- v0.4 (同日): 1 回目の WP-3 監査の不合格を受けた監督裁定により、規則 R0〜R6 を廃止し、軸の割当を割当表 `tools/control_mapping_axes.tsv` へ移した。
+- 旧版: v0.3 (同日) は設計レビュー 2 回目の反映。v0.2 は設計レビュー 1 回目と目標形の裁定の反映。v0.1 は初稿。
 - 対象は `security/CONTROL_MAPPING.md` の**形だけ**である。主張の文は変えない。`spec/`、`security/SECURITY_INVARIANTS_V1.md`、`security/CONTROL_MAPPING_HISTORY.md`、`conformance-tests/CONDITIONS.md`、両 peer のコードは変えない。
 - 変更クラスは全体で Class D (`security/`)。Class C (`conformance-tests/`) と Class B (`tools/`) の変更を含む。
 - **非目標**: 内容の訂正・更新。見つけた陳腐化は §8 に列挙だけする。
@@ -85,46 +86,33 @@
 
 ### 3.2 割当 (主張 → 軸)
 
-用語:
-- **本文**: 主張から末尾の `.` `;` `:` を 1 つ除いたもの。
-- **語数**: backtick span を 1 語と数え、残りを空白で分けた数。
-- **ラベル**: 主張の先頭にある太字ラベル `\*\*([^*]+?)(\*\*:|:\*\*)` の中身 (末尾の `:` を除く)。又は、太字でないラベル `^(Stated limit( \([^)]*\))?|Same stated limit):` の中身。
-- R2 以外の正規表現は大小を区別しない。
+軸の割当は意味の判断であり、規則では決めない。**正本は割当表 `tools/control_mapping_axes.tsv` である。** 全 418 主張の軸を 1 行ずつ明示する。
 
-| 優先 | 条件 | 軸 |
-|---|---|---|
-| R0 | 下の上書き表の (SI, peer, 主張の先頭句) に一致する | 表の軸 |
-| R1 | ラベルが `^(disclosed\|acceptance boundary\|deployment (precondition\|caveat)\|not bound\|two limits\|stated limit\|same stated limit)\b` に一致する | Status |
-| R1b | R1 の主張から、`.` で終わる最初の主張 (R1 の主張自身を含む) までの後続の主張 | R1 と同じ軸 |
-| R2 | 主張が `^(This\|That\|These\|It\|Its\|Both\|Such\|The same)\b` で始まり (大小区別)、同じ (SI, peer) に直前の主張がある | 直前の主張と同じ軸 |
-| R3 | 本文が `\b(TBD\|not yet)\b` を含む。又は `\bgaps?\b` を含み、かつ `\bnot a (\w+ )?gap\b` を含まない | Status |
-| R4 | 主張が `Evidence:` で始まる。又は本文が backtick span、`,`、`(`、`)`、`and`、`or`、空白だけでできている | Evidence |
-| R5 | 本文が `\b(tests?\|review)$` に一致し、語数が 8 以下 | Evidence |
-| R6 | 上のどれにも当たらない | 旧 peer 列は Control、旧 Common 列は Evidence |
+| 列 | 内容 |
+|---|---|
+| `si` / `peer` | 主張の属する (SI, peer) |
+| `index` | (SI, peer) 内の旧セル順 (0 始まり) |
+| `head` | 主張の先頭部分 (逐語) |
+| `axis` | `Control` / `Evidence` / `Status` |
 
-**R0 上書き表** (全件。各行はちょうど 1 つの主張に一致しなければならず、一致 0 件又は 2 件以上なら生成は赤で止まる。適用はログに `R0` と出る):
+**判定基準** (表の作成と監査に共通):
+- 軸は主張の意味で決め、小節には依存しない。
+- 限界、未実施、配備依存、開示 → Status。
+- テスト、conformance 条件、計測を証拠として挙げる → Evidence。
+- それ以外 (統制の実現) → Control。
+- peer 間で同じ内容の主張は同じ軸にする。
+- 1 つの主張に内容が混在するときは、主節の軸にする。
+- **優先順位 (監督裁定 2026-09-14、2 回目の WP-3 再監査)**: 上の 2 項目が競合するとき (1 つの主張の中で主節の軸と peer 間一致とが違う軸を指すとき)、主節の軸を優先する。peer 間一致はそもそも内容が同じ場合だけ適用し、内容が違えば peer ごとに独立して判定する。
 
-| SI | peer | 主張の先頭句 | 軸 | 理由 |
-|---|---|---|---|---|
-| SI-00 | Common | `All four registered plugs currently resolve` | Status | 未到達の分岐という残余の限界 |
-| SI-01 | MitateDB-api | `Local/test-cluster evidence only` | Status | 本番の証拠が `absent` |
-| SI-01 | MitateDB-api | `on the one real deployment made so far` | Status | `has not been re-exercised` |
-| SI-05 | r2db-api | `Exercised against a real local PostgreSQL 16 cluster only` | Status | `no production evidence` |
-| SI-11 | r2db-api | `no production evidence.` | Status | 同上 |
-| SI-14 | r2db-api | `The same measurement technique` | Control | R2 が直前の Status を継承してしまう (AST scanner 側の記述) |
-
-- 割当は主張ごとに行う。太字ブロックでまとめて割り当てると、ブロック内のテスト名が Control に入るためである。
-- 却下案: R1 の軸を次のラベルまで継承する。実測では約 45 件が逆に誤る (例: SI-02 r2db-api の role 分離、SI-14 r2db-api の AST scanner)。
-- 参考値 (レビュー実装での概算、R0 適用後): 主張 418 件。Control 304 / Evidence 69 / Status 45。
-- 例 (SI-07 r2db-api): `Topology deny rules plus per-credential role/scope records;` → Control (R6)。`negative topology and isolation tests;` → Evidence (R5)。`production containment evidence not yet present.` → Status (R3)。
+却下: 規則 (R0〜R6) による推定。1 回目の WP-3 監査で、意味上の誤割当が 38 件、判断を要する群が 13 個出た (§9.5)。
 
 ## 4. 生成と照合
 
-どちらも `tools/` に置き、base rev を引数に取る。照合は生成を import せず、§3.1 の分解を独自に実装する。新ファイル側は箇条書きの行をそのまま主張として読む。このため 2 つの実装の分解が食い違えば赤になる。
+どちらも `tools/` に置き、base rev を引数に取る。照合は生成を import せず、割当表も読まない。§3.1 の分解を独自に実装し、内容不変だけを検査する。新ファイル側は箇条書きの行をそのまま主張として読むので、2 つの実装の分解が食い違えば赤になる。
 
 | script | 役割 |
 |---|---|
-| `tools/restructure_control_mapping.py --base <rev>` | 旧ファイル → 新ファイル全体 (preamble の P1〜P4 と P2 の `<N>` を含む) を決定的に出力する。`--log` で主張ごとの割当ログ (SI, peer, 主張の番号, 規則#, 軸) を TSV で出す |
+| `tools/restructure_control_mapping.py --base <rev>` | 旧ファイルを分解し、割当表を引いて新ファイル全体 (preamble の P1〜P4 と P2 の `<N>` を含む) を決定的に出力する。表と主張が 1 対 1 でない場合 (行の欠落・余剰・重複)、`head` が主張の先頭と一致しない場合、`axis` が 3 値以外の場合は赤で止まる。`--log` で (SI, peer, index, axis) を TSV で出す |
 | `tools/check_control_mapping_restructure.py --base <rev>` | 下の V1〜V8 を検査し、集計行を出す |
 
 | # | 検査 | 赤の条件 |
@@ -148,7 +136,7 @@
 
 期待する集計行: `sections=16 blocks=48 claims_old=<N> claims_new=<N> missing=0 added=0 moved=0 reordered=0 unbalanced=0 history=16/16 ccr14=identical rule=identical preamble=identical chars=identical`
 
-割当が妥当かは機械では判定しない。割当ログと監査の突合で見る (§7)。却下案: script を scratchpad の一時物にする — 前例 (Phase 7 WP-7) と同じく証拠を再現できない。
+割当が妥当かは機械では判定しない。割当表を監査が §3.2 の判定基準で突合する (§7)。却下案: script を scratchpad の一時物にする — 前例 (Phase 7 WP-7) と同じく証拠を再現できない。
 
 ## 5. 登録テストの改修
 
@@ -186,20 +174,20 @@ WP-1 と WP-2 は 1 つの merge で入る。新しい登録テストは旧形�
 | WP | 触る | 触らない |
 |---|---|---|
 | WP-1 script と登録テスト | `tools/restructure_control_mapping.py`、`tools/check_control_mapping_restructure.py`、`tools/tests/test_restructure_control_mapping.py`、`conformance-tests/test_control_mapping_register.py` | `security/` 全部 |
-| WP-2 再編本体 | `security/CONTROL_MAPPING.md` (生成 script の出力だけ)、登録テストの `MAX_LINE_LENGTH` (生成器が出す `<N>`)、本書の実施記録 (旧 P1・P2 段落の逐語、規則ごとの件数) | `security/CONTROL_MAPPING_HISTORY.md`、その他全部 |
+| WP-2 再編本体 | `tools/control_mapping_axes.tsv` (§3.2 の判定基準で全 418 行)、`security/CONTROL_MAPPING.md` (生成 script の出力だけ)、登録テストの `MAX_LINE_LENGTH` (生成器が出す `<N>`)、本書の実施記録 (旧 P1・P2 段落の逐語、軸ごとの件数) | `security/CONTROL_MAPPING_HISTORY.md`、その他全部 |
 | WP-3 監査 | なし | 全ファイル |
 
 | WP | 完了条件 | 変異 (対象: 操作) | 赤になるもの |
 |---|---|---|---|
 | WP-1 | 照合の各検査が働く | fixture の新形で: 主張 1 つを削除 / 1 語を足す / 主張を別の SI へ移す / 同じ軸の 2 主張を入替 / SI 名を 1 字変える / history の fragment を変える / history リンクを 2 つにする / CCR-14 の 1 文字を変える / P1〜P4 以外の preamble 語を変える / 主張の backtick を 1 つ消す / 分解関数を、切れ目の文字を 1 つ落とす版に差し替える | `missing=1` / `missing=1 added=1` / `moved=1` / `reordered=1` / `sections=differs` / `history` 不一致 / `history` 不一致 / `ccr14=differs` / `preamble=differs` / `unbalanced=1` / `chars=differs`。いずれも `tools/tests` の fixture test |
-| WP-1 | 生成が §3 どおり | fixture の旧形に R0〜R6 の各規則、R1b、`not a disclosure gap`、太字でないラベル、`Evidence:`、backtick 内の `...`、`vs.`、`. ` の無いリンク直前の主張、`\|` を含め、期待する新形・ログ・赤停止とバイト一致させる。規則 1 つの分岐 (例: `not a … gap` の除外) を消す / R0 の先頭句を一致 0 件にする | fixture test |
+| WP-1 | 生成が §3 どおり | fixture の旧形 (backtick 内の `...`、`vs.`、`. ` の無いリンク直前の主張、`\|` を含む) と fixture の割当表から、期待する新形・ログ・赤停止とバイト一致させる。割当表から 1 行消す / 1 行足す / 行を重複させる / `head` を 1 字変える / `axis` を 3 値以外にする | fixture test (いずれも生成が赤で止まる) |
 | WP-1 | 独立コードレビュー | `tools/` の 2 script と登録テストを、実装担当と別の担当がレビューする。報告に無い変異を 1〜2 種、自分で注入する | 指摘の未解消、又は赤にならない変異 |
 | WP-1 | ゲート | `pytest tools/tests -q` | 緑でない |
 | WP-2 | 生成の出力が新ファイルと一致 | `restructure_control_mapping.py --base 65a9896` の出力と `security/CONTROL_MAPPING.md` をバイト比較する | 不一致 |
 | WP-2 | 照合 0 件 | `check_control_mapping_restructure.py --base 65a9896` | §4 の期待集計行でない |
 | WP-2 | 登録テストが実ファイルで働く (変異は復元する) | `## SI-07` 節を削除 / SI-03 と SI-04 の節を入替 / history の fragment を実在しない値に / 1 peer の `#### Status` を削除 / 軸の下に散文行を 1 行足す / `\|` 行を足す / (SI, 小節) を 15,201 字に / 1 行を `MAX_LINE_LENGTH` + 1 字に | 1 対 1 一致テストと HISTORY 集合テスト / 順序テスト / リンクテスト / 形テスト / 形テスト / 形テスト / block cap テスト / line cap テスト |
 | WP-2 | ゲート | root suite 単独実行、`pytest tools/tests -q`、`tools/check_doc_refs.py` | 集計行が緑でない |
-| WP-3 | 独立の再現と突合 | 生成と照合を自分で実行し、出力・ログ・集計行が WP-2 と一致することを確かめる。実装担当の要約を見ずにログを突合する: R0・R1b・R2・R3 の全件、ラベルの後続主張の全件 (次のラベル又はセル末まで)、SI-08・SI-14 の全主張、R6 から無作為に 10 件。WP-2 の変異を 2 種再現する | 不一致、又は意味上の誤割当が 1 件以上 (R0 への追加で是正し、WP-2 からやり直す) |
+| WP-3 | 意味の突合と独立再現 | 割当表の 418 行すべてを、実装担当の要約を見ずに §3.2 の判定基準で突合する。内容不変は、実装の tools を使わずに独立に再現する。WP-2 の変異を 2 種再現する | 不一致、又は意味上の誤割当が 1 件以上 (割当表を直し、WP-2 からやり直す) |
 
 新しい test 名は WP-1 で確定する。
 
@@ -208,3 +196,94 @@ WP-1 と WP-2 は 1 つの merge で入る。新しい登録テストは旧形�
 - roadmap R-22 行の 1 列目「SI-14 行 26,012 文字、SI-08 行 5,797 文字」は旧値である (同じ行の裁定に 2026-09-14 の実測 27,950 / 20,315 がある)。
 - CCR-14 節の「which this row does not restate verbatim」の「row」は、節の中の文なので現行でも不正確である。
 - 主張の中の位置語 (row 51 件、above / below 14 件) は書き換えない。新形では「row」が字義どおりには合わなくなる。節の順は保つので「above」は偽にならない。
+
+## 9. 実施記録 (WP-2、2026-09-14)
+
+`tools/restructure_control_mapping.py --base a230c6c` (旧 `security/CONTROL_MAPPING.md` は 65a9896 時点から a230c6c まで無変更 -- `git diff 65a9896 a230c6c -- security/CONTROL_MAPPING.md` は空) の出力を `security/CONTROL_MAPPING.md` へそのまま書いた。`tools/check_control_mapping_restructure.py --base a230c6c` の集計行:
+
+```
+sections=16 blocks=48 claims_old=418 claims_new=418 missing=0 added=0 moved=0 reordered=0 unbalanced=0 history=16/16 ccr14=identical rule=identical preamble=identical chars=identical
+```
+
+`MAX_LINE_LENGTH` は生成器が実測して `1400` を採った (最長物理行 1,384 字 -- `- ` + SI-08 r2db-api の最長主張 1,382 字 -- を 100 字単位で切り上げ)。`MAX_BLOCK_LENGTH` は旧 `MAX_CELL_LENGTH` の 15200 を無変更で引き継いだ (最長ブロックは SI-14 r2db-api、15,122 字 -- 旧セル長と一致)。
+
+### 9.1 廃止規則 R0〜R6 の履歴 (1 回目の WP-2 の実測。v0.4 でこの規則自体を廃止し、コードからも削除した)
+
+以下は規則が正本だった間 (v0.3 まで) の実測記録であり、現在の割当を主張するものではない。現在の軸の正本は割当表 `tools/control_mapping_axes.tsv` であり、その件数は §9.6 に記録する。
+
+| 規則 | 件数 |
+|---|---|
+| R0 | 6 |
+| R1 | 20 |
+| R1b | 15 |
+| R2 | 8 |
+| R3 | 4 |
+| R4 | 16 |
+| R5 | 13 |
+| R6 | 336 |
+
+この時点の軸ごと件数: Control 304 / Evidence 69 / Status 45。1 回目の WP-3 監査 (§9.5) がこの規則ベースの割当に誤りを見つけ、v0.4 の裁定で規則そのものを廃止した。
+
+### 9.2 旧 P1・P2 段落 (逐語、書き換え前)
+
+P1 が指した旧 "Update convention" 段落 (旧 7〜20 行目):
+
+> **Update convention** (phase 7 WP-7 (i), requester ruling 4 --
+> `docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` §5):
+> 「訂正は現行行を書き換え、旧文は履歴へ移す」-- a correction rewrites the
+> current row below in place, and the superseded text it replaces is moved,
+> verbatim and unedited, into the per-ID companion file
+> `CONTROL_MAPPING_HISTORY.md` (headings there are the bare ID only, e.g.
+> `## SI-14`, so a row's own `[history](CONTROL_MAPPING_HISTORY.md#si-14)`
+> link resolves to a real GitHub anchor). Each row keeps only today's control
+> and its evidence -- test names, `file:line`, and any disclosed scope limits
+> -- plus that one link; it is not a place to re-accumulate the next
+> correction's own narrative. This file holds exactly one `|`-started table
+> (`conformance-tests/test_control_mapping_register.py` parses on that
+> assumption); do not add a second one, and keep every cell as one continuous
+> line (no raw `|` or embedded newline inside a cell).
+
+P2 が指した旧 "Cell-length cap measurement" 段落 (旧 22〜29 行目):
+
+> **Cell-length cap measurement** (差し戻し rework round 3, 監督裁定 2026-09-06 item
+> C-1/B-2; re-measured 2026-09-10, WP-9): this file's longest cell is still
+> SI-14's r2db-api control/evidence cell, now 15,122 characters (15,065 on
+> 2026-09-06, the figure `conformance-tests/test_control_mapping_register.py`'s
+> own comment records). Its `MAX_CELL_LENGTH = 15200` is that 2026-09-06
+> measurement plus a 135-char margin, unchanged (78 left today), set independently
+> of `conformance-tests/CONDITIONS.md`'s own cap (per C-1: a shared cap left that
+> file's own guard nearly inert; design section 13/WP-8 keeps its own copy).
+
+### 9.3 参照側の影響 (grep 再実行)
+
+`security/CONTROL_MAPPING.md` を "row" / "cell" と絡めて参照する `.py` ファイルを再 grep した。据え置いた 2 件は §2 の記載どおり (`conformance-tests/test_c10_no_bypass_material_on_the_wire.py:29` の「peer-local SI-12 row」、`conformance-tests/test_conditions_register.py:42` の「SI-14's r2db-api cell」)。他に `MitateDB-api/src/mitatedb_api/control_plane.py`/`r2db-api/src/r2db_api/control_plane.py` に `CONTROL_MAPPING.md SI-10/SI-02` を指す 2 件のコメントがあるが、"row"/"cell" 語を伴わない単純な参照でありどちらも変更不要だった。変更が要った参照は 0 件。
+
+### 9.4 完了ゲート (実測、v0.4 最終是正後、2026-09-14)
+
+- 生成器出力と `security/CONTROL_MAPPING.md` はバイト一致。
+- `check_control_mapping_restructure.py --base a230c6c`: `sections=16 blocks=48 claims_old=418 claims_new=418 missing=0 added=0 moved=0 reordered=0 unbalanced=0 history=16/16 ccr14=identical rule=identical preamble=identical chars=identical`
+- `pytest tools/tests -q`: `107 passed`
+- `pytest conformance-tests/test_control_mapping_register.py -q`: `11 passed`
+- `tools/check_doc_refs.py`: `check_doc_refs OK: 0 dangling references`
+- `tools/public_value_scan.py` (変更ファイル 7 件: `security/CONTROL_MAPPING.md`、`conformance-tests/test_control_mapping_register.py`、`tools/restructure_control_mapping.py`、`tools/check_control_mapping_restructure.py`、`tools/tests/test_restructure_control_mapping.py`、`tools/control_mapping_axes.tsv`、本書): `total_flagged=0`
+- `tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=3340 floor=3326 diff=14`
+- root suite (`pytest -q -n 5 --dist loadgroup`) 単独実行は監督ゲート待ち (本実装パスは対象外の pytest を起動しない規律のため)。
+
+### 9.5 1 回目の WP-3 監査 (不合格) と裁定 v0.4
+
+- **内容不変**: 監査は実装の tools を使わずに独立に再現し、一致した (48 ブロック、CCR-14 節・Rule 節・preamble を含む)。
+- **割当**: 規則による割当に、意味上の誤割当 38 件 (C→E 26、C→S 8、E→S 3、E→C 1) と、判断を要する群 13 個があった。赤条件に該当するので不合格。
+- **原因**: 規則の構造にある。「Exercised … by `test`」型の文が既定値で Control に落ちる、R3 の語彙が狭い、R4 が誤爆する。
+- **監督裁定 (v0.4)**: 規則を廃止し、割当表を正本とする (§3.2)。WP-2 は割当表の作成からやり直し、WP-3 は表 418 行の意味の突合と内容不変の独立再現を行う。
+
+### 9.6 割当表 (正本) の軸ごとの件数、是正の経過
+
+| 段階 | Control | Evidence | Status | 備考 |
+|---|---|---|---|---|
+| 規則ベース (廃止、§9.1) | 304 | 69 | 45 | 1 回目の WP-2 の実測 |
+| 1 回目の WP-3 是正後 | 264 | 91 | 63 | 誤割当 38 件 + 判断群 13 個 (§9.5) を反映 |
+| 2 回目の WP-3 是正後 (最終、v0.4) | 261 | 93 | 64 | §9.7 の 6 行を反映。総 418 件は不変 |
+
+### 9.7 WP-3 再監査 (2 回目) と裁定
+
+1 回目の不合格 (§9.5) → 割当表を是正 (264/91/63) → 2 回目の WP-3 監査で残り 2 件の誤割当 (SI-11 MitateDB-api [4] は主節がテストの記述で Evidence、SI-14 r2db-api [33] は主節が flush の統制で peer の [16] と揃えて Control) と、判断が割れた 4 件 (SI-02 r2db-api [4] は主節が C-14 の vector で Evidence、[18] は Control のまま、[55] と MitateDB-api [31] は runbook 依存の配備開示で Status) を検出。監督裁定 (2026-09-14) でこの 6 行を確定し、判定基準に優先順位「主節の軸 > peer 間の一致 (内容が同じ場合だけ適用)」を追記した (§3.2)。最終件数は §9.6 のとおり (261/93/64)。
