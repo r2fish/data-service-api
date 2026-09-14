@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.7 (2026-09-14)。** 基点 main `2fde59a` (WP-1g / 1h / 1i 統合済み。worktree `r37-wp0` の `dad3c35` と同一 tree)。§5.15〜§5.19 に WP-1j / 1k / 1l (CE3 → CE4 → BP4) の manifest と未確定 X-1〜X-4 を追記した。既存の行は書き換えていない。独立レビュー反映: 監督裁定 X-1〜X-5 (§5.19)、1k の括弧書きと順序、1l の allowlist 実測値。**独立レビュー済み。**
 - **v1.6 (2026-09-14)。** W-1〜W-3 と既知の穴の追跡先への監督裁定を反映した (§5.11 の 14、§5.13 の追加行・23・24、§5.14 の裁定表)。独立レビューの指摘 (監督裁定) も反映した。v1.5 以降の未コミット分だけを直し、それ以前の行は書き換えていない。
 - **v1.5 (2026-09-14)。** 基点 main `4fc5517` (WP-1d / 1e / 1f 統合済み)。§6 に U-2 の追記行 (r2db `service.py` は変更セット 2 が先)、§5.10〜§5.14 に WP-1g / 1h / 1i の manifest を追記した。既存の行は書き換えていない。**独立レビュー待ち。**
 - **v1.4 (2026-09-14)。** 独立レビューの minor 5 件 (監督裁定、全件採用) を §5.5〜§5.9 に反映した: 共通の完了条件 C-1〜C-3 を §5.5 へ集約、§5.6 の変異 3b・5b と位置参照、§5.7 の `__future__` 必須と既知の穴、§5.9 の未確定表を削除して裁定表だけ残した。
@@ -674,6 +675,177 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | W-3 | 変更セット 2 との重なり表は、監督の示したファイル一覧のままでよい | §5.14 |
 | 既知の穴 | 設計 §10.4 の #5・#7・#8 と §10.2 の 1〜3 は roadmap §8 R-39 で追跡する。#6 (F821) は型検査器の既知事項として設計 §10.4 に残す | 設計 §10.4、roadmap R-38・R-39 |
 | 独立レビュー | 1g の移動範囲を L287-549 に訂正、40c の一覧 (1g の L292、1i の L561・L1383)、1g の新規テストを性質ごとに分割 (計 4 本)、1i の新規テストを 1 本に、1h の変異 3 の注記、1g と変更セット 2 の非重複 | §5.11〜§5.14 |
+
+### 5.15 WP-1i の次の 3 件の共通 (v1.7 追記、**独立レビュー済み**)
+
+| 項目 | 内容 |
+|---|---|
+| 対象 | §4 の「4〜」行の残り 3 件 (CE3 → CE4 → BP4)。飛ばした候補は無い。3 件とも MitateDB 側で、r2db-api と `conformance-tests/` は触らない |
+| 行番号 | `2fde59a` の実測。WP-1k の `cell.py` の行は WP-1j の統合でずれるので着手時に取り直す。WP-1l の `backend_postgres.py` は 1j / 1k が触らない |
+| 変更クラス、テンプレート、検証コマンド | §5 の共通表、§5.5、§5.10 のとおり。各表の末尾に §5.5 の C-1〜C-3 を付ける (C-2 の「新規 1 件」は各 WP の新規テスト本数と読み替える) |
+| 読む正本 | §5.10 に加え、設計 §10.5 |
+| baseline (導出) | root 3,366 (`r2db-api/tests` 1,275 / `MitateDB-api/tests` 1,096 / `conformance-tests` 995)、`tools/tests` 109。§1 の件数に設計 §10.1・§10.4・§10.5 の新規テスト本数を足した値で、WP-1i の root ゲート `3366 passed` と一致する。着手時に collect-only で確かめる |
+| S_M | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py`。現在は `SCANNED_MODULES` 11 件、件数 pin `cell.py` 47・`backend_postgres.py` 24、行番号 allowlist 20 件 (`backend_postgres.py` L563〜L1986)、sib tuple (`cell.py`, `field_types.py`, `http.py`, `identifiers.py`, `request_limits.py`) |
+| 新規テスト | facade は先例どおり、移した名前の組ごとに `is` の検査を 1 本。性質のテストは各節に書く (1j 2 本、1k 2 本、1l 2 本。すべて `MitateDB-api/tests`) |
+| `_gate` (設計 §9.3) | 3 件とも `_gate` (L883)・`_limit_gate` (L803) の本体とその呼出し経路を動かさない。両関数は移す名前を呼ばない (実測)。移すものはゲート通過後の操作から呼ばれ、呼出し箇所は `cell.py` に残る |
+
+### 5.16 WP-1j — MitateDB field_constraints の解決 (CE3、**独立レビュー済み**)
+
+**目的**: `cell.py` の `_validate_enum_declaration_with_path` と `_resolve_field_constraints` を leaf `MitateDB-api/src/mitatedb_api/constraint_resolution.py` (§2.2 の名前) へ移す。
+
+| 項目 | 実測 (`2fde59a`) |
+|---|---|
+| 移動範囲 | `cell.py` L164-270 (2 関数。直前の L161 は `_FIELD_TYPE_VOCABULARY`、直後の L272 からは次の定数の説明コメントなので含めない) |
+| 呼出し元 | `ApplicationCell.create_collection` (L1381、`_resolve_field_constraints`)、`add_field` (L1778)・`alter_field` (L2039) (`_validate_enum_declaration_with_path`) |
+| leaf の import | `.errors` (`ResourceLimitError`・`ValidationError`)、`.field_types` (`_ConstraintDeclarationError`・`json_type_name`・`validate_enum_declaration`)。`field_types.py` は `typing` と `.errors` だけを import するので循環しない。注釈が無いので `__future__` は不要 |
+| facade | `cell.py` が 2 名を import する。移動で未使用になる `validate_enum_declaration`・`_ConstraintDeclarationError` を `cell.py` の import から削除する (他 module とテストは `cell` から読まない)。`json_type_name` は L2032 が使うので残す |
+| denial | `ValidationError` 3 件 (L199、L238、L252。4-key)、`ResourceLimitError` 1 件 (L267、`enum_members`) |
+| 件数 pin | `cell.py` 47 → 44、`constraint_resolution.py` 3 |
+| 行番号 allowlist | 対象は `backend_postgres.py` だけなので差分 0 |
+| sib tuple | `constraint_resolution.py` を足す |
+| `test_limit_class_vocabulary.py` | パッケージ直下の `*.py` を走査するので件数 36 は変わらない |
+| 範囲内の位置参照 | L176「(`_resolve_field_constraints` below)」は 2 関数を同じ順で移すので leaf の中で成り立つ。L180・L192・L229 の「here」は同じ関数・同じ宣言を指す |
+| 範囲外の位置参照 (40c) | 直す: `field_types.py` L256 と L288 の「`cell.py`'s own `_validate_enum_declaration_with_path`」、`cell.py` L4229-4230 と L4342-4343 の「`_resolve_field_constraints`/`add_field`/`alter_field` above」(3 名のうち移るのは `_resolve_field_constraints` だけ。X-4)。直さない: 両 peer の `tests/test_audit_query.py` (MitateDB L2473-2474、r2db L2688-2689) の `cell._validate_enum_declaration_with_path` (qualified name は facade で成り立つ。§5.10 の 10)、`MitateDB-api/tests/test_limit_class_vocabulary.py` L154 の件数説明の文字列「cell.py x3 … in `_resolve_field_constraints`」(V-4 と同じ扱い) |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/cell.py` (移動範囲を除き、import 1 行の追加と 2 名の削除、括弧書き 2 箇所)、新規 `MitateDB-api/src/mitatedb_api/constraint_resolution.py`、`MitateDB-api/src/mitatedb_api/field_types.py` (L256・L288 の括弧書きだけ)、`MitateDB-api/tests/test_constraints_declaration.py` (新規テスト 2 本)、S_M (`SCANNED_MODULES`、件数 pin、sib tuple)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `.errors`・`.field_types`) | `MitateDB-api/src/mitatedb_api/http.py` (変更セット 3)、`backend_postgres.py`、S_M の `_BACKEND_LAYER_ALLOWLIST`、`MitateDB-api/tests/test_limit_class_vocabulary.py`、両 peer の `tests/test_audit_query.py` (登録は `field_types.validate_enum_declaration` のまま)、r2db-api 全部、`conformance-tests/` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `cell.py`: import から `_resolve_field_constraints` を外す | `MitateDB-api/tests/test_constraints_declaration.py::test_constraint_resolution_leaf_preserves_cell_facade` (新規。2 名の `is`)、`::test_field_constraints_unknown_key_is_rejected` (L1381 の NameError) |
+| 2 | field_constraints の未知キーを拒否する | `constraint_resolution.py`: `if unknown_keys:` を `if False and unknown_keys:` にする | `MitateDB-api/tests/test_constraints_declaration.py::test_field_constraints_unknown_key_is_rejected` |
+| 3 | nullable は bool だけ | `constraint_resolution.py`: `not isinstance(nullable, bool)` を `False and not isinstance(nullable, bool)` にする | `MitateDB-api/tests/test_constraints_declaration.py::test_field_constraints_nullable_not_a_boolean_is_refused` |
+| 4 | 解決結果は total で、nullable の既定は true | `constraint_resolution.py`: `declared.get("nullable", True)` の `True` を `False` にする | `MitateDB-api/tests/test_constraints_declaration.py::test_catalog_field_constraints_round_trips_and_is_total` |
+| 5 | enum の path は `field_constraints/<field>/enum` | `constraint_resolution.py`: `f"field_constraints/{field}/enum"` を `"enum"` にする | `MitateDB-api/tests/test_constraints_declaration.py::test_enum_on_json_typed_field_is_constraint_declaration` |
+| 6 | enum 宣言の違反は `declared_type` を持つ | `constraint_resolution.py`: wrapper の `"declared_type": declared_type,` の行を削る | `MitateDB-api/tests/test_constraints_declaration.py::test_empty_enum_is_constraint_declaration`、`::test_enum_on_untyped_field_is_constraint_declaration_via_add_field` |
+| 7 | enum の要素数は上限ちょうどまで許す | `constraint_resolution.py`: `len(validated_enum) > max_enum_members` を `>=` にする | `MitateDB-api/tests/test_constraints_declaration.py::test_create_entity_enum_at_exactly_max_enum_members_is_accepted` (新規。`max_enum_members=3` で 3 要素の `create_entity` が通る。既存の `::test_enum_members_limit_exceeded_refuses_before_anything_is_created` は 4 要素なので緑のまま) |
+| 8 | 上限超過は `enum_members` の LIMIT_EXCEEDED | `constraint_resolution.py`: `limit_class="enum_members"` を外す | `MitateDB-api/tests/test_limit_class_vocabulary.py::test_every_resource_limit_error_call_site_declares_a_contract_limit_class`、`MitateDB-api/tests/test_constraints_declaration.py::test_enum_members_limit_exceeded_refuses_before_anything_is_created` |
+| 9 | 移動先が `SCANNED_MODULES` に入る (40b) | S_M: `SCANNED_MODULES` から `constraint_resolution.py` を外す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_module_with_a_vocabulary_denial_is_accounted_for`、`::test_ast_full_count_matches_a_non_trivial_floor` |
+| 10 | 件数 pin (`cell.py` 44、`constraint_resolution.py` 3) | `constraint_resolution.py`: `ValidationError("x", details={"violated_declaration": "request_schema"})` を raise する関数を 1 つ足す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_a_non_trivial_floor` |
+| 11 | 移した denial が 4-key のまま | `constraint_resolution.py`: 未知キーの `ValidationError` から `details=` を外す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` |
+| 12 | 行番号 allowlist が実測と一致 | **監査照合**: 本 WP による `_BACKEND_LAYER_ALLOWLIST` の差分 0 | — |
+| 13 | sib tuple に移動先が入る | `constraint_resolution.py`: `"field_constraints.nullable must be a boolean"` を allowlist の文言 `"storage backend rejected the request"` にする | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial` (tuple を更新しないと緑のまま) |
+| 14 | leaf の import が許可リストの内だけ | `constraint_resolution.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 15 | 新 leaf が分類される | 一覧から `constraint_resolution.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 16 | 未使用になった import を削除した | **監査照合**: `cell.py` の import に `validate_enum_declaration`・`_ConstraintDeclarationError` が無く、コード上の参照も 0 件 (docstring の言及は残る) | — |
+| 17 | 逐語移動と位置参照の括弧書き (40c) | **監査照合**: 2 つの docstring と関数内のコメントが逐語。括弧書きは `field_types.py` L256・L288、`cell.py` L4230・L4343 の 4 箇所だけ | — |
+| 18 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0 (登録は `field_types.validate_enum_declaration` で、移す 2 関数は登録外)、r2db `src/` の同名 def 0 件 | — |
+| 19 | 既知の穴を記録する | **監査照合**: `test_limit_class_vocabulary.py` L154 の件数説明が古くなることが、完了時の実施記録に載る | — |
+
+### 5.17 WP-1k — MitateDB provisional gate (CE4、**独立レビュー済み**)
+
+**目的**: `cell.py` の `_deny_provisional_field` を leaf `MitateDB-api/src/mitatedb_api/provisional_gate.py` へ移す (CE3 と責務が違うので別 leaf。U-6。名前は X-2)。**変更セット 3 の統合後に着手する** (X-1)。
+
+| 項目 | 実測 (`2fde59a`。WP-1j の統合後に取り直す) |
+|---|---|
+| 移動範囲 | `cell.py` L3828-3856 (1 関数。直前は `ApplicationCell._require_developer` の末尾、直後は L3858 の `class ApplicationRuntime`) |
+| 呼出し元 | 無い (docstring のとおり到達不能)。`http.py` L474 の同名関数は別物で、`http.py` L534 はそちらを呼ぶ。§2.2 の CE4 行の「`http.py`」は誤りで、本行を正とする |
+| leaf の import | `.errors` (`CapabilityError`) |
+| facade | `cell.py` が 1 名を import する。`CapabilityError` は `cell.py` に残る 5 箇所が使う。未使用になる import は無い |
+| denial | `CapabilityError` 1 件 (L3852。`details` あり) |
+| 件数 pin | `cell.py` 44 → 43 (WP-1j 統合後の値から)、`provisional_gate.py` 1 |
+| 行番号 allowlist | 差分 0 |
+| sib tuple | `provisional_gate.py` を足す (§4 の m6) |
+| 既存テスト | 直接のテストは無い (到達不能のため) |
+| 範囲内の位置参照 (40c) | L3836-3837「`ApplicationRuntime`/`ApplicationDeveloper`'s own keyword-only-field gates below」: 2 class は `cell.py` に残る (L3858、L4387) ので、「below」の直後に「(in `cell.py`)」を付ける。2 class には gate の呼出しがもう無く、この記述は移動前から古いが、V-4 と同じく本文は直さない。「`http.py::_deny_provisional_field`」(2 箇所) と、r2db の「`structured.py`'s own `SCHEMA_OPERATIONS`」(r2db `structured.py` L332 に在る) は成り立つ |
+| 範囲外の位置参照 (40c) | `errors.py` L284「(`cell.py`/`http.py`'s own `_deny_provisional_field`)」の `cell.py` の直後に「(in `provisional_gate.py`)」。`http.py` L500「(mirrors `cell.py`'s identical in-process counterpart)」も指す先が変わるので、変更セット 3 の統合後に L500 の文を取り直して付ける (X-1) |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/cell.py` (移動範囲を除き import 1 行)、新規 `MitateDB-api/src/mitatedb_api/provisional_gate.py`、`MitateDB-api/src/mitatedb_api/errors.py` (L284 の括弧書きだけ)、`MitateDB-api/src/mitatedb_api/http.py` (L500 の括弧書きだけ。X-1 の裁定と変更セット 3 統合後の実測による)、`MitateDB-api/tests/test_denial_details_and_request_id.py` (新規テスト 2 本)、S_M (`SCANNED_MODULES`、件数 pin、sib tuple)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `.errors`) | `http.py` の `_deny_provisional_field` の本体と呼出し、`backend_postgres.py`、S_M の `_BACKEND_LAYER_ALLOWLIST`、両 peer の `tests/test_audit_query.py`、r2db-api 全部、`conformance-tests/` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `cell.py`: import から `_deny_provisional_field` を外す | `MitateDB-api/tests/test_denial_details_and_request_id.py::test_provisional_gate_leaf_preserves_cell_facade` (新規) |
+| 2 | details の `violated_declaration` は `capability` | `provisional_gate.py`: `"capability"` を `"request_schema"` にする | `MitateDB-api/tests/test_denial_details_and_request_id.py::test_deny_provisional_field_raises_capability_unsupported_naming_the_field` (新規。`_deny_provisional_field("budget")` の例外型、文言、details を literal で固定する) |
+| 3 | details の `field` は field 名 | `provisional_gate.py`: `"field": field_name` を削る | 同上 |
+| 4 | 移動先が `SCANNED_MODULES` に入る (40b) | S_M: `SCANNED_MODULES` から `provisional_gate.py` を外す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_module_with_a_vocabulary_denial_is_accounted_for`、`::test_ast_full_count_matches_a_non_trivial_floor` |
+| 5 | 件数 pin (`cell.py` 43、`provisional_gate.py` 1) | `provisional_gate.py`: `CapabilityError("x", details={"violated_declaration": "capability"})` を raise する関数を 1 つ足す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_a_non_trivial_floor` |
+| 6 | 移した denial が 4-key のまま | `provisional_gate.py`: `details=` を外す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` |
+| 7 | 行番号 allowlist が実測と一致 | **監査照合**: 本 WP による `_BACKEND_LAYER_ALLOWLIST` の差分 0 | — |
+| 8 | sib tuple に移動先が入る | `provisional_gate.py`: 文言を allowlist の文言 `"storage backend rejected the request"` にする | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial` (tuple を更新しないと緑のまま) |
+| 9 | leaf の import が許可リストの内だけ | `provisional_gate.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 10 | 新 leaf が分類される | 一覧から `provisional_gate.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 11 | 逐語移動と位置参照の括弧書き (40c) | **監査照合**: docstring が逐語。括弧書きは leaf 内の L3837、`errors.py` L284、`http.py` L500 の 3 箇所だけ | — |
+| 12 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0。同じ peer の `http.py::_deny_provisional_field` とは登録が無く、本 WP でも足さない | — |
+| 13 | 既知の穴を記録する | **監査照合**: L3833-3838 の caller list の記述が移動前から古いことが、完了時の実施記録に載る | — |
+
+### 5.18 WP-1l — MitateDB PostgreSQL 予約名 (BP4、**独立レビュー済み**)
+
+**目的**: `backend_postgres.py` の予約名の定数 2 つ (説明コメントを含む) と `PostgresBackend.check_reserved` の検査本体を、leaf `MitateDB-api/src/mitatedb_api/postgres_reserved_names.py` の関数 `_check_reserved_name(value, label)` へ移す。method は委譲で残す (§2.5 の「2 名 + method」。名前と形は X-2・X-3)。
+
+| 項目 | 実測 (`2fde59a`) |
+|---|---|
+| 移動範囲 | `backend_postgres.py` L129-138 (L129-136 の説明コメント、`_RESERVED_EXACT`、`_RESERVED_PREFIX`) と、`check_reserved` の本体 L543-547 (`if` と `raise`) |
+| 残すもの | `check_reserved` の `def` と L533-542 のコメント (identifier choke point の後半である理由で、method に属する)。本体は `_check_reserved_name(value, label)` の 1 行にする |
+| self | `check_reserved` は `self` を読まない (実測)。`cell.py` L1107 が `self._backend.check_reserved(value, label)` で呼ぶので、method は残す (`backend.StorageBackend` の duck-typed 契約) |
+| leaf の import | `.errors` (`ValidationError`・`violation`) |
+| facade | `backend_postgres.py` が 3 名を import する。`ValidationError`・`violation` は残る denial が使う。未使用になる import は無い |
+| denial | `ValidationError` 1 件 (L544。4-key、`identifier_syntax`) |
+| 件数 pin | `backend_postgres.py` 24 → 23、`postgres_reserved_names.py` 1 |
+| 行番号 allowlist | **20 件すべてが 14 行上へずれる** (実測): 549, 606, 655, 682, 739, 791, 816, 994, 1011, 1142, 1300, 1387, 1439, 1472, 1498, 1565, 1593, 1634, 1903, 1972。前提は import 1 行 (facade の説明コメントなし) と委譲 1 行。コメントを足すとずれ幅が変わるので、そのときは実測で書き直す |
+| sib tuple | 足さない。backend 層の leaf で、§4 の m6 の対象 (ST3〜ST9、CE2〜CE4) の外。先例 `postgres_value_domain.py` も tuple に無い (X-3) |
+| 既存テスト | PostgreSQL backend の `pg_` 接頭辞と `audit_events` の完全一致を固定するテストは無い (`MitateDB-api/tests` の grep 0 件)。SI-04 の穴として新規テストで塞ぐ |
+| 位置参照 (40c) | L129-136 のコメントは leaf へ逐語で移り、「`check_reserved` is a method」は method が残るので成り立つ。method に残る L536「that module's own docstring」は `identifiers` を、L538「this backend」は `PostgresBackend` を指し、変わらない。範囲外の `identifiers.py` L11-12・`backend_sqlite.py` L138-139 の `backend_postgres.PostgresBackend.check_reserved`、`spec/CCR_DISPOSITION.md` L135・r2db `identifier_rules.py` L75・`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` L112 の `backend_postgres` の `_RESERVED_EXACT` は facade で成り立つので直さない。`docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` L79 の「L98」は移動前から古い記録で直さない。**括弧書きは 0 箇所** |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/backend_postgres.py` (移動範囲を除き、import 1 行と `check_reserved` の本体)、新規 `MitateDB-api/src/mitatedb_api/postgres_reserved_names.py`、`MitateDB-api/tests/test_postgres.py` (新規テスト 2 本。PostgreSQL に接続しない)、S_M (`SCANNED_MODULES`、件数 pin、行番号 allowlist 20 件)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `.errors`) | `cell.py`、`backend_sqlite.py` (`_RESERVED` と `check_reserved` は対象外)、`backend.py`、`identifiers.py`、S_M の sib tuple、`spec/`、`docs/design/`、両 peer の `tests/test_audit_query.py`、r2db-api 全部、`conformance-tests/` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `backend_postgres.py`: import から `_RESERVED_PREFIX` を外す (module 内の参照は無い) | `MitateDB-api/tests/test_postgres.py::test_postgres_reserved_names_leaf_preserves_backend_postgres_facade` (新規。3 名の `is`) |
+| 2 | `pg_` で始まる名前を拒否する | `postgres_reserved_names.py`: `value.startswith(_RESERVED_PREFIX)` を `value == _RESERVED_PREFIX` にする | `MitateDB-api/tests/test_postgres.py::test_postgres_backend_check_reserved_refuses_pg_prefix_and_audit_events_exactly` (新規。`PostgresBackend.check_reserved(None, …)` で呼び、`"pg_x"` と `"audit_events"` の例外と details `{"violated_declaration": "identifier_syntax", "field": <label>}`、`"audit_events2"` と `"xpg_"` が通ることを literal で固定する) |
+| 3 | `audit_events` は完全一致だけを拒否する | `postgres_reserved_names.py`: `value in _RESERVED_EXACT` を `value.startswith("audit_events")` にする | 同上 |
+| 4 | `audit_events` を拒否する | `postgres_reserved_names.py`: `value in _RESERVED_EXACT or ` を削る | 同上 |
+| 5 | details の `field` は label | `postgres_reserved_names.py`: `field=label` を `field="identifier"` にする | 同上 |
+| 6 | method が leaf に委譲する | `backend_postgres.py`: `check_reserved` の委譲の行を `return None` にする | 同上 |
+| 7 | 移動先が `SCANNED_MODULES` に入る (40b) | S_M: `SCANNED_MODULES` から `postgres_reserved_names.py` を外す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_module_with_a_vocabulary_denial_is_accounted_for`、`::test_ast_full_count_matches_a_non_trivial_floor` |
+| 8 | 件数 pin (`backend_postgres.py` 23、`postgres_reserved_names.py` 1) | `postgres_reserved_names.py`: `ValidationError("x", details=violation("request_schema"))` を raise する関数を 1 つ足す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_a_non_trivial_floor` |
+| 9 | 移した denial が 4-key のまま | `postgres_reserved_names.py`: `details=` を外す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` |
+| 10 | 行番号 allowlist 20 件が実測と一致 (40b) | S_M: 1 件を移動前の行番号に戻す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_allowlist_entries_match_real_bare_call_sites` |
+| 11 | leaf の import が許可リストの内だけ | `postgres_reserved_names.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 12 | 新 leaf が分類される | 一覧から `postgres_reserved_names.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 13 | sib tuple を変えない (X-3) | **監査照合**: sib tuple の差分 0 | — |
+| 14 | 逐語移動 (40c) | **監査照合**: L129-136 のコメントが leaf に逐語、L533-542 のコメントが method に逐語で残る。leaf の `if` 文は移動前の method 本体と AST 同一。括弧書き 0 箇所 | — |
+| 15 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、r2db `src/` の同名 def 0 件。`backend_sqlite.SQLiteBackend.check_reserved` は変えない | — |
+| 16 | 既知の穴を記録する | **監査照合**: 移動前は PostgreSQL の予約名 (SI-04) を固定するテストが無かったこと (本 WP で塞いだ) が、完了時の実施記録に載る | — |
+
+### 5.19 重なり・順序・未確定 (v1.7 追記)
+
+**触るパスの重なり** (L = `tools/tests/test_leaf_import_direction.py`、S_M = §5.15、C = `MitateDB-api/src/mitatedb_api/cell.py`、H = `MitateDB-api/src/mitatedb_api/http.py`):
+
+| | WP-1j (CE3) | WP-1k (CE4) | WP-1l (BP4) | 変更セット 3 |
+|---|---|---|---|---|
+| WP-1j | — | × L、S_M、C | × L、S_M | ○ |
+| WP-1k | × | — | × L、S_M | × H (L500 の括弧書き。X-1) |
+| WP-1l | × | × | — | ○ |
+
+- **順序**: 1 branch で WP-1j → WP-1l → WP-1k の直列 (3 件とも L と S_M を触り、1j と 1k は C も触る。X-1)。1l は 1j / 1k のコードに依存せず、件数 pin と allowlist も別 module の値なので、1l を先にしても値は変わらない。1k は変更セット 3 の統合後に行う。
+- **U-1 / U-2**: 変更セット 3 が触る MitateDB `http.py`・r2db `control_plane.py`・r2db `service.py`・`docs/code-history/` を、1j と 1l は触らない。変更セット 3 は両 peer の `tests/` を触らないので、共有する静的テストも無い。1k だけが `http.py` L500 に括弧書きを要するので、1k は変更セット 3 の統合後に行い、L500 の文を取り直す (X-1)。
+- `cell.py`・`backend_postgres.py` のコメント整理は抽出の後 (U-2)。`backend_postgres.py` は BP1〜BP3 も残るので、整理は BP 系の抽出がすべて済んでから行う。
+- 設計 §9.3: 3 件とも `_gate` とその呼出し経路を動かさない (§5.15)。
+- 並行 branch `codex/mitatedb-operation-depth-platform-plan` は、main との差に MitateDB の `src/`・`tests/` と `tools/tests` を含まない (実測)。
+
+**未確定 (監督判断待ち)**:
+
+| # | 点 |
+|---|---|
+| X-1 | WP-1k の `http.py` L500「(mirrors `cell.py`'s identical in-process counterpart)」の括弧書き。案 (a) 変更セット 3 の統合後に 1k を行い、残った文に付ける。案 (b) 1k では付けず、V-4 と同じく既知の穴にする |
+| X-2 | leaf 名。CE4 は `provisional_gate.py`、BP4 は `postgres_reserved_names.py` と関数 `_check_reserved_name` (§2.2・§2.5 は未定)。CE3 は §2.2 の `constraint_resolution.py` |
+| X-3 | BP4 の形。検査本体を leaf の関数へ移し、method は委譲で残す (method 内のコメントも method に残す)。sib tuple には足さない |
+| X-4 | `cell.py` L4230・L4343 の「above」は 3 名を指し、移るのは `_resolve_field_constraints` だけ。括弧書きを「(`_resolve_field_constraints` now in `constraint_resolution.py`)」とするか |
+
+**監督裁定 (2026-09-14)**:
+
+| # | 裁定 |
+|---|---|
+| X-1 | 案 (a)。W-2 により位置参照は各 WP の統合時点で正しくする。順序は WP-1j → WP-1l → WP-1k とし、1k は変更セット 3 の統合後に L500 の文を取り直して括弧書きを付ける |
+| X-2 | 提案名で進める (`constraint_resolution.py`、`provisional_gate.py`、`postgres_reserved_names.py` の `_check_reserved_name`) |
+| X-3 | 提案どおり。検査本体を leaf に移し、method は委譲で残す。sib tuple に足さない理由は独立レビューで確かめる |
+| X-4 | 「above」の直後に「(`_resolve_field_constraints` in `constraint_resolution.py`)」を付ける。残る 2 名には付けない。「now」などの経緯語は使わない |
+| X-5 | CE4 (`_deny_provisional_field`) は到達不能だが、docstring の記録どおり次の provisional capability 用の仕組みとして残す。削除せずに抽出する |
 
 ## 6. 重なり表と監督裁定
 
