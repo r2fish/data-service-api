@@ -2765,10 +2765,15 @@ def _check_rev_pair(repo_root, rel_path, old_source, new_source, real_paths, ide
         had_failure = True
     peer = Path(rel_path).parts[0]
     companion_lookup = cp._load_companion_lookup(repo_root, peer)
+    corrections_lookup, corrections_errors = cp._load_corrections_lookup(repo_root, peer)
+    for corr_err in corrections_errors:
+        print(f"FAIL (§9f) {corr_err}", file=out)
+        had_failure = True
     new_blocks = cp.extract_all_blocks(new_source)
     old_blocks = cp.extract_all_blocks(old_source)
     for msg in cp.check_provenance_semantics(
-        rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths, identifier_set
+        rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths, identifier_set,
+        corrections_lookup,
     ):
         print(msg, file=out)
         had_failure = True
@@ -2780,6 +2785,18 @@ def _check_rev_pair(repo_root, rel_path, old_source, new_source, real_paths, ide
             continue
         for correct, broken in cp.find_broken_line_wrap_joins(nb.kind, basis_text, nb.dedented, identifier_set):
             print(f"FAIL (§9e) {rel_path} broken line-wrap join: {broken!r} should be {correct!r} (zero space)", file=out)
+            had_failure = True
+        if (
+            nb.kind == "comment"
+            and nb.retained_text
+            and cp._is_colon_style_block(basis_text)
+            and not cp._is_colon_style_block(nb.retained_text)
+        ):
+            print(
+                f"FAIL (§9f) {rel_path} {nb.history_id}: '#:' Sphinx-style comment marker lost "
+                "(basis used '#:' lines, new block does not)",
+                file=out,
+            )
             had_failure = True
     return 1 if had_failure else 0
 
@@ -3402,3 +3419,354 @@ def test_0f_item3_mutation_y2_dropping_prev_char_guard_is_red():
 
     assert mutated_rule7_y2("`a =", "b`") is True  # bug: wrongly joins
     assert cp._is_join_sensitive_boundary("`a =", "b`", frozenset()) is False  # fixed
+
+
+# ===========================================================================
+# Change set 0g: append-only companion correction records (design
+# docs/design/CODE_COMMENT_PROVENANCE_V1.md v0.11 §9, supervisor ruling
+# 2026-09-15). A companion's original fenced block is never edited; a
+# `### correction: <date>` entry is appended under the same CH-ID heading
+# instead (see `cp.Correction`/`cp._parse_corrections` for the exact
+# format). `_apply_corrections` splices the correction's `old` sentence
+# out and its `new` sentence in, against the FLATTENED basis text, before
+# any derivability/0d check runs.
+# ===========================================================================
+
+def _correction_block(date: str, reason: str, old: str, new: str) -> str:
+    return (
+        f"### correction: {date}\n\n"
+        f"- reason: {reason}\n\n"
+        f"old:\n```\n{old}\n```\n\n"
+        f"new:\n```\n{new}\n```\n\n"
+    )
+
+
+def _correction_scenario(tmp_path, companion_lines, correction_blocks, current_block_lines, extra_committed_files=None):
+    """Shared setup: the committed revision AND the working tree carry the
+    SAME (already-corrected-in-code) block, referencing CH-0001 (a Q-4
+    re-edit of an already-migrated block) -- exactly the shape of the real
+    CH-0239/CH-0139 regression (`test_0f_both_peers_all_src_rev_vs_itself_
+    is_green`). The companion's own recorded text (`companion_lines`)
+    still holds the ORIGINAL (pre-fix) wording; `correction_blocks` (zero
+    or more, from `_correction_block`) are appended after the companion's
+    unedited fenced block to bridge the two. `extra_committed_files`
+    ({rel_path: content}) are written and committed alongside the source
+    file -- needed so a real-path fixture's referenced file actually
+    exists in the BASIS revision's tree (`_tree_paths`)."""
+    repo = _init_repo(tmp_path)
+    for rel_path, content in (extra_committed_files or {}).items():
+        _write(repo, rel_path, content)
+    src = "\n".join(current_block_lines + ["# history: CH-0001"]) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", src)
+    rev = _commit_all(repo, "old")
+    section = _companion_section("CH-0001", "\n".join(companion_lines))
+    section += "".join(correction_blocks)
+    _write(repo, "docs/code-history/r2db-api/mod.md", section)
+    return repo, rev
+
+
+_SI08_COMPANION = ["# Guarded by SI-08.", "# The old widget does not exist yet."]
+_SI08_CURRENT = ["# Guarded by SI-08.", "# The new widget exists now."]
+_SI08_CORRECTION = _correction_block(
+    "2026-09-10", "the widget shipped", "The old widget does not exist yet.", "The new widget exists now.",
+)
+
+
+def test_0g_correction_bridges_rewritten_protected_sentence_is_green(tmp_path):
+    repo, rev = _correction_scenario(tmp_path, _SI08_COMPANION, [_SI08_CORRECTION], _SI08_CURRENT)
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# --- (a): removing the correction entry is red ----------------------------
+
+def test_0g_missing_correction_entry_is_red(tmp_path):
+    repo, rev = _correction_scenario(tmp_path, _SI08_COMPANION, [], _SI08_CURRENT)
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (2)" in output
+
+
+# --- (b): an old sentence that does not occur is red -----------------------
+
+def test_0g_correction_old_sentence_not_found_is_red(tmp_path):
+    bad_correction = _correction_block(
+        "2026-09-10", "the widget shipped",
+        "The odl widget does not exist yet.",  # typo -- never occurs in the basis
+        "The new widget exists now.",
+    )
+    repo, rev = _correction_scenario(tmp_path, _SI08_COMPANION, [bad_correction], _SI08_CURRENT)
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "occurs 0 time" in output
+
+
+# --- (c): an old sentence occurring twice is red ----------------------------
+
+def test_0g_correction_old_sentence_ambiguous_is_red(tmp_path):
+    companion_lines = [
+        "# The old widget does not exist yet.",
+        "# The old widget does not exist yet.",
+    ]
+    correction = _correction_block(
+        "2026-09-10", "the widget shipped",
+        "The old widget does not exist yet.", "The new widget exists now.",
+    )
+    repo, rev = _correction_scenario(
+        tmp_path, companion_lines, [correction], ["# The new widget exists now."],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "occurs 2 time" in output
+
+
+# --- (d): two chained corrections, order matters ---------------------------
+
+_CHAIN_COMPANION = ["# Step one happens then step two happens."]
+_CHAIN_CURRENT = ["# Phase one runs then phase two runs."]
+_CHAIN_CORRECTION_1 = _correction_block(
+    "2026-09-10", "phase 1 renamed",
+    "Step one happens then step two happens.", "Phase one runs then step two happens.",
+)
+_CHAIN_CORRECTION_2 = _correction_block(
+    "2026-09-15", "phase 2 renamed",
+    "Phase one runs then step two happens.", "Phase one runs then phase two runs.",
+)
+
+
+def test_0g_chained_corrections_in_file_order_is_green(tmp_path):
+    repo, rev = _correction_scenario(
+        tmp_path, _CHAIN_COMPANION, [_CHAIN_CORRECTION_1, _CHAIN_CORRECTION_2], _CHAIN_CURRENT,
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0g_chained_corrections_out_of_file_order_is_red(tmp_path):
+    # The SAME two corrections, written in the WRONG (swapped) order --
+    # correction 2's own `old` text does not exist until correction 1 has
+    # already been applied, so applying strictly in file order (never by
+    # date, never by any other reordering) must catch this as red.
+    repo, rev = _correction_scenario(
+        tmp_path, _CHAIN_COMPANION, [_CHAIN_CORRECTION_2, _CHAIN_CORRECTION_1], _CHAIN_CURRENT,
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "occurs 0 time" in output
+
+
+# --- (e): a malformed correction entry is red under --register -------------
+
+def test_0g_malformed_correction_entry_register_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    _write(
+        repo, "r2db-api/src/r2db_api/mod.py",
+        "# history: CH-0001\ndef f():\n    return 1\n",
+    )
+    section = _companion_section("CH-0001", "# Some moved comment.")
+    # Missing the required '- reason:' line.
+    section += (
+        "### correction: 2026-09-10\n\n"
+        "old:\n```\nSome moved comment.\n```\n\n"
+        "new:\n```\nSome other comment.\n```\n\n"
+    )
+    _write(repo, "docs/code-history/r2db-api/mod.md", section)
+    code, output = _run_register(repo)
+    assert code == 1
+    assert "§9f" in output
+    assert "reason" in output
+
+
+# --- (f): a correction does not relax 0d elsewhere --------------------------
+
+def test_0g_correction_present_but_other_protected_sentence_deleted_is_red(tmp_path):
+    companion_lines = [
+        "# Guarded by SI-08.",
+        "# The old widget does not exist yet.",
+        "# See C-05 for details.",
+    ]
+    # The correction only bridges the middle sentence; the code below
+    # drops the THIRD sentence entirely -- still protected (C-05), so
+    # this must stay red regardless of the (valid, present) correction.
+    repo, rev = _correction_scenario(
+        tmp_path, companion_lines, [_SI08_CORRECTION], _SI08_CURRENT,
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (2)" in output
+    assert "cannot delete a whole sentence carrying a protected reference" in output
+    assert "See C-05 for details." in output
+
+
+# ===========================================================================
+# Change set 0g review round (supervisor ruling 2026-09-15, "hole" fix): a
+# correction record must never let a protected reference in its `old`
+# sentence silently disappear from `new` -- that would be a 0d bypass (a
+# sentence 0d would never let vanish outright could otherwise be
+# "corrected" into one that no longer carries what made it protected).
+# Adding a protected reference is fine; only DROPPING one already present
+# is red (§9f). A real path that changed is deliberately NOT an exception.
+# ===========================================================================
+
+def test_0g_correction_dropping_protected_id_is_red(tmp_path):
+    bad_correction = _correction_block(
+        "2026-09-10", "widget shipped (drops SI-08 too)",
+        "Guarded by SI-08, the old widget does not exist yet.",
+        "The new widget exists now.",  # SI-08 silently dropped
+    )
+    repo, rev = _correction_scenario(
+        tmp_path,
+        ["# Guarded by SI-08, the old widget does not exist yet."],
+        [bad_correction],
+        ["# The new widget exists now."],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "SI-08" in output
+    assert "dropped" in output
+
+
+def test_0g_correction_dropping_real_path_is_red(tmp_path):
+    bad_correction = _correction_block(
+        "2026-09-10", "path reference reworded away (drops the real path)",
+        "See `docs/design/X_V1.md` for the old rule.",
+        "See the updated rule.",  # the real path reference vanished
+    )
+    repo, rev = _correction_scenario(
+        tmp_path,
+        ["# See `docs/design/X_V1.md` for the old rule."],
+        [bad_correction],
+        ["# See the updated rule."],
+        extra_committed_files={"docs/design/X_V1.md": "stub\n"},
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "docs/design/X_V1.md" in output
+    assert "dropped" in output
+
+
+def test_0g_correction_adding_protected_reference_is_green(tmp_path):
+    # Adding a protected reference that was not there before is allowed --
+    # only DROPPING one already present in `old` is restricted.
+    good_correction = _correction_block(
+        "2026-09-10", "now cites SI-08 for clarity",
+        "The widget behaves the old way.",
+        "The widget behaves the old way, per SI-08.",
+    )
+    repo, rev = _correction_scenario(
+        tmp_path,
+        ["# The widget behaves the old way."],
+        [good_correction],
+        ["# The widget behaves the old way, per SI-08."],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0g_real_ch0239_and_ch0139_corrections_stay_green():
+    # The two real corrections (control_plane.py CH-0239, service.py
+    # CH-0139) must still pass the new protection-preservation check --
+    # covered end-to-end by test_0f_both_peers_all_src_rev_vs_itself_is_
+    # green already, but pinned here directly against the real companion
+    # records so a future edit to either correction entry is caught even
+    # if the broader rev-vs-itself sweep is ever narrowed.
+    real_paths = cp._tree_paths(REAL_REPO_ROOT, "HEAD")
+    lookup = cp._load_corrections_lookup(REAL_REPO_ROOT, "r2db-api")
+    corrections_by_id, format_errors = lookup
+    assert format_errors == []
+    for ch_id in ("CH-0239", "CH-0139"):
+        for corr in corrections_by_id.get(ch_id, []):
+            err = cp._correction_relaxes_protection(corr.old, corr.new, real_paths)
+            assert err is None, f"{ch_id}: {err}"
+
+
+# ===========================================================================
+# Change set 0g review round 2 (supervisor ruling 2026-09-15): flattening
+# stripped only the leading `#`, so a Sphinx-style `#:`-prefixed comment
+# line kept its own leading `:` as if it were CONTENT. Change set 4's
+# `ops.py` CH-0321 one-line compaction hit exactly this -- a stray ": "
+# landed mid-sentence -- and went undetected because the SAME (buggy)
+# stripping corrupted the companion's own basis text identically, so both
+# sides matched each other. `_comment_line_groups` now strips `#:` as its
+# own two-character marker; `_is_colon_style_block` additionally flags a
+# basis-was-`#:`-but-new-is-not style regression even when content still
+# happens to match.
+# ===========================================================================
+
+_COLON_COMPANION = ["#: Note continues across two lines here.", "#: Second part stays intact too."]
+
+
+def test_0g_colon_prefix_stray_residue_one_liner_is_red(tmp_path):
+    # Naive one-line compaction: drops the `#:` marker in favor of plain
+    # `#` and bakes a stray ": " into the middle of the sentence -- the
+    # exact shape of the real change-set-4 `ops.py` CH-0321 bug.
+    repo = _init_repo(tmp_path)
+    old = "\n".join(_COLON_COMPANION) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        "# Note continues across two lines here. : Second part stays intact too.\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(_COLON_COMPANION)),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "Sphinx-style" in output
+
+
+def test_0g_colon_prefix_correct_one_liner_keeps_marker_is_green(tmp_path):
+    # A CORRECT compaction: still one line, but keeps the `#:` marker and
+    # introduces no stray residue -- content and style both preserved.
+    repo = _init_repo(tmp_path)
+    old = "\n".join(_COLON_COMPANION) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        "#: Note continues across two lines here. Second part stays intact too.\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(_COLON_COMPANION)),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0g_plain_hash_block_unaffected_by_colon_style_check(tmp_path):
+    # An ordinary `#` block (never `#:`) compacted the same way must be
+    # completely unaffected by the new style check -- `_is_colon_style_
+    # block` on the basis is False, so it never even looks at the new
+    # side.
+    repo, rev = _setup_retained_reduction(
+        tmp_path, "# Sentence A stays here.\n# Sentence B stays here too.",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+    assert "§9f" not in output
+
+
+def test_0g_is_colon_style_block_unit():
+    assert cp._is_colon_style_block("#: a\n#: b") is True
+    assert cp._is_colon_style_block("#: a\n# b") is False
+    assert cp._is_colon_style_block("# a\n# b") is False
+    assert cp._is_colon_style_block("") is False
+
+
+def test_0g_flatten_strips_colon_marker_not_content():
+    # The flatten fix itself: `#:` is a two-character marker, stripped
+    # whole (plus one following space) -- a bare `#:` occurring MID-LINE
+    # (not as the line's own leading marker) is untouched.
+    assert cp._flatten_comment("#: Note here.\n#: continues.") == "Note here. continues."
+    assert cp._flatten_comment("# See ratio 3:1 here.") == "See ratio 3:1 here."

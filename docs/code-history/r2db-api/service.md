@@ -780,6 +780,20 @@ caller through `query_page` below, which `http.post_query` uses.
 # enforced (`structured.py`/`postgres.py`).
 ```
 
+### correction: 2026-09-15
+
+- reason: R-22 fact-fix commit 1715e18 -- the three capabilities are now `enabled`, not `unavailable`, and the schema fields they reference are declared below this comment, not above
+
+old:
+```
+Contract 1.7.0 (subordinate ruling 12, D-1 (3)): three new capabilities, honestly declared `unavailable` until each one's own capability WP flips it, in the SAME commit as the provisional gate that rejects every field it governs (`schema`/`mutate_result`/`_query_outcome` above, `http.py`'s `post_mutate`/`post_query`) -- P-3 (宣言と挙動は同一コミット).
+```
+
+new:
+```
+Contract 1.7.0 (subordinate ruling 12): each of the three capabilities below is declared `enabled` in the same commit that removes the provisional gate rejecting every field it governs (`schema`/`mutate_result`/`_query_outcome` below, `http.py`'s `post_mutate`/`post_query`) -- P-3 (宣言と挙動は同一コミット).
+```
+
 ## CH-0140
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)

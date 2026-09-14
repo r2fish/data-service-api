@@ -163,7 +163,11 @@ _REVISION_TABLE = "_r2db_schema_revision"
 #: upgrade ledger, excluded from the application-visible catalog/RLS-
 #: coverage check the same way.
 _FIELD_CONSTRAINTS_TABLE = "_r2db_field_constraints"
-#: Contract 1.7.0 (D-5 (6), U-3 = (A), WP-2c): the per-application : idempotency-record side table -- a FOURTH backend bookkeeping table, : excluded from the application-visible catalog/RLS-coverage check the : same way the other three are (migration).
+#: Contract 1.7.0 (D-5 (6), U-3 = (A), WP-2c): the per-application
+#: idempotency-record side table -- a FOURTH backend bookkeeping table,
+#: excluded from the application-visible catalog/RLS-coverage check the
+#: same way the other three are (migration `0011_idempotency_records_
+#: upgrade.sql`).
 # history: CH-0102
 _IDEMPOTENCY_TABLE = "_r2db_idempotency"
 _BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE, _IDEMPOTENCY_TABLE})
