@@ -1550,6 +1550,39 @@ def test_contains_nul_leaf_preserves_structured_facade_and_nested_detection():
     assert not _contains_nul({"safe": ["also safe", {"nested": None}]})
 
 
+def test_pg_text_format_leaf_preserves_structured_facade_and_postgres_text_forms():
+    from r2db_api.structured import _float8out_text, _jsonb_numeric_text, _jsonb_scalar_text, _jsonb_text
+    from r2db_api.pg_text_format import (
+        _float8out_text as leaf_float8out_text,
+        _jsonb_numeric_text as leaf_jsonb_numeric_text,
+        _jsonb_scalar_text as leaf_jsonb_scalar_text,
+        _jsonb_text as leaf_jsonb_text,
+    )
+
+    assert _float8out_text is leaf_float8out_text
+    assert _jsonb_numeric_text is leaf_jsonb_numeric_text
+    assert _jsonb_scalar_text is leaf_jsonb_scalar_text
+    assert _jsonb_text is leaf_jsonb_text
+
+    # float8out: an integer-valued float drops its trailing ".0".
+    assert _float8out_text(100.0) == "100"
+    # A value already in scientific notation passes through unchanged.
+    assert _float8out_text(1e20) == repr(1e20)
+
+    # jsonb numeric: scientific notation is expanded to plain decimal digits...
+    assert _jsonb_numeric_text(1e20) == "100000000000000000000"
+    # ...but a non-exponential trailing zero is preserved (never dropped like float8out).
+    assert _jsonb_numeric_text(100.0) == "100.0"
+
+    # jsonb scalar: bool is the lowercase jsonb literal, never Python's True/False.
+    assert _jsonb_scalar_text(True) == "true"
+    assert _jsonb_scalar_text(False) == "false"
+
+    # jsonb object: key order is (byte length, byte value), not alphabetical --
+    # "b" (length 1) sorts before "aa" (length 2) even though "aa" < "b" alphabetically.
+    assert _jsonb_text({"aa": 1, "b": 2}) == '{"b": 2, "aa": 1}'
+
+
 def test_expected_revision_containing_nul_is_validation_failed():
     cell = _cell()
     _create_entity(cell, "docs")
