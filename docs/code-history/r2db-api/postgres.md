@@ -1672,3 +1672,340 @@ request.
 # WP-6d-i's scope (both peers, one pass) -- not added
 # here. See supervisory ruling 2026-09-08.
 ```
+
+## CH-0087
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Phase 4 (design D-2, error-row rule): see `transact`'s
+# identical comment.
+```
+
+## CH-0088
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Phase 4 (design D-2, item 2): unconditional -- every
+# schema operation is fail-closed class. Last statement
+# inside this `with conn.transaction():` block, same
+# reasoning as `transact`'s identical comment.
+```
+
+## CH-0089
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Contract 1.7.0 (D-2 (6)): every existing row is
+# checked against the constraints this operation
+# would establish, INSIDE this same `with conn.
+# transaction():` block, before anything commits --
+# one violating row refuses the WHOLE operation
+# with CONFLICT via `fail()`, which unwinds this
+# entire transaction (nothing has been written yet
+# at this point, so there is nothing to roll back
+# beyond PostgreSQL's own transactional DDL/DML).
+# Two separate, targeted queries (never a combined
+# OR) so the CONFLICT can name exactly which
+# declaration a violating row breaks, without ever
+# naming the row itself or how many there are
+# (SI-10, contract text).
+```
+
+## CH-0090
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Phase 4 (design D-2/D-10): see `transact`'s identical `hook_fired`
+# comment -- `True` only once the durable pre-commit row has
+# already committed on its own connection, which is what lets the
+# `except psycopg.Error` clause below tell a post-hook data-commit
+# failure apart from every other failure.
+```
+
+## CH-0091
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell._apply_upsert`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
+# constraints, same source `_apply` above reads.
+```
+
+## CH-0092
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell._apply`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Monitor ruling M-3/D (rulings-wp2a-review.md, D-3 (2)): every
+# `details.field` this method raises for a VALUE-position defect
+# in `bound.values` names the request-internal PATH to that value.
+```
+
+## CH-0093
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell._apply`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
+# constraints, already read by `_load_catalog` into `table_info`
+# (addendum 2 S-k's 6 write call sites all pass this through to
+# `_check_type`; the 2 predicate call sites never do).
+```
+
+## CH-0094
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell.transact`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Phase 4 (design D-2, error-row rule): `hook_fired` is only
+# `True` once the durable pre-commit row has already
+# committed on its own (separate) connection -- so an
+# exception reaching here after that point can only be this
+# method's own data commit failing. Record the durable
+# `outcome="error"` row for the same `request_id` (still
+# fail-closed: this call may itself raise `FoundationError`
+# SERVICE_UNAVAILABLE, which is exactly what happens next
+# regardless of whether it does).
+```
+
+## CH-0095
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell.transact`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Phase 4 (design D-2/D-10): whether this batch passed through the
+# DESTRUCTIVE_CONFIRMATION_V1 choke -- see `ApplicationCell.
+# transact`'s identical comment (D-10 parity).
+```
+
+## CH-0096
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell._write_field_constraints`)
+- parent commit: `3a4c018`
+- kind: docstring
+
+```
+Contract 1.7.0 (D-2 (4), WP-2a): persists (or clears) one
+field's own row in the side-table registry -- the ONLY write path
+into it, called from `apply_schema`'s `create_entity`/`add_field`/
+`alter_field` branches, always inside that method's own outer `with
+conn.transaction():` (never a separate commit). A field whose
+constraints are no longer declared at all (`not constraints.is_
+declared` -- `alter_field` clearing back to the version-wide
+default) has its row DELETEd rather than left standing; `create_
+entity`/`add_field` only ever call this for a field the request
+gave an actual spec (never for the fully-default case, so a plain
+`create_entity`/`add_field` that never mentions `field_constraints`
+/`enum`/`nullable` never touches this table at all).
+```
+
+## CH-0097
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell._describe_table`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Contract 1.7.0 (D-2 (1), WP-2a): total over `table_info.
+# columns` (like `field_types` below) -- `nullable` always
+# present, `enum` only for a field the registry (`table_info.
+# constraints`, read by `_load_catalog`'s own `_load_field_
+# constraints`) actually carries a declaration for.
+```
+
+## CH-0098
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell`)
+- parent commit: `3a4c018`
+- kind: docstring
+
+```
+A `StorageBackend` over one application's own PostgreSQL database
+(architecture §8, "D-3 改訂": database-per-application, not
+schema-per-application -- each application's entities live in that
+database's `public` schema; `schema` below is `"public"` for every
+application, and the isolation boundary is which *database* a
+connection's DSN names, not a schema name inside a shared one).
+
+`application_id` and `schema` are supplied by the caller (the control
+plane), never derived from client request content (D-3: "the physical
+namespace is assigned by the control plane, not derived from client
+input" -- true of both the database name and the schema name within
+it). `runtime_dsn`/`developer_dsn` are two separate, already
+fully-formed connection strings authenticating as this application's
+`runtime` and `developer` PostgreSQL roles respectively, each already
+naming this application's own database (provisioned by
+`r2db-api/migrations/`, see `r2db-api/docs/`); this class never embeds a
+control-plane credential and never widens a connection's role at
+runtime, so schema-changing operations physically execute under the
+`developer` role (DDL-capable on this database's `public` schema only)
+while queries and data mutations physically execute under the `runtime`
+role (DML only) -- a second, DB-enforced layer under the `developer:
+bool` check already performed by `bind_schema_operation` (SI-03
+defence in depth).
+
+Connection pooling (D-3/§10.1, and the fix this class's `_runtime`/
+`_developer` attributes are part of): each is a `_PoolHandle` onto a
+pool owned by `pool_manager` -- `default_pool_manager` (module-level, a
+single process-wide `SharedPoolManager`) unless a caller supplies its
+own, e.g. a test that wants an isolated cache with a short idle
+interval. No pool is created here at construction time; `PostgresCell`
+itself now holds nothing heavier than DSNs and a pool-cache key
+(`application_id`, role) until something actually calls `.connection()`.
+Because the cache is shared across every `PostgresCell` instance rather
+than private to each one, the number of live pools is bounded by
+`pool_manager`'s own cap regardless of how many applications exist --
+see `SharedPoolManager`'s docstring and `r2db-api/docs/
+POSTGRES_PROVISIONING_RUNBOOK.md` §4 for the resulting arithmetic.
+`pool_size`, same as before, is this cell's own requested per-pool
+connection cap (`None` defers to `pool_manager`'s configured default,
+itself `R2DB_POOL_SIZE + R2DB_POOL_MAX_OVERFLOW` unless overridden) --
+it is only consulted the moment a pool is actually (re)created for this
+cell's key, exactly like every other pool setting here.
+```
+
+## CH-0099
+
+- moved from: `src/r2db_api/postgres.py` (`SharedPoolManager`)
+- parent commit: `3a4c018`
+- kind: docstring
+
+```
+The fix for this module's connection-pooling defect: a single,
+process-wide cache of `_RolePool` instances keyed by `(application_id,
+role)`, shared across every `PostgresCell` -- not one pair of pools per
+cell, held forever, as before.
+
+Design, adapted from the currently deployed reference implementation
+(`r2-vps/apps/r2db-api/src/r2db_api/pools.py::AppPoolManager`, a
+SQLAlchemy engine cache with the same two properties) to this package's
+hand-rolled psycopg pooling:
+
+- **Idle eviction.** A pool unused for `R2DB_POOL_IDLE_SECONDS` (default
+  300) is retired the next time *any* key is looked up here -- eviction
+  is swept lazily, on access, exactly like the reference implementation,
+  not on a background timer.
+- **An LRU cap on live pools (`R2DB_POOL_CACHE_MAX`, default 32).** This
+  is the property that actually decouples the connection ceiling from
+  the number of applications: `PostgresCell.__init__` no longer creates
+  a pool eagerly at all, it only registers a `(dsn, schema, maxconn)`
+  recipe with this manager and asks for the live pool by key on every
+  use (`_PoolHandle`, below). However many applications exist, at most
+  `cache_max` *pools* are ever open at once, each capped at
+  `maxconn` connections (default `R2DB_POOL_SIZE + R2DB_POOL_MAX_
+  OVERFLOW` = 2 + 2 = 4, matching the reference implementation's
+  effective per-application capacity) -- an absolute ceiling of
+  `cache_max * maxconn` connections cluster-wide (default 32 * 4 = 128,
+  itself still an operator-facing figure to size against `max_
+  connections`, but no longer one that grows with application count).
+
+Eviction never closes a connection a caller currently has checked out
+-- see `_RolePool.retire()`. It closes idle connections in the pool's
+queue immediately and lets any in-flight one finish and be closed on
+return.
+
+A default instance (`default_pool_manager`, below) is what `PostgresCell`
+uses when no `pool_manager` is supplied, so this behaves as a drop-in
+fix with no caller changes required. Tests (and any caller that wants
+isolated pool-cache behaviour, e.g. a short idle interval to make
+eviction observable) construct their own `SharedPoolManager` and pass it
+to `PostgresCell(..., pool_manager=...)` explicitly.
+```
+
+## CH-0100
+
+- moved from: `src/r2db_api/postgres.py` (`_env_int`)
+- parent commit: `3a4c018`
+- kind: docstring
+
+```
+Read an `int`-valued setting the way the rest of this package does
+(`R2DB_`-prefixed environment variables, e.g. `R2DB_CREDENTIAL_PEPPER`
+in `auth.py`) -- a bare `os.environ.get` rather than a `pydantic`
+settings object, since this package (unlike the SQLAlchemy-based
+reference implementation this design is adapted from) has no
+`Settings`/`get_settings()` of its own. An unset, empty, or unparsable
+value silently falls back to `default` rather than raising: these are
+pool-tuning knobs, not required configuration, and a malformed value at
+startup should degrade to a sane default, not crash the process.
+```
+
+## CH-0101
+
+- moved from: `src/r2db_api/postgres.py` (`_TableInfo`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared `enum`/
+# `nullable` constraints, read from the side-table registry (`_load_
+# field_constraints` below) -- field name -> `FieldConstraints`,
+# present ONLY for a field something was actually declared on
+# (`FieldConstraints.is_declared`), same "absence = default" convention
+# `columns`/`indexes` above never needed (there is no "undeclared
+# column"). Defaults to `{}` so every EXISTING call site that builds a
+# `_TableInfo` without constraints in mind (there are none left after
+# this WP, but a future one) keeps working.
+```
+
+## CH-0102
+
+- moved from: `src/r2db_api/postgres.py` (`<module>`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+#: Contract 1.7.0 (D-5 (6), U-3 = (A), WP-2c): the per-application
+#: idempotency-record side table -- a FOURTH backend bookkeeping table,
+#: excluded from the application-visible catalog/RLS-coverage check the
+#: same way the other three are (migration `0011_idempotency_records_
+#: upgrade.sql`).
+```
+
+## CH-0181
+
+- moved from: `src/r2db_api/postgres.py` (`_RolePool._acquire`)
+- parent commit: `3a4c018`
+- kind: comment
+
+```
+# Reserve a slot (increment `_created`) and release the lock
+# *before* calling `_connect()` -- a real, previously-shipped bug
+# this class had: `_connect()` used to run while `self._lock` was
+# held, so every thread contending for a new connection against an
+# unreachable target serialized on this lock for the full connect
+# attempt, and a failed `_connect()` never rolled its reservation
+# back. `maxconn` consecutive failures against an unreachable
+# target therefore permanently pinned `_created` at `maxconn`, so
+# every later `_acquire()` call fell straight through to the
+# untimed `self._queue.get()` below and blocked forever -- even
+# once the target became reachable again, since nothing ever put a
+# connection back on this empty queue. `r2db_api/tests/
+# test_postgres.py::test_role_pool_recovers_after_connect_failures_
+# are_exhausted_and_target_becomes_reachable` and
+# `test_credential_persistence.py::
+# test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_
+# recovers_once_reachable` are the executable checks for this fix.
+```
