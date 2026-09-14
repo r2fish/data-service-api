@@ -1,5 +1,7 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.2 (2026-09-14)**: 変更セット 2 の節 (§5) に独立レビューの指摘 7 件 (監督裁定) を反映し、§5.5 に裁定を統合した。§0〜§4 は書き換えていない。
+- **v1.1 (2026-09-14)**: §5 に変更セット 2 (r2db `postgres.py` の §9 再判定と r2db `service.py`) の manifest を追記した。§0〜§4 は書き換えていない。
 - 版数: **v1.0 (2026-09-14)**。起草 v0.1 の疑義 9 件への監督裁定 (同日) を反映した。基点 main `016a0f3`。
 - 正本設計: `docs/design/CODE_COMMENT_PROVENANCE_V1.md` (**v0.3**)。以下「設計」。形式は roadmap §9 の 9 の Change Set Manifest。
 - 設計の表・裁定・却下案は写さず、節番号で指す。**設計と食い違ったら設計が正。** 訂正は本文を書き換えず §4 に訂正註として追記する (`OPERATING_CONDITIONS.md` §1.8 の 57)。
@@ -325,3 +327,126 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 ## 4. 訂正註
 
 (なし)
+
+## 5. 変更セット 2 — r2db `postgres.py` の再判定と r2db `service.py`
+
+正本設計は v0.6 (§3、§6、§8、§9)。行番号は `ccp-cs0` `81ff2b7` の値。
+
+### 5.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | 変更セット 0c が、Q-4 の照合 (§5.5) を含めて main に統合されている |
+| 2 | R-37 WP-1e / WP-1f と完了条件が重ならない。共有パスは `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` だけ (本変更セットは `_BACKEND_LAYER_ALLOWLIST` の数値。WP-1e / 1f は `SCANNED_MODULES`・件数 pin・sib 集合) なので、直列にする。WP-1e / 1f は `postgres.py`・`service.py` に触れない |
+| 3 | `service.py` はコメント整理を先、R-37 WP-3 (SV1〜SV3 の抽出) を後にし、並行しない。R-37 作業指示書 U-2 への追記は、次の R-37 の文書コミットで行う |
+| 4 | 0c 確定後のツールで `postgres.py` の再判定件数を取り直し、§5.3 に追記する |
+| 5 | 着手時に、並行 branch と設計 §5(b) の grep を取り直す |
+
+### 5.2 次の module の選定 (実測 2026-09-14。対象ファイルは main と `81ff2b7` で同一)
+
+設計 §6 の優先 1 を 10 行以上の塊の行数順に並べ、U-1 / U-2 と枠を当てた。`service.py` の 174 は、塊の中を 0c の語で数えた値 (レビュー実測)。他の行は、コメントと docstring の中を設計 §4.1 (5) と §9 の 1 の語で数えた起草時の参考値。
+
+| 候補 | 経緯トークン | 10 行以上の塊 (件 / 行) | 登録 helper | §5(b) 検査 | 行番号 pin | R-37 | 判定 |
+|---|---|---|---|---|---|---|---|
+| MitateDB `cell.py` | 644 | 101 / 2,347 | あり | あり | 0 | 抽出中 | 対象外 (枠) |
+| r2db `structured.py` | 222 | 53 / 841 | あり | なし | 0 | WP-1e / 1f 抽出中 | 対象外 (枠) |
+| MitateDB `backend_postgres.py` | 197 | 36 / 829 | なし | なし | 20 | 抽出が先 (U-2) | 除外 |
+| **r2db `service.py`** | 174 | 35 / 779 | **なし** | **なし** | **0** (件数 pin 10 は AST 走査で行送りに鈍感) | WP-3 (SV1〜SV3、未着手。§5.1 の 3) | **選定** |
+| MitateDB `http.py` | 179 | 40 / 708 | なし | なし | 0 | 候補外 | 次点 (優先 2) |
+
+### 5.3 Manifest
+
+**目的**: (1) `postgres.py` の全 156 塊を設計 §9 で再判定する。(2) `service.py` の経緯を `docs/code-history/r2db-api/service.md` へ移す。
+
+**変更セット 1 で保留した代表例 (19 塊。CH 付き 13、未移動 6)。** 再判定の件数は §5.1 の 4 で取り直す。
+
+| 区分 | 塊の開始行 (CH) | 件数 |
+|---|---|---|
+| `rulings-wp2a-review.md` ラベル (§9 の 2) | L996 (CH-0012)、L1074 (CH-0014)、L1814 (CH-0050)、L2135 (CH-0068)、L1594 (未移動。`M-3/D` は §9 の 4) | 5 |
+| `(design D-N)` 括弧 (§9 の 3) | L1 (CH-0001)、L108 (CH-0002)、L283 (CH-0007)、L2649 (CH-0083) | 4 |
+| `Phase N` が残る塊 (§9 の 1) | L1160 (CH-0017)、L1199 (CH-0085)、L2164 (CH-0069)、L2246 (CH-0071)、L2386 (CH-0076)、未移動 L1391、L1518、L1992、L2348、L2376 | 10 |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/postgres.py`、`r2db-api/src/r2db_api/service.py` (**どちらもコメントと docstring だけ**)、`docs/code-history/r2db-api/postgres.md` (節の追加だけ。既存節は書き換えない。D-1)、新規 `docs/code-history/r2db-api/service.md`、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` (`_BACKEND_LAYER_ALLOWLIST` の数値だけ)、本書 §5.4 | 他の `src/` 全部 (`structured.py`、`cell.py`、`backend_postgres.py` を含む)、`tools/`、`tools/tests/`、`r2db-api/tests/test_foundation.py`、同 L1 scan の `SCANNED_MODULES`・件数 pin・sib 集合、`conformance-tests/`、`docs/code-history/pair.md`、`_ISOMORPHIC_TARGETS` |
+
+| 項目 | 内容 |
+|---|---|
+| CH-ID 予約 | **`CH-0087`〜`CH-0257`** (未移動の `postgres.py` 71 塊 + `service.py` 100 塊 = 171 が上限)。CH 付きの塊は既存 ID を再利用する (§5.5 Q-4)。CH-0086 は欠番 |
+| ID とパス | 設計 §3・§8・§9。`service.py` の `{scratchpad}` を含むパス 5 件と `rulings-r4` 4 件は実在しないので経緯 (§9 の 2)。L823 の `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` は実在するので出所 |
+| 指示語チェック | 削除した文ごとに §5.4 の候補一覧を作る。**直後にある残す文 2 つを必ず載せる** (定冠詞による参照、例「the second caller」を拾うため)。判定表の列は一覧の行を参照し、監査は一覧を再現して照合する。機械化できないので監査照合とする (設計 §3「削除前の確認」) |
+| 手順 | 設計 §6「手順」。40b: `("postgres.py", N)` を実測で更新 |
+
+**完了条件 ↔ 変異** (P1 / P2 = `check_comment_provenance.py --base <親コミット>` を `postgres.py` / `service.py` に、R = `--register`)
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 1 | コード不変 | `postgres.py`・`service.py`: コード行の literal を 1 文字変える | P1 / P2 exit 1 (1) |
+| 2 | 移した塊が逐語 | `service.md`: 1 節から 1 文消す | P2 exit 1 (2) |
+| 3 | CH の無い塊を変えていない | `service.py`: CH を付けずに 1 塊から 1 文消す | P2 exit 1 (2) |
+| 4 | 文区間の削除だけ | `service.py`: (a) 否定語を落とす (b) 2 文を並べ替える (c) 1 語足す (d) 折返し行を 1 行消す | P2 exit 1 (3)、4 種それぞれ |
+| 5 | 括弧内の削除が規則どおり | `postgres.py`: L2243 の `(SI-10, contract text)` から `SI-10` を消す | P1 exit 1 (4) |
+| 6 | ラベル削除が規則どおり (§8) | `service.py`: 区切りの後ろの先頭文字を小文字化する | P2 exit 1 (6) |
+| 7 | 経緯を足していない | 追加行に `WP-` を含める | P exit 1 (5) |
+| 8 | §9 の 1: 複数語トークンも追加検査に掛かる | 追加行に `Requester ruling` を含める | P exit 1 (5) |
+| 9 | §9 の 2: 実在パスと同じ括弧の ID は出所付きとして残る | `postgres.py`: L324 の `(design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1(b))` から `D-1(b)` を消す | P1 exit 1 |
+| 10 | §9 の 2: 実在パスそのものは消せない | `postgres.py`: 同じ括弧から実在パスだけを消す | P1 exit 1 |
+| 11 | §9 の 3: 種類語だけになった括弧の括弧ごと削除は許可 (義務ではない) | 緑の fixture: `postgres.py` の `(design D-1)` を括弧ごと消す。`(design)` を残す形も許容操作なので緑 | P1 exit 0 (**監査照合**: 実行ログを記録) |
+| 12 | §9 の 5: 出所付きの条項 ID は残る | `postgres.py`: L1101 の `(contract 1.7.0 D-5)` から `D-5` を消す | P1 exit 1 |
+| 13 | 指示語の参照先を消していない | 残す文の指示語・定冠詞が参照する文を削除する | 機械では赤にならない — **監査照合**: §5.4 の候補一覧を再現して照合し、コードレビュー (テンプレート 5) でも確かめる |
+| 14 | ID の解決と孤児 | コード側 1 件を `CH-0999` にする / 参照されない節を足す | R exit 1 (§4.2-1) |
+| 15 | ID の全体一意 | `docs/code-history/MitateDB-api/x.md` に同番号の節を足す | R exit 1 (§4.2-2) |
+| 16 | docstring 依存の新設なし | `service.py` に `__doc__` の読出しを 1 行 | R exit 1 (§4.2-5) |
+| 17 | 行番号 pin が実測と一致 | allowlist を更新前の値に戻す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_allowlist_entries_match_real_bare_call_sites` |
+| 18 | 非空虚 | 全参照行と全節を消す (`MIN_CH_IDS` = 1) | R exit 1 (§4.2-6) |
+| 19 | 受け皿の ID が `check_doc_refs` で解決 | `service.md` の fenced block に roadmap に無い 2 桁の R 番号を 1 つ足す | `check_doc_refs.py` exit 1 |
+| 20 | 文字列検査 | 非該当 — **監査照合**: §5(b) の grep を取り直し、2 ファイルを読む検査 0 件を記録 | — |
+| 21 | 判定表が対象を覆う | **監査照合** — `postgres.py` の全 156 塊と `service.py` の変更塊が §5.4 にあり、根拠・指示語チェックに空欄なし | — |
+| 22 | 集計行と経緯トークン数の前後 | **監査照合** (§5.4 の記録と実行ログ。数え方は §2.3 末尾) | — |
+| 23 | 対応の無い行が無い | **監査照合** (§1.5 の 40) | — |
+| 24 | Q-4: 再利用した ID の塊は、削除した分が既存節に逐語で含まれる | 再利用した塊に、変更セット 1 で削除した文を受け皿の節から書き戻す | P1 exit 1 (Q-4 の照合だけ)。R は exit 0 |
+| 25 | §9 の 4: `/` 結合 ID は ID ごとに扱う | `postgres.py`: L1594 の `M-3/D` から `M-3` だけを消す | P1 exit 1 |
+| 26 | Q-4 の照合は正しい変更を赤にしない | 変異なし — **監査照合**: 親コミットのまま `--base <親コミット>` で再照合し、exit 0 を記録 | — |
+
+**検証コマンドと期待形** (40a: 前後の 2 回、前景直列、`timeout` 600000)
+
+```
+./.venv/bin/python -m pytest -q r2db-api/tests       → failed/skipped/xfailed 0、前後で passed 数一致 (L1 scan を含む)
+./.venv/bin/python -m pytest -q MitateDB-api/tests   → 同上
+./.venv/bin/python -m pytest -q conformance-tests    → 同上
+./.venv/bin/python -m pytest -q tools/tests          → failed 0
+python3 tools/check_comment_provenance.py --base <親コミット> r2db-api/src/r2db_api/postgres.py r2db-api/src/r2db_api/service.py → exit 0
+python3 tools/check_comment_provenance.py --register → exit 0
+python3 tools/check_doc_refs.py                      → exit 0
+python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=0
+監督: root suite 単独 (§1.3 の 19〜23)。前後の集計差分は 0
+```
+
+**使用テンプレート**: **2** → **5** → **6**。**変更クラス**: **B**。
+
+### 5.4 塊ごとの判定表 (実装担当が埋め、監督がコミット前に確定する)
+
+**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 指示語・定冠詞の参照 | 結果 (該当なし / 参照あり → 残した) |
+|---|---|---|---|---|---|---|
+
+**判定表**
+
+| ファイル / 塊 (旧行範囲 / qualname) | 判定 (残す / 移す `CH-NNNN` / 再利用 `CH-NNNN` / 対象外) | 根拠 (設計の節) | 指示語チェック (候補一覧の #) |
+|---|---|---|---|
+
+| 記録 | 前 | 後 |
+|---|---|---|
+| 経緯トークン数 `postgres.py` / `service.py` (§2.3 末尾の数え方) | | |
+| r2db / MitateDB / conformance / tools/tests の集計行 | | |
+
+### 5.5 監督裁定 (2026-09-14。疑義はすべて解決)
+
+| # | 裁定 | 反映 |
+|---|---|---|
+| Q-4 | CH 付きの塊は既存 ID を再利用し、受け皿の既存節は書き換えない。照合は「削除した分が既存節に逐語で含まれる」ことで、0c でツールに実装する | §5.1 の 1、§5.3 の CH-ID 予約、完了条件 24・26 |
+| Q-5 | ラベルは実測の 5 件 (CH の無い L1594 を含む) | §5.3 の代表例 |
+| Q-6 | 許容操作はすべて許可であり、規則 3 の括弧ごと削除も義務ではない。`(design)` を残す形も括弧ごと削除も緑 | 完了条件 11 |
+| (5) の範囲 | 追加行の検査は、基点の塊に無かった経緯トークンだけを対象にする。基点に元からある経緯トークンを残す部分削除は (5) で赤にならない | 完了条件 7・8 |
+| レビュー | 独立レビューの指摘 1〜7 (範囲を全 156 塊に広げる、Q-4 の変異の差替え、変異対象の修正、数え方の併記、R-37 WP-3 との順序、指示語の候補一覧、重複の整理) | §5.1〜§5.4 |

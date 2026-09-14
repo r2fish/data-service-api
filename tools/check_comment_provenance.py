@@ -71,25 +71,32 @@ PEER_SRC_DIRS: dict[str, str] = {
 # R- / L- / D- are deliberately NOT in this list (handled by §3's judgment
 # table instead, on a per-block-moved basis, never by this blanket scan).
 # ---------------------------------------------------------------------------
-_HISTORY_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(p, re.ASCII)
-    for p in (
-        # `(?<![A-Za-z0-9])` (v0.4 review round 2) instead of `\b`: an
-        # underscore directly before "WP-" (`_WP-3`) is itself a word
-        # character, so `\b` would see no boundary there and miss it --
-        # this lookbehind only excludes a letter/digit immediately before,
-        # so "_WP-3" and "作業WP-3" (with re.ASCII above) are both caught.
-        r"(?<![A-Za-z0-9])WP-[0-9A-Za-z-]+",
-        r"\bPhase \d+",
-        # Inflected forms (v0.4 review round 2): "reviews"/"reviewed" etc.
-        r"\breview(?:s|ed|er|ers)?\b",
-        r"\bround \d+\b",
-        r"\b20\d\d-\d\d-\d\d\b",
-        r"差し戻し",
-        r"監督裁定",
-        r"supervisor ruling",
-        r"\bblocker\b",
-    )
+_HISTORY_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # `(?<![A-Za-z0-9])` (v0.4 review round 2) instead of `\b`: an
+    # underscore directly before "WP-" (`_WP-3`) is itself a word
+    # character, so `\b` would see no boundary there and miss it -- this
+    # lookbehind only excludes a letter/digit immediately before, so
+    # "_WP-3" and "作業WP-3" (with re.ASCII) are both caught.
+    re.compile(r"(?<![A-Za-z0-9])WP-[0-9A-Za-z-]+", re.ASCII),
+    # design §9 rule 1 (v0.6, change set 0c): multi-word history tokens,
+    # case-insensitive. "round \d+" is excluded when immediately followed
+    # by a unit word (decimal/digit(s)/place(s)/significant) -- that is a
+    # numeric-precision phrase, not a history round number.
+    re.compile(r"\bphase \d+", re.ASCII | re.IGNORECASE),
+    # Inflected forms (v0.4 review round 2): "reviews"/"reviewed" etc.
+    re.compile(r"\breview(?:s|ed|er|ers)?\b", re.ASCII),
+    re.compile(
+        r"\bround \d+\b(?!\s+(?:decimal|digits?|places?|significant)\b)",
+        re.ASCII | re.IGNORECASE,
+    ),
+    re.compile(r"\b20\d\d-\d\d-\d\d\b", re.ASCII),
+    re.compile(r"差し戻し"),
+    re.compile(r"監督裁定"),
+    # design §9 rule 1: broadened from "supervisor ruling" alone to the
+    # (supervisor|supervisory|monitor|requester) ruling family, case-
+    # insensitive.
+    re.compile(r"\b(?:supervisor|supervisory|monitor|requester) ruling\b", re.ASCII | re.IGNORECASE),
+    re.compile(r"\bblocker\b", re.ASCII),
 )
 
 # design D-2: the only two canonical reference-line forms. `_DOC_HIST_LINE_RE`
@@ -122,28 +129,32 @@ _CH_ID_LOOSE_RE = re.compile(r"\bCH-\d+\b")
 _BARE_ID_RE = re.compile(r"^[A-Z]{1,6}-\d+[a-z]?$")
 _PROTECTED_ID_PREFIXES: tuple[str, ...] = ("SI-", "C-", "CCR-")
 # A parenthetical (or, for §4.1 (6), a whole label) carries its own
-# provenance tag if it names a file -- ANY `.ext` (not just .md/.py, e.g.
-# `migrations/0008_x.sql`) -- or a word containing a path separator that
-# is not itself just a slash-joined ID list (`SI-08/R-5` is NOT a path:
-# every segment already looks like a bare/protected ID), or the words
-# "roadmap" / "spec" anywhere in it, or a VERSIONED DOCUMENT NAME (0b
-# review round 3 supervisor ruling (a)(i)): `contract <version>`,
-# `design <version>`, or `<document name> v<version>`, version being
-# `\d+(\.\d+)+` or `v\d+(\.\d+)*`. In any of these cases NO bare ID in the
-# same parens/label is removable, even one that would otherwise qualify,
-# because the file/roadmap/spec/versioned-document reference is what the
-# ID is qualified by (protection covers the WHOLE parenthetical or label,
-# not only the ID adjacent to the tag).
-#
-# `_FILENAME_EXT_RE` is deliberately the WIDE form (any `.<alnum>` run,
-# not just letter-led) -- narrowing it (as an earlier revision of this
-# file did, to stop `1.7.0` from being mistaken for a file extension)
-# silently lost protection for `contract 1.7.0 D-5`-shaped text, which
-# relied on that side effect. The versioned-document check below is the
-# INTENDED way to protect such text; the wide filename regex is restored
-# because erring toward "still protected" is safer than erring toward
-# "no longer protected" (supervisor ruling (a), 0b review round 3).
-_FILENAME_EXT_RE = re.compile(r"\.[A-Za-z0-9]+\b")
+# provenance tag if it names a file that is REAL (design §9 rule 2, v0.6,
+# change set 0c -- see `_has_real_filename_reference` below), or a word
+# containing a path separator that is not itself just a slash-joined ID
+# list (`SI-08/R-5` is NOT a path: every segment already looks like a
+# bare/protected ID), or the words "roadmap" / "spec" anywhere in it, or a
+# VERSIONED DOCUMENT NAME (0b review round 3 supervisor ruling (a)(i)):
+# `contract <version>`, `design <version>`, or `<document name>
+# v<version>`, version being `\d+(\.\d+)+` or `v\d+(\.\d+)*`. In any of
+# these cases NO bare ID in the same parens/label is removable, even one
+# that would otherwise qualify, because the file/roadmap/spec/versioned-
+# document reference is what the ID is qualified by (protection covers
+# the WHOLE parenthetical or label, not only the ID adjacent to the tag).
+# Recognized file extensions ONLY -- deliberately NOT "any letter-led
+# `.suffix`": that wider form (an earlier revision of this file used it)
+# mistook an ordinary dotted identifier inside backticks (`` `information_
+# schema.columns.domain_name` ``, `` `create_entity` `` has none at all)
+# for a filename candidate, wrongly subjecting it to §9 rule 2's real-path
+# check and deleting it as a "fake filename" once it inevitably failed
+# that check -- corrupting unrelated code references, discovered against
+# the real r2db `postgres.py` (basis 5d12799, CH-0001 module docstring).
+_KNOWN_FILE_EXTENSIONS: tuple[str, ...] = (
+    "md", "py", "sql", "json", "yaml", "yml", "txt", "toml", "cfg", "ini",
+    "sh", "js", "ts", "html", "css",
+)
+_EXT_SUFFIX = r"\.(?:" + "|".join(_KNOWN_FILE_EXTENSIONS) + r")\b"
+_FILENAME_EXT_RE = re.compile(_EXT_SUFFIX, re.IGNORECASE)
 _PROVENANCE_WORD_RE = re.compile(r"\b(?:roadmap|spec)\b")
 _VERSION_TOKEN = r"(?:\d+(?:\.\d+)+|v\d+(?:\.\d+)*)"
 _VERSIONED_DOC_RE = re.compile(
@@ -152,15 +163,87 @@ _VERSIONED_DOC_RE = re.compile(
     re.IGNORECASE,
 )
 
+# design §9 rule 2 (v0.6, change set 0c): a filename-looking string is
+# only a provenance tag if it REALLY EXISTS in the repository tree at the
+# relevant revision (design §9's "出所になるファイル名は、リポジトリ内に
+# 実在するパスだけ") -- `{scratchpad}/...` and an unqualified working-note
+# name (`rulings-r5-r6.md`) never exist there, so they are never tags;
+# instead they are themselves history tokens (removable, uncounted as
+# content). A backtick span, and a path that a physical line-wrap broke in
+# two (already rejoined with a single space by `_flatten_comment`/
+# `_flatten_docstring` well before this point), are matched as ONE
+# candidate; internal whitespace is stripped before the tree-membership
+# check so a wrap-broken path still matches its real, unbroken form.
+_FILENAME_CANDIDATE_RE = re.compile(
+    r"`[^`]*/[^`]*`"                      # backtick span containing a path separator
+    r"|`[^`]*" + _EXT_SUFFIX + r"`"       # backtick span ending in a KNOWN extension
+    r"|\{[^}\s]*\}/[^\s,;()]+"            # bare `{...}/...` (e.g. `{scratchpad}/...`)
+    r"|[^\s,;()`]*" + _EXT_SUFFIX,        # bare token ending in a KNOWN extension
+    re.IGNORECASE,
+)
+
+
+def _clean_filename_candidate(raw: str) -> str:
+    text = raw[1:-1] if raw.startswith("`") and raw.endswith("`") and len(raw) >= 2 else raw
+    return re.sub(r"\s+", "", text)
+
+
+def _filename_candidates(text: str) -> list[str]:
+    return [m.group(0) for m in _FILENAME_CANDIDATE_RE.finditer(text)]
+
+
+def _is_real_filename_candidate(raw: str, real_paths: frozenset[str]) -> bool:
+    cleaned = _clean_filename_candidate(raw)
+    if cleaned in real_paths:
+        return True
+    # v0.7 follow-up supervisor ruling: a filename with NO path separator
+    # (e.g. `CONTROL_MAPPING.md`, referencing the real, uniquely-named
+    # `security/CONTROL_MAPPING.md`) still counts as a provenance tag if
+    # its basename matches EXACTLY ONE path in the tree -- 0 matches (it
+    # really doesn't exist) or >=2 matches (ambiguous, e.g. `README.md`)
+    # both leave it a removable history token, same as before. `cleaned`
+    # itself is compared AS-IS here (never reduced to its own basename),
+    # so a "/"-containing candidate (e.g. `x/CONTROL_MAPPING.md`) can
+    # never coincidentally match a real path's basename this way -- an
+    # earlier, now-removed `if "/" in cleaned: return False` guard was
+    # unreachable dead code given this (fixed by e2e fixture
+    # test_review_slash_path_basename_match_not_real_is_green, not by a
+    # guard clause).
+    basename_matches = [p for p in real_paths if p.rpartition("/")[2] == cleaned]
+    return len(basename_matches) == 1
+
+
+def _has_real_filename_reference(text: str, real_paths: frozenset[str]) -> bool:
+    return any(_is_real_filename_candidate(c, real_paths) for c in _filename_candidates(text))
+
+
+_SUBSCRIPT_RE = re.compile(r"^[A-Z]{1,2}$|^\d+$")
+# Matches the opaque placeholder `_strip_allowed_parens` substitutes for a
+# globally pre-merged ID+branch-number pair -- never a real path segment,
+# so it must never make `_looks_like_path_word` misfire on the ARTIFACT of
+# that substitution (e.g. "I-6/\x00Y0\x00" for "I-6/D-5 (5)").
+_ID_BRANCH_PLACEHOLDER_RE = re.compile(r"^\x00Y\d+\x00$")
+
 
 def _looks_like_path_word(word: str) -> bool:
+    """A slash-joined word is path-like only if some segment is neither
+    ID-shaped, protected-prefixed, NOR a §9 rule 4 bare subscript (1-2
+    uppercase letters or digits alone) -- without the subscript
+    exception, `M-3/D` would be misread as a path (design §9 rule 4
+    deliberately leaves this judgment unchanged for GENUINE paths like
+    `docs/design/X.md`, whose segments are ordinary words)."""
     if "/" not in word:
         return False
     segments = word.split("/")
     if len(segments) < 2:
         return False
     return any(
-        not (_BARE_ID_RE.match(seg) or seg.startswith(_PROTECTED_ID_PREFIXES))
+        not (
+            _BARE_ID_RE.match(seg)
+            or seg.startswith(_PROTECTED_ID_PREFIXES)
+            or _SUBSCRIPT_RE.match(seg)
+            or _ID_BRANCH_PLACEHOLDER_RE.match(seg)
+        )
         for seg in segments
     )
 
@@ -169,14 +252,29 @@ def _has_versioned_document_reference(text: str) -> bool:
     return bool(_VERSIONED_DOC_RE.search(text))
 
 
-def _parens_has_provenance_tag(inner: str) -> bool:
+def _parens_has_provenance_tag(inner: str, real_paths: frozenset[str]) -> bool:
     if (
-        _FILENAME_EXT_RE.search(inner)
+        _has_real_filename_reference(inner, real_paths)
         or _PROVENANCE_WORD_RE.search(inner)
         or _has_versioned_document_reference(inner)
     ):
         return True
-    return any(_looks_like_path_word(chunk) for chunk in re.split(r"[,;\s]+", inner))
+    # The generic path-word fallback (design §9 rule 4: "パス語の判定は
+    # 変えない") is for a directory-shaped chunk WITHOUT its own filename
+    # candidate shape (e.g. extension-less "docs/R-5"). A filename
+    # candidate (`{scratchpad}/...`, backtick span, `.ext`) was already
+    # resolved -- as real or fake -- by the check above, so every such
+    # span is blanked out FIRST (as one atomic unit, even a backtick span
+    # with an internal wrap-join space, which `[,;\s]+`-splitting alone
+    # would otherwise tear into two bogus path-shaped fragments) before
+    # the remainder is split into chunks. Letting an unresolved fragment
+    # of a non-real filename fall through here would make it count as a
+    # tag anyway via this older, reality-blind path (§9 rule 2 must win).
+    remainder = _FILENAME_CANDIDATE_RE.sub(" ", inner)
+    for chunk in re.split(r"[,;\s]+", remainder):
+        if _looks_like_path_word(chunk):
+            return True
+    return False
 
 # design §4.2 (5): the frozen, change-set-0-measured baseline (2026-09-14,
 # both peers' `src/`: 0 hits), now detected via AST name resolution (v0.4
@@ -442,23 +540,108 @@ def split_sentences(flattened_text: str) -> list[str]:
     return [restore(p).strip() for p in sentences if restore(p).strip()]
 
 
+# design §9 rule 1 (v0.6, change set 0c): the multi-word history tokens
+# that need pre-merging into ONE unit before any whitespace-based word
+# split (`_PAREN_SPLIT_RE` / `_label_word_tokens`'s `.split()`) -- without
+# this, "monitor ruling" would be tested word-by-word ("monitor" alone,
+# "ruling" alone), and neither half matches the 2-word pattern on its own.
+# This is the exact same subset of `_HISTORY_TOKEN_PATTERNS` whose source
+# pattern contains a literal space.
+_MULTIWORD_HISTORY_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    pat for pat in _HISTORY_TOKEN_PATTERNS if " " in pat.pattern
+)
+
+# design §9 rule 4 (v0.6, change set 0c): a `/`-joined ID sequence (`M-3/D`)
+# splits into separate IDs; a bare 1-2-uppercase-letter or digits-only
+# fragment counts as an ID too WHEN it continues a real (unprotected) ID
+# across a `/` (so `TCP/IP`, `read/write`, `enable/disable` -- none of
+# which start with a hyphen-digit ID -- never match). Protected IDs
+# (`SI-08/R-5`) are deliberately excluded from the base-ID alternative, so
+# they stay fully protected via the existing protected-prefix rule.
+_SLASH_ID_CONTINUATION_RE = re.compile(
+    r"\b(?:(?!" + "|".join(re.escape(p) for p in _PROTECTED_ID_PREFIXES) + r")[A-Z]{1,6}-\d+[a-z]?)"
+    r"((?:/(?:[A-Z]{1,2}|\d+))+)\b"
+)
+
+
+def _slash_id_subscripts(text: str) -> frozenset[str]:
+    subs: set[str] = set()
+    for m in _SLASH_ID_CONTINUATION_RE.finditer(text):
+        subs.update(part for part in m.group(1).split("/") if part)
+    return frozenset(subs)
+
+
+# design §3 exclusion 2 ("出所を明示した参照だけ" -- SI-/C-/CCR- protected):
+# `SI-08/R-5` needs NO dedicated slash-group protection here -- `SI-08`
+# already blocks its OWN removal via the ordinary protected-prefix check
+# (unconditionally, regardless of `has_provenance_tag`), and `R-5` was
+# never swept into `_slash_id_subscripts` for this text (that regex's
+# base-ID alternative excludes a protected prefix), so `R-5` falls through
+# to the plain bare-ID rule and stays independently removable -- exactly
+# design §9 rule 4's own boundary example ("SI-08/R-5 → 保護参照を含むので
+# 消せない" describes the GROUP being excluded from rule 4's own new
+# slash-splitting shortcut, not a change to R-5's pre-existing, correct,
+# stand-alone removability).
+
+# design §9 rule 3 (v0.6, change set 0c): once (4) has removed >=1 word
+# from a parenthetical, if ONLY provenance KIND words remain (design /
+# contract / spec / roadmap / ruling / review, case-insensitive), the
+# whole parenthetical goes too -- but a parenthetical that held ONLY kind
+# words from the start (`(design)`) is never touched by this.
+_KIND_WORD_RE = re.compile(r"^(?:design|contract|spec|roadmap|ruling|review)$", re.IGNORECASE)
+
+
 # ---------------------------------------------------------------------------
 # design §4.1 (4): mechanical parenthetical-content removal (v0.4 review
 # fix (b)): a parenthetical's content is split into WORDS on `, ` `/` `;`
 # and plain whitespace -- so "see SI-08 WP-3" is 3 words, not 1 -- and only
-# a word that is ENTIRELY a §4.1 (5) history token, or a bare ID with no
-# provenance tag co-located in the same parens, may be removed. Original
-# separators are preserved and only the removed words (plus one adjacent
-# separator each) disappear -- the rest of the parenthetical is untouched
-# byte-for-byte, never rejoined with a different separator.
+# a word that is ENTIRELY a §4.1 (5) history token, a bare ID with no
+# provenance tag co-located in the same parens, a NON-real filename (§9
+# rule 2), or a `/`-continuation ID subscript (§9 rule 4), may be removed.
+# Original separators are preserved and only the removed words (plus one
+# adjacent separator each) disappear -- the rest of the parenthetical is
+# untouched byte-for-byte, never rejoined with a different separator.
 # ---------------------------------------------------------------------------
-def _is_removable_word(word: str, has_provenance_tag: bool) -> bool:
+def _premerge_tokens(text: str, real_paths: frozenset[str]) -> tuple[str, dict[str, tuple[str, bool]]]:
+    """Merges, into single opaque placeholders BEFORE any `/`/whitespace
+    split, in this order: (1) a filename candidate (backtick span, or a
+    bare `{...}/...`- or `.ext`-suffixed token) -- removable (non-
+    content) unless it is REAL (§9 rule 2); (2) a multi-word history
+    token (§9 rule 1); (3) an ID (bare or a §4.1 (5) token such as `WP-`)
+    immediately followed by a parenthesized digit/roman-numeral branch
+    number. All three are shared, byte-identical, between §4.1 (4)'s
+    parenthetical reduction and §4.1 (6)'s label word-count. Returns
+    (working_text, {placeholder: (original_text, is_content)})."""
+    placeholders: dict[str, tuple[str, bool]] = {}
+
+    def make(original: str, is_content: bool) -> str:
+        tok = f"\x00X{len(placeholders)}\x00"
+        placeholders[tok] = (original, is_content)
+        return tok
+
+    working = _FILENAME_CANDIDATE_RE.sub(
+        lambda m: make(m.group(0), _is_real_filename_candidate(m.group(0), real_paths)), text
+    )
+    for pat in _MULTIWORD_HISTORY_TOKEN_PATTERNS:
+        working = pat.sub(lambda m: make(m.group(0), False), working)
+    working = _ID_BRANCH_RE.sub(lambda m: make(m.group(0), False), working)
+    return working, placeholders
+
+
+def _is_removable_word(
+    word: str, has_provenance_tag: bool, real_paths: frozenset[str],
+    slash_subscripts: frozenset[str] = frozenset(),
+) -> bool:
     word = word.strip()
     if not word:
         return False
     for pat in _HISTORY_TOKEN_PATTERNS:
         if pat.search(word):
             return True
+    if word in slash_subscripts:
+        return True
+    if _FILENAME_CANDIDATE_RE.fullmatch(word) and not _is_real_filename_candidate(word, real_paths):
+        return True
     if has_provenance_tag:
         return False
     if _BARE_ID_RE.match(word) and not word.startswith(_PROTECTED_ID_PREFIXES):
@@ -469,15 +652,45 @@ def _is_removable_word(word: str, has_provenance_tag: bool) -> bool:
 _PAREN_SPLIT_RE = re.compile(r"([,/;\s]+)")
 
 
-def _strip_allowed_parens(sentence: str) -> str:
+def _strip_allowed_parens(sentence: str, real_paths: frozenset[str]) -> str:
+    # An ID+branch-number pair ("D-5 (5)") is the ONLY source of a paren
+    # NESTED inside another ("(I-6/D-5 (5))", design §9 row 5) -- it is
+    # merged into one opaque, ALWAYS-removable placeholder across the
+    # WHOLE sentence FIRST, before the outer-paren regex ever runs. This
+    # keeps that regex a plain, non-nested `\(([^()]*)\)`: attempting
+    # instead to make the outer regex itself nesting-aware (an earlier
+    # version of this function did) risks over-matching across two
+    # unrelated parenthetical groups in dense, heavily-parenthesized real
+    # prose, silently deleting content between them.
+    id_branch_placeholders: dict[str, str] = {}
+
+    def merge_id_branch(m: re.Match[str]) -> str:
+        tok = f"\x00Y{len(id_branch_placeholders)}\x00"
+        id_branch_placeholders[tok] = m.group(0)
+        return tok
+
+    working_sentence = _ID_BRANCH_RE.sub(merge_id_branch, sentence)
+
     def repl(m: re.Match[str]) -> str:
         leading_ws, inner = m.group(1), m.group(2)
-        has_tag = _parens_has_provenance_tag(inner)
-        parts = _PAREN_SPLIT_RE.split(inner)
+        has_tag = _parens_has_provenance_tag(inner, real_paths)
+        slash_subscripts = _slash_id_subscripts(inner)
+        working, placeholders = _premerge_tokens(inner, real_paths)
+        parts = _PAREN_SPLIT_RE.split(working)
         word_positions = [i for i in range(0, len(parts), 2) if parts[i].strip()]
         if not word_positions:
             return m.group(0)
-        flags = {i: _is_removable_word(parts[i], has_tag) for i in word_positions}
+
+        def is_removable(i: int) -> bool:
+            token = parts[i]
+            if token in id_branch_placeholders:
+                return True
+            if token in placeholders:
+                _original, is_content = placeholders[token]
+                return not is_content
+            return _is_removable_word(token, has_tag, real_paths, slash_subscripts)
+
+        flags = {i: is_removable(i) for i in word_positions}
         if all(flags[i] for i in word_positions):
             return ""
         if not any(flags[i] for i in word_positions):
@@ -489,12 +702,263 @@ def _strip_allowed_parens(sentence: str) -> str:
                 del parts[i : i + 2]
             else:
                 del parts[i : i + 1]
-        new_inner = "".join(parts)
+
+        def restore(s: str) -> str:
+            for tok, (orig, _is_content) in placeholders.items():
+                s = s.replace(tok, orig)
+            return s
+
+        remaining_words = [restore(parts[i]).strip() for i in range(0, len(parts), 2) if parts[i].strip()]
+        if remaining_words and all(_KIND_WORD_RE.match(w) for w in remaining_words):
+            return ""
+        new_inner = restore("".join(parts))
         return leading_ws + "(" + new_inner + ")"
 
-    result = re.sub(r"(\s?)\(([^()]*)\)", repl, sentence)
+    result = re.sub(r"(\s?)\(([^()]*)\)", repl, working_sentence)
+    for tok, orig in id_branch_placeholders.items():
+        result = result.replace(tok, orig)
     result = re.sub(r" {2,}", " ", result)
     return result.strip()
+
+
+# design v0.7 supervisor ruling (change set 0c follow-up, refined a
+# second time): every operation in §4.1 (3)/(4)/(6) and §9 rules 1-4 is a
+# PERMISSION ("してよい"), never an obligation. `_strip_allowed_parens`
+# above computes ONE particular (maximal) reduction; the functions below
+# instead answer "is THIS specific candidate sentence one of the
+# reductions a human editor could legally have stopped at". The FIRST
+# version of this (kept only in history) enumerated every subset of a
+# parenthetical's removable words -- a combinatorial blow-up capped at a
+# fixed word count, which then wrongly rejected a correct PARTIAL
+# reduction in a long, multi-parenthetical sentence once that cap was
+# exceeded. The supervisor ruling that followed requires instead: each
+# independent SITE (each parenthetical; the leading label) is judged on
+# its own -- "left untouched" or "one of its own allowed reductions" --
+# and the candidate sentence is verified against the combination those
+# per-site choices imply by a single LEFT-TO-RIGHT scan (no enumeration
+# of combinations across sites, and so no cap on sentence length).
+def _paren_words_removable(
+    inner: str, real_paths: frozenset[str], id_branch_placeholders: dict[str, str]
+) -> list[tuple[str | None, str, bool]]:
+    """The ordered (prev_separator, word_text, is_removable) sequence for
+    one `(...)`'s content -- `prev_separator` is the exact separator text
+    (restored) immediately preceding this word in the ORIGINAL content
+    (`,` / `/` / `;` / whitespace, possibly combined, e.g. `", "`), or
+    None for the very first word. word_text is restored to its original
+    spelling (filename candidates, multi-word history tokens, and
+    id+branch pairs un-merged). Removing a word takes its OWN preceding
+    separator with it (design §4.1 (4)'s original word+adjacent-separator
+    deletion mechanic) -- kept words must reproduce their ORIGINAL
+    preceding separator exactly UNLESS they end up first in the output."""
+    has_tag = _parens_has_provenance_tag(inner, real_paths)
+    slash_subscripts = _slash_id_subscripts(inner)
+    working, placeholders = _premerge_tokens(inner, real_paths)
+    parts = _PAREN_SPLIT_RE.split(working)
+
+    def restore(s: str) -> str:
+        for tok, (orig, _is_content) in placeholders.items():
+            s = s.replace(tok, orig)
+        for tok, orig in id_branch_placeholders.items():
+            s = s.replace(tok, orig)
+        return s
+
+    def is_removable(token: str) -> bool:
+        if token in id_branch_placeholders:
+            return True
+        if token in placeholders:
+            _orig, is_content = placeholders[token]
+            return not is_content
+        return _is_removable_word(token, has_tag, real_paths, slash_subscripts)
+
+    words: list[tuple[str | None, str, bool]] = []
+    for i in range(0, len(parts), 2):
+        if parts[i].strip():
+            prev_sep = restore(parts[i - 1]) if i > 0 else None
+            words.append((prev_sep, restore(parts[i]).strip(), is_removable(parts[i])))
+    return words
+
+
+def _paren_target_pairs(
+    target_inner: str, real_paths: frozenset[str]
+) -> list[tuple[str | None, str]] | None:
+    """The (prev_separator, word_text) sequence for a CANDIDATE (already
+    real, restored) parenthetical's inner text, tokenized the SAME way
+    `_paren_words_removable` tokenizes the original (pre-merging filename
+    candidates / multi-word history tokens / id+branch pairs into one
+    atomic word each, so e.g. a backtick path containing "/" compares as
+    ONE word, not shattered by a naive comma/slash/whitespace split).
+    Returns None if `target_inner` has a DANGLING separator at its very
+    start or end (no word on that side) -- always invalid, regardless of
+    word content, since a valid reduction never leaves an orphaned
+    separator behind (design review: T3/T4, e.g. "(R-5, SI-08)" ->
+    "(, SI-08)" or "(M-3/D)" -> "(/D)")."""
+    working, placeholders = _premerge_tokens(target_inner, real_paths)
+    parts = _PAREN_SPLIT_RE.split(working)
+    if not parts or not parts[0].strip() or not parts[-1].strip():
+        return None
+
+    def restore(s: str) -> str:
+        for tok, (orig, _is_content) in placeholders.items():
+            s = s.replace(tok, orig)
+        return s
+
+    pairs: list[tuple[str | None, str]] = []
+    for i in range(0, len(parts), 2):
+        if not parts[i].strip():
+            return None  # a separator-only slot in the MIDDLE -- malformed
+        prev_sep = restore(parts[i - 1]) if i > 0 else None
+        pairs.append((prev_sep, restore(parts[i]).strip()))
+    return pairs
+
+
+def _paren_span_reachable(
+    leading_ws: str, inner: str, candidate_span: str, real_paths: frozenset[str],
+    id_branch_placeholders: dict[str, str],
+) -> bool:
+    """Is `candidate_span` (either "", the untouched `leading_ws(inner)`,
+    or some `leading_ws(reduced inner)`) one allowed outcome for this one
+    `(...)`? A single linear pass over this parenthetical's own words --
+    no subset enumeration, so no length limit. `inner` may still contain
+    RAW id+branch placeholders (needed by `_paren_words_removable`'s own
+    word classification); `candidate_span` is always real, restored text,
+    so the untouched-original comparison must restore `inner` too."""
+    restored_inner = inner
+    for tok, orig in id_branch_placeholders.items():
+        restored_inner = restored_inner.replace(tok, orig)
+    original_full = leading_ws + "(" + restored_inner + ")"
+    if candidate_span == original_full:
+        return True
+    words = _paren_words_removable(inner, real_paths, id_branch_placeholders)
+    if not words:
+        return False
+    if candidate_span == "":
+        # design §9 rule 3: ONLY for a parenthetical where (4) already
+        # removed >=1 word ("(4) で語が減った括弧に限り") -- a parens that
+        # held nothing but kind words from the START (nothing removable at
+        # all) must stay untouched, never swept to "".
+        removed_any = any(removable for _sep, _w, removable in words)
+        remaining = [w for _sep, w, removable in words if not removable]
+        if not remaining:
+            return removed_any
+        if not removed_any:
+            return False
+        return all(_KIND_WORD_RE.match(w) for w in remaining)
+    if not (candidate_span.startswith(leading_ws + "(") and candidate_span.endswith(")")):
+        return False
+    target_inner = candidate_span[len(leading_ws) + 1 : -1]
+    # Tokenize `target_inner` the SAME way `_paren_words_removable` tokenized
+    # the original `inner` (pre-merging filename candidates / multi-word
+    # history tokens / id+branch pairs into one atomic word each) AND
+    # track separators, not just words: a kept word must reproduce its
+    # OWN original preceding separator exactly (unless it ends up first),
+    # and a dangling separator with no word on one side is never valid
+    # (design review round: T1-T4).
+    target_pairs = _paren_target_pairs(target_inner, real_paths)
+    if target_pairs is None:
+        return False
+    j = 0
+    for prev_sep, word, removable in words:
+        if j < len(target_pairs) and target_pairs[j][1] == word and (
+            j == 0 or target_pairs[j][0] == prev_sep
+        ):
+            j += 1
+        elif removable:
+            continue
+        else:
+            return False
+    return j == len(target_pairs)
+
+
+def _sentence_reachable(sentence: str, target: str, real_paths: frozenset[str]) -> bool:
+    """Is `target` reachable from `sentence` by, independently at each
+    `(...)` site, leaving it untouched or applying one of its own allowed
+    reductions (§4.1 (4) / §9 rules 1-4, each a permission -- v0.7
+    supervisor ruling)? Text OUTSIDE any parenthetical is never reduced
+    (rule 4 is scoped to parenthetical content only) and so must match
+    `target` verbatim; each parenthetical's own span in `target` is
+    located via the FIXED, literal text immediately following it (no
+    combination search across independent sites)."""
+    id_branch_placeholders: dict[str, str] = {}
+
+    def merge_id_branch(m: re.Match[str]) -> str:
+        tok = f"\x00Y{len(id_branch_placeholders)}\x00"
+        id_branch_placeholders[tok] = m.group(0)
+        return tok
+
+    working_sentence = _ID_BRANCH_RE.sub(merge_id_branch, sentence)
+    matches = list(re.finditer(r"(\s?)\(([^()]*)\)", working_sentence))
+
+    def restore_text(s: str) -> str:
+        for tok, orig in id_branch_placeholders.items():
+            s = s.replace(tok, orig)
+        return s
+
+    texts: list[str] = []
+    cursor = 0
+    for m in matches:
+        texts.append(restore_text(working_sentence[cursor : m.start()]))
+        cursor = m.end()
+    texts.append(restore_text(working_sentence[cursor:]))
+
+    pos = 0
+    for i, txt in enumerate(texts[:-1]):
+        if not target.startswith(txt, pos):
+            return False
+        pos += len(txt)
+        leading_ws, inner = matches[i].group(1), matches[i].group(2)
+        original_span = leading_ws + "(" + restore_text(inner) + ")"
+        next_txt = texts[i + 1]
+        if target.startswith(original_span, pos):
+            pos += len(original_span)
+            continue
+        if (
+            next_txt
+            and target.startswith(next_txt, pos)
+            and _paren_span_reachable(leading_ws, inner, "", real_paths, id_branch_placeholders)
+        ):
+            continue  # this parenthetical fully (and validly) removed
+        if next_txt:
+            # `next_txt` (fixed anchor text) can itself occur MULTIPLE
+            # times inside a reduced parenthetical's own possible spans
+            # (e.g. `next_txt="."` coincides with the dots inside a kept
+            # version number like "1.7.0" or "v1.2") -- try every
+            # occurrence at/after `pos` as a candidate end boundary and
+            # accept the first one for which the parenthetical's own
+            # content is actually reachable, rather than committing to
+            # just the FIRST occurrence found.
+            found_end = None
+            search_from = pos
+            while True:
+                end = target.find(next_txt, search_from)
+                if end == -1:
+                    break
+                candidate_span = target[pos:end]
+                if _paren_span_reachable(leading_ws, inner, candidate_span, real_paths, id_branch_placeholders):
+                    found_end = end
+                    break
+                search_from = end + 1
+            if found_end is None:
+                return False
+            pos = found_end
+            continue
+        if i == len(matches) - 1:
+            # trailing parenthetical with nothing fixed after it (the
+            # sentence ends right at/after it) -- its span runs to the
+            # end of `target`.
+            end = len(target)
+        else:
+            # a genuinely empty gap before the NEXT parenthetical (two
+            # parens back-to-back with no separating text) -- this one
+            # cannot claim any of that following parenthetical's span.
+            end = pos
+        candidate_span = target[pos:end]
+        if not _paren_span_reachable(leading_ws, inner, candidate_span, real_paths, id_branch_placeholders):
+            return False
+        pos = end
+    if not target.startswith(texts[-1], pos):
+        return False
+    pos += len(texts[-1])
+    return pos == len(target)
 
 
 # ---------------------------------------------------------------------------
@@ -550,24 +1014,21 @@ _NEGATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 ) + (re.compile("ない"), re.compile("禁止"), re.compile("しない"))
 
 
-def _label_word_tokens(text: str) -> list[tuple[str, bool]]:
+def _label_word_tokens(text: str, real_paths: frozenset[str]) -> list[tuple[str, bool]]:
     """[(token, is_content_word), ...] per design §8.1's word-counting
-    rules: a backtick span is one (content) word; an UNPROTECTED ID
-    immediately followed by a parenthesized digit/roman-numeral branch
-    (`(4)`, `(ii)`) merges into one NON-content word (a protected ID
-    such as `SI-08 (2)` never merges); remaining parens are unwrapped
-    (brackets dropped, content flows into the flat stream); a history
-    token, an unprotected bare ID, or "and"/"or"/"、" is one non-content
-    word; a symbol-only fragment does not count as a word at all."""
-    placeholders: dict[str, bool] = {}
-
-    def make_placeholder(is_content: bool) -> str:
-        tok = f"\x00W{len(placeholders)}\x00"
-        placeholders[tok] = is_content
-        return tok
-
-    working = _BACKTICK_SPAN_RE.sub(lambda m: make_placeholder(True), text)
-    working = _ID_BRANCH_RE.sub(lambda m: make_placeholder(False), working)
+    rules: a backtick span is one (content) word (UNLESS it is a non-real
+    filename, §9 rule 2, in which case it is a history token instead); a
+    multi-word history token (§9 rule 1) merges into one non-content word
+    BEFORE any split; an UNPROTECTED ID immediately followed by a
+    parenthesized digit/roman-numeral branch (`(4)`, `(ii)`) merges into
+    one NON-content word (a protected ID such as `SI-08 (2)` never
+    merges); remaining parens are unwrapped (brackets dropped, content
+    flows into the flat stream); a history token, an unprotected bare ID,
+    a non-real filename, a `/`-continuation ID subscript (§9 rule 4), or
+    "and"/"or"/"、" is one non-content word; a symbol-only fragment does
+    not count as a word at all."""
+    slash_subscripts = _slash_id_subscripts(text)
+    working, placeholders = _premerge_tokens(text, real_paths)
     working = working.replace("(", " ").replace(")", " ")
 
     tokens: list[tuple[str, bool]] = []
@@ -576,12 +1037,19 @@ def _label_word_tokens(text: str) -> list[tuple[str, bool]]:
         if not t:
             continue
         if t in placeholders:
-            tokens.append((t, placeholders[t]))
+            _original, is_content = placeholders[t]
+            tokens.append((t, is_content))
             continue
         if t in _CONNECTIVE_WORDS:
             tokens.append((t, False))
             continue
         if any(pat.search(t) for pat in _HISTORY_TOKEN_PATTERNS):
+            tokens.append((t, False))
+            continue
+        if t in slash_subscripts:
+            tokens.append((t, False))
+            continue
+        if _FILENAME_CANDIDATE_RE.fullmatch(t) and not _is_real_filename_candidate(t, real_paths):
             tokens.append((t, False))
             continue
         if _BARE_ID_RE.match(t) and not t.startswith(_PROTECTED_ID_PREFIXES):
@@ -591,24 +1059,26 @@ def _label_word_tokens(text: str) -> list[tuple[str, bool]]:
     return tokens
 
 
-def _label_provenance_tag_present(text: str) -> bool:
+def _label_provenance_tag_present(text: str, real_paths: frozenset[str]) -> bool:
     """Same §4.1 (4)/(6) origin-tag detection as `_parens_has_provenance_tag`
-    (filename, `roadmap`/`spec`, path word, or a versioned document name),
-    applied to the WHOLE label (not just inside one parenthetical) --
-    review round: "ファイル名・roadmap・specが同じラベルにあれば、そのID
-    は出所付き"."""
+    (a REAL filename -- §9 rule 2, `roadmap`/`spec`, path word, or a
+    versioned document name), applied to the WHOLE label (not just inside
+    one parenthetical) -- review round: "ファイル名・roadmap・specが同じ
+    ラベルにあれば、そのIDは出所付き"."""
     if (
-        _FILENAME_EXT_RE.search(text)
+        _has_real_filename_reference(text, real_paths)
         or _PROVENANCE_WORD_RE.search(text)
         or _has_versioned_document_reference(text)
     ):
         return True
-    return any(
-        _looks_like_path_word(chunk) for chunk in re.split(r"[,;()\s]+", text)
-    )
+    remainder = _FILENAME_CANDIDATE_RE.sub(" ", text)
+    for chunk in re.split(r"[,;()\s]+", remainder):
+        if _looks_like_path_word(chunk):
+            return True
+    return False
 
 
-def _label_has_provenance_marker(text: str) -> bool:
+def _label_has_provenance_marker(text: str, real_paths: frozenset[str]) -> bool:
     """Condition (1): a §4.1 (5) history token, or an unprotected bare ID
     that is NOT itself provenance-tagged elsewhere in the label."""
     if any(pat.search(text) for pat in _HISTORY_TOKEN_PATTERNS):
@@ -617,10 +1087,10 @@ def _label_has_provenance_marker(text: str) -> bool:
     unprotected = [i for i in ids if not i.startswith(_PROTECTED_ID_PREFIXES)]
     if not unprotected:
         return False
-    return not _label_provenance_tag_present(text)
+    return not _label_provenance_tag_present(text, real_paths)
 
 
-def _label_has_protected_reference(text: str) -> bool:
+def _label_has_protected_reference(text: str, real_paths: frozenset[str]) -> bool:
     """Review-round supervisor ruling (L1/L10): a label containing a
     protected reference (SI-/C-/CCR-, or a bare ID that is provenance-
     tagged) is never removable, even if it also carries a qualifying (5)
@@ -629,7 +1099,7 @@ def _label_has_protected_reference(text: str) -> bool:
     if any(i.startswith(_PROTECTED_ID_PREFIXES) for i in ids):
         return True
     unprotected = [i for i in ids if not i.startswith(_PROTECTED_ID_PREFIXES)]
-    return bool(unprotected) and _label_provenance_tag_present(text)
+    return bool(unprotected) and _label_provenance_tag_present(text, real_paths)
 
 
 def _label_japanese_char_count(text: str) -> int:
@@ -643,14 +1113,14 @@ def _label_japanese_char_count(text: str) -> int:
     return len(re.sub(r"\s+", "", working))
 
 
-def _label_qualifies(text: str) -> bool:
+def _label_qualifies(text: str, real_paths: frozenset[str]) -> bool:
     if any(p.search(text) for p in _NEGATION_PATTERNS):
         return False
-    if _label_has_protected_reference(text):
+    if _label_has_protected_reference(text, real_paths):
         return False
-    if not _label_has_provenance_marker(text):
+    if not _label_has_provenance_marker(text, real_paths):
         return False
-    tokens = _label_word_tokens(text)
+    tokens = _label_word_tokens(text, real_paths)
     content_count = sum(1 for _t, is_content in tokens if is_content)
     if content_count > 3:
         return False
@@ -661,7 +1131,7 @@ def _label_qualifies(text: str) -> bool:
     return True
 
 
-def _strip_leading_label(sentence: str) -> str:
+def _strip_leading_label(sentence: str, real_paths: frozenset[str]) -> str:
     """The separator is looked for OUTSIDE backtick code spans only
     (review round fix (b))."""
     spans = [(m.start(), m.end()) for m in _BACKTICK_SPAN_RE.finditer(sentence)]
@@ -673,19 +1143,35 @@ def _strip_leading_label(sentence: str) -> str:
         if _inside_span(m.start()):
             continue
         label = sentence[: m.start()]
-        if not _label_qualifies(label):
+        if not _label_qualifies(label, real_paths):
             return sentence
         return sentence[m.end() :]
     return sentence
 
 
-def _is_allowed_reduction(kind: str, old_full_text: str, new_retained_text: str) -> tuple[bool, str]:
-    """design §4.1 (3)+(4)+(6): `new_retained_text` must be reachable from
-    `old_full_text` by deleting whole sentences (order preserved) and/or
-    applying, to a kept sentence, the (4) mechanical parenthetical
-    removal and/or the (6) leading-label removal (v0.5; (6) may be
-    followed by (4) on what remains) -- nothing else (no reorder, no
-    added word, no dropped negation, no mid-sentence line-wrap deletion)."""
+def _is_allowed_reduction(
+    kind: str, old_full_text: str, new_retained_text: str, real_paths: frozenset[str]
+) -> tuple[bool, str]:
+    """design §4.1 (3)+(4)+(6)+§9: `new_retained_text` must be reachable
+    from `old_full_text` by deleting whole sentences (order preserved)
+    and/or applying, to a kept sentence, ANY ALLOWED SUBSET of the (4)
+    mechanical parenthetical-word removals (each a PERMISSION, not an
+    obligation -- v0.7 supervisor ruling) and/or the (6) leading-label
+    removal (v0.5, itself an atomic permission; (6) may be followed by
+    (4) on what remains) -- nothing else (no reorder, no added word, no
+    dropped negation, no mid-sentence line-wrap deletion). Because every
+    (4)/§9-rule-1-4 word removal and the §9 rule 3 kind-word-residue
+    sweep are permissions rather than obligations, a sentence that
+    stopped at a PARTIAL reduction (e.g. change set 1 removing an id
+    from a parenthetical but leaving a lone kind word like "(ruling)"
+    behind, instead of also sweeping it per rule 3) is just as valid as
+    the maximal one; `_sentence_reachable` checks each independent site
+    (each parenthetical; the leading label) on its own via a single
+    left-to-right scan, with no combination search and no length limit
+    (second v0.7 follow-up ruling: the original subset-enumeration form
+    of this capped parenthetical size to avoid a combinatorial blow-up,
+    which wrongly rejected a valid partial reduction once a sentence had
+    enough removable words)."""
     old_sentences = split_sentences(_flatten(kind, old_full_text))
     new_sentences = split_sentences(_flatten(kind, new_retained_text))
     j = 0
@@ -694,14 +1180,10 @@ def _is_allowed_reduction(kind: str, old_full_text: str, new_retained_text: str)
         while j < len(old_sentences):
             candidate = old_sentences[j]
             j += 1
-            label_stripped = _strip_leading_label(candidate)
-            allowed = {
-                candidate,
-                _strip_allowed_parens(candidate),
-                label_stripped,
-                _strip_allowed_parens(label_stripped),
-            }
-            if ns in allowed:
+            label_stripped = _strip_leading_label(candidate, real_paths)
+            if _sentence_reachable(candidate, ns, real_paths) or (
+                label_stripped != candidate and _sentence_reachable(label_stripped, ns, real_paths)
+            ):
                 found = True
                 break
         if not found:
@@ -752,23 +1234,37 @@ def _first_diff_line(old_source: str, new_source: str) -> int:
 # blocks, so it was already covering that case; the ruling just records it
 # as deliberate).
 # ---------------------------------------------------------------------------
-def _added_lines(old_source: str, new_source: str) -> list[tuple[int, str]]:
+def _added_lines(old_source: str, new_source: str) -> list[tuple[int, str, str]]:
+    """(new_lineno, new_line_text, old_chunk_text) for each changed line
+    in an "insert" or "replace" diff opcode. `old_chunk_text` is the
+    WHOLE replaced region (its lines joined with "\\n"), not just the one
+    corresponding old line -- a token can shift lines within the same
+    edited region -- and is "" for a pure insert (nothing old to compare
+    against, so every token in it is unconditionally new)."""
     old_lines = old_source.splitlines()
     new_lines = new_source.splitlines()
     sm = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
-    added: list[tuple[int, str]] = []
-    for tag, _i1, _i2, j1, j2 in sm.get_opcodes():
+    added: list[tuple[int, str, str]] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag in ("insert", "replace"):
+            old_chunk = "\n".join(old_lines[i1:i2]) if tag == "replace" else ""
             for k in range(j1, j2):
-                added.append((k + 1, new_lines[k]))
+                added.append((k + 1, new_lines[k], old_chunk))
     return added
 
 
 def check_no_added_history_tokens(old_source: str, new_source: str) -> list[tuple[int, str, str]]:
+    """design §4.1 (5), supervisor ruling (0c review): flag only a history
+    token that did NOT already exist somewhere in the basis block's own
+    (replaced) text -- a token-level diff against the basis, not a blanket
+    "any history token on a changed line" scan. A partial reduction that
+    keeps an EXISTING token untouched (e.g. "(WP-3, round 2, R-5)" ->
+    "(round 2)") is not itself an added-history-token violation; only a
+    genuinely NEW token (absent from the basis) is."""
     hits: list[tuple[int, str, str]] = []
-    for lineno, line in _added_lines(old_source, new_source):
+    for lineno, line, old_chunk in _added_lines(old_source, new_source):
         for pat in _HISTORY_TOKEN_PATTERNS:
-            if pat.search(line):
+            if any(m.group(0) not in old_chunk for m in pat.finditer(line)):
                 hits.append((lineno, line, pat.pattern))
                 break
     return hits
@@ -852,6 +1348,34 @@ def _git_show(repo_root: Path, rev: str, rel_path: str) -> str | None:
         return None
 
 
+def _tree_paths(repo_root: Path, rev: str) -> frozenset[str]:
+    """design §9 rule 2 (v0.6, change set 0c): every path that REALLY
+    EXISTS in `rev`'s git tree (recursive), as repo-relative POSIX paths
+    -- `--base`'s basis for "is this filename real", read from the basis
+    REVISION's tree (`git ls-tree`), never the working tree (a later
+    rename must not silently change the verdict). `--register` (no single
+    revision) uses `_tree_paths(repo_root, "HEAD")`. An unreadable/absent
+    tree yields an EMPTY set (fail toward "nothing is real", i.e. toward
+    treating more things as history tokens -- never silently toward
+    protecting something that cannot be confirmed)."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", "-z", rev],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    if proc.returncode != 0:
+        return frozenset()
+    try:
+        names = proc.stdout.decode("utf-8").split("\0")
+    except UnicodeDecodeError:
+        return frozenset()
+    return frozenset(n for n in names if n)
+
+
 _SCOPE_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
@@ -909,7 +1433,8 @@ def _block_positions(source: str, blocks: list[Block]) -> list[tuple[str, str]]:
 
 def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                                 old_blocks: list[Block], new_blocks: list[Block],
-                                companion_lookup: dict[str, str]) -> list[str]:
+                                companion_lookup: dict[str, str],
+                                real_paths: frozenset[str]) -> list[str]:
     """design §4.1 (2)+(3)+(4), correspondence taken via CH-ID (v0.3).
 
     v0.4 P3 (review rounds 2-3): a new block WITHOUT a CH-ID is compared
@@ -932,7 +1457,19 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
     scope-blind "first match anywhere" would let a reference in the wrong
     scope hide behind a byte-identical block that happens to live
     somewhere else entirely (e.g. a block silently relocated from f to g,
-    then re-labeled as if it had "moved via history" from g)."""
+    then re-labeled as if it had "moved via history" from g).
+
+    Q-4 supervisor ruling (0c): if the BASIS block for a new CH-ID
+    reference ALREADY carries that same id (it was migrated before and is
+    being mechanically reduced further now), no new id is allocated and
+    the existing companion section is never rewritten (D-1). Instead: (a)
+    every SENTENCE of the basis block's own retained text must already
+    appear, verbatim, among the companion's sentences (the companion is a
+    strict superset -- the snapshot from the ORIGINAL, earlier move); (b)
+    the new block's retained text must be an allowed (3)(4)(6)+§9
+    reduction of the BASIS block's retained text (not of the full
+    companion text, which may hold sentences the basis block no longer
+    even has)."""
     errors: list[str] = []
     consumed = [False] * len(old_blocks)
     old_positions = _block_positions(old_source, old_blocks)
@@ -949,9 +1486,46 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             )
             continue
         nb_scope = new_positions[j][0]
+
+        # Q-4: the basis block for this same CH-ID already exists (a
+        # re-edit of an already-migrated block), takes priority over a
+        # fresh "first move" match.
+        reedit_candidates = [
+            i for i, ob in enumerate(old_blocks)
+            if not consumed[i] and ob.history_id == ch_id and old_positions[i][0] == nb_scope
+        ]
+        if reedit_candidates:
+            match_idx = reedit_candidates[0]
+            ob = old_blocks[match_idx]
+            consumed[match_idx] = True
+            # Containment (fixed per reviewer report on q4repo/rev-cs2,
+            # postgres.py CH-0001 false-red): the basis block need not
+            # sentence-match the companion VERBATIM -- change set 1 (and
+            # any earlier one) may already have applied (3)(4)(6)+§9 to
+            # it, so its retained text is only a FURTHER reduction of the
+            # companion's original, unreduced text. Require that it be
+            # DERIVABLE from the companion via the same allowed-reduction
+            # machinery, not that every sentence appear byte-for-byte.
+            if ob.retained_text:
+                ok, reason = _is_allowed_reduction(ob.kind, companion_text, ob.retained_text, real_paths)
+                if not ok:
+                    errors.append(
+                        f"FAIL (§4.1 (2)) {rel_path}:{nb.start_line} basis block for {ch_id} is "
+                        f"not derivable from the existing companion section: {reason}"
+                    )
+                    continue
+            if nb.retained_text:
+                ok, reason = _is_allowed_reduction(nb.kind, ob.retained_text, nb.retained_text, real_paths)
+                if not ok:
+                    errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
+            continue
+
         same_scope = [
             i for i, ob in enumerate(old_blocks)
-            if not consumed[i] and ob.dedented == companion_text and old_positions[i][0] == nb_scope
+            if not consumed[i]
+            and ob.history_id is None
+            and ob.dedented == companion_text
+            and old_positions[i][0] == nb_scope
         ]
         # design v0.4 P3 (review round 5, supervisor ruling): NO cross-
         # scope fallback -- a CH-ID's companion must byte-match an
@@ -970,9 +1544,23 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             continue
         consumed[match_idx] = True
         if nb.retained_text:
-            ok, reason = _is_allowed_reduction(nb.kind, companion_text, nb.retained_text)
+            ok, reason = _is_allowed_reduction(nb.kind, companion_text, nb.retained_text, real_paths)
             if not ok:
                 errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
+
+    # Q-4: an old block that carried its OWN CH-ID and was never consumed
+    # (no new block claimed it -- e.g. its id was swapped for a different
+    # section's id) gets its own clear error, instead of silently falling
+    # into the CH-ID-less "plain sequence" comparison below (where it does
+    # not belong and would still fail, just less legibly).
+    for i, ob in enumerate(old_blocks):
+        if consumed[i] or ob.history_id is None:
+            continue
+        errors.append(
+            f"FAIL (§4.1 (2)) {rel_path}:{ob.start_line} basis block's own {ob.history_id} "
+            "reference was not matched by any new block (a different CH-ID was substituted?)"
+        )
+        consumed[i] = True
 
     remaining_old_by_key: dict[tuple[str, str], list[tuple[int, str]]] = {}
     for i, ob in enumerate(old_blocks):
@@ -1005,6 +1593,9 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
     had_failure = False
     total_new_blocks = 0
     companion_cache: dict[str, dict[str, str]] = {}
+    # design §9 rule 2: real-path membership is read from the BASIS
+    # revision's own tree, once per invocation (never the working tree).
+    real_paths = _tree_paths(repo_root, rev)
 
     for rel_path in rel_paths:
         old_source = _git_show(repo_root, rev, rel_path)
@@ -1049,7 +1640,7 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
         total_new_blocks += len(new_blocks)
 
         for msg in check_provenance_semantics(
-            rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup
+            rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths
         ):
             print(msg, file=out)
             had_failure = True
