@@ -121,17 +121,36 @@ _CH_ID_LOOSE_RE = re.compile(r"\bCH-\d+\b")
 # is removable; SI-/C-/CCR- are always provenance-tagged, never removable.
 _BARE_ID_RE = re.compile(r"^[A-Z]{1,6}-\d+[a-z]?$")
 _PROTECTED_ID_PREFIXES: tuple[str, ...] = ("SI-", "C-", "CCR-")
-# A parenthetical carries its own provenance tag (v0.4 review, widened in
-# review round 2) if it names a file -- ANY `.ext` (not just .md/.py, e.g.
-# `migrations/0008_x.sql`) or a word containing a path separator that is
-# not itself just a slash-joined ID list (`SI-08/R-5` is NOT a path: every
-# segment already looks like a bare/protected ID) -- or the words
-# "roadmap" / "spec" anywhere in it. In that case NO bare ID in the same
-# parens is removable, even one that would otherwise qualify, because the
-# file/roadmap/spec reference is what the ID is qualified by (protection
-# covers the WHOLE parenthetical, not only the ID adjacent to the tag).
+# A parenthetical (or, for §4.1 (6), a whole label) carries its own
+# provenance tag if it names a file -- ANY `.ext` (not just .md/.py, e.g.
+# `migrations/0008_x.sql`) -- or a word containing a path separator that
+# is not itself just a slash-joined ID list (`SI-08/R-5` is NOT a path:
+# every segment already looks like a bare/protected ID), or the words
+# "roadmap" / "spec" anywhere in it, or a VERSIONED DOCUMENT NAME (0b
+# review round 3 supervisor ruling (a)(i)): `contract <version>`,
+# `design <version>`, or `<document name> v<version>`, version being
+# `\d+(\.\d+)+` or `v\d+(\.\d+)*`. In any of these cases NO bare ID in the
+# same parens/label is removable, even one that would otherwise qualify,
+# because the file/roadmap/spec/versioned-document reference is what the
+# ID is qualified by (protection covers the WHOLE parenthetical or label,
+# not only the ID adjacent to the tag).
+#
+# `_FILENAME_EXT_RE` is deliberately the WIDE form (any `.<alnum>` run,
+# not just letter-led) -- narrowing it (as an earlier revision of this
+# file did, to stop `1.7.0` from being mistaken for a file extension)
+# silently lost protection for `contract 1.7.0 D-5`-shaped text, which
+# relied on that side effect. The versioned-document check below is the
+# INTENDED way to protect such text; the wide filename regex is restored
+# because erring toward "still protected" is safer than erring toward
+# "no longer protected" (supervisor ruling (a), 0b review round 3).
 _FILENAME_EXT_RE = re.compile(r"\.[A-Za-z0-9]+\b")
 _PROVENANCE_WORD_RE = re.compile(r"\b(?:roadmap|spec)\b")
+_VERSION_TOKEN = r"(?:\d+(?:\.\d+)+|v\d+(?:\.\d+)*)"
+_VERSIONED_DOC_RE = re.compile(
+    r"\b(?:contract|design)\s+" + _VERSION_TOKEN + r"\b"
+    r"|\b[A-Za-z][\w-]*\s+v\d+(?:\.\d+)*\b",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_path_word(word: str) -> bool:
@@ -146,8 +165,16 @@ def _looks_like_path_word(word: str) -> bool:
     )
 
 
+def _has_versioned_document_reference(text: str) -> bool:
+    return bool(_VERSIONED_DOC_RE.search(text))
+
+
 def _parens_has_provenance_tag(inner: str) -> bool:
-    if _FILENAME_EXT_RE.search(inner) or _PROVENANCE_WORD_RE.search(inner):
+    if (
+        _FILENAME_EXT_RE.search(inner)
+        or _PROVENANCE_WORD_RE.search(inner)
+        or _has_versioned_document_reference(inner)
+    ):
         return True
     return any(_looks_like_path_word(chunk) for chunk in re.split(r"[,;\s]+", inner))
 
@@ -470,12 +497,195 @@ def _strip_allowed_parens(sentence: str) -> str:
     return result.strip()
 
 
+# ---------------------------------------------------------------------------
+# design §4.1 (6), v0.5 (change set 0b, supervisor ruling; tightened in
+# the 0b review): mechanical removal of a leading history LABEL --
+# "Ruling U-7 (WP-6d): reason." -> "reason." A label is the text from the
+# sentence's start up to the FIRST separator (`: ` / `：` / ` -- ` /
+# ` — `) found OUTSIDE any backtick code span, qualifying only if ALL of:
+#   (1) it contains >=1 §4.1 (5) history token, or an unprotected bare ID
+#       that is not itself provenance-tagged (same §4.1 (4) origin-tag
+#       detection, applied to the WHOLE label -- a filename/`roadmap`/
+#       `spec` reference anywhere in the label tags every bare ID in it);
+#   (2) it is <=12 words (ALWAYS, Japanese included) and, additionally,
+#       if it contains any Japanese character, <=24 characters once
+#       bracket CHARACTERS (not their content) / history tokens / IDs are
+#       removed;
+#   (3) it has <=3 CONTENT words (everything except history tokens, IDs,
+#       brackets, "and"/"or"/"、");
+#   (4) it contains NO negation word (never/not/no/must not/don't/cannot,
+#       ない/禁止/しない) and NO protected reference (SI-/C-/CCR-, or a
+#       bare ID that is provenance-tagged per (1)) -- review-round
+#       supervisor ruling L1/L10: such text is never treated as a label,
+#       regardless of (1)-(3).
+# Only the label and its separator are removed; the text after the
+# separator is kept byte-for-byte (no lowercasing or other reshaping).
+# (4) may be applied afterward to what remains (design v0.4 §8.1 "(4)と
+# の併用").
+# ---------------------------------------------------------------------------
+_LABEL_SEPARATOR_RE = re.compile(r": |：| -- | — ")
+_BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
+_BRANCH_PAREN = r"\((?:\d+|[IVXLCDMivxlcdm]+)\)"
+# 0b review round 4 (supervisor ruling): the branch-number merge applies
+# to an unprotected bare ID AND to a §4.1 (5) history token (`WP-6d
+# (ii)`), not only to a bare ID -- so "WP-" is carved out of the bare-ID
+# alternative (`(?!...|WP-)`) and given its OWN alternative below, using
+# the exact same token shape as `_HISTORY_TOKEN_PATTERNS`'s WP- entry.
+# This is deliberately NOT left to the format overlap between "WP-6d" and
+# the bare-ID shape (`[A-Z]{1,6}-\d+[a-z]?`, which "WP-6d" also happens to
+# match): that overlap is coincidental for a short suffix and would not
+# hold for e.g. "WP-abc123", so the merge is anchored to the actual
+# history-token grammar instead.
+_ID_BRANCH_RE = re.compile(
+    r"\b((?!" + "|".join(re.escape(p) for p in _PROTECTED_ID_PREFIXES) + r"|WP-)"
+    r"[A-Z]{1,6}-\d+[a-z]?"
+    r"|WP-[0-9A-Za-z-]+)\s*(" + _BRANCH_PAREN + r")"
+)
+_CONNECTIVE_WORDS = frozenset({"and", "or", "、"})
+_JAPANESE_CHAR_RE = re.compile(r"[぀-ヿ㐀-鿿＀-￯]")
+_ANY_ID_RE = re.compile(r"\b[A-Z]{1,6}-\d+[a-z]?\b")
+_NEGATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.ASCII | re.IGNORECASE)
+    for p in (r"\bnever\b", r"\bnot\b", r"\bno\b", r"\bmust\s+not\b", r"\bdon't\b", r"\bcannot\b")
+) + (re.compile("ない"), re.compile("禁止"), re.compile("しない"))
+
+
+def _label_word_tokens(text: str) -> list[tuple[str, bool]]:
+    """[(token, is_content_word), ...] per design §8.1's word-counting
+    rules: a backtick span is one (content) word; an UNPROTECTED ID
+    immediately followed by a parenthesized digit/roman-numeral branch
+    (`(4)`, `(ii)`) merges into one NON-content word (a protected ID
+    such as `SI-08 (2)` never merges); remaining parens are unwrapped
+    (brackets dropped, content flows into the flat stream); a history
+    token, an unprotected bare ID, or "and"/"or"/"、" is one non-content
+    word; a symbol-only fragment does not count as a word at all."""
+    placeholders: dict[str, bool] = {}
+
+    def make_placeholder(is_content: bool) -> str:
+        tok = f"\x00W{len(placeholders)}\x00"
+        placeholders[tok] = is_content
+        return tok
+
+    working = _BACKTICK_SPAN_RE.sub(lambda m: make_placeholder(True), text)
+    working = _ID_BRANCH_RE.sub(lambda m: make_placeholder(False), working)
+    working = working.replace("(", " ").replace(")", " ")
+
+    tokens: list[tuple[str, bool]] = []
+    for raw in working.split():
+        t = raw.strip(",;")
+        if not t:
+            continue
+        if t in placeholders:
+            tokens.append((t, placeholders[t]))
+            continue
+        if t in _CONNECTIVE_WORDS:
+            tokens.append((t, False))
+            continue
+        if any(pat.search(t) for pat in _HISTORY_TOKEN_PATTERNS):
+            tokens.append((t, False))
+            continue
+        if _BARE_ID_RE.match(t) and not t.startswith(_PROTECTED_ID_PREFIXES):
+            tokens.append((t, False))
+            continue
+        tokens.append((t, True))
+    return tokens
+
+
+def _label_provenance_tag_present(text: str) -> bool:
+    """Same §4.1 (4)/(6) origin-tag detection as `_parens_has_provenance_tag`
+    (filename, `roadmap`/`spec`, path word, or a versioned document name),
+    applied to the WHOLE label (not just inside one parenthetical) --
+    review round: "ファイル名・roadmap・specが同じラベルにあれば、そのID
+    は出所付き"."""
+    if (
+        _FILENAME_EXT_RE.search(text)
+        or _PROVENANCE_WORD_RE.search(text)
+        or _has_versioned_document_reference(text)
+    ):
+        return True
+    return any(
+        _looks_like_path_word(chunk) for chunk in re.split(r"[,;()\s]+", text)
+    )
+
+
+def _label_has_provenance_marker(text: str) -> bool:
+    """Condition (1): a §4.1 (5) history token, or an unprotected bare ID
+    that is NOT itself provenance-tagged elsewhere in the label."""
+    if any(pat.search(text) for pat in _HISTORY_TOKEN_PATTERNS):
+        return True
+    ids = _ANY_ID_RE.findall(text)
+    unprotected = [i for i in ids if not i.startswith(_PROTECTED_ID_PREFIXES)]
+    if not unprotected:
+        return False
+    return not _label_provenance_tag_present(text)
+
+
+def _label_has_protected_reference(text: str) -> bool:
+    """Review-round supervisor ruling (L1/L10): a label containing a
+    protected reference (SI-/C-/CCR-, or a bare ID that is provenance-
+    tagged) is never removable, even if it also carries a qualifying (5)
+    token elsewhere (e.g. "SI-08 WP-3:")."""
+    ids = _ANY_ID_RE.findall(text)
+    if any(i.startswith(_PROTECTED_ID_PREFIXES) for i in ids):
+        return True
+    unprotected = [i for i in ids if not i.startswith(_PROTECTED_ID_PREFIXES)]
+    return bool(unprotected) and _label_provenance_tag_present(text)
+
+
+def _label_japanese_char_count(text: str) -> int:
+    """Bracket CHARACTERS are excluded, but their CONTENT counts (review
+    round fix (b)) -- only `(`/`)` themselves, plus history tokens and
+    IDs, are stripped before counting."""
+    working = text.replace("(", "").replace(")", "")
+    for pat in _HISTORY_TOKEN_PATTERNS:
+        working = pat.sub("", working)
+    working = _ANY_ID_RE.sub("", working)
+    return len(re.sub(r"\s+", "", working))
+
+
+def _label_qualifies(text: str) -> bool:
+    if any(p.search(text) for p in _NEGATION_PATTERNS):
+        return False
+    if _label_has_protected_reference(text):
+        return False
+    if not _label_has_provenance_marker(text):
+        return False
+    tokens = _label_word_tokens(text)
+    content_count = sum(1 for _t, is_content in tokens if is_content)
+    if content_count > 3:
+        return False
+    if len(tokens) > 12:
+        return False
+    if _JAPANESE_CHAR_RE.search(text) and _label_japanese_char_count(text) > 24:
+        return False
+    return True
+
+
+def _strip_leading_label(sentence: str) -> str:
+    """The separator is looked for OUTSIDE backtick code spans only
+    (review round fix (b))."""
+    spans = [(m.start(), m.end()) for m in _BACKTICK_SPAN_RE.finditer(sentence)]
+
+    def _inside_span(pos: int) -> bool:
+        return any(start <= pos < end for start, end in spans)
+
+    for m in _LABEL_SEPARATOR_RE.finditer(sentence):
+        if _inside_span(m.start()):
+            continue
+        label = sentence[: m.start()]
+        if not _label_qualifies(label):
+            return sentence
+        return sentence[m.end() :]
+    return sentence
+
+
 def _is_allowed_reduction(kind: str, old_full_text: str, new_retained_text: str) -> tuple[bool, str]:
-    """design §4.1 (3)+(4): `new_retained_text` must be reachable from
+    """design §4.1 (3)+(4)+(6): `new_retained_text` must be reachable from
     `old_full_text` by deleting whole sentences (order preserved) and/or
-    applying the (4) mechanical parenthetical removal to a kept sentence --
-    nothing else (no reorder, no added word, no dropped negation, no
-    mid-sentence line-wrap deletion)."""
+    applying, to a kept sentence, the (4) mechanical parenthetical
+    removal and/or the (6) leading-label removal (v0.5; (6) may be
+    followed by (4) on what remains) -- nothing else (no reorder, no
+    added word, no dropped negation, no mid-sentence line-wrap deletion)."""
     old_sentences = split_sentences(_flatten(kind, old_full_text))
     new_sentences = split_sentences(_flatten(kind, new_retained_text))
     j = 0
@@ -484,7 +694,14 @@ def _is_allowed_reduction(kind: str, old_full_text: str, new_retained_text: str)
         while j < len(old_sentences):
             candidate = old_sentences[j]
             j += 1
-            if ns == candidate or ns == _strip_allowed_parens(candidate):
+            label_stripped = _strip_leading_label(candidate)
+            allowed = {
+                candidate,
+                _strip_allowed_parens(candidate),
+                label_stripped,
+                _strip_allowed_parens(label_stripped),
+            }
+            if ns in allowed:
                 found = True
                 break
         if not found:
