@@ -2149,6 +2149,28 @@ def test_inmemory_sort_leaf_preserves_structured_facade_and_null_rank():
     ]
 
 
+def test_paging_leaf_preserves_structured_facade():
+    """R-37 WP-1h (ST7): `structured.py` re-exports all 8 page-size/
+    order_by/cursor names from the new leaf `paging.py` as the exact same
+    objects -- this checks facade identity only, not behaviour (the
+    dedicated tests around this one exercise behaviour)."""
+    from r2db_api import structured
+    from r2db_api import paging
+
+    names = [
+        "MAX_PAGE_SIZE",
+        "validate_page_size",
+        "MAX_ORDER_BY_FIELDS",
+        "MAX_CURSOR_OFFSET",
+        "_resolve_order_by",
+        "_shape_hash",
+        "_encode_cursor",
+        "_decode_cursor",
+    ]
+    for name in names:
+        assert getattr(structured, name) is getattr(paging, name), name
+
+
 def test_order_by_sorts_and_appends_id_when_absent():
     cell = _numbered_cell(3)  # n = 0, 1, 2 with id = 1, 2, 3 respectively
     descending = cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "desc"}])
@@ -2169,6 +2191,26 @@ def test_order_by_rejects_a_repeated_field():
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "asc"}, {"field": "n", "direction": "desc"}])
     assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_resolve_order_by_bounds_fields_and_appends_id_last():
+    """`_resolve_order_by` accepts up to `MAX_ORDER_BY_FIELDS` (10) entries
+    and rejects an 11th (the length check runs before per-item field
+    validation, so the 11 unvalidated field names below never need to be
+    known fields to trigger it); when the caller's own order_by omits
+    `id`, it is appended (ascending) as the final tie-breaker."""
+    from r2db_api.structured import _resolve_order_by
+
+    known = {f"f{i}" for i in range(10)} | {"id"}
+    ten_fields = [{"field": f"f{i}"} for i in range(10)]
+    assert _resolve_order_by(ten_fields, known) == [(f"f{i}", "asc") for i in range(10)] + [("id", "asc")]
+
+    eleven_fields = [{"field": f"f{i}"} for i in range(11)]
+    with pytest.raises(FoundationError) as exc:
+        _resolve_order_by(eleven_fields, known)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+    assert _resolve_order_by(None, set()) == [("id", "asc")]
 
 
 def test_order_by_null_placement_matches_postgresql_defaults():
@@ -2255,6 +2297,31 @@ def test_cursor_shape_mismatch_and_malformed_cursor_are_rejected():
     assert exc.value.code == "VALIDATION_FAILED"
 
 
+def test_cursor_rejects_reuse_with_a_different_where_value_at_the_same_shape():
+    """SI-08: the shape hash binds `where`'s own VALUES, not merely its
+    field/operator shape -- a cursor minted for `n >= 1` must not validate
+    a same-shaped `n >= 2` query (tampering with a filter value while
+    keeping everything else identical must fail loudly, never silently
+    page through a different selection)."""
+    cell = _numbered_cell(5)
+    first = cell.query("items", select=["n"], where=[Predicate("n", "gte", 1)], page_size=2, limits=LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["n"], where=[Predicate("n", "gte", 2)], page_size=2, limits=LIMITS, cursor=first.next_cursor)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_cursor_rejects_reuse_with_a_different_page_size():
+    """SI-08: the shape hash binds the page `size` a cursor was minted for
+    -- reusing a cursor with a different `page_size` must fail loudly,
+    never silently apply the stored offset against a differently-sized
+    page."""
+    cell = _numbered_cell(5)
+    first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["n"], where=[], page_size=3, limits=LIMITS, cursor=first.next_cursor)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
 def _forge_cursor(payload) -> str:
     blob = json.dumps(payload).encode("utf-8")
     return base64.urlsafe_b64encode(blob).decode("ascii").rstrip("=")
@@ -2299,6 +2366,19 @@ def test_page_size_over_the_contract_maximum_is_validation_failed():
     # The boundary value itself is accepted (rejected only for exceeding
     # it, not merely being large).
     cell.query("items", select=["n"], where=[], page_size=1000, limits=LIMITS)
+
+
+def test_validate_page_size_refuses_zero_as_limit_exceeded():
+    """`validate_page_size` rejects `page_size <= 0` as `LIMIT_EXCEEDED`
+    (a resource-class refusal, distinct from the `VALIDATION_FAILED`
+    contract-ceiling check above) -- the smallest positive value (1)
+    passes silently."""
+    from r2db_api.structured import validate_page_size
+
+    with pytest.raises(FoundationError) as exc:
+        validate_page_size(0, LIMITS)
+    assert exc.value.code == "LIMIT_EXCEEDED"
+    validate_page_size(1, LIMITS)
 
 
 def test_cursor_shape_hash_is_bound_to_application_and_entity():
