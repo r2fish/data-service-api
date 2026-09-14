@@ -710,11 +710,31 @@ def _comment_line_groups(text: str) -> list[list[str]]:
     """Paragraphs of per-line content for a comment block -- the SAME
     per-line stripping `_flatten_comment` uses, factored out so change
     set 0e's detection pass (`find_broken_line_wrap_joins`) walks
-    line-by-line boundaries identically to how flattening joins them."""
+    line-by-line boundaries identically to how flattening joins them.
+
+    change set 0g review round 2 (supervisor ruling 2026-09-15): a
+    Sphinx-style `#:`-prefixed line (`#: some attribute doc`) has its
+    OWN two-character line-start marker, `#:`, not just `#` -- stripping
+    only the `#` left a stray leading `:` (plus, previously, one space)
+    behind as if it were CONTENT, e.g. "#: this was inlined" flattening
+    to ": this was inlined" instead of "this was inlined". Joined into a
+    single sentence with a preceding line, that leftover `:` lands mid-
+    sentence ("... : previously inlined") -- change set 4's `ops.py`
+    CH-0321 compaction did exactly this, and went undetected because the
+    SAME (buggy) stripping was applied to the companion's own basis text
+    too, so both sides carried the identical stray `: ` and matched each
+    other. `#:` is recognized ONLY as a line-start marker (a bare `#:`
+    appearing mid-line, inside otherwise-plain content, is untouched --
+    it is not this block's own comment-prefix at all)."""
     groups: list[list[str]] = [[]]
     for line in text.splitlines():
         stripped = line.strip()
-        content = stripped[1:] if stripped.startswith("#") else stripped
+        if stripped.startswith("#:"):
+            content = stripped[2:]
+        elif stripped.startswith("#"):
+            content = stripped[1:]
+        else:
+            content = stripped
         if content.startswith(" "):
             content = content[1:]
         content = content.strip()
@@ -724,6 +744,20 @@ def _comment_line_groups(text: str) -> list[list[str]]:
         else:
             groups[-1].append(content)
     return [g for g in groups if g]
+
+
+def _is_colon_style_block(dedented: str) -> bool:
+    """change set 0g review round 2 (supervisor ruling 2026-09-15):
+    detects a Sphinx-style `#:`-prefixed comment block -- True only when
+    the block has at least one non-blank line and EVERY such line starts
+    with the two-character `#:` marker (not merely `#`). A block mixing
+    `#:` and plain `#` lines is treated as NOT colon-style (the safer,
+    ambiguous-favors-no default). Only meaningful for `kind == "comment"`
+    text (a docstring has no `#` at all, so it is never colon-style)."""
+    lines = [ln for ln in dedented.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    return all(ln.strip().startswith("#:") for ln in lines)
 
 
 def _flatten_comment(text: str, identifier_set: frozenset[str] = frozenset()) -> str:
@@ -1713,6 +1747,193 @@ def _load_companion_lookup(repo_root: Path, peer: str) -> dict[str, str]:
     return merged
 
 
+@dataclass(frozen=True)
+class Correction:
+    """One append-only correction record for a CH-ID's companion section
+    (design docs/design/CODE_COMMENT_PROVENANCE_V1.md v0.11 §9, change set
+    0g, supervisor ruling 2026-09-15).
+
+    A companion section's original fenced block is captured once, at move
+    time, and is NEVER edited afterward -- not even when the code it
+    describes is later fact-fixed (R-22, commit 1715e18) to correct a
+    protected sentence that (rightly) no longer matches the code. Instead,
+    a correction entry is appended below the original fenced block, inside
+    the SAME `## CH-XXXX` section, in this fenced format (chosen to match
+    the section's own established shape -- a `- key: value` metadata line,
+    then fenced content):
+
+        ### correction: 2026-09-15
+
+        - reason: one-line reason the sentence no longer matched the code
+
+        old:
+        ```
+        <the exact old sentence, one line>
+        ```
+
+        new:
+        ```
+        <the exact new sentence, one line>
+        ```
+
+    Corrections are append-only (the original block above this is never
+    touched) and are applied, in FILE ORDER, to the FLATTENED basis text
+    before any derivability/0d/predicate-B check runs (`_apply_corrections`)
+    -- so a second correction may legitimately CHAIN on the first (its own
+    `old` text existing in the basis only after the first has already been
+    applied). `_parse_corrections` builds these from a section's raw text;
+    `--register` (§9f) validates their format; `run_base`/the rev-vs-itself
+    check apply them via `_apply_corrections` when building the basis for
+    derivability."""
+    ch_id: str
+    date: str
+    reason: str
+    old: str
+    new: str
+
+
+_CORRECTION_HEADING_RE = re.compile(r"^### correction: (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
+_CORRECTION_REASON_RE = re.compile(r"^- reason: (.+)$", re.MULTILINE)
+_CORRECTION_OLD_MARKER_RE = re.compile(r"^old:\s*$", re.MULTILINE)
+_CORRECTION_NEW_MARKER_RE = re.compile(r"^new:\s*$", re.MULTILINE)
+
+
+def _parse_corrections(ch_id: str, path: Path, body: str) -> tuple[list[Correction], list[str]]:
+    """[Correction, ...] plus [format-error, ...] for one CH-ID section's
+    body (everything after its `## CH-XXXX` heading). A malformed entry
+    (missing date/reason/old/new, markers out of order, or an old/new
+    fence that never closes or is empty) is a format error, never
+    silently skipped -- `--register` (§9f) reports these, and so does
+    `run_base`'s own basis-building, since a correction that cannot be
+    parsed can never be safely applied."""
+    headings = list(_CORRECTION_HEADING_RE.finditer(body))
+    corrections: list[Correction] = []
+    errors: list[str] = []
+    for i, m in enumerate(headings):
+        date = m.group(1)
+        start = m.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(body)
+        chunk = body[start:end]
+        reason_m = _CORRECTION_REASON_RE.search(chunk)
+        old_marker_m = _CORRECTION_OLD_MARKER_RE.search(chunk)
+        new_marker_m = _CORRECTION_NEW_MARKER_RE.search(chunk)
+        if reason_m is None:
+            errors.append(f"{path} {ch_id} correction {date}: missing '- reason:' line")
+            continue
+        if (
+            old_marker_m is None
+            or new_marker_m is None
+            or old_marker_m.start() > new_marker_m.start()
+        ):
+            errors.append(f"{path} {ch_id} correction {date}: missing 'old:'/'new:' markers (in order)")
+            continue
+        old_content = _fenced_content(chunk[old_marker_m.end():new_marker_m.start()])
+        new_content = _fenced_content(chunk[new_marker_m.end():])
+        if old_content is None or not old_content.strip():
+            errors.append(f"{path} {ch_id} correction {date}: 'old:' has no (non-empty) fenced block")
+            continue
+        if new_content is None or not new_content.strip():
+            errors.append(f"{path} {ch_id} correction {date}: 'new:' has no (non-empty) fenced block")
+            continue
+        corrections.append(
+            Correction(
+                ch_id=ch_id, date=date, reason=reason_m.group(1).strip(),
+                old=old_content.strip(), new=new_content.strip(),
+            )
+        )
+    return corrections, errors
+
+
+def _load_corrections_lookup(repo_root: Path, peer: str) -> tuple[dict[str, list[Correction]], list[str]]:
+    """{CH-ID: [Correction, ...]} for one peer, merged across its companion
+    dir and pair.md (see `_companion_files`) -- plus every format error
+    encountered (§9f) while parsing them."""
+    merged: dict[str, list[Correction]] = {}
+    errors: list[str] = []
+    for path in _companion_files(repo_root, peer):
+        for ch_id, body in _iter_companion_sections(path):
+            corrections, errs = _parse_corrections(ch_id, path, body)
+            if corrections:
+                merged.setdefault(ch_id, []).extend(corrections)
+            errors.extend(errs)
+    return merged, errors
+
+
+def _correction_relaxes_protection(old: str, new: str, real_paths: frozenset[str]) -> str | None:
+    """change set 0g review round (supervisor ruling 2026-09-15, "hole"
+    fix): a correction record must never be usable to let a protected
+    reference in its `old` sentence quietly disappear in `new` -- adding
+    one is fine, but dropping one would bypass 0d's own whole-sentence-
+    deletion guard (a sentence 0d would never let vanish outright could
+    otherwise be "corrected" into one that no longer carries what made it
+    protected, then deleted freely by ordinary derivation). Uses the SAME
+    detection primitives 0d itself uses (`_ANY_ID_RE`/
+    `_PROTECTED_ID_PREFIXES`, `_SPEC_SECTION_RE`,
+    `_has_versioned_document_reference`, `_filename_candidates`/
+    `_is_real_filename_candidate`). A real path that changed is NOT an
+    exception to this, even for an otherwise-legitimate reason (the file
+    was renamed/moved) -- per the ruling, that stays a hard red, left for
+    a human to re-escalate as its own, separately reviewed decision,
+    never silently absorbed by this correction mechanism. Returns an
+    error string, or None if nothing protected was lost."""
+    old_ids = frozenset(i for i in _ANY_ID_RE.findall(old) if i.startswith(_PROTECTED_ID_PREFIXES))
+    lost_ids = sorted(i for i in old_ids if i not in new)
+    if lost_ids:
+        return f"protected reference(s) {lost_ids!r} dropped (old: {old!r}, new: {new!r})"
+
+    old_real_paths = frozenset(
+        _clean_filename_candidate(c) for c in _filename_candidates(old)
+        if _is_real_filename_candidate(c, real_paths)
+    )
+    new_candidates_cleaned = frozenset(_clean_filename_candidate(c) for c in _filename_candidates(new))
+    lost_paths = sorted(p for p in old_real_paths if p not in new_candidates_cleaned)
+    if lost_paths:
+        return f"real path(s) {lost_paths!r} dropped (old: {old!r}, new: {new!r})"
+
+    if _SPEC_SECTION_RE.search(old) and not _SPEC_SECTION_RE.search(new):
+        return f"'spec §' reference dropped (old: {old!r}, new: {new!r})"
+    if _has_versioned_document_reference(old) and not _has_versioned_document_reference(new):
+        return f"versioned document reference dropped (old: {old!r}, new: {new!r})"
+    return None
+
+
+def _apply_corrections(
+    kind: str, basis_text: str, corrections: list[Correction],
+    real_paths: frozenset[str], identifier_set: frozenset[str],
+) -> tuple[str, str | None]:
+    """Applies a CH-ID's own correction entries, IN ORDER, to the
+    FLATTENED basis text -- so a corrected sentence's exact wording is
+    matched the same way every other sentence comparison in this file
+    already ignores a mid-block line wrap (via `_flatten`). `_flatten` is
+    idempotent when re-applied to already-flattened text (single spaces
+    within a paragraph, `\\n\\n` between paragraphs, both already in their
+    reduced/normalized form), which is why the result below is safe to
+    feed straight into `_is_allowed_reduction`/`_first_protected_sentence`
+    in place of the raw companion text -- those functions flatten their
+    input themselves, and doing so a second time changes nothing. Each
+    correction's `old` text must occur EXACTLY ONCE in the basis as
+    corrected by every PRIOR entry -- 0 occurrences (stale/mistyped) or
+    >=2 (ambiguous) is a hard error, never silently resolved by picking
+    the first/last match. Each correction is also checked
+    (`_correction_relaxes_protection`) for silently dropping a protected
+    reference the `old` sentence carried -- a 0d-bypass hole a supervisor
+    ruling closed. Returns (corrected_text, error); error is None on
+    success."""
+    working = _flatten(kind, basis_text, identifier_set)
+    for corr in corrections:
+        protection_err = _correction_relaxes_protection(corr.old, corr.new, real_paths)
+        if protection_err:
+            return working, f"correction {corr.date}: {protection_err}"
+        count = working.count(corr.old)
+        if count != 1:
+            return working, (
+                f"correction {corr.date} old sentence occurs {count} time(s) in the basis "
+                f"(expected exactly 1): {corr.old!r}"
+            )
+        working = working.replace(corr.old, corr.new, 1)
+    return working, None
+
+
 # ---------------------------------------------------------------------------
 # --base: design §4.1 (1)-(5), per source path.
 # ---------------------------------------------------------------------------
@@ -1860,7 +2081,8 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                                 old_blocks: list[Block], new_blocks: list[Block],
                                 companion_lookup: dict[str, str],
                                 real_paths: frozenset[str],
-                                identifier_set: frozenset[str] = frozenset()) -> list[str]:
+                                identifier_set: frozenset[str] = frozenset(),
+                                corrections_lookup: dict[str, list[Correction]] | None = None) -> list[str]:
     """design §4.1 (2)+(3)+(4), correspondence taken via CH-ID (v0.3).
 
     v0.4 P3 (review rounds 2-3): a new block WITHOUT a CH-ID is compared
@@ -1895,11 +2117,29 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
     the new block's retained text must be an allowed (3)(4)(6)+§9
     reduction of the BASIS block's retained text (not of the full
     companion text, which may hold sentences the basis block no longer
-    even has)."""
+    even has).
+
+    change set 0g: `corrections_lookup` (§9's append-only correction
+    records, `_parse_corrections`) is applied to a CH-ID's companion text
+    -- via `_apply_corrections` -- BEFORE it is used as the "basis" for
+    any `_is_allowed_reduction`/`_first_protected_sentence` call below.
+    The companion's raw fenced content itself is never rewritten by this;
+    only the in-memory basis text used for derivability is corrected. A
+    correction whose own `old` sentence cannot be found (exactly once) in
+    the basis is reported here (§9f) and that block's checks are skipped
+    for this CH-ID, rather than silently falling back to the uncorrected
+    (and, by construction, now-wrong) basis."""
     errors: list[str] = []
     consumed = [False] * len(old_blocks)
     old_positions = _block_positions(old_source, old_blocks)
     new_positions = _block_positions(new_source, new_blocks)
+    corrections_lookup = corrections_lookup or {}
+
+    def _corrected_basis(text: str, ch_id: str, kind: str) -> tuple[str | None, str | None]:
+        basis, err = _apply_corrections(
+            kind, text, corrections_lookup.get(ch_id, []), real_paths, identifier_set
+        )
+        return (None, err) if err else (basis, None)
 
     for j, nb in enumerate(new_blocks):
         if nb.history_id is None:
@@ -1933,7 +2173,11 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             # DERIVABLE from the companion via the same allowed-reduction
             # machinery, not that every sentence appear byte-for-byte.
             if ob.retained_text:
-                ok, reason = _is_allowed_reduction(ob.kind, companion_text, ob.retained_text, real_paths, identifier_set)
+                basis_text, corr_err = _corrected_basis(companion_text, ch_id, ob.kind)
+                if corr_err:
+                    errors.append(f"FAIL (§9f) {rel_path}:{nb.start_line} {ch_id}: {corr_err}")
+                    continue
+                ok, reason = _is_allowed_reduction(ob.kind, basis_text, ob.retained_text, real_paths, identifier_set)
                 if not ok:
                     errors.append(
                         f"FAIL (§4.1 (2)) {rel_path}:{nb.start_line} basis block for {ch_id} is "
@@ -1980,15 +2224,19 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             )
             continue
         consumed[match_idx] = True
+        basis_text, corr_err = _corrected_basis(companion_text, ch_id, nb.kind)
+        if corr_err:
+            errors.append(f"FAIL (§9f) {rel_path}:{nb.start_line} {ch_id}: {corr_err}")
+            continue
         if nb.retained_text:
-            ok, reason = _is_allowed_reduction(nb.kind, companion_text, nb.retained_text, real_paths, identifier_set)
+            ok, reason = _is_allowed_reduction(nb.kind, basis_text, nb.retained_text, real_paths, identifier_set)
             if not ok:
                 errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
         else:
             # change set 0d review round (item 1): first move, nothing
             # kept in code -- check the FULL companion text (everything
             # that is disappearing from the source) sentence by sentence.
-            protected = _first_protected_sentence(companion_text, nb.kind, real_paths, identifier_set)
+            protected = _first_protected_sentence(basis_text, nb.kind, real_paths, identifier_set)
             if protected is not None:
                 errors.append(
                     f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} cannot move the whole block away "
@@ -2040,6 +2288,7 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
     had_failure = False
     total_new_blocks = 0
     companion_cache: dict[str, dict[str, str]] = {}
+    corrections_cache: dict[str, dict[str, list[Correction]]] = {}
     # design §9 rule 2: real-path membership is read from the BASIS
     # revision's own tree, once per invocation (never the working tree).
     real_paths = _tree_paths(repo_root, rev)
@@ -2084,6 +2333,13 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
         if peer not in companion_cache:
             companion_cache[peer] = _load_companion_lookup(repo_root, peer)
         companion_lookup = companion_cache[peer]
+        if peer not in corrections_cache:
+            corrections_lookup, corrections_errors = _load_corrections_lookup(repo_root, peer)
+            for corr_err in corrections_errors:
+                print(f"FAIL (§9f) {corr_err}", file=out)
+                had_failure = True
+            corrections_cache[peer] = corrections_lookup
+        corrections_lookup = corrections_cache[peer]
 
         new_blocks = extract_all_blocks(new_source)
         old_blocks = extract_all_blocks(old_source)
@@ -2091,7 +2347,7 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
 
         for msg in check_provenance_semantics(
             rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths,
-            identifier_set,
+            identifier_set, corrections_lookup,
         ):
             print(msg, file=out)
             had_failure = True
@@ -2109,6 +2365,25 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
                 print(
                     f"FAIL (§9e) {rel_path}:{nb.start_line} broken line-wrap join for "
                     f"{nb.history_id}: {broken!r} should be {correct!r} (zero space)",
+                    file=out,
+                )
+                had_failure = True
+            # change set 0g review round 2: the basis's own `#:` Sphinx-
+            # style comment marker must not have been silently lost.
+            # Checked against `nb.retained_text` (the block's own content
+            # lines), never `nb.dedented` -- `dedented` still carries the
+            # trailing `# history: CH-XXXX` marker line, which is ALWAYS
+            # plain `#` by construction and would otherwise make every
+            # single-line-retained `#:` block a false positive.
+            if (
+                nb.kind == "comment"
+                and nb.retained_text
+                and _is_colon_style_block(basis_text)
+                and not _is_colon_style_block(nb.retained_text)
+            ):
+                print(
+                    f"FAIL (§9f) {rel_path}:{nb.start_line} {nb.history_id}: "
+                    "'#:' Sphinx-style comment marker lost (basis used '#:' lines, new block does not)",
                     file=out,
                 )
                 had_failure = True
@@ -2255,6 +2530,17 @@ def run_register(repo_root: Path, out=sys.stdout, err=sys.stderr) -> int:
                 fail(f"FAIL (§4.2 3) {rel} {ch_id}: missing required '{name}' line")
         if _fenced_content(body) is None:
             fail(f"FAIL (§4.2 3) {rel} {ch_id}: section has no fenced block")
+
+    # §9f (change set 0g): every correction entry appended under a CH-ID
+    # section, in ANY companion file, must itself be well-formed (date,
+    # reason, and a non-empty old/new fenced block each) -- `--register`
+    # is where this format is validated; whether a correction's `old`
+    # sentence actually occurs in the basis is a `run_base`/rev-vs-itself
+    # concern (it needs the block's own kind and the current source).
+    for ch_id, body, path in all_sections:
+        _corrections, corr_errors = _parse_corrections(ch_id, path, body)
+        for corr_err in corr_errors:
+            fail(f"FAIL (§9f) {corr_err}")
 
     referenced_by_peer: dict[str, set[str]] = {}
     total_referenced: set[str] = set()

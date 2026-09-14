@@ -61,6 +61,20 @@ py` do not exist yet (WP-4). Constructing a `ControlPlaneService` is, as of
 this WP, something only this module's own tests do.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-22 fact-fix commit 1715e18 -- `control_http.py`/`control_main.py` now exist (the pre-CCR-14-WP-4 wording no longer matched the code)
+
+old:
+```
+This module connects to no HTTP surface, ASGI app, or composition root; `control_http.py`/`control_main.py` do not exist yet (WP-4).
+```
+
+new:
+```
+This module connects to no HTTP surface, ASGI app, or composition root itself: `control_http.py` is the ASGI boundary over `ControlPlaneService`, and `control_main.py` constructs it.
+```
+
 ## CH-0240
 
 - moved from: `src/r2db_api/control_plane.py` (`<module>`)
