@@ -605,6 +605,11 @@ def test_filename_tagged_paren_removal_is_red(tmp_path):
     old_block_lines = ["# Store (`docs/design/X_V1.md` R-2).", "# Moved."]
     old = "\n".join(old_block_lines) + "\ndef f():\n    return 1\n"
     _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    # design §9 rule 2 (0c): a filename is only a provenance tag if it
+    # REALLY EXISTS in the basis revision's tree -- commit a stub so this
+    # fixture still exercises the "real filename" branch, not the "fake
+    # filename becomes a removable history token" branch.
+    _write(repo, "docs/design/X_V1.md", "stub\n")
     rev = _commit_all(repo, "old")
     # R-2 is a bare ID, but the same parens names a design file, so it may
     # not be removed -- this edit (dropping R-2, keeping the file name) is
@@ -881,6 +886,7 @@ def test_filename_tagged_paren_protects_every_id_is_red(tmp_path):
     old_block_lines = ["# Store (`docs/design/X_V1.md` R-1/R-2).", "# Moved."]
     old = "\n".join(old_block_lines) + "\ndef f():\n    return 1\n"
     _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    _write(repo, "docs/design/X_V1.md", "stub\n")  # design §9 rule 2: must be real
     rev = _commit_all(repo, "old")
     # R-2 is not adjacent to the file name, but the whole parens is
     # file-tagged, so it may not be removed either.
@@ -1262,7 +1268,7 @@ def test_label_word_tokens_merges_history_token_branch():
     # "Ruling U-7 (WP-6d (ii))" must count as exactly 3 words / 1 content
     # word (Ruling); without the WP- merge, "ii" stands alone as a 2nd
     # content word and the total climbs to 4.
-    tokens = cp._label_word_tokens("Ruling U-7 (WP-6d (ii))")
+    tokens = cp._label_word_tokens("Ruling U-7 (WP-6d (ii))", frozenset())
     assert len(tokens) == 3
     assert sum(1 for _t, is_content in tokens if is_content) == 1
 
@@ -1407,7 +1413,7 @@ def test_label_word_tokens_does_not_merge_protected_id_branch():
     # regardless of how it tokenizes. So this pins the tokenizer directly:
     # SI-08 (protected) must NOT merge with a following "(2)" branch the
     # way an unprotected ID would.
-    tokens = cp._label_word_tokens("Invariant SI-08 (2) rule")
+    tokens = cp._label_word_tokens("Invariant SI-08 (2) rule", frozenset())
     content_words = [t for t, is_content in tokens if is_content]
     assert "SI-08" in content_words
 
@@ -1424,7 +1430,7 @@ def test_label_has_provenance_marker_ignores_tagged_bare_id():
     # rejects "roadmap R-22" (a provenance-tagged bare ID is itself a
     # "protected reference" per the supervisor ruling), so condition (1)'s
     # own tag-check can't be isolated end-to-end either.
-    assert cp._label_has_provenance_marker("roadmap R-22") is False
+    assert cp._label_has_provenance_marker("roadmap R-22", frozenset()) is False
 
 
 def test_label_removal_negation_word_is_red(tmp_path):
@@ -1554,3 +1560,752 @@ def test_label_removal_no_real_separator_is_red(tmp_path):
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 1
     assert "§4.1 (3)" in output
+
+
+# ===========================================================================
+# Change set 0c: design §9 (v0.6) rule-hole fixes, §9.1 fixtures.
+# ===========================================================================
+
+# --- rule 1: multi-word history tokens ------------------------------------
+
+def test_0c_rule1_multiword_token_full_removal_is_green(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Note (Phase 10, WP-6d-i review): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule1_lowercase_monitor_ruling_is_green(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Note (monitor ruling, WP-2): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# --- rule 2: real-filename-only provenance --------------------------------
+
+def _real_paths_scenario(tmp_path, old_first_sentence: str, new_first_sentence: str, extra_files=()):
+    """Like `_label_scenario`, but commits `extra_files` ({rel: content})
+    into the basis commit first, so `_tree_paths` sees them as real."""
+    repo = _init_repo(tmp_path)
+    for rel, content in extra_files:
+        _write(repo, rel, content)
+    old_block_lines = [f"# {old_first_sentence}", "# Moved."]
+    old = "\n".join(old_block_lines) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = f"# {new_first_sentence}\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(old_block_lines)),
+    )
+    return repo, rev
+
+
+def test_0c_rule2_fake_scratchpad_path_paren_is_green(tmp_path):
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (D-3, {scratchpad}/review2/frame.md): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule2_fake_backtick_path_leaves_non_id_residue_is_green(tmp_path):
+    repo, rev = _real_paths_scenario(
+        tmp_path,
+        "Store (`{scratchpad}/review2/frame.md` F-①, WP-6d): body.",
+        "Store (F-①): body.",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule2_wrapped_backtick_path_is_green(tmp_path):
+    # A physical line-wrap inside the backtick span joins to one space
+    # (via `_flatten_comment`) well before this check runs; that space is
+    # stripped again when checking tree-membership, so the whole span is
+    # treated as ONE word either way -- a non-real path, hence removable.
+    repo = _init_repo(tmp_path)
+    old_block_lines = [
+        "# Note (D-3, `{scratchpad}/rulings-r3-",
+        "# r7-flip.md`): body.",
+        "# Moved.",
+    ]
+    old = "\n".join(old_block_lines) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# Note: body.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(old_block_lines)),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule2_unprefixed_working_note_name_is_green(tmp_path):
+    # No `{scratchpad}/` prefix at all, and this name was never committed
+    # -- design §9 rule 2's other example of "not real".
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (D-3, rulings-r5-r6.md): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule2_real_file_stays_protective_is_red(tmp_path):
+    # Regression: a filename that DOES exist in the basis tree must still
+    # protect its co-located ID (§9 rule 2 only removes protection from
+    # FAKE filenames, never from real ones).
+    repo, rev = _real_paths_scenario(
+        tmp_path,
+        "Store (`docs/design/Y_V1.md` R-9): body.",
+        "Store: body.",
+        extra_files=[("docs/design/Y_V1.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0c_rule2_read_write_paren_unchanged_is_red(tmp_path):
+    # Fixture 5: "(read/write, R-5)" is unaffected by rule 2/4 -- attempting
+    # any removal here is invalid.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (read/write, R-5): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+# --- rule 3: kind-word-only residue after (4) reduction --------------------
+
+def test_0c_rule3_kind_word_residue_removed_is_green(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Note (design D-4, WP-2): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule3_original_kind_word_only_paren_stays_is_red(tmp_path):
+    # A parens that held ONLY a kind word from the start is never touched.
+    repo, rev = _label_scenario(
+        tmp_path, "Note (design): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0c_rule3_versioned_doc_blocks_rule3_is_green(tmp_path):
+    # Only WP-2 goes; rule 3 must NOT sweep away "(design v1.2)" since a
+    # versioned document name remains.
+    repo, rev = _label_scenario(
+        tmp_path, "Note (design v1.2, WP-2): body.", "Note (design v1.2): body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# --- rule 4: `/`-joined ID splitting ---------------------------------------
+
+def test_0c_rule4_slash_joined_ids_removed_is_green(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Note (M-3/D): body.", "Note: body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule4_protected_slash_id_partial_removal_is_green(tmp_path):
+    # SI-08 stays protected; R-5 alone is still an ordinary removable bare
+    # ID (rule 4 just declines to treat the PAIR as a slash-ID shortcut).
+    repo, rev = _label_scenario(
+        tmp_path, "Note (SI-08/R-5): body.", "Note (SI-08): body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# --- rule 5: slash-ID + branch-number combination, contract clause --------
+
+def test_0c_rule5_slash_and_branch_combo_is_green(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Note (I-6/D-5 (5)): body.", "Note: body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0c_rule5_contract_clause_with_provenance_unchanged_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Note (contract 1.7.0 D-5): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+# --- items 9-11: label negation, added-line tokens, round exclusion -------
+
+def test_0c_negation_monitor_ruling_label_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Never (Monitor ruling M-4): retry.", "retry."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0c_added_line_requester_ruling_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# Keep.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# Keep.\n\n# Per the Requester ruling, this changed.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (5)" in output
+
+
+def test_0c_round_unit_exclusion_paren_removal_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Note (round 2 decimal places): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0c_round_unit_exclusion_label_removal_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Round 2 digits: body stays put here now.", "body stays put here now."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0c_round_unit_exclusion_added_line_is_green(tmp_path):
+    # A trailing/inline comment (design v0.4 ruling: excluded from block
+    # extraction, but the (5) added-history-token scan still reads it) --
+    # isolates this fixture to the (5) concern alone.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    x = 1\n    return x\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    x = 1  # uses round 2 decimal places for the total\n    return x\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# ===========================================================================
+# Q-4 supervisor ruling (0c): re-edit of an already-CH-ID'd block. No new
+# id is allocated; the existing companion section is not rewritten (D-1).
+# Containment is derivability via (3)(4)(6)+§9, not a byte/sentence-exact
+# match (fixed per the reviewer report on q4repo/rev-cs2, postgres.py
+# CH-0001 false-red).
+# ===========================================================================
+
+def test_q4_reedit_further_label_and_paren_removal_is_green(tmp_path):
+    # Companion (v0.5-era first move) holds the full original text. The
+    # basis block already reduced it once (label removed by an earlier
+    # change set) and keeps CH-0001; this diff reduces it a second time
+    # (the now-lone bare id "(R-2)" is removed by (4)) -- same CH-0001,
+    # no new id, companion untouched.
+    repo = _init_repo(tmp_path)
+    old = "# body (R-2).\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# body.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Note (WP-3): body (R-2).\n# Moved."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_q4_reedit_sentence_not_in_companion_is_red(tmp_path):
+    # The basis block carries a sentence the companion section does not
+    # contain (in any derivable form) -- e.g. added after the companion
+    # snapshot was taken, then deleted here. Must be red, not silently
+    # accepted as a "further reduction".
+    repo = _init_repo(tmp_path)
+    old = "# body (R-2). Extra note.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# body. Extra note.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Note (WP-3): body (R-2).\n# Moved."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "not derivable from the existing companion section" in output
+
+
+def test_q4_reedit_id_swapped_to_different_section_is_red(tmp_path):
+    # The basis block's own CH-0001 marker is replaced by a different,
+    # also-existing section's id (CH-0002) instead of being reused. The
+    # basis block's own CH-0001 reference then goes unmatched.
+    repo = _init_repo(tmp_path)
+    old = "# body.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# body.\n# history: CH-0002\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# body.") + _companion_section("CH-0002", "# body."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "was not matched by any new block" in output
+
+
+# ===========================================================================
+# v0.7 supervisor ruling (0c follow-up): §4.1 (3)/(4)/(6) and §9 rules 1-4
+# are each a PERMISSION, not an obligation. The derivation check accepts
+# ANY subset of the allowed operations, not only the maximal reduction --
+# e.g. change set 1 leaving a lone kind word like "(ruling)" behind
+# instead of also sweeping it per §9 rule 3 is just as valid as sweeping
+# it. Q-4 (CH-0001) itself is unchanged by this ruling.
+# ===========================================================================
+
+def test_v07_partial_rule3_reduction_is_green(tmp_path):
+    # A human editor may remove the bare id from a parenthetical via (4)
+    # and STOP there, leaving the lone kind word "ruling" unswept -- §9
+    # rule 3's sweep is a permission, not an obligation.
+    repo, rev = _label_scenario(
+        tmp_path, "Note (ruling I-7/D-4): body.", "Note (ruling): body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_v07_maximal_rule3_reduction_still_green(tmp_path):
+    # The maximal reduction (rule 3's sweep actually applied) must remain
+    # an equally valid, reachable outcome.
+    repo, rev = _label_scenario(
+        tmp_path, "Note (ruling I-7/D-4): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_q4_real_repo_postgres_unchanged_is_green():
+    # Real-repository check (read-only, per the file docstring's stated
+    # exception for `test_repository_register_passes`): the actual,
+    # already-migrated r2db `postgres.py` at main `5d12799`, left
+    # UNCHANGED, must pass `--base 5d12799` cleanly. Before the v0.7
+    # ruling this was blocked by several blocks (e.g. CH-0028) where
+    # change set 1 stopped at a partial, rule-3-eligible-but-not-swept
+    # reduction; the permissive derivation check now accepts those too.
+    out = io.StringIO()
+    code = cp.run_base(
+        REAL_REPO_ROOT, "5d12799", ["r2db-api/src/r2db_api/postgres.py"], out=out, err=out
+    )
+    output = out.getvalue()
+    assert code == 0, output
+
+
+def test_v07_rule3_broadened_would_break_real_repo_is_red_when_mandatory():
+    # White-box companion to the mutation "revert rule 3 to mandatory":
+    # isolates the exact real-repo sentence pair (CH-0028) so the
+    # regression is visible without needing the whole real file. Directly
+    # exercises `_is_allowed_reduction`, not an e2e `_run_base` scenario.
+    old_full = "A `dry_run` never consults or writes a record (ruling I-7/D-4)."
+    retained = "A `dry_run` never consults or writes a record (ruling)."
+    ok, _reason = cp._is_allowed_reduction("comment", old_full, retained, frozenset())
+    assert ok is True
+
+
+# --- fixtures isolating the 4 mutations the first 0c mutation run missed ---
+# (note: the "rule1_broadened" mutation -- removing the round-unit
+# negative lookahead -- is caught by the EXISTING
+# test_0c_round_unit_exclusion_added_line_is_green fixture above; the
+# paren-removal fixture doesn't catch it because leftover "decimal"/
+# "places" words mask the regression there.)
+
+def test_0c_rule2_dotted_backtick_identifier_not_a_filename_is_red(tmp_path):
+    # A backtick-quoted, dotted CODE identifier that is neither a real
+    # path nor ends in a KNOWN extension must never be treated as a
+    # (fake, hence removable) filename candidate -- this is the exact
+    # real-world corruption `_FILENAME_EXT_RE`'s narrowing fixed
+    # (`` `information_schema.columns.domain_name` ``-shaped content).
+    repo, rev = _label_scenario(
+        tmp_path,
+        "Body text stays (`schema.columns.name`) as is.",
+        "Body text stays as is.",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0c_rule4_readwrite_id_stays_protected_is_red(tmp_path):
+    # "(read/write, R-5)" as a whole is already covered by
+    # test_0c_rule2_read_write_paren_unchanged_is_red (full removal
+    # attempt). This isolates the PARTIAL leak an over-broadened
+    # `_SUBSCRIPT_RE` introduces: "read/write" no longer registers as
+    # path-like, so it stops protecting the co-located bare id "R-5" --
+    # removing R-5 ALONE while leaving "read/write" untouched must still
+    # be rejected.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (read/write, R-5): body.", "Note (read/write): body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0c_history_token_branch_merge_crosses_content_word_limit_is_green(tmp_path):
+    # Unlike test_label_removal_with_branch_number_is_green (content-word
+    # count stays under the limit with or without the merge), this label
+    # is built so the branch-number merge is NECESSARY for it to qualify
+    # at all: merged, content words are "Ruling"/"Pool"/"Lock" (3, at the
+    # limit); without the merge, "WP-6d-i" and "(ii)" would be counted as
+    # separate tokens and "ii" would stand alone as a 4th content word,
+    # crossing the <=3 limit and disqualifying the whole label.
+    repo, rev = _label_scenario(
+        tmp_path, "Ruling Pool Lock U-7 (WP-6d-i (ii)): reason.", "reason."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# ===========================================================================
+# v0.7 supervisor ruling, second follow-up: (1) an unprefixed (basename-
+# only) filename is STILL a provenance tag if its basename matches
+# EXACTLY ONE path in the tree; 0 or >=2 matches keep it a removable
+# history token. (2) `_is_allowed_reduction` judges each independent SITE
+# (each parenthetical; the leading label) on its own via a single left-
+# to-right scan, not by enumerating subsets -- so there is no length cap.
+# ===========================================================================
+
+def test_v072_unique_basename_filename_protects_is_red(tmp_path):
+    # `CONTROL_MAPPING.md` has no path separator but its basename matches
+    # exactly one real path (`security/CONTROL_MAPPING.md`) -- it counts
+    # as a provenance tag, so SI-10 stays protected too.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (CONTROL_MAPPING.md, SI-10): body.", "Note: body.",
+        extra_files=[("security/CONTROL_MAPPING.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_v072_unique_basename_filename_alone_protects_is_red(tmp_path):
+    # Isolates the basename-uniqueness check itself from SI-10's OWN,
+    # independent protected-prefix protection (the fixture above keeps
+    # its outcome even if the filename check is removed entirely, since
+    # SI-10 alone already blocks full removal) -- here nothing BUT the
+    # unique-basename match protects the parenthetical.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (CONTROL_MAPPING.md): body.", "Note: body.",
+        extra_files=[("security/CONTROL_MAPPING.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_v072_nonexistent_basename_filename_removable_is_green(tmp_path):
+    # No file anywhere in the tree has this basename -- 0 matches, stays
+    # a removable history token (unchanged from the original §9 rule 2).
+    repo, rev = _label_scenario(
+        tmp_path, "Note (D-3, rulings-r5-r6.md): body.", "Note: body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_v072_ambiguous_basename_filename_removable_is_green(tmp_path):
+    # `README.md` exists at TWO different paths -- ambiguous, so it stays
+    # a removable history token rather than becoming a provenance tag.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (README.md, D-3): body.", "Note: body.",
+        extra_files=[("a/README.md", "stub\n"), ("b/README.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_v072_unique_basename_matches_real_repo_control_mapping(tmp_path):
+    # Confirms the real repository actually has exactly one
+    # `CONTROL_MAPPING.md` (under security/) -- the precondition the
+    # first fixture above relies on, pinned directly against HEAD's tree.
+    real_paths = cp._tree_paths(REAL_REPO_ROOT, "HEAD")
+    matches = [p for p in real_paths if p.rpartition("/")[2] == "CONTROL_MAPPING.md"]
+    assert matches == ["security/CONTROL_MAPPING.md"], matches
+
+
+def test_v072_mutation_basename_uniqueness_removed_would_break_control_mapping():
+    # White-box companion to the "basename uniqueness check removed"
+    # mutation: directly pins that a basename match alone (without
+    # requiring exactly one) is not what makes CONTROL_MAPPING.md real.
+    real_paths = frozenset({"security/CONTROL_MAPPING.md"})
+    assert cp._is_real_filename_candidate("CONTROL_MAPPING.md", real_paths) is True
+    ambiguous = frozenset({"a/README.md", "b/README.md"})
+    assert cp._is_real_filename_candidate("README.md", ambiguous) is False
+
+
+def test_v072_long_sentence_partial_reduction_of_one_of_three_parens_is_green(tmp_path):
+    # 30+ words, 3 independent parenthetical sites, one per physical line
+    # (so only the MIDDLE line's own diff is scanned by §4.1 (5) -- the
+    # untouched "(WP-3)" line must not itself trip an added-token false
+    # positive) -- only the middle parenthetical is PARTIALLY reduced
+    # (its 3 words are "design"/D-4/WP-2; only WP-2 is removed, "design
+    # D-4" stays -- a genuine partial retention inside a >2-word paren,
+    # not one of the 2 "extremes" a length-capped check could still
+    # coincidentally accept); the other two parens stay untouched. The
+    # first (subset-enumeration) form of the permissive check capped
+    # parenthetical size and would have rejected this once the sentence
+    # grew long enough to matter; the per-site linear scan has no cap.
+    repo = _init_repo(tmp_path)
+    old_block_lines = [
+        "# Alpha bravo charlie delta echo (SI-08) foxtrot golf hotel india juliet",
+        "# kilo lima (design D-4, WP-2) mike november oscar papa quebec romeo",
+        "# sierra tango uniform (WP-3) victor whiskey xray yankee zulu end.",
+        "# Moved.",
+    ]
+    old = "\n".join(old_block_lines) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        "# Alpha bravo charlie delta echo (SI-08) foxtrot golf hotel india juliet\n"
+        "# kilo lima (design D-4) mike november oscar papa quebec romeo\n"
+        "# sierra tango uniform (WP-3) victor whiskey xray yankee zulu end.\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(old_block_lines)),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_v072_long_sentence_one_word_substitution_in_paren_is_red(tmp_path):
+    # Same 3-line sentence, but the middle parenthetical's content is
+    # CHANGED (WP-2 -> WP-9) rather than reduced by an allowed operation
+    # -- must be rejected, not silently accepted as "close enough".
+    repo = _init_repo(tmp_path)
+    old_block_lines = [
+        "# Alpha bravo charlie delta echo (SI-08) foxtrot golf hotel india juliet",
+        "# kilo lima (design D-4, WP-2) mike november oscar papa quebec romeo",
+        "# sierra tango uniform (WP-3) victor whiskey xray yankee zulu end.",
+        "# Moved.",
+    ]
+    old = "\n".join(old_block_lines) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        "# Alpha bravo charlie delta echo (SI-08) foxtrot golf hotel india juliet\n"
+        "# kilo lima (design D-4, WP-9) mike november oscar papa quebec romeo\n"
+        "# sierra tango uniform (WP-3) victor whiskey xray yankee zulu end.\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(old_block_lines)),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+# ===========================================================================
+# 0c review round: (1) versioned-doc dot false positive when locating a
+# parenthetical's end anchor, (2) separator-aware paren matching, (3)
+# supervisor ruling narrowing §4.1 (5) to a token-level diff against the
+# basis. Cross-checked against the reviewer's own probe9.py/probe10.py
+# (scratchpad rev-ccp0/) -- every one of their ~40 labeled cases agrees
+# with this implementation.
+# ===========================================================================
+
+def test_review_t9_versioned_doc_dot_anchor_is_green(tmp_path):
+    # `end = target.find(next_txt, pos)` used to stop at the FIRST "."
+    # inside "1.7.0" itself (next_txt here is just "."), truncating the
+    # candidate span before the real closing paren -- try every
+    # occurrence, not just the first.
+    repo, rev = _label_scenario(
+        tmp_path, "Pool (contract 1.7.0 D-5, WP-2c).", "Pool (contract 1.7.0 D-5)."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_review_design_v1_2_dot_anchor_is_green(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Note (design v1.2 R-4, WP-4).", "Note (design v1.2 R-4)."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_review_t1_separator_comma_to_space_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Pool (SI-08, C-05) stays.", "Pool (SI-08 C-05) stays.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_review_t2_separator_comma_to_slash_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Pool (SI-08, C-05) stays.", "Pool (SI-08/C-05) stays.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_review_t3_dangling_separator_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Pool (R-5, SI-08) stays.", "Pool (, SI-08) stays.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_review_t4_dangling_slash_separator_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Pool (M-3/D) stays.", "Pool (/D) stays.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_review_middle_word_removal_keeps_correct_separator_is_green(tmp_path):
+    # Removing the MIDDLE word "WP-3" must reconnect SI-08 and C-05 with
+    # their OWN original mutual separator (", "), not lose track of it.
+    repo, rev = _label_scenario(
+        tmp_path, "Pool (SI-08, WP-3, C-05) stays.", "Pool (SI-08, C-05) stays."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_review_n4_partial_keeps_existing_token_is_green(tmp_path):
+    # supervisor ruling: (5) flags only a history token ABSENT from the
+    # basis -- "round 2" already existed in the basis paren, so keeping
+    # it while removing WP-3/R-5 is not itself an added-token violation.
+    repo, rev = _label_scenario(
+        tmp_path, "Pool (WP-3, round 2, R-5) stays.", "Pool (round 2) stays."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_review_added_line_new_token_not_in_basis_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    x = 1  # note (WP-3) here\n    return x\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    x = 1  # note (WP-3, WP-9) here\n    return x\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (5)" in output
+
+
+def test_check_no_added_history_tokens_basis_diff_direct():
+    # White-box: same N4/WP-9 pair, calling the (5) checker directly.
+    old_n4 = "x = 1  # note (WP-3, round 2, R-5) here\n"
+    new_n4 = "x = 1  # note (round 2) here\n"
+    assert cp.check_no_added_history_tokens(old_n4, new_n4) == []
+
+    old_wp9 = "x = 1  # note (WP-3) here\n"
+    new_wp9 = "x = 1  # note (WP-3, WP-9) here\n"
+    hits = cp.check_no_added_history_tokens(old_wp9, new_wp9)
+    assert len(hits) == 1 and "WP-" in hits[0][2]
+
+
+# ===========================================================================
+# reviewer-planned mutations (0c review round item 4).
+# ===========================================================================
+
+def test_review_q4_scope_mismatch_rejected_is_red(tmp_path):
+    # Q-4's reedit_candidates lookup must stay scoped to the SAME scope as
+    # the referencing new block. g() wrongly claims f()'s already-migrated
+    # CH-0001 -- without the scope check this cross-scope reuse would be
+    # silently accepted using f's basis block as g's "reedit" predecessor.
+    repo = _init_repo(tmp_path)
+    old = (
+        "def f():\n    # body (R-2).\n    # history: CH-0001\n    return 1\n\n\n"
+        "def g():\n    return 2\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        "def f():\n    return 1\n\n\n"
+        "def g():\n    # body.\n    # history: CH-0001\n    return 2\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "Note (WP-3): body (R-2)."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (2)" in output
+
+
+def test_review_tree_paths_uses_base_rev_not_head_is_red(tmp_path):
+    # `_tree_paths` for `--base <rev>` must use the BASIS revision's tree,
+    # never HEAD's -- a file added AFTER the basis commit must not count
+    # as "real" when judging the basis's own comment content.
+    repo = _init_repo(tmp_path)
+    old_lines = ["# Note (D-3, notes_added_later.md): body.", "# Moved."]
+    _write(repo, "r2db-api/src/r2db_api/mod.py", "\n".join(old_lines) + "\ndef f():\n    return 1\n")
+    rev = _commit_all(repo, "old")
+    # AFTER the basis commit, a file with this exact basename appears --
+    # if `_tree_paths` used HEAD instead of `rev`, it would wrongly treat
+    # the basis's filename mention as real (protecting it, and D-3).
+    _write(repo, "notes_added_later.md", "stub\n")
+    new = "# Note: body.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(old_lines)),
+    )
+    _commit_all(repo, "add notes file (after basis)")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_review_backtick_stripped_before_tree_check_is_red(tmp_path):
+    # `_clean_filename_candidate` must strip the surrounding backticks
+    # before the tree-membership check -- a real file referenced WITHOUT
+    # backticks in the comment must still be recognized (and protect its
+    # co-located id), not be treated as fake merely because the raw
+    # candidate text (with backticks) never appears verbatim in the tree.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Store (`docs/design/X_V1.md` R-9): body.", "Store: body.",
+        extra_files=[("docs/design/X_V1.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_review_slash_path_basename_match_not_real_is_green(tmp_path):
+    # A candidate WITH a path separator ("x/CONTROL_MAPPING.md") must
+    # never fall through to the basename-uniqueness check -- only an
+    # EXACT full-path match counts as real for a "/"-containing
+    # candidate, even when its basename uniquely matches a real file
+    # elsewhere in the tree (`security/CONTROL_MAPPING.md`). So the fake
+    # path is a removable history token, and the co-located bare id R-9
+    # (no other provenance tag) is independently removable too.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (x/CONTROL_MAPPING.md, R-9): body.", "Note: body.",
+        extra_files=[("security/CONTROL_MAPPING.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
