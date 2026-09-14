@@ -867,6 +867,39 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             _canonical_where_json([Filter("f", "eq", _Unserializable())])
 
+    def test_delete_confirmation_leaf_preserves_cell_facade_and_phrase_shape(self):
+        # R-37 WP-1b (work order docs/work-orders/
+        # WORK_ORDER_R37_WP0_INVENTORY_V1.md §5.3, CE1): `_canonical_where_
+        # json`/`_delete_confirmation_phrase` moved to the new leaf
+        # `mitatedb_api.delete_confirmation`; `cell.py` keeps them as
+        # facade imports, so both names must be the SAME function object.
+        from mitatedb_api.cell import _canonical_where_json, _delete_confirmation_phrase
+        from mitatedb_api.delete_confirmation import (
+            _canonical_where_json as leaf_canonical_where_json,
+            _delete_confirmation_phrase as leaf_delete_confirmation_phrase,
+        )
+
+        self.assertIs(_canonical_where_json, leaf_canonical_where_json)
+        self.assertIs(_delete_confirmation_phrase, leaf_delete_confirmation_phrase)
+
+        # M1 (監督裁定, work order §5.3 WP-1b, #2): `sort_keys=True` sorts
+        # EVERY nesting level, not just each Filter's own {"field",
+        # "operator", "value"} object -- a Filter whose own value is
+        # itself a dict with a jumbled key order must still come out
+        # key-sorted ("a" before "z"), even though the caller's own
+        # literal writes "z" first.
+        jumbled = Filter("f", "eq", {"z": 1, "a": 2})
+        self.assertEqual(
+            _canonical_where_json([jumbled]),
+            '[{"field":"f","operator":"eq","value":{"a":2,"z":1}}]',
+        )
+
+        # Phrase shape (work order §5.3 WP-1b, #3): literal pin of a fixed
+        # input's phrase -- digest16 is the first 16 hex characters of
+        # sha256(_canonical_where_json(filters)).
+        phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 1)], 3)
+        self.assertEqual(phrase, "DELETE things @where=cba0176d56d3d473 @schema_revision=3")
+
     def test_delete_without_confirmation_is_gated_not_conflated_with_empty_filters(self):
         # WP-2 review m-6 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md §5):
         # the old combined test above conflated "empty filters"
