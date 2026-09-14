@@ -108,6 +108,7 @@ LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("request_traversal.py", frozenset({"dataclasses", "typing"})),
         ("delete_confirmation.py", frozenset({"hashlib", "json"})),
         ("request_limits.py", frozenset({".errors", ".request_traversal"})),
+        ("constraint_resolution.py", frozenset({".errors", ".field_types"})),
     ],
 }
 
