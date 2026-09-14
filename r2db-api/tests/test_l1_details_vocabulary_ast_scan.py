@@ -58,7 +58,15 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 #: carries the 4 `fail("IDENTIFIER_INVALID", ...)` call sites those
 #: functions moved with (already 4-key, moved verbatim) and must stay in
 #: `SCANNED_MODULES` for the same reason as `inmemory_predicate.py` above.
-SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py", "identifier_rules.py")
+#: R-37 WP-1h (2026-09-14): `paging.py` holds `validate_page_size`/
+#: `_resolve_order_by`/`_shape_hash`/`_encode_cursor`/`_decode_cursor`,
+#: extracted from `structured.py` -- it carries the 10 `fail("VALIDATION_
+#: FAILED", ...)` call sites those functions moved with (already 4-key,
+#: moved verbatim; the `_resolve_order_by` `fail("NOT_FOUND", ...)` site
+#: and `validate_page_size`'s own `fail("LIMIT_EXCEEDED", ...)` site are
+#: not vocabulary codes and are not counted here) and must stay in
+#: `SCANNED_MODULES` for the same reason as `identifier_rules.py` above.
+SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py")
 
 _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED"}
 
@@ -329,7 +337,7 @@ def test_every_choke_point_denial_carries_details_ast_full_count():
 def test_ast_full_count_matches_the_audit_site_count():
     """Non-空振り: the scan actually visits at least the 76 sites D-1
     counted (plus every VALIDATION_FAILED/IDENTIFIER_INVALID/
-    CAPABILITY_UNSUPPORTED site in these 6 files that already carried
+    CAPABILITY_UNSUPPORTED site in these 7 files that already carried
     `violated_declaration` before this rework -- the audit's own 76 was
     only the GAP count, not the total) -- a scanner that silently matched
     0 calls (e.g. because `fail` were imported under an alias, or the
@@ -340,7 +348,7 @@ def test_ast_full_count_matches_the_audit_site_count():
     R-8/M-8: re-pinned to the measured post-merge count (`limits.py`'s
     4 inline budget denials were folded into 1 `_budget_denied` helper by
     the R-5/R-6 pair-closing merge, `violated_declaration` preserved)."""
-    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py", "identifier_rules.py")}
+    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py")}
     assert counts == {
         # R-37 WP-1e (2026-09-14): -1 -- `_wildcard_pattern`'s own bare
         # trailing-backslash `fail("VALIDATION_FAILED", ...)` site
@@ -351,7 +359,11 @@ def test_ast_full_count_matches_the_audit_site_count():
         # reserved_entity_name`'s own `fail("IDENTIFIER_INVALID", ...)`
         # sites (already 4-key) moved verbatim to `identifier_rules.py`
         # (92 -> 88); see that module's own count below.
-        "structured.py": 88, "service.py": 10, "limits.py": 5, "http.py": 8,
+        # R-37 WP-1h (2026-09-14): -10 -- `validate_page_size`/
+        # `_resolve_order_by`/`_decode_cursor`'s own `fail("VALIDATION_
+        # FAILED", ...)` sites (already 4-key) moved verbatim to
+        # `paging.py` (88 -> 78); see that module's own count below.
+        "structured.py": 78, "service.py": 10, "limits.py": 5, "http.py": 8,
         # R-37 WP-1e (2026-09-14): the 1 site `_wildcard_pattern` carried
         # in `structured.py` before the move, unchanged in wording or
         # `details=` shape.
@@ -361,6 +373,13 @@ def test_ast_full_count_matches_the_audit_site_count():
         # reserved_entity_name` carried in `structured.py` before the
         # move, unchanged in wording or `details=` shape.
         "identifier_rules.py": 4,
+        # R-37 WP-1h (2026-09-14): the 10 `fail("VALIDATION_FAILED", ...)`
+        # sites `validate_page_size`/`_resolve_order_by`/`_decode_cursor`
+        # carried in `structured.py` before the move, unchanged in
+        # wording or `details=` shape (the module's own `LIMIT_EXCEEDED`
+        # and `NOT_FOUND` sites are not vocabulary codes and are not
+        # counted here).
+        "paging.py": 10,
     }, counts
     assert sum(counts.values()) >= 76, counts
 
@@ -432,11 +451,11 @@ def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
     carries (exactly what R-2 did for the 5 former allowlist entries this
     left behind). This scans `structured.py`'s and its extracted leaves'
     (`inmemory_predicate.py`, R-37 WP-1e; `identifier_rules.py`, R-37
-    WP-1f) FULL fail-message vocabulary (any code, not just the 3
-    in-scope ones -- see `_all_fail_messages`), so a match against a
-    `NOT_FOUND`/`CONFLICT` message would be caught too."""
+    WP-1f; `paging.py`, R-37 WP-1h) FULL fail-message vocabulary (any
+    code, not just the 3 in-scope ones -- see `_all_fail_messages`), so a
+    match against a `NOT_FOUND`/`CONFLICT` message would be caught too."""
     in_memory_messages: set[str] = set()
-    for module in ("structured.py", "inmemory_predicate.py", "identifier_rules.py"):
+    for module in ("structured.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py"):
         in_memory_messages |= _all_fail_messages(SRC / module)
     shared = []
     for module, lineno in sorted(_BACKEND_LAYER_ALLOWLIST):

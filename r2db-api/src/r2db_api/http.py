@@ -463,8 +463,8 @@ async def post_query(request: Request) -> Response:
             _check_object_shape(body, _SCHEMAS["QueryRequest"], label="QueryRequest")
             # CCR-13 WP-4/WP-5: `order_by`/`page.cursor` are delegated to
             # `DataService.query_page`, which passes them to the underlying cell
-            # (`structured.py`'s shared `_resolve_order_by`/`_decode_cursor`
-            # validate the shapes).
+            # (`structured.py`'s shared `_resolve_order_by`/`_decode_cursor`,
+            # now in `paging.py`, validate the shapes).
             kwargs: dict[str, Any] = {"select": body.get("select"), "where": body.get("where"), "order_by": body.get("order_by")}
             page = body.get("page")
             if page is not None:

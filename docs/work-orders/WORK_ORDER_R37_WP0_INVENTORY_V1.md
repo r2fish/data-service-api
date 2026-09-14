@@ -588,6 +588,12 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | 21 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、MitateDB `src/` の同名 def 0 件 | — |
 | 22 | 既知の穴を記録する | **監査照合**: `Predicate` の裸の注釈が型検査器で F821 になることが、完了時の実施記録に載る | — |
 
+**監督裁定 (WP-1h 実装時): 範囲外の位置参照 1 件を W-2 に従い修正**
+
+対象は `structured.py:1294` (`normalize_request_for_plan` の docstring 内、`_shape_hash` への位置参照に `(in \`paging.py\`)` を補った)。完了条件 20 の「範囲外の差分」はこの 1 件を含む。
+
+**監督裁定 (WP-1h コードレビュー): cursor hash の束縛テスト 2 件を追加**
+
 ### 5.13 WP-1i — r2db 値の型検査 (ST6、**独立レビュー待ち**)
 
 **目的**: `structured.py` の値の型・domain 検査と述語値の検査 (6 名) を、それだけが読む `_TEXT_ONLY_OPERATORS` と一緒に leaf `r2db-api/src/r2db_api/value_types.py` へ移す (W-1)。**変更セット 2 と WP-1h の統合後に着手する** (§5.14)。
