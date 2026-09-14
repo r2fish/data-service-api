@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.12 (2026-09-15)。** 直後の v1.11 行は当時の改版履歴として保存する。v1.12 は既存の本文を書き換えず、末尾に **§10.9 (WP-3a〜3c 実施記録)** を追記した記録である。
 - **現行版: v1.11 (2026-09-15)。** 直後の v1.10 行は当時の改版履歴として保存する。v1.11 は既存の本文を書き換えず、末尾に **§10.8 (WP-2a 実施記録)** を追記した記録である。
 - **現行版: v1.10 (2026-09-15)。** 直後の v1.9 行は当時の改版履歴として保存する。v1.10 は既存の本文を書き換えず、末尾に **§10.7 (WP-1m / 1n / 1k 実施記録)** を追記した記録である。
 - **現行版: v1.9 (2026-09-15)。** 直後の v1.8 行は当時の改版履歴として保存する。v1.9 は既存の本文を書き換えず、末尾に **§10.6 (WP-1j / 1l 実施記録)** を追記した記録である。
@@ -408,3 +409,26 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 - **レビューの訂正**: テストの docstring から経緯語を消した。list 順を 3 要素に強くした (MitateDB 側の既存の 2 要素だけの穴も閉じた)。
 - **閉じた項目**: roadmap R-39 の (1b) と (1g)。conformance のベクトルは R-41 に回した (Z-1)。規則 1 の `destructive` の値からの独立と規則 5 も R-41 に加えた。
 - **次の WP**: WP-3 (request binding、manifest 起草中)、`backend_postgres.py` のコメント整理 (Y-5、コメント変更セット 5 の後)。
+
+### 10.9 WP-3a〜3c 実施記録 (2026-09-15、v1.12 追記)
+
+作業指示書 §5.27〜§5.31。3 件とも r2db `service.py` からの片側抽出で、認証・rate・slot・audit の順序は facade に残した。
+
+| WP | 抽出 | merge | root ゲート (passed) | 備考 |
+| --- | --- | --- | --- | --- |
+| WP-3a | r2db `service.py` → `service_results.py` (SV1: `QueryPage`・`MutationResult`) | `6f7168f` | 3384 | — |
+| WP-3b | r2db `service.py` → `capabilities_document.py` (SV2: 文書の組立) | `93a81de` | 3386 | principal・limits・deployment の値を既定値の無い引数で渡す。移した本体の AST の差はその名前の置換だけ (W3-3)。ロールとデプロイ設定の 240 通りで出力が移動前と同一であることをレビューで確認 |
+| WP-3c | r2db `service.py` → `request_shape.py` (SV3: query / mutate の形の検査と CH-0126 の塊、W3-5) | `d236d0b` | 3388 | 認証の後に形の検査が走ること (無効な資格情報と不正な形の組は `AUTH_INVALID`) と、拒否が監査に残ることを query・mutate の tests で固定 (mutate はレビューで追加)。L1 scan の件数 pin `service.py` 10 → 4、`request_shape.py` 6、sib tuple に追加 (W3-4) |
+
+- 3 件とも、コメントは CH-ID ごと逐語 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 40c) で、括弧書きを足した塊は受け皿 `docs/code-history/r2db-api/service.md` に訂正の記録を追記した。変異はすべて赤 (6 / 10 / 14)、root ゲートの前後の `pg_database` 差分 0。WP-3c 統合後の root ゲートは `3388 passed` (`pg_database` / `pg_roles` 差分 0)、`tools/tests` は `392 passed`。
+- **次の WP**: ST8〜ST10 と CE5〜CE7 を WP-3d 以降として実測・起草する (作業指示書 §5.31 の W3-1)。
+
+**既知の穴** (移動前から存在し、各 WP の範囲外。§10.7 の続き):
+
+| # | 対象 | 穴 | 追跡 |
+| --- | --- | --- | --- |
+| 21 | `r2db-api/tests/test_foundation.py` | L439 が `service.py` の `capabilities()` のコメントを引くが、そのコメントはソースに無い (WP-3a の統合時点で既に無い) | R-39 |
+| 22 | r2db `service.py` | L720・L770 の docstring の崩れ「every existing caller --, the in-process」 | R-39 |
+| 23 | r2db `service_results.py` | L14 (逐語で移動) の docstring の崩れ「CCR-13 introduced `items`/`next_page` adds `revisions`」 | R-39 |
+| 24 | r2db `request_shape.py` | 形の検査と `limits.check_request` の順序を固定するテストが無い (WP-3c の commit が記録) | R-39 |
+| 25 | `r2db-api/conformance/conformance_adapter_r2db.py`、`conformance-tests/test_c04_unsupported_and_safe_errors.py` | `service.py` の行番号参照が移動前から古い (WP-3c の commit が記録) | R-39 |
