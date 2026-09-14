@@ -692,6 +692,74 @@ def test_delete_confirmation_phrases_have_fixed_literal_shapes():
     assert RESET_CONTROL_CREDENTIALS == "RESET_CONTROL_CREDENTIALS"
 
 
+def test_delete_confirmation_phrase_distinguishes_value_types():
+    """The where-clause VALUE's own type is part of the derived scope
+    (contract `phrase_construction` rule "scope-included") -- int `1`, str
+    `"1"`, and bool `True` must never collide onto the same phrase even
+    though `1 == True` in Python (and their hashes are equal), so the three
+    values are never used as a dict/set key here, only as a `Predicate.value`
+    argument to the real function."""
+    from r2db_api.structured import Predicate, delete_confirmation_phrase
+
+    def phrase(value):
+        return delete_confirmation_phrase("things", [Predicate(field="id", operator="eq", value=value)], 3)
+
+    assert len({phrase(v) for v in (1, "1", True)}) == 3
+
+
+def test_canonical_where_json_preserves_predicate_order():
+    """`_canonical_where_json` preserves the CALLER's own list order -- it
+    must not silently sort or reverse by operator. Three predicates given in
+    a non-monotonic operator order (`gt`, `lt`, `eq` -- neither ascending nor
+    descending by operator name) must still appear in that same relative
+    order in the canonical JSON: this single chained comparison catches a
+    full ascending sort, a full descending sort, and a reversal that only
+    takes effect once 3 or more predicates are present. Compared by each
+    operator's own quoted value, not by the surrounding key/spacing spelling
+    (spelling is implementation-defined, not pinned here)."""
+    from r2db_api.structured import Predicate, _canonical_where_json
+
+    where = [
+        Predicate(field="id", operator="gt", value=1),
+        Predicate(field="id", operator="lt", value=10),
+        Predicate(field="id", operator="eq", value=5),
+    ]
+    result = _canonical_where_json(where)
+    assert result.index('"gt"') < result.index('"lt"') < result.index('"eq"')
+
+
+def test_delete_confirmation_phrase_is_bounded_by_the_phrase_max_length():
+    """`_PHRASE_MAX_LENGTH` must equal the packaged contract's own
+    `confirmation.maxLength` (never a locally-chosen literal that happens to
+    match it), read the same way `test_http.py`'s own `test_packaged_
+    contract_copy_is_byte_identical_to_spec_source_of_truth` does, and
+    `delete_confirmation_phrase` must actually enforce it against the REAL
+    phrase length. A single-character entity ("w") with an empty `where`
+    list fixes the phrase's own fixed-width portion at 50 characters
+    (`"DELETE " + "w" + " @where=" + digest16(16) + " @schema_revision="`),
+    so the schema_revision's own decimal digit count must be exactly `bound
+    - 50` for the phrase to land exactly at the bound."""
+    from importlib import resources
+
+    from r2db_api.structured import _PHRASE_MAX_LENGTH, delete_confirmation_phrase
+
+    contract = json.loads(
+        resources.files("r2db_api.contract").joinpath("data-service-api.v1.json").read_bytes()
+    )
+    bound = contract["definitions"]["Mutation"]["properties"]["confirmation"]["maxLength"]
+    assert contract["definitions"]["ScopedMutation"]["properties"]["confirmation"]["maxLength"] == bound
+    assert contract["schemas"]["SchemaOperationRequest"]["properties"]["confirmation"]["maxLength"] == bound
+    assert contract["schemas"]["CredentialRevokeRequest"]["properties"]["confirmation"]["maxLength"] == bound
+    assert _PHRASE_MAX_LENGTH == bound
+
+    digits = bound - 50
+    phrase = delete_confirmation_phrase("w", [], int("1" * digits))
+    assert len(phrase) == bound
+
+    with pytest.raises(AssertionError):
+        delete_confirmation_phrase("w", [], int("1" * (digits + 1)))
+
+
 def test_require_destructive_confirmation_needs_destructive_true_and_the_exact_phrase():
     """`require_destructive_confirmation` denies whenever `destructive` is
     not `True`, even when `confirmation` matches `phrase` exactly -- the
