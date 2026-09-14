@@ -9,25 +9,26 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal
-import re
 from typing import Any, Callable
 
 from .audit_hook import ApplicationAuditHook
 from .errors import fail, observed_type_of, violation
+from .identifier_rules import (
+    IDENTIFIER,
+    MAX_IDENTIFIER_LENGTH,
+    _RESERVED_ENTITY_NAMES,
+    _RESERVED_PREFIX,
+    _reject_reserved_entity_name,
+    _reject_reserved_field,
+    _reject_reserved_prefix,
+    validate_identifier,
+)
 from .inmemory_predicate import _matches, _predicate_text, _wildcard_pattern
 from .inmemory_sort import _JSON_TYPE_RANK, _sort_key, _sort_rows
 from .limits import ResourceLimits
 from .pg_text_format import _float8out_text, _jsonb_numeric_text, _jsonb_scalar_text, _jsonb_text
 from .value_nul import _contains_nul
 
-IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# PostgreSQL's own identifier limit, and the bound MitateDB-api already
-# enforces (`^[a-z][a-z0-9_]{0,62}$`). This is a structural syntax policy on
-# identifiers, not a deployment-tunable resource class from the contract's
-# `limits.classes`, so it lives here as a constant rather than in
-# ResourceLimits; the contract permits a stricter per-implementation
-# identifier policy.
-MAX_IDENTIFIER_LENGTH = 63
 OPERATORS = {"eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"}
 # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication, docs/design/
 # R2DB_CCR13_STORAGE_V1.md): `contains` is literal substring containment
@@ -38,66 +39,6 @@ OPERATORS = {"eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", 
 # ahead of the per-column `_check_type` declared-type check below, since
 # this constraint is about the operator, not the column.
 _TEXT_ONLY_OPERATORS = {"contains", "matches"}
-
-# Contract 1.1.0 (CCR-13, R2DB_CCR13_STORAGE_V1.md R-3): the server-assigned
-# row address `id` and any implementation-internal name starting with this
-# prefix (e.g. the invisible revision column `_r2db_revision`) are reserved.
-# A client may never declare a field, entity, or index using either form --
-# this is what keeps the reservation a checked, fail-closed property instead
-# of a convention two backends could silently drift on (R-3, M-9: both cells
-# share this exact policy; R-5 extends the `_r2db` prefix reservation to
-# index names too -- WP-2 review minor (d)).
-_RESERVED_PREFIX = "_r2db"
-
-
-# WP-2e rework (audit-wp2e.md D-3, ruling L-3): `field` is now REQUIRED
-# (never a default) on every identifier-syntax helper below -- the exact
-# request-internal path (`errors.details_vocabulary.VALIDATION_FAILED.
-# field`'s own convention, "/"-separated from the request body root, no
-# leading "/") carrying the identifier under check, batch index included
-# wherever the caller has one (`operations/<i>/...`). A REQUIRED keyword-
-# only parameter (not a default of `None`/`"identifier"`) is deliberate:
-# it makes forgetting to supply a real path a call-site TypeError, not a
-# silently-wrong literal `"identifier"` that matches no request key (the
-# exact D-3 finding this rework closes).
-def validate_identifier(value: str, *, field: str) -> str:
-    if not isinstance(value, str) or not IDENTIFIER.fullmatch(value) or len(value) > MAX_IDENTIFIER_LENGTH:
-        fail("IDENTIFIER_INVALID", "Identifier has an unsupported format.", details=violation("identifier_syntax", field=field))
-    return value
-
-
-def _reject_reserved_field(name: str, *, field: str) -> None:
-    if name == "id" or name.startswith(_RESERVED_PREFIX):
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field=field))
-
-
-def _reject_reserved_prefix(name: str, *, field: str) -> None:
-    """Prefix-only reservation, used for entity names and (WP-2 review
-    minor (d)) index names -- unlike `_reject_reserved_field`, `id` itself
-    is not reserved here (an entity or index literally named `id` does not
-    collide with the per-row address column)."""
-    if name.startswith(_RESERVED_PREFIX):
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field=field))
-
-
-# WP-2(b) review B-2 (major, supervisor ruling 2026-09-03 -- "義務として
-# 実装する"): contract 1.4.0 `structured_operations.reserved_entity_names_
-# note` (unconditional item 6) states "audit_events is reserved across
-# implementations as an entity/collection name ... both peers already
-# refuse this exact name defensively". That was true for MitateDB
-# (`backend_sqlite._RESERVED` / `backend_postgres._RESERVED_EXACT`) but NOT
-# for r2db-api before this fix -- `_reject_reserved_prefix` above only ever
-# rejected the `_r2db` PREFIX, never this one exact name, so `create_entity`
-# with `entity="audit_events"` was silently ACCEPTED. EXACT match only
-# (never a prefix) -- an application legitimately owning e.g.
-# "audit_events_archive" must not be blocked; the contract's own text names
-# this one literal string, not a namespace.
-_RESERVED_ENTITY_NAMES = frozenset({"audit_events"})
-
-
-def _reject_reserved_entity_name(name: str, *, field: str) -> None:
-    if name in _RESERVED_ENTITY_NAMES:
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field=field))
 
 
 def _mapping(value: Any, message: str) -> dict[str, Any]:
@@ -361,8 +302,9 @@ def bind_mutation(operation: Any, known_fields: set[str], *, operation_index: in
 # unvalidated client-supplied string reflected back), and (e) bounded well
 # within `confirmation`'s contract maxLength (256).
 
-# r2db's own identifier limit (`MAX_IDENTIFIER_LENGTH` above), not a contract
-# figure -- used only to assert the worst-case phrase length stays bounded.
+# r2db's own identifier limit (`MAX_IDENTIFIER_LENGTH` above (in
+# `identifier_rules.py`)), not a contract figure -- used only to assert the
+# worst-case phrase length stays bounded.
 _PHRASE_MAX_LENGTH = 256
 # int64 (`_INT64_MAX` below in this same module) has at most 19 decimal
 # digits; `schema_revision` is a monotonic counter starting at 0 and is
