@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.10 (2026-09-15)。** 直後の v1.9 行は当時の改版履歴として保存する。v1.10 は既存の本文を書き換えず、末尾に **§10.7 (WP-1m / 1n / 1k 実施記録)** を追記した記録である。
 - **現行版: v1.9 (2026-09-15)。** 直後の v1.8 行は当時の改版履歴として保存する。v1.9 は既存の本文を書き換えず、末尾に **§10.6 (WP-1j / 1l 実施記録)** を追記した記録である。
 - **現行版: v1.8 (2026-09-14)。** 直後の v1.7 行は当時の改版履歴として保存する。v1.8 は既存の本文を書き換えず、§10.3 に【追記】を 1 件足し、末尾に **§10.5 (WP-1g / 1h / 1i 実施記録)** を追記した記録である。
 - **現行版: v1.7 (2026-09-14)。** 直後の v1.6 行は当時の改版履歴として保存する。v1.7 は §10.3 以前を書き換えず、未コミットの §10.4 に既知の穴の追跡先 (roadmap R-39) と #6 の扱い (型検査器の既知事項) を反映した記録である。
@@ -374,3 +375,23 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 | 15 | `MitateDB-api/tests/test_limit_class_vocabulary.py` | L154 の件数説明が `_resolve_field_constraints` の箇所を今も `cell.py` としている (作業指示書 §5.16 の 19) | R-39 |
 | 16 | MitateDB `postgres_reserved_names.py` | 予約名の拒否メッセージの文言を固定するテストが無い | R-39 |
 | 17 | MitateDB `postgres_reserved_names.py` | `pg_` の大文字小文字の区別を固定するテストが無い (`identifiers.py` の小文字限定の正規表現が先に弾くので、外からは到達しない) | R-39 |
+
+### 10.7 WP-1m / 1n / 1k 実施記録 (2026-09-15、v1.10 追記)
+
+| WP | 抽出 | merge | root ゲート (passed) | 備考 |
+| --- | --- | --- | --- | --- |
+| WP-1m | MitateDB `backend_postgres.py` → `postgres_types.py` (BP1: 型対応の定数 4 つ) | `cca16fe` | 3371 | `_TYPES` は facade に残さない (Y-7)。allowlist は −64。manifest の変異 2 で `test_declared_type_registry_round_trips_every_contract_type` も赤になることを実測 |
+| WP-1n | MitateDB `backend_postgres.py` → 既存の `postgres_value_domain.py` (BP2: `_validate_value_domain`) | `4d45fc6` | 3373 | 件数 pin 23 → 21 / 4 → 6、allowlist は −118。未使用になった `observed_type_of` を削除。括弧書きは Y-2 / Y-4 / Y-9 と `backend_sqlite.py` L688 |
+| WP-1k | MitateDB `cell.py` → `provisional_gate.py` (CE4: `_deny_provisional_field`) | `13241c2` | 3375 | 件数 pin `cell.py` 44 → 43。`http.py` の CH-ID 付き docstring に 40c の括弧書きを足したので、受け皿 `docs/code-history/MitateDB-api/http.md` の CH-0192 に訂正の記録を追記 (コメント出所の変更セット 0g の手順)。`errors.py` の括弧書きは入れ子にしない書き換え |
+
+- 3 件とも、関数本体は AST で同一、facade 経由で同じ object、docstring は逐語 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 40c)、独立コードレビュー済み、root ゲートの前後の `pg_database` 差分 0。
+- **その間に起きた事象**: コメント出所の変更セット 0g が r2db `postgres.py` の 4 行を戻したため、r2db の L1 scan の行番号 pin (1519 → 1523) がずれ、main の root suite が赤になった。`9297dd9` で直した。0g の最終確認は `tools/tests` だけで、root gate を流していなかった。**教訓: src の行数が変わる変更は、root gate を通してから統合する。**
+- **次の WP**: WP-1 の「4〜」行は完了。次は WP-2a (CE1 の性質テスト、Y-6)、`backend_postgres.py` のコメント整理 (Y-5、WP-4 の前)、WP-3。
+
+**既知の穴** (移動前から存在し、各 WP の範囲外。§10.6 の続き):
+
+| # | 対象 | 穴 | 追跡 |
+| --- | --- | --- | --- |
+| 18 | MitateDB `postgres_types.py` | int32 / int64 の入れ替えと text domain の差し替えを検出するのは、新しい literal pin だけ | R-39 |
+| 19 | MitateDB `postgres_value_domain.py` | float・int32・json の domain 検査を 1 型だけ飛ばす変異と、孤立 surrogate の検査を high surrogate だけに狭める変異が緑のまま | R-39 |
+| 20 | MitateDB `provisional_gate.py` | 移した docstring の呼出し元の文は移動前から古い。到達不能な gate を固定しているのは直接のテストだけ | R-39 |
