@@ -697,13 +697,11 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
     errors: list[BaseException] = []
 
     # `*args, **kwargs`, forwarded verbatim to `original_gate` -- see
-    # `conformance_adapter_mitatedb.py`'s own identical-named function for
-    # the full rationale (`ApplicationCell._limit_gate` has already grown
-    # one new keyword since this monkeypatch was first written,
-    # `effective_limits`, and a hardcoded signature here would drop it
-    # silently or break on any future one). The stall point's own
-    # placement is unchanged; only the argument plumbing is now
-    # signature-agnostic.
+    # `conformance_adapter_mitatedb.py`'s own identical-named function.
+    # This stall point holds the request AFTER the real gate's own
+    # `__enter__` (rate/concurrency/request_bytes/operation_depth already
+    # checked) and BEFORE that value reaches the caller, without needing
+    # to know `_limit_gate`'s own current keyword signature.
     def _stalled_limit_gate(*args, **kwargs):
         inner = original_gate(*args, **kwargs)
         return _StalledGateContextManager(inner, entered, release)

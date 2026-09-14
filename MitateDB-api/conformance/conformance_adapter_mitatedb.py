@@ -443,18 +443,11 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
     release = threading.Event()
     errors: list[BaseException] = []
 
-    # `*args, **kwargs`, forwarded verbatim to `original_gate` (rather than
-    # a fixed `principal, request=None, *, request_id=None` signature):
-    # `ApplicationCell._limit_gate` has already grown one new keyword
-    # since this monkeypatch was first written (`effective_limits`, Phase
-    # 9 WP-3d) -- a hardcoded signature here would either drop that
-    # keyword silently or raise `TypeError` on any FUTURE one, and WP-3cd
-    # separately had to route `_gate()` around this exact fragility via an
-    # identity comparison (`self.config`) rather than this proxy ever
-    # seeing it. This stall point's own placement (after the real gate's
-    # `__enter__` -- rate/concurrency/request_bytes/operation_depth --
-    # and before that value reaches the caller) is unchanged; only the
-    # argument plumbing is now signature-agnostic.
+    # `*args, **kwargs`, forwarded verbatim to `original_gate`: this stall
+    # point holds the request AFTER the real gate's own `__enter__`
+    # (rate/concurrency/request_bytes/operation_depth already checked)
+    # and BEFORE that value reaches the caller, without needing to know
+    # `_limit_gate`'s own current keyword signature.
     def _stalled_limit_gate(*args, **kwargs):
         inner = original_gate(*args, **kwargs)
         return _StalledGateContextManager(inner, entered, release)
