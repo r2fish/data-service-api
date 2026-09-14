@@ -1,5 +1,7 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.4 (2026-09-14)**: 変更セット 3 の節 (§6) に独立レビューの指摘 (監督裁定) を反映した: 0d の着手条件、契約説明らしい文の監査照合 (完了条件 24)、判定表の範囲、Q-7・Q-8 の本文への反映と §6.5 への統合。§0〜§5 は書き換えていない。
+- **v1.3 (2026-09-14)**: §6 に変更セット 3 (MitateDB `http.py` と r2db `control_plane.py`) の manifest を追記した。§0〜§5 は書き換えていない。
 - **v1.2 (2026-09-14)**: 変更セット 2 の節 (§5) に独立レビューの指摘 7 件 (監督裁定) を反映し、§5.5 に裁定を統合した。§0〜§4 は書き換えていない。
 - **v1.1 (2026-09-14)**: §5 に変更セット 2 (r2db `postgres.py` の §9 再判定と r2db `service.py`) の manifest を追記した。§0〜§4 は書き換えていない。
 - 版数: **v1.0 (2026-09-14)**。起草 v0.1 の疑義 9 件への監督裁定 (同日) を反映した。基点 main `016a0f3`。
@@ -797,3 +799,137 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 | Q-6 | 許容操作はすべて許可であり、規則 3 の括弧ごと削除も義務ではない。`(design)` を残す形も括弧ごと削除も緑 | 完了条件 11 |
 | (5) の範囲 | 追加行の検査は、基点の塊に無かった経緯トークンだけを対象にする。基点に元からある経緯トークンを残す部分削除は (5) で赤にならない | 完了条件 7・8 |
 | レビュー | 独立レビューの指摘 1〜7 (範囲を全 156 塊に広げる、Q-4 の変異の差替え、変異対象の修正、数え方の併記、R-37 WP-3 との順序、指示語の候補一覧、重複の整理) | §5.1〜§5.4 |
+
+## 6. 変更セット 3 — MitateDB `http.py` と r2db `control_plane.py`
+
+正本設計は v0.7 (§3、§6、§8、§9、§10)。行番号は main `d628985` の値。
+
+### 6.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | 変更セット 2 が main に統合されている (`d628985`) |
+| 2 | 設計 §3 の叙述の目印一覧が main に統合されている (§6.5 Q-7) |
+| 2b | 変更セット 0d (保護参照 — SI- / C- / CCR-、spec §、版数付き文書名、実在パス — を含む文の丸ごと削除をツールで常時禁止。設計 v0.8 §9) が main に統合されている |
+| 3 | 着手時に、並行 branch、R-37 の触るファイル (§6.2)、設計 §5(b) の grep を取り直す |
+
+### 6.2 選定 (実測 2026-09-14、`d628985`)
+
+設計 §6 の優先 1 は、残る 3 module がすべて R-37 の抽出待ちなので対象外。優先 2 (10 行以上の塊の行数順) から、登録 helper と文字列検査を持たない上位を peer ごとに 1 つ選んだ。経緯トークンは §2.3 末尾の数え方 (`_HISTORY_TOKEN_PATTERNS`、全文。`service.py` 65 / `postgres.py` 37 を再現して確認)。
+
+| 候補 | 経緯トークン | 10 行以上の塊 (件 / 行) | 登録 helper | §5(b) 検査 | 行番号 pin | R-37 | 判定 |
+|---|---|---|---|---|---|---|---|
+| MitateDB `cell.py` / `backend_postgres.py`、r2db `structured.py` | — | — | — | — | — | 抽出が残る | 対象外 (枠) |
+| **MitateDB `http.py`** | 182 | 40 / 708 | なし | なし (`test_preauth_concurrency_bound.py:561` は `getsource` を `ast.parse` に通すので除外) | 0 | 予定なし | **選定** |
+| **r2db `control_plane.py`** | 155 | 37 / 655 | なし | なし | 0 | 予定なし | **選定** |
+| r2db `ops.py` | 131 | 27 / 616 | あり | あり | 0 | — | 除外 |
+| r2db `credential_store.py` | — | 31 / 596 | あり | — | — | — | 除外 |
+| MitateDB `control_plane.py` | 150 | 28 / 467 | あり | なし | 0 | — | 除外 |
+
+- 受け皿は peer ごと: 新規 `docs/code-history/MitateDB-api/http.md` (MitateDB 側で最初の companion。ツールの `PEERS` は両 peer を走査する) と新規 `docs/code-history/r2db-api/control_plane.md`。
+
+**R-37 WP-1h / WP-1i との重なり** (○ = なし)
+
+| 本変更セットが触るファイル | WP-1h | WP-1i |
+|---|---|---|
+| `MitateDB-api/src/mitatedb_api/http.py` | ○ (1h が触るのは r2db `http.py` の L466) | ○ |
+| `r2db-api/src/r2db_api/control_plane.py` | ○ | ○ (`delete_confirmation.py` は facade 経由で呼ばれるだけ) |
+| `docs/code-history/MitateDB-api/http.md`、`docs/code-history/r2db-api/control_plane.md`、本書 §6 | ○ | ○ |
+| (触らない) `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`、`tools/tests/test_leaf_import_direction.py`、`structured.py`、`r2db-api/tests/test_foundation.py` | 1h が触る | 1i が触る |
+
+2 module とも行番号 pin が 0 件で件数 pin は AST 走査なので、L1 scan のファイルは触らない。したがって WP-1h / 1i と並行できる。
+
+### 6.3 Manifest
+
+**目的**: 2 module の経緯を peer ごとの受け皿へ移し、コードに現在の理由と `CH-NNNN` を残す。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/http.py`、`r2db-api/src/r2db_api/control_plane.py` (**どちらもコメントと docstring だけ**)、新規 `docs/code-history/MitateDB-api/http.md`、新規 `docs/code-history/r2db-api/control_plane.md`、本書 §6.4 | 他の `src/` 全部 (r2db `http.py`、MitateDB `control_plane.py` を含む)、`tools/`、`tools/tests/`、両 peer の `tests/` (L1 scan を含む)、`conformance-tests/`、既存の受け皿、`docs/code-history/pair.md`、`docs/design/`、roadmap、`_ISOMORPHIC_TARGETS` |
+
+| 項目 | 内容 |
+|---|---|
+| CH-ID 予約 | **`CH-0182`〜`CH-0388`** (`http.py` 97 塊 + `control_plane.py` 110 塊 = 207 が上限)。基点の CH-ID は 2 module とも 0 件なので、すべて新規 |
+| 必須の規律 (変更セット 2 までの裁定) | (i) 経緯だけの文は (3) で削除し、現在の理由 (特に安全上の理由)・規則・防護の説明と同居する文は残して、トークンだけを機械的に消す (設計 §3、§10.1)。(ii) 削除した文ごとに、直後に残す 2 文を §6.4 の候補一覧に載せ、指示語・定冠詞・副詞 (設計 §3 の点検語) を確かめる。(iii) 全 207 塊を読み、判定表は設計 §3 の目印一覧に当たる全文を覆う (一覧は下限)。(iv) Q-4 の再利用照合は対象外 (基点に CH-ID が無い。§6.5 Q-8) |
+| ID とパス | 設計 §3・§8・§9。`control_plane.py` L3 の `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` は実在パス (出所) |
+| 手順 | 設計 §6「手順」。40b は非該当 (行番号 pin 0 件) を監査照合で記録する |
+
+**完了条件 ↔ 変異** (P3 / P4 = `check_comment_provenance.py --base <親コミット>` を `http.py` / `control_plane.py` に、R = `--register`)
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 1 | コード不変 | 2 module: コード行の literal を 1 文字変える | P3 / P4 exit 1 (1) |
+| 2 | 移した塊が逐語 | `http.md`: 1 節から 1 文消す | P3 exit 1 (2) |
+| 3 | CH の無い塊を変えていない | `control_plane.py`: CH を付けずに 1 塊から 1 文消す | P4 exit 1 (2) |
+| 4 | 文区間の削除だけ | `http.py`: (a) 否定語を落とす (b) 2 文を並べ替える (c) 1 語足す (d) 折返し行を 1 行消す | P3 exit 1 (3)、4 種それぞれ |
+| 5 | 保護参照は括弧内で消せない | `http.py`: L228 の `(SI-08)` を消す | P3 exit 1 (4) |
+| 6 | ラベル削除が規則どおり (§8) | `control_plane.py`: L199 のラベルを消し、区切りの後ろの先頭文字を小文字化する | P4 exit 1 (6) |
+| 7 | 経緯を足していない | 追加行に `WP-` を含める | P exit 1 (5) |
+| 8 | §9 の 1: 複数語トークンも追加検査に掛かる | 追加行に `Supervisor ruling` を含める | P exit 1 (5) |
+| 9 | §9 の 2: 実在パスは消せない | `control_plane.py`: L3 の実在パスを消す | P4 exit 1 |
+| 10 | §9 の 3: 括弧ごと削除は許可 (義務ではない) | **確認 (変異ではない)**: `control_plane.py` L199 の `(design D-5)` を括弧ごと消す | P4 exit 0 (**監査照合**: 実行ログ) |
+| 11 | §9 の 4: `/` 結合 ID は ID ごとに扱う | `control_plane.py`: L39 の `R-1/R-3` から `R-1` だけを消す | P4 exit 1 |
+| 12 | 版数付きの文書名は残る (§3) | `control_plane.py`: L207 の括弧から `contract 1.8.0` を消す | P4 exit 1 |
+| 13 | 指示語・定冠詞・副詞の参照先を消していない | 残す文の点検語が参照する文を削除する | 機械では赤にならない — **監査照合**: §6.4 の候補一覧を再現して照合し、コードレビュー (テンプレート 5) でも確かめる |
+| 14 | 安全上の理由と同居する文を残している | 同居文を文ごと削除する | 機械では赤にならない — **監査照合**: 判定表の根拠とレビュー |
+| 15 | ソースから削った文が受け皿に逐語で残っている (Q-4 の再利用照合は対象外。§6.5 Q-8) | `http.md` 又は `control_plane.md`: 移した塊の節から 1 文を削る | P3 / P4 exit 1 (§4.1 (2)) |
+| 16 | ID の解決と孤児 | コード側 1 件を `CH-0999` にする / 参照されない節を足す | R exit 1 (§4.2-1) |
+| 17 | ID の全体一意 | `docs/code-history/MitateDB-api/http.md` に `control_plane.md` と同じ番号の節を足す | R exit 1 (§4.2-2) |
+| 18 | docstring 依存の新設なし | `http.py` に `__doc__` の読出しを 1 行 | R exit 1 (§4.2-5) |
+| 19 | 受け皿の ID が `check_doc_refs` で解決 | `http.md` の fenced block に roadmap に無い 2 桁の R 番号を 1 つ足す | `check_doc_refs.py` exit 1 |
+| 20 | 行番号 pin と文字列検査が非該当のまま | **監査照合**: 両 peer の L1 scan の allowlist に 2 module が 0 件、§5(b) の grep で 2 module を文字列として読む検査 0 件 | — |
+| 21 | 判定表が対象を覆う | **監査照合** — 設計 §3 の目印一覧に当たる全文 (一覧は下限) が §6.4 にあり、根拠・点検語の欄に空欄なし。全 207 塊を読んだことを記録する | — |
+| 22 | 集計行と経緯トークン数の前後 | **監査照合** (§6.4 の記録と実行ログ。数え方は §2.3 末尾) | — |
+| 23 | 対応の無い行が無い | **監査照合** (§1.5 の 40) | — |
+| 24 | 契約説明らしい文を消していない | HTTP のステータス番号 (3 桁) 又はエラーコード語彙 (大文字を `_` で区切る語。例 `CONFLICT`、`SERVICE_UNAVAILABLE`) を含む文を 1 つ消す | **監査照合**: 削除した文からこれらを含む文をスクリプトで一覧に出す。一覧の各行が判定表で「経緯だけの文で、現行の契約説明ではない」と根拠付きで判定されていなければ赤 |
+
+**検証コマンドと期待形** (40a: 前後の 2 回、前景直列、`timeout` 600000)
+
+```
+./.venv/bin/python -m pytest -q r2db-api/tests       → failed/skipped/xfailed 0、前後で passed 数一致 (L1 scan を含む)
+./.venv/bin/python -m pytest -q MitateDB-api/tests   → 同上 (L1 scan、test_preauth_concurrency_bound.py を含む)
+./.venv/bin/python -m pytest -q conformance-tests    → 同上
+./.venv/bin/python -m pytest -q tools/tests          → failed 0
+python3 tools/check_comment_provenance.py --base <親コミット> MitateDB-api/src/mitatedb_api/http.py r2db-api/src/r2db_api/control_plane.py → exit 0
+python3 tools/check_comment_provenance.py --register → exit 0
+python3 tools/check_doc_refs.py                      → exit 0
+python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=0
+監督: root suite 単独 (§1.3 の 19〜23)。前後の集計差分は 0
+```
+
+**使用テンプレート**: **2** → **5** → **6**。**変更クラス**: **B**。
+
+### 6.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
+
+**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行。点検語は設計 §3)
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語 (指示語・定冠詞・副詞) の参照 | 結果 |
+|---|---|---|---|---|---|---|
+
+**判定表** (設計 §3 の目印一覧に当たる全文。一覧は下限。全 207 塊を読む。完了条件 24 の一覧の文を含む)
+
+| ファイル / 塊又は文 (行 / qualname) | 判定 (残す / 移す `CH-NNNN` / 対象外) | 根拠 (設計の節。同居文はその旨) | 候補一覧の # |
+|---|---|---|---|
+
+| 記録 | 前 | 後 |
+|---|---|---|
+| 経緯トークン数 `http.py` / `control_plane.py` (§2.3 末尾の数え方) | 182 / 155 | |
+| r2db / MitateDB / conformance / tools/tests の集計行 | | |
+
+### 6.5 監督裁定 (2026-09-14。疑義はすべて解決)
+
+| # | 裁定 | 反映 |
+|---|---|---|
+| Q-7 | 叙述の目印の語の一覧は設計 §3 に固定する (一覧は下限) | §6.1 の 2、§6.3 (iii)、完了条件 21、§6.4 |
+| Q-8 | 基点に CH-ID が無い module では Q-4 の書き戻し変異は意味を持たず、再利用照合は対象外 | §6.3 (iv)、完了条件 15 |
+| レビュー | 0d の統合を着手条件にする。契約説明らしい文 (HTTP ステータス番号・エラーコード語彙) の削除を監査照合する。完了条件 10 は確認と明記する | §6.1 の 2b、完了条件 10・24 |
+| 0d の適用 | 実在パスへの言及を含む文は、引用の形でなくても常に保護する。変更セット 2 で `r2db-api/src/r2db_api/service.py:72` (CH-0179) から削った文 (`_coalesced_count` のコメントが `audit_counts.py` へ移った旨) はこの規則で削除できないので、本変更セットで戻す | 下の追記 |
+
+**追記 (0d の適用)**
+
+- **触るファイルに加える**: `r2db-api/src/r2db_api/service.py`。変更は CH-0179 の塊にこの 1 文を戻すことだけ。`# history: CH-0179` 行と `docs/code-history/r2db-api/service.md` の CH-0179 節は残す (D-1)。戻す文は同節の fenced block (変更セット 2 の親コミット時点の写し) から逐語で複写する。
+- **重なり表**: `service.py` は R-37 WP-1h / WP-1i と重ならない (WP-1i が触るのは r2db `structured.py` で、`service.py` は触らない)。
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 25 | 戻した文が変更セット 2 より前の原文と逐語で一致し、`service.py` が照合を通る | `service.py`: 戻した文の 1 語を変える | `check_comment_provenance.py --base <本変更セットの親コミット> r2db-api/src/r2db_api/service.py` exit 1 (§4.1 (3))。変異なしで exit 0 |
