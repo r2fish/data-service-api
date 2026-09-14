@@ -2743,30 +2743,121 @@ def test_0e_run_base_green_when_join_fixed(tmp_path):
     assert code == 0, output
 
 
-def test_0e_both_peers_untouched_src_unchanged_base_head_is_green():
-    # Regression safety: running --base HEAD across every real source
-    # file in both peers that this session's work did NOT touch (still
-    # byte-identical to HEAD) must stay green -- the new §9e check must
-    # not fire any false positive on ordinary, untouched content. The 4
-    # files this round's fix targets (http.py, control_plane.py,
-    # service.py, postgres.py) are excluded here on purpose: they carry
-    # this session's own pending, uncommitted fix and are covered
-    # instead by the dedicated `--base` runs in the change-set-3 report
-    # (they must show 0 §9e hits once fixed, which is verified
-    # separately, not by this generic sweep).
-    excluded = {"http.py", "control_plane.py", "service.py", "postgres.py"}
+def _check_rev_pair(repo_root, rel_path, old_source, new_source, real_paths, identifier_set, out):
+    """change set 0f (supervisor ruling 2026-09-15, fixing this test's
+    own working-tree dependency): the SAME per-file checks `run_base`
+    runs, but taking `old_source`/`new_source` directly instead of
+    reading the working tree -- lets a test compare two REVISIONS (or a
+    revision against itself) without ever touching the local worktree's
+    own uncommitted state."""
+    had_failure = False
+    try:
+        old_sig = cp.ast_signature(old_source)
+        new_sig = cp.ast_signature(new_source)
+    except SyntaxError as exc:
+        print(f"FAIL (§4.1 (1)) {rel_path}: could not parse ({exc})", file=out)
+        return 1
+    if old_sig != new_sig:
+        print(f"FAIL (§4.1 (1)) {rel_path}: code changed (AST differs, docstrings excluded)", file=out)
+        had_failure = True
+    for lineno, line_text, pat in cp.check_no_added_history_tokens(old_source, new_source):
+        print(f"FAIL (§4.1 (5)) {rel_path}:{lineno} added line carries a history token ({pat}): {line_text.strip()!r}", file=out)
+        had_failure = True
+    peer = Path(rel_path).parts[0]
+    companion_lookup = cp._load_companion_lookup(repo_root, peer)
+    new_blocks = cp.extract_all_blocks(new_source)
+    old_blocks = cp.extract_all_blocks(old_source)
+    for msg in cp.check_provenance_semantics(
+        rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths, identifier_set
+    ):
+        print(msg, file=out)
+        had_failure = True
+    for nb in new_blocks:
+        if nb.history_id is None:
+            continue
+        basis_text = companion_lookup.get(nb.history_id)
+        if basis_text is None:
+            continue
+        for correct, broken in cp.find_broken_line_wrap_joins(nb.kind, basis_text, nb.dedented, identifier_set):
+            print(f"FAIL (§9e) {rel_path} broken line-wrap join: {broken!r} should be {correct!r} (zero space)", file=out)
+            had_failure = True
+    return 1 if had_failure else 0
+
+
+def test_0f_both_peers_all_src_rev_vs_itself_is_green():
+    # Regression safety, rewritten to be independent of the local
+    # worktree's own uncommitted state (supervisor ruling 2026-09-15):
+    # the previous version of this test compared the WORKING TREE
+    # against HEAD, so it went red the instant ANY tracked .py file
+    # under either peer's src/ had an uncommitted comment edit -- R-37
+    # WP-1m hit exactly this in a different worktree (an unrelated
+    # parenthetical edit looked like "an unregistered change" under
+    # 40c). A checker must never depend on what else happens to be
+    # sitting, uncommitted, in the same shared checkout. Instead this
+    # compares HEAD's own blob against ITSELF (via `git show`, never
+    # the working tree) for every tracked .py file in both peers' src/
+    # -- content is byte-identical by construction, so nothing DIFFERS
+    # for the AST/added-token/derivability checks to flag. §9e
+    # (`find_broken_line_wrap_joins`) does not compare old vs new for
+    # equality -- it asks "does this content still contain a broken
+    # join relative to ITS OWN companion" -- so it is NOT automatically
+    # green just because both sides are the same rev: it can genuinely,
+    # correctly go red if HEAD's own committed blob still contains a
+    # broken join relative to its companion's canonical text (design
+    # ruling 2026-09-15 (c): no per-file exception list -- a red here
+    # correctly catches real, still-uncommitted breakage left in HEAD,
+    # and clears on its own the moment that breakage is committed, with
+    # nothing to remove by hand).
+    real_paths = cp._tree_paths(REAL_REPO_ROOT, "HEAD")
+    identifier_set = cp._tracked_identifier_set(REAL_REPO_ROOT, "HEAD")
     r2db_src = REAL_REPO_ROOT / "r2db-api" / "src" / "r2db_api"
     mitatedb_src = REAL_REPO_ROOT / "MitateDB-api" / "src" / "mitatedb_api"
     rel_paths = [
         str(p.relative_to(REAL_REPO_ROOT))
         for base in (r2db_src, mitatedb_src)
         for p in sorted(base.glob("*.py"))
-        if p.name not in excluded
     ]
     out = io.StringIO()
-    code = cp.run_base(REAL_REPO_ROOT, "HEAD", rel_paths, out=out, err=out)
+    had_failure = False
+    for rel_path in rel_paths:
+        blob = subprocess.run(
+            ["git", "show", f"HEAD:{rel_path}"], cwd=REAL_REPO_ROOT, capture_output=True, timeout=30
+        )
+        assert blob.returncode == 0, blob.stderr.decode()
+        source = blob.stdout.decode("utf-8")
+        code = _check_rev_pair(REAL_REPO_ROOT, rel_path, source, source, real_paths, identifier_set, out)
+        if code != 0:
+            had_failure = True
     output = out.getvalue()
-    assert code == 0, output
+    assert not had_failure, output
+
+
+def test_0f_rev_pair_check_is_red_when_working_tree_has_uncommitted_comment_edit(tmp_path):
+    # Mutation for the rewritten test above: swapping the comparison
+    # target back to the WORKING TREE (the exact bug being fixed) must
+    # go red for a fixture with an uncommitted, unregistered comment
+    # edit -- confirming this failure mode is real and that the new
+    # rev-vs-itself test correctly avoids it.
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/mod.py", "# a plain comment.\ndef f():\n    return 1\n")
+    rev = _commit_all(repo, "old")
+    # An uncommitted, unrelated comment tweak -- never registered/moved,
+    # exactly like R-37 WP-1m's parenthetical edit.
+    _write(repo, "r2db-api/src/r2db_api/mod.py", "# a plain comment (tweaked).\ndef f():\n    return 1\n")
+    # Old-style check: working tree vs HEAD -- goes red.
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1, output
+    # New-style check: rev vs itself -- stays green regardless of the
+    # uncommitted working-tree edit, since it never reads the worktree.
+    real_paths = cp._tree_paths(repo, rev)
+    identifier_set = cp._tracked_identifier_set(repo, rev)
+    blob = subprocess.run(
+        ["git", "show", f"{rev}:r2db-api/src/r2db_api/mod.py"], cwd=repo, capture_output=True, timeout=30
+    )
+    source = blob.stdout.decode("utf-8")
+    out2 = io.StringIO()
+    code2 = _check_rev_pair(repo, "r2db-api/src/r2db_api/mod.py", source, source, real_paths, identifier_set, out2)
+    assert code2 == 0, out2.getvalue()
 
 
 def test_0e_camelcase_split_inside_backtick_zero_space_join():
@@ -3056,3 +3147,258 @@ def test_0e_mutation_identifier_set_excluding_docs_is_red(tmp_path):
         wrong_identifier_set,
     )
     assert ok is False, reason
+
+
+# ===========================================================================
+# change set 0f: predicate B rules 6-8 (supervisor ruling 2026-09-15,
+# read-only survey found 71 remaining reflow-damage cases B still missed)
+# ===========================================================================
+
+def test_0f_rule6_slash_boundary_red_and_green():
+    # Red (broken): a naive single-space join after `/`.
+    assert cp._flatten_comment("# see `cell.py`/\n# `backend_sqlite.py` here.") == (
+        "see `cell.py`/`backend_sqlite.py` here."
+    )
+    assert cp._flatten_comment("# calls `POST /v1/data/\n# mutations` endpoint.") == (
+        "calls `POST /v1/data/mutations` endpoint."
+    )
+
+
+def test_0f_rule7_paren_bracket_equals_inside_backtick_red_and_green():
+    assert cp._flatten_comment("# uses `HttpService(\n# ...)` call sites.") == "uses `HttpService(...)` call sites."
+    assert cp._flatten_comment('# an allow-list for `role=\n# "audit"` while.') == (
+        'an allow-list for `role="audit"` while.'
+    )
+    # Green: an ordinary SPACED assignment `a = b` keeps its space -- the
+    # character right before `=` is a space, not a word char or bracket.
+    assert cp._flatten_comment("# note that a =\n# b holds here.") == "note that a = b holds here."
+
+
+def test_0f_rule8_opening_backtick_immediately_wrapped_red_and_green():
+    assert cp._flatten_comment("# never `\n# contract_field_types` entirely.") == (
+        "never `contract_field_types` entirely."
+    )
+
+
+def test_0f_exclusions_stay_green():
+    # Closing backtick followed by ordinary English: not a trigger.
+    assert cp._flatten_comment("# `ConflictError`\n# immediately above.") == "`ConflictError` immediately above."
+    # Quote mark followed by English: not a trigger.
+    assert cp._flatten_comment('# the "local-foundation-only"\n# rule has no notion.') == (
+        'the "local-foundation-only" rule has no notion.'
+    )
+    # `*` (markdown emphasis) followed by English: not a trigger.
+    assert cp._flatten_comment("# it is *separate*\n# process from the app.") == "it is *separate* process from the app."
+    # An `=`-rule separator line: the char before the LAST `=` is another
+    # `=`, not a word char or bracket, so rule 7 does not fire.
+    assert cp._flatten_comment("# ========\n# ==== Ceremony core") == "======== ==== Ceremony core"
+    # A `<->` arrow: `-` is preceded by `<`, not a word char, so rule 2
+    # (unchanged, pre-existing) does not fire either.
+    assert cp._flatten_comment("# only on a failing<->\n# healthy state.") == "only on a failing<-> healthy state."
+
+
+def test_0f_mutations_removing_rules_6_7_8_is_red():
+    identifier_set = frozenset()
+
+    def boundary_without(rule, accumulated, next_line):
+        inside_backticks = accumulated.count("`") % 2 == 1
+        last = accumulated[-1]
+        prev = accumulated[-2] if len(accumulated) >= 2 else ""
+        nxt = next_line[0]
+        if last == "_" and cp._is_word_char(prev) and cp._is_word_char(nxt):
+            return True
+        if last == "-" and prev != "-" and cp._is_word_char(prev) and cp._is_word_char(nxt):
+            return True
+        if last == "." and inside_backticks and cp._is_word_char(nxt):
+            return True
+        if last == "." and not inside_backticks:
+            m = cp._JOIN_EXTENSION_RE.match(next_line)
+            if m and m.group(0).lower() in cp._JOIN_EXTENSIONS:
+                return True
+        if inside_backticks and last.isalpha() and last.islower() and nxt.isalpha() and nxt.isupper():
+            joined = cp._joined_identifier_at_boundary(accumulated, next_line)
+            if joined in identifier_set:
+                return True
+        if rule != "rule6" and last == "/" and prev != " " and (cp._is_word_char(nxt) or nxt == "`"):
+            return True
+        if rule != "rule7" and inside_backticks and last in "([=" and (cp._is_word_char(prev) or prev in "([") and nxt != " ":
+            return True
+        if rule != "rule8" and last == "`" and inside_backticks and nxt != " ":
+            return True
+        return False
+
+    cases = {
+        "rule6": ("`cell.py`/", "`backend_sqlite.py`"),
+        "rule7": ("`HttpService(", "...)`"),
+        "rule8": ("`", "contract_field_types`"),
+    }
+    for rule, (left, right) in cases.items():
+        assert cp._is_join_sensitive_boundary(left, right, identifier_set) is True, rule
+    for rule, (left, right) in cases.items():
+        assert boundary_without(rule, left, right) is False, rule
+
+
+def test_0f_run_base_flags_slash_boundary_as_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# see `cell.py`/\n# `backend_sqlite.py` here. The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    broken = (
+        "# see `cell.py`/ `backend_sqlite.py` here. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", broken)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# see `cell.py`/\n# `backend_sqlite.py` here. The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9e" in output
+
+
+def test_0f_run_base_green_when_slash_boundary_fixed(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# see `cell.py`/\n# `backend_sqlite.py` here. The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    fixed = (
+        "# see `cell.py`/`backend_sqlite.py` here. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", fixed)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# see `cell.py`/\n# `backend_sqlite.py` here. The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# ===========================================================================
+# change set 0f, review round 2 (supervisor ruling 2026-09-15): 3 further
+# fixes -- Item 1 [major] a real-path-detection bug in
+# `_FILENAME_CANDIDATE_RE`/`_filename_candidates` present since 4bc9535,
+# Item 2 [minor] rule 6's `/`-boundary needs a not-preceded-by-space
+# guard, Item 3 [minor] a fixture pinning rule 7's existing prev-char
+# guard (the reviewer's own mutation "y2" found it incorrectly green).
+# ===========================================================================
+
+def test_0f_item1_real_path_between_backtick_spans_is_protected():
+    """Item 1: the OLD `_FILENAME_CANDIDATE_RE.finditer`-based candidate
+    extraction matched a literal backtick ... backtick pair without
+    tracking which backtick OPENS a span and which CLOSES one, so a bare
+    (non-backtick) real path sandwiched between two backtick spans was
+    swallowed whole into one bogus, non-real "candidate" running from
+    the first span's closing backtick to the second span's opening
+    backtick -- and was therefore never recognized as a real, protected
+    path reference. Fixed by pairing backticks front-to-back first, then
+    finding path candidates separately inside each paired span and in
+    the residue outside every span (`_filename_span_matches`)."""
+    sentence = (
+        "Counterpart to `a` below (design docs/design/X_V1.md R-2): "
+        "a plain `SELECT` here."
+    )
+    real_paths = frozenset({"docs/design/X_V1.md"})
+    assert cp._filename_candidates(sentence) == ["docs/design/X_V1.md"]
+    assert cp._has_real_filename_reference(sentence, real_paths) is True
+    assert cp._sentence_has_protected_reference(sentence, real_paths) is True
+    # Deleting the whole sentence must not be an allowed reduction.
+    ok, reason = cp._is_allowed_reduction("comment", sentence, "", real_paths, frozenset())
+    assert ok is False, reason
+
+
+def test_0f_item1_mutation_reverting_to_greedy_regex_is_red():
+    """Mutation: reverting to the ORIGINAL (buggy) candidate extraction
+    -- a plain `_FILENAME_CANDIDATE_RE.finditer` over the whole text,
+    with no backtick-pairing -- must reproduce the bug: the bare path
+    is swallowed into one bogus backtick-to-backtick candidate and
+    never recognized, so the sentence is (wrongly) NOT protected. This
+    pins the fix as load-bearing: the fixture above only passes because
+    of the pairing-aware rewrite, not by coincidence."""
+    sentence = (
+        "Counterpart to `a` below (design docs/design/X_V1.md R-2): "
+        "a plain `SELECT` here."
+    )
+    real_paths = frozenset({"docs/design/X_V1.md"})
+
+    def buggy_filename_candidates(text: str) -> list[str]:
+        return [m.group(0) for m in cp._FILENAME_CANDIDATE_RE.finditer(text)]
+
+    candidates = buggy_filename_candidates(sentence)
+    assert "docs/design/X_V1.md" not in candidates  # swallowed by the old bug
+    buggy_has_real_ref = any(
+        cp._is_real_filename_candidate(c, real_paths) for c in candidates
+    )
+    assert buggy_has_real_ref is False  # old code wrongly says: no real path here
+
+
+def test_0f_item1_ch0080_postgres_reference_now_protected():
+    """The coordinator flagged that the CH-0080 sentence restored in
+    postgres.py:2432 (`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md`) may
+    also not have been recognized as protected under the buggy regex,
+    since it too sits directly after other prose with no backtick
+    wrapping. Pin that it IS recognized once real, with the fix."""
+    real_paths = frozenset({"docs/design/DESTRUCTIVE_CONFIRMATION_V1.md"})
+    sentence = (
+        "See design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-2 item 1 m-1."
+    )
+    assert cp._has_real_filename_reference(sentence, real_paths) is True
+    assert cp._sentence_has_protected_reference(sentence, real_paths) is True
+
+
+def test_0f_item2_rule6_slash_boundary_requires_no_space_before_slash():
+    """Item 2: a genuinely SPACED path-like expression `a / b` (a real
+    space before the `/`) must join WITH a space when wrapped right
+    after the `/`, not zero-space -- only a `/` sitting directly
+    against the preceding text (no space before it) is a real path
+    separator."""
+    identifier_set = frozenset()
+    # Green: spaced `a / b` keeps its space.
+    assert cp._is_join_sensitive_boundary("a /", "b holds here.", identifier_set) is False
+    assert cp._flatten_comment("# note that a /\n# b holds here.") == "note that a / b holds here."
+    # Still red/joining: a real zero-space path split (unaffected regression check).
+    assert cp._is_join_sensitive_boundary("`cell.py`/", "`backend_sqlite.py`", identifier_set) is True
+
+
+def test_0f_item2_mutation_dropping_space_guard_on_rule6_is_red():
+    """Mutation: rule 6 WITHOUT the new not-preceded-by-space guard
+    would (wrongly) join the spaced `a / b` case with zero space."""
+    def mutated_rule6(accumulated: str, next_line: str) -> bool:
+        last = accumulated[-1]
+        nxt = next_line[0]
+        return last == "/" and (cp._is_word_char(nxt) or nxt == "`")
+
+    assert mutated_rule6("a /", "b holds here.") is True  # bug: wrongly joins
+    assert cp._is_join_sensitive_boundary("a /", "b holds here.", frozenset()) is False  # fixed
+
+
+def test_0f_item3_rule7_prev_char_guard_pinned_by_fixture():
+    """Item 3: pin rule 7's existing "the character immediately before
+    `(`/`[`/`=` must be a word character or `(`/`[`" guard with a
+    dedicated fixture -- the reviewer's own mutation "y2" (removing/
+    weakening exactly this guard) was found to incorrectly stay GREEN.
+    A genuinely SPACED `a = b` expression, wrapped right after `=`,
+    must stay spaced (the space before `=` means this is an ordinary
+    assignment, not a call/subscript/kwarg opening)."""
+    identifier_set = frozenset()
+    assert cp._is_join_sensitive_boundary("`a =", "b`", identifier_set) is False
+    assert cp._flatten_comment("# note that a =\n# b holds here.") == "note that a = b holds here."
+
+
+def test_0f_item3_mutation_y2_dropping_prev_char_guard_is_red():
+    """Mutation y2: rule 7 WITHOUT the prev-char guard (only checking
+    that `accumulated` ends `(`/`[`/`=` and is inside backticks) would
+    (wrongly) join the spaced `a = b` case with zero space -- this is
+    exactly the reviewer's own mutation that was found to incorrectly
+    stay green, now pinned red by the fixture above."""
+    def mutated_rule7_y2(accumulated: str, next_line: str) -> bool:
+        inside_backticks = accumulated.count("`") % 2 == 1
+        last = accumulated[-1]
+        nxt = next_line[0]
+        return inside_backticks and last in "([=" and nxt != " "
+
+    assert mutated_rule7_y2("`a =", "b`") is True  # bug: wrongly joins
+    assert cp._is_join_sensitive_boundary("`a =", "b`", frozenset()) is False  # fixed
