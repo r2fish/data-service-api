@@ -89,9 +89,14 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
 #: a 4th moved denial, a bare `ResourceLimitError`, is outside this
 #: scan's `_VOCAB_CLASSES`) and must stay in `SCANNED_MODULES` for the
 #: same reason `postgres_value_domain.py` does above.
+#: R-37 WP-1l (2026-09-15): `postgres_reserved_names.py` holds
+#: `_check_reserved_name`, extracted from `backend_postgres.py` -- it
+#: carries the 1 `ValidationError` call site that function moved with
+#: (already 4-key, moved verbatim) and must stay in `SCANNED_MODULES`
+#: for the same reason `postgres_value_domain.py` does above.
 SCANNED_MODULES = (
     "cell.py", "http.py", "field_types.py", "identifiers.py", "backend_postgres.py", "backend_sqlite.py",
-    "postgres_value_domain.py", "request_limits.py", "constraint_resolution.py",
+    "postgres_value_domain.py", "request_limits.py", "constraint_resolution.py", "postgres_reserved_names.py",
     "control_plane.py", "control_http.py", "audit_query.py",
 )
 
@@ -185,6 +190,14 @@ _VOCAB_CLASSES = {"ValidationError", "CapabilityError"}
 #: -> 563, ..., 1987 -> 1986). Re-verified
 #: against the current file via `_fail_call_sites`, not hand-shifted.
 #: Entry count and site identity unchanged (20).
+#: R-37 WP-1l (2026-09-15): `check_reserved`'s own reserved-name check
+#: (`_RESERVED_EXACT`/`_RESERVED_PREFIX` + the `if`/`raise` body, not on
+#: this allowlist -- its denial carries `details`) moved to `postgres_
+#: reserved_names.py`, leaving a facade re-export import plus a 1-line
+#: delegation in `backend_postgres.py`. Net effect: every entry below
+#: shifted UP by 14 lines (563 -> 549, ..., 1986 -> 1972). Re-verified
+#: against the current file via `_fail_call_sites`, not hand-shifted.
+#: Entry count and site identity unchanged (20).
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # Code-review fix F1/F2/F6 (Opus review 2, WP-6d rework): every line
     # number below shifted when `idempotency_begin`/`idempotency_reserve`
@@ -195,26 +208,26 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # file, not merely offset by a constant (the two idempotency sites
     # near the bottom moved by MORE than every site above them, since the
     # added code sits between them and the earlier sites).
-    ("backend_postgres.py", 563),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 620),   # generic driver-exception translation
-    ("backend_postgres.py", 669),   # generic driver-exception translation
-    ("backend_postgres.py", 696),   # generic driver-exception translation
-    ("backend_postgres.py", 753),   # generic driver-exception translation
-    ("backend_postgres.py", 805),   # generic driver-exception translation
-    ("backend_postgres.py", 830),   # generic driver-exception translation
-    ("backend_postgres.py", 1008),  # generic driver-exception translation
-    ("backend_postgres.py", 1025),  # generic driver-exception translation
-    ("backend_postgres.py", 1156),  # generic driver-exception translation
-    ("backend_postgres.py", 1314),  # generic driver-exception translation
-    ("backend_postgres.py", 1401),  # generic driver-exception translation
-    ("backend_postgres.py", 1453),  # generic driver-exception translation
-    ("backend_postgres.py", 1486),  # generic driver-exception translation
-    ("backend_postgres.py", 1512),  # generic driver-exception translation
-    ("backend_postgres.py", 1579),  # generic driver-exception translation
-    ("backend_postgres.py", 1607),  # generic driver-exception translation
-    ("backend_postgres.py", 1648),  # generic driver-exception translation
-    ("backend_postgres.py", 1917),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1986),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 549),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 606),   # generic driver-exception translation
+    ("backend_postgres.py", 655),   # generic driver-exception translation
+    ("backend_postgres.py", 682),   # generic driver-exception translation
+    ("backend_postgres.py", 739),   # generic driver-exception translation
+    ("backend_postgres.py", 791),   # generic driver-exception translation
+    ("backend_postgres.py", 816),   # generic driver-exception translation
+    ("backend_postgres.py", 994),   # generic driver-exception translation
+    ("backend_postgres.py", 1011),  # generic driver-exception translation
+    ("backend_postgres.py", 1142),  # generic driver-exception translation
+    ("backend_postgres.py", 1300),  # generic driver-exception translation
+    ("backend_postgres.py", 1387),  # generic driver-exception translation
+    ("backend_postgres.py", 1439),  # generic driver-exception translation
+    ("backend_postgres.py", 1472),  # generic driver-exception translation
+    ("backend_postgres.py", 1498),  # generic driver-exception translation
+    ("backend_postgres.py", 1565),  # generic driver-exception translation
+    ("backend_postgres.py", 1593),  # generic driver-exception translation
+    ("backend_postgres.py", 1634),  # generic driver-exception translation
+    ("backend_postgres.py", 1903),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1972),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
@@ -464,12 +477,20 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # 4 `ValidationError` sites (all already 4-key) moved verbatim to
         # `postgres_value_domain.py` (28 -> 24); see that module's own
         # count below.
-        "backend_postgres.py": 24,
+        # R-37 WP-1l (2026-09-15): -1 -- `check_reserved`'s own
+        # `ValidationError` site (already 4-key) moved verbatim to
+        # `postgres_reserved_names.py` (24 -> 23); see that module's own
+        # count below.
+        "backend_postgres.py": 23,
         "backend_sqlite.py": 4,
         # R-37 WP-1 leaf extraction (2026-09-14): the 4 sites `_check_
         # domain` carried in `backend_postgres.py` before the move,
         # unchanged in wording or `details=` shape.
         "postgres_value_domain.py": 4,
+        # R-37 WP-1l (2026-09-15): the 1 `ValidationError` site
+        # `check_reserved` carried in `backend_postgres.py` before the
+        # move, unchanged in wording or `details=` shape.
+        "postgres_reserved_names.py": 1,
         # R-37 WP-1d (2026-09-14): the 2 sites `_measure_request_bytes`/
         # `_check_operation_depth` carried in `cell.py` before the move,
         # unchanged in wording or `details=` shape.
