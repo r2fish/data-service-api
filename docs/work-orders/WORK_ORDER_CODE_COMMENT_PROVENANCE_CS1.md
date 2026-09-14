@@ -1,5 +1,7 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.6 (2026-09-15)**: §12 のレビュー差し戻し 7 件 (監督裁定) を反映した: 塊をまたぐ参照先の点検、`backend_sqlite.py` の保護候補、完了条件 10 の変異先、目印の件数 (対象の塊だけ)、改行・受け皿・ガードテストの行、静的テストの注記、`ops.py` の blob の着手条件。
+- **v1.5 (2026-09-15)**: §12 に変更セット 4 (r2db `ops.py` と MitateDB `backend_sqlite.py`) の manifest を追記した (起草、監督確認待ち)。既存の節は書き換えていない。
 - **v1.4 (2026-09-14)**: 変更セット 3 の節 (§6) に独立レビューの指摘 (監督裁定) を反映した: 0d の着手条件、契約説明らしい文の監査照合 (完了条件 24)、判定表の範囲、Q-7・Q-8 の本文への反映と §6.5 への統合。§0〜§5 は書き換えていない。
 - **v1.3 (2026-09-14)**: §6 に変更セット 3 (MitateDB `http.py` と r2db `control_plane.py`) の manifest を追記した。§0〜§5 は書き換えていない。
 - **v1.2 (2026-09-14)**: 変更セット 2 の節 (§5) に独立レビューの指摘 7 件 (監督裁定) を反映し、§5.5 に裁定を統合した。§0〜§4 は書き換えていない。
@@ -1181,3 +1183,167 @@ fixture: `test_0f_item1_real_path_between_backtick_spans_is_protected` (上の�
 **3. [minor] 条件7の直前文字ガードを fixture で固定**: 条件7の既存の「`(`・`[`・`=` の直前が語の文字又は `(`・`[`」というガード自体はロジックとして既にあったが、これを狙い撃ちして外す変異 (レビュアー自作の "y2") に対する専用 fixture が無かった。空白を挟んだ `a = b` を `=` の直後で改行した場合に空白のまま緑であることを確認する fixture (`test_0f_item3_rule7_prev_char_guard_pinned_by_fixture`) と、ガードを外す y2 相当の変異が (誤って) 空白なしでつなげてしまうことを示す mutation (`test_0f_item3_mutation_y2_dropping_prev_char_guard_is_red`) を追加した。
 
 **検証 (再実行)**: `--base 6e91983`(`http.py`・`control_plane.py`)・`--base 3a4c018`(`service.py`)・`--base 944e86b`(`postgres.py`)・`--register` はすべて exit 0。`tools/check_doc_refs.py`・`tools/public_value_scan.py`・`tools/check_collection_floor.py` もすべて OK。
+
+## 12. 変更セット 4 — r2db `ops.py` と MitateDB `backend_sqlite.py`
+
+正本設計は v0.11 (§3、§5、§6、§8、§9、§10)。行番号と実測は main `d09733a` の値。
+
+### 12.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | 変更セット 0f、事実訂正、記録が main に統合されている (`d09733a`) |
+| 2 | **R-37 WP-1n が main に統合されている** (WP-1n は `backend_sqlite.py` L688 に括弧書きを足す。§12.2 の重なり表)。統合後に `backend_sqlite.py` の行番号と実測を取り直す |
+| 3 | 着手時に、並行 branch、R-37 の触るファイル、設計 §5(b) の grep を取り直す |
+| 4 | `ops.py` の blob が `d09733a` から着手時の親コミットまで変わっていない (変わっていれば `--base` と実測を取り直す) |
+
+### 12.2 選定と実測 (`d09733a`)
+
+監督裁定により 1 peer 1 module。どちらも R-37 の抽出対象ではない: `docs/work-orders/WORK_ORDER_R37_WP0_INVENTORY_V1.md` §2 の inventory と §3・§4 に無く、§5 では `ops.py` が WP-1g の呼出し元・位置参照として、`backend_sqlite.py` が WP-1l / 1m の「変えない」と WP-1n の括弧書き 1 箇所として出るだけである。
+
+| 項目 | r2db `ops.py` | MitateDB `backend_sqlite.py` |
+|---|---|---|
+| 塊 (`extract_all_blocks`。全塊を読む) | 72 (docstring 30 / comment 42) | 57 (docstring 12 / comment 45) |
+| うち登録 helper の中 (対象外。設計 §3、§5(a)) | 7 (`cmd_verify_declarations`、`_upsert_declaration`、`_verify_declarations_checks` / `_ok` / `_fail`、`_VERIFY_DECLARATIONS_EXIT_CODES` / `_READ_ORDER`) | 0 |
+| 対象の塊 | **65** | **57** |
+| 経緯トークン (§2.3 末尾の数え方、全文) | **131** | **103** |
+| 設計 §3 の目印一覧に当たる文 / 塊 (対象の塊だけ) | 24 / 21 (登録 helper を含む全塊では 28 / 24) | 13 / 12 |
+| 既存の CH-ID | 0 | 0 |
+| 行番号 pin (L1 scan) | 0 (`SCANNED_MODULES` 外) | 0 (`SCANNED_MODULES` 内。件数 pin 4 は AST 走査で、コメントに依らない) |
+| 設計 §5(b) の文字列検査 | `r2db-api/tests/test_audit_query.py:2284` (`in`、`event_class="credential_lifecycle"`)。L2270 の `_scan_field_literals` は AST 走査 | なし |
+
+- 受け皿は新規 `docs/code-history/r2db-api/ops.md` と新規 `docs/code-history/MitateDB-api/backend_sqlite.md`。
+
+**静的テストの注記** (監督裁定)
+
+| 箇所 | 扱い |
+|---|---|
+| `r2db-api/tests/test_audit_query.py:2284` | 最初の一致がコードにあるので、コメントを削除しても赤にならない。完了条件 11 で向きを確かめる |
+| `r2db-api/tests/test_audit_query.py:2270` | AST 走査なのでコメントに依らない。監査照合で足りる |
+| `r2db-api/tests/test_ops_declarations.py:1115`、`conformance-tests/test_deploy_secret_argv_scan.py:61` | 実害なし |
+| 古い行番号参照: `conformance-tests/test_c22_dry_run_and_plan.py:188`、`conformance-tests/test_c20_constraint_declaration_agreement.py:156` の `:207` / `:250`、`tools/public_value_scan.py:249` の `:30` | 範囲外の既知事項。変更セット 4 では直さない (conformance-tests を直すと Class C になる) |
+
+**R-37 WP-1n との重なり** (○ = なし)
+
+| 本変更セットが触るファイル | WP-1n |
+|---|---|
+| `r2db-api/src/r2db_api/ops.py` | ○ |
+| `MitateDB-api/src/mitatedb_api/backend_sqlite.py` | **× (WP-1n が L688 に括弧書きを足す)** → 着手条件 2 |
+| 受け皿 2 件、本書 §12 | ○ |
+| (触らない) `backend_postgres.py`、`postgres_value_domain.py`、`field_types.py`、MitateDB `tests/` | 1n が触る |
+
+**塊をまたぐ参照先** (監督裁定): 2 module の中と両 peer の `tests/` を `see … own comment` / `above` / `below` / `the comment on` などで grep し、他の塊や tests から指されている文を「残す」と固定する。結果は §12.4 の参照先一覧に載せる。既知の例: `backend_sqlite.py` L655 → L45-57、L310 → L499-510、`MitateDB-api/tests/test_foundation.py:1071` → `encode_value` のコメント。
+
+**`backend_sqlite.py` の保護候補** (監督裁定): 経緯の語を含んでいても、現在の安全上の理由として文を残す。経緯トークンだけを機械的に消すことは許す。
+
+| 行 | 残す理由 |
+|---|---|
+| L45-57 | int64 の OverflowError で BEGIN が開いたまま固まる |
+| L101-107 | `PRAGMA table_info` から型を取らない理由 |
+| L177-195 | `_begin_pseudo_tx`、DDL の自動 commit |
+| L499-510 | `:memory:` の単一接続なので LOCK TABLE が要らない |
+| L673-690 | 孤立 surrogate の拒否 |
+| L856-867 | `begin()` が先に rollback する |
+| L900-912 | `ApplicationCell._lock` の範囲 (`again` は点検語) |
+
+### 12.3 Manifest
+
+**目的**: 2 module の経緯を peer ごとの受け皿へ移し、コードに現在の理由と `CH-NNNN` を残す。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/ops.py`、`MitateDB-api/src/mitatedb_api/backend_sqlite.py` (**どちらもコメントと docstring だけ**。`ops.py` の登録 helper 7 塊を除く)、新規 `docs/code-history/r2db-api/ops.md`、新規 `docs/code-history/MitateDB-api/backend_sqlite.md`、本書 §12.4 | 他の `src/` 全部、`tools/`、`tools/tests/`、両 peer の `tests/`、`conformance-tests/`、既存の受け皿、`docs/code-history/pair.md`、`docs/design/`、roadmap、`_ISOMORPHIC_TARGETS` |
+
+| 項目 | 内容 |
+|---|---|
+| CH-ID 予約 | **`CH-0288`〜`CH-0409`** (登録済みの最大 `CH-0287` の次から。対象 65 + 57 = 122 塊が上限) |
+| `--base` | main `d09733a` (`ops.py`)。`backend_sqlite.py` は WP-1n 統合後の本変更セットの親コミット |
+| 必須の規律 | §6.3 の (i)〜(iii) (同居文は残しトークンだけ消す、直後の 2 文を候補一覧に、目印一覧は下限で全塊を読む) と設計 §3 の点検語 (副詞を含む)。(iv) Q-4 の再利用照合は対象外 (基点に CH-ID が無い) |
+| 保護文 (0d) | 保護参照を含む文は丸ごと消さない (設計 §9 0d)。そのうち今のコードと食い違う文は本変更セットで直さず、§12.4 の訂正一覧に載せ、統合後の訂正コミットで直す (設計 v0.10 §9。`--base` 照合の対象外、独立レビューで事実照合) |
+| 改行 | 詰めるときは述語 B (設計 §9 0e / 0f、条件 1〜8) でつなぐ。`find_broken_line_wrap_joins` の残り 0 件 |
+| 手順 | 設計 §6「手順」。40a は両 peer の suite を前後 2 回。40b は非該当 (行番号 pin 0 件) を監査照合で記録する |
+
+**完了条件 ↔ 変異** (P4 / P5 = `check_comment_provenance.py --base <上の基準>` を `ops.py` / `backend_sqlite.py` に、R = `--register`。変異の行は着手時に決め、§12.4 に記録する)
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 1 | コード不変 | 2 module: コード行の literal を 1 文字変える | P4 / P5 exit 1 (1) |
+| 2 | 移した塊が逐語 | `ops.md`: 1 節から 1 文消す | P4 exit 1 (2) |
+| 3 | CH の無い塊を変えていない | `backend_sqlite.py`: CH を付けずに 1 塊から 1 文消す | P5 exit 1 (2) |
+| 4 | 文区間の削除だけ | `ops.py`: (a) 否定語を落とす (b) 2 文を並べ替える (c) 1 語足す (d) 折返し行を 1 行消す | P4 exit 1 (3)、4 種それぞれ |
+| 5 | 保護参照を含む文は丸ごと消せない (0d) | 保護参照を含む文を 1 つ丸ごと消す | P exit 1 (3) |
+| 6 | ラベル削除が規則どおり (§8) | ラベルを消し、区切りの後ろの先頭文字を小文字化する | P exit 1 (6) |
+| 7 | 経緯を足していない | 追加行に `WP-` 又は `Supervisor ruling` を含める | P exit 1 (5) |
+| 8 | 実在パス・版数付き文書名は残る | 実在パス又は `contract <版数>` を消す | P exit 1 |
+| 9 | 識別子の途中の改行を正しくつないだ (0e / 0f) | `_` の直後の改行を空白 1 つでつなぐ | P exit 1 (§9 0e の検出) |
+| 10 | 登録 helper を変えていない | `ops.py`: 登録 helper の中の対象外のコメント塊 (例: L1369) から 1 文消す (L1580 の docstring は同型性テストが比較から除くので変異先にしない) | `r2db-api/tests/test_audit_query.py::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` |
+| 11 | 文字列検査が効いたまま (設計 §5(b)、`in`) | `ops.py`: コード側の `event_class="credential_lifecycle"` だけを消した写しで検査する | `test_audit_query.py` L2284 を含む test |
+| 12 | 指示語・定冠詞・副詞の参照先を消していない | 残す文の点検語が参照する文を削除する | 機械では赤にならない — **監査照合**: §12.4 の候補一覧とコードレビュー (テンプレート 5) |
+| 13 | 安全上の理由と同居する文を残している | 同居文を文ごと削除する | 機械では赤にならない — **監査照合**: 判定表の根拠とレビュー |
+| 14 | ID の解決と孤児 | コード側 1 件を `CH-0999` にする / 参照されない節を足す | R exit 1 (§4.2-1) |
+| 15 | ID の全体一意 | `backend_sqlite.md` に `ops.md` と同じ番号の節を足す | R exit 1 (§4.2-2) |
+| 16 | docstring 依存の新設なし | `backend_sqlite.py` に `__doc__` の読出しを 1 行 | R exit 1 (§4.2-5) |
+| 17 | 受け皿の ID が `check_doc_refs` で解決 | `ops.md` の fenced block に roadmap に無い 2 桁の R 番号を 1 つ足す | `check_doc_refs.py` exit 1 |
+| 18 | 行番号 pin と件数 pin が非該当のまま | **監査照合**: 両 peer の L1 scan の allowlist に 2 module が 0 件、`backend_sqlite.py` の件数 pin 4 が不変 | — |
+| 19 | 判定表が対象を覆う | **監査照合**: 対象の塊で目印一覧に当たる 37 文 (24 + 13) 以上が §12.4 にあり、根拠・点検語の欄に空欄なし。対象 122 塊を読んだことを記録する | — |
+| 20 | HTTP の status・error code を含む削除文 | 3 桁のステータス番号又はエラーコード語彙を含む文を 1 つ消す | **監査照合**: 削除した文から該当文をスクリプトで §12.4 の監査一覧に出し、各行が判定表で根拠付きで「経緯だけの文」と判定されていなければ赤 |
+| 21 | 事実と異なる保護文を本変更セットで直していない | **監査照合**: §12.4 の訂正一覧の文が差分に無い | — |
+| 22 | 集計行と経緯トークン数の前後 | **監査照合** (§12.4 の記録と実行ログ。数え方は §2.3 末尾) | — |
+| 23 | 塊をまたぐ参照先の文を残している | 参照先一覧の文 (例: `backend_sqlite.py` L45-57) を削除する | 機械では赤にならない — **監査照合**: grep の結果と §12.4 の参照先一覧を照合し、一覧の文がすべて残っている |
+| 24 | 両ファイルで改行の壊れが 0 件 | `find_broken_line_wrap_joins` を両ファイルに流す。変異: (a) B が偽の境目 (`id ASC` 型) を空白なしでつなぐ (b) `/` の直後の改行を空白 1 つでつなぐ (c) 開き backtick の直後の改行を空白 1 つでつなぐ | 0 件であること。(a) は P exit 1 (§4.1 (3))、(b)(c) は P exit 1 (§9 0e の検出) |
+| 25 | 受け皿が原文の写しとして完全 | (a) `backend_sqlite.md` の fenced block の末尾を 1 語切り詰める (b) 折り返しで割れた実在パスを含むラベルを、パスの後半ごと削る (§6.5 の #8 / #9 型) | (a) P5 exit 1 (§4.1 (2))、(b) P exit 1 (実在パスの保護) |
+| 26 | 2 つのコミット (本体と §12.4 の記録) の後に、新しい HEAD で `tools/tests` が緑 | **監査照合**: 監督がコミット後の HEAD で `pytest -q tools/tests` を流す (ガードテストは HEAD を読むため) | — |
+| 27 | 対応の無い行が無い | **監査照合** (§1.5 の 40) | — |
+
+**検証コマンドと期待形** (40a: 前後の 2 回、前景直列、`timeout` 600000)
+
+```
+./.venv/bin/python -m pytest -q r2db-api/tests       → failed/skipped/xfailed 0、前後で passed 数一致 (test_audit_query.py を含む)
+./.venv/bin/python -m pytest -q MitateDB-api/tests   → 同上 (L1 scan を含む)
+./.venv/bin/python -m pytest -q conformance-tests    → 同上
+./.venv/bin/python -m pytest -q tools/tests          → failed 0
+python3 tools/check_comment_provenance.py --base d09733a r2db-api/src/r2db_api/ops.py → exit 0
+python3 tools/check_comment_provenance.py --base <WP-1n 統合後の親コミット> MitateDB-api/src/mitatedb_api/backend_sqlite.py → exit 0
+python3 tools/check_comment_provenance.py --register → exit 0
+python3 tools/check_doc_refs.py                      → exit 0
+python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=0
+監督: root suite 単独 (§1.3 の 19〜23)。前後の集計差分は 0
+```
+
+**使用テンプレート**: **2** → **5** → **6**。**変更クラス**: **B** (登録 helper の本体に触れない)。
+
+### 12.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
+
+**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行。点検語は設計 §3)
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
+|---|---|---|---|---|---|---|
+
+**HTTP の status・error code を含む削除文の監査一覧** (完了条件 20)
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 含む語 | 判定表の根拠 |
+|---|---|---|---|---|
+
+**事実と異なる保護文の訂正一覧** (完了条件 21。訂正コミットへ回す)
+
+| # | ファイル:行 (CH-ID) | 文 (先頭の数語) | 今のコードとの食い違い (根拠 `file:line`) |
+|---|---|---|---|
+
+**塊をまたぐ参照先一覧** (完了条件 23。§12.2 の grep の結果)
+
+| # | 参照元 (`file:line`) | 参照の語 | 参照先 (`file:line`) | 参照先の文 (先頭の数語) | 残っているか |
+|---|---|---|---|---|---|
+
+**判定表** (目印一覧に当たる全文を含む。一覧は下限)
+
+| ファイル / 塊 (行) | 判定 | 根拠 |
+|---|---|---|
+
+**記録**
+
+| 項目 | 前 | 後 |
+|---|---|---|
+| 経緯トークン数 `ops.py` / `backend_sqlite.py` (§2.3 末尾の数え方) | 131 / 103 | |
+| 移した塊 / 対象の塊 | — | / 122 |
+| 変異の行 (完了条件 1〜11) | — | |
+| 各 suite と照合コマンドの集計行 | | |
