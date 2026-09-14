@@ -1289,7 +1289,7 @@ def test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phr
     """WP-4 item A's own "3 面 (data/control/CLI) 書式一致" follow-through:
     the CLI's two destructive-confirmation phrases (`RESET_CONTROL_
     CREDENTIALS`/`delete_credential_confirmation_phrase`) live in the exact
-    same module (`structured.py`) as the data/schema-plane phrase functions
+    same module `structured.py` (now in `delete_confirmation.py`) as the data/schema-plane phrase functions
     and the control-plane's own `revoke_last_control_credential_
     confirmation_phrase` -- `ops.py` imports these exact module-level
     symbols rather than re-deriving its own spelling.

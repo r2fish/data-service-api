@@ -622,6 +622,130 @@ def test_delete_phrase_invalidated_by_drop_recreate_of_the_same_entity_under_the
     assert cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items == [{"id": 1}]
 
 
+def test_delete_confirmation_leaf_preserves_structured_facade():
+    """R-37 WP-1g (ST5): `structured.py` re-exports all 11 destructive-
+    confirmation names from the new leaf `delete_confirmation.py` as the
+    exact same objects -- this checks facade identity only, not behaviour
+    (the phrase-shape and gate tests below exercise behaviour)."""
+    from r2db_api import structured
+    from r2db_api import delete_confirmation
+
+    names = [
+        "RESET_CONTROL_CREDENTIALS",
+        "_MAX_REVISION_DIGITS",
+        "_PHRASE_MAX_LENGTH",
+        "_canonical_where_json",
+        "_where_digest16",
+        "delete_confirmation_phrase",
+        "delete_credential_confirmation_phrase",
+        "drop_entity_confirmation_phrase",
+        "drop_index_confirmation_phrase",
+        "require_destructive_confirmation",
+        "revoke_last_control_credential_confirmation_phrase",
+    ]
+    for name in names:
+        assert getattr(structured, name) is getattr(delete_confirmation, name), name
+
+
+def test_canonical_where_json_sorts_nested_keys_and_escapes_non_ascii():
+    """`_canonical_where_json`'s own `json.dumps(..., sort_keys=True,
+    ensure_ascii=True)` call: a `Predicate.value` that is itself a dict
+    ({"z": 1, "a": 2}) is serialized with ITS OWN keys sorted too (not just
+    the outer `field`/`operator`/`value` keys, which already happen to sort
+    alphabetically), and a non-ASCII character in a string value is escaped
+    to its `\\uXXXX` form rather than emitted as a literal UTF-8 byte."""
+    from r2db_api.structured import Predicate, _canonical_where_json
+
+    where = [
+        Predicate(field="tags", operator="eq", value={"z": 1, "a": 2}),
+        Predicate(field="name", operator="eq", value="é"),
+    ]
+    assert _canonical_where_json(where) == (
+        '[{"field": "tags", "operator": "eq", "value": {"a": 2, "z": 1}}, '
+        '{"field": "name", "operator": "eq", "value": "\\u00e9"}]'
+    )
+
+
+def test_delete_confirmation_phrases_have_fixed_literal_shapes():
+    """The 4 `*_confirmation_phrase` functions plus `RESET_CONTROL_
+    CREDENTIALS` pin their exact output for fixed inputs -- `delete_
+    confirmation_phrase`'s own digest is a 16-hex-character SHA-256 prefix
+    of `_canonical_where_json`'s output (verified independently below), and
+    the other three phrases and the fixed CLI constant are plain, literal
+    string compositions with no digest at all."""
+    from r2db_api.structured import (
+        RESET_CONTROL_CREDENTIALS,
+        Predicate,
+        delete_confirmation_phrase,
+        delete_credential_confirmation_phrase,
+        drop_entity_confirmation_phrase,
+        drop_index_confirmation_phrase,
+        revoke_last_control_credential_confirmation_phrase,
+    )
+
+    where = [Predicate(field="id", operator="eq", value=1)]
+    assert delete_confirmation_phrase("widgets", where, 0) == "DELETE widgets @where=3e312ba40194420b @schema_revision=0"
+    assert drop_entity_confirmation_phrase("widgets", 0) == "DROP_ENTITY widgets @schema_revision=0"
+    assert drop_index_confirmation_phrase("widgets", "by_tag", 0) == "DROP_INDEX widgets.by_tag @schema_revision=0"
+    assert revoke_last_control_credential_confirmation_phrase("ctl_test") == "REVOKE_LAST_CONTROL_CREDENTIAL ctl_test"
+    assert delete_credential_confirmation_phrase("crd_0123456789abcdef") == "DELETE_CREDENTIAL crd_0123456789abcdef"
+    assert RESET_CONTROL_CREDENTIALS == "RESET_CONTROL_CREDENTIALS"
+
+
+def test_require_destructive_confirmation_needs_destructive_true_and_the_exact_phrase():
+    """`require_destructive_confirmation` denies whenever `destructive` is
+    not `True`, even when `confirmation` matches `phrase` exactly -- the
+    gate is `destructive is True AND confirmation == phrase`, not either
+    condition alone. The denial's `details` carries all 4 contract-required
+    keys (`required_confirmation`/`consequence`/`reversible_alternative`/
+    `recovery`), `reversible_alternative`/`recovery` passed through as
+    `None` unchanged (never fabricated). The phrase comparison is exact,
+    unmodified string equality (contract 1.2.0 `destructive_confirmation.
+    valid_confirmation`): `destructive=True` with the identical phrase is
+    accepted, and `destructive=True` with a whitespace-padded or a
+    swapcased phrase is denied -- neither a `.strip()`-tolerant nor a
+    `.casefold()`-tolerant comparison would still catch those two."""
+    from r2db_api.structured import require_destructive_confirmation
+
+    kwargs = dict(
+        message="Destructive confirmation is required.",
+        consequence="rows are permanently removed",
+        reversible_alternative=None,
+        recovery=None,
+    )
+    expected_details = {
+        "required_confirmation": "PHRASE",
+        "consequence": "rows are permanently removed",
+        "reversible_alternative": None,
+        "recovery": None,
+    }
+
+    with pytest.raises(FoundationError) as exc:
+        require_destructive_confirmation(False, "PHRASE", "PHRASE", **kwargs)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert exc.value.status == 409
+    assert exc.value.details == expected_details
+
+    # destructive=True with the exact phrase is accepted (no exception).
+    assert require_destructive_confirmation(True, "PHRASE", "PHRASE", **kwargs) is None
+
+    # destructive=True with a whitespace-padded phrase is still denied --
+    # the comparison must not be `.strip()`-tolerant.
+    with pytest.raises(FoundationError) as exc:
+        require_destructive_confirmation(True, " PHRASE ", "PHRASE", **kwargs)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert exc.value.status == 409
+    assert exc.value.details == expected_details
+
+    # destructive=True with a swapcased phrase is still denied -- the
+    # comparison must not be `.casefold()`-tolerant.
+    with pytest.raises(FoundationError) as exc:
+        require_destructive_confirmation(True, "PHRASE".swapcase(), "PHRASE", **kwargs)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert exc.value.status == 409
+    assert exc.value.details == expected_details
+
+
 def test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded(service):
     """Opus review minor m-3: a bidirectional test for the Q1-D8
     reclassification (structured.py:212) -- this was not actually covered

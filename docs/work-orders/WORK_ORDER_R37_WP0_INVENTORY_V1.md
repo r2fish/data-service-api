@@ -540,6 +540,8 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | 13 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0。MitateDB `delete_confirmation._canonical_where_json(filters)` は署名が違う (WP-2) | — |
 | 14 | マージ時点で `_INT64_MAX` の参照が正しい (W-2 裁定) | **監査照合**: 移した文の「`_INT64_MAX` below in this same module」の直後に `(in \`structured.py\`)` があり、`_INT64_MAX` が `structured.py` に在ること | — |
 
+**監督裁定 (WP-1gコードレビュー)**: `test_control_plane_store.py` L1292 の入れ子括弧を 1 層 (`` `structured.py` (now in `delete_confirmation.py`) ``) に直して原文の改行を保ち、`ops.py` L138-140 も原文の改行を保ったまま括弧書きだけを足す形に戻し、完了条件 7・8 のテストに `destructive=True` かつ正確な phrase で通る場合と、空白付き・swapcase の phrase が `.strip()`/`.casefold()` 緩和の変異でそれぞれ赤になることを実測して足した。
+
 ### 5.12 WP-1h — r2db page size・order_by・cursor (ST7、**独立レビュー待ち**)
 
 **目的**: `structured.py` の page size・order_by・cursor の検査と組立 (8 名と節見出し 2 行) を leaf `r2db-api/src/r2db_api/paging.py` へ移す。**変更セット 2 と WP-1g の統合後に着手する** (§5.14)。
