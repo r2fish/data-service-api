@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.11 (2026-09-15)。** 直後の v1.10 行は当時の改版履歴として保存する。v1.11 は既存の本文を書き換えず、末尾に **§10.8 (WP-2a 実施記録)** を追記した記録である。
 - **現行版: v1.10 (2026-09-15)。** 直後の v1.9 行は当時の改版履歴として保存する。v1.10 は既存の本文を書き換えず、末尾に **§10.7 (WP-1m / 1n / 1k 実施記録)** を追記した記録である。
 - **現行版: v1.9 (2026-09-15)。** 直後の v1.8 行は当時の改版履歴として保存する。v1.9 は既存の本文を書き換えず、末尾に **§10.6 (WP-1j / 1l 実施記録)** を追記した記録である。
 - **現行版: v1.8 (2026-09-14)。** 直後の v1.7 行は当時の改版履歴として保存する。v1.8 は既存の本文を書き換えず、§10.3 に【追記】を 1 件足し、末尾に **§10.5 (WP-1g / 1h / 1i 実施記録)** を追記した記録である。
@@ -395,3 +396,15 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 | 18 | MitateDB `postgres_types.py` | int32 / int64 の入れ替えと text domain の差し替えを検出するのは、新しい literal pin だけ | R-39 |
 | 19 | MitateDB `postgres_value_domain.py` | float・int32・json の domain 検査を 1 型だけ飛ばす変異と、孤立 surrogate の検査を high surrogate だけに狭める変異が緑のまま | R-39 |
 | 20 | MitateDB `provisional_gate.py` | 移した docstring の呼出し元の文は移動前から古い。到達不能な gate を固定しているのは直接のテストだけ | R-39 |
+
+### 10.8 WP-2a 実施記録 (2026-09-15、v1.11 追記)
+
+**判断 (Y-6)**: MitateDB CE1 と r2db `_canonical_where_json` を `_ISOMORPHIC_TARGETS` に登録しない。契約は phrase の綴りを実装定義としているので、代わりに各 peer のテストで契約の規則を固定した。
+
+| WP | 内容 | merge | root ゲート (passed) | 備考 |
+| --- | --- | --- | --- | --- |
+| WP-2a | テストのみ。MitateDB 4 本 (非 ASCII の escape、型の区別、上限の境界、3 要素以上の list 順)、r2db 3 本 (型の区別、list 順 (gt / lt / eq)、`_PHRASE_MAX_LENGTH` と契約の上限) | `b45312d` | 3382 | 上限は同梱の契約から読み、4 箇所の `confirmation.maxLength` が等しいことも検査する (Z-3) |
+
+- **レビューの訂正**: テストの docstring から経緯語を消した。list 順を 3 要素に強くした (MitateDB 側の既存の 2 要素だけの穴も閉じた)。
+- **閉じた項目**: roadmap R-39 の (1b) と (1g)。conformance のベクトルは R-41 に回した (Z-1)。規則 1 の `destructive` の値からの独立と規則 5 も R-41 に加えた。
+- **次の WP**: WP-3 (request binding、manifest 起草中)、`backend_postgres.py` のコメント整理 (Y-5、コメント変更セット 5 の後)。
