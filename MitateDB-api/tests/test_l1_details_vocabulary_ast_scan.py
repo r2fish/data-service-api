@@ -70,8 +70,16 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
 #: does not name -- out of this scan's scope (every site in those files
 #: was read while drafting this scan/O-1's own fix; `config.py`'s own
 #: ONE exception is verified separately, see above).
+#: R-37 WP-1 leaf extraction (2026-09-14): `postgres_value_domain.py`
+#: holds `_check_domain`, extracted from `backend_postgres.py` -- it
+#: carries 4 `ValidationError` call sites (all already 4-key, moved
+#: verbatim) and must stay in `SCANNED_MODULES` so a future edit to that
+#: leaf is still covered by this scan (this was the exact gap the
+#: R-37 WP-1 fix closed: the leaf was extracted without being added
+#: here).
 SCANNED_MODULES = (
     "cell.py", "http.py", "field_types.py", "identifiers.py", "backend_postgres.py", "backend_sqlite.py",
+    "postgres_value_domain.py",
     "control_plane.py", "control_http.py", "audit_query.py",
 )
 
@@ -146,6 +154,25 @@ _VOCAB_CLASSES = {"ValidationError", "CapabilityError"}
 #: re-verified against the current file via `_fail_call_sites`, not
 #: hand-shifted. Entry count unchanged (20): no site was added or
 #: removed, only comment/lock-clause text.
+#: R-37 WP-1 leaf extraction (2026-09-14): `_check_domain` (4
+#: `ValidationError` sites, all already 4-key -- not on this allowlist)
+#: moved to `postgres_value_domain.py`, which leaves a facade re-export
+#: import in `backend_postgres.py` for `_INT_DOMAIN_RANGES`/
+#: `_check_domain`. Net effect on every entry at or before the
+#: `encode_value` docstring comment block (`schema_count` through the
+#: site just above that comment): UP by 49 lines. Every entry AFTER that
+#: comment block (including the two WP-6d-i idempotency sites): UP by
+#: 48 lines -- one less, because the R-37 WP-1 corrective change's
+#: verbatim-restoration bracket fix to that comment block (`_check_
+#: domain` now in `postgres_value_domain.py`) added back 1 line the
+#: pre-fix extraction had saved. Reviewer-fix follow-up (2026-09-14):
+#: the `_INT_DOMAIN_RANGES` facade-compat comment above the `postgres_
+#: value_domain` import (this file's own review item 3) shrank by 1
+#: line (a factual correction to what it claimed, not a rewording for
+#: its own sake), shifting EVERY entry below DOWN by 1 line again (564
+#: -> 563, ..., 1987 -> 1986). Re-verified
+#: against the current file via `_fail_call_sites`, not hand-shifted.
+#: Entry count and site identity unchanged (20).
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # Code-review fix F1/F2/F6 (Opus review 2, WP-6d rework): every line
     # number below shifted when `idempotency_begin`/`idempotency_reserve`
@@ -156,26 +183,26 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # file, not merely offset by a constant (the two idempotency sites
     # near the bottom moved by MORE than every site above them, since the
     # added code sits between them and the earlier sites).
-    ("backend_postgres.py", 613),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 670),   # generic driver-exception translation
-    ("backend_postgres.py", 719),   # generic driver-exception translation
-    ("backend_postgres.py", 746),   # generic driver-exception translation
-    ("backend_postgres.py", 803),   # generic driver-exception translation
-    ("backend_postgres.py", 855),   # generic driver-exception translation
-    ("backend_postgres.py", 880),   # generic driver-exception translation
-    ("backend_postgres.py", 1058),  # generic driver-exception translation
-    ("backend_postgres.py", 1075),  # generic driver-exception translation
-    ("backend_postgres.py", 1206),  # generic driver-exception translation
-    ("backend_postgres.py", 1364),  # generic driver-exception translation
-    ("backend_postgres.py", 1450),  # generic driver-exception translation
-    ("backend_postgres.py", 1502),  # generic driver-exception translation
-    ("backend_postgres.py", 1535),  # generic driver-exception translation
-    ("backend_postgres.py", 1561),  # generic driver-exception translation
-    ("backend_postgres.py", 1628),  # generic driver-exception translation
-    ("backend_postgres.py", 1656),  # generic driver-exception translation
-    ("backend_postgres.py", 1697),  # generic driver-exception translation
-    ("backend_postgres.py", 1966),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 2035),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 563),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 620),   # generic driver-exception translation
+    ("backend_postgres.py", 669),   # generic driver-exception translation
+    ("backend_postgres.py", 696),   # generic driver-exception translation
+    ("backend_postgres.py", 753),   # generic driver-exception translation
+    ("backend_postgres.py", 805),   # generic driver-exception translation
+    ("backend_postgres.py", 830),   # generic driver-exception translation
+    ("backend_postgres.py", 1008),  # generic driver-exception translation
+    ("backend_postgres.py", 1025),  # generic driver-exception translation
+    ("backend_postgres.py", 1156),  # generic driver-exception translation
+    ("backend_postgres.py", 1314),  # generic driver-exception translation
+    ("backend_postgres.py", 1401),  # generic driver-exception translation
+    ("backend_postgres.py", 1453),  # generic driver-exception translation
+    ("backend_postgres.py", 1486),  # generic driver-exception translation
+    ("backend_postgres.py", 1512),  # generic driver-exception translation
+    ("backend_postgres.py", 1579),  # generic driver-exception translation
+    ("backend_postgres.py", 1607),  # generic driver-exception translation
+    ("backend_postgres.py", 1648),  # generic driver-exception translation
+    ("backend_postgres.py", 1917),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1986),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
@@ -412,8 +439,16 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # reserve` (2 bare `ValidationError` sites) replace the pre-WP-6d
         # `idempotency_get`/`idempotency_reap_expired`/`idempotency_count`
         # (3 bare sites); `idempotency_unlock` (new) raises nothing.
-        "backend_postgres.py": 28,
+        # R-37 WP-1 leaf extraction (2026-09-14): -4 -- `_check_domain`'s
+        # 4 `ValidationError` sites (all already 4-key) moved verbatim to
+        # `postgres_value_domain.py` (28 -> 24); see that module's own
+        # count below.
+        "backend_postgres.py": 24,
         "backend_sqlite.py": 4,
+        # R-37 WP-1 leaf extraction (2026-09-14): the 4 sites `_check_
+        # domain` carried in `backend_postgres.py` before the move,
+        # unchanged in wording or `details=` shape.
+        "postgres_value_domain.py": 4,
         # 追補 4 O-1: the 3 control-plane modules this WP newly scans --
         # "12 + 4 + 3" is the AUDIT's own bare-site count (before this
         # WP's fix); the total CALL-SITE count (bare + already-had-
@@ -574,6 +609,89 @@ def test_config_budget_denial_helper_carries_the_4_key_form():
     assert isinstance(details_kw.value, ast.Dict)
     keys = {k.value for k in details_kw.value.keys if isinstance(k, ast.Constant)}
     assert "violated_declaration" in keys and "field" in keys
+
+
+#: R-37 WP-1 fix (2026-09-14, corrective revision per reviewer ruling):
+#: guard against the exact gap this WP found -- `postgres_value_domain.
+#: py` was extracted from `backend_postgres.py` without being added to
+#: `SCANNED_MODULES`, so its `ValidationError` denials silently dropped
+#: out of scan coverage. `config.py`/`control_auth.py`/`control_
+#: credential_store_postgres.py`/`ops.py` are the ONLY modules under
+#: `src/mitatedb_api` (recursively) that carry a vocabulary-class denial
+#: site while staying out of `SCANNED_MODULES` -- this file's own
+#: top-level module docstring already discloses them as a deliberate
+#: scope limit (deployment-time configuration or a surface O-1 does not
+#: name); `config.py`'s own one genuine choke-point site is separately
+#: verified by `test_config_budget_denial_helper_carries_the_4_key_form`
+#: above. Each entry's value below is that disclosure, quoted short, not
+#: a fresh justification invented here. Any OTHER module with such a
+#: site is a real coverage gap, not a disclosed one. Adding, removing,
+#: or renaming an entry here is a `SCANNED_MODULES`-boundary change and
+#: requires the same supervisor ruling any other change to that boundary
+#: would -- this set is not a general escape hatch. LIMITATION (this
+#: scan's own coverage boundary, not something this guard can close): a
+#: vocabulary-class denial newly added INSIDE an already-excluded module
+#: is invisible to this whole file -- excluding a module means its
+#: future edits are not audited here at all, only that its CURRENT
+#: exclusion is not silently stale or silently overlapping `SCANNED_
+#: MODULES`.
+_DELIBERATELY_UNSCANNED_MODULES: dict[str, str] = {
+    "config.py": "module docstring above: deployment-time FoundationConfig construction, not a client-request choke point (its own _budget_denied exception is verified separately)",
+    "control_auth.py": "module docstring above: not named by O-1's own 12+4+3 count",
+    "control_credential_store_postgres.py": "module docstring above: not named by O-1's own 12+4+3 count",
+    "ops.py": "module docstring above: not named by O-1's own 12+4+3 count",
+}
+
+
+def test_every_module_with_a_vocabulary_denial_is_accounted_for():
+    """Regression guard for scan-coverage gaps: walks every `*.py`
+    under `src/mitatedb_api`, RECURSIVELY (a nested package such as
+    `contract/` can carry its own denial site just as easily as a
+    top-level module can), and asserts that any module carrying >= 1
+    site this scanner's own `_fail_call_sites` counts is either a
+    `SCANNED_MODULES` member or a key of the explicit, reasoned
+    exclusion set above. Keys are POSIX relative paths from
+    `src/mitatedb_api` -- identical to the plain filename for every
+    current top-level entry, but able to name a nested file (e.g.
+    `contract/__init__.py`) without inventing a different key shape for
+    that case. Non-空振り: also asserts at least one module was actually
+    found carrying a denial, so a scanner that silently matched nothing
+    anywhere would not pass this test vacuously."""
+    modules_with_denials: list[str] = []
+    unaccounted: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(SRC).as_posix()
+        if _fail_call_sites(path):
+            modules_with_denials.append(rel)
+            if rel not in SCANNED_MODULES and rel not in _DELIBERATELY_UNSCANNED_MODULES:
+                unaccounted.append(rel)
+    assert modules_with_denials, "no module under src/mitatedb_api carries a vocabulary-class denial call site -- the scanner is not visiting real code"
+    assert unaccounted == [], f"module(s) with a vocabulary-class denial call site but not in SCANNED_MODULES or the explicit exclusion set: {unaccounted}"
+
+
+def test_deliberately_unscanned_modules_do_not_overlap_scanned_modules():
+    """A module must never sit on BOTH `SCANNED_MODULES` and this
+    exclusion set at once -- that would mean an incomplete edit (an
+    exclusion entry added without removing the module from `SCANNED_
+    MODULES`, or vice versa) left the two boundaries contradicting each
+    other, silently obscuring which one actually governs that module."""
+    overlap = sorted(set(_DELIBERATELY_UNSCANNED_MODULES) & set(SCANNED_MODULES))
+    assert overlap == [], f"module(s) listed as both scanned and deliberately excluded: {overlap}"
+
+
+def test_deliberately_unscanned_modules_each_carry_a_real_denial():
+    """Guard against exclusion-set staleness: every excluded module must
+    actually contain >= 1 vocabulary-class denial site right now,
+    checked against the same live scanner the rest of this file uses --
+    a module that no longer does should be REMOVED from the exclusion
+    set (there is nothing left to disclose an exception for), not left
+    there as unexplained dead weight that could later hide a real gap."""
+    for rel, reason in sorted(_DELIBERATELY_UNSCANNED_MODULES.items()):
+        assert reason, f"{rel} has no reason recorded in _DELIBERATELY_UNSCANNED_MODULES"
+        sites = _fail_call_sites(SRC / rel)
+        assert sites, f"{rel} is on the exclusion set but carries no vocabulary-class denial site -- remove it"
 
 
 # 追補 4 O-1 (版フリップ監査 §14 疑義 1/§16, 2026-09-08): the test that

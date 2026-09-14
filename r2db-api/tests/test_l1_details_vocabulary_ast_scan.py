@@ -80,7 +80,13 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # 1752) -- WP-6a's own doc comment in _idempotency_reserve (the LOCK
     # TABLE it once carried was removed; WP-6d-i owns that lock) lengthens the
     # file by 8 lines above this call site.
-    ("postgres.py", 1752),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # R-37 WP-1 leaf extraction (2026-09-14): line shift only (1752 -> 1706)
+    # -- `_column_type_sql`/`_FIELD_TYPE_SQL`/`_JSONB_SQL` moved to
+    # `postgres_types.py` and `_escape_like_literal` moved to
+    # `postgres_like.py`, each leaving a facade re-export import in place of
+    # the removed body; `_fail_client_value`'s own single `fail()` call is
+    # otherwise unchanged.
+    ("postgres.py", 1706),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
@@ -427,3 +433,85 @@ def test_type_pair_rule_is_respected_at_every_violated_declaration_site():
             if unexpected:
                 violations.append(f"{module}:{lineno} {code} violated_declaration={vd!r} carries forbidden key(s) {sorted(unexpected)}")
     assert violations == [], f"type-pair rule (D-3 (4)) not respected: {violations}"
+
+
+#: R-37 WP-1 fix (2026-09-14, corrective revision per reviewer ruling):
+#: guard against the exact gap this WP found -- `postgres_value_domain.
+#: py` was extracted as a `SCANNED_MODULES` sibling leaf on the MitateDB
+#: side without being added to that peer's `SCANNED_MODULES`, so its
+#: `ValidationError` denials silently dropped out of scan coverage.
+#: `auth.py`/`credential_store.py`/`ops.py` are the ONLY r2db modules
+#: under `src/r2db_api` (recursively -- `contract/` included) that carry
+#: a vocabulary-code `fail(...)`/`_deny(code=...)` site while staying
+#: out of `SCANNED_MODULES` -- the comment directly above `SCANNED_
+#: MODULES` (not this file's own top-level module docstring, which never
+#: names these three) already discloses them as an unaddressed,
+#: deliberate scope limit (O-1's own audit did not enumerate them, and
+#: no WP has extended the scan there). Each entry's value below is that
+#: disclosure, quoted short, not a fresh justification invented here.
+#: Any OTHER module with such a site is a real coverage gap, not a
+#: disclosed one. Adding, removing, or renaming an entry here is a
+#: `SCANNED_MODULES`-boundary change and requires the same supervisor
+#: ruling any other change to that boundary would -- this set is not a
+#: general escape hatch. LIMITATION (this scan's own coverage boundary,
+#: not something this guard can close): a vocabulary-code denial newly
+#: added INSIDE an already-excluded module is invisible to this whole
+#: file -- excluding a module means its future edits are not audited
+#: here at all, only that its CURRENT exclusion is not silently stale or
+#: silently overlapping `SCANNED_MODULES`.
+_DELIBERATELY_UNSCANNED_MODULES: dict[str, str] = {
+    "auth.py": "SCANNED_MODULES comment above: O-1's own audit did not enumerate it, and no WP has extended the scan there",
+    "credential_store.py": "SCANNED_MODULES comment above: O-1's own audit did not enumerate it, and no WP has extended the scan there",
+    "ops.py": "SCANNED_MODULES comment above: O-1's own audit did not enumerate it, and no WP has extended the scan there",
+}
+
+
+def test_every_module_with_a_vocabulary_denial_is_accounted_for():
+    """Regression guard for scan-coverage gaps: walks every `*.py` under
+    `src/r2db_api`, RECURSIVELY (a nested package such as `contract/`
+    can carry its own denial site just as easily as a top-level module
+    can), and asserts that any module carrying >= 1 site this scanner's
+    own `_fail_call_sites` counts is either a `SCANNED_MODULES` member or
+    a key of the explicit, reasoned exclusion set above. Keys are POSIX
+    relative paths from `src/r2db_api` -- identical to the plain
+    filename for every current top-level entry, but able to name a
+    nested file (e.g. `contract/__init__.py`) without inventing a
+    different key shape for that case. Non-空振り: also asserts at least
+    one module was actually found carrying a denial, so a scanner that
+    silently matched nothing anywhere would not pass this test
+    vacuously."""
+    modules_with_denials: list[str] = []
+    unaccounted: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(SRC).as_posix()
+        if _fail_call_sites(path):
+            modules_with_denials.append(rel)
+            if rel not in SCANNED_MODULES and rel not in _DELIBERATELY_UNSCANNED_MODULES:
+                unaccounted.append(rel)
+    assert modules_with_denials, "no module under src/r2db_api carries a vocabulary-code denial call site -- the scanner is not visiting real code"
+    assert unaccounted == [], f"module(s) with a vocabulary-code denial call site but not in SCANNED_MODULES or the explicit exclusion set: {unaccounted}"
+
+
+def test_deliberately_unscanned_modules_do_not_overlap_scanned_modules():
+    """A module must never sit on BOTH `SCANNED_MODULES` and this
+    exclusion set at once -- that would mean an incomplete edit (an
+    exclusion entry added without removing the module from `SCANNED_
+    MODULES`, or vice versa) left the two boundaries contradicting each
+    other, silently obscuring which one actually governs that module."""
+    overlap = sorted(set(_DELIBERATELY_UNSCANNED_MODULES) & set(SCANNED_MODULES))
+    assert overlap == [], f"module(s) listed as both scanned and deliberately excluded: {overlap}"
+
+
+def test_deliberately_unscanned_modules_each_carry_a_real_denial():
+    """Guard against exclusion-set staleness: every excluded module must
+    actually contain >= 1 vocabulary-code denial site right now, checked
+    against the same live scanner the rest of this file uses -- a module
+    that no longer does should be REMOVED from the exclusion set (there
+    is nothing left to disclose an exception for), not left there as
+    unexplained dead weight that could later hide a real gap."""
+    for rel, reason in sorted(_DELIBERATELY_UNSCANNED_MODULES.items()):
+        assert reason, f"{rel} has no reason recorded in _DELIBERATELY_UNSCANNED_MODULES"
+        sites = _fail_call_sites(SRC / rel)
+        assert sites, f"{rel} is on the exclusion set but carries no vocabulary-code denial site -- remove it"

@@ -114,6 +114,9 @@ from .errors import fail, violation
 from .limits import ResourceLimits
 from . import platform_upgrades
 from .postgres_like import _escape_like_literal
+# `_FIELD_TYPE_SQL`/`_JSONB_SQL` are not used directly in this module; the
+# import exists only as a facade-compat re-export (design D-2) for callers
+# that still import them from `postgres`.
 from .postgres_types import _FIELD_TYPE_SQL, _JSONB_SQL, _column_type_sql
 from .structured import (
     BoundMutation,
