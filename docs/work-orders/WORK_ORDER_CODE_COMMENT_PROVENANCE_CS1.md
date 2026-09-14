@@ -1,5 +1,7 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.8 (2026-09-15)**: §13 のレビュー差し戻し 7 件 (監督裁定) を反映した: 安全上の理由の一覧の追加、参照先の grep を src まで広げた参照表、変異 9・12(c) の変異先の固定、0d で残った経緯だけの文の表、参照の文数の数え方、R-37 との重なりの書き直し。
+- **v1.7 (2026-09-15)**: §13 に変更セット 5 (r2db `credential_store.py` と MitateDB `ops.py`) の manifest を追記した (起草、監督確認待ち)。既存の節は書き換えていない。
 - **v1.6 (2026-09-15)**: §12 のレビュー差し戻し 7 件 (監督裁定) を反映した: 塊をまたぐ参照先の点検、`backend_sqlite.py` の保護候補、完了条件 10 の変異先、目印の件数 (対象の塊だけ)、改行・受け皿・ガードテストの行、静的テストの注記、`ops.py` の blob の着手条件。
 - **v1.5 (2026-09-15)**: §12 に変更セット 4 (r2db `ops.py` と MitateDB `backend_sqlite.py`) の manifest を追記した (起草、監督確認待ち)。既存の節は書き換えていない。
 - **v1.4 (2026-09-14)**: 変更セット 3 の節 (§6) に独立レビューの指摘 (監督裁定) を反映した: 0d の着手条件、契約説明らしい文の監査照合 (完了条件 24)、判定表の範囲、Q-7・Q-8 の本文への反映と §6.5 への統合。§0〜§5 は書き換えていない。
@@ -1480,3 +1482,194 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 | 移した塊 / 対象の塊 | — | 93 (ops.py 48 + backend_sqlite.py 45) / 122。文削除 (3) は3件 (CH-0299, CH-0323 は差し戻し (b) で追加、CH-0321 は差し戻し (a) で行頭 `#:` 書式を訂正) |
 | 変異の行 (完了条件 1〜11、24a) | — | 全13変異 (1a,1b,2,3,4a,4b,4c,4d,5,6,7,8,9,10,11,24a) すべて赤 (クリーン restore を都度実施)。詳細は本文 §12 実施記録参照 |
 | 各 suite と照合コマンドの集計行 | | `check_comment_provenance.py --base d09733a ops.py` OK 72 blocks / `--base 4d45fc6 backend_sqlite.py` OK 57 blocks / `--register` OK 75 files・378 CH-ID / `find_broken_line_wrap_joins` 両ファイル 0 件 / `check_doc_refs.py` OK 0 dangling / `public_value_scan.py`（触ったファイル4件）total_flagged=0 / `pytest tools/tests` 309 passed, 1 failed（既知の赤 `test_0f_both_peers_all_src_rev_vs_itself_is_green`、main 4d45fc6 でも赤、CH-0239/CH-0139 の事実訂正起因、変更セット4とは無関係。出力に ops.py/backend_sqlite.py の行は含まれない） / `pytest r2db-api/tests` 1275 passed / `pytest MitateDB-api/tests` 1103 passed, 2 subtests passed / `pytest conformance-tests` 995 passed |
+
+## 13. 変更セット 5 — r2db `credential_store.py` と MitateDB `ops.py`
+
+正本設計は v0.13 (§3、§5、§6、§8、§9 (0d〜0g)、§10)。行番号と実測は main `3adba35` の値。
+
+### 13.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | 変更セット 4 と記録が main に統合されている (`3adba35`) |
+| 2 | 着手時に、並行 branch、R-37 の触るファイル、設計 §5(b) の grep を取り直す |
+| 3 | 2 module の blob が `3adba35` から着手時の親コミットまで変わっていない (変わっていれば `--base` と実測を取り直す) |
+
+### 13.2 選定と実測 (`3adba35`)
+
+監督裁定により 1 peer 1 module (設計 §10.3 の次の候補)。どちらも R-37 の抽出対象ではない (`docs/work-orders/WORK_ORDER_R37_WP0_INVENTORY_V1.md` §2〜§4 に無く、§5 では `credential_store.py` が WP-1f の呼出し元として出るだけ。MitateDB `ops.py` は出ない)。
+
+| 項目 | r2db `credential_store.py` | MitateDB `ops.py` |
+|---|---|---|
+| 塊 (`extract_all_blocks`。全塊を読む) | 71 (docstring 43 / comment 28) | 60 (docstring 32 / comment 28) |
+| うち登録 helper の中 (対象外) | 1 (`_take_bound_advisory_lock`) | 7 (`cmd_verify_declarations`、`_upsert_declaration`、`_verify_declarations_checks` / `_ok` / `_fail`、`_VERIFY_DECLARATIONS_EXIT_CODES` / `_READ_ORDER`) |
+| 対象の塊 | **70** | **53** |
+| 経緯トークン (§2.3 末尾の数え方、全文) | **81** | **105** |
+| 目印一覧に当たる文 / 塊 (対象の塊だけ) | 12 / 11 | 22 / 17 |
+| 塊をまたぐ参照の語を含む文 (対象の塊、`above` / `below` / `see … own comment` / `the comment on`) | 38 | 20 |
+
+- 参照の文数の数え方: 対象の塊ごとに `_flatten` と `split_sentences` で文に分け、正規表現 `\b(above|below|see [^.]{0,60}own (comment|docstring)|the comment on)\b` (大文字小文字を区別しない) に当たる文を数えた。同じ塊の中を指す文も含むので、参照表の行数とは一致しない。
+| `#:` の行 | 0 | 18 |
+| 既存の CH-ID | 0 | 0 |
+
+- 受け皿は新規 `docs/code-history/r2db-api/credential_store.md` と新規 `docs/code-history/MitateDB-api/ops.md`。
+
+**静的テストの注記**
+
+| 箇所 | 扱い |
+|---|---|
+| 行番号 pin (L1 scan) | 2 module とも両 peer の `SCANNED_MODULES` 外で pin 0 件。ただし行数が変わるので root gate を通す (設計 §10.2 の教訓) |
+| 文字列の検査 (設計 §5(b)) | `MitateDB-api/tests/test_ops_upgrade.py:476` は `ast.parse` に通すのでコメントに依らない。`credential_store.py` を文字列として読む検査は 0 件。`r2db-api/tests/test_audit_query.py:2270` / `:2284` は r2db `ops.py` が対象で本変更セットと無関係 |
+| 同型性の表 | 登録 helper の中の 8 塊は触らない。変異先は対象外のコメント塊 (先頭 docstring は同型性テストが比較から除くので使わない) |
+
+**R-37 との重なり**: R-37 WP-2a は manifest が main に統合済み (`5919dc6`) で、いまは両 peer の `test_foundation.py` を実装中である。2 module への参照は 0 件で、重なりなし (着手条件 2 で取り直す)。
+
+**塊をまたぐ参照先**: 2 module の中、両 peer の `src/` と `tests/` を grep し、他の塊・他の module・tests から指されている文を「残す」と固定して §13.4 の参照先一覧に載せる。既知の参照は同一覧に先に載せた。
+
+**経緯と見誤りやすい安全上の理由 (先に一覧にする)**: 経緯トークンと安全上の理由が同じ文にある塊 (`3adba35` 実測)。文は残し、経緯トークンだけを機械的に消すことは許す。`credential_store.py` は認証情報の保存なので、hash / pepper / 定数時間比較 / 失効 / lock の理由を特に洗い出し、下の一覧に無い文も §13.4 の判定表で確かめる。
+
+| module | 行 | 安全上の語 |
+|---|---|---|
+| `credential_store.py` | L98-114 | `FOR UPDATE`、`lock_timeout` |
+| 〃 | L139-144 | `compare_digest` |
+| 〃 | L324-341 | `compare_digest`、secret |
+| 〃 | L373-375 | `compare_digest`、revoked |
+| 〃 | L488-502 | lock |
+| 〃 | L597-617 | revoked、secret |
+| 〃 | L635-659 | revoked |
+| 〃 | L755-762 | `lock_timeout`、commit / rollback |
+| 〃 | L933-949 | advisory lock (TOCTOU) |
+| 〃 | L1012-1034 | row lock、`revoke_credential`、lockout |
+| 〃 | L1191-1210 | lock |
+| 〃 | L1376-1403 | commit (total order) |
+| MitateDB `ops.py` | L1-141 | revoke |
+| 〃 | L344-369 | secret |
+| 〃 | L649-674 | advisory lock、`revoke_all` |
+| `credential_store.py` (監督裁定で追加) | L893-906、L990-1000 | `must_rotate` と rotate |
+| 〃 | L520-536 | bearer の組立てと transaction |
+| 〃 | L779-784 | 認証の locator → digest |
+| 〃 | L86-94、L1290-1300、L1309-1315、L1319-1329、L1475-1481、L1490-1495、L1499-1502 | DB 側 timeout |
+| 〃 (裸 ID のラベル。操作 (6) で消されやすい) | L684-702 | pepper の分離 |
+| 〃 (同上) | L356-362 | 無条件の `compare_digest` |
+| 〃 (同上) | L366-370 | エラーの不透明性 (SI-10) |
+| 〃 (同上) | L294-304、L1358-1362 | commit / rollback |
+| MitateDB `ops.py` (監督裁定で追加) | L272-287 | secret を 1 回だけ表示 |
+| 〃 | L480-491 | lockout |
+| 〃 | L1651-1666、L1700-1707 | 未 provision のアプリの扱い |
+| 〃 | L1799-1804 | break-glass |
+
+### 13.3 Manifest
+
+**目的**: 2 module の経緯を peer ごとの受け皿へ移し、コードに現在の理由と `CH-NNNN` を残す。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/credential_store.py`、`MitateDB-api/src/mitatedb_api/ops.py` (**どちらもコメントと docstring だけ**。登録 helper の 8 塊を除く)、新規 `docs/code-history/r2db-api/credential_store.md`、新規 `docs/code-history/MitateDB-api/ops.md`、本書 §13.4 | 他の `src/` 全部、`tools/`、`tools/tests/`、両 peer の `tests/`、`conformance-tests/`、既存の受け皿、`docs/code-history/pair.md`、`docs/design/`、roadmap、`_ISOMORPHIC_TARGETS` |
+
+| 項目 | 内容 |
+|---|---|
+| CH-ID 予約 | **`CH-0381`〜`CH-0503`** (登録済みの最大 `CH-0380` の次から。対象 70 + 53 = 123 塊が上限) |
+| `--base` | main `3adba35` (2 module とも) |
+| 必須の規律 | §6.3 の (i)〜(iii) と設計 §3 の点検語 (副詞を含む)。目印の件数は対象の塊だけで数える。(iv) Q-4 の再利用照合は対象外 (基点に CH-ID が無い) |
+| 保護文 (0d) と訂正 (0g) | 保護参照を含む文は丸ごと消さない。今のコードと食い違う文は、受け皿の該当 CH-ID 節に訂正の記録 (日付、理由 1 行、旧文、新文) を追記して直す。訂正は保護参照を減らさない (設計 §9 0g)。事実の照合は独立レビュー |
+| 改行 | 述語 B (設計 §9 0e / 0f) と `#:` の行頭記号 (0g) を守る。`find_broken_line_wrap_joins` の残り 0 件 |
+| 統合 | コミットした後の HEAD で `tools/tests` を流し、**root gate を通してから統合する** (行数が変わるため。設計 §10.2) |
+| 手順 | 設計 §6「手順」。40a は両 peer の suite を前後 2 回。40b は非該当 (行番号 pin 0 件) を監査照合で記録する |
+
+**完了条件 ↔ 変異** (P = `check_comment_provenance.py --base 3adba35 <module>`、R = `--register`。変異の行は着手時に決め、§13.4 に記録する)
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 1 | コード不変 | 2 module: コード行の literal を 1 文字変える | P exit 1 (1) |
+| 2 | 移した塊が逐語 | `credential_store.md`: 1 節から 1 文消す | P exit 1 (2) |
+| 3 | CH の無い塊を変えていない | `ops.py`: CH を付けずに 1 塊から 1 文消す | P exit 1 (2) |
+| 4 | 文区間の削除だけ | `credential_store.py`: (a) 否定語を落とす (b) 2 文を並べ替える (c) 1 語足す (d) 折返し行を 1 行消す | P exit 1 (3)、4 種それぞれ |
+| 5 | 保護参照を含む文は丸ごと消せない (0d) | 保護参照を含む文を 1 つ丸ごと消す | P exit 1 (3) |
+| 6 | ラベル削除が規則どおり (§8) | ラベルを消し、区切りの後ろの先頭文字を小文字化する | P exit 1 (6) |
+| 7 | 経緯を足していない | 追加行に `WP-` 又は `Supervisor ruling` を含める | P exit 1 (5) |
+| 8 | 実在パス・版数付き文書名は残る | 実在パス又は `contract <版数>` を消す | P exit 1 |
+| 9 | 登録 helper を変えていない | MitateDB `ops.py`: 登録 helper の中のコメント (例: L1049-1053) から 1 文消す (r2db の対象外は docstring だけで、同型性テストが比較から除くので変異先にしない) | 両 peer の `tests/test_audit_query.py::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` |
+| 10 | 訂正の記録が規則どおり (0g) | (a) 記録の旧文を基準に無い文にする (b) 新文から保護参照を 1 つ消す | (a) P exit 1 (b) P exit 1。記録が無い場合は該当なしを監査照合で記録する |
+| 11 | `#:` の行を保つ (0g) | `ops.py`: `#:` の塊を 1 行に詰める | P exit 1 |
+| 12 | 両ファイルで改行の壊れが 0 件 | `find_broken_line_wrap_joins` を両ファイルに流す。変異: (a) `id ASC` 型をつなぐ (b) `/` の直後の改行を空白 1 つでつなぐ (c) backtick の span の中の折返し (例: `credential_store.py` L139 の `compare_` / `digest`) を空白 1 つでつなぐ | 0 件であること。(a) P exit 1 (§4.1 (3))、(b)(c) P exit 1 (§9 0e の検出) |
+| 13 | 受け皿が原文の写しとして完全 | (a) `ops.md` の fenced block の末尾を 1 語切り詰める (b) 折り返しで割れた実在パスを含むラベルを、パスの後半ごと削る | (a) P exit 1 (§4.1 (2))、(b) P exit 1 |
+| 14 | 指示語・定冠詞・副詞の参照先を消していない | 残す文の点検語が参照する文を削除する | 機械では赤にならない — **監査照合**: §13.4 の候補一覧とコードレビュー |
+| 15 | 安全上の理由と同居する文を残している | §13.2 の一覧の文を文ごと削除する | 機械では赤にならない — **監査照合**: 判定表の根拠とレビュー |
+| 16 | 塊をまたぐ参照先の文を残している | 参照先一覧の文 (例: L597-617、L356) を削除する | 機械では赤にならない — **監査照合**: 両 peer の `src/`・`tests/` の grep の結果と §13.4 の参照先一覧 |
+| 17 | ID の解決・孤児・全体一意 | コード側 1 件を `CH-0999` にする / 他の受け皿と同じ番号の節を足す | R exit 1 (§4.2-1 / -2) |
+| 18 | docstring 依存の新設なし | `ops.py` に `__doc__` の読出しを 1 行 | R exit 1 (§4.2-5) |
+| 19 | 受け皿の ID が `check_doc_refs` で解決 | `credential_store.md` の fenced block に roadmap に無い 2 桁の R 番号を 1 つ足す | `check_doc_refs.py` exit 1 |
+| 20 | 行番号 pin と文字列検査が非該当のまま | **監査照合**: L1 scan の allowlist に 2 module が 0 件、§5(b) の grep で文字列として読む検査 0 件 | — |
+| 21 | 判定表が対象を覆う | **監査照合**: 対象の塊で目印一覧に当たる 34 文 (12 + 22) 以上と §13.2 の安全上の理由の一覧が §13.4 にあり、根拠・点検語の欄に空欄なし。対象 123 塊を読んだことを記録する | — |
+| 22 | HTTP の status・error code を含む削除文 | 3 桁のステータス番号又はエラーコード語彙を含む文を 1 つ消す | **監査照合**: §13.4 の監査一覧の各行が判定表で根拠付きで「経緯だけの文」と判定されている |
+| 23 | 集計行と経緯トークン数の前後 | **監査照合** (§13.4 の記録と実行ログ。数え方は §2.3 末尾) | — |
+| 24 | コミット後の HEAD で `tools/tests` が緑、root gate を通過 | **監査照合**: 監督がコミット後の HEAD で `pytest -q tools/tests` と root suite を流す | — |
+| 25 | 対応の無い行が無い | **監査照合** (§1.5 の 40) | — |
+
+**検証コマンドと期待形** (40a: 前後の 2 回、前景直列、`timeout` 600000)
+
+```
+./.venv/bin/python -m pytest -q r2db-api/tests       → failed/skipped/xfailed 0、前後で passed 数一致
+./.venv/bin/python -m pytest -q MitateDB-api/tests   → 同上 (test_ops_upgrade.py を含む)
+./.venv/bin/python -m pytest -q conformance-tests    → 同上
+./.venv/bin/python -m pytest -q tools/tests          → failed 0 (コミット後の HEAD で)
+python3 tools/check_comment_provenance.py --base 3adba35 r2db-api/src/r2db_api/credential_store.py MitateDB-api/src/mitatedb_api/ops.py → exit 0
+python3 tools/check_comment_provenance.py --register → exit 0
+python3 tools/check_doc_refs.py                      → exit 0
+python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=0
+監督: root suite 単独 (§1.3 の 19〜23)。前後の集計差分は 0
+```
+
+**使用テンプレート**: **2** → **5** → **6**。**変更クラス**: **B** (登録 helper の本体に触れない)。
+
+### 13.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
+
+**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
+|---|---|---|---|---|---|---|
+
+**塊をまたぐ参照先一覧**
+
+| # | 参照元 (`file:line`) | 参照の語 | 参照先 (`file:line`) | 参照先の文 (先頭の数語) | 残っているか |
+|---|---|---|---|---|---|
+| 1 | `r2db-api/src/r2db_api/auth.py:298` | (外部) | `credential_store.py` L597-617 | | |
+| 2 | `r2db-api/tests/test_credential_persistence.py:714` | (外部) | `credential_store.py` L404-411 | | |
+| 3 | `MitateDB-api/tests/test_ops_upgrade.py:16` | (外部) | MitateDB `ops.py` L174-181 | | |
+| 4 | `credential_store.py` L779 | | L324 | | |
+| 5 | `credential_store.py` L796 | | L356 | | |
+| 6 | `credential_store.py` L373 | | L356 | | |
+| 7 | `credential_store.py` L429 | | L404 | | |
+| 8 | `credential_store.py` L1475 | | L1290 | | |
+| 9 | `credential_store.py` L1499 | | L1319 | | |
+| 10 | MitateDB `ops.py` L436 | | L416 | | |
+| 11 | MitateDB `ops.py` L174 | | L223 | | |
+
+**HTTP の status・error code を含む削除文の監査一覧**
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 含む語 | 判定表の根拠 |
+|---|---|---|---|---|
+
+**0d の保護参照があるために残った、経緯だけの文** (設計 §9 0d の既知の制約。変更セットの報告に載せる)
+
+| # | ファイル / 塊 (行) | 文 (先頭の数語) | 保護参照 |
+|---|---|---|---|
+
+**訂正の記録 (0g)**
+
+| # | CH-ID | 旧文 (先頭の数語) | 新文 (先頭の数語) | 理由 (根拠 `file:line`) |
+|---|---|---|---|---|
+
+**判定表** (目印一覧に当たる全文と §13.2 の安全上の理由の一覧を含む。一覧は下限)
+
+| ファイル / 塊 (行) | 判定 | 根拠 |
+|---|---|---|
+
+**記録**
+
+| 項目 | 前 | 後 |
+|---|---|---|
+| 経緯トークン数 `credential_store.py` / `ops.py` (§2.3 末尾の数え方) | 81 / 105 | |
+| 移した塊 / 対象の塊 | — | / 123 |
+| 変異の行 | — | |
+| 各 suite と照合コマンドの集計行 | | |
