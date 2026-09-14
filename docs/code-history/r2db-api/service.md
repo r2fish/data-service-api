@@ -540,6 +540,20 @@ request_budget`/`.idempotency` both flipping to `enabled` (P-3).
 # though both behave identically otherwise.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-3c -- the `_mutate_outcome` request-shape checks moved to `request_shape.py`; the pointer gets a 40c position bracket
+
+old:
+```
+`transaction` is never a contract-level *default* -- `None` here means the caller's own request object never carried the key at all (both `http.post_mutate` and the in-process port omit the kwarg rather than resolving it to `"atomic"` before this call). `resolved_transaction` is used for every behavioural decision (the capability gate below); the RAW `transaction` value (still `None` when omitted) is what `plan_request` below reflects, so a request that carried `transaction: "atomic"` explicitly digests differently from one that omitted the key entirely, even though both behave identically otherwise.
+```
+
+new:
+```
+`transaction` is never a contract-level *default* -- `None` here means the caller's own request object never carried the key at all (both `http.post_mutate` and the in-process port omit the kwarg rather than resolving it to `"atomic"` before this call). `resolved_transaction` is used for every behavioural decision (the capability gate below); the RAW `transaction` value (still `None` when omitted) is what `plan_request` below (in `service.py`) reflects, so a request that carried `transaction: "atomic"` explicitly digests differently from one that omitted the key entirely, even though both behave identically otherwise.
+```
+
 ## CH-0127
 
 - moved from: `src/r2db_api/service.py` (`DataService.mutate_result`)

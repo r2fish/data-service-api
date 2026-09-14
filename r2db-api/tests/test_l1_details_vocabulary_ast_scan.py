@@ -73,7 +73,15 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 #: `fail("VALIDATION_FAILED", ...)` call sites those functions moved with
 #: (already 4-key, moved verbatim) and must stay in `SCANNED_MODULES` for
 #: the same reason as `paging.py` above.
-SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py")
+#: R-37 WP-3c (2026-09-15): `request_shape.py` holds `_check_query_
+#: request_shape`/`_check_mutation_request_shape`, extracted from
+#: `service.py` -- it carries the 6 `fail(...)` call sites (4
+#: `VALIDATION_FAILED` from the query-shape checks, 1 `CAPABILITY_
+#: UNSUPPORTED` and 1 `VALIDATION_FAILED` from the mutation-shape checks)
+#: those functions moved with (already 4-key, moved verbatim) and must
+#: stay in `SCANNED_MODULES` for the same reason as `value_types.py`
+#: above.
+SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py", "request_shape.py")
 
 _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED"}
 
@@ -355,7 +363,7 @@ def test_ast_full_count_matches_the_audit_site_count():
     R-8/M-8: re-pinned to the measured post-merge count (`limits.py`'s
     4 inline budget denials were folded into 1 `_budget_denied` helper by
     the R-5/R-6 pair-closing merge, `violated_declaration` preserved)."""
-    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py")}
+    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py", "request_shape.py")}
     assert counts == {
         # R-37 WP-1e (2026-09-14): -1 -- `_wildcard_pattern`'s own bare
         # trailing-backslash `fail("VALIDATION_FAILED", ...)` site
@@ -375,7 +383,13 @@ def test_ast_full_count_matches_the_audit_site_count():
         # "VALIDATION_FAILED", ...)` sites (already 4-key) moved verbatim
         # to `value_types.py` (78 -> 67); see that module's own count
         # below.
-        "structured.py": 67, "service.py": 10, "limits.py": 5, "http.py": 8,
+        # R-37 WP-3c (2026-09-15): -6 -- `_query_outcome`'s 4 `fail(
+        # "VALIDATION_FAILED", ...)` request-shape sites and `_mutate_
+        # outcome`'s `fail("CAPABILITY_UNSUPPORTED", ...)`/`fail(
+        # "VALIDATION_FAILED", ...)` sites (already 4-key) moved verbatim
+        # to `request_shape.py` (10 -> 4); see that module's own count
+        # below.
+        "structured.py": 67, "service.py": 4, "limits.py": 5, "http.py": 8,
         # R-37 WP-1e (2026-09-14): the 1 site `_wildcard_pattern` carried
         # in `structured.py` before the move, unchanged in wording or
         # `details=` shape.
@@ -397,6 +411,10 @@ def test_ast_full_count_matches_the_audit_site_count():
         # predicate_types` carried in `structured.py` before the move,
         # unchanged in wording or `details=` shape.
         "value_types.py": 11,
+        # R-37 WP-3c (2026-09-15): the 6 sites `_check_query_request_
+        # shape`/`_check_mutation_request_shape` carried in `service.py`
+        # before the move, unchanged in wording or `details=` shape.
+        "request_shape.py": 6,
     }, counts
     assert sum(counts.values()) >= 76, counts
 
@@ -468,12 +486,12 @@ def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
     carries (exactly what R-2 did for the 5 former allowlist entries this
     left behind). This scans `structured.py`'s and its extracted leaves'
     (`inmemory_predicate.py`, R-37 WP-1e; `identifier_rules.py`, R-37
-    WP-1f; `paging.py`, R-37 WP-1h; `value_types.py`, R-37 WP-1i) FULL
-    fail-message vocabulary (any code, not just the 3 in-scope ones --
-    see `_all_fail_messages`), so a match against a `NOT_FOUND`/
-    `CONFLICT` message would be caught too."""
+    WP-1f; `paging.py`, R-37 WP-1h; `value_types.py`, R-37 WP-1i;
+    `request_shape.py`, R-37 WP-3c) FULL fail-message vocabulary (any
+    code, not just the 3 in-scope ones -- see `_all_fail_messages`), so a
+    match against a `NOT_FOUND`/`CONFLICT` message would be caught too."""
     in_memory_messages: set[str] = set()
-    for module in ("structured.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py"):
+    for module in ("structured.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py", "request_shape.py"):
         in_memory_messages |= _all_fail_messages(SRC / module)
     shared = []
     for module, lineno in sorted(_BACKEND_LAYER_ALLOWLIST):

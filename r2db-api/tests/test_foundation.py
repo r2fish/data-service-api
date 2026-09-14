@@ -2485,6 +2485,97 @@ def test_data_service_capabilities_passes_deployment_values_to_the_document():
     }
 
 
+def test_request_shape_denials_carry_code_details_and_order(service):
+    """`_check_query_request_shape`/`_check_mutation_request_shape`
+    (`request_shape.py`) carry the 6 request-shape denials of
+    `query`/`mutate`, fixed here against their literal code/details so a
+    mutation to any one of them is caught. The `transaction`/`operations` pair also pins the capability
+    check running before the operations-shape check (the order the two
+    denials must fire in)."""
+    runtime = service.authenticate("cred-a.secret-a")
+
+    with pytest.raises(FoundationError) as error:
+        service.query(runtime, "notes", select=["id"], page_size=True)
+    assert error.value.code == "VALIDATION_FAILED"
+    assert error.value.details == {"violated_declaration": "request_schema"}
+
+    with pytest.raises(FoundationError) as error:
+        service.query(runtime, "notes", select="id")
+    assert error.value.code == "VALIDATION_FAILED"
+    assert error.value.details == {"violated_declaration": "request_schema"}
+
+    with pytest.raises(FoundationError) as error:
+        service.query(runtime, "notes", select=["id"], where="not-a-list")
+    assert error.value.code == "VALIDATION_FAILED"
+    assert error.value.details == {"violated_declaration": "request_schema", "field": "where", "declared_type": "array", "observed_type": "string"}
+
+    with pytest.raises(FoundationError) as error:
+        service.query(runtime, "notes", select=["id"], order_by="not-a-list")
+    assert error.value.code == "VALIDATION_FAILED"
+    assert error.value.details == {"violated_declaration": "request_schema", "field": "order_by", "declared_type": "array", "observed_type": "string"}
+
+    with pytest.raises(FoundationError) as error:
+        service.query(runtime, "notes", select=["id"], cursor=123)
+    assert error.value.code == "VALIDATION_FAILED"
+    assert error.value.details == {"violated_declaration": "request_schema", "field": "cursor", "declared_type": "string", "observed_type": "integer"}
+
+    # capability check before the operations-shape check: an unsupported
+    # `transaction` together with malformed `operations` still reports
+    # CAPABILITY_UNSUPPORTED, never VALIDATION_FAILED.
+    with pytest.raises(FoundationError) as error:
+        service.mutate(runtime, "notes", "not-a-list", transaction="best_effort")
+    assert error.value.code == "CAPABILITY_UNSUPPORTED"
+    assert error.value.details == {"violated_declaration": "capability", "field": "transaction"}
+
+    with pytest.raises(FoundationError) as error:
+        service.mutate(runtime, "notes", "not-a-list")
+    assert error.value.code == "VALIDATION_FAILED"
+    assert error.value.details == {"violated_declaration": "request_schema", "field": "operations"}
+
+
+def test_request_shape_checks_run_after_authorization_and_are_audited(service):
+    """The request-shape checks (`request_shape.py`) run INSIDE `_slot`,
+    after authorization, for both `query` and `mutate` -- an invalid
+    context together with a malformed `select` or `operations` reports
+    `AUTH_INVALID` (authorization is checked first, the shape is never
+    reached), while the same malformed argument with a valid,
+    authenticated context reaches the shape check and its
+    `VALIDATION_FAILED` deny is recorded in the legacy in-memory audit
+    (`ControlAuthority.audit_events()`)."""
+    control = ControlAuthority(service)
+
+    with pytest.raises(FoundationError) as error:
+        service.query("not-a-context", "notes", select="not-a-list")
+    assert error.value.code == "AUTH_INVALID"
+
+    runtime = service.authenticate("cred-a.secret-a")
+    with pytest.raises(FoundationError) as error:
+        service.query(runtime, "notes", select="not-a-list")
+    assert error.value.code == "VALIDATION_FAILED"
+
+    denials = [
+        event for event in control.audit_events()
+        if event["operation"] == "query" and event["outcome"] == "deny" and event["reason_code"] == "VALIDATION_FAILED"
+    ]
+    assert denials, "expected a VALIDATION_FAILED deny recorded in the in-memory audit"
+
+    def validation_denials():
+        return [
+            event for event in control.audit_events()
+            if event["outcome"] == "deny" and event["reason_code"] == "VALIDATION_FAILED"
+        ]
+
+    with pytest.raises(FoundationError) as error:
+        service.mutate("not-a-context", "notes", "x")
+    assert error.value.code == "AUTH_INVALID"
+
+    before = len(validation_denials())
+    with pytest.raises(FoundationError) as error:
+        service.mutate(runtime, "notes", "x")
+    assert error.value.code == "VALIDATION_FAILED"
+    assert len(validation_denials()) == before + 1, "expected the mutate VALIDATION_FAILED deny recorded in the in-memory audit"
+
+
 def test_order_by_sorts_and_appends_id_when_absent():
     cell = _numbered_cell(3)  # n = 0, 1, 2 with id = 1, 2, 3 respectively
     descending = cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "desc"}])
