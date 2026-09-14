@@ -7,7 +7,7 @@ from typing import Any
 
 def _as_traversable(item: Any) -> Any:
     """Phase 8 WP-1a (design D-1): `_measure_request_bytes`/`_check_
-    operation_depth` below (in `cell.py`) traverse the JSON-safe request
+    operation_depth` below (in `request_limits.py`) traverse the JSON-safe request
     structures this module's own gate (`cell.py`) builds internally (a
     plain dict of the method's own arguments) -- but those arguments
     legitimately carry this module's own (`cell.py`) `Filter` frozen

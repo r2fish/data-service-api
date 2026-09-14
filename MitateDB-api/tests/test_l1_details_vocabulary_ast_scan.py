@@ -61,7 +61,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
 #: Contract 1.7.0 `errors.details_vocabulary` applies to EVERY
 #: `VALIDATION_FAILED`/`IDENTIFIER_INVALID`/`CAPABILITY_UNSUPPORTED`
 #: denial this peer answers with, data-plane (D-1/D-3) AND control-plane
-#: (追補 4 O-1) alike -- these 9 files are the full choke-point/request-
+#: (追補 4 O-1) alike -- these 11 files are the full choke-point/request-
 #: shape layer for both surfaces, plus the two data-plane backend
 #: realizations. `config.py`/`ops.py`/`control_auth.py`/`control_
 #: credential_store_postgres.py` also raise `ValidationError`/
@@ -77,9 +77,14 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
 #: leaf is still covered by this scan (this was the exact gap the
 #: R-37 WP-1 fix closed: the leaf was extracted without being added
 #: here).
+#: R-37 WP-1d (2026-09-14): `request_limits.py` holds `_measure_request_
+#: bytes`/`_check_operation_depth`, extracted from `cell.py` -- it
+#: carries the 2 `ValidationError` call sites those functions moved with
+#: (both already 4-key, moved verbatim) and must stay in `SCANNED_
+#: MODULES` for the same reason `postgres_value_domain.py` does above.
 SCANNED_MODULES = (
     "cell.py", "http.py", "field_types.py", "identifiers.py", "backend_postgres.py", "backend_sqlite.py",
-    "postgres_value_domain.py",
+    "postgres_value_domain.py", "request_limits.py",
     "control_plane.py", "control_http.py", "audit_query.py",
 )
 
@@ -428,7 +433,11 @@ def test_ast_full_count_matches_a_non_trivial_floor():
     -- measured directly against this WP's own post-fix tree."""
     counts = {module: len(_fail_call_sites(SRC / module)) for module in SCANNED_MODULES}
     assert counts == {
-        "cell.py": 49,
+        # R-37 WP-1d (2026-09-14): -2 -- `_measure_request_bytes`'s and
+        # `_check_operation_depth`'s own bare-cycle `ValidationError`
+        # sites (both already 4-key) moved verbatim to `request_
+        # limits.py` (49 -> 47); see that module's own count below.
+        "cell.py": 47,
         # WP-3e rework T2 (追補 L-4): +1 -- `_check_object_shape`'s own
         # new "present but wrong type" leg (a genuine new choke-point
         # call site, not a relabeling of an existing one).
@@ -449,6 +458,10 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # domain` carried in `backend_postgres.py` before the move,
         # unchanged in wording or `details=` shape.
         "postgres_value_domain.py": 4,
+        # R-37 WP-1d (2026-09-14): the 2 sites `_measure_request_bytes`/
+        # `_check_operation_depth` carried in `cell.py` before the move,
+        # unchanged in wording or `details=` shape.
+        "request_limits.py": 2,
         # 追補 4 O-1: the 3 control-plane modules this WP newly scans --
         # "12 + 4 + 3" is the AUDIT's own bare-site count (before this
         # WP's fix); the total CALL-SITE count (bare + already-had-
@@ -542,7 +555,7 @@ def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
     just the 2 in-scope classes), so a match against a differently-coded
     denial would be caught too."""
     in_memory_messages: set[str] = set()
-    for module in ("cell.py", "field_types.py", "http.py", "identifiers.py"):
+    for module in ("cell.py", "field_types.py", "http.py", "identifiers.py", "request_limits.py"):
         in_memory_messages |= _all_denial_messages(SRC / module)
     shared = []
     for module, lineno in sorted(_BACKEND_LAYER_ALLOWLIST):

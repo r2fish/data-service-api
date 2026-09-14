@@ -38,7 +38,7 @@ import pytest
 
 from mitatedb_api.auth import Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend
-from mitatedb_api.cell import ApplicationCell, Filter, _LimitStateHolder, _as_traversable, _measure_request_bytes
+from mitatedb_api.cell import ApplicationCell, Filter, _LimitStateHolder, _as_traversable, _check_operation_depth, _measure_request_bytes
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import ResourceLimitError, ValidationError
@@ -282,6 +282,101 @@ def test_gate_denies_operation_depth_before_budget_validation():
             runtime2, [{"type": "insert", "collection": "t", "values": deep}],
             budget={"execution_ms": 1_000_000})
     assert excinfo2.value.details["violated_declaration"] == "budget"
+
+
+def test_request_limits_leaf_preserves_cell_facade():
+    """R-37 WP-1d (CE2): `_measure_request_bytes`/`_check_operation_depth`
+    moved from `cell.py` to the new leaf `request_limits.py` -- `cell.py`
+    keeps a facade import of both (the SAME function objects, not a copy),
+    so `ApplicationCell._limit_gate`'s own bare calls to them (`cell.py`)
+    and any EXISTING caller that already imports either name from
+    `cell.py` keep working with no change to their own import line (this
+    file's own import at L41 is not such a caller -- it is new, added by
+    this WP to reach `_check_operation_depth` directly for the tests
+    below). Dropping either name from `cell.py`'s own facade import
+    breaks this identity check, and also breaks collection of this
+    test module, since that same import line is where L41 reads both
+    names from."""
+    from mitatedb_api.request_limits import (
+        _check_operation_depth as leaf_check_operation_depth,
+        _measure_request_bytes as leaf_measure_request_bytes,
+    )
+
+    assert _measure_request_bytes is leaf_measure_request_bytes
+    assert _check_operation_depth is leaf_check_operation_depth
+
+
+def test_measure_request_bytes_counts_each_string_character_as_four_bytes():
+    """変異 2 (design D-1 実現方式): a bare string's own structural cost is
+    `len(value) * 4` -- `"x" * 25` costs exactly `25 * 4 = 100`, so
+    `bound=99` must reject it and `bound=100` must accept it (a literal
+    pin, not just "some string is rejected somewhere")."""
+    payload = "x" * 25
+    with pytest.raises(ResourceLimitError) as excinfo:
+        _measure_request_bytes(payload, 99)
+    assert excinfo.value.details == {"limit_class": "request_bytes"}
+    _measure_request_bytes(payload, 100)  # does not raise
+
+
+def test_measure_request_bytes_rejects_a_dict_with_too_many_elements_before_the_running_total_would():
+    """変異 3b: the dict branch's own per-container element-count
+    early-reject (`len(item) > bound // 8`), the dict analogue of
+    `test_measure_request_bytes_rejects_a_container_with_too_many_
+    elements_before_the_running_total_would` above (which exercises the
+    list branch's identical check). 13,000 single-character keys (each
+    costing `1 * 4 = 4`) each mapped to an empty list (each costing `2`):
+    running total is `2 (outer dict) + 13_000 * (4 + 2) = 78_002`, well
+    under `bound=100_000`, but the element count (13,000) exceeds
+    `bound // 8 = 12_500` -- only the early-reject can catch this shape."""
+    bound = 100_000
+    request = {chr(0x4E00 + i): [] for i in range(13_000)}
+    assert all(len(key) == 1 for key in request), "keys must be exactly one character each"
+    with pytest.raises(ResourceLimitError) as excinfo:
+        _measure_request_bytes(request, bound)
+    assert excinfo.value.details == {"limit_class": "request_bytes"}
+
+
+def test_check_operation_depth_denies_only_once_nesting_exceeds_the_bound():
+    """変異 4: the depth bound is exclusive -- nesting EQUAL to `bound` is
+    allowed, only nesting BEYOND `bound` is denied (`next_depth > bound`,
+    not `>=`). `{"a": {"b": 1}}` nests two containers deep (the outer
+    dict, then `{"b": 1}`): `bound=2` must pass without raising, and only
+    `bound=1` denies with `limit_class="operation_depth"`."""
+    request = {"a": {"b": 1}}
+    _check_operation_depth(request, 2)  # does not raise
+    with pytest.raises(ResourceLimitError) as excinfo:
+        _check_operation_depth(request, 1)
+    assert excinfo.value.details == {"limit_class": "operation_depth"}
+
+
+def _self_referential_list():
+    cyclic: list = []
+    cyclic.append(cyclic)
+    return cyclic
+
+
+def test_check_operation_depth_rejects_a_self_referential_container_as_a_cyclic_request_structure():
+    """変異 5a: calls `_check_operation_depth` directly (not through the
+    gate) because a gate-level call would hit `_measure_request_bytes`'s
+    own identical cycle check first, masking this mutation (work order
+    §5.6 note). A list containing itself is a genuine cycle -- not the
+    same object appearing twice as unrelated siblings -- and must raise
+    `ValidationError` with the bare `request_schema` violation (no
+    `field`, since the walk has no positional path to blame)."""
+    cyclic = _self_referential_list()
+    with pytest.raises(ValidationError) as excinfo:
+        _check_operation_depth(cyclic, 100)
+    assert excinfo.value.details == {"violated_declaration": "request_schema"}
+
+
+def test_measure_request_bytes_rejects_a_self_referential_container_as_a_cyclic_request_structure():
+    """変異 5b: `_measure_request_bytes`'s own identical cycle check,
+    called directly for the same reason as the `_check_operation_depth`
+    test above."""
+    cyclic = _self_referential_list()
+    with pytest.raises(ValidationError) as excinfo:
+        _measure_request_bytes(cyclic, 100)
+    assert excinfo.value.details == {"violated_declaration": "request_schema"}
 
 
 def test_measure_request_bytes_rejects_a_container_with_too_many_elements_before_the_running_total_would():
@@ -550,7 +645,7 @@ def test_execution_ms_pg_lock_timeout_maps_to_limit_exceeded_via_transact(platfo
 def test_request_bytes_dual_layer_responses_are_identical(platform, app_a):
     """design D-1 "HTTP面の二重化について": the ASGI byte-count middleware
     (real bytes, `http.py:208`) and the in-process structural estimate
-    (`cell.py::_measure_request_bytes`, reached via `ApplicationCell.
+    (`request_limits.py::_measure_request_bytes`, reached via `ApplicationCell.
     _limit_gate`) measure DIFFERENT quantities of the SAME class --
     "whichever crosses its own bound first rejects". This fixture sets
     the middleware's own bound (`request_bytes_limit`) LARGER than the
