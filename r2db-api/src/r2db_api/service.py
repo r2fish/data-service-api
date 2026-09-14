@@ -26,7 +26,7 @@ _logger = logging.getLogger(__name__)
 # supervisor ruling 2026-09-02): an INCLUSION set -- only a denial whose
 # reason_code is one of these 6 (D-3's own range table, SI-14's minimal
 # event class: authentication/authorization denial) is fail-closed/
-# coalesced-durable. Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_ UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_ UNAVAILABLE`, ...) -- is out of scope for durable/buffered recording (N-2: buffering them would just let the flow problem exists to bound come back through the buffer instead). An exclusion-list reading
+# coalesced-durable. Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable/buffered recording (N-2: buffering them would just let the flow problem exists to bound come back through the buffer instead). An exclusion-list reading
 # (only the named 4 are non-durable, everything else durable) was this
 # module's first implementation; the review's B-1 finding showed it lets a
 # `SERVICE_UNAVAILABLE` produced by the audit pipeline's OWN failure re-enter
@@ -44,7 +44,7 @@ _DURABLE_DENIAL_CODES = frozenset({
     "DESTRUCTIVE_CONFIRMATION_REQUIRED",  # DESTRUCTIVE_CONFIRMATION_REQUIRED
 })
 
-# a `FoundationError.details` marker this module's own audit-hook/denial-routing code sets on a `SERVICE_UNAVAILABLE` it raises BECAUSE the durable audit pipeline itself just failed (a pre-commit sink failure, a post-commit `error`-row write, a coalesced- denial first-insert failure). `_event`'s own deny-dispatch checks this marker and skips routing such a denial through `_route_denial` again -- without it, the generic `except FoundationError` handler every public method already has would treat this SERVICE_UNAVAILABLE as a brand-new denial needing its own durable write, producing a second (or third) durable row for what D-10 requires stays at most one (+ the error-row exception).
+# a `FoundationError.details` marker this module's own audit-hook/denial-routing code sets on a `SERVICE_UNAVAILABLE` it raises BECAUSE the durable audit pipeline itself just failed (a pre-commit sink failure, a post-commit `error`-row write, a coalesced-denial first-insert failure). `_event`'s own deny-dispatch checks this marker and skips routing such a denial through `_route_denial` again -- without it, the generic `except FoundationError` handler every public method already has would treat this SERVICE_UNAVAILABLE as a brand-new denial needing its own durable write, producing a second (or third) durable row for what D-10 requires stays at most one (+ the error-row exception).
 # history: CH-0177
 _AUDIT_SINK_ORIGIN = "audit_sink"
 
@@ -65,10 +65,12 @@ _DEFAULT_AUDIT_BUFFER_CAPACITY = 1000
 # thread uses (imports this name directly rather than defining its own).
 _DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 
-# Phase 10 WP-6a (design, contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self. _rate_windows`/`self._active`, both below), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`. Every other `ResourceLimits` class is either region (i) (request-scoped, unaffected regardless of process count) or region (iii) (`idempotency_entries`, bound in PostgreSQL -- `enforced` regardless of `process_ceiling`, design; the count lock itself is scope, not this WP's).
+# Phase 10 WP-6a (design, contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`. Every other `ResourceLimits` class is either region (i) (request-scoped, unaffected regardless of process count) or region (iii) (`idempotency_entries`, bound in PostgreSQL -- `enforced` regardless of `process_ceiling`, design; the count lock itself is scope, not this WP's).
 # history: CH-0174
 _IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES = frozenset({"requests_per_minute", "concurrency"})
 
+# `_coalesced_count`'s own comment (Phase 4 WP-2(b) review B-1) moved with
+# it to `audit_counts.py` when that helper was extracted.
 # history: CH-0179
 
 # Phase 4 (design §7.4/D-4): fixed, no-interpolation log messages -- the
@@ -80,7 +82,7 @@ _BUFFER_OVERFLOW_LOG_MESSAGE = "application_audit buffer overflow: events were d
 _ALERT_WRITE_FAILED_LOG_MESSAGE = "application_audit overflow-alert row could not be written; retrying with backoff"
 _ALERT_WRITE_RECOVERED_LOG_MESSAGE = "application_audit overflow-alert row recorded; pending overflow cleared"
 
-# fixed, no-interpolation log messages for the denial-coalescer's own aggregate (repeat-count summary) row write path -- mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_ WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline, applied to `_DenialCoalescer._note_aggregate_write_result`.
+# fixed, no-interpolation log messages for the denial-coalescer's own aggregate (repeat-count summary) row write path -- mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline, applied to `_DenialCoalescer._note_aggregate_write_result`.
 # history: CH-0173
 _COALESCE_AGGREGATE_WRITE_FAILED_LOG_MESSAGE = "application_audit coalesced-denial summary row could not be written; retrying"
 _COALESCE_AGGREGATE_WRITE_RECOVERED_LOG_MESSAGE = "application_audit coalesced-denial summary row recorded; retry cleared"
@@ -307,7 +309,7 @@ class _AuditBuffer:
         order, always on a connection/transaction of its own. A failed batch write leaves the events in place for the next attempt (retained, not counted as dropped --) rather than discarding them or alerting on its own.
 
         the periodic-flush thread (composition root) and a request-path threshold flush (`push()`, M-2 above) can call this method concurrently on the SAME buffer.
-        `pending` is therefore SWAPPED OUT of `self._events` under a single lock acquisition (not merely copied) -- this, not a separate "flush in progress" flag, is what makes two concurrent `flush()` calls durably write disjoint (usually one full, one empty) sets of events instead of both durably writing the SAME events (the double-row bug this found, reproduced verbatim by `test_concurrent_periodic_and_threshold_flush_never_double_ writes_pending_events`). A concurrent call that finds `self.
+        `pending` is therefore SWAPPED OUT of `self._events` under a single lock acquisition (not merely copied) -- this, not a separate "flush in progress" flag, is what makes two concurrent `flush()` calls durably write disjoint (usually one full, one empty) sets of events instead of both durably writing the SAME events (the double-row bug this found, reproduced verbatim by `test_concurrent_periodic_and_threshold_flush_never_double_writes_pending_events`). A concurrent call that finds `self.
         _events` already emptied by the swap simply has nothing to flush
         and returns without ever touching the sink -- it is not blocked or
         serialized behind the in-flight I/O, so this stays lock-free
@@ -691,10 +693,10 @@ class DataService:
         if control_plane_status not in {"enabled", "unavailable"}:
             raise ValueError("control_plane_status must be 'enabled' or 'unavailable'")
         self._control_plane_status = control_plane_status
-        # `surfaces` is constructor-injected, same "deployer-declared, not derived" discipline as `control_ plane_status` immediately above -- `main.py` (the real composition root) is the one caller that validates the two `R2DB_*_BASE_URL` environment variables' SHAPE at startup and assembles this dict from them; this class only ever echoes whatever it was given, verbatim, in `capabilities()` below. `None` (the default -- every caller, including this repository's own unit tests that construct `DataService` directly without opting in) omits the `surfaces` key from the response entirely, never a `"surfaces": None` value (contract `Capability Document.surfaces` is an optional key, not a nullable one).
+        # `surfaces` is constructor-injected, same "deployer-declared, not derived" discipline as `control_plane_status` immediately above -- `main.py` (the real composition root) is the one caller that validates the two `R2DB_*_BASE_URL` environment variables' SHAPE at startup and assembles this dict from them; this class only ever echoes whatever it was given, verbatim, in `capabilities()` below. `None` (the default -- every caller, including this repository's own unit tests that construct `DataService` directly without opting in) omits the `surfaces` key from the response entirely, never a `"surfaces": None` value (contract `CapabilityDocument.surfaces` is an optional key, not a nullable one).
         # history: CH-0147
         self._surfaces = surfaces
-        # Phase 10 WP-6a (design, contract 1.8.0): the deployer's own declared ceiling on how many processes may serve THIS plane's `surfaces` base URL at the same time -- constructor- injected, same "deployer-declared, not derived" discipline as `control_plane_status`/`surfaces` above. `main.py` (the real
+        # Phase 10 WP-6a (design, contract 1.8.0): the deployer's own declared ceiling on how many processes may serve THIS plane's `surfaces` base URL at the same time -- constructor-injected, same "deployer-declared, not derived" discipline as `control_plane_status`/`surfaces` above. `main.py` (the real
         # composition root) is the one caller that resolves this from the
         # DB-side `process_ceilings` declaration (`platform_declarations.
         # read_platform_declarations(...).process_ceilings.data`) at
@@ -777,7 +779,7 @@ class DataService:
                 #
                 # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/ PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): the SAME commit as this host's own R-3 (`errors.details_vocabulary` 4-key details) and R-7 (`request_id` on every successful result) implementation -- the two 1.7.0 UNCONDITIONAL obligations -- never ahead of the behavior it declares (D-1 (7)'s xfail(strict=True) version gate is exactly what would catch that ordering mistake).
                 #
-                # Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as this host's own `process_ceilings` mapping -- the version's one unconditional obligation, `limit_enforcement_scoped_ to_deployment_behind_base_url` -- never ahead of the behavior it declares.
+                # Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as this host's own `process_ceilings` mapping -- the version's one unconditional obligation, `limit_enforcement_scoped_to_deployment_behind_base_url` -- never ahead of the behavior it declares.
                 # history: CH-0142
                 "contract_version": "1.8.0",
                 "capabilities": {
@@ -818,7 +820,7 @@ class DataService:
                     "control_plane": {"status": self._control_plane_status},
                     # Contract 1.7.0 (subordinate ruling 12): three new capabilities, honestly declared `unavailable` until each one's own capability WP flips it, in the SAME commit as the provisional gate that rejects every field it governs (`schema`/`mutate_result`/ `_query_outcome` above, `http.py`'s `post_mutate`/ `post_query`) -- P-3 (宣言と挙動は同一コミット).
                     #
-                    # `constraint_declarations` is `enabled` -- `field_constraints`/`enum`/`nullable`/`alter_field` are no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_ FIELDS` (removed in this same commit) and are now enforced (`structured.py`/`postgres.py`).
+                    # `constraint_declarations` is `enabled` -- `field_constraints`/`enum`/`nullable`/`alter_field` are no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS` (removed in this same commit) and are now enforced (`structured.py`/`postgres.py`).
                     # history: CH-0139
                     "constraint_declarations": {"status": "enabled"},
                     # `dry_run` is `enabled` -- `dry_run`/`plan` are no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS` (schema side) and `mutate_result`/`_mutate_outcome` (mutation side) no longer refuse them outright, in this same commit as `structured.py`/`postgres.py`'s own real dry_run/plan enforcement. WP-2d
@@ -835,7 +837,7 @@ class DataService:
                     "request_budget": {"status": "enabled"},
                 },
                 "limits": self.limits.as_dict(),
-                # `idempotency_retention_ms` joins `execution_ms` in the `reference_wall_clock` set -- both are wall-clock DURATIONS a deployment cannot drive to a deterministic N/N+1 boundary within a bounded test run (unlike every COUNT-valued class here, `idempotency_ entries` included, which genuinely IS `enforced`: a record's own retention window is checked lazily, against real elapsed time, not a request-counted budget).
+                # `idempotency_retention_ms` joins `execution_ms` in the `reference_wall_clock` set -- both are wall-clock DURATIONS a deployment cannot drive to a deterministic N/N+1 boundary within a bounded test run (unlike every COUNT-valued class here, `idempotency_entries` included, which genuinely IS `enforced`: a record's own retention window is checked lazily, against real elapsed time, not a request-counted budget).
                 # Phase 10 WP-6a (design, contract 1.8.0): three regions, not two. Region (i) (request-scoped: every class
                 # below not named in the other two sets) is unaffected by
                 # `process_ceiling` -- unchanged from before this WP.
@@ -894,7 +896,7 @@ class DataService:
         expose (kept byte-for-byte backward compatible with every pre-
         CCR-13 caller). `revisions` is always index-aligned with `items`: `revision_preconditions` is declared `enabled`, and every entity both cells provision is `mutable`, so a query response always carries revisions.
 
-        `budget` (contract 1.7.0, `QueryRequest.budget`): real, given full effect by `_query_outcome` below via `limits. narrow_limits_by_budget` -- `capabilities().request_budget` is `enabled` as of this commit. `result_items`/`execution_ms` are the two classes a query's own `budget` may narrow; an applicable-but-invalid or inapplicable `budget` is refused `VALIDATION_FAILED` before target existence.
+        `budget` (contract 1.7.0, `QueryRequest.budget`): real, given full effect by `_query_outcome` below via `limits.narrow_limits_by_budget` -- `capabilities().request_budget` is `enabled` as of this commit. `result_items`/`execution_ms` are the two classes a query's own `budget` may narrow; an applicable-but-invalid or inapplicable `budget` is refused `VALIDATION_FAILED` before target existence.
 
         History: CH-0134
         """
@@ -946,7 +948,7 @@ class DataService:
     def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None = None, request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None, idempotency_key: str | None = None, concurrency_precharged: bool = False) -> "MutationResult":
         """The HTTP-facing shape (`{affected, assigned_addresses}`, `spec/data-service-api.v1.json`'s `MutationResult`) -- used by `http.post_mutate` instead of `mutate` above, mirroring the `query`/`query_page` split.
 
-        `dry_run`/`plan` (contract 1.7.0, D-4): real, given full effect below -- `capabilities().dry_run` is `enabled` as of this commit. `budget` (contract 1.7.0, D-6) and `idempotency_ key` (contract 1.7.0, D-5) are likewise real as of this commit -- `capabilities().request_budget`/`.idempotency` are both `enabled`; `_mutate_outcome` below validates/narrows `budget` and consults/records `idempotency_key` at exactly the request stages `narrow_limits_by_budget`'s/`transact`'s own comments describe.
+        `dry_run`/`plan` (contract 1.7.0, D-4): real, given full effect below -- `capabilities().dry_run` is `enabled` as of this commit. `budget` (contract 1.7.0, D-6) and `idempotency_key` (contract 1.7.0, D-5) are likewise real as of this commit -- `capabilities().request_budget`/`.idempotency` are both `enabled`; `_mutate_outcome` below validates/narrows `budget` and consults/records `idempotency_key` at exactly the request stages `narrow_limits_by_budget`'s/`transact`'s own comments describe.
 
         History: CH-0129
         """
@@ -1012,7 +1014,7 @@ class DataService:
                     plan_request["transaction"] = transaction
                 if budget is not None:
                     plan_request["budget"] = budget
-                # `idempotency_key` is INCLUDED in the plan digest (only `plan`/`dry_run` are excluded there, `normalize_ request_for_plan`'s own 2-key exclusion) even though it is excluded from its OWN digest (`normalize_request_for_ idempotency`'s 3-key exclusion, `idempotency_digest` below) -- a `plan` token captured with one key (or none) must not verify against a request presenting a different one.
+                # `idempotency_key` is INCLUDED in the plan digest (only `plan`/`dry_run` are excluded there, `normalize_request_for_plan`'s own 2-key exclusion) even though it is excluded from its OWN digest (`normalize_request_for_idempotency`'s 3-key exclusion, `idempotency_digest` below) -- a `plan` token captured with one key (or none) must not verify against a request presenting a different one.
                 # history: CH-0123
                 if effective_idempotency_key is not None:
                     plan_request["idempotency_key"] = effective_idempotency_key
@@ -1050,9 +1052,9 @@ class DataService:
             raise
 
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None, concurrency_precharged: bool = False) -> "SchemaOutcome":
-        """Always returns `SchemaOutcome` (`.committed`/`.revision`/ `.descriptor`/`.plan`, contract 1.7.0, D-4) -- a pure passthrough of `ApplicationCell.apply_schema`/`PostgresCell. apply_schema`'s own return, which review round F-8 unified to one shape regardless of whether `operation` carries `dry_run`/`plan`. Every pre-1.7.0 direct caller of this method reads `.revision` off the result; the in-process conformance adapter's own `hasattr( result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
+        """Always returns `SchemaOutcome` (`.committed`/`.revision`/ `.descriptor`/`.plan`, contract 1.7.0, D-4) -- a pure passthrough of `ApplicationCell.apply_schema`/`PostgresCell.apply_schema`'s own return, which review round F-8 unified to one shape regardless of whether `operation` carries `dry_run`/`plan`. Every pre-1.7.0 direct caller of this method reads `.revision` off the result; the in-process conformance adapter's own `hasattr( result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
 
-        `budget`/`idempotency_key` (contract 1.7.0, D-6/D-5): both real as of this commit -- the provisional gate that used to reject either field outright (`_PROVISIONAL_UNSUPPORTED_SCHEMA_ FIELDS`) is removed in this same commit as `capabilities(). request_budget`/`.idempotency` both flipping to `enabled`.
+        `budget`/`idempotency_key` (contract 1.7.0, D-6/D-5): both real as of this commit -- the provisional gate that used to reject either field outright (`_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS`) is removed in this same commit as `capabilities().request_budget`/`.idempotency` both flipping to `enabled`.
 
         History: CH-0120
         """
@@ -1078,7 +1080,7 @@ class DataService:
                 # history: CH-0117
                 effective_limits = narrow_limits_by_budget(self.limits, operation.get("budget"), "schema")
                 deadline = self._clock() + effective_limits.execution_ms / 1000
-                # Contract 1.7.0 (S-a): the contract-level request object a `plan` commits to -- `operation` itself already IS that object (`SchemaOperationRequest`'s own flat shape), minus `plan`/`dry_run` (S-a's exclusion pair, applied again defensively inside `normalize_ request_for_plan`). `idempotency_key`, when present, stays IN this object (only `plan`/`dry_run` are excluded here) -- `idempotency_digest` below applies its own, separate 3-key exclusion.
+                # Contract 1.7.0 (S-a): the contract-level request object a `plan` commits to -- `operation` itself already IS that object (`SchemaOperationRequest`'s own flat shape), minus `plan`/`dry_run` (S-a's exclusion pair, applied again defensively inside `normalize_request_for_plan`). `idempotency_key`, when present, stays IN this object (only `plan`/`dry_run` are excluded here) -- `idempotency_digest` below applies its own, separate 3-key exclusion.
                 # history: CH-0116
                 plan_request = {key: value for key, value in operation.items() if key not in ("plan", "dry_run")}
                 idempotency_key = operation.get("idempotency_key")
@@ -1154,7 +1156,7 @@ class DataService:
 
     @contextmanager
     def _slot(self, context: AuthContext, *, concurrency_precharged: bool = False) -> Iterator[AuthContext]:
-        """`concurrency_ precharged` mirrors `ControlPlaneService.check_rate()`'s own `rate_precharged` parameter (`control_plane.py::check_rate`'s docstring) -- an HTTP caller that already reserved this SAME deployment's own concurrency slot BEFORE authentication (via `acquire_concurrency_slot()` below, called from `http.py` ahead of `_authenticate`) passes `concurrency_precharged=True` into the eventual `DataService` call so this method does not reserve a SECOND slot for the identical logical request -- otherwise every HTTP request would cost 2 units of `limits.concurrency` instead of 1, halving the deployment's own real capacity relative to its declaration (completion condition 3). Every OTHER caller (this
+        """`concurrency_precharged` mirrors `ControlPlaneService.check_rate()`'s own `rate_precharged` parameter (`control_plane.py::check_rate`'s docstring) -- an HTTP caller that already reserved this SAME deployment's own concurrency slot BEFORE authentication (via `acquire_concurrency_slot()` below, called from `http.py` ahead of `_authenticate`) passes `concurrency_precharged=True` into the eventual `DataService` call so this method does not reserve a SECOND slot for the identical logical request -- otherwise every HTTP request would cost 2 units of `limits.concurrency` instead of 1, halving the deployment's own real capacity relative to its declaration (completion condition 3). Every OTHER caller (this
         repository's own tests, the in-process conformance adapter, which
         call a `DataService` method directly with no pre-auth reservation
         of their own) keeps the default `False` -- unchanged from before
@@ -1213,7 +1215,7 @@ class DataService:
         followed (there is no `context`/`canonical` to attribute it to
         yet in any case).
 
-        Deliberately its OWN copy of the check-then-increment block `_slot` above also carries (not a shared helper the two call into) -- `tests/test_threadpool_offload.py::test_slot_check_then_ increment_is_lexically_inside_the_active_lock` pins that exact block LEXICALLY INSIDE `_slot` itself (an AST scan), so factoring it out into a shared private method would have turned that pre-existing, unrelated test red as a side effect of this WP -- an acceptable small duplication (four lines) rather than disturbing a pinned mutation-test shape this WP does not own.
+        Deliberately its OWN copy of the check-then-increment block `_slot` above also carries (not a shared helper the two call into) -- `tests/test_threadpool_offload.py::test_slot_check_then_increment_is_lexically_inside_the_active_lock` pins that exact block LEXICALLY INSIDE `_slot` itself (an AST scan), so factoring it out into a shared private method would have turned that pre-existing, unrelated test red as a side effect of this WP -- an acceptable small duplication (four lines) rather than disturbing a pinned mutation-test shape this WP does not own.
 
         History: CH-0110
         """
@@ -1255,7 +1257,7 @@ class DataService:
           above, when the backend's own pre-commit hook already durably
           recorded this exact event): return immediately. D-10's "at most
           one durable row per operation" rule.
-        - `outcome == "deny"`: `details["origin"] == "audit_sink"` means this denial's `SERVICE_UNAVAILABLE` was produced by the audit pipeline itself already failing to record this very operation (a pre-commit sink failure, a commit-failure error-row write, a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write for what is still logically one operation, so this returns without doing anything further. Otherwise, any reason code outside D-3's durable-code inclusion list (`_DURABLE_ DENIAL_CODES` -- not merely the 4 originally named) returns without any durable/buffered record at all; every other reason code is fail-closed-class and goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
+        - `outcome == "deny"`: `details["origin"] == "audit_sink"` means this denial's `SERVICE_UNAVAILABLE` was produced by the audit pipeline itself already failing to record this very operation (a pre-commit sink failure, a commit-failure error-row write, a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write for what is still logically one operation, so this returns without doing anything further. Otherwise, any reason code outside D-3's durable-code inclusion list (`_DURABLE_DENIAL_CODES` -- not merely the 4 originally named) returns without any durable/buffered record at all; every other reason code is fail-closed-class and goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
         - `outcome == "allow"`: buffer-class -- `query`/`catalog` always reach here (they never pass through the confirmation choke), and `mutate` reaches here only when its batch did NOT (`already_durable=False`).
 
         History: CH-0109
@@ -1387,7 +1389,7 @@ class ControlAuthority:
             raise
 
     def set_credential_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None, work: Any = None) -> None:
-        """`work` is keyword-only and defaults to `None` (CCR-14): when omitted, this method self-manages exactly as before -- opens its own `unit_of_work()`, commits/reverts exactly one call's worth of state, and every pre-WP-3 caller (this repository's own tests, the in-process conformance adapter) keeps working unchanged. When a caller supplies its own already-open `work` handle (`ControlPlane Service`'s in-memory backend it needs the credential-state change and its own `control_audit` sink append to land in the *same* transaction), this method uses that handle directly instead of opening a second one -- never both. `work`'s type is deliberately
+        """`work` is keyword-only and defaults to `None` (CCR-14): when omitted, this method self-manages exactly as before -- opens its own `unit_of_work()`, commits/reverts exactly one call's worth of state, and every pre-WP-3 caller (this repository's own tests, the in-process conformance adapter) keeps working unchanged. When a caller supplies its own already-open `work` handle (`ControlPlaneService`'s in-memory backend it needs the credential-state change and its own `control_audit` sink append to land in the *same* transaction), this method uses that handle directly instead of opening a second one -- never both. `work`'s type is deliberately
         untyped (`Any`) rather than importing `auth._InMemoryWork`/
         `credential_store._PostgresWork` here: this module stays agnostic to
         which store implementation (in-memory or PostgreSQL) it is holding,
