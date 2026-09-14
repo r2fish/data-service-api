@@ -2261,6 +2261,49 @@ def test_value_types_leaf_preserves_structured_facade():
         assert getattr(structured, name) is getattr(value_types, name), name
 
 
+def test_service_results_leaf_preserves_service_facade():
+    """R-37 WP-3a (SV1): `service.py` re-exports `QueryPage`/`MutationResult`
+    from the new leaf `service_results.py` as the exact same objects --
+    this checks facade identity only, not behaviour (the dedicated test
+    below exercises the frozen dataclasses' own shape)."""
+    from r2db_api import service
+    from r2db_api import service_results
+
+    names = ["QueryPage", "MutationResult"]
+    for name in names:
+        assert getattr(service, name) is getattr(service_results, name), name
+
+
+def test_service_results_are_frozen_with_contract_defaults():
+    """R-37 WP-3a (SV1): `QueryPage`/`MutationResult` stay frozen dataclasses
+    after the move to `service_results.py`, and their contract-facing
+    field names/defaults are unchanged."""
+    from dataclasses import MISSING, FrozenInstanceError, fields
+    from r2db_api.service_results import MutationResult, QueryPage
+
+    page = QueryPage(items=[], next_page=None, revisions=[])
+    with pytest.raises(FrozenInstanceError):
+        page.items = ["mutated"]
+
+    result = MutationResult(affected=0, assigned_addresses=None)
+    with pytest.raises(FrozenInstanceError):
+        result.affected = 1
+
+    assert [(f.name, f.default) for f in fields(QueryPage)] == [
+        ("items", MISSING),
+        ("next_page", MISSING),
+        ("revisions", MISSING),
+        ("request_id", None),
+    ]
+    assert [(f.name, f.default) for f in fields(MutationResult)] == [
+        ("affected", MISSING),
+        ("assigned_addresses", MISSING),
+        ("committed", True),
+        ("plan", None),
+        ("request_id", None),
+    ]
+
+
 def test_order_by_sorts_and_appends_id_when_absent():
     cell = _numbered_cell(3)  # n = 0, 1, 2 with id = 1, 2, 3 respectively
     descending = cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "desc"}])

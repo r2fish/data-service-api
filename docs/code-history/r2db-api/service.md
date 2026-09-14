@@ -1513,6 +1513,20 @@ contract's "does not carry" wording. A real commit always gets a list
 before this version.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-3a -- `MutationResult` moved to `service_results.py`; the pointer gets a 40c position bracket
+
+old:
+```
+Mirrors the `query`/`query_page` split (WP-4): `mutate` below stays byte-for-byte backward compatible (a bare `int`, the affected count) for every existing caller (`tests/test_foundation.py`, the in-process conformance adapter); this richer shape reaches only the HTTP boundary, which needs `assigned_addresses` to build the contract's own response.
+```
+
+new:
+```
+Mirrors the `query`/`query_page` split (WP-4): `mutate` below (in `service.py`) stays byte-for-byte backward compatible (a bare `int`, the affected count) for every existing caller (`tests/test_foundation.py`, the in-process conformance adapter); this richer shape reaches only the HTTP boundary, which needs `assigned_addresses` to build the contract's own response.
+```
+
 ## CH-0169
 
 - moved from: `src/r2db_api/service.py` (`QueryPage`)
