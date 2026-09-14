@@ -188,7 +188,7 @@ _DOC_ACCESS_ATTRS: frozenset[str] = frozenset({"getdoc", "getsource", "getcommen
 # design §4.2 (6): non-emptiness floor, counted across BOTH peers combined
 # (never per peer). Change set 0 leaves this at 0; change set 1 raises it
 # to 1 (work order §2.2, "触るファイル" table).
-MIN_CH_IDS = 0
+MIN_CH_IDS = 1
 
 _ABBREVIATIONS: tuple[str, ...] = ("e.g.", "i.e.", "vs.", "...")
 # design §4.1 (3) + v0.4 review fix (e), extended in review round 2 (P4):
