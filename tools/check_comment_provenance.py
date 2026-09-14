@@ -181,6 +181,11 @@ _FILENAME_CANDIDATE_RE = re.compile(
     r"|[^\s,;()`]*" + _EXT_SUFFIX,        # bare token ending in a KNOWN extension
     re.IGNORECASE,
 )
+_BARE_FILENAME_CANDIDATE_RE = re.compile(
+    r"\{[^}\s]*\}/[^\s,;()`]+"            # bare `{...}/...` (e.g. `{scratchpad}/...`)
+    r"|[^\s,;()`]*" + _EXT_SUFFIX,        # bare token ending in a KNOWN extension
+    re.IGNORECASE,
+)
 
 
 def _clean_filename_candidate(raw: str) -> str:
@@ -188,8 +193,90 @@ def _clean_filename_candidate(raw: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _filename_span_matches(text: str) -> list[tuple[int, int, str]]:
+    """0f Item 1 fix (supervisor-reported bug present since 4bc9535): the
+    OLD approach ran `_FILENAME_CANDIDATE_RE.finditer` directly over the
+    whole text. Its backtick-span alternatives (`` `[^`]*/[^`]*` `` etc.)
+    match a literal backtick ... backtick pair WITHOUT tracking which
+    backtick is an "opener" and which is a "closer" -- so given
+    "`a` below (design docs/design/X_V1.md R-2): a plain `SELECT` here.",
+    the pattern happily starts at the CLOSING backtick of `` `a` `` and
+    ends at the OPENING backtick of `` `SELECT` ``, since the run between
+    them contains a "/" and no backtick. That swallows the entire bare
+    path "docs/design/X_V1.md" into one bogus, non-real "candidate"
+    (` below (design docs/design/X_V1.md R-2): a plain `), so the bare
+    path is never seen as its own candidate and never recognized as a
+    real, protected path.
+
+    Fixed by pairing backticks front-to-back FIRST (0th+1st backtick is
+    one span, 2nd+3rd is the next, ...; a trailing unmatched backtick is
+    not treated as a span at all), then looking for path-shaped content
+    (a) INSIDE each properly-paired span (checked against the span's own
+    inner text, for a "/" or a known extension) and (b) in the residue
+    OUTSIDE every span (checked with the bare-token-only patterns, which
+    never themselves consume a backtick). This finds the sandwiched bare
+    path as a candidate in its own right, independent of the backtick
+    spans on either side of it."""
+    tick_positions = [m.start() for m in re.finditer("`", text)]
+    pairs = [
+        (tick_positions[i], tick_positions[i + 1])
+        for i in range(0, len(tick_positions) - 1, 2)
+    ]
+    covered = bytearray(len(text))
+    for start, end in pairs:
+        for k in range(start, end + 1):
+            covered[k] = 1
+
+    spans: list[tuple[int, int, str]] = []
+    for start, end in pairs:
+        inner = text[start + 1 : end]
+        if "/" in inner or _FILENAME_EXT_RE.search(inner):
+            spans.append((start, end + 1, text[start : end + 1]))
+
+    idx = 0
+    n = len(text)
+    while idx < n:
+        if covered[idx]:
+            idx += 1
+            continue
+        j = idx
+        while j < n and not covered[j]:
+            j += 1
+        segment = text[idx:j]
+        for m in _BARE_FILENAME_CANDIDATE_RE.finditer(segment):
+            if m.group(0):
+                spans.append((idx + m.start(), idx + m.end(), m.group(0)))
+        idx = j
+
+    spans.sort(key=lambda s: s[0])
+    return spans
+
+
+def _sub_filename_candidates(text: str, repl) -> str:
+    """Pairing-aware equivalent of `_FILENAME_CANDIDATE_RE.sub(repl, text)`
+    (0f Item 1 fix) -- see `_filename_span_matches`."""
+    pieces: list[str] = []
+    pos = 0
+    for start, end, matched in _filename_span_matches(text):
+        if start < pos:
+            continue  # defensive: skip any accidental overlap
+        pieces.append(text[pos:start])
+        pieces.append(repl(matched) if callable(repl) else repl)
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces)
+
+
+def _is_filename_candidate_fullmatch(word: str) -> bool:
+    """Pairing-aware equivalent of `_FILENAME_CANDIDATE_RE.fullmatch(word)`
+    (0f Item 1 fix) -- `word` qualifies only if it is ENTIRELY one single
+    candidate span, not a partial or multi-span run."""
+    spans = _filename_span_matches(word)
+    return len(spans) == 1 and spans[0][0] == 0 and spans[0][1] == len(word)
+
+
 def _filename_candidates(text: str) -> list[str]:
-    return [m.group(0) for m in _FILENAME_CANDIDATE_RE.finditer(text)]
+    return [s[2] for s in _filename_span_matches(text)]
 
 
 def _is_real_filename_candidate(raw: str, real_paths: frozenset[str]) -> bool:
@@ -270,7 +357,7 @@ def _parens_has_provenance_tag(inner: str, real_paths: frozenset[str]) -> bool:
     # the remainder is split into chunks. Letting an unresolved fragment
     # of a non-real filename fall through here would make it count as a
     # tag anyway via this older, reality-blind path (§9 rule 2 must win).
-    remainder = _FILENAME_CANDIDATE_RE.sub(" ", inner)
+    remainder = _sub_filename_candidates(inner, " ")
     for chunk in re.split(r"[,;\s]+", remainder):
         if _looks_like_path_word(chunk):
             return True
@@ -543,6 +630,37 @@ def _is_join_sensitive_boundary(accumulated: str, next_line: str, identifier_set
         other real word boundary (`` `SHARE MODE` ``, `` `foo bar` ``,
         an ALL-CAPS pair or two lowercase words, which never satisfy
         "lowercase-then-uppercase" in the first place).
+    (6) `accumulated` ends `/`, the character immediately BEFORE that
+        `/` is NOT a space (0f Item 2 fix, supervisor ruling
+        2026-09-15: a genuinely SPACED path-like expression such as
+        `a / b` must keep its space when wrapped right after the `/`,
+        not be joined with zero space -- only a `/` that itself sits
+        directly against the preceding text, with no space before it,
+        is a real path/module separator), and `next_line` starts with
+        a word character OR a backtick -- regardless of backtick state
+        (a path/module split right after `/`, e.g. `` `cell.py`/
+        `backend_sqlite.py` `` or `docs/design/SOME_FILE.md`);
+    (7) INSIDE an open backtick span, `accumulated` ends `(`, `[`, or
+        `=`, the character immediately BEFORE that is a word character
+        or `(`/`[` (this is what excludes an ordinary spaced assignment
+        like `a = b`, where the character right before `=` is a space,
+        not a word character or bracket), and `next_line` starts with
+        any NON-whitespace character -- a call/subscript/kwarg opening
+        split right after the punctuation (`` `HttpService(
+        ...)` ``, `` `role="audit"` ``);
+    (8) `accumulated` ends with a backtick that OPENS a span (i.e. the
+        count of backticks in `accumulated`, INCLUDING this one, is
+        ODD) and `next_line` starts with any NON-whitespace character
+        -- the wrap falls immediately after the opening backtick
+        itself, before any content (`` `
+        contract_field_types` `` -> `` `contract_field_types` ``).
+        Deliberately excludes a CLOSING backtick (even count) followed
+        by ordinary English, a quote mark, `*` (markdown emphasis)
+        followed by English, an `=`-rule separator line (the character
+        before a `=` that is itself part of a `====` run is another
+        `=`, not a word character or bracket, so rule 7 does not fire),
+        and a `<->` arrow (`-` there is preceded by `<`, not a word
+        character, so rule 2 already does not fire).
     Deliberately NOT a trigger: any other backtick-internal boundary
     with no marker at all (a multi-word SQL/expression fragment quoted
     whole in backticks, e.g. `` `<predicate> AND _r2db_revision::text =
@@ -569,6 +687,12 @@ def _is_join_sensitive_boundary(accumulated: str, next_line: str, identifier_set
         joined = _joined_identifier_at_boundary(accumulated, next_line)
         if joined in identifier_set:
             return True
+    if last == "/" and prev != " " and (_is_word_char(nxt) or nxt == "`"):
+        return True
+    if inside_backticks and last in "([=" and (_is_word_char(prev) or prev in "([") and nxt != " ":
+        return True
+    if last == "`" and inside_backticks and nxt != " ":
+        return True
     return False
 
 
@@ -826,8 +950,8 @@ def _premerge_tokens(text: str, real_paths: frozenset[str]) -> tuple[str, dict[s
         placeholders[tok] = (original, is_content)
         return tok
 
-    working = _FILENAME_CANDIDATE_RE.sub(
-        lambda m: make(m.group(0), _is_real_filename_candidate(m.group(0), real_paths)), text
+    working = _sub_filename_candidates(
+        text, lambda matched: make(matched, _is_real_filename_candidate(matched, real_paths))
     )
     for pat in _MULTIWORD_HISTORY_TOKEN_PATTERNS:
         working = pat.sub(lambda m: make(m.group(0), False), working)
@@ -847,7 +971,7 @@ def _is_removable_word(
             return True
     if word in slash_subscripts:
         return True
-    if _FILENAME_CANDIDATE_RE.fullmatch(word) and not _is_real_filename_candidate(word, real_paths):
+    if _is_filename_candidate_fullmatch(word) and not _is_real_filename_candidate(word, real_paths):
         return True
     if has_provenance_tag:
         return False
@@ -1256,7 +1380,7 @@ def _label_word_tokens(text: str, real_paths: frozenset[str]) -> list[tuple[str,
         if t in slash_subscripts:
             tokens.append((t, False))
             continue
-        if _FILENAME_CANDIDATE_RE.fullmatch(t) and not _is_real_filename_candidate(t, real_paths):
+        if _is_filename_candidate_fullmatch(t) and not _is_real_filename_candidate(t, real_paths):
             tokens.append((t, False))
             continue
         if _BARE_ID_RE.match(t) and not t.startswith(_PROTECTED_ID_PREFIXES):
@@ -1278,7 +1402,7 @@ def _label_provenance_tag_present(text: str, real_paths: frozenset[str]) -> bool
         or _has_versioned_document_reference(text)
     ):
         return True
-    remainder = _FILENAME_CANDIDATE_RE.sub(" ", text)
+    remainder = _sub_filename_candidates(text, " ")
     for chunk in re.split(r"[,;()\s]+", remainder):
         if _looks_like_path_word(chunk):
             return True

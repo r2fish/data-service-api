@@ -206,7 +206,7 @@ class _PreCommitHook:
 class _AuditBuffer:
     """Phase 4 (design D-4/§7.3/§7.4): the bounded in-memory buffer for
     ordinary (buffer-class) data-operation success events, plus the
-    overflow-alert sticky-retry state. Owns its own lock; the durable I/O `flush()` performs happens on the calling thread using `sink.append`/ `append_many`, each of which opens its own connection/transaction (D-1's `PostgresApplicationAuditSink` docstring) -- this is what makes "a flush never shares a transaction with a fail-closed write" automatic rather than something this class has to arrange.
+    overflow-alert sticky-retry state. Owns its own lock; the durable I/O `flush()` performs happens on the calling thread using `sink.append`/`append_many`, each of which opens its own connection/transaction (D-1's `PostgresApplicationAuditSink` docstring) -- this is what makes "a flush never shares a transaction with a fail-closed write" automatic rather than something this class has to arrange.
 
     capacity is per-process, not per-deployment -- a multi-instance deployment's real bound is `capacity * <max instances>`, which is runbook (§9.3), not code, territory.
 
@@ -777,7 +777,7 @@ class DataService:
                 # unchanged: this host never provides it, D-5's own
                 # "declaration = real behavior" rule).
                 #
-                # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/ PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): the SAME commit as this host's own R-3 (`errors.details_vocabulary` 4-key details) and R-7 (`request_id` on every successful result) implementation -- the two 1.7.0 UNCONDITIONAL obligations -- never ahead of the behavior it declares (D-1 (7)'s xfail(strict=True) version gate is exactly what would catch that ordering mistake).
+                # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): the SAME commit as this host's own R-3 (`errors.details_vocabulary` 4-key details) and R-7 (`request_id` on every successful result) implementation -- the two 1.7.0 UNCONDITIONAL obligations -- never ahead of the behavior it declares (D-1 (7)'s xfail(strict=True) version gate is exactly what would catch that ordering mistake).
                 #
                 # Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as this host's own `process_ceilings` mapping -- the version's one unconditional obligation, `limit_enforcement_scoped_to_deployment_behind_base_url` -- never ahead of the behavior it declares.
                 # history: CH-0142
@@ -812,13 +812,13 @@ class DataService:
                     "idempotency": {"status": "enabled"},
                     "revision_preconditions": {"status": "enabled"},
                     "row_addressability": {"status": "enabled"},
-                    # `cross_entity_mutation` needs the new `POST /v1/data/ mutations` endpoint (stubbed in as CAPABILITY_UNSUPPORTED, not executable), so it stays `unavailable` here: it has no executable operation at all. (`control_plane`, immediately below, is NOT in the same position any more: CCR-14 shipped the surface as a separate process, and its status is the deployer's own declaration -- the pre-CCR-14 wording that once grouped the two as "both remain unavailable" was corrected)
+                    # `cross_entity_mutation` needs the new `POST /v1/data/mutations` endpoint (stubbed in as CAPABILITY_UNSUPPORTED, not executable), so it stays `unavailable` here: it has no executable operation at all. (`control_plane`, immediately below, is NOT in the same position any more: CCR-14 shipped the surface as a separate process, and its status is the deployer's own declaration -- the pre-CCR-14 wording that once grouped the two as "both remain unavailable" was corrected)
                     # history: CH-0141
                     "cross_entity_mutation": {"status": "unavailable"},
                     # reflects this instance's own constructor-injected deployer declaration -- never hardcoded (see __init__'s comment on this field).
                     # history: CH-0140
                     "control_plane": {"status": self._control_plane_status},
-                    # Contract 1.7.0 (subordinate ruling 12): three new capabilities, honestly declared `unavailable` until each one's own capability WP flips it, in the SAME commit as the provisional gate that rejects every field it governs (`schema`/`mutate_result`/ `_query_outcome` above, `http.py`'s `post_mutate`/ `post_query`) -- P-3 (宣言と挙動は同一コミット).
+                    # Contract 1.7.0 (subordinate ruling 12): three new capabilities, honestly declared `unavailable` until each one's own capability WP flips it, in the SAME commit as the provisional gate that rejects every field it governs (`schema`/`mutate_result`/`_query_outcome` above, `http.py`'s `post_mutate`/`post_query`) -- P-3 (宣言と挙動は同一コミット).
                     #
                     # `constraint_declarations` is `enabled` -- `field_constraints`/`enum`/`nullable`/`alter_field` are no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS` (removed in this same commit) and are now enforced (`structured.py`/`postgres.py`).
                     # history: CH-0139
@@ -999,7 +999,7 @@ class DataService:
                 # history: CH-0125
                 effective_limits = narrow_limits_by_budget(self.limits, budget, "mutate")
                 deadline = self._clock() + effective_limits.execution_ms / 1000
-                # Contract 1.7.0 (S-a): the contract-level request object a `plan` commits to -- `operations`/ `transaction`/`budget`, plus this request's own target `entity` (addendum 2: "computed from the request itself" includes the request's URL path segment, not only its body -- `MutationRequest` itself has no `entity` property, but the plan digest is not scoped to `MutationRequest` alone). Placed at the
+                # Contract 1.7.0 (S-a): the contract-level request object a `plan` commits to -- `operations`/`transaction`/`budget`, plus this request's own target `entity` (addendum 2: "computed from the request itself" includes the request's URL path segment, not only its body -- `MutationRequest` itself has no `entity` property, but the plan digest is not scoped to `MutationRequest` alone). Placed at the
                 # object's own top level so a plan captured for one entity's
                 # dry_run, presented against a DIFFERENT entity's apply
                 # (identical `operations`/`transaction`/`budget`, identical
@@ -1052,7 +1052,7 @@ class DataService:
             raise
 
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None, concurrency_precharged: bool = False) -> "SchemaOutcome":
-        """Always returns `SchemaOutcome` (`.committed`/`.revision`/ `.descriptor`/`.plan`, contract 1.7.0, D-4) -- a pure passthrough of `ApplicationCell.apply_schema`/`PostgresCell.apply_schema`'s own return, which review round F-8 unified to one shape regardless of whether `operation` carries `dry_run`/`plan`. Every pre-1.7.0 direct caller of this method reads `.revision` off the result; the in-process conformance adapter's own `hasattr( result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
+        """Always returns `SchemaOutcome` (`.committed`/`.revision`/`.descriptor`/`.plan`, contract 1.7.0, D-4) -- a pure passthrough of `ApplicationCell.apply_schema`/`PostgresCell.apply_schema`'s own return, which review round F-8 unified to one shape regardless of whether `operation` carries `dry_run`/`plan`. Every pre-1.7.0 direct caller of this method reads `.revision` off the result; the in-process conformance adapter's own `hasattr(result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
 
         `budget`/`idempotency_key` (contract 1.7.0, D-6/D-5): both real as of this commit -- the provisional gate that used to reject either field outright (`_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS`) is removed in this same commit as `capabilities().request_budget`/`.idempotency` both flipping to `enabled`.
 
@@ -1140,7 +1140,7 @@ class DataService:
         (`audit_query`, `cross_entity_mutation`); this always raises
         `CAPABILITY_UNSUPPORTED`, it never returns.
 
-        this denial's `reason_code` is always `CAPABILITY_UNSUPPORTED` -- not in D-3's durable-code inclusion list, so `_event`'s deny dispatch never routes it through the durable/ coalesced path (unchanged from pre-Phase-4 behaviour: this method never wrote a durable row before this WP either).
+        this denial's `reason_code` is always `CAPABILITY_UNSUPPORTED` -- not in D-3's durable-code inclusion list, so `_event`'s deny dispatch never routes it through the durable/coalesced path (unchanged from pre-Phase-4 behaviour: this method never wrote a durable row before this WP either).
 
         History: CH-0113
         """
