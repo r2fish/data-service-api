@@ -43,18 +43,7 @@ Data model (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-2/R-4/R-7):
 ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and an invisible
 `_r2db_revision uuid NOT NULL DEFAULT gen_random_uuid()` (the per-row
 optimistic-concurrency token), ahead of the caller's own declared fields.
-Those own fields default to `JSONB` (`create_entity` never carries a
-`field_type` -- rejected at the shared `bind_schema_operation` boundary);
-`add_field`'s own optional `field_type` maps `string`/`integer`/`number`/
-`boolean` to `TEXT`/`BIGINT`/`DOUBLE PRECISION`/`BOOLEAN` respectively, and
-`object`/`array` to the two DOMAINs `migrations/0003_provision_application.
-sql` provisions per application database, `_r2db_json_object`/
-`_r2db_json_array` -- each a `jsonb` DOMAIN with a `jsonb_typeof(VALUE)`
-CHECK, so PostgreSQL's own catalog (`information_schema.columns.
-domain_name`) is what lets `_load_catalog` tell "declared as object" apart
-from "declared as array" apart from "untyped JSONB" (WP-3 review, "object/
-array の DOMAIN 型統一": a bare `jsonb` column cannot report this
-distinction at all). `id`/`_r2db_revision` require PostgreSQL 13+
+Those own fields default to `JSONB` (`create_entity` never carries a `field_type` -- rejected at the shared `bind_schema_operation` boundary); `add_field`'s own optional `field_type` maps `string`/`integer`/`number`/ `boolean` to `TEXT`/`BIGINT`/`DOUBLE PRECISION`/`BOOLEAN` respectively, and `object`/`array` to the two DOMAINs `migrations/0003_provision_application. sql` provisions per application database, `_r2db_json_object`/ `_r2db_json_array` -- each a `jsonb` DOMAIN with a `jsonb_typeof(VALUE)` CHECK, so PostgreSQL's own catalog (`information_schema.columns. domain_name`) is what lets `_load_catalog` tell "declared as object" apart from "declared as array" apart from "untyped JSONB" ("object/ array の DOMAIN 型統一": a bare `jsonb` column cannot report this distinction at all). `id`/`_r2db_revision` require PostgreSQL 13+
 (`gen_random_uuid()` is a built-in as of that version).
 
 Two layers validate a value written to an `object`/`array` column: `_check_
@@ -92,6 +81,8 @@ identifiers/operators/shapes, and the exact same errors/precedence for
 every other checked property (addressability, uniqueness, revision
 preconditions, `contains`/`matches` literal/wildcard semantics against
 SQL's own three-valued logic, and object/array typing), identically.
+
+History: CH-0001
 """
 from __future__ import annotations
 
@@ -114,9 +105,8 @@ from .errors import fail, violation
 from .limits import ResourceLimits
 from . import platform_upgrades
 from .postgres_like import _escape_like_literal
-# `_FIELD_TYPE_SQL`/`_JSONB_SQL` are not used directly in this module; the
-# import exists only as a facade-compat re-export (design D-2) for callers
-# that still import them from `postgres`.
+# `_FIELD_TYPE_SQL`/`_JSONB_SQL` are not used directly in this module; the import exists only as a facade-compat re-export (design D-2) for callers that still import them from `postgres`.
+# history: CH-0002
 from .postgres_types import _FIELD_TYPE_SQL, _JSONB_SQL, _column_type_sql
 from .structured import (
     BoundMutation,
@@ -180,16 +170,9 @@ _FIELD_CONSTRAINTS_TABLE = "_r2db_field_constraints"
 #: upgrade.sql`).
 _IDEMPOTENCY_TABLE = "_r2db_idempotency"
 _BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE, _IDEMPOTENCY_TABLE})
-# Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): two-int
-# `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the
-# PER-KEY idempotency lock -- see `_idempotency_key_lock` below.
+# Ruling U-7 (`{scratchpad}/review2/frame.md` F-①): two-int `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the PER-KEY idempotency lock -- see `_idempotency_key_lock` below.
 #
-# Code-review fix F7 (Opus review 2): the rationale this comment
-# carried before this fix was FALSE and is corrected here (the constant
-# itself is unaffected). It claimed a namespace of 0 would land in the
-# SAME lock space the single-bigint form `ops.py::_RITUAL_ADVISORY_
-# LOCK_KEY` (1414141) uses, risking a collision between a bootstrap/
-# reset ritual's lock and an idempotency-key lock. PostgreSQL actually
+# PostgreSQL actually
 # keeps those two key spaces disjoint by construction, regardless of
 # namespace value: the 1-argument `pg_advisory_xact_lock(bigint)` form
 # and the 2-argument `pg_advisory_xact_lock(int, int)` form record
@@ -204,14 +187,10 @@ _BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgra
 # HUMAN legibility (so two DIFFERENT lock families never share a
 # suspiciously similar-looking id in a `pg_locks` dump), not because a
 # collision with the 1-argument form was ever actually possible.
+# history: CH-0003
 _IDEMPOTENCY_KEY_LOCK_NAMESPACE = 20261007
-# Ruling U-7: table-level (not per-key) advisory lock serializing
-# `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys (D-5
-# (iii)) -- same family as `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (a
-# single, fixed 64-bit `pg_advisory_xact_lock` key), a DIFFERENT
-# constant from it (that lock guards bootstrap/reset ritual ordering;
-# this one guards `idempotency_entries` capacity accounting -- two
-# independent serialization points that must never share one lock id).
+# table-level (not per-key) advisory lock serializing `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys (D-5 (iii)) -- same family as `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (a single, fixed 64-bit `pg_advisory_xact_lock` key), a DIFFERENT constant from it (that lock guards bootstrap/reset ritual ordering; this one guards `idempotency_entries` capacity accounting -- two independent serialization points that must never share one lock id).
+# history: CH-0004
 _IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 1414142
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
@@ -222,10 +201,8 @@ _ID_COLUMN = "id"
 _REVISION_COLUMN = "_r2db_revision"
 _RESERVED_INTERNAL_PREFIX = "_r2db"
 
-# The two DOMAIN types' own bare names (as `information_schema.columns.
-# domain_name` reports them -- unqualified, WP-3 review confirmed
-# empirically), mapped back to the shared `r2db_api.structured` vocabulary
-# string `_load_catalog` reports for such a column's declared type.
+# The two DOMAIN types' own bare names (as `information_schema.columns. domain_name` reports them -- unqualified confirmed empirically), mapped back to the shared `r2db_api.structured` vocabulary string `_load_catalog` reports for such a column's declared type.
+# history: CH-0005
 _DOMAIN_TO_DECLARED: dict[str, str] = {
     "_r2db_json_object": "object",
     "_r2db_json_array": "array",
@@ -271,18 +248,12 @@ _COMPARISON_OPERATORS: dict[str, sql.SQL] = {
 
 @dataclass
 class _TableInfo:
-    """One entity table's live shape, as re-derived from PostgreSQL's own
-    catalog by `PostgresCell._load_catalog` on every call (never cached
-    across calls, never trusted as a standing assumption -- D-4/R-1).
+    """One entity table's live shape, as re-derived from PostgreSQL's own catalog by `PostgresCell._load_catalog` on every call (never cached across calls, never trusted as a standing assumption --).
 
     `columns`: declared field name -> declared type in the shared
     `r2db_api.structured` vocabulary (`"string"`/`"integer"`/`"number"`/
     `"boolean"`/`"object"`/`"array"`), or `None` for an untyped/JSONB-
-    equivalent column. `"object"`/`"array"` are recovered from PostgreSQL's
-    own `information_schema.columns.domain_name` (WP-3 review, "object/
-    array の DOMAIN 型統一") -- a plain `jsonb` column with no domain
-    reports `None`. Includes `"id"` (always `"integer"`); never includes
-    the invisible `"_r2db_revision"` column (R-3/R-4).
+    equivalent column. `"object"`/`"array"` are recovered from PostgreSQL's own `information_schema.columns.domain_name` ("object/ array の DOMAIN 型統一") -- a plain `jsonb` column with no domain reports `None`. Includes `"id"` (always `"integer"`); never includes the invisible `"_r2db_revision"` column.
 
     `indexes`: client index name -> `{"physical": <table>__<index> name,
     "fields": (declared field name, ...), "unique": bool}`, covering every
@@ -290,6 +261,8 @@ class _TableInfo:
     this table (both unique and non-unique -- SI-08/R-5: both count toward
     `schema_objects`), excluding the primary key on `id` (R-1/§2: an
     address, not a domain uniqueness declaration).
+
+    History: CH-0006
     """
 
     columns: dict[str, str | None]
@@ -307,10 +280,9 @@ class _TableInfo:
 
 
 def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] = ()) -> None:
-    """The single execution choke point. Typed to accept only a composed
-    psycopg SQL object -- never `str` -- so a raw string cannot reach the
-    database from anywhere in this file, as a checked property rather than a
-    convention (design D-4).
+    """The single execution choke point. Typed to accept only a composed psycopg SQL object -- never `str` -- so a raw string cannot reach the database from anywhere in this file, as a checked property rather than a convention (design D-4).
+
+    History: CH-0007
     """
     if not isinstance(statement, (sql.Composed, sql.SQL)):
         raise TypeError("PostgresCell only executes psycopg.sql.Composed/SQL objects, never str")
@@ -788,11 +760,7 @@ class PostgresCell:
         validate_identifier(developer_role, field="developer_role")
         self._runtime_role = runtime_role
         self._developer_role = developer_role
-        # Q4 WP-3 (design D-3(f)): kept as a plain attribute, separate from
-        # `self._runtime` below, so `verify_platform_upgrades_applied` can
-        # open a single, UNPOOLED, explicitly-closed connection for its own
-        # one-shot cell open time check -- never through the shared pool
-        # manager. Reaching through `self._runtime`'s own pool instead
+        # kept as a plain attribute, separate from `self._runtime` below, so `verify_platform_upgrades_applied` can open a single, UNPOOLED, explicitly-closed connection for its own one-shot cell open time check -- never through the shared pool manager. Reaching through `self._runtime`'s own pool instead
         # would leave a live connection sitting in that pool indefinitely
         # (pools are released only by `close()`/idle eviction, never by
         # this class itself), which would needlessly hold every served
@@ -801,6 +769,7 @@ class PostgresCell:
         # arrives -- exactly the standing-connection cost this class' own
         # "no pool is created here at construction time" design (this
         # docstring's own paragraph above) exists to avoid.
+        # history: CH-0008
         self._runtime_dsn = runtime_dsn
         manager = pool_manager if pool_manager is not None else default_pool_manager
         self._pool_manager = manager
@@ -869,14 +838,10 @@ class PostgresCell:
     # ---- catalog -----------------------------------------------------
 
     def _describe_table(self, name: str, table_info: "_TableInfo") -> dict[str, Any]:
-        """One entity's `EntityDescriptor` (contract shape) -- factored
-        out of `catalog()` below (WP-2b) so `apply_schema`'s own `dry_run`
-        response can build the identical descriptor for the ONE entity a
-        schema operation targets (D-4 (3)), re-reading `table_info` from
-        the SAME open transaction/connection a tentative (not yet
-        committed, and about to be rolled back) DDL/registry write just
-        ran in -- mirrors `ApplicationCell._describe_entity`'s identical
-        role for the in-memory backend, without sharing code with it."""
+        """One entity's `EntityDescriptor` (contract shape) -- factored out of `catalog()` below so `apply_schema`'s own `dry_run` response can build the identical descriptor for the ONE entity a schema operation targets (D-4 (3)), re-reading `table_info` from the SAME open transaction/connection a tentative (not yet committed, and about to be rolled back) DDL/registry write just ran in -- mirrors `ApplicationCell._describe_entity`'s identical role for the in-memory backend, without sharing code with it.
+
+        History: CH-0009
+        """
         unique_keys = [
             {"name": index_name, "fields": list(index_info["fields"])}
             for index_name, index_info in sorted(table_info.indexes.items())
@@ -897,10 +862,8 @@ class PostgresCell:
         return {
             "entity": name,
             "fields": sorted(table_info.columns),
-            # Phase 6 WP-2 (design D-3(iii)): `table_info.columns`
-            # is already `{field_name: declared_type_or_None}` --
-            # `None` (untyped/JSONB) reports as `json`, decision
-            # (ii)'s own default.
+            # `table_info.columns` is already `{field_name: declared_type_or_None}` -- `None` (untyped/JSONB) reports as `json`, decision (ii)'s own default.
+            # history: CH-0010
             "field_types": {field_name: (declared_type or "json") for field_name, declared_type in table_info.columns.items()},
             "field_constraints": field_constraints_out,
             # R-1/R-2/§2: every entity this backend provisions is
@@ -986,7 +949,8 @@ class PostgresCell:
                     columns[_ID_COLUMN] = "integer"
                 elif column_name == _REVISION_COLUMN:
                     revision_ok[table_name] = data_type == "uuid"
-                    # Never a known/selectable field (R-3/R-4).
+                    # Never a known/selectable field.
+                    # history: CH-0011
                 elif column_name.startswith(_RESERVED_INTERNAL_PREFIX):
                     continue
                 else:
@@ -1035,6 +999,7 @@ class PostgresCell:
         # is `False` -- `query` (D-2 (2): "query の predicate 値は enum を
         # 検査しない") never uses `table_info.constraints` at all, so
         # paying for that read on every read-only request is pure waste.
+        # history: CH-0012
         constraints_by_entity = self._load_field_constraints(conn) if with_constraints else {}
         return {
             name: _TableInfo(columns=columns, indexes=indexes.get(name, {}), constraints=constraints_by_entity.get(name, {}))
@@ -1045,16 +1010,7 @@ class PostgresCell:
         """Contract 1.7.0 (D-2 (4), WP-2a): reads the side-table registry
         (`public._r2db_field_constraints`, migration `0010_field_
         constraints_upgrade.sql`) -- the declaration's own source of truth
-        (physical column constraints are never added, §4 A-1). `conn` is
-        already inside the caller's own `with conn.transaction():` block
-        (`catalog`/`transact`/`apply_schema` above), so this method opens a
-        NESTED transaction (a real PostgreSQL SAVEPOINT once already inside
-        one) around its own read: if the table does not exist yet (an
-        application that has never run `python -m r2db_api.ops upgrade-
-        applications` for upgrade 10, WP-2a completion condition 10), that
-        one savepoint rolls back to a clean, still-usable state and this
-        method returns `{}` -- every entity/field then reports the
-        version-wide default (`nullable: true`, no `enum`). An application
+        (physical column constraints are never added, §4 A-1). `conn` is already inside the caller's own `with conn.transaction():` block (`catalog`/`transact`/`apply_schema` above), so this method opens a NESTED transaction (a real PostgreSQL SAVEPOINT once already inside one) around its own read: if the table does not exist yet (an application that has never run `python -m r2db_api.ops upgrade- applications` for upgrade 10 completion condition 10), that one savepoint rolls back to a clean, still-usable state and this method returns `{}` -- every entity/field then reports the version-wide default (`nullable: true`, no `enum`). An application
         that never declares any `field_constraints`/`enum`/`nullable` at
         all keeps working unmodified without ever needing that upgrade;
         only an attempt to WRITE a declaration (`_write_field_constraints`
@@ -1063,6 +1019,8 @@ class PostgresCell:
         handling (`transact`/`apply_schema`), which already maps it to a
         safe `SERVICE_UNAVAILABLE` with no rows changed (the enclosing
         `with conn.transaction():` rolls the whole operation back).
+
+        History: CH-0013
         """
         result: dict[str, dict[str, FieldConstraints]] = {}
         try:
@@ -1126,6 +1084,8 @@ class PostgresCell:
         entity`/`add_field` actually WRITING a declaration, which legitimately
         needs the table and is left to fail closed (`SERVICE_UNAVAILABLE`,
         `_write_field_constraints`'s own docstring) if it is missing.
+
+        History: CH-0014
         """
         try:
             with conn.transaction():
@@ -1138,7 +1098,7 @@ class PostgresCell:
         except psycopg.errors.UndefinedTable:
             return
 
-    # ---- idempotency (contract 1.7.0 D-5, WP-2c) --------------------------
+    # ---- idempotency (contract 1.7.0 D-5) --------------------------
     #
     # Ruling I-1/U-3 = (A): the Postgres-backend counterpart of `Application
     # Cell`'s process-internal dict -- the `public._r2db_idempotency` side
@@ -1150,20 +1110,10 @@ class PostgresCell:
     # `ApplicationCell`'s single-process dict, so the DATABASE's own notion
     # of "now" is what a lazy reclaim compares against.
     #
-    # Read (`_idempotency_lookup`) fails CLOSED on a missing table (ruling
-    # J-5, WP-2cd audit N-6) -- an application that has never run upgrade
-    # 11 gets `SERVICE_UNAVAILABLE` right here, before target-existence/
-    # execution, exactly like the WRITE (`_idempotency_store`) already did:
-    # `UndefinedTable` is left to propagate to `transact`/`apply_schema`'s
-    # own `except psycopg.Error` clause, rolling back the (as yet empty)
-    # transaction and touching no row. This method runs FIRST on the
+    # Read (`_idempotency_lookup`) fails CLOSED on a missing table (ruling audit) -- an application that has never run upgrade 11 gets `SERVICE_UNAVAILABLE` right here, before target-existence/ execution, exactly like the WRITE (`_idempotency_store`) already did: `UndefinedTable` is left to propagate to `transact`/`apply_schema`'s own `except psycopg.Error` clause, rolling back the (as yet empty) transaction and touching no row. This method runs FIRST on the
     # idempotent path (before `catalog`/target-existence in `transact`;
     # right after `catalog` but before any operation-specific work in
-    # `apply_schema`), so nothing has executed yet when it raises. Before
-    # this ruling, this method instead caught `UndefinedTable` and
-    # returned `None` ("no record found"), which let a request pay for
-    # target-existence/execution before failing at `_store` regardless --
-    # same eventual `SERVICE_UNAVAILABLE`, strictly more work done first.
+    # `apply_schema`), so nothing has executed yet when it raises.
     # `_idempotency_reserve` (below) can therefore no longer actually
     # observe `UndefinedTable` in practice: on this same path it always
     # runs after this method has already succeeded (or already raised),
@@ -1171,13 +1121,10 @@ class PostgresCell:
     # between -- its own guard is kept anyway (defense in depth, and it
     # matches `_load_field_constraints`'s own posture of not depending on
     # a caller having gotten the ordering right).
+    # history: CH-0015
 
     def _idempotency_key_lock(self, conn: "psycopg.Connection[Any]", key: str) -> None:
-        """Ruling U-7 (WP-6d): transaction-scoped advisory lock keyed on
-        this idempotency key -- taken directly in the OUTER `with conn.
-        transaction():` (`transact`/`apply_schema`), immediately BEFORE
-        calling `_idempotency_lookup`, never inside `_idempotency_
-        lookup`'s own nested `with conn.transaction():` (a SAVEPOINT).
+        """transaction-scoped advisory lock keyed on this idempotency key -- taken directly in the OUTER `with conn. transaction():` (`transact`/`apply_schema`), immediately BEFORE calling `_idempotency_lookup`, never inside `_idempotency_ lookup`'s own nested `with conn.transaction():` (a SAVEPOINT).
         `pg_advisory_xact_lock` auto-releases only at the enclosing
         (outer) transaction's own commit/rollback, never at a savepoint
         rollback or a savepoint's own commit -- taking it here, before
@@ -1202,22 +1149,15 @@ class PostgresCell:
         ADVISORY_LOCK_KEY` and `ops.py::_RITUAL_ADVISORY_LOCK_KEY` also
         occupy (all three are small positive integers); namespacing the
         high 32 bits keeps per-key locks in a visibly separate space.
-        `hashtext` collisions between two DIFFERENT keys are accepted
-        (ruling U-7): a collision only over-serializes (two unrelated
-        keys briefly wait on each other), it can never under-serialize.
+        `hashtext` collisions between two DIFFERENT keys are accepted (ruling): a collision only over-serializes (two unrelated keys briefly wait on each other), it can never under-serialize.
+
+        History: CH-0016
         """
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s, hashtext(%s))"), [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
 
     def _idempotency_reserve_lock(self, conn: "psycopg.Connection[Any]") -> None:
-        """Ruling U-7 (WP-6d): table-level advisory lock serializing
-        `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys
-        (D-5 (iii)) -- taken directly in the OUTER transaction, BEFORE
-        calling `_idempotency_reserve`, never inside that method's own
-        nested `with conn.transaction():` savepoint (same reasoning as
-        `_idempotency_key_lock` above: the lock's lifetime should not
-        depend on savepoint/advisory-lock interaction being understood
-        by a future reader). A constant lock id (not keyed on anything)
+        """table-level advisory lock serializing `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys (D-5 (iii)) -- taken directly in the OUTER transaction, BEFORE calling `_idempotency_reserve`, never inside that method's own nested `with conn.transaction():` savepoint (same reasoning as `_idempotency_key_lock` above: the lock's lifetime should not depend on savepoint/advisory-lock interaction being understood by a future reader). A constant lock id (not keyed on anything)
         because this guards the TABLE'S row count, not any one key.
 
         `LOCK TABLE public.<idempotency table> IN SHARE MODE` was
@@ -1230,6 +1170,8 @@ class PostgresCell:
         precedent's own lock mode finding. `pg_advisory_xact_lock` has
         no such self-conflict-free class: a second holder of the SAME
         key always waits for the first, full stop.
+
+        History: CH-0017
         """
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
@@ -1249,13 +1191,8 @@ class PostgresCell:
 
     def _idempotency_reserve(self, conn: "psycopg.Connection[Any]", limits: ResourceLimits) -> None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
-        # Ruling J-6 (WP-2cd audit N-7): the lazy-reclaim DELETE this method
-        # used to also issue here is dropped -- `_idempotency_lookup`, this
-        # same transaction, always runs first on this path and already
-        # reclaimed every expired record moments earlier; a second DELETE
-        # here was always a 0-row no-op (measured, WP-2cd closure: `_run`
-        # count for a keyed write drops from 11 to 10; a replay never
-        # reaches this method at all and stays at 4).
+        # the lazy-reclaim DELETE this method used to also issue here is dropped -- `_idempotency_lookup`, this same transaction, always runs first on this path and already reclaimed every expired record moments earlier; a second DELETE here was always a 0-row no-op (measured closure: `_run` count for a keyed write drops from 11 to 10; a replay never reaches this method at all and stays at 4).
+        # history: CH-0018
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -1266,38 +1203,22 @@ class PostgresCell:
                     # check, but the same-key serialization AND the count
                     # lock that would close this count's TOCTOU window are
                     # WP-6d-i's scope (both peers, one pass) -- not added
-                    # here. See supervisory ruling 2026-09-08.
+                    # here.
+                    # history: CH-0085
                     _run(cur, sql.SQL("SELECT count(*) FROM public.{table}").format(table=table))
                     (count,) = cur.fetchone()
         except psycopg.errors.UndefinedTable:
             count = 0
-        # Ruling I-6/D-5 (5): checked BEFORE this request executes anything
-        # -- reusing the SAME generic `ResourceLimits.check()` every other
-        # COUNT-valued class already uses (`ApplicationCell`'s identical
-        # `_idempotency_reserve` comment).
+        # checked BEFORE this request executes anything -- reusing the SAME generic `ResourceLimits.check()` every other COUNT-valued class already uses (`ApplicationCell`'s identical `_idempotency_reserve` comment).
+        # history: CH-0019
         limits.check("idempotency_entries", count + 1)
 
     def _idempotency_store(self, conn: "psycopg.Connection[Any]", key: str, *, digest: str, kind: str, payload: dict[str, Any], retention_ms: int) -> None:
-        # M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2, WP-2e
-        # closure audit R-1): `ON CONFLICT (idempotency_key) DO UPDATE`,
-        # not a bare `INSERT` -- a resend of a key whose stored record was
-        # just treated as absent (`_idempotency_record_has_request_id`
-        # returned false, at both call sites below) reaches this SAME
-        # method for the SAME key, and must overwrite the stale row
-        # rather than fail on the primary key it still holds -- an
-        # expired-but-not-yet-reaped row, or a pre-1.7.0-shaped row with
-        # no `request_id` at all, are the only ways a live row can still
-        # be sitting under this key when this INSERT runs. Mirrors
+        # M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2 closure audit R-1): `ON CONFLICT (idempotency_key) DO UPDATE`, not a bare `INSERT` -- a resend of a key whose stored record was just treated as absent (`_idempotency_record_has_request_id` returned false, at both call sites below) reaches this SAME method for the SAME key, and must overwrite the stale row rather than fail on the primary key it still holds -- an expired-but-not-yet-reaped row, or a pre-1.7.0-shaped row with no `request_id` at all, are the only ways a live row can still be sitting under this key when this INSERT runs. Mirrors
         # `ApplicationCell._idempotency_store`'s plain dict assignment,
         # which overwrites unconditionally by construction.
         #
-        # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①): this
-        # `ON CONFLICT DO UPDATE` is NOT what makes concurrent same-key
-        # requests safe -- `_idempotency_key_lock` (taken by every caller
-        # before `_idempotency_lookup`, in the same outer transaction)
-        # is what closes that race, by making the second concurrent
-        # request wait for the first's commit/rollback before either one
-        # reaches this method at all. Once that lock serializes entry,
+        # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①): this `ON CONFLICT DO UPDATE` is NOT what makes concurrent same-key requests safe -- `_idempotency_key_lock` (taken by every caller before `_idempotency_lookup`, in the same outer transaction) is what closes that race, by making the second concurrent request wait for the first's commit/rollback before either one reaches this method at all. Once that lock serializes entry,
         # nothing else can be racing THIS INSERT for the SAME key: the
         # conflict this clause resolves is only ever this key's own
         # prior (already-committed, sequential) row -- never a row a
@@ -1305,6 +1226,7 @@ class PostgresCell:
         # Kept as `DO UPDATE` (not narrowed to a bare `INSERT`) purely
         # for that stale-row-still-present case above, not for
         # concurrency.
+        # history: CH-0020
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
         with conn.cursor() as cur:
             _run(
@@ -1344,9 +1266,8 @@ class PostgresCell:
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
-                    # Monitor ruling M-4: `query` never reads `table_info.
-                    # constraints` (D-2 (2): predicates are not bound by
-                    # `enum`/`nullable`) -- skip the side-table read.
+                    # `query` never reads `table_info. constraints` (D-2 (2): predicates are not bound by `enum`/`nullable`) -- skip the side-table read.
+                    # history: CH-0021
                     catalog = self._load_catalog(conn, with_constraints=False)
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1354,24 +1275,16 @@ class PostgresCell:
                     known_fields = set(table_info.columns)
                     validate_projection(select, known_fields)
                     validate_predicates(where, known_fields)
-                    # R-6: identifier/catalog-checked order_by, with a
-                    # deterministic trailing `id ASC` tie-break appended
-                    # whenever the caller's own order_by does not already
-                    # mention `id` -- the exact same shared function
-                    # `ApplicationCell.query` uses, so both backends accept/
-                    # reject the same order_by shapes identically.
+                    # identifier/catalog-checked order_by, with a deterministic trailing `id ASC` tie-break appended whenever the caller's own order_by does not already mention `id` -- the exact same shared function `ApplicationCell.query` uses, so both backends accept/ reject the same order_by shapes identically.
+                    # history: CH-0022
                     order_spec = _resolve_order_by(order_by, known_fields)
                     order_by_count = len(order_by) if order_by else 0
                     limits.check("query_complexity", len(where) + len(select) + order_by_count)
-                    # R-7, corrigendum M-9: validate every predicate's value
-                    # type before touching stored rows at all -- the same
-                    # shared function and the same ordering `ApplicationCell.
-                    # query` uses.
+                    # validate every predicate's value type before touching stored rows at all -- the same shared function and the same ordering `ApplicationCell. query` uses.
+                    # history: CH-0023
                     _validate_predicate_types(where, table_info.columns)
-                    # R-6: the cursor's opaque shape hash binds the
-                    # Application scope, entity, and the full query shape
-                    # (select/where/order_by/size) -- decoded (and
-                    # validated) here, before any SQL referencing it runs.
+                    # the cursor's opaque shape hash binds the Application scope, entity, and the full query shape (select/where/order_by/size) -- decoded (and validated) here, before any SQL referencing it runs.
+                    # history: CH-0024
                     shape = _shape_hash(self.application_id, entity, select, where, order_spec, page_size)
                     offset = 0
                     if cursor is not None:
@@ -1387,14 +1300,8 @@ class PostgresCell:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.Error:
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
-        # R-6: `rows` was fetched with `LIMIT page_size + 1` (the look-ahead
-        # row, if present, is never returned to the caller -- it only
-        # signals `has_more`); `min(len(rows), page_size)` therefore equals
-        # `page_size` whenever at least `page_size` rows matched, or the
-        # true (smaller) match count otherwise -- exactly the quantity
-        # `ApplicationCell.query`'s own equivalent check computes from its
-        # full (unbounded) in-memory match list, before it slices to a
-        # window.
+        # `rows` was fetched with `LIMIT page_size + 1` (the look-ahead row, if present, is never returned to the caller -- it only signals `has_more`); `min(len(rows), page_size)` therefore equals `page_size` whenever at least `page_size` rows matched, or the true (smaller) match count otherwise -- exactly the quantity `ApplicationCell.query`'s own equivalent check computes from its full (unbounded) in-memory match list, before it slices to a window.
+        # history: CH-0025
         limits.check("result_items", min(len(rows), page_size))
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
@@ -1425,10 +1332,7 @@ class PostgresCell:
         if where_sql is not None:
             statement = sql.SQL("{base} WHERE {where}").format(base=statement, where=where_sql)
         statement = sql.SQL("{base} ORDER BY {order}").format(base=statement, order=self._order_by_sql(order_spec))
-        # R-6: NULL placement (ASC -> NULLS LAST, DESC -> NULLS FIRST) is
-        # PostgreSQL's own default when no NULLS clause is given, which is
-        # exactly the semantics `ApplicationCell._sort_key` was written to
-        # match -- no explicit NULLS FIRST/LAST needed here. Likewise, a
+        # NULL placement (ASC -> NULLS LAST, DESC -> NULLS FIRST) is PostgreSQL's own default when no NULLS clause is given, which is exactly the semantics `ApplicationCell._sort_key` was written to match -- no explicit NULLS FIRST/LAST needed here. Likewise, a
         # plain (untyped/JSONB) column's own cross-type ordering (ascending:
         # String < Number < Boolean < Array < Object) falls directly out of
         # PostgreSQL's native `jsonb` comparison operators.
@@ -1437,6 +1341,7 @@ class PostgresCell:
         # non-negative integers (never client-supplied text) by this point
         # -- `sql.Literal` here is composing a trusted value, the same
         # pattern `_set_timeouts` already uses for its own computed values.
+        # history: CH-0026
         return sql.SQL("{base} OFFSET {offset} LIMIT {limit}").format(base=statement, offset=sql.Literal(int(offset)), limit=sql.Literal(int(page_size) + 1))
 
     def _order_by_sql(self, order_spec: list[tuple[str, str]]) -> sql.Composed:
@@ -1463,10 +1368,7 @@ class PostgresCell:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> MutationOutcome:
-        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
-        the single tx-exit point sits right before the pre-commit hook,
-        inside the SAME `with conn.transaction():` block every operation
-        already writes its (uncommitted) row changes in. A `dry_run`
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4): the single tx-exit point sits right before the pre-commit hook, inside the SAME `with conn.transaction():` block every operation already writes its (uncommitted) row changes in. A `dry_run`
         forces a real ROLLBACK via `psycopg.Rollback` (caught and
         swallowed by `conn.transaction()`'s own `__exit__`, never
         surfacing as an error -- `ApplicationCell.transact`'s in-memory
@@ -1474,6 +1376,8 @@ class PostgresCell:
         `deepcopy`) rather than committing; `committed` below carries the
         decided result out of that block, since a raise cannot itself
         return a value.
+
+        History: CH-0027
         """
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
@@ -1506,22 +1410,17 @@ class PostgresCell:
                     # Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3,
                     # WP-2c): the idempotency lookup -- see `Application
                     # Cell.transact`'s identical comment for the ordering
-                    # rationale (after bounds, before target existence). A
-                    # `dry_run` never consults or writes a record (ruling
-                    # I-7/D-4).
+                    # rationale (after bounds, before target existence). A `dry_run` never consults or writes a record (ruling).
+                    # history: CH-0028
                     if idempotency_key is not None and not dry_run:
                         assert plan_request is not None  # service.py always builds this
                         idempotency_digest_value = idempotency_digest(plan_request)
-                        # Ruling U-7 (WP-6d): taken in THIS outer
-                        # transaction, before `_idempotency_lookup` opens
-                        # its own nested savepoint -- see `_idempotency_
-                        # key_lock`'s own docstring for why the lock must
-                        # sit here and not inside that savepoint.
+                        # taken in THIS outer transaction, before `_idempotency_lookup` opens its own nested savepoint -- see `_idempotency_ key_lock`'s own docstring for why the lock must sit here and not inside that savepoint.
+                        # history: CH-0029
                         self._idempotency_key_lock(conn, idempotency_key)
                         record = self._idempotency_lookup(conn, idempotency_key)
-                        # L-6/M-6: a record with no `request_id` (pre-1.7.0)
-                        # is not a usable replay source -- treated as
-                        # absent, checked before the digest comparison.
+                        # a record with no `request_id` (pre-1.7.0) is not a usable replay source -- treated as absent, checked before the digest comparison.
+                        # history: CH-0030
                         if record is not None and _idempotency_record_has_request_id(record[2]):
                             stored_digest, _stored_kind, stored_payload = record
                             if stored_digest != idempotency_digest_value:
@@ -1529,22 +1428,17 @@ class PostgresCell:
                                     "CONFLICT", "This idempotency key was already used with a different request.", status=409,
                                     details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
                                 )
-                            # Ruling I-3/I-8: answered from the record --
-                            # target existence, confirmation, precondition
-                            # and execution never run for a replay.
+                            # answered from the record -- target existence, confirmation, precondition and execution never run for a replay.
+                            # history: CH-0031
                             return MutationOutcome(
                                 affected=stored_payload["affected"], assigned_addresses=stored_payload["assigned_addresses"],
                                 destructive=False, committed=True, plan=None, replayed=True,
-                                # M-6: the ORIGINAL execution's own
-                                # `request_id` (guaranteed present), no
-                                # fallback to this resend's own.
+                                # the ORIGINAL execution's own `request_id` (guaranteed present), no fallback to this resend's own.
+                                # history: CH-0032
                                 request_id=stored_payload["request_id"],
                             )
-                        # Ruling I-6/D-5 (5): capacity checked before this
-                        # request executes anything. Ruling U-7: the
-                        # table-level count lock is likewise taken in
-                        # THIS outer transaction, before `_idempotency_
-                        # reserve` opens its own nested savepoint.
+                        # capacity checked before this request executes anything. the table-level count lock is likewise taken in THIS outer transaction, before `_idempotency_ reserve` opens its own nested savepoint.
+                        # history: CH-0033
                         self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
                     catalog = self._load_catalog(conn)
@@ -1557,13 +1451,8 @@ class PostgresCell:
                     # advance this counter, but reading it here (rather
                     # than after the loop) keeps this identical in spirit
                     # to `apply_schema`'s own "before this operation's own
-                    # tentative write" read. Review round F-5: gated on
-                    # `dry_run or plan is not None` too -- an ordinary
-                    # apply (neither) skips both the digest computation
-                    # AND this method's own extra `_read_schema_revision`
-                    # round trip, which `delete` would otherwise pay
-                    # twice over (once here, once for its own confirmation
-                    # phrase).
+                    # tentative write" read. gated on `dry_run or plan is not None` too -- an ordinary apply (neither) skips both the digest computation AND this method's own extra `_read_schema_revision` round trip, which `delete` would otherwise pay twice over (once here, once for its own confirmation phrase).
+                    # history: CH-0034
                     expected_plan = (
                         compute_plan_token(plan_request, self._read_schema_revision(conn))
                         if plan_request is not None and (dry_run or plan is not None)
@@ -1571,14 +1460,11 @@ class PostgresCell:
                     )
                     for operation_index, operation in enumerate(operations):
                         if deadline is not None and clock is not None:
-                            # WP-2 review M-2 parity: per-operation deadline
-                            # check, not only before/after the whole batch.
+                            # per-operation deadline check, not only before/after the whole batch.
+                            # history: CH-0035
                             limits.check_deadline(deadline, clock)
-                        # Monitor ruling M-3/D (rulings-wp2a-review.md):
-                        # this operation's own position in the request's
-                        # `operations` list -- `_apply` composes `details.
-                        # field` as a request-internal path from it
-                        # (`operations/<i>/values/<field>`, D-3 (2)).
+                        # Monitor ruling M-3/D: this operation's own position in the request's `operations` list -- `_apply` composes `details. field` as a request-internal path from it (`operations/<i>/values/<field>`, D-3 (2)).
+                        # history: CH-0036
                         count, address, op_destructive = self._apply(conn, entity, operation, table_info, operation_index)
                         affected += count
                         destructive = destructive or op_destructive
@@ -1602,13 +1488,8 @@ class PostgresCell:
                     if dry_run:
                         committed = False
                         raise psycopg.Rollback()
-                    # Phase 4 (design D-2): the pre-commit hook is the LAST
-                    # statement inside this `with conn.transaction():`
-                    # block -- a raise here propagates straight through the
-                    # block's own `__exit__`, which rolls the data
-                    # transaction back exactly like any other exception
-                    # raised inside it (no special-casing needed at this
-                    # call site: fail-closed by construction).
+                    # the pre-commit hook is the LAST statement inside this `with conn.transaction():` block -- a raise here propagates straight through the block's own `__exit__`, which rolls the data transaction back exactly like any other exception raised inside it (no special-casing needed at this call site: fail-closed by construction).
+                    # history: CH-0037
                     if destructive and audit_hook is not None:
                         audit_hook.pre_commit()
                         hook_fired = True
@@ -1646,34 +1527,24 @@ class PostgresCell:
                 if hook_fired and audit_hook is not None:
                     audit_hook.commit_failed()
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
-        # `conn.transaction()` rolls back the *entire* batch on any
-        # exception (including a `FoundationError` raised by a later
-        # operation), giving the whole batch one real database transaction
-        # (D-5) in place of `ApplicationCell`'s in-memory deepcopy/restore.
-        # `assigned_addresses` (CCR-13, R-5) lists, in operation order, the
-        # address of every operation that resolved to an insert (a plain
-        # `insert`, or an `upsert` whose declared key found no existing
-        # row) -- an `upsert` that resolved to an update contributes
-        # nothing here, exactly like `ApplicationCell.transact`. `plan`
+        # `conn.transaction()` rolls back the *entire* batch on any exception (including a `FoundationError` raised by a later operation), giving the whole batch one real database transaction in place of `ApplicationCell`'s in-memory deepcopy/restore.
+        # `assigned_addresses` (CCR-13) lists, in operation order, the address of every operation that resolved to an insert (a plain `insert`, or an `upsert` whose declared key found no existing row) -- an `upsert` that resolved to an update contributes nothing here, exactly like `ApplicationCell.transact`. `plan`
         # (D-4 (3)) is surfaced only for a `dry_run` -- `None` for a real
         # commit (`committed=True`), matching `ApplicationCell.transact`.
+        # history: CH-0038
         return MutationOutcome(
             affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
             committed=committed, plan=(expected_plan if not committed else None), request_id=request_id,
         )
 
     def _fail_unique_conflict(self, entity: str, exc: "psycopg.errors.UniqueViolation") -> None:
-        """R-5, corrigendum M-5: map a real PostgreSQL `UniqueViolation`
-        (raised naturally by any INSERT/UPDATE that collides with a
-        `create_index(unique=True)`-declared index -- including one other
-        than the key an `upsert` used for its own existence test, R-5's
-        "既存重複は CONFLICT") to the contract's `CONFLICT`, disclosing at
-        most the client-recognizable index name and never PostgreSQL's own
-        DETAIL text, constraint/index internals, or any row value. `exc.
+        """map a real PostgreSQL `UniqueViolation` (raised naturally by any INSERT/UPDATE that collides with a `create_index(unique=True)`-declared index -- including one other than the key an `upsert` used for its own existence test, R-5's "既存重複は CONFLICT") to the contract's `CONFLICT`, disclosing at most the client-recognizable index name and never PostgreSQL's own DETAIL text, constraint/index internals, or any row value. `exc.
         diag.constraint_name` is PostgreSQL's own (physical) index name; it
         is only ever used here to look up the corresponding client name by
         stripping this backend's own `{entity}__` naming convention -- never
         surfaced to the caller directly.
+
+        History: CH-0039
         """
         physical = exc.diag.constraint_name or ""
         prefix = f"{entity}__"
@@ -1683,14 +1554,7 @@ class PostgresCell:
         fail("CONFLICT", "A declared uniqueness key would be violated.", status=409, details=details)
 
     def _fail_client_value(self) -> None:
-        """R-7 addendum (WP-3 review blocker-2): a `psycopg.errors.
-        DataError` (SQLSTATE class 22 -- e.g. `NumericValueOutOfRange`, or
-        a NUL byte PostgreSQL's `text`/`jsonb` storage cannot hold at all)
-        is always a decisive, deterministic client-supplied-value bug, not
-        a transient server condition -- `VALIDATION_FAILED`, never
-        `SERVICE_UNAVAILABLE` (which reads as "retry", and an AI agent
-        client retrying an identical, never-succeeding request is exactly
-        the failure mode this refusal exists to prevent). This is a second,
+        """a `psycopg.errors. DataError` (SQLSTATE class 22 -- e.g. `NumericValueOutOfRange`, or a NUL byte PostgreSQL's `text`/`jsonb` storage cannot hold at all) is always a decisive, deterministic client-supplied-value bug, not a transient server condition -- `VALIDATION_FAILED`, never `SERVICE_UNAVAILABLE` (which reads as "retry", and an AI agent client retrying an identical, never-succeeding request is exactly the failure mode this refusal exists to prevent). This is a second,
         defence-in-depth layer underneath the shared boundary's own value-
         domain checks (`r2db_api.structured._check_type`'s integer-range/
         NUL-byte validation, `_validate_wildcard_pattern`'s grammar check)
@@ -1702,23 +1566,15 @@ class PostgresCell:
         reliably attributed to one specific field from this generic catch
         site, so no field name is guessed at (`errors.disclosure`: never
         wrong information is safer than no information).
+
+        History: CH-0040
         """
         fail("VALIDATION_FAILED", "A value in this request is not acceptable to the underlying storage.")
 
     def _bind_value(self, value: Any, field_type: str | None) -> Any:
-        """R-7 addendum (WP-2 review M-B, confirmed empirically against a
-        real server): a JSON `null` must bind as SQL `NULL` for every
-        column shape, typed or untyped -- `Jsonb(None)` would instead
-        produce the JSONB literal `'null'::jsonb` for an untyped column,
-        which would make `is_null` predicates and `order_by` NULL placement
-        diverge from `ApplicationCell`'s own null semantics. A non-null
-        value binds as a native parameter for a scalar-typed column
-        (`string`/`integer`/`number`/`boolean`) or wrapped in `Jsonb(...)`
-        for an untyped column *or* an `object`/`array` one -- the latter
-        two are still physically `jsonb` underneath their DOMAIN (WP-3
-        review, object/array DOMAIN unification), so psycopg must still be
-        told to serialize the value as jsonb, exactly as for an untyped
-        column.
+        """R-7 addendum (M-B, confirmed empirically against a real server): a JSON `null` must bind as SQL `NULL` for every column shape, typed or untyped -- `Jsonb(None)` would instead produce the JSONB literal `'null'::jsonb` for an untyped column, which would make `is_null` predicates and `order_by` NULL placement diverge from `ApplicationCell`'s own null semantics. A non-null value binds as a native parameter for a scalar-typed column (`string`/`integer`/`number`/`boolean`) or wrapped in `Jsonb(...)` for an untyped column *or* an `object`/`array` one -- the latter two are still physically `jsonb` underneath their DOMAIN (object/array DOMAIN unification), so psycopg must still be told to serialize the value as jsonb, exactly as for an untyped column.
+
+        History: CH-0041
         """
         if value is None:
             return None
@@ -1754,8 +1610,8 @@ class PostgresCell:
                     "A field declared nullable: false requires a value on insert.",
                     details={"field": values_path + missing_field, "violated_declaration": "nullable", "declared_type": _declared_type_label(field_types.get(missing_field)), "observed_type": "absent"},
                 )
-            # R-7, corrigendum M-9: value types are validated before
-            # anything is sent to the database.
+            # value types are validated before anything is sent to the database.
+            # history: CH-0042
             for key, value in bound.values.items():
                 _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
             row_id = self._insert(conn, entity, bound.values, field_types)
@@ -1777,9 +1633,8 @@ class PostgresCell:
         where_sql, where_params = self._where_clause(bound.where, field_types)
 
         if bound.operation == "delete":
-            # R-4, corrigendum m-5: destructive confirmation is checked
-            # before any precondition-related outcome (never resolves to a
-            # PRECONDITION_FAILED/NOT_FOUND).
+            # destructive confirmation is checked before any precondition-related outcome (never resolves to a PRECONDITION_FAILED/NOT_FOUND).
+            # history: CH-0043
             require_destructive_confirmation(
                 bound.destructive, bound.confirmation,
                 delete_confirmation_phrase(entity, bound.where, self._read_schema_revision(conn)),
@@ -1788,9 +1643,8 @@ class PostgresCell:
                 reversible_alternative=None,
                 recovery=None,
             )
-            # Phase 4 (design D-2): reaching this point means the
-            # confirmation choke above did not raise -- confirmed-
-            # destructive, same signal `ApplicationCell._apply` returns.
+            # reaching this point means the confirmation choke above did not raise -- confirmed- destructive, same signal `ApplicationCell._apply` returns.
+            # history: CH-0044
             affected = self._delete(conn, entity, where_sql, where_params, bound.expected_revision)
             return affected, None, True
 
@@ -1798,11 +1652,7 @@ class PostgresCell:
         return affected, None, False
 
     def _append_revision_predicate(self, where_sql: sql.Composed | None, where_params: list[Any], expected_revision: str | None) -> tuple[sql.Composed | None, list[Any]]:
-        """R-4: an `expected_revision` precondition is folded into the same
-        WHERE clause as the caller's own predicate (`<predicate> AND
-        _r2db_revision::text = $expected`), so the comparison and the write
-        are one atomic statement (the contract's revision-precondition
-        clause 5) rather than a separate read-then-write.
+        """an `expected_revision` precondition is folded into the same WHERE clause as the caller's own predicate (`<predicate> AND _r2db_revision::text = $expected`), so the comparison and the write are one atomic statement (the contract's revision-precondition clause 5) rather than a separate read-then-write.
 
         The comparison casts the `uuid` column to `text` rather than
         binding `expected_revision` as a (contextually inferred) `uuid`
@@ -1817,6 +1667,8 @@ class PostgresCell:
         `text` here is what keeps that same "never matches, never raises"
         behaviour on this backend too, instead of a `SERVICE_UNAVAILABLE`
         this predicate's own value should never be able to trigger.
+
+        History: CH-0045
         """
         if expected_revision is None:
             return where_sql, list(where_params)
@@ -1825,12 +1677,9 @@ class PostgresCell:
         return combined, list(where_params) + [expected_revision]
 
     def _resolve_precondition_miss(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, where_sql: sql.Composed | None, where_params: list[Any]) -> None:
-        """R-4, corrigendum M-2: when a revision-qualified UPDATE/DELETE
-        affects zero rows, re-evaluate the caller's own predicate alone (no
-        revision clause), in the same transaction, to decide which of the
-        two failures applies -- `PRECONDITION_FAILED` (a row exists, but its
-        revision was not the one asserted) or `NOT_FOUND` (no row matches
-        the predicate at all, so there was no row to assert about).
+        """when a revision-qualified UPDATE/DELETE affects zero rows, re-evaluate the caller's own predicate alone (no revision clause), in the same transaction, to decide which of the two failures applies -- `PRECONDITION_FAILED` (a row exists, but its revision was not the one asserted) or `NOT_FOUND` (no row matches the predicate at all, so there was no row to assert about).
+
+        History: CH-0046
         """
         if self._exists(conn, table, where_sql, where_params):
             fail("PRECONDITION_FAILED", "The row's revision no longer matches the supplied precondition.", status=412)
@@ -1873,10 +1722,8 @@ class PostgresCell:
     ) -> int:
         table = sql.Identifier(entity)
         if expected_revision is None and not values:
-            # R-4, corrigendum M-1: this branch is only reachable without a
-            # precondition -- `bind_mutation` already rejects an empty-
-            # `values` `update` carrying `expected_revision` outright, so a
-            # precondition is never silently discarded here.
+            # this branch is only reachable without a precondition -- `bind_mutation` already rejects an empty- `values` `update` carrying `expected_revision` outright, so a precondition is never silently discarded here.
+            # history: CH-0047
             return self._count(conn, table, where_sql, where_params)
         full_where_sql, full_params = self._append_revision_predicate(where_sql, where_params, expected_revision)
         revision_bump = sql.SQL("{col} = gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
@@ -1947,8 +1794,8 @@ class PostgresCell:
         # Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
         # constraints, same source `_apply` above reads.
         entity_constraints = table_info.constraints
-        # R-7, corrigendum M-9: type-check before any SQL runs, symmetric
-        # with insert/update above.
+        # type-check before any SQL runs, symmetric with insert/update above.
+        # history: CH-0048
         for key, value in bound.values.items():
             _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
 
@@ -1959,17 +1806,8 @@ class PostgresCell:
 
         # Contract 1.7.0 (D-2 (3)(ii), contract text: "An upsert that
         # resolves to an insert is refused on the same rule [as insert];
-        # an upsert that resolves to an update is not"). Unlike `_apply`'s
-        # plain `insert` branch, this backend cannot know ahead of the two
-        # real SQL statements below whether THIS upsert will resolve to an
-        # insert or an update (corrigendum M-4: no separate existence
-        # check drives that choice) -- so the missing-field question is
-        # only even asked (one extra, targeted `SELECT ... LIMIT 1`,
-        # skipped entirely when every non-nullable field IS present, the
-        # common case) when it can actually change the outcome: a
-        # precondition (`expected_revision`) already guarantees this
-        # upsert can never resolve to an insert (R-5, `_apply_upsert`'s own
-        # docstring), so this check does not apply there at all.
+        # an upsert that resolves to an update is not"). Unlike `_apply`'s plain `insert` branch, this backend cannot know ahead of the two real SQL statements below whether THIS upsert will resolve to an insert or an update (corrigendum M-4: no separate existence check drives that choice) -- so the missing-field question is only even asked (one extra, targeted `SELECT ... LIMIT 1`, skipped entirely when every non-nullable field IS present, the common case) when it can actually change the outcome: a precondition (`expected_revision`) already guarantees this upsert can never resolve to an insert (`_apply_upsert`'s own docstring), so this check does not apply there at all.
+        # history: CH-0049
         if bound.expected_revision is None:
             missing_non_nullable = sorted({name for name, c in entity_constraints.items() if not c.nullable} - set(bound.values))
             if missing_non_nullable:
@@ -1988,6 +1826,7 @@ class PostgresCell:
                 # (or the whole transaction serializes behind it) when the
                 # INSERT/UPDATE below actually run -- the missing-field
                 # verdict this check reaches can no longer go stale.
+                # history: CH-0050
                 with conn.cursor() as cur:
                     _run(cur, sql.SQL("SELECT 1 FROM {table} WHERE {where} LIMIT 1 FOR UPDATE").format(table=table, where=key_where_sql), key_where_params)
                     resolves_to_update = cur.fetchone() is not None
@@ -2008,9 +1847,8 @@ class PostgresCell:
             update_value_params = []
 
         if bound.expected_revision is not None:
-            # R-5: a precondition never resolves an upsert to an insert --
-            # no key match is NOT_FOUND (via `_resolve_precondition_miss`),
-            # exactly like update/delete.
+            # a precondition never resolves an upsert to an insert -- no key match is NOT_FOUND (via `_resolve_precondition_miss`), exactly like update/delete.
+            # history: CH-0051
             full_where_sql, full_params = self._append_revision_predicate(key_where_sql, key_where_params, bound.expected_revision)
             statement = sql.SQL("UPDATE {table} SET {set} WHERE {where}").format(table=table, set=set_clause, where=full_where_sql)
             with conn.cursor() as cur:
@@ -2038,11 +1876,8 @@ class PostgresCell:
             _run(cur, update_statement, update_value_params + key_where_params)
             row = cur.fetchone()
         if row is None:
-            # M-4: the row this INSERT's ON CONFLICT saw was removed by a
-            # concurrent transaction before this UPDATE could find it --
-            # neither statement resolved, so the whole batch rolls back as
-            # a concurrent-modification conflict rather than silently
-            # inserting a second time.
+            # the row this INSERT's ON CONFLICT saw was removed by a concurrent transaction before this UPDATE could find it -- neither statement resolved, so the whole batch rolls back as a concurrent-modification conflict rather than silently inserting a second time.
+            # history: CH-0052
             fail("CONFLICT", "The row was concurrently modified.", status=409)
         return 1, None
 
@@ -2061,10 +1896,7 @@ class PostgresCell:
 
     def _text_expression(self, column: sql.Identifier, field_type: str | None) -> sql.Composed:
         """The text form of `column` that `contains`/`matches` compare
-        against. R-7: "非 text 列は従来どおり ::text に対して適用" -- a
-        typed non-text column's plain `::text` cast is exactly this (a
-        numeric/boolean column's text representation carries no quoting
-        ambiguity). An *untyped* (JSONB-equivalent) column is different:
+        against. "非 text 列は従来どおり ::text に対して適用" -- a typed non-text column's plain `::text` cast is exactly this (a numeric/boolean column's text representation carries no quoting ambiguity). An *untyped* (JSONB-equivalent) column is different:
         PostgreSQL's own `::text` cast on jsonb returns the JSON text
         representation, which wraps a JSON **string** value in literal
         double quotes (`"hello"`, not `hello`) -- silently breaking a full-
@@ -2079,6 +1911,8 @@ class PostgresCell:
         wrong. This is what keeps the two backends' behaviour for a string-
         typed field in parity, whether the client declared it via `add_field
         field_type: "string"` or left it untyped.
+
+        History: CH-0053
         """
         if field_type is None:
             return sql.SQL("(") + column + sql.SQL(" #>> '{}')")
@@ -2100,26 +1934,21 @@ class PostgresCell:
             if not isinstance(predicate.value, list) or not predicate.value:
                 fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
             placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in predicate.value)
-            # R-7, corrigendum m-7: each element gets the same per-column
-            # type-aware bind (native for a typed column, `Jsonb(...)` for
-            # an untyped one, SQL NULL for a JSON null) as every other
-            # value position -- never a blanket `Jsonb(v)`.
+            # each element gets the same per-column type-aware bind (native for a typed column, `Jsonb(...)` for an untyped one, SQL NULL for a JSON null) as every other value position -- never a blanket `Jsonb(v)`.
+            # history: CH-0054
             return sql.SQL("{col} IN ({items})").format(col=column, items=placeholders), [self._bind_value(v, field_type) for v in predicate.value]
         if predicate.operator in ("contains", "matches"):
             text_column = self._text_expression(column, field_type)
             if predicate.operator == "contains":
-                # Q-2 (案i): literal substring containment -- `%`/`_`/`\`
-                # in the value are escaped before being wrapped in
-                # `%...%`, so no character of the value is ever
-                # interpreted as a wildcard. `_validate_predicate_types`
+                # literal substring containment -- `%`/`_`/`\` in the value are escaped before being wrapped in `%...%`, so no character of the value is ever interpreted as a wildcard. `_validate_predicate_types`
                 # (called by every caller of this method) has already
                 # required `predicate.value` to be a string by this point.
+                # history: CH-0055
                 escaped = _escape_like_literal(predicate.value)
                 pattern = f"%{escaped}%"
             else:
-                # Q-2 (補足案): the client's pattern already uses exactly
-                # SQL LIKE's own wildcard grammar (`%`/`_`/`\`-escape) --
-                # bound as-is, no transformation.
+                # the client's pattern already uses exactly SQL LIKE's own wildcard grammar (`%`/`_`/`\`-escape) -- bound as-is, no transformation.
+                # history: CH-0056
                 pattern = predicate.value
             return sql.SQL("{col} LIKE {ph} ESCAPE '\\'").format(col=text_column, ph=sql.Placeholder()), [pattern]
         operator = _COMPARISON_OPERATORS.get(predicate.operator)
@@ -2129,13 +1958,8 @@ class PostgresCell:
             # rejects any operator outside `structured.OPERATORS`. Kept as
             # an explicit, fixed-literal-only fallback rather than trusting
             # that invariant silently (D-4: "operators map to fixed
-            # literals"). M-1: this is a redundant application-level shape
-            # backstop, not a storage-rejection translation -- so it is
-            # NOT allowlist-eligible (`layer_rule`'s defence-in-depth
-            # exemption is for backend/storage denials only); it carries
-            # the same 4-key vocabulary `Predicate.validate`'s own operator
-            # check uses (`errors.violation("capability", ...)`), no field-
-            # index available this deep, so a generic `"where"` path.
+            # literals"). this is a redundant application-level shape backstop, not a storage-rejection translation -- so it is NOT allowlist-eligible (`layer_rule`'s defence-in-depth exemption is for backend/storage denials only); it carries the same 4-key vocabulary `Predicate.validate`'s own operator check uses (`errors.violation("capability", ...)`), no field- index available this deep, so a generic `"where"` path.
+            # history: CH-0057
             fail("VALIDATION_FAILED", "Unsupported filter operator.", details=violation("capability", field="where"))
         return sql.SQL("{col} {op} {ph}").format(col=column, op=operator, ph=sql.Placeholder()), [self._bind_value(predicate.value, field_type)]
 
@@ -2156,21 +1980,13 @@ class PostgresCell:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> "SchemaOutcome":
-        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
-        identical single tx-exit-point discipline to `transact` above --
-        the exit point sits right before `_bump_revision`/the pre-commit
-        hook, inside the SAME `with conn.transaction():` block every
-        operation branch already writes its (uncommitted) DDL/registry
-        changes in. A `dry_run` forces a real ROLLBACK via `psycopg.
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4): identical single tx-exit-point discipline to `transact` above -- the exit point sits right before `_bump_revision`/the pre-commit hook, inside the SAME `with conn.transaction():` block every operation branch already writes its (uncommitted) DDL/registry changes in. A `dry_run` forces a real ROLLBACK via `psycopg.
         Rollback` (caught and swallowed by `conn.transaction()`'s own
         `__exit__`, never surfacing as an error) rather than committing --
         `outcome_*` locals below carry the decided result out of that
-        block, since a raise cannot itself return a value. Always returns
-        `SchemaOutcome` (review round F-8, `{scratchpad}/rulings-r4.md`;
-        mirrors `ApplicationCell.apply_schema`'s identical unification) --
-        this method's own direct callers (`tests/test_constraints_
-        declaration.py`'s many `cell.apply_schema(...)` call sites among
-        them) read `.revision` off the result.
+        block, since a raise cannot itself return a value. Always returns `SchemaOutcome` (round F-8, `{scratchpad}/rulings-r4.md`; mirrors `ApplicationCell.apply_schema`'s identical unification) -- this method's own direct callers (`tests/test_constraints_ declaration.py`'s many `cell.apply_schema(...)` call sites among them) read `.revision` off the result.
+
+        History: CH-0058
         """
         bound = bind_schema_operation(operation, developer=developer)
         # Phase 4 (design D-2/D-10): see `transact`'s identical `hook_fired`
@@ -2179,11 +1995,8 @@ class PostgresCell:
         # `except psycopg.Error` clause below tell a post-hook data-commit
         # failure apart from every other failure.
         hook_fired = False
-        # Contract 1.7.0 (D-4, WP-2b): the tx-exit-point's own decided
-        # outcome, set inside `with conn.transaction():` below (a `dry_
-        # run`'s own `return` cannot come from inside that block -- normal
-        # exit COMMITS -- so `psycopg.Rollback` is raised instead, and
-        # these locals carry the already-decided result past it).
+        # Contract 1.7.0: the tx-exit-point's own decided outcome, set inside `with conn.transaction():` below (a `dry_ run`'s own `return` cannot come from inside that block -- normal exit COMMITS -- so `psycopg.Rollback` is raised instead, and these locals carry the already-decided result past it).
+        # history: CH-0059
         outcome_committed = True
         outcome_revision: int | None = None
         outcome_descriptor: dict[str, Any] | None = None
@@ -2206,20 +2019,17 @@ class PostgresCell:
                     # own key already dropped would compute nonsense, not
                     # merely skip a check the design allows skipping; see
                     # `ApplicationCell.apply_schema`'s identical comment).
-                    # `dry_run` never consults/writes a record (ruling
-                    # I-7/D-4).
+                    # `dry_run` never consults/writes a record (ruling).
+                    # history: CH-0060
                     if idempotency_key is not None and not dry_run:
                         assert plan_request is not None  # service.py always builds this
                         idempotency_digest_value = idempotency_digest(plan_request)
-                        # Ruling U-7 (WP-6d): see `transact`'s identical
-                        # comment -- taken in THIS outer transaction,
-                        # before `_idempotency_lookup`'s own nested
-                        # savepoint.
+                        # see `transact`'s identical comment -- taken in THIS outer transaction, before `_idempotency_lookup`'s own nested savepoint.
+                        # history: CH-0061
                         self._idempotency_key_lock(conn, idempotency_key)
                         record = self._idempotency_lookup(conn, idempotency_key)
-                        # L-6/M-6: a record with no `request_id` (pre-1.7.0)
-                        # is not a usable replay source -- treated as
-                        # absent, checked before the digest comparison.
+                        # a record with no `request_id` (pre-1.7.0) is not a usable replay source -- treated as absent, checked before the digest comparison.
+                        # history: CH-0062
                         if record is not None and _idempotency_record_has_request_id(record[2]):
                             stored_digest, _stored_kind, stored_payload = record
                             if stored_digest != idempotency_digest_value:
@@ -2227,22 +2037,16 @@ class PostgresCell:
                                     "CONFLICT", "This idempotency key was already used with a different request.", status=409,
                                     details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
                                 )
-                            # Ruling I-3/I-8/I-9: applies to schema
-                            # operations too -- a resent `drop_entity`
-                            # answers from the record even though the
-                            # entity, and any confirmation phrase computed
-                            # against it, are both long gone.
+                            # applies to schema operations too -- a resent `drop_entity` answers from the record even though the entity, and any confirmation phrase computed against it, are both long gone.
+                            # history: CH-0063
                             return SchemaOutcome(
                                 committed=True, revision=stored_payload["revision"], descriptor=None, plan=None, replayed=True,
-                                # M-6: the ORIGINAL execution's own
-                                # `request_id` (guaranteed present), no
-                                # fallback to this resend's own.
+                                # the ORIGINAL execution's own `request_id` (guaranteed present), no fallback to this resend's own.
+                                # history: CH-0064
                                 request_id=stored_payload["request_id"],
                             )
-                        # Ruling I-6/D-5 (5): capacity checked before this
-                        # request executes anything. Ruling U-7: table-
-                        # level count lock, same outer-transaction
-                        # placement as `transact` above.
+                        # capacity checked before this request executes anything. table- level count lock, same outer-transaction placement as `transact` above.
+                        # history: CH-0065
                         self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
                     # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j,
@@ -2251,15 +2055,8 @@ class PostgresCell:
                     # revision as it stood when the request was decided"
                     # (D-4 (7)), the SAME value a dry run's own `revision`
                     # reports (S-j) and a real apply's `plan` verification
-                    # is checked against. Review round F-5: read only when
-                    # actually needed -- `dry_run` always needs it for
-                    # `outcome_revision` below (S-j), and a caller-
-                    # presented `plan` needs it to verify; an ordinary
-                    # apply (neither) needs neither, and skips this extra
-                    # round trip entirely (`plan_request` is otherwise
-                    # built unconditionally by `service.py`, so gating on
-                    # `plan_request is not None` alone would not have
-                    # helped).
+                    # is checked against. read only when actually needed -- `dry_run` always needs it for `outcome_revision` below (S-j), and a caller- presented `plan` needs it to verify; an ordinary apply (neither) needs neither, and skips this extra round trip entirely (`plan_request` is otherwise built unconditionally by `service.py`, so gating on `plan_request is not None` alone would not have helped).
+                    # history: CH-0066
                     revision_before = self._read_schema_revision(conn) if dry_run or plan is not None else None
                     expected_plan = (
                         compute_plan_token(plan_request, revision_before)
@@ -2298,15 +2095,8 @@ class PostgresCell:
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
                     if bound.operation == "create_entity":
-                        # WP-2(b) review B-2 (supervisor ruling): defense-
-                        # in-depth -- `bind_schema_operation` above already
-                        # rejects this exact name (structured.py's own
-                        # `_reject_reserved_entity_name`, the real, load-
-                        # bearing check for BOTH cell implementations), but
-                        # this backend's own physical-DDL layer re-checks
-                        # it directly too, mirroring MitateDB's per-backend
-                        # `check_reserved` redundancy rather than relying
-                        # solely on the shared caller never being bypassed.
+                        # defense- in-depth -- `bind_schema_operation` above already rejects this exact name (structured.py's own `_reject_reserved_entity_name`, the real, load- bearing check for BOTH cell implementations), but this backend's own physical-DDL layer re-checks it directly too, mirroring MitateDB's per-backend `check_reserved` redundancy rather than relying solely on the shared caller never being bypassed.
+                        # history: CH-0067
                         _reject_reserved_entity_name(bound.entity, field="entity")
                         if bound.entity in catalog:
                             fail("CONFLICT", "Entity already exists.", status=409)
@@ -2356,6 +2146,7 @@ class PostgresCell:
                         # exists) must still succeed for it, exactly like
                         # every other schema/data operation that never
                         # touches `field_constraints`.
+                        # history: CH-0068
                         self._clear_field_constraints(conn, bound.entity)
                     elif bound.operation == "add_field":
                         if bound.entity not in catalog:
@@ -2370,16 +2161,7 @@ class PostgresCell:
                         # carried `enum`/`nullable` at all).
                         if bound.constraints is not None and bound.constraints.enum is not None:
                             limits.check("enum_members", len(bound.constraints.enum))
-                        # Monitor ruling M-6 (rulings-wp2a-review.md,
-                        # contract corrigendum): "An add_field declaring
-                        # nullable: false on an entity that already holds
-                        # rows is refused with CONFLICT on the same rule" --
-                        # the SAME tx + lock `alter_field`'s own existing-
-                        # row scan uses below (M-1/F): `LOCK TABLE ... IN
-                        # SHARE ROW EXCLUSIVE MODE` before the existence
-                        # check, so a concurrent INSERT cannot slip a row
-                        # in between this check and the DDL/registry write
-                        # below.
+                        # Monitor ruling M-6 (contract corrigendum): "An add_field declaring nullable: false on an entity that already holds rows is refused with CONFLICT on the same rule" -- the SAME tx + lock `alter_field`'s own existing- row scan uses below (M-1/F): `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE` before the existence check, so a concurrent INSERT cannot slip a row in between this check and the DDL/registry write below.
                         #
                         # R-35 (Phase 10, WP-6d-i review): plain `SHARE
                         # MODE` does not conflict with itself, so two
@@ -2397,6 +2179,7 @@ class PostgresCell:
                         # excludes concurrent row writers (ROW EXCLUSIVE)
                         # exactly as plain SHARE did, so the R-2 existing-
                         # row-scan property above is unchanged.
+                        # history: CH-0069
                         if bound.constraints is not None and not bound.constraints.nullable:
                             add_field_table_ident = sql.Identifier(bound.entity)
                             with conn.cursor() as cur:
@@ -2426,15 +2209,11 @@ class PostgresCell:
                         declared_type = table_info.columns[bound.field]
                         patch = bound.constraint_patch
                         assert patch is not None  # bind_schema_operation always sets this for alter_field
-                        # Monitor ruling A/B-2 (rulings-wp3a-review.md,
-                        # rulings-wp2a-review.md): compose the request's
-                        # PATCH against the field's EXISTING declared
-                        # constraints -- only known here (`table_info.
-                        # constraints`, never at bind time, addendum R-b/
-                        # R-c, D-2 (3)). `enum`/`nullable` omitted each
+                        # Monitor ruling A/B-2: compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info. constraints`, never at bind time, addendum R-b/ R-c, D-2 (3)). `enum`/`nullable` omitted each
                         # LEAVE the existing value as it is; `enum: null`
                         # CLEARS it; an explicit list is fully validated
                         # against the field's real declared type now.
+                        # history: CH-0070
                         existing_constraints = table_info.constraints.get(bound.field, FieldConstraints())
                         new_nullable = existing_constraints.nullable if patch.nullable_omitted else patch.nullable
                         if patch.enum_clear:
@@ -2464,23 +2243,7 @@ class PostgresCell:
                         # (SI-10, contract text).
                         table_ident = sql.Identifier(bound.entity)
                         field_ident = sql.Identifier(bound.field)
-                        # Monitor ruling F/M-1 (rulings-wp3a-review.md,
-                        # rulings-wp2a-review.md): lock the entity's own
-                        # table (SHARE ROW EXCLUSIVE -- blocks concurrent
-                        # writers, never concurrent readers) BEFORE the
-                        # scan below, inside this SAME transaction. Without
-                        # this, READ COMMITTED lets another session
-                        # INSERT/UPDATE a row that violates the new
-                        # constraints, commit it AFTER this scan sees zero
-                        # violations but BEFORE this transaction's own
-                        # `_write_field_constraints` commits -- `alter_
-                        # field` would then succeed while a violating row
-                        # already exists, making the catalog's own
-                        # declaration false (G-3) the instant it is
-                        # published. A table-level lock (not a row lock)
-                        # because the scan below reads the WHOLE table, not
-                        # a single identified row (contrast the upsert
-                        # TOCTOU fix below, M-2, which locks one row).
+                        # Monitor ruling F/M-1: lock the entity's own table (SHARE ROW EXCLUSIVE -- blocks concurrent writers, never concurrent readers) BEFORE the scan below, inside this SAME transaction. Without this, READ COMMITTED lets another session INSERT/UPDATE a row that violates the new constraints, commit it AFTER this scan sees zero violations but BEFORE this transaction's own `_write_field_constraints` commits -- `alter_ field` would then succeed while a violating row already exists, making the catalog's own declaration false the instant it is published. A table-level lock (not a row lock) because the scan below reads the WHOLE table, not a single identified row (contrast the upsert TOCTOU fix below, which locks one row).
                         #
                         # R-35 (Phase 10, WP-6d-i review): the original fix
                         # used plain `SHARE MODE`, which does not conflict
@@ -2499,6 +2262,7 @@ class PostgresCell:
                         # writers (ROW EXCLUSIVE) exactly as plain SHARE
                         # did, so the R-2 existing-row-scan property above
                         # is unchanged.
+                        # history: CH-0071
                         with conn.cursor() as cur:
                             _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE").format(table=table_ident))
                         if not new_constraints.nullable:
@@ -2540,10 +2304,8 @@ class PostgresCell:
                         table_info = catalog[bound.entity]
                         if bound.index not in table_info.indexes:
                             fail("NOT_FOUND", "Index was not found.", status=404)
-                        # R-5, corrigendum M-6: dropping a unique index
-                        # removes a guardrail and can silently re-enable
-                        # upsert -- SI-09 destructive confirmation applies
-                        # exactly like drop_entity.
+                        # dropping a unique index removes a guardrail and can silently re-enable upsert -- SI-09 destructive confirmation applies exactly like drop_entity.
+                        # history: CH-0072
                         require_destructive_confirmation(
                             bound.destructive, bound.confirmation,
                             drop_index_confirmation_phrase(bound.entity, bound.index, self._read_schema_revision(conn)),
@@ -2572,15 +2334,10 @@ class PostgresCell:
                             status=412, details={"violated_declaration": "plan"},
                         )
                     if dry_run:
-                        # D-4 (3): `descriptor` is the target entity's own
-                        # descriptor as it would read afterwards -- built
-                        # from a FRESH `_load_catalog` re-read inside this
-                        # SAME (still open, uncommitted) transaction, which
-                        # sees this operation's own tentative writes;
-                        # `None` for a dry-run `drop_entity` (the entity no
-                        # longer appears in that re-read). `revision`
+                        # `descriptor` is the target entity's own descriptor as it would read afterwards -- built from a FRESH `_load_catalog` re-read inside this SAME (still open, uncommitted) transaction, which sees this operation's own tentative writes; `None` for a dry-run `drop_entity` (the entity no longer appears in that re-read). `revision`
                         # (S-j) is `revision_before`, never a bumped value
                         # -- `_bump_revision` below is never reached here.
+                        # history: CH-0073
                         catalog_after = self._load_catalog(conn)
                         outcome_descriptor = self._describe_table(bound.entity, catalog_after[bound.entity]) if bound.entity in catalog_after else None
                         outcome_committed = False
@@ -2610,8 +2367,8 @@ class PostgresCell:
             except psycopg.errors.LockNotAvailable:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.UniqueViolation as exc:
-                # R-5: `create_index(unique=True)` against data that
-                # already violates the requested uniqueness.
+                # `create_index(unique=True)` against data that already violates the requested uniqueness.
+                # history: CH-0074
                 self._fail_unique_conflict(bound.entity, exc)
             except psycopg.errors.DataError:
                 self._fail_client_value()
@@ -2621,22 +2378,12 @@ class PostgresCell:
                 if hook_fired and audit_hook is not None:
                     audit_hook.commit_failed()
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
-        # Review round F-8: always `SchemaOutcome`, dry_run/plan or
-        # neither (mirrors `ApplicationCell.apply_schema`'s identical
-        # unification) -- every pre-1.7.0 direct caller of this method
-        # (`tests/test_constraints_declaration.py`'s many `cell.
-        # apply_schema(...)` call sites among them) now reads `.revision`
-        # off the result instead of comparing the result itself to an
-        # `int`.
+        # always `SchemaOutcome`, dry_run/plan or neither (mirrors `ApplicationCell.apply_schema`'s identical unification) -- every pre-1.7.0 direct caller of this method (`tests/test_constraints_declaration.py`'s many `cell. apply_schema(...)` call sites among them) now reads `.revision` off the result instead of comparing the result itself to an `int`.
+        # history: CH-0075
         return SchemaOutcome(committed=outcome_committed, revision=outcome_revision, descriptor=outcome_descriptor, plan=outcome_plan, request_id=request_id)
 
     def _create_entity(self, conn: "psycopg.Connection[Any]", entity: str, fields: tuple[str, ...], field_types: dict[str, str | None] | None = None) -> None:
-        # R-1/R-4: every entity table gets a server-assigned `id` address
-        # (`GENERATED ALWAYS AS IDENTITY`, so the sequence is never
-        # rewound by any statement reachable through this public API -- see
-        # R-1's "採番識別子の非推論条項"/property-5 note) and an invisible,
-        # per-row `_r2db_revision` (PostgreSQL 13+'s built-in
-        # `gen_random_uuid()`), ahead of the caller's own declared fields.
+        # every entity table gets a server-assigned `id` address (`GENERATED ALWAYS AS IDENTITY`, so the sequence is never rewound by any statement reachable through this public API -- see R-1's "採番識別子の非推論条項"/property-5 note) and an invisible, per-row `_r2db_revision` (PostgreSQL 13+'s built-in `gen_random_uuid()`), ahead of the caller's own declared fields.
         # `"id"`/`"_r2db_revision"` are hardcoded server literals here,
         # never client input, so composing them as fixed SQL text (rather
         # than through `sql.Identifier`) does not reopen the
@@ -2649,6 +2396,7 @@ class PostgresCell:
         # JSONB (`field_types` defaults to `None`/empty, so an ordinary
         # 1.5.0-shaped `create_entity` -- `fields` only, no `field_types` --
         # creates every column JSONB, unchanged).
+        # history: CH-0076
         field_types = field_types or {}
         id_column = sql.SQL("id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY")
         revision_column = sql.SQL("{col} uuid NOT NULL DEFAULT gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
@@ -2685,19 +2433,15 @@ class PostgresCell:
                 )
 
     def _apply_row_level_security(self, cur: "psycopg.Cursor[Any]", entity: str) -> None:
-        """D-3's third layer: RLS as defence-in-depth underneath the
-        database boundary and the two distinct DB roles (architecture §8,
-        "D-3 改訂": each application now owns its own PostgreSQL database,
-        not merely its own schema inside one shared database -- the
-        database boundary is the primary wall, since PostgreSQL admits no
-        cross-database query path at all without FDW/dblink, which this
-        deployment never grants). This policy's job is to survive a
+        """RLS as defence-in-depth underneath the database boundary and the two distinct DB roles (architecture §8, "D-3 改訂": each application now owns its own PostgreSQL database, not merely its own schema inside one shared database -- the database boundary is the primary wall, since PostgreSQL admits no cross-database query path at all without FDW/dblink, which this deployment never grants). This policy's job is to survive a
         *future* misconfiguration of that primary wall -- e.g. an
         accidental broader `CONNECT` grant -- rather than to be the
         primary control itself. It restricts every row in every table this
         cell creates to being visible/writable only by this application's
         own two roles, checked by PostgreSQL itself via `current_user`, not
         by anything this Python process asserts about itself.
+
+        History: CH-0077
         """
         table = sql.Identifier(entity)
         _run(cur, sql.SQL("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY").format(table=table))
@@ -2771,22 +2515,19 @@ class PostgresCell:
             _run(cur, statement)
 
     def _add_field(self, conn: "psycopg.Connection[Any]", entity: str, field: str, field_type: str | None) -> None:
-        # R-2: `field_type` maps to a real typed column; omitted keeps the
-        # pre-CCR-13 default, JSONB.
+        # `field_type` maps to a real typed column; omitted keeps the pre-CCR-13 default, JSONB.
+        # history: CH-0078
         statement = sql.SQL("ALTER TABLE {table} ADD COLUMN {col} {type}").format(table=sql.Identifier(entity), col=sql.Identifier(field), type=_column_type_sql(field_type))
         with conn.cursor() as cur:
             _run(cur, statement)
 
     def _create_index(self, conn: "psycopg.Connection[Any]", entity: str, index_name: str, fields: tuple[str, ...], unique: bool) -> None:
-        # R-5: the physical index name is `{entity}__{index}` -- `bind_
-        # schema_operation` has already rejected any client index name
-        # containing `__` or whose composed length would exceed the
-        # identifier limit, so this composition is unambiguous to invert
-        # (`_load_catalog` does exactly that). `entity`/`index_name` are
+        # the physical index name is `{entity}__{index}` -- `bind_ schema_operation` has already rejected any client index name containing `__` or whose composed length would exceed the identifier limit, so this composition is unambiguous to invert (`_load_catalog` does exactly that). `entity`/`index_name` are
         # plain Python strings built from already-validated identifiers;
         # `sql.Identifier` below is what actually makes this safe to send
         # to PostgreSQL (it quotes/escapes the resulting name regardless of
         # content), not the string concatenation itself.
+        # history: CH-0079
         physical_name = f"{entity}__{index_name}"
         columns = sql.SQL(", ").join(sql.Identifier(f) for f in fields)
         unique_keyword = sql.SQL("UNIQUE ") if unique else sql.SQL("")
@@ -2800,19 +2541,15 @@ class PostgresCell:
             _run(cur, statement)
 
     def _read_schema_revision(self, conn: "psycopg.Connection[Any]") -> int:
-        """Read-only counterpart to `_bump_revision` below (design docs/
-        design/DESTRUCTIVE_CONFIRMATION_V1.md R-2 item 1, WP-0 m-1): a plain
-        `SELECT` of the current `schema_revision`, in the SAME transaction
-        as the pending schema operation, used to compute a `drop_entity`/
-        `drop_index` confirmation phrase's own state fingerprint before the
-        destructive-confirmation gate runs (and therefore before this same
-        transaction's own `_bump_revision` call increments it again).
+        """Read-only counterpart to `_bump_revision` below (design docs/ design/DESTRUCTIVE_CONFIRMATION_V1.md R-2 item 1 m-1): a plain `SELECT` of the current `schema_revision`, in the SAME transaction as the pending schema operation, used to compute a `drop_entity`/ `drop_index` confirmation phrase's own state fingerprint before the destructive-confirmation gate runs (and therefore before this same transaction's own `_bump_revision` call increments it again).
         `migrations/0003_provision_application.sql` inserts this table's one
         row (`revision = 0`) at provisioning time, so the `SELECT` always
         finds it in practice; the `0` fallback below exists only so this
         method never raises on a row that -- against that expectation --
         turns out to be missing, mirroring `_bump_revision`'s own
         insert-if-missing defensiveness without itself writing anything.
+
+        History: CH-0080
         """
         table = sql.Identifier(_REVISION_TABLE)
         select = sql.SQL("SELECT revision FROM {table}").format(table=table)
@@ -2843,16 +2580,14 @@ class PostgresCell:
         return max(1, int(budget_ms))
 
     def _set_timeouts(self, conn: "psycopg.Connection[Any]", timeout_ms: int) -> None:
-        """One request = one transaction (D-5): `statement_timeout` and
-        `lock_timeout` are set with `SET LOCAL`, so they apply only to the
-        current transaction and are automatically discarded on commit or
-        rollback -- never leaking onto the next transaction this pooled
-        connection is reused for. The timeout value passed here is always a
+        """One request = one transaction: `statement_timeout` and `lock_timeout` are set with `SET LOCAL`, so they apply only to the current transaction and are automatically discarded on commit or rollback -- never leaking onto the next transaction this pooled connection is reused for. The timeout value passed here is always a
         server-computed `int` (derived from `ResourceLimits.execution_ms`
         and the caller's deadline, never from request content), so
         `sql.Literal` -- necessary because PostgreSQL's `SET` grammar does
         not accept a bind placeholder in this position -- is composing a
         trusted value, not interpolating untrusted text.
+
+        History: CH-0081
         """
         statement_timeout = sql.SQL("SET LOCAL statement_timeout = {t}").format(t=sql.Literal(f"{timeout_ms}ms"))
         lock_timeout = sql.SQL("SET LOCAL lock_timeout = {t}").format(t=sql.Literal(f"{timeout_ms}ms"))
@@ -2868,14 +2603,6 @@ class _RefusingPlatformUpgradeCell:
     per-application platform-upgrade ledger is missing an entry
     `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` requires.
 
-    Before this rework, `_cell_factory` called `PostgresCell.verify_
-    platform_upgrades_applied()` and let the `SERVICE_UNAVAILABLE`
-    `FoundationError` it raises propagate straight out of `_cell_
-    factory`, out of `ControlAuthority.register_application`, out of
-    `build_app`'s own eager `for slug in slugs` registration loop -- so
-    ONE served application with a pending upgrade took the WHOLE PROCESS
-    down, refusing every OTHER served application too (review H-1).
-
     Now `_cell_factory` catches that same `FoundationError` and registers
     one of these instead: this process still starts, every OTHER served
     application's `PostgresCell` opens and serves exactly as before, and
@@ -2889,6 +2616,8 @@ class _RefusingPlatformUpgradeCell:
     snapshot, matching D-1(e)/D-2(g)/U-3's own "起動時スナップショット"
     discipline for every other Q4 declared value) -- never re-derived per
     request.
+
+    History: CH-0082
     """
 
     def __init__(self, application_id: str, message: str) -> None:
@@ -2917,13 +2646,12 @@ class _RefusingPlatformUpgradeCell:
         self._refuse()
 
 
-# Checked, not just claimed: `PostgresCell` must present the exact same call
-# surface as `ApplicationCell` (design D-1). See `backend.py` for the
+# Checked, not just claimed: `PostgresCell` must present the exact same call surface as `ApplicationCell` (design D-1). See `backend.py` for the
 # equivalent assertion covering `ApplicationCell`.
+# history: CH-0083
 assert issubclass(PostgresCell, _StorageBackend), "PostgresCell must conform to StorageBackend (design D-1)"
-# H-1(a): the refusing cell registered in its place must present that same
-# face too -- `DataService` (and every conformance/test caller) cannot tell
-# the two apart at the type level.
+# the refusing cell registered in its place must present that same face too -- `DataService` (and every conformance/test caller) cannot tell the two apart at the type level.
+# history: CH-0084
 assert issubclass(_RefusingPlatformUpgradeCell, _StorageBackend), "_RefusingPlatformUpgradeCell must conform to StorageBackend (H-1(a))"
 
 __all__ = ["PostgresCell", "SharedPoolManager", "default_pool_manager", "_RefusingPlatformUpgradeCell"]
