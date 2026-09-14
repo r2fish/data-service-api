@@ -2547,13 +2547,49 @@ def test_0d_hyphen_wrapped_id_sentence_deleted_is_red(tmp_path):
     assert "§4.1 (3)" in output
 
 
-def test_join_wrapped_lines_ordinary_hyphenated_prose_keeps_space():
-    # White-box, pinned directly against the real-corpus discovery: an
-    # ordinary lowercase, hyphenated English compound word wrapped across
-    # lines keeps its space (not ID-shaped), while an uppercase ID prefix
-    # followed by a digit-starting continuation does not.
-    assert cp._flatten_comment("# confirmed-\n# destructive") == "confirmed- destructive"
+def test_join_wrapped_lines_hyphenated_compound_joins_with_zero_space():
+    # change set 0e (supervisor ruling, corrects this test's own change-
+    # set-0d-era assumption): a real-corpus check during the change-set-3
+    # re-review found `postgres.py` ITSELF already carrying the broken
+    # "confirmed- destructive" / "table- level" forms of this exact
+    # split -- the old assumption that ordinary hyphenated English
+    # compounds deliberately keep their space when wrapped was wrong;
+    # both an ID-shaped split and an ordinary hyphenated compound now
+    # join with zero space, uniformly (rule (b), §9e).
+    assert cp._flatten_comment("# confirmed-\n# destructive") == "confirmed-destructive"
     assert cp._flatten_comment("# SI-\n# 08") == "SI-08"
+
+
+def test_join_wrapped_lines_multiword_backtick_fragment_keeps_space():
+    # change set 0e: a multi-word SQL/expression fragment quoted whole in
+    # backticks, wrapped mid-phrase with NO `_`/`-`/`.` boundary marker at
+    # the line break, keeps its space -- bare backtick-openness alone is
+    # deliberately NOT a join trigger (real-corpus pin: `postgres.py`
+    # CH-0045's own "`<predicate> AND\n_r2db_revision::text = $expected`"
+    # and CH-0069's own "`SHARE\nMODE`" wraps).
+    assert (
+        cp._flatten_comment("# `<predicate> AND\n# _r2db_revision::text = $x`")
+        == "`<predicate> AND _r2db_revision::text = $x`"
+    )
+    assert cp._flatten_comment("# `SHARE\n# MODE`") == "`SHARE MODE`"
+
+
+def test_join_wrapped_lines_dot_inside_backtick_joins_with_zero_space():
+    # change set 0e, predicate B rule 3 (supervisor ruling 2026-09-15
+    # final unification): a `.` wrapped INSIDE a backtick span is always
+    # attribute/method/path access, never a sentence-ending period --
+    # joins with zero space regardless of whether the following word is
+    # a file extension (contrast rule 4, the outside-backtick case,
+    # which IS scoped to extensions only). ONE predicate now serves
+    # detection, normalization, and a fresh join alike -- no more
+    # narrow/broad split (that split itself caused false greens on
+    # `` `conn. transaction()` ``/`self. _rate_windows`, since the
+    # broader normalization silently absorbed the mismatch detection's
+    # narrower rule was supposed to catch).
+    assert cp._flatten_comment("# `table_info.\n# constraints`") == "`table_info.constraints`"
+    assert cp._flatten_comment("# `conn.\n# transaction():`") == "`conn.transaction():`"
+    assert cp._flatten("comment", "# `table_info.\n# constraints`") == "`table_info.constraints`"
+    assert cp._flatten("comment", "# `conn.\n# transaction():`") == "`conn.transaction():`"
 
 
 def test_0d_q4_reedit_to_empty_with_protected_ref_is_red(tmp_path):
@@ -2597,3 +2633,426 @@ def test_0d_bare_real_path_mention_not_citation_shaped_is_red(tmp_path):
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 1
     assert "§4.1 (3)" in output
+
+
+# ===========================================================================
+# change set 0e: broken line-wrap join detection (supervisor ruling,
+# 2026-09-15, corrects change set 0d review round item 3)
+# ===========================================================================
+
+def test_0e_backtick_path_py_extension_zero_space_join():
+    assert (
+        cp._flatten_comment("# see `spec/data-service-api.v1.\n# json` for the schema.")
+        == "see `spec/data-service-api.v1.json` for the schema."
+    )
+
+
+def test_0e_underscore_identifier_zero_space_join():
+    assert cp._flatten_comment("# calls `violated_\n# declaration` here.") == "calls `violated_declaration` here."
+    assert (
+        cp._flatten_comment("# refuses `CAPABILITY_\n# UNSUPPORTED` outright.")
+        == "refuses `CAPABILITY_UNSUPPORTED` outright."
+    )
+
+
+def test_0e_hyphen_compound_zero_space_join():
+    assert (
+        cp._flatten_comment("# the row is already-\n# committed here.") == "the row is already-committed here."
+    )
+
+
+def test_0e_dot_py_extension_outside_backtick_zero_space_join():
+    assert cp._flatten_comment("# see control_main.\n# py for wiring.") == "see control_main.py for wiring."
+
+
+def test_0e_sentence_end_period_before_capitalized_word_keeps_space():
+    # No false red: an ordinary sentence boundary (period, then a new
+    # sentence starting with a capitalized word that is NOT a known file
+    # extension) must NOT be treated as a join-sensitive boundary.
+    assert cp._flatten_comment("# End of sentence.\n# Next sentence starts here.") == (
+        "End of sentence. Next sentence starts here."
+    )
+
+
+def test_0e_double_hyphen_em_dash_newline_keeps_space():
+    # No false red: `--` (the em-dash-like separator used throughout this
+    # codebase's comments) is explicitly excluded from the hyphen rule.
+    assert cp._flatten_comment("# first clause --\n# second clause.") == "first clause -- second clause."
+
+
+def test_0e_find_broken_line_wrap_joins_detects_broken_form():
+    basis = "# see `spec/data-service-api.v1.\n# json` for the schema."
+    broken_new = "# see `spec/data-service-api.v1. json` for the schema.\n# history: CH-0001"
+    fixed_new = "# see `spec/data-service-api.v1.json` for the schema.\n# history: CH-0001"
+    hits = cp.find_broken_line_wrap_joins("comment", basis, broken_new)
+    assert hits == [("`spec/data-service-api.v1.json`", "`spec/data-service-api.v1. json`")]
+    assert cp.find_broken_line_wrap_joins("comment", basis, fixed_new) == []
+
+
+def test_0e_run_base_flags_broken_join_as_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = (
+        "# see `spec/data-service-api.v1.\n"
+        "# json` for the schema. The body is JSON.\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    broken = (
+        "# see `spec/data-service-api.v1. json` for the schema. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", broken)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section(
+            "CH-0001",
+            "# see `spec/data-service-api.v1.\n# json` for the schema. The body is JSON.",
+        ),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9e" in output
+    assert "`spec/data-service-api.v1. json`" in output
+
+
+def test_0e_run_base_green_when_join_fixed(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = (
+        "# see `spec/data-service-api.v1.\n"
+        "# json` for the schema. The body is JSON.\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    fixed = (
+        "# see `spec/data-service-api.v1.json` for the schema. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", fixed)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section(
+            "CH-0001",
+            "# see `spec/data-service-api.v1.\n# json` for the schema. The body is JSON.",
+        ),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0e_both_peers_untouched_src_unchanged_base_head_is_green():
+    # Regression safety: running --base HEAD across every real source
+    # file in both peers that this session's work did NOT touch (still
+    # byte-identical to HEAD) must stay green -- the new §9e check must
+    # not fire any false positive on ordinary, untouched content. The 4
+    # files this round's fix targets (http.py, control_plane.py,
+    # service.py, postgres.py) are excluded here on purpose: they carry
+    # this session's own pending, uncommitted fix and are covered
+    # instead by the dedicated `--base` runs in the change-set-3 report
+    # (they must show 0 §9e hits once fixed, which is verified
+    # separately, not by this generic sweep).
+    excluded = {"http.py", "control_plane.py", "service.py", "postgres.py"}
+    r2db_src = REAL_REPO_ROOT / "r2db-api" / "src" / "r2db_api"
+    mitatedb_src = REAL_REPO_ROOT / "MitateDB-api" / "src" / "mitatedb_api"
+    rel_paths = [
+        str(p.relative_to(REAL_REPO_ROOT))
+        for base in (r2db_src, mitatedb_src)
+        for p in sorted(base.glob("*.py"))
+        if p.name not in excluded
+    ]
+    out = io.StringIO()
+    code = cp.run_base(REAL_REPO_ROOT, "HEAD", rel_paths, out=out, err=out)
+    output = out.getvalue()
+    assert code == 0, output
+
+
+def test_0e_camelcase_split_inside_backtick_zero_space_join():
+    # supervisor ruling 2026-09-15 (predicate B rule 5): a lowercase-
+    # then-uppercase boundary INSIDE a backtick span joins with zero
+    # space ONLY when the joined identifier is a member of the tracked
+    # identifier set -- "ControlAuthority" is a real class in this
+    # codebase's own corpus, so the fixture below supplies it explicitly.
+    identifier_set = frozenset({"ControlAuthority"})
+    assert (
+        cp._flatten_comment("# see `Control\n# Authority`'s own gate.", identifier_set)
+        == "see `ControlAuthority`'s own gate."
+    )
+
+
+def test_0e_identifier_set_guard_f1_f7_red_fixtures():
+    # F1-F7 (reviewer fixtures, $SP/rev-ccp0/probe16.py): each of these
+    # must compare/join as the CORRECT (fixed) form -- i.e. predicate B
+    # is true at the boundary and a lingering broken (spaced) form is
+    # what `find_broken_line_wrap_joins` must flag red.
+    identifier_set = frozenset({"ApplicationCell", "ControlAuthority"})
+    # F1: `conn. transaction()` -> `conn.transaction()` (rule 3, dot
+    # inside backtick, regardless of extension).
+    assert cp._flatten_comment("# `conn.\n# transaction()`") == "`conn.transaction()`"
+    # F2: `table_info. constraints` -> `table_info.constraints` (rule 3).
+    assert cp._flatten_comment("# `table_info.\n# constraints`") == "`table_info.constraints`"
+    # F3: `SchemaOperationRequest. idempotency_key` -> zero space (rule 3).
+    assert (
+        cp._flatten_comment("# `SchemaOperationRequest.\n# idempotency_key`")
+        == "`SchemaOperationRequest.idempotency_key`"
+    )
+    # F4: `self. _rate_windows` -> `self._rate_windows` (rule 3: `.`
+    # inside backtick followed by a word character, `_` included).
+    assert cp._flatten_comment("# `self.\n# _rate_windows`") == "`self._rate_windows`"
+    # F5: `id ASC` stays TWO words -- "idASC" is not a real tracked
+    # identifier, so rule 5 does not fire and the space is REQUIRED
+    # (over-joining this into one token is what must go red elsewhere).
+    assert cp._flatten_comment("# `id\n# ASC`", identifier_set) == "`id ASC`"
+    assert "idASC" not in identifier_set
+    # F6: `exceptFoundationError` is not a real tracked identifier either
+    # -- "except"/"FoundationError" stays two words WITH a required space.
+    assert cp._flatten_comment("# `except\n# FoundationError`", identifier_set) == "`except FoundationError`"
+    assert "exceptFoundationError" not in identifier_set
+    # F7: `Control Authority` -> `ControlAuthority` (rule 5, WITH the
+    # identifier in the set this time).
+    assert (
+        cp._flatten_comment("# `Control\n# Authority` type", identifier_set) == "`ControlAuthority` type"
+    )
+
+
+def test_0e_all_caps_and_lowercase_pairs_inside_backtick_keep_space():
+    # No false red: an ALL-CAPS pair or two lowercase words inside
+    # backticks is not a case CHANGE at all, so it stays a real word
+    # boundary regardless of the identifier set.
+    identifier_set = frozenset({"ShareMode", "FooBar"})
+    assert (
+        cp._flatten_comment("# `SHARE\n# MODE` is not self-conflicting.", identifier_set)
+        == "`SHARE MODE` is not self-conflicting."
+    )
+    assert cp._flatten_comment("# `foo\n# bar` is a stub.", identifier_set) == "`foo bar` is a stub."
+
+
+def test_0e_is_none_and_except_foundationerror_join_with_space_stays_green():
+    # No false red (the coordinator's own repro): a lowercase-to-
+    # uppercase boundary that does NOT form a real tracked identifier
+    # once joined stays a required space -- joining WITH a space is the
+    # correct, green form.
+    identifier_set = frozenset({"ApplicationCell"})
+    assert cp._flatten_comment("# `is\n# None`", identifier_set) == "`is None`"
+    assert cp._flatten_comment("# `except\n# FoundationError`", identifier_set) == "`except FoundationError`"
+
+
+def test_0e_sentence_end_dot_next_and_double_hyphen_stay_green_outside_backtick():
+    assert cp._flatten_comment("# End of sentence.\n# Next sentence.") == "End of sentence. Next sentence."
+    assert cp._flatten_comment("# first clause --\n# second clause.") == "first clause -- second clause."
+
+
+def test_0e_run_base_flags_camelcase_split_as_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# see `Control\n# Authority`'s own gate. The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    # "ControlAuthority" must be a real identifier somewhere in the
+    # BASIS tree for rule 5 to fire -- give it a real occurrence.
+    _write(repo, "r2db-api/src/r2db_api/other.py", "class ControlAuthority:\n    pass\n")
+    rev = _commit_all(repo, "old")
+    broken = (
+        "# see `Control Authority`'s own gate. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", broken)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# see `Control\n# Authority`'s own gate. The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9e" in output
+    assert "`Control Authority`" in output
+
+
+def test_0e_run_base_green_when_camelcase_fixed(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# see `Control\n# Authority`'s own gate. The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    _write(repo, "r2db-api/src/r2db_api/other.py", "class ControlAuthority:\n    pass\n")
+    rev = _commit_all(repo, "old")
+    fixed = (
+        "# see `ControlAuthority`'s own gate. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", fixed)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# see `Control\n# Authority`'s own gate. The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0e_run_base_red_when_over_joined_id_asc(tmp_path):
+    # The over-join direction: the basis genuinely has TWO words ("id
+    # ASC", never wrapped -- both on the same original line), and new
+    # code wrongly mashes them into "idASC". Since "idASC" is not a real
+    # tracked identifier, predicate B's rule 5 does not license this
+    # join, so the two texts must NOT compare equal.
+    repo = _init_repo(tmp_path)
+    old = "# order by `id ASC`. The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    over_joined = "# order by `idASC`. The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", over_joined)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# order by `id ASC`. The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1, output
+
+
+def test_0e_mutations_removing_each_predicate_b_rule_is_red():
+    # Mutation set pinned per the supervisor's own instruction: each of
+    # predicate B's 5 rules, the identifier-set check, and the inside/
+    # outside-backtick judgment is individually load-bearing -- removing
+    # any one of them must turn a previously-detected real corpus case
+    # undetected (i.e. was red, mutated-checker sees it as green).
+    identifier_set = frozenset({"ApplicationCell"})
+
+    def boundary_without(rule: str, accumulated: str, next_line: str) -> bool:
+        if not accumulated or not next_line:
+            return False
+        inside_backticks = accumulated.count("`") % 2 == 1
+        if rule == "invert_backtick":
+            inside_backticks = not inside_backticks
+        last = accumulated[-1]
+        prev = accumulated[-2] if len(accumulated) >= 2 else ""
+        nxt = next_line[0]
+        if rule != "rule1" and last == "_" and cp._is_word_char(prev) and cp._is_word_char(nxt):
+            return True
+        if rule != "rule2" and last == "-" and prev != "-" and cp._is_word_char(prev) and cp._is_word_char(nxt):
+            return True
+        if rule != "rule3" and last == "." and inside_backticks and cp._is_word_char(nxt):
+            return True
+        if rule != "rule4" and last == "." and not inside_backticks:
+            m = cp._JOIN_EXTENSION_RE.match(next_line)
+            if m and m.group(0).lower() in cp._JOIN_EXTENSIONS:
+                return True
+        if rule != "rule5" and inside_backticks and last.isalpha() and last.islower() and nxt.isalpha() and nxt.isupper():
+            if rule == "no_identifier_check":
+                return True
+            joined = cp._joined_identifier_at_boundary(accumulated, next_line)
+            if joined in identifier_set:
+                return True
+        return False
+
+    cases = {
+        "rule1": ("applications_", "count_locked`"),
+        "rule2": ("already-", "committed"),
+        "rule3": ("`conn.", "transaction()`"),
+        "rule4": ("see spec/data-service-api.v1.", "json for the schema."),
+        "rule5": ("`Application", "Cell.transact`"),
+    }
+    # each real trigger must be true under the real predicate...
+    for rule, (left, right) in cases.items():
+        assert cp._is_join_sensitive_boundary(left, right, identifier_set) is True, rule
+    # ...and false once its OWN rule is removed.
+    for rule, (left, right) in cases.items():
+        assert boundary_without(rule, left, right) is False, rule
+    # identifier-set check removed: "idASC" (not a real identifier)
+    # would now WRONGLY join (must be inside backticks for rule 5 to be
+    # in play at all).
+    assert cp._is_join_sensitive_boundary("`id", "ASC`", identifier_set) is False
+    assert boundary_without("no_identifier_check", "`id", "ASC`") is True
+    # backtick in/out judgment inverted: rule 3's trigger (inside
+    # backtick) now wrongly requires OUTSIDE, so the real inside-
+    # backtick case stops firing.
+    assert boundary_without("invert_backtick", "`conn.", "transaction()`") is False
+
+
+def test_0e_mutation_identifier_set_from_head_instead_of_base_is_red(tmp_path):
+    # x1 (reviewer fixture): predicate B rule 5 must build the
+    # identifier set from the BASIS revision's own tree, never HEAD/the
+    # working tree -- an identifier that existed at the basis but was
+    # since renamed away must still license the join when checking
+    # THAT basis (using HEAD's set instead would silently drop it).
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/widget.py", "class OldWidget:\n    pass\n")
+    old = "# see `Old\n# Widget` handle requests. The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")  # this becomes the --base revision
+    # Advance past `rev`: rename OldWidget away, so by the time HEAD is
+    # read, this identifier no longer exists anywhere in the tree.
+    _write(repo, "r2db-api/src/r2db_api/widget.py", "class NewWidget:\n    pass\n")
+    _commit_all(repo, "renamed")
+    fixed = (
+        "# see `OldWidget` handle requests. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", fixed)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# see `Old\n# Widget` handle requests. The body is JSON."),
+    )
+    # correct: identifier set built from the BASIS rev (`rev`) -- green.
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+    # mutation: identifier set built from HEAD instead of `rev` --
+    # "OldWidget" no longer exists anywhere in the tree at HEAD, so
+    # predicate B's rule 5 must not fire with it, and the fixed source
+    # no longer compares equal to the basis -- red.
+    wrong_identifier_set = cp._tracked_identifier_set(repo, "HEAD")
+    assert "OldWidget" not in wrong_identifier_set
+    companion_lookup = cp._load_companion_lookup(repo, "r2db-api")
+    ok, reason = cp._is_allowed_reduction(
+        "comment",
+        companion_lookup["CH-0001"],
+        "see `OldWidget` handle requests. The body is JSON.",
+        frozenset(),
+        wrong_identifier_set,
+    )
+    assert ok is False, reason
+
+
+def test_0e_mutation_identifier_set_excluding_docs_is_red(tmp_path):
+    # x2 (reviewer fixture): predicate B rule 5's identifier set must
+    # scan `docs` too, not just `src`/`spec` -- an identifier documented
+    # only in a design doc (never mentioned in any tracked source file)
+    # must still license the join.
+    repo = _init_repo(tmp_path)
+    (repo / "docs" / "design").mkdir(parents=True, exist_ok=True)
+    _write(repo, "docs/design/SOME_DESIGN.md", "`DocsOnlyWidget` is described here.\n")
+    old = "# see `Docs\n# OnlyWidget` here. The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    fixed = (
+        "# see `DocsOnlyWidget` here. The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", fixed)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# see `Docs\n# OnlyWidget` here. The body is JSON."),
+    )
+    # correct: identifier set includes docs -- green.
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+    # mutation: identifier set built WITHOUT docs -- "DocsOnlyWidget"
+    # only ever appears in docs/design/SOME_DESIGN.md, so excluding
+    # docs from the scan must make it disappear from the set, and the
+    # fixed source no longer compares equal to the basis -- red.
+    proc = subprocess.run(
+        ["git", "grep", "-I", "-h", "-o", "-E", cp._IDENTIFIER_TOKEN_RE.pattern, rev,
+         "--", "r2db-api/src", "MitateDB-api/src", "spec"],
+        cwd=repo, capture_output=True, timeout=30,
+    )
+    wrong_identifier_set = frozenset(proc.stdout.decode("utf-8").splitlines())
+    assert "DocsOnlyWidget" not in wrong_identifier_set
+    companion_lookup = cp._load_companion_lookup(repo, "r2db-api")
+    ok, reason = cp._is_allowed_reduction(
+        "comment",
+        companion_lookup["CH-0001"],
+        "see `DocsOnlyWidget` here. The body is JSON.",
+        frozenset(),
+        wrong_identifier_set,
+    )
+    assert ok is False, reason

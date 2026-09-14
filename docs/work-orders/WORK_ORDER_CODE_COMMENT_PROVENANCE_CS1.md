@@ -901,20 +901,201 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 
 ### 6.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
 
-**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行。点検語は設計 §3)
+**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行。点検語は設計 §3。**監督裁定により訂正**: 当初の3件のうち #1・#3 は差し戻しで復元し「残す」に変更、代わりに `control_plane.py` `CH-0239` の2文を追加。現在の削除は3件のまま (#2, #4, #5))
 
-| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語 (指示語・定冠詞・副詞) の参照 | 結果 |
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
 |---|---|---|---|---|---|---|
+| ~~1~~ | ~~`http.py` L443~~ | ~~「Before this leg existed…」~~ | — | — | — | **監督裁定により復元 (残す)。現在の安全上の理由と同居する文だったため誤削除。CH-0191として全文を受け皿から逐語で戻した** |
+| 2 | `http.py` L863 / module header (Endpoints) | 「Closes review F-2's own measured gap: before this WP, an unauthenticated flood…」 | 「`acquire_concurrency_slot()` is held for the caller's own ENTIRE request…via a plain synchronous `with`…」 | (段落末尾。次はコメント区切り線) | 無し (this/again/still等の参照なし) | 削除可 (変更なし) |
+| ~~3~~ | ~~`control_plane.py` L929~~ | ~~「Before this WP, the count above ran on its own…」~~ | — | — | — | **監督裁定により復元 (残す)。design D-5(ii) の TOCTOU の理由と同居する文だったため誤削除。CH-0264として全文を受け皿から逐語で戻した** |
+| 4 | `control_plane.py` `<module>` docstring `CH-0239`、Single-commit rule 段落 文1 | 「Single-commit rule (design §5, still binding for this WP): `control_plane` stays declared `unavailable`…」 | 文2「This module connects to no HTTP surface…`control_http.py`/`control_main.py` do not exist yet.」(保護参照のため残す) | (段落末尾。直後は `History: CH-0239` marker) | 無し (this/again/still等が文1を指す箇所なし。文2の「This module」は自己言及) | 削除可 (`control_main.py:351` が実際に構築しており「still binding for this WP」は事実と合わない) |
+| 5 | `control_plane.py` `<module>` docstring `CH-0239`、Single-commit rule 段落 文3 | 「Constructing a `ControlPlaneService` is, as of this WP, something only this module's own tests do.」 | (段落最終文。直後は `History: CH-0239` marker、残す文なし) | (無し) | 無し。塊末尾の文で直後にコメント文なし | 削除可 (`control_main.py:351` が構築しており事実と合わない) |
 
-**判定表** (設計 §3 の目印一覧に当たる全文。一覧は下限。全 207 塊を読む。完了条件 24 の一覧の文を含む)
+**完了条件 24 の監査一覧** (削除した文のうち HTTP ステータス番号 (3 桁) 又はエラーコード語彙 (大文字+`_`) を含むもの): **該当なし** (現在の削除3文 #2, #4, #5 はいずれも該当語彙を含まない。プログラムで全削除文をスキャンし確認した)
 
-| ファイル / 塊又は文 (行 / qualname) | 判定 (残す / 移す `CH-NNNN` / 対象外) | 根拠 (設計の節。同居文はその旨) | 候補一覧の # |
+**判定表 (抜粋: 設計 §3 の目印一覧に当たる全文。64 箇所を判定。一覧は下限であり、全 207 塊は機械的パイプラインで抽出・処理して読んだ)**
+
+| ファイル / 塊 (行) | 判定 | 根拠 |
+|---|---|---|
+| http.py L52 `<module>` docstring | 残す | `spec/data-service-api.v1.json`・`CLAUDE.md`・`pyproject.toml` 実在パス参照を含み保護参照 (0d)。かつ現在のパッケージ同梱コピー方式を選んだ理由の説明 |
+| http.py L84 (HTTP status<->contract error code header) | 残す | 現在の契約エラーコード対応表そのものの説明 (公開契約の記述、設計§3「外部仕様の挙動」) |
+| http.py L179 `_problem_for_exception` | 残す | `PlatformUpgradePending` を例外扱いする現在の理由 (安全上/契約上の理由と同居) |
+| http.py L443/`CH-0191` (4文) | **残す (全文。監督裁定: 差し戻し)** | 監督裁定により「Before this leg existed…」の文を復元。この文は「検査が無いとdetailsなしで後段へ届き未処理の例外になる」という検査が必要な理由を述べており、経緯だけの叙述ではない (現在の安全上の理由と同居) |
+| http.py L475 `_deny_provisional_field` (3文) | 残す | 現在の capability 宣言状態 (enabled/unavailable) の説明。契約 P-3 違反の理由と同居 |
+| http.py L586 `_CredentialMalformed` | 残す | クラス全体の存在理由が「現在は歴史的マーカーとしてのみ保持」という現在の状態説明そのもの。分割すると説明が成立しない |
+| http.py L637 (3文) | 残す | 既知の未修正スコープの開示 (現在のリスク開示、安全上の理由) |
+| http.py L681 (2文) | 残す | `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` 実在パス参照を含み保護参照 (0d)。現在のルーター必須理由とも同居 |
+| http.py L699 `authenticate` (2文) | 残す | 現在の認証境界の挙動そのものの説明 |
+| http.py L735 `acquire_concurrency_slot` (2文) | 残す | 現在の並行実行スロット予約の安全上の理由 |
+| http.py L761 (2文) | 残す | 現在のスレッドプール委譲挙動とその制限の説明 |
+| http.py L803 `_authenticate` | 残す | request_id 一貫性という現在の安全上の理由 |
+| http.py L916 (2文) | 残す | 現在の単一情報源方式が正しい理由の説明 (2文目は1文目を「同じ理由で」参照するため単独削除も不可) |
+| http.py L1047 | 残す | 契約フィールド名の現在のマッピング説明 (公開契約) |
+| http.py L1078 `_mutation_outcome` (2文) | 残す | 現在の戻り値構成の説明 |
+| http.py L1142 `transaction_raw` | 残す | `C-22` (C-プレフィックス) を含み保護参照 (0d)。現在のダイジェスト規則の理由とも同居 |
+| http.py L1192 | 残す | 現在の後方互換性保証の説明 |
+| http.py L1454 `create_entity` field_type | 残す | 現在のチェックが必要な安全上の理由 (契約違反の実例を示す現在の説明) |
+| http.py L1491 | 残す | 現在の契約形状 (`fields`/`field_type`/`field_types`) の説明 |
+| http.py L1551 | 残す | 現在のデフォルト型決定の説明 |
+| http.py L1571 (3文) | 残す | 現在の返り値読み出し方式とその安全上の理由 (競合読み出し回避) |
+| http.py L1644 (`CH-0232`) | **残す (経緯だけの文だが保護参照のため削除不可。監督裁定: 保護を優先し残す)** | 文自体は経緯の叙述 (旧実装との差異) だが、`postgres.py` の実在basename参照 (0d 規則2) を含むため (3) で丸ごと削除できない。経緯トークンのみ機械的に削減済み |
+| http.py L1712 | 残す | `C-17` (C-プレフィックス) を含み保護参照 (0d) |
+| http.py L1726 | 残す | `UNCHANGED` センチネルの現在の意味論の説明 (契約上重要) |
+| http.py L1771 (2文) | 残す | 現在の fail-closed 理由・一貫した認証順序の説明 |
+| control_plane.py L1 `<module>` docstring, 冒頭段落 (3文) | 残す | `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` 実在パス参照を含み保護参照 (0d)。現在の宣言状態の説明とも同居 |
+| control_plane.py `<module>` docstring, "Single-commit rule" 段落 (3文、`CH-0239`) | **監督裁定により差し替え**: 1文目「Single-commit rule…still binding for this WP…」→ **移す** (コードで確認: `control_main.py`/`control_http.py` は実在し `control_main.py` が `ControlPlaneService` を構築しているため「still binding for this WP」は今は成り立たない。保護参照なし、削除可)。2文目「This module connects to no HTTP surface…`control_http.py`/`control_main.py` do not exist yet」→ **残す** (内容は同じ理由で既に事実と合わないが、`control_http.py`/`control_main.py` の実在basename参照 (0d 規則2) を含むため丸ごと削除は不可。機械的トークン削減のみ)。3文目「Constructing a `ControlPlaneService`…only this module's own tests do」→ **移す** (`control_main.py:351` が構築しており事実と合わない。保護参照なし、削除可) | 指示語チェック: 3文目は段落最後の文で `History: CH-0239` marker が直後、残す文なし。1文目削除後に残る2文目「This module connects to…」に this/again/still 等の参照なし (「This module」は自己言及で1文目を指さない)。1文目・3文目とも削除可 |
+| control_plane.py L167 | 残す | `AUTH_REQUIRED` を含める現在のセキュリティ上の理由 |
+| control_plane.py L647 | 残す | 現在のデフォルト値の効果の説明 |
+| control_plane.py L695 | 残す | 現在のデフォルト値による後方互換性の説明 |
+| control_plane.py L735 | 残す | 現在の単一情報源方式の説明 |
+| control_plane.py L756 | 残す | 現在の request_bytes 挙動の説明 |
+| control_plane.py L789 (3文、版数変遷 1.4.0/1.5.0/1.6.0/1.7.0/1.8.0、`CH-0260`) | **1・2文目は残す (経緯だけの文だが保護参照のため削除不可。監督裁定: 保護を優先し残す)。3文目は残す (現在値の説明)** | 1文目は `contract 1.4.0`/`design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` を、2文目は `design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md`/`C-19` を含み保護参照 (0d)。両文とも内容自体は版数変遷の経緯の叙述のみ。service.py の CH-0142 (変更セット2) と同型だが、0d 導入後の本塊は保護参照のため丸ごと削除不可 -- 機械的トークン削減のみ実施 |
+| control_plane.py L881 | 残す | 現在の契約フィールド意味論の逐語一致説明 (公開契約) |
+| control_plane.py L929/`CH-0264` (2文) | **残す (全文。監督裁定: 差し戻し)** | 監督裁定により「Before this WP, the count above ran on its own…」の文を復元。この文は transaction の外で数えると2つの `register_application` が両方通って上限を超えるという design D-5(ii) の TOCTOU の理由を述べており、経緯だけの叙述ではない (現在の安全上の理由と同居) |
+| control_plane.py L964 | 残す | 現在のチェック順序が必要な理由 |
+| control_plane.py L1039 | 残す | 現在のトランザクション内実行の安全上の理由 |
+| control_plane.py L1083 | 残す | 現在の露出値の説明 |
+| control_plane.py L1147 `_gate_must_rotate`等 docstring | 残す | `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` 実在パス参照を含み保護参照 (0d) |
+| control_plane.py L1483 (2文) | 残す | 2文目は「earlier code は conflate していたが、caller 提供の override を完全に削除して修正した」という現在の状態説明と同居 (指示語チェック: 削除すると1文目の `role` 一貫性説明が孤立するため残す) |
+| control_plane.py L1621 | 残す | 現在の契約コード選択 (`FORBIDDEN`) の理由説明 |
+| control_plane.py L1710 | 残す | 現在のデフォルト値の効果の説明 |
+| control_plane.py L1743 | 残す | 現在のスライディングウィンドウ方式の説明 |
+| control_plane.py L1844 | 残す | 現在のパラメータ挙動の説明 |
+| control_plane.py L1920 | 残す | 現在の抽出方針の説明 |
+| service.py L72 (`CH-0179`) | **戻す (再利用 `CH-0179`)** | 変更セット2で削除した1文を、0d 導入後は実在パス参照 (`audit_counts.py`) を含む保護参照と判明したため、受け皿から逐語で復元。参照行・受け皿節は維持 (D-1) |
+
+**判定表の対象範囲 (数字、監督要求により明記)**: 全塊数は `http.py` 97 塊、`control_plane.py` 110 塊 (合計 207 塊、`extract_all_blocks` で実測)。設計 §3 の目印一覧に当たる文は自前の sweep で 63 文抽出 (`http.py` 39、`control_plane.py` 24)。うち `control_plane.py` `<module>` docstring (`CH-0239`) の3文を本訂正で見直し、現在の削除文は3件 (`http.py` L863、`control_plane.py` `CH-0239` の文1・文3)。この3文それぞれについて、直後に残す2文の候補一覧は上表の #2 (残す文2つのうち2つ目は段落末尾のため該当なし)・#4 (直後の残す文1つのみ、2つ目は `History:` marker のため該当なし)・#5 (段落最終文、直後の残す文なし) に記載済み。
+
+**全 207 塊の内訳**: 上表の 64 箇所 (目印一覧に当たる文を含む塊、一部重複あり) は個別に判定した。全 207 塊を機械的パイプライン (`_strip_leading_label`/`_strip_allowed_parens`、`_is_allowed_reduction` で逐一検証) にも通した結果、106 塊 (`http.py` 57、`control_plane.py` 49) が実際に変化 (3 塊は上表の文削除、103 塊はラベル・括弧の機械的削減のみ) して新規 `CH-ID` (`CH-0182`〜`CH-0287`) を得た。残り 101 塊 (`http.py` 40、`control_plane.py` 61) は削減できる語が無く完全に無変更 (「残す」、CH-ID なし)。上表で「残す」と判定した 61 箇所のうち、L52・L84・L179 等一部の塊は目印文自体は残しつつ、同じ塊の別の語 (ラベル/括弧) が機械的に削減されて CH-ID を得ている (下の機械的削減一覧に同じ行番号で重複掲載)。機械的削減のみの一覧は以下のとおり。
+
+**http.py (機械的削減のみ、文削除なしの塊 -- CH-IDは末尾の文削除一覧のものを除く)**
+
+| CH-ID | 行 | 種別 | 備考 |
 |---|---|---|---|
+| `CH-0182` | L1 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0183` | L52 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0184` | L84 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0185` | L125 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0186` | L149 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0187` | L179 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0188` | L281 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0189` | L367 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0190` | L393 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0192` | L475 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0193` | L518 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0194` | L553 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0195` | L586 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0196` | L609 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0197` | L625 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0198` | L637 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0199` | L681 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0200` | L699 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0201` | L735 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0202` | L761 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0203` | L803 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0204` | L830 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0205` | L838 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0207` | L898 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0208` | L916 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0209` | L942 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0210` | L1002 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0211` | L1024 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0212` | L1055 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0213` | L1078 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0214` | L1120 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0215` | L1142 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0216` | L1186 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0217` | L1192 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0218` | L1199 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0219` | L1207 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0220` | L1218 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0221` | L1243 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0222` | L1257 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0223` | L1277 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0224` | L1300 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0225` | L1321 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0226` | L1353 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0227` | L1381 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0228` | L1454 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0229` | L1491 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0230` | L1562 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0231` | L1571 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0232` | L1644 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0233` | L1675 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0234` | L1684 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0235` | L1712 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0236` | L1726 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0237` | L1756 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0238` | L1771 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+
+**control_plane.py (機械的削減のみ、文削除なしの塊 -- CH-IDは末尾の文削除一覧のものを除く)**
+
+| CH-ID | 行 | 種別 | 備考 |
+|---|---|---|---|
+| `CH-0239` | L1 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0240` | L132 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0241` | L167 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0242` | L199 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0243` | L207 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0244` | L240 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0245` | L297 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0246` | L303 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0247` | L326 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0248` | L395 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0249` | L448 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0250` | L523 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0251` | L537 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0252` | L637 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0253` | L647 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0254` | L689 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0255` | L695 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0256` | L710 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0257` | L756 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0258` | L773 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0259` | L781 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0260` | L789 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0261` | L821 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0262` | L832 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0263` | L881 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0265` | L964 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0266` | L977 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0267` | L1058 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0268` | L1083 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0269` | L1113 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0270` | L1128 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0271` | L1147 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0272` | L1169 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0273` | L1259 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0274` | L1341 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0275` | L1483 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0276` | L1520 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0277` | L1528 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0278` | L1574 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0279` | L1653 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0280` | L1710 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0281` | L1743 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0282` | L1773 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0283` | L1784 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0284` | L1811 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0285` | L1844 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0286` | L1906 | comment | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
+| `CH-0287` | L1920 | docstring | ラベル・括弧の機械的削減 (設計 §4.1 (4)(6)・§9)。文削除なし |
 
 | 記録 | 前 | 後 |
 |---|---|---|
-| 経緯トークン数 `http.py` / `control_plane.py` (§2.3 末尾の数え方) | 182 / 155 | |
-| r2db / MitateDB / conformance / tools/tests の集計行 | | |
+| 経緯トークン数 `http.py` (§2.3 末尾の数え方) | 182 | 131 |
+| 経緯トークン数 `control_plane.py` (同上) | 155 | 121 |
+| tools/tests | -- | 272 passed |
+| r2db-api/tests (peer suite、L1 scan 含む) | -- | 1274 passed |
+| MitateDB-api/tests (peer suite、L1 scan・test_preauth_concurrency_bound.py 含む) | -- | 1096 passed, 2 subtests passed |
+| conformance-tests | -- | 995 passed |
+| check_comment_provenance.py --base 6e91983 http.py control_plane.py | -- | exit 0 (207 blocks) |
+| check_comment_provenance.py --base 3a4c018 service.py | -- | exit 0 (100 blocks。理由は下の疑義参照) |
+| check_comment_provenance.py --register | -- | exit 0 (71 files, 285 CH-IDs) |
+| check_doc_refs.py | -- | exit 0 |
+| public_value_scan.py (対象3ファイル) | -- | exit 0 (total_flagged=0) |
+| tools/check_collection_floor.py | -- | exit 0 (measured=3365 floor=3326) |
+| AST 不変確認 (3ファイル) | -- | 3ファイルとも一致 |
 
 ### 6.5 監督裁定 (2026-09-14。疑義はすべて解決)
 
@@ -933,3 +1114,28 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 | # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
 |---|---|---|---|
 | 25 | 戻した文が変更セット 2 より前の原文と逐語で一致し、`service.py` が照合を通る | `service.py`: 戻した文の 1 語を変える | `check_comment_provenance.py --base <本変更セットの親コミット> r2db-api/src/r2db_api/service.py` exit 1 (§4.1 (3))。変異なしで exit 0 |
+
+**0e 監督裁定 (2026-09-15) による手直し 7 件** (CamelCase 識別子が backtick 内で改行により空白入りになっていた箇所。0e の検出が「backtick 内側の英小文字→英大文字の境目」を対象に追加したことで判明。指摘 2 件 + 自前の実測で追加発見 5 件)
+
+| # | ファイル:行 (CH-ID) | 壊れていた形 | 直した形 | 正しさの根拠 (受け皿の原文) |
+|---|---|---|---|---|
+| 1 | `postgres.py:1365` (`CH-0120`) | `` `Application Cell.transact` `` | `` `ApplicationCell.transact` `` | 受け皿 `postgres.md` の `CH-0120` 節: `` `Application`` の行末で改行、次行が `` Cell.`` から始まる (逐語一致) |
+| 2 | `service.py:696` (`CH-0139`) | `` `Capability Document.surfaces` `` | `` `CapabilityDocument.surfaces` `` | 受け皿 `service.md` L950-951: `` `Capability`` の行末で改行、次行が `` Document.surfaces` `` |
+| 3 | `control_plane.py:1` (`CH-0239`) | `` `Control Authority` `` | `` `ControlAuthority` `` | 受け皿 `control_plane.md` L33: `` `Control`` の行末で改行、次行が `` Authority`)`` |
+| 4 | `control_plane.py:219` (`CH-0246`) | `` `Control Authority`'s `` | `` `ControlAuthority`'s `` | 受け皿 `control_plane.md` L198: 同上の改行位置 |
+| 5 | `control_plane.py:910` (`CH-0272`) | `` `CredentialRevoke Request.destructive: `` | `` `CredentialRevokeRequest.destructive: `` | 受け皿 `control_plane.md` L669-670: `` `CredentialRevoke`` の行末で改行、次行が `` Request.destructive:`` |
+| 6 | `service.py:1392` (`CH-0105`) | `` (`ControlPlane Service`'s `` | `` (`ControlPlaneService`'s `` | 受け皿 `service.md` L58-59: `` (`ControlPlane`` の行末で改行、次行が `` Service`'s`` |
+| 7 | `http.py:405` (`CH-0195`) | `` `Authentication Error` `` | `` `AuthenticationError` `` | 受け皿 `http.md` L367: `` `Authentication`` の行末で改行、次行が `` Error` (`AUTH_INVALID`)`` |
+
+いずれも 0e 導入前は「backtick 内側の空白はすべて改行由来では単語境界として保持される」という誤った前提のもとで見逃されていたもの。0e の `find_broken_line_wrap_joins` を全 4 ファイルの全 CH-ID に対して再実行し、上記 7 件以外の残存が 0 件であることを確認した (2026-09-15 の 0e 述語 B 統一後の再実測でも 0 件のまま)。
+
+**変更セット3中に手で直した切り詰め破損 2 件の記録** (0e とは別の原因。実装担当自身の機械的削減パイプラインが、実在パス参照を含むラベルを誤って過剰に削った切り詰めバグ。`--base 6e91983` の §4.1(3) 失敗で発覚し、受け皿の原文に合わせて手で復元した)
+
+| # | ファイル:行 (CH-ID) | 壊れていた形 | 直した形 | 正しさの根拠 (受け皿の原文) |
+|---|---|---|---|---|
+| 8 | `http.py:70` (`CH-0185`) | `Phase 4 (design PHASE4_): ` (`DURABLE_AUDIT_SINK_V1.md D-2/D-3` が消えていた) | `Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-3): ` | 受け皿 `http.md` `CH-0185` 節 L113: `Phase 4 (design PHASE4_` の行末で改行、次行が `DURABLE_AUDIT_SINK_V1.md D-2/D-3): ` から始まる (逐語一致) |
+| 9 | `http.py:820` (`CH-0221`) | `P35 WP-2 (R-3, design docs/design/PHASE35_CROSS_ENTITY_AND_ §2): ` (`CONTRACT_130_V1.md` が消えていた) | `P35 WP-2 (R-3, design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2): ` | 受け皿 `http.md` `CH-0221` 節 L923-924: `PHASE35_CROSS_ENTITY_AND_` の行末で改行、次行が `CONTRACT_130_V1.md §2): ` から始まる (逐語一致) |
+
+**実装時に見つかった疑義 (完了条件 25 の「変異なしで exit 0」について)**: `--base 6e91983`単独では、変異なしでも exit 1 になる (実測)。原因: `service.py` は 6e91983 の時点で既に `CH-0179` を持ち、その時点の retained_text は空 (変更セット2で全文削除済み)。Q-4 の再利用照合 (`check_provenance_semantics`) は新しい retained_text を「基点の retained_text から導出可能か」で検証するため、空文字列からは 1 文でも導出不可能で、`FAIL (§4.1 (3)) retained text has no order-preserving match` になる (§4.1 (5) の追加行検査でも history token を含む行として赤になる)。これは変異の有無に関係なく起きる、Q-4 機構と「全文復元」操作の構造的な不整合であり、設計の穴の可能性がある。回避として `--base 3a4c018` (このCH-IDが存在しない、変更セット2着手前のコミット) で検証したところ、変異なしで exit 0、1 語変異で exit 1 (§4.1 (3) `cannot delete a whole sentence carrying a protected reference`) を確認した。`--register` は変異なし・1 語変異前後とも exit 0 (69→71 files, 285 CH-ID、値は無変更)。監督確認をお願いしたい。
+
+**0e: 改行を詰めるときは識別子の途中の改行を空白なしでつなぐ。チェッカーが検出する。事実と異なる保護文 (CH-0239 の `control_http.py`/`control_main.py` の文、`service.py` CH-0139 の「honestly declared `unavailable`」の文) は、変更セット 3 の後の別コミットで訂正する。**
