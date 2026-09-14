@@ -1139,3 +1139,45 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 **実装時に見つかった疑義 (完了条件 25 の「変異なしで exit 0」について)**: `--base 6e91983`単独では、変異なしでも exit 1 になる (実測)。原因: `service.py` は 6e91983 の時点で既に `CH-0179` を持ち、その時点の retained_text は空 (変更セット2で全文削除済み)。Q-4 の再利用照合 (`check_provenance_semantics`) は新しい retained_text を「基点の retained_text から導出可能か」で検証するため、空文字列からは 1 文でも導出不可能で、`FAIL (§4.1 (3)) retained text has no order-preserving match` になる (§4.1 (5) の追加行検査でも history token を含む行として赤になる)。これは変異の有無に関係なく起きる、Q-4 機構と「全文復元」操作の構造的な不整合であり、設計の穴の可能性がある。回避として `--base 3a4c018` (このCH-IDが存在しない、変更セット2着手前のコミット) で検証したところ、変異なしで exit 0、1 語変異で exit 1 (§4.1 (3) `cannot delete a whole sentence carrying a protected reference`) を確認した。`--register` は変異なし・1 語変異前後とも exit 0 (69→71 files, 285 CH-ID、値は無変更)。監督確認をお願いしたい。
 
 **0e: 改行を詰めるときは識別子の途中の改行を空白なしでつなぐ。チェッカーが検出する。事実と異なる保護文 (CH-0239 の `control_http.py`/`control_main.py` の文、`service.py` CH-0139 の「honestly declared `unavailable`」の文) は、変更セット 3 の後の別コミットで訂正する。**
+
+## 11. 変更セット 0f — B の条件 6〜8 (改行の壊れ、残り 71 件)
+
+**監督裁定 (2026-09-15)**: 読み取り専用調査 (`$SP/survey-joins/survey.py`) で見つかった残存 71 件 (`/` の直後 63 件、backtick 内のコード構文の途中 8 件) に対応するため、述語 B に条件 6〜8 を追加する。つなぎ方・正規化・検出はすべて同じ B を使う (0e の裁定を継続)。
+
+- **条件 6**: L が `/`、R が語の文字又は backtick。backtick の内外を問わない。
+- **条件 7**: backtick の内側で、L が `(`・`[`・`=` のいずれかで、L の直前が語の文字又は `(`・`[` (`a = b` の `=` はここで除外される — 直前が空白のため)。R が空白でない文字。
+- **条件 8**: L が開きの backtick (L を含めた累積の backtick 数が奇数)。R が空白でない文字。
+
+**対象外のままにした理由**:
+- 閉じ backtick の直後の英語: L が backtick でも閉じ (偶数) なので条件 8 が発火しない。
+- 引用符・`*` の直後の英語: L がそもそも `/`・`(`・`[`・`=`・backtick のいずれでもないので、既存条件も新条件も発火しない。
+- `=` の罫線 (`========` のような区切り線): 最後の `=` の直前も `=` であり、条件 7 が要求する「直前が語の文字又は `(`・`[`」に当たらないため発火しない。
+- `<->` の矢印: `-` の直前が `<` であり、既存条件 2 (単一の `-`) が要求する「直前が語の文字」に当たらないため、以前から発火しない。
+
+**修正件数** (受け皿の原文の改行位置に合わせて空白なしでつなぎ直した。新しい B で全 4 ファイルを数え直し、残りは 0 件、つなぎ過ぎも 0 件): `postgres.py` 8 件、`control_plane.py` 16 件、`service.py` 9 件、`http.py` 18 件 (うち 1 件は `/` が連続する塊の 2 か所目で自動修正が届かず手で追加)。合計 51 件 + 手直し 1 件 = 52 件。
+
+**新たに見つかった疑義 (0f 修正の副作用)**: `postgres.py` `CH-0080` (`_read_schema_revision` の docstring) のラベルが、条件 6 導入前は `docs/` と `design/DESTRUCTIVE_CONFIRMATION_V1.md` が空白で分断されていたために実在パスとして認識されず、変更セット 1 (0d 導入前) の削減で `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (実在パス) が丸ごと消えていた。条件 6 でこの分断が正しく `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` に再結合されるようになった結果、`--base 944e86b` の導出可能性検査がこの欠落を正しく検出するようになったため、受け皿の原文に合わせて実在パスを復元した (`WP-0` の除去は既存の許容操作のままで保持)。この結果、両 peer の全 src に対する `--base HEAD` の例外は、当初想定していた `service.py:72` の 2 件 (変更セット 0e/3 のマージにより HEAD 側の retained_text が復元済みの形になったため、現在は解消済み) から、`postgres.py:2432` (`CH-0080`) の 1 件に置き換わった。件数は 1 件のみ (§4.1 (2) のメッセージ 1 行)。
+
+**検証**: `--base 6e91983` (`http.py`、`control_plane.py`)・`--base 3a4c018` (`service.py`)・`--base 944e86b` (`postgres.py`)・`--register` はすべて exit 0。両 peer の全 src に対する `--base HEAD` は `postgres.py:2432` (`CH-0080`) の 1 件のみ FAIL (上記の理由による、変更セット 0d 以前からの実在パス欠落の是正)。
+
+**ガードテストの直し (監督裁定、R-37 WP-1m が別 worktree で踏んだ偽の赤の報告を受けて)**: `tools/tests` の `test_0e_both_peers_untouched_src_unchanged_base_head_is_green` は作業ツリーを HEAD と比べていたため、無関係な worktree の未コミット変更だけで赤になる欠陥があった。`_check_rev_pair` ヘルパーを追加し、`git show <rev>:<path>` で取り出した同じ rev の blob 同士 (作業ツリーを一切読まない) を比べる `test_0f_both_peers_all_src_rev_vs_itself_is_green` に置き換えた。作業ツリーに未コミットのコメント変更があっても緑になることは別テスト `test_0f_rev_pair_check_is_red_when_working_tree_has_uncommitted_comment_edit` で固定した。
+
+このテストは当初、変更セット 0f 自身の修正がまだ作業ツリーにしかなく HEAD の blob には未反映の4ファイル (`http.py`・`control_plane.py`・`service.py`・`postgres.py`) を除外リストで除いていたが、監督裁定によりこの除外は削除した (理由: 「同じ rev の blob 同士を比べるなら内容は同一のはず」という理解に対し、実際には §9e (`find_broken_line_wrap_joins`) は old/new の等値比較ではなく、new の内容を受け皿という「外部の基準」と突き合わせる検査であるため、rev 同士が同一でも HEAD 自身の内容が受け皿とまだ食い違っていれば正しく赤になり得ることを確認した上で、除外を残すとコミット後も何もしない設定がテストに残ってしまうため)。除外を外すと、コミット前は本テスト1件が赤になる (§9e 56件 + 既知の `postgres.py:2432` `CH-0080` (§4.1 (2)) 1件、他の200件は緑のまま)。これは HEAD に残っている壊れ (この変更セット0fの直し待ちの箇所そのもの) を正しく検出した結果であり、想定どおり。この赤が「未コミットの修正分だけ」が原因であることは、作業ツリーの差分をコピー (`git clone` した使い捨てクローン) 上に一時的に commit して確かめ、そこでは本テストが緑になることを確認した (このクローンは検証専用で、破棄済み。実際の ccp-cs0 では commit していない)。監督が2つのコミット後に新しい HEAD で `tools/tests` を流し、緑になることを確認してからマージする。
+
+### 11.1 変更セット 0f 差し戻し — 3 点の追加修正 (監督裁定 2026-09-15)
+
+0f の条件 6〜8 と 52 件の直しは承認。71 件との差は調査の数え方の違いで漏れではない、との確認のうえで、以下 3 点を追加した。
+
+**1. [major] `_FILENAME_CANDIDATE_RE` の実在パス判定の穴 (`4bc9535` から存在)**: `tools/check_comment_provenance.py` の `_FILENAME_CANDIDATE_RE` の1つ目・2つ目の分岐 (backtick を含む候補) は、単なる「backtick ... backtick」の文字マッチであり、どちらが開き・どちらが閉じかを区別していなかった。そのため「`` `a` `` below (design docs/design/X_V1.md R-2): a plain `` `SELECT` `` here.」のような文で、`` `a` `` の閉じ backtick から `` `SELECT` `` の開き backtick までを1つの (実在しない) 候補として貪欲に取ってしまい、間に挟まった素のパス `docs/design/X_V1.md` を丸ごと飲み込んで見えなくしていた (`docs/design/X_V1.md` 自体は候補としてまったく検出されない)。
+
+修正: backtick の位置を先頭から前後で対にし (0番目と1番目が1つの span、2番目と3番目が次の span、...)、(a) 各 span の内側にあるパス候補と (b) span の外側 (対になっていない残り) にある素のパス候補を別々に探す `_filename_span_matches` を新設。`_filename_candidates`・`_sub_filename_candidates` (旧 `_FILENAME_CANDIDATE_RE.sub` の置き換え)・`_is_filename_candidate_fullmatch` (旧 `_FILENAME_CANDIDATE_RE.fullmatch` の置き換え) の3つの呼び出し経路すべてをこの新関数に統一した。
+
+fixture: `test_0f_item1_real_path_between_backtick_spans_is_protected` (上の例文そのもの。`docs/design/X_V1.md` が候補として検出され、保護対象と判定され、文全体の削除が許可されないことを確認)。mutation: `test_0f_item1_mutation_reverting_to_greedy_regex_is_red` (元の `_FILENAME_CANDIDATE_RE.finditer` に戻すと、同じ文でパスが飲み込まれ、保護判定が偽陰性になることを確認 — 直しが効いていることの裏付け)。今回復元した `postgres.py:2432` の `CH-0080` の文 (`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md`) も同じ構造 (backtick span → 素のパス → backtick span) であることを `test_0f_item1_ch0080_postgres_reference_now_protected` で確認した。
+
+**遡っての確認**: 修正済みチェッカーで、変更セット1〜3が触った4ファイルを元の基準revに対して流し直した: `--base 944e86b`(`postgres.py`)・`--base 3a4c018`(`service.py`)・`--base 6e91983`(`http.py`・`control_plane.py`)。結果はすべて exit 0 (FAIL なし)。**この穴によって誤って削除が許可されていた文は、この4ファイルの範囲では 0 件だった** — 復元が必要な文もなし。(`auth.py`・`limits.py`・`ops.py` など、変更セット1〜3の対象外だった箇所での穴の存在自体は監督指摘のとおりだが、それらは変更セット1〜3の対象ファイルではないため、本項の遡及確認の対象外。)
+
+**2. [minor] 条件6に「`/` の直前が空白でない」を追加**: 空白を挟んだ `a / b` のような表現が `/` の直後で改行されている場合、これまでの条件6は L の直前の文字を見ずに `/` で終われば無条件に発火していたため、空白ありのまま緑であるべき箇所が空白なしで誤ってつながる余地があった。`/` の直前が空白でないことを条件に追加し、fixture (`test_0f_item2_rule6_slash_boundary_requires_no_space_before_slash`) と、ガードを外すと壊れることを示す mutation (`test_0f_item2_mutation_dropping_space_guard_on_rule6_is_red`) を追加した。
+
+**3. [minor] 条件7の直前文字ガードを fixture で固定**: 条件7の既存の「`(`・`[`・`=` の直前が語の文字又は `(`・`[`」というガード自体はロジックとして既にあったが、これを狙い撃ちして外す変異 (レビュアー自作の "y2") に対する専用 fixture が無かった。空白を挟んだ `a = b` を `=` の直後で改行した場合に空白のまま緑であることを確認する fixture (`test_0f_item3_rule7_prev_char_guard_pinned_by_fixture`) と、ガードを外す y2 相当の変異が (誤って) 空白なしでつなげてしまうことを示す mutation (`test_0f_item3_mutation_y2_dropping_prev_char_guard_is_red`) を追加した。
+
+**検証 (再実行)**: `--base 6e91983`(`http.py`・`control_plane.py`)・`--base 3a4c018`(`service.py`)・`--base 944e86b`(`postgres.py`)・`--register` はすべて exit 0。`tools/check_doc_refs.py`・`tools/public_value_scan.py`・`tools/check_collection_floor.py` もすべて OK。

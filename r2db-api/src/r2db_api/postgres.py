@@ -43,7 +43,7 @@ Data model (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-2/R-4/R-7):
 ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and an invisible
 `_r2db_revision uuid NOT NULL DEFAULT gen_random_uuid()` (the per-row
 optimistic-concurrency token), ahead of the caller's own declared fields.
-Those own fields default to `JSONB` (`create_entity` never carries a `field_type` -- rejected at the shared `bind_schema_operation` boundary); `add_field`'s own optional `field_type` maps `string`/`integer`/`number`/ `boolean` to `TEXT`/`BIGINT`/`DOUBLE PRECISION`/`BOOLEAN` respectively, and `object`/`array` to the two DOMAINs `migrations/0003_provision_application.sql` provisions per application database, `_r2db_json_object`/ `_r2db_json_array` -- each a `jsonb` DOMAIN with a `jsonb_typeof(VALUE)` CHECK, so PostgreSQL's own catalog (`information_schema.columns.domain_name`) is what lets `_load_catalog` tell "declared as object" apart from "declared as array" apart from "untyped JSONB" ("object/ array の DOMAIN 型統一": a bare `jsonb` column cannot report this distinction at all). `id`/`_r2db_revision` require PostgreSQL 13+
+Those own fields default to `JSONB` (`create_entity` never carries a `field_type` -- rejected at the shared `bind_schema_operation` boundary); `add_field`'s own optional `field_type` maps `string`/`integer`/`number`/`boolean` to `TEXT`/`BIGINT`/`DOUBLE PRECISION`/`BOOLEAN` respectively, and `object`/`array` to the two DOMAINs `migrations/0003_provision_application.sql` provisions per application database, `_r2db_json_object`/`_r2db_json_array` -- each a `jsonb` DOMAIN with a `jsonb_typeof(VALUE)` CHECK, so PostgreSQL's own catalog (`information_schema.columns.domain_name`) is what lets `_load_catalog` tell "declared as object" apart from "declared as array" apart from "untyped JSONB" ("object/array の DOMAIN 型統一": a bare `jsonb` column cannot report this distinction at all). `id`/`_r2db_revision` require PostgreSQL 13+
 (`gen_random_uuid()` is a built-in as of that version).
 
 Two layers validate a value written to an `object`/`array` column: `_check_
@@ -250,7 +250,7 @@ class _TableInfo:
     `columns`: declared field name -> declared type in the shared
     `r2db_api.structured` vocabulary (`"string"`/`"integer"`/`"number"`/
     `"boolean"`/`"object"`/`"array"`), or `None` for an untyped/JSONB-
-    equivalent column. `"object"`/`"array"` are recovered from PostgreSQL's own `information_schema.columns.domain_name` ("object/ array の DOMAIN 型統一") -- a plain `jsonb` column with no domain reports `None`. Includes `"id"` (always `"integer"`); never includes the invisible `"_r2db_revision"` column.
+    equivalent column. `"object"`/`"array"` are recovered from PostgreSQL's own `information_schema.columns.domain_name` ("object/array の DOMAIN 型統一") -- a plain `jsonb` column with no domain reports `None`. Includes `"id"` (always `"integer"`); never includes the invisible `"_r2db_revision"` column.
 
     `indexes`: client index name -> `{"physical": <table>__<index> name,
     "fields": (declared field name, ...), "unique": bool}`, covering every
@@ -264,7 +264,7 @@ class _TableInfo:
 
     columns: dict[str, str | None]
     indexes: dict[str, dict[str, Any]]
-    # Contract 1.7.0: this entity's own declared `enum`/ `nullable` constraints, read from the side-table registry (`_load_field_constraints` below) -- field name -> `FieldConstraints`, present ONLY for a field something was actually declared on (`FieldConstraints.is_declared`), same "absence = default" convention `columns`/`indexes` above never needed (there is no "undeclared column"). Defaults to `{}` so every EXISTING call site that builds a
+    # Contract 1.7.0: this entity's own declared `enum`/`nullable` constraints, read from the side-table registry (`_load_field_constraints` below) -- field name -> `FieldConstraints`, present ONLY for a field something was actually declared on (`FieldConstraints.is_declared`), same "absence = default" convention `columns`/`indexes` above never needed (there is no "undeclared column"). Defaults to `{}` so every EXISTING call site that builds a
     # `_TableInfo` without constraints in mind (there are none left after
     # this WP, but a future one) keeps working.
     # history: CH-0101
@@ -1002,7 +1002,7 @@ class PostgresCell:
         return result
 
     def _write_field_constraints(self, conn: "psycopg.Connection[Any]", entity: str, field_name: str, constraints: "FieldConstraints") -> None:
-        """Contract 1.7.0: persists (or clears) one field's own row in the side-table registry -- the ONLY write path into it, called from `apply_schema`'s `create_entity`/`add_field`/ `alter_field` branches, always inside that method's own outer `with conn.transaction():` (never a separate commit). A field whose
+        """Contract 1.7.0: persists (or clears) one field's own row in the side-table registry -- the ONLY write path into it, called from `apply_schema`'s `create_entity`/`add_field`/`alter_field` branches, always inside that method's own outer `with conn.transaction():` (never a separate commit). A field whose
         constraints are no longer declared at all (`not constraints.is_
         declared` -- `alter_field` clearing back to the version-wide
         default) has its row DELETEd rather than left standing; `create_
@@ -1066,7 +1066,7 @@ class PostgresCell:
     # `ApplicationCell`'s single-process dict, so the DATABASE's own notion
     # of "now" is what a lazy reclaim compares against.
     #
-    # Read (`_idempotency_lookup`) fails CLOSED on a missing table (ruling audit) -- an application that has never run upgrade 11 gets `SERVICE_UNAVAILABLE` right here, before target-existence/ execution, exactly like the WRITE (`_idempotency_store`) already did: `UndefinedTable` is left to propagate to `transact`/`apply_schema`'s own `except psycopg.Error` clause, rolling back the (as yet empty) transaction and touching no row. This method runs FIRST on the
+    # Read (`_idempotency_lookup`) fails CLOSED on a missing table (ruling audit) -- an application that has never run upgrade 11 gets `SERVICE_UNAVAILABLE` right here, before target-existence/execution, exactly like the WRITE (`_idempotency_store`) already did: `UndefinedTable` is left to propagate to `transact`/`apply_schema`'s own `except psycopg.Error` clause, rolling back the (as yet empty) transaction and touching no row. This method runs FIRST on the
     # idempotent path (before `catalog`/target-existence in `transact`;
     # right after `catalog` but before any operation-specific work in
     # `apply_schema`), so nothing has executed yet when it raises.
@@ -1231,7 +1231,7 @@ class PostgresCell:
                     known_fields = set(table_info.columns)
                     validate_projection(select, known_fields)
                     validate_predicates(where, known_fields)
-                    # identifier/catalog-checked order_by, with a deterministic trailing `id ASC` tie-break appended whenever the caller's own order_by does not already mention `id` -- the exact same shared function `ApplicationCell.query` uses, so both backends accept/ reject the same order_by shapes identically.
+                    # identifier/catalog-checked order_by, with a deterministic trailing `id ASC` tie-break appended whenever the caller's own order_by does not already mention `id` -- the exact same shared function `ApplicationCell.query` uses, so both backends accept/reject the same order_by shapes identically.
                     # history: CH-0022
                     order_spec = _resolve_order_by(order_by, known_fields)
                     order_by_count = len(order_by) if order_by else 0
@@ -2429,7 +2429,7 @@ class PostgresCell:
             _run(cur, statement)
 
     def _read_schema_revision(self, conn: "psycopg.Connection[Any]") -> int:
-        """Read-only counterpart to `_bump_revision` below (design docs R-2 item 1 m-1): a plain `SELECT` of the current `schema_revision`, in the SAME transaction as the pending schema operation, used to compute a `drop_entity`/ `drop_index` confirmation phrase's own state fingerprint before the destructive-confirmation gate runs (and therefore before this same transaction's own `_bump_revision` call increments it again).
+        """Read-only counterpart to `_bump_revision` below (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-2 item 1 m-1): a plain `SELECT` of the current `schema_revision`, in the SAME transaction as the pending schema operation, used to compute a `drop_entity`/`drop_index` confirmation phrase's own state fingerprint before the destructive-confirmation gate runs (and therefore before this same transaction's own `_bump_revision` call increments it again).
         `migrations/0003_provision_application.sql` inserts this table's one
         row (`revision = 0`) at provisioning time, so the `SELECT` always
         finds it in practice; the `0` fallback below exists only so this
