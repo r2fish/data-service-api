@@ -300,6 +300,20 @@ the standing mechanism the next provisional capability would reuse
 None)` regardless of how it was set.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-1k -- `cell.py`'s `_deny_provisional_field` moved to `provisional_gate.py`; the pointer gets a 40c position bracket
+
+old:
+```
+Every 1.7.0 capability this gate ever covered is `enabled` as of this WP (`_PROVISIONAL_UNSUPPORTED_*_FIELDS` below are all empty tuples), so this function currently has no reachable call site -- left in place, undeleted, as the standing mechanism the next provisional capability would reuse (mirrors `cell.py`'s identical in-process counterpart).
+```
+
+new:
+```
+Every 1.7.0 capability this gate ever covered is `enabled` as of this WP (`_PROVISIONAL_UNSUPPORTED_*_FIELDS` below are all empty tuples), so this function currently has no reachable call site -- left in place, undeleted, as the standing mechanism the next provisional capability would reuse (mirrors `cell.py`'s identical in-process counterpart) (in `provisional_gate.py`).
+```
+
 ## CH-0193
 
 - moved from: `src/mitatedb_api/http.py` (`<module>`)

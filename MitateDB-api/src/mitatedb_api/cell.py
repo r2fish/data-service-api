@@ -48,6 +48,7 @@ from .field_types import (
     json_type_name,
 )
 from .identifiers import validate_identifier, is_identifier_syntax
+from .provisional_gate import _deny_provisional_field
 from .request_limits import _check_operation_depth, _measure_request_bytes
 from .request_traversal import _as_traversable
 from .surfaces import build_surfaces
@@ -3713,36 +3714,6 @@ class ApplicationCell:
                 operation="schema", target_kind="collection", target_id=None,
             )
             raise AuthorizationError("developer authority required")
-
-
-def _deny_provisional_field(field_name):
-    """Contract 1.7.0 provisional gate (design docs/design/
-    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-1 (3); work
-    order docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9)):
-    in-process counterpart of `http.py::_deny_provisional_field`. Every
-    1.7.0 capability this gate ever covered (`constraint_declarations`
-    WP-3a, `dry_run` WP-3b, `idempotency` WP-3c, `request_budget` WP-3d)
-    is `enabled` as of this WP -- both this function's own module-level
-    caller list (`ApplicationRuntime`/`ApplicationDeveloper`'s own
-    keyword-only-field gates below) and `http.py`'s equivalent are now
-    empty tuples, so this function currently has no reachable call site
-    at all. Left in place (never deleted) as the standing mechanism the
-    NEXT provisional capability this contract adds would reuse -- deleting
-    live, documented, zero-risk dead code would satisfy no completion
-    condition, only look like it did (mirrors r2db-api's own stale-
-    literal precedent, `structured.py`'s own `SCHEMA_OPERATIONS`
-    constant).
-
-    Phase 9 WP-3e (design D-3 (5), V-7): `details` is now passed through
-    `CapabilityError.__init__` itself -- the attribute-assignment escape
-    hatch this function's own pre-WP-3e docstring described (`err.details
-    = {...}` after construction) is gone; this is the isomorphic
-    counterpart of `http.py::_deny_provisional_field`'s identical
-    change."""
-    raise CapabilityError(
-        f"{field_name} is not supported by this peer",
-        details={"violated_declaration": "capability", "field": field_name},
-    )
 
 
 class ApplicationRuntime:
