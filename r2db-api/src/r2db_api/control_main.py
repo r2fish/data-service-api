@@ -29,7 +29,7 @@ at all, its own control plane is, by definition, enabled).
 
 Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work
 order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md WP-1;
-REWORK ROUND, supervisor ruling 2026-09-05, rulings-q4-wp12-rework.md
+REWORK ROUND, rulings-q4-wp12-rework.md
 sec.2): `surfaces`, `audit_visibility_lag_ms`, and the coalescing window
 this process declares are no longer read from env vars -- they are
 DB-side declarations read from `r2dbsvc_registry.platform_declarations`
@@ -191,6 +191,8 @@ one up first, via `pytest.MonkeyPatch`, before the first import, the same
 established pattern `test_credential_persistence.py`'s `main_module` fixture
 already uses for `r2db_api.main` (see `test_control_http.py`'s own
 `control_main_module` fixture).
+
+History: CH-0504
 """
 from __future__ import annotations
 
@@ -439,7 +441,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
-    # Phase 10 WP-4e (supervisor ruling 2026-09-09) investigated deriving
+    # Phase 10 WP-4e investigated deriving
     # this default from a declared concurrency ceiling too (mirroring
     # `r2db_api.main`'s data-plane platform pool fix, `role_pool_size`) --
     # this process' own 4 platform-plane stores (`applications`/
@@ -481,6 +483,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # outside this WP's own scope (pool SIZING/composition only, not pool
     # LIFECYCLE) -- reported for a separate ruling. `R2DB_PLATFORM_
     # POOL_SIZE` still wins outright when set explicitly.
+    # history: CH-0509
     pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
 
     limits = ControlPlaneLimits(
@@ -558,7 +561,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             )
         visibility_lag_ms = derive_visibility_lag_ms(all_catalogs)
 
-        # Phase 10 WP-4g (supervisor ruling 2026-09-09, following WP-4f's
+        # Phase 10 WP-4g (following WP-4f's
         # own `ops verify-declarations` F-16 aggregate check): this
         # process' own startup now ALSO fails fast on F-16, scoped to
         # exactly the role(s) THIS process' own pool composition uses --
@@ -571,6 +574,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # (`application_slugs=()`: this process serves no application at
         # all). Run on this same borrowed connection (login role = the
         # real `r2dbsvc_controlplane` writer role).
+        # history: CH-0512
         _own_role_classes = {"controlplane"}
         if audit_dsn:
             _own_role_classes.add("auditreader")
