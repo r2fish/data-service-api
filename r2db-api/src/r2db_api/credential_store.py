@@ -95,23 +95,24 @@ DEFAULT_SCHEMA = "r2dbsvc_registry"
 DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS = 5000
 DEFAULT_AUDIT_IDLE_TIMEOUT_MS = 5000
 
-# Opus review minor m-5: the control plane's own last-active-control-
-# credential gate (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3)
-# takes a real `FOR UPDATE` lock across every control-credential row for
-# the duration of `control_credentials_unit_of_work` (`PostgresControl
-# CredentialStore.list_all_for_update`) -- the same kind of lock-holding
-# transaction `postgres.py`'s own `_set_timeouts` already bounds with a
-# `SET LOCAL lock_timeout` on the DATA plane, so the control plane needs
-# the identical discipline: a request that would otherwise wait forever
+# the control plane's own last-active-control-credential gate (design
+# docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3) takes a real `FOR UPDATE`
+# lock across every control-credential row for the duration of
+# `control_credentials_unit_of_work`
+# (`PostgresControlCredentialStore.list_all_for_update`) -- the same kind of
+# lock-holding transaction `postgres.py`'s own `_set_timeouts` already bounds
+# with a `SET LOCAL lock_timeout` on the DATA plane, so the control plane
+# needs the identical discipline: a request that would otherwise wait forever
 # behind a stuck/slow concurrent transaction must instead fail
 # deterministically. Reuses `ResourceLimits`'s own default `execution_ms`
 # (5000ms) for consistency with the data plane's own default budget --
 # `ControlPlaneLimits` has no `execution_ms`-shaped field of its own to
 # derive this from (R-7's 3 control-plane resource classes are
-# applications/credentials_per_application/control_requests_per_minute,
-# none of which is a lock/statement-timeout bound), so this is a fixed
-# constant here rather than a configurable one, unlike the data plane's
-# per-request budget.
+# applications/credentials_per_application/control_requests_per_minute, none
+# of which is a lock/statement-timeout bound), so this is a fixed constant
+# here rather than a configurable one, unlike the data plane's per-request
+# budget.
+# history: CH-0381
 _CONTROL_LOCK_TIMEOUT_MS = 5000
 
 
@@ -136,12 +137,13 @@ class _PostgresWork:
 # tuple-unpacking helpers that follow stay in one place instead of being
 # repeated (and risking drifting out of sync) at every call site.
 _COLUMNS = "c.credential_id, c.application_slug, c.role, c.verifier, c.enabled, c.revoked"
-# Phase 6 WP-2 (design D-1(c)): `_SELECT_BY_VERIFIER` (the pre-WP-2
-# digest-keyed lookup) is REMOVED, not merely unused -- authentication is
-# now a locator lookup (`_SELECT_BY_ID`, below) followed by `compare_
-# digest`, never a `WHERE verifier = ...` scan. `_SELECT_BY_ID` was
-# already this store's `assert_active`/`canonical_context`/
-# `application_id_for` lookup; `authenticate` now shares it too.
+# `_SELECT_BY_VERIFIER` (the digest-keyed lookup) is REMOVED, not merely
+# unused -- authentication is now a locator lookup (`_SELECT_BY_ID`, below)
+# followed by `compare_digest`, never a `WHERE verifier = ...` scan.
+# `_SELECT_BY_ID` was already this store's
+# `assert_active`/`canonical_context`/`application_id_for` lookup;
+# `authenticate` now shares it too.
+# history: CH-0383
 _SELECT_BY_ID = "SELECT {columns}, a.enabled FROM {credentials} c JOIN {applications} a ON a.application_slug = c.application_slug WHERE c.credential_id = {ph}"
 
 # Phase 6 WP-2 (design D-1(c), r2db decision (c)'s own "control 側にも
@@ -156,19 +158,21 @@ _CONTROL_SELECT_BY_ID = "SELECT credential_id, verifier, enabled, revoked, must_
 
 
 def _execute(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] | Mapping[str, Any] = ()) -> None:
-    """The single execution choke point for this file -- mirrors `postgres.
-    py::_run`'s identical role there. Typed to accept only a composed
-    psycopg SQL object, never `str`, so a raw string cannot reach the
-    database from anywhere in this module (D-4).
+    """The single execution choke point for this file -- mirrors
+    `postgres.py::_run`'s identical role there. Typed to accept only a
+    composed psycopg SQL object, never `str`, so a raw string cannot reach
+    the database from anywhere in this module.
 
-    Phase 4 WP-2(b): `params` now also accepts a `Mapping` (psycopg3's own
-    `%(name)s`-style binding) -- `PostgresAuditQueryStore.query`'s own
-    `audit_query` UNION statement below reuses several parameters (the
-    visibility-lag threshold, the cursor triple, the class filter) at
-    multiple positions in the composed SQL text, which named binding
-    expresses far more directly than repeating the same positional
-    placeholder object many times. Every pre-existing caller in this file
-    still passes a `Sequence`, unaffected.
+    `params` now also accepts a `Mapping` (psycopg3's own `%(name)s`-style
+    binding) -- `PostgresAuditQueryStore.query`'s own `audit_query` UNION
+    statement below reuses several parameters (the visibility-lag
+    threshold, the cursor triple, the class filter) at multiple positions
+    in the composed SQL text, which named binding expresses far more
+    directly than repeating the same positional placeholder object many
+    times. Every pre-existing caller in this file still passes a
+    `Sequence`, unaffected.
+
+    History: CH-0384
     """
     if not isinstance(statement, (sql.Composed, sql.SQL)):
         raise TypeError("credential_store.py only executes psycopg.sql.Composed/SQL objects, never str")
@@ -478,8 +482,11 @@ class PostgresCredentialStore:
 
     def count_active_for_application(self, application_id: str) -> int:
         """`auth.CredentialStore.count_active_for_application`'s Postgres
-        counterpart (R-7 `credentials_per_application`: revoked rows are
-        never counted)."""
+        counterpart (`credentials_per_application`: revoked rows are
+        never counted).
+
+        History: CH-0386
+        """
         statement = sql.SQL("SELECT count(*) FROM {table} WHERE application_slug = {ph} AND NOT revoked").format(table=self._credentials_table, ph=sql.Placeholder())
         row = self._fetch_or_503(statement, [application_id])
         return int(row[0]) if row is not None else 0
@@ -594,26 +601,29 @@ class PostgresCredentialStore:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
 
     def rotate(self, credential_id: str, secret: str, *, work: _PostgresWork) -> str:
-        """Not part of `auth.CredentialStore`'s call surface (that class has
-        no rotation concept at all) -- added here because `python -m
-        r2db_api.ops rotate-credential` (P2-D6) needs exactly this one extra
-        operation, and computing/writing a verifier is already this class's
-        own responsibility; duplicating that SQL a second time in `ops.py`
-        would only risk the two copies drifting apart. P2-D6: "同一
-        credential_id の verifier を差し替える" -- rotation reuses the
-        existing `credential_id`, `role`, and `application_slug`, replacing
-        only `verifier` (so the old secret stops authenticating and the new
-        one starts, with no other lifecycle state introduced). Unchanged by
-        WP-2: this method still does not check `revoked` (§8 M-2's finding
-        about this exact method -- see `auth.CredentialStore.rotate`'s
-        docstring for why the new in-memory `rotate` was written to match
-        this, not the other way around). `work` is required (round-2
-        ruling (A)).
+        """Not part of `auth.CredentialStore`'s call surface (that class
+        has no rotation concept at all) -- added here because
+        `python -m r2db_api.ops rotate-credential` (P2-D6) needs
+        exactly this one extra operation, and computing/writing a
+        verifier is already this class's own responsibility;
+        duplicating that SQL a second time in `ops.py` would only risk
+        the two copies drifting apart. P2-D6: "同一 credential_id の
+        verifier を差し替える" -- rotation reuses the existing
+        `credential_id`, `role`, and `application_slug`, replacing only
+        `verifier` (so the old secret stops authenticating and the new
+        one starts, with no other lifecycle state introduced). this
+        method still does not check `revoked` (§8 M-2's finding about
+        this exact method -- see `auth.CredentialStore.rotate`'s
+        docstring for why the new in-memory `rotate` was written to
+        match this, not the other way around). `work` is required
+        (round-2 ruling (A)).
 
-        Rework (coordinator follow-up, 2026-09-04 audit finding §3-A):
-        returns the composed bearer (`auth.compose_bearer_locator(
-        credential_id, secret)`) -- `ops.py cmd_rotate_credential` now uses
-        this return value verbatim instead of composing it itself.
+        Rework (coordinator follow-up audit finding §3-A): returns the
+        composed bearer (`auth.compose_bearer_locator(credential_id,
+        secret)`) -- `ops.py cmd_rotate_credential` now uses this
+        return value verbatim instead of composing it itself.
+
+        History: CH-0388
         """
         verifier = self.verifier(secret)
         statement = sql.SQL(
@@ -681,24 +691,26 @@ class PostgresCredentialStore:
 
 
 def validate_control_pepper_separation(app_pepper: str | None, control_pepper: str | None) -> None:
-    """R-2: wherever a process' configuration carries *both* the
-    application-plane pepper (`R2DB_CREDENTIAL_PEPPER`) and the
-    control-plane pepper (`R2DB_CONTROL_CREDENTIAL_PEPPER`), the two values
-    must differ. An operator who (by mistake, e.g. copy-paste from one
-    secret-manager entry to both env var names) configures them identically
-    would make an application credential's verifier and a control
-    credential's verifier collide under the same underlying secret string --
-    silently punching a hole through R-2's "control credential storage is
-    unreadable from the application plane" wall via pepper reuse rather than
-    any table/grant mistake.
+    """wherever a process' configuration carries *both* the application-plane
+    pepper (`R2DB_CREDENTIAL_PEPPER`) and the control-plane pepper
+    (`R2DB_CONTROL_CREDENTIAL_PEPPER`), the two values must differ. An
+    operator who (by mistake, e.g. copy-paste from one secret-manager entry
+    to both env var names) configures them identically would make an
+    application credential's verifier and a control credential's verifier
+    collide under the same underlying secret string -- silently punching a
+    hole through R-2's "control credential storage is unreadable from the
+    application plane" wall via pepper reuse rather than any table/grant
+    mistake.
 
     Called from `ops.py`'s control-credential ritual/break-glass command
     constructors today -- design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md
     §1 R-2 calls this "共通経路" (a shared path): a future composition root
-    that ever constructs both an application-plane and a control-plane store
-    in the same process must call this too, which is why this lives here
-    (imported by both `ops.py` and, in the future, `main.py`/`control_main.
+    that ever constructs both an application-plane and a control-plane
+    store in the same process must call this too, which is why this lives
+    here (imported by both `ops.py` and, in the future, `main.py`/`control_main.
     py`) rather than being duplicated at each call site.
+
+    History: CH-0390
     """
     if app_pepper and control_pepper and app_pepper == control_pepper:
         raise ValueError("R2DB_CREDENTIAL_PEPPER and R2DB_CONTROL_CREDENTIAL_PEPPER must not be equal")
@@ -752,14 +764,16 @@ class PostgresControlCredentialStore:
     @contextmanager
     def unit_of_work(self) -> Iterator[_PostgresWork]:
         with self._pool.connection() as conn:
-            # Opus review minor m-5: `SET LOCAL lock_timeout`, mirroring
-            # `postgres.py`'s own `_set_timeouts` (data plane) -- scoped to
-            # this transaction only (discarded on commit/rollback, never
-            # leaking onto the next transaction this pooled connection is
-            # reused for). Bounds the last-active-control-credential gate's
-            # own `FOR UPDATE` lock wait (`list_all_for_update`) so a
-            # concurrent lock holder that never releases cannot wedge this
-            # transaction open indefinitely.
+            # `SET LOCAL lock_timeout`, mirroring `postgres.py`'s
+            # own `_set_timeouts` (data plane) -- scoped to this
+            # transaction only (discarded on commit/rollback,
+            # never leaking onto the next transaction this pooled
+            # connection is reused for). Bounds the
+            # last-active-control-credential gate's own
+            # `FOR UPDATE` lock wait (`list_all_for_update`) so a
+            # concurrent lock holder that never releases cannot
+            # wedge this transaction open indefinitely.
+            # history: CH-0392
             with conn.cursor() as cur:
                 _execute(cur, sql.SQL("SET LOCAL lock_timeout = {t}").format(t=sql.Literal(f"{_CONTROL_LOCK_TIMEOUT_MS}ms")), [])
             work = _PostgresWork(conn)
@@ -776,11 +790,13 @@ class PostgresControlCredentialStore:
         return hmac.new(self._pepper, secret.encode(), hashlib.sha256).hexdigest()
 
     def authenticate(self, secret: str | None) -> ControlAuthContext:
-        """Phase 6 WP-2 (design D-1(c)): locator-then-digest, mirroring
-        `PostgresCredentialStore.authenticate`'s own rewrite above -- see
-        that method's docstring for the full rationale. The former inline
-        `WHERE verifier = {ph}` lookup is gone; this now shares `_CONTROL_
-        SELECT_BY_ID` with `assert_active` below.
+        """locator-then-digest, mirroring
+        `PostgresCredentialStore.authenticate`'s own rewrite above --
+        see that method's docstring for the full rationale. The former
+        inline `WHERE verifier = {ph}` lookup is gone; this now shares
+        `_CONTROL_SELECT_BY_ID` with `assert_active` below.
+
+        History: CH-0393
         """
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
@@ -833,21 +849,25 @@ class PostgresControlCredentialStore:
     # ---- write path (ritual-only: `ops.py`'s bootstrap/reset/break-glass) --
 
     def add(self, credential_id: str, secret: str, *, role: str = "control", work: _PostgresWork) -> None:
-        """Only reachable through `ops.py` (connected as `r2dbsvc_control`)
-        -- `r2dbsvc_controlplane` (0006) is never granted INSERT on this
-        table at all, so calling this against a control-plane-process
-        connection fails at the database-privilege level (R-3), independent
-        of this Python-level restriction. `work` is required (round-2
-        ruling (A) -- see `PostgresCredentialStore.add`'s docstring for the
-        full history).
+        """Only reachable through `ops.py` (connected as
+        `r2dbsvc_control`) -- `r2dbsvc_controlplane` (0006) is never
+        granted INSERT on this table at all, so calling this against a
+        control-plane-process connection fails at the
+        database-privilege level, independent of this Python-level
+        restriction. `work` is required (round-2 ruling (A) -- see
+        `PostgresCredentialStore.add`'s docstring for the full
+        history).
 
-        Phase 3.5 WP-4: `role` defaults to `"control"` (every pre-WP-4 caller
-        -- `bootstrap_control_credential`/`reset_control_credentials` --
-        is unaffected); `"audit"` is the one other accepted value, used only
-        by `issue_audit_credential_ceremony` below. The table's own `CHECK
-        (role IN ('control', 'audit'))` (0006, in-place WP-4 revision) is the
-        authoritative enforcement; this Python-level check exists only to
-        surface a clean `VALIDATION_FAILED` before ever reaching SQL.
+        `role` defaults to `"control"` (every pre-WP-4 caller --
+        `bootstrap_control_credential`/`reset_control_credentials` --
+        is unaffected); `"audit"` is the one other accepted value, used
+        only by `issue_audit_credential_ceremony` below. The table's
+        own `CHECK (role IN ('control', 'audit'))` (0006, in-place
+        revision) is the authoritative enforcement; this Python-level
+        check exists only to surface a clean `VALIDATION_FAILED` before
+        ever reaching SQL.
+
+        History: CH-0394
         """
         if role not in {"control", "audit"}:
             fail("VALIDATION_FAILED", "Control-table credentials require control or audit role.")
@@ -900,9 +920,11 @@ class PostgresControlCredentialStore:
         worse error for the caller than the dedicated `VALIDATION_FAILED`
         this gives instead). `work` is required (round-2 ruling (A)).
 
-        Rework (coordinator follow-up, 2026-09-04 audit finding §3-A):
-        returns the composed bearer -- `ops.py cmd_rotate_control_
-        credential` now uses this return value verbatim.
+        Rework (coordinator follow-up audit finding §3-A): returns the
+        composed bearer -- `ops.py cmd_rotate_control_credential` now
+        uses this return value verbatim.
+
+        History: CH-0395
         """
         verifier = self.verifier(secret)
         select_statement = sql.SQL("SELECT revoked FROM {table} WHERE credential_id = {id_ph} FOR UPDATE").format(
@@ -930,13 +952,13 @@ class PostgresControlCredentialStore:
         return compose_bearer_locator(credential_id, secret)
 
     def has_any(self, *, include_revoked: bool = True, work: _PostgresWork | None = None) -> bool:
-        """§8 M-6: bootstrap's existence check, real-row semantics -- see
+        """bootstrap's existence check, real-row semantics -- see
         `auth.ControlCredentialStore.has_any`'s identical docstring.
 
-        `work` is a **read-only**, optional parameter (this is not one of
-        the state-changing methods ruling (A) requires `work` on): when
-        omitted, this runs as a plain standalone read on its own pooled
-        connection, exactly as round 1 of this WP had it. When supplied
+        `work` is a **read-only**, optional parameter (this is not one
+        of the state-changing methods ruling (A) requires `work` on):
+        when omitted, this runs as a plain standalone read on its own
+        pooled connection, exactly as round 1 of this WP had it. When supplied
         (MA-3, round-2 review: closing the TOCTOU gap between a standalone
         existence check and the subsequent `add` -- two concurrent
         bootstraps could both observe "no row" before either committed),
@@ -946,6 +968,8 @@ class PostgresControlCredentialStore:
         called (`ops.py cmd_bootstrap`/`cmd_reset`), a second concurrent
         ritual invocation blocks until the first commits or rolls back, and
         then sees its row.
+
+        History: CH-0396
         """
         if include_revoked:
             statement = sql.SQL("SELECT EXISTS(SELECT 1 FROM {table})").format(table=self._table)
@@ -967,9 +991,11 @@ class PostgresControlCredentialStore:
             raise  # unreachable; fail() always raises
 
     def revoke_all(self, *, work: _PostgresWork) -> None:
-        """Reset's "revoke every existing control credential" step (R-5) --
-        see `auth.ControlCredentialStore.revoke_all`'s identical docstring.
+        """Reset's "revoke every existing control credential" step -- see
+        `auth.ControlCredentialStore.revoke_all`'s identical docstring.
         `work` is required (round-2 ruling (A)).
+
+        History: CH-0397
         """
         statement = sql.SQL("UPDATE {table} SET revoked = true, updated_at = now() WHERE NOT revoked").format(table=self._table)
         try:
@@ -1009,28 +1035,32 @@ class PostgresControlCredentialStore:
             raise  # unreachable; fail() always raises
 
     def list_all_for_update(self, work: _PostgresWork) -> list[tuple[str, bool, bool, str]]:
-        """Row-locking counterpart to `list_all` above, used exclusively by
-        `ControlPlaneService.revoke_credential`'s last-active-control-
-        credential destructive-confirmation gate (design docs/design/
-        DESTRUCTIVE_CONFIRMATION_V1.md R-3, WP-0 MA-2). `FOR UPDATE` with no
-        `WHERE` locks every row in this table for the remainder of `work`'s
-        transaction -- the gate's own count of active rows must not be able
-        to change between this read and the state-changing `UPDATE`
-        (`set_state`) that follows in the SAME transaction, closing the
-        TOCTOU window a standalone count-then-write would leave between two
-        concurrent revokes each independently observing "count = 2" and
-        both proceeding unconfirmed. A concurrent `rotate`/`set_state`
-        call's own single-row `SELECT ... FOR UPDATE` (see those methods
-        above) blocks against this same lock too, since it necessarily
-        locks a row this statement has already locked.
+        """Row-locking counterpart to `list_all` above, used exclusively
+        by `ControlPlaneService.revoke_credential`'s
+        last-active-control-credential destructive-confirmation gate
+        (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3, WP-0 MA-2).
+        `FOR UPDATE` with no `WHERE` locks every row in this table for
+        the remainder of `work`'s transaction -- the gate's own count
+        of active rows must not be able to change between this read and
+        the state-changing `UPDATE` (`set_state`) that follows in the
+        SAME transaction, closing the TOCTOU window a standalone
+        count-then-write would leave between two concurrent revokes
+        each independently observing "count = 2" and both proceeding
+        unconfirmed. A concurrent `rotate`/`set_state` call's own
+        single-row `SELECT ... FOR UPDATE` (see those methods above)
+        blocks against this same lock too, since it necessarily locks a
+        row this statement has already locked.
 
-        Phase 3.5 WP-4: `role` is now selected too -- the gate's own "active"
-        count (`ControlPlaneService.revoke_credential`) must count only
-        `role="control"` rows; an `"audit"` credential existing alongside the
-        sole active control credential must not be allowed to mask that
-        control credential as "not the last one" (an audit credential cannot
-        perform any control-plane management operation at all, so it does
-        not relieve the lockout the gate exists to prevent).
+        `role` is now selected too -- the gate's own "active" count
+        (`ControlPlaneService.revoke_credential`) must count only
+        `role="control"` rows; an `"audit"` credential existing
+        alongside the sole active control credential must not be
+        allowed to mask that control credential as "not the last one"
+        (an audit credential cannot perform any control-plane
+        management operation at all, so it does not relieve the lockout
+        the gate exists to prevent).
+
+        History: CH-0399
         """
         statement = sql.SQL("SELECT credential_id, enabled, revoked, role FROM {table} ORDER BY credential_id FOR UPDATE").format(table=self._table)
         try:
@@ -1102,10 +1132,13 @@ class PostgresApplicationRegistry:
                 raise
 
     def register(self, application_id: str, *, work: _PostgresWork) -> None:
-        """Registration-only `INSERT` -- every provisioning column (`database_
-        name`/`runtime_role`/`developer_role`/`provisioned_at`) is omitted, so
-        each stays `NULL`, satisfying 0006's two-state CHECK as a "registered,
-        not yet provisioned" row (R-4)."""
+        """Registration-only `INSERT` -- every provisioning column
+        (`database_name`/`runtime_role`/`developer_role`/`provisioned_at`)
+        is omitted, so each stays `NULL`, satisfying 0006's two-state
+        CHECK as a "registered, not yet provisioned" row.
+
+        History: CH-0400
+        """
         statement = sql.SQL("INSERT INTO {table} (application_slug) VALUES ({ph})").format(table=self._table, ph=sql.Placeholder())
         try:
             with work.connection.cursor() as cur:
@@ -1307,12 +1340,15 @@ class PostgresControlAuditSink:
 
     def borrow_connection(self):
         """Q4 phase WP-1 rework (rulings-q4-wp12-rework.md sec.1): exposes
-        this sink's OWN pool so `platform_declarations.check_writer_role_
-        timeouts` can run its dual check on a connection whose login role
-        actually IS the `control_audit` writer role (`r2dbsvc_
-        controlplane`) -- a role setting only takes effect at login time,
-        so no other connection would observe this role's true effective
-        value (design D-1(c))."""
+        this sink's OWN pool so
+        `platform_declarations.check_writer_role_timeouts` can run its
+        dual check on a connection whose login role actually IS the
+        `control_audit` writer role (`r2dbsvc_controlplane`) -- a role
+        setting only takes effect at login time, so no other connection
+        would observe this role's true effective value.
+
+        History: CH-0402
+        """
         return self._pool.connection()
 
     def effective_timeouts_ms(self) -> dict[str, int]:
@@ -1379,13 +1415,13 @@ class PostgresControlAuditSink:
         Design §0: "読み取りsurface(events())はin-memory/Postgres双方に用意
         (WP-5のportcontrol_audit_events()とWP-6のaudit-reportが使う)".
 
-        Round-2 review MI-8: routed through `_execute` (D-4's single
-        execution choke point, like every other statement in this file) and
-        the module's own `psycopg.Error` -> `AUTH_STATE_UNAVAILABLE` (503)
-        discipline (`_fetch_or_503`'s pattern) -- this method previously
-        called `cur.execute` directly and let a connection failure propagate
-        as a raw `psycopg.Error`, the one read path in this file that had not
-        been brought under that discipline yet.
+        routed through `_execute` (D-4's single execution choke point,
+        like every other statement in this file) and the module's own
+        `psycopg.Error` -> `AUTH_STATE_UNAVAILABLE` (503) discipline
+        (`_fetch_or_503`'s pattern) -- this method previously called
+        `cur.execute` directly and let a connection failure propagate
+        as a raw `psycopg.Error`, the one read path in this file that
+        had not been brought under that discipline yet.
 
         WP-5 round-2 review NIT-4: `ORDER BY recorded_at` alone is not a
         total order -- `recorded_at` is `DEFAULT now()`, a single
@@ -1400,6 +1436,8 @@ class PostgresControlAuditSink:
         "some order consistent with `recorded_at`" -- `event_id` (the
         primary key, application-generated per `AuditSink.append`) is the
         deterministic tiebreaker.
+
+        History: CH-0403
         """
         statement = sql.SQL("SELECT {columns} FROM {table} ORDER BY recorded_at, event_id").format(
             columns=sql.SQL(", ").join(sql.Identifier(name) for name in _CONTROL_AUDIT_COLUMNS), table=self._table
@@ -1542,16 +1580,18 @@ class PostgresApplicationAuditSink:
             conn.commit()
 
     def append_many(self, events: "list[Any]") -> None:
-        """D-4's buffer flush: every buffered `audit.AuditEvent` in
-        `events` is written as one multi-row `INSERT` on one connection/
-        transaction -- either the whole batch commits or (on failure) none
-        of it does, exactly like `audit.ApplicationAuditSink.append_many`'s
-        in-memory all-or-nothing behaviour (D-10 parity). A `psycopg.Error`
-        propagates to the caller unchanged; `service.py`'s buffer-flush
-        logic treats a failed flush as lost events (D-4: buffer content is
-        a best-effort channel, the overflow-alert mechanism -- not a
-        per-batch retry queue -- is SI-14's "explicit operational alert"
-        answer to that loss).
+        """every buffered `audit.AuditEvent` in `events` is written as one
+        multi-row `INSERT` on one connection/transaction -- either the
+        whole batch commits or (on failure) none of it does, exactly
+        like `audit.ApplicationAuditSink.append_many`'s in-memory
+        all-or-nothing behaviour (D-10 parity). A `psycopg.Error` propagates
+        to the caller unchanged; `service.py`'s buffer-flush logic
+        treats a failed flush as lost events (D-4: buffer content is a
+        best-effort channel, the overflow-alert mechanism -- not a
+        per-batch retry queue -- is SI-14's "explicit operational
+        alert" answer to that loss).
+
+        History: CH-0406
         """
         if not events:
             return
@@ -1671,19 +1711,21 @@ _AUDIT_QUERY_ROW_COLUMNS = (
 
 
 class PostgresAuditQueryStore:
-    """Phase 4 WP-2(b) (design D-5/D-6): `audit_query`'s Postgres reader --
-    the dedicated, SELECT-only `r2dbsvc_auditreader` role (migration
-    `0007_application_audit.sql` §1.3), reading BOTH `control_audit` and
-    `application_audit` over one connection (D-1(b): a single platform DB
-    is what makes this possible without an N-database fan-out). Never
-    shares a pool/DSN with any writer role or with `r2dbsvc_controlplane`
-    (D-5's own "別 DSN" requirement -- `r2dbsvc_controlplane` receives no
-    grant on either audit table at all, migration 0007 §1.3 note 5).
+    """`audit_query`'s Postgres reader -- the dedicated, SELECT-only
+    `r2dbsvc_auditreader` role (migration `0007_application_audit.sql`
+    §1.3), reading BOTH `control_audit` and `application_audit` over one
+    connection (D-1(b): a single platform DB is what makes this possible
+    without an N-database fan-out). Never shares a pool/DSN with any writer
+    role or with `r2dbsvc_controlplane` (D-5's own "別 DSN" requirement --
+    `r2dbsvc_controlplane` receives no grant on either audit table at all,
+    migration 0007 §1.3 note 5).
 
-    `InMemoryAuditQueryStore` (`audit_query.py`) is this class's in-memory
-    pair (D-10) -- both implement the same `AuditQueryReader` call surface
-    and are exercised by the identical parity test
+    `InMemoryAuditQueryStore` (`audit_query.py`) is this class's in-memory pair -- both
+    implement the same `AuditQueryReader` call surface and are exercised by
+    the identical parity test
     (`test_in_memory_and_postgres_audit_query_semantics_have_parity`).
+
+    History: CH-0407
     """
 
     def __init__(
