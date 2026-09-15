@@ -448,6 +448,51 @@ def test_gate_catalog_diff():
     assert gate.diff(before, {"pg_database": ["a", "b", "c"], "pg_roles": []}) == ["pg_database +1 -0", "pg_roles +0 -1"]
 
 
+def _gate_main_with_catalogs(tmp_path, monkeypatch, capsys, before, after):
+    """gate.main with the catalog snapshots and the suite run injected (no database, no pytest)."""
+    monkeypatch.setenv("SP", str(tmp_path / "sp"))
+    monkeypatch.setattr(dl, "wait_clear", lambda *a, **k: [])
+    snaps = iter([before, after])
+    monkeypatch.setattr(gate, "snapshot", lambda: next(snaps))
+
+    def fake_run(cmd, cwd, log):
+        log.write_text("....\n3 passed in 1.00s\n", encoding="utf-8")
+        return 0, []
+
+    monkeypatch.setattr(gate, "run_watched", fake_run)
+    code = gate.main(["--hold", str(tmp_path / "gate-hold.flag"), "--python", sys.executable, "-C", str(tmp_path)])
+    out = capsys.readouterr().out.splitlines()
+    return code, out, Path(out[-1].split("log=", 1)[1]).read_text(encoding="utf-8")
+
+
+def test_gate_names_catalog_changes_in_log_and_bounded_stdout(tmp_path, monkeypatch, capsys):
+    dbs = [f"t_db_{i:02d}" for i in range(12)]
+    code, out, log = _gate_main_with_catalogs(
+        tmp_path, monkeypatch, capsys,
+        {"pg_database": ["postgres", *reversed(dbs)], "pg_roles": ["postgres", "t_role_b", "t_role_a"]},
+        {"pg_database": ["postgres", "t_new"], "pg_roles": ["postgres"]})
+    assert code == 1
+    assert out[:2] == ["gate: 3 passed in 1.00s", "gate: judge=FAIL (pg_database +1 -12, pg_roles +0 -2)"]
+    assert out[2:-1] == [
+        "gate: pg_database added (1): t_new",
+        f"gate: pg_database removed (12): {', '.join(dbs[:10])}, ... +2 more",
+        "gate: pg_roles removed (2): t_role_a, t_role_b",
+    ]
+    assert "t_db_10" not in "\n".join(out)
+    assert out[-1].startswith("gate: pg_database/pg_roles diff pg_database +1 -12, pg_roles +0 -2 | log=")
+    assert log.startswith("....\n3 passed in 1.00s\n")
+    section = log.split(f"== {gate.LOG_SECTION}", 1)[1].splitlines()[1:]
+    assert section == ["pg_database added (1):", "  t_new", "pg_database removed (12):", *[f"  {d}" for d in dbs],
+                       "pg_roles removed (2):", "  t_role_a", "  t_role_b"]
+
+
+def test_gate_no_catalog_change_prints_no_names(tmp_path, monkeypatch, capsys):
+    snap = {"pg_database": ["postgres"], "pg_roles": ["postgres"]}
+    code, out, log = _gate_main_with_catalogs(tmp_path, monkeypatch, capsys, snap, dict(snap))
+    assert code == 0 and len(out) == 3 and out[1] == "gate: judge=PASS"
+    assert log.split(f"== {gate.LOG_SECTION}", 1)[1].splitlines()[1:] == ["0"]
+
+
 def test_gate_rejects_hold_dash():
     assert gate.main(["--hold", "-", "--python", sys.executable]) == dl.ERROR
 

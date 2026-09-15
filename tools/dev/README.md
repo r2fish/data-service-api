@@ -27,6 +27,7 @@ Common behaviour:
 - Gate-hold flag: `--hold PATH`, else `$GATE_HOLD_FLAG`, else `$SP/gate-hold.flag`. `--hold -` states that the session has no supervisor gate. With none of these the tools refuse instead of assuming "no hold".
 - Other pytest processes are counted by executable name (python / pytest) excluding the caller's own process chain, so the check never matches its own shell.
 - Full output goes to `$SP/dev-logs/`; stdout carries only tally lines, failures and the log path.
+- `gate.py` names the databases and roles behind a non-empty `pg_database` / `pg_roles` diff: all of them, sorted, in a section appended to the end of the log; the first 10 of each list on stdout, before the log path. Any diff is still FAIL.
 - Exit codes stay clear of pytest's 0-5: 75 refused to start (hold flag, other pytest, unfinished mutation journal), 76 finalize committed but not merged, 70 restore failed, 78 precondition error.
 - `mutate.py` writes a journal in the worktree's git dir before editing; if the run is killed, `pt.py` / `finalize.py` / `mutate.py` refuse until `tools/dev/mutate.py --recover -C WT` restores.
 
