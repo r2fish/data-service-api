@@ -948,6 +948,20 @@ it with `CAPABILITY_UNSUPPORTED`, not a second copy of that refusal
 at this layer.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-3e -- `_TRANSACT_INSERT_KEYS`/`_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS` moved to `request_vocabulary.py`; the pointer gets a 40c position bracket
+
+old:
+```
+Otherwise identical field-by-field mapping onto `ApplicationCell.transact`'s own operation-dict vocabulary (`_TRANSACT_INSERT_KEYS`/`_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS` in `cell.py`) -- an unsupported key (`expected_revision`/`unique_key`) still rides along here exactly as `_mutation_item` lets it, so `transact()`'s own single choke refuses it with `CAPABILITY_UNSUPPORTED`, not a second copy of that refusal at this layer.
+```
+
+new:
+```
+Otherwise identical field-by-field mapping onto `ApplicationCell.transact`'s own operation-dict vocabulary (`_TRANSACT_INSERT_KEYS`/`_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS` in `cell.py` (now in `request_vocabulary.py`)) -- an unsupported key (`expected_revision`/`unique_key`) still rides along here exactly as `_mutation_item` lets it, so `transact()`'s own single choke refuses it with `CAPABILITY_UNSUPPORTED`, not a second copy of that refusal at this layer.
+```
+
 ## CH-0222
 
 - moved from: `src/mitatedb_api/http.py` (`<module>`)
@@ -1079,6 +1093,20 @@ matches `post_mutate`'s own response shape exactly).
 # entity is created, is the same "reject an unread capability-
 # shaped key before execution" discipline `cell.py`'s own
 # `_TRANSACT_INSERT_KEYS` already applies to `transact()`.
+```
+
+### correction: 2026-09-15
+
+- reason: R-37 WP-3e -- `_TRANSACT_INSERT_KEYS` moved to `request_vocabulary.py`; the pointer gets a 40c position bracket
+
+old:
+```
+`field_type` has no per-field association on `create_entity` at all (only a single, request-level slot -- see the comment below), so there is no way to honor it here; refusing it explicitly, before any entity is created, is the same "reject an unread capability-shaped key before execution" discipline `cell.py`'s own `_TRANSACT_INSERT_KEYS` already applies to `transact()`.
+```
+
+new:
+```
+`field_type` has no per-field association on `create_entity` at all (only a single, request-level slot -- see the comment below), so there is no way to honor it here; refusing it explicitly, before any entity is created, is the same "reject an unread capability-shaped key before execution" discipline `cell.py`'s own `_TRANSACT_INSERT_KEYS` (now in `request_vocabulary.py`) already applies to `transact()`.
 ```
 
 ## CH-0229

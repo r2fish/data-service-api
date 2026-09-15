@@ -47,7 +47,7 @@ def _delete_confirmation_phrase(collection, filters, schema_revision):
     digest16 is the first 16 hex characters of the SHA-256 of
     `_canonical_where_json(filters)`; `schema_revision` is this
     application's current schema-revision counter (P3 WP-1 round 2
-    instruction #5 -- see the module-level comment above (in `cell.py`)
+    instruction #5 -- see the module-level comment above (in `cell.py`) (now in `request_vocabulary.py`)
     `_DELETE_CONSEQUENCE` for why this was added). `collection` must
     already be identifier-validated by the caller (contract
     `phrase_construction` rule "only identifier-validated target names")

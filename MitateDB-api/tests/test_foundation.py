@@ -1264,6 +1264,94 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(entry["field_types"]["typed"], "integer")
         self.assertEqual(entry["field_types"]["untyped"], "json")
 
+    def test_request_vocabulary_leaf_preserves_cell_facade(self):
+        """R-37 WP-3e (CE5): `cell.py` reads its seven request-vocabulary
+        constants (`_CONTRACT_MUTATION_VOCABULARY`/`_TRANSACT_INSERT_KEYS`/
+        `_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS`/`_FIELD_TYPE_
+        VOCABULARY`/`_UNSUPPORTED_CONTRACT_OPERATORS`/`_DELETE_CONSEQUENCE`)
+        from the new leaf `request_vocabulary.py` as the exact same
+        objects -- this checks facade identity only, not value shape (the
+        dedicated test below pins the literal values)."""
+        from mitatedb_api import cell
+        from mitatedb_api import request_vocabulary
+
+        names = [
+            "_CONTRACT_MUTATION_VOCABULARY",
+            "_TRANSACT_INSERT_KEYS",
+            "_TRANSACT_UPDATE_KEYS",
+            "_TRANSACT_DELETE_KEYS",
+            "_FIELD_TYPE_VOCABULARY",
+            "_UNSUPPORTED_CONTRACT_OPERATORS",
+            "_DELETE_CONSEQUENCE",
+        ]
+        for name in names:
+            self.assertIs(getattr(cell, name), getattr(request_vocabulary, name), name)
+
+    def test_request_vocabulary_constants_are_literal(self):
+        """R-37 WP-3e (CE5): the seven request-vocabulary constants keep
+        their exact pre-move values after the move to `request_vocabulary.
+        py` -- a literal pin, not merely a facade-identity check."""
+        from mitatedb_api.request_vocabulary import (
+            _CONTRACT_MUTATION_VOCABULARY,
+            _DELETE_CONSEQUENCE,
+            _FIELD_TYPE_VOCABULARY,
+            _TRANSACT_DELETE_KEYS,
+            _TRANSACT_INSERT_KEYS,
+            _TRANSACT_UPDATE_KEYS,
+            _UNSUPPORTED_CONTRACT_OPERATORS,
+        )
+
+        self.assertEqual(_CONTRACT_MUTATION_VOCABULARY, {"insert", "update", "upsert", "delete"})
+        self.assertIs(type(_CONTRACT_MUTATION_VOCABULARY), set)
+        self.assertEqual(_TRANSACT_INSERT_KEYS, {"type", "collection", "values", "idempotency_key"})
+        self.assertIs(type(_TRANSACT_INSERT_KEYS), set)
+        self.assertEqual(
+            _TRANSACT_UPDATE_KEYS, {"type", "collection", "values", "filters", "idempotency_key"})
+        self.assertIs(type(_TRANSACT_UPDATE_KEYS), set)
+        self.assertEqual(
+            _TRANSACT_DELETE_KEYS,
+            {"type", "collection", "values", "filters", "destructive", "confirm", "idempotency_key"},
+        )
+        self.assertIs(type(_TRANSACT_DELETE_KEYS), set)
+        self.assertEqual(_FIELD_TYPE_VOCABULARY, frozenset({"text", "integer", "real", "boolean", "json"}))
+        self.assertIs(type(_FIELD_TYPE_VOCABULARY), frozenset)
+        self.assertEqual(_UNSUPPORTED_CONTRACT_OPERATORS, {"contains", "matches", "is_null"})
+        self.assertIs(type(_UNSUPPORTED_CONTRACT_OPERATORS), set)
+        self.assertEqual(
+            _DELETE_CONSEQUENCE,
+            "The rows matching this delete's filters are permanently removed from "
+            "the collection; there is no in-band restore path.",
+        )
+        self.assertIs(type(_DELETE_CONSEQUENCE), str)
+
+    def test_transact_key_set_check_runs_after_authorization(self):
+        """R-37 WP-3e (CE5, WF-3): `transact`'s own authorization check
+        (`_require_data`, `cell.py`) must still run BEFORE `_plan_
+        operation`'s per-operation-type excess-key check (now reading
+        `_TRANSACT_INSERT_KEYS` from the `request_vocabulary` leaf) -- a
+        principal from a DIFFERENT application is refused with
+        `AuthorizationError` even when the operation itself also carries a
+        capability-shaped extra key (`expected_revision`); the identical
+        operation, from a principal of the CORRECT application, reaches
+        the excess-key check instead and is refused with
+        `CapabilityError`."""
+        from mitatedb_api.auth import Principal
+        from mitatedb_api.backend_sqlite import SQLiteBackend
+        from mitatedb_api.cell import ApplicationCell
+        from mitatedb_api.errors import AuthorizationError
+
+        cell = ApplicationCell("app_a", FoundationConfig(), backend=SQLiteBackend())
+        operation = {"type": "insert", "collection": "things", "values": {"a": 1}, "expected_revision": 1}
+
+        foreign_principal = Principal(application_id="app_b", credential_id="c1", role=Role.RUNTIME)
+        with self.assertRaises(AuthorizationError):
+            cell.transact(foreign_principal, [operation])
+
+        same_app_principal = Principal(application_id="app_a", credential_id="c2", role=Role.RUNTIME)
+        with self.assertRaises(CapabilityError) as ctx:
+            cell.transact(same_app_principal, [operation])
+        self.assertEqual(ctx.exception.details["field"], "operations/0/expected_revision")
+
 
 if __name__ == "__main__":
     unittest.main()
