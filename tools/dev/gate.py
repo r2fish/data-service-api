@@ -22,7 +22,10 @@ deselected and subtests failed / skipped / xfailed / xpassed all 0 (1.3-22),
 plus no pg_database / pg_roles change (1.3-23). psql connects with
 `-h $PGHOST` (default /tmp).
 
-Output (3 lines): the tally, `judge=PASS|FAIL (...)`, and the catalog diff with the log path.
+Output: the tally, `judge=PASS|FAIL (...)`, and the catalog diff with the log path.
+When the catalog changed, one line per non-empty added / removed list comes before
+the last line (at most STDOUT_NAMES names each); the log ends with a section
+naming every added / removed database and role, sorted.
 The suite outlasts the Bash timeout: run it with run_in_background.
 Exit: 0 PASS; 1 FAIL; 75 refused (flag exists / other pytest did not end); 78 precondition error.
 """
@@ -42,6 +45,8 @@ GATE_ARGS = ["-q", "-n", "5", "--dist", "loadgroup"]
 MUST_BE_ZERO = ("failed", "errors", "skipped", "xfailed", "xpassed", "deselected",
                 "subtests failed", "subtests skipped", "subtests xfailed", "subtests xpassed")
 POLL_SECONDS = 10.0
+STDOUT_NAMES = 10
+LOG_SECTION = "gate: pg_database / pg_roles diff"
 
 
 def judge(exit_code: int, tally: str | None) -> tuple[bool, list[str]]:
@@ -71,14 +76,51 @@ def snapshot() -> dict[str, list[str]]:
     }
 
 
-def diff(before: dict[str, list[str]], after: dict[str, list[str]]) -> list[str]:
+def catalog_changes(before: dict[str, list[str]], after: dict[str, list[str]]) -> list[tuple[str, list[str], list[str]]]:
+    """(catalog, added names, removed names) for each catalog that changed; names sorted."""
     out = []
     for name in before:
         added = sorted(set(after[name]) - set(before[name]))
         removed = sorted(set(before[name]) - set(after[name]))
         if added or removed:
-            out.append(f"{name} +{len(added)} -{len(removed)}")
+            out.append((name, added, removed))
     return out
+
+
+def diff(before: dict[str, list[str]], after: dict[str, list[str]]) -> list[str]:
+    return counts(catalog_changes(before, after))
+
+
+def counts(changed: list[tuple[str, list[str], list[str]]]) -> list[str]:
+    return [f"{name} +{len(added)} -{len(removed)}" for name, added, removed in changed]
+
+
+def _name_lists(changed: list[tuple[str, list[str], list[str]]]):
+    for name, added, removed in changed:
+        for kind, names in (("added", added), ("removed", removed)):
+            if names:
+                yield name, kind, names
+
+
+def name_lines(changed: list[tuple[str, list[str], list[str]]], limit: int) -> list[str]:
+    """Stdout form: one line per non-empty list, at most `limit` names each."""
+    lines = []
+    for name, kind, names in _name_lists(changed):
+        more = len(names) - limit
+        lines.append(f"{name} {kind} ({len(names)}): {', '.join(names[:limit])}"
+                     + (f", ... +{more} more" if more > 0 else ""))
+    return lines
+
+
+def log_section(changed: list[tuple[str, list[str], list[str]]]) -> str:
+    """Log form: every added / removed name, one per line (appended after pytest's output)."""
+    lines = ["", f"== {LOG_SECTION} (names sorted) =="]
+    if not changed:
+        lines.append("0")
+    for name, kind, names in _name_lists(changed):
+        lines.append(f"{name} {kind} ({len(names)}):")
+        lines += [f"  {n}" for n in names]
+    return "\n".join(lines) + "\n"
 
 
 def create_flag(flag: Path) -> bool:
@@ -143,13 +185,19 @@ def main(argv: list[str] | None = None) -> int:
         before = snapshot()
         log = dl.log_dir() / f"gate-{ns.label}-{dl.stamp()}.log"
         code, concurrent = run_watched([python, "-m", "pytest", *GATE_ARGS], cwd, log)
-        changes = diff(before, snapshot())
+        changed = catalog_changes(before, snapshot())
+        changes = counts(changed)
+        # The tally is pytest's last line: read it before the name section is appended.
         tally = dl.tally_line(log.read_text(encoding="utf-8"))
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(log_section(changed))
         ok, reasons = judge(code, tally)
         reasons += concurrent + changes
         ok = ok and not concurrent and not changes
         print(f"gate: {tally or '(no tally line)'}")
         print(f"gate: judge={'PASS' if ok else 'FAIL'}" + ("" if ok else f" ({', '.join(reasons)})"))
+        for line in name_lines(changed, STDOUT_NAMES):
+            print(f"gate: {line}")
         print(f"gate: pg_database/pg_roles diff {'0' if not changes else ', '.join(changes)} | log={log}")
         return 0 if ok else 1
     except dl.DevError as exc:
