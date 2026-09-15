@@ -567,6 +567,45 @@ def _is_word_char(c: str) -> bool:
     return c.isalnum() or c == "_"
 
 
+_CJK_PUNCTUATION = "、。「」『』（）〔〕【】・…〜々〇！？：；［］〈〉《》"
+
+
+def _is_cjk_char(c: str) -> bool:
+    """change set 0h, predicate B condition 9: is `c` a CJK character --
+    Han (`\\u4e00`-`\\u9fff`, plus CJK Unified Ideographs Extension A
+    `\\u3400`-`\\u4dbf`, change set 5), Hiragana (`\\u3040`-`\\u309f`),
+    Katakana (fullwidth `\\u30a0`-`\\u30ff`, plus halfwidth
+    `\\uff66`-`\\uff9f`, change set 5), or one of the CJK punctuation
+    marks (`、` `。` the bracket/ellipsis-shaped marks that appear
+    inside Japanese prose, the iteration mark `々` and the ideographic
+    zero `〇` (change set 5, both live in the same CJK Symbols and
+    Punctuation block as `、`/`。`), and the fullwidth punctuation
+    `！？：；［］〈〉《》` (change set 5) -- all of `_CJK_PUNCTUATION`)
+    -- used ONLY to detect a line-wrap boundary that split two CJK
+    characters with no space in the basis, since Japanese prose carries
+    no spaces between words at all and a line wrap there must always
+    rejoin with zero space, never the single space `_join_wrapped_lines`
+    inserts by default for an ordinary (English) word boundary.
+    Deliberately NOT extended to fullwidth alphanumerics (design v0.14,
+    supervisor ruling 2026-09-15): those were not part of the ruling's
+    scope. Known constraint (design v0.14 §9): normalization strips a
+    space between two CJK characters wherever it appears, not only at a
+    basis line wrap, so adding or removing an in-line space between CJK
+    characters is invisible to the comparison."""
+    if not c:
+        return False
+    if c in _CJK_PUNCTUATION:
+        return True
+    cp = ord(c)
+    return (
+        0x4E00 <= cp <= 0x9FFF  # Han (CJK Unified Ideographs)
+        or 0x3400 <= cp <= 0x4DBF  # Han, CJK Unified Ideographs Extension A (change set 5)
+        or 0x3040 <= cp <= 0x309F  # Hiragana
+        or 0x30A0 <= cp <= 0x30FF  # Katakana (fullwidth)
+        or 0xFF66 <= cp <= 0xFF9F  # Katakana (halfwidth, change set 5)
+    )
+
+
 def _joined_identifier_at_boundary(accumulated: str, next_line: str) -> str:
     """The candidate CamelCase identifier formed by concatenating the
     identifier-shaped run ending `accumulated` with the identifier-
@@ -596,7 +635,7 @@ def _is_join_sensitive_boundary(accumulated: str, next_line: str, identifier_set
     genuine CamelCase split from two ordinary separate words). Checked
     against the text immediately either side of the boundary, and
     against whether the boundary sits inside an OPEN backtick span (odd
-    backtick count in `accumulated`). Exactly five triggers:
+    backtick count in `accumulated`). Nine triggers:
     (1) `accumulated` ends `<word char>_` and `next_line` starts with a
         word character -- regardless of backtick state;
     (2) `accumulated` ends `<word char>-` (a SINGLE hyphen, not part of
@@ -661,6 +700,15 @@ def _is_join_sensitive_boundary(accumulated: str, next_line: str, identifier_set
         `=`, not a word character or bracket, so rule 7 does not fire),
         and a `<->` arrow (`-` there is preceded by `<`, not a word
         character, so rule 2 already does not fire).
+    (9) change set 0h: `accumulated` ends with a CJK character (Han,
+        Hiragana, Katakana, or a CJK punctuation mark such as `、`/`。`
+        -- `_is_cjk_char`) AND `next_line` starts with a CJK character
+        -- regardless of backtick state. Japanese prose has no spaces
+        between words at all, so a line wrap that falls between two CJK
+        characters (`いかなる` wrapped as `い` / `かなる`) must always
+        rejoin with zero space; the single-space default that rules
+        1-8 leave in place for an ordinary English word boundary is
+        itself the corruption here (`い かなる`, `無効化 中`).
     Deliberately NOT a trigger: any other backtick-internal boundary
     with no marker at all (a multi-word SQL/expression fragment quoted
     whole in backticks, e.g. `` `<predicate> AND _r2db_revision::text =
@@ -692,6 +740,8 @@ def _is_join_sensitive_boundary(accumulated: str, next_line: str, identifier_set
     if inside_backticks and last in "([=" and (_is_word_char(prev) or prev in "([") and nxt != " ":
         return True
     if last == "`" and inside_backticks and nxt != " ":
+        return True
+    if _is_cjk_char(last) and _is_cjk_char(nxt):
         return True
     return False
 
@@ -800,17 +850,40 @@ def find_broken_line_wrap_joins(
     its own reduction -- contains the BROKEN form as a literal
     substring. A hit means somewhere along the way (a rewrite, a partial
     reduction) the mid-token wrap got flattened with a naive single
-    space instead of zero, corrupting the identifier/path/word. Returns
-    (correct, broken) pairs actually found broken; empty if none."""
+    space instead of zero, corrupting the identifier/path/word.
+
+    change set 5 fix (supervisor ruling 2026-09-15): for a boundary
+    triggered ONLY by condition 9 (both `accumulated[-1]` and `line[0]`
+    are CJK, `_is_cjk_char`), the context tokens are the single
+    characters on each side, `ltok = accumulated[-1]` / `rtok =
+    line[0]`, NOT the full `\\S+` run either side of the boundary. A
+    `\\S+` run can span an entire CJK sentence with no ASCII space
+    inside it at all, so a SEPARATE, unrelated space corruption
+    elsewhere in that same run (not at this boundary) breaks the
+    literal-substring match for the whole run and hides a genuine
+    condition-9 break at this boundary (r2db `control_plane.py:1380`,
+    CH-0281: the run after the boundary, `line`, contains a second,
+    later space after `。` that has nothing to do with THIS boundary;
+    matching that whole run as one literal string failed to find the
+    boundary's own broken join, `超過 は`, even though it was present).
+    The single-character short context is only ever used for a pure
+    condition-9 boundary; every other condition (1-8) keeps the
+    original `\\S+` token context, since those already anchor on
+    ASCII/backtick punctuation that does not suffer from this failure
+    mode. Returns (correct, broken) pairs actually found broken; empty
+    if none."""
     hits: list[tuple[str, str]] = []
     for group in _line_groups(kind, basis_dedented):
         accumulated = group[0]
         for line in group[1:]:
             if _is_join_sensitive_boundary(accumulated, line, identifier_set):
-                ltok_m = re.search(r"\S+$", accumulated)
-                rtok_m = re.search(r"^\S+", line)
-                ltok = ltok_m.group(0) if ltok_m else accumulated
-                rtok = rtok_m.group(0) if rtok_m else line
+                if _is_cjk_char(accumulated[-1]) and _is_cjk_char(line[0]):
+                    ltok, rtok = accumulated[-1], line[0]
+                else:
+                    ltok_m = re.search(r"\S+$", accumulated)
+                    rtok_m = re.search(r"^\S+", line)
+                    ltok = ltok_m.group(0) if ltok_m else accumulated
+                    rtok = rtok_m.group(0) if rtok_m else line
                 correct = ltok + rtok
                 broken = ltok + " " + rtok
                 if broken in new_dedented:
@@ -863,17 +936,31 @@ def split_sentences(flattened_text: str) -> list[str]:
     bracket(s) `」』）)】` attached to the sentence that just ended -- P4,
     review round 2) or a paragraph break -- never on a bare line wrap.
     Abbreviations and backtick code spans are protected so their internal
-    periods never split a sentence."""
+    periods never split a sentence.
+
+    change set 0h (bug fix): backtick spans are hidden BEFORE abbreviation
+    substitution runs, not after. Hiding abbreviations first let an
+    abbreviation textually INSIDE a backtick span (e.g. the literal `...`
+    in `` `cursor.execute(...)` ``) get replaced by its own `\\x00A{n}\\x00`
+    placeholder first; the backtick-span regex then captured that
+    placeholder AS PART OF the span's "original" text, so `restore()`'s
+    single left-to-right pass restored the B-token back to text that
+    still contained an unrestored `\\x00A{n}\\x00` sequence (A-tokens are
+    restored earlier in insertion order, before the B-token substitution
+    that reintroduces one). Hiding backtick spans first makes their
+    content opaque to the abbreviation pass entirely, so nothing is ever
+    substituted inside a span in the first place -- restoring the B-token
+    later yields the untouched original bytes, `...` included."""
     protected = flattened_text
     placeholders: dict[str, str] = {}
-    for idx, abbr in enumerate(_ABBREVIATIONS):
-        token = f"\x00A{idx}\x00"
-        placeholders[token] = abbr
-        protected = protected.replace(abbr, token)
     for idx, span in enumerate(re.findall(r"`[^`]*`", protected)):
         token = f"\x00B{idx}\x00"
         placeholders[token] = span
         protected = protected.replace(span, token, 1)
+    for idx, abbr in enumerate(_ABBREVIATIONS):
+        token = f"\x00A{idx}\x00"
+        placeholders[token] = abbr
+        protected = protected.replace(abbr, token)
 
     # `_SENTENCE_BOUNDARY_RE` is used with a capturing group, so
     # `re.split` interleaves [text, boundary, text, boundary, ..., text].

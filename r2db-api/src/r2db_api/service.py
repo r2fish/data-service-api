@@ -736,7 +736,7 @@ class DataService:
 
         History: CH-0134
         """
-        # Contract 1.7.0: resolved HERE, once, so the SAME value both reaches `QueryPage.request_id` below and is the one `_query_outcome` uses for its own audit event -- the generation point for the request/response pair a caller sees, never re-derived a second time for the response body (Q-1: "HTTP 層は 再生成しない" generalizes to "no layer re-derives it").
+        # Contract 1.7.0: resolved HERE, once, so the SAME value both reaches `QueryPage.request_id` below and is the one `_query_outcome` uses for its own audit event -- the generation point for the request/response pair a caller sees, never re-derived a second time for the response body (Q-1: "HTTP 層は再生成しない" generalizes to "no layer re-derives it").
         # history: CH-0133
         rid = request_id or str(uuid.uuid4())
         outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=rid, budget=budget, concurrency_precharged=concurrency_precharged)

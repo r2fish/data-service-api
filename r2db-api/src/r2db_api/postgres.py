@@ -969,7 +969,7 @@ class PostgresCell:
                 client_name = index_name[len(prefix):]
                 indexes[table_name][client_name] = {"physical": index_name, "fields": tuple(fields), "unique": bool(is_unique)}
 
-        # the side-table read (a nested SAVEPOINT + SELECT + RELEASE SAVEPOINT, `_load_field_constraints` below) is skipped entirely when `with_constraints` is `False` -- `query` (D-2 (2): "query の predicate 値は enum を 検査しない") never uses `table_info.constraints` at all, so paying for that read on every read-only request is pure waste.
+        # the side-table read (a nested SAVEPOINT + SELECT + RELEASE SAVEPOINT, `_load_field_constraints` below) is skipped entirely when `with_constraints` is `False` -- `query` (D-2 (2): "query の predicate 値は enum を検査しない") never uses `table_info.constraints` at all, so paying for that read on every read-only request is pure waste.
         # history: CH-0012
         constraints_by_entity = self._load_field_constraints(conn) if with_constraints else {}
         return {

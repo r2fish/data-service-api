@@ -1377,7 +1377,7 @@ class ControlPlaneService:
 
     def _check_rate(self) -> None:
         """
-        R-7 `control_requests_per_minute` -- a single, global window (never keyed per-credential/actor, unlike the data plane's `DataService._acquire_rate`): this check runs *before* authentication (design §4/R-6's own "監査増幅の防止" -- an unauthenticated caller must not be able to generate unbounded durable audit rows), so there is no `credential_id` to key on yet even in principle. Rate-limit refusals are deliberately never durably audited at all (design §4: "拒否には状態変更が無い...rate limit超過 は監査しない(認証前・実行者不明。 監査増幅DoSの防止)") -- this is the one denial category with no R-11 `audited: true` declaration.
+        R-7 `control_requests_per_minute` -- a single, global window (never keyed per-credential/actor, unlike the data plane's `DataService._acquire_rate`): this check runs *before* authentication (design §4/R-6's own "監査増幅の防止" -- an unauthenticated caller must not be able to generate unbounded durable audit rows), so there is no `credential_id` to key on yet even in principle. Rate-limit refusals are deliberately never durably audited at all (design §4: "拒否には状態変更が無い...rate limit超過は監査しない(認証前・実行者不明。監査増幅DoSの防止)") -- this is the one denial category with no R-11 `audited: true` declaration.
 
         Round-2 review MI-7: this is a *sliding* window (every call re-filters to "within the last 60s of `self._clock()`"), not the fixed/bucketed window design §1 R-7 says merely "suffices" (固定窓で足りる) -- a fixed window is a permissive floor, not a ceiling, and the sliding form is strictly stricter (no boundary double-burst at a bucket edge) while staying bounded (this list can never hold more than `control_requests_per_minute` entries, by the `fail()` below). Kept deliberately rather than downgraded to match the design's minimum; noted here so a future reader does not "fix" this back down to a fixed window under the mistaken impression the design requires it.
 
@@ -1400,7 +1400,7 @@ class ControlPlaneService:
 
     def _check_audit_rate(self) -> None:
         """
-        `audit_requests_per_minute` -- a SEPARATE global window from `_check_rate`'s `control_requests_per_minute` above (own lock, own list, own limit field), reusing the identical sliding-window mechanism (never a new one -- work order §6 item 5: "制約・制限の 追加で問題を回避しない...新機構を発明しない"). Pre-auth, exactly like `_check_rate` (this window governs BOTH and its alias, before either path even extracts a bearer token) -- and, identically, never durably audited (rate-limit refusals carry no attributable actor yet; the same "監査増幅の防止" reasoning `_check_rate` documents applies unchanged to this second window).
+        `audit_requests_per_minute` -- a SEPARATE global window from `_check_rate`'s `control_requests_per_minute` above (own lock, own list, own limit field), reusing the identical sliding-window mechanism (never a new one -- work order §6 item 5: "制約・制限の追加で問題を回避しない...新機構を発明しない"). Pre-auth, exactly like `_check_rate` (this window governs BOTH and its alias, before either path even extracts a bearer token) -- and, identically, never durably audited (rate-limit refusals carry no attributable actor yet; the same "監査増幅の防止" reasoning `_check_rate` documents applies unchanged to this second window).
 
         History: CH-0283
         """

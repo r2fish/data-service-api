@@ -3770,3 +3770,236 @@ def test_0g_flatten_strips_colon_marker_not_content():
     # (not as the line's own leading marker) is untouched.
     assert cp._flatten_comment("#: Note here.\n#: continues.") == "Note here. continues."
     assert cp._flatten_comment("# See ratio 3:1 here.") == "See ratio 3:1 here."
+
+
+# ---------------------------------------------------------------------------
+# change set 0h: `split_sentences` did not restore an `_ABBREVIATIONS`
+# placeholder (`...`) hidden INSIDE a backtick span -- e.g. change set 5's
+# `credential_store.py` module docstring, `` passed through `cursor.
+# execute(...)` `` -- because abbreviation-hiding ran BEFORE backtick-span
+# hiding: the backtick-span regex then captured the ALREADY-hidden `\x00A3
+# \x00` token as part of the span's own "original" text, and `restore()`'s
+# single left-to-right pass over `placeholders` (A-tokens inserted first,
+# so restored first) had already finished restoring lone A-tokens by the
+# time the B-token substitution reintroduced one, hidden inside the
+# now-restored backtick span. Minimal repro (found working on change set
+# 5's real `credential_store.py`, 2026-09-15):
+#   input:    "Every statement is passed through `cursor.execute(...)`
+#              with a bound list."
+#   expected: [the same string, unsplit -- one sentence]
+#   actual (before this fix): the returned sentence contained the literal
+#              placeholder text "\x00A3\x00" in place of "...".
+# Fix: hide backtick spans FIRST, abbreviations SECOND, so an
+# abbreviation-shaped substring inside a span is never separately
+# substituted at all (it is already opaque) -- `restore()`'s insertion
+# order therefore restores the (untouched) span before any lone
+# abbreviation outside it, and neither pass can leave a placeholder behind
+# inside the other's restored text.
+# ---------------------------------------------------------------------------
+
+
+def test_0h_ellipsis_inside_backtick_span_survives_split_sentences():
+    text = "Every statement is passed through `cursor.execute(...)` with a bound list."
+    assert cp.split_sentences(text) == [text]
+
+
+def test_0h_various_abbreviations_inside_backtick_span_survive_split_sentences():
+    for abbr in ("...", "e.g.", "i.e.", "vs."):
+        text = f"See the `example({abbr})` call for the exact shape. Next sentence."
+        result = cp.split_sentences(text)
+        assert "\x00" not in "".join(result), (abbr, result)
+        assert result[0] == f"See the `example({abbr})` call for the exact shape."
+        assert result[1] == "Next sentence."
+
+
+def test_0h_abbreviation_outside_backtick_span_still_protected():
+    # The fix must not regress the ORIGINAL purpose of abbreviation-hiding:
+    # a bare "e.g." outside any backtick span must still not split the
+    # sentence on its own internal period.
+    text = "This covers common cases, e.g. a plain one. The next sentence."
+    result = cp.split_sentences(text)
+    assert result == [
+        "This covers common cases, e.g. a plain one.",
+        "The next sentence.",
+    ]
+
+
+# ===========================================================================
+# change set 0h, predicate B condition 9 (design v0.14 §9): a line-wrap
+# boundary where BOTH sides are CJK characters (Han, Hiragana, Katakana, or
+# CJK punctuation) must join with ZERO space, never the single space rules
+# 1-8 (all English-oriented) leave in place by default. Found in change set
+# 5's `ops.py` ("い かなる", "無効化 中", etc. -- Japanese prose carries no
+# spaces between words at all, so any such stray space is itself the
+# corruption).
+# ===========================================================================
+
+
+def test_0h_rule9_cjk_boundary_red_and_green():
+    # Red (broken): a naive single-space join between two CJK characters,
+    # both outside and inside a backtick span.
+    assert cp._flatten_comment("# い\n# かなる HTTP surface からも発行できない。") == (
+        "いかなる HTTP surface からも発行できない。"
+    )
+    assert cp._flatten_comment("# 無効化\n# 中の application も対象に含める。") == (
+        "無効化中の application も対象に含める。"
+    )
+    assert cp._flatten_comment("# `psql の実行結果は監査\n# 不要`とする。") == (
+        "`psql の実行結果は監査不要`とする。"
+    )
+    # Green: an ASCII word immediately next to CJK text is NOT a trigger --
+    # only a CJK-CJK boundary joins with zero space; a CJK/ASCII boundary
+    # keeps its space exactly as rules 1-8 already require.
+    assert cp._flatten_comment("# 対象は application\n# のみとする。") == (
+        "対象は application のみとする。"
+    )
+    assert cp._flatten_comment("# こちらは英語の control_plane\n# モジュールが担当する。") == (
+        "こちらは英語の control_plane モジュールが担当する。"
+    )
+    # Green: a correctly-joined (already zero-space, never wrapped) CJK
+    # phrase on one physical line is left untouched.
+    assert cp._flatten_comment("# いかなる HTTP surface からも発行できない。") == (
+        "いかなる HTTP surface からも発行できない。"
+    )
+
+
+def test_0h_run_base_flags_cjk_boundary_as_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# い\n# かなる HTTP surface からも発行できない。The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    broken = (
+        "# い かなる HTTP surface からも発行できない。The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", broken)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# い\n# かなる HTTP surface からも発行できない。The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9e" in output
+
+
+def test_0h_run_base_green_when_cjk_boundary_fixed(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# い\n# かなる HTTP surface からも発行できない。The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    fixed = (
+        "# いかなる HTTP surface からも発行できない。The body is JSON.\n"
+        "# history: CH-0001\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", fixed)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# い\n# かなる HTTP surface からも発行できない。The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# ===========================================================================
+# change set 5 (independent review): fixtures for the charset A2 extended
+# (々/〇, fullwidth punctuation, CJK Ext-A, halfwidth Katakana) and the
+# 、/。/（ punctuation boundary specifically, plus the A1 short-context
+# fix in `find_broken_line_wrap_joins` (real code, not a local copy).
+# ===========================================================================
+
+
+def test_0h_punctuation_boundary_toten_kuten_open_paren_red_and_green():
+    # 、(toten) and 。(kuten) and （(fullwidth open paren) each join with
+    # zero space against an adjacent CJK character across a line wrap --
+    # the same condition-9 rule pinned above for `。`/Han, exercised here
+    # for `、` and `（` specifically (design v0.14 §9, A2 charset review).
+    assert cp._flatten_comment("# 対象は権限\n# 、権限失効の両方とする。") == (
+        "対象は権限、権限失効の両方とする。"
+    )
+    assert cp._flatten_comment("# 対象は権限、\n# 権限失効の両方とする。") == (
+        "対象は権限、権限失効の両方とする。"
+    )
+    assert cp._flatten_comment("# 引数は必須\n# （キーワード専用）とする。") == (
+        "引数は必須（キーワード専用）とする。"
+    )
+    # Green: an ASCII word adjacent to `、`/`。` keeps its required space.
+    assert cp._flatten_comment("# 対象は application\n# 、権限失効とする。") == (
+        "対象は application 、権限失効とする。"
+    )
+
+
+def test_0h_katakana_boundary_fullwidth_and_halfwidth_red_and_green():
+    # Fullwidth Katakana (already in range before change set 5) and
+    # halfwidth Katakana (change set 5, A2) both join with zero space
+    # against an adjacent CJK character across a line wrap.
+    assert cp._flatten_comment("# ダウン\n# ロードは対象外とする。") == (
+        "ダウンロードは対象外とする。"
+    )
+    assert cp._flatten_comment("# ﾀﾝｰ\n# ﾆﾟｸﾝは半角カナである。") == (
+        "ﾀﾝｰﾆﾟｸﾝは半角カナである。"
+    )
+    # Green: an ASCII word adjacent to Katakana keeps its required space.
+    assert cp._flatten_comment("# ダウンロード module\n# は対象外とする。") == (
+        "ダウンロード module は対象外とする。"
+    )
+
+
+def test_0h_extended_charset_iteration_mark_and_ext_a_red():
+    # 々 (iteration mark) and a CJK Unified Ideographs Extension A
+    # character (change set 5, A2) both join with zero space against an
+    # adjacent CJK character across a line wrap.
+    assert cp._is_cjk_char("々") is True
+    assert cp._is_cjk_char("〇") is True  # 〇 ideographic zero
+    assert cp._is_cjk_char("㐀") is True  # CJK Ext-A, first code point
+    assert cp._is_cjk_char("䶿") is True  # CJK Ext-A, last code point
+    assert cp._flatten_comment("# 日々\n# の運用は対象外とする。") == (
+        "日々の運用は対象外とする。"
+    )
+    # Fullwidth alphanumerics are deliberately NOT CJK (A2 scope limit).
+    assert cp._is_cjk_char("Ａ") is False  # fullwidth "A"
+    assert cp._is_cjk_char("１") is False  # fullwidth "1"
+
+
+def test_0h_find_broken_line_wrap_joins_short_context_survives_unrelated_run_space():
+    # change set 5 fix (independent review finding, r2db `control_plane.py`
+    # CH-0281 shape): the basis wraps between two CJK characters -- a
+    # genuine condition-9 boundary (超過/は) -- inside a `\\S+`-delimited
+    # run that ALSO contains a SECOND, unrelated space later in the SAME
+    # run (after `。`, mid-line in the basis, nothing to do with this
+    # boundary). A full-token `\\S+` context spanning the WHOLE run fails
+    # to find the boundary's own broken join as a literal substring once
+    # that unrelated space exists in `new_dedented`; the short single-
+    # character CJK context this fix uses must still catch it.
+    basis = "rate limit超過\nは監査しない(認証前・実行者不明。監査増幅DoSの防止)\")"
+    broken_new = "rate limit超過 は監査しない(認証前・実行者不明。 監査増幅DoSの防止)\")"
+    hits = cp.find_broken_line_wrap_joins("docstring", basis, broken_new)
+    assert ("過は", "過 は") in hits
+
+
+def test_0h_find_broken_line_wrap_joins_short_context_ascii_unaffected():
+    # The short-context change is scoped to a pure condition-9 (CJK/CJK)
+    # boundary only -- an ordinary ASCII word-boundary break (rule 1,
+    # underscore-joined identifier) still uses the full `\\S+` token
+    # context exactly as before, unaffected by this fix.
+    basis = "the `foo_\nbar` helper stays intact"
+    broken_new = "the `foo_ bar` helper stays intact"
+    hits = cp.find_broken_line_wrap_joins("comment", basis, broken_new)
+    assert ("`foo_bar`", "`foo_ bar`") in hits
+
+
+def test_0h_fullwidth_punctuation_added_in_a2_line_wrap_boundary_hit():
+    # change set 5, second send-back C2 (independent review item 6): the
+    # fullwidth punctuation `！？：；［］〈〉《》` added to `_CJK_PUNCTUATION`
+    # in A2 is covered by `_is_cjk_char` (test_0h_extended_charset_...) and
+    # by `_flatten_comment` for `、`/`。`/`（` specifically, but nothing
+    # exercised it through `find_broken_line_wrap_joins` -- the actual
+    # detector a mutation against `_CJK_PUNCTUATION` must turn red. The
+    # basis wraps between `！` and a Han character; a broken rejoin that
+    # inserts a single space there must be caught.
+    basis = "重要度は高！\n重大事項である。"
+    broken_new = "重要度は高！ 重大事項である。"
+    hits = cp.find_broken_line_wrap_joins("comment", basis, broken_new)
+    assert len(hits) >= 1
+    assert ("！重", "！ 重") in hits
