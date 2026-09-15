@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.17 (2026-09-15)**: §10.5 に、揺れの疑いがあったテストの調査の結論 (原因、テストの修正、測定、他テストの監査、教訓 1 行) を【追記】した。製品側の問題は roadmap (`docs/design/ROADMAP_POST_PHASE7_V1.md`) R-42 に起票した。
 - **v0.16 (2026-09-15)**: §10.5 に変更セット 6 の実施記録、赤いゲートの統合事故、教訓 2 行を追記した。
 - **v0.15 (2026-09-15)**: §10.4 に変更セット 0h・5 の実施記録、教訓 2 行、次の候補を追記した。
 - **v0.14 (2026-09-15)**: §9 に変更セット 0h (文の分割で backtick の span を略語より先に隠す) を足し、§6 に 0h の行、§10.2 に教訓 1 行を足した。同版の中で、0h として述語 B に条件 9 (CJK 文字に挟まれた改行) を、§3 に判定表の区分の規則を足した (監督裁定)。変更セット 5 の最終レビューを受けて、§9 に条件 9 の検出の文脈、CJK 文字の範囲、既知の制約を、§10.2 に教訓 1 行を足した。
@@ -457,3 +458,29 @@
 - 0e・0f の fixture のうち手元のコピーを検査するテストの置き換え
 - R6-4 で残した日付の除去
 - 上の揺れの疑いがあるテストの調査
+
+**【追記 2026-09-15、v0.17】揺れの疑いがあったテストの調査 (結論)**:
+- **判定**: race による揺れではなく、lock の退行でもない。原因を特定した。
+- **原因**:
+  - MitateDB `cell.py::_limit_gate` は、要求 B の期限 (既定 5000 ms) を、`read` が `with self._lock:` を取る前に計算する (`cell.py:771`、lock は `cell.py:2171-2172`)。
+  - 期限を過ぎると、`backend_postgres.py::_timeout_ms` (:1477-1481) は `max(1, ...)` ms に丸め、`SET LOCAL statement_timeout/lock_timeout` を設定する。
+  - テストは B を A の lock の後ろで約 10 s (400 × 0.025 s の poll 窓) 待たせており、予算より長い。このため B の `read` は常に `statement_timeout = 1ms` で走っていた。
+- **証拠**: 読み取りだけの pytest plugin で `_set_timeouts` を記録すると、緑の回でも B の `read` は `timeout_ms=1` だった。`timeout_ms == 1` のときに 10 ms の文を強制すると、ゲートの赤がそのまま再現した (`visible_before_a_commit: 0`、`b_started_before_a_released: False`、`a_status: 200`、`b_status: 413`)。
+- **修正 (本変更、テストだけ)**: `MitateDB-api/tests/test_threadpool_offload.py`。
+  - B の race 窓を `app_a_stack.cell.config.max_execution_ms / 1000 / 5` (既定で 1.0 s) にし、`time.monotonic()` で区切る。窓は B が `ApplicationCell._gate` (`endpoint_kind="query"`) に入ったこと (`b_gated`) を確かめてから始める。
+  - `_set_timeouts` を記録し、A の解放後の呼び出しがすべて `timeout_ms > 1` であることを前提条件として assert する。記録が 0 件で素通りしないことも確かめる。status の assert の文言に記録を添える。
+  - 既存の 3 つの assert は変えていない。独立レビュー (Opus) は accept with minors で、指摘 (上の `b_gated` と monotonic の窓、文言) は全て反映した。
+- **測定**:
+  - レビュー反映後、当該テスト単独で 3/3 緑、ファイル全体で `12 passed`。
+  - M1 (`read` の外側の `with self._lock:` を除く): 赤。観測値は `{'b_done_before_a_released': True, 'b_started_before_a_released': True, 'visible_before_a_commit': 1, 'a_status': 200, 'b_status': 200}`。
+  - M2 (窓を 10 s に戻す、`/ 1000 * 2`): 新しい前提条件で赤 (`timeout_ms=1`)。lock の assert は正しい値のまま。
+  - M3 (`b_gated.set()` を除く): `b_gated` の assert で赤。
+  - `mutate.py`: 3/3 が期待どおりで、復元を確認した。
+- **他テストの監査** (Sonnet、読み取りのみ。両 peer と `conformance-tests/`):
+  - 同じ形のテストは他に無い。
+  - `test_threadpool_offload.py` の stall テストと `test_preauth_concurrency_bound.py` は gate の前で止めるので、予算を使わない。
+  - `test_idempotency_concurrency.py` (両 peer) と `conformance-tests/test_c27_concurrent_same_key.py` は、gate を通った要求を固定の `time.sleep(0.3)` だけ止める。仕組みは同じだが余裕が約 4.7 s あるので、危険ではなく注意点として記録する。
+- **製品側の問題**: 期限を使い切った要求が 1 ms の timeout で文を発行する点は、roadmap (`docs/design/ROADMAP_POST_PHASE7_V1.md`) R-42 に起票した。
+
+**教訓**:
+- limit gate の後で要求を lock や stall の後ろに止めると、その間も実行予算を使う。成功を期待するテストは止める時間を予算より十分短くし、そうなったことを assert する。
