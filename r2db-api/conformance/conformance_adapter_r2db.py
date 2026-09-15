@@ -1393,7 +1393,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         if expected_revision is not None:
             # A real parameter position on this peer's single mutation
             # dispatcher (`Mutation.expected_revision`, `structured.py`'s
-            # `_MUTATION_KEYS`) -- carried through exactly like `values`/
+            # `_MUTATION_KEYS` (now in `mutation_binding.py`)) -- carried through exactly like `values`/
             # `where` above, never interpreted here. As of work package
             # WP-5b this peer declares `revision_preconditions: enabled`
             # and genuinely evaluates it (R-4); before that it was a real,
@@ -1407,7 +1407,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             item["unique_key"] = unique_key
         if idempotency_key is not None:
             # port v1.11 (design D-6.7 C-07 (ii)): `structured.py`'s own
-            # `_MUTATION_KEYS`/`bind_mutation` already recognize this key
+            # `_MUTATION_KEYS`/`bind_mutation` (now in `mutation_binding.py`) already recognize this key
             # on this peer's internal (non-HTTP) mutation-item shape and
             # refuse it with a real, present `CAPABILITY_UNSUPPORTED`
             # BEFORE execution (`idempotency: unavailable`) -- carried

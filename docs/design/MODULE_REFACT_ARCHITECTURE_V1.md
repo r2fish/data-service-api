@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.15 (2026-09-15)。** 直後の v1.14 行は当時の改版履歴として保存する。v1.15 は既存の本文を書き換えず、§10.11 に【追記】を 1 件足し、末尾に **§10.12 (WP-3f 実施記録)** を追記した記録である。
 - **現行版: v1.14 (2026-09-15)。** 直後の v1.13 行は当時の改版履歴として保存する。v1.14 は既存の本文を書き換えず、末尾に **§10.11 (WP-3e 実施記録)** を追記した記録である。
 - **現行版: v1.13 (2026-09-15)。** 直後の v1.12 行は当時の改版履歴として保存する。v1.13 は既存の本文を書き換えず、末尾に **§10.10 (WP-3d 実施記録)** を追記した記録である。
 - **v1.12 (2026-09-15)。** 直後の v1.11 行は当時の改版履歴として保存する。v1.12 は既存の本文を書き換えず、末尾に **§10.9 (WP-3a〜3c 実施記録)** を追記した記録である。
@@ -476,3 +477,25 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 - root gate: `3393 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (監督、`tools/dev/gate.py`)。
 - **教訓**: 移動した名前の grep は、行をまたいで折り返した名前を取りこぼす。位置参照の走査は折り返しを考慮して行う (W3-15 はこうして漏れ、後で見つかった)。
 - **次の WP**: WP-3f (ST8)。
+
+**【追記 2026-09-15 (WP-3f のレビューで判明)】** 上の「`http.py` のコメント来歴の checker: `comment provenance OK: 97 blocks checked`」は `--base 6e91983` で走らせた結果である。`6e91983` は変更セット 3 (`f03c02f`) より前で、CH-0221・CH-0228 がまだ無い。そのため checker は初めての移動の枝を通り、再編集については何も示していない。WP-3e の実際の親 `b65e97d` に対しては、同じ確認が赤になる: `FAIL (§4.1 (2)) MitateDB-api/src/mitatedb_api/http.py:820 basis block for CH-0221 is not derivable ...`。`:993` の CH-0228 も同じである。これは §10.12 と同じく、設計どおりの再編集の枝である。WP-3e で実際に成り立つ証拠は、新しい HEAD での `tools/tests` `404 passed` (0f が緑、`finalize.py --tools-tests`) である。main は赤ではなく、コードの変更は要らない。上の行は消さずに残す (R-14)。
+
+### 10.12 WP-3f (ST8 → `mutation_binding.py`) 実施記録 (2026-09-15、v1.15 追記)
+
+作業指示書 §5.32・§5.35 (訂正註)・§5.39 (裁定 W3-6〜W3-18)。
+
+| WP | 抽出 | merge | 備考 |
+| --- | --- | --- | --- |
+| WP-3f | r2db `structured.py` → `mutation_binding.py` (ST8: 11 名) | 本変更 | `structured.py` L64-104 と L137-307 (`b4aac70`、飛び石 2 塊) を新規の leaf `r2db-api/src/r2db_api/mutation_binding.py` へ移した。leaf の import は manifest の一覧だけである。facade は 6 名を import で読む。間の D-1 見出し (manifest の L104-133) は facade に残し、括弧書きを付けた (W3-7 (b))。`b4aac70` で測り直し、manifest (`9994d7c` で実測) からのずれは行の一様なずれだけである |
+
+- **40c**: manifest の括弧書き 3 箇所を除き、バイト単位で同一の移動である (独立 Opus レビューが別に導出して一致)。W3-17 と合わせて括弧書きは計 11 箇所。
+- **40b**: `SCANNED_MODULES` と sib tuple に leaf を足した。件数 pin は `structured.py` 49、`mutation_binding.py` 18。`r2db-api/tests/test_audit_query.py` の修飾名は `mutation_binding.bind_mutation` (W3-8)。
+- **変異** (`mutate.py`): C1〜C12 の 12/12 が予想どおり赤、復元を確認。test は §5.35 の表のとおり。C1 は W3-14 の上書き (facade の import の後で `parse_predicate = None`) を使った。
+- **完了条件 13**: 変更をコミットした使い捨ての clone で観測した。`tools/tests` `403 passed` (0f が緑)。CH-0057 の訂正の記録を消すと 0f が CH-0057 で赤、CH-0266 の記録を消すと 0f が CH-0266 で赤。
+- **40a の suite** (手直し後、`pt.py`): `r2db-api/tests` `1289 passed`、`MitateDB-api/tests` `1112 passed` (subtests 2)、`conformance-tests` `995 passed`、`tools/tests` `402 passed` と commit 前の予想どおりの 0f の赤 (未追跡の新 leaf)。
+- **レビュー**: 独立 Opus レビュー・監査・調査 (判定: 差し戻し、裁定待ち → W3-17・W3-18・M2・N1〜N3)、手直し 1 回。
+- root gate: `3396 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (監督、`tools/dev/gate.py`)。
+- **教訓**:
+  - 位置参照の走査は、行をまたいで折り返した名前だけでなく、移した名前の近くの位置の語も探す。WP-3f の走査は折り返しを考慮していたが、折り返していない 8 つの参照を漏らした。
+  - R-37 の移動が CH の塊の中に括弧書きを足す場合、来歴の証拠は新しい HEAD での 0f である。`--base <親>` は再編集の枝で設計どおり必ず赤になる。`--base` は R-22 のコメントだけの変更セットの関門であり、R-37 の移動の関門ではない。
+- **次の WP**: WP-3g (ST9 の一部)。

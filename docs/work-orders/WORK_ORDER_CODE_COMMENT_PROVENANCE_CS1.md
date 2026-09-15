@@ -1,5 +1,6 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.12 (2026-09-15)**: §15.1 の末尾に訂正註を足した (R-37 WP-3f の監督裁定 W3-18 による `test_q4_real_repo_postgres_unchanged_is_green` の退役と、着手条件 3 の再確認)。既存の節は書き換えていない。
 - **v1.11 (2026-09-15)**: §15 に変更セット 0i (チェッカーの保護参照の拡張、手元のコピーを検査するテストの置き換え、遡った確認の塊の戻し) の manifest を追記し、疑義 Z0i-1〜Z0i-7 と監督裁定を §15.5 に置いた。設計レビュー 1 を反映した。既存の節は書き換えていない。
 - **v1.10 (2026-09-15)**: 実装担当が §14.4 (候補一覧・判定表・記録) を埋めた (監督がコミット前に確定する)。既存の節は書き換えていない。
 - **v1.9 (2026-09-15)**: §14 に変更セット 6 (r2db `control_main.py` と MitateDB `backend_postgres.py`) の manifest と、起草時の疑義 4 件への監督裁定 (§14.5) を追記し、独立レビューの指摘への監督裁定 Y6-5〜Y6-12 を §14 に反映した。既存の節は書き換えていない。
@@ -2735,6 +2736,8 @@ D. 差し戻しと R6-1〜R6-3 で基準のバイト列に戻した塊 (CH-ID �
 |---|---|---|
 | R-37 WP-3e (worktree `r37-wp3e`、R-37 作業指示書 §5.34) | MitateDB `cell.py`・`delete_confirmation.py`・新規 `request_vocabulary.py` とテスト。rework で MitateDB `http.py` L821・L993 (CH-0221・CH-0228) と `docs/code-history/MitateDB-api/http.md` | ×。`http.py` の別の塊が重なるので、0i は WP-3e の統合の後に着手し、その main を基点に §15.2 を取り直す (§15.1 の 4。レビューの実測では WP-3e は遡った確認の塊の集合を変えない) |
 | R-37 WP-3f (R-37 作業指示書 §5.35) | r2db `structured.py`・新規 `mutation_binding.py`・`postgres.py`、`docs/code-history/r2db-api/postgres.md` ほか (§14.1 の表) | ツールだけなら ○。Z0i-4 (A) では r2db `postgres.py` (5 塊) が重なるので、WP-3f と並行しない |
+
+**訂正註 (2026-09-15、R-37 WP-3f の監督裁定 W3-18、本文は書き換えない)**: R-37 WP-3f の裁定 W3-18 (R-37 作業指示書 §5.39) で、`tools/tests/test_comment_provenance.py::test_q4_real_repo_postgres_unchanged_is_green` (q4) を退役させた。0i が `r2db-api/src/r2db_api/postgres.py` の塊 (CH-0003・CH-0058・CH-0066・CH-0070・CH-0100) に予定する戻しも、q4 を赤にするはずだった。§15 は q4 に触れていなかったが、その判断はもう要らない。WP-3f が `tools/tests/test_comment_provenance.py` に加える変更は q4 の削除だけである。0i は着手時に、このテストファイルについての §15.1 の条件 3 を確かめ直す。
 
 ### 15.2 選定と実測 (`f0637d9`)
 

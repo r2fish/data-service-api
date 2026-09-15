@@ -1132,6 +1132,20 @@ field_type: "string"` or left it untyped.
 # index available this deep, so a generic `"where"` path.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-3f -- `OPERATORS` (with `_mapping`/`parse_predicate`/`Predicate`/`validate_projection`/`validate_predicates`/`BoundMutation`/`bind_mutation`) moved from `structured.py` to `mutation_binding.py`; the pointer gets a 40c position bracket.
+
+old:
+```
+Unreachable in practice: `predicate.validate()` (called by `validate_predicates`, upstream of every caller here) already rejects any operator outside `structured.OPERATORS`. Kept as an explicit, fixed-literal-only fallback rather than trusting that invariant silently (D-4: "operators map to fixed literals"). M-1: this is a redundant application-level shape backstop, not a storage-rejection translation -- so it is NOT allowlist-eligible (`layer_rule`'s defence-in-depth exemption is for backend/storage denials only); it carries the same 4-key vocabulary `Predicate.validate`'s own operator check uses (`errors.violation("capability", ...)`), no field-index available this deep, so a generic `"where"` path.
+```
+
+new:
+```
+Unreachable in practice: `predicate.validate()` (called by `validate_predicates`, upstream of every caller here) already rejects any operator outside `structured.OPERATORS` (now in `mutation_binding.py`). Kept as an explicit, fixed-literal-only fallback rather than trusting that invariant silently (D-4: "operators map to fixed literals"). M-1: this is a redundant application-level shape backstop, not a storage-rejection translation -- so it is NOT allowlist-eligible (`layer_rule`'s defence-in-depth exemption is for backend/storage denials only); it carries the same 4-key vocabulary `Predicate.validate`'s own operator check uses (`errors.violation("capability", ...)`), no field-index available this deep, so a generic `"where"` path.
+```
+
 ## CH-0058
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)

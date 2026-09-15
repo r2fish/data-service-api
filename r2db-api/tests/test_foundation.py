@@ -3135,3 +3135,74 @@ def test_service_query_matches_filter_combines_with_order_by(service):
     service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "another"}}])
     items = service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}], order_by=[{"field": "id", "direction": "asc"}])
     assert items == [{"body": "a"}, {"body": "another"}]
+
+
+def test_mutation_binding_leaf_preserves_structured_facade():
+    """R-37 WP-3f (ST8): `structured.py` (and, through it, `postgres.py`'s
+    own import) reads `BoundMutation`/`Predicate`/`bind_mutation`/
+    `parse_predicate`/`validate_predicates`/`validate_projection` from the
+    new leaf `mutation_binding.py` as the exact same objects -- this
+    checks facade identity only, not behaviour (the dedicated tests below
+    exercise the moved functions' own denials)."""
+    from r2db_api import mutation_binding
+    from r2db_api import structured
+
+    names = ["BoundMutation", "Predicate", "bind_mutation", "parse_predicate", "validate_predicates", "validate_projection"]
+    for name in names:
+        assert getattr(structured, name) is getattr(mutation_binding, name), name
+
+
+def test_mutation_binding_denials_carry_code_and_details(service):
+    """R-37 WP-3f (ST8): `mutation_binding.py`'s own denials keep their
+    exact `code`/`details` after the move -- `insert` never accepts a
+    `where` (`unsupported_field`/`where`), an operator outside `OPERATORS`
+    is rejected by `Predicate.validate` (`capability`, batch-indexed
+    `field`), and a non-str `expected_revision` is rejected with the
+    type-pair `declared_type`/`observed_type` on `request_schema`."""
+    runtime = service.authenticate("cred-a.secret-a")
+
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "x"}, "where": [{"field": "id", "operator": "eq", "value": 1}]}])
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "unsupported_field", "field": "where"}
+
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "update", "values": {"body": "x"}, "where": [{"field": "body", "operator": "like", "value": "x"}]}])
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "capability", "field": "operations/0/where/0/operator"}
+
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "update", "values": {"body": "x"}, "where": [{"field": "id", "operator": "eq", "value": 1}], "expected_revision": 7}])
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "expected_revision", "declared_type": "string", "observed_type": "integer"}
+
+
+def test_mutation_binding_runs_after_authorization_and_is_audited(service):
+    """R-37 WP-3f (ST8, WF-3): `bind_mutation`'s own shape/allowlist
+    checks run INSIDE `_slot`, after authorization -- an invalid context
+    together with an `insert` that also carries a `where` reports
+    `AUTH_INVALID` (authorization is checked first, `bind_mutation` is
+    never reached), while the identical operation with a valid,
+    authenticated context reaches `bind_mutation` and its
+    `VALIDATION_FAILED` deny is recorded in the legacy in-memory audit
+    (`ControlAuthority.audit_events()`)."""
+    control = ControlAuthority(service)
+    operation = [{"operation": "insert", "values": {"body": "x"}, "where": [{"field": "id", "operator": "eq", "value": 1}]}]
+
+    with pytest.raises(FoundationError) as exc:
+        service.mutate("not-a-context", "notes", operation)
+    assert exc.value.code == "AUTH_INVALID"
+
+    runtime = service.authenticate("cred-a.secret-a")
+
+    def validation_denials():
+        return [
+            event for event in control.audit_events()
+            if event["outcome"] == "deny" and event["reason_code"] == "VALIDATION_FAILED"
+        ]
+
+    before = len(validation_denials())
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", operation)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert len(validation_denials()) == before + 1, "expected the mutation_binding VALIDATION_FAILED deny recorded in the in-memory audit"

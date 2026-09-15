@@ -757,7 +757,7 @@ class ControlPlaneService:
         # Nit (round-2): `enabled`'s own bool-ness must be checked *before* it is used to pick an `operation` name at all -- unlike every other operation's shape validation (which the canonical (3) gate -> (4) validate order defers past the gate on purpose), this one specific field is an input to the gate call itself (which `operation` name to check), so there is no way to gate first without first deciding what a non-bool `enabled` even means for audit/gate purposes. Both `enable_application`/`disable_application` are refused identically under must_rotate regardless, so this ordering has no observable effect on gate outcomes -- it only avoids deriving an operation name from a value that was never validated as meaningful in the first place.
         # history: CH-0265
         if not isinstance(enabled, bool):
-            # O-1 (追補4): contract 1.7.0's `errors.details_vocabulary` unconditional obligation (a) covers "every denial", not only the data-plane query/mutate/schema surface -- this control-plane request field gets the same 4-key `violation(...)` shape a data-plane `bind_mutation`'s own `destructive` boolean-shape check (structured.py) already carries.
+            # O-1 (追補4): contract 1.7.0's `errors.details_vocabulary` unconditional obligation (a) covers "every denial", not only the data-plane query/mutate/schema surface -- this control-plane request field gets the same 4-key `violation(...)` shape a data-plane `bind_mutation`'s own `destructive` boolean-shape check (structured.py (now in `mutation_binding.py`)) already carries.
             # history: CH-0266
             fail("VALIDATION_FAILED", "enabled must be a boolean.", details=violation("request_schema", field="enabled", declared_type="boolean", observed_type=observed_type_of(enabled)))
         operation = "enable_application" if enabled else "disable_application"
@@ -907,7 +907,7 @@ class ControlPlaneService:
         context = self._authenticate(secret, request_id)
         self._authorize_role(context, operation="revoke_credential", request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
         self._gate_must_rotate(context, operation="revoke_credential", request_id=request_id)
-        # Review blocker B-1: shape validation of the request's own `destructive`/`confirmation` fields (contract `CredentialRevokeRequest.destructive: {"type": "boolean"}` / `.confirmation: {"type": "string", ...}`) -- applied unconditionally, regardless of whether this particular revoke ever meets the gate condition below. This is the same "request schema enforce" `bind_mutation` already applies to every data-plane mutation's own `destructive` field (structured.py); it is not part of the destructive-confirmation *semantics* the contract's own `non_destructive_requests` clause says a non-gated revoke never inspects -- a non-boolean truthy `destructive` (e.g. the string `"false"`, which a loose `bool(...)` cast would silently coerce to `True`) must be rejected as a shape defect before that semantic question is even reached, exactly per contract `evaluation_order` (shape validation precedes confirmation evaluation).
+        # Review blocker B-1: shape validation of the request's own `destructive`/`confirmation` fields (contract `CredentialRevokeRequest.destructive: {"type": "boolean"}` / `.confirmation: {"type": "string", ...}`) -- applied unconditionally, regardless of whether this particular revoke ever meets the gate condition below. This is the same "request schema enforce" `bind_mutation` already applies to every data-plane mutation's own `destructive` field (structured.py (now in `mutation_binding.py`)); it is not part of the destructive-confirmation *semantics* the contract's own `non_destructive_requests` clause says a non-gated revoke never inspects -- a non-boolean truthy `destructive` (e.g. the string `"false"`, which a loose `bool(...)` cast would silently coerce to `True`) must be rejected as a shape defect before that semantic question is even reached, exactly per contract `evaluation_order` (shape validation precedes confirmation evaluation).
         # history: CH-0272
         if destructive is not None and not isinstance(destructive, bool):
             fail("VALIDATION_FAILED", "destructive must be boolean.", details=violation("request_schema", field="destructive", declared_type="boolean", observed_type=observed_type_of(destructive)))
@@ -1010,7 +1010,7 @@ class ControlPlaneService:
         if not isinstance(request, dict):
             # O-1: the request as a whole is what is malformed (mirrors
             # `structured.py`'s own bare `violation("request_schema")` for
-            # a whole-body shape violation, e.g. `bind_mutation`'s
+            # a whole-body shape violation, e.g. `bind_mutation` (now in `mutation_binding.py`)'s
             # "Mutation shape is not supported.") -- no single `field`.
             fail("VALIDATION_FAILED", "AuditQueryRequest must be an object.", details=violation("request_schema"))
         event_classes = self._validate_audit_event_classes(request.get("event_classes"))
@@ -1027,7 +1027,7 @@ class ControlPlaneService:
             return None
         if not isinstance(value, list) or len(value) > _MAX_AUDIT_QUERY_EVENT_CLASSES or not all(isinstance(item, str) for item in value):
             # O-1: a bounded-list shape violation, mirrors `structured.py`'s
-            # own `validate_projection`'s identical "bounded non-empty
+            # own `validate_projection` (now in `mutation_binding.py`)'s identical "bounded non-empty
             # list" check (`violation("request_schema", field="select")`,
             # no type pair -- the violation may be item-type, or length,
             # not necessarily the top-level value's own JSON type).
