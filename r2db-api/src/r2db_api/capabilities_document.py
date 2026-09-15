@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-# Phase 10 WP-6a (design, contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below) (in `service.py`), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`. Every other `ResourceLimits` class is either region (i) (request-scoped, unaffected regardless of process count) or region (iii) (`idempotency_entries`, bound in PostgreSQL -- `enforced` regardless of `process_ceiling`, design; the count lock itself is scope, not this WP's).
+# Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below) (in `service.py`), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`. Every other `ResourceLimits` class is either region (i) (request-scoped, unaffected regardless of process count) or region (iii) (`idempotency_entries`, bound in PostgreSQL -- `enforced` regardless of `process_ceiling`, design; the count lock itself is scope, not this WP's).
 # history: CH-0174
 _IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES = frozenset({"requests_per_minute", "concurrency"})
 
@@ -41,7 +41,7 @@ def build_capabilities_document(
         # unchanged: this host never provides it, D-5's own
         # "declaration = real behavior" rule).
         #
-        # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): the SAME commit as this host's own R-3 (`errors.details_vocabulary` 4-key details) and R-7 (`request_id` on every successful result) implementation -- the two 1.7.0 UNCONDITIONAL obligations -- never ahead of the behavior it declares (D-1 (7)'s xfail(strict=True) version gate is exactly what would catch that ordering mistake).
+        # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1 (5)): the SAME commit as this host's own R-3 (`errors.details_vocabulary` 4-key details) and R-7 (`request_id` on every successful result) implementation -- the two 1.7.0 UNCONDITIONAL obligations -- never ahead of the behavior it declares (D-1 (7)'s xfail(strict=True) version gate is exactly what would catch that ordering mistake).
         #
         # Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as this host's own `process_ceilings` mapping -- the version's one unconditional obligation, `limit_enforcement_scoped_to_deployment_behind_base_url` -- never ahead of the behavior it declares.
         # history: CH-0142
@@ -76,7 +76,7 @@ def build_capabilities_document(
             "idempotency": {"status": "enabled"},
             "revision_preconditions": {"status": "enabled"},
             "row_addressability": {"status": "enabled"},
-            # `cross_entity_mutation` needs the new `POST /v1/data/mutations` endpoint (stubbed in as CAPABILITY_UNSUPPORTED, not executable), so it stays `unavailable` here: it has no executable operation at all. (`control_plane`, immediately below, is NOT in the same position any more: CCR-14 shipped the surface as a separate process, and its status is the deployer's own declaration -- the pre-CCR-14 wording that once grouped the two as "both remain unavailable" was corrected)
+            # `cross_entity_mutation` needs the new `POST /v1/data/mutations` endpoint (stubbed in `http.py` as CAPABILITY_UNSUPPORTED, not executable), so it stays `unavailable` here: it has no executable operation at all. (`control_plane`, immediately below, is NOT in the same position any more: CCR-14 shipped the surface as a separate process, and its status is the deployer's own declaration -- the pre-CCR-14 wording that once grouped the two as "both remain unavailable" was corrected)
             # history: CH-0141
             "cross_entity_mutation": {"status": "unavailable"},
             # reflects this instance's own constructor-injected deployer declaration -- never hardcoded (see __init__'s comment on this field) (in `service.py`).
@@ -102,7 +102,7 @@ def build_capabilities_document(
         },
         "limits": limits.as_dict(),
         # `idempotency_retention_ms` joins `execution_ms` in the `reference_wall_clock` set -- both are wall-clock DURATIONS a deployment cannot drive to a deterministic N/N+1 boundary within a bounded test run (unlike every COUNT-valued class here, `idempotency_entries` included, which genuinely IS `enforced`: a record's own retention window is checked lazily, against real elapsed time, not a request-counted budget).
-        # Phase 10 WP-6a (design, contract 1.8.0): three regions, not two. Region (i) (request-scoped: every class
+        # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): three regions, not two. Region (i) (request-scoped: every class
         # below not named in the other two sets) is unaffected by
         # `process_ceiling` -- unchanged from before this WP.
         # Region (ii) (`requests_per_minute`/`concurrency` --

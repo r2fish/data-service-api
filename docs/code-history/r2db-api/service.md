@@ -406,6 +406,20 @@ FIELDS`) is removed in this same commit as `capabilities().
 request_budget`/`.idempotency` both flipping to `enabled` (P-3).
 ```
 
+### correction: 2026-09-16
+
+- reason: R-22 change set 0i (ruling Z0i-4d) -- `tests/test_constraints_declaration.py` never reads `.revision` off this method's result (only off `cell.apply_schema`); `tests/test_foundation.py` is the direct caller that does
+
+old:
+```
+Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`, `tests/test_constraints_declaration.py`) reads `.revision` off the result; the in-process conformance adapter's own `hasattr(result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
+```
+
+new:
+```
+Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`; `tests/test_constraints_declaration.py` reads `.revision` only off `cell.apply_schema`) reads `.revision` off the result; the in-process conformance adapter's own `hasattr(result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
+```
+
 ## CH-0121
 
 - moved from: `src/r2db_api/service.py` (`DataService._mutate_outcome`)

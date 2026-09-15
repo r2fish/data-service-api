@@ -71,6 +71,30 @@ PEER_SRC_DIRS: dict[str, str] = {
 # R- / L- / D- are deliberately NOT in this list (handled by §3's judgment
 # table instead, on a per-block-moved basis, never by this blanket scan).
 # ---------------------------------------------------------------------------
+_REVIEW_FID_TOKEN_RE = re.compile(
+    r"\breview(?: round)? (?:F-\d+[a-z]?|\(F-\d+[a-z]?\))(?![A-Za-z0-9_])",
+    re.ASCII | re.IGNORECASE,
+)
+# design 9.2 rule 1 (Z0i-1 (B), change set 0i; F2/F3 code-review fix,
+# M1): the "review (F-n)" form can ALSO occur as a standalone TOP-LEVEL
+# parenthetical whose OWN content is just the F-ID, with "review"/
+# "review round" sitting in the surrounding sentence prose immediately
+# before the "(" -- outside the paren's own inner text, so this
+# pattern's premerge (which only ever sees one paren's own inner
+# content, or a plain run of flat text with no parens at all) never
+# spans across that paren boundary to find it (real corpus: MitateDB
+# `http.py` CH-0198, "round-1 review (F-2) found this pair..."). The
+# pattern's own SECOND alternative, `\(F-n\)`, is a BALANCED closed
+# paren (not two independently optional `(`/`)`, which would also
+# match a dangling "review (F-2" or "review F-2)"), and the trailing
+# `(?![A-Za-z0-9_])` stops it from swallowing part of a longer token.
+# `_sentence_reachable` checks whether a match of THIS SAME pattern's
+# own `(F-n)` alternative ends flush with a given paren's own close and,
+# if so, tells `_paren_words_removable` (`preceded_by_review`) to treat
+# a bare F-ID that is that ONE paren's entire content as a removable
+# history token too -- deriving the flag from this ONE shared pattern
+# (M1), never a separate, independently-maintained prefix regex.
+
 _HISTORY_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     # `(?<![A-Za-z0-9])` (v0.4 review round 2) instead of `\b`: an
     # underscore directly before "WP-" (`_WP-3`) is itself a word
@@ -83,6 +107,19 @@ _HISTORY_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     # by a unit word (decimal/digit(s)/place(s)/significant) -- that is a
     # numeric-precision phrase, not a history round number.
     re.compile(r"\bphase \d+", re.ASCII | re.IGNORECASE),
+    # design 9.2 rule 1 (v0.18, change set 0i, Z0i-1 (B)): a REVIEW
+    # POINTER naming an F-ID ("review F-2", "review round F-5", "review
+    # (F-2)") is ONE history token, span and all -- an indicated
+    # review-round pointer, not the executable-check F-ID it happens to
+    # share a number with. Placed BEFORE the plain "review" entry below
+    # so `_premerge_tokens` merges the WHOLE span first (the same
+    # compiled pattern object, `_REVIEW_FID_TOKEN_RE`, is reused
+    # unchanged by `_protected_reference_ids` (M1) to strip this span
+    # before protected-ID extraction, in the other three of the four
+    # 9.2 "使う箇所"). Known constraint (9.2 (b)): an indication-less
+    # pointer (bare "F-2" with no "review" beside it) stays protected,
+    # the same protection-favoring bias as 0d's own known constraint.
+    _REVIEW_FID_TOKEN_RE,
     # Inflected forms (v0.4 review round 2): "reviews"/"reviewed" etc.
     re.compile(r"\breview(?:s|ed|er|ers)?\b", re.ASCII),
     re.compile(
@@ -127,7 +164,14 @@ _CH_ID_LOOSE_RE = re.compile(r"\bCH-\d+\b")
 # design §4.1 (4): a "bare ID lacking a provenance tag in the same parens"
 # is removable; SI-/C-/CCR- are always provenance-tagged, never removable.
 _BARE_ID_RE = re.compile(r"^[A-Z]{1,6}-\d+[a-z]?$")
-_PROTECTED_ID_PREFIXES: tuple[str, ...] = ("SI-", "C-", "CCR-")
+# design 9.2 rule 1 (v0.18, change set 0i, monitor ruling Z0i-1): "F-"
+# (the F-ID hazard-declaration family, e.g. `F-1` .. `F-16`) is a
+# PROTECTED prefix, exactly like SI-/C-/CCR- -- never a removable bare
+# ID, and never merged with a following branch-number parenthetical
+# (`_ID_BRANCH_RE`'s exclusion list is built FROM this tuple, so
+# `F-4b(ii)` is automatically excluded from that merge too, the same
+# way `SI-08(2)` already was -- see 9.2's own note on this).
+_PROTECTED_ID_PREFIXES: tuple[str, ...] = ("SI-", "C-", "CCR-", "F-")
 # A parenthetical (or, for §4.1 (6), a whole label) carries its own
 # provenance tag if it names a file that is REAL (design §9 rule 2, v0.6,
 # change set 0c -- see `_has_real_filename_reference` below), or a word
@@ -279,25 +323,68 @@ def _filename_candidates(text: str) -> list[str]:
     return [s[2] for s in _filename_span_matches(text)]
 
 
+_QUALNAME_LOCATION_SUFFIX_RE = re.compile(r"(?:::[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?)+\Z")
+_LINE_LOCATION_SUFFIX_RE = re.compile(r":\d+(?:-\d+)?\Z")
+
+
+def _strip_location_suffix(candidate: str) -> str:
+    """design 9.2 rule 2 (Z0i-3 (A), monitor ruling; F1 code-review fix):
+    strip a trailing `:line` or `:line-line` range FIRST, then a
+    trailing `::qualname` (ALL `::`-joined segments, e.g. `::Cls::meth`,
+    M4) -- a segment MAY itself be a DOTTED Python qualname
+    (`::ApplicationCell.transact`, the dominant real-corpus form) and MAY
+    carry a trailing call-suffix `()` (`::entities()`) -- BEFORE the
+    real-path membership check below -- so `http.py::get_catalog`,
+    `` `cell.py::ApplicationCell.transact` `` and
+    `r2db-api/src/r2db_api/limits.py:16-20` are matched against their
+    real underlying path, rather than rejected as fake merely because of
+    the location suffix appended to it. Line MUST be stripped BEFORE
+    qualname: a candidate combining both (`::get_catalog:12`) would
+    otherwise leave the qualname segment behind uncleaned, since the
+    qualname pattern is anchored at the string's end (`\\Z`) and a
+    trailing `:12` blocks it from matching there at all."""
+    candidate = _LINE_LOCATION_SUFFIX_RE.sub("", candidate)
+    candidate = _QUALNAME_LOCATION_SUFFIX_RE.sub("", candidate)
+    return candidate
+
+
 def _is_real_filename_candidate(raw: str, real_paths: frozenset[str]) -> bool:
-    cleaned = _clean_filename_candidate(raw)
+    cleaned = _strip_location_suffix(_clean_filename_candidate(raw))
     if cleaned in real_paths:
         return True
-    # v0.7 follow-up supervisor ruling: a filename with NO path separator
-    # (e.g. `CONTROL_MAPPING.md`, referencing the real, uniquely-named
-    # `security/CONTROL_MAPPING.md`) still counts as a provenance tag if
-    # its basename matches EXACTLY ONE path in the tree -- 0 matches (it
-    # really doesn't exist) or >=2 matches (ambiguous, e.g. `README.md`)
-    # both leave it a removable history token, same as before. `cleaned`
-    # itself is compared AS-IS here (never reduced to its own basename),
-    # so a "/"-containing candidate (e.g. `x/CONTROL_MAPPING.md`) can
-    # never coincidentally match a real path's basename this way -- an
-    # earlier, now-removed `if "/" in cleaned: return False` guard was
-    # unreachable dead code given this (fixed by e2e fixture
-    # test_review_slash_path_basename_match_not_real_is_green, not by a
-    # guard clause).
+    # design 9.2 rule 2 (change set 0i, monitor ruling): a MULTI-SEGMENT
+    # candidate ("/" in cleaned -- a bare single-segment basename is
+    # rule 3's job below, not this one) with no EXACT match is still
+    # real if it is a proper suffix of some real path, split only at a
+    # "/" boundary -- never mid-segment (a suffix like
+    # "rity/CONTROL_MAPPING.md", cut out of the middle of
+    # "security/CONTROL_MAPPING.md", is never real, since there is no
+    # "/" immediately before "rity" in that real path). This is how a
+    # peer-relative reference written WITHOUT its own peer's directory
+    # prefix ("migrations/0003_provision_application.sql" for
+    # "MitateDB-api/migrations/0003_provision_application.sql",
+    # "r2db_api/ops.py" for "r2db-api/src/r2db_api/ops.py") is
+    # recognized as real.
+    if "/" in cleaned and any(p.endswith("/" + cleaned) for p in real_paths):
+        return True
+    # v0.7 follow-up supervisor ruling, WIDENED by design 9.2 rule 3
+    # (Z0i-2 (A), change set 0i, monitor ruling): a filename with NO
+    # path separator (e.g. `CONTROL_MAPPING.md`, or a basename shared by
+    # both peers such as `service.py`/`ops.py`/`http.py`) still counts
+    # as a provenance tag if its basename matches ONE OR MORE paths in
+    # the tree -- 0 matches (it really doesn't exist) leaves it a
+    # removable history token, same as before; ambiguity (`README.md`,
+    # or a basename both peers happen to share) is no longer
+    # disqualifying by itself, since the protecting condition is "does a
+    # real file answer to this name", not "which real file, uniquely"
+    # (the identity of the file is not what protection is judging --
+    # OPERATING_CONDITIONS.md 1.7's "no proxy measure" ruling; the cost
+    # of this widening is measured in the work order). `cleaned` itself
+    # is compared AS-IS here (never reduced to its own basename), so a
+    # "/"-containing candidate can never coincidentally match a real
+    # path's basename this way.
     basename_matches = [p for p in real_paths if p.rpartition("/")[2] == cleaned]
-    return len(basename_matches) == 1
+    return len(basename_matches) >= 1
 
 
 def _has_real_filename_reference(text: str, real_paths: frozenset[str]) -> bool:
@@ -305,10 +392,11 @@ def _has_real_filename_reference(text: str, real_paths: frozenset[str]) -> bool:
 
 
 _SUBSCRIPT_RE = re.compile(r"^[A-Z]{1,2}$|^\d+$")
-# Matches the opaque placeholder `_strip_allowed_parens` substitutes for a
-# globally pre-merged ID+branch-number pair -- never a real path segment,
-# so it must never make `_looks_like_path_word` misfire on the ARTIFACT of
-# that substitution (e.g. "I-6/\x00Y0\x00" for "I-6/D-5 (5)").
+# Matches the opaque placeholder `_sentence_reachable`'s own ID+branch
+# merge substitutes for a globally pre-merged ID+branch-number pair --
+# never a real path segment, so it must never make `_looks_like_path_word`
+# misfire on the ARTIFACT of that substitution (e.g. "I-6/\x00Y0\x00" for
+# "I-6/D-5 (5)").
 _ID_BRANCH_PLACEHOLDER_RE = re.compile(r"^\x00Y\d+\x00$")
 
 
@@ -362,6 +450,46 @@ def _parens_has_provenance_tag(inner: str, real_paths: frozenset[str]) -> bool:
         if _looks_like_path_word(chunk):
             return True
     return False
+
+
+def _balanced_paren_spans(sentence: str) -> list[tuple[int, int]]:
+    """design 9.2 rule 4 (nested parens, change set 0i): every BALANCED
+    `(...)` pair in `sentence`, INCLUDING nested ones -- unlike the flat
+    `\\(([^()]*)\\)` regex used elsewhere in this file, which only ever
+    matches a pair with no further paren inside it, so a genuinely
+    nested pair (e.g. `(see docs/design/X_V1.md §3 (D-4, WP-2))`) is
+    found here even though only its INNERMOST pair is ever matched by
+    that flat regex. A simple stack scan; an unmatched `(` or `)`
+    (design 9.2 known constraint (a): 51 of 5,233 sentences at
+    `f0637d9`) contributes no span for that character."""
+    stack: list[int] = []
+    spans: list[tuple[int, int]] = []
+    for i, ch in enumerate(sentence):
+        if ch == "(":
+            stack.append(i)
+        elif ch == ")" and stack:
+            start = stack.pop()
+            spans.append((start, i + 1))
+    return spans
+
+
+def _has_enclosing_tagged_paren(
+    sentence: str, paren_start: int, paren_end: int, real_paths: frozenset[str]
+) -> bool:
+    """design 9.2 rule 4 (change set 0i, monitor ruling): does some OTHER
+    paren pair in `sentence` that STRICTLY encloses `[paren_start,
+    paren_end)` itself carry a §4.1 (4)/§9 rule 2 provenance tag,
+    checked the SAME way a non-nested paren's own tag is
+    (`_parens_has_provenance_tag`, over the enclosing pair's own full
+    inner text, ID+branch pairs already merged away by the caller so no
+    literal nested parens remain from those)? Known constraint (Z0i-6):
+    scoped to `sentence` only, never across a sentence boundary."""
+    for start, end in _balanced_paren_spans(sentence):
+        if start < paren_start and end > paren_end:
+            if _parens_has_provenance_tag(sentence[start + 1 : end - 1], real_paths):
+                return True
+    return False
+
 
 # design §4.2 (5): the frozen, change-set-0-measured baseline (2026-09-14,
 # both peers' `src/`: 0 hits), now detected via AST name resolution (v0.4
@@ -1104,79 +1232,11 @@ def _is_removable_word(
 _PAREN_SPLIT_RE = re.compile(r"([,/;\s]+)")
 
 
-def _strip_allowed_parens(sentence: str, real_paths: frozenset[str]) -> str:
-    # An ID+branch-number pair ("D-5 (5)") is the ONLY source of a paren
-    # NESTED inside another ("(I-6/D-5 (5))", design §9 row 5) -- it is
-    # merged into one opaque, ALWAYS-removable placeholder across the
-    # WHOLE sentence FIRST, before the outer-paren regex ever runs. This
-    # keeps that regex a plain, non-nested `\(([^()]*)\)`: attempting
-    # instead to make the outer regex itself nesting-aware (an earlier
-    # version of this function did) risks over-matching across two
-    # unrelated parenthetical groups in dense, heavily-parenthesized real
-    # prose, silently deleting content between them.
-    id_branch_placeholders: dict[str, str] = {}
-
-    def merge_id_branch(m: re.Match[str]) -> str:
-        tok = f"\x00Y{len(id_branch_placeholders)}\x00"
-        id_branch_placeholders[tok] = m.group(0)
-        return tok
-
-    working_sentence = _ID_BRANCH_RE.sub(merge_id_branch, sentence)
-
-    def repl(m: re.Match[str]) -> str:
-        leading_ws, inner = m.group(1), m.group(2)
-        has_tag = _parens_has_provenance_tag(inner, real_paths)
-        slash_subscripts = _slash_id_subscripts(inner)
-        working, placeholders = _premerge_tokens(inner, real_paths)
-        parts = _PAREN_SPLIT_RE.split(working)
-        word_positions = [i for i in range(0, len(parts), 2) if parts[i].strip()]
-        if not word_positions:
-            return m.group(0)
-
-        def is_removable(i: int) -> bool:
-            token = parts[i]
-            if token in id_branch_placeholders:
-                return True
-            if token in placeholders:
-                _original, is_content = placeholders[token]
-                return not is_content
-            return _is_removable_word(token, has_tag, real_paths, slash_subscripts)
-
-        flags = {i: is_removable(i) for i in word_positions}
-        if all(flags[i] for i in word_positions):
-            return ""
-        if not any(flags[i] for i in word_positions):
-            return m.group(0)
-        for i in sorted((i for i in word_positions if flags[i]), reverse=True):
-            if i - 1 >= 0:
-                del parts[i - 1 : i + 1]
-            elif i + 1 < len(parts):
-                del parts[i : i + 2]
-            else:
-                del parts[i : i + 1]
-
-        def restore(s: str) -> str:
-            for tok, (orig, _is_content) in placeholders.items():
-                s = s.replace(tok, orig)
-            return s
-
-        remaining_words = [restore(parts[i]).strip() for i in range(0, len(parts), 2) if parts[i].strip()]
-        if remaining_words and all(_KIND_WORD_RE.match(w) for w in remaining_words):
-            return ""
-        new_inner = restore("".join(parts))
-        return leading_ws + "(" + new_inner + ")"
-
-    result = re.sub(r"(\s?)\(([^()]*)\)", repl, working_sentence)
-    for tok, orig in id_branch_placeholders.items():
-        result = result.replace(tok, orig)
-    result = re.sub(r" {2,}", " ", result)
-    return result.strip()
-
-
 # design v0.7 supervisor ruling (change set 0c follow-up, refined a
 # second time): every operation in §4.1 (3)/(4)/(6) and §9 rules 1-4 is a
-# PERMISSION ("してよい"), never an obligation. `_strip_allowed_parens`
-# above computes ONE particular (maximal) reduction; the functions below
+# PERMISSION ("してよい"), never an obligation -- an earlier maximal-
+# reduction helper (deleted as dead code with no callers, F5 code-review
+# fix) computed ONE particular (maximal) reduction; the functions below
 # instead answer "is THIS specific candidate sentence one of the
 # reductions a human editor could legally have stopped at". The FIRST
 # version of this (kept only in history) enumerated every subset of a
@@ -1190,7 +1250,8 @@ def _strip_allowed_parens(sentence: str, real_paths: frozenset[str]) -> str:
 # per-site choices imply by a single LEFT-TO-RIGHT scan (no enumeration
 # of combinations across sites, and so no cap on sentence length).
 def _paren_words_removable(
-    inner: str, real_paths: frozenset[str], id_branch_placeholders: dict[str, str]
+    inner: str, real_paths: frozenset[str], id_branch_placeholders: dict[str, str],
+    enclosing_tag: bool = False, preceded_by_review: bool = False,
 ) -> list[tuple[str | None, str, bool]]:
     """The ordered (prev_separator, word_text, is_removable) sequence for
     one `(...)`'s content -- `prev_separator` is the exact separator text
@@ -1201,8 +1262,25 @@ def _paren_words_removable(
     id+branch pairs un-merged). Removing a word takes its OWN preceding
     separator with it (design §4.1 (4)'s original word+adjacent-separator
     deletion mechanic) -- kept words must reproduce their ORIGINAL
-    preceding separator exactly UNLESS they end up first in the output."""
-    has_tag = _parens_has_provenance_tag(inner, real_paths)
+    preceding separator exactly UNLESS they end up first in the output.
+
+    `enclosing_tag` (design 9.2 rule 4, change set 0i, monitor ruling):
+    True when some OTHER paren pair enclosing THIS one, in the same
+    sentence, itself carries a provenance tag (`_has_enclosing_tagged_paren`,
+    computed once per match by the caller, `_sentence_reachable`) -- an
+    ID+branch pair inside an untagged paren that is itself inside a
+    tagged one is still protected, the tag reaching inward exactly the
+    way it would if the words were not nested at all.
+
+    `preceded_by_review` (design 9.2 rule 1, Z0i-1 (B), change set 0i;
+    F2 code-review fix, M1): True when a match of the SAME shared
+    `_REVIEW_FID_TOKEN_RE` pattern's own `(F-n)` alternative ends flush
+    with THIS paren's own close -- i.e. this paren IS that match's
+    `(F-n)` tail (computed by the caller) -- a bare F-ID that is this
+    paren's ENTIRE content is a removable history token in that case,
+    the same shared pattern gives the in-parens "review F-n"/"review
+    round F-n" forms."""
+    has_tag = _parens_has_provenance_tag(inner, real_paths) or enclosing_tag
     slash_subscripts = _slash_id_subscripts(inner)
     working, placeholders = _premerge_tokens(inner, real_paths)
     parts = _PAREN_SPLIT_RE.split(working)
@@ -1216,10 +1294,23 @@ def _paren_words_removable(
 
     def is_removable(token: str) -> bool:
         if token in id_branch_placeholders:
-            return True
+            # design 9.2 rule 4 (change set 0i, monitor ruling; F6
+            # code-review fix): a bare ID + branch-number pair
+            # ("D-5(ii)") is protected exactly like a lone bare ID
+            # would be, when this paren (or one enclosing it) carries a
+            # tag; a history-token + branch pair ("WP-6d (ii)") stays
+            # removable regardless -- told apart from a bare ID via
+            # `_ID_BRANCH_RE`'s own two NAMED alternatives (`history_id`
+            # vs `bare_id`), re-matched against the ORIGINAL merged
+            # text here, rather than a duplicated `"WP-"` literal proxy.
+            if _ID_BRANCH_RE.fullmatch(id_branch_placeholders[token]).group("history_id"):
+                return True
+            return not has_tag
         if token in placeholders:
             _orig, is_content = placeholders[token]
             return not is_content
+        if preceded_by_review and re.fullmatch(r"F-\d+[a-z]?", token.strip(), re.ASCII):
+            return True
         return _is_removable_word(token, has_tag, real_paths, slash_subscripts)
 
     words: list[tuple[str | None, str, bool]] = []
@@ -1266,6 +1357,7 @@ def _paren_target_pairs(
 def _paren_span_reachable(
     leading_ws: str, inner: str, candidate_span: str, real_paths: frozenset[str],
     id_branch_placeholders: dict[str, str],
+    enclosing_tag: bool = False, preceded_by_review: bool = False,
 ) -> bool:
     """Is `candidate_span` (either "", the untouched `leading_ws(inner)`,
     or some `leading_ws(reduced inner)`) one allowed outcome for this one
@@ -1280,7 +1372,9 @@ def _paren_span_reachable(
     original_full = leading_ws + "(" + restored_inner + ")"
     if candidate_span == original_full:
         return True
-    words = _paren_words_removable(inner, real_paths, id_branch_placeholders)
+    words = _paren_words_removable(
+        inner, real_paths, id_branch_placeholders, enclosing_tag, preceded_by_review
+    )
     if not words:
         return False
     if candidate_span == "":
@@ -1358,6 +1452,17 @@ def _sentence_reachable(sentence: str, target: str, real_paths: frozenset[str]) 
             return False
         pos += len(txt)
         leading_ws, inner = matches[i].group(1), matches[i].group(2)
+        # design 9.2 rule 4 (change set 0i): computed ONCE per matched
+        # paren, over `working_sentence` (ID+branch pairs already merged
+        # into single-char placeholders, so any literal "(" "/" ")"
+        # remaining there is a genuinely separate, nested paren pair).
+        enclosing_tag = _has_enclosing_tagged_paren(
+            working_sentence, matches[i].start(2) - 1, matches[i].end(2) + 1, real_paths
+        )
+        preceded_by_review = any(
+            t.end() == matches[i].end(2) + 1 and t.group(0).endswith(")")
+            for t in _REVIEW_FID_TOKEN_RE.finditer(working_sentence)
+        )
         original_span = leading_ws + "(" + restore_text(inner) + ")"
         next_txt = texts[i + 1]
         if target.startswith(original_span, pos):
@@ -1366,7 +1471,9 @@ def _sentence_reachable(sentence: str, target: str, real_paths: frozenset[str]) 
         if (
             next_txt
             and target.startswith(next_txt, pos)
-            and _paren_span_reachable(leading_ws, inner, "", real_paths, id_branch_placeholders)
+            and _paren_span_reachable(
+                leading_ws, inner, "", real_paths, id_branch_placeholders, enclosing_tag, preceded_by_review
+            )
         ):
             continue  # this parenthetical fully (and validly) removed
         if next_txt:
@@ -1385,7 +1492,10 @@ def _sentence_reachable(sentence: str, target: str, real_paths: frozenset[str]) 
                 if end == -1:
                     break
                 candidate_span = target[pos:end]
-                if _paren_span_reachable(leading_ws, inner, candidate_span, real_paths, id_branch_placeholders):
+                if _paren_span_reachable(
+                    leading_ws, inner, candidate_span, real_paths, id_branch_placeholders,
+                    enclosing_tag, preceded_by_review,
+                ):
                     found_end = end
                     break
                 search_from = end + 1
@@ -1404,7 +1514,10 @@ def _sentence_reachable(sentence: str, target: str, real_paths: frozenset[str]) 
             # cannot claim any of that following parenthetical's span.
             end = pos
         candidate_span = target[pos:end]
-        if not _paren_span_reachable(leading_ws, inner, candidate_span, real_paths, id_branch_placeholders):
+        if not _paren_span_reachable(
+            leading_ws, inner, candidate_span, real_paths, id_branch_placeholders,
+            enclosing_tag, preceded_by_review,
+        ):
             return False
         pos = end
     if not target.startswith(texts[-1], pos):
@@ -1453,9 +1566,9 @@ _BRANCH_PAREN = r"\((?:\d+|[IVXLCDMivxlcdm]+)\)"
 # hold for e.g. "WP-abc123", so the merge is anchored to the actual
 # history-token grammar instead.
 _ID_BRANCH_RE = re.compile(
-    r"\b((?!" + "|".join(re.escape(p) for p in _PROTECTED_ID_PREFIXES) + r"|WP-)"
-    r"[A-Z]{1,6}-\d+[a-z]?"
-    r"|WP-[0-9A-Za-z-]+)\s*(" + _BRANCH_PAREN + r")"
+    r"\b(?:(?P<bare_id>(?!" + "|".join(re.escape(p) for p in _PROTECTED_ID_PREFIXES) + r"|WP-)"
+    r"[A-Z]{1,6}-\d+[a-z]?)"
+    r"|(?P<history_id>WP-[0-9A-Za-z-]+))\s*(" + _BRANCH_PAREN + r")"
 )
 _CONNECTIVE_WORDS = frozenset({"and", "or", "、"})
 _JAPANESE_CHAR_RE = re.compile(r"[぀-ヿ㐀-鿿＀-￯]")
@@ -1464,6 +1577,33 @@ _NEGATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.ASCII | re.IGNORECASE)
     for p in (r"\bnever\b", r"\bnot\b", r"\bno\b", r"\bmust\s+not\b", r"\bdon't\b", r"\bcannot\b")
 ) + (re.compile("ない"), re.compile("禁止"), re.compile("しない"))
+
+
+_PROTECTED_ID_EXTRACT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Z]{1,6}-\d+[a-z]?(?![A-Za-z0-9_])", re.ASCII
+)
+
+
+def _protected_reference_ids(text: str) -> list[str]:
+    """Shared protected-ID extraction (design 9.2 "使う箇所", M1, change
+    set 0i): strip every `review F-n` / `review round F-n` / `review
+    (F-n)` span first (Z0i-1 (B) -- an indicated review-round pointer is
+    a history token, never a protected reference), then extract every
+    ID-shaped token with ASCII word boundaries (M2) -- Python's Unicode
+    `\\w`/`\\b` treats a Hiragana/Katakana/Kanji character as a word
+    character, so a plain `\\b` would see no boundary, and miss the ID
+    entirely, right after an ID glued directly onto Japanese text with
+    no separating space or punctuation (`F-12だけは`). Returns every
+    id-shaped token found, not only protected-prefixed ones -- callers
+    filter by `_PROTECTED_ID_PREFIXES` themselves, exactly as they did
+    with the plain `_ANY_ID_RE.findall` this replaces at all three of
+    the four 9.2 "使う箇所" that need free-text extraction (the fourth,
+    §4.1 (4)'s parenthetical word removal, gets the same
+    `_REVIEW_FID_TOKEN_RE` pattern through `_HISTORY_TOKEN_PATTERNS`/
+    `_premerge_tokens` instead, since that path already merges
+    multi-word tokens before any word-level check runs)."""
+    stripped = _REVIEW_FID_TOKEN_RE.sub(" ", text)
+    return _PROTECTED_ID_EXTRACT_RE.findall(stripped)
 
 
 def _label_word_tokens(text: str, real_paths: frozenset[str]) -> list[tuple[str, bool]]:
@@ -1535,7 +1675,7 @@ def _label_has_provenance_marker(text: str, real_paths: frozenset[str]) -> bool:
     that is NOT itself provenance-tagged elsewhere in the label."""
     if any(pat.search(text) for pat in _HISTORY_TOKEN_PATTERNS):
         return True
-    ids = _ANY_ID_RE.findall(text)
+    ids = _protected_reference_ids(text)
     unprotected = [i for i in ids if not i.startswith(_PROTECTED_ID_PREFIXES)]
     if not unprotected:
         return False
@@ -1546,8 +1686,15 @@ def _label_has_protected_reference(text: str, real_paths: frozenset[str]) -> boo
     """Review-round supervisor ruling (L1/L10): a label containing a
     protected reference (SI-/C-/CCR-, or a bare ID that is provenance-
     tagged) is never removable, even if it also carries a qualifying (5)
-    token elsewhere (e.g. "SI-08 WP-3:")."""
-    ids = _ANY_ID_RE.findall(text)
+    token elsewhere (e.g. "SI-08 WP-3:"). design 9.2 "使う箇所" (M3,
+    change set 0i, monitor ruling): also calls the SAME sentence-level
+    protected-reference check §4.1 (3) uses (protected ID, `spec §`, a
+    versioned document name, a real path) -- a label carrying, say, a
+    real filename reference must be just as unremovable as a whole
+    sentence carrying one, not only an ID."""
+    if _sentence_has_protected_reference(text, real_paths):
+        return True
+    ids = _protected_reference_ids(text)
     if any(i.startswith(_PROTECTED_ID_PREFIXES) for i in ids):
         return True
     unprotected = [i for i in ids if not i.startswith(_PROTECTED_ID_PREFIXES)]
@@ -1561,7 +1708,7 @@ def _label_japanese_char_count(text: str) -> int:
     working = text.replace("(", "").replace(")", "")
     for pat in _HISTORY_TOKEN_PATTERNS:
         working = pat.sub("", working)
-    working = _ANY_ID_RE.sub("", working)
+    working = _PROTECTED_ID_EXTRACT_RE.sub("", working)
     return len(re.sub(r"\s+", "", working))
 
 
@@ -1616,7 +1763,7 @@ def _sentence_has_protected_reference(sentence: str, real_paths: frozenset[str])
     sentence deletion is restricted). HTTP status codes and error-code
     vocabulary are deliberately NOT protected here -- left to audit/
     conformance review, not this tool."""
-    ids = _ANY_ID_RE.findall(sentence)
+    ids = _protected_reference_ids(sentence)
     if any(i.startswith(_PROTECTED_ID_PREFIXES) for i in ids):
         return True
     if _SPEC_SECTION_RE.search(sentence):
@@ -1963,16 +2110,29 @@ def _correction_relaxes_protection(old: str, new: str, real_paths: frozenset[str
     a human to re-escalate as its own, separately reviewed decision,
     never silently absorbed by this correction mechanism. Returns an
     error string, or None if nothing protected was lost."""
-    old_ids = frozenset(i for i in _ANY_ID_RE.findall(old) if i.startswith(_PROTECTED_ID_PREFIXES))
-    lost_ids = sorted(i for i in old_ids if i not in new)
+    old_ids = frozenset(i for i in _protected_reference_ids(old) if i.startswith(_PROTECTED_ID_PREFIXES))
+    new_ids = frozenset(_protected_reference_ids(new))
+    lost_ids = sorted(i for i in old_ids if i not in new_ids)
     if lost_ids:
         return f"protected reference(s) {lost_ids!r} dropped (old: {old!r}, new: {new!r})"
 
     old_real_paths = frozenset(
-        _clean_filename_candidate(c) for c in _filename_candidates(old)
+        _strip_location_suffix(_clean_filename_candidate(c)) for c in _filename_candidates(old)
         if _is_real_filename_candidate(c, real_paths)
     )
-    new_candidates_cleaned = frozenset(_clean_filename_candidate(c) for c in _filename_candidates(new))
+    # Z0i-4f: strip the location suffix here too, the same way
+    # `_is_real_filename_candidate` already strips it (Z0i-3) before the
+    # real-path membership check above -- otherwise a correction that
+    # only swaps a `:line-line` range for a `::qualname` (or vice versa)
+    # on the SAME real path is misread as dropping that path, since the
+    # uncleaned old form (`...ops.py:541-550`) never matches the
+    # uncleaned new form (`...ops.py::_run_deprovision_script`). A
+    # correction that drops the path itself is still refused: its
+    # stripped form then has no match in `new_candidates_cleaned` at
+    # all.
+    new_candidates_cleaned = frozenset(
+        _strip_location_suffix(_clean_filename_candidate(c)) for c in _filename_candidates(new)
+    )
     lost_paths = sorted(p for p in old_real_paths if p not in new_candidates_cleaned)
     if lost_paths:
         return f"real path(s) {lost_paths!r} dropped (old: {old!r}, new: {new!r})"
