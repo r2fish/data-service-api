@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import uuid
 from unittest import mock
 
@@ -573,7 +574,34 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
     `visible_before_a_commit` becomes 1 again (an independent connection
     sees A's uncommitted `CREATE TABLE`) and `b_started_before_a_released`
     becomes `True` (B's own `field_domains` starts before A's `release`
-    event is ever set) -- both assertions below go red.
+    event is ever set) -- both assertions below go red (measured: M1,
+    `{'b_done_before_a_released': True, 'b_started_before_a_released':
+    True, 'visible_before_a_commit': 1, 'a_status': 200, 'b_status':
+    200}`).
+
+    Budget precondition: B's own race window below (`b_race_window_s`,
+    derived from `app_a_stack.cell.config.max_execution_ms`, 1.0s at the
+    default 5000ms) must stay well inside B's own execution budget --
+    post-fix, B is held behind A's lock for that entire window, so B's
+    OWN `PostgresBackend._timeout_ms`/`_set_timeouts` (computed from the
+    wall-clock `deadline` set at B's own `ApplicationCell._limit_gate`
+    entry -- `cell.py`, `deadline = time.monotonic() + ...` -- reached
+    AFTER auth, the body read, and the request's own shape checks, never
+    at B's request start) would clamp to `max(1, ...)` ms once B finally
+    runs if that window ever reached B's own budget -- turning the
+    `a_status`/`b_status` assertion below into a load-timing assertion,
+    not a lock-correctness one. Mutation (M2, the window widened back to
+    exactly the pre-fix 10 s, `/ 1000 * 2` instead of `/ 1000 / 5`): the
+    precondition assertion on `after_release_timeouts` goes red
+    deterministically BEFORE the status assertion is ever reached: a
+    hold of at least 10 s is longer than B's own 5 s budget, so B's own
+    `PostgresBackend._timeout_ms` (`backend_postgres.py`) always clamps
+    to 1ms once B finally runs (measured: `timeout_ms` recorded as `1`
+    for the one `_set_timeouts` call observed after A's own `release`
+    was set, while `visible_before_a_commit`/`b_started_before_a_
+    released` both stayed at their correct, post-fix values) -- i.e.
+    this is genuinely a budget artifact, not a lock regression (the lock
+    assertions stayed at their post-fix values).
     """
     _create_entity(app_a_stack, "wp8b_u10_probe_target", ["item_key"])
 
@@ -584,6 +612,8 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
 
     original_bump = PostgresBackend._bump_schema_revision
     original_domains = PostgresBackend.field_domains
+    original_set_timeouts = PostgresBackend._set_timeouts
+    original_gate = type(app_a_stack.cell)._gate
 
     def _stalling_bump(self, cur):
         result = original_bump(self, cur)
@@ -599,7 +629,26 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
         finally:
             b_done.set()
 
+    set_timeouts_calls: list[dict] = []
+
+    def _recording_set_timeouts(self, cur, timeout_ms):
+        set_timeouts_calls.append({"timeout_ms": timeout_ms, "after_release": release.is_set()})
+        return original_set_timeouts(self, cur, timeout_ms)
+
+    b_gated = threading.Event()
+
+    def _watched_gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
+        if endpoint_kind == "query":
+            b_gated.set()
+        return original_gate(
+            self, principal, request, request_id=request_id, budget=budget, endpoint_kind=endpoint_kind)
+
     observed: dict[str, object] = {}
+
+    # Derived from the deployed budget -- see the docstring's "Budget
+    # precondition" paragraph for why this must stay well inside
+    # max_execution_ms.
+    b_race_window_s = app_a_stack.cell.config.max_execution_ms / 1000 / 5
 
     async def _scenario():
         async with httpx.AsyncClient(
@@ -619,12 +668,16 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
                 "/v1/data/wp8b_u10_probe_target/query",
                 headers={"authorization": f"Bearer {app_a_stack.runtime_bearer}"},
                 json={"select": ["item_key"]}))
-            # 400 * 0.025s = 10s -- comfortably enough time for B to race
-            # ahead of A if it ever COULD (pre-fix); post-fix, B stays
-            # blocked on `self._lock` for this entire window instead.
             for _ in range(400):
-                if b_done.is_set():
+                if b_gated.is_set():
                     break
+                await asyncio.sleep(0.025)
+            assert b_gated.is_set(), "B never reached its own _gate call (endpoint_kind='query')"
+
+            # See the docstring's "Budget precondition" paragraph for why
+            # this window must stay well inside B's own max_execution_ms.
+            window_end = time.monotonic() + b_race_window_s
+            while time.monotonic() < window_end and not b_done.is_set():
                 await asyncio.sleep(0.025)
             observed["b_done_before_a_released"] = b_done.is_set()
             observed["b_started_before_a_released"] = b_started.is_set()
@@ -645,7 +698,9 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
             observed["b_status"] = b_response.status_code
 
     with mock.patch.object(PostgresBackend, "_bump_schema_revision", _stalling_bump), \
-         mock.patch.object(PostgresBackend, "field_domains", _watched_domains):
+         mock.patch.object(PostgresBackend, "field_domains", _watched_domains), \
+         mock.patch.object(PostgresBackend, "_set_timeouts", _recording_set_timeouts), \
+         mock.patch.object(type(app_a_stack.cell), "_gate", _watched_gate):
         asyncio.run(_scenario())
 
     print("\nU-10 PROBE OBSERVED:", observed)
@@ -657,7 +712,18 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
     assert not observed["b_started_before_a_released"], (
         "request B reached field_domains (the shared _developer connection) "
         f"BEFORE request A released its own lock hold: {observed}")
-    assert observed["a_status"] == 200 and observed["b_status"] == 200, observed
+    after_release_timeouts = [t["timeout_ms"] for t in set_timeouts_calls if t["after_release"]]
+    assert after_release_timeouts, (
+        "no PostgresBackend._set_timeouts call was observed after A's own "
+        "release was set -- this precondition would be vacuous: "
+        f"{set_timeouts_calls}")
+    assert all(t > 1 for t in after_release_timeouts), (
+        "a statement timeout of <= 1ms was set for a call made after A's "
+        "own release -- B's own execution budget (max_execution_ms) ran "
+        "out while B was held behind A's lock; the fix is to shorten B's "
+        f"own race window, not to treat this as a lock regression: {set_timeouts_calls}")
+    assert observed["a_status"] == 200 and observed["b_status"] == 200, (
+        f"{observed} timeouts={set_timeouts_calls}")
 
 
 # ---------------------------------------------------------------------------
