@@ -125,6 +125,57 @@
 - `tools/perf_baseline.py`: 起動部品で専用クラスタを使い、排他 lock を取る (単独実行)。
 - テスト: `tools/tests/test_dev_tools.py` の hold flag・他 pytest の検出のテストを置き換える。
 
+### 3.1 WP-2 manifest (v1.1、2026-09-16 追記。§3 の枠は書き換えない)
+
+**目的**: 道具を新方式へ移す。gate は実行のクラスタを見て判定し、`ps` の観測による排他を実ロックに置き換え、hold flag を廃止する。設計 D-5・D-6・D-9、裁定 Q-2 (a)・Q-3。基点は WP-1 統合後の main (`41e1beb`)。
+
+**(a) ロック (`tools/testpg/dsa_testpg.py` に足す)**
+
+- 基底ディレクトリ直下に `suite.lock` と `gate.intent` を置く (実行ディレクトリの外。掃除の対象にしない)。
+- `suite_lock(exclusive: bool, wait: float)`: `flock` の context manager。排他は gate と性能計測、共有はそれ以外の pytest。
+- gate は `gate.intent` を書いてから排他ロックを取り、解放時に消す。共有ロックを取る側は、`gate.intent` があれば消えるまで待ってから取りに行く (gate の飢餓防止)。ロックなので、確認と取得の間に隙が無い。
+- `ensure_for_pytest()` は **owned のときだけ**共有ロックを実行の間持つ (`stop_owned()` で解放)。`external` では取らない — gate 自身が起動する pytest が、gate の排他ロックと自分で競合しないため。
+- 待ち時間を超えたら `TestPgError` (道具側は REFUSED 75 に変換する)。
+
+**(b) `tools/dev/gate.py`**
+
+- `dsa_testpg` で自分のクラスタを起動し、`DSA_TEST_PG=external` と `Cluster.env()` を渡して root suite を実行する。
+- `pg_database` / `pg_roles` の前後比較は**そのクラスタ**で、停止前に行う。差分があれば FAIL (名前の出力は現行のまま)。
+- 共有クラスタの前後比較は `info=` の 1 行として残す。判定には使わない (Q-3)。
+- 排他ロックを取る。`--hold` と gate-hold flag、`ps` による他 pytest の監視 (`run_watched` の poll) を廃止する。
+- 出力は現行の形を保つ (集計行、`judge=`、名前の行、`log=`)。
+
+**(c) `tools/dev/pt.py` / `mutate.py` / `finalize.py` / `handover_ready.py` / `_devlib.py`**
+
+- `hold_flag` / `blockers` / `wait_clear` / `other_pytest` / `current_other_pytest` / `parse_ps` と `--hold` を削除する。`blockers` の役割のうち**変異 journal の検査だけ**を残す (`journal_blocker()` に改名)。
+- `pt.py` / `mutate.py`: `--wait` は「gate の排他ロックが解けるまでの待ち」に意味を変える。実行は conftest 経由で共有ロックを取るので、道具側での二重取得はしない。
+- `finalize.py --tools-tests`: `tools/tests` は conftest を読まない (根が `tools/tests/pytest.ini`) ので、ロックも PostgreSQL も要らない。journal の検査だけを残す。
+- `handover_ready.py`: 「他の pytest が 0 件」「gate-hold flag が無い」の 2 条件を廃止し、「gate が走っていない (`gate.intent` が無く排他ロックが空いている)」「変異 journal が無い」「担当 worktree がクリーン」に置き換える。
+
+**(d) `tools/perf_baseline.py`**
+
+- `dsa_testpg.cluster()` で専用クラスタを使い、排他ロックを取る (単独実行を維持、§2 の 19・§3 の 10)。
+- 基準値の取り直しは WP-4 (Q-9)。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `tools/testpg/dsa_testpg.py`、`tools/dev/gate.py`・`pt.py`・`mutate.py`・`finalize.py`・`handover_ready.py`・`_devlib.py`、`tools/perf_baseline.py`、`tools/tests/test_dev_tools.py`、`tools/tests/test_testpg.py`、`tools/dev/README.md` (道具の説明は道具と同じコミットで直す) | 23 ファイルの既定値と `socket_harness.py` (WP-3)、`docs/work-orders/OPERATING_CONDITIONS.md` と他の README (WP-4)、`conftest.py` 3 つ、`.github/workflows/ci.yml`、`conformance-tests/` のテスト |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるテスト (予想) |
+|---|---|---|---|
+| 1 | gate は実行のクラスタの差分で FAIL する | `gate.py`: 判定から実行クラスタの差分を外す | `test_dev_tools.py::test_gate_fails_on_run_cluster_diff` (新規、`snapshot` を注入) |
+| 2 | gate は共有クラスタの差分では FAIL しない | `gate.py`: 共有クラスタの差分を判定に足す | `::test_gate_shared_cluster_diff_is_info_only` (新規) |
+| 3 | gate は pytest に external と接続情報を渡す | `gate.py`: `DSA_TEST_PG` を渡さない | `::test_gate_passes_external_env_to_pytest` (新規) |
+| 4 | gate は排他ロックを取る | `gate.py`: ロックを取らない | `::test_gate_holds_the_exclusive_lock` (新規、別 process から共有ロックを試す) |
+| 5 | 共有ロックは gate の intent を待つ | `dsa_testpg.py`: intent の確認を消す | `test_testpg.py::test_shared_lock_waits_for_gate_intent` (新規) |
+| 6 | external では共有ロックを取らない | `dsa_testpg.py`: external でも取る | `test_testpg.py::test_external_mode_takes_no_lock` (新規。取ると gate 自身が止まる) |
+| 7 | 変異 journal の検査は残る | `_devlib.py`: `journal_blocker()` を無効にする | `test_dev_tools.py` の既存の journal テスト |
+| 8 | 性能計測は排他ロックと専用クラスタを使う | `perf_baseline.py`: ロックを取らない | `test_perf_baseline.py::test_perf_baseline_takes_the_exclusive_lock` (新規) |
+| 9 | `handover_ready` は gate 中に READY を出さない | `handover_ready.py`: gate の確認を消す | `test_dev_tools.py::test_handover_not_ready_while_gate_runs` (新規) |
+
+- **完了ゲート**: 新しい `gate.py` 自身で root suite を通す。集計行は WP-1 統合後の main (`3417 passed, 2 subtests passed`) に新規テストの数を足した値と一致し、実行クラスタの差分 0、共有クラスタの情報行も 0 であること。
+- **並列の確認 (設計 §7 の完了条件)**: suite を 2 本並列に 3 回走らせ、毎回両方の集計行が一致することを WP-2 の報告に添える。
+
 ## 4. WP-3 — 既定値の削除と待ち受けポート (枠)
 
 - 23 ファイルの `host=/tmp port=5432 dbname=postgres` の既定値と、それを埋め込んだ fail メッセージを削除し、未設定は fail にする。`tools/tests` に既定値のリテラルが再び入らないことの検査を足す。
