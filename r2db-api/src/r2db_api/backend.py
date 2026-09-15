@@ -28,7 +28,7 @@ from .structured import ApplicationCell, MutationOutcome, Predicate, QueryOutcom
 
 # `QueryOutcome`/`MutationOutcome`/`SchemaOutcome` (CCR-13, docs/design/
 # R2DB_CCR13_STORAGE_V1.md §3; `SchemaOutcome` added by contract 1.7.0 D-4,
-# WP-2b) are defined in `structured.py` -- the module that already owns the
+# WP-2b) are defined in `structured.py` (now in `storage_outcomes.py`) -- the module that already owns the
 # shared validation/planning boundary and is where `ApplicationCell` actually
 # constructs them -- and re-exported here so this module remains the single
 # place that names the full `StorageBackend` call surface, inputs and

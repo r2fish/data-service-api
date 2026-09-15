@@ -1535,6 +1535,7 @@ tools/dev/gate.py --label wp3d                             # 監督。run_in_bac
 | W3-11 | 本案。3i は 3 method に限る。backend を引数で渡す案は採らない |
 | W3-12 | 認める。W3-3 と同じく、差分を列挙してログに残す |
 | W3-13 | 認める |
+| W3-14 | 3d の完了条件 1 の変異 (`structured.py` の import から `SchemaOutcome` を外す) は、`backend.py` も同じ名前を import するので収集時の ImportError (exit 2) になり、条件 1 だけを壊さない。`storage_outcomes` の import の直後で `SchemaOutcome` を別の class で上書きする変異に置き換える (実装時の監督裁定、2026-09-15)。以後の WP でも、facade の名前を消す変異が他 module の import を壊す場合は、同じく上書きの変異を使う |
 
 
 ## 6. 重なり表と監督裁定

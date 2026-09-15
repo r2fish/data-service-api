@@ -2261,6 +2261,71 @@ def test_value_types_leaf_preserves_structured_facade():
         assert getattr(structured, name) is getattr(value_types, name), name
 
 
+def test_storage_outcomes_leaf_preserves_structured_facade():
+    """R-37 WP-3d (ST10): `structured.py` (and, through it, `backend.py`'s
+    own `StorageBackend` protocol re-export) reads `QueryOutcome`/
+    `MutationOutcome`/`SchemaOutcome` from the new leaf `storage_outcomes.
+    py` as the exact same objects -- this checks facade identity only,
+    not behaviour (the dedicated test below exercises the frozen
+    dataclasses' own shape)."""
+    from r2db_api import backend
+    from r2db_api import structured
+    from r2db_api import storage_outcomes
+
+    names = ["QueryOutcome", "MutationOutcome", "SchemaOutcome"]
+    for name in names:
+        assert getattr(structured, name) is getattr(storage_outcomes, name), name
+        assert getattr(backend, name) is getattr(storage_outcomes, name), name
+
+
+def test_storage_outcomes_are_frozen_with_contract_defaults():
+    """R-37 WP-3d (ST10): `QueryOutcome`/`MutationOutcome`/`SchemaOutcome`
+    stay frozen dataclasses after the move to `storage_outcomes.py`, their
+    contract-facing field names/defaults are unchanged, and `QueryOutcome`
+    still rejects a `revisions` list whose length does not match `items`."""
+    from dataclasses import MISSING, FrozenInstanceError, fields
+    from r2db_api.storage_outcomes import MutationOutcome, QueryOutcome, SchemaOutcome
+
+    query = QueryOutcome(items=[])
+    with pytest.raises(FrozenInstanceError):
+        query.items = ["mutated"]
+
+    mutation = MutationOutcome(affected=0)
+    with pytest.raises(FrozenInstanceError):
+        mutation.affected = 1
+
+    schema = SchemaOutcome(committed=True, revision=1)
+    with pytest.raises(FrozenInstanceError):
+        schema.committed = False
+
+    assert [(f.name, f.default) for f in fields(QueryOutcome)] == [
+        ("items", MISSING),
+        ("revisions", None),
+        ("has_more", False),
+        ("next_cursor", None),
+    ]
+    assert [(f.name, f.default) for f in fields(MutationOutcome)] == [
+        ("affected", MISSING),
+        ("assigned_addresses", None),
+        ("destructive", False),
+        ("committed", True),
+        ("plan", None),
+        ("replayed", False),
+        ("request_id", None),
+    ]
+    assert [(f.name, f.default) for f in fields(SchemaOutcome)] == [
+        ("committed", MISSING),
+        ("revision", MISSING),
+        ("descriptor", None),
+        ("plan", None),
+        ("replayed", False),
+        ("request_id", None),
+    ]
+
+    with pytest.raises(ValueError):
+        QueryOutcome(items=[{"a": 1}], revisions=["r1", "r2"])
+
+
 def test_service_results_leaf_preserves_service_facade():
     """R-37 WP-3a (SV1): `service.py` re-exports `QueryPage`/`MutationResult`
     from the new leaf `service_results.py` as the exact same objects --

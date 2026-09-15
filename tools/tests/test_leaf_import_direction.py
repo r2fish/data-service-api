@@ -105,6 +105,7 @@ LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("service_results.py", frozenset({"dataclasses", "typing"})),
         ("capabilities_document.py", frozenset({"typing"})),
         ("request_shape.py", frozenset({"typing", ".errors"})),
+        ("storage_outcomes.py", frozenset({"dataclasses", "typing"})),
     ],
     "mitatedb": [
         ("postgres_value_domain.py", frozenset({".errors"})),
