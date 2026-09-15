@@ -2016,15 +2016,21 @@ def test_v072_nonexistent_basename_filename_removable_is_green(tmp_path):
     assert code == 0, output
 
 
-def test_v072_ambiguous_basename_filename_removable_is_green(tmp_path):
-    # `README.md` exists at TWO different paths -- ambiguous, so it stays
-    # a removable history token rather than becoming a provenance tag.
+def test_0i_rule3_ambiguous_basename_is_real_is_red(tmp_path):
+    # design 9.2 rule 3 (Z0i-2 (A), change set 0i, monitor ruling):
+    # `README.md` exists at TWO different paths -- under 0c/pre-0i this
+    # stayed a removable history token (ambiguous); under 0i, a basename
+    # match count of >=1 (not ==1) is enough to make it real, so it now
+    # protects its co-located ID instead. Replaces (old name recorded in
+    # the work order 15.4) `test_v072_ambiguous_basename_filename_removable_is_green`,
+    # whose expectation this inverts.
     repo, rev = _real_paths_scenario(
         tmp_path, "Note (README.md, D-3): body.", "Note: body.",
         extra_files=[("a/README.md", "stub\n"), ("b/README.md", "stub\n")],
     )
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
-    assert code == 0, output
+    assert code == 1
+    assert "§4.1 (3)" in output
 
 
 def test_v072_unique_basename_matches_real_repo_control_mapping(tmp_path):
@@ -2036,14 +2042,19 @@ def test_v072_unique_basename_matches_real_repo_control_mapping(tmp_path):
     assert matches == ["security/CONTROL_MAPPING.md"], matches
 
 
-def test_v072_mutation_basename_uniqueness_removed_would_break_control_mapping():
-    # White-box companion to the "basename uniqueness check removed"
-    # mutation: directly pins that a basename match alone (without
-    # requiring exactly one) is not what makes CONTROL_MAPPING.md real.
+def test_v072_unique_basename_is_real():
+    # F8 (code review, nit): renamed from
+    # test_v072_mutation_basename_uniqueness_removed_would_break_control_mapping
+    # (work order §15.4) -- since the `== 1` assert this pinned was
+    # removed (Z0i-2 (A)), the old name described a mutation that no
+    # longer exists. White-box companion pinning the unique-basename-
+    # real precondition test_v072_unique_basename_matches_real_repo_
+    # control_mapping relies on. (The ambiguous-README.md half of the
+    # original assertion moved to test_0i_rule3_ambiguous_basename_is_
+    # real_is_red, since >=2 matches is now REAL, the opposite of what
+    # this pinned.)
     real_paths = frozenset({"security/CONTROL_MAPPING.md"})
     assert cp._is_real_filename_candidate("CONTROL_MAPPING.md", real_paths) is True
-    ambiguous = frozenset({"a/README.md", "b/README.md"})
-    assert cp._is_real_filename_candidate("README.md", ambiguous) is False
 
 
 def test_v072_long_sentence_partial_reduction_of_one_of_three_parens_is_green(tmp_path):
@@ -3004,66 +3015,19 @@ def test_0e_run_base_red_when_over_joined_id_asc(tmp_path):
     assert code == 1, output
 
 
-def test_0e_mutations_removing_each_predicate_b_rule_is_red():
-    # Mutation set pinned per the supervisor's own instruction: each of
-    # predicate B's 5 rules, the identifier-set check, and the inside/
-    # outside-backtick judgment is individually load-bearing -- removing
-    # any one of them must turn a previously-detected real corpus case
-    # undetected (i.e. was red, mutated-checker sees it as green).
-    identifier_set = frozenset({"ApplicationCell"})
-
-    def boundary_without(rule: str, accumulated: str, next_line: str) -> bool:
-        if not accumulated or not next_line:
-            return False
-        inside_backticks = accumulated.count("`") % 2 == 1
-        if rule == "invert_backtick":
-            inside_backticks = not inside_backticks
-        last = accumulated[-1]
-        prev = accumulated[-2] if len(accumulated) >= 2 else ""
-        nxt = next_line[0]
-        if rule != "rule1" and last == "_" and cp._is_word_char(prev) and cp._is_word_char(nxt):
-            return True
-        if rule != "rule2" and last == "-" and prev != "-" and cp._is_word_char(prev) and cp._is_word_char(nxt):
-            return True
-        if rule != "rule3" and last == "." and inside_backticks and cp._is_word_char(nxt):
-            return True
-        if rule != "rule4" and last == "." and not inside_backticks:
-            m = cp._JOIN_EXTENSION_RE.match(next_line)
-            if m and m.group(0).lower() in cp._JOIN_EXTENSIONS:
-                return True
-        if rule != "rule5" and inside_backticks and last.isalpha() and last.islower() and nxt.isalpha() and nxt.isupper():
-            if rule == "no_identifier_check":
-                return True
-            joined = cp._joined_identifier_at_boundary(accumulated, next_line)
-            if joined in identifier_set:
-                return True
-        return False
-
-    cases = {
-        "rule1": ("applications_", "count_locked`"),
-        "rule2": ("already-", "committed"),
-        "rule3": ("`conn.", "transaction()`"),
-        "rule4": ("see spec/data-service-api.v1.", "json for the schema."),
-        "rule5": ("`Application", "Cell.transact`"),
-    }
-    # each real trigger must be true under the real predicate...
-    for rule, (left, right) in cases.items():
-        assert cp._is_join_sensitive_boundary(left, right, identifier_set) is True, rule
-    # ...and false once its OWN rule is removed.
-    for rule, (left, right) in cases.items():
-        assert boundary_without(rule, left, right) is False, rule
-    # identifier-set check removed: "idASC" (not a real identifier)
-    # would now WRONGLY join (must be inside backticks for rule 5 to be
-    # in play at all).
-    assert cp._is_join_sensitive_boundary("`id", "ASC`", identifier_set) is False
-    assert boundary_without("no_identifier_check", "`id", "ASC`") is True
-    # backtick in/out judgment inverted: rule 3's trigger (inside
-    # backtick) now wrongly requires OUTSIDE, so the real inside-
-    # backtick case stops firing.
-    assert boundary_without("invert_backtick", "`conn.", "transaction()`") is False
-
-
-def test_0e_mutation_identifier_set_from_head_instead_of_base_is_red(tmp_path):
+def test_0e_identifier_set_is_read_from_base_rev_is_green(tmp_path):
+    # change set 0i (Z0i-5, monitor ruling): renamed from
+    # test_0e_mutation_identifier_set_from_head_instead_of_base_is_red
+    # (work order 15.4) -- the back half, which hand-built a stand-in
+    # for the (mis-scoped) identifier set and called
+    # `_is_allowed_reduction` directly to prove the MUTATED behavior
+    # would be red, is replaced by the `mutate.py` mutation
+    # "b27-identifier-set-head" against the real checker code (design
+    # 10.2's own "no hand-copied mutation evidence" lesson). What
+    # remains here is the real-code fixture: a renamed identifier that
+    # existed at the basis but not at HEAD must still license the join
+    # when checking that basis.
+    #
     # x1 (reviewer fixture): predicate B rule 5 must build the
     # identifier set from the BASIS revision's own tree, never HEAD/the
     # working tree -- an identifier that existed at the basis but was
@@ -3091,24 +3055,16 @@ def test_0e_mutation_identifier_set_from_head_instead_of_base_is_red(tmp_path):
     # correct: identifier set built from the BASIS rev (`rev`) -- green.
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 0, output
-    # mutation: identifier set built from HEAD instead of `rev` --
-    # "OldWidget" no longer exists anywhere in the tree at HEAD, so
-    # predicate B's rule 5 must not fire with it, and the fixed source
-    # no longer compares equal to the basis -- red.
-    wrong_identifier_set = cp._tracked_identifier_set(repo, "HEAD")
-    assert "OldWidget" not in wrong_identifier_set
-    companion_lookup = cp._load_companion_lookup(repo, "r2db-api")
-    ok, reason = cp._is_allowed_reduction(
-        "comment",
-        companion_lookup["CH-0001"],
-        "see `OldWidget` handle requests. The body is JSON.",
-        frozenset(),
-        wrong_identifier_set,
-    )
-    assert ok is False, reason
 
 
-def test_0e_mutation_identifier_set_excluding_docs_is_red(tmp_path):
+def test_0e_identifier_set_includes_docs_is_green(tmp_path):
+    # change set 0i (Z0i-5, monitor ruling): renamed from
+    # test_0e_mutation_identifier_set_excluding_docs_is_red (work order
+    # 15.4) -- the back half (a hand-built stand-in for the docs-
+    # excluding identifier set, via a local `git grep` call) is
+    # replaced by the `mutate.py` mutation "b28-identifier-set-no-docs"
+    # against the real checker code.
+    #
     # x2 (reviewer fixture): predicate B rule 5's identifier set must
     # scan `docs` too, not just `src`/`spec` -- an identifier documented
     # only in a design doc (never mentioned in any tracked source file)
@@ -3132,26 +3088,6 @@ def test_0e_mutation_identifier_set_excluding_docs_is_red(tmp_path):
     # correct: identifier set includes docs -- green.
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 0, output
-    # mutation: identifier set built WITHOUT docs -- "DocsOnlyWidget"
-    # only ever appears in docs/design/SOME_DESIGN.md, so excluding
-    # docs from the scan must make it disappear from the set, and the
-    # fixed source no longer compares equal to the basis -- red.
-    proc = subprocess.run(
-        ["git", "grep", "-I", "-h", "-o", "-E", cp._IDENTIFIER_TOKEN_RE.pattern, rev,
-         "--", "r2db-api/src", "MitateDB-api/src", "spec"],
-        cwd=repo, capture_output=True, timeout=30,
-    )
-    wrong_identifier_set = frozenset(proc.stdout.decode("utf-8").splitlines())
-    assert "DocsOnlyWidget" not in wrong_identifier_set
-    companion_lookup = cp._load_companion_lookup(repo, "r2db-api")
-    ok, reason = cp._is_allowed_reduction(
-        "comment",
-        companion_lookup["CH-0001"],
-        "see `DocsOnlyWidget` here. The body is JSON.",
-        frozenset(),
-        wrong_identifier_set,
-    )
-    assert ok is False, reason
 
 
 # ===========================================================================
@@ -3200,47 +3136,6 @@ def test_0f_exclusions_stay_green():
     # A `<->` arrow: `-` is preceded by `<`, not a word char, so rule 2
     # (unchanged, pre-existing) does not fire either.
     assert cp._flatten_comment("# only on a failing<->\n# healthy state.") == "only on a failing<-> healthy state."
-
-
-def test_0f_mutations_removing_rules_6_7_8_is_red():
-    identifier_set = frozenset()
-
-    def boundary_without(rule, accumulated, next_line):
-        inside_backticks = accumulated.count("`") % 2 == 1
-        last = accumulated[-1]
-        prev = accumulated[-2] if len(accumulated) >= 2 else ""
-        nxt = next_line[0]
-        if last == "_" and cp._is_word_char(prev) and cp._is_word_char(nxt):
-            return True
-        if last == "-" and prev != "-" and cp._is_word_char(prev) and cp._is_word_char(nxt):
-            return True
-        if last == "." and inside_backticks and cp._is_word_char(nxt):
-            return True
-        if last == "." and not inside_backticks:
-            m = cp._JOIN_EXTENSION_RE.match(next_line)
-            if m and m.group(0).lower() in cp._JOIN_EXTENSIONS:
-                return True
-        if inside_backticks and last.isalpha() and last.islower() and nxt.isalpha() and nxt.isupper():
-            joined = cp._joined_identifier_at_boundary(accumulated, next_line)
-            if joined in identifier_set:
-                return True
-        if rule != "rule6" and last == "/" and prev != " " and (cp._is_word_char(nxt) or nxt == "`"):
-            return True
-        if rule != "rule7" and inside_backticks and last in "([=" and (cp._is_word_char(prev) or prev in "([") and nxt != " ":
-            return True
-        if rule != "rule8" and last == "`" and inside_backticks and nxt != " ":
-            return True
-        return False
-
-    cases = {
-        "rule6": ("`cell.py`/", "`backend_sqlite.py`"),
-        "rule7": ("`HttpService(", "...)`"),
-        "rule8": ("`", "contract_field_types`"),
-    }
-    for rule, (left, right) in cases.items():
-        assert cp._is_join_sensitive_boundary(left, right, identifier_set) is True, rule
-    for rule, (left, right) in cases.items():
-        assert boundary_without(rule, left, right) is False, rule
 
 
 def test_0f_run_base_flags_slash_boundary_as_red(tmp_path):
@@ -3315,31 +3210,6 @@ def test_0f_item1_real_path_between_backtick_spans_is_protected():
     assert ok is False, reason
 
 
-def test_0f_item1_mutation_reverting_to_greedy_regex_is_red():
-    """Mutation: reverting to the ORIGINAL (buggy) candidate extraction
-    -- a plain `_FILENAME_CANDIDATE_RE.finditer` over the whole text,
-    with no backtick-pairing -- must reproduce the bug: the bare path
-    is swallowed into one bogus backtick-to-backtick candidate and
-    never recognized, so the sentence is (wrongly) NOT protected. This
-    pins the fix as load-bearing: the fixture above only passes because
-    of the pairing-aware rewrite, not by coincidence."""
-    sentence = (
-        "Counterpart to `a` below (design docs/design/X_V1.md R-2): "
-        "a plain `SELECT` here."
-    )
-    real_paths = frozenset({"docs/design/X_V1.md"})
-
-    def buggy_filename_candidates(text: str) -> list[str]:
-        return [m.group(0) for m in cp._FILENAME_CANDIDATE_RE.finditer(text)]
-
-    candidates = buggy_filename_candidates(sentence)
-    assert "docs/design/X_V1.md" not in candidates  # swallowed by the old bug
-    buggy_has_real_ref = any(
-        cp._is_real_filename_candidate(c, real_paths) for c in candidates
-    )
-    assert buggy_has_real_ref is False  # old code wrongly says: no real path here
-
-
 def test_0f_item1_ch0080_postgres_reference_now_protected():
     """The coordinator flagged that the CH-0080 sentence restored in
     postgres.py:2432 (`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md`) may
@@ -3368,18 +3238,6 @@ def test_0f_item2_rule6_slash_boundary_requires_no_space_before_slash():
     assert cp._is_join_sensitive_boundary("`cell.py`/", "`backend_sqlite.py`", identifier_set) is True
 
 
-def test_0f_item2_mutation_dropping_space_guard_on_rule6_is_red():
-    """Mutation: rule 6 WITHOUT the new not-preceded-by-space guard
-    would (wrongly) join the spaced `a / b` case with zero space."""
-    def mutated_rule6(accumulated: str, next_line: str) -> bool:
-        last = accumulated[-1]
-        nxt = next_line[0]
-        return last == "/" and (cp._is_word_char(nxt) or nxt == "`")
-
-    assert mutated_rule6("a /", "b holds here.") is True  # bug: wrongly joins
-    assert cp._is_join_sensitive_boundary("a /", "b holds here.", frozenset()) is False  # fixed
-
-
 def test_0f_item3_rule7_prev_char_guard_pinned_by_fixture():
     """Item 3: pin rule 7's existing "the character immediately before
     `(`/`[`/`=` must be a word character or `(`/`[`" guard with a
@@ -3391,22 +3249,6 @@ def test_0f_item3_rule7_prev_char_guard_pinned_by_fixture():
     identifier_set = frozenset()
     assert cp._is_join_sensitive_boundary("`a =", "b`", identifier_set) is False
     assert cp._flatten_comment("# note that a =\n# b holds here.") == "note that a = b holds here."
-
-
-def test_0f_item3_mutation_y2_dropping_prev_char_guard_is_red():
-    """Mutation y2: rule 7 WITHOUT the prev-char guard (only checking
-    that `accumulated` ends `(`/`[`/`=` and is inside backticks) would
-    (wrongly) join the spaced `a = b` case with zero space -- this is
-    exactly the reviewer's own mutation that was found to incorrectly
-    stay green, now pinned red by the fixture above."""
-    def mutated_rule7_y2(accumulated: str, next_line: str) -> bool:
-        inside_backticks = accumulated.count("`") % 2 == 1
-        last = accumulated[-1]
-        nxt = next_line[0]
-        return inside_backticks and last in "([=" and nxt != " "
-
-    assert mutated_rule7_y2("`a =", "b`") is True  # bug: wrongly joins
-    assert cp._is_join_sensitive_boundary("`a =", "b`", frozenset()) is False  # fixed
 
 
 # ===========================================================================
@@ -3991,3 +3833,297 @@ def test_0h_fullwidth_punctuation_added_in_a2_line_wrap_boundary_hit():
     hits = cp.find_broken_line_wrap_joins("comment", basis, broken_new)
     assert len(hits) >= 1
     assert ("！重", "！ 重") in hits
+
+
+# ===========================================================================
+# change set 0i (design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.2 v0.18,
+# work order docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md §15,
+# monitor ruling): protected-reference extension -- rule 1 (F-ID, with the
+# "review F-n"/"review round F-n"/"review (F-n)" exclusion), rule 2 (real
+# path, suffix match at a "/" boundary, ::qualname/:line stripped first),
+# rule 3 (basename real with >=1 match), rule 4 (a paren enclosing another
+# in the same sentence extends its own tag inward), and M3 (the label
+# exclusion also calls the sentence-level protected-reference check).
+# ===========================================================================
+
+# --- rule 1: F-ID ------------------------------------------------------
+
+def test_0i_rule1_fid_sentence_whole_deletion_is_red():
+    sentence = "Status F-2 applies here."
+    ok, reason = cp._is_allowed_reduction("comment", sentence, "", frozenset(), frozenset())
+    assert ok is False, reason
+
+
+def test_0i_rule1_cjk_adjacent_fid_sentence_whole_deletion_is_red():
+    # M2: protected-ID extraction uses ASCII word boundaries, so an ID
+    # glued directly onto Japanese text with no separating space or
+    # punctuation is still caught -- Python's default Unicode `\\b`
+    # treats Hiragana as a word character and would see no boundary
+    # between "2" and "だ" here, missing the ID entirely.
+    sentence = "F-12だけは特別な扱いを受ける。"
+    assert cp._sentence_has_protected_reference(sentence, frozenset()) is True
+    ok, reason = cp._is_allowed_reduction("comment", sentence, "", frozenset(), frozenset())
+    assert ok is False, reason
+
+
+def test_0i_rule1_fid_in_parens_not_removable_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Note (F-2): body.", "Note: body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0i_rule1_fid_label_not_removable_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Ruling F-2 (WP-6d): reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0i_rule1_review_fid_is_history_token_is_green(tmp_path):
+    # paren: "review F-2" is a removable history token, not a protected ID.
+    repo, rev = _label_scenario(tmp_path, "Note (review F-2): body.", "Note: body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+    # whole-sentence deletion: a sentence naming only "review round F-5"
+    # (no other protected reference) may be deleted outright.
+    assert cp._sentence_has_protected_reference("Per review round F-5 this changed.", frozenset()) is False
+    # the parenthesized form "review (F-2)" is the same one token.
+    assert cp._sentence_has_protected_reference("See review (F-2) below.", frozenset()) is False
+
+
+def test_0i_rule1_review_fid_standalone_paren_is_green():
+    # Z0i-1 (B), real-corpus form (MitateDB `http.py` CH-0198): "review"
+    # sits in plain sentence prose immediately before a TOP-LEVEL paren
+    # whose own entire content is just the F-ID ("round-1 review (F-2)
+    # found ..."). `_REVIEW_FID_TOKEN_RE`'s premerge never spans across
+    # that paren boundary (it only ever sees one paren's own inner text,
+    # or a plain flat run with none), so this needs `_sentence_reachable`
+    # to separately recognize "review"/"review round" immediately before
+    # a paren as licensing that whole paren's removal too.
+    old = "FAIL CLOSED, not fail open: round-1 review (F-2) found this pair."
+    new = "FAIL CLOSED, not fail open: round-1 review found this pair."
+    ok, reason = cp._is_allowed_reduction("comment", old, new, frozenset(), frozenset())
+    assert ok is True, reason
+
+
+def test_0i_rule1_review_paren_holes_closed_is_red():
+    # F2/F3 (code review): the review-flag must come from the ONE
+    # shared `_REVIEW_FID_TOKEN_RE` pattern (M1), not a separate, wider
+    # grammar -- these four synthetic forms are NOT the ruled
+    # "review (F-n)" form (Z0i-1 (B), whole paren content is only the
+    # F-ID) and must stay protected.
+    real_paths = frozenset({"docs/design/X_V1.md"})
+
+    def refused(old, new):
+        ok, reason = cp._is_allowed_reduction("comment", old, new, real_paths, frozenset())
+        assert ok is False, (old, new, reason)
+
+    # zero-space "review(F-2)": never matched by the token pattern at
+    # all (it requires a literal space), so it must not be reachable
+    # via any review-flag path either.
+    refused("The review(F-2) found this.", "The review found this.")
+    # paren holds MORE than just the F-ID -- dropping F-5 alone.
+    refused("The review (D-3, F-5) found this.", "The review (D-3) found this.")
+    # paren already carries its OWN provenance tag (a real path) --
+    # the review flag must never bypass that tag.
+    refused(
+        "The review (docs/design/X_V1.md, F-4) found this.",
+        "The review (docs/design/X_V1.md) found this.",
+    )
+    # paren holds "see" plus the F-ID -- not a sole-content match.
+    refused("Per review (see F-12) the code is fixed.", "Per review (see) the code is fixed.")
+
+
+def test_0i_rule1_unhyphenated_and_circled_forms_unchanged_is_green():
+    # "F6" (no hyphen) and "F-①" (circled digit, not an ASCII digit) are
+    # not ID-shaped -- unprotected before 0i, still unprotected after
+    # (9.2's known constraint (b) is about un-indicated REVIEW pointers,
+    # not these never-ID-shaped forms).
+    assert cp._sentence_has_protected_reference("Code-review fix F6 landed.", frozenset()) is False
+    assert cp._sentence_has_protected_reference("See F-① for detail.", frozenset()) is False
+
+
+def test_0i_rule1_correction_cannot_drop_fid_is_red():
+    # 0g's own "correction must not drop a protected reference" check
+    # (design 9.2's fourth "使う箇所"), now extended to F-IDs.
+    err = cp._correction_relaxes_protection("Bug F-2 occurs here.", "Bug occurs here.", frozenset())
+    assert err is not None
+    assert "F-2" in err
+
+
+def test_0i_rule1_correction_substring_id_overlap_is_red():
+    # F4 (code review): the old check compared "i not in new" as a
+    # SUBSTRING test, so a correction turning F-1 into F-12 (F-1 is a
+    # character subsequence -- in fact a literal substring -- of F-12)
+    # silently passed. Must compare the SETS of extracted protected IDs.
+    err = cp._correction_relaxes_protection("Code F-1 applies.", "Code F-12 applies.", frozenset())
+    assert err is not None
+    assert "F-1" in err
+
+
+# --- rule 2: real path (suffix match, location-suffix stripped) --------
+
+def test_0i_rule2_peer_relative_path_is_real_is_red(tmp_path):
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Store (r2db_api/ops.py, D-3): body.", "Store: body.",
+        extra_files=[("r2db-api/src/r2db_api/ops.py", "# stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0i_rule2_segment_boundary_required_is_green(tmp_path):
+    # M5: a suffix that cuts through the MIDDLE of a path segment
+    # ("rity/CONTROL_MAPPING.md" out of "security/CONTROL_MAPPING.md")
+    # is never real -- stays a removable history token.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Note (D-3, rity/CONTROL_MAPPING.md): body.", "Note: body.",
+        extra_files=[("security/CONTROL_MAPPING.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0i_rule2_location_suffix_stripped_is_real_is_red(tmp_path):
+    # Z0i-3 (A): a trailing "::qualname" is stripped before the real-path
+    # check, so a candidate naming a specific symbol inside a real file
+    # is matched against that file, not rejected for the suffix.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Store (`r2db_api/service.py::Cls::meth`, D-3): body.", "Store: body.",
+        extra_files=[("r2db-api/src/r2db_api/service.py", "# stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0i_rule2_dotted_qualname_and_call_suffix_stripped_is_real_is_red(tmp_path):
+    # F1 (code review, major): the real-corpus DOMINANT form is a
+    # DOTTED Python qualname (e.g. `cell.py::ApplicationCell.transact`),
+    # and a call-suffix form (`::entities()`) also occurs -- the
+    # stripper must handle both, not just an undotted `::ident::ident`
+    # chain.
+    repo, rev = _real_paths_scenario(
+        tmp_path, "Store (`r2db_api/service.py::Cls.meth`, D-3): body.", "Store: body.",
+        extra_files=[("r2db-api/src/r2db_api/service.py", "# stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+    assert cp._is_real_filename_candidate(
+        "`r2db_api/limits.py::entities()`",
+        frozenset({"r2db-api/src/r2db_api/limits.py"}),
+    ) is True
+
+
+def test_0i_rule2_peer_relative_sentence_whole_deletion_is_red():
+    real_paths = frozenset({"MitateDB-api/migrations/0003_provision_application.sql"})
+    sentence = "See migrations/0003_provision_application.sql for the schema."
+    assert cp._sentence_has_protected_reference(sentence, real_paths) is True
+    ok, reason = cp._is_allowed_reduction("comment", sentence, "", real_paths, frozenset())
+    assert ok is False, reason
+
+
+def test_0i_z0i4f_correction_swaps_location_suffix_only_is_green():
+    # Z0i-4f: `_correction_relaxes_protection`'s lost-path comparison
+    # must strip the location suffix the same way the real-path decision
+    # already does (Z0i-3, `_is_real_filename_candidate`). A correction
+    # that only replaces a `:line-line` range with a `::qualname` on the
+    # SAME real path is not a relaxation -- the restorer's CH-0292
+    # correction (`ops.py:541-550` -> `ops.py::_run_deprovision_script`)
+    # is exactly this shape.
+    real_paths = frozenset({"MitateDB-api/src/mitatedb_api/ops.py"})
+    err = cp._correction_relaxes_protection(
+        "See `MitateDB-api/src/mitatedb_api/ops.py:10-20` for detail.",
+        "See `MitateDB-api/src/mitatedb_api/ops.py::func` for detail.",
+        real_paths,
+    )
+    assert err is None
+
+
+def test_0i_z0i4f_correction_drops_real_path_is_red():
+    # A correction that drops the real path itself (not merely its
+    # location suffix) must still be refused.
+    real_paths = frozenset({"MitateDB-api/src/mitatedb_api/ops.py"})
+    err = cp._correction_relaxes_protection(
+        "See `MitateDB-api/src/mitatedb_api/ops.py:10-20` for detail.",
+        "See the updated rule.",
+        real_paths,
+    )
+    assert err is not None
+    assert "MitateDB-api/src/mitatedb_api/ops.py" in err
+
+
+# (rule 3's test, test_0i_rule3_ambiguous_basename_is_real_is_red, lives
+# in place of the replaced test_v072_ambiguous_basename_filename_removable_
+# is_green above, among the other real-path fixtures.)
+
+# --- rule 4: nested (enclosing) parens ----------------------------------
+
+def test_0i_rule4_id_branch_in_tagged_paren_not_removable_is_red(tmp_path):
+    # Only D-5(ii) is removed here (its own preceding separator with
+    # it); "design" and "contract 1.8.0" both stay -- "design" alone is
+    # never independently removable (rule 3's kind-word sweep only
+    # clears a parenthetical down to "", never down to a partial kind-
+    # word residue), so this is the only candidate that isolates rule
+    # 4's own tag-dependent judgment on D-5(ii).
+    repo, rev = _label_scenario(
+        tmp_path, "Note (design D-5(ii), contract 1.8.0): body.", "Note (design, contract 1.8.0): body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0i_rule4_enclosing_paren_tag_protects_inner_bare_id_is_red(tmp_path):
+    repo, rev = _real_paths_scenario(
+        tmp_path,
+        "Note (see docs/design/X_V1.md §3 (D-4, WP-2)): body.",
+        "Note (see docs/design/X_V1.md §3 (WP-2)): body.",
+        extra_files=[("docs/design/X_V1.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0i_rule4_history_token_branch_in_tagged_paren_removable_is_green(tmp_path):
+    repo, rev = _real_paths_scenario(
+        tmp_path,
+        "Note (see docs/design/X_V1.md §3 (D-4, WP-6d (ii))): body.",
+        "Note (see docs/design/X_V1.md §3 (D-4)): body.",
+        extra_files=[("docs/design/X_V1.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# --- M3: label exclusion 2 also calls the sentence-level check ---------
+
+def test_0i_label_with_real_path_not_removable_is_red(tmp_path):
+    # A history token alone ("phase 3") makes this a candidate label,
+    # and it carries no ID at all, so pre-M3 `_label_has_protected_
+    # reference` never looked at the real path in it (its own ID-only
+    # check found nothing) -- M3 makes it also call the sentence-level
+    # protected-reference check, which does see the real path.
+    repo, rev = _real_paths_scenario(
+        tmp_path,
+        "Per docs/design/X_V1.md phase 3: reason.",
+        "reason.",
+        extra_files=[("docs/design/X_V1.md", "stub\n")],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0i_label_m3_without_protected_reference_stays_removable_is_green(tmp_path):
+    # F9: M3's own GREEN side -- the ADDED sentence-level check
+    # (_sentence_has_protected_reference) finds nothing here (no ID, no
+    # real path), so a label carrying only a plain history token still
+    # qualifies for removal exactly as before M3.
+    repo, rev = _label_scenario(tmp_path, "Per phase 3: reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output

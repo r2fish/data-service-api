@@ -153,6 +153,20 @@ store.validate_control_pepper_separation`).
 # (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").
 ```
 
+### correction: 2026-09-16
+
+- reason: R-22 change set 0i (rulings Z0i-4d, Z0i-4g) -- the raw line ranges had gone stale (at `7bc6650`, `_run_deprovision_script` starts at `MitateDB-api/src/mitatedb_api/ops.py:553` and `_migrations_dir` at `:380`), so both now name the definitions they meant, on the same path
+
+old:
+```
+Q4 WP-3 (design D-4(b), work order §4 WP-3 change table E): r2db-api had neither a `psql` subprocess invocation nor a migrations-directory resolver before this WP -- both are new here, modeled on MitateDB-api's own `_run_deprovision_script`/`_migrations_dir` (`MitateDB-api/src/mitatedb_api/ops.py:541-550`/`:373-375`) -- CALL SHAPE ONLY, never `_die` (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").
+```
+
+new:
+```
+Q4 WP-3 (design D-4(b), work order §4 WP-3 change table E): r2db-api had neither a `psql` subprocess invocation nor a migrations-directory resolver before this WP -- both are new here, modeled on MitateDB-api's own `_run_deprovision_script`/`_migrations_dir` (`MitateDB-api/src/mitatedb_api/ops.py::_run_deprovision_script`/`::_migrations_dir`) -- CALL SHAPE ONLY, never `_die` (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").
+```
+
 ## CH-0293
 
 - moved from: `src/r2db_api/ops.py` (`_application_dsn`)

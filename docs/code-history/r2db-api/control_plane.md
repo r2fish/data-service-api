@@ -75,6 +75,20 @@ new:
 This module connects to no HTTP surface, ASGI app, or composition root itself: `control_http.py` is the ASGI boundary over `ControlPlaneService`, and `control_main.py` constructs it.
 ```
 
+### correction: 2026-09-16
+
+- reason: R-22 change set 0i (ruling Z0i-4d) -- `control_plane`'s status is now the constructor-injected `control_plane_status` (`service.py`, `capabilities_document.py`), so "stays declared `unavailable` in every public capability document" no longer matched the code
+
+old:
+```
+Single-commit rule (design §5, still binding for this WP): `control_plane` stays declared `unavailable` in every public capability document this codebase already emits (`DataService.capabilities`, `config/capabilities.json`) -- neither of those files is touched here.
+```
+
+new:
+```
+`control_plane` is declared in `DataService.capabilities` with its constructor-injected `control_plane_status` (`enabled` or `unavailable`, default `unavailable`; `main.py` reads it from `R2DB_CONTROL_PLANE_STATUS`, and `capabilities_document.py` emits it), while `config/capabilities.json` still lists it as `unavailable`.
+```
+
 ## CH-0240
 
 - moved from: `src/r2db_api/control_plane.py` (`<module>`)

@@ -173,7 +173,7 @@ _IDEMPOTENCY_TABLE = "_r2db_idempotency"
 _BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE, _IDEMPOTENCY_TABLE})
 # two-int `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the PER-KEY idempotency lock -- see `_idempotency_key_lock` below.
 #
-# PostgreSQL actually
+# Code-review fix F7 (Opus review 2): the rationale this comment carried before this fix was FALSE and is corrected here (the constant itself is unaffected). It claimed a namespace of 0 would land in the SAME lock space the single-bigint form `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (1414141) uses, risking a collision between a bootstrap/reset ritual's lock and an idempotency-key lock. PostgreSQL actually
 # keeps those two key spaces disjoint by construction, regardless of
 # namespace value: the 1-argument `pg_advisory_xact_lock(bigint)` form
 # and the 2-argument `pg_advisory_xact_lock(int, int)` form record
@@ -509,7 +509,7 @@ class _RolePool:
 
 
 def _env_int(name: str, default: int) -> int:
-    """Read an `int`-valued setting the way the rest of this package does (`R2DB_`-prefixed environment variables, e.g. `R2DB_CREDENTIAL_PEPPER` in) -- a bare `os.environ.get` rather than a `pydantic` settings object, since this package (unlike the SQLAlchemy-based reference implementation this design is adapted from) has no `Settings`/`get_settings()` of its own. An unset, empty, or unparsable
+    """Read an `int`-valued setting the way the rest of this package does (`R2DB_`-prefixed environment variables, e.g. `R2DB_CREDENTIAL_PEPPER` in `auth.py`) -- a bare `os.environ.get` rather than a `pydantic` settings object, since this package (unlike the SQLAlchemy-based reference implementation this design is adapted from) has no `Settings`/`get_settings()` of its own. An unset, empty, or unparsable
     value silently falls back to `default` rather than raising: these are
     pool-tuning knobs, not required configuration, and a malformed value at
     startup should degrade to a sane default, not crash the process.
@@ -1923,7 +1923,7 @@ class PostgresCell:
         Rollback` (caught and swallowed by `conn.transaction()`'s own
         `__exit__`, never surfacing as an error) rather than committing --
         `outcome_*` locals below carry the decided result out of that
-        block, since a raise cannot itself return a value. Always returns `SchemaOutcome` (round; mirrors `ApplicationCell.apply_schema`'s identical unification) -- this method's own direct callers (`tests/test_constraints_declaration.py`'s many `cell.apply_schema(...)` call sites among them) read `.revision` off the result.
+        block, since a raise cannot itself return a value. Always returns `SchemaOutcome` (review round F-8; mirrors `ApplicationCell.apply_schema`'s identical unification) -- this method's own direct callers (`tests/test_constraints_declaration.py`'s many `cell.apply_schema(...)` call sites among them) read `.revision` off the result.
 
         History: CH-0058
         """
@@ -1985,7 +1985,7 @@ class PostgresCell:
                         # history: CH-0065
                         self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
-                    # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): read ONCE, before any DDL/registry write this transaction is about to (tentatively) make -- "the revision as it stood when the request was decided", the SAME value a dry run's own `revision` reports (S-j) and a real apply's `plan` verification is checked against. read only when actually needed -- `dry_run` always needs it for `outcome_revision` below (S-j), and a caller-presented `plan` needs it to verify; an ordinary apply (neither) needs neither, and skips this extra round trip entirely (`plan_request` is otherwise built unconditionally by, so gating on `plan_request is not None` alone would not have helped).
+                    # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): read ONCE, before any DDL/registry write this transaction is about to (tentatively) make -- "the revision as it stood when the request was decided", the SAME value a dry run's own `revision` reports (S-j) and a real apply's `plan` verification is checked against. read only when actually needed -- `dry_run` always needs it for `outcome_revision` below (S-j), and a caller-presented `plan` needs it to verify; an ordinary apply (neither) needs neither, and skips this extra round trip entirely (`plan_request` is otherwise built unconditionally by `service.py`, so gating on `plan_request is not None` alone would not have helped).
                     # history: CH-0066
                     revision_before = self._read_schema_revision(conn) if dry_run or plan is not None else None
                     expected_plan = (
@@ -2117,7 +2117,7 @@ class PostgresCell:
                         declared_type = table_info.columns[bound.field]
                         patch = bound.constraint_patch
                         assert patch is not None  # bind_schema_operation always sets this for alter_field
-                        # compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/ R-c). `enum`/`nullable` omitted each
+                        # compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/R-c, D-2 (3)). `enum`/`nullable` omitted each
                         # LEAVE the existing value as it is; `enum: null`
                         # CLEARS it; an explicit list is fully validated
                         # against the field's real declared type now.

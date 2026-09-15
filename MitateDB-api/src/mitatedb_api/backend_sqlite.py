@@ -2,7 +2,7 @@
 
 This is the extracted, backend-specific half of what used to be ``cell.ApplicationCell`` before the WP-1 seam refactor: nothing here validates a request's SHAPE or a principal's AUTHORITY any more (that stayed in ``cell.py``, unchanged) -- this module only ever turns an already-validated request into SQLite statements against one private, in-memory (``:memory:``) connection.
 
-Kept as "a deterministic local foundation backend" only -- never the production persistence topology (that is ``backend_postgres.PostgresBackend``).
+Kept as "a deterministic local foundation backend" only (`architecture/DATA_SERVICE_FOUNDATION.md`) -- never the production persistence topology (that is ``backend_postgres.PostgresBackend``).
 
 History: CH-0336
 """
@@ -63,7 +63,7 @@ class SQLiteBackend:
         # Phase 6 WP-3 (design, §1.5 finding 2a): sqlite has no provisioning concept, so this registry is lazily-created, in-memory state -- `{collection: {field: contract_type}}`, the SAME 7-word contract vocabulary the PostgreSQL registry table stores (see `field_types` below). Never derived from `PRAGMA table_info` -- that reports THIS backend's own physical type (`_TYPES`, `text`/`integer`/`real`/`json` -- SQLite's dynamic column affinity does not even enforce it), which cannot recover `object` vs `array` vs `json`, nor a declared `boolean` (also physically `INTEGER`, same as a declared `integer` "0/1" value).
         # history: CH-0341
         self._declared_types = {}
-        # Phase 9 WP-3a (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): "SQLite backend は `_declared_types` と同じプロセス内構造に制約を持つ" -- `{collection: {field: {"nullable": bool, "enum": [...]}}}`, the SAME lazily-created, in-memory-only shape as `_declared_types` immediately above (no upgrade script: this backend is the `:memory:` process-local one). `"enum"` is present only on a field that declares one; `"nullable"` is always present (default `True`, the contract default).
+        # Phase 9 WP-3a (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (4)): "SQLite backend は `_declared_types` と同じプロセス内構造に制約を持つ" -- `{collection: {field: {"nullable": bool, "enum": [...]}}}`, the SAME lazily-created, in-memory-only shape as `_declared_types` immediately above (no upgrade script: this backend is the `:memory:` process-local one, F-6). `"enum"` is present only on a field that declares one; `"nullable"` is always present (default `True`, the contract default).
         # history: CH-0342
         self._declared_constraints = {}
         # "SQLite backend はプロセス内である"; 監督裁定集約 rulings-r5-r6.md I-1): idempotency records for this backend are a private, in-process dict -- this backend already IS the process-local, non-durable foundation (no upgrade script, matching `_declared_types`/`_declared_constraints` above), never a SQL table. `{key: {"digest": str, "response_json": str, "created_at_ms": int}}`.
@@ -319,7 +319,7 @@ class SQLiteBackend:
         return dict(self._declared_types.get(collection, {}))
 
     def all_field_types(self):
-        """`{collection: {field: contract_type}}` for EVERY collection this backend currently has -- `GET /v1/catalog`'s own sole data source. Never includes a collection with no registry entries (cannot occur for one this backend's own `create_collection` created -- every field always gets a registry row, `create_collection`'s own docstring).
+        """`{collection: {field: contract_type}}` for EVERY collection this backend currently has -- `GET /v1/catalog`'s own sole data source (`http.py::get_catalog`). Never includes a collection with no registry entries (cannot occur for one this backend's own `create_collection` created -- every field always gets a registry row, `create_collection`'s own docstring).
 
         History: CH-0357
         """
@@ -557,7 +557,7 @@ class SQLiteBackend:
         where, params = self._where_sql(filters)
         statement += where
         if order_by is not None:
-            # `order_by` is always `None` or a non-empty LIST of `(field, direction)` tuples now, multi-field sort included -- a pre-WP-3 single-field caller already reaches this as a one-element list.
+            # `order_by` is always `None` or a non-empty LIST of `(field, direction)` tuples now (`cell.py::_bind_order_by`), multi-field sort included -- a pre-WP-3 single-field caller already reaches this as a one-element list.
             # `_DIRECTION_TOKENS[direction]` (a closed dict lookup), never `direction.upper()` concatenated directly into SQL text -- see that constant's own docstring. `KeyError` for an unexpected value is translated to `errors.ValidationError` here rather than escaping raw, matching this backend's own existing translation discipline for every other native driver exception in this file.
             # history: CH-0371
             try:

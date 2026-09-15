@@ -35,7 +35,7 @@ _logger = logging.getLogger(__name__)
 # as a "new" denial, writing a THIRD durable row for one operation (D-10's
 # own prohibited case (ii)) -- switching to inclusion closes that path
 # structurally (`SERVICE_UNAVAILABLE` was never in D-3's fail-closed list to
-# begin with). `test_durable_denial_codes_match_the_design_d3_table` fixes this set against D-3's table by name.
+# begin with). `test_durable_denial_codes_match_the_design_d3_table` (`tests/test_application_audit.py`) fixes this set against D-3's table by name.
 # history: CH-0178
 _DURABLE_DENIAL_CODES = frozenset({
     "AUTH_REQUIRED",       # 認証系 (AUTH_REQUIRED/AUTH_INVALID相当)
@@ -638,7 +638,7 @@ class DataService:
     """Public application facade; control state is deliberately private."""
 
     def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1) -> None:
-        # R-9 (CCR-14, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §1: "capability 申告は環境変数由来で composition root 注入"): whether this application-plane process' own `capabilities()` declares `control_plane: enabled` is a *deployer* fact this class cannot know on its own (a separated deployment, the default, means the application-plane process has no idea whether a control-plane process is running anywhere at all) -- it is constructor-injected, defaulting to the safe, honest `unavailable` so nothing short of an explicit composition-root decision (reading `R2DB_CONTROL_PLANE_STATUS`) ever declares `enabled`. Validated here too (not only at `main.py`'s env-parsing boundary) so any other caller constructing a `DataService` directly (this repository's own tests, the in-process conformance adapter) gets the same fail-loud guard against a typo'd status string, rather than silently publishing an invalid capability value.
+        # R-9 (CCR-14, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §1: "capability 申告は環境変数由来で composition root 注入"): whether this application-plane process' own `capabilities()` declares `control_plane: enabled` is a *deployer* fact this class cannot know on its own (a separated deployment, the default, means the application-plane process has no idea whether a control-plane process is running anywhere at all) -- it is constructor-injected, defaulting to the safe, honest `unavailable` so nothing short of an explicit composition-root decision (`main.py`, reading `R2DB_CONTROL_PLANE_STATUS`) ever declares `enabled`. Validated here too (not only at `main.py`'s env-parsing boundary) so any other caller constructing a `DataService` directly (this repository's own tests, the in-process conformance adapter) gets the same fail-loud guard against a typo'd status string, rather than silently publishing an invalid capability value.
         # history: CH-0148
         if control_plane_status not in {"enabled", "unavailable"}:
             raise ValueError("control_plane_status must be 'enabled' or 'unavailable'")
@@ -646,7 +646,7 @@ class DataService:
         # `surfaces` is constructor-injected, same "deployer-declared, not derived" discipline as `control_plane_status` immediately above -- `main.py` (the real composition root) is the one caller that validates the two `R2DB_*_BASE_URL` environment variables' SHAPE at startup and assembles this dict from them; this class only ever echoes whatever it was given, verbatim, in `capabilities()` below. `None` (the default -- every caller, including this repository's own unit tests that construct `DataService` directly without opting in) omits the `surfaces` key from the response entirely, never a `"surfaces": None` value (contract `CapabilityDocument.surfaces` is an optional key, not a nullable one).
         # history: CH-0147
         self._surfaces = surfaces
-        # Phase 10 WP-6a (design, contract 1.8.0): the deployer's own declared ceiling on how many processes may serve THIS plane's `surfaces` base URL at the same time -- constructor-injected, same "deployer-declared, not derived" discipline as `control_plane_status`/`surfaces` above. `main.py` (the real
+        # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): the deployer's own declared ceiling on how many processes may serve THIS plane's `surfaces` base URL at the same time -- constructor-injected, same "deployer-declared, not derived" discipline as `control_plane_status`/`surfaces` above. `main.py` (the real
         # composition root) is the one caller that resolves this from the
         # DB-side `process_ceilings` declaration (`platform_declarations.
         # read_platform_declarations(...).process_ceilings.data`) at
@@ -787,7 +787,7 @@ class DataService:
             # history: CH-0128
             request_id=outcome.request_id,
             affected=outcome.affected,
-            # D-4 (3)/A-9: a dry-run mutation result never carries `assigned_addresses` -- the addresses a real execution would assign are not settled (an insert may still have tentatively consumed real id-sequence values, but this response never reports them). `None`, not `[]` -- `http.post_mutate` omits the key itself on `None`, matching the contract's "does not carry" wording.
+            # D-4 (3)/A-9: a dry-run mutation result never carries `assigned_addresses` -- the addresses a real execution would assign are not settled (an insert may still have tentatively consumed real id-sequence values, F-15, but this response never reports them). `None`, not `[]` -- `http.post_mutate` omits the key itself on `None`, matching the contract's "does not carry" wording.
             # history: CH-0127
             assigned_addresses=None if dry_run else list(outcome.assigned_addresses or []),
             committed=outcome.committed,
@@ -816,7 +816,7 @@ class DataService:
                 # history: CH-0125
                 effective_limits = narrow_limits_by_budget(self.limits, budget, "mutate")
                 deadline = self._clock() + effective_limits.execution_ms / 1000
-                # Contract 1.7.0 (S-a): the contract-level request object a `plan` commits to -- `operations`/`transaction`/`budget`, plus this request's own target `entity` (addendum 2: "computed from the request itself" includes the request's URL path segment, not only its body -- `MutationRequest` itself has no `entity` property, but the plan digest is not scoped to `MutationRequest` alone). Placed at the
+                # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level request object a `plan` commits to -- `operations`/`transaction`/`budget`, plus this request's own target `entity` (addendum 2: "computed from the request itself" includes the request's URL path segment, not only its body -- `MutationRequest` itself has no `entity` property, but the plan digest is not scoped to `MutationRequest` alone). Placed at the
                 # object's own top level so a plan captured for one entity's
                 # dry_run, presented against a DIFFERENT entity's apply
                 # (identical `operations`/`transaction`/`budget`, identical
@@ -869,7 +869,7 @@ class DataService:
             raise
 
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None, concurrency_precharged: bool = False) -> "SchemaOutcome":
-        """Always returns `SchemaOutcome` (`.committed`/`.revision`/`.descriptor`/`.plan`, contract 1.7.0, D-4) -- a pure passthrough of `ApplicationCell.apply_schema`/`PostgresCell.apply_schema`'s own return, which review round F-8 unified to one shape regardless of whether `operation` carries `dry_run`/`plan`. Every pre-1.7.0 direct caller of this method reads `.revision` off the result; the in-process conformance adapter's own `hasattr(result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
+        """Always returns `SchemaOutcome` (`.committed`/`.revision`/`.descriptor`/`.plan`, contract 1.7.0, D-4) -- a pure passthrough of `ApplicationCell.apply_schema`/`PostgresCell.apply_schema`'s own return, which review round F-8 unified to one shape regardless of whether `operation` carries `dry_run`/`plan`. Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`; `tests/test_constraints_declaration.py` reads `.revision` only off `cell.apply_schema`) reads `.revision` off the result; the in-process conformance adapter's own `hasattr(result, "revision")` branch already handles a non-`int` result unchanged (it never assumed `int`).
 
         `budget`/`idempotency_key` (contract 1.7.0, D-6/D-5): both real as of this commit -- the provisional gate that used to reject either field outright (`_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS`) is removed in this same commit as `capabilities().request_budget`/`.idempotency` both flipping to `enabled`.
 
@@ -897,7 +897,7 @@ class DataService:
                 # history: CH-0117
                 effective_limits = narrow_limits_by_budget(self.limits, operation.get("budget"), "schema")
                 deadline = self._clock() + effective_limits.execution_ms / 1000
-                # Contract 1.7.0 (S-a): the contract-level request object a `plan` commits to -- `operation` itself already IS that object (`SchemaOperationRequest`'s own flat shape), minus `plan`/`dry_run` (S-a's exclusion pair, applied again defensively inside `normalize_request_for_plan`). `idempotency_key`, when present, stays IN this object (only `plan`/`dry_run` are excluded here) -- `idempotency_digest` below applies its own, separate 3-key exclusion.
+                # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level request object a `plan` commits to -- `operation` itself already IS that object (`SchemaOperationRequest`'s own flat shape), minus `plan`/`dry_run` (S-a's exclusion pair, applied again defensively inside `normalize_request_for_plan`). `idempotency_key`, when present, stays IN this object (only `plan`/`dry_run` are excluded here) -- `idempotency_digest` below applies its own, separate 3-key exclusion.
                 # history: CH-0116
                 plan_request = {key: value for key, value in operation.items() if key not in ("plan", "dry_run")}
                 idempotency_key = operation.get("idempotency_key")
@@ -1233,7 +1233,7 @@ class ControlAuthority:
         state`'s docstring immediately above for the full CCR-14 WP-3
         rationale; identical reasoning applies here.
 
-        Rework (coordinator item 3): returns the composed bearer `self._service._credentials.add(...)` itself now returns (design "合成は store/service 層のみ" principle) -- this out-of-band lifecycle-authority entry point is an issuance point (the conformance in-process plug's own privileged-setup `issue_credential` calls this directly does not use this method at all -- see that module's own `cmd_issue_credential`, which calls the store's `add` directly and gets the same composed return value there). Every pre-WP-2 caller that ignored the
+        Rework (coordinator item 3): returns the composed bearer `self._service._credentials.add(...)` itself now returns (design D-1(c) "合成は store/service 層のみ" principle) -- this out-of-band lifecycle-authority entry point is an issuance point (the conformance in-process plug's own privileged-setup `issue_credential` calls this directly, `ops.py` does not use this method at all -- see that module's own `cmd_issue_credential`, which calls the store's `add` directly and gets the same composed return value there). Every pre-WP-2 caller that ignored the
         previous `None` return is unaffected (Python permits discarding a
         return value freely) -- `test_control_authority_work_parameter_
         defaults_preserve_existing_callers` pins this explicitly.

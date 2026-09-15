@@ -11,7 +11,7 @@ Two backend implementations share one call surface (`ControlBackend`, below), th
 
 Both backends are deliberately dumb: everything a backend method raises (`NOT_FOUND`/`CONFLICT`/`VALIDATION_FAILED` from the underlying stores) is allowed to surface through unchanged; `ControlPlaneService` never asks a backend "is this allowed" -- it decides that itself, then tells the backend what to persist.
 
-This module connects to no HTTP surface, ASGI app, or composition root itself: `control_http.py` is the ASGI boundary over `ControlPlaneService`, and `control_main.py` constructs it.
+`control_plane` is declared in `DataService.capabilities` with its constructor-injected `control_plane_status` (`enabled` or `unavailable`, default `unavailable`; `main.py` reads it from `R2DB_CONTROL_PLANE_STATUS`, and `capabilities_document.py` emits it), while `config/capabilities.json` still lists it as `unavailable`. This module connects to no HTTP surface, ASGI app, or composition root itself: `control_http.py` is the ASGI boundary over `ControlPlaneService`, and `control_main.py` constructs it.
 
 History: CH-0239
 """
@@ -136,7 +136,7 @@ _DEFAULT_AUDIT_QUERY_LIMIT = 100
 _MAX_AUDIT_QUERY_LIMIT = 1000
 _MAX_AUDIT_QUERY_EVENT_CLASSES = 20
 
-# Phase 10 WP-6a (design, contract 1.8.0): this plane's own region (ii) -- `ControlPlaneLimits` classes bound by in-memory, per-process state (`self._rate_window`/`self._audit_rate_window`), the only classes whose `limit_enforcement` mapping depends on `process_ceiling`. Every other `ControlPlaneLimits` class is either region (i) (`request_bytes`, request-scoped) or region (iii) (`applications`/`credentials_per_application`, bound in PostgreSQL under a same-transaction lock -- `enforced` regardless of `process_ceiling`).
+# Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) -- `ControlPlaneLimits` classes bound by in-memory, per-process state (`self._rate_window`/`self._audit_rate_window`), the only classes whose `limit_enforcement` mapping depends on `process_ceiling`. Every other `ControlPlaneLimits` class is either region (i) (`request_bytes`, request-scoped) or region (iii) (`applications`/`credentials_per_application`, bound in PostgreSQL under a same-transaction lock -- `enforced` regardless of `process_ceiling`).
 # history: CH-0243
 _IN_MEMORY_PROCESS_WIDE_CONTROL_LIMIT_CLASSES = frozenset({"control_requests_per_minute", "audit_requests_per_minute"})
 
@@ -226,7 +226,7 @@ class InMemoryControlBackend:
 
     def __init__(self, authority: ControlAuthority, control_credentials: ControlCredentialStore) -> None:
         self._authority = authority
-        # `ControlAuthority` has no public accessor for the `CredentialStore` it holds (by design -- it is the trusted lifecycle authority, not a data-access facade); reaching `._service._credentials` directly mirrors `ControlAuthority._control_event`'s own established precedent of reading `self._service`'s private state from inside this package (is not modified to add a new public accessor here -- the work order scopes service.py's only change to the `work=` keyword argument addition).
+        # `ControlAuthority` has no public accessor for the `CredentialStore` it holds (by design -- it is the trusted lifecycle authority, not a data-access facade); reaching `._service._credentials` directly mirrors `ControlAuthority._control_event`'s own established precedent of reading `self._service`'s private state from inside this package (service.py is not modified to add a new public accessor here -- the WP-3 work order scopes service.py's only change to the `work=` keyword argument addition).
         # history: CH-0247
         self._credentials: CredentialStore = authority._service._credentials  # noqa: SLF001
         self._control_credentials = control_credentials
@@ -567,7 +567,7 @@ class ControlPlaneService:
         # Phase 6 WP-2: same constructor-injected, echo-only discipline as `DataService.__init__`'s own `surfaces` parameter -- see that class's comment. `control_main.py` (the real composition root) assembles this from the same two `R2DB_*_BASE_URL` environment variables `main.py` reads.
         # history: CH-0254
         self._surfaces = surfaces
-        # Phase 10 WP-6a (design, contract 1.8.0): this plane's own declared process ceiling -- see `DataService.__init__`'s identical parameter/validation for the full rationale. `control_main.py` resolves this from `declarations.process_ceilings.control` (never `.data`, the data-plane's own). Default `1` preserves every pre-Phase-10 caller's behavior unchanged (this repository's own tests, the in-process conformance adapter).
+        # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own declared process ceiling -- see `DataService.__init__`'s identical parameter/validation for the full rationale. `control_main.py` resolves this from `declarations.process_ceilings.control` (never `.data`, the data-plane's own). Default `1` preserves every pre-Phase-10 caller's behavior unchanged (this repository's own tests, the in-process conformance adapter).
         # history: CH-0255
         if isinstance(process_ceiling, bool) or not isinstance(process_ceiling, int) or process_ceiling < 1:
             raise ValueError("process_ceiling must be a positive integer")
@@ -612,7 +612,7 @@ class ControlPlaneService:
         self._authorize_role(context, operation="control_capabilities", request_id=request_id)
         self._gate_must_rotate(context, operation="control_capabilities", request_id=request_id)
         limits = self._limits.as_dict()
-        # Phase 10 WP-6a (design, contract 1.8.0): region (ii) (`control_requests_per_minute`/`audit_requests_per_minute` -- bound by in-memory, per-process state, `self._rate_window`/`self._audit_rate_window`) reads `enforced` only while `self._process_ceiling == 1`, `deployment_required` once `>= 2`. Region (iii) (`applications`/`credentials_per_application` -- bound in PostgreSQL, under a same-transaction, table-scoped constant-key `pg_advisory_xact_lock`, `register_application`/`issue_credential` below) stays `enforced` regardless of `process_ceiling` -- the lock makes the bound hold across every process. `request_bytes` (region (i), request-scoped) is untouched here, overridden to `"unavailable"` below exactly as before this WP.
+        # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): region (ii) (`control_requests_per_minute`/`audit_requests_per_minute` -- bound by in-memory, per-process state, `self._rate_window`/`self._audit_rate_window`) reads `enforced` only while `self._process_ceiling == 1`, `deployment_required` once `>= 2`. Region (iii) (`applications`/`credentials_per_application` -- bound in PostgreSQL, under a same-transaction, table-scoped constant-key `pg_advisory_xact_lock`, `register_application`/`issue_credential` below) stays `enforced` regardless of `process_ceiling` -- the lock makes the bound hold across every process. `request_bytes` (region (i), request-scoped) is untouched here, overridden to `"unavailable"` below exactly as before this WP.
         # history: CH-0257
         limit_enforcement = {
             name: ("enforced" if self._process_ceiling <= 1 else "deployment_required") if name in _IN_MEMORY_PROCESS_WIDE_CONTROL_LIMIT_CLASSES else "enforced"
@@ -626,7 +626,7 @@ class ControlPlaneService:
         document: dict[str, Any] = {
             # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.version_binding`), flipped to 1.5.0 in phase 5 WP-3, flipped to 1.6.0 in phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md, subordinate ruling 11): the flip lands in the SAME commit as the real `audit_query`/locator-credential/`surfaces` behavior -- unconditional (every instance of this service declares 1.6.0 now, whether or not `audit_query` itself is `enabled` on this deployment; the 1.4.0 obligations that are conditional on `audit_query` being provided stay conditional per version_binding's own text).
             #
-            # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): the SAME commit as `service.py`'s own data-plane flip (C-19's control-plane/data-plane match assert) -- never ahead of the R-3/R-7 behavior this data-plane host now implements.
+            # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1 (5)): the SAME commit as `service.py`'s own data-plane flip (C-19's control-plane/data-plane match assert) -- never ahead of the R-3/R-7 behavior this data-plane host now implements.
             #
             # Flipped again to 1.8.0 in phase 10 WP-6a/pair-closing: the SAME commit as `service.py`'s own data-plane flip and this host's own `process_ceilings` mapping -- never ahead of the behavior it declares.
             # history: CH-0260
@@ -1367,7 +1367,7 @@ class ControlPlaneService:
         """
         CCR-14 WP-4 round-2 (independent): public wrapper around `_check_rate` below, charging exactly one token against the R-7 `control_requests_per_minute` window (or raising `LIMIT_EXCEEDED`/429, same as every internal call site).
 
-        Exists so an HTTP binding layer can charge the window *before* it does anything else -- including reading/parsing a request body -- for the 3 endpoints whose request schema is read off the body before the corresponding service method is called at all (design §12.5: those methods take already-extracted arguments, so the HTTP layer must shape-check the body first; see `control_http.py`'s own module docstring for why that ordering is otherwise correct). Without a way to charge the window ahead of that shape check, a malformed/unauthenticated body flood against `register_application`/`issue_credential`/`revoke_credential` never touched `_check_rate` at all -- an unbounded, unauthenticated path under a `limit_enforcement: "enforced"` capability declaration (round-2, measured).
+        Exists so an HTTP binding layer (`control_http.py`) can charge the window *before* it does anything else -- including reading/parsing a request body -- for the 3 endpoints whose request schema is read off the body before the corresponding service method is called at all (design §12.5: those methods take already-extracted arguments, so the HTTP layer must shape-check the body first; see `control_http.py`'s own module docstring for why that ordering is otherwise correct). Without a way to charge the window ahead of that shape check, a malformed/unauthenticated body flood against `register_application`/`issue_credential`/`revoke_credential` never touched `_check_rate` at all -- an unbounded, unauthenticated path under a `limit_enforcement: "enforced"` capability declaration (round-2, measured).
 
         A caller that calls `check_rate()` itself and then calls one of the 9 operation methods below **must** pass `rate_precharged=True` to that call -- otherwise the window is charged twice for one logical request. Every operation method's own default (`rate_precharged=False`) keeps every *other* caller (this repository's own tests, the in-process conformance adapter will wire up) fully charged exactly as before this fix: the in-process path calls a method directly, once, with no separate `check_rate()` call, so the internal `_check_rate()` below still runs and still charges one token per call, unchanged.
 
@@ -1497,7 +1497,7 @@ def issue_audit_credential_ceremony(
     """
     Phase 3.5 WP-4 out-of-band audit-credential issuance ceremony (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-D, P35-D12/M-1). Same extraction rationale as `bootstrap_control_credential`/`reset_control_credentials` above (reusable product code, not hand-rolled per caller -- `ops.py cmd_issue_audit_credential` is this WP's own only caller today).
 
-    Unlike bootstrap/reset, this ceremony issues AND rotates the credential in the SAME transaction, before a secret is ever handed back to the caller: an `audit`-role principal has no in-band self-rotate path at all (`ControlPlaneService._gate_must_rotate`'s own allow-list for `role="audit"` while `must_rotate` is true is `control_capabilities` ONLY -- design's own explicit decision not to extend self-rotate to it, since the whole point of completing the rotation here is that no in-band path should ever need to). Issuing with `must_rotate=true` and leaving it to the operator to somehow clear it out-of-band-again would be a dead end; this ceremony closes that gap structurally by never printing a secret whose `must_rotate` is still true. The intermediate `add()`-time secret is generated, used once to satisfy `add`'s own required `secret` parameter, and immediately discarded -- only the final, post-`rotate()` secret is ever returned (and therefore ever printed by).
+    Unlike bootstrap/reset, this ceremony issues AND rotates the credential in the SAME transaction, before a secret is ever handed back to the caller: an `audit`-role principal has no in-band self-rotate path at all (`ControlPlaneService._gate_must_rotate`'s own allow-list for `role="audit"` while `must_rotate` is true is `control_capabilities` ONLY -- design's own explicit decision not to extend self-rotate to it, since the whole point of completing the rotation here is that no in-band path should ever need to). Issuing with `must_rotate=true` and leaving it to the operator to somehow clear it out-of-band-again would be a dead end; this ceremony closes that gap structurally by never printing a secret whose `must_rotate` is still true. The intermediate `add()`-time secret is generated, used once to satisfy `add`'s own required `secret` parameter, and immediately discarded -- only the final, post-`rotate()` secret is ever returned (and therefore ever printed by `ops.py`).
 
     Returns `(credential_id, secret)` -- `secret` is the one that actually authenticates (post-rotation); `must_rotate` is `false` for it already. Phase 6 WP-2: `secret` is the composed bearer (`compose_bearer_locator`) -- the store itself still receives/rotates on the raw `distributed_secret`.
 

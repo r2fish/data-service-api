@@ -29,7 +29,7 @@ class QueryPage:
 @dataclass(frozen=True)
 class MutationResult:
     """`DataService.mutate_result`'s own return shape, matching
-    `spec/data-service-api.v1.json`'s `MutationResult`. Mirrors the `query`/`query_page` split: `mutate` below (in `service.py`) stays byte-for-byte backward compatible (a bare `int`, the affected count) for every existing caller (the in-process conformance adapter); this richer shape reaches only the HTTP boundary, which needs `assigned_addresses` to build the contract's own response. `entity` is
+    `spec/data-service-api.v1.json`'s `MutationResult`. Mirrors the `query`/`query_page` split: `mutate` below (in `service.py`) stays byte-for-byte backward compatible (a bare `int`, the affected count) for every existing caller (`tests/test_foundation.py`, the in-process conformance adapter); this richer shape reaches only the HTTP boundary, which needs `assigned_addresses` to build the contract's own response. `entity` is
     never present on any element here (contract: only the cross-entity
     endpoint's own elements name their entity; this is the per-entity
     endpoint's shape).

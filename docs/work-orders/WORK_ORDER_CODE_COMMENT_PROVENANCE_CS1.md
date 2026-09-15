@@ -2906,6 +2906,7 @@ D. 差し戻しと R6-1〜R6-3 で基準のバイト列に戻した塊 (CH-ID �
 **戻した塊の監査** (`$SP/ccp0i_restore_audit.py` に下の本文のとおり作り、変えない)
 
 - `--base` は基点 (既定値なし)、`--expect` は §15.4 の一覧。検査は、コード・CH-ID の無い塊・CH-ID の集合が不変、(iv) 変わった CH-ID の集合が `--expect` と一致、塊ごとに (i) 0i の前のチェッカーで受け皿から導ける、(ii) 基点の塊の文字列が新しい塊の文字列の部分列 (挿入だけ。折り返し直すと赤)、(iii) 0i のチェッカー (`_apply_corrections` を含む) で受け皿から導ける。(ii) の名前付き例外は CH-0058 だけ (Z0i-4a)。
+- 訂正註 (2026-09-16): 上の箇条、CH-0058 の行、監査スクリプトの本文の「名前付き例外は CH-0058 だけ」は、Z0i-4c・Z0i-4g で CH-0058・CH-0070・CH-0184・CH-0292 の 4 つに広げた (§15.5。スクリプトの diff は §15.4.4・§15.4.5)。
 - 変えていない作業ツリーで確かめた: `--base f0637d9 --expect <§15.2 の 52 塊>` は (iv) の `FAIL` 52 行と `SUMMARY changed_blocks=0 restored_ok=0 exceptions=0 fail=52`、exit 1。`--expect ""` は `fail=0`、exit 0。`--base` なしは argparse の exit 2。
 
 ```python
@@ -3083,23 +3084,489 @@ tools/dev/finalize.py -C "$WT" --branch ccp-0i --allow 'tools/check_comment_prov
 
 | 項目 | 前 (`f0637d9`) | 後 |
 |---|---|---|
-| 規則 1〜4 の実装 (関数と行) | — | |
-| 新規テスト (名前と数) | — | |
-| 消したテスト・後半を消したテスト・改名 (旧名 → 新名) | — | |
-| 期待を変えたテスト (Z0i-2) | — | |
-| `tools/tests` の集計行 (`pt.py`) | | |
-| 変異 1〜12 (1a・3a を含む) の `old` / `new`、実装したチェッカーの上での `old` の再確認 (m9) | — | |
-| `mutate.py` の表 (id / 変異 / 期待 / 結果 / ログの実行時刻とファイル / ログの行) | — | |
+| 規則 1〜4 の実装 (関数と行) | — | 裁定どおり実装し、手直し 1 (F1〜F9) を当てた。試作との食い違い 0、遡った確認は 52 塊のまま。変更セット 5・6 の rev の組 (`--base 3adba35` を `db82663` の tree で、`--base 80fad55` を `42842de` の tree で) は exit 0。Z0i-4f の修正の後も、試作との食い違い 0、遡った確認は 52 塊 (§15.4.5) |
+| 新規テスト (名前と数) | — | 23 本 (`tools/` の diff の `test_0i_*`。名前は §15.4.6) |
+| 消したテスト・後半を消したテスト・改名 (旧名 → 新名) | — | ステージ 1 の `tools/` の diff から。消した 5 本: `test_0e_mutations_removing_each_predicate_b_rule_is_red`、`test_0f_mutations_removing_rules_6_7_8_is_red`、`test_0f_item1_mutation_reverting_to_greedy_regex_is_red`、`test_0f_item2_mutation_dropping_space_guard_on_rule6_is_red`、`test_0f_item3_mutation_y2_dropping_prev_char_guard_is_red`。後半を消して改名 (Z0i-5): `test_0e_mutation_identifier_set_from_head_instead_of_base_is_red` → `test_0e_identifier_set_is_read_from_base_rev_is_green`、`test_0e_mutation_identifier_set_excluding_docs_is_red` → `test_0e_identifier_set_includes_docs_is_green`。改名 (手直し 1 の F8): `test_v072_mutation_basename_uniqueness_removed_would_break_control_mapping` → `test_v072_unique_basename_is_real` |
+| 期待を変えたテスト (Z0i-2) | — | `test_v072_ambiguous_basename_filename_removable_is_green` → `test_0i_rule3_ambiguous_basename_is_real_is_red` (diff の `def` の置き換え) |
+| `tools/tests` の集計行 (`pt.py`) | | 戻した後の作業ツリー (HEAD = 基点): `1 failed, 413 passed`。赤は 13 の 1 本だけ。第 2 段の 3 の後 (§15.4.5): `1 failed, 419 passed`。赤は同じ 13 の 1 本だけ |
+| 変異 1〜12 (1a・3a を含む) の `old` / `new`、実装したチェッカーの上での `old` の再確認 (m9) | — | §15.4.6 の表。m9: 実装したチェッカーの上で、34 行すべての `old` が 1 回だけ現れる (証拠の監査で再確認) |
+| `mutate.py` の表 (id / 変異 / 期待 / 結果。結果は最新の mutate 実行) | — | 手直し 1 の後、33 行すべて赤 (33/33)。Z0i-4f の後、行 34 (`13-rule2-z0i4f-lost-path-location-suffix`) を足して 34 行すべて赤 (34/34)。各行の `FAILED` は意図した test の 1 本だけ (証拠の監査)。§15.3 の外の 5 行の対応は §15.4.6 |
 | 規則ごとの件数の取り直し (§15.2 の表と同じ区分) | §15.2 | |
-| 遡った確認の取り直し (基点。CH-ID の一覧 = 戻す塊 = `--expect`) | `f0637d9` の試作で 52 塊 (§15.2) | |
-| CH-0058 を 0i のチェッカーが拒む理由 (実測。Z0i-4a) | — | |
-| 塊ごとの Opus の文面の判定 (CH-ID / 戻した箇所 / 判定) | — | |
-| 戻した塊 (`ccp0i_restore_audit.py` の出力を逐語。CH-0058 を (ii) の例外にした場合は前後の文字列を含む) | — | |
-| 13 の監査照合 (コミット前の赤の CH-ID と集計行、コミット後の緑の集計行、各コマンド) | — | |
-| `_BACKEND_LAYER_ALLOWLIST` の `postgres.py` の行 (Z0i-4 (A)) | | |
-| 40a の集計行 (Z0i-4 (A)) | | |
-| `--register` / `check_doc_refs.py` / `public_value_scan.py` の出力の行 | | |
-| root gate と `finalize.py --tools-tests` の行 (監督) | — | |
+| 遡った確認の取り直し (基点。CH-ID の一覧 = 戻す塊 = `--expect`) | `f0637d9` の試作で 52 塊 (§15.2) | 基点 `7bc6650` で 52 塊、`f0637d9` の一覧と同一 (増減 0): CH-0003,CH-0058,CH-0066,CH-0070,CH-0100,CH-0103,CH-0116,CH-0120,CH-0124,CH-0127,CH-0137,CH-0141,CH-0142,CH-0146,CH-0148,CH-0168,CH-0174,CH-0178,CH-0183,CH-0184,CH-0185,CH-0192,CH-0193,CH-0196,CH-0209,CH-0213,CH-0230,CH-0239,CH-0243,CH-0247,CH-0255,CH-0257,CH-0260,CH-0280,CH-0287,CH-0288,CH-0290,CH-0292,CH-0295,CH-0296,CH-0302,CH-0308,CH-0309,CH-0310,CH-0314,CH-0315,CH-0320,CH-0329,CH-0336,CH-0342,CH-0357,CH-0371 |
+| CH-0058 を 0i のチェッカーが拒む理由 (実測。Z0i-4a) | — | 断片が理由 (§15.4.2)。ruled repair を当てた。(ii) は満たし、`EXCEPTION` 行は無い |
+| 塊ごとの Opus の文面の判定 (CH-ID / 戻した箇所 / 判定) | — | §15.4.1。戻した 46 塊、STOP 6 塊 (CH-0003・CH-0070・CH-0120・CH-0184・CH-0239・CH-0292)。第 2 段の 2 の後: 戻した 51 塊、STOP 1 塊 (CH-0292。§15.4.4)。第 2 段の 3 の後: 戻した 52 塊、STOP 0 (§15.4.5) |
+| 戻した塊 (`ccp0i_restore_audit.py` の出力を逐語。CH-0058 を (ii) の例外にした場合は前後の文字列を含む) | — | §15.4.3。52 塊の `--expect` で `fail=6` (STOP 6 塊の (iv) だけ)、exit 1。戻した 46 塊の `--expect` で `fail=0`、exit 0。第 2 段の 2 の後 (§15.4.4): 52 塊で `fail=1` (CH-0292 の (iv) だけ)、exit 1。51 塊で `fail=0`、`exceptions=2`、exit 0。第 2 段の 3 の後 (§15.4.5): 52 塊で `fail=0`、`exceptions=3` (CH-0070・CH-0184・CH-0292)、exit 0 |
+| 13 の監査照合 (コミット前の赤の CH-ID と集計行、コミット後の緑の集計行、各コマンド) | — | コミット前: `tools/dev/pt.py -C "$WT" -- tools/tests -q` → `1 failed, 413 passed`、赤の CH-ID は 52 (一覧と `diff` 0 行)。作業ツリーの src を HEAD の代わりに読ませた同じ照合では、残る赤は STOP の 6 塊だけ (§4.1 (2) 6 行、§9e 0 行)。コミット後の緑は、STOP の裁定の後 (監督)。第 2 段の 2 の後、作業ツリーの同じ照合で残る赤は CH-0292 だけ (§15.4.4)。第 2 段の 3 の後、作業ツリーの同じ照合で赤 0 (`HAD_FAILURE=False`)。`tools/tests` の赤は 13 の 1 本だけで、赤の CH-ID は 52 (一覧と `diff` 0 行) (§15.4.5)。コミット後の緑は `finalize.py --tools-tests` で見る (root gate の行) |
+| `_BACKEND_LAYER_ALLOWLIST` の `postgres.py` の行 (Z0i-4 (A)) | | `("postgres.py", 1523)` のまま。戻しはすべて行の中の挿入で、r2db `postgres.py` は 2545 行のまま。L1523 は同じ `fail("VALIDATION_FAILED", …)` の行。テストファイルは変えていない |
+| 40a の集計行 (Z0i-4 (A)) | | 戻した tree で 2 回 (1 回目は 48 塊、2 回目は 46 塊。46 塊の tree は最終ではない)。r2db `1292 passed` / `1292 passed`。MitateDB `1112 passed, 2 subtests passed` / 同。`conformance-tests` `995 passed` (46 塊の tree)。failed・skipped・xfailed 0。第 2 段の 2 の後: r2db `1292 passed`、MitateDB `1112 passed, 2 subtests passed`、`conformance-tests` `995 passed` (§15.4.4)。第 2 段の 3 の後: r2db `1292 passed` (§15.4.5) |
+| `--register` / `check_doc_refs.py` / `public_value_scan.py` の出力の行 | | `comment provenance register OK: 83 files scanned, 427 CH-IDs` (exit 0) / `check_doc_refs OK: 0 dangling references` (§15.4 の記入後、exit 0) / `# mode=tree files_scanned=8 total_flagged=0` (触った src 8 ファイル)。第 2 段の 3 の後: 同じ 2 行 (exit 0) と、`git status --short` の 14 ファイルそれぞれで `total_flagged=0` (§15.4.5) |
+| root gate と `finalize.py --tools-tests` の行 (監督) | — | root gate (最終の作業ツリー): `3399 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の diff 0。finalize は §15.3 のコマンドの `--allow` に `docs/code-history/r2db-api/control_plane.md`・`docs/code-history/r2db-api/ops.md`・`docs/code-history/r2db-api/service.md` を足す (§15.3 の manifest の外。裁定 Z0i-4d・Z0i-4g による)。`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` は変わっていないので、その `--allow` は要らない。13 のコミット後の緑 (0f) は `finalize.py --tools-tests` で見る。コミット後の `tools/tests`: `finalize.py --tools-tests` が新しい HEAD で観測する。集計行は統合後に §15 末尾の【追記】に書く |
+
+#### 15.4.1 塊ごとの判定 (ステージ 2、Opus)
+
+戻す箇所は、失われた保護参照を含む括弧・ラベル・文の全体で、受け皿 (訂正の適用後) から逐語で取った。同じ括弧の中の経緯トークンも箇所の一部として戻る (CH-0116・CH-0124 の `WP-2b`、CH-0192 の `WP-1 (9)`、CH-0247 の `WP-3`、CH-0288 の `WP-4/WP-5`・`WP-5's`)。CH-0288 では、これで壊れていた語順 (`control_main` of this same phase`、`as of single-commit declaration flip`) も元に戻る。保護参照を含まない箇所 (CH-0103 の `2026-09-04 review`、CH-0066・CH-0070・CH-0302・CH-0357・CH-0371 のラベル、CH-0124 の `H-1, {scratchpad}/rulings-r4.md`、CH-0148 の `WP-5`・`/control/v1`) は戻していない。どれもチェッカーが戻さずに導ける。src の行数は 8 ファイルとも変わらない。AST は 8 ファイルとも HEAD と同一 (docstring を除いた `ast.dump`、`ast_signature`)。
+
+真偽の確認 (戻した箇所が今のコードで正しいか): `R2DB_CREDENTIAL_PEPPER` は `auth.py` が読む。`tests/test_foundation.py` は `mutate` を呼ぶ。`test_durable_denial_codes_match_the_design_d3_table` は `tests/test_application_audit.py` にある。r2db `http.py` の `POST /v1/data/mutations` は今も未実装の stub である。`delete_confirmation.py` のヘッダーに規則 (c)・(d) がある。`bootstrap_control_credential`・`reset_control_credentials`・`issue_audit_credential_ceremony` は `control_plane.py` にある。`PROVISION_DSN_ENV` は `platform_declarations.py` にある。`ops.py` は `ControlAuthority.issue_credential` を呼ばない。`deploy/DEPLOYMENT_RUNBOOK.md` は `R2DB_CONTROL_PLANE_STATUS` を扱う。`main.py` はこの変数を読む。`get_catalog` は `http.py` に、`_bind_order_by` は `cell.py` にある。`_mutation_result_to_mapping` は `envelope.get("committed", not dry_run)` を使う。CH-0336 の注: 引用句 "a deterministic local foundation backend" は `architecture/DATA_SERVICE_FOUNDATION.md` に逐語では無く、過去にも無かった (`git log -S` で 0 件)。文書は L55-56 で "SQLite solely for deterministic foundation tests. It is not the production persistence topology." と書いており、中身は一致する。帰属は基準の文のままなので、戻せると判定した。
+
+| CH-ID | file:line | 戻した箇所 | 判定 |
+|---|---|---|---|
+| CH-0058 | r2db `postgres.py`:1922 | `` review `` / `` F-8 `` | 戻した |
+| CH-0066 | r2db `postgres.py`:1988 | `` `service.py` `` | 戻した |
+| CH-0100 | r2db `postgres.py`:512 | `` `auth.py` `` | 戻した |
+| CH-0103 | r2db `service.py`:1232 | `` D-1(c) `` / `` , `ops.py` `` | 戻した |
+| CH-0116 | r2db `service.py`:900 | `` D-4 (7)/ `` / `` , WP-2b `` | 戻した |
+| CH-0124 | r2db `service.py`:819 | `` D-4 (7)/ `` / `` , WP-2b `` | 戻した |
+| CH-0127 | r2db `service.py`:790 | `` F-15, `` | 戻した |
+| CH-0137 | r2db `capabilities_document.py`:104 | `` D-5(ii) `` | 戻した |
+| CH-0141 | r2db `capabilities_document.py`:79 | `` `http.py` `` | 戻した |
+| CH-0142 | r2db `capabilities_document.py`:33 | `` D-1 (5) `` | 戻した |
+| CH-0146 | r2db `service.py`:649 | `` D-5(ii) `` | 戻した |
+| CH-0148 | r2db `service.py`:641 | `` `main.py`, `` | 戻した |
+| CH-0168 | r2db `service_results.py`:31 | `` `tests/test_foundation.py`, `` | 戻した |
+| CH-0174 | r2db `capabilities_document.py`:10 | `` D-5(ii) `` | 戻した |
+| CH-0178 | r2db `service.py`:27 | `` (`tests/test_application_audit.py`) `` | 戻した |
+| CH-0183 | MitateDB `http.py`:41 | `` `mitatedb_api/contract/data-service-api.v1.json`, `` | 戻した |
+| CH-0185 | MitateDB `http.py`:70 | `` , `errors.py` `` | 戻した |
+| CH-0192 | MitateDB `http.py`:342 | `` D-1 (3) `` / `` WP-1 (9) `` | 戻した |
+| CH-0193 | MitateDB `http.py`:363 | `` D-1 (4) `` | 戻した |
+| CH-0196 | MitateDB `http.py`:422 | `` `main.py` `` | 戻した |
+| CH-0209 | MitateDB `http.py`:608 | `` (`tests/test_http.py`) `` | 戻した |
+| CH-0213 | MitateDB `http.py`:713 | `` (`conformance/conformance_adapter_mitatedb.py::_mutation_result_to_mapping`) `` | 戻した |
+| CH-0230 | MitateDB `http.py`:1080 | `` D-2 (1) `` | 戻した |
+| CH-0243 | r2db `control_plane.py`:139 | `` D-5(ii) `` | 戻した |
+| CH-0247 | r2db `control_plane.py`:229 | `` service.py `` / `` WP-3 `` | 戻した |
+| CH-0255 | r2db `control_plane.py`:570 | `` D-5(ii) `` | 戻した |
+| CH-0257 | r2db `control_plane.py`:615 | `` D-5(ii) `` | 戻した |
+| CH-0260 | r2db `control_plane.py`:627 | `` D-1 (5) `` | 戻した |
+| CH-0280 | r2db `control_plane.py`:1367 | `` (`control_http.py`) `` | 戻した |
+| CH-0287 | r2db `control_plane.py`:1497 | `` `ops.py` `` | 戻した |
+| CH-0288 | r2db `ops.py`:1 | `` , WP-4/WP-5 `` / `` WP-5's `` / `` , deploy/DEPLOYMENT_RUNBOOK.md `` | 戻した |
+| CH-0290 | r2db `ops.py`:66 | `` `delete_confirmation.py` `` | 戻した |
+| CH-0295 | r2db `ops.py`:196 | `` (`control_plane.py`) `` | 戻した |
+| CH-0296 | r2db `ops.py`:212 | `` (design D-1(c)) `` / `` D-1(c) `` | 戻した |
+| CH-0302 | r2db `ops.py`:365 | `` D-1(c) `` | 戻した |
+| CH-0308 | r2db `ops.py`:676 | `` (`control_plane.py`) `` | 戻した |
+| CH-0309 | r2db `ops.py`:699 | `` (`control_plane.py`) `` | 戻した |
+| CH-0310 | r2db `ops.py`:732 | `` (`control_plane.py`) `` | 戻した |
+| CH-0314 | r2db `ops.py`:803 | `` (F-1/F-2) `` | 戻した |
+| CH-0315 | r2db `ops.py`:810 | `` (F-4b) `` | 戻した |
+| CH-0320 | r2db `ops.py`:980 | `` `platform_declarations.py` `` | 戻した |
+| CH-0329 | r2db `ops.py`:1321 | `` D-4(c) `` | 戻した |
+| CH-0336 | MitateDB `backend_sqlite.py`:1 | `` (`architecture/DATA_SERVICE_FOUNDATION.md`) `` | 戻した |
+| CH-0342 | MitateDB `backend_sqlite.py`:66 | `` D-2 (4) `` / `` , F-6 `` | 戻した |
+| CH-0357 | MitateDB `backend_sqlite.py`:322 | `` (`http.py::get_catalog`) `` | 戻した |
+| CH-0371 | MitateDB `backend_sqlite.py`:560 | `` (`cell.py::_bind_order_by`) `` | 戻した |
+| CH-0003 | r2db `postgres.py`:174 | 文 `` Code-review fix F7 (Opus review 2): … `` / 文 `` It claimed … `` (Z0i-4b) | 戻した (第 2 段の 2) |
+| CH-0070 | r2db `postgres.py`:2120 | `` , D-2 (3) `` と継ぎ目の空白 1 つ (Z0i-4c) | 戻した (第 2 段の 2。(ii) の名前付き例外) |
+| CH-0120 | r2db `service.py`:872 | 訂正後の括弧 (Z0i-4d) | 戻した (第 2 段の 2) |
+| CH-0184 | MitateDB `http.py`:51 | `` `auth.py` `` と継ぎ目の空白 1 つ (Z0i-4c) | 戻した (第 2 段の 2。(ii) の名前付き例外) |
+| CH-0239 | r2db `control_plane.py`:1 | 訂正後の文 (Z0i-4d) | 戻した (第 2 段の 2) |
+| CH-0292 | r2db `ops.py`:126 | — | **STOP** (Z0i-4d の訂正を 0g が拒む。§15.4.4) |
+
+**STOP の詳細** (ステージ 2 の時点の記録。裁定 Z0i-4b〜4d と第 2 段の 2 の結果は §15.4.4)
+
+- **CH-0003** (r2db `postgres.py` L174)。失われた箇所は文 "It claimed a namespace of 0 would land in the SAME lock space the single-bigint form `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (1414141) uses, risking a collision between a bootstrap/reset ritual's lock and an idempotency-key lock." である。基準では、この文の前に "Code-review fix F7 (Opus review 2): the rationale this comment carried before this fix was FALSE and is corrected here (the constant itself is unaffected)." がある。変更セット 1 がこの前の文を消した (保護参照は無い)。今の塊は "... see `_idempotency_key_lock` below. / PostgreSQL actually keeps those two key spaces disjoint ..." と続く。"It claimed …" だけを戻すと、"It" の指す先が無くなる。今のコメント自身が衝突を主張しているように読め、次の文と逆の意味になる。読める形にするには F7 の文も要り、戻す単位を超える。事実 (`ops.py` L72 `_RITUAL_ADVISORY_LOCK_KEY = 1414141`) は正しい。
+- **CH-0070** (r2db `postgres.py` L2120)。戻す箇所は `, D-2 (3)` (括弧 "(`table_info.constraints`, never at bind time, addendum R-b/R-c, D-2 (3))") である。今の本文は変更セットの折り返しで生まれた `R-b/ R-c` (空白入り) を持つ。挿入すると、0f の §9e が `broken line-wrap join: 'R-b/ R-c,' should be 'R-b/R-c,' (zero space)` を出す (試して実測し、戻した)。直すには空白 1 字を消すことになり、監査の (ii) が赤になる (名前付き例外は CH-0058 だけ)。
+- **CH-0120** (r2db `service.py` L872、`DataService.schema`)。戻す箇所は "Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`, `tests/test_constraints_declaration.py`) reads `.revision` off the result" の括弧である。今の本文は同じ文で括弧が無い。事実と食い違う点: `tests/test_constraints_declaration.py` は `service.schema(` を 4 か所 (L716・L718・L1527・L1534) で呼ぶが、どこでも `.revision` を読まない。このファイルの `.revision` は `cell.apply_schema(...)` から読んでいる。`tests/test_foundation.py` は L79 で読む。
+- **CH-0184** (MitateDB `http.py` L51)。戻す箇所は `` `auth.py` `` (基準 "IDENTIFIER_INVALID -- `auth.py`/`credential_store_postgres.py` fold …"、今 "IDENTIFIER_INVALID --/ `credential_store_postgres.py` fold …") である。挿入すると、0f の §9e が `'`auth.py`/ `credential_store_postgres.py`' should be '`auth.py`/`credential_store_postgres.py`' (zero space)` を出す (実測)。空白の削除は (ii) を赤にする。
+- **CH-0239** (r2db `control_plane.py` L1)。失われた箇所は文 "Single-commit rule (design §5, still binding for this WP): `control_plane` stays declared `unavailable` in every public capability document this codebase already emits (`DataService.capabilities`, `config/capabilities.json`) -- neither of those files is touched here." である。今のコードと食い違う点: `DataService.__init__` は `control_plane_status` (`"enabled"`/`"unavailable"`、`service.py` L640-644) を受け取る。composition root (`main.py`) は `R2DB_CONTROL_PLANE_STATUS` を読む。`capabilities_document.py` L79 は、`control_plane` がもうその位置に無いと書く。`config/capabilities.json` は今も `unavailable` だが、「すべての公開 capability 文書で unavailable」は偽である。同じ塊の次の文は、訂正 (2026-09-15) で今の事実に直してある。
+- **CH-0292** (r2db `ops.py` L126)。戻す箇所は `` `MitateDB-api/src/mitatedb_api/ops.py:541-550`/ `` である。今のコードと食い違う点: MitateDB `ops.py` の `_run_deprovision_script` は L553、`_migrations_dir` は L380 にあり、行の範囲が古い。本文に残っている `:373-375` も古いが、これは既存で、触っていない。
+
+#### 15.4.2 CH-0058 (Z0i-4a) の実測
+
+0i のチェッカー (ステージ 1) の上で、受け皿 → 今の塊の導出を文ごとに見た (`$SP/ccp0i_probe.py`)。
+- 今の文 "Always returns `SchemaOutcome` (round; mirrors `ApplicationCell.apply_schema`'s identical unification) -- …" は、基準の文 "Always returns `SchemaOutcome` (review round F-8, `{scratchpad}/rulings-r4.md`; mirrors …" と順序を保って一致しない。Z0i-1 (B) で `review round F-8` は 1 つの経緯トークンになり、`round` だけが残る形は許される除去から作れない。
+- そのため基準の文は丸ごと削除の扱いになり、`tests/test_constraints_declaration.py` (規則 2) を持つので `cannot delete a whole sentence carrying a protected reference` で拒まれる。理由は断片 `(round; mirrors …` である。
+- 裁定どおり `(round; mirrors` → `(review round F-8; mirrors` にした。`{scratchpad}/rulings-r4.md` は戻していない。新しいチェッカーで導出は ok。(ii) は満たす (基点の文字列は新しい文字列の部分列) ので、`EXCEPTION` 行は無い (§15.4.3 の `RESTORED … CH-0058 i,ii,iii ok`)。
+
+#### 15.4.3 `ccp0i_restore_audit.py` の出力 (逐語)
+
+`python3 "$SP/ccp0i_restore_audit.py" -C "$WT" --base 7bc6650 --expect <52 塊>` (exit 1。FAIL は STOP 6 塊の (iv) だけ):
+
+```
+BASE 7bc6650 HEAD worktree FILES 83 EXPECT 52
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L1	CH-0336	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L66	CH-0342	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L322	CH-0357	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L560	CH-0371	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L41	CH-0183	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L70	CH-0185	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L342	CH-0192	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L363	CH-0193	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L422	CH-0196	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L608	CH-0209	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L713	CH-0213	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L1080	CH-0230	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L104	CH-0137	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L79	CH-0141	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L33	CH-0142	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L10	CH-0174	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L139	CH-0243	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L229	CH-0247	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L570	CH-0255	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L615	CH-0257	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L627	CH-0260	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1367	CH-0280	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1497	CH-0287	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L1	CH-0288	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L66	CH-0290	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L196	CH-0295	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L212	CH-0296	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L365	CH-0302	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L676	CH-0308	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L699	CH-0309	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L732	CH-0310	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L803	CH-0314	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L810	CH-0315	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L980	CH-0320	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L1321	CH-0329	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L1922	CH-0058	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L1988	CH-0066	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L512	CH-0100	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L1232	CH-0103	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L900	CH-0116	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L819	CH-0124	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L790	CH-0127	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L649	CH-0146	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L641	CH-0148	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L27	CH-0178	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service_results.py	L31	CH-0168	i,ii,iii ok
+FAIL	(iv)	CH-0003	in --expect but unchanged
+FAIL	(iv)	CH-0070	in --expect but unchanged
+FAIL	(iv)	CH-0120	in --expect but unchanged
+FAIL	(iv)	CH-0184	in --expect but unchanged
+FAIL	(iv)	CH-0239	in --expect but unchanged
+FAIL	(iv)	CH-0292	in --expect but unchanged
+SUMMARY changed_blocks=46 restored_ok=46 exceptions=0 fail=6
+```
+
+`--expect <戻した 46 塊>` (CH-0058,CH-0066,CH-0100,CH-0103,CH-0116,CH-0124,CH-0127,CH-0137,CH-0141,CH-0142,CH-0146,CH-0148,CH-0168,CH-0174,CH-0178,CH-0183,CH-0185,CH-0192,CH-0193,CH-0196,CH-0209,CH-0213,CH-0230,CH-0243,CH-0247,CH-0255,CH-0257,CH-0260,CH-0280,CH-0287,CH-0288,CH-0290,CH-0295,CH-0296,CH-0302,CH-0308,CH-0309,CH-0310,CH-0314,CH-0315,CH-0320,CH-0329,CH-0336,CH-0342,CH-0357,CH-0371) では `SUMMARY changed_blocks=46 restored_ok=46 exceptions=0 fail=0`、exit 0。
+
+#### 15.4.4 第 2 段の 2 (STOP 6 塊、監督裁定 2、Opus)
+
+手直し 1 の後のチェッカーで 6 塊を実測し (Z0i-4e)、裁定 Z0i-4b〜4d のとおり処理した。src の行数と AST (docstring を除いた `ast.dump`、`ast_signature`) は 8 ファイルとも HEAD と同一。
+
+| CH-ID | 拒む理由 (実測) | 処理 | 結果 |
+|---|---|---|---|
+| CH-0003 | `cannot delete a whole sentence carrying a protected reference` ("It claimed …"。`ops.py::_RITUAL_ADVISORY_LOCK_KEY` が規則 2・3 で実在) | Z0i-4b。2 文を基準から逐語で取り、基準の位置 (`PostgreSQL actually` の前、同じ行) に入れた | 戻した |
+| CH-0070 | `retained text has no order-preserving match in the original block` (括弧は出所付き (0i の前も同じ判定) で、規則 4 により `D-2 (3)` を消せない。0i の前のチェッカーでは導けた) | Z0i-4c。`, D-2 (3)` を入れ、継ぎ目の空白 1 つを除いた | 戻した ((ii) の名前付き例外) |
+| CH-0120 | `cannot delete a whole sentence carrying a protected reference` (括弧の 2 つのパスが規則 2 で実在) | Z0i-4d。訂正の記録を足し、訂正後の括弧を戻した | 戻した |
+| CH-0184 | `cannot delete a whole sentence carrying a protected reference` (`auth.py` が規則 3 で実在) | Z0i-4c。`` `auth.py` `` を入れ、継ぎ目の空白 1 つを除いた | 戻した ((ii) の名前付き例外) |
+| CH-0239 | `cannot delete a whole sentence carrying a protected reference` (`config/capabilities.json` が規則 2 で実在) | Z0i-4d。訂正の記録を足し、訂正後の文を戻した | 戻した |
+| CH-0292 | `cannot delete a whole sentence carrying a protected reference` (`MitateDB-api/src/mitatedb_api/ops.py:541-550` が規則 2 で実在) | Z0i-4d の訂正を試した (書いていない) | **STOP** |
+
+**事実の確認** (戻した文が今のコードで正しいか):
+- CH-0003: r2db `ops.py` L72 は `_RITUAL_ADVISORY_LOCK_KEY = 1414141` で、L266 は 1 引数形 `pg_advisory_xact_lock(%s)`。`postgres.py` の定数 `_IDEMPOTENCY_KEY_LOCK_NAMESPACE = 20261007` は変わっていない。"It" は前の文の "the rationale this comment carried before this fix" を指し、次の "PostgreSQL actually keeps …" が訂正後の理由として読める。
+- CH-0070: `table_info.constraints` は `postgres.py` の `_TableInfo.constraints`。`D-2 (3)` は `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` §3 D-2 (3) (強制点。監督裁定 R-b / R-c)。
+- CH-0184: MitateDB `auth.py` の `authenticate` は `enabled`・`revoked` を 1 つの `valid` にまとめ、`AuthenticationError` を出す。`credential_store_postgres.py` も同じ。
+- CH-0120: 直接の呼び出しで結果の `.revision` を読むのは `tests/test_foundation.py` (L79・L137・L3060・L3084) だけ。`tests/test_constraints_declaration.py` の `service.schema(` 4 か所 (L716・L718・L1527・L1534) は `.revision` を読まない。このファイルの `.revision` は `cell.apply_schema(...)` から読む (L215・L471・L678・L1147)。このファイルは Phase 9 WP-2a (`fdef94e`、1.7.0 の constraint_declarations) で足された。conformance adapter の `hasattr(result, "revision")` は `r2db-api/conformance/conformance_adapter_r2db.py` にある。
+- CH-0120 の訂正後の括弧が `tests/test_constraints_declaration.py` を限定句付きで残すのは、パスを落とす訂正を 0g が拒むため (証拠の監査の実測: `real path(s) ['tests/test_constraints_declaration.py'] dropped`)。
+- CH-0239: `DataService.__init__` は `control_plane_status: str = "unavailable"` を受け取る (`service.py` L640)。`"enabled"`/`"unavailable"` 以外を拒み (L643-644)、`capabilities()` から `build_capabilities_document` に渡す (L714)。`capabilities_document.py` L84 が `"control_plane": {"status": control_plane_status}` を出す。`main.py` は `R2DB_CONTROL_PLANE_STATUS` を読み (L179・L326)、`DataService` に渡す (L536)。`r2db-api/config/capabilities.json` は `control_plane` を `unavailable` に置いたまま。
+
+**Z0i-4c の例外の前後** (逐語。変わった行。差は挿入と継ぎ目の空白 1 つの除去だけ。塊の全体は下の監査の `EXCEPTION` 行):
+
+CH-0070 (r2db `postgres.py` L2120):
+```
+前: # compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/ R-c). `enum`/`nullable` omitted each
+後: # compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/R-c, D-2 (3)). `enum`/`nullable` omitted each
+```
+
+CH-0184 (MitateDB `http.py` L51。行の該当部分):
+```
+前: IDENTIFIER_INVALID --/ `credential_store_postgres.py` fold "revoked"/"disabled"
+後: IDENTIFIER_INVALID -- `auth.py`/`credential_store_postgres.py` fold "revoked"/"disabled"
+```
+
+**Z0i-4d の訂正の記録** (日付 2026-09-16。受け皿の該当 CH-ID 節の末尾に追記):
+
+| CH-ID | ファイル | 旧 → 新 (変えた部分) |
+|---|---|---|
+| CH-0120 | `docs/code-history/r2db-api/service.md` | `` (`tests/test_foundation.py`, `tests/test_constraints_declaration.py`) `` → `` (`tests/test_foundation.py`; `tests/test_constraints_declaration.py` reads `.revision` only off `cell.apply_schema`) `` |
+| CH-0239 | `docs/code-history/r2db-api/control_plane.md` (既存の 2026-09-15 の訂正の後) | `` Single-commit rule (design §5, still binding for this WP): `control_plane` stays declared `unavailable` in every public capability document this codebase already emits (`DataService.capabilities`, `config/capabilities.json`) -- neither of those files is touched here. `` → `` `control_plane` is declared in `DataService.capabilities` with its constructor-injected `control_plane_status` (`enabled` or `unavailable`, default `unavailable`; `main.py` reads it from `R2DB_CONTROL_PLANE_STATUS`, and `capabilities_document.py` emits it), while `config/capabilities.json` still lists it as `unavailable`. `` |
+| CH-0292 | — | 書いていない (STOP) |
+
+**CH-0292 の STOP** (基点のバイト列のまま。監督に上げる):
+- 今の事実: MitateDB `ops.py` の `_run_deprovision_script` は L553、`_migrations_dir` は L380 にある。L541-550・L373-375 はどちらも別の行である。
+- 試した訂正 (書いていない): 括弧 (`` `MitateDB-api/src/mitatedb_api/ops.py:541-550`/`:373-375` ``) を (`` `MitateDB-api/src/mitatedb_api/ops.py::_run_deprovision_script`/`::_migrations_dir` ``) にする。位置を除いた (`` `MitateDB-api/src/mitatedb_api/ops.py` ``) も試した。
+- 0g の結果: どちらも `correction 2026-09-16: real path(s) ['MitateDB-api/src/mitatedb_api/ops.py:541-550'] dropped` で拒まれた。`_correction_relaxes_protection` は、実在の判定では位置を除く (Z0i-3) が、失われたかの比較は `_clean_filename_candidate` の後の文字列 (位置を含む) で行う。そのため、行番号を名前に替える訂正は、パスが残っても実在パスの喪失になる。
+- 加えて、src の `` (`:373-375`) `` を名前の形に替えると `:373-375` が消え、監査の (ii) を満たさない (名前付き例外は 3 つに限る)。
+
+**監査スクリプトの diff** (Z0i-4c。§15.3 の本文 → 今のスクリプト):
+```diff
+--- ccp0i_restore_audit.py (§15.3)
++++ ccp0i_restore_audit.py (Z0i-4c)
+@@ -9,7 +9,7 @@
+   (i)   PRE-0i: corrected companion -> new retained text is an allowed reduction
+   (ii)  the base block text is a character subsequence of the new block text (pure insertion, no reflow)
+   (iii) NEW (its own _apply_corrections and _is_allowed_reduction): corrected companion -> new retained text
+-CH-0058 is the single named exception to (ii) (ruling Z0i-4a): a miss there prints EXCEPTION with both texts
++CH-0058, CH-0070 and CH-0184 are the only named exceptions to (ii) (rulings Z0i-4a, Z0i-4c): a miss there prints EXCEPTION with both texts
+ verbatim instead of FAIL; (i), (iii) and (iv) still apply to it.
+ Prints RESTORED / EXCEPTION / FAIL rows and SUMMARY. Exit 0 only when there is no FAIL row.
+ Usage: python3 ccp0i_restore_audit.py -C WT --base START_PARENT --expect CH-0003,CH-0058,... [--head REV]
+@@ -24,7 +24,7 @@
+ import types
+ from pathlib import Path
+ 
+-SUBSEQUENCE_EXCEPTION = "CH-0058"
++SUBSEQUENCE_EXCEPTION = ("CH-0058", "CH-0070", "CH-0184")
+ 
+ 
+ def git(root: Path, *args: str) -> str:
+@@ -120,7 +120,7 @@
+                 "ii": is_subsequence(o.dedented, b.dedented),
+                 "iii": not err_new and new_cp._is_allowed_reduction(b.kind, basis_new, retained, real, ids)[0],
+             }
+-            if not checks["ii"] and hid == SUBSEQUENCE_EXCEPTION:
++            if not checks["ii"] and hid in SUBSEQUENCE_EXCEPTION:
+                 exceptions += 1
+                 checks["ii"] = True
+                 print(f"EXCEPTION\t{rel}\tL{b.start_line}\t{hid}\t(ii) before={o.dedented!r}\tafter={b.dedented!r}")
+```
+
+**`ccp0i_restore_audit.py` の出力 (逐語、最終)**
+
+`python3 "$SP/ccp0i_restore_audit.py" -C "$WT" --base 7bc6650 --expect <52 塊>` (exit 1。FAIL は STOP の CH-0292 の (iv) だけ):
+
+```
+BASE 7bc6650 HEAD worktree FILES 83 EXPECT 52
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L1	CH-0336	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L66	CH-0342	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L322	CH-0357	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L560	CH-0371	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L41	CH-0183	i,ii,iii ok
+EXCEPTION	MitateDB-api/src/mitatedb_api/http.py	L51	CH-0184	(ii) before='# -------------------------------------------------------------------------- HTTP status <-> contract error code (m-12: cross-peer status agreement is tracked conformance evidence, contract errors.http_status_note). Every code this peer can actually emit is listed here, mapped to the SAME status r2db-api\'s own call sites use for that code (grep\'d from r2db-api/src/r2db_api/*.py\'s own `fail(...)`/`FoundationError(...)` call sites -- r2db-api itself is not imported or modified, only read for this cross-check per the task brief). No divergence was needed: every code below agrees with r2db-api\'s own mapping. This peer simply never emits several contract codes at all (AUTH_REVOKED, APPLICATION_DISABLED, SCOPE_MISMATCH, ATOMICITY_FAILED, IDENTIFIER_INVALID --/ `credential_store_postgres.py` fold "revoked"/"disabled" into a single `AuthenticationError` -> AUTH_INVALID, and `identifiers.py` raises the same `ValidationError` -> VALIDATION_FAILED for a malformed identifier as for any other malformed shape); that is a pre-existing fact about this peer\'s own error vocabulary, not something WP-3 narrows, and is reported to the requester as a known divergence (not a status mismatch -- there is nothing to compare a peer never emits).\n#\n# Phase 9 WP-3b (design, 追補 2 S-h): PRECONDITION_FAILED is no longer in that "never emits" set -- `errors.PreconditionFailedError` (a stale `plan` token) is this peer\'s first real source of it, mapped to 412 -- the SAME status `r2db-api/src/r2db_api/structured.py`/`postgres.py` already use for their own (row-level) `PRECONDITION_FAILED` `fail(..., status=412)` call sites (cross-peer status agreement m-12).\n# history: CH-0184'	after='# -------------------------------------------------------------------------- HTTP status <-> contract error code (m-12: cross-peer status agreement is tracked conformance evidence, contract errors.http_status_note). Every code this peer can actually emit is listed here, mapped to the SAME status r2db-api\'s own call sites use for that code (grep\'d from r2db-api/src/r2db_api/*.py\'s own `fail(...)`/`FoundationError(...)` call sites -- r2db-api itself is not imported or modified, only read for this cross-check per the task brief). No divergence was needed: every code below agrees with r2db-api\'s own mapping. This peer simply never emits several contract codes at all (AUTH_REVOKED, APPLICATION_DISABLED, SCOPE_MISMATCH, ATOMICITY_FAILED, IDENTIFIER_INVALID -- `auth.py`/`credential_store_postgres.py` fold "revoked"/"disabled" into a single `AuthenticationError` -> AUTH_INVALID, and `identifiers.py` raises the same `ValidationError` -> VALIDATION_FAILED for a malformed identifier as for any other malformed shape); that is a pre-existing fact about this peer\'s own error vocabulary, not something WP-3 narrows, and is reported to the requester as a known divergence (not a status mismatch -- there is nothing to compare a peer never emits).\n#\n# Phase 9 WP-3b (design, 追補 2 S-h): PRECONDITION_FAILED is no longer in that "never emits" set -- `errors.PreconditionFailedError` (a stale `plan` token) is this peer\'s first real source of it, mapped to 412 -- the SAME status `r2db-api/src/r2db_api/structured.py`/`postgres.py` already use for their own (row-level) `PRECONDITION_FAILED` `fail(..., status=412)` call sites (cross-peer status agreement m-12).\n# history: CH-0184'
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L51	CH-0184	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L70	CH-0185	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L342	CH-0192	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L363	CH-0193	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L422	CH-0196	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L608	CH-0209	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L713	CH-0213	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L1080	CH-0230	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L104	CH-0137	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L79	CH-0141	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L33	CH-0142	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L10	CH-0174	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1	CH-0239	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L139	CH-0243	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L229	CH-0247	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L570	CH-0255	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L615	CH-0257	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L627	CH-0260	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1367	CH-0280	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1497	CH-0287	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L1	CH-0288	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L66	CH-0290	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L196	CH-0295	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L212	CH-0296	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L365	CH-0302	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L676	CH-0308	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L699	CH-0309	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L732	CH-0310	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L803	CH-0314	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L810	CH-0315	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L980	CH-0320	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L1321	CH-0329	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L174	CH-0003	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L1922	CH-0058	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L1988	CH-0066	i,ii,iii ok
+EXCEPTION	r2db-api/src/r2db_api/postgres.py	L2120	CH-0070	(ii) before="# compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/ R-c). `enum`/`nullable` omitted each\n# LEAVE the existing value as it is; `enum: null`\n# CLEARS it; an explicit list is fully validated\n# against the field's real declared type now.\n# history: CH-0070"	after="# compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/R-c, D-2 (3)). `enum`/`nullable` omitted each\n# LEAVE the existing value as it is; `enum: null`\n# CLEARS it; an explicit list is fully validated\n# against the field's real declared type now.\n# history: CH-0070"
+RESTORED	r2db-api/src/r2db_api/postgres.py	L2120	CH-0070	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L512	CH-0100	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L1232	CH-0103	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L900	CH-0116	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L872	CH-0120	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L819	CH-0124	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L790	CH-0127	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L649	CH-0146	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L641	CH-0148	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L27	CH-0178	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service_results.py	L31	CH-0168	i,ii,iii ok
+FAIL	(iv)	CH-0292	in --expect but unchanged
+SUMMARY changed_blocks=51 restored_ok=51 exceptions=2 fail=1
+```
+
+`--expect <CH-0292 を除く 51 塊>` では `SUMMARY changed_blocks=51 restored_ok=51 exceptions=2 fail=0`、exit 0 (`EXCEPTION` は CH-0070・CH-0184 の 2 行)。
+
+**作業ツリーの自己検査** (0f と同じ照合を作業ツリーの src で。`python3 "$SP/ccp0i_retro_worktree.py" "$WT"`): 赤は CH-0292 の §4.1 (2) 1 行だけ (`HAD_FAILURE=True`、§9e 0 行)。
+
+**集計行** (`pt.py`。第 2 段の 2 の後の作業ツリー。証拠の監査で照合):
+- `tools/dev/pt.py -C "$WT" -- MitateDB-api/tests -q` → `1112 passed, 2 subtests passed`
+- `tools/dev/pt.py -C "$WT" -- conformance-tests -q` → `995 passed`
+- `tools/dev/pt.py -C "$WT" -- r2db-api/tests -q` → `1292 passed`
+- 第 2 段の 3 の後 (§15.4.5): `tools/tests` → `1 failed, 419 passed` (赤は 0f の 1 本だけ。src を `git show HEAD:` で読む)、r2db → `1292 passed`
+
+#### 15.4.5 第 2 段の 3 (CH-0292、監督裁定 3、Opus)
+
+**Z0i-4f のチェッカーの修正** (監督の手で済み。この段では `tools/` を変えていない):
+- `_correction_relaxes_protection` は、`old_real_paths` と `new_candidates_cleaned` の両方で、`_clean_filename_candidate` の後に `_strip_location_suffix` を掛ける。同じパスの位置の接尾辞 (`:line`、`::qualname`) だけが変わる訂正は緩和にならず、パスそのものを落とす訂正は引き続き拒む。
+- 新しい fixture は `test_0i_z0i4f_correction_swaps_location_suffix_only_is_green` と `test_0i_z0i4f_correction_drops_real_path_is_red`。
+- 変異の行 34 は `13-rule2-z0i4f-lost-path-location-suffix`。`mutate.py` は 34/34 赤。
+- 試作との食い違い 0、遡った確認は 52 塊。
+
+**CH-0292 の実測**:
+- 拒まれた理由 (§15.4.4): `correction 2026-09-16: real path(s) ['MitateDB-api/src/mitatedb_api/ops.py:541-550'] dropped`。落ちたパスの比較が位置の接尾辞を残した形で行われていた。Z0i-4f の後は、同じ訂正に対して `_correction_relaxes_protection(old, new, real_paths)` が `None` を返す (受け入れる)。
+- 今の事実 (基点 `7bc6650`。MitateDB `ops.py` は 0i で変えていない): `_run_deprovision_script` は `MitateDB-api/src/mitatedb_api/ops.py` L553-562、`_migrations_dir` は L380-382 にある。L541-550・L373-375 はどちらも別の行である。
+- 名前の形は、チェッカーが受け入れる `path::name` とした。`MitateDB-api/src/mitatedb_api/ops.py::_run_deprovision_script` と、同じパスに続く `::_migrations_dir` である。パスは残る。
+
+**訂正の記録** (日付 2026-09-16。受け皿の CH-0292 節の末尾に追記):
+
+| CH-ID | ファイル | 旧 → 新 (変えた部分) |
+|---|---|---|
+| CH-0292 | `docs/code-history/r2db-api/ops.md` | `` (`MitateDB-api/src/mitatedb_api/ops.py:541-550`/`:373-375`) `` → `` (`MitateDB-api/src/mitatedb_api/ops.py::_run_deprovision_script`/`::_migrations_dir`) `` |
+
+**Z0i-4g の例外の前後** (逐語。変わった行。r2db `ops.py` L126。括弧の全体を訂正後の基準から取った。この行の外、次の `# history: CH-0292` の行は変えていない。塊の全体は下の監査の `EXCEPTION` 行):
+
+```
+前: # Q4 WP-3 (design D-4(b), work order §4 WP-3 change table E): r2db-api had neither a `psql` subprocess invocation nor a migrations-directory resolver before this WP -- both are new here, modeled on MitateDB-api's own `_run_deprovision_script`/`_migrations_dir` (`:373-375`) -- CALL SHAPE ONLY, never `_die` (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").
+後: # Q4 WP-3 (design D-4(b), work order §4 WP-3 change table E): r2db-api had neither a `psql` subprocess invocation nor a migrations-directory resolver before this WP -- both are new here, modeled on MitateDB-api's own `_run_deprovision_script`/`_migrations_dir` (`MitateDB-api/src/mitatedb_api/ops.py::_run_deprovision_script`/`::_migrations_dir`) -- CALL SHAPE ONLY, never `_die` (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").
+```
+
+**監査スクリプトの diff** (Z0i-4g):
+```diff
+--- ccp0i_restore_audit.py (Z0i-4c)
++++ ccp0i_restore_audit.py (Z0i-4g)
+@@ -9,7 +9,7 @@
+   (i)   PRE-0i: corrected companion -> new retained text is an allowed reduction
+   (ii)  the base block text is a character subsequence of the new block text (pure insertion, no reflow)
+   (iii) NEW (its own _apply_corrections and _is_allowed_reduction): corrected companion -> new retained text
+-CH-0058, CH-0070 and CH-0184 are the only named exceptions to (ii) (rulings Z0i-4a, Z0i-4c): a miss there prints EXCEPTION with both texts
++CH-0058, CH-0070, CH-0184 and CH-0292 are the only named exceptions to (ii) (rulings Z0i-4a, Z0i-4c, Z0i-4g): a miss there prints EXCEPTION with both texts
+ verbatim instead of FAIL; (i), (iii) and (iv) still apply to it.
+ Prints RESTORED / EXCEPTION / FAIL rows and SUMMARY. Exit 0 only when there is no FAIL row.
+ Usage: python3 ccp0i_restore_audit.py -C WT --base START_PARENT --expect CH-0003,CH-0058,... [--head REV]
+@@ -24,7 +24,7 @@
+ import types
+ from pathlib import Path
+ 
+-SUBSEQUENCE_EXCEPTION = ("CH-0058", "CH-0070", "CH-0184")
++SUBSEQUENCE_EXCEPTION = ("CH-0058", "CH-0070", "CH-0184", "CH-0292")
+ 
+ 
+ def git(root: Path, *args: str) -> str:
+```
+
+**`ccp0i_restore_audit.py` の出力 (逐語、最終)**
+
+`python3 "$SP/ccp0i_restore_audit.py" -C "$WT" --base 7bc6650 --expect <52 塊>` (exit 0):
+
+```
+BASE 7bc6650 HEAD worktree FILES 83 EXPECT 52
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L1	CH-0336	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L66	CH-0342	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L322	CH-0357	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/backend_sqlite.py	L560	CH-0371	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L41	CH-0183	i,ii,iii ok
+EXCEPTION	MitateDB-api/src/mitatedb_api/http.py	L51	CH-0184	(ii) before='# -------------------------------------------------------------------------- HTTP status <-> contract error code (m-12: cross-peer status agreement is tracked conformance evidence, contract errors.http_status_note). Every code this peer can actually emit is listed here, mapped to the SAME status r2db-api\'s own call sites use for that code (grep\'d from r2db-api/src/r2db_api/*.py\'s own `fail(...)`/`FoundationError(...)` call sites -- r2db-api itself is not imported or modified, only read for this cross-check per the task brief). No divergence was needed: every code below agrees with r2db-api\'s own mapping. This peer simply never emits several contract codes at all (AUTH_REVOKED, APPLICATION_DISABLED, SCOPE_MISMATCH, ATOMICITY_FAILED, IDENTIFIER_INVALID --/ `credential_store_postgres.py` fold "revoked"/"disabled" into a single `AuthenticationError` -> AUTH_INVALID, and `identifiers.py` raises the same `ValidationError` -> VALIDATION_FAILED for a malformed identifier as for any other malformed shape); that is a pre-existing fact about this peer\'s own error vocabulary, not something WP-3 narrows, and is reported to the requester as a known divergence (not a status mismatch -- there is nothing to compare a peer never emits).\n#\n# Phase 9 WP-3b (design, 追補 2 S-h): PRECONDITION_FAILED is no longer in that "never emits" set -- `errors.PreconditionFailedError` (a stale `plan` token) is this peer\'s first real source of it, mapped to 412 -- the SAME status `r2db-api/src/r2db_api/structured.py`/`postgres.py` already use for their own (row-level) `PRECONDITION_FAILED` `fail(..., status=412)` call sites (cross-peer status agreement m-12).\n# history: CH-0184'	after='# -------------------------------------------------------------------------- HTTP status <-> contract error code (m-12: cross-peer status agreement is tracked conformance evidence, contract errors.http_status_note). Every code this peer can actually emit is listed here, mapped to the SAME status r2db-api\'s own call sites use for that code (grep\'d from r2db-api/src/r2db_api/*.py\'s own `fail(...)`/`FoundationError(...)` call sites -- r2db-api itself is not imported or modified, only read for this cross-check per the task brief). No divergence was needed: every code below agrees with r2db-api\'s own mapping. This peer simply never emits several contract codes at all (AUTH_REVOKED, APPLICATION_DISABLED, SCOPE_MISMATCH, ATOMICITY_FAILED, IDENTIFIER_INVALID -- `auth.py`/`credential_store_postgres.py` fold "revoked"/"disabled" into a single `AuthenticationError` -> AUTH_INVALID, and `identifiers.py` raises the same `ValidationError` -> VALIDATION_FAILED for a malformed identifier as for any other malformed shape); that is a pre-existing fact about this peer\'s own error vocabulary, not something WP-3 narrows, and is reported to the requester as a known divergence (not a status mismatch -- there is nothing to compare a peer never emits).\n#\n# Phase 9 WP-3b (design, 追補 2 S-h): PRECONDITION_FAILED is no longer in that "never emits" set -- `errors.PreconditionFailedError` (a stale `plan` token) is this peer\'s first real source of it, mapped to 412 -- the SAME status `r2db-api/src/r2db_api/structured.py`/`postgres.py` already use for their own (row-level) `PRECONDITION_FAILED` `fail(..., status=412)` call sites (cross-peer status agreement m-12).\n# history: CH-0184'
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L51	CH-0184	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L70	CH-0185	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L342	CH-0192	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L363	CH-0193	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L422	CH-0196	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L608	CH-0209	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L713	CH-0213	i,ii,iii ok
+RESTORED	MitateDB-api/src/mitatedb_api/http.py	L1080	CH-0230	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L104	CH-0137	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L79	CH-0141	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L33	CH-0142	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/capabilities_document.py	L10	CH-0174	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1	CH-0239	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L139	CH-0243	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L229	CH-0247	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L570	CH-0255	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L615	CH-0257	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L627	CH-0260	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1367	CH-0280	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/control_plane.py	L1497	CH-0287	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L1	CH-0288	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L66	CH-0290	i,ii,iii ok
+EXCEPTION	r2db-api/src/r2db_api/ops.py	L126	CH-0292	(ii) before='# Q4 WP-3 (design D-4(b), work order §4 WP-3 change table E): r2db-api had neither a `psql` subprocess invocation nor a migrations-directory resolver before this WP -- both are new here, modeled on MitateDB-api\'s own `_run_deprovision_script`/`_migrations_dir` (`:373-375`) -- CALL SHAPE ONLY, never `_die` (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").\n# history: CH-0292'	after='# Q4 WP-3 (design D-4(b), work order §4 WP-3 change table E): r2db-api had neither a `psql` subprocess invocation nor a migrations-directory resolver before this WP -- both are new here, modeled on MitateDB-api\'s own `_run_deprovision_script`/`_migrations_dir` (`MitateDB-api/src/mitatedb_api/ops.py::_run_deprovision_script`/`::_migrations_dir`) -- CALL SHAPE ONLY, never `_die` (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").\n# history: CH-0292'
+RESTORED	r2db-api/src/r2db_api/ops.py	L126	CH-0292	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L196	CH-0295	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L212	CH-0296	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L365	CH-0302	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L676	CH-0308	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L699	CH-0309	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L732	CH-0310	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L803	CH-0314	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L810	CH-0315	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L980	CH-0320	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/ops.py	L1321	CH-0329	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L174	CH-0003	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L1922	CH-0058	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L1988	CH-0066	i,ii,iii ok
+EXCEPTION	r2db-api/src/r2db_api/postgres.py	L2120	CH-0070	(ii) before="# compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/ R-c). `enum`/`nullable` omitted each\n# LEAVE the existing value as it is; `enum: null`\n# CLEARS it; an explicit list is fully validated\n# against the field's real declared type now.\n# history: CH-0070"	after="# compose the request's PATCH against the field's EXISTING declared constraints -- only known here (`table_info.constraints`, never at bind time, addendum R-b/R-c, D-2 (3)). `enum`/`nullable` omitted each\n# LEAVE the existing value as it is; `enum: null`\n# CLEARS it; an explicit list is fully validated\n# against the field's real declared type now.\n# history: CH-0070"
+RESTORED	r2db-api/src/r2db_api/postgres.py	L2120	CH-0070	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/postgres.py	L512	CH-0100	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L1232	CH-0103	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L900	CH-0116	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L872	CH-0120	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L819	CH-0124	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L790	CH-0127	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L649	CH-0146	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L641	CH-0148	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service.py	L27	CH-0178	i,ii,iii ok
+RESTORED	r2db-api/src/r2db_api/service_results.py	L31	CH-0168	i,ii,iii ok
+SUMMARY changed_blocks=52 restored_ok=52 exceptions=3 fail=0
+```
+
+**作業ツリーの自己検査** (0f と同じ照合を作業ツリーの src で。`python3 "$SP/ccp0i_retro_worktree.py" "$WT"`、exit 0): 出力は `HAD_FAILURE=False` だけ。赤の CH-ID は 0。
+
+**AST** (`r2db-api/src/r2db_api/ops.py`): docstring を除いた `ast.dump` は HEAD と同一。docstring を含む `ast.dump` は、この段の前の作業ツリーと同一 (変えたのはコメント 1 行)。HEAD とは違うが、それは第 2 段で戻した docstring の塊 (CH-0295 など) による。行数は HEAD・作業ツリーとも 1698。
+
+**集計行** (`pt.py`):
+- `tools/dev/pt.py -C "$WT" -- tools/tests -q` → `1 failed, 419 passed`。赤は `test_0f_both_peers_all_src_rev_vs_itself_is_green` (13。HEAD の src を `git show` で読む照合) の 1 本だけ。赤の CH-ID は 52 で、一覧と `diff` 0 行。
+- `tools/dev/pt.py -C "$WT" -- r2db-api/tests -q` → `1292 passed`。
+
+**`--register` / `check_doc_refs.py` / `public_value_scan.py`**:
+- `python3 tools/check_comment_provenance.py --register` → `comment provenance register OK: 83 files scanned, 427 CH-IDs` (exit 0)
+- `python3 tools/check_doc_refs.py` → `check_doc_refs OK: 0 dangling references` (exit 0)
+- `python3 tools/public_value_scan.py <ファイル>` を `git status --short` の 14 ファイルそれぞれに掛けた → すべて `# mode=tree files_scanned=1 total_flagged=0`
+
+#### 15.4.6 変異・新規テスト・監査照合の対応 (証拠の監査の後、Opus)
+
+**変異 1〜12 (1a・3a を含む)** (`old` / `new` の literal は変異の JSON にある。ここでは対象と変更を 1 行で書く。対象はすべて `tools/check_comment_provenance.py`。m9: 34 行すべての `old` が実装したチェッカーに 1 回だけ現れる。赤は最新の mutate 実行):
+
+| # | 変異 id | 対象 | 変更 | 赤になる test |
+|---|---|---|---|---|
+| 1 | `1-rule1-fid-prefix` | `_PROTECTED_ID_PREFIXES` | `("SI-", "C-", "CCR-", "F-")` から `"F-"` を外す | `test_0i_rule1_fid_sentence_whole_deletion_is_red` |
+| 1a | `1a-rule1-ascii-boundary` | `_PROTECTED_ID_EXTRACT_RE` | ASCII の look-around と `re.ASCII` を Unicode の `\b` に戻す | `test_0i_rule1_cjk_adjacent_fid_sentence_whole_deletion_is_red` |
+| 2 | `2-rule1-fid-in-parens` | `_PROTECTED_ID_PREFIXES` | 1 と同じ | `test_0i_rule1_fid_in_parens_not_removable_is_red` |
+| 3 | `3-rule1-fid-label` | `_PROTECTED_ID_PREFIXES` | 1 と同じ | `test_0i_rule1_fid_label_not_removable_is_red` |
+| 3a | `3a-label-m3` | `_label_has_protected_reference` | `_sentence_has_protected_reference(text, real_paths)` の呼び出しを外す | `test_0i_label_with_real_path_not_removable_is_red` |
+| 4 | `4-rule1-review-fid-token` | `_REVIEW_FID_TOKEN_RE` | 先頭の `\b` を `(?!)` にして一致しなくする | `test_0i_rule1_review_fid_is_history_token_is_green` |
+| 5 | `5-rule1-fid-correction` | `_PROTECTED_ID_PREFIXES` | 1 と同じ | `test_0i_rule1_correction_cannot_drop_fid_is_red` |
+| 6 | `6-rule2-suffix-match` | `_is_real_filename_candidate` | 末尾一致の分岐を `if False and …` で止める | `test_0i_rule2_peer_relative_path_is_real_is_red` |
+| 7 | `7-rule2-segment-boundary` | `_is_real_filename_candidate` | `p.endswith("/" + cleaned)` を `p.endswith(cleaned)` にする | `test_0i_rule2_segment_boundary_required_is_green` |
+| 8 | `8-rule2-location-suffix` | `_is_real_filename_candidate` | `cleaned` の `_strip_location_suffix(…)` を外す | `test_0i_rule2_location_suffix_stripped_is_real_is_red` |
+| 9 | `9-rule3-basename-count` | `_is_real_filename_candidate` | `len(basename_matches) >= 1` を `== 1` にする | `test_0i_rule3_ambiguous_basename_is_real_is_red` |
+| 10 | `10-rule4-id-branch-tag` | `_paren_words_removable` の `is_removable` | ID + 枝番の分岐の `return not has_tag` を `return True` にする | `test_0i_rule4_id_branch_in_tagged_paren_not_removable_is_red` |
+| 11 | `11-rule4-enclosing-tag` | `_paren_words_removable` | `has_tag` から `or enclosing_tag` を外す | `test_0i_rule4_enclosing_paren_tag_protects_inner_bare_id_is_red` |
+| 12 | `12-rule4-history-token-branch` | `_paren_words_removable` の `is_removable` | 経緯トークンの分岐 (`group("history_id")`) を `if False and …` で止める | `test_0i_rule4_history_token_branch_in_tagged_paren_removable_is_green` |
+
+**§15.3 の外の変異 (5 行)** (§1.5 の 40 の対応。変異の行 34 の id の `13` は変異の通し番号で、完了条件 13 (0f の監査照合。M4) とは別):
+
+| 変異 id | 根拠 | 対象 | 変更 | 赤になる test |
+|---|---|---|---|---|
+| `4b-rule1-review-paren-standalone` | Z0i-1 (B) / m5 (`review (F-n)` の括弧の形) | `_sentence_reachable` | `preceded_by_review` を常に `False` にする | `test_0i_rule1_review_fid_standalone_paren_is_green` |
+| `f1-dotted-qualname-suffix` | 手直し 1 の F1 (Z0i-3 / m4) | `_QUALNAME_LOCATION_SUFFIX_RE` | `::` の segment から `.` と `()` を外す | `test_0i_rule2_dotted_qualname_and_call_suffix_stripped_is_real_is_red` |
+| `f2-review-flag-wide-regex-reintroduced` | 手直し 1 の F2 (経緯トークンのパターンは 1 つ。M1) | `_sentence_reachable` | `preceded_by_review` を、共有の `_REVIEW_FID_TOKEN_RE` でなく直前の `review( round)?` を見る広い正規表現に戻す | `test_0i_rule1_review_paren_holes_closed_is_red` |
+| `f4-correction-substring-overlap` | 手直し 1 の F4 (0g の ID は集合で比べる) | `_correction_relaxes_protection` | 失われた ID を、新しい文の ID の集合でなく部分文字列 (`i not in new`) で判定する | `test_0i_rule1_correction_substring_id_overlap_is_red` |
+| 変異の行 34 `13-rule2-z0i4f-lost-path-location-suffix` | Z0i-4f | `_correction_relaxes_protection` | `old_real_paths`・`new_candidates_cleaned` の `_strip_location_suffix` を外す | `test_0i_z0i4f_correction_swaps_location_suffix_only_is_green` |
+
+**新規テスト (23 本。`tools/` の diff の `def`)**: §15.3 の 16 本に、手直し 1 の 5 本と Z0i-4f の 2 本を足した。
+- 規則 1 (10 本): `test_0i_rule1_fid_sentence_whole_deletion_is_red`、`test_0i_rule1_cjk_adjacent_fid_sentence_whole_deletion_is_red`、`test_0i_rule1_fid_in_parens_not_removable_is_red`、`test_0i_rule1_fid_label_not_removable_is_red`、`test_0i_rule1_review_fid_is_history_token_is_green`、`test_0i_rule1_review_fid_standalone_paren_is_green`、`test_0i_rule1_review_paren_holes_closed_is_red`、`test_0i_rule1_unhyphenated_and_circled_forms_unchanged_is_green`、`test_0i_rule1_correction_cannot_drop_fid_is_red`、`test_0i_rule1_correction_substring_id_overlap_is_red`
+- 規則 2 (5 本): `test_0i_rule2_peer_relative_path_is_real_is_red`、`test_0i_rule2_segment_boundary_required_is_green`、`test_0i_rule2_location_suffix_stripped_is_real_is_red`、`test_0i_rule2_dotted_qualname_and_call_suffix_stripped_is_real_is_red`、`test_0i_rule2_peer_relative_sentence_whole_deletion_is_red`
+- 規則 3 (1 本。Z0i-2 の置き換え): `test_0i_rule3_ambiguous_basename_is_real_is_red`
+- Z0i-4f (2 本): `test_0i_z0i4f_correction_swaps_location_suffix_only_is_green`、`test_0i_z0i4f_correction_drops_real_path_is_red`
+- 規則 4 (3 本): `test_0i_rule4_id_branch_in_tagged_paren_not_removable_is_red`、`test_0i_rule4_enclosing_paren_tag_protects_inner_bare_id_is_red`、`test_0i_rule4_history_token_branch_in_tagged_paren_removable_is_green`
+- ラベル (2 本): `test_0i_label_with_real_path_not_removable_is_red`、`test_0i_label_m3_without_protected_reference_stays_removable_is_green` (F9 の緑側)
+
+**監査照合 29・30・33** (証拠の監査):
+- 29: `grep -nE "def boundary_without|def mutated_rule|def buggy_filename_candidates|wrong_identifier_set" tools/tests/test_comment_provenance.py` → 0 行。
+- 30: 消した 5 本と後半を消した 2 本が固定していた性質 (条件 1〜8、backtick の内外、識別子集合、0f 項目 1〜3) は、14〜28 に 1 行ずつある。最新の mutate 実行で 15 行すべて赤 (b27・b28 は改名後の test で赤)。
+- 33: 監査は、完了条件に対応の無い変異を 5 行 (`4b`・`f1`・`f2`・`f4`・変異の行 34) 見つけた。上の表で、それぞれに根拠・変更・test を対応させた。これで変異 34 行はすべて、完了条件 1〜12 (1a・3a を含む)・14〜28 か上の 5 行に対応する。完了条件 13・29〜33 は監査照合である。
 
 ### 15.5 疑義と監督裁定
 
@@ -3134,3 +3601,24 @@ tools/dev/finalize.py -C "$WT" --branch ccp-0i --allow 'tools/check_comment_prov
 | 簡潔化 | 削る: §15.2 の数え方の 18 行、ディレクトリ別の内訳、F-ID の literal の段落、WP-3e の重なりの長いセル、設計 §9.2 の `split_sentences` の箇条と §15.2 と重なる retro の段落 |
 
 **後続 (0i の外)**: 作業指示書 R6-4 の日付の除去と変更セット 7 の選定は、0i と Z0i-4 の裁定の結果の統合の後に行う (設計 §9.2)。R6-4 の対象 (`control_main.py` の手順 5b、`backend_postgres.py` L278-308・L406-417・L1006-1036 など) は、F-ID (`F-12`・`F-16`) や `migrations/…` を同じ塊に持つため、0i の保護をチェッカーで確かめてから日付だけを除く。
+
+**監督裁定 2 (2026-09-16、第 2 段の STOP 6 塊)**
+
+| # | 裁定 |
+|---|---|
+| Z0i-4b (CH-0003) | 戻す単位を、失われた文と、その文が指す直前の文 (変更セット 1 が除いた「Code-review fix F7 … was FALSE」の文) の 2 文に広げる。2 文とも訂正を反映した基準から逐語で取り、両方が今のコードについて成り立つことを確かめる。成り立たない場合は Z0i-4d に従う。単位を 2 文より広げない |
+| Z0i-4c (CH-0070・CH-0184) | 戻すと表に出る行の継ぎ目の壊れ (`R-b/ R-c`、`` `auth.py`/ `credential_store_postgres.py` ``) は、継ぎ目の空白 1 つだけを除いて直す。空白の除去は監査の部分列検査 (ii) を満たさないので、CH-0058 (Z0i-4a) と同じ名前付き例外とする。監査スクリプトの名前付き例外は CH-0058・CH-0070・CH-0184 の 3 つに限る。例外ごとに、戻す前と後の文字列を §15.4 に逐語で記録する。空白 1 つ以外の差がある場合は例外にせず、監督に上げる |
+| Z0i-4d (CH-0120・CH-0239・CH-0292) | 戻す文が今のコードと食い違う場合は、黙って書き換えず、設計 §9 の「事実と異なる保護文の訂正」(v0.9、0g) の仕組みで `docs/code-history/` の該当 CH-ID の節に訂正の記録を足す。戻す文は、その訂正を反映した基準から取る (Z0i-4 の (1))。CH-0120: 括弧書きが指すテストを、実際に `.revision` を読むテスト (`r2db-api/tests/test_foundation.py`) に直す。CH-0239: `control_plane` の宣言が `control_plane_status` で構成できる今の事実に合わせて文を直す (`r2db-api/src/r2db_api/service.py` と `r2db-api/src/r2db_api/capabilities_document.py` を実測して書く)。CH-0292: 古い行範囲を、行番号ではなく定義の名前 (`_run_deprovision_script`、`_migrations_dir`) を指す形に直す。同じ塊の既存の `:373-375` も同じ訂正で直す。訂正の記録がチェッカー (0g の保護の緩和の検査を含む) に拒まれる場合、または保護参照を保ったまま真の文にできない場合は、監督に上げる |
+| Z0i-4e (順序) | 6 塊の戻しは、チェッカーの手直し 1 (F1〜F9) の後に、手直し後のチェッカーで行う。担当は Opus で、塊ごとに文面を判定する |
+
+- 監査スクリプトの名前付き例外は、Z0i-4c により CH-0058・CH-0070・CH-0184 の 3 つに広げた (スクリプトの diff は §15.4.4)。
+
+**監督裁定 3 (2026-09-16、CH-0292 と記録の公開値)**
+
+| # | 裁定 |
+|---|---|
+| Z0i-4f | チェッカーの 0g の保護の緩和の検査 (`_correction_relaxes_protection`) は、実在パスの判定では位置の接尾辞を取り除く (Z0i-3) のに、落ちたパスの比較では `_clean_filename_candidate` の出力 (`:541-550` を残す) を使っている。このため、行範囲を定義の名前に置き換える正しい訂正を「実在パスを落とした」と誤って拒む。落ちたパスの比較も、Z0i-3 と同じく位置の接尾辞 (`:line`、`::qualname`) を取り除いた形で行うように直す。同じパスが接尾辞だけ変わる訂正は緩和として扱わない。パスそのものを落とす訂正は、引き続き拒む。赤側と緑側の fixture と、この修正を戻す変異を足す |
+| Z0i-4g (CH-0292) | Z0i-4d の訂正 (行範囲を `_run_deprovision_script`・`_migrations_dir` の名前に置き換え、同じ塊の既存の `:373-375` も同じ訂正で直す) は、既存の文字列を置き換えるので監査の部分列検査 (ii) を満たさない。CH-0292 を 4 つ目の名前付き例外とする。名前付き例外は CH-0058・CH-0070・CH-0184・CH-0292 に限る。戻す前と後の文字列を §15.4 に逐語で記録する |
+| Z0i-4h | §15.4 に書いた pytest のログのファイル名 (`pt-2026…`) は公開値の走査に project id として検出される。ファイル名を消し、集計行と実行したコマンドだけを残す |
+
+- 監査スクリプトの名前付き例外は、Z0i-4g により CH-0058・CH-0070・CH-0184・CH-0292 の 4 つに広げた (スクリプトの diff は §15.4.5)。
