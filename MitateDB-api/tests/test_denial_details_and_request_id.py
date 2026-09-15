@@ -559,7 +559,7 @@ def test_flip_target_capabilities_are_all_enabled(service):
 #: `check_contract_170_declarations` no longer takes a `config` argument
 #: at all -- it reads BOTH the capability-enabled half AND the limit-value
 #: half from the served `capabilities_document` alone, mirroring
-#: `__build_capabilities_document`'s (`cell.py`) real, already-normalized
+#: `__build_capabilities_document`'s (`cell.py`) (body now in `capabilities_document.py`) real, already-normalized
 #: `limits` block (`"enum_members"`/`"idempotency_entries"`/
 #: `"idempotency_retention_ms"`, this peer's own `max_*` `FoundationConfig`
 #: attribute names already resolved at document-build time). This helper

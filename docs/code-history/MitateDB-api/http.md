@@ -696,6 +696,20 @@ CONSTRUCTION time instead of silently disabling this check --
 # overriding `request_bytes` above.
 ```
 
+### correction: 2026-09-16
+
+- reason: R-37 WP-3h -- `__build_capabilities_document`'s body (including this comment) moved to `capabilities_document.py`; the pointer gets a 40c position bracket
+
+old:
+```
+`operation_depth` is now the SAME -- `cell.py`'s own single-source declaration is `enforced` on BOTH surfaces too (see `cell.py:: ApplicationRuntime.capabilities()`'s own `limit_enforcement.operation_depth` comment for why the WP-1a report's original "in-process has no request dict" premise was factually wrong: `_check_operation_depth` genuinely runs, in-process included, on every request shape `_limit_gate`'s own callers build -- `insert`'s own `{"collection": ..., "values": ...}` is a real request dict, not an absent one).
+```
+
+new:
+```
+`operation_depth` is now the SAME -- `cell.py`'s own single-source declaration is `enforced` on BOTH surfaces too (see `cell.py:: ApplicationRuntime.capabilities()`'s own `limit_enforcement.operation_depth` comment (now in `capabilities_document.py`) for why the WP-1a report's original "in-process has no request dict" premise was factually wrong: `_check_operation_depth` genuinely runs, in-process included, on every request shape `_limit_gate`'s own callers build -- `insert`'s own `{"collection": ..., "values": ...}` is a real request dict, not an absent one).
+```
+
 ## CH-0209
 
 - moved from: `src/mitatedb_api/http.py` (`<module>`)

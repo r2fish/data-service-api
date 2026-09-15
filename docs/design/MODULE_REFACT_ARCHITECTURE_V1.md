@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.17 (2026-09-16)。** 直後の v1.16 行は当時の改版履歴として保存する。v1.17 は既存の本文を書き換えず、末尾に **§10.14 (WP-3h 実施記録)** を追記した記録である。
 - **現行版: v1.16 (2026-09-16)。** 直後の v1.15 行は当時の改版履歴として保存する。v1.16 は既存の本文を書き換えず、末尾に **§10.13 (WP-3g 実施記録)** を追記した記録である。
 - **現行版: v1.15 (2026-09-15)。** 直後の v1.14 行は当時の改版履歴として保存する。v1.15 は既存の本文を書き換えず、§10.11 に【追記】を 1 件足し、末尾に **§10.12 (WP-3f 実施記録)** を追記した記録である。
 - **現行版: v1.14 (2026-09-15)。** 直後の v1.13 行は当時の改版履歴として保存する。v1.14 は既存の本文を書き換えず、末尾に **§10.11 (WP-3e 実施記録)** を追記した記録である。
@@ -524,3 +525,31 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 - root gate (再実行): `3399 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (監督、`tools/dev/gate.py`、他の pytest 0 件)。
 - **教訓**: pytest を走らせうる agent (使い捨ての clone での無防備な実行を含む) が動いている間は root gate を走らせない。順に走らせる。
 - **次の WP**: WP-3h (CE7)。
+
+### 10.14 WP-3h (CE7 → `capabilities_document.py`) 実施記録 (2026-09-16、v1.17 追記)
+
+作業指示書 §5.32・§5.37 (訂正註)・§5.39 (裁定 W3-6〜W3-22)。
+
+| WP | 抽出 | merge | 備考 |
+| --- | --- | --- | --- |
+| WP-3h | MitateDB `cell.py` → `capabilities_document.py` (CE7) | 本変更 | `ApplicationRuntime.__build_capabilities_document` の本体と `_surfaces_document_fragment` を、`cell.py` (`ffd6493`) から新規の leaf `MitateDB-api/src/mitatedb_api/capabilities_document.py` の `build_capabilities_document(*, is_developer, role, application_id, cell_config, process_ceiling)` (既定値なし) へ移した。leaf の import は `.backend`・`.surfaces` だけで、`.auth` は import しない (W3-10)。facade の method は 5 つの keyword で leaf を 1 回呼ぶ。`capabilities()` の中の 認可 → limit gate → 組立 の順は変えていない。`ffd6493` で測り直すと、manifest (`9994d7c` で実測) からのずれは行の一様なずれ (-166) だけである |
+
+- **40c / W3-10**: 本体の差は 4 つの置換と範囲内の括弧書き 8 箇所だけである (独立 Opus レビューが別に導出して一致)。`_surfaces_document_fragment` はバイト単位で同一。手直しで範囲内に R5 の 2 箇所を足した。W3-21・W3-22 と合わせて、括弧書きは計 21 箇所、書換えは 1 つ (`request_vocabulary.py` L119) である。
+- `cell.py` L521 (`ffd6493`)「reads it via `self.__cell.process_ceiling`」は確かめた。facade がなお読むので括弧書きを付けない (W3-21)。「`cell.py`'s own declaration」の形の参照も、残る `capabilities()` を指すので付けない (W3-22 の n1)。
+- **40b**: leaf に denial の呼出し箇所は無い。L1 scan の件数 pin (`"cell.py": 43`)、`SCANNED_MODULES`、allowlist は変わらない。`_ISOMORPHIC_TARGETS` も変わらない。
+- **変異** (`mutate.py`、手直し後): C1〜C7・C4b・C4c と n2 (入替え)・n3 (C2 の 2 本目) の 11/11 が予想どおり赤で、復元も確かめた。test は §5.37 の表と訂正註のとおり。
+- **新規テスト 3 本**。テスト 3 は n2 で強化した。`rpm=1` を使い切った credential を revoke して再び呼ぶと、認可が先なら `AuthenticationError`、入れ替えると `ResourceLimitError` になる。
+- **来歴の証拠 (コミットした HEAD)**: 使い捨ての clone で 3 段を観測した。変更の全体をコミットすると `tools/tests` `420 passed`。CH-0208 の訂正の記録だけを消すと、0f が CH-0208 で赤 (`FAIL (§4.1 (2)) MitateDB-api/src/mitatedb_api/http.py:599 basis block for CH-0208 is not derivable ...`)。記録を戻すと `420 passed`。CH-ID の塊に入る編集は R2 だけである。
+- **40a の suite** (手直し後、`pt.py`): `MitateDB-api/tests` `1115 passed` (subtests 2)、`r2db-api/tests` `1292 passed`、`conformance-tests` `995 passed`、`tools/tests` `419 passed`。`tools/tests` には commit 前の予想どおりの 0f の赤がある (未追跡の新 leaf)。
+- **レビュー**: 手順 0 の停止 → W3-21。独立 Opus の静的レビュー (判定: 差し戻し、小 → W3-22)。手直し 1 回。
+- root gate: 1 回目は `3402 passed` だったが、`judge=FAIL (pg_database -7, pg_roles -22)` だった。原因は、実装者が止めた conformance の実行が PostgreSQL に残した物を、suite の起動時の掃除が消したことである。常駐のローカル service の database が残っていることは確かめた。
+- root gate (再実行、落ち着いた catalog で): `3402 passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (手直し前)。
+- root gate (手直し後): `3402 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (監督、`tools/dev/gate.py`、他の pytest 0 件)。
+- **既知の穴** (監督が別コミットで roadmap R-39 に足す):
+  - レビューが見つけた (m2)、移動前から古い `cell.py:NNNN` の参照: `MitateDB-api/README.md` L204-205 (`cell.py:3887`・`:3860`) と L218-220 (`:4051`・`:4055`・`:4044`)、`conformance-tests/test_c04_unsupported_and_safe_errors.py` L159 (`:1751`)、`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py` L2169 (`:1769`)、`conformance-tests/test_c05_limit_declaration_agreement.py` L890 (`:1491`・`:1502`)。
+  - `cell.py` L3736「flip to `enabled` below」(`ApplicationDeveloper.create_entity` の中にある。移動前から本体より後ろにあり、文書を指したことがない)。
+  - R3・R4 の `cell.py:1875-1926` と R5 の `:770`・`:832` の値。括弧書きは付けたが、値は古いまま残した。
+- **教訓**:
+  - 位置参照の走査は、移した名前だけでなく、移したコメントを指す参照 (「`X`'s own `...` comment」の形) も探す。R2〜R4 はこの形で漏れた。
+  - pytest の実行を止めない。止めた実行が PostgreSQL に残した物で、次の gate の catalog の差分が FAIL になる。
+- **次の WP**: WP-3i (CE6 の一部)。

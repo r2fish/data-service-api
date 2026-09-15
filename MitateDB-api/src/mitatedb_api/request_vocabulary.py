@@ -116,7 +116,7 @@ _FIELD_TYPE_VOCABULARY = frozenset({"text", "integer", "real", "boolean", "json"
 # these three is a real member of the common contract's own filter-operator
 # vocabulary (`structured_operations.allowed_query_operators`) that this
 # peer declares `unsupported` in its own `structured_query` capability
-# entry below (in `cell.py`) -- `capability_status.rules`: "optional target operations
+# entry below (in `capabilities_document.py`) -- `capability_status.rules`: "optional target operations
 # ... must fail with CAPABILITY_UNSUPPORTED". `matches` already raised
 # `CapabilityError` correctly; `contains`/`is_null` used to fall through to
 # the generic "not a filter operator this peer implements at all" branch
