@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.18 (2026-09-16)。** 直後の v1.17 行は当時の改版履歴として保存する。v1.18 は既存の本文を書き換えず、末尾に **§10.15 (WP-3i 実施記録)** を追記した記録である。
 - **現行版: v1.17 (2026-09-16)。** 直後の v1.16 行は当時の改版履歴として保存する。v1.17 は既存の本文を書き換えず、末尾に **§10.14 (WP-3h 実施記録)** を追記した記録である。
 - **現行版: v1.16 (2026-09-16)。** 直後の v1.15 行は当時の改版履歴として保存する。v1.16 は既存の本文を書き換えず、末尾に **§10.13 (WP-3g 実施記録)** を追記した記録である。
 - **現行版: v1.15 (2026-09-15)。** 直後の v1.14 行は当時の改版履歴として保存する。v1.15 は既存の本文を書き換えず、§10.11 に【追記】を 1 件足し、末尾に **§10.12 (WP-3f 実施記録)** を追記した記録である。
@@ -553,3 +554,28 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
   - 位置参照の走査は、移した名前だけでなく、移したコメントを指す参照 (「`X`'s own `...` comment」の形) も探す。R2〜R4 はこの形で漏れた。
   - pytest の実行を止めない。止めた実行が PostgreSQL に残した物で、次の gate の catalog の差分が FAIL になる。
 - **次の WP**: WP-3i (CE6 の一部)。
+
+### 10.15 WP-3i (CE6 の一部 → `request_binding.py`) 実施記録 (2026-09-16、v1.18 追記)
+
+作業指示書 §5.32・§5.38 (訂正註)・§5.39 (裁定 W3-6〜W3-23)。
+
+| WP | 抽出 | merge | 備考 |
+| --- | --- | --- | --- |
+| WP-3i | MitateDB `cell.py` → `request_binding.py` (CE6 の一部: 3 method) | 本変更 | `_check_predicate_value`・`_normalize_value`・`_normalize_value_for_storage` を、`cell.py` (`a48cfa1`) から新規の leaf `MitateDB-api/src/mitatedb_api/request_binding.py` の関数へ移した (W3-11)。class には `X = staticmethod(X)` の委譲の属性を残す。leaf の import は `json`・`.errors`・`.field_types` だけである (`__future__` は常に許す)。CE6 の他の 7 method と登録 helper は変えていない。`a48cfa1` で測り直すと、manifest (`9994d7c` で実測) からのずれは行の一様なずれ (-178) だけである |
+
+- **40c / W3-12**: 差は列挙したものだけである。デコレータの削除 3 つ、`cls` 引数の削除、`cls._normalize_value` → `_normalize_value` の置換、§5.38 の括弧書き 1 箇所。これらを戻すと AST は一致する (独立 Opus レビューが別に導出して一致)。`cell.py` の hunk はちょうど 3 つである (import の 1 行と、委譲の 2 か所)。
+- `cell.py` L3392-3393「`_check_predicate_value`'s own path immediately above」は確かめた。`cell.py` に残る `_bind_filters` の呼出し箇所を指すので、括弧書きを付けない (W3-23 (2))。範囲外の括弧書き 2 箇所と leaf の module docstring の訂正は W3-23 のとおりで、括弧書きは計 3 箇所である。
+- **40b**: `SCANNED_MODULES` と sib tuple (7 → 8 module) に leaf を足した。件数 pin は `cell.py` 42、`request_binding.py` 1。ずれた `cell.py` の行を引く静的な pin は他に無い。`_ISOMORPHIC_TARGETS` は変わらない。sib tuple の docstring は例を挙げるだけなので変えていない (W3-23 (5))。
+- **変異** (`mutate.py`): C1〜C11 と C8b の 12/12 が予想どおり赤で、復元も確かめた。test は §5.38 の表と訂正註のとおり。C2 の巻き添え (既存の json の往復テスト 5 本) と C1 の巻き添えは認めた (W3-23)。
+- **新規テスト 4 本**。WF-3 の順序テストは本物の順序テストである (`read` の `_require_data` を `_bind_filters` の後へ移すと、`AuthorizationError` が `ValidationError` に変わる)。
+- **来歴の証拠 (コミットした HEAD)**: 使い捨ての clone で `tools/tests` `422 passed` (0f が緑、手直し 1 の前)。CH-ID の塊に入る編集は無い (`cell.py` の marker は 0。register は 85 files、427 CH-IDs)。
+- **40a の suite** (1 回目、`pt.py`): `MitateDB-api/tests` `1119 passed` (subtests 2)、`r2db-api/tests` `1292 passed`、`conformance-tests` `995 passed`、`tools/tests` `421 passed`。`tools/tests` には commit 前の予想どおりの 0f の赤がある (未追跡の新 leaf)。
+- 40a (手直し後、`pt.py`): `MitateDB-api/tests` `1119 passed` (subtests 2)、`tools/tests` `421 passed` と commit 前の予想どおりの 0f の赤。手直しはコメントと docstring だけなので `r2db-api/tests` と `conformance-tests` は再実行していない。変異 C1・C6・C7・C8 を再実行し 4/4 が赤。
+- **レビュー**: 手順 0 (実装者は止まらなかった。逸脱、W3-23)。独立 Opus の静的レビュー (判定: 小を付けて受入れ → W3-23)。手直し 1 回。
+- root gate: 1 回目は `3406 passed` だったが、`judge=FAIL (concurrent pytest ×3)` だった。pytest は、同じ checkout でテスト用 PostgreSQL の分離を進める別のセッションのものだった。監督はそのセッションに pytest を控えるよう求め、gate を再実行した。
+- root gate (再実行、手直し前): `3406 passed`、`judge=PASS`、pg_database / pg_roles の差分 0。
+- root gate (手直し後): `3406 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (監督、`tools/dev/gate.py`)。開始時の他の pytest は 0 件である。手直し後に 2 回走らせ、1 回目は開始時に他セッションの pytest が 1 件あったため、判定が PASS でも破棄した (§10.15 の教訓)。
+- **教訓**:
+  - 分類の無い参照で止まる規則があるのは、実装者の自己判定が当てにならないからである。「変更なし」と自己判定した 2 つの参照のうち、1 つは括弧書きが要った。
+  - 同じ checkout で並行するセッションは、machine 全体で数える pytest の件数を共有する。root gate を走らせる前に、動いている相手と gate の時間帯を調整する。
+- **次の WP**: WP-3 (3a〜3i) は完了した。作業指示書 §4 の表で WP-3 の後に並ぶのは WP-4 (PG1〜PG4、BP3。manifest は未作成) で、本設計 §4 ではその後が WP-5 (facade 縮小と閉止) である。WP-4 の前に置く `backend_postgres.py` のコメント整理 (Y-5) は、R-22 変更セット 6 (merge `42842de`) で行われた (roadmap の R-22 行)。CE6 の残り 7 method は W3-11 で範囲外とした。その後続は作業指示書に未記載。

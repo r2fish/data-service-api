@@ -1455,7 +1455,7 @@ class FoundationTests(unittest.TestCase):
         # (rate limit entered before authorization). This third scenario
         # makes the order itself observable: the SAME credential first
         # spends its own `max_requests_per_minute=1` budget (rate keyed by
-        # `principal.credential_id`, `cell.py:587`) with one successful
+        # `principal.credential_id`, `cell.py:587` (now `:588`)) with one successful
         # call, is THEN revoked, and calls again. Authorization-first
         # means `__authorize` raises `AuthenticationError` on the second
         # call without `_limit_gate` ever being entered a second time; if
@@ -1469,6 +1469,95 @@ class FoundationTests(unittest.TestCase):
         control.revoke_credential(combo_id)
         with self.assertRaises(AuthenticationError):
             combo_runtime.capabilities()
+
+    def test_request_binding_leaf_preserves_cell_delegates(self):
+        """R-37 WP-3i (CE6 の一部): `cell.py`'s `ApplicationCell` keeps
+        `_check_predicate_value`/`_normalize_value`/`_normalize_value_
+        for_storage` as the exact same objects the new leaf `request_
+        binding.py` defines -- this checks facade identity only, not
+        value shape (the dedicated test below pins the literal
+        normalization values)."""
+        from mitatedb_api.cell import ApplicationCell
+        from mitatedb_api import request_binding
+
+        names = ["_check_predicate_value", "_normalize_value", "_normalize_value_for_storage"]
+        for name in names:
+            self.assertIs(getattr(ApplicationCell, name), getattr(request_binding, name), name)
+
+    def test_request_binding_normalizes_values_literally(self):
+        """R-37 WP-3i (CE6 の一部): `_normalize_value`/`_normalize_
+        value_for_storage` canonicalize a dict/list value as sorted-key,
+        compact JSON text regardless of the original key order (for a
+        `json`/`object`/`array`-declared field, `_normalize_value_for_
+        storage`; for every other declared type, the same `_normalize_
+        value` fallback), a `json`-declared plain string is JSON-encoded
+        (round-trips via `json.loads` back to the same string), `None`
+        is never encoded, and a Python value outside the accepted set
+        (`dict`/`list`/`bool`/`str`/`int`/`float`/`None`) is refused
+        `ValidationError`/`request_schema` with no `field` of its own."""
+        import json
+
+        from mitatedb_api.cell import ApplicationCell
+        from mitatedb_api.errors import ValidationError
+
+        self.assertEqual(
+            ApplicationCell._normalize_value_for_storage({"b": 1, "a": 2}, "json"),
+            '{"a":2,"b":1}',
+        )
+        self.assertEqual(ApplicationCell._normalize_value_for_storage([3, 1, 2], "array"), "[3,1,2]")
+        encoded_plain = ApplicationCell._normalize_value_for_storage("plain", "json")
+        self.assertEqual(json.loads(encoded_plain), "plain")
+        self.assertIsNone(ApplicationCell._normalize_value_for_storage(None, "json"))
+        self.assertEqual(ApplicationCell._normalize_value_for_storage(5, "integer"), 5)
+        self.assertEqual(ApplicationCell._normalize_value({"b": 1, "a": 2}), '{"a":2,"b":1}')
+
+        with self.assertRaises(ValidationError) as ctx:
+            ApplicationCell._normalize_value(object())
+        self.assertEqual(ctx.exception.details, {"violated_declaration": "request_schema"})
+
+    def test_request_binding_predicate_value_denial_carries_value_path(self):
+        """R-37 WP-3i (CE6 の一部, 追補 4 O-2): `_check_predicate_value`
+        attaches the predicate's own request-relative VALUE path
+        (`where/<i>/value`, never the bare field name) to a `field_type`
+        denial it did not itself construct -- an `integer`-declared
+        field's predicate given a `str` value is refused with `field`
+        naming the VALUE position, mirroring `_prepare_values`'s own
+        write-side path attachment for the same choke point."""
+        self.dev.create_entity(
+            "predicate_probe", fields={"amount": "integer"}, field_types={"amount": "integer"})
+        with self.assertRaises(ValidationError) as ctx:
+            self.runtime.read("predicate_probe", filters=[Filter("amount", "eq", "not-a-number")])
+        details = ctx.exception.details
+        self.assertEqual(details["violated_declaration"], "field_type")
+        self.assertEqual(details["field"], "where/0/value")
+
+    def test_predicate_value_check_runs_after_authorization(self):
+        """R-37 WP-3i (CE6 の一部, WF-3): `read`'s own authorization
+        check (`_require_data`) must still run BEFORE `_bind_filters`'s
+        per-predicate value-type check (now delegating to the `request_
+        binding` leaf) -- a principal from a DIFFERENT application is
+        refused `AuthorizationError` even when the query's own filter
+        also carries a capability-shaped value-type mismatch (a `str`
+        against an `integer`-declared field); the identical query, from
+        a principal of the CORRECT application, reaches the value check
+        instead and is refused `ValidationError`."""
+        from mitatedb_api.auth import Principal
+        from mitatedb_api.backend_sqlite import SQLiteBackend
+        from mitatedb_api.cell import ApplicationCell
+        from mitatedb_api.errors import AuthorizationError
+
+        cell = ApplicationCell("app_a", FoundationConfig(), backend=SQLiteBackend())
+        dev_principal = Principal(application_id="app_a", credential_id="d1", role=Role.DEVELOPER)
+        cell.create_entity(
+            dev_principal, "predicate_order_probe", fields={"amount": "integer"}, field_types={"amount": "integer"})
+
+        foreign_principal = Principal(application_id="app_b", credential_id="c1", role=Role.RUNTIME)
+        with self.assertRaises(AuthorizationError):
+            cell.read(foreign_principal, "predicate_order_probe", filters=[Filter("amount", "eq", "not-a-number")])
+
+        same_app_principal = Principal(application_id="app_a", credential_id="c2", role=Role.RUNTIME)
+        with self.assertRaises(ValidationError):
+            cell.read(same_app_principal, "predicate_order_probe", filters=[Filter("amount", "eq", "not-a-number")])
 
 
 if __name__ == "__main__":
