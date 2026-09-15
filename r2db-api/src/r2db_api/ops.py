@@ -362,7 +362,7 @@ def cmd_issue_credential(args: argparse.Namespace) -> int:
         credential_id = _new_credential_id()
         secret = _new_secret()
         with store.unit_of_work() as work:
-            # `store.add` is now this CLI's own issuance point -- it returns the composed bearer directly (design "合成は store/service 層の み"), so this call site no longer composes it itself (see `_print_issued`'s own docstring: every caller now passes an already-composed value straight through).
+            # `store.add` is now this CLI's own issuance point -- it returns the composed bearer directly (design "合成は store/service 層のみ"), so this call site no longer composes it itself (see `_print_issued`'s own docstring: every caller now passes an already-composed value straight through).
             # history: CH-0302
             bearer = store.add(credential_id, args.slug, args.role, secret, work=work)
             _write_control_audit(
@@ -626,7 +626,7 @@ def _parse_report_timestamp(value: str, flag: str) -> datetime:
 def cmd_audit_report(args: argparse.Namespace) -> int:
     """R-11 playbook helper (docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md R-11 "侵害/誤操作 playbook" step 2; `r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`): lists every durable `control_audit` row whose application-side event timestamp (`occurred_at` -- never `recorded_at`, the table's own DB-side insertion timestamp; see `0006_control_plane_http.sql`'s `control_audit` table comment) falls inside `[--since, --until]` (`--until` optional; omitting it means "no upper bound"), oldest first, one JSON object per line (JSON Lines) on stdout.
 
-    Read-only: connects with `R2DB_CONTROL_DSN` (`r2dbsvc_control`, this schema's owner -- the same read path `credential_store.PostgresControlAuditSink.events()` already documents as sufficient, since `r2dbsvc_controlplane`, the control-plane HTTP process' own role, has no SELECT on this table at all -- R-3) and writes no audit event of its own: a read has nothing to audit, the same "list 系（読み取り）は監査 不要" rule `cmd_list_credentials`/`cmd_list_apps` already follow.
+    Read-only: connects with `R2DB_CONTROL_DSN` (`r2dbsvc_control`, this schema's owner -- the same read path `credential_store.PostgresControlAuditSink.events()` already documents as sufficient, since `r2dbsvc_controlplane`, the control-plane HTTP process' own role, has no SELECT on this table at all -- R-3) and writes no audit event of its own: a read has nothing to audit, the same "list 系（読み取り）は監査不要" rule `cmd_list_credentials`/`cmd_list_apps` already follow.
 
     Ordering is `occurred_at ASC, event_id ASC` -- the identical tiebreaker `PostgresControlAuditSink.events()` uses (that method's own docstring, round-2): `occurred_at`/`recorded_at` alone are not a total order (two rows can share a timestamp), so a second, deterministic key is required for a stable, repeatable "oldest first" report -- exactly what a playbook's "did I see every event in this window" investigation needs.
 
@@ -800,8 +800,8 @@ def cmd_rotate_control_credential(args: argparse.Namespace) -> int:
     return 0
 
 
-# =========================================================================== Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md WP-1 change table C; rework round, rulings-q4-wp12-rework.md sec.1, rulings-q4-writer-roles.md D-2(h)): declaration subcommands -- the ONLY way to change the declared audit writer roles' timeouts or the platform's `surfaces`/`audit_coalescing_window_ms` declaration, now that both processes reject their own former env vars outright. Every subcommand below connects with `R2DB_CONTROL_DSN` (`r2dbsvc_control`, this schema's owner -- the only role with write access to `platform_declarations`, migration `0008`'s own GRANTs) and writes NO `control_audit` event (these are provisioning-time/rare operations against a schema-owned table, not an authenticated-principal operation this schema's audit trail is designed to cover -- the same "list系 （読み取り）は監査不要" reasoning `cmd_list_apps`/`cmd_audit_report` already follow extends here to the ONE write path this table has).
-# Rework round: role names are no longer derived from `_schema()` by a naming-convention rewrite (`_platform_writer_roles`, removed) -- D-2(h) requires reading the declared `audit_writer_roles` row instead, the SAME row migration `0008` seeds from the very `-v api_role=.../-v controlplane_role=...` variables it issues `ALTER ROLE` for. URL-shape validation for `declare-surfaces` now calls `platform_declarations.validate_surfaces_value` -- the SAME function `r2db_api.main`/`r2db_api.control_main` call at READ time (design D-2(d): "書き込み時と読み出し時 の両方で行い、両方が同じ Python の検証関数を通る") -- rather than keeping a third independent copy of the same three SHAPE checks.
+# =========================================================================== Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md WP-1 change table C; rework round, rulings-q4-wp12-rework.md sec.1, rulings-q4-writer-roles.md D-2(h)): declaration subcommands -- the ONLY way to change the declared audit writer roles' timeouts or the platform's `surfaces`/`audit_coalescing_window_ms` declaration, now that both processes reject their own former env vars outright. Every subcommand below connects with `R2DB_CONTROL_DSN` (`r2dbsvc_control`, this schema's owner -- the only role with write access to `platform_declarations`, migration `0008`'s own GRANTs) and writes NO `control_audit` event (these are provisioning-time/rare operations against a schema-owned table, not an authenticated-principal operation this schema's audit trail is designed to cover -- the same "list系（読み取り）は監査不要" reasoning `cmd_list_apps`/`cmd_audit_report` already follow extends here to the ONE write path this table has).
+# Rework round: role names are no longer derived from `_schema()` by a naming-convention rewrite (`_platform_writer_roles`, removed) -- D-2(h) requires reading the declared `audit_writer_roles` row instead, the SAME row migration `0008` seeds from the very `-v api_role=.../-v controlplane_role=...` variables it issues `ALTER ROLE` for. URL-shape validation for `declare-surfaces` now calls `platform_declarations.validate_surfaces_value` -- the SAME function `r2db_api.main`/`r2db_api.control_main` call at READ time (design D-2(d): "書き込み時と読み出し時の両方で行い、両方が同じ Python の検証関数を通る") -- rather than keeping a third independent copy of the same three SHAPE checks.
 # Q4 WP-1 does not import `r2db_api.main`/`r2db_api.control_main` here (or anywhere else in this file) -- both of those modules build a real ASGI app as an import-time side effect (`app = build_app()`/`app = build_control_app()`), which this CLI must never trigger merely by being invoked. ===========================================================================
 # history: CH-0314
 
@@ -894,7 +894,7 @@ def cmd_declare_surfaces(args: argparse.Namespace) -> int:
 
 
 def cmd_declare_coalescing_window(args: argparse.Namespace) -> int:
-    """D-2 (design §3 change table C): writes the `audit_coalescing_window_ms` row through the SAME validation function (`validate_coalescing_window_value`, `r2db_api.platform_declarations`) both composition roots run on READ (design D-2(d): "書き込み時と読み出し時 の両方で行い、両方が同じPythonの検証関数を通る") -- a value this command itself would reject can never enter the table.
+    """D-2 (design §3 change table C): writes the `audit_coalescing_window_ms` row through the SAME validation function (`validate_coalescing_window_value`, `r2db_api.platform_declarations`) both composition roots run on READ (design D-2(d): "書き込み時と読み出し時の両方で行い、両方が同じPythonの検証関数を通る") -- a value this command itself would reject can never enter the table.
 
     History: CH-0318
     """
@@ -1342,7 +1342,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
         application_id = app["application_slug"]
         database_name = app["database_name"]
         if database_name is None:
-            # Design D-4(a)/(d)/(e) fix: reachable only via an explicit `--application <id>` naming a registered-but-never-provisioned application. `pending_after` is always every number this package requires (nothing could possibly have been applied to a database that does not exist) -- this alone is what makes `--dry-run` return `4` here (D-5: "database_nameがNULLの 場合はappliedを[]とする").
+            # Design D-4(a)/(d)/(e) fix: reachable only via an explicit `--application <id>` naming a registered-but-never-provisioned application. `pending_after` is always every number this package requires (nothing could possibly have been applied to a database that does not exist) -- this alone is what makes `--dry-run` return `4` here (D-5: "database_nameがNULLの場合はappliedを[]とする").
             # `failed` is populated the SAME way -- but ONLY for a real (non-dry-run) invocation. D-4(e)'s own exit-code table names `database_name`がNULL explicitly as ONE of the two conditions exit code `3` covers ("psql exit 3、または `database_name`がNULL"); populating `failed` is what makes `summarize_upgrade_run` below -- UNMODIFIED, still the exact same pinned pure function -- return `3` for this case on its own, with no special-casing needed at this call site (the prior form filtered these rows OUT before calling it, which is why this case silently returned `0`). A `--dry-run` never "fails" anything (nothing is attempted), so `failed` stays empty there -- `pending_after` alone already drives that path's own `4`.
             # history: CH-0330
             all_numbers = tuple(sorted(platform_upgrades.PLATFORM_UPGRADE_NUMBERS))
@@ -1433,7 +1433,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
 
 
 def cmd_upgrade_status(args: argparse.Namespace) -> int:
-    """`applied`/`pending`/`database_name` for every targeted application, provision-DSN-only -- never touches `list-apps`' own resource or shape (design D-5's own reason: this CLI cannot add a column to a contract-shaped `ApplicationsResult` without a contract change). An application with no ledger table at all reports `applied=[]` (design D-5's own "台帳が無いapplicationはapplied=[]と する").
+    """`applied`/`pending`/`database_name` for every targeted application, provision-DSN-only -- never touches `list-apps`' own resource or shape (design D-5's own reason: this CLI cannot add a column to a contract-shaped `ApplicationsResult` without a contract change). An application with no ledger table at all reports `applied=[]` (design D-5's own "台帳が無いapplicationはapplied=[]とする").
 
     History: CH-0334
     """

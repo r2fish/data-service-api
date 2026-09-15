@@ -18,7 +18,7 @@ from .identifiers import quote_identifier, validate_identifier
 
 
 def _check_deadline(deadline):
-    """"変更はapp側deadline検査の 呼び出しのみ"): this backend has no native query-timeout API (`sqlite3` offers none) -- unlike `backend_postgres.py`'s own real `SET LOCAL statement_timeout`/`lock_timeout`, this is the app-side wall-clock check `cell.ApplicationCell._limit_gate`'s own computed `deadline` (`time.monotonic()` seconds) is handed to. `deadline=None` (a direct caller of this backend that supplies no deadline -- this repository's own tests) skips the check entirely, mirroring `backend_postgres.py`'s identical `None`-means-unbounded convention.
+    """"変更はapp側deadline検査の呼び出しのみ"): this backend has no native query-timeout API (`sqlite3` offers none) -- unlike `backend_postgres.py`'s own real `SET LOCAL statement_timeout`/`lock_timeout`, this is the app-side wall-clock check `cell.ApplicationCell._limit_gate`'s own computed `deadline` (`time.monotonic()` seconds) is handed to. `deadline=None` (a direct caller of this backend that supplies no deadline -- this repository's own tests) skips the check entirely, mirroring `backend_postgres.py`'s identical `None`-means-unbounded convention.
 
     History: CH-0337
     """
@@ -63,10 +63,10 @@ class SQLiteBackend:
         # Phase 6 WP-3 (design, §1.5 finding 2a): sqlite has no provisioning concept, so this registry is lazily-created, in-memory state -- `{collection: {field: contract_type}}`, the SAME 7-word contract vocabulary the PostgreSQL registry table stores (see `field_types` below). Never derived from `PRAGMA table_info` -- that reports THIS backend's own physical type (`_TYPES`, `text`/`integer`/`real`/`json` -- SQLite's dynamic column affinity does not even enforce it), which cannot recover `object` vs `array` vs `json`, nor a declared `boolean` (also physically `INTEGER`, same as a declared `integer` "0/1" value).
         # history: CH-0341
         self._declared_types = {}
-        # Phase 9 WP-3a (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): "SQLite backend は `_declared_types` と同じプロセス内構造に制約 を持つ" -- `{collection: {field: {"nullable": bool, "enum": [...]}}}`, the SAME lazily-created, in-memory-only shape as `_declared_types` immediately above (no upgrade script: this backend is the `:memory:` process-local one). `"enum"` is present only on a field that declares one; `"nullable"` is always present (default `True`, the contract default).
+        # Phase 9 WP-3a (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md): "SQLite backend は `_declared_types` と同じプロセス内構造に制約を持つ" -- `{collection: {field: {"nullable": bool, "enum": [...]}}}`, the SAME lazily-created, in-memory-only shape as `_declared_types` immediately above (no upgrade script: this backend is the `:memory:` process-local one). `"enum"` is present only on a field that declares one; `"nullable"` is always present (default `True`, the contract default).
         # history: CH-0342
         self._declared_constraints = {}
-        # "SQLite backend はプロセス 内である"; 監督裁定集約 rulings-r5-r6.md I-1): idempotency records for this backend are a private, in-process dict -- this backend already IS the process-local, non-durable foundation (no upgrade script, matching `_declared_types`/`_declared_constraints` above), never a SQL table. `{key: {"digest": str, "response_json": str, "created_at_ms": int}}`.
+        # "SQLite backend はプロセス内である"; 監督裁定集約 rulings-r5-r6.md I-1): idempotency records for this backend are a private, in-process dict -- this backend already IS the process-local, non-durable foundation (no upgrade script, matching `_declared_types`/`_declared_constraints` above), never a SQL table. `{key: {"digest": str, "response_json": str, "created_at_ms": int}}`.
         # history: CH-0343
         self._idempotency = {}
 
@@ -99,7 +99,7 @@ class SQLiteBackend:
         return self._schema_revision
 
     def field_domains(self, collection):
-        # SQLite's own column affinity is dynamic (no equivalent to PostgreSQL's own type-mismatch failure mode this backend's domain concept exists to catch), so every field maps to domain `None` -- `ApplicationCell.encode_value` calls skip domain validation entirely for `None`, matching this backend's own pre-existing, unchanged external behavior (P3 instruction #1: "SQLite側の外部挙動は 不変に保つこと").
+        # SQLite's own column affinity is dynamic (no equivalent to PostgreSQL's own type-mismatch failure mode this backend's domain concept exists to catch), so every field maps to domain `None` -- `ApplicationCell.encode_value` calls skip domain validation entirely for `None`, matching this backend's own pre-existing, unchanged external behavior (P3 instruction #1: "SQLite側の外部挙動は不変に保つこと").
         # history: CH-0345
         name = validate_identifier(collection, "entity")
         try:

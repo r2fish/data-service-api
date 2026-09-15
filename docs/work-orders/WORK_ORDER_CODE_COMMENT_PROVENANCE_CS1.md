@@ -1622,54 +1622,274 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 
 **使用テンプレート**: **2** → **5** → **6**。**変更クラス**: **B** (登録 helper の本体に触れない)。
 
-### 13.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
+**訂正註 (B6、差し戻し対応、2026-09-15、本文は書き換えない)**: 完了条件21の「34文 (12+22)」は §13.2 の manifest 冒頭時点の見積り (最低限) であり、後続パスで対象123塊の全文精査により §13.4 の判定表がこれを上回る件数を扱った (§13.4 参照)。また、条件9追加で見つかった変更セット1〜4統合済み6ファイル16か所 (r2db `postgres.py`・`control_plane.py`・`ops.py` 7か所・`service.py`、MitateDB `backend_sqlite.py` 4か所・`http.py` 2か所) の空白1文字の壊れは、監督が本パスまでに全てつなぎ直し済みであり、HEAD の `tools/tests` は401 passed (0 failed) である。§13.4 に前あった「別の専用変更セットで修復する (spawn_task task_b06b1cd8)」という記述は、この事実にもう合わない。
+
+**訂正註 (2026-09-15、§13.4 の記録の再起草、本文は書き換えない)**: 上の訂正註 (B6) の「HEAD の `tools/tests` は 401 passed」は当時の値で、再起草時の HEAD (`bcd07c1`) では 404 passed (失敗 0)。完了条件 21 の「34 文 (12 + 22)」は再計測でも同じ数で、§13.4 の判定表はこの 34 文を含む 106 文を載せた。上の訂正註の「後続パスで…上回る件数を扱った」は旧版の 93 行の表のことで、その表は再起草で置き換えた。CH-ID 予約 `CH-0381`〜`CH-0503` のうち HEAD で使っているのは `CH-0381`〜`CH-0439` の 41 件で、欠番 20 件は §13.4 の記録に書いた。
+
+### 13.4 候補一覧・判定表・記録 (2026-09-15 再起草。WIP コミット `bcd07c1` の作業ツリーを基準 `3adba35` と実測して書き直した)
+
+**変更セット0h (別記): `split_sentences` のバッククォート内省略記号 `...` 復元漏れを `tools/check_comment_provenance.py`/`tools/tests/test_comment_provenance.py` で修正した。設計への記載は監督側の担当。**
 
 **指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
 
-| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
-|---|---|---|---|---|---|---|
+(該当なし。HEAD で操作 (3) により削除した文は 0 文。途中のパスで削除した 2 文、基準 `credential_store.py` L520-536 の "`work` is a required keyword-only argument…" と `ops.py` L1620-1638 の "Before this fix, `N not in migrations_by_number`…" は、最終レビュー A4・B2 で基準の文に戻した。判定は下の判定表 #18・#99。`ops.py` L1373-1403 の "Before this fix the SAME…" を削除しなかった理由は判定表 #89)
 
-**塊をまたぐ参照先一覧**
+**塊をまたぐ参照先一覧** (参照元・参照先の行番号は基準 `3adba35` のもの。「残っているか」は HEAD の実物)
 
 | # | 参照元 (`file:line`) | 参照の語 | 参照先 (`file:line`) | 参照先の文 (先頭の数語) | 残っているか |
 |---|---|---|---|---|---|
-| 1 | `r2db-api/src/r2db_api/auth.py:298` | (外部) | `credential_store.py` L597-617 | | |
-| 2 | `r2db-api/tests/test_credential_persistence.py:714` | (外部) | `credential_store.py` L404-411 | | |
-| 3 | `MitateDB-api/tests/test_ops_upgrade.py:16` | (外部) | MitateDB `ops.py` L174-181 | | |
-| 4 | `credential_store.py` L779 | | L324 | | |
-| 5 | `credential_store.py` L796 | | L356 | | |
-| 6 | `credential_store.py` L373 | | L356 | | |
-| 7 | `credential_store.py` L429 | | L404 | | |
-| 8 | `credential_store.py` L1475 | | L1290 | | |
-| 9 | `credential_store.py` L1499 | | L1319 | | |
-| 10 | MitateDB `ops.py` L436 | | L416 | | |
-| 11 | MitateDB `ops.py` L174 | | L223 | | |
+| 1 | `r2db-api/src/r2db_api/auth.py:298` | (外部) | `credential_store.py` L597-617 (CH-0388) | "this method still does not check `revoked`..." | はい (文は残る。文頭ラベル "Unchanged by WP-2:" は (6) で除去。判定表 #21) |
+| 2 | `r2db-api/tests/test_credential_persistence.py:714` | (外部) | `credential_store.py` L404-411 | "Audit-trail attribution only (...) -- unlike `authenticate`/`assert_active` above..." | はい (無変更) |
+| 3 | `MitateDB-api/tests/test_ops_upgrade.py:16` | (外部) | MitateDB `ops.py` L174-181 | "This repository's own copy of the package (...) -- overridable via `MITATEDB_MIGRATIONS_DIR`..." | はい (無変更) |
+| 4 | `credential_store.py` L779 | (see 文) | L324 | "Phase 6 WP-2 (design D-1(c), L6-1 (i)/(iv)): `secret` is the presented bearer's locator form..." | はい (無変更。判定表 #9) |
+| 5 | `credential_store.py` L796 | (see 文、`identical comment above`) | L356 | "Coordinator item 7(i): `compare_digest` runs UNCONDITIONALLY..." | はい (無変更。判定表 #12) |
+| 6 | `credential_store.py` L373 | (`compare_digest` (above)) | L356 | 同上 | はい (無変更) |
+| 7 | `credential_store.py` L429 | (`canonical_context` above) | L404 | "Audit-trail attribution only (...)..." (#2 と同じ docstring) | はい (無変更) |
+| 8 | `credential_store.py` L1475 | (see 文) | L1290 | "Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1(b)): this class no longer sets..." | はい (無変更。判定表 #46) |
+| 9 | `credential_store.py` L1499 | (see 文) | L1319 | "Q4 phase WP-1 (design D-1(b)(ii)): borrows one connection from this sink's OWN pool..." | はい (無変更。判定表 #49) |
+| 10 | MitateDB `ops.py` L436 | (dispatch 同一) | L416 | "Works on either an application credential or a control credential..." | はい (無変更) |
+| 11 | MitateDB `ops.py` L174 | (see 文形) | L223 | "Not part of the documented environment contract -- exists purely so..." | はい (無変更。C1 で塊を基準のバイト列に戻し、CH-0410 は欠番) |
+
+- 訂正 (再起草): 旧版の #5・#6 は参照先の文を L348 の "SI-15 fail-closed…"、#7 を「同上」、#8 を L1417 の "Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md…" としていた。基準の参照元の語 (`identical comment above`、`compare_digest (above)`、`canonical_context above`、`PostgresControlAuditSink.__init__'s identical comment`) が指す文に直した。
 
 **HTTP の status・error code を含む削除文の監査一覧**
 
 | # | ファイル / 塊 | 削除した文 (先頭の数語) | 含む語 | 判定表の根拠 |
 |---|---|---|---|---|
+| — | (該当なし) | HEAD で操作 (3) により削除した文は 0 文。途中で削除して戻した 2 文も 3 桁の HTTP ステータス番号・エラーコード語彙を含まない | — | 監査照合の結果、該当行なし |
 
-**0d の保護参照があるために残った、経緯だけの文** (設計 §9 0d の既知の制約。変更セットの報告に載せる)
+**0d の保護参照があるために残った、経緯だけの文** (設計 §9 0d の既知の制約。HEAD の状態を併記)
 
-| # | ファイル / 塊 (行) | 文 (先頭の数語) | 保護参照 |
-|---|---|---|---|
-
-**訂正の記録 (0g)**
-
-| # | CH-ID | 旧文 (先頭の数語) | 新文 (先頭の数語) | 理由 (根拠 `file:line`) |
+| # | ファイル / 塊 (行) | 文 (先頭の数語) | 保護参照 | HEAD の状態 |
 |---|---|---|---|---|
+| 1 | `credential_store.py` L98-114 (CH-0381) | "the control plane's own last-active-control-credential gate..." | `design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3` | 文は残る。文頭ラベル "Opus review minor m-5:" は (6) で除去 (判定表 #2。L755-762 の CH-0392 も同じラベルを除去、#28) |
+| 2 | `credential_store.py` L1012-1034 (CH-0399) | "Row-locking counterpart to `list_all` above... (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3, WP-0 MA-2)." | 同上 | 無変更 (A5 で `WP-0` を戻した。判定表 #41) |
+| 3 | `credential_store.py` L1251-1272 | "CCR-14 WP-3, R-6: the durable control-plane audit trail's Postgres half..." | `0006`/`0007` 実在マイグレーションファイル名、`R-6` | 無変更 (C1 で塊を基準に戻し、CH-0401 は欠番) |
+| 4 | `credential_store.py` L1417-1424 | "Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/§6.1): the same 13 contract..." | `design PHASE4_DURABLE_AUDIT_SINK_V1.md` | 無変更 |
+| 5 | `ops.py` L1-141 (module docstring、CH-0408) | "Design v1.2 R-6 (...)"、"WP-6 addition (design v1.2 §3 WP-6 row: ...)" 等 | `design v1.2` (版数付き文書名) | 挙げた文は残る (判定表 #61・#66・#68)。同じ塊の別の括弧は (4) で除去 (#61・#62・#64) |
+| 6 | `ops.py` L1007-1031 | "Phase 8 WP-4 (design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-5 決定1/2...)" | `design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` | 無変更 (C1 で塊を基準に戻し、CH-0424 は欠番) |
 
-**判定表** (目印一覧に当たる全文と §13.2 の安全上の理由の一覧を含む。一覧は下限)
+**訂正 (B7)**: 旧版はここに 8 行目として `ops.py` L1204-1240 (`_served_capabilities_document`) の "O-7 prep (版フリップ監査, ruling …追補4): extracted..." を載せていた。この文の括弧にあるパスは基準の tree に実在しない作業用パスで、設計 §9 (0d) の保護参照ではない。文が丸ごと残る根拠は §3 の「1 文に現在の理由と経緯の叙述が同居する → 残す」なので、下の個別検討 #6 に区分し直し、この表から除いた。
 
-| ファイル / 塊 (行) | 判定 | 根拠 |
-|---|---|---|
+**訂正の記録 (0g)**: 該当なし。本変更セットで扱った文はいずれも現在のコードと矛盾する事実を含まず、0g の訂正記録を要する保護文は見つからなかった (fact-fix candidates = 0)。
 
-**記録**
+**判定表** (2026-09-15 再起草。旧版の「93 件の機械分類表」と「9 件の個別検討の追加分」を置き換えた)
+
+- 範囲: 対象の塊 (下の数え方) の文のうち、(a) 設計 §3 の叙述の目印に当たる文、(b) CH-ID が残る塊で変わった文、(c) §13.2 の安全上の理由の一覧の行に当たる文。基準 `3adba35` と HEAD の両方を読み、行ごとに起草者が文と HEAD の形を確かめた。
+- 数え方: 塊は `check_comment_provenance.extract_all_blocks` (`--base` と同じ抽出。2 ファイルで 71 + 60 = 131 塊、`--base` の `131 blocks checked` と一致)。登録 helper の中の塊は、同型性テスト `_isomorphic_symbol_source` と同じく、`_ISOMORPHIC_TARGETS` の symbol と `cmd_verify_declarations` の定義の行範囲 (`lineno`〜`end_lineno`) に始まる塊とした (`credential_store.py` 1、`ops.py` 7)。文は `_flatten` (基準の tree の識別子集合を渡す) と `split_sentences` で割った。基準と HEAD の塊は同じ順で 1 対 1 に対応し、全塊で文の数が一致した (文区間の削除 0)。目印は §3 の一覧の正規表現 (英語は語境界付き、大文字小文字を区別しない。日本語は語境界なし)。§13.2 の安全の行は、行範囲に重なる塊の文のうち、行に書いた安全上の語に当たる文 (L294-304 と L1358-1362 は語に当たる文が無いので塊の全文) とした。
+- 「HEAD の状態」の「除去」は、基準の文と HEAD の文を空白区切りの語で比べて消えた部分を逐語で書いた (「A」→「B」は A が B になった)。
+- 区分は §3 の「残す」「移す」だけを使う。文を残して経緯トークンやラベルだけを除いた行は「残す (除いた語は移す)」と書いた。「無変更」は塊が基準と同一 (CH-ID なし)、「文は無変更 (塊には除去あり)」は CH-ID のある塊で当の文が基準と同一。
+- 根拠の (4)(6) は設計 §4.1 (4) と §8 の機械的削除。「許可に当たらない」「許可に当たるが使っていない」は、チェッカーの `_strip_leading_label` と `_strip_allowed_parens` を基準の文にかけて確かめた。
+
+| # | ファイル / 塊 (基準の行) | CH-ID | 拾った理由 | 文 (先頭の数語) | HEAD の状態 | 判定 (§3) | 根拠 | 点検語 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `credential_store.py` L86-94 | なし | 安全 L86-94 | "Phase 4 (design D-6/N-3; WP-2(a) fix round 2…" | 無変更 | 残す | §13.2 L86-94 の安全上の理由 (両 composition root の writer 接続の timeout を 1 か所で定義し、ずれを防ぐ) が現在も成立。文頭ラベルは (6) の許可に当たらない | `that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 2 | `credential_store.py` L98-114 | CH-0381 | 安全 L98-114、CH 塊の変更文 | "Opus review minor m-5: the control plane's own…" | 除去: 「Opus review minor m-5:」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと裸の局所 ID だけ ((6))。`FOR UPDATE` と `lock_timeout` の理由 (§13.2 L98-114) と出所付きの `design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3` は残る | `that`/`instead`/`otherwise`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 3 | `credential_store.py` L139-144 | CH-0383 | 目印 `pre-WP`、安全 L139-144、CH 塊の変更文 | "Phase 6 WP-2 (design D-1(c)): `_SELECT_BY_VERIFIER` (the pre-WP-2…" | 除去: 「Phase 6 WP-2 (design D-1(c)):」、「pre-WP-2」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと出所の無い D- だけ ((6))。括弧内の `pre-WP-2` は経緯トークン ((4))。locator で引いて `compare_digest` で照合する現在の手順 (§13.2 L139-144) は残る | なし |
+| 4 | `credential_store.py` L147-154 | なし | 目印 `this WP` | "Phase 6 WP-2 (design D-1(c), r2db decision (c)'s…" | 無変更 | 残す | 目印は括弧の中で、`assert_active` が credential_id で引くという現在の事実と同居 (§3)。ラベル・括弧とも (4)(6) の許可に当たらない | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 5 | `credential_store.py` L159-172 | CH-0384 | CH 塊の変更文 | "Typed to accept only a composed psycopg SQL…" | 除去: 「module (D-4).」→「module.」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID だけの括弧 ((4))。raw string を DB に届かせない型の理由は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 6 | `credential_store.py` L159-172 | CH-0384 | CH 塊の変更文 | "Phase 4 WP-2(b): `params` now also accepts a…" | 除去: 「Phase 4 WP-2(b):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンだけ ((6))。`Mapping` を受ける現在の理由は残る | `also`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 7 | `credential_store.py` L294-304 | なし (旧 CH-0385、欠番) | 安全 L294-304 | "R-6/§8 B-2: check out exactly one connection from…" | 無変更 | 残す | §13.2 L294-304 の安全上の理由 (1 接続 1 transaction、例外で `ROLLBACK`)。先頭の `R-6/§8 B-2:` は (6) の許可に当たらない | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 8 | `credential_store.py` L294-304 | なし (旧 CH-0385、欠番) | 安全 L294-304 | "A caller that also needs to write a…" | 無変更 | 残す | 空白だけの差で内容の除去が無かったため、D1 (C1 と同じ扱い) で塊を基準のバイト列に戻した | `this`/`that`/`also`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 9 | `credential_store.py` L324-341 | なし | 安全 L324-341 | "Phase 6 WP-2 (design D-1(c), L6-1 (i)/(iv)): `secret`…" | 無変更 | 残す | bearer の locator 形式の説明 (§13.2 L324-341 の secret)。ラベルは (6) の許可に当たらない | なし |
+| 10 | `credential_store.py` L324-341 | なし | 安全 L324-341 | "Authentication is now a `credential_id`-keyed row lookup (`_SELECT_BY_ID`…" | 無変更 | 残す | `compare_digest` で照合する現在の認証手順 (§13.2 L324-341)。経緯トークンなし | なし |
+| 11 | `credential_store.py` L324-341 | なし | 目印 `pre-WP`、安全 L324-341 | "Unlike the pre-WP-2 form, that `compare_digest` call is…" | 無変更 | 残す | 目印 `pre-WP-2` は比べる相手を示すだけで、`compare_digest` が唯一の認証検査であるという安全上の理由と同居 (§3)。(4)(6) の許可に当たらない | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 12 | `credential_store.py` L356-362 | なし | 安全 L356-362 | "Coordinator item 7(i): `compare_digest` runs UNCONDITIONALLY -- against…" | 無変更 | 残す | §13.2 L356-362 の無条件の `compare_digest` (行の有無の timing oracle を作らない)。ラベル `Coordinator item 7(i):` は (6) の許可に当たらない | `this`/`otherwise`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 13 | `credential_store.py` L366-370 | なし | 安全 L366-370 | "Design implementation constraint 2: an unknown locator and…" | 無変更 | 残す | §13.2 L366-370 のエラーの不透明性。保護参照 `SI-10` を含む (0d) | なし |
+| 14 | `credential_store.py` L373-375 | なし | 目印 `pre-WP`、安全 L373-375 | "Design implementation constraint 1: `compare_digest` (above) runs --…" | 無変更 | 残す | 目印 `pre-WP-2` は順序が変わっていないことを言うだけで、`compare_digest` を `revoked` 等より先に行う安全上の理由 (§13.2 L373-375) と同居 (§3) | `exactly as`: 同じ文の `pre-WP-2 ordering` を指す |
+| 15 | `credential_store.py` L480-482 | CH-0386 | CH 塊の変更文 | "`auth.CredentialStore.count_active_for_application`'s Postgres counterpart (R-7 `credentials_per_application`: revoked rows are…" | 除去: 「(R-7 `credentials_per_application`:」→「(`credentials_per_application`:」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID `R-7` を括弧から除いた ((4))。失効行を数えない規則は残る | なし |
+| 16 | `credential_store.py` L488-502 | なし (旧 CH-0387、欠番) | 安全 L488-502 | "Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)):…" | 無変更 | 残す | 0d の保護参照 `design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii)` を含む行ロック版の説明 (§13.2 L488-502)。C1 で塊を基準に戻した | なし |
+| 17 | `credential_store.py` L488-502 | なし (旧 CH-0387、欠番) | 安全 L488-502 | "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see…" | 無変更 | 残す | advisory lock で TOCTOU を閉じる安全上の理由 (§13.2 L488-502)。括弧内の `pre-review-round-3` の除去は許可に当たるが使っていない (許可であって義務ではない、§3) | `that function's own docstring` は `_take_bound_advisory_lock` (登録 helper、無変更) を指す。他は同じ文の中 |
+| 18 | `credential_store.py` L520-536 | なし (旧 CH-0440、欠番) | 安全 L520-536 | "`work` is a required keyword-only argument (round-2 review…" | 無変更 | 残す | 最終レビュー A4 で基準の文に戻した。`work` 必須という現在の規則と、状態変更と監査 INSERT が別の接続になる危険 (§13.2 L520-536) が経緯と同居 (§3) | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 19 | `credential_store.py` L520-536 | なし (旧 CH-0440、欠番) | 安全 L520-536 | "Rework (coordinator item 3): returns the composed bearer…" | 無変更 | 残す | bearer を発行点で組み立てる現在の規則 (§13.2 L520-536)。ラベル `Rework (coordinator item 3):` は (6) の許可に当たらない | `that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 20 | `credential_store.py` L597-617 | CH-0388 | 安全 L597-617 | "P2-D6: "同一 credential_id の verifier を差し替える" -- rotation…" | 文は無変更 (塊には除去あり) | 残す | rotate で `credential_id` 等を保ち verifier だけ差し替える現在の規則 (§13.2 L597-617)。`P2-D6:` の後ろは引用で、(6) の許可に当たらない | なし |
+| 21 | `credential_store.py` L597-617 | CH-0388 | 安全 L597-617、CH 塊の変更文 | "Unchanged by WP-2: this method still does not…" | 除去: 「Unchanged by WP-2:」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンだけ ((6))。`revoked` を検査しないという現在の挙動 (§13.2 L597-617) は残る。塊をまたぐ参照先 (`auth.py:298`) の文 | `this` / `still`: 同じ文で `rotate` の現在の挙動を指し、除いたラベルを指さない |
+| 22 | `credential_store.py` L597-617 | CH-0388 | 安全 L597-617、CH 塊の変更文 | "Rework (coordinator follow-up, 2026-09-04 audit finding §3-A): returns…" | 除去: 「follow-up, 2026-09-04」→「follow-up」 | 残す (除いた語は移す) | 括弧内の日付は経緯トークン ((4))。組立て済みの bearer を返す現在の規則は残る | `this`/`instead`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 23 | `credential_store.py` L635-659 | なし (旧 CH-0389、欠番) | 安全 L635-659 | "Not part of `auth.CredentialStore`'s call surface either, and…" | 無変更 | 残す | 失効は行を残し、`delete` は行を消すという区別 (§13.2 L635-659)。C1 で塊を基準に戻した | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 24 | `credential_store.py` L635-659 | なし (旧 CH-0389、欠番) | 安全 L635-659 | "Added specifically so `0004_deprovision_application.sql`'s `assert_no_credentials_for_deprovision` guard (review-reported gap)…" | 無変更 | 残す | 失効済みでも行があれば deprovision できない現在の理由 (§13.2 L635-659)。括弧 `(review-reported gap)` の除去は許可に当たるが使っていない | `that`/`still`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 25 | `credential_store.py` L635-659 | なし (旧 CH-0389、欠番) | 安全 L635-659 | "Only a *revoked* credential can be deleted." | 無変更 | 残す | 失効済みの credential だけを消せるという現在の規則 (§13.2 L635-659) | なし |
+| 26 | `credential_store.py` L684-702 | CH-0390 | 安全 L684-702、CH 塊の変更文 | "R-2: wherever a process' configuration carries *both* the…" | 除去: 「R-2:」 | 残す (除いた語は移す) | 文頭ラベルは出所の無い裸の局所 ID だけ ((6)、設計 §3 の例)。pepper を分ける規則 (§13.2 L684-702) は残る | なし |
+| 27 | `credential_store.py` L684-702 | CH-0390 | 安全 L684-702 | "An operator who (by mistake, e.g. copy-paste from…" | 文は無変更 (塊には除去あり) | 残す | pepper の再利用で壁が破られる安全上の理由 (§13.2 L684-702)。`R-2's` は主語の一部で (4)(6) の対象外 | なし |
+| 28 | `credential_store.py` L755-762 | CH-0392 | 安全 L755-762、CH 塊の変更文 | "Opus review minor m-5: `SET LOCAL lock_timeout`, mirroring…" | 除去: 「Opus review minor m-5:」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンだけ ((6))。`SET LOCAL lock_timeout` の範囲の理由 (§13.2 L755-762) は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 29 | `credential_store.py` L779-784 | CH-0393 | 安全 L779-784、CH 塊の変更文 | "Phase 6 WP-2 (design D-1(c)): locator-then-digest, mirroring `PostgresCredentialStore.authenticate`'s…" | 除去: 「Phase 6 WP-2 (design D-1(c)):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと出所の無い D- だけ ((6))。locator を引いてから digest を照合する順 (§13.2 L779-784) は残る | `that method's docstring` は L324-341 (無変更) を指す。`then` は `locator-then-digest` の語の一部で参照ではない |
+| 30 | `credential_store.py` L836-851 | CH-0394 | CH 塊の変更文 | "Only reachable through `ops.py` (connected as `r2dbsvc_control`) --…" | 除去: 「level (R-3),」→「level,」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID だけの括弧 ((4))。DB 権限で INSERT を拒む理由は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 31 | `credential_store.py` L836-851 | CH-0394 | 目印 `pre-WP`、CH 塊の変更文 | "Phase 3.5 WP-4: `role` defaults to `"control"` (every…" | 除去: 「Phase 3.5 WP-4:」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンだけ ((6))。括弧内の `pre-WP-4` は A5 で基準に戻した (`issue_audit_credential_ceremony` も呼出し元で、除くと「全ての呼出し元」と意味が変わる) | なし |
+| 32 | `credential_store.py` L836-851 | CH-0394 | CH 塊の変更文 | "The table's own `CHECK (role IN ('control', 'audit'))`…" | 除去: 「WP-4」 | 残す (除いた語は移す) | 括弧内の経緯トークン ((4))。`CHECK` 制約が正本という現在の理由は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 33 | `credential_store.py` L893-906 | CH-0395 | 安全 L893-906 | "R-5/§2 M-2: verifier replacement + `must_rotate = false`…" | 文は無変更 (塊には除去あり) | 残す | `must_rotate = false` を 1 文で更新する規則 (§13.2 L893-906)。ラベル `R-5/§2 M-2:` は (6) の許可に当たらない | なし |
+| 34 | `credential_store.py` L893-906 | CH-0395 | 安全 L893-906、CH 塊の変更文 | "Rework (coordinator follow-up, 2026-09-04 audit finding §3-A): returns…" | 除去: 「follow-up, 2026-09-04」→「follow-up」 | 残す (除いた語は移す) | 括弧内の日付は経緯トークン ((4))。組立て済みの bearer を返す現在の規則は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 35 | `credential_store.py` L933-949 | CH-0396 | CH 塊の変更文 | "§8 M-6: bootstrap's existence check, real-row semantics --…" | 除去: 「§8 M-6:」 | 残す (除いた語は移す) | 出所の無い節番号と局所 ID だけのラベル ((6))。bootstrap の存在確認の意味は残る | なし |
+| 36 | `credential_store.py` L933-949 | CH-0396 | 目印 `this WP` | "`work` is a **read-only**, optional parameter (this is…" | 文は無変更 (塊には除去あり) | 残す | 目印は `work` を省いたときの現在の挙動 (単独の read) の説明と同居 (§3)。(4)(6) の許可に当たらない | `this` / `exactly as`: 同じ文の中を指す |
+| 37 | `credential_store.py` L933-949 | CH-0396 | 安全 L933-949 | "When supplied (MA-3, round-2 review: closing the TOCTOU…" | 文は無変更 (塊には除去あり) | 残す | 同じ接続で存在確認をして TOCTOU を閉じる安全上の理由 (§13.2 L933-949)。ラベル・括弧の除去は許可に当たるが、括弧が TOCTOU の説明そのものなので使っていない | `then` などは同じ文の中を指す |
+| 38 | `credential_store.py` L970-973 | CH-0397 | CH 塊の変更文 | "Reset's "revoke every existing control credential" step (R-5)…" | 除去: 「(R-5)」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID だけの括弧 ((4)) | なし |
+| 39 | `credential_store.py` L990-1000 | なし (旧 CH-0398、欠番) | 安全 L990-1000 | "`auth.ControlCredentialStore.list_all`'s Postgres counterpart -- `(credential_id, enabled, revoked, must_rotate, role)`…" | 無変更 | 残す | 返す tuple の形 (§13.2 L990-1000 の `must_rotate`)。C1 で塊を基準に戻した | なし |
+| 40 | `credential_store.py` L990-1000 | なし (旧 CH-0398、欠番) | 目印 `this WP`、安全 L990-1000 | "Phase 3.5 WP-4 (design §4/§1-B, P35-D7): `must_rotate` is…" | 無変更 | 残す | `must_rotate` を返す現在の理由と 0d の保護参照 `contract 1.3.0` が経緯と同居 (§3)。(4)(6) の許可に当たらない | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 41 | `credential_store.py` L1012-1034 | CH-0399 | 安全 L1012-1034 | "Row-locking counterpart to `list_all` above, used exclusively by…" | 文は無変更 (塊には除去あり) | 残す | 行ロック版を使う、最後の control credential の gate (§13.2 L1012-1034)。括弧の `WP-0 MA-2` は A5 で基準に戻した (同じ設計書に MA-2 が 2 つあり、`WP-0` で区別する) | なし |
+| 42 | `credential_store.py` L1012-1034 | CH-0399 | 安全 L1012-1034、CH 塊の変更文 | "Phase 3.5 WP-4: `role` is now selected too…" | 除去: 「Phase 3.5 WP-4:」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンだけ ((6))。audit credential が lockout を防ぐ gate を隠さない理由 (§13.2 L1012-1034) は残る | `that`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 43 | `credential_store.py` L1105-1108 | CH-0400 | CH 塊の変更文 | "Registration-only `INSERT` -- every provisioning column (`database_name`/`runtime_role`/`developer_role`/`provisioned_at`) is…" | 除去: 「row (R-4).」→「row.」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID ((4)) | なし |
+| 44 | `credential_store.py` L1191-1210 | なし | 安全 L1191-1210 | "Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)):…" | 無変更 | 残す | 0d の保護参照 `design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii)` を含む行ロック版の説明 (§13.2 L1191-1210) | なし |
+| 45 | `credential_store.py` L1191-1210 | なし | 目印 `pre-WP`、安全 L1191-1210 | "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see…" | 無変更 | 残す | 目印 `pre-WP-6a` は、別の接続で数えると TOCTOU が開くという安全上の理由 (§13.2 L1191-1210) と同居 (§3)。括弧の除去は許可に当たるが、括弧が比べる相手 (以前の呼出し順) を示し理由の一部なので判定に迷い、残す | `this`/`that`/`instead`/`otherwise`/`then`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 46 | `credential_store.py` L1290-1300 | なし | 目印 `no longer`、安全 L1290-1300 | "Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1(b)): this class…" | 無変更 | 残す | 目印 `no longer` は timeout を役割の設定へ移した現在の構成の説明で、0d の保護参照 `design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` と同居 (§13.2 L1290-1300、§3) | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 47 | `credential_store.py` L1290-1300 | なし | 安全 L1290-1300 | "`r2db_api.control_main.build_control_app` double-checks this connection's actual effective value against…" | 無変更 | 残す | 起動時に実効値を役割の設定と照合する現在の手順 (§13.2 L1290-1300) | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 48 | `credential_store.py` L1309-1315 | CH-0402 | 安全 L1309-1315、CH 塊の変更文 | "Q4 phase WP-1 rework (rulings-q4-wp12-rework.md sec.1): exposes this…" | 除去: 「value (design D-1(c)).」→「value.」 | 残す (除いた語は移す) | ファイル名の無い `design` と D- だけの括弧 ((4))。役割ごとの接続で実効値を読む理由 (§13.2 L1309-1315) は残る。ラベル `Q4 phase WP-1 rework (rulings-q4-wp12-rework.md sec.1):` は (6) の許可に当たらず残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 49 | `credential_store.py` L1319-1329 | なし | 安全 L1319-1329 | "Q4 phase WP-1 (design D-1(b)(ii)): borrows one connection…" | 無変更 | 残す | `pg_settings` から実効値を読む理由 (§13.2 L1319-1329)。ラベルは (6) の許可に当たらない。塊をまたぐ参照先 (L1499 の see 文) | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 50 | `credential_store.py` L1319-1329 | なし | 安全 L1319-1329 | "`pg_settings.setting` for these two GUCs is already a…" | 無変更 | 残す | ms 整数で読むので解析が要らないという現在の理由 (§13.2 L1319-1329) | なし |
+| 51 | `credential_store.py` L1358-1362 | なし | 安全 L1358-1362 | "Same connection/transaction as the caller's state change --…" | 無変更 | 残す | §13.2 L1358-1362 の commit / rollback (例外を握りつぶさず、呼出し側の transaction ごと戻す)。括弧 `(R-6/fail-closed-by-construction)` は (4) の許可に当たらない | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 52 | `credential_store.py` L1376-1403 | CH-0403 | 目印 `previously`、CH 塊の変更文 | "Round-2 review MI-8: routed through `_execute` (D-4's single…" | 除去: 「Round-2 review MI-8:」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンだけ ((6))。目印 `previously` の節は、`_execute` を通す現在の規律の理由と同居 (§3) | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 53 | `credential_store.py` L1376-1403 | CH-0403 | 安全 L1376-1403 | "WP-5 round-2 review NIT-4: `ORDER BY recorded_at` alone…" | 文は無変更 (塊には除去あり) | 残す | `ORDER BY recorded_at` が全順序でない理由 (§13.2 L1376-1403)。ラベル `WP-5 round-2 review NIT-4:` の除去は許可に当たるが、判定に迷うため残す (下の個別検討 #4) | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 54 | `credential_store.py` L1376-1403 | CH-0403 | 目印 `this WP` | "This became load-bearing this WP: C-15 vector 2's…" | 文は無変更 (塊には除去あり) | 残す | 目印は、`event_id` が決定的な tiebreaker である現在の理由と 0d の保護参照 `C-15` と同居 (§3) | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 55 | `credential_store.py` L1475-1481 | なし | 目印 `no longer`、安全 L1475-1481 | "Q4 phase WP-1 (design D-1(b)): see `PostgresControlAuditSink.__init__`'s identical…" | 無変更 | 残す | #46 と同じ構成の説明 (§13.2 L1475-1481)。(4)(6) の許可に当たらない | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 56 | `credential_store.py` L1490-1495 | なし (旧 CH-0405、欠番) | 安全 L1490-1495 | "Q4 phase WP-1 rework (rulings-q4-wp12-rework.md sec.1): exposes this…" | 無変更 | 残す | 役割ごとの pool を公開する理由 (§13.2 L1490-1495)。括弧 `(rulings-q4-wp12-rework.md sec.1)` の除去は許可に当たるが使っていない。C1 で塊を基準に戻した | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 57 | `credential_store.py` L1499-1502 | なし | 安全 L1499-1502 | "Q4 phase WP-1 (design D-1(b)(ii)): see `PostgresControlAuditSink.effective_timeouts_ms`'s identical…" | 無変更 | 残す | 役割ごとの接続で実効値を読む理由 (§13.2 L1499-1502)。ラベルは (6) の許可に当たらない | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 58 | `credential_store.py` L1545-1555 | CH-0406 | CH 塊の変更文 | "D-4's buffer flush: every buffered `audit.AuditEvent` in `events`…" | 除去: 「D-4's buffer flush:」 | 残す (除いた語は移す) | ツールは (6) の許可として受け付ける (出所の無い D- のラベル)。all-or-nothing の説明は残り、文法は崩れない | なし |
+| 59 | `credential_store.py` L1674-1687 | CH-0407 | CH 塊の変更文 | "Phase 4 WP-2(b) (design D-5/D-6): `audit_query`'s Postgres reader…" | 除去: 「Phase 4 WP-2(b) (design D-5/D-6):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと出所の無い D- だけ ((6))。実在パス `0007_application_audit.sql` と `D-1(b)` の説明は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 60 | `credential_store.py` L1674-1687 | CH-0407 | CH 塊の変更文 | "`InMemoryAuditQueryStore` (`audit_query.py`) is this class's in-memory pair (D-10)…" | 除去: 「(D-10)」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID ((4))。実在ファイル名 `audit_query.py` は A5 で基準に戻した | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 61 | `ops.py` L1-141 | CH-0408 | CH 塊の変更文 | "Design v1.2 R-6 ("bootstrap / reset は out-of-band…" | 除去: 「(WP-3/WP-4)」 | 残す (除いた語は移す) | 経緯トークンだけの括弧 ((4))。0d の保護参照 `Design v1.2 R-6` と、CLI を先に作らなかった理由は残る | なし |
+| 62 | `ops.py` L1-141 | CH-0408 | 目印なし (旧 CH 塊の変更文) | "This module is the flip's own CLI half,…" | 文は無変更 (D2 で `control_main.py` を戻した。塊には除去あり) | 残す | 実在ファイル名は A5 と同じく残す (D2) | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 63 | `ops.py` L1-141 | CH-0408 | 目印 `this WP` | "Scope (deliberately narrower than r2db-api's sibling `r2db_api.ops`, which…" | 文は無変更 (塊には除去あり) | 残す | 目印 `this WP's own instruction` は、bootstrap / reset を out-of-band に限る現在の範囲と R-6 の引用と同居 (§3)。(4)(6) の許可に当たらない | `this`/`also`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 64 | `ops.py` L1-141 | CH-0408 | 目印なし (旧 CH 塊の変更文) | "Both subcommands call the SAME reusable ceremony core…" | 文は無変更 (D2 で `control_plane.py` を戻した。塊には除去あり) | 残す | 実在ファイル名は A5 と同じく残す (D2) | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 65 | `ops.py` L1-141 | CH-0408 | 安全 L1-141 | "``bootstrap`` carries no such gate (contract: a second…" | 文は無変更 (塊には除去あり) | 残す | §13.2 L1-141 (revoke)。`bootstrap` に gate が無い理由 (contract の `CONFLICT`) | `such`: 直前の文の `reset` の gate を指し、その文は無変更 |
+| 66 | `ops.py` L1-141 | CH-0408 | 目印 `監督裁定`、安全 L1-141 | "WP-6 addition (design v1.2 §3 WP-6 row: "break-glass…" | 文は無変更 (塊には除去あり) | 残す | 0d の保護参照 `design v1.2` の引用で、B8 で引用の中身を逐語に戻した。版数付き文書名の引用の中の経緯トークンは消さない (§3) | なし |
+| 67 | `ops.py` L1-141 | CH-0408 | 安全 L1-141 | "`revoke-credential` reuses `ControlPlaneService.revoke_credential`'s own built-in declare-and-echo gate (triggered…" | 文は無変更 (塊には除去あり) | 残す | §13.2 L1-141 (revoke の gate を再利用する)。経緯トークンなし | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 68 | `ops.py` L1-141 | CH-0408 | 目印 `this WP` | "Design v1.2 R-6 (deprovision is one of this…" | 文は無変更 (塊には除去あり) | 残す | 0d の保護参照 `Design v1.2 R-6` と、deprovision の唯一のインターロックという安全上の理由が経緯と同居 (§3)。括弧の除去は許可に当たるが使っていない | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 69 | `ops.py` L272-287 | CH-0411 | 安全 L272-287 | "The secret is shown exactly once, here, and…" | 文は無変更 (塊には除去あり) | 残す | §13.2 L272-287 (secret を 1 回だけ表示する)。経緯トークンなし | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 70 | `ops.py` L272-287 | CH-0411 | 目印 `supervisor ruling`、CH 塊の変更文 | "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief…" | 除去: 「(supervisor ruling 2026-09-04, brief」→「(brief」、「WP-3」 | 残す (除いた語は移す) | 括弧内の経緯トークン ((4))。呼出し元が組立て済みの bearer を渡す現在の規則は残る。ラベル `Phase 6 WP-3 追補` は (6) の許可に当たらない | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 71 | `ops.py` L344-369 | CH-0413 | 目印 `supervisor ruling`、目印 `差し戻し`、安全 L344-369、CH 塊の変更文 | "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定…" | 除去: 「Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンだけ ((6))。`MITATEDB_CONTROL_CREDENTIAL_SECRET` に組立て済みの bearer を置く規則 (§13.2 L344-369) は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 72 | `ops.py` L344-369 | CH-0413 | 目印 `no longer`、安全 L344-369 | "`MITATEDB_CONTROL_CREDENTIAL_ID` is still required here (an early, operator-facing…" | 文は無変更 (塊には除去あり) | 残す | 目印 `no longer read` は現在の挙動 (値を読まない) の説明で経緯ではない (§3 残す) | `still`: 同じ文の中 |
+| 73 | `ops.py` L449-457 | CH-0414 | CH 塊の変更文 | "`ControlPlaneService.revoke_credential`'s own built-in declare-and-echo gate fires only when…" | 除去: 「(design R-6)」 | 残す (除いた語は移す) | ファイル名の無い `design` と裸の R- だけの括弧 ((4))。括弧ごと消えるので `design)` の残骸は出ない | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 74 | `ops.py` L480-491 | CH-0415 | 安全 L480-491 | "R-9 lockout/compromise playbook helper: prints every durable `control_audit`…" | 文は無変更 (塊には除去あり) | 残す | §13.2 L480-491 (lockout)。`R-9 lockout/compromise playbook helper:` は (6) の許可に当たらない | なし |
+| 75 | `ops.py` L480-491 | CH-0415 | CH 塊の変更文 | "Requires `MITATEDB_PROVISION_DSN` -- `mitatedbsvc_controlplane` itself is INSERT-only on…" | 除去: 「(R-4)」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID ((4))。controlplane 役割が INSERT だけという現在の権限は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 76 | `ops.py` L559-565 | CH-0416 | CH 塊の変更文 | "`application_id` is format-validated BEFORE any database access or…" | 除去: 「MA-1」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID ((4))。識別子を検証してから使う理由は残る | なし |
+| 77 | `ops.py` L649-674 | CH-0417 | 安全 L649-674、CH 塊の変更文 | "It STILL takes the SAME `_lock_ritual` advisory lock…" | 除去: 「review」 | 残す (除いた語は移す) | 括弧内の経緯トークン ((4))。reset と同じ advisory lock を取る安全上の理由 (§13.2 L649-674) は残る | `this`/`that`/`still`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 78 | `ops.py` L649-674 | CH-0417 | 目印なし (旧 CH 塊の変更文) | "`issue_audit_credential_ceremony` (`control_plane.py`) does the real work -- see…" | 文は無変更 (D3 で `control_plane.py` と `M-1` を戻した。塊には除去あり) | 残す | 実在ファイル名は A5、条項 ID `M-1` は B5 と同じく残す (D3) | `that`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 79 | `ops.py` L761-765 | CH-0419 | CH 塊の変更文 | "D-2(h) 4: the target of `set-platform-timeouts` comes from…" | 除去: 「D-2(h) 4:」 | 残す (除いた語は移す) | 出所の無い D- のラベル ((6))。role 名を導出しない規則は残る | なし |
+| 80 | `ops.py` L793-804 | CH-0420 | 目印 `monitor ruling`、CH 塊の変更文 | "Returns `None` (never a guessed role-name pair) when…" | 除去: 「it (monitor ruling 2026-09-05, N-6).」→「it.」 | 残す (除いた語は移す) | 経緯トークンと裸の ID だけの括弧 ((4))。推測した role 名を出さない規則は残る | `exactly as`: 同じ文の中 |
+| 81 | `ops.py` L869-880 | CH-0421 | 目印 `supervisor ruling`、CH 塊の変更文 | "`--control-base-url` is OPTIONAL (omitted = no control row…" | 除去: 「(supervisor ruling correction 2026-09-05,」→「(correction,」 | 残す (除いた語は移す) | 括弧内の経緯トークン ((4))。`--no-control` を省略と等価に受け付ける引用は残る | `that`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 82 | `ops.py` L904-909 | CH-0422 | CH 塊の変更文 | "Phase 10 WP-6b (design D-5 (ii)): writes the…" | 除去: 「Phase 10 WP-6b (design D-5 (ii)):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと出所の無い D- だけ ((6)) | なし |
+| 83 | `ops.py` L957-967 | なし (旧 CH-0423、欠番) | 目印 `monitor ruling` | "Read-only diagnostic: the current `platform_declarations` row contents (raw,…" | 無変更 | 残す | 目印は、診断コマンドが F-3/F-4b/F-5 を強制しない理由と role 名を推測しない理由と同じ括弧の中で同居 (§3)。B3 で `F-3/F-4b/F-5` を戻して除去が 0 になり、C1 で塊を基準に戻した | `this`/`that`/`instead`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 84 | `ops.py` L1007-1031 | なし (旧 CH-0424、欠番) | 目印 `supervisor ruling` | "`_VERIFY_DECLARATIONS_EXIT_CODES`/`_VERIFY_DECLARATIONS_READ_ORDER`/`_verify_declarations_ok`/`_verify_declarations_fail`/`_verify_declarations_checks`/`cmd_verify_declarations` are ALL pinned isomorphic to r2db-api's own…" | 無変更 | 残す | B4 で基準の文に戻した。括弧から経緯トークンを除くと `rework #1` の残骸が出るので (4) を使わない (§3 v0.14)。同型性の固定という現在の事実を含む | なし |
+| 85 | `ops.py` L1094-1103 | なし (旧 CH-0425、欠番) | 目印 `previously`、目印 `supervisor ruling` | "WP-4 rework (supervisor ruling 2026-09-06, wp4-rework-1.md #2): this…" | 無変更 | 残す | 目印の節は、関数を分けて終端の行を 1 回だけ出す現在の理由と同居 (§3)。CH-0425 を外して基準に戻した (記録の「登録 helper 誤対象の是正」) | `this`/`that`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 86 | `ops.py` L1204-1240 | なし | 目印 `before this rework`、目印 `Previously` | "Previously named `_contract_170_capabilities_document` and taking the caller's already-resolved…" | 無変更 | 残す | 目印 (`Previously named`、`before this rework`) の節は、`from_env` が `data_base_url` を要求するので固定の偽 URL を渡す現在の理由と同居 (§3)。(4)(6) の許可に当たらない | `this`/`instead`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 87 | `ops.py` L1373-1403 | CH-0428 | CH 塊の変更文 | "Design D-4(a): the DEFAULT target set (`application_id is None`)…" | 除去: 「Design D-4(a):」 | 残す (除いた語は移す) | 出所の無い D- のラベル ((6))。後ろの括弧 `(design D-4(a): "...")` は引用なので残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 88 | `ops.py` L1373-1403 | CH-0428 | 目印 `supervisor ruling`、CH 塊の変更文 | "M-2(a)/(d) fix (supervisor ruling 2026-09-05, rework): an EXPLICITLY…" | 除去: 「(supervisor ruling 2026-09-05, rework):」→「(rework):」 | 残す (除いた語は移す) | 括弧内の経緯トークン ((4))。名指しの application を返す規則と実在パス `r2db_api/ops.py` は残る | なし |
+| 89 | `ops.py` L1373-1403 | CH-0428 | 目印 `Before this fix` | "Before this fix the SAME `database_name IS NOT NULL`…" | 文は無変更 (塊には除去あり) | 残す | 直後の文の `BOTH callers` がこの文の `cmd_upgrade_applications`/`cmd_upgrade_status` を受けるので削除しない (§3 削除前の確認) | 直後の文の `BOTH callers` がこの文を指すので残す。この文の `then` / `instead` は同じ文の中 |
+| 90 | `ops.py` L1426-1439 | CH-0429 | CH 塊の変更文 | "Design D-4(b): the `psql` subprocess call shape this…" | 除去: 「Design D-4(b):」 | 残す (除いた語は移す) | 出所の無い D- のラベル ((6))。`_die` を使わない理由と実在パス `MitateDB-api/src/mitatedb_api/ops.py` は残る | `this`/`still`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 91 | `ops.py` L1452-1465 | なし (旧 CH-0430、欠番) | 目印 `no longer` | "A `psycopg.Error` reaching this application's own database (unreachable,…" | 無変更 | 残す | 目印 `no longer resolves` は現在の失敗条件の記述で経緯ではない (§3 残す)。C1 で塊を基準に戻した | `this`/`that`/`still`/`otherwise`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 92 | `ops.py` L1509-1520 | CH-0431 | 目印 `before this fix`、目印 `supervisor ruling`、CH 塊の変更文 | "M-3 (supervisor ruling 2026-09-05, review): the failed psql…" | 除去: 「M-3 (supervisor ruling 2026-09-05, review):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと裸の ID だけ ((6))。目印 `before this fix` の節は、psql の出力が唯一のエラー文という現在の理由と同居 (§3) | `this fix` は除いたラベルの `M-3` の修正を指していた。修正の中身 (出力を捨てていた) は同じ文に残るので意味は保たれる (判定に迷う点) |
+| 93 | `ops.py` L1541-1567 | CH-0432 | CH 塊の変更文 | "Design D-4(d): one line per application (`applied_before` ->…" | 除去: 「Design D-4(d):」、「failed (design D-4(c)),」→「failed,」 | 残す (除いた語は移す) | ラベル ((6)) と、出所の無い D- だけの括弧 ((4))。引用の括弧 `(design D-4(d): "...")` は残る | `that`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 94 | `ops.py` L1541-1567 | CH-0432 | 目印 `supervisor ruling`、目印 `差し戻し` | "Counting rule (supervisor ruling U-1, 2026-09-05, 差し戻し後 delta…" | 文は無変更 (塊には除去あり) | 残す | 各 application が 1 つの区分に入る数え方の規則。括弧の除去は許可に当たるが、区分の出所を示す `delta 監査` と一体で判定に迷うため残す | なし |
+| 95 | `ops.py` L1541-1567 | CH-0432 | CH 塊の変更文 | "`failed` always wins first -- this INCLUDES `database_name is None`…" | 除去: 「(M-1/M-2(d))」 | 残す (除いた語は移す) | 裸の ID だけの括弧 ((4))。未 provision を failed に数える規則は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 96 | `ops.py` L1582-1586 | CH-0433 | 目印 `supervisor ruling`、CH 塊の変更文 | "M-3 (supervisor ruling 2026-09-05, review): psql's own stderr…" | 除去: 「M-3 (supervisor ruling 2026-09-05, review):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと裸の ID だけ ((6))。stderr の末尾を出す理由は残る | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 97 | `ops.py` L1603-1616 | CH-0434 | CH 塊の変更文 | "Design D-4: bulk-applies every pending per-application upgrade (design…" | 除去: 「Design D-4:」 (D4 で `platform_upgrades.py` を戻した) | 残す (除いた語は移す) | 出所の無いラベル ((6))。実在ファイル名 `platform_upgrades.py` は A5 と同じく残す (D4) | `this`/`that`/`still`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 98 | `ops.py` L1620-1638 | なし (旧 CH-0441、欠番) | 目印 `supervisor ruling` | "M-2(b)/(c) fix (supervisor ruling 2026-09-05, review): an explicit…" | 無変更 | 残す | usage error を per-app ループの前で検査する現在の規則。ラベルの除去は許可に当たるが、B2 で塊を基準に戻し CH-0441 を外した | なし |
+| 99 | `ops.py` L1620-1638 | なし (旧 CH-0441、欠番) | 目印 `Before this fix` | "Before this fix, `N not in migrations_by_number` (true…" | 無変更 | 残す | B2 で基準の文に戻した。偽の success 報告を防ぐため検査をループの前に置く現在の理由が経緯と同居 (§3)。`MitateDB-api/tests/test_ops_upgrade.py:518-531` がこの性質を固定する | `this` / `also`: 同じ文の中。直前の文 (#98) は無変更 |
+| 100 | `ops.py` L1651-1666 | CH-0435 | 目印 `supervisor ruling`、安全 L1651-1666、CH 塊の変更文 | "M-1/M-2(d) fix (supervisor ruling 2026-09-05): a REGISTERED but…" | 除去: 「M-1/M-2(d) fix (supervisor ruling 2026-09-05):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと裸の ID だけ ((6))。未 provision の application の扱い (§13.2 L1651-1666) は残る | なし |
+| 101 | `ops.py` L1684-1688 | CH-0436 | CH 塊の変更文 | "Design D-5: read-only equivalent of `upgrade-applications --dry-run` --…" | 除去: 「Design D-5:」 | 残す (除いた語は移す) | 出所の無い D- のラベル ((6)) | なし |
+| 102 | `ops.py` L1684-1688 | CH-0436 | CH 塊の変更文 | "Never touches the existing `list-applications` command (design D-5:…" | 除去: 「surface (U-1).」→「surface.」 | 残す (除いた語は移す) | 出所の無い裸の局所 ID ((4)) | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0)。除いた語を指すものは無い |
+| 103 | `ops.py` L1700-1707 | CH-0437 | 目印 `supervisor ruling`、安全 L1700-1707、CH 塊の変更文 | "M-2(d) fix (supervisor ruling 2026-09-05): a REGISTERED but…" | 除去: 「M-2(d) fix (supervisor ruling 2026-09-05):」 | 残す (除いた語は移す) | 文頭ラベルは経緯トークンと裸の ID だけ ((6))。未 provision の application を `applied=[]` と報告する扱い (§13.2 L1700-1707) は残る | なし |
+| 104 | `ops.py` L1799-1804 | なし | 安全 L1799-1804 | "---- WP-6 break-glass command family --------------------------------- Every subcommand…" | 無変更 | 残す | §13.2 L1799-1804 (break-glass も同じ `ControlPlaneService` で認証する)。見出しの `WP-6` は括弧でもラベルでもなく (4)(6) の対象外 | `this`: 同じ文又は同じ塊の残る文を指す (削除した文 0) |
+| 105 | `ops.py` L1890-1893 | CH-0438 | CH 塊の変更文 | "---- Q4 phase declaration-management command family (design D-1/D-2)…" | 除去: 「(design D-1/D-2)」 | 残す (除いた語は移す) | 出所の無い D- だけの括弧 ((4)) | なし |
+| 106 | `ops.py` L1959-1961 | CH-0439 | CH 塊の変更文 | "---- Q4 phase per-application platform-upgrade command family (design…" | 除去: 「(design D-4/D-5)」 | 残す (除いた語は移す) | 出所の無い D- だけの括弧 ((4)) | なし |
+
+**判定に迷った塊の個別検討**: `events` (`credential_store.py` L1376-1403) と `_served_capabilities_document` (`ops.py` L1204-1240) は機械整形が誤検出を生みうるため、§3「判定に迷う → 残し、根拠欄にその旨を書く」に沿って個別に検討した。HEAD の状態を併記する。
+
+| # | ファイル / 塊 (行) | 文 (先頭の数語) | 判定 | 根拠 | HEAD の状態 |
+|---|---|---|---|---|---|
+| 1 | `credential_store.py` L1376-1403 (`events`、CH-0403) | "Read surface for tests/tooling connected with sufficient privilege (...)." | 残す | 現在の理由 (安全側判断) -- 誰がこの読み取り面を使えるかという現行のアクセス制御根拠 | 無変更 |
+| 2 | 同上 | "Design §0: "読み取りsurface(events())はin-memory/Postgres双方に用意 (...)"." | 残す | 設計 §0 の逐語引用。ラベル "Design §0:" の除去は引用の出典表示を壊すので使わず、判定に迷うため保持 | 無変更 |
+| 3 | 同上 | "Round-2 review MI-8: routed through `_execute` (...)." | 残す (除いた語は移す) | ラベル "Round-2 review MI-8:" を (6) で除去。残った "routed through..." の小文字始まりは削除規則の結果で、書き換えではない | 除去: 「Round-2 review MI-8:」(判定表 #52) |
+| 4 | 同上 | "WP-5 round-2 review NIT-4: `ORDER BY recorded_at` alone is not a total order (...)." | 残す | `ORDER BY` が全順序でないという現行の技術的事実。ラベルの除去は許可に当たるが、判定に迷うため保持 | 無変更 (判定表 #53) |
+| 5 | 同上 | "This became load-bearing this WP: C-15 vector 2's own prefix assertion (...) is the deterministic tiebreaker." | 残す | 現在の理由と経緯が同居 (§3) -- `event_id` が決定的な tie-breaker である現行の理由 | 無変更 (判定表 #54) |
+| 6 | `ops.py` L1204-1240 (`_served_capabilities_document`) | "O-7 prep (版フリップ監査, ruling …追補4): extracted out of `_verify_declarations_checks` (...)." | 残す | 訂正 (B7): 0d 保護ではない。括弧のパスは基準の tree に実在しない作業用パスで、設計 §9 (0d) 上は経緯トークン。丸ごと残る根拠は §3 の同居 -- "calls this helper with no arguments and carries no peer-specific complexity of its own" が現在の構造の説明 | 無変更 |
+| 7 | 同上 | "This peer's own equivalent, unlike r2db-api's, first has to build a `FoundationConfig` (...)." | 残す | 現行の実装差異の説明。経緯トークンなし | 無変更 |
+| 8 | 同上 | "`FoundationConfig.from_env()` still reads every OTHER (limit) env var exactly as before (...)." | 残す | 現在の理由。末尾の "(O-7's own instruction: ...)" は出所の無い局所ラベルだが、日本語引用と同居し判定に迷うため保持 | 無変更 |
+| 9 | 同上 | "The REAL `ApplicationRuntime.capabilities()` document for a throwaway, entirely in-memory application/credential (...)." | 残す | 現行のテスト設計 (本番コード経路の再利用) の説明。経緯トークンなし | 無変更 |
+
+**訂正 (validate_control_pepper_separation / has_any、A6)**: 旧版はこの 2 つを「base 文へ全文復元」と記していたが、実物は `validate_control_pepper_separation` のラベル `R-2:` (判定表 #26) と `has_any` のラベル `§8 M-6:` (#35) を (6) で除去したままであり、全文復元はしていない。この 2 件は「残す (除いた語は移す)」である。`delete`、`PostgresControlCredentialStore` のクラス docstring、`PostgresApplicationAuditSink.borrow_connection` の 3 塊は C1 で基準のバイト列に戻し (CH-0389・CH-0391・CH-0405 は欠番)、`ops.py` の `cmd_upgrade_applications` 内の 2 文は B2 で基準の文に戻した (CH-0441 は欠番)。
+
+**記録** (2026-09-15 再起草で実測。HEAD は WIP コミット `bcd07c1`、作業ツリーは clean)
 
 | 項目 | 前 | 後 |
 |---|---|---|
-| 経緯トークン数 `credential_store.py` / `ops.py` (§2.3 末尾の数え方) | 81 / 105 | |
-| 移した塊 / 対象の塊 | — | / 123 |
-| 変異の行 | — | |
-| 各 suite と照合コマンドの集計行 | | |
+| 経緯トークン数 `credential_store.py` (§2.3 末尾の数え方: `_HISTORY_TOKEN_PATTERNS` の `findall` を全文で合計) | 81 | 61 |
+| 経緯トークン数 `ops.py` (同上) | 105 | 76 |
+| 塊 (`extract_all_blocks`) `credential_store.py` / `ops.py` | 71 / 60 | 71 / 60 |
+| 対象の塊 (登録 helper の中を除く) `credential_store.py` / `ops.py` | — | 70 / 53 (計 123) |
+| CH-ID のある塊 `credential_store.py` / `ops.py` | — | 18 / 22 (計 40)。残る 83 の対象の塊は基準と同一 (`dedented` が一致) |
+| 目印に当たる文 / 塊 (対象の塊、基準) `credential_store.py` / `ops.py` | — | 12 / 11、22 / 17 (計 34 文。§13.2 の値と一致) |
+| 判定表の文 | — | 106 (`credential_store.py` 60、`ops.py` 46)。うち目印 34、§13.2 の安全の行 55、CH 塊の変更文 48 (重なりあり。D1〜D4 の後)。§13.2 の安全の一覧の 36 の行範囲すべてに 1 文以上が当たる |
+| 読んだ塊 (完了条件 21) | — | 123 / 123 (実装担当の記録)。再起草では、判定表の 106 文を起草者が全文読み、残る 83 塊は基準との一致を機械で確かめた (D1 の後) |
+| CH-ID | — | `CH-0381`〜`CH-0439` のうち 40 件 (予約 `CH-0381`〜`CH-0503`)。欠番 21 件: `CH-0382`、`CH-0385`、`CH-0387`、`CH-0389`、`CH-0391`、`CH-0398`、`CH-0401`、`CH-0404`、`CH-0405`、`CH-0409`、`CH-0410`、`CH-0412`、`CH-0418`、`CH-0423`、`CH-0424`、`CH-0425`、`CH-0426`、`CH-0427`、`CH-0430`、`CH-0440`、`CH-0441`。うち 17 件は C1 (内容の除去が 0 の塊を基準のバイト列に戻した)、`CH-0440`・`CH-0441` は A4・B2、`CH-0425` は登録 helper の直前の塊 (下記)。欠番の 20 塊はすべて HEAD で基準のバイト列と一致し、`src/` と受け皿のどちらにも ID が無い |
+| `--register` | — | `comment provenance register OK: 79 files scanned, 418 CH-IDs` |
+| 文区間の削除 (操作 (3)) | — | 0 (基準と HEAD で全対象塊の文の数が一致) |
+| 変異の行 | — | 下の 2 表 |
+| 各 suite と照合コマンドの集計行 | — | 下表 |
+
+- 旧版の「144 行」の判定表は再現できない。前セッションの作業用ファイルにだけあり、本書にもリポジトリにも載っておらず、行の選び方も記録されていないため (最終レビュー パート B F5)。
+
+**変更セット0hの再現例と修正**
+
+| 項目 | 内容 |
+|---|---|
+| 再現入力 | `` "Every statement is passed through `cursor.execute(...)` with a bound list." `` |
+| 修正前の実際の分割結果 | `` "Every statement is passed through `cursor.execute(\x00A3\x00)` with a bound list." `` (バッククォート内の `...` がプレースホルダのまま残留) |
+| 期待する分割結果 | 入力と同一の1文 (省略記号は変化しない) |
+| 原因 | `split_sentences` が略語 (`_ABBREVIATIONS`、`...`含む) の隠蔽を先に行い、バッククォート span の隠蔽を後に行っていたため、span内の略語プレースホルダが span ごとキャプチャされ、`restore()` の挿入順 (略語→span) では span 復元時に埋め込まれた略語プレースホルダが再帰的に戻らなかった |
+| 修正 | 隠蔽の順序を「バッククォート span を先、略語を後」に入れ替えた (`tools/check_comment_provenance.py` `split_sentences`)。span 内容は略語パスに触れなくなるため、埋め込みプレースホルダが発生しなくなる |
+| 固定したテスト (HEAD にある `test_0h_*`) | `test_0h_ellipsis_inside_backtick_span_survives_split_sentences`、`test_0h_various_abbreviations_inside_backtick_span_survive_split_sentences`、`test_0h_abbreviation_outside_backtick_span_still_protected` (隠蔽順)。`test_0h_rule9_cjk_boundary_red_and_green`、`test_0h_run_base_flags_cjk_boundary_as_red`、`test_0h_run_base_green_when_cjk_boundary_fixed`、`test_0h_punctuation_boundary_toten_kuten_open_paren_red_and_green`、`test_0h_katakana_boundary_fullwidth_and_halfwidth_red_and_green`、`test_0h_extended_charset_iteration_mark_and_ext_a_red`、`test_0h_fullwidth_punctuation_added_in_a2_line_wrap_boundary_hit` (条件 9 と文字集合、A2・A3・C2)。`test_0h_find_broken_line_wrap_joins_short_context_survives_unrelated_run_space`、`test_0h_find_broken_line_wrap_joins_short_context_ascii_unaffected` (A1) |
+| 影響範囲の確認 | HEAD の `tools/tests` は 404 passed (失敗 0)。両 peer の実 `src/` を読む `test_0f_both_peers_all_src_rev_vs_itself_is_green` と `test_q4_real_repo_postgres_unchanged_is_green` を含む |
+
+- 訂正 (再起草): 旧版の「固定したテスト」は、A3 で消した手元のコピーを検査するテスト (`test_0h_mutation_reverting_hide_order_reintroduces_the_bug`、`test_0h_mutation_dropping_rule9_is_red`、`test_0h_fixture_narrow_mutation_removing_only_ellipsis_span_protection`) を証拠に挙げていた。どれも HEAD に無い。実コードへの変異は下の `mutate.py` の表に置き換えた。旧版の「使い捨て clone で 331 件」と、旧 `--base` での再照合の記述は、再起草で再現していないので除いた。
+
+**発見した副次バグ (本パスで発覚、要フォローアップ)**: docstring 塊を編集する際、`inspect.cleandoc` 後の値 (デコード済み文字列) をそのまま新しい `"""..."""` ソースへ書き戻すと、元ソースが `\\c` のような二重バックスラッシュだった箇所が単一バックスラッシュとして再出力され、`pytest` の warnings-as-errors 設定下で `SyntaxError` (invalid escape sequence) となり `--register` の「unparsable → hit」フォールバックを誤発火させることが判明した (`ops.py` の `_run_upgrade_script` docstring、`\\c`/`\\q` で発現)。本パスの実装スクリプト側でバックスラッシュの再エスケープを追加して回避した。チェッカー本体 (`tools/check_comment_provenance.py`) 自体には同種の脆弱性は無い (チェッカーは常に基準リビジョンの生ソースを `git show` で読み、デコード済み値を書き戻すことはしない) が、**今後 docstring 塊を書き戻す実装担当は同じ落とし穴に注意すること**として記録する。
+
+**変異実行結果 (完了条件の変異、実装担当の記録。差し戻し前の作業ツリーで実施し都度復元。再起草では再実行していない)**
+
+| # | 変異 | 結果 |
+|---|---|---|
+| 1 | `credential_store.py` の `DEFAULT_SCHEMA` リテラルを1文字変更 | P exit 1 (§4.1 (1)) |
+| 2 | `credential_store.md` CH-0381 の節から1行 (文の一部) を削除 | P exit 1 (§4.1 (2)) |
+| 3 | `ops.py` の CH 無し塊 (`cmd_enable_credential` docstring) から1文削除 | P exit 1 (§4.1 (2)、CH無し塊の並び変化) |
+| 4a | 残す文から否定語 (`never`) を落とす | P exit 1 (§4.1 (3)) |
+| 4b | 残した2文 (`revoke_all` docstring) を並べ替える | P exit 1 (§4.1 (3)) |
+| 4c | 残す文に1語 (`definitely`) を足す | P exit 1 (§4.1 (3)) |
+| 4d | 残す文の折返し行を1行消す (0d保護文の一部を破壊) | P exit 1 (保護参照を含む文の丸ごと削除に該当) |
+| 5 | 保護参照 (`SI-15`) を含む文を1つ丸ごと消す | P exit 1 |
+| 6 | ラベル除去+区切り後の先頭小文字化 (関数直接検証) | `_is_allowed_reduction` が正しい除去は許可、小文字化された誤った除去は拒否することを確認 |
+| 7 | 追加行に `WP-77` を含める | P exit 1 (§4.1 (5)、§4.1 (3)) |
+| 8 | 実在パス付き参照 (`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3`) を消す | P exit 1 (保護参照を含む文の削除) |
+| 9 | 登録 helper 内 (`_verify_declarations_checks`) のコメントから1文削除 | 両 peer `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` が赤 |
+| 11 | `ops.py` の `#:` 塊 (L1055-1057 相当) を1行に圧縮 | P exit 1 |
+| 12a-c | `find_broken_line_wrap_joins` の3変異 (アンダースコア/スラッシュ/バッククォート内コード構文の折返しを空白1つで誤結合) を関数直接検証 | いずれも正しく破損として検出 (実ファイルは0件を確認済み) |
+| 13a | `ops.md` CH-0408 の fenced block 末尾を1語切り詰め | P exit 1 (§4.1 (2)) |
+| 13b | 実在パスラベルを含む文への破壊的変異 (関数直接検証) | `_is_allowed_reduction` が拒否することを確認 |
+| 17a | コード側参照を存在しない `CH-0999` に差し替え | R exit 1 (§4.2-1) |
+| 17b | 別 peer の受け皿に同じ `CH-0381` の節を追加 | R exit 1 (§4.2-2) |
+| 18 | `ops.py` に `__doc__` 読み出しを1行追加 | R exit 1 (§4.2-5) |
+| 19 | `credential_store.md` に roadmap に無い2桁の R 番号を追加 (この記録には具体の番号を書かない -- `check_doc_refs.py` 自身が本書を走査するため) | `check_doc_refs.py` exit 1 |
+
+実装担当の報告では 19 行すべて赤。#10 (訂正記録) は該当する訂正が 0 件のため監査照合で「該当なし」。#14-16・20-23 は監査照合 (本節の各一覧・記録で代替)。#24 は監督がコミット後の HEAD で行う。#25 は §13.2 のとおり 2 モジュールとも対応外の行は無い。表の CH-ID (CH-0381、CH-0408) は HEAD にもある。
+
+**0h・A1・C2 の変異 (`tools/dev/mutate.py`、実コードへの変異。ログは `mutate.py` の出力ディレクトリの実行時刻とファイル名で書く)**
+
+| id | 変異 (`tools/check_comment_provenance.py`) | 期待 | ログ (実行時刻 / ファイル) | ログの行 (逐語) |
+|---|---|---|---|---|
+| A3-0h-a-order | `split_sentences` の隠蔽順を直す前の順 (略語が先、backtick span が後) に戻す | 赤 | `20260915-095030/A3-0h-a-order.log` | `FAILED tools/tests/test_comment_provenance.py::test_0h_ellipsis_inside_backtick_span_survives_split_sentences`<br>`============================== 1 failed in 0.05s ===============================` |
+| A3-condition9-removed | 述語 B の条件 9 (`_is_cjk_char(last) and _is_cjk_char(nxt)` で真を返す 2 行) を消す | 赤 | `20260915-095030/A3-condition9-removed.log` | `FAILED tools/tests/test_comment_provenance.py::test_0h_rule9_cjk_boundary_red_and_green`<br>`============================== 1 failed in 0.06s ===============================` |
+| A3-punctuation-emptied | `_CJK_PUNCTUATION` を空文字列にする | 赤 | `20260915-095030/A3-punctuation-emptied.log` | `FAILED tools/tests/test_comment_provenance.py::test_0h_punctuation_boundary_toten_kuten_open_paren_red_and_green`<br>`============================== 1 failed in 0.05s ===============================` |
+| A3-katakana-range-dropped | `_is_cjk_char` から全角カタカナの範囲 (`0x30A0`〜`0x30FF`) の行を消す | 赤 | `20260915-095030/A3-katakana-range-dropped.log` | `FAILED tools/tests/test_comment_provenance.py::test_0h_katakana_boundary_fullwidth_and_halfwidth_red_and_green`<br>`============================== 1 failed in 0.05s ===============================` |
+| A1-short-context-reverted | `find_broken_line_wrap_joins` の CJK 境界の 1 文字文脈を、`\S+` の token 文脈に戻す | 赤 | `20260915-095030/A1-short-context-reverted.log` | `FAILED tools/tests/test_comment_provenance.py::test_0h_find_broken_line_wrap_joins_short_context_survives_unrelated_run_space`<br>`============================== 1 failed in 0.05s ===============================` |
+| RF1-fullwidth-punct-dropped | `_CJK_PUNCTUATION` から全角の `！？：；［］〈〉《》` を除く (C2) | 赤 | `20260915-103952/RF1-fullwidth-punct-dropped.log` | `FAILED tools/tests/test_comment_provenance.py::test_0h_fullwidth_punctuation_added_in_a2_line_wrap_boundary_hit`<br>`============================== 1 failed in 0.06s ===============================` |
+
+- 6 件とも赤 (pytest を `-x` で走らせ、最初の失敗で止まる)。A3 の 5 件の spec は `cs5-fix-mutations.json`、RF1 は `cs5-fix2-mutations.json`。最終レビューで同じ RF1 を走らせた `mutate.py` の実行 (時刻 `20260915-102711`) は C2 の fixture が入る前で、緑 (NG) だった。
+
+**登録 helper の直前の塊 (CH-0425)**: `ops.py` の基準 L1094-1103 (`_verify_declarations_checks` の `def` の直前の `#:` 塊。"WP-4 rework (supervisor ruling 2026-09-06, wp4-rework-1.md #2): this was previously inlined…") に一度 `CH-0425` を付けてラベルを除いたが、基準の塊に戻し、`ops.md` の節も消して欠番にした (HEAD で基準のバイト列と一致。判定表 #85)。なお同型性テストの `_isomorphic_symbol_source` は `def` の行から始まるので、この塊は登録 helper の比較範囲の外で、§13.2 の数え方 (対象 53 塊) では対象の塊に入る。旧版の「移した塊数を 32/53 へ訂正」は、その後の C1 で値が変わったので除いた (実測は上の記録)。
+
+| 照合コマンド / suite | 結果 (HEAD `bcd07c1`、2026-09-15 再起草で実行。出力の行を逐語) |
+|---|---|
+| `check_comment_provenance.py --base 3adba35 r2db-api/src/r2db_api/credential_store.py MitateDB-api/src/mitatedb_api/ops.py` | `comment provenance OK: 131 blocks checked` (exit 0) |
+| `check_comment_provenance.py --register` | `comment provenance register OK: 79 files scanned, 418 CH-IDs` (exit 0) |
+| `tools/dev/pt.py -C <worktree> --wait 300 -- tools/tests -q` | `pt: 404 passed in 42.31s` / `pt: exit=0` (`pt.py` のログ、実行時刻 `20260915-105824`) |
+| `check_doc_refs.py` | `check_doc_refs OK: 0 dangling references` (exit 0。`tracked markdown files scanned: 109`) |
+| `pytest -q r2db-api/tests`・`MitateDB-api/tests`・`conformance-tests` | 再起草では実行していない (完了条件 24 の root gate は監督がコミット後の HEAD で行う) |
+
+**条件 9 で見つかった変更セット 1〜4 の壊れ (既知の失敗の訂正。HEAD の実物に合わせて書き直した)**: 述語 B に条件 9 (CJK と CJK の境界、v0.14 0h) を足すと、main に統合済みの 6 ファイル 16 か所で、基準の改行の位置に空白 1 文字が入った壊れが見つかった (例: `r2db-api/ops.py:365` の `層の み` は `層のみ` の誤り)。HEAD では 16 か所とも空白を除いてつないである。main `d8e2522` と HEAD の差分の実測: r2db `postgres.py` 1 行 (L972)、`control_plane.py` 1 行 (L1403)、`ops.py` 7 行 (L365、L629、L803、L804、L897、L1345、L1436)、`service.py` 1 行 (L739)、MitateDB `backend_sqlite.py` 4 行 (L21、L66、L69、L102)、`http.py` 2 行 (L288、L440)。これとは別に、A1 で `control_plane.py` L1380 (CH-0281) の 2 か所 (「超過 は」「。 監査」) の空白を除いた。HEAD の `tools/tests` は 404 passed で、既知の失敗は無い。旧版の「別の専用変更セットで修復する (spawn_task task_b06b1cd8)」と「334 passed、2 failed」は、この事実に合わないので除いた。
