@@ -1894,7 +1894,7 @@ class PostgresCell:
         if operator is None:
             # Unreachable in practice: `predicate.validate()` (called by
             # `validate_predicates`, upstream of every caller here) already
-            # rejects any operator outside `structured.OPERATORS`. Kept as
+            # rejects any operator outside `structured.OPERATORS` (now in `mutation_binding.py`). Kept as
             # an explicit, fixed-literal-only fallback rather than trusting
             # that invariant silently (D-4: "operators map to fixed
             # literals"). this is a redundant application-level shape backstop, not a storage-rejection translation -- so it is NOT allowlist-eligible (`layer_rule`'s defence-in-depth exemption is for backend/storage denials only); it carries the same 4-key vocabulary `Predicate.validate`'s own operator check uses (`errors.violation("capability", ...)`), no field-index available this deep, so a generic `"where"` path.

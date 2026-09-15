@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.13 (2026-09-15)。** 基点 `b4aac70` (WP-3e を統合済み)。WP-3f の実装中の監督裁定 W3-17・W3-18 を §5.39 の裁定表に足し、§5.35 に訂正註を足した。既存の行は書き換えていない。
 - **v1.12 (2026-09-15)。** 基点 main `b65e97d` (WP-3d を統合済み)。WP-3e の実装中の監督裁定 W3-15・W3-16 を §5.39 の裁定表に足し、§5.34 に訂正註を足した。既存の行は書き換えていない。
 - **v1.11 (2026-09-15)。** 基点 main `9994d7c` (WP-3a〜3c を統合済み)。§5.32〜§5.39 を追記した。内容は、WP-3d〜3i (ST10 → CE5 → ST8 → ST9 → CE7 → CE6) の実測、監督の枠 WF-1〜WF-7、manifest、未確定 W3-6〜W3-13 である。既存の行は書き換えていない。独立レビュー反映: M1〜M5、minor、監督裁定 U1〜U5 (§5.32〜§5.39)。**独立レビュー反映済み。**
 - **v1.10 (2026-09-15)。** 基点 main `b45312d` (WP-2a を統合済み)。§5.27〜§5.31 に WP-3 (SV1〜SV3) の実測、WP-3a / 3b / 3c の manifest、未確定 W3-1〜W3-5 を追記した。既存の行は書き換えていない。独立レビュー (差し戻し) 反映: facade テスト、訂正の記録の赤テスト、評価順の変異、W3-4、範囲外の位置参照、CH-0126 の扱い。**独立レビュー待ち。**
@@ -1384,6 +1385,15 @@ tools/dev/gate.py --label wp3d                             # 監督。run_in_bac
 | 14 | 逐語移動と位置参照 (40c) | **監査照合**: AST とコメントが逐語。括弧書きは L106 (W3-7 (b))、`postgres.py` L1897、adapter L3576 だけ。見出し L104-133 はそれ以外の差分 0 | — |
 | 15 | 登録 helper・同型・統合 | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、WF-4、WF-6 | — |
 
+【訂正註 2026-09-15 (WP-3f の実装、監督裁定 W3-17・W3-18)。上の表は起草時の原文であり、消さずに残す (`OPERATING_CONDITIONS.md` §1.8 の 57)】
+
+- 範囲外の位置参照の括弧書きは 2 箇所ではなく 10 箇所である。manifest の `postgres.py` L1897 と adapter L3576 に、W3-17 の 8 箇所を足す。括弧書きは計 11 箇所 (見出し L106 と範囲外 10)。完了条件 14 の「括弧書きは L106、`postgres.py` L1897、adapter L3576 だけ」は W3-17 と合わせて読む。
+- 範囲外の位置参照の「付けない」に挙げた `control_plane.py` L1013・L1030 は、W3-17 で付ける側に分類し直した。
+- 訂正の記録は 3 件である: CH-0057 (manifest)、CH-0266・CH-0272 (W3-17)。
+- 触るファイルに `r2db-api/src/r2db_api/capabilities_document.py`・`r2db-api/src/r2db_api/control_plane.py`・`r2db-api/conformance/conformance_adapter_r2db.py` (括弧書きだけ) と `docs/code-history/r2db-api/control_plane.md` (訂正の記録だけ) (W3-17)、`tools/tests/test_comment_provenance.py` (W3-18。q4 の削除だけ) を足す。`structured.py` は L442 の括弧書き (W3-17) も触る。「触らないファイル」の `control_plane.py` は、この括弧書きを除いて読む。
+- 触るファイルの行の「新規テスト 4 本」は 3 本である。完了条件の表が名指す新規テストは 3 つで、条件 4 は条件 2 のテストを使う。§5.39 の新規テストの数の「3f 4」も 3 と読む。
+- 見出しの括弧書きの名前は backtick で囲む (レビュー N1)。
+
 ### 5.36 WP-3g — r2db の schema の束縛の型と定数 (ST9 の一部、**独立レビュー反映済み**)
 
 **目的**: ST9 の 11 名のうち `bind_schema_operation` を除く 10 名を、leaf `r2db-api/src/r2db_api/schema_binding.py` (§2.1) へ移す。`bind_schema_operation` は developer gate (L578-579) も本体 (L580-975) も `structured.py` に残す。**WP-3f の統合後に着手する。**
@@ -1546,6 +1556,8 @@ tools/dev/gate.py --label wp3d                             # 監督。run_in_bac
 | W3-14 | 3d の完了条件 1 の変異 (`structured.py` の import から `SchemaOutcome` を外す) は、`backend.py` も同じ名前を import するので収集時の ImportError (exit 2) になり、条件 1 だけを壊さない。`storage_outcomes` の import の直後で `SchemaOutcome` を別の class で上書きする変異に置き換える (実装時の監督裁定、2026-09-15)。以後の WP でも、facade の名前を消す変異が他 module の import を壊す場合は、同じく上書きの変異を使う |
 | W3-15 | `cell.py` の `add_field` の docstring (L1326 付近) の「see the module-level comment above `_DELETE_CONSEQUENCE`」(名前が行をまたいで折り返す) は、manifest (§5.34) が漏らした範囲外の位置参照である。L2409-2410 の項と同じ括弧書き「(now in `request_vocabulary.py`)」を付ける。この塊に CH-ID は無い。実装者が見つけた (実装時の監督裁定、2026-09-15) |
 | W3-16 | manifest (§5.34) が漏らした範囲外の位置参照が `MitateDB-api/src/mitatedb_api/http.py` にさらに 2 つあり、どちらも CH-ID が付く: L821 (CH-0221)「(`_TRANSACT_INSERT_KEYS`/`_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS` in `cell.py`)」と L993 (CH-0228)「`cell.py`'s own `_TRANSACT_INSERT_KEYS` already applies to `transact()`」。それぞれに括弧書き「(now in `request_vocabulary.py`)」を付け、`docs/code-history/MitateDB-api/http.md` に §5.27 の形式の訂正の記録を書く (WF-5 (iv))。このため `http.py` と `docs/code-history/MitateDB-api/http.md` は §5.34 の「触らないファイル」から外れる。独立 Opus レビューが見つけた (実装時の監督裁定、2026-09-15) |
+| W3-17 | manifest (§5.35) が漏らした範囲外の位置参照が 8 つある。独立 Opus レビューが見つけた。いずれも `mutation_binding.py` へ移った名前を指すことを確かめ、括弧書き「(now in `mutation_binding.py`)」を付ける: `r2db-api/src/r2db_api/structured.py` L442「`bind_mutation`'s identical check above」、`r2db-api/src/r2db_api/capabilities_document.py` L56「bind_mutation/_apply_upsert」、`r2db-api/src/r2db_api/control_plane.py` L760「(structured.py)」(CH-0266)・L910「(structured.py)」(CH-0272)・L1012「e.g. `bind_mutation`'s」・L1029「`validate_projection`'s」(L1012・L1029 は §5.35 が名前だけとしたものを分類し直す)、`r2db-api/conformance/conformance_adapter_r2db.py` L1395-1396・L1409-1410 (`_MUTATION_KEYS` / `bind_mutation`)。CH-0266・CH-0272 には `docs/code-history/r2db-api/control_plane.md` に §5.27 の形式の訂正の記録を書く。`r2db-api/tests/test_foundation.py` L549-550 の「structured.py:229」は `b4aac70` の時点ですでに古く、既知の穴のまま残す (R-39 と同種) (実装時の監督裁定、2026-09-15) |
+| W3-18 | `tools/tests/test_comment_provenance.py::test_q4_real_repo_postgres_unchanged_is_green` を退役させる。このテストは固定の基点 `5d12799` で `run_base` を走らせ、作業ツリーの `r2db-api/src/r2db_api/postgres.py` と比べていた。基点ですでに CH-ID を持つ塊に正当な位置の括弧書きを足すと、チェッカーの再編集の枝 (`tools/check_comment_provenance.py` の L2246〜L2275 付近) を通る。この枝は古い基点からは決して導けないので、CH-0057 に括弧書きが付くとテストは赤になる (再現: `FAIL (§4.1 (2)) r2db-api/src/r2db_api/postgres.py:1895 basis block for CH-0057 is not derivable ...`)。覆いは `test_0f_both_peers_all_src_rev_vs_itself_is_green` (HEAD の全 CH の塊) と CH-0028 の pin が保つ。採らない案: 基点の貼り直し (それより前の SHA はすべて赤で、コミットは自分の SHA を名指せない)、チェッカーの変更 (同じチェッカーを書き換える R-22 変更セット 0i と衝突する)、括弧書きの移動・省略 (赤になるか、WF-5 (i) に反する)。あわせて: CH-0057 の訂正の記録は、当初 `M-1: ` のラベルの除去を記録の無い除去として織り込んでいた。その除去は変更セット 1 自身の操作 (6) で、すでに導ける。記録は括弧書きだけを足す形に書き直した (レビュー M2) (実装時の監督裁定、2026-09-15) |
 
 
 ## 6. 重なり表と監督裁定

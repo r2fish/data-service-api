@@ -54,7 +54,7 @@ def build_capabilities_document(
             # unique_keys`, `application_catalog` below) -- an
             # entity with no declared uniqueness key still refuses
             # `upsert` with `CAPABILITY_UNSUPPORTED` (structured.py::
-            # bind_mutation/_apply_upsert), but that is a per-entity
+            # bind_mutation (now in `mutation_binding.py`)/_apply_upsert), but that is a per-entity
             # condition the catalog itself communicates, not a
             # service-wide gap `atomic_mutation` needs to qualify.
             "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},

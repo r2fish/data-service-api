@@ -1,5 +1,7 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.12 (2026-09-15)**: §15.1 の末尾に訂正註を足した (R-37 WP-3f の監督裁定 W3-18 による `test_q4_real_repo_postgres_unchanged_is_green` の退役と、着手条件 3 の再確認)。既存の節は書き換えていない。
+- **v1.11 (2026-09-15)**: §15 に変更セット 0i (チェッカーの保護参照の拡張、手元のコピーを検査するテストの置き換え、遡った確認の塊の戻し) の manifest を追記し、疑義 Z0i-1〜Z0i-7 と監督裁定を §15.5 に置いた。設計レビュー 1 を反映した。既存の節は書き換えていない。
 - **v1.10 (2026-09-15)**: 実装担当が §14.4 (候補一覧・判定表・記録) を埋めた (監督がコミット前に確定する)。既存の節は書き換えていない。
 - **v1.9 (2026-09-15)**: §14 に変更セット 6 (r2db `control_main.py` と MitateDB `backend_postgres.py`) の manifest と、起草時の疑義 4 件への監督裁定 (§14.5) を追記し、独立レビューの指摘への監督裁定 Y6-5〜Y6-12 を §14 に反映した。既存の節は書き換えていない。
 - **v1.8 (2026-09-15)**: §13 のレビュー差し戻し 7 件 (監督裁定) を反映した: 安全上の理由の一覧の追加、参照先の grep を src まで広げた参照表、変異 9・12(c) の変異先の固定、0d で残った経緯だけの文の表、参照の文数の数え方、R-37 との重なりの書き直し。
@@ -2714,3 +2716,421 @@ D. 差し戻しと R6-1〜R6-3 で基準のバイト列に戻した塊 (CH-ID �
 | R6-2 | CH-0520 の `I-1` | 残す (R6-1) |
 | R6-3 | 実装担当が裁定なしで基準に残した CH-0508 `N-7`、CH-0524 `R-2 stage 2`、CH-0534 `R-2/B-1` | 基準のまま (R6-1 と同じ)。CH-0508 は日付だけの除去をチェッカーが拒むので欠番 |
 | R6-4 | R6-1 で許される日付の除去のうち、前のパスが触れていなかった箇所 (`control_main.py` step 5b、`backend_postgres.py` L278-308・L406-417・L1006-1036 など) | 本変更セットでは足さない。後の変更セットで扱う。F-ID・peer 相対パス・入れ子の括弧をチェッカーで保護することは候補 0i とする |
+
+## 15. 変更セット 0i — チェッカーの保護参照の拡張と手元コピーのテストの置き換え
+
+正本設計は v0.18 (§9 の 0d〜0h、§9.2、§10.4、§10.5)。実測は `f0637d9` の値 (起草時の main は `d9bc30e` で、差分は roadmap だけ)。共通の規則は §13・§14 を指し、ここには差分だけを書く。§15.5 の監督裁定を反映している。
+
+### 15.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | 変更セット 6 の記録と揺れの調査 (設計 v0.17) が main に統合されている (`f0637d9`) |
+| 2 | §15.5 の監督裁定が本節と設計 §9.2 に反映されている |
+| 3 | `tools/check_comment_provenance.py` と `tools/tests/test_comment_provenance.py` の blob が `f0637d9` から着手時の親コミットまで変わっていない (変わっていれば §15.2 と変異 14〜28 の `old` を取り直す) |
+| 4 | R-37 WP-3e が main に統合されている。その main を着手時の親コミット (以下、基点) とし、§15.2 の遡った確認を基点で取り直して §15.4 に書く (M6) |
+
+**重なり** (設計レビュー 1 の時点。`r37-wp3e` は基点 `b65e97d`、未コミット)
+
+| 比べた相手 | 相手が触るファイル | 重なり |
+|---|---|---|
+| R-37 WP-3e (worktree `r37-wp3e`、R-37 作業指示書 §5.34) | MitateDB `cell.py`・`delete_confirmation.py`・新規 `request_vocabulary.py` とテスト。rework で MitateDB `http.py` L821・L993 (CH-0221・CH-0228) と `docs/code-history/MitateDB-api/http.md` | ×。`http.py` の別の塊が重なるので、0i は WP-3e の統合の後に着手し、その main を基点に §15.2 を取り直す (§15.1 の 4。レビューの実測では WP-3e は遡った確認の塊の集合を変えない) |
+| R-37 WP-3f (R-37 作業指示書 §5.35) | r2db `structured.py`・新規 `mutation_binding.py`・`postgres.py`、`docs/code-history/r2db-api/postgres.md` ほか (§14.1 の表) | ツールだけなら ○。Z0i-4 (A) では r2db `postgres.py` (5 塊) が重なるので、WP-3f と並行しない |
+
+**訂正註 (2026-09-15、R-37 WP-3f の監督裁定 W3-18、本文は書き換えない)**: R-37 WP-3f の裁定 W3-18 (R-37 作業指示書 §5.39) で、`tools/tests/test_comment_provenance.py::test_q4_real_repo_postgres_unchanged_is_green` (q4) を退役させた。0i が `r2db-api/src/r2db_api/postgres.py` の塊 (CH-0003・CH-0058・CH-0066・CH-0070・CH-0100) に予定する戻しも、q4 を赤にするはずだった。§15 は q4 に触れていなかったが、その判断はもう要らない。WP-3f が `tools/tests/test_comment_provenance.py` に加える変更は q4 の削除だけである。0i は着手時に、このテストファイルについての §15.1 の条件 3 を確かめ直す。
+
+### 15.2 選定と実測 (`f0637d9`)
+
+数え方: チェッカーを別 module で読み込んで規則を差し替えた試作 (`tools/` は変えていない)。対象は `f0637d9` の両 peer の `src/` 80 ファイル・5,233 文で、遡った確認は `test_0f_both_peers_all_src_rev_vs_itself_is_green` の Q-4 照合と同じ判定。数は実装の後に実装担当が取り直す。
+
+**規則 1 (F-ID)**
+
+| 形 (実測) | MitateDB | r2db | 計 |
+|---|---|---|---|
+| ハイフン形 (`F-N`、`F-3c`・`F-4b`、`F-4b(i)`・`F-4b(ii)`。ASCII の境界で数える) | 201 | 246 | 447 (うち `review` の経緯トークン 19) |
+| (保護しない形) ハイフン無し `FN` (`Code-review fix F6` など) 52、`F12 (ii)` 1、`F-①` 11 | — | — | 64 |
+
+- F-ID の文字列 literal は両 peer の `ops.py`・`platform_declarations.py` の `"F-1"`〜`"F-16"` (`"F-12"` を除く)・`"F-3c"`・`"F-4b"`。`F-12` は MitateDB `errors.PlatformUpgradePending` の番号で、`F-2`・`F-5`・`F-6`・`F-8` は同じ番号が指摘番号にも使われる。
+
+**規則 2・3 (実在パス)**: 今は実在でなく、規則で実在になる候補の出現数
+
+| 区分 | MitateDB | r2db | 例 |
+|---|---|---|---|
+| basename だけ、一致 2 件以上 (規則 3) | 155 | 167 | `service.py`、`auth.py`、`http.py` |
+| 同上、位置の除去で一致 (Z0i-3。うち 56 / 6 は除去の後の basename が一意で、Z0i-2 ではなく Z0i-3 による) | 119 | 14 | `http.py::_CLASSIFY_ORDER`、`main.py:285` |
+| peer 相対 (規則 2) | 51 | 33 | `migrations/0003_provision_application.sql`、`r2db_api/ops.py` |
+| 同上、位置の除去で一致 (Z0i-3) | 14 | 6 | `r2db-api/src/r2db_api/limits.py:16-20`、`tests/test_audit_query.py::test_…` |
+
+- 他の peer の repo 相対パスで、今すでに実在のもの 4 (例: MitateDB `control_plane.py` の `r2db-api/src/r2db_api/limits.py`)。peer 名 + backtick のファイル名 5 (`` r2db `http.py` ``、`` MitateDB `cell.py` `` など。basename の一致は 1 件 4、2 件以上 1)。
+
+**0d で新たに丸ごと削除できなくなる文** (今は保護参照を持たない文)
+
+| 規則の組 | MitateDB | r2db |
+|---|---|---|
+| 規則 1 (ハイフン形すべて。ASCII の境界) | 90 | 95 |
+| 規則 2・3 (位置の除去なし) | 132 | 124 |
+| 規則 2・3 (位置の除去あり) | 223 | 137 |
+| 規則 1〜4 (規則 1 はハイフン形すべて) | 303 | 225 |
+
+- Z0i-2 (A) の費用: 規則 2・3 で丸ごと削除できなくなる文 132 / 124、遡った確認 17〜21 塊、既存テスト 2 本の期待の反転 (§15.3)。
+
+**規則 4 (入れ子の括弧)**: 出所付きの括弧の中の ID + 枝番 25 か所 (MitateDB 15、r2db 10。チェッカーが `_paren_words_removable` に渡す、ID + 枝番を placeholder にした括弧の文字列で数える)、囲む括弧だけに出所がある裸の ID 2 か所 (MitateDB `platform_upgrades.py` L57 の `D-5`・`I-1`)。今のチェッカーの最大の (4) 縮小を試作が拒む文は 26 文 (MitateDB 16、r2db 10)。
+
+**変更セット 5・6 の基準で見た見逃し** (今のチェッカーは許し、規則で拒む)
+
+| 変更セット (基準) | 箇所 | 見逃し |
+|---|---|---|
+| 6 (`80fad55`) | r2db `control_main.py` L594-599 "Phase 10 WP-6a (design D-5(ii), contract 1.8.0): the CONTROL plane's own ceiling …" | 版数付き文書名と同じ括弧の `D-5(ii)` を消せる (規則 4。R6-1 の「版数付き文書名と同じ括弧の中の条項 ID の喪失」の形)。統合では R6-1 で基準のまま |
+| 6 (`80fad55`) | MitateDB `backend_postgres.py` L136-158・L161・L183-200・L645-659 の `migrations/0003_provision_application.sql` (両 peer に同名、完全一致なし) | 経緯トークンとして消せる (規則 2)。統合では B1 で基準のまま |
+| 6 (`80fad55`) | r2db `control_main.py` L1-194・L362-408・L561-573 の `F-1`〜`F-16` | 裸の ID として消せる (規則 1。§14.4 の監査スクリプトの出力の `REMOVED … id F-n` の行)。統合では A2 で基準のまま |
+| 5 (`3adba35`) | MitateDB `ops.py` L1373-1403 ("Before this fix the SAME `database_name IS NOT NULL` filter …") と L1426 ("Design D-4(b): the `psql` subprocess call shape …") | 最大の (4) 縮小を試作が拒む (規則 4)。統合後の塊には残っている (下の rev 同士の照合で新しい FAIL 0) |
+| 5 (`3adba35`) | MitateDB `ops.py` L1204・L1373 の `r2db_api/ops.py`、L174 の `src/mitatedb_api/ops.py` | 経緯トークンとして消せる (規則 2) |
+
+**遡った確認** (`f0637d9` の CH-ID の塊。塊の数)
+
+| 規則の組 | 導けなくなる塊 |
+|---|---|
+| 規則 1 (ハイフン形すべて / Z0i-1 (B)) | 14 / 5 |
+| 規則 2 (位置の除去なし / あり) | 8 / 11 |
+| 規則 3 (位置の除去なし / あり) | 17 / 21 |
+| 規則 2 + 3 (位置の除去なし / あり) | 25 / 30 |
+| 規則 4 | 19 |
+| ラベルの除外 2 の文単位の検査 (M3) だけ | 0 |
+| **裁定の組** (規則 1 (B) + 2 + 3 + 位置の除去 + 4 + M3) | **52** |
+| 規則 3 を採らない組 | 34 |
+
+- 裁定の前の規則 1 (B) (`review (F-n)` を含まない) では、規則 1 が 6、裁定の組が 53、規則 3 を採らない組が 35 だった。差は CH-0198 (受け皿の `round-1 review (F-2)`) だけで、ASCII の境界 (M2) と M3 は塊を増やさない。
+
+裁定の組の 52 塊 (括弧は規則。(位置) は位置の除去だけで拒まれる。変更セット 1: 4、2: 14、3: 17、4: 17。5・6: 0):
+
+- MitateDB `backend_sqlite.py` (4): CH-0336 (2)、CH-0342 (1・4)、CH-0357 (3・位置)、CH-0371 (位置)
+- MitateDB `http.py` (9): CH-0183 (2)、CH-0184 (3)、CH-0185 (3)、CH-0192 (4)、CH-0193 (4)、CH-0196 (3)、CH-0209 (2)、CH-0213 (2・位置)、CH-0230 (4)
+- r2db `capabilities_document.py` (4): CH-0137 (4)、CH-0141 (3)、CH-0142 (4)、CH-0174 (4)
+- r2db `control_plane.py` (8): CH-0239 (2)、CH-0243 (4)、CH-0247 (3)、CH-0255 (4)、CH-0257 (4)、CH-0260 (4)、CH-0280 (3)、CH-0287 (3)
+- r2db `ops.py` (13): CH-0288 (2)、CH-0290 (3)、CH-0292 (位置)、CH-0295 (3)、CH-0296 (4)、CH-0302 (4)、CH-0308 (3)、CH-0309 (3)、CH-0310 (3)、CH-0314 (1)、CH-0315 (1)、CH-0320 (3)、CH-0329 (4)
+- r2db `postgres.py` (5): CH-0003 (3・位置)、CH-0058 (1)、CH-0066 (3)、CH-0070 (4)、CH-0100 (3)
+- r2db `service.py` (8): CH-0103 (3・4)、CH-0116 (4)、CH-0120 (2)、CH-0124 (4)、CH-0127 (1)、CH-0146 (4)、CH-0148 (3)、CH-0178 (2)
+- r2db `service_results.py` (1): CH-0168 (2)
+
+- ハイフン形すべての規則 1 だけで加わる 9 塊 (CH-0034、CH-0075、CH-0110、CH-0111、CH-0198、CH-0201、CH-0206 と、裁定の組に別の規則で入る CH-0066・CH-0168) は、`review F-2`・`review (F-2)`、`Review round F-5`・`F-6`・`F-8` の指摘番号の文である。
+- 拒む理由: 49 塊は文の丸ごと削除、3 塊 (CH-0070、CH-0302、CH-0329) は順序を保つ一致なし (規則 4。ID を戻せば足りる)。
+- CH-0058 (r2db `postgres.py`): 試作では、変更セット 1 が残した断片 `(round; mirrors …` が経緯トークン `review round F-8` の一部だけを残すので導けない。`(review round F-8; mirrors …` にした形は、試作で §15.3 の監査の (i)〜(iii) を満たす (Z0i-4a)。
+- (基準, merge) の組の rev 同士の照合 (裁定の組で取り直した): 変更セット 5 (`3adba35` → `db82663`) と 6 (`80fad55` → `42842de`) の 4 ファイルは新しい FAIL が 0 行。新しい FAIL は変更セット 1〜4 のファイルにだけ出た。
+- 行番号 pin: r2db `_BACKEND_LAYER_ALLOWLIST` に `postgres.py` 1 行。MitateDB の allowlist は `backend_postgres.py` の 20 行だけで、上の 8 ファイルは入っていない。
+
+### 15.3 Manifest
+
+**目的**: 設計 §9.2 の規則 1〜4 をチェッカーに入れ、0i の規則で導けなくなる統合済みの塊の保護参照を戻し、0e・0f の手元のコピーを検査するテストを実コードへの変異に置き換える。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `tools/check_comment_provenance.py`、`tools/tests/test_comment_provenance.py`、本書 §15.4、§15.2 の 8 ファイルのコメントと docstring (§15.4 の一覧の塊の残した文だけ)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` (`_BACKEND_LAYER_ALLOWLIST` の `postgres.py` の行番号だけ) | 他の `tools/` (`tools/dev/` を含む)、他の `tools/tests/`、両 peer の他の `src/`・`tests/`・`conformance/`、`conformance-tests/`、受け皿 `docs/code-history/` (戻す場合も書き換えない。戻す文は写しの中にある)、`docs/design/` (記録は監督の別コミット)、roadmap、`_ISOMORPHIC_TARGETS` |
+
+| 項目 | 内容 |
+|---|---|
+| 規則の実装 | 設計 §9.2 の 1〜4 だけ。保護参照の判定と経緯トークンのパターンはそれぞれ 1 つにし、(3) の丸ごと削除、(4) の括弧、(6) のラベル、0g の訂正で共有する |
+| 消すテスト (手元のコピー、5 本) | `test_0e_mutations_removing_each_predicate_b_rule_is_red`、`test_0f_mutations_removing_rules_6_7_8_is_red`、`test_0f_item1_mutation_reverting_to_greedy_regex_is_red`、`test_0f_item2_mutation_dropping_space_guard_on_rule6_is_red`、`test_0f_item3_mutation_y2_dropping_prev_char_guard_is_red` |
+| 後半だけ消すテスト (2 本) | `test_0e_mutation_identifier_set_from_head_instead_of_base_is_red`・`test_0e_mutation_identifier_set_excluding_docs_is_red` の、手元で識別子集合を作り直して `_is_allowed_reduction` に渡す後半 (`wrong_identifier_set`)。前半 (`_run_base` が exit 0) は残す。名前は Z0i-5 |
+| 期待を変えるテスト (Z0i-2 (A)) | `test_v072_ambiguous_basename_filename_removable_is_green` (2 件一致の `README.md` が出所になり赤) と、`test_v072_mutation_basename_uniqueness_removed_would_break_control_mapping` の 2 件一致の assert。`test_0i_rule3_ambiguous_basename_is_real_is_red` に置き換え、旧名を §15.4 に書く |
+| 新規テスト | 規則 1: `test_0i_rule1_fid_sentence_whole_deletion_is_red`、`test_0i_rule1_cjk_adjacent_fid_sentence_whole_deletion_is_red` (`F-12だけは`。M2)、`test_0i_rule1_fid_in_parens_not_removable_is_red`、`test_0i_rule1_fid_label_not_removable_is_red`、`test_0i_rule1_review_fid_is_history_token_is_green` (Z0i-1 (B)。括弧の中、文の丸ごと削除、`review (F-n)` を 1 件ずつ assert)、`test_0i_rule1_unhyphenated_and_circled_forms_unchanged_is_green`、`test_0i_rule1_correction_cannot_drop_fid_is_red`。規則 2: `test_0i_rule2_peer_relative_path_is_real_is_red`、`test_0i_rule2_segment_boundary_required_is_green` (パスの途中の segment で切れる接尾辞 `rity/CONTROL_MAPPING.md` は実在でなく消せる。M5)、`test_0i_rule2_location_suffix_stripped_is_real_is_red` (Z0i-3 (A)。`::Cls::meth` を含む)、`test_0i_rule2_peer_relative_sentence_whole_deletion_is_red`。規則 3: `test_0i_rule3_ambiguous_basename_is_real_is_red` (Z0i-2 (A))。規則 4: `test_0i_rule4_id_branch_in_tagged_paren_not_removable_is_red`、`test_0i_rule4_enclosing_paren_tag_protects_inner_bare_id_is_red`、`test_0i_rule4_history_token_branch_in_tagged_paren_removable_is_green`。ラベル (M3): `test_0i_label_with_real_path_not_removable_is_red`。fixture の文は設計 §9.2 の例と §15.2 の実物の形 (`(design D-5(ii), contract 1.8.0)`、`migrations/0003_provision_application.sql`、`review F-2`、`F-4b`) にする |
+| 非空虚 | 新規テストは赤の側と緑の側をそれぞれ 1 件以上 assert する (`OPERATING_CONDITIONS.md` §1.5 の 32)。規則 4 で緑のままの既存 fixture `test_0c_rule5_slash_and_branch_combo_is_green` (`(I-6/D-5 (5))`) は変えない |
+| 遡った確認の塊 (Z0i-4 (A)) | §15.4 の一覧の塊 (基点で取り直した塊) の失われた保護参照を、ツールと同じ統合で戻す。(1) 戻す単位は文・括弧・ラベルの箇所全体とし、訂正を当てた受け皿の基準から逐語で取り、基準の位置に入れる。(2) スクリプトで折り返し直さない。隣の行は変えない。(3) 塊ごとに Opus が文面を判定し、判定を §15.4 に書く。(4) 戻した後、31 の監査が exit 0、13 の監査照合が成り立つ |
+| CH-0058 (Z0i-4a) | 実装担当は先に、0i のチェッカーが CH-0058 を拒む理由を実測して §15.4 に書く。理由が r2db `postgres.py` の壊れた断片 `(round; mirrors …` でなければ監督に上げる。断片なら `review round F-8` を戻して `(review round F-8; mirrors …` にし、`{scratchpad}/rulings-r4.md` は戻さない (製品コードに `{scratchpad}` の参照を足さない。`OPERATING_CONDITIONS.md` §1.9 の 62)。監査の (ii) を満たさない場合は、監査スクリプトの唯一の名前付き例外 (`EXCEPTION` 行) とし、前後の文字列を §15.4 に逐語で書く |
+| 40a・40b (Z0i-4 (A)) | 40a: 両 peer の suite を前後 2 回。40b: r2db `postgres.py` の行が動くので、`_BACKEND_LAYER_ALLOWLIST` の `postgres.py` 1 行を実測で更新する |
+| 統合 | `src/` の行数が変わるので、root gate を通してから `finalize.py --tools-tests` で統合する (設計 §10.2) |
+
+**完了条件 ↔ 変異** (変異はすべて `tools/dev/mutate.py` で実コードに当て、手元のコピーには当てない。1〜12 (1a・3a を含む) の `old`/`new` は実装の後の行で決めて §15.4 に記録する。14〜28 は下の spec のとおり。赤は `mutate.py` の `pytest -x` の exit 1)
+
+| # | 完了条件 | 変異 | 赤になる test (`tools/tests/test_comment_provenance.py::`) |
+|---|---|---|---|
+| 1 | 規則 1: F-ID を含む文は丸ごと消せない | 共有の保護接頭辞の判定から `"F-"` を外す | `test_0i_rule1_fid_sentence_whole_deletion_is_red` |
+| 1a | 保護 ID の抽出は ASCII の境界 (M2) | 共有の保護 ID の抽出パターンの境界を Unicode の `\b` に戻す | `test_0i_rule1_cjk_adjacent_fid_sentence_whole_deletion_is_red` |
+| 2 | 規則 1: 括弧の中の F-ID は消せない | 1 と同じ (共有の判定を壊し、括弧の用途の test で赤を確かめる。m7) | `test_0i_rule1_fid_in_parens_not_removable_is_red` |
+| 3 | 規則 1: F-ID を含むラベルは消せない | 1 と同じ (ラベルの用途の test で確かめる) | `test_0i_rule1_fid_label_not_removable_is_red` |
+| 3a | ラベルの除外 2 は文単位の保護参照の検査も呼ぶ (M3) | ラベル規則から文単位の検査の呼び出しを外す | `test_0i_label_with_real_path_not_removable_is_red` |
+| 4 | 規則 1: `review F-n`・`review round F-n`・`review (F-n)` は経緯トークンで、その span は保護 ID の抽出の前に取り除く (Z0i-1 (B)) | 共有の経緯トークンのパターンを外す | `test_0i_rule1_review_fid_is_history_token_is_green` |
+| 5 | 規則 1: 訂正の記録は F-ID を減らさない (0g の 5) | 1 と同じ (0g の用途の test で確かめる) | `test_0i_rule1_correction_cannot_drop_fid_is_red` |
+| 6 | 規則 2: 末尾一致で実在 | 末尾一致を外し、完全一致だけにする | `test_0i_rule2_peer_relative_path_is_real_is_red` |
+| 7 | 規則 2: 一致は `/` の境目だけ | 末尾一致が `/` の境目を見ないようにする (パスの途中の segment で切れる接尾辞も実在になる。M5) | `test_0i_rule2_segment_boundary_required_is_green` |
+| 8 | 規則 2: 位置を除いてから判定 (Z0i-3 (A)) | 位置の除去をやめる | `test_0i_rule2_location_suffix_stripped_is_real_is_red` |
+| 9 | 規則 3: basename は 1 件以上で実在 (Z0i-2 (A)) | 一致数の条件を `== 1` に戻す | `test_0i_rule3_ambiguous_basename_is_real_is_red` |
+| 10 | 規則 4: 出所付きの括弧の ID + 枝番は消せない | ID + 枝番の組を出所に関わらず消せる判定に戻す | `test_0i_rule4_id_branch_in_tagged_paren_not_removable_is_red` |
+| 11 | 規則 4: 囲む括弧の出所を見る | 囲む括弧の出所を見ない判定に戻す | `test_0i_rule4_enclosing_paren_tag_protects_inner_bare_id_is_red` |
+| 12 | 規則 4: 枝番付きの経緯トークンは消せる | 経緯トークンの例外を外す | `test_0i_rule4_history_token_branch_in_tagged_paren_removable_is_green` |
+| 13 | 統合済みの塊が 0i の規則で導ける (Z0i-4 (A)) | **監査照合** (M4): 0i のチェッカーを入れた作業ツリーで、コミット前 (HEAD = 基点、戻す前の src) に `test_0f_both_peers_all_src_rev_vs_itself_is_green` が赤で、出力の CH-ID が §15.4 の一覧と一致する。コミット後の HEAD で緑。両方の実行コマンドと集計行を §15.4 に書く (§1.5 の 40) | — |
+| 14 | 述語 B 条件 1 | `b14-rule1` | `test_0e_underscore_identifier_zero_space_join` |
+| 15 | 条件 2 | `b15-rule2` | `test_0e_hyphen_compound_zero_space_join` |
+| 16 | 条件 3 | `b16-rule3` | `test_0e_identifier_set_guard_f1_f7_red_fixtures` |
+| 17 | 条件 4 | `b17-rule4` | `test_0e_dot_py_extension_outside_backtick_zero_space_join` |
+| 18 | 条件 5 | `b18-rule5` | `test_0e_camelcase_split_inside_backtick_zero_space_join` |
+| 19 | 条件 5 の識別子集合の照合 | `b19-rule5-identifier-set` | `test_0e_is_none_and_except_foundationerror_join_with_space_stays_green` |
+| 20 | backtick の内外の判定 | `b20-backtick-parity` | `test_0e_sentence_end_period_before_capitalized_word_keeps_space` |
+| 21 | 条件 6 | `b21-rule6` | `test_0f_rule6_slash_boundary_red_and_green` |
+| 22 | 条件 7 | `b22-rule7` | `test_0f_rule7_paren_bracket_equals_inside_backtick_red_and_green` |
+| 23 | 条件 8 | `b23-rule8` | `test_0f_rule8_opening_backtick_immediately_wrapped_red_and_green` |
+| 24 | 0f 項目 1 (backtick を前から対にする) | `b24-item1-pairing` | `test_0f_item1_real_path_between_backtick_spans_is_protected` |
+| 25 | 0f 項目 2 (条件 6 の `/` の前の空白) | `b25-item2-space-guard` | `test_0f_item2_rule6_slash_boundary_requires_no_space_before_slash` |
+| 26 | 0f 項目 3 (条件 7 の直前の文字) | `b26-item3-prev-char-guard` | `test_0f_item3_rule7_prev_char_guard_pinned_by_fixture` |
+| 27 | 識別子集合は基準の rev から読む | `b27-identifier-set-head` | `test_0e_mutation_identifier_set_from_head_instead_of_base_is_red` (前半。名前は Z0i-5) |
+| 28 | 識別子集合に docs を含む | `b28-identifier-set-no-docs` | `test_0e_mutation_identifier_set_excluding_docs_is_red` (前半。同上) |
+| 29 | 手元のコピーを検査するテストが残っていない | **監査照合**: `grep -nE "def boundary_without\|def mutated_rule\|def buggy_filename_candidates\|wrong_identifier_set" tools/tests/test_comment_provenance.py` が 0 行 | — |
+| 30 | 消したテストの性質の証拠が減っていない | **監査照合**: 消した 5 本と後半 2 本が固定していた性質 (条件 1〜8、backtick の内外、識別子集合の 3 点、0f 項目 1〜3) が 14〜28 に 1 行ずつ在り、`mutate.py` の結果がすべて赤 | — |
+| 31 | 戻した塊が一覧どおりで、箇所の挿入だけ (Z0i-4 (A)) | **監査照合 (固定スクリプト)**: `ccp0i_restore_audit.py --base <基点> --expect <§15.4 の一覧>` の出力に `FAIL` 行が 0、exit 0。出力を §15.4 に逐語で貼る | — |
+| 32 | `--register`・`check_doc_refs`・公開値の検査が緑、コミット後の HEAD で `tools/tests` が緑 | **監査照合**: 各コマンドの出力の行と `finalize.py --tools-tests` の行 | — |
+| 33 | 対応の無い行が無い | **監査照合** (§1.5 の 40) | — |
+
+- 14〜28 の赤になる test は、起草時にコードを読んで予想したもので、`mutate.py` の結果で確定する。`old` は `f0637d9` のチェッカーでそれぞれ 1 回だけ現れ、test はそれぞれ 1 本だけ在ることを起草時に確かめた。実装担当は、実装したチェッカーの上で各変異の `old` が 1 回だけ現れることを、`mutate.py` を流す前に 1 回確かめる (m9)。
+
+**変異 spec (14〜28)** (`$SP/ccp0i-mutations.json` に下の内容で作り、1〜12 (1a・3a を含む) の行を §15.4 の決定に従って足す)
+
+```json
+{"mutations": [
+  {"id": "b14-rule1", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_underscore_identifier_zero_space_join"], "file": "tools/check_comment_provenance.py", "old": "if last == \"_\" and _is_word_char(prev) and _is_word_char(nxt):", "new": "if False and last == \"_\" and _is_word_char(prev) and _is_word_char(nxt):"},
+  {"id": "b15-rule2", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_hyphen_compound_zero_space_join"], "file": "tools/check_comment_provenance.py", "old": "if last == \"-\" and prev != \"-\" and _is_word_char(prev) and _is_word_char(nxt):", "new": "if False and last == \"-\" and prev != \"-\" and _is_word_char(prev) and _is_word_char(nxt):"},
+  {"id": "b16-rule3", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_identifier_set_guard_f1_f7_red_fixtures"], "file": "tools/check_comment_provenance.py", "old": "if last == \".\" and inside_backticks and _is_word_char(nxt):", "new": "if False and last == \".\" and inside_backticks and _is_word_char(nxt):"},
+  {"id": "b17-rule4", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_dot_py_extension_outside_backtick_zero_space_join"], "file": "tools/check_comment_provenance.py", "old": "if m and m.group(0).lower() in _JOIN_EXTENSIONS:", "new": "if False and m and m.group(0).lower() in _JOIN_EXTENSIONS:"},
+  {"id": "b18-rule5", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_camelcase_split_inside_backtick_zero_space_join"], "file": "tools/check_comment_provenance.py", "old": "if inside_backticks and last.isalpha() and last.islower() and nxt.isalpha() and nxt.isupper():", "new": "if False and inside_backticks and last.isalpha() and last.islower() and nxt.isalpha() and nxt.isupper():"},
+  {"id": "b19-rule5-identifier-set", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_is_none_and_except_foundationerror_join_with_space_stays_green"], "file": "tools/check_comment_provenance.py", "old": "if joined in identifier_set:", "new": "if True:"},
+  {"id": "b20-backtick-parity", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_sentence_end_period_before_capitalized_word_keeps_space"], "file": "tools/check_comment_provenance.py", "old": "inside_backticks = accumulated.count(\"`\") % 2 == 1", "new": "inside_backticks = accumulated.count(\"`\") % 2 == 0"},
+  {"id": "b21-rule6", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0f_rule6_slash_boundary_red_and_green"], "file": "tools/check_comment_provenance.py", "old": "if last == \"/\" and prev != \" \" and (_is_word_char(nxt) or nxt == \"`\"):", "new": "if False and last == \"/\" and prev != \" \" and (_is_word_char(nxt) or nxt == \"`\"):"},
+  {"id": "b22-rule7", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0f_rule7_paren_bracket_equals_inside_backtick_red_and_green"], "file": "tools/check_comment_provenance.py", "old": "if inside_backticks and last in \"([=\" and (_is_word_char(prev) or prev in \"([\") and nxt != \" \":", "new": "if False and inside_backticks and last in \"([=\" and (_is_word_char(prev) or prev in \"([\") and nxt != \" \":"},
+  {"id": "b23-rule8", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0f_rule8_opening_backtick_immediately_wrapped_red_and_green"], "file": "tools/check_comment_provenance.py", "old": "if last == \"`\" and inside_backticks and nxt != \" \":", "new": "if False and last == \"`\" and inside_backticks and nxt != \" \":"},
+  {"id": "b24-item1-pairing", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0f_item1_real_path_between_backtick_spans_is_protected"], "file": "tools/check_comment_provenance.py", "old": "return [s[2] for s in _filename_span_matches(text)]", "new": "return [m.group(0) for m in _FILENAME_CANDIDATE_RE.finditer(text)]"},
+  {"id": "b25-item2-space-guard", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0f_item2_rule6_slash_boundary_requires_no_space_before_slash"], "file": "tools/check_comment_provenance.py", "old": "if last == \"/\" and prev != \" \" and (_is_word_char(nxt) or nxt == \"`\"):", "new": "if last == \"/\" and (_is_word_char(nxt) or nxt == \"`\"):"},
+  {"id": "b26-item3-prev-char-guard", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0f_item3_rule7_prev_char_guard_pinned_by_fixture"], "file": "tools/check_comment_provenance.py", "old": "if inside_backticks and last in \"([=\" and (_is_word_char(prev) or prev in \"([\") and nxt != \" \":", "new": "if inside_backticks and last in \"([=\" and nxt != \" \":"},
+  {"id": "b27-identifier-set-head", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_mutation_identifier_set_from_head_instead_of_base_is_red"], "file": "tools/check_comment_provenance.py", "old": "identifier_set = _tracked_identifier_set(repo_root, rev)", "new": "identifier_set = _tracked_identifier_set(repo_root, \"HEAD\")"},
+  {"id": "b28-identifier-set-no-docs", "expect": "red", "tests": ["tools/tests/test_comment_provenance.py::test_0e_mutation_identifier_set_excluding_docs_is_red"], "file": "tools/check_comment_provenance.py", "old": "\"--\", \"r2db-api/src\", \"MitateDB-api/src\", \"spec\", \"docs\"],", "new": "\"--\", \"r2db-api/src\", \"MitateDB-api/src\", \"spec\"],"}
+]}
+```
+
+**戻した塊の監査** (`$SP/ccp0i_restore_audit.py` に下の本文のとおり作り、変えない)
+
+- `--base` は基点 (既定値なし)、`--expect` は §15.4 の一覧。検査は、コード・CH-ID の無い塊・CH-ID の集合が不変、(iv) 変わった CH-ID の集合が `--expect` と一致、塊ごとに (i) 0i の前のチェッカーで受け皿から導ける、(ii) 基点の塊の文字列が新しい塊の文字列の部分列 (挿入だけ。折り返し直すと赤)、(iii) 0i のチェッカー (`_apply_corrections` を含む) で受け皿から導ける。(ii) の名前付き例外は CH-0058 だけ (Z0i-4a)。
+- 変えていない作業ツリーで確かめた: `--base f0637d9 --expect <§15.2 の 52 塊>` は (iv) の `FAIL` 52 行と `SUMMARY changed_blocks=0 restored_ok=0 exceptions=0 fail=52`、exit 1。`--expect ""` は `fail=0`、exit 0。`--base` なしは argparse の exit 2。
+
+```python
+"""ccp0i_restore_audit.py -- change set 0i, Z0i-4 (A): audit of restored CH-ID blocks (work order §15.3 row 31).
+
+Every tracked .py under both peers' src/ at --base (the start parent) is compared with the new side (the
+working tree, or --head REV). PRE-0i checker = tools/check_comment_provenance.py at --base (git show);
+NEW checker = the worktree's own file. Companion and corrections = the worktree's docs/code-history.
+  code  ast_signature, the ordered CH-ID-less blocks and the CH-ID set of each file are unchanged
+  (iv)  the set of CH-IDs whose block text changed equals --expect (the work order §15.4 list)
+  for each changed block:
+  (i)   PRE-0i: corrected companion -> new retained text is an allowed reduction
+  (ii)  the base block text is a character subsequence of the new block text (pure insertion, no reflow)
+  (iii) NEW (its own _apply_corrections and _is_allowed_reduction): corrected companion -> new retained text
+CH-0058 is the single named exception to (ii) (ruling Z0i-4a): a miss there prints EXCEPTION with both texts
+verbatim instead of FAIL; (i), (iii) and (iv) still apply to it.
+Prints RESTORED / EXCEPTION / FAIL rows and SUMMARY. Exit 0 only when there is no FAIL row.
+Usage: python3 ccp0i_restore_audit.py -C WT --base START_PARENT --expect CH-0003,CH-0058,... [--head REV]
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import re
+import subprocess
+import sys
+import types
+from pathlib import Path
+
+SUBSEQUENCE_EXCEPTION = "CH-0058"
+
+
+def git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout
+
+
+def load_new(wt: Path) -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location("cp_new", wt / "tools" / "check_comment_provenance.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["cp_new"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_old(wt: Path, base: str) -> types.ModuleType:
+    mod = types.ModuleType("cp_old")
+    mod.__file__ = str(wt / "tools" / "check_comment_provenance.py")
+    sys.modules["cp_old"] = mod
+    exec(compile(git(wt, "show", f"{base}:tools/check_comment_provenance.py"), "cp_old", "exec"), mod.__dict__)
+    return mod
+
+
+def is_subsequence(small: str, big: str) -> bool:
+    it = iter(big)
+    return all(ch in it for ch in small)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-C", dest="wt", required=True)
+    ap.add_argument("--base", required=True)
+    ap.add_argument("--head", default=None)
+    ap.add_argument("--expect", required=True, help="comma-separated CH-IDs (work order §15.4)")
+    ns = ap.parse_args()
+    wt = Path(ns.wt).resolve()
+    expect = frozenset(x.strip() for x in ns.expect.split(",") if x.strip())
+    bad_ids = sorted(x for x in expect if not re.fullmatch(r"CH-\d{4}", x))
+    if bad_ids:
+        print(f"FAIL\t--expect\tmalformed {bad_ids}")
+        return 1
+    old_cp, new_cp = load_old(wt, ns.base), load_new(wt)
+    real = old_cp._tree_paths(wt, ns.base)
+    ids = old_cp._tracked_identifier_set(wt, ns.base)
+    paths = [p for p in git(wt, "ls-tree", "-r", "--name-only", ns.base, "--", "r2db-api/src", "MitateDB-api/src").split()
+             if p.endswith(".py")]
+    lookups: dict[str, tuple[dict, dict]] = {}
+    changed: set[str] = set()
+    restored = exceptions = fails = 0
+
+    def fail(msg: str) -> None:
+        nonlocal fails
+        fails += 1
+        print(f"FAIL\t{msg}")
+
+    print(f"BASE {ns.base} HEAD {ns.head or 'worktree'} FILES {len(paths)} EXPECT {len(expect)}")
+    for rel in paths:
+        peer = rel.split("/")[0]
+        old_src = git(wt, "show", f"{ns.base}:{rel}")
+        if ns.head:
+            new_src = git(wt, "show", f"{ns.head}:{rel}")
+        elif (wt / rel).is_file():
+            new_src = (wt / rel).read_text(encoding="utf-8")
+        else:
+            fail(f"{rel}\tmissing on the new side")
+            continue
+        if old_src == new_src:
+            continue
+        if old_cp.ast_signature(old_src) != old_cp.ast_signature(new_src):
+            fail(f"{rel}\tcode changed")
+        ob, nb = old_cp.extract_all_blocks(old_src), old_cp.extract_all_blocks(new_src)
+        if [b.dedented for b in ob if b.history_id is None] != [b.dedented for b in nb if b.history_id is None]:
+            fail(f"{rel}\tCH-ID-less blocks changed")
+        old_by_id = {b.history_id: b for b in ob if b.history_id}
+        new_by_id = {b.history_id: b for b in nb if b.history_id}
+        if set(old_by_id) != set(new_by_id):
+            fail(f"{rel}\tCH-ID set changed {sorted(set(old_by_id) ^ set(new_by_id))}")
+        if peer not in lookups:
+            lookups[peer] = (new_cp._load_companion_lookup(wt, peer), new_cp._load_corrections_lookup(wt, peer)[0])
+        comp, corr = lookups[peer]
+        for hid in sorted(set(old_by_id) & set(new_by_id)):
+            o, b = old_by_id[hid], new_by_id[hid]
+            if o.dedented == b.dedented:
+                continue
+            changed.add(hid)
+            if hid not in comp:
+                fail(f"{rel}\tL{b.start_line}\t{hid}\tno companion section")
+                continue
+            retained = b.retained_text or ""
+            basis_old, err_old = old_cp._apply_corrections(b.kind, comp[hid], corr.get(hid, []), real, ids)
+            basis_new, err_new = new_cp._apply_corrections(b.kind, comp[hid], corr.get(hid, []), real, ids)
+            checks = {
+                "i": not err_old and old_cp._is_allowed_reduction(b.kind, basis_old, retained, real, ids)[0],
+                "ii": is_subsequence(o.dedented, b.dedented),
+                "iii": not err_new and new_cp._is_allowed_reduction(b.kind, basis_new, retained, real, ids)[0],
+            }
+            if not checks["ii"] and hid == SUBSEQUENCE_EXCEPTION:
+                exceptions += 1
+                checks["ii"] = True
+                print(f"EXCEPTION\t{rel}\tL{b.start_line}\t{hid}\t(ii) before={o.dedented!r}\tafter={b.dedented!r}")
+            bad = [k for k, v in checks.items() if not v]
+            if bad:
+                fail(f"{rel}\tL{b.start_line}\t{hid}\tfailed={','.join(bad)}")
+            else:
+                restored += 1
+                print(f"RESTORED\t{rel}\tL{b.start_line}\t{hid}\ti,ii,iii ok")
+    for hid in sorted(expect - changed):
+        fail(f"(iv)\t{hid}\tin --expect but unchanged")
+    for hid in sorted(changed - expect):
+        fail(f"(iv)\t{hid}\tchanged but not in --expect")
+    print(f"SUMMARY changed_blocks={len(changed)} restored_ok={restored} exceptions={exceptions} fail={fails}")
+    return 0 if fails == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+**検証コマンドと期待形** (`WT` は監督が割り当てる worktree、Bash の timeout 600000)
+
+```bash
+tools/dev/pt.py -C "$WT" -- tools/tests -q                   # 着手前は失敗 0。コミット前は 13 の 1 本だけ赤
+tools/dev/mutate.py "$SP/ccp0i-mutations.json" -C "$WT"      # 1〜12 (1a・3a を含む)・14〜28 の各行 expect: red
+python3 tools/check_comment_provenance.py --register          # exit 0
+python3 tools/check_doc_refs.py                               # exit 0
+python3 tools/public_value_scan.py <触ったファイル>            # total_flagged=0
+tools/dev/pt.py -C "$WT" -- tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green -q  # 13: コミット前は赤、コミット後の HEAD で緑
+python3 "$SP/ccp0i_restore_audit.py" -C "$WT" --base <基点> --expect <§15.4 の一覧>  # 31: exit 0、fail=0。出力を §15.4 に逐語で貼る
+tools/dev/pt.py -C "$WT" -- r2db-api/tests -q                 # 40a の前後。failed/skipped/xfailed 0、passed 数一致
+tools/dev/pt.py -C "$WT" -- MitateDB-api/tests -q             # 同上
+tools/dev/pt.py -C "$WT" -- conformance-tests -q              # 同上
+tools/dev/gate.py -C "$WT" --label ccp0i                      # 監督。run_in_background
+# 統合 (監督。gate の通過後)
+tools/dev/finalize.py -C "$WT" --branch ccp-0i --allow 'tools/check_comment_provenance.py' --allow 'tools/tests/test_comment_provenance.py' --allow 'docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md' -m "$SP/msg-ccp0i.txt" --tools-tests
+# 上に次の --allow を足す
+#   --allow 'MitateDB-api/src/mitatedb_api/backend_sqlite.py' --allow 'MitateDB-api/src/mitatedb_api/http.py'
+#   --allow 'r2db-api/src/r2db_api/capabilities_document.py' --allow 'r2db-api/src/r2db_api/control_plane.py'
+#   --allow 'r2db-api/src/r2db_api/ops.py' --allow 'r2db-api/src/r2db_api/postgres.py'
+#   --allow 'r2db-api/src/r2db_api/service.py' --allow 'r2db-api/src/r2db_api/service_results.py'
+#   --allow 'r2db-api/tests/test_l1_details_vocabulary_ast_scan.py'
+```
+
+**使用テンプレート**: **2** → **5** → **6**。**変更クラス**: **B** (ツールと自己テスト。`src/` の変更はコメントと docstring だけ)。
+
+### 15.4 記録 (実装担当が埋め、監督がコミット前に確定する)
+
+| 項目 | 前 (`f0637d9`) | 後 |
+|---|---|---|
+| 規則 1〜4 の実装 (関数と行) | — | |
+| 新規テスト (名前と数) | — | |
+| 消したテスト・後半を消したテスト・改名 (旧名 → 新名) | — | |
+| 期待を変えたテスト (Z0i-2) | — | |
+| `tools/tests` の集計行 (`pt.py`) | | |
+| 変異 1〜12 (1a・3a を含む) の `old` / `new`、実装したチェッカーの上での `old` の再確認 (m9) | — | |
+| `mutate.py` の表 (id / 変異 / 期待 / 結果 / ログの実行時刻とファイル / ログの行) | — | |
+| 規則ごとの件数の取り直し (§15.2 の表と同じ区分) | §15.2 | |
+| 遡った確認の取り直し (基点。CH-ID の一覧 = 戻す塊 = `--expect`) | `f0637d9` の試作で 52 塊 (§15.2) | |
+| CH-0058 を 0i のチェッカーが拒む理由 (実測。Z0i-4a) | — | |
+| 塊ごとの Opus の文面の判定 (CH-ID / 戻した箇所 / 判定) | — | |
+| 戻した塊 (`ccp0i_restore_audit.py` の出力を逐語。CH-0058 を (ii) の例外にした場合は前後の文字列を含む) | — | |
+| 13 の監査照合 (コミット前の赤の CH-ID と集計行、コミット後の緑の集計行、各コマンド) | — | |
+| `_BACKEND_LAYER_ALLOWLIST` の `postgres.py` の行 (Z0i-4 (A)) | | |
+| 40a の集計行 (Z0i-4 (A)) | | |
+| `--register` / `check_doc_refs.py` / `public_value_scan.py` の出力の行 | | |
+| root gate と `finalize.py --tools-tests` の行 (監督) | — | |
+
+### 15.5 疑義と監督裁定
+
+| # | 疑義 | 選択肢 | 推奨と理由 |
+|---|---|---|---|
+| Z0i-1 | 規則 1 の F-ID の範囲。ハイフン形は実行時の検査コードと、同じ番号の指摘番号 (`review F-2`、`Review round F-5`) の両方に使われている (§15.2) | (A) ハイフン形すべて (遡り 14 塊)。(B) ハイフン形、ただし直前が `review` / `review round` のものは `review` と合わせて経緯トークン (遡り 5 塊。§15.2)。(C) (A) にハイフン無しの `FN` と `F-①` も足す。(D) 基準の tree の `src/` の文字列 literal に在る F-ID だけ (`f0637d9` では `F-12` を除いて literal と同じ番号で、指摘番号の `F-2`・`F-5`・`F-6`・`F-8` とも区別できない) | **(B)**。検査コードは保護し、設計 §3 が移す側に置く指摘番号は、指摘である印の付いたものだけ経緯として扱う。印の無い指摘番号は保護側に倒れ、0d の既知の制約と同じ性質になる。(C) の `FN` は `Code-review fix F6` の指摘番号だけで、検査コードに当たらない |
+| Z0i-2 | 規則 3 の basename の一致数 (設計 §9 規則 2、v0.7 の「一意一致」) | (A) 1 件以上 (枠組みどおり。既存テスト 2 本の期待が変わる。遡り 17 塊、位置の除去を含め 21 塊)。(B) 一意一致のまま (両 peer に同名のファイル名は保護しない。遡り 0)。(C) 同じ文の peer 名でその peer の中に絞って一意 | **(A)**。保護の条件は「実在のファイルへの参照か」で、一意性は「どのファイルか」の条件である (`OPERATING_CONDITIONS.md` §1.7 の 52、代理指標を使わない)。両 peer に同名があるのは peer 対称の設計の結果で、どちらを指しても実在の参照である。(C) は peer 名の書き方の揺れ (`r2db`、`r2db-api's`) を判定に持ち込む |
+| Z0i-3 | 規則 2・3 の前に `::qualname` / `:行` を除くか | (A) 除く (候補 +153、遡り +5 塊)。(B) 除かない | **(A)**。`http.py::get_catalog` は実在のファイルへの、より細かい参照である。除かないと、細かく書いた参照ほど消せる逆転になる |
+| Z0i-4 | 遡った確認の塊 (§15.2。変更セット 1〜4 で統合済みの除去が、0i の規則で導けない) | (A) 0i の中で戻す (保護参照を落とした文・語だけを受け皿の写しから逐語で戻す。8 ファイル、root gate、40a、40b 1 行、WP-3f と並行しない)。(B) 0i の規則を新しい変更 (基点の残した文 → 新しい残した文、初めての移動) だけに掛け、Q-4 の「基点の残した文が受け皿から導けるか」には 0i の前の規則を掛ける (チェッカーに規則が 2 系統残る)。(C) 53 塊を免除の一覧にする。(D) 規則を狭めて塊を減らす (Z0i-2 (B) でも 34 塊残り、0 にはならない) | **(A)**。規則を 1 系統に保ち、例外の一覧を作らない (`test_0f_both_peers_all_src_rev_vs_itself_is_green` の注記にある 0f の監督裁定 (c) と同じ方針)。0i の目的は保護参照をコードに残すことで、受け皿から辿れることでは足りない。作業の形は変更セット 5 の復元 (A5・B5・D1〜D4) と同じで、`ccp0i_restore_audit.py` で機械的に照合できる。ツールと戻しは同じ merge で統合する (途中の main の `tools/tests` を赤にしないため) |
+| Z0i-5 | 後半を消す 2 本のテストの名前 (`…_mutation_…_is_red` だが、残る前半は実コードの緑を確かめる fixture) | (A) `test_0e_identifier_set_is_read_from_base_rev_is_green` / `test_0e_identifier_set_includes_docs_is_green` に改め、旧名を §15.4 に書く。(B) 名前を変えない (§11・設計 §10.2 の記録の test id を保つ)。(C) 後半も残す | **(A)**。名前が中身と食い違うと、読み手が手元のコピーの変異テストが残っていると誤る。記録からは §15.4 の対応表で辿れる。(C) は設計 §10.2 の教訓 (手元のコピーを変異の証拠にしない) に反する |
+| Z0i-6 | 規則 4 の囲む括弧を、文をまたいで見るか (`f0637d9` で 51 文) | (A) 同じ文の中だけ (既知の制約として設計 §9.2 に書いた)。(B) 塊全体で括弧の対を取ってから文に分ける | **(A)**。照合の単位は文であり (§4.1 (3))、塊全体の対は、文の削除と並べ替えの判定と単位が合わない。51 文は今の規則でも括弧の除去の判定が文ごとである |
+| Z0i-7 | 遡った確認を常設のテストにするか | (A) しない。`test_0f_both_peers_all_src_rev_vs_itself_is_green` が HEAD の全 CH-ID の塊の Q-4 照合で同じことを常時見る。(B) 設計 §10 の (基準, merge) の組を常設テストにする | **(A)**。(B) は古いコミットの受け皿の取り出しが要り、`tools/tests` の実行時間が延びるうえ、統合済みの組の結果は Z0i-4 の後は変わらない |
+
+**監督裁定 (2026-09-15、設計レビュー 1 の後)**
+
+| # | 裁定 |
+|---|---|
+| Z0i-1 | (B)。`review F-n` / `review round F-n` / `review (F-n)` (括弧付きの形を含む。m5) を 1 つの経緯トークンとし、その span を保護 ID の抽出の前に取り除く。取り除きは保護 ID を使う 4 箇所 (文ごとの削除、ラベル規則、0g、括弧) で同じ 1 つのパターンを共有する (M1)。保護 ID の抽出は ASCII の境界で行い、`F-12だけは` のように CJK 文字が続く ID も保護する。SI- / C- / CCR- にも同じ境界を使う (M2)。R6-1 は変更セット 6 の除去範囲の裁定であり、本裁定と矛盾しない |
+| Z0i-2 | (A)。基点の tree で basename が 1 件以上一致すれば実在とする。保護が増える費用 (規則 2+3 で除去できない文が 132 / 124 増える、retro 17〜21 塊、既存テスト 2 本の反転) を §15.2 に記録する |
+| Z0i-3 | (A)。照合の前に `::qualname` と `:line` を取り除く。`::Cls::meth` のように `::` が続く形もすべて取り除く (m4) |
+| Z0i-4 | (A)。53 塊の失われた保護参照を、同じ統合で戻す。戻し方は次のとおり (M7)。(1) 戻す単位は文・括弧・ラベルの「箇所」全体とし、訂正を反映した基準から取る。(2) 塊ごとに Opus が文面を判定する。スクリプトで折り返し直さない。(3) 監査スクリプトは次を検査する: 変わった CH-ID の集合が §15.4 の一覧と一致すること / 旧い塊の文字列が新しい塊の文字列の部分列であること / (iii) は新しい `_apply_corrections` を使うこと。`--base` は必須とし、既定値を持たない (M6) |
+| Z0i-4a (CH-0058) | `postgres.py` の壊れた断片 `(round; mirrors …` は、`review round F-8` を戻して `(review round F-8; mirrors …` にする。`{scratchpad}/rulings-r4.md` は戻さない。製品コードに `{scratchpad}` の参照を新しく足さない (`OPERATING_CONDITIONS.md` §1.9 の 62)。これで監査の部分列検査 (ii) が満たされない場合は、CH-0058 を監査スクリプトの唯一の名前付き例外とし、前後の文字列を §15.4 に逐語で記録する。実装担当は先に、0i のチェッカーが CH-0058 を拒む理由を実測して §15.4 に書く。理由が上の断片でなければ監督に上げる |
+| Z0i-5 | (A)。半分を削る 2 本のテストは改名し、旧名を §15.4 に記録する |
+| Z0i-6 | (A)。規則 4 は、1 つの文の中で囲んでいる括弧だけを見る |
+| Z0i-7 | (A)。常設の retro テストは足さない (HEAD の自己検査が覆う) |
+| M3 | ラベル規則 (6) からも、文単位の保護参照の検査を呼ぶ。設計の「使う箇所」の記述を実装に合わせる |
+| M4 | 行 13 は変異を監査照合に替える: 0i のチェッカーで、戻す前の commit では赤、HEAD では緑 (§1.5 の 40 の監査照合として、実行コマンドと集計行を記録する) |
+| M5 | 行 7 の fixture は、パスの途中の segment で切れる接尾辞 (例: `rity/CONTROL_MAPPING.md`) にする。変異は振る舞いで書く |
+| M6 | §15.1 の重なりの行を訂正する。WP-3e の rework は MitateDB `http.py` L821・L993 (CH-0221・CH-0228) と `docs/code-history/MitateDB-api/http.md` を触る。0i の実装は WP-3e の統合の後に着手し、その時の main を基点として §15.2 の retro を取り直す (レビューの実測では、WP-3e は 53 塊の集合を変えない) |
+| m1〜m3 | 数値を訂正する: 規則 2 の位置剥ぎありは 11、規則 3 抜きは 35、CH-0371 は (位置)。規則 4 の件数は、チェッカーが見る括弧の文字列で数えて 25 とし、数え方を 1 行で書く。位置剥ぎの一致 119 件のうち 56 件は basename が一意であり、Z0i-2 ではなく Z0i-3 から来ることを書く |
+| m6〜m9 | Z0i-1 の (D) の文言を F-12 の段落と矛盾しないように直す。変異 2・3・5 は、呼び出し箇所ごとに接頭辞を検査する前提を置かず、共有パターン 1 つを壊す形に直す。新しいテスト 3 本の名前に `_is_red` / `_is_green` を付ける。各変異の `old` 文字列は、実装したチェッカーの上で実装担当が 1 回だけ現れることを再確認する (§15.3 に明記する) |
+| 簡潔化 | 削る: §15.2 の数え方の 18 行、ディレクトリ別の内訳、F-ID の literal の段落、WP-3e の重なりの長いセル、設計 §9.2 の `split_sentences` の箇条と §15.2 と重なる retro の段落 |
+
+**後続 (0i の外)**: 作業指示書 R6-4 の日付の除去と変更セット 7 の選定は、0i と Z0i-4 の裁定の結果の統合の後に行う (設計 §9.2)。R6-4 の対象 (`control_main.py` の手順 5b、`backend_postgres.py` L278-308・L406-417・L1006-1036 など) は、F-ID (`F-12`・`F-16`) や `migrations/…` を同じ塊に持つため、0i の保護をチェッカーで確かめてから日付だけを除く。

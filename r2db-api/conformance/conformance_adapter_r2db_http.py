@@ -3573,7 +3573,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # existing top-level `application_id`-smuggling vector above.
             # `Mutation`'s own schema (`definitions.Mutation`) is
             # `additionalProperties: false` and has no `entity` property;
-            # `structured.py`'s `bind_mutation` enforces the equivalent
+            # `structured.py`'s `bind_mutation` (now in `mutation_binding.py`) enforces the equivalent
             # key-allowlist independently (`_MUTATION_KEYS`, which also
             # excludes "entity") since `http.py` never re-validates each
             # operation dict's shape against that schema itself. Either

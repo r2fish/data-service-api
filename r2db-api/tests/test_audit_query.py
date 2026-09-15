@@ -1493,7 +1493,7 @@ _NON_AUDIT_OPERATION_PARAMETERS: frozenset[str] = frozenset(
         "postgres.PostgresCell._apply",
         "postgres.PostgresCell.apply_schema",
         "service.DataService.schema",
-        "structured.bind_mutation",
+        "mutation_binding.bind_mutation",
         "structured.bind_schema_operation",
         "structured.ApplicationCell._apply",
         "structured.ApplicationCell.apply_schema",

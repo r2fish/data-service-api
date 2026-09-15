@@ -578,6 +578,20 @@ request.
 # (structured.py) already carries.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-3f -- `bind_mutation` moved from `structured.py` to `mutation_binding.py`; the pointer gets a 40c position bracket
+
+old:
+```
+O-1 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4): contract 1.7.0's `errors.details_vocabulary` unconditional obligation (a) covers "every denial", not only the data-plane query/mutate/schema surface -- this control-plane request field gets the same 4-key `violation(...)` shape a data-plane `bind_mutation`'s own `destructive` boolean-shape check (structured.py) already carries.
+```
+
+new:
+```
+O-1 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4): contract 1.7.0's `errors.details_vocabulary` unconditional obligation (a) covers "every denial", not only the data-plane query/mutate/schema surface -- this control-plane request field gets the same 4-key `violation(...)` shape a data-plane `bind_mutation`'s own `destructive` boolean-shape check (structured.py (now in `mutation_binding.py`)) already carries.
+```
+
 ## CH-0267
 
 - moved from: `src/r2db_api/control_plane.py` (`<module>`)
@@ -694,6 +708,20 @@ credentials only] -> execute (design R-3's own ordering).
 # must be rejected as a shape defect before that semantic question
 # is even reached, exactly per contract `evaluation_order` (shape
 # validation precedes confirmation evaluation).
+```
+
+### correction: 2026-09-15
+
+- reason: R-37 WP-3f -- `bind_mutation` moved from `structured.py` to `mutation_binding.py`; the pointer gets a 40c position bracket
+
+old:
+```
+Review blocker B-1: shape validation of the request's own `destructive`/`confirmation` fields (contract `CredentialRevokeRequest.destructive: {"type": "boolean"}` / `.confirmation: {"type": "string", ...}`) -- applied unconditionally, regardless of whether this particular revoke ever meets the gate condition below. This is the same "request schema enforce" `bind_mutation` already applies to every data-plane mutation's own `destructive` field (structured.py); it is not part of the destructive-confirmation *semantics* the contract's own `non_destructive_requests` clause says a non-gated revoke never inspects -- a non-boolean truthy `destructive` (e.g. the string `"false"`, which a loose `bool(...)` cast would silently coerce to `True`) must be rejected as a shape defect before that semantic question is even reached, exactly per contract `evaluation_order` (shape validation precedes confirmation evaluation).
+```
+
+new:
+```
+Review blocker B-1: shape validation of the request's own `destructive`/`confirmation` fields (contract `CredentialRevokeRequest.destructive: {"type": "boolean"}` / `.confirmation: {"type": "string", ...}`) -- applied unconditionally, regardless of whether this particular revoke ever meets the gate condition below. This is the same "request schema enforce" `bind_mutation` already applies to every data-plane mutation's own `destructive` field (structured.py (now in `mutation_binding.py`)); it is not part of the destructive-confirmation *semantics* the contract's own `non_destructive_requests` clause says a non-gated revoke never inspects -- a non-boolean truthy `destructive` (e.g. the string `"false"`, which a loose `bool(...)` cast would silently coerce to `True`) must be rejected as a shape defect before that semantic question is even reached, exactly per contract `evaluation_order` (shape validation precedes confirmation evaluation).
 ```
 
 ## CH-0273

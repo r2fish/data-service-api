@@ -1900,20 +1900,8 @@ def test_v07_maximal_rule3_reduction_still_green(tmp_path):
     assert code == 0, output
 
 
-def test_q4_real_repo_postgres_unchanged_is_green():
-    # Real-repository check (read-only, per the file docstring's stated
-    # exception for `test_repository_register_passes`): the actual,
-    # already-migrated r2db `postgres.py` at main `5d12799`, left
-    # UNCHANGED, must pass `--base 5d12799` cleanly. Before the v0.7
-    # ruling this was blocked by several blocks (e.g. CH-0028) where
-    # change set 1 stopped at a partial, rule-3-eligible-but-not-swept
-    # reduction; the permissive derivation check now accepts those too.
-    out = io.StringIO()
-    code = cp.run_base(
-        REAL_REPO_ROOT, "5d12799", ["r2db-api/src/r2db_api/postgres.py"], out=out, err=out
-    )
-    output = out.getvalue()
-    assert code == 0, output
+# Retired (R-37 WP-3f, ruling W3-18): the fixed-anchor re-edit branch can never
+# stay derivable once a migrated CH block gains a position parenthetical; see test_0f.
 
 
 def test_v07_rule3_broadened_would_break_real_repo_is_red_when_mandatory():
