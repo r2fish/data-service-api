@@ -3206,3 +3206,120 @@ def test_mutation_binding_runs_after_authorization_and_is_audited(service):
         service.mutate(runtime, "notes", operation)
     assert exc.value.code == "VALIDATION_FAILED"
     assert len(validation_denials()) == before + 1, "expected the mutation_binding VALIDATION_FAILED deny recorded in the in-memory audit"
+
+
+def test_schema_binding_leaf_preserves_structured_facade():
+    """R-37 WP-3g (ST9 minus `bind_schema_operation`): `structured.py`
+    reads `BoundSchemaOperation`/`ConstraintPatch`/`FIELD_TYPES`/
+    `FieldConstraints`/`MAX_INDEX_FIELDS`/`_ConstraintDeclarationError`/
+    `_ENUM_ELIGIBLE_TYPES`/`_SCHEMA_KEYS`/`_fail_constraint_declaration`
+    from the new leaf `schema_binding.py` as the exact same objects --
+    this checks facade identity only, not shape (the dedicated test below
+    pins the literal values). `SCHEMA_OPERATIONS` has 0 readers (W3-9,
+    work order §5.36) and is deliberately NOT re-exported."""
+    from r2db_api import schema_binding
+    from r2db_api import structured
+
+    names = [
+        "BoundSchemaOperation",
+        "ConstraintPatch",
+        "FIELD_TYPES",
+        "FieldConstraints",
+        "MAX_INDEX_FIELDS",
+        "_ConstraintDeclarationError",
+        "_ENUM_ELIGIBLE_TYPES",
+        "_SCHEMA_KEYS",
+        "_fail_constraint_declaration",
+    ]
+    for name in names:
+        assert getattr(structured, name) is getattr(schema_binding, name), name
+    assert not hasattr(structured, "SCHEMA_OPERATIONS")
+
+
+def test_schema_binding_constants_and_types_are_literal():
+    """R-37 WP-3g (ST9 minus `bind_schema_operation`): the four moved
+    constants and the three moved dataclasses' own field names/defaults
+    keep their exact pre-move shape after the move to `schema_binding.
+    py`, and `_fail_constraint_declaration`'s own denial keeps the
+    field-path/declared-type-label `details` shape (monitor ruling
+    m-1)."""
+    from dataclasses import MISSING, fields
+
+    from r2db_api.schema_binding import (
+        FIELD_TYPES,
+        MAX_INDEX_FIELDS,
+        BoundSchemaOperation,
+        ConstraintPatch,
+        FieldConstraints,
+        _ConstraintDeclarationError,
+        _ENUM_ELIGIBLE_TYPES,
+        _SCHEMA_KEYS,
+        _fail_constraint_declaration,
+    )
+
+    assert FIELD_TYPES == {"string", "integer", "number", "boolean", "object", "array", "json"}
+    assert type(FIELD_TYPES) is set
+    assert MAX_INDEX_FIELDS == 16
+    assert type(MAX_INDEX_FIELDS) is int
+    assert _ENUM_ELIGIBLE_TYPES == ("string", "integer", "number", "boolean")
+    assert type(_ENUM_ELIGIBLE_TYPES) is tuple
+    assert _SCHEMA_KEYS == {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type", "field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key"}
+    assert type(_SCHEMA_KEYS) is set
+
+    def shape(cls):
+        result = []
+        for f in fields(cls):
+            if f.default is not MISSING:
+                result.append((f.name, f.default))
+            elif f.default_factory is not MISSING:  # type: ignore[misc]
+                result.append((f.name, f.default_factory()))
+            else:
+                result.append((f.name, MISSING))
+        return result
+
+    assert shape(FieldConstraints) == [("enum", None), ("nullable", True)]
+    assert shape(ConstraintPatch) == [
+        ("enum_omitted", True),
+        ("enum_clear", False),
+        ("enum_raw", None),
+        ("nullable_omitted", True),
+        ("nullable", True),
+    ]
+    assert shape(BoundSchemaOperation) == [
+        ("operation", MISSING),
+        ("entity", MISSING),
+        ("field", MISSING),
+        ("fields", MISSING),
+        ("destructive", MISSING),
+        ("confirmation", None),
+        ("field_type", None),
+        ("index", None),
+        ("index_fields", ()),
+        ("unique", False),
+        ("field_types", {}),
+        ("field_constraints", {}),
+        ("constraints", None),
+        ("constraint_patch", None),
+    ]
+
+    with pytest.raises(FoundationError) as exc:
+        _fail_constraint_declaration("enum", None, _ConstraintDeclarationError("m"))
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"field": "enum", "violated_declaration": "constraint_declaration", "declared_type": "json"}
+
+
+def test_schema_binding_developer_gate_precedes_shape_checks():
+    """R-37 WP-3g (WF-3): `bind_schema_operation`'s developer-authority
+    gate still runs BEFORE the `_SCHEMA_KEYS` shape check after the move
+    -- an operation carrying both `developer=False` AND an unrecognized
+    key is refused with `FORBIDDEN` (403), never `VALIDATION_FAILED` for
+    the unrecognized key."""
+    from r2db_api.structured import bind_schema_operation
+
+    with pytest.raises(FoundationError) as exc:
+        bind_schema_operation(
+            {"operation": "create_entity", "entity": "widgets", "fields": ["name"], "not_a_real_key": True},
+            developer=False,
+        )
+    assert exc.value.code == "FORBIDDEN"
+    assert exc.value.status == 403
