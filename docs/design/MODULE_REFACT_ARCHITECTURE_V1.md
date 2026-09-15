@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.16 (2026-09-16)。** 直後の v1.15 行は当時の改版履歴として保存する。v1.16 は既存の本文を書き換えず、末尾に **§10.13 (WP-3g 実施記録)** を追記した記録である。
 - **現行版: v1.15 (2026-09-15)。** 直後の v1.14 行は当時の改版履歴として保存する。v1.15 は既存の本文を書き換えず、§10.11 に【追記】を 1 件足し、末尾に **§10.12 (WP-3f 実施記録)** を追記した記録である。
 - **現行版: v1.14 (2026-09-15)。** 直後の v1.13 行は当時の改版履歴として保存する。v1.14 は既存の本文を書き換えず、末尾に **§10.11 (WP-3e 実施記録)** を追記した記録である。
 - **現行版: v1.13 (2026-09-15)。** 直後の v1.12 行は当時の改版履歴として保存する。v1.13 は既存の本文を書き換えず、末尾に **§10.10 (WP-3d 実施記録)** を追記した記録である。
@@ -499,3 +500,27 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
   - 位置参照の走査は、行をまたいで折り返した名前だけでなく、移した名前の近くの位置の語も探す。WP-3f の走査は折り返しを考慮していたが、折り返していない 8 つの参照を漏らした。
   - R-37 の移動が CH の塊の中に括弧書きを足す場合、来歴の証拠は新しい HEAD での 0f である。`--base <親>` は再編集の枝で設計どおり必ず赤になる。`--base` は R-22 のコメントだけの変更セットの関門であり、R-37 の移動の関門ではない。
 - **次の WP**: WP-3g (ST9 の一部)。
+
+### 10.13 WP-3g (ST9 の一部 → `schema_binding.py`) 実施記録 (2026-09-16、v1.16 追記)
+
+作業指示書 §5.32・§5.36 (訂正註)・§5.39 (裁定 W3-6〜W3-20)。
+
+| WP | 抽出 | merge | 備考 |
+| --- | --- | --- | --- |
+| WP-3g | r2db `structured.py` → `schema_binding.py` (ST9 の一部: 10 名) | 本変更 | `structured.py` L106-228・L253-265・L311-371 (`bdea9ee`、飛び石 3 塊) を新規の leaf `r2db-api/src/r2db_api/schema_binding.py` へ移した。`bind_schema_operation` の本体は facade に残す (W3-9)。leaf の import は `dataclasses`・`typing`・`.errors`・`.value_types` だけである (`__future__` は常に許す)。facade は 9 名を import で読む (`SCHEMA_OPERATIONS` は再 export しない)。`bdea9ee` で測り直し、manifest (`9994d7c` で実測) からのずれは行の一様なずれ (-203) だけである |
+
+- **40c**: 範囲内の括弧書き 11 箇所を除き、バイト単位で同一の移動である (独立 Opus レビューが別に導出して一致)。`bind_schema_operation` の差分は L326 の括弧書きだけである。登録 helper 6 つは AST で同一 (WF-1)。leaf に `developer` と `FORBIDDEN` は無く、gate は `_SCHEMA_KEYS` の検査より前で走る (WF-2)。W3-19・W3-20 と合わせて括弧書きは計 15 箇所。
+- leaf L192「this file's own internal vocabulary」はレビューで確かめ、移動後も成り立つので括弧書きを付けない。
+- **40b**: `SCANNED_MODULES` と sib tuple (とその docstring) に leaf を足した。件数 pin は `structured.py` 48、`schema_binding.py` 1 (レビューが別に導出して一致)。コメントだけの `structured.py:NNNN` pin は `bdea9ee` の時点ですでに古い (R-39 と同種)。
+- **変異** (`mutate.py`、手直し後): C1〜C10 の 10/10 が予想どおり赤、復元を確認。test は §5.36 の表のとおり。C1 は W3-14 の上書き、C6 は孤立した probe を使った (W3-20)。
+- **新規テスト 3 本**。WF-3 の順序テストは本物の順序テストである (gate の順序を入れ替えると `FORBIDDEN` が `VALIDATION_FAILED` に変わる)。
+- **来歴の証拠 (コミットした HEAD)**: 変更をコミットした使い捨ての clone で `tools/tests` `403 passed` (0f が緑)。実装者と独立レビューがそれぞれ 1 回観測した (どちらも W3-20 の手直し前。W3-20 は CH-ID の無いコメント 1 つだけである)。CH-ID の塊に入る括弧書きは無い。
+- **40a の suite** (手直し後、`pt.py`): `r2db-api/tests` `1292 passed`、`MitateDB-api/tests` `1112 passed` (subtests 2)、`conformance-tests` `995 passed`、`tools/tests` `402 passed` と commit 前の予想どおりの 0f の赤 (未追跡の新 leaf)。
+- **レビュー**: 手順 0 の停止 → W3-19。独立 Opus レビューと監査 (判定: 差し戻し、小 → W3-20・m1・m2)、手直し 1 回。
+- **既知の穴** (レビューで判明。監督が別コミットで roadmap R-39 に足す):
+  - `r2db-api/src/r2db_api/limits.py` L278-280「`_fail_constraint_declaration` precedent above in this same module」: `limits.py` では一度も成り立ったことがなく、登録 helper の中にある。
+  - `r2db-api/tests/test_audit_query.py` L2686-2687 と MitateDB 側の L2471-2472「never surfaced past its own module」: 移動前から不正確である。
+- root gate: 1 回目は `3399 passed` だったが `judge=FAIL (concurrent pytest)` (レビューが同時に pytest を走らせた)。merge せず、手直しの後に再実行した。
+- root gate (再実行): `3399 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (監督、`tools/dev/gate.py`、他の pytest 0 件)。
+- **教訓**: pytest を走らせうる agent (使い捨ての clone での無防備な実行を含む) が動いている間は root gate を走らせない。順に走らせる。
+- **次の WP**: WP-3h (CE7)。

@@ -10,7 +10,7 @@ its own explicitly-passed arguments (a value, a declared type, an
 already-bound `FieldConstraints`/`Predicate` list), consulting no
 connection, catalog, clock, or global state. The choke points that decide
 *which* values reach this leaf (`ApplicationCell._apply`/`query`/
-`_fail_constraint_declaration`, in `structured.py`) remain in their own
+`_fail_constraint_declaration`, in `structured.py` (now in `schema_binding.py`)) remain in their own
 module.
 """
 from __future__ import annotations

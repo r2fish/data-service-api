@@ -26,7 +26,7 @@ def _deny_provisional_field(field_name):
     NEXT provisional capability this contract adds would reuse -- deleting
     live, documented, zero-risk dead code would satisfy no completion
     condition, only look like it did (mirrors r2db-api's own stale-
-    literal precedent, `structured.py`'s own `SCHEMA_OPERATIONS`
+    literal precedent, `structured.py`'s own `SCHEMA_OPERATIONS` (now in `schema_binding.py`)
     constant).
 
     Phase 9 WP-3e (design D-3 (5), V-7): `details` is now passed through

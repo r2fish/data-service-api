@@ -1212,7 +1212,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
     # `create_entity` above already uses. Unreachable as of this WP (no
     # peer declares 1.6.0 yet, `test_c19_client_self_sufficiency.py`'s own
     # declare-first gate on every caller); `structured.py`'s own pre-1.6.0
-    # `_SCHEMA_KEYS`/`bind_schema_operation` does not yet recognize
+    # `_SCHEMA_KEYS` (now in `schema_binding.py`)/`bind_schema_operation` does not yet recognize
     # `field_types` at all, so a real call here today would deny with
     # `VALIDATION_FAILED` -- written for WP-2's real eventual shape, not a
     # stub (mirrors every other declare-first method already on this ABC).
