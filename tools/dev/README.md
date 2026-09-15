@@ -12,12 +12,14 @@ Single-command versions of procedures that `docs/work-orders/OPERATING_CONDITION
 | `handover_ready.py` | judging whether this is a safe boundary to move to a new chat; prints the continuation prompt | 1.10-67 |
 | `turn_budget_hook.py` | (PostToolUse hook) counting a chat's model calls; reminds it to hand over past the threshold | 1.10-67 |
 
-The hook is registered in user settings, not in the gitignored `.claude/settings.local.json`, because a handover chip starts the next chat in a fresh worktree that has no local settings; `--project-root` keeps it silent outside this checkout:
+The hook is registered in user settings, not in the gitignored `.claude/settings.local.json`, because a handover chip starts the next chat in a fresh worktree that has no local settings; `--project-root` keeps it silent outside this checkout. The registration calls a copy under `~/.claude`, not the working tree (user instruction 2026-09-15, same as the PreToolUse guard hook): a hook that points at the working tree runs every session's uncommitted, unreviewed edits on every tool call of every session.
 
 ```json
 {"matcher": "*", "hooks": [{"type": "command", "timeout": 10,
-  "command": "python3 -B \"<main checkout>/tools/dev/turn_budget_hook.py\" --project-root \"<main checkout>\" --threshold 300 --every 50"}]}
+  "command": "python3 -B \"$HOME/.claude/hooks-turn-budget/data-service-api/turn_budget_hook.py\" --project-root \"<main checkout>\" --threshold 300 --every 50"}]}
 ```
+
+After changing `turn_budget_hook.py`, the copy must be refreshed on the user-settings side (the user does the copy). Check for drift with `diff tools/dev/turn_budget_hook.py ~/.claude/hooks-turn-budget/data-service-api/turn_budget_hook.py` (no output = identical).
 
 Common behaviour:
 
