@@ -1,5 +1,6 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.13 (2026-09-16)**: §15 の末尾に変更セット 0i の統合の【追記】(統合のコミット、コミット後の `tools/tests`、ゲートの行) を足した。既存の節は書き換えていない。
 - **v1.12 (2026-09-15)**: §15.1 の末尾に訂正註を足した (R-37 WP-3f の監督裁定 W3-18 による `test_q4_real_repo_postgres_unchanged_is_green` の退役と、着手条件 3 の再確認)。既存の節は書き換えていない。
 - **v1.11 (2026-09-15)**: §15 に変更セット 0i (チェッカーの保護参照の拡張、手元のコピーを検査するテストの置き換え、遡った確認の塊の戻し) の manifest を追記し、疑義 Z0i-1〜Z0i-7 と監督裁定を §15.5 に置いた。設計レビュー 1 を反映した。既存の節は書き換えていない。
 - **v1.10 (2026-09-15)**: 実装担当が §14.4 (候補一覧・判定表・記録) を埋めた (監督がコミット前に確定する)。既存の節は書き換えていない。
@@ -3622,3 +3623,13 @@ SUMMARY changed_blocks=52 restored_ok=52 exceptions=3 fail=0
 | Z0i-4h | §15.4 に書いた pytest のログのファイル名 (`pt-2026…`) は公開値の走査に project id として検出される。ファイル名を消し、集計行と実行したコマンドだけを残す |
 
 - 監査スクリプトの名前付き例外は、Z0i-4g により CH-0058・CH-0070・CH-0184・CH-0292 の 4 つに広げた (スクリプトの diff は §15.4.5)。
+
+**【追記 2026-09-16 (統合)】**
+
+- 変更セット 0i をコミット `d9191fe` とし、手元の main に統合した (merge `ffd6493`)。push は停止中のため行っていない。
+- 統合後の HEAD での finalize の出力:
+  - `check_doc_refs`: OK。`public_value_scan`: clean。
+  - `--register`: `comment provenance register OK: 83 files scanned, 427 CH-IDs`。
+  - `tools/tests`: `420 passed`。コミットした HEAD で `test_0f_both_peers_all_src_rev_vs_itself_is_green` が緑である。これが完了条件 13 (裁定 M4) の緑側である。赤側 (コミット前) はちょうど 52 CH-ID を覆った (§15.4)。
+- root gate (コミット前の最終の作業ツリー): `3399 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の diff 0 (§15.4 の表の行と同じ)。
+- 記録: 設計 (`docs/design/CODE_COMMENT_PROVENANCE_V1.md`) v0.19 §10.6、roadmap (`docs/design/ROADMAP_POST_PHASE7_V1.md`) v1.40 の R-22 行。
