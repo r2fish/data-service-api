@@ -1488,7 +1488,7 @@ def test_cross_entity_mutation_upsert_is_capability_unsupported(app_a_stack):
 
 def test_cross_entity_mutation_expected_revision_is_capability_unsupported(app_a_stack):
     """Same "unread capability-shaped key" refusal `post_mutate` already
-    gives `expected_revision` (`_TRANSACT_INSERT_KEYS` in `cell.py`),
+    gives `expected_revision` (`_TRANSACT_INSERT_KEYS` in `cell.py` (now in `request_vocabulary.py`)),
     exercised through the cross-entity endpoint too."""
     entity = "http_cross_entity_expected_revision_target"
     _create_entity(app_a_stack, entity, fields=["label"])

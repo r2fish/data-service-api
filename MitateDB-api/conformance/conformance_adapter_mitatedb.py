@@ -1465,7 +1465,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # this peer's own product code gains the real "partial field_types,
     # server fills json" behavior this method targets). Unreachable as of
     # this WP (declare-first gated at 1.6.0; `cell.py`'s own pre-1.6.0
-    # `_FIELD_TYPE_VOCABULARY` is a DIFFERENT five-word set -- `text`/
+    # `_FIELD_TYPE_VOCABULARY` (now in `request_vocabulary.py`) is a DIFFERENT five-word set -- `text`/
     # `integer`/`real`/`boolean`/`json`, not the contract's seven -- so a
     # real call presenting `string`/`number`/`object`/`array` today denies
     # with `ValidationError`, surfaced as `VALIDATION_FAILED` by

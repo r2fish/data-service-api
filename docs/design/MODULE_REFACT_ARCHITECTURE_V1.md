@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.14 (2026-09-15)。** 直後の v1.13 行は当時の改版履歴として保存する。v1.14 は既存の本文を書き換えず、末尾に **§10.11 (WP-3e 実施記録)** を追記した記録である。
 - **現行版: v1.13 (2026-09-15)。** 直後の v1.12 行は当時の改版履歴として保存する。v1.13 は既存の本文を書き換えず、末尾に **§10.10 (WP-3d 実施記録)** を追記した記録である。
 - **v1.12 (2026-09-15)。** 直後の v1.11 行は当時の改版履歴として保存する。v1.12 は既存の本文を書き換えず、末尾に **§10.9 (WP-3a〜3c 実施記録)** を追記した記録である。
 - **現行版: v1.11 (2026-09-15)。** 直後の v1.10 行は当時の改版履歴として保存する。v1.11 は既存の本文を書き換えず、末尾に **§10.8 (WP-2a 実施記録)** を追記した記録である。
@@ -445,3 +446,33 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 - root ゲートの前後の `pg_database` / `pg_roles` 差分は 0、`tools/tests` は `404 passed`。
 - §10.9 の既知の穴 22・23 (`service.py` と `service_results.py` の docstring の崩れ) は、`d85bd42` (merge `7c25e88`) で閉じた。崩したのは R-22 変更セット 2 の `fb9a098`。
 - **次の WP**: WP-3e (CE5)。R-22 変更セット 6 と MitateDB の `tests/test_l1_details_vocabulary_ast_scan.py` を共有するので、変更セット 6 の統合後に行数を測り直してから着手する。
+
+### 10.11 WP-3e (CE5 → `request_vocabulary.py`) 実施記録 (2026-09-15、v1.14 追記)
+
+作業指示書 §5.32・§5.34 (訂正註)・§5.39 (裁定 W3-6〜W3-16)。
+
+| WP | 抽出 | merge | 備考 |
+| --- | --- | --- | --- |
+| WP-3e | MitateDB `cell.py` → `request_vocabulary.py` (CE5: 7 定数) | 本変更 | `cell.py` L56-229 (`b65e97d`、174 行) を新規の leaf `MitateDB-api/src/mitatedb_api/request_vocabulary.py` へ移した。leaf は何も import しない (`tools/tests/test_leaf_import_direction.py` の許可は空集合)。facade は 7 名を import で読む。`b65e97d` で測り直し、manifest (`9994d7c` で実測) からのずれは無い |
+
+- **40c**: 範囲内の括弧書き 8 箇所を除き、バイト単位で同一の移動である (独立 Opus レビューが別に導出して一致)。括弧書きは計 17 箇所 (範囲内 8、範囲外 9)。範囲外のうち 3 箇所は W3-15・W3-16 で足した。
+- 登録 helper と CE7 は動かしていない (正確な範囲で差分 0)。`_ISOMORPHIC_TARGETS` も差分 0。
+- **40b**: 更新の要る静的 pin は無い。`cell.py` の L1 details の件数は 43 のまま。backend の allowlist は `cell.py` を覆わない。コメントだけの `cell.py:NNNN` pin 16 件は `b65e97d` の時点ですでに古い (既知の穴、R-39 と同種)。
+- **変異** (`mutate.py`。7/7 が予想どおり赤、復元を確認):
+
+| 変異 | 完了条件 | test |
+| --- | --- | --- |
+| C1 | 1 facade | `test_request_vocabulary_leaf_preserves_cell_facade` (AttributeError で赤。W3-14 の上書きの形は要らなかった) |
+| C2 | 2 literal | `test_request_vocabulary_constants_are_literal` |
+| C2b | 2 型の pin | 同上 |
+| C3 | 3 認可が鍵集合の検査より先 | `test_transact_key_set_check_runs_after_authorization` |
+| C3b | 3 `details["field"]` | 同上 |
+| C4 | 4 leaf の import | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| C5 | 5 分類 | `::test_every_src_module_is_classified` |
+
+- **40a の suite** (手直し後、`pt.py`): `MitateDB-api/tests` `1112 passed` (subtests 2)、`r2db-api/tests` `1286 passed`、`conformance-tests` `995 passed`、`tools/tests` `403 passed` と commit 前の 1 failed (`test_0f_both_peers_all_src_rev_vs_itself_is_green`。未追跡の新 leaf を `git show HEAD:` で読むため。新しい HEAD では `finalize.py --tools-tests` で緑)。
+- `http.py` のコメント来歴の checker: `comment provenance OK: 97 blocks checked`。register: `81 files scanned, 427 CH-IDs`。
+- **レビュー**: 独立 Opus レビューと監査 (差し戻し: W3-15・W3-16 と minor 2 件)、手直し 1 回。
+- root gate: `3393 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の差分 0 (監督、`tools/dev/gate.py`)。
+- **教訓**: 移動した名前の grep は、行をまたいで折り返した名前を取りこぼす。位置参照の走査は折り返しを考慮して行う (W3-15 はこうして漏れ、後で見つかった)。
+- **次の WP**: WP-3f (ST8)。

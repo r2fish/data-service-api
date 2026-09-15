@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.12 (2026-09-15)。** 基点 main `b65e97d` (WP-3d を統合済み)。WP-3e の実装中の監督裁定 W3-15・W3-16 を §5.39 の裁定表に足し、§5.34 に訂正註を足した。既存の行は書き換えていない。
 - **v1.11 (2026-09-15)。** 基点 main `9994d7c` (WP-3a〜3c を統合済み)。§5.32〜§5.39 を追記した。内容は、WP-3d〜3i (ST10 → CE5 → ST8 → ST9 → CE7 → CE6) の実測、監督の枠 WF-1〜WF-7、manifest、未確定 W3-6〜W3-13 である。既存の行は書き換えていない。独立レビュー反映: M1〜M5、minor、監督裁定 U1〜U5 (§5.32〜§5.39)。**独立レビュー反映済み。**
 - **v1.10 (2026-09-15)。** 基点 main `b45312d` (WP-2a を統合済み)。§5.27〜§5.31 に WP-3 (SV1〜SV3) の実測、WP-3a / 3b / 3c の manifest、未確定 W3-1〜W3-5 を追記した。既存の行は書き換えていない。独立レビュー (差し戻し) 反映: facade テスト、訂正の記録の赤テスト、評価順の変異、W3-4、範囲外の位置参照、CH-0126 の扱い。**独立レビュー待ち。**
 - **v1.9 (2026-09-15)。** 基点 main `13241c2` (WP-1m・1n・1k を統合済み)。§5.25・§5.26 に WP-2a (Y-6・Y-8、削除確認 phrase の契約規則のテスト) の manifest と未確定 Z-1〜Z-3 を追記した。既存の行は書き換えていない。独立レビュー (差し戻し) 反映: Z-2・Z-3 の裁定、型区別の assert、規則 5 と R-41 の注記。**独立レビュー待ち。**
@@ -1335,6 +1336,13 @@ tools/dev/gate.py --label wp3d                             # 監督。run_in_bac
 | 6 | 逐語移動と位置参照 (40c) | **監査照合**: コメントが逐語。括弧書きは上表の範囲内 8 箇所と範囲外 6 箇所だけ | — |
 | 7 | 登録 helper を動かさない・同型登録しない・統合の手順 | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0 と L232-339 の差分 0、WF-4、WF-6 | — |
 
+【訂正註 2026-09-15 (WP-3e の実装、監督裁定 W3-15・W3-16)。上の表は起草時の原文であり、消さずに残す (`OPERATING_CONDITIONS.md` §1.8 の 57)】
+
+- 範囲外の位置参照の括弧書きは 6 箇所ではなく 9 箇所である。括弧書きは計 17 箇所 (範囲内 8、範囲外 9)。完了条件 6 の「範囲外 6 箇所」も 9 箇所と読む。足した 3 箇所は、`cell.py` の `add_field` の docstring (W3-15) と `MitateDB-api/src/mitatedb_api/http.py` L821・L993 (W3-16) である。
+- 「範囲外の位置参照は、いずれも CH は無い」は誤りである。`http.py` の 2 箇所に CH-0221・CH-0228 が付く。訂正の記録は 2 件 (CH-0221、CH-0228) である。
+- 触るファイルに `http.py` (括弧書き 2 箇所) と `docs/code-history/MitateDB-api/http.md` (訂正の記録 2 件) を足す (W3-16)。「触らないファイル」の `http.py` と `docs/code-history/` は、この 2 件を除いて読む。
+- 新規テストはレビュー後に締めた: `test_request_vocabulary_constants_are_literal` に 7 定数すべての型の完全一致の pin (変異 C2b)、`test_transact_key_set_check_runs_after_authorization` の同じ Application の枝に `details["field"]` の assert (変異 C3b)。
+
 ### 5.35 WP-3f — r2db の mutation の束縛 (ST8、**独立レビュー反映済み**)
 
 **目的**: ST8 を leaf `r2db-api/src/r2db_api/mutation_binding.py` (§2.1) へ移す。**WP-3e の統合後に着手する。**
@@ -1536,6 +1544,8 @@ tools/dev/gate.py --label wp3d                             # 監督。run_in_bac
 | W3-12 | 認める。W3-3 と同じく、差分を列挙してログに残す |
 | W3-13 | 認める |
 | W3-14 | 3d の完了条件 1 の変異 (`structured.py` の import から `SchemaOutcome` を外す) は、`backend.py` も同じ名前を import するので収集時の ImportError (exit 2) になり、条件 1 だけを壊さない。`storage_outcomes` の import の直後で `SchemaOutcome` を別の class で上書きする変異に置き換える (実装時の監督裁定、2026-09-15)。以後の WP でも、facade の名前を消す変異が他 module の import を壊す場合は、同じく上書きの変異を使う |
+| W3-15 | `cell.py` の `add_field` の docstring (L1326 付近) の「see the module-level comment above `_DELETE_CONSEQUENCE`」(名前が行をまたいで折り返す) は、manifest (§5.34) が漏らした範囲外の位置参照である。L2409-2410 の項と同じ括弧書き「(now in `request_vocabulary.py`)」を付ける。この塊に CH-ID は無い。実装者が見つけた (実装時の監督裁定、2026-09-15) |
+| W3-16 | manifest (§5.34) が漏らした範囲外の位置参照が `MitateDB-api/src/mitatedb_api/http.py` にさらに 2 つあり、どちらも CH-ID が付く: L821 (CH-0221)「(`_TRANSACT_INSERT_KEYS`/`_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS` in `cell.py`)」と L993 (CH-0228)「`cell.py`'s own `_TRANSACT_INSERT_KEYS` already applies to `transact()`」。それぞれに括弧書き「(now in `request_vocabulary.py`)」を付け、`docs/code-history/MitateDB-api/http.md` に §5.27 の形式の訂正の記録を書く (WF-5 (iv))。このため `http.py` と `docs/code-history/MitateDB-api/http.md` は §5.34 の「触らないファイル」から外れる。独立 Opus レビューが見つけた (実装時の監督裁定、2026-09-15) |
 
 
 ## 6. 重なり表と監督裁定
