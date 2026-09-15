@@ -2,7 +2,8 @@
 
 ## 0. 版数・位置づけ
 
-- **現行版: v1.12 (2026-09-15)。** 直後の v1.11 行は当時の改版履歴として保存する。v1.12 は既存の本文を書き換えず、末尾に **§10.9 (WP-3a〜3c 実施記録)** を追記した記録である。
+- **現行版: v1.13 (2026-09-15)。** 直後の v1.12 行は当時の改版履歴として保存する。v1.13 は既存の本文を書き換えず、末尾に **§10.10 (WP-3d 実施記録)** を追記した記録である。
+- **v1.12 (2026-09-15)。** 直後の v1.11 行は当時の改版履歴として保存する。v1.12 は既存の本文を書き換えず、末尾に **§10.9 (WP-3a〜3c 実施記録)** を追記した記録である。
 - **現行版: v1.11 (2026-09-15)。** 直後の v1.10 行は当時の改版履歴として保存する。v1.11 は既存の本文を書き換えず、末尾に **§10.8 (WP-2a 実施記録)** を追記した記録である。
 - **現行版: v1.10 (2026-09-15)。** 直後の v1.9 行は当時の改版履歴として保存する。v1.10 は既存の本文を書き換えず、末尾に **§10.7 (WP-1m / 1n / 1k 実施記録)** を追記した記録である。
 - **現行版: v1.9 (2026-09-15)。** 直後の v1.8 行は当時の改版履歴として保存する。v1.9 は既存の本文を書き換えず、末尾に **§10.6 (WP-1j / 1l 実施記録)** を追記した記録である。
@@ -432,3 +433,15 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 | 23 | r2db `service_results.py` | L14 (逐語で移動) の docstring の崩れ「CCR-13 introduced `items`/`next_page` adds `revisions`」 | R-39 |
 | 24 | r2db `request_shape.py` | 形の検査と `limits.check_request` の順序を固定するテストが無い (WP-3c の commit が記録) | R-39 |
 | 25 | `r2db-api/conformance/conformance_adapter_r2db.py`、`conformance-tests/test_c04_unsupported_and_safe_errors.py` | `service.py` の行番号参照が移動前から古い (WP-3c の commit が記録) | R-39 |
+
+### 10.10 WP-3d 実施記録 (2026-09-15、v1.13 追記)
+
+作業指示書 §5.32・§5.33・§5.39 (裁定 W3-6〜W3-14)。
+
+| WP | 抽出 | merge | root ゲート (passed) | 備考 |
+| --- | --- | --- | --- | --- |
+| WP-3d | r2db `structured.py` → `storage_outcomes.py` (ST10: `QueryOutcome`・`MutationOutcome`・`SchemaOutcome`) | `ead4893` | 3390 | 登録 helper を挟む 2 塊を飛び石で移し、`_ISOMORPHIC_TARGETS` の差分は 0。括弧書きは `backend.py` の 1 か所。新規テスト 2 本 (facade の同一性、frozen と既定値)。変異は実装 5 件とレビュー 3 件がすべて赤。完了条件 1 の変異は、名前を消すと `backend.py` の import が収集時に壊れるため、別の class で上書きする形に改めた (W3-14) |
+
+- root ゲートの前後の `pg_database` / `pg_roles` 差分は 0、`tools/tests` は `404 passed`。
+- §10.9 の既知の穴 22・23 (`service.py` と `service_results.py` の docstring の崩れ) は、`d85bd42` (merge `7c25e88`) で閉じた。崩したのは R-22 変更セット 2 の `fb9a098`。
+- **次の WP**: WP-3e (CE5)。R-22 変更セット 6 と MitateDB の `tests/test_l1_details_vocabulary_ast_scan.py` を共有するので、変更セット 6 の統合後に行数を測り直してから着手する。
