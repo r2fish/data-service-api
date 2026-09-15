@@ -108,6 +108,16 @@
 
 - **完了ゲート**: 監督が `tools/dev/gate.py` で root suite を通す。集計行は直前の main (`3402 passed, 2 subtests passed`) に新規テストの数を足したものと一致し、共有クラスタの差分は 0 であること。`tools/tests` の集計行も添える。
 
+### 2.6 訂正註 (2026-09-16、独立レビュー 1 回目の後。本文は書き換えない)
+
+- **(a) §2.5 の 12 行目の変異は `mutate.py` では表現できない。** 対応する変異は `tools/tests/pytest.ini` の削除だが、`mutate.py` は文字列の置換しか行わず、`pytest.ini` は中身が空でも根として数えられる。よって 12 行目は **監督の監査照合**で確かめる: ファイルを一時的に改名 → 統合テスト 7 を実行 → 戻す → sha256 を 2 回照合 (§1.4 の 28〜31 と同じ形)。結果を §2.6 に記録する。
+- **(a-1) 12 行目の監査照合の結果 (2026-09-16、監督)。** `tools/tests/pytest.ini` を scratchpad へ退避すると `conformance-tests/test_testpg_cluster.py::test_tools_tests_root_does_not_start_a_cluster` が赤 (`1 failed, 8 deselected`)、戻すと緑 (`1 passed, 8 deselected`)。復元は sha256 を 3 秒あけて 2 回照合し、退避前と一致した (`7b4c0cc3…bbc1`)。よって 12 行目の完了条件は満たされている。
+- **(b) §2.5 の 3 行目 (TimeZone) の変異は、最初の実行で緑になった。** `-c TimeZone=Asia/Tokyo` を消しても、`initdb` が焼いた既定値で同じ値になるためである。固定を 2 つに分ける: `pg_settings` の `source` が `command line` であること (統合) と、`postgres` の引数に `-c` の設定が並ぶこと (単体)。
+- **(c) §2.2 に追記**: 3 つの conftest は、pytest が非 package の `conftest` を複数読み込めるように `sys.modules` の後始末を行う。この処理も 1 つのテストと変異で固定する。
+- **(d) WP-1 の間の gate の限界**: `tools/dev/gate.py` は共有クラスタを見続けるが、テストはもう共有クラスタに触れないので、その前後差分 0 は「残骸なし」の証拠にならない。実行のクラスタを見る判定は WP-2 で入れる。それまでの gate の `pg_database / pg_roles` の行は情報として読む。
+- **(f) 並列実行でだけ出た不具合 (2026-09-16、監督の完了ゲート 1 回目、`3 failed, 3414 passed`)。** `-n 5 --dist loadgroup` では、テストが worker の中で動き、そこから起動する入れ子の pytest が `PYTEST_XDIST_WORKER` を引き継ぐ。起動部品はそれを見て「worker なのに mode が無い」と判定し、新しい controller であるにもかかわらず起動を拒む (`test_nested_pytest_with_a_dsn_but_no_mode_is_ambiguous_and_fails`、`test_peer_root_starts_and_cleans_up_its_own_cluster` の 2 件)。直列の実行では再現しない。対処は 2 段: 起動部品は、環境変数だけでなく process が本当に worker であること (`xdist.remote` が `sys.modules` にあること) を確かめる。テストは入れ子の pytest に渡す環境から `PYTEST_*` を除く。単体テストと変異を足す。
+- **(e) レビューの主な指摘**: 統合テストが実行中の環境変数を読むと CI で壊れ、外部モードの指す先が共有クラスタなら接続してしまう (§1 違反)。`sweep()` の基底ディレクトリの安全確認漏れ。実行ディレクトリの作成から `flock` までの隙。失敗経路での postmaster と fd の取り残し。いずれも実装で直す。全文は独立レビューの報告 (`$SP` の scratchpad、非追跡) にある。
+
 ## 3. WP-2 — 道具 (枠。着手時に manifest を追記する)
 
 - `tools/dev/gate.py`: `dsa_testpg.cluster()` でクラスタを起動し、`DSA_TEST_PG=external` と `Cluster.env()` で pytest を実行する。`pg_database` / `pg_roles` の前後比較はそのクラスタで停止前に行い、FAIL の判定に使う。共有クラスタの前後比較は情報表示だけにする (Q-3)。

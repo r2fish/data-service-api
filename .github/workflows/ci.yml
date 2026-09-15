@@ -81,6 +81,16 @@ env:
   # README.md "Running against real PostgreSQL").
   R2DB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
   MITATEDB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
+  # tools/testpg/dsa_testpg.py (work order docs/work-orders/WORK_ORDER_R44_
+  # TEST_PG_ISOLATION_V1.md WP-1, design docs/design/
+  # TEST_POSTGRES_ISOLATION_V0_1.md v0.2 D-4): with both DSNs above already
+  # set, `external` tells every conftest.py's `ensure_for_pytest()` to use
+  # THIS job's own already-running `docker run postgres:16` container
+  # (below) instead of starting a throwaway cluster of its own -- the
+  # `tools-tests` job also inherits this (and the two DSNs), which is fine:
+  # `tools/tests/pytest.ini` keeps it from loading any conftest.py at all,
+  # so `ensure_for_pytest()` never runs there regardless.
+  DSA_TEST_PG: "external"
 
 jobs:
   change-class:
@@ -141,6 +151,17 @@ jobs:
     # Phase 8 WP-1 review finding 3: a broken hold_in_flight premise hangs
     # rather than fails; bound the whole job so the hang surfaces as red.
     timeout-minutes: 30
+    env:
+      # tools/testpg/dsa_testpg.py's own integration tests (conformance-
+      # tests/test_testpg_cluster.py, work order docs/work-orders/
+      # WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §2.4) start REAL, nested
+      # throwaway clusters of their own -- independent of the docker-run
+      # container above, which this job's suite otherwise uses via
+      # DSA_TEST_PG=external (workflow-level env:). Ubuntu's `postgresql-16`
+      # apt package (installed below) does not put its server binaries on
+      # PATH, so DSA_TEST_PG_BINDIR points the launcher straight at them
+      # (§6: unconfirmed until push resumes and this job actually runs).
+      DSA_TEST_PG_BINDIR: /usr/lib/postgresql/16/bin
     strategy:
       fail-fast: false
       matrix:
@@ -173,8 +194,13 @@ jobs:
           docker logs pg16 || true
           exit 1
 
-      - name: "Install PostgreSQL client (both adapters shell out to psql) and nginx (design D-3: required dependency of conformance-tests/socket_harness.py) -- one `apt-get update` for both (F-9 差し戻し 監督裁定 2026-09-08: the previous two separate steps each ran their own redundant `apt-get update`)"
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client nginx
+      - name: "Do not let postgresql-16's postinst create/start a Debian cluster (review M-9: the pg16 container above already owns 127.0.0.1:5432; Debian/Ubuntu's postgresql-16 package runs pg_createcluster on install and starts a default 16/main cluster otherwise -- untested interaction with the container's own port, so suppressed outright rather than relying on it happening to pick a free port)"
+        run: |
+          sudo install -d /etc/postgresql-common
+          echo "create_main_cluster = false" | sudo tee /etc/postgresql-common/createcluster.conf
+
+      - name: "Install PostgreSQL client (both adapters shell out to psql), PostgreSQL 16 server binaries (tools/testpg/dsa_testpg.py's own nested throwaway clusters -- DSA_TEST_PG_BINDIR above), and nginx (design D-3: required dependency of conformance-tests/socket_harness.py) -- one `apt-get update` for all three (F-9 差し戻し 監督裁定 2026-09-08: the previous two separate steps each ran their own redundant `apt-get update`)"
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client postgresql-16 nginx
 
       - name: "Stop the distro's own nginx service (design D-11 (1): Debian starts a default-conf service on install; this job's own conformance gate must be the only nginx running for the duration -- see the marker-scoped residue check below, which would NOT itself catch this distro service left running, since its own argv carries none of this harness's own `conformance-socket-harness` marker)"
         run: sudo systemctl disable --now nginx || sudo service nginx stop
