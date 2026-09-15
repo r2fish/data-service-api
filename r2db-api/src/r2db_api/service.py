@@ -717,7 +717,7 @@ class DataService:
             )
 
     def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> list[dict[str, Any]]:
-        """Plain-item-list form, unchanged in shape since before CCR-13 (every existing caller --, the in-process conformance adapter -- keeps working against exactly this return type). `order_by`/`cursor` (CCR-13) are accepted here too (so this method alone is enough to exercise/test them against the facade), but the pagination continuation itself only reaches a caller through `query_page` below, which `http.post_query` uses.
+        """Plain-item-list form, unchanged in shape since before CCR-13 (every existing caller -- `tests/test_foundation.py`, the in-process conformance adapter -- keeps working against exactly this return type). `order_by`/`cursor` (CCR-13) are accepted here too (so this method alone is enough to exercise/test them against the facade), but the pagination continuation itself only reaches a caller through `query_page` below, which `http.post_query` uses.
 
         History: CH-0135
         """
@@ -767,7 +767,7 @@ class DataService:
             raise
 
     def mutate(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic", request_id: str | None = None) -> int:
-        """Plain affected-count form, unchanged in shape since before CCR-13 (every existing caller --, the in-process conformance adapter -- keeps working against exactly this return type). `mutate_result` below is the richer shape
+        """Plain affected-count form, unchanged in shape since before CCR-13 (every existing caller -- `tests/test_foundation.py`, the in-process conformance adapter -- keeps working against exactly this return type). `mutate_result` below is the richer shape
         `http.post_mutate` uses.
 
         History: CH-0130

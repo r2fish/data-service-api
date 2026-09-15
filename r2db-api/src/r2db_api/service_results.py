@@ -11,7 +11,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class QueryPage:
-    """`DataService.query_page`'s own return shape, matching `spec/data-service-api.v1.json`'s `QueryResult` (CCR-13 introduced `items`/`next_page` adds `revisions`, index-aligned with `items`, now that `revision_preconditions` is declared `enabled`). `next_page`
+    """`DataService.query_page`'s own return shape, matching `spec/data-service-api.v1.json`'s `QueryResult` (CCR-13 introduced `items`/`next_page`; WP-5 adds `revisions`, index-aligned with `items`, now that `revision_preconditions` is declared `enabled`). `next_page`
     is the opaque cursor for the next page (`QueryOutcome.next_cursor`,
     `r2db_api.structured`), or `None` when this was the last page.
 
