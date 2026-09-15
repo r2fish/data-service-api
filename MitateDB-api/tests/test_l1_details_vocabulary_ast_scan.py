@@ -238,21 +238,21 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     ("backend_postgres.py", 473),   # generic driver-exception translation
     ("backend_postgres.py", 500),   # generic driver-exception translation
     ("backend_postgres.py", 557),   # generic driver-exception translation
-    ("backend_postgres.py", 609),   # generic driver-exception translation
-    ("backend_postgres.py", 634),   # generic driver-exception translation
-    ("backend_postgres.py", 812),   # generic driver-exception translation
-    ("backend_postgres.py", 829),   # generic driver-exception translation
-    ("backend_postgres.py", 960),   # generic driver-exception translation
-    ("backend_postgres.py", 1118),  # generic driver-exception translation
-    ("backend_postgres.py", 1205),  # generic driver-exception translation
-    ("backend_postgres.py", 1257),  # generic driver-exception translation
-    ("backend_postgres.py", 1290),  # generic driver-exception translation
-    ("backend_postgres.py", 1316),  # generic driver-exception translation
-    ("backend_postgres.py", 1383),  # generic driver-exception translation
-    ("backend_postgres.py", 1411),  # generic driver-exception translation
-    ("backend_postgres.py", 1452),  # generic driver-exception translation
-    ("backend_postgres.py", 1721),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1790),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 615),   # generic driver-exception translation
+    ("backend_postgres.py", 640),   # generic driver-exception translation
+    ("backend_postgres.py", 821),   # generic driver-exception translation
+    ("backend_postgres.py", 838),   # generic driver-exception translation
+    ("backend_postgres.py", 969),   # generic driver-exception translation
+    ("backend_postgres.py", 1127),  # generic driver-exception translation
+    ("backend_postgres.py", 1214),  # generic driver-exception translation
+    ("backend_postgres.py", 1267),  # generic driver-exception translation
+    ("backend_postgres.py", 1300),  # generic driver-exception translation
+    ("backend_postgres.py", 1326),  # generic driver-exception translation
+    ("backend_postgres.py", 1393),  # generic driver-exception translation
+    ("backend_postgres.py", 1421),  # generic driver-exception translation
+    ("backend_postgres.py", 1462),  # generic driver-exception translation
+    ("backend_postgres.py", 1731),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1800),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --

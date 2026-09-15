@@ -1,5 +1,6 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.10 (2026-09-15)**: 実装担当が §14.4 (候補一覧・判定表・記録) を埋めた (監督がコミット前に確定する)。既存の節は書き換えていない。
 - **v1.9 (2026-09-15)**: §14 に変更セット 6 (r2db `control_main.py` と MitateDB `backend_postgres.py`) の manifest と、起草時の疑義 4 件への監督裁定 (§14.5) を追記し、独立レビューの指摘への監督裁定 Y6-5〜Y6-12 を §14 に反映した。既存の節は書き換えていない。
 - **v1.8 (2026-09-15)**: §13 のレビュー差し戻し 7 件 (監督裁定) を反映した: 安全上の理由の一覧の追加、参照先の grep を src まで広げた参照表、変異 9・12(c) の変異先の固定、0d で残った経緯だけの文の表、参照の文数の数え方、R-37 との重なりの書き直し。
 - **v1.7 (2026-09-15)**: §13 に変更セット 5 (r2db `credential_store.py` と MitateDB `ops.py`) の manifest を追記した (起草、監督確認待ち)。既存の節は書き換えていない。
@@ -2326,86 +2327,370 @@ tools/dev/finalize.py -C "$WT" --branch <branch> --allow 'r2db-api/src/r2db_api/
 
 ### 14.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
 
-各表は未記入。範囲・数え方・区分・「HEAD の状態」の書き方は §13.4 と同じ。
+範囲・数え方・区分・「HEAD の状態」の書き方は §13.4 と同じ。対象 113 塊 (24+89) を全件読んだ。**差し戻しの修正 (2026-09-15)**: 監督裁定 (P1〜P5、A1〜A7、B1〜B7) と R6-1〜R6-3 により、2 module を基準 `80fad55` のバイト列に戻し、許される除去 (経緯の日付と裁定日付の語句だけ。条項 ID・WP の位置指定・ラベルは基準のまま) を 1 か所ずつ当て直した。以下は修正後の最終状態である。
 
-**変異 5・8 の対象文** (着手時に選ぶ。CH-ID を付けた塊の文。Y6-5)
+**変異 5・8 の対象文** (着手時に選ぶ。CH-ID を付けた塊の文。Y6-5。CH-0513 の欠番に伴い変異 8 を移した)
 
 | 変異 | ファイル / 塊 (基準の行) | CH-ID | 文 (先頭の数語) | 保護参照 |
 |---|---|---|---|---|
-| 5 | | | | |
-| 8 | | | | |
+| 5 | control_main.py / L1-194 (文は L3-11) | CH-0504 | `Design this file is written against: docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md v1.6, ...` | 実在パス `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` |
+| 8 | control_main.py / L1-194 (文は L3-4) | CH-0504 | 同じ文の `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md v1.6` から `v1.6` を消す | 版数付き文書名 `R2DB_CCR14_CONTROL_PLANE_V1.md v1.6` (括弧の外。CH を残す塊に括弧内の版数付き文書名が無いため) |
 
 **監査スクリプトの出力** (`cs6_removed_tokens.py`。Y6-6。実行ごとに「実行 N (最初 / 裁定 #n の後、実行時刻、`--head`)」の 1 行と、出力全体を逐語で入れたコードブロックを順に足す)
+
+実行 1 (最初、2026-09-15、コミット前 `--head` 省略 = 作業ツリー。**履歴**: 差し戻し前の状態。R6 の後は下の実行 2 が正):
+
+```text
+BASE 80fad55 HEAD worktree
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-1	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-10	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-11	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-13	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-2	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-3	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-3c	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-4	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-4b	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-7	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-8	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	F-9	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	WP-1	x3
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	WP-4	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	id	WP-5	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L1-194	CH-0504	wp-locator	work order WP-1	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L271-317	CH-0505	id	D-5	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L271-317	CH-0505	id	R-2	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L335-343	CH-0506	id	D-5	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L335-343	CH-0506	id	M-4	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	D-1	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-1	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-10	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-11	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-13	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-15	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-2	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-3	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-3c	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-4	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-4b	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-5	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-6	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-7	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-8	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	F-9	x2
+REMOVED	r2db-api/src/r2db_api/control_main.py	L362-408	CH-0507	id	WP-6a	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L418-421	CH-0508	id	N-7	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L442-483	CH-0509	id	WP-4	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L490-492	CH-0510	id	D-5	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L503-506	CH-0511	id	D-5	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L503-506	CH-0511	id	M-4	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L561-573	CH-0512	id	F-16	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L561-573	CH-0512	id	WP-4f	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L594-599	CH-0513	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1-81	CH-0515	id	R-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1-81	CH-0515	id	R-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1-81	CH-0515	id	WP-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L97-98	CH-0516	id	D-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L105-121	CH-0517	id	F-12	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L161-167	CH-0519	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L183-200	CH-0520	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L183-200	CH-0520	id	I-1	x2
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L238-243	CH-0522	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L238-243	CH-0522	id	WP-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L278-308	CH-0523	id	F-12	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L374-393	CH-0524	id	R-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L583-591	CH-0526	id	G-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L583-591	CH-0526	id	P-8	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L645-659	CH-0527	id	F-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L735-739	CH-0530	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L816-817	CH-0531	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L838-840	CH-0532	id	R-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L873-888	CH-0533	id	D-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1124-1136	CH-0534	id	B-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1124-1136	CH-0534	id	R-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1140-1142	CH-0535	id	R-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1212-1222	CH-0536	id	R-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1458-1465	CH-0538	id	D-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1458-1465	CH-0538	id	P-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1458-1465	CH-0538	id	WP-1a	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1576-1665	CH-0540	id	I-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1683-1708	CH-0542	id	WP-6d	x1
+SUMMARY ch_blocks=42 ws_only=0 unpaired=0 removed_rows=73
+```
+
+実行 2 (差し戻しの修正と裁定 R6-1〜R6-3 の後、2026-09-15 15:03、コミット前 `--head` 省略 = 作業ツリー。exit 0):
+
+```text
+BASE 80fad55 HEAD worktree
+SUMMARY ch_blocks=9 ws_only=0 unpaired=0 removed_rows=0
+```
 
 **指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
 
 | # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
 |---|---|---|---|---|---|---|
+| — | 該当なし: 文区間の削除 (§4.1 (3)) は 0 件。除去は括弧・ラベルの中の日付の語句 9 か所だけで、どの文も残る。残した文の点検語は下の判定表の「点検語」欄に文ごとに書いた | — | — | — | — | — |
 
-**塊をまたぐ参照先一覧** (行番号は基準 `80fad55`。「残っているか」は HEAD の実物)
+**塊をまたぐ参照先一覧** (行番号は基準 `80fad55`。「残っているか」は HEAD の実物。§14.2 の参照表の全行)
 
 | # | 参照元 (`file:line`) | 参照の語 | 参照先 (`file:line`) | 参照先の文 (先頭の数語) | 残っているか |
 |---|---|---|---|---|---|
+| 1 | `control_main.py` L330-331 | this function's own docstring | L271-317 | `Assemble the 4-Postgres-store ...` の docstring (CH-0505 は欠番) | はい (基準のバイト列) |
+| 2 | `control_main.py` L313、L365、L413、L638 | this module's (own) header | L1-194 | module docstring (CH-0504。除去は `, supervisor ruling 2026-09-05` だけ) | はい |
+| 3 | `backend_postgres.py` L165 | immediately above | L136-158 | `Bookkeeping table name (provisioned by migrations/0003_provision_application.sql ...` | はい (基準。CH-0518 は欠番) |
+| 4 | `backend_postgres.py` L465、L492 | `field_domains`'s own identical rework above | L406-417 | `WP-3 差し戻し最終ラウンド ...` | はい (基準) |
+| 5 | `backend_postgres.py` L525 | `_field_types_locked` immediately above | L438-441 | `_field_types_locked` の docstring | はい (基準) |
+| 6 | `backend_postgres.py` L991、L998 | `create_collection`'s own identical fallback / comment | L852-857・L861-864、L873-888 | `Phase 6 WP-3 (design D-3): robust ...`、`Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2, review M-6) ...` | はい (基準。CH-0533 は欠番) |
+| 7 | `backend_postgres.py` L1076、L1093 | own identical (rework) comment above | L762-769、L922-934 | `Phase 9 WP-3c rework (design D-5, I-1/I-8): built here ...` | はい (基準) |
+| 8 | `backend_postgres.py` L1201-1202 | this module's own top-of-file docstring | L1-81 | module docstring の B-1 (ii) | はい (基準。CH-0515 は欠番) |
+| 9 | `backend_postgres.py` L1238 | module-level comment above `_timeout_ms` | L1458-1465 | `execution_ms (Phase 8 WP-1a, design D-1 "実装の形" 3) ...` | はい (基準。CH-0538 は欠番) |
+| 10 | `backend_postgres.py` L1278、L1308 | identical `except` clause | L1232-1245 | `Phase 8 WP-1a rework 1 (裁定 2): the SAME execution_ms mapping ...` | はい (CH-0537。除去は `, 監督裁定 2026-09-06` だけ) |
+| 11 | `backend_postgres.py` L1296 | `update_in_transaction` immediately above | L1262-1266 | `P3-D2 (WP-1.5): no commit/rollback here ...` | はい (基準) |
+| 12 | `backend_postgres.py` L1544 | each method's own docstring | L1576-1665、L1729-1760、L1794-1820 | `idempotency_begin`/`idempotency_reserve`/`idempotency_unlock` の docstring | はい (基準。CH-0540・0543・0545 は欠番) |
+| 13 | `backend_postgres.py` L1670-1671、L1702 | this method's own docstring | L1576-1665 | `What DOES span both this lookup ...` | はい (基準) |
+| 14 | `backend_postgres.py` L1770、L1785 | `idempotency_begin` と同じ理由 / that method's own comment | L1683-1708、L1711-1716 | `Code-review fix F1 (Opus review 2, blocker): commit HERE ...`、`Code-review fix F2: the SAME mapping ...` | はい (基準。CH-0542 は欠番) |
+| 15 | `backend_postgres.py` L76 | ``insert``'s own docstring | **無い** | `insert` に docstring が無い (移動前からの穴) | 参照先が元から無い。本変更セットは docstring を足さない (コメントと docstring の移動に限る。訂正の記録を参照) |
+| 16 | `backend_postgres.py` L1527、L1759、L1804 | `idempotency_connection`'s own docstring | **無い** | 同上 | 同上 |
+| 17 | r2db `tests/test_audit_query.py:58`、`tests/test_surfaces_env.py:258`、`tests/test_control_http.py:727` | `control_main.py`'s own docstring | `control_main.py` L1-194 | module docstring | はい (CH-0504、日付の語句だけ除去) |
+| 18 | r2db `tests/test_surfaces_env.py:41`・`:270`、`tests/test_control_http.py:727`・`:830` | `control_main.py`'s own tail | L627-660 | `Design SS8 m-10, WP-5 flip: the literal uvicorn/systemd entry point ...` | はい (基準。CH-0514 は欠番) |
+| 19 | r2db `tests/test_process_ceilings_declaration.py:655` | step 6 of that function's own docstring | L362-408 (と L583-587) | `6. assemble the rest of the stack via assemble_control_stack(...) ...` | はい (基準。CH-0507 は欠番) |
+| 20 | r2db `conformance/conformance_adapter_r2db_http.py:1787` | `control_main.py`'s own note (`_RolePool.__init__` は接続を開かない) | **確定: L611-616** (`each owns its own dedicated _RolePool ...` の塊。L442-483 は pool の lifecycle の話で、接続を開かない旨ではない) | `(each owns its own dedicated _RolePool, like PostgresCredentialStore ...` | はい (CH なしの塊、基準) |
+| 21 | r2db `src/r2db_api/platform_declarations.py:83` | `r2db_api.control_main`'s own `R2DB_PLATFORM_SCHEMA` documents | **確定: L1-194** (env 表の `R2DB_PLATFORM_SCHEMA` の行) | env 表の `R2DB_PLATFORM_SCHEMA` | はい (env 表は基準のバイト列) |
+| 22 | r2db `src/r2db_api/platform_declarations.py:949` | `r2db_api.control_main`'s own 4 platform-plane stores ... WP-4e's own investigated-and-reverted default | **確定: L442-483** | `Phase 10 WP-4e investigated deriving this default ...` | はい (CH-0509、`(supervisor ruling 2026-09-09)` だけ除去) |
+| 23 | r2db `src/r2db_api/platform_declarations.py:1053` | `control_main`'s own startup fail-fast calls | **確定: L561-573** | `Phase 10 WP-4g (following WP-4f's own ops verify-declarations F-16 aggregate check): this process' own startup now ALSO fails fast ...` | はい (CH-0512、`supervisor ruling 2026-09-09, ` だけ除去) |
+| 24 | r2db `src/r2db_api/platform_declarations.py:1061` | `control_main`'s own case: that process serves no application | **確定: L561-573** | `(application_slugs=(): this process serves no application at all)` | はい (CH-0512、この文は変えていない) |
+| 25 | MitateDB `src/mitatedb_api/backend.py:450`、`tests/test_idempotency_concurrency.py:237`・`:257` | `idempotency_begin`/`idempotency_reserve` | L1576-1665、L1729-1760 | 両 method の docstring | はい (基準) |
+| 26 | MitateDB `src/mitatedb_api/postgres_value_domain.py:98-99` | layer (ii) backstop、per-DML-method final clause | L1-81、L1201-1203 | module docstring の B-1 (ii)、`B-1 (ii): defensive backstop ...` | はい (基準) |
+| 27 | MitateDB `src/mitatedb_api/postgres_types.py:10`・`:21`・`:37` | `encode_value` below / no method in this module / `field_domains` below | L1124-1136、L130-132、L374-393 | `values (R-2/B-1 value-domain gate) ...`、`m-7: operator-token ...`、`Live catalog lookup (R-2 stage 2) ...` | はい (基準。CH-0534・CH-0524 は欠番) |
+| 28 | MitateDB `src/mitatedb_api/backend_sqlite.py:21` | `backend_postgres.py` の native timeout (`SET LOCAL statement_timeout`/`lock_timeout`) | L1458-1465 | `execution_ms (Phase 8 WP-1a, design D-1 "実装の形" 3): a real SET LOCAL ...` | はい (基準) |
+| 29 | MitateDB `src/mitatedb_api/backend_sqlite.py:45` | `backend_postgres.py`'s own `_DIRECTION_SQL` constant dict | L130-134 (BP3) | `_OPERATOR_SQL`/`_DIRECTION_SQL` と直前の `m-7:` | はい (基準) |
+| 30 | MitateDB `tests/test_application_plane_limits.py:550` | `backend_postgres.py`'s own `SET LOCAL lock_timeout` | L1458-1465 | 同上 | はい (基準) |
+| 31 | `security/CONTROL_MAPPING.md:538` | `backend_postgres.py` converts it into a real `SET LOCAL statement_timeout`/`lock_timeout` (`backend_postgres.py:1658-1661`) | L1458-1465、L1474-1480 (行番号の参照は移動前から古い。範囲外) | 同上 | はい (基準) |
+| 32 | MitateDB `tests/test_main.py:250` | `backend_postgres.py`'s own `__init__` no longer raises | L278-308 | `H-1(a) rework: this constructor no longer RAISES ...` | はい (基準。CH-0523 は欠番) |
+| 33 | MitateDB `tests/test_postgres.py:3087` | `field_domains`/`field_types`/`all_field_types` の `except` | L406-417、L465-466、L492-493 | `Before this fix every read/write on an un-migrated DB surfaced as ValidationError ...` | はい (基準) |
+| 34 | MitateDB `src/mitatedb_api/cell.py:3168` | `backend_postgres.py`'s own `read()` | **確定: L1326-1359** (`read()` の中の `order_by` と direction の注記。返す物理表現そのものはコードで、注記は L1326-1341) | `WP-3: order_by is always None or a non-empty LIST ...` | はい (基準) |
+| 35 | MitateDB `conformance/conformance_adapter_mitatedb_http.py:921-923` | its own module docstring (pool を持たず持続接続 2 本) | L72-80 (L1-81 の中、`design v1.1 §7`。Y6-7) | `Notable, deliberate differences from that peer's own design: no pooling ...` | はい (基準。CH-0515 は欠番) |
+| 36 | MitateDB `src/mitatedb_api/credential_store_postgres.py:50` | `backend_postgres.py`'s identical `_execute` | L248 | `R-2 choke point. The ONLY call to cursor.execute in this module.` | はい (CH なし、基準。Y6-7) |
+| 37 | MitateDB `src/mitatedb_api/credential_store_postgres.py:211` | mirrors `backend_postgres.py`'s identical role | L248 | 同上 | はい (同上) |
+| 38 | MitateDB `README.md:223` | `backend_postgres.py:1658-1661` | 行番号の参照 (移動前から古い) | — | 範囲外 (README は触らない) |
 
 **HTTP の status・error code を含む削除文の監査一覧**
 
 | # | ファイル / 塊 | 削除した文 (先頭の数語) | 含む語 | 判定表の根拠 |
 |---|---|---|---|---|
+| — | 該当なし: 文区間の削除が 0 件なので、status 番号やエラーコード語彙 (F-n を含む) を含む削除文も 0 件 | — | — | — |
 
 **0d の保護参照があるために残った、経緯だけの文**
 
 | # | ファイル / 塊 (行) | 文 (先頭の数語) | 保護参照 | HEAD の状態 |
 |---|---|---|---|---|
+| — | 該当なし: 文の削除を 1 件も試みていないため、0d の禁止で残った文は無い (経緯だけの文も含めて、すべて §3 の判定か R6-1 で基準のまま残した) | — | — | — |
 
 **訂正の記録 (0g)** (§14.2 の参照先が無い 2 件の扱いもここに書く)
 
 | # | ファイル:行 (CH-ID) | 旧文 (先頭の数語) | 新文 (先頭の数語) | 今のコードとの食い違い (根拠 `file:line`) |
 |---|---|---|---|---|
+| — | 該当なし: 0g の訂正は 0 件 | — | — | — |
+| 参照先が無い 2 件 | `backend_postgres.py` L76 (``insert``'s own docstring)、L1527・L1759・L1804 (`idempotency_connection`'s own docstring) | — | — | 参照先の docstring が基準 `80fad55` に元から無い (`insert`、`idempotency_connection` とも docstring なし)。直すには docstring の追加 (コードの AST は変わらないが本変更セットの「移動と機械的除去だけ」の範囲外) か参照の文の書換え (0g の訂正) が要る。本変更セットではどちらもせず、別件として残す |
 
-**除いた語の一覧** (実在ファイル名・条項 ID・WP の位置指定。完了条件 25。最後の `cs6_removed_tokens.py` の出力の `REMOVED` 行と、同じ順で 1 行ずつ一致させる。不一致は赤)
+**除いた語の一覧** (実在ファイル名・条項 ID・WP の位置指定。完了条件 25。最後の `cs6_removed_tokens.py` の出力 (実行 2) の `REMOVED` 行と、同じ順で 1 行ずつ一致させる。不一致は赤)
 
-| # | ファイル / 塊 (基準の行) | CH-ID | 種類 (`path` / `id` / `wp-locator`) | 除いた語 | 回数 | 意味と出所が残る根拠 |
+| # | ファイル / 塊 (基準の行) | CH-ID | 種類 | 除いた語 | 回数 | 意味と出所が残る根拠 |
 |---|---|---|---|---|---|---|
+| — | 該当なし: 実行 2 の `REMOVED` 行は 0 行 (`removed_rows=0`)。実行 1 の 73 行は差し戻しと R6-1 ですべて基準に戻した (下の判定表 D) | — | — | — | — | — |
 
 **判定表**
 
+A. 除去を残した文 (9 文) は、すべて目印一覧に当たる文なので、B の行 (B2、B6、B10、B25、B26、B28、B29、B31、B35) に含めた。
+
+B. 目印一覧に当たる文 (50 文 = 11 + 39。条件 22)
+
 | # | ファイル / 塊 (基準の行) | CH-ID | 拾った理由 | 文 (先頭の数語) | HEAD の状態 | 判定 (§3) | 根拠 | 点検語 |
 |---|---|---|---|---|---|---|---|---|
+| B1 | control_main.py / L1-194 | CH-0504 | `this WP` | Design this file is written against: docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md v1.6, ... | 変更なし | 残す | 設計ファイルのパスと版数 (0d)、R-1/R-2/R-3/R-9、§5 の WP-4 行、§8 m-10 の出所がある文。`this WP` と `WP-5` は R6-1 で基準のまま | `this` (this file / this module = control_main.py、this WP = 当時の WP。指す先の文は削除していない) |
+| B2 | control_main.py / L1-194 | CH-0504 | `no longer`+`supervisor ruling` | Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work order ... WP-1; REWORK ROUND, ... | `, supervisor ruling 2026-09-05` だけを除去 | 残す ((4) で裁定日付の語句だけ除去) | env から読まない規則、4 変数の拒否 (F-1/F-2)、実在パス 2 つ、`work order ... WP-1`、`rulings-q4-wp12-rework.md sec.2` は基準のまま。除去後は `REWORK ROUND, rulings-q4-wp12-rework.md sec.2)` で、区切りの残骸なし | `this` (this process declares = control-plane process) |
+| B3 | control_main.py / L1-194 | CH-0504 | `no longer` | ... reach-in is REMOVED entirely: there is no longer any private-field mutation from this module into `service`). | 変更なし | 残す | `service` の private field を外から書き換えない現行の不変条件 (A7 の目印文 1)。previous round の叙述と同居するので文ごと残す | `this` (this module) |
+| B4 | control_main.py / L1-194 | CH-0504 | `previously` | R2DB_CONTROL_LIMIT_REQUEST_BYTES optional, default `ControlPlaneLimits.request_bytes` (1_048_576, ... | 変更なし | 残す | env 表の行で、外部に見える既定値の説明。env 表 83 行は基準のバイト列 | `this` (this env var) |
+| B5 | control_main.py / L362-408 | — (CH-0507 欠番) | `supervisor ruling` | (Phase 10 WP-4g, supervisor ruling 2026-09-09) F-16, on the same borrowed connection: ... | 変更なし | 残す | 手順 5b: F-16 (実行時のエラーコード、A2) と、接続上限を検査する role の範囲。塊は A2〜A5 の復元で除去 0 になり P4 で基準に戻した。本修正で新しい除去は足していない | `this` (this process' own role) |
+| B6 | control_main.py / L442-483 | CH-0509 | `supervisor ruling` | Phase 10 WP-4e (supervisor ruling 2026-09-09) investigated deriving this default ... | 括弧 `(supervisor ruling 2026-09-09)` だけを除去 | 残す ((4) で括弧ごと除去) | 括弧の中身が裁定の語と日付だけ。`Phase 10 WP-4e investigated deriving this default from ...` と主語・動詞が残り、pool_size を固定 4 に置く理由は後続の文に基準のまま | `this` (this default = `R2DB_PLATFORM_POOL_SIZE` の既定 4)、`that` (後続の that migration = 0013) |
+| B7 | control_main.py / L442-483 | CH-0509 | `this WP` | A genuine fix needs either a higher `r2dbsvc_controlplane` `CONNECTION LIMIT` ... outside this WP's own scope ... | 変更なし | 残す | `CONNECTION LIMIT` と `_RolePool` に idle eviction が無いという現行の制約と、別裁定への申し送り (A7 の目印文 2)。`this WP's own scope` を除くと「範囲外」の根拠が落ちる | `that` (0013 is exactly that = 上限を上げること)、`this` (this WP) |
+| B8 | control_main.py / L494-500 | — | `previously` | Phase 4 ledger closure L4-10 (work order WP-B3): previously unwired -- ... | 変更なし | 残す | WP の位置指定 `L4-10 (work order WP-B3)` (§14.3) と、既定値が変わらない (behavior-preserving) 理由 | なし (点検語を含まない) |
+| B9 | control_main.py / L544-548 | — | `no longer` | Step 5: EVERY declared role's catalog, unconditionally (rework round -- no longer gated on `audit_dsn`/`audit_reader` presence). | 変更なし | 残す | audit_dsn の有無に依らず全 role の catalog を読む現行の規則 (A7 の目印文 3)。`no longer gated` は条件の否定で、除くと規則が逆に読める | なし |
+| B10 | control_main.py / L561-573 | CH-0512 | `supervisor ruling` | Phase 10 WP-4g (supervisor ruling 2026-09-09, following WP-4f's own `ops verify-declarations` F-16 aggregate check): this process' own startup now ALSO fails fast on F-16 ... | `supervisor ruling 2026-09-09, ` だけを除去 | 残す ((4) で語と区切り 1 つを除去) | 括弧に `following WP-4f's own ... F-16 aggregate check` が残り、F-16 (A2) と WP-4f は基準のまま。起動時 fail-fast の範囲 (controlplane と、DSN があれば auditreader。application role は見ない) も残る | `this` (this process)、`also` (ALSO = ops verify-declarations に加えて起動時にも)、`that` (that role = auditreader)、`then` (this process then pools) |
+| B11 | control_main.py / L627-660 | — (CH-0514 欠番) | `previously`+`no longer` | This is now REQUIRED because `build_control_app()` is no longer zero-network ... | 変更なし | 残す | import だけで接続しないために `app` を lazy にする現行の理由 (A7 の目印文 4)。tests の「own tail」の参照先 | `this` (this module)、`that` (that function) |
+| B12 | backend_postgres.py / L1-81 | — (CH-0515 欠番) | `used to` | WP-1 independent review B-1 (blocker): a value whose Python-level SHAPE was acceptable ... | 変更なし | 残す | 中断した接続を残さない B-1 の安全上の理由。B-1 は同じ塊の layer (i)/(ii) と L1201 ほかの `B-1 (ii)` が指す | `still`・`then`・`this`・`that` (いずれも同じ文の中の失敗経路と接続を指す) |
+| B13 | backend_postgres.py / L1-81 | — | `this WP` | Notable, deliberate differences from that peer's own design: no pooling ... | 変更なし | 残す | 保護参照 `design v1.1 §7`、R-1 (application ごとの DB の境界)。`conformance_adapter_mitatedb_http.py:921-923` の参照先 | `that` (that peer = r2db-api)、`this` (this foundation / this WP) |
+| B14 | backend_postgres.py / L105-121 | — (CH-0517 欠番) | `supervisor ruling` | Q4 rework (supervisor ruling 2026-09-05, H-1(a)): decorates every `PostgresBackend` method below ... | 変更なし | 残す | 未適用の platform upgrade を拒否する guard の範囲。塊は F-12 の復元 (A2) で除去 0 | `that` (method that touches)、`this` (THIS application) |
+| B15 | backend_postgres.py / L105-121 | — | `no longer` | `PostgresBackend.__init__` no longer raises when this application's own platform-upgrade ledger is missing ... | 変更なし | 残す | `__init__` が raise せず他の application を止めない理由と F-12 の保持 | `instead` (stores ... instead)、`this` (this application) |
+| B16 | backend_postgres.py / L183-200 | — (CH-0520 欠番) | `監督裁定` | Phase 9 WP-3c (design D-5, 追補 2 S-a; 監督裁定集約 rulings-r5-r6.md I-1): the per-application idempotency-record side table ... | 変更なし | 残す | 実在パス (`migrations/0003`・`0010`)、runtime role が DML の grant を持つ理由。D-5・I-1 と I-1 の出所は B4 と R6-1 で基準のまま | なし |
+| B17 | backend_postgres.py / L203-227 | — (CH-0521 欠番) | `before this fix` | Code-review fix F8 (Opus review 2): the rationale this comment carried before this fix was FALSE ... | 変更なし | 残す | 後続の lock 名前空間の説明が「corrected here」でこの文を前提にする。レビューの括弧は B5 で基準 | `this` (this comment / this fix) |
+| B18 | backend_postgres.py / L203-227 | — | `it claimed` | It claimed a namespace of 0 would land in the SAME lock space ... | 変更なし | 残す | 直後の文 (PostgreSQL actually keeps those two key spaces disjoint) が It claimed の内容を打ち消す形で参照する。lock の理由 | なし (後続文の `those two key spaces` がこの文を指すので残す) |
+| B19 | backend_postgres.py / L278-308 | — (CH-0523 欠番) | `this WP`+`requester ruling` | Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(f), §3.7 data-plane steps 9-10, F-12; requester ruling 2026-09-05 U-2, ... | 変更なし | 残す | 実在パス (0d) と F-12 (A2) | `instead`、`this` |
+| B20 | backend_postgres.py / L278-308 | — | `before this rework`+`no longer` | H-1(a) rework: this constructor no longer RAISES when this application's own ledger is missing an upgrade ... | 変更なし | 残す | `tests/test_main.py:250` の参照先。起動全体を止めない理由 | `this` (this constructor / this rework) |
+| B21 | backend_postgres.py / L374-393 | — (CH-0524 欠番) | `no longer` | Phase 6 WP-3 (design D-3, L6-1 (v)): a physical `text` column's own domain is no longer a single shared `"text"` bucket ... | 変更なし | 残す | domain の現行の規則。`postgres_types.py:37` の参照先 | `instead`、`that` |
+| B22 | backend_postgres.py / L374-393 | — | `this WP` | A `text`-physical column absent from the registry ... after this WP ... degrades to `"string"`, never a crash. | 変更なし | 残す | 登録の無い列を落とさない fail-safe の理由 | `this` (this peer / this WP) |
+| B23 | backend_postgres.py / L406-417 | — | `supervisor ruling`+`差し戻し` | WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 6, review F9): `_mdb_field_types` missing entirely means migration 0006 was never applied ... | 変更なし | 残す | 未 migrate を運用障害として出す理由 (エラーの帰属)。塊に CH-ID は無く、除去はしていない | `this` (this application) |
+| B24 | backend_postgres.py / L406-417 | — | `before this fix` | Before this fix every read/write on an un-migrated DB surfaced as `ValidationError` ... | 変更なし | 残す | client の fault code にしない理由。`tests/test_postgres.py:3087` の参照先 | `this` (this fix) |
+| B25 | backend_postgres.py / L565-570 | CH-0525 | `used to`+`監督裁定` | Code review §2 C / 監督裁定 C (2026-09-07): `field_types`'s own `declared_type` ... | 括弧 `(2026-09-07)` だけを除去 | 残す ((4) で括弧ごと除去) | 括弧の中身が日付だけ。ラベルと、同じ行の 3 列を 1 query で読む説明は基準のまま | `that` (that identical row)、`this` (this reads) |
+| B26 | backend_postgres.py / L583-591 | CH-0526 | `監督裁定` | Code review §2 C / 監督裁定 C (2026-09-07, P-8/G-4 performance finding): see ... | `2026-09-07, ` だけを除去 | 残す ((4) で日付と区切り 1 つを除去) | `P-8/G-4` は R6-1 で基準のまま。`(P-8/G-4 performance finding)` と `cell.py::_prepare_values` (唯一の caller) が残る | なし |
+| B27 | backend_postgres.py / L645-659 | — (CH-0527 欠番) | `監督裁定` | Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, F-6, 監督裁定 S-g): see ... | 変更なし | 残す | F-6 (A2)。同じ塊の後続文の `(F-6, migrations/0003_provision_application.sql)` は B1 で基準 | なし |
+| B28 | backend_postgres.py / L676-682 | CH-0528 | `監督裁定` | Code review §2 A / 監督裁定 A (2026-09-07): tri-state `enum` ... | 括弧 `(2026-09-07)` だけを除去 | 残す ((4) で括弧ごと除去) | 3 値 (`UNCHANGED`/`None`/値) の現行の規則と `backend_sqlite` との一致は基準のまま | なし |
+| B29 | backend_postgres.py / L689-718 | CH-0529 | `監督裁定` | Code review §2 F / 監督裁定 F (2026-09-07): locks `collection` IN SHARE ROW EXCLUSIVE MODE ... | 括弧 `(2026-09-07)` だけを除去 | 残す ((4) で括弧ごと除去) | 安全上の理由と同居する文なので文ごと残し、日付だけを除いた。phantom write の窓を閉じる lock の理由は基準のまま | `still` (still permitting SELECTs)、`this` (this SAME transaction / this lock) |
+| B30 | backend_postgres.py / L689-718 | CH-0529 | `the original fix` | R-35 (Phase 10, WP-6d-i review): the original fix used plain `SHARE MODE` ... | 変更なし | 残す | SHARE ROW EXCLUSIVE にした理由 (自己衝突で deadlock を避ける)。R-35 と位置指定は基準のまま | `then` (then both deadlock) |
+| B31 | backend_postgres.py / L735-739 | CH-0530 | `監督裁定` | Code review §2 D / 監督裁定 D (2026-09-07): `field` names a POSITION IN THE REQUEST (design D-3 (2)) ... | 括弧 `(2026-09-07)` だけを除去 | 残す ((4) で括弧ごと除去) | `(design D-3 (2))` は B4 で基準のまま。`field` の意味 (要求内の位置) と `backend_sqlite` の同じ注記への参照が残る | `that` (that position) |
+| B32 | backend_postgres.py / L873-888 | — (CH-0533 欠番) | `used to` | Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2, review M-6): `commit()` moved INSIDE this `try` ... | 変更なし | 残す | 設計ファイル名 (出所)、fail-closed の理由。`D-2 item 2` と `D-2's error-row case` が D-2 を指す (B3) | `this` (this `try` / this method) |
+| B33 | backend_postgres.py / L1006-1036 | — | `監督裁定` | M-6 (監督裁定, WP-3a rework 2, 2026-09-07): mirrors `alter_field_constraints`'s own existing-row rule ... | 変更なし | 残す | lock と COMMIT の順序の理由。塊に CH-ID は無く、除去はしていない | `instead`、`that`、`this` |
+| B34 | backend_postgres.py / L1064-1070 | — | `used to` | ... `contract/data-service-api.v1.json`'s own `schemas.SchemaOperationResult.required`): same same-transaction ... | 変更なし | 残す | 実在パス (契約ファイル) と同じ transaction で読む理由 | `this` |
+| B35 | backend_postgres.py / L1232-1245 | CH-0537 | `監督裁定` | Phase 8 WP-1a rework 1 (裁定 2, 監督裁定 2026-09-06): the SAME `execution_ms` mapping ... | `, 監督裁定 2026-09-06` だけを除去 | 残す ((4) で語と日付と区切りを除去) | 括弧は `(裁定 2)` として残る。rollback を外側の `transact()` に任せる理由、`B-1 (ii)`、`cell.py::transact` は基準のまま。L1278・L1308 の「identical except clause」の参照先で、参照される文は変えていない | `this` (this method / this exception) |
+| B36 | backend_postgres.py / L1326-1341 | — | `pre-WP` | WP-3: `order_by` is always `None` or a non-empty LIST of `(field, direction)` tuples now ... | 変更なし | 残す | 入力の形の保証と `cell.py::_bind_order_by` の位置。`cell.py:3168` の参照先 | `this` |
+| B37 | backend_postgres.py / L1326-1341 | — | `used to` | M-4 (independent review, consistency fix): an unexpected `direction` here used to raise a raw, untranslated `KeyError` ... | 変更なし | 残す | 未知の direction を翻訳済みの例外にする理由 (エラーの帰属) | `that`、`this` (this dict lookup) |
+| B38 | backend_postgres.py / L1508-1551 | — (CH-0539 欠番) | `監督裁定` | Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約 rulings-r5-r6.md I-1): idempotency records ... | 変更なし | 残す | I-1 の出所 (B5。除くと I-1 が設計の条項に読める) | なし |
+| B39 | backend_postgres.py / L1508-1551 | — | `pre-WP` | Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): PRE-WP-6d, lookup/reap/count ran over ... | 変更なし | 残す | 同じキーの競合が起きた仕組み。後続文の `REPLACE that self-committing trio` の `that` がこの文を指す | なし (後続文の `that` の参照先なので残す) |
+| B40 | backend_postgres.py / L1508-1551 | — | `before this fix`+`used to` | Code-review fix F1 (Opus review 2, blocker) corrects what this paragraph used to claim here ... | 変更なし | 残す | 即時 commit と session advisory lock の理由 (lock の理由)。レビューの括弧は B5 で基準 | `this` (this paragraph / this fix) |
+| B41 | backend_postgres.py / L1576-1665 | — (CH-0540 欠番) | `before this fix` | Reaps expired records, then looks up `key`, over `conn` ... | 変更なし | 残す | 即時 commit の理由 (`begin()` の rollback が未 commit の DELETE を消す)。括弧は B5 で基準 | `then` (then looks up)、`this` (this request) |
+| B42 | backend_postgres.py / L1576-1665 | — | `this commit`+`pre-WP` | What DOES span both this lookup and the caller's eventual write is the SESSION-scoped advisory lock ... | 変更なし | 残す | 同じキーを直列化する lock の理由。L1670-1671・L1702 の参照先 | `still` (still spans)、`this` (this lookup / this commit) |
+| B43 | backend_postgres.py / L1576-1665 | — | `pre-WP` | Returns `{"digest": str, "response_json": str}` for `key`, or `None` ... | 変更なし | 残す | 返り値の形 (外部に見える挙動) | `this` (this Application) |
+| B44 | backend_postgres.py / L1683-1708 | — (CH-0542 欠番) | `used to` | Code-review fix F1 (Opus review 2, blocker): commit HERE, immediately ... | 変更なし | 残す | 即時 commit の理由。直後の 2 文 (transact の経路、session lock) がこの文を前提にする | なし |
+| B45 | backend_postgres.py / L1683-1708 | — | `before WP-6d` | On the `transact` path (`for_developer=False`), `cell.py`'s `transact` calls ... | 変更なし | 残す | reap の DELETE が消える実測の根拠。`before WP-6d` を除くと `before, the reap` と崩れる (B5) | `this` (this method) |
+| B46 | backend_postgres.py / L1683-1708 | — | `this commit` | The SESSION advisory lock taken above is untouched by this commit ... | 変更なし | 残す | session lock が commit を越えて残る理由 (lock の理由) | `this` (this commit = 直後の `conn.commit()`) |
+| B47 | backend_postgres.py / L1729-1760 | — (CH-0543 欠番) | `pre-WP` | Replaces the pre-WP-6d self-committing `idempotency_count` (removed). | 変更なし | 残す | 置き換えた対象の名前。後続文が COUNT の直列化の理由を述べる | なし |
+| B48 | backend_postgres.py / L1729-1760 | — | `was considered` | `LOCK TABLE public.{_IDEMPOTENCY_TABLE} IN SHARE MODE` was considered and rejected for this purpose ... | 変更なし | 残す | SHARE 同士は衝突しないので採らない安全上の理由 (条件 15 の例) | `then`、`this` (this purpose) |
+| B49 | backend_postgres.py / L1769-1781 | — (CH-0544 欠番) | `this commit` | A bare `SELECT count(*)` leaves nothing for that rollback to discard ... | 変更なし | 残す | commit を置く理由 (対称性と、lock を囲む transaction を早く閉じる)。`that rollback` は直前の文の `self._runtime.rollback()` で、直前の文も基準のまま | `that`、`this` (this commit) |
+| B50 | backend_postgres.py / L1840-1849 | — | `was considered` | Declared (not simply inherited/omitted) so a future reader sees this backend was considered, not skipped. | 変更なし | 残す | どの状態でも no-op で安全という宣言の理由 | `this` (this backend) |
+
+C. §14.2 の「経緯と同じ文にある安全上の理由・保護参照・位置指定」の一覧 (両 module)
+
+| # | module / 塊 | CH-ID | 種別 | HEAD の状態 | 判定 (§3) | 根拠 (その塊の安全上の理由・保護参照が残ること) | 点検語 |
+|---|---|---|---|---|---|---|---|
+| C1 | control_main.py / L1-194 | CH-0504 | 安全、保護参照 (5 文)、位置 | `, supervisor ruling 2026-09-05` だけを除去 | 残す | pepper の分離 (`R2DB_CREDENTIAL_PEPPER` を必須にする理由)、`r2dbsvc_controlplane` role、実在パス 3 つ、`below` は基準のまま | `this module treats it as required` の `this`、`That framing holds` の `That` (直前の設計の記述。どちらも残る) |
+| C2 | control_main.py / L271-317 | — (CH-0505 欠番) | 安全、保護参照、位置 | 基準のバイト列 | 残す | pepper の分離を全 caller に掛ける `(R-2)` (R6-1)、adapter の 2 つの pepper、`(D-5 M-4: ...)` (A4)、`below` | `this check` (validate_control_pepper_separation) |
+| C3 | control_main.py / L326-331 | — | 安全 | 基準 (CH なし) | 残す | timeout を role 側の設定に置く (`statement_timeout`)、`design D-1(b)` | なし |
+| C4 | control_main.py / L335-343、L490-492 | — (CH-0506・CH-0510 欠番) | 安全、位置 | 基準のバイト列 | 残す | `r2dbsvc_auditreader` は `controlplane_dsn` と別の DSN/role。`(D-5 M-4)` (R6-1) と `(design D-5, P4-D4 item 8)` (A3) | `above` (controlplane_dsn above、the 3 lines above) |
+| C5 | control_main.py / L362-408 | — (CH-0507 欠番) | 安全、位置 | 基準のバイト列 | 残す | 手順 2〜6 の順序、F-16 と接続上限の範囲、F-ID (A2)、`design D-1(c)` (A4)、手順の改行と字下げ (A5) | `this process`、`this exact order` |
+| C6 | control_main.py / L429-436 | — | 安全 | 基準 (CH なし) | 残す | pepper の分離を DB 側の宣言読みの前に検査 (`(R-2)`) | なし |
+| C7 | control_main.py / L442-483 | CH-0509 | 安全、保護参照、位置 | 括弧 `(supervisor ruling 2026-09-09)` だけを除去 | 残す | `CONNECTION LIMIT` と pool の lifecycle、`0006_control_plane_http.sql`・`0013_role_connection_limits.sql`、`conformance_adapter_r2db_http.py::self._control_pool_size` (基準の改行、A5)、`L-3 correction, WP-4 integration review 2026-09-10` (A3) | `above`・`below` (The conclusion below / the ANALYSIS above。同じ塊の中で両方残る) |
+| C8 | control_main.py / L494-500 | — | 保護参照、位置 | 基準 (CH なし) | 残す | `L4-10 (work order WP-B3)` | なし |
+| C9 | control_main.py / L561-573 | CH-0512 | 安全、位置 | `supervisor ruling 2026-09-09, ` だけを除去 | 残す | 起動時 fail-fast (F-16) の範囲、`WP-4f's own` (A3)、`r2dbsvc_` / `api` の改行 (A5)、`below` (audit_reader below) | `this process`、`that role` |
+| C10 | control_main.py / L594-599 | — (CH-0513 欠番) | 保護参照 | 基準のバイト列 | 残す | `(design D-5(ii), contract 1.8.0)` (A1) | なし |
+| C11 | control_main.py / L627-660 | — (CH-0514 欠番) | 位置 | 基準のバイト列 | 残す | lazy な `app` の理由、`deviation for supervisor review` (A3)、tests の「own tail」の参照先 | `below` (`__getattr__` below) |
+| C12 | backend_postgres.py / L1-81 | — (CH-0515 欠番) | 安全、位置 | 基準のバイト列 | 残す | B-1 の backstop (`ROLLBACK`)、`design v1.1 §7`、`(R-2/R-3)` と `WP-1 P3 round 2 instruction #1` (R6-1・B6) | `below` |
+| C13 | backend_postgres.py / L105-121、L278-308 | — (CH-0517・CH-0523 欠番) | 安全、保護参照 (L278-308)、位置 | 基準のバイト列 | 残す | 未適用 upgrade の guard、`__init__` が raise しない理由、F-12 (A2)、`docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` | `below` (every method below) |
+| C14 | backend_postgres.py / L130-132 | — | 安全 | 基準 (CH なし、BP3 に接する) | 残す | `sql.SQL` の定数で組み立て、文字列を連結しない | なし |
+| C15 | backend_postgres.py / L136-158 | — (CH-0518 欠番) | 安全 | 基準のバイト列 | 残す | runtime role に grant が無い、`ALTER DEFAULT PRIVILEGES` の前に作る、`migrations/0003_provision_application.sql` x2 (B1) | `that statement` (ALTER DEFAULT PRIVILEGES の文) |
+| C16 | backend_postgres.py / L170-180 | — | 安全、保護参照、位置 | 基準 (CH なし) | 残す | ledger への `SELECT` だけの grant、`docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` | なし |
+| C17 | backend_postgres.py / L203-227、L238-243 | — (CH-0521・CH-0522 欠番) | 安全、位置 | 基準のバイト列 | 残す | per-key lock と table-level count lock を別の id に置く理由、m-1 の事実 (B2) | `below` (see idempotency_begin below) |
+| C18 | backend_postgres.py / L341-350 | — | 安全 | 基準 (CH なし) | 残す | 予約名の拒否 (identifier の検査) | なし |
+| C19 | backend_postgres.py / L406-417 | — | 安全 | 基準 (CH なし) | 残す | 未 migrate の DB を運用障害として出す | `this fix` |
+| C20 | backend_postgres.py / L510-516、L852-857、L1124-1136 | — (CH-0534 欠番) | 保護参照 | 基準のバイト列 | 残す | **語の確定**: L510-516 は `0009_field_constraints_upgrade.sql`・`backend_sqlite.SQLiteBackend`、L852-857 は `cell.py`・`cell.ApplicationCell.create_collection`、L1124-1136 は `postgres_value_domain.py`・`cell.py`・`tests/test_postgres.py` (折返し) | なし |
+| C21 | backend_postgres.py / L689-718、L1006-1036 | CH-0529 (L689-718) | 安全、位置 | L689-718 は括弧 `(2026-09-07)` だけを除去、L1006-1036 は基準 | 残す | `SHARE ROW EXCLUSIVE` の lock、deadlock、COMMIT の前に scan を終える | `still`、`this lock` |
+| C22 | backend_postgres.py / L762-769、L785-787、L816-817、L903-907、L922-934、L1061-1062、L1074-1076 | — (CH-0531 欠番) | 安全、位置 | 基準のバイト列 | 残す | 同じ transaction の中で書く、commit / rollback の前に組み立てる、`(Phase 9 WP-3c rework)` (B5) | `above` (built above) |
+| C23 | backend_postgres.py / L873-888、L997-998、L1421-1426 | — (CH-0533 欠番) | 安全、保護参照 (L873-888)、位置 | 基準のバイト列 | 残す | `commit()` を `try` の中に置く (pre-commit hook、fail-closed、`D-2 item 2`)、`PHASE4_DURABLE_AUDIT_SINK_V1.md` | `below` (final except below) |
+| C24 | backend_postgres.py / L1232-1245、L1277-1281、L1307-1310 | CH-0537 (L1232-1245) | 安全、保護参照 (L1232-1245)、位置 | L1232-1245 は `, 監督裁定 2026-09-06` だけを除去、ほかは基準 | 残す | `QueryCanceled`/`LockNotAvailable` → `execution_ms`、rollback は外側の `transact()`、`cell.py::transact` | `above` (insert() above) |
+| C25 | backend_postgres.py / L1262-1266、L1295-1299 | — | 安全、位置 | 基準 (CH なし) | 残す | 外側の transaction なので commit / rollback しない | `below` (update below / delete below) |
+| C26 | backend_postgres.py / L1326-1341 | — | 保護参照、位置 | 基準 (CH なし) | 残す | `direction` の検査、`cell.py::_bind_order_by` | `this dict lookup` |
+| C27 | backend_postgres.py / L1458-1465、L1492-1496 | — (CH-0538 欠番) | 安全 | 基準のバイト列 | 残す | `SET LOCAL statement_timeout`/`lock_timeout`、`design D-1 "実装の形" 3`・`P-6` (B4・R6-1)。`backend_sqlite.py:21`・`test_application_plane_limits.py:550`・`CONTROL_MAPPING.md:538` の参照先 | なし |
+| C28 | backend_postgres.py / L1508-1551、L1576-1665、L1669-1673、L1683-1708、L1711-1716、L1729-1760、L1769-1781、L1794-1820 | — (CH-0539〜CH-0545 欠番) | 安全、保護参照、位置 | 基準のバイト列 | 残す | 同じキーの session advisory lock、lock の前の timeout、即時 commit、`LOCK TABLE ... IN SHARE MODE` を採らない理由、`I-5` (B6) | `this method's own docstring` |
+| C29 | backend_postgres.py / L1840-1849 | — | 安全、位置 | 基準 (CH なし) | 残す | 状態を問わず no-op で安全な理由 (transaction) | `this backend` |
+| C30 | backend_postgres.py / 位置の語だけ (L374-393、L583-591、L676-682、L744-747、L757-760、L896-900、L984-986、L989-991、L1046-1051、L1054-1058、L1092-1093、L1348-1359、L1784-1785) | CH-0526 (L583-591)、CH-0528 (L676-682) | 位置 | CH-0526・CH-0528 は日付だけを除去、ほかは基準 | 残す | `above`・`below`・「`X`'s own」の参照先の文を変えていない | `above`/`below` |
+
+D. 差し戻しと R6-1〜R6-3 で基準のバイト列に戻した塊 (CH-ID を外し、受け皿の節を消した。番号は詰めない)
+
+| # | module / 塊 (基準の行) | 旧 CH-ID | 前回の除去 (変わった文) | 戻した根拠 | HEAD の状態 |
+|---|---|---|---|---|---|
+| D1 | control_main.py / L271-317 | CH-0505 | `(R-2)`、`(D-5 M-4:` → `(M-4:`、段落の詰め直し | A4 (`D-5 M-4`)、R6-1 (`R-2`)、P1 | 基準のバイト列、CH-ID なし、節なし |
+| D2 | control_main.py / L335-343 | CH-0506 | `(D-5 M-4)` | R6-1 | 同上 |
+| D3 | control_main.py / L362-408 | CH-0507 | F-ID、`rulings-q4-wp12-rework.md`、`Phase 10 WP-6a`、`design D-1(c)`、手順 2〜4 の段落化 | A2、A3 (L370・L379・L385・L387)、A4、A5 | 同上 |
+| D4 | control_main.py / L418-421 | CH-0508 | `2026-09-05,` と `N-7` | R6-3 で `N-7` は基準。日付だけの除去 (`(design amendment N-7)`) は checker が `FAIL (§4.1 (3))` にした (括弧に内容語 `design amendment` があり、日付だけを除けない)。除去 0 で P4 | 同上 |
+| D5 | control_main.py / L490-492 | CH-0510 | `(design D-5, P4-D4 item 8)` → `(design, P4-D4 item 8)` | A3 (L486) | 同上 |
+| D6 | control_main.py / L503-506 | CH-0511 | `(D-5 M-4)` | R6-1 | 同上 |
+| D7 | control_main.py / L594-599 | CH-0513 | `(design D-5(ii), contract 1.8.0)` → `(design, contract 1.8.0)` | A1 | 同上 |
+| D8 | control_main.py / L627-660 | CH-0514 | `deviation for supervisor review` → `deviation for supervisor` | A3 (L632) | 同上 |
+| D9 | backend_postgres.py / L1-81 | CH-0515 | `(R-2/R-3)`、`WP-1 P3 round 2` → `P3`、段落 (i) の詰め直し | R6-1、B6 | 同上 |
+| D10 | backend_postgres.py / L97-98 | CH-0516 | `(design D-2)` | B6 | 同上 |
+| D11 | backend_postgres.py / L105-121 | CH-0517 | `(F-12)`、詰め直し (`StorageConfig urationError`) | A2・B6、P1 | 同上 |
+| D12 | backend_postgres.py / L136-158 | CH-0518 | 変わった文 2 つ: 「Bookkeeping table name (provisioned by, mirroring ...」(パスと文法が落ちた)、「has NO grant of any kind on this table (creates it BEFORE the `ALTER DEFAULT PRIVILEGES` ...」(privilege の理由の主語と出所が落ちた) | B1 | 同上 |
+| D13 | backend_postgres.py / L161-167 | CH-0519 | `(design D-3, §1.5 finding 2a)` → `(design, §1.5 finding 2a)` | B4 | 同上 |
+| D14 | backend_postgres.py / L183-200 | CH-0520 | `D-5`、`監督裁定集約 rulings-r5-r6.md I-1`、段落中の `I-1` | B4、R6-1・R6-2 | 同上 |
+| D15 | backend_postgres.py / L203-227 | CH-0521 | `(Opus review 2)` → `(Opus 2)` | B5 | 同上 |
+| D16 | backend_postgres.py / L238-243 | CH-0522 | 「m-1 (independent correction, extended Q4 phase adds `_IDEMPOTENCY_TABLE`)」(事実が変わった) | B2 | 同上 |
+| D17 | backend_postgres.py / L278-308 | CH-0523 | `(F-12)`、詰め直し (`http.py:: _CLASSIFY_ORDER`) | A2・B6、P1 | 同上 |
+| D18 | backend_postgres.py / L374-393 | CH-0524 | `(R-2 stage 2)` → `(stage 2)` | R6-3 | 同上 |
+| D19 | backend_postgres.py / L645-659 | CH-0527 | 変わった文 1 つ: 「... and PostgreSQL grants a table's owner every privilege on it, `SELECT` included, with no separate `GRANT` required.」(`(F-6, migrations/0003_provision_application.sql)` が落ち、所有者権限の理由の出所が消えた)。前回の表の「変更なし」は誤り | B1・A2 | 同上 |
+| D20 | backend_postgres.py / L816-817 | CH-0531 | `(Phase 9 WP-3c rework)` → `(rework)` | B5 | 同上 |
+| D21 | backend_postgres.py / L838-840 | CH-0532 | `(developer connection only -- R-1)` → `(developer connection only --)` | B5 | 同上 |
+| D22 | backend_postgres.py / L873-888 | CH-0533 | `D-2, review M-6` → `D-2 M-6`、`construction, D-2 item 2` → `construction item 2` | B3 | 同上 |
+| D23 | backend_postgres.py / L1124-1136 | CH-0534 | `(R-2/B-1 value-domain gate)` → `(value-domain gate)` | R6-3 (B-1 は同じ塊の layer (i) が指す) | 同上 |
+| D24 | backend_postgres.py / L1140-1142 | CH-0535 | `(runtime connection only -- R-1)` → `(runtime connection only --)` | B5 | 同上 |
+| D25 | backend_postgres.py / L1212-1222 | CH-0536 | `(R-3)` | R6-1 | 同上 |
+| D26 | backend_postgres.py / L1458-1465 | CH-0538 | `Phase 8 WP-1a, design D-1` → `design`、`P-6` | B4、R6-1 | 同上 |
+| D27 | backend_postgres.py / L1508-1551 | CH-0539 | `監督裁定集約 rulings-r5-r6.md` (`S-a/S-b I-1` と崩れた)、レビューの括弧 | B5 | 同上 |
+| D28 | backend_postgres.py / L1576-1665 | CH-0540 | レビューの括弧 (`fix F2, Opus 2`)、`(I-5)` | B5、B6 | 同上 |
+| D29 | backend_postgres.py / L1669-1673 | CH-0541 | `(Opus review 2, should-fix)` → `(Opus 2, should-fix)` | B5 | 同上 |
+| D30 | backend_postgres.py / L1683-1708 | CH-0542 | レビューの括弧、`before WP-6d` → `before` | B5 | 同上 |
+| D31 | backend_postgres.py / L1729-1760 | CH-0543 | レビューの括弧 | B5 | 同上 |
+| D32 | backend_postgres.py / L1769-1781 | CH-0544 | レビューの括弧 | B5 | 同上 |
+| D33 | backend_postgres.py / L1794-1820 | CH-0545 | レビューの括弧 | B5 | 同上 |
 
 **復元・欠番の裁定と全ファイルの再走査** (完了条件 24)
 
 | # | 裁定 (塊、内容) | 走査の基準 | 走査した範囲 | 結果 | 再実行の `SUMMARY` 行 (逐語) |
 |---|---|---|---|---|---|
+| 1 | 差し戻し (2026-09-15、P1〜P5・A1〜A7・B1〜B7) と R6-1〜R6-3: 2 module を基準のバイト列に戻し、日付と裁定日付の語句の除去だけを 1 か所ずつ当て直した | P2 と R6-1 (条項 ID・WP の位置指定・ラベルは基準のまま) | 2 ファイルの対象 113 塊全件 | CH を残す塊 10 (control_main 4、backend_postgres 6) | 中間 (CH-0508 を戻す前): `SUMMARY ch_blocks=10 ws_only=0 unpaired=0 removed_rows=0` |
+| 2 | CH-0508: 日付だけの除去が `FAIL (§4.1 (3))` → 基準に戻して欠番 (P4) | 同上 | 同上 | CH を残す塊 9 (control_main 3、backend_postgres 6)。checker P exit 0 | 実行 2: `SUMMARY ch_blocks=9 ws_only=0 unpaired=0 removed_rows=0` |
 
 **内容の除去が 0 の塊の検査** (完了条件 23)
 
 | CH-ID の塊 (出力の `ch_blocks`) | 差が空白だけの塊 (`WS-ONLY` 行の数) | `SUMMARY` 行 (逐語) |
 |---|---|---|
+| 9 | 0 | `SUMMARY ch_blocks=9 ws_only=0 unpaired=0 removed_rows=0` |
 
-**変異の記録** (`tools/dev/mutate.py`。ログは実行時刻とファイル名で書く)
+**変異の記録** (`tools/dev/mutate.py`。ログは実行時刻とファイル名で書く。実行 2026-09-15 15:00:10、ログは `$SP/dev-logs/` の下の mutate の実行ディレクトリ (実行時刻 `20260915-150010`) にある。`$SP/cs6-mutations.json` は欠番と基準の改行に合わせて c4a〜c4d・c5・c6・c8・c12b・c12c・c13a・c17b・c19・c20 の対象を移した)
 
 | # | 変異 | 期待 | ログ (実行時刻 / ファイル) | ログの行 (逐語) |
 |---|---|---|---|---|
+| c1 | コード不変 (条件 1) | red | `c1.log` | `c1       expect=red   got=red       OK  | 1 failed in 0.31s | restore=ok` |
+| c2 | 受け皿から 1 文削除 (条件 2) | red | `c2.log` | `c2       expect=red   got=red       OK  | 1 failed in 0.23s | restore=ok` |
+| c3 | CH の無い塊から 1 文削除 (条件 3) | red | `c3.log` | `c3       expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c4a | 否定語を落とす (条件 4a、CH-0504 の `never`。CH-0507 の欠番で移した) | red | `c4a.log` | `c4a      expect=red   got=red       OK  | 1 failed in 0.31s | restore=ok` |
+| c4b | 2 文を並べ替える (条件 4b、`backend_postgres.py` CH-0526。CH-0511 の欠番で移した) | red | `c4b.log` | `c4b      expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c4c | 1 語足す (条件 4c、CH-0504。基準の改行に合わせた) | red | `c4c.log` | `c4c      expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c4d | 折返し行を 1 行消す (条件 4d、CH-0512。基準の改行に合わせた) | red | `c4d.log` | `c4d      expect=red   got=red       OK  | 1 failed in 0.31s | restore=ok` |
+| c5 | 保護参照を含む文を丸ごと削除 (条件 5、CH-0504。基準の文に合わせた) | red | `c5.log` | `c5       expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c6 | ラベル削除 (条件 6、CH-0512 のラベル。CH-0513 の欠番で移した) | red | `c6.log` | `c6       expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c7 | 追加行に WP- を含める (条件 7) | red | `c7.log` | `c7       expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c8 | 版数付き文書名を削除 (条件 8、CH-0504 の `v1.6`。CH-0513 の欠番で移した) | red | `c8.log` | `c8       expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c12a | 語を結合 (条件 12a) | red | `c12a.log` | `c12a     expect=red   got=red       OK  | 1 failed in 0.32s | restore=ok` |
+| c12b | `/` 直後の改行を空白 1 つでつなぐ (条件 12b、基準の改行に合わせた) | red | `c12b.log` | `c12b     expect=red   got=red       OK  | 1 failed in 0.31s | restore=ok` |
+| c12c | backtick 内の折返しを空白 1 つでつなぐ (条件 12c、基準の改行に合わせた) | red | `c12c.log` | `c12c     expect=red   got=red       OK  | 1 failed in 0.30s | restore=ok` |
+| c13a | 受け皿 fenced block の末尾を 1 語切り詰め (条件 13a、CH-0537 の節。CH-0545 の欠番で移した) | red | `c13a.log` | `c13a     expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c13b | 実在パスの後半を削る (条件 13b) | red | `c13b.log` | `c13b     expect=red   got=red       OK  | 1 failed in 0.29s | restore=ok` |
+| c17a | コード側 CH-ID を CH-0999 に (条件 17a) | red | `c17a.log` | `c17a     expect=red   got=red       OK  | 1 failed in 0.25s | restore=ok` |
+| c17b | CH-ID の節を重複させる (条件 17b、`## CH-0509` の前。CH-0505 の欠番で移した) | red | `c17b.log` | `c17b     expect=red   got=red       OK  | 1 failed in 0.24s | restore=ok` |
+| c18 | `__doc__` 読出しを追加 (条件 18) | red | `c18.log` | `c18      expect=red   got=red       OK  | 1 failed in 0.24s | restore=ok` |
+| c19 | roadmap に無い R 番号を追加 (条件 19、CH-0525 の節。CH-0515 の欠番で移した) | red | `c19.log` | `c19      expect=red   got=red       OK  | 1 failed in 0.52s | restore=ok` |
+| c20 | allowlist の値が変わった pin を戻す (条件 20、615 → 609) | red | `c20.log` | `c20      expect=red   got=red       OK  | 1 failed in 0.07s | restore=ok` |
+| c21 | `removesuffix` を含む行を追加 (条件 21) | red | `c21.log` | `c21      expect=red   got=red       OK  | 1 failed in 0.11s | restore=ok` |
 
 **記録**
 
 | 項目 | `control_main.py` | `backend_postgres.py` |
 |---|---|---|
-| CH-ID を付けた塊 / 対象の塊 | / 24 | / 89 |
-| 使った CH-ID と欠番 | | |
-| 経緯トークン (前 → 後) | 56 → | 178 → |
-| 削除した文 | | |
-| `_BACKEND_LAYER_ALLOWLIST` の更新 | — | 20 行 |
+| CH-ID を付けた塊 / 対象の塊 | 3 / 24 | 6 / 89 |
+| 使った CH-ID と欠番 | CH-0504・CH-0509・CH-0512 (欠番 CH-0505〜0508・CH-0510・CH-0511・CH-0513・CH-0514 の 8) | CH-0525・CH-0526・CH-0528・CH-0529・CH-0530・CH-0537 (欠番 CH-0515〜0524・CH-0527・CH-0531〜0536・CH-0538〜0545 の 25) |
+| 経緯トークン (前 → 後、`_HISTORY_TOKEN_PATTERNS` を全文に当てた数) | 56 → 50 | 178 → 171 |
+| 削除した文 | 0 (括弧・ラベルの中の日付の語句 3 か所だけ) | 0 (括弧の中の日付の語句 6 か所だけ) |
+| `_BACKEND_LAYER_ALLOWLIST` の更新 | — | 15 行 (609→615、634→640、812→821、829→838、960→969、1118→1127、1205→1214、1257→1267、1290→1300、1316→1326、1383→1393、1411→1421、1452→1462、1721→1731、1790→1800)。367〜557 の 5 行は値が変わらない |
 
 | 照合コマンド / suite | 結果 (出力の行を逐語) |
 |---|---|
-| `check_comment_provenance.py --base 80fad55 …` | |
-| `check_comment_provenance.py --register` | |
-| `pt.py … tools/tests -q` (コミット後の HEAD) | |
-| `pt.py … r2db-api/tests`・`MitateDB-api/tests`・`conformance-tests` (前 / 後) | |
-| `check_doc_refs.py` | |
-| `public_value_scan.py <触ったファイル>` | |
-| `gate.py --label cs6` | |
+| `check_comment_provenance.py --base 80fad55 …` | `comment provenance OK: 113 blocks checked` (exit 0) |
+| `check_comment_provenance.py --register` | `comment provenance register OK: 79 files scanned, 427 CH-IDs` (exit 0) |
+| `pt.py … MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py r2db-api/tests/test_ops_declarations.py -q` | `pt: 69 passed in 1.95s` (exit 0) |
+| `tools/dev/mutate.py cs6-mutations.json` | `mutate: 22 mutations, 22 as expected, restores verified 5/5 files (sha256 x2), grep counts unchanged (n/a for 7 edits whose lines all exist in the pristine file)` |
+| `check_doc_refs.py` | `check_doc_refs OK: 0 dangling references` (exit 0) |
+| `public_value_scan.py <触ったファイル>` | `# mode=tree files_scanned=6 total_flagged=0` (exit 0) |
+| `pt.py … r2db-api/tests`・`MitateDB-api/tests`・`conformance-tests`・`tools/tests` | 修正の後は実装担当は未実行 (差し戻し前の値は旧状態のもの)。監督の gate と `finalize.py --tools-tests` で取り直す |
+| `gate.py --label cs6` | 監督が実行 |
 
 ### 14.5 監督裁定 (2026-09-15、起草時の疑義)
 
@@ -2425,3 +2710,7 @@ tools/dev/finalize.py -C "$WT" --branch <branch> --allow 'r2db-api/src/r2db_api/
 | Y6-12 | 安全の語・位置の語の件数が再現できない (レビューの未確定) | 正規表現と数え方を §14.2 に書いた。`80fad55` で再実行して 12 / 9 / 12 文、47 / 13 / 55 文で、変わらなかった |
 
 **後続 (変更セット 6 の外)**: basename だけの file 名を checker の 0d の保護参照にするのは、将来の tools の変更セット (候補 0i) で扱う (Y6-6)。
+| R6-1 | 独立レビュー 2 本 (A: 阻害 1・重大 5、B: 重大 3 ほか) の後の範囲 | 変更セット 6 で除くのは、純粋な日付と裁定の日付句 (`supervisor ruling 2026-09-09`、`監督裁定 2026-09-06` 等) だけとする。条項 ID (F-n を含む)、WP の位置指定、ラベル、実在パス (peer 相対を含む) は基準のまま残す。除去の残らない塊は基準のバイト列に戻して欠番にする。前の実装パスはツールが許す除去を機械的に当て、文法の崩れ・事実の変化・パスや条項 ID の喪失を生んだため |
+| R6-2 | CH-0520 の `I-1` | 残す (R6-1) |
+| R6-3 | 実装担当が裁定なしで基準に残した CH-0508 `N-7`、CH-0524 `R-2 stage 2`、CH-0534 `R-2/B-1` | 基準のまま (R6-1 と同じ)。CH-0508 は日付だけの除去をチェッカーが拒むので欠番 |
+| R6-4 | R6-1 で許される日付の除去のうち、前のパスが触れていなかった箇所 (`control_main.py` step 5b、`backend_postgres.py` L278-308・L406-417・L1006-1036 など) | 本変更セットでは足さない。後の変更セットで扱う。F-ID・peer 相対パス・入れ子の括弧をチェッカーで保護することは候補 0i とする |

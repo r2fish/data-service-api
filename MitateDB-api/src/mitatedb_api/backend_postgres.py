@@ -562,12 +562,15 @@ class PostgresBackend:
         return declared
 
     def _field_types_and_constraints_locked(self, cur, collection):
-        """Code review §2 C / 監督裁定 C (2026-09-07): `field_types`'s own
+        """Code review §2 C / 監督裁定 C: `field_types`'s own
         `declared_type` and `field_constraints`'s own `enum_json`/
         `nullable` live on the SAME `_mdb_field_types` row -- this reads
         all three columns in the ONE query `_field_types_locked`/
         `_field_constraints_locked` used to make as TWO independent
-        round trips against that identical row."""
+        round trips against that identical row.
+
+        History: CH-0525
+        """
         _execute(cur, sql.SQL(
             "SELECT field, declared_type, enum_json, nullable FROM {} WHERE entity = %s"
         ).format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
@@ -580,7 +583,7 @@ class PostgresBackend:
 
     @_guard_pending_platform_upgrades
     def field_types_and_constraints(self, collection):
-        """Code review §2 C / 監督裁定 C (2026-09-07, P-8/G-4 performance
+        """Code review §2 C / 監督裁定 C (P-8/G-4 performance
         finding): see `backend.StorageBackend.field_types_and_
         constraints`'s own contract -- `field_types` and `field_
         constraints` merged into the single query `_field_types_and_
@@ -588,7 +591,10 @@ class PostgresBackend:
         via the pair it returns, `_check_missing_required_fields`) is
         the sole caller -- every other reader of `field_types`/`field_
         constraints` keeps calling one of those two on their own,
-        unchanged. Existence-checked the same way both are."""
+        unchanged. Existence-checked the same way both are.
+
+        History: CH-0526
+        """
         validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
@@ -673,20 +679,21 @@ class PostgresBackend:
                     raise NotFoundError("field not found")
                 declared_type, current_enum_json, current_nullable = row
                 new_nullable = bool(current_nullable) if nullable is None else nullable
-                # Code review §2 A / 監督裁定 A (2026-09-07): tri-state
+                # Code review §2 A / 監督裁定 A: tri-state
                 # `enum` -- `UNCHANGED` (default) keeps the field's
                 # current `enum` (decoded from the row already read
                 # above); an explicit `None` CLEARS it; any other value
                 # (an already-validated, non-empty list) SETS/REPLACES
                 # it. This is the SAME three-way rule `backend_sqlite.
                 # SQLiteBackend.alter_field_constraints` applies.
+                # history: CH-0528
                 if enum is UNCHANGED:
                     new_enum = json.loads(current_enum_json) if current_enum_json is not None else None
                 elif enum is not None:
                     new_enum = list(enum)
                 else:
                     new_enum = None
-                # Code review §2 F / 監督裁定 F (2026-09-07): locks
+                # Code review §2 F / 監督裁定 F: locks
                 # `collection` IN SHARE ROW EXCLUSIVE MODE before scanning
                 # its existing rows, inside this SAME transaction -- this
                 # blocks a concurrent INSERT/UPDATE/DELETE (ROW
@@ -716,6 +723,7 @@ class PostgresBackend:
                 # excludes concurrent row writers (ROW EXCLUSIVE) exactly
                 # as plain SHARE did, so the scan property above is
                 # unchanged.
+                # history: CH-0529
                 _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE").format(sql.Identifier(collection)))
                 _execute(cur, sql.SQL("SELECT {} FROM {}").format(
                     sql.Identifier(field), sql.Identifier(collection)))
@@ -732,11 +740,12 @@ class PostgresBackend:
                             violation = "enum"
                             break
                 if violation is not None:
-                    # Code review §2 D / 監督裁定 D (2026-09-07): `field`
+                    # Code review §2 D / 監督裁定 D: `field`
                     # names a POSITION IN THE REQUEST (design D-3 (2)),
                     # not the entity field name -- see `backend_sqlite.
                     # SQLiteBackend.alter_field_constraints`'s identical
                     # comment for why that position is `violation` itself.
+                    # history: CH-0530
                     raise ConflictError(
                         "existing rows violate the constraints this alter_field would establish",
                         details={"field": violation, "violated_declaration": violation},
@@ -1229,7 +1238,7 @@ class PostgresBackend:
             with self._runtime.cursor() as cur:
                 _execute(cur, statement, params)
                 rowid = str(cur.fetchone()[0])
-        # Phase 8 WP-1a rework 1 (裁定 2, 監督裁定 2026-09-06): the SAME
+        # Phase 8 WP-1a rework 1 (裁定 2): the SAME
         # `execution_ms` mapping `insert()` above already has -- not rolled
         # back here either (same B-1 (ii) reasoning as every other
         # `except` clause in this method: the OUTER `transact()`
@@ -1243,6 +1252,7 @@ class PostgresBackend:
         # always dispatches through it), so leaving this mapping out here
         # left the whole HTTP mutation surface unable to ever observe a
         # real `LIMIT_EXCEEDED`/`execution_ms` denial (review finding 2).
+        # history: CH-0537
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UniqueViolation:
