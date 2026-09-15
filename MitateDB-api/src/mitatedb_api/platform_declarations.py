@@ -770,7 +770,7 @@ def check_writer_role_timeouts(
 #       constructed `FoundationConfig`/`ResourceLimits`) carries a
 #       positive `enum_members`/`idempotency_entries`/`idempotency_
 #       retention_ms` -- this peer's own `__build_capabilities_document`
-#       (`cell.py`) already normalizes every limit key to the contract's
+#       (`cell.py`) (body now in `capabilities_document.py`) already normalizes every limit key to the contract's
 #       own vocabulary name there (`"enum_members": config.max_enum_
 #       members`, this peer's own `max_*` naming convention resolved at
 #       DOCUMENT-BUILD time, not read here), so this function needs no
@@ -855,7 +855,7 @@ _CONTRACT_170_ENABLED_CAPABILITIES: tuple = ("constraint_declarations", "dry_run
 #: this peer's `FoundationConfig` attribute names (`max_enum_members`
 #: etc., `config.py`) differ from these contract-vocabulary names, but
 #: that rename already happens once, at DOCUMENT-BUILD time, inside
-#: `cell.py`'s own `__build_capabilities_document` (`"enum_members":
+#: `cell.py`'s own `__build_capabilities_document` (body now in `capabilities_document.py`) (`"enum_members":
 #: config.max_enum_members`) -- never here. WP-3e rework T3 (ruling
 #: `{scratchpad}/rulings-r3-r7-flip.md` L-2/M-7) removed this module's
 #: former `_CONTRACT_170_LIMIT_ATTRIBUTES` (a `contract name -> Foundation
@@ -867,7 +867,7 @@ _CONTRACT_170_ENABLED_CAPABILITIES: tuple = ("constraint_declarations", "dry_run
 #: class whose contract name and this peer's own `FoundationConfig` field
 #: name genuinely diverge (unlike the three above) would need a mapping
 #: constant again -- if so, keep it OUTSIDE this function's own body (a
-#: module-level constant `cell.py`'s document-builder reads from), never
+#: module-level constant `cell.py`'s document-builder (body now in `capabilities_document.py`) reads from), never
 #: inlined into `check_contract_170_declarations` itself, so this
 #: function's own body stays textually isomorphic to r2db-api's.
 _CONTRACT_170_LIMIT_CLASSES: tuple = ("enum_members", "idempotency_entries", "idempotency_retention_ms")

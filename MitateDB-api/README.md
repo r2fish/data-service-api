@@ -195,8 +195,8 @@ real-instance verification procedure).
 
 ### What remains reference-only or unimplemented
 
-- **Remaining declaration gaps** (`cell.py`'s `__build_capabilities_document`,
-  as of this WP): `upsert` (`unsupported` within `atomic_mutation`/
+- **Remaining declaration gaps** (`cell.py`'s `__build_capabilities_document`
+  (body now in `capabilities_document.py`), as of this WP): `upsert` (`unsupported` within `atomic_mutation`/
   `cross_entity_mutation`), `contains`/`matches`/`is_null` (`unsupported`
   within `structured_query`), `create_index`/`drop_index`/`drop_entity`/
   `jobs` (`unsupported` within `schema_operations`), `row_addressability`,

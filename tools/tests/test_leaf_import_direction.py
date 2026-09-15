@@ -119,6 +119,7 @@ LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("provisional_gate.py", frozenset({".errors"})),
         ("postgres_types.py", frozenset({"psycopg"})),
         ("request_vocabulary.py", frozenset()),
+        ("capabilities_document.py", frozenset({".backend", ".surfaces"})),
     ],
 }
 

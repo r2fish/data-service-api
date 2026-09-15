@@ -1352,6 +1352,124 @@ class FoundationTests(unittest.TestCase):
             cell.transact(same_app_principal, [operation])
         self.assertEqual(ctx.exception.details["field"], "operations/0/expected_revision")
 
+    def test_capabilities_document_is_built_only_from_explicit_arguments(self):
+        """R-37 WP-3h (CE7): the leaf `capabilities_document.build_
+        capabilities_document` builds the entire capability document from
+        its explicit keyword arguments alone -- calling it directly, with
+        no `ApplicationCell`/`ApplicationRuntime`/`Principal` in scope at
+        all, still produces the exact document shape those objects would
+        have produced (`is_developer`'s effect on `schema_operations`, a
+        `process_ceiling=2` deployment's effect on the two in-memory
+        `limit_enforcement` classes, `surfaces`'s presence/absence, and the
+        `application_scope`/`role` literals)."""
+        from mitatedb_api.capabilities_document import build_capabilities_document
+
+        base_config = FoundationConfig()
+        developer_doc = build_capabilities_document(
+            is_developer=True, role="developer", application_id="app_a",
+            cell_config=base_config, process_ceiling=1,
+        )
+        self.assertEqual(
+            developer_doc["capabilities"]["schema_operations"]["operations"],
+            ["create_entity", "add_field", "alter_field"],
+        )
+
+        runtime_doc = build_capabilities_document(
+            is_developer=False, role="runtime", application_id="app_a",
+            cell_config=base_config, process_ceiling=1,
+        )
+        self.assertEqual(runtime_doc["capabilities"]["schema_operations"]["operations"], [])
+        self.assertEqual(runtime_doc["limit_enforcement"]["concurrency"], "enforced")
+        self.assertEqual(runtime_doc["limit_enforcement"]["requests_per_minute"], "enforced")
+        self.assertNotIn("surfaces", runtime_doc)
+        self.assertEqual(runtime_doc["application_scope"], "app_a")
+        self.assertEqual(runtime_doc["role"], "runtime")
+
+        ceiling_two_doc = build_capabilities_document(
+            is_developer=False, role="runtime", application_id="app_a",
+            cell_config=base_config, process_ceiling=2,
+        )
+        self.assertEqual(ceiling_two_doc["limit_enforcement"]["concurrency"], "deployment_required")
+        self.assertEqual(ceiling_two_doc["limit_enforcement"]["requests_per_minute"], "deployment_required")
+
+        surfaced_config = FoundationConfig(data_base_url="https://h/v1", control_base_url="https://h/control/v1")
+        surfaced_doc = build_capabilities_document(
+            is_developer=False, role="runtime", application_id="app_a",
+            cell_config=surfaced_config, process_ceiling=1,
+        )
+        self.assertIn("surfaces", surfaced_doc)
+
+    def test_runtime_capabilities_passes_cell_values_to_the_document(self):
+        """R-37 WP-3h (CE7): the retained facade wrapper (`cell.py`'s own
+        `ApplicationRuntime.__build_capabilities_document`) passes this
+        SAME cell's own `config`/`process_ceiling` -- never a fresh
+        default -- to the leaf, along with this SAME principal's own
+        `role`/`application_id`. A non-default `FoundationConfig`
+        (`max_batch_items=17`) and `process_ceiling=2` are both reflected,
+        verbatim, in `capabilities()`'s own served document."""
+        from mitatedb_api.auth import Principal
+        from mitatedb_api.backend_sqlite import SQLiteBackend
+        from mitatedb_api.cell import ApplicationCell, ApplicationRuntime
+
+        config = FoundationConfig(max_batch_items=17)
+        cell = ApplicationCell("app_a", config, backend=SQLiteBackend(), process_ceiling=2)
+        principal = Principal(application_id="app_a", credential_id="rt", role=Role.RUNTIME)
+        runtime = ApplicationRuntime(cell, principal)
+
+        document = runtime.capabilities()
+        self.assertEqual(document["limits"]["batch_items"], 17)
+        self.assertEqual(document["limit_enforcement"]["concurrency"], "deployment_required")
+        self.assertEqual(document["limit_enforcement"]["requests_per_minute"], "deployment_required")
+        self.assertEqual(document["application_scope"], "app_a")
+        self.assertEqual(document["role"], "runtime")
+
+    def test_capabilities_document_is_built_after_authorization_inside_the_limit_gate(self):
+        """R-37 WP-3h (CE7, WF-3): `capabilities()` still runs
+        `__authorize` and `_limit_gate` BEFORE calling into the
+        (now-leaf-backed) document builder -- a revoked credential's own
+        runtime is refused `AuthenticationError` before any document is
+        built, and a second call against a `max_requests_per_minute=1`
+        deployment is refused `ResourceLimitError` -- proving both checks
+        still gate this call for real, not merely wrap a call that always
+        succeeds."""
+        control = ControlPlane("synthetic-test-pepper-0123456789", FoundationConfig(max_requests_per_minute=1))
+        control.provision_application("app_rate")
+        service = MitateDataService(control)
+
+        _, rate_secret = control.issue_credential("app_rate", Role.RUNTIME)
+        rate_runtime = service.open_session(rate_secret)
+        rate_runtime.capabilities()
+        with self.assertRaises(ResourceLimitError):
+            rate_runtime.capabilities()
+
+        control.provision_application("app_revoked")
+        revoked_id, revoked_secret = control.issue_credential("app_revoked", Role.RUNTIME)
+        revoked_runtime = service.open_session(revoked_secret)
+        control.revoke_credential(revoked_id)
+        with self.assertRaises(AuthenticationError):
+            revoked_runtime.capabilities()
+
+        # n2 (WP-3h rework 1): the two scenarios above each hit only ONE
+        # of `__authorize`/`_limit_gate`'s own failure modes, so neither
+        # would notice `capabilities()` calling them in the OTHER order
+        # (rate limit entered before authorization). This third scenario
+        # makes the order itself observable: the SAME credential first
+        # spends its own `max_requests_per_minute=1` budget (rate keyed by
+        # `principal.credential_id`, `cell.py:587`) with one successful
+        # call, is THEN revoked, and calls again. Authorization-first
+        # means `__authorize` raises `AuthenticationError` on the second
+        # call without `_limit_gate` ever being entered a second time; if
+        # `_limit_gate` ran first instead, its own already-exhausted rate
+        # bucket would raise `ResourceLimitError` before authorization was
+        # ever checked.
+        control.provision_application("app_revoked_and_rate")
+        combo_id, combo_secret = control.issue_credential("app_revoked_and_rate", Role.RUNTIME)
+        combo_runtime = service.open_session(combo_secret)
+        combo_runtime.capabilities()
+        control.revoke_credential(combo_id)
+        with self.assertRaises(AuthenticationError):
+            combo_runtime.capabilities()
+
 
 if __name__ == "__main__":
     unittest.main()

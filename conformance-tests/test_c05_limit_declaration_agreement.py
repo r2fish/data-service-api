@@ -929,7 +929,7 @@ def test_c05_v1_d_unavailable_class_may_still_publish_a_limits_value(adapter: Co
     # depth` genuinely runs in-process via `_limit_gate`, wired at
     # `cell.py:531`, and traverses the real request dict every in-process
     # `insert`/`update`/`delete`/`transact` call site builds -- see that
-    # class's own `limit_enforcement` comment, `cell.py:1875-1926`, for
+    # class's own `limit_enforcement` comment, `cell.py:1875-1926` (now in `capabilities_document.py`), for
     # the full trace), so as of Phase 8 WP-1 rework 3 (裁定 3, 監督裁定
     # 2026-09-07) the combination is observed on NEITHER class, on NO
     # plug. The PROPOSITION this control protected -- V1 (d): an
@@ -1200,7 +1200,7 @@ def test_c05_l7_21_adapter_name_reads_are_allowlisted() -> None:
 # deterministically raises `LIMIT_EXCEEDED`/`operation_depth`, in-process,
 # no HTTP transport involved. `("MitateDB-api", "operation_depth")` is
 # therefore ALSO removed -- `cell.py`'s own `limit_enforcement` comment
-# (`cell.py:1875-1926`) has the full trace, including the one real
+# (`cell.py:1875-1926`) (now in `capabilities_document.py`) has the full trace, including the one real
 # asymmetry that DOES remain between the two surfaces (which port
 # ENTRY POINT a depth attack must use, not whether the peer enforces the
 # bound at all).
