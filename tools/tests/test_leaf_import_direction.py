@@ -120,6 +120,7 @@ LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("postgres_types.py", frozenset({"psycopg"})),
         ("request_vocabulary.py", frozenset()),
         ("capabilities_document.py", frozenset({".backend", ".surfaces"})),
+        ("request_binding.py", frozenset({"json", ".errors", ".field_types"})),
     ],
 }
 

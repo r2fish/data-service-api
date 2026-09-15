@@ -808,7 +808,7 @@ def test_nul_value_is_validation_failed(app_a_stack):
     entity = "http_nul_entity"
     # Phase 6 WP-3 (design D-3, decision (ii)): a name-only field now
     # defaults to `json`, whose write-side canonicalization (`cell.py::
-    # _normalize_value_for_storage`) JSON-escapes an embedded NUL byte
+    # _normalize_value_for_storage` (body now in `request_binding.py`)) JSON-escapes an embedded NUL byte
     # (`json.dumps` turns it into the 6-character `backslash-u-0000` sequence,
     # never a literal NUL) -- so this test declares `label` explicitly
     # `string` to keep exercising the PostgreSQL backend's own literal-
