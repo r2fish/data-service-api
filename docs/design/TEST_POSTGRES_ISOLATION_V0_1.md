@@ -1,7 +1,8 @@
-# テスト用 PostgreSQL の実行ごとの分離 設計メモ（v0.1）
+# テスト用 PostgreSQL の実行ごとの分離 設計メモ（v0.2）
 
-- 状態: **設計メモ案・依頼者判断待ち（§6）**。規律・道具・テストの変更の根拠にはまだならない。台帳は計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-44**。
+- 状態: **依頼者裁定済み（2026-09-16、§6 の Q-1〜Q-9 はすべて推奨を採用）**。作業は作業指示書 `docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md` で行う。台帳は計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-44**。
 - 起票: 2026-09-16。契機は §1.1 の 3 件。設計レビュー 1 回（同日、§9）の指摘を反映済み。
+- 改版: v0.1（2026-09-16）起票。v0.2（2026-09-16）§6 に依頼者裁定を、§3.4 に起動の試走結果を、D-2 に `LC_ALL` の必要性を追記した。
 - 公開規律: 実 DSN・パスワードを置かない（`docs/work-orders/OPERATING_CONDITIONS.md` §2 の 13）。DSN は形だけを書く。
 
 ## 1. 問題
@@ -57,6 +58,12 @@
 - `r2db-api/tests/test_control_plane_store.py` の `test_audit_report_naive_since_is_interpreted_as_utc` は、セッションの TimeZone が UTC 以外のときだけ誤りを検出できる（UTC の CI では効かない）。
 - 残骸の疑いがあるオブジェクト（`wp2e2e99887_*`、`mitatedb_app_phaseb_verify`、`revm1*`）がある。帰属は未判定で、本件の範囲外（§6 Q-5）。
 
+### 3.4 起動の試走（2026-09-16、監督、`$TMPDIR` 配下、共有クラスタに触れない）
+
+- `initdb -U postgres --auth=scram-sha-256` 0.79 秒、`postgres` を直接の子として起動して接続可能になるまで 0.07 秒、停止 0.10 秒。Claude Code の sandbox の下で動いた。
+- socket パス長 88 バイト（`$TMPDIR` 配下の実行ディレクトリ）。`PGPASSFILE` の host 欄に socket ディレクトリのパスを書いて接続できた。誤ったパスワードは `password authentication failed` で拒否された。
+- `LC_ALL` を置かないと `postmaster became multithreaded during startup` で停止した（D-2 に反映）。
+
 ## 4. 設計案
 
 - **D-1 起動の場所**:
@@ -76,6 +83,7 @@
   - `initdb --auth=scram-sha-256`、superuser 名は §6 Q-7、パスワードは実行ごとに `secrets` で生成。
   - パスワードは DSN に入れず、0600 の `PGPASSFILE`（実行ディレクトリ内、ユーザー名を明記した 1 行）で渡す。DSN はエラーメッセージや `psql` の引数に出るため。
   - `--locale=en_US.UTF-8 --encoding=UTF8`、`max_connections=300`、`TimeZone` は §6 Q-6。
+  - `initdb` と `postgres` の環境に `LC_ALL=en_US.UTF-8` を置く。無いと macOS では `postmaster became multithreaded during startup` で起動に失敗する（§3.4）。
   - TCP を開かない（`listen_addresses=''`）。CI は TCP なので、ここは CI と違うまま残る（TCP にするとポートの割り当てが再び競合点になる）。
   - `unix_socket_directories` とデータディレクトリは、ユーザー単位の固定の基底（`$TMPDIR` 配下。`/tmp` 直下の固定名や CI の残骸検査が見る `conf-socket-*` は使わない）の下の実行ディレクトリ（0700、`unix_socket_permissions=0700`）。socket のパス長が 104 バイトを超えるなら fail。Drive 同期ツリーの外。
   - 子プロセスに渡す環境変数: `R2DB_TEST_ADMIN_DSN` / `MITATEDB_TEST_ADMIN_DSN`（形: `host=<socket dir> port=<port> dbname=postgres user=<superuser>`）、`PGHOST`、`PGPORT`、`PGUSER`、`PGPASSFILE`。これで host を書かない接続もその実行のクラスタに届く（目標 1）。
@@ -133,6 +141,8 @@
 
 ## 6. 依頼者に決めていただく点
 
+**【裁定 2026-09-16】** 依頼者（逐語）: 「全て推奨で進めてください」。Q-1〜Q-9 はすべて各項の推奨を採用する。Q-4 の確認: 既定値を持つ 23 ファイルは、進行中の R-37 WP-3i の作業範囲（`docs/work-orders/WORK_ORDER_R37_WP0_INVENTORY_V1.md` §5.38）と変更中のファイルに含まれない。以下の各項は裁定前の文面のまま残す。
+
 - **Q-1 認証方式**: 使い捨てクラスタを scram-sha-256 にする（推奨。CI と揃い、ローカルでもパスワードの誤りを検出できる）／ trust のまま。
 - **Q-2 gate と他の実行の関係**:
   - (a) 通常の実行は並列に走ってよく、gate の実行中だけ他の実行が lock で待つ（推奨）。roadmap R-42（期限切れの要求の成否が負荷で揺れる）が未修正の間、gate の集計行を負荷から守るため。
@@ -166,8 +176,8 @@
 ## 8. 未確認の点
 
 - uvicorn の `--fd` に TCP のソケットを渡したときの実際の挙動。
-- `initdb` と起動にかかる時間。毎回の `--collect-only` と `tools/check_collection_floor.py` も払うので記録する（roadmap R-20 の「先に測る」）。
-- Claude Code の sandbox の下で、subprocess が `$TMPDIR` 配下にディレクトリを作り、postmaster を起動できること。
+- `initdb` と起動にかかる時間。毎回の `--collect-only` と `tools/check_collection_floor.py` も払うので記録する（roadmap R-20 の「先に測る」）。【解消 2026-09-16】§3.4 で 1 秒未満を実測した。
+- Claude Code の sandbox の下で、subprocess が `$TMPDIR` 配下にディレクトリを作り、postmaster を起動できること。【解消 2026-09-16】§3.4 で起動できた。
 - `postgres:16` イメージの既定の TimeZone（UTC と見込む）。
 - ローカルでだけ trust に依存して通っているテストが無いこと。CI は scram で通っているので少ない見込み。既知の前例は修正済み。
 - 専用クラスタで性能の値が変わるか（Q-9 の判断材料）。
