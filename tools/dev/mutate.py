@@ -6,7 +6,7 @@ backup back, `sleep 3`, compare sha256 twice, grep the mutation string
 (OPERATING_CONDITIONS 1.4-28..31).
 
 Usage:
-    tools/dev/mutate.py SPEC.json [-C DIR] [--hold PATH|-] [--wait SECONDS] [--python PY]
+    tools/dev/mutate.py SPEC.json [-C DIR] [--wait SECONDS] [--python PY]
     tools/dev/mutate.py --recover [-C DIR]
 
 SPEC.json:
@@ -22,8 +22,34 @@ SPEC.json:
     }
 
 Each `old` must occur exactly once in the pristine file. Every mutation
-starts from the pristine backup. `expect` is "red" (pytest exit 1, run with
--x) or "green" (exit 0).
+starts from the pristine backup. `expect` is "red" (pytest exit code exactly
+1, run with -x), "green" (exit code exactly 0), or "error" (exit code 2-5:
+interrupted, internal error, usage error, or no tests collected -- something
+broke the run itself rather than merely failing a test, e.g. a mutation that
+keeps a conftest.py from starting its own cluster at all). The printed
+`got=` field still shows pytest's own more specific outcome (`red` / `green`
+/ `no-tests` / `error(N)`, unchanged); `expect: "error"` is satisfied by any
+of exit codes 2-5, i.e. a `no-tests` (5) outcome counts as "error" too --
+only `expect: "red"` requires exactly 1 and only `expect: "green"` requires
+exactly 0 (WP-2, docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md
+§3.1, following up on WP-1's `M13-no-lc-all`, whose exit 4 was reported as a
+mismatch against `expect: "red"` even though it failed for exactly the
+intended reason).
+
+WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (c)):
+`--wait` is how long each per-mutation pytest subprocess's own owned-mode
+PostgreSQL cluster start-up waits for gate.py's exclusive suite lock to
+clear (forwarded via `DSA_TEST_PG_LOCK_WAIT`, default 0). mutate.py takes no
+lock of its own and no longer waits for a gate-hold flag or other pytest
+processes before editing files: each subprocess's own conftest.py takes the
+shared lock directly, so there is no double acquisition on the tool side.
+If that wait times out, `dsa_testpg.TestPgError`'s own message is detected
+in the captured output (review M-3, never guessed from the raw pytest exit
+code, which is an ordinary-looking 2-4) and the run STOPS with REFUSED
+(after restoring the mutation that hit it) instead of scoring that
+mutation under any `expect` -- an infrastructure timeout is not a mutation
+outcome, and under `expect: "error"` a raw exit code would otherwise wrongly
+report it as OK.
 
 Safety: before the first edit a journal (inside the worktree's git dir)
 records the backups. SIGINT/SIGTERM/SIGHUP restore before exiting; further
@@ -54,6 +80,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _devlib as dl  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "testpg"))
+import dsa_testpg  # noqa: E402
+
 SETTLE_SECONDS = 3.0  # OPERATING_CONDITIONS 1.4-30
 _SIGNALS = [s for s in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)) if s is not None]
 
@@ -71,8 +100,8 @@ def normalize(spec: dict) -> list[dict]:
             if not all(isinstance(e.get(k), str) for k in ("file", "old", "new")) or not e["old"] or e["old"] == e["new"]:
                 raise dl.DevError(f"{mid}: each edit needs string file/old/new with a non-empty old != new")
         expect = m.get("expect", "red")
-        if expect not in ("red", "green"):
-            raise dl.DevError(f"{mid}: expect must be red or green")
+        if expect not in ("red", "green", "error"):
+            raise dl.DevError(f"{mid}: expect must be red, green, or error")
         tests = m.get("tests") or spec.get("pytest")
         if not tests:
             raise dl.DevError(f"{mid}: no tests (set mutation 'tests' or top-level 'pytest')")
@@ -114,7 +143,30 @@ def grep_count(root: Path, text: str) -> int:
 
 
 def classify(code: int) -> str:
+    """The `got=` text printed per mutation -- unchanged by the addition of
+    `expect: "error"` below (WP-2 §3.1): still the specific pytest outcome,
+    never the coarser "error" bucket `matches()` checks expectations against."""
     return {0: "green", 1: "red", 5: "no-tests"}.get(code, f"error({code})")
+
+
+_ERROR_CODES = (2, 3, 4, 5)  # pytest: interrupted, internal error, usage error, no tests collected
+
+
+def matches(code: int, expect: str) -> bool:
+    """Whether pytest's own exit `code` satisfies `expect`. `"red"` requires
+    EXACTLY 1 and `"green"` EXACTLY 0 (never widened); `"error"` accepts any
+    of `_ERROR_CODES` (2-5) -- a mutation that breaks the run itself (e.g.
+    keeps a conftest.py from starting its own cluster at all, WP-1's `M13-
+    no-lc-all`) is a real, intended "red" of a different shape than a failed
+    test, and must not be reported as a mismatch just because pytest's own
+    exit code for it is not literally 1."""
+    if expect == "red":
+        return code == 1
+    if expect == "green":
+        return code == 0
+    if expect == "error":
+        return code in _ERROR_CODES
+    raise dl.DevError(f"unknown expect: {expect!r}")  # unreachable: normalize() already validated
 
 
 def copy_back(root: Path, backups: Path, files) -> None:
@@ -148,8 +200,8 @@ def recover(root: Path, out=sys.stdout, settle: float = SETTLE_SECONDS) -> int:
     return 0
 
 
-def run(spec: dict, root: Path, python: str, flag: Path | None, out=sys.stdout,
-        guard: bool = True, settle: float = SETTLE_SECONDS, work: Path | None = None, wait: float = 0.0) -> int:
+def run(spec: dict, root: Path, python: str, out=sys.stdout,
+        settle: float = SETTLE_SECONDS, work: Path | None = None, wait: float = 0.0) -> int:
     muts = normalize(spec)
     journal = dl.journal_path(root)
     if journal.exists():
@@ -162,12 +214,6 @@ def run(spec: dict, root: Path, python: str, flag: Path | None, out=sys.stdout,
     for m in muts:  # every edit must apply to pristine content before anything is touched
         for f, edits in by_file(m["edits"]).items():
             apply_edits(pristine[f], edits, m["id"])
-    if guard:
-        reasons = dl.wait_clear(flag, wait)
-        if reasons:
-            for r in reasons:
-                print(f"mutate: REFUSED -- {r}", file=out)
-            return dl.REFUSED
 
     work = work or (dl.log_dir() / f"mutate-{dl.stamp()}")
     backups = work / "backups"
@@ -193,12 +239,6 @@ def run(spec: dict, root: Path, python: str, flag: Path | None, out=sys.stdout,
     completed = False
     try:
         for m in muts:
-            if guard:  # files are pristine here, so waiting is safe
-                reasons = dl.wait_clear(flag, wait)
-                if reasons:
-                    print(f"mutate: STOPPED before {m['id']} -- {reasons[0]}", file=out)
-                    status = dl.REFUSED
-                    break
             grouped = by_file(m["edits"])
             for f, edits in grouped.items():
                 dirty.add(f)
@@ -207,15 +247,27 @@ def run(spec: dict, root: Path, python: str, flag: Path | None, out=sys.stdout,
             # No .pyc writes: a restore in the same second as the mutated write, with the same
             # size, would otherwise let the mutated bytecode be reused by later runs.
             proc = subprocess.run([python, "-m", "pytest", *args], cwd=root, capture_output=True, text=True,
-                                  env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
-            (work / f"{m['id']}.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
+                                  env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+                                       dsa_testpg.ENV_LOCK_WAIT: str(wait)})
+            combined = proc.stdout + proc.stderr
+            (work / f"{m['id']}.log").write_text(combined, encoding="utf-8")
             copy_back(root, backups, grouped)
             bad = mismatches(root, grouped, base_hash, settle)
             if bad:
                 raise RestoreError(f"restore mismatch for {', '.join(bad)} after {m['id']}")
             dirty.difference_update(grouped)
+            if dl.lock_timeout_detected(combined, dl.tally_line(proc.stdout)):
+                # review M-3: an environmental refusal (gate.py held the exclusive lock past
+                # this mutation's own --wait budget) is not a mutation OUTCOME at all -- scoring
+                # it under any `expect` (including the new "error" bucket, which a raw pytest
+                # exit 2-4 would otherwise satisfy) would misreport an infrastructure timeout as
+                # the mutation's own effect. Stop here, after this mutation's own restore, and
+                # before every later mutation's file is ever touched (still pristine).
+                print(f"mutate: STOPPED before {m['id']} -- exclusive suite lock wait timed out", file=out)
+                status = dl.REFUSED
+                break
             got = classify(proc.returncode)
-            ok = got == m["expect"]
+            ok = matches(proc.returncode, m["expect"])
             met += ok
             print(f"{m['id']:<8} expect={m['expect']:<5} got={got:<9} {'OK ' if ok else 'NG '} "
                   f"| {dl.tally_line(proc.stdout) or '(no tally)'} | restore=ok", file=out)
@@ -268,7 +320,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("spec", nargs="?")
     parser.add_argument("-C", dest="cwd", default=".")
-    parser.add_argument("--hold")
     parser.add_argument("--python")
     parser.add_argument("--wait", type=float, default=0.0)
     parser.add_argument("--recover", action="store_true")
@@ -280,9 +331,8 @@ def main(argv: list[str] | None = None) -> int:
         if not ns.spec:
             raise dl.DevError("SPEC.json is required (or --recover)")
         spec = json.loads(Path(ns.spec).read_text(encoding="utf-8"))
-        flag = dl.hold_flag(ns.hold)
         python = ns.python or dl.venv_python(root)
-        return run(spec, root, python, flag, wait=ns.wait)
+        return run(spec, root, python, wait=ns.wait)
     except (dl.DevError, json.JSONDecodeError, OSError) as exc:
         print(f"mutate: ERROR -- {exc}")
         return dl.ERROR

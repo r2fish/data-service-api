@@ -144,6 +144,8 @@
     - 監督の完了ゲート (§1.3 の 19〜23): `tools/dev/gate.py`
     - 監督のコミットと main へのマージ: `tools/dev/finalize.py` (変更ごとに `finalize_*.sh` を書かない)
     - 長い文書から節を取り出す: `tools/dev/section.py`
+**【訂正註 2026-09-16 (R-44 WP-2)】** gate-hold flag と `--hold` 引数、`ps` による「他の pytest が 0 件」の確認は **R-44 WP-2 で廃止した**。排他は `tools/testpg/dsa_testpg.py` の `suite_lock()` (gate と性能計測が排他、通常の pytest は共有) が担い、待ち合わせは道具が自動で行う。**§1.3 の 23 の「`pg_database` の差分 0」は、WP-1 の統合 (main `41e1beb`) 以降、共有クラスタについては残骸なしの証拠ではない** — テストは実行ごとの使い捨てクラスタを使うので、共有クラスタの差分は当然 0 になる。WP-2 以降、判定はその実行のクラスタの差分で行い、共有クラスタの差分は情報として表示する。本節と §1.3 の 19〜21・23、§1.5 の 39 の正式な改訂は R-44 WP-4 で行う。設計は `docs/design/TEST_POSTGRES_ISOLATION_V0_1.md` v0.2、作業は `docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md` §3。
+
 65. subagent への発注では、手順を文章で書き下さず、道具名と引数を渡す。報告には道具の出力行 (集計行・変異表・`log=` のパス) をそのまま貼る。(依頼者指示 2026-09-15)
 66. 道具が REFUSED (終了コード 75) を返したら、待つか監督に上げる。道具を迂回して手で実行しない。(依頼者指示 2026-09-15)
 67. 監督チャットは、モデル呼び出しが 300 回を超えたら、次の区切りで新しいチャットへ移る。回数はフック `tools/dev/turn_budget_hook.py` (ユーザー設定に `--project-root` を付けて登録) が数え、超えた後は 50 回ごとに通知する。フックの登録はユーザー設定側のコピー (`$HOME/.claude/hooks-turn-budget/data-service-api/`) を呼び、作業ツリーを直接指さない。本体を変更したら、報告で依頼者に再コピーを依頼し、`diff` で一致を確かめる (手順は `DEVTOOLS`)。区切りは `tools/dev/handover_ready.py --no-running-agents --worktree <担当 worktree>` が READY を返す時点とする。超えた後は旧チャットで新しい WP を始めない。移るときは引き継ぎ書を `finalize.py` でコミットし、`handover_ready.py --handover <引き継ぎ書>` が出力するプロンプトで spawn_task の引き継ぎチップを出す。(依頼者指示 2026-09-15、`DEVTOOLS`)

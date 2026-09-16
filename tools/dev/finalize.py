@@ -8,13 +8,16 @@ fast-forwarding the worktree (OPERATING_CONDITIONS 1.1-12a, 1.2, 1.9, 2-15).
 
 Usage:
     tools/dev/finalize.py -C WORKTREE --branch NAME --allow GLOB [--allow GLOB ...] -m MSGFILE
-                          [--check "CMD" ...] [--tools-tests] [--hold PATH|-] [--no-merge]
+                          [--check "CMD" ...] [--tools-tests] [--no-merge]
 
     --allow        every changed path (tracked or untracked) must match one glob
                    (fnmatch: `*` also matches `/`)
     -m MSGFILE     full commit message; its Co-Authored-By lines are copied to the merge commit
     --check        extra shell command run in the worktree before committing; non-zero stops
-    --tools-tests  run `pytest -q tools/tests` (guarded, as pt.py) at the new HEAD before merging
+    --tools-tests  run `pytest -q tools/tests` at the new HEAD before merging. WP-2 (docs/work-orders/
+                   WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (c)): `tools/tests` has its own root
+                   (`tools/tests/pytest.ini`) that never reads a conftest.py, so this run needs
+                   neither the suite lock nor PostgreSQL -- only the mutation-journal check remains.
     --leave GLOB   changed paths matching GLOB stay uncommitted (to split one worktree's changes
                    into several commits: e.g. `--no-merge --leave 'r2db-api/*'`, then a second call)
 
@@ -65,7 +68,7 @@ def run_check(wt: Path, argv: list[str] | str, label: str, out) -> None:
 
 
 def finalize(wt: Path, branch: str, allow: list[str], msgfile: Path, checks: list[str],
-             tools_tests: bool, flag: Path | None, merge: bool, python: str, out=sys.stdout,
+             tools_tests: bool, merge: bool, python: str, out=sys.stdout,
              repo_checks: bool = True, leave: list[str] = ()) -> int:
     wt = dl.worktree_root(wt)
     if dl.journal_path(wt).exists():
@@ -137,9 +140,9 @@ def finalize(wt: Path, branch: str, allow: list[str], msgfile: Path, checks: lis
 
     try:
         if tools_tests:
-            reasons = dl.blockers(flag)
-            if reasons:
-                return partial(f"tools/tests refused ({reasons[0]})", False)
+            blocker = dl.journal_blocker(wt)
+            if blocker:
+                return partial(f"tools/tests refused ({blocker})", False)
             proc = subprocess.run([python, "-m", "pytest", "-q", "tools/tests"], cwd=wt, capture_output=True, text=True)
             print(f"finalize: tools/tests: {dl.tally_line(proc.stdout)}", file=out)
             if proc.returncode != 0:
@@ -182,16 +185,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-m", dest="msgfile", required=True)
     parser.add_argument("--check", action="append", default=[])
     parser.add_argument("--tools-tests", action="store_true")
-    parser.add_argument("--hold")
     parser.add_argument("--no-merge", action="store_true")
     parser.add_argument("--leave", action="append", default=[])
     parser.add_argument("--python")
     ns = parser.parse_args(argv)
     try:
         wt = Path(ns.cwd).resolve()
-        flag = dl.hold_flag(ns.hold) if ns.tools_tests else None
         python = ns.python or dl.venv_python(wt)
-        return finalize(wt, ns.branch, ns.allow, Path(ns.msgfile), ns.check, ns.tools_tests, flag,
+        return finalize(wt, ns.branch, ns.allow, Path(ns.msgfile), ns.check, ns.tools_tests,
                         not ns.no_merge, python, leave=ns.leave)
     except dl.DevError as exc:
         print(f"finalize: ERROR -- {exc}")

@@ -11,6 +11,7 @@ Run directly:
 """
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import io
@@ -24,7 +25,9 @@ from pathlib import Path
 import pytest
 
 _DEV = Path(__file__).resolve().parents[1] / "dev"
+_TESTPG = Path(__file__).resolve().parents[1] / "testpg"
 sys.path.insert(0, str(_DEV))
+sys.path.insert(0, str(_TESTPG))
 
 
 def _load(name: str):
@@ -35,6 +38,7 @@ def _load(name: str):
 
 
 dl = importlib.import_module("_devlib")  # the same module object the scripts import
+dsa_testpg = importlib.import_module("dsa_testpg")  # the same module object gate.py / pt.py / mutate.py / handover_ready.py import
 pt = _load("pt")
 mutate = _load("mutate")
 section = _load("section")
@@ -100,57 +104,12 @@ def _intercept_pytest(monkeypatch, fn):
 # _devlib
 # ---------------------------------------------------------------------------
 
-PS_TEXT = """\
-    1     0 /sbin/launchd
-  100     1 /bin/zsh -c cd wt && python -m pytest -q tools/tests
-  101   100 /x/.venv/bin/python -m pytest -q tools/tests
-  102   101 /x/.venv/bin/python tools/dev/pt.py -- -q
-  103   102 /x/.venv/bin/python -m pytest -q sub
-  200     1 /x/.venv/bin/python -m pytest -q -n 5 --dist loadgroup
-  201   200 /x/.venv/bin/python -c import sys;exec(eval(sys.stdin.readline()))
-  300     1 grep pytest
-  301     1 /bin/bash -c while ps -eo args= | grep -q '[-]m pytest'; do sleep 5; done
-  400     1 /opt/homebrew/Cellar/python/Frameworks/Python.framework/Resources/Python.app/Contents/MacOS/Python -m pytest tools/tests
-  500     1 /x/.venv/bin/pytest -q
-  600     1 /x/.venv/bin/python -m uvicorn app:api --port 8000
-"""
-
-
-def test_other_pytest_counts_python_pytest_only_and_skips_own_chain():
-    hits = [pid for pid, _ in dl.other_pytest(PS_TEXT, 102)]
-    assert hits == [200, 400, 500]
-
-
-def test_other_pytest_sees_another_process_chain():
-    assert [pid for pid, _ in dl.other_pytest(PS_TEXT, 600)] == [101, 103, 200, 400, 500]
-
-
-def test_current_other_pytest_reads_the_real_process_list():
-    assert all(pid != os.getpid() for pid, _ in dl.current_other_pytest())
-
-
-def test_current_other_pytest_refuses_incomplete_list(monkeypatch):
-    fake = subprocess.CompletedProcess([], 0, stdout=b"  200   150 /x/python -m pytest\n", stderr=b"")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: fake)
-    with pytest.raises(dl.DevError, match="incomplete"):
-        dl.current_other_pytest()
-
-
-def test_hold_flag_resolution_order(monkeypatch, tmp_path):
-    monkeypatch.setenv("SP", str(tmp_path))
-    monkeypatch.setenv("GATE_HOLD_FLAG", str(tmp_path / "env.flag"))
-    assert dl.hold_flag("/x/explicit.flag") == Path("/x/explicit.flag")
-    assert dl.hold_flag(None) == tmp_path / "env.flag"
-    monkeypatch.delenv("GATE_HOLD_FLAG")
-    assert dl.hold_flag(None) == tmp_path / "gate-hold.flag"
-    assert dl.hold_flag("-") is None
-
-
-def test_hold_flag_unknown_location_refuses(monkeypatch):
-    monkeypatch.delenv("SP", raising=False)
-    monkeypatch.delenv("GATE_HOLD_FLAG", raising=False)
-    with pytest.raises(dl.DevError):
-        dl.hold_flag(None)
+def test_journal_blocker_reports_the_unfinished_run(isolated_git, tmp_path):
+    proj = _calc_project(tmp_path)
+    assert dl.journal_blocker(proj) is None
+    dl.journal_path(proj).write_text("{}")
+    blocker = dl.journal_blocker(proj)
+    assert blocker is not None and "unfinished mutation run" in blocker and "--recover" in blocker
 
 
 def test_tally_line_is_the_last_stdout_line_only():
@@ -173,24 +132,36 @@ def test_exit_codes_do_not_overlap_pytest():
     assert {dl.RESTORE_FAILED, dl.REFUSED, dl.PARTIAL, dl.ERROR}.isdisjoint(range(0, 6))
 
 
+def test_lock_timeout_detected_requires_both_the_marker_and_nothing_collected():
+    """review M-3, found running this WP's own mutation spec against
+    tools/tests/test_testpg.py: the marker text ALONE is not enough -- a
+    unit test that deliberately exercises the real suite lock can legitimately
+    raise a real `TestPgError` whose message contains this exact wording as
+    part of a NORMAL, scored test failure (pytest still reports real
+    passed/failed counts), which must never be reported as an
+    infrastructure refusal. Only a run that collected/ran nothing at all
+    (no tally, or passed=failed=0) counts.
+
+    mutation (`tools/dev/_devlib.py`): drop the tally-based narrowing (marker
+    text alone decides) -- this test goes red on the `marker_but_real_failure`
+    case below."""
+    marker = "timed out after 0.3s waiting for the shared suite lock: /x/suite.lock"
+    assert dl.lock_timeout_detected(f"...\n{marker}\n", None) is True
+    assert dl.lock_timeout_detected(f"...\n{marker}\n", "1 error in 0.1s") is True
+    assert dl.lock_timeout_detected(f"...\n{marker}\n", "1 failed in 0.1s") is False  # marker_but_real_failure
+    assert dl.lock_timeout_detected(f"...\n{marker}\n", "1 passed in 0.1s") is False
+    assert dl.lock_timeout_detected("no marker here\n", None) is False
+
+
 # ---------------------------------------------------------------------------
 # pt
 # ---------------------------------------------------------------------------
-
-def test_pt_refuses_when_hold_flag_present(isolated_git, tmp_path):
-    proj = _calc_project(tmp_path)
-    flag = tmp_path / "gate-hold.flag"
-    flag.touch()
-    buf = io.StringIO()
-    assert pt.guarded_run(proj, sys.executable, ["-q"], flag, 0, 5, out=buf) == dl.REFUSED
-    assert "gate hold flag present" in buf.getvalue()
-
 
 def test_pt_refuses_while_mutation_journal_exists(isolated_git, tmp_path):
     proj = _calc_project(tmp_path)
     dl.journal_path(proj).write_text("{}")
     buf = io.StringIO()
-    assert pt.guarded_run(proj, sys.executable, ["-q"], None, 0, 5, out=buf) == dl.REFUSED
+    assert pt.guarded_run(proj, sys.executable, ["-q"], 0, 5, out=buf) == dl.REFUSED
     assert "unfinished mutation run" in buf.getvalue()
 
 
@@ -198,12 +169,50 @@ def test_pt_reports_tally_failures_and_exit(isolated_git, tmp_path):
     proj = _calc_project(tmp_path)
     (proj / "test_calc.py").write_text(_TEST_CALC + "\n\ndef test_bad():\n    assert add(1, 1) == 3\n")
     buf = io.StringIO()
-    code = pt.guarded_run(proj, sys.executable, ["-q"], None, 0, 5, out=buf, guard=False)
+    code = pt.guarded_run(proj, sys.executable, ["-q"], 0, 5, out=buf, guard=False)
     text = buf.getvalue()
     assert code == 1
     assert "pt: 1 failed, 1 passed" in text
     assert "FAILED test_calc.py::test_bad" in text
     assert "pt: exit=1 log=" in text
+
+
+def test_pt_forwards_wait_as_the_lock_wait_env_var(isolated_git, tmp_path, monkeypatch):
+    """work order §3.1 (c): pt.py's own --wait becomes the budget the pytest
+    subprocess's owned-mode cluster start-up (conftest.py ->
+    dsa_testpg.ensure_for_pytest()) waits for gate.py's exclusive lock,
+    forwarded via DSA_TEST_PG_LOCK_WAIT -- pt.py takes no lock of its own."""
+    proj = _calc_project(tmp_path)
+    seen = {}
+    real_run = subprocess.run
+
+    def spy(cmd, *a, **k):
+        seen["env"] = k.get("env")
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    buf = io.StringIO()
+    pt.guarded_run(proj, sys.executable, ["-q"], 42.5, 5, out=buf, guard=False)
+    assert seen["env"][dsa_testpg.ENV_LOCK_WAIT] == "42.5"
+
+
+def test_pt_refuses_on_a_lock_timeout(isolated_git, tmp_path, monkeypatch):
+    """review M-3: a lock-wait timeout inside the pytest subprocess's own
+    owned-mode conftest.py (`dsa_testpg.TestPgError`, an ordinary-looking
+    pytest exit 2-4) is detected from the captured output and converted to
+    REFUSED(75) -- never surfaced as if the suite itself were broken."""
+    proj = _calc_project(tmp_path)
+    fake = subprocess.CompletedProcess(
+        [], 4, stdout=(
+            "ImportError while loading conftest.py\n"
+            "dsa_testpg.TestPgError: timed out after 0.0s waiting for the shared suite lock: /x/suite.lock\n"
+        ), stderr="")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: fake)
+    buf = io.StringIO()
+    code = pt.guarded_run(proj, sys.executable, ["-q"], 0, 5, out=buf, guard=False)
+    assert code == dl.REFUSED
+    text = buf.getvalue()
+    assert "pt: REFUSED --" in text and "suite lock wait timed out" in text
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +221,7 @@ def test_pt_reports_tally_failures_and_exit(isolated_git, tmp_path):
 
 def _mutate(proj: Path, spec: dict, tmp_path: Path) -> tuple[int, str]:
     buf = io.StringIO()
-    code = mutate.run(spec, proj, sys.executable, None, out=buf, guard=False, settle=0, work=tmp_path / "work")
+    code = mutate.run(spec, proj, sys.executable, out=buf, settle=0, work=tmp_path / "work")
     return code, buf.getvalue()
 
 
@@ -326,22 +335,71 @@ def test_mutate_killed_run_leaves_journal_then_recover(isolated_git, tmp_path, m
 
 
 def test_mutate_interrupted_while_pristine_removes_journal(isolated_git, tmp_path, monkeypatch):
+    """The journal is written (backups taken) before the first mutation's own
+    `by_file()` call, which is the first thing the per-mutation loop does --
+    interrupting there simulates a KeyboardInterrupt landing while every file
+    is still pristine (WP-2 §3.1 (c) dropped the old wait_clear() call this
+    test used to hook for the same purpose, since mutate.py no longer waits
+    for anything before editing)."""
     proj = _calc_project(tmp_path)
     spec = {"pytest": ["-q"], "mutations": [
         {"id": "M1", "file": "calc.py", "old": "return a + b", "new": "return 0  # MUT", "expect": "red"}]}
+    real_by_file = mutate.by_file
     calls = {"n": 0}
 
-    def wait_then_interrupt(*args, **kwargs):
+    def by_file_then_interrupt(edits):
         calls["n"] += 1
-        if calls["n"] == 2:  # 1 = before backups, 2 = before the first edit
+        if calls["n"] == 2:  # 1 = the pristine-apply precheck (before the journal is written),
+            # 2 = the per-mutation loop's own first call (files still pristine at this point)
             assert dl.journal_path(proj).exists()
             raise KeyboardInterrupt
-        return []
+        return real_by_file(edits)
 
-    monkeypatch.setattr(dl, "wait_clear", wait_then_interrupt)
+    monkeypatch.setattr(mutate, "by_file", by_file_then_interrupt)
     with pytest.raises(KeyboardInterrupt):
-        mutate.run(spec, proj, sys.executable, None, out=io.StringIO(), settle=0, work=tmp_path / "work")
+        mutate.run(spec, proj, sys.executable, out=io.StringIO(), settle=0, work=tmp_path / "work")
     assert _pristine(proj) and not dl.journal_path(proj).exists()
+
+
+def test_mutate_forwards_wait_as_the_lock_wait_env_var(isolated_git, tmp_path, monkeypatch):
+    """work order §3.1 (c): mutate.py's own --wait is forwarded the same way
+    as pt.py's, via DSA_TEST_PG_LOCK_WAIT, to each per-mutation pytest
+    subprocess -- mutate.py takes no lock of its own."""
+    proj = _calc_project(tmp_path)
+    seen = {}
+
+    def spy(cmd, **kw):
+        seen["env"] = kw.get("env")
+        return subprocess.CompletedProcess(cmd, 0, stdout="1 passed in 0s\n", stderr="")
+
+    _intercept_pytest(monkeypatch, spy)
+    spec = {"pytest": ["-q"], "mutations": [
+        {"id": "M1", "file": "calc.py", "old": "return a + b", "new": "return 0  # MUT", "expect": "green"}]}
+    buf = io.StringIO()
+    mutate.run(spec, proj, sys.executable, out=buf, settle=0, work=tmp_path / "work", wait=17.0)
+    assert seen["env"][dsa_testpg.ENV_LOCK_WAIT] == "17.0"
+
+
+def test_mutate_stops_on_a_lock_timeout_without_scoring_it(isolated_git, tmp_path, monkeypatch):
+    """review M-3: a lock-wait timeout must STOP the run (REFUSED), after
+    restoring the mutation that hit it, rather than being scored under any
+    `expect` -- in particular `expect: "error"` must not silently accept an
+    infrastructure timeout (pytest exit 2-4) as its own intended outcome."""
+    proj = _calc_project(tmp_path)
+
+    def timeout_pytest(cmd, **kw):
+        return subprocess.CompletedProcess(
+            cmd, 4, stdout="dsa_testpg.TestPgError: timed out after 0.0s waiting for the shared suite lock: /x/suite.lock\n",
+            stderr="")
+
+    _intercept_pytest(monkeypatch, timeout_pytest)
+    spec = {"pytest": ["-q"], "mutations": [
+        {"id": "M1", "file": "calc.py", "old": "return a + b", "new": "return 0  # MUT", "expect": "error"}]}
+    code, text = _mutate(proj, spec, tmp_path)
+    assert code == dl.REFUSED
+    assert "mutate: STOPPED before M1 -- exclusive suite lock wait timed out" in text
+    assert "expect=error got=" not in text
+    assert _pristine(proj)
 
 
 def test_mutate_restore_mismatch_aborts_and_still_restores(isolated_git, tmp_path, monkeypatch):
@@ -375,6 +433,44 @@ def test_mutate_leftover_mutation_line_fails_final_grep(isolated_git, tmp_path, 
         {"id": "M1", "file": "calc.py", "old": "return a + b", "new": "return 0  # MUT", "expect": "red"}]}
     code, text = _mutate(proj, spec, tmp_path)
     assert code == dl.RESTORE_FAILED and "mutation line count changed" in text
+
+
+@pytest.mark.parametrize("code,expect,ok", [
+    (0, "green", True), (1, "green", False), (2, "green", False),
+    (1, "red", True), (0, "red", False), (2, "red", False), (5, "red", False),
+    (2, "error", True), (3, "error", True), (4, "error", True), (5, "error", True),
+    (0, "error", False), (1, "error", False), (6, "error", False),
+])
+def test_mutate_matches_pins_red_green_and_error(code, expect, ok):
+    """WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1,
+    follow-up to WP-1's `M13-no-lc-all`): `expect: "error"` must accept
+    every pytest exit code 2-5 (interrupted / internal error / usage error /
+    no tests collected) as satisfying it, while `"red"`/`"green"` stay exact
+    (1/0 only) -- a mutation that breaks the run itself before collecting
+    anything (e.g. a conftest.py that can no longer start its own cluster)
+    is a real, intended "red" of a different shape than a failed test, not
+    a mismatch. (0, "error", False) and (1, "error", False) in particular
+    pin that a genuinely green or red run must NOT satisfy `expect: "error"`.
+
+    mutation (`tools/dev/mutate.py`): widen `_ERROR_CODES` (or `matches()`'s
+    own `"error"` branch) to also accept code 1 -- this test goes red on the
+    `(1, "error", False)` case, exactly the WP-2 supervisor's own example of
+    a genuinely-red mutation wrongly satisfying an "error" expectation."""
+    assert mutate.matches(code, expect) is ok
+
+
+def test_mutate_error_expect_accepts_a_pre_collection_failure(isolated_git, tmp_path, monkeypatch):
+    """End-to-end: a mutation whose pytest subprocess exits 4 (usage error --
+    stands in for a conftest.py that can no longer start its own cluster,
+    WP-1's `M13-no-lc-all`) satisfies `expect: "error"`, and the printed
+    `got=` stays the specific `error(4)`, not a generic "error" label."""
+    proj = _calc_project(tmp_path)
+    _intercept_pytest(monkeypatch, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 4, stdout="usage error\n", stderr=""))
+    spec = {"pytest": ["-q"], "mutations": [
+        {"id": "M1", "file": "calc.py", "old": "return a + b", "new": "return 0  # MUT", "expect": "error"}]}
+    code, text = _mutate(proj, spec, tmp_path)
+    assert code == 0, text
+    assert "M1       expect=error got=error(4)" in text
 
 
 # ---------------------------------------------------------------------------
@@ -448,38 +544,80 @@ def test_gate_catalog_diff():
     assert gate.diff(before, {"pg_database": ["a", "b", "c"], "pg_roles": []}) == ["pg_database +1 -0", "pg_roles +0 -1"]
 
 
-def _gate_main_with_catalogs(tmp_path, monkeypatch, capsys, before, after):
-    """gate.main with the catalog snapshots and the suite run injected (no database, no pytest)."""
+_EMPTY_CATALOGS = {"pg_database": [], "pg_roles": []}
+
+
+class _FakeCluster:
+    """Stands in for a real `dsa_testpg.Cluster` in gate tests -- no real
+    PostgreSQL, no real dsa_testpg base dir touched."""
+
+    def env(self):
+        return {
+            dsa_testpg.R2DB_DSN: "host=/fake/s port=5432 dbname=postgres user=postgres",
+            dsa_testpg.MITATEDB_DSN: "host=/fake/s port=5432 dbname=postgres user=postgres",
+            "PGHOST": "/fake/s", "PGPORT": "5432", "PGUSER": "postgres", "PGPASSFILE": "/fake/pgpass",
+        }
+
+
+@contextlib.contextmanager
+def _fake_cluster_cm():
+    yield _FakeCluster()
+
+
+@contextlib.contextmanager
+def _noop_lock_cm(*a, **k):
+    yield
+
+
+def _patch_gate_cluster_and_lock(monkeypatch, lock=None):
+    """Every gate test except test_gate_holds_the_exclusive_lock fakes BOTH
+    dsa_testpg.cluster (no real PostgreSQL) and dsa_testpg.suite_lock (no
+    real, machine-shared lock file) -- this is the real, shared `dsa_testpg`
+    module object gate.py itself imports (same idiom already used for `dl`
+    above), so the patch is undone by monkeypatch at the end of each test."""
+    monkeypatch.setattr(gate.dsa_testpg, "cluster", lambda: _fake_cluster_cm())
+    monkeypatch.setattr(gate.dsa_testpg, "suite_lock", lock or (lambda *a, **k: _noop_lock_cm()))
+
+
+def _gate_main(tmp_path, monkeypatch, capsys, run_before, run_after,
+               shared_before=None, shared_after=None, code=0, tally="3 passed in 1.00s\n"):
+    """gate.main with a fake cluster/lock and the catalog snapshots and the
+    suite run injected -- no real database, no real pytest."""
     monkeypatch.setenv("SP", str(tmp_path / "sp"))
-    monkeypatch.setattr(dl, "wait_clear", lambda *a, **k: [])
-    snaps = iter([before, after])
-    monkeypatch.setattr(gate, "snapshot", lambda: next(snaps))
+    _patch_gate_cluster_and_lock(monkeypatch)
+    run_snaps = iter([run_before, run_after])
+    shared_snaps = iter([shared_before or _EMPTY_CATALOGS, shared_after or shared_before or _EMPTY_CATALOGS])
+    monkeypatch.setattr(gate, "run_snapshot", lambda env: next(run_snaps))
+    monkeypatch.setattr(gate, "shared_snapshot", lambda: (next(shared_snaps), ""))
 
-    def fake_run(cmd, cwd, log):
-        log.write_text("....\n3 passed in 1.00s\n", encoding="utf-8")
-        return 0, []
+    def fake_run_suite(cmd, cwd, env, stdout_path):
+        stdout_path.write_text(f"....\n{tally}", encoding="utf-8")
+        return code
 
-    monkeypatch.setattr(gate, "run_watched", fake_run)
-    code = gate.main(["--hold", str(tmp_path / "gate-hold.flag"), "--python", sys.executable, "-C", str(tmp_path)])
+    monkeypatch.setattr(gate, "run_suite", fake_run_suite)
+    result = gate.main(["--python", sys.executable, "-C", str(tmp_path)])
     out = capsys.readouterr().out.splitlines()
-    return code, out, Path(out[-1].split("log=", 1)[1]).read_text(encoding="utf-8")
+    log_line = next(l for l in out if l.startswith("gate: pg_database/pg_roles diff"))
+    log_path = Path(log_line.rsplit("log=", 1)[1])
+    return result, out, log_path.read_text(encoding="utf-8")
 
 
 def test_gate_names_catalog_changes_in_log_and_bounded_stdout(tmp_path, monkeypatch, capsys):
     dbs = [f"t_db_{i:02d}" for i in range(12)]
-    code, out, log = _gate_main_with_catalogs(
+    code, out, log = _gate_main(
         tmp_path, monkeypatch, capsys,
         {"pg_database": ["postgres", *reversed(dbs)], "pg_roles": ["postgres", "t_role_b", "t_role_a"]},
         {"pg_database": ["postgres", "t_new"], "pg_roles": ["postgres"]})
     assert code == 1
     assert out[:2] == ["gate: 3 passed in 1.00s", "gate: judge=FAIL (pg_database +1 -12, pg_roles +0 -2)"]
-    assert out[2:-1] == [
+    assert out[2:-2] == [
         "gate: pg_database added (1): t_new",
         f"gate: pg_database removed (12): {', '.join(dbs[:10])}, ... +2 more",
         "gate: pg_roles removed (2): t_role_a, t_role_b",
     ]
     assert "t_db_10" not in "\n".join(out)
-    assert out[-1].startswith("gate: pg_database/pg_roles diff pg_database +1 -12, pg_roles +0 -2 | log=")
+    assert out[-2].startswith("gate: pg_database/pg_roles diff pg_database +1 -12, pg_roles +0 -2 | log=")
+    assert out[-1] == "gate: info=shared pg_database/pg_roles diff 0"
     assert log.startswith("....\n3 passed in 1.00s\n")
     section = log.split(f"== {gate.LOG_SECTION}", 1)[1].splitlines()[1:]
     assert section == ["pg_database added (1):", "  t_new", "pg_database removed (12):", *[f"  {d}" for d in dbs],
@@ -488,35 +626,206 @@ def test_gate_names_catalog_changes_in_log_and_bounded_stdout(tmp_path, monkeypa
 
 def test_gate_no_catalog_change_prints_no_names(tmp_path, monkeypatch, capsys):
     snap = {"pg_database": ["postgres"], "pg_roles": ["postgres"]}
-    code, out, log = _gate_main_with_catalogs(tmp_path, monkeypatch, capsys, snap, dict(snap))
-    assert code == 0 and len(out) == 3 and out[1] == "gate: judge=PASS"
+    code, out, log = _gate_main(tmp_path, monkeypatch, capsys, snap, dict(snap))
+    assert code == 0 and len(out) == 4 and out[1] == "gate: judge=PASS"
+    assert out[-1] == "gate: info=shared pg_database/pg_roles diff 0"
     assert log.split(f"== {gate.LOG_SECTION}", 1)[1].splitlines()[1:] == ["0"]
 
 
-def test_gate_rejects_hold_dash():
-    assert gate.main(["--hold", "-", "--python", sys.executable]) == dl.ERROR
+def test_gate_fails_on_run_cluster_diff(tmp_path, monkeypatch, capsys):
+    """WP-2 §3.1 table row 1: the gate's OWN run cluster's own diff decides
+    PASS/FAIL -- the shared cluster here is unchanged, so this proves the
+    run-cluster diff alone is what fails it."""
+    snap = {"pg_database": ["postgres"], "pg_roles": ["postgres"]}
+    code, out, _ = _gate_main(tmp_path, monkeypatch, capsys, snap,
+                              {"pg_database": ["postgres", "t_new"], "pg_roles": ["postgres"]})
+    assert code == 1
+    assert "judge=FAIL" in out[1] and "pg_database +1 -0" in out[1]
 
 
-def test_gate_refuses_existing_flag_and_leaves_it(tmp_path, capsys):
-    flag = tmp_path / "gate-hold.flag"
-    flag.touch()
-    assert gate.main(["--hold", str(flag), "--python", sys.executable, "-C", str(tmp_path)]) == dl.REFUSED
-    assert flag.exists() and "already exists" in capsys.readouterr().out
+def test_gate_shared_cluster_diff_is_info_only(tmp_path, monkeypatch, capsys):
+    """WP-2 §3.1 table row 2 (Q-3): the shared local PostgreSQL's own diff
+    is printed as an `info=` line and never fails the gate -- the run
+    cluster here is unchanged, so a FAIL would only be explainable by the
+    shared diff wrongly being judged."""
+    snap = {"pg_database": ["postgres"], "pg_roles": ["postgres"]}
+    code, out, _ = _gate_main(tmp_path, monkeypatch, capsys, snap, dict(snap),
+                              shared_before=snap, shared_after={"pg_database": ["postgres", "shared_new"], "pg_roles": ["postgres"]})
+    assert code == 0 and out[1] == "gate: judge=PASS"
+    assert out[-1] == "gate: info=shared pg_database/pg_roles diff pg_database +1 -0"
 
 
-def test_gate_removes_only_its_own_flag_on_error(tmp_path, monkeypatch):
-    flag = tmp_path / "gate-hold.flag"
-    monkeypatch.setattr(dl, "wait_clear", lambda *a, **k: [])
-    monkeypatch.setattr(gate, "snapshot", lambda: (_ for _ in ()).throw(dl.DevError("psql failed")))
-    assert gate.main(["--hold", str(flag), "--python", sys.executable, "-C", str(tmp_path)]) == dl.ERROR
-    assert not flag.exists()
+def test_gate_passes_external_env_to_pytest(tmp_path, monkeypatch, capsys):
+    """WP-2 §3.1 table row 3: the suite runs with DSA_TEST_PG=external and
+    the gate's own cluster's Cluster.env(). Also review B-1: DSA_TEST_PG_
+    LOCK_HELD=1 is in that same env, so a genuine nested owned-mode pytest
+    the suite spawns (e.g. conformance-tests/test_testpg_cluster.py's own
+    nested-controller tests) knows an ancestor already holds the lock and
+    must not try to acquire it again."""
+    monkeypatch.setenv("SP", str(tmp_path / "sp"))
+    _patch_gate_cluster_and_lock(monkeypatch)
+    monkeypatch.setattr(gate, "run_snapshot", lambda env: dict(_EMPTY_CATALOGS))
+    monkeypatch.setattr(gate, "shared_snapshot", lambda: (dict(_EMPTY_CATALOGS), ""))
+    seen = {}
+
+    def fake_run_suite(cmd, cwd, env, stdout_path):
+        seen["env"] = env
+        stdout_path.write_text("....\n3 passed in 1.00s\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(gate, "run_suite", fake_run_suite)
+    code = gate.main(["--python", sys.executable, "-C", str(tmp_path)])
+    assert code == 0
+    fake_env = _FakeCluster().env()
+    assert seen["env"][dsa_testpg.ENV_MODE] == "external"
+    assert seen["env"][dsa_testpg.ENV_LOCK_HELD] == "1"
+    assert seen["env"][dsa_testpg.R2DB_DSN] == fake_env[dsa_testpg.R2DB_DSN]
+    assert seen["env"][dsa_testpg.MITATEDB_DSN] == fake_env[dsa_testpg.MITATEDB_DSN]
+    assert seen["env"]["PGPASSFILE"] == fake_env["PGPASSFILE"]
 
 
-def test_gate_run_watched_reports_concurrent_pytest(tmp_path, monkeypatch):
-    monkeypatch.setattr(dl, "current_other_pytest", lambda: [(4242, "python -m pytest")])
-    code, seen = gate.run_watched([sys.executable, "-c", "import time; time.sleep(0.5)"], tmp_path,
-                                  tmp_path / "out.log", poll=0.05)
-    assert code == 0 and seen == ["concurrent pytest pid=4242"]
+def test_gate_holds_the_exclusive_lock(tmp_path, monkeypatch, capsys):
+    """WP-2 §3.1 table row 4: gate.py actually takes the REAL exclusive
+    suite lock (not a fake) for the duration of its run -- proven from a
+    separate process trying a shared acquisition against the SAME (tmp,
+    never the machine's real per-uid) base dir while gate.main() is
+    "running" (run_suite is faked to do the probe synchronously, since the
+    lock is already held by the time run_suite is reached)."""
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(gate.dsa_testpg, "_base_dir", lambda *a, **k: base)
+    monkeypatch.setattr(gate.dsa_testpg, "cluster", lambda: _fake_cluster_cm())
+    monkeypatch.setenv("SP", str(tmp_path / "sp"))
+    monkeypatch.setattr(gate, "run_snapshot", lambda env: dict(_EMPTY_CATALOGS))
+    monkeypatch.setattr(gate, "shared_snapshot", lambda: (dict(_EMPTY_CATALOGS), ""))
+
+    script = (
+        "import pathlib, sys; sys.path.insert(0, %r); import dsa_testpg\n"
+        "try:\n"
+        "    with dsa_testpg.suite_lock(False, 0.3, base=pathlib.Path(%r)):\n"
+        "        pass\n"
+        "except dsa_testpg.TestPgError:\n"
+        "    sys.exit(75)\n"
+        "sys.exit(0)\n"
+    ) % (str(_TESTPG), str(base))
+
+    def fake_run_suite(cmd, cwd, env, stdout_path):
+        probe = subprocess.run([sys.executable, "-c", script])
+        assert probe.returncode == 75, "a second process's shared acquisition must time out while gate holds the exclusive lock"
+        stdout_path.write_text("....\n3 passed in 1.00s\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(gate, "run_suite", fake_run_suite)
+    code = gate.main(["--python", sys.executable, "-C", str(tmp_path)])
+    assert code == 0
+    # The exclusive lock is released on the way out: a fresh shared acquisition now succeeds.
+    handle = dsa_testpg._acquire_suite_lock(exclusive=False, wait=1.0, base=base)
+    handle.release()
+    assert not (base / dsa_testpg.GATE_INTENT_NAME).exists()
+
+
+def test_gate_refused_when_the_exclusive_lock_times_out(tmp_path, monkeypatch, capsys):
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(gate.dsa_testpg, "_base_dir", lambda *a, **k: base)
+    held = dsa_testpg._acquire_suite_lock(exclusive=False, wait=1.0, base=base)  # a live "other pytest run"
+    try:
+        code = gate.main(["--python", sys.executable, "-C", str(tmp_path), "--wait", "0.3"])
+    finally:
+        held.release()
+    assert code == dl.REFUSED
+    out = capsys.readouterr().out
+    assert "REFUSED" in out
+
+
+def test_gate_cluster_startup_failure_is_error_and_releases_the_lock(tmp_path, monkeypatch, capsys):
+    """review MINOR-3 (test gap 8): the gate's ERROR(78) path had no test at
+    all after `test_gate_removes_only_its_own_flag_on_error` was deleted
+    with the hold flag. Here `dsa_testpg.cluster()` itself raises
+    `TestPgError` (a real cluster start-up failure, e.g. no postgres 16
+    binary) with the REAL exclusive lock held (only `_base_dir` is
+    redirected to a tmp base) -- the lock must still be released and
+    `gate.intent` removed on the way out, proven by a fresh acquisition
+    succeeding immediately afterward."""
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(gate.dsa_testpg, "_base_dir", lambda *a, **k: base)
+    monkeypatch.setenv("SP", str(tmp_path / "sp"))
+
+    def failing_cluster():
+        raise dsa_testpg.TestPgError("cluster start-up failed (simulated)")
+
+    monkeypatch.setattr(gate.dsa_testpg, "cluster", failing_cluster)
+
+    code = gate.main(["--python", sys.executable, "-C", str(tmp_path)])
+    assert code == dl.ERROR
+    assert "ERROR" in capsys.readouterr().out
+    handle = dsa_testpg._acquire_suite_lock(exclusive=True, wait=1.0, base=base)
+    handle.release()
+    assert not (base / dsa_testpg.GATE_INTENT_NAME).exists()
+
+
+def test_gate_run_snapshot_failure_is_error(tmp_path, monkeypatch, capsys):
+    """review MINOR-3 (test gap 8): a `dl.DevError` from `run_snapshot`
+    (e.g. `psql` failing against the gate's own run cluster) is a real
+    precondition failure, not a refusal -- ERROR(78), not REFUSED(75)."""
+    monkeypatch.setenv("SP", str(tmp_path / "sp"))
+    _patch_gate_cluster_and_lock(monkeypatch)
+    monkeypatch.setattr(gate, "shared_snapshot", lambda: (dict(_EMPTY_CATALOGS), ""))
+
+    def failing_run_snapshot(env):
+        raise dl.DevError("psql failed: simulated")
+
+    monkeypatch.setattr(gate, "run_snapshot", failing_run_snapshot)
+    code = gate.main(["--python", sys.executable, "-C", str(tmp_path)])
+    assert code == dl.ERROR
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_shared_snapshot_never_raises_on_a_failing_read(monkeypatch):
+    """review M-2: `shared_snapshot()` ITSELF (not merely a caller working
+    around it) catches the psql failure and returns `(None, reason)`
+    instead of letting `dl.DevError` propagate -- calls the REAL function
+    (only `gate.catalog`, the thing it wraps, is faked), unlike the
+    end-to-end test below which fakes `shared_snapshot` itself and so
+    cannot see a regression inside its own try/except.
+
+    mutation (`tools/dev/gate.py`): re-raise instead of returning `(None,
+    str(exc))` in `shared_snapshot`'s own `except dl.DevError` -- this test
+    goes red because `dl.DevError` would then propagate out uncaught."""
+    monkeypatch.setattr(gate, "catalog", lambda query, env: (_ for _ in ()).throw(dl.DevError("psql failed: simulated")))
+    snap, reason = gate.shared_snapshot()
+    assert snap is None
+    assert "psql failed: simulated" in reason
+
+
+def test_gate_shared_snapshot_failure_still_yields_the_normal_pass_output(tmp_path, monkeypatch, capsys):
+    """review M-2: a failing shared-cluster read must never abort the gate
+    or drop the tally/judge/log -- only degrade the `info=` line."""
+    monkeypatch.setenv("SP", str(tmp_path / "sp"))
+    _patch_gate_cluster_and_lock(monkeypatch)
+    snap = dict(_EMPTY_CATALOGS)
+    monkeypatch.setattr(gate, "run_snapshot", lambda env: dict(snap))
+    calls = {"n": 0}
+
+    def flaky_shared_snapshot():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return dict(snap), ""
+        return None, "psql failed: simulated"
+
+    monkeypatch.setattr(gate, "shared_snapshot", flaky_shared_snapshot)
+
+    def fake_run_suite(cmd, cwd, env, stdout_path):
+        stdout_path.write_text("....\n3 passed in 1.00s\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(gate, "run_suite", fake_run_suite)
+    code = gate.main(["--python", sys.executable, "-C", str(tmp_path)])
+    out = capsys.readouterr().out.splitlines()
+    assert code == 0
+    assert out[:2] == ["gate: 3 passed in 1.00s", "gate: judge=PASS"]
+    assert out[-1] == "gate: info=shared pg_database/pg_roles diff unavailable (psql failed: simulated)"
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +846,9 @@ def _msg(tmp_path: Path, text: str) -> Path:
 
 
 def _finalize(wt, tmp_path, allow, msg="docs: change [skip ci]\n\nbody\n\nCo-Authored-By: A <a@example.com>\n",
-              checks=(), tools_tests=False, flag=None):
+              checks=(), tools_tests=False):
     buf = io.StringIO()
-    code = finalize.finalize(wt, "wp", allow, _msg(tmp_path, msg), list(checks), tools_tests, flag,
+    code = finalize.finalize(wt, "wp", allow, _msg(tmp_path, msg), list(checks), tools_tests,
                              True, sys.executable, out=buf, repo_checks=False)
     return code, buf.getvalue()
 
@@ -567,7 +876,7 @@ def test_finalize_splits_commits_with_leave(isolated_git, tmp_path):
     (wt / "src/x.py").write_text("x = 2\n")
     (wt / "src/new.py").write_text("y = 1\n")
     buf = io.StringIO()
-    code = finalize.finalize(wt, "wp", ["docs/*"], _msg(tmp_path, "docs first\n"), [], False, None, False,
+    code = finalize.finalize(wt, "wp", ["docs/*"], _msg(tmp_path, "docs first\n"), [], False, False,
                              sys.executable, out=buf, repo_checks=False, leave=["src/*"])
     assert code == 0, buf.getvalue()
     assert "left uncommitted by --leave: 2 paths" in buf.getvalue()
@@ -609,7 +918,7 @@ def test_finalize_requires_branch_and_noreply_identities(isolated_git, tmp_path,
     _, wt = _repo_with_worktree(tmp_path)
     (wt / "docs/a.md").write_text("a2\n")
     with pytest.raises(dl.DevError, match="not 'other'"):
-        finalize.finalize(wt, "other", ["docs/*"], _msg(tmp_path, "m\n"), [], False, None, True,
+        finalize.finalize(wt, "other", ["docs/*"], _msg(tmp_path, "m\n"), [], False, True,
                           sys.executable, out=io.StringIO(), repo_checks=False)
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "someone@example.com")
     with pytest.raises(dl.DevError, match="GIT_COMMITTER_IDENT"):
@@ -637,13 +946,14 @@ def test_finalize_rechecks_head_before_commit(isolated_git, tmp_path):
     assert _git(wt, "diff", "--cached", "--name-only") == ""
 
 
-def test_finalize_post_commit_refusal_is_partial(isolated_git, tmp_path):
+def test_finalize_post_commit_refusal_is_partial(isolated_git, tmp_path, monkeypatch):
+    """WP-2 §3.1 (c): the --tools-tests guard is now journal-only (the
+    gate-hold flag it used to also check is gone)."""
     main_root, wt = _repo_with_worktree(tmp_path)
     main_head = _git(main_root, "rev-parse", "HEAD")
     (wt / "docs/a.md").write_text("a2\n")
-    flag = tmp_path / "gate-hold.flag"
-    flag.touch()
-    code, text = _finalize(wt, tmp_path, ["docs/*"], tools_tests=True, flag=flag)
+    monkeypatch.setattr(dl, "journal_blocker", lambda root: "unfinished mutation run: fake")
+    code, text = _finalize(wt, tmp_path, ["docs/*"], tools_tests=True)
     assert code == dl.PARTIAL and "tools/tests refused" in text and "merged=no" in text
     assert _git(wt, "log", "-1", "--format=%s").strip() == "docs: change [skip ci]"
     assert _git(main_root, "rev-parse", "HEAD") == main_head
@@ -748,7 +1058,10 @@ def test_hook_never_fails_the_session(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _ready_repo(tmp_path, monkeypatch):
-    monkeypatch.setattr(dl, "current_other_pytest", lambda: [])
+    # WP-2 §3.1 (c): "no pytest process" + "gate-hold flag absent" collapse
+    # into dsa_testpg.gate_running() -- faked here (never the real, machine-
+    # shared per-uid base dir) so every handover_ready test stays hermetic.
+    monkeypatch.setattr(dsa_testpg, "gate_running", lambda *a, **k: (False, ""))
     main_root, wt = _repo_with_worktree(tmp_path)
     (main_root / "docs/HANDOVER_X.md").write_text("next: WP-9\n")
     _git(main_root, "add", "docs/HANDOVER_X.md")
@@ -759,7 +1072,7 @@ def _ready_repo(tmp_path, monkeypatch):
 def test_handover_ready_prints_continuation_prompt(isolated_git, tmp_path, monkeypatch):
     main_root, wt = _ready_repo(tmp_path, monkeypatch)
     buf = io.StringIO()
-    code = ready.check(wt, True, [str(wt)], None, "docs/HANDOVER_X.md", out=buf)
+    code = ready.check(wt, True, [str(wt)], "docs/HANDOVER_X.md", out=buf)
     text = buf.getvalue()
     assert code == 0, text
     assert "READY" in text and "NOT READY" not in text
@@ -768,24 +1081,32 @@ def test_handover_ready_prints_continuation_prompt(isolated_git, tmp_path, monke
     assert f"{main_root}/docs/HANDOVER_X.md" in prompt
 
 
+def test_handover_not_ready_while_gate_runs(isolated_git, tmp_path, monkeypatch):
+    """WP-2 §3.1 manifest row 9, named exactly as the manifest specifies
+    (review MINOR-6: previously only the `gate_running` case of the
+    parametrized `test_handover_ready_not_ready` below -- pulled out into
+    its own function so the name matches)."""
+    main_root, wt = _ready_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(dsa_testpg, "gate_running", lambda *a, **k: (True, "gate intent present: /x/gate.intent"))
+    buf = io.StringIO()
+    assert ready.check(wt, True, [str(wt)], "docs/HANDOVER_X.md", out=buf) == 1
+    text = buf.getvalue()
+    assert "NG  gate not running" in text and "NOT READY" in text and "BEGIN CONTINUATION" not in text
+
+
 @pytest.mark.parametrize("case,needle", [
     ("agents", "NG  no running subagents"),
-    ("flag", "NG  gate-hold flag absent"),
     ("main_dirty", "NG  main checkout on main and clean"),
     ("journal", "NG  no unfinished mutation journal"),
     ("wt_dirty", "clean=False"),
     ("wt_unmerged", "merged=False"),
     ("handover_missing", "NG  handover committed on main"),
-    ("pytest", "NG  no pytest process"),
 ])
 def test_handover_ready_not_ready(isolated_git, tmp_path, monkeypatch, case, needle):
     main_root, wt = _ready_repo(tmp_path, monkeypatch)
-    denied, flag, handover = True, None, "docs/HANDOVER_X.md"
+    denied, handover = True, "docs/HANDOVER_X.md"
     if case == "agents":
         denied = False
-    elif case == "flag":
-        flag = tmp_path / "gate-hold.flag"
-        flag.touch()
     elif case == "main_dirty":
         (main_root / "stray.txt").write_text("x")
     elif case == "journal":
@@ -796,9 +1117,7 @@ def test_handover_ready_not_ready(isolated_git, tmp_path, monkeypatch, case, nee
         _git(wt, "commit", "-q", "--allow-empty", "-m", "unmerged")
     elif case == "handover_missing":
         handover = "docs/NOPE.md"
-    elif case == "pytest":
-        monkeypatch.setattr(dl, "current_other_pytest", lambda: [(4242, "python -m pytest")])
     buf = io.StringIO()
-    assert ready.check(wt, denied, [str(wt)], flag, handover, out=buf) == 1
+    assert ready.check(wt, denied, [str(wt)], handover, out=buf) == 1
     text = buf.getvalue()
     assert needle in text and "NOT READY" in text and "BEGIN CONTINUATION" not in text
