@@ -1560,5 +1560,117 @@ class FoundationTests(unittest.TestCase):
             cell.read(same_app_principal, "predicate_order_probe", filters=[Filter("amount", "eq", "not-a-number")])
 
 
+    def test_postgres_sql_leaf_preserves_backend_facade(self):
+        """R-37 WP-4a (BP3): `backend_postgres.PostgresBackend` keeps
+        `_where_sql` as the exact same object the new leaf `postgres_
+        sql.py` defines (`staticmethod` delegation, WP-3i's form), and
+        `_DIRECTION_SQL` is re-exported from the same leaf and read by
+        `read()`'s own ORDER BY assembly unchanged. `_OPERATOR_SQL` has
+        zero readers left in `backend_postgres.py` after the move (the
+        only use was inside `_where_sql`'s own body, which moved too),
+        so it is fixed on the leaf side only, not re-exported."""
+        from mitatedb_api import postgres_sql
+        from mitatedb_api.backend_postgres import PostgresBackend
+        import mitatedb_api.backend_postgres as backend_postgres_module
+
+        self.assertIs(PostgresBackend._where_sql, postgres_sql._where_sql)
+        self.assertIs(backend_postgres_module._DIRECTION_SQL, postgres_sql._DIRECTION_SQL)
+        self.assertFalse(hasattr(backend_postgres_module, "_OPERATOR_SQL"))
+
+    def test_postgres_sql_where_fragment_is_composed_literally(self):
+        """R-37 WP-4a (BP3): `postgres_sql._where_sql` composes an empty
+        `filters` list into an empty `sql.SQL` fragment with no bound
+        params; a single non-`in` filter into ` WHERE "field" = %s` with
+        the value as the sole bound param; two filters joined by exactly
+        one ` AND `; and an `in` filter into a parenthesized placeholder
+        list with one `%s` per value, in the same order."""
+        from psycopg import sql
+
+        from mitatedb_api.postgres_sql import _where_sql
+
+        empty_fragment, empty_params = _where_sql([])
+        self.assertEqual(empty_fragment.as_string(None), "")
+        self.assertEqual(empty_params, [])
+
+        one_fragment, one_params = _where_sql([Filter("amount", "eq", 5)])
+        self.assertEqual(one_fragment.as_string(None), ' WHERE "amount" = %s')
+        self.assertEqual(one_params, [5])
+
+        two_fragment, two_params = _where_sql([Filter("amount", "eq", 5), Filter("name", "ne", "x")])
+        rendered = two_fragment.as_string(None)
+        self.assertEqual(rendered.count(" AND "), 1)
+        self.assertEqual(rendered, ' WHERE "amount" = %s AND "name" != %s')
+        self.assertEqual(two_params, [5, "x"])
+
+        in_fragment, in_params = _where_sql([Filter("amount", "in", [1, 2, 3])])
+        self.assertEqual(in_fragment.as_string(None), ' WHERE "amount" IN (%s, %s, %s)')
+        self.assertEqual(in_params, [1, 2, 3])
+        self.assertIsInstance(in_fragment, sql.Composed)
+
+    def test_postgres_sql_never_inlines_a_value_into_the_fragment(self):
+        """R-37 WP-4a (BP3, design D-4 / §5.2 "SQL 安全性"): a filter
+        value containing a `'` never appears, literally or escaped,
+        inside the composed `sql.Composed` fragment's own rendered
+        text -- it reaches the statement exclusively via a bound
+        `psycopg.sql.Placeholder`/`%s`, never by string interpolation
+        into the SQL text itself."""
+        from mitatedb_api.postgres_sql import _where_sql
+
+        fragment, params = _where_sql([Filter("name", "eq", "o'brien")])
+        rendered = fragment.as_string(None)
+        self.assertNotIn("o'brien", rendered)
+        self.assertIn("%s", rendered)
+        self.assertEqual(params, ["o'brien"])
+
+    def test_postgres_sql_operator_and_direction_tokens_are_closed(self):
+        """R-37 WP-4a (BP3): `_OPERATOR_SQL`/`_DIRECTION_SQL` are closed
+        lookup tables built once at import time from `backend.
+        SQL_OPERATOR_TOKENS` and a literal ASC/DESC pair -- pinning
+        their exact literal contents so a mutation that widens or
+        narrows either table is caught here directly, not only via the
+        integration-level `test_postgres.py` order-by test."""
+        from psycopg import sql
+
+        from mitatedb_api.postgres_sql import _DIRECTION_SQL, _OPERATOR_SQL
+
+        self.assertEqual(set(_OPERATOR_SQL), {"eq", "ne", "lt", "lte", "gt", "gte", "in"})
+        for name, token in {"eq": "=", "ne": "!=", "lt": "<", "lte": "<=", "gt": ">", "gte": ">=", "in": "IN"}.items():
+            self.assertIsInstance(_OPERATOR_SQL[name], sql.SQL)
+            self.assertEqual(_OPERATOR_SQL[name].as_string(None), token)
+
+        self.assertEqual(set(_DIRECTION_SQL), {"asc", "desc"})
+        self.assertEqual(_DIRECTION_SQL["asc"].as_string(None), "ASC")
+        self.assertEqual(_DIRECTION_SQL["desc"].as_string(None), "DESC")
+
+    def test_postgres_sql_where_fragment_rejects_an_operator_outside_the_closed_vocabulary(self):
+        """R-37 WP-4a (BP3, independent code review 中-1, 監督裁定 W4-4
+        追補): `_where_sql` looks up `item.operator` in `_OPERATOR_SQL`
+        via a plain subscript, never `.get(..., default)` -- an operator
+        outside `backend.SQL_OPERATOR_TOKENS`'s own closed vocabulary
+        raises `KeyError` at the LEAF itself rather than silently
+        falling back to some default comparison (design §5.1's "閉語彙
+        外" requirement, pinned at the mechanism level; `cell.py`'s own
+        `_bind_filters` -- `if item.operator not in SQL_OPERATOR_TOKENS`
+        -- already refuses an out-of-vocabulary operator with a
+        classified `ValidationError` before a request ever reaches this
+        backend, but that outer gate is not what this test is pinning).
+        Separately, and by contrast: an empty `in` value list is NOT
+        refused by this leaf at all -- it composes a syntactically-valid
+        ` WHERE "field" IN ()` with zero placeholders; the "in filter
+        requires values" refusal is `cell.py`'s own responsibility
+        (`cell.py:3370`), outside this leaf's boundary -- the two
+        backends' extraction moved the SQL-assembly half of this
+        predicate out of `cell.py` without moving that value-shape
+        check, which stays where it always was."""
+        from mitatedb_api.postgres_sql import _where_sql
+
+        with self.assertRaises(KeyError):
+            _where_sql([Filter("amount", "outside-the-vocabulary", 5)])
+
+        empty_in_fragment, empty_in_params = _where_sql([Filter("amount", "in", [])])
+        self.assertEqual(empty_in_fragment.as_string(None), ' WHERE "amount" IN ()')
+        self.assertEqual(empty_in_params, [])
+
+
 if __name__ == "__main__":
     unittest.main()
