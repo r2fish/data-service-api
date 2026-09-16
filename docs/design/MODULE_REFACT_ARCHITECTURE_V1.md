@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.19 (2026-09-16)。** 直後の v1.18 行は当時の改版履歴として保存する。v1.19 は既存の本文を書き換えず、末尾に **§10.16 (WP-4a 実施記録)** を追記した記録である。
 - **現行版: v1.18 (2026-09-16)。** 直後の v1.17 行は当時の改版履歴として保存する。v1.18 は既存の本文を書き換えず、末尾に **§10.15 (WP-3i 実施記録)** を追記した記録である。
 - **現行版: v1.17 (2026-09-16)。** 直後の v1.16 行は当時の改版履歴として保存する。v1.17 は既存の本文を書き換えず、末尾に **§10.14 (WP-3h 実施記録)** を追記した記録である。
 - **現行版: v1.16 (2026-09-16)。** 直後の v1.15 行は当時の改版履歴として保存する。v1.16 は既存の本文を書き換えず、末尾に **§10.13 (WP-3g 実施記録)** を追記した記録である。
@@ -579,3 +580,30 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
   - 分類の無い参照で止まる規則があるのは、実装者の自己判定が当てにならないからである。「変更なし」と自己判定した 2 つの参照のうち、1 つは括弧書きが要った。
   - 同じ checkout で並行するセッションは、machine 全体で数える pytest の件数を共有する。root gate を走らせる前に、動いている相手と gate の時間帯を調整する。
 - **次の WP**: WP-3 (3a〜3i) は完了した。作業指示書 §4 の表で WP-3 の後に並ぶのは WP-4 (PG1〜PG4、BP3。manifest は未作成) で、本設計 §4 ではその後が WP-5 (facade 縮小と閉止) である。WP-4 の前に置く `backend_postgres.py` のコメント整理 (Y-5) は、R-22 変更セット 6 (merge `42842de`) で行われた (roadmap の R-22 行)。CE6 の残り 7 method は W3-11 で範囲外とした。その後続は作業指示書に未記載。
+
+### 10.16 WP-4a (BP3 → `postgres_sql.py`) 実施記録 (2026-09-16、v1.19 追記)
+
+作業指示書 §5.40 (共通・裁定 Z4-1〜Z4-8)・§5.41 (manifest)・§5.45 (訂正註、第 2 次〜第 4 次の裁定)。
+
+| WP | 抽出 | merge | 備考 |
+| --- | --- | --- | --- |
+| WP-4a | MitateDB `backend_postgres.py` → `postgres_sql.py` (BP3: `_OPERATOR_SQL`・`_DIRECTION_SQL`・`PostgresBackend._where_sql`) | 本変更 (commit `dd59cd4`、merge `acb257e`。8 files changed, 203 insertions(+), 44 deletions(-)) | 2 定数と 1 method を、新規の pure leaf `MitateDB-api/src/mitatedb_api/postgres_sql.py` の module 定数と関数へ移した (Z4-8)。class には `_where_sql = staticmethod(_where_sql)` の委譲属性を残したので、5 箇所の呼出し (`update_in_transaction`・`delete_in_transaction`・`read`・`update`・`delete`) は 1 行も変わらない。`insert` は `_where_sql` を呼ばない。ORDER BY / LIMIT の組立・`_execute`・timeout・driver 例外の変換は `backend_postgres.py` に残る。leaf の import は `psycopg` (`from psycopg import sql`) と `.backend` (`SQL_OPERATOR_TOKENS`) だけである |
+
+- **40c**: 本体の差は `def _where_sql(self, filters):` → `def _where_sql(filters):` の 1 種だけである。移動した説明コメント (m-7) と定数は逐語で、移動先 `postgres_sql.py` L20-24 と旧 L130-134 は逐語一致する (独立レビューが diff で確認)。括弧書き (位置参照) は `MitateDB-api/src/mitatedb_api/backend_sqlite.py`:45 と `MitateDB-api/tests/test_postgres.py`:1418 の **2 箇所**で、§5.41 の一覧どおりである。
+- **`_OPERATOR_SQL` は facade へ再 export しない。** 第 2 次裁定 6 の条件付き (「移動後の読み手 0 を実測で示したら削る」) は、実測により**削る**に決着した。`backend_postgres.py` 側の読み手は 0 件で、`hasattr(backend_postgres, "_OPERATOR_SQL") is False` も実測した。回帰証拠は下の 40a の suite の集計行である。
+- **差し戻し S-1**: 上の削除に伴い、`backend_postgres.py`:90 の `from .backend import SQL_OPERATOR_TOKENS, UNCHANGED` の `SQL_OPERATOR_TOKENS` が読み手 0 になっていた (唯一の読み手は `_OPERATOR_SQL` の定義式だった)。監督の差分確認で見つけ、同じ基準 (裁定 6) で削った。`UNCHANGED` は読み手 5 なので残した。**suite でも変異でも検出されない種類の欠陥である** — 壊れるのは実行時の挙動ではなく、設計 D-1 の「依存グラフを細くする」という主張と、同じ変更セット内での裁定 6 の適用の一貫性である。以後の抽出 WP は、移動によって読み手を失った import・定数・再 export が移動元に残っていないかを、移動前の HEAD と比較した AST の参照件数で確かめる (作業指示書 §5.45 の訂正註 4)。
+- **40b**: `tools/tests/test_leaf_import_direction.py` の leaf 一覧に 1 行足し、許可集合は `{"psycopg", ".backend"}` である。`MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py` の行番号 allowlist 20 件は実測で行送りした (前半 11 件 -5、後半 9 件 -19)。各件に既存の書式の行送りコメントを添えた。件数 pin は `backend_postgres.py` 21 のまま差分 0、新 leaf は denial 0 件なので `SCANNED_MODULES`・件数 pin の辞書・sib tuple はいずれも差分 0 である。`_ISOMORPHIC_TARGETS` も差分 0 (WF-1)。
+- **変異** (`tools/dev/mutate.py`): **13 件すべて予想どおり赤**で、復元も確かめた。内訳は**実装担当 12 (M1〜M11 と M13)、監督 1** で、**M12 (完了条件 12、CH-0340 の訂正の記録を消す変異) が監督**である (W4-4 (a)(c))。M12 は `mutate: 1 mutations, 1 as expected, restores verified 1/1 files (sha256 x2)`。
+- **完了条件 16 件** (変異 13 + 監査照合 3)、**新規テスト 5 本**。M13 と完了条件 16 (「operator は閉じた表から引き、閉語彙外は黙って既定値に落ちない」。変異は `_OPERATOR_SQL[item.operator]` を `_OPERATOR_SQL.get(item.operator, sql.SQL("="))` にする) は、独立コードレビューの指摘 (中-1) で足した。manifest の当初の新規 4 本は、この変異を 4 本とも緑のまま通していた。§5.1 の 2 が必須の証拠に挙げる「閉語彙外、例外経路」の取りこぼしである。
+- **来歴の証拠 (コミットした HEAD)**: 使い捨て clone は使わない (W4-4 (b))。監督が `tools/dev/finalize.py --no-merge` で WP branch に記録し、その HEAD (`dd59cd4`) で `tools/tests` を流して **`486 passed in 34.06s`** を得た。0f (`test_0f_both_peers_all_src_rev_vs_itself_is_green`) は緑である。移動範囲の CH-ID は 0 件で、範囲外の CH-0340 に括弧書きを足したので `docs/code-history/MitateDB-api/backend_sqlite.md` §CH-0340 に訂正の記録を書いた。登録簿の節は動かしていない (Z4-4)。
+- **40a の suite** (`tools/dev/pt.py`): `MitateDB-api/tests` `1124 passed, 2 subtests passed`、`r2db-api/tests` `1292 passed`、`conformance-tests` `1006 passed`、`tools/tests` (高-1 の修正後・統合前) `1 failed, 485 passed`。この 1 赤は `test_0f_both_peers_all_src_rev_vs_itself_is_green` の 1 件だけで、実エラーは `AssertionError: fatal: path 'MitateDB-api/src/mitatedb_api/postgres_sql.py' exists on disk, but not in 'HEAD'` である。**`_check_rev_pair` に到達する前の「全 real_paths が HEAD に存在するか」の assert で停止しており、§9f 起因ではない。**裏づけは、同じ実行が記録後の HEAD で `486 passed` になっていることである (下の来歴の証拠)。
+- **訂正の記録の書式 (独立レビュー 高-1)**: 初稿は §CH-0340 の `old:` / `new:` を、コメント記号 `# ` と行の折り返しを含む断片のまま書いていた。`tools/check_comment_provenance.py` の `_apply_corrections` は companion を `_flatten` した本文に対して `old` の 1 件一致を要求するので、これは 0 件一致で `FAIL (§9f)` になる。HEAD の blob 同士でも出るので、**記録に入れても 0f は赤のままだった**。**初稿時点の実装担当の報告「`tools/tests` の 1 赤は未コミットの新 leaf だけが理由」は実測に反しており** (§1.5 の 34)、当時の 1 赤には §9f の不一致も含まれていた。独立レビューだけがこれを検出した。記号を落とし折り返しを連結した 1 行に直して緑にし、その後の統合前の 1 赤は上の 40a のとおり未追跡の新 leaf だけが理由になった。前例は `docs/code-history/MitateDB-api/http.md`:699 (CH-0208) と `docs/code-history/r2db-api/service.md`:409 である。
+- **`--base` の §4.1 の赤 (独立レビュー 低-2。完了条件 14 の監査照合の材料)**: `tools/check_comment_provenance.py --base` は `backend_postgres.py`:130・:131 ほか 8 件で §4.1 の赤を出す。CH-ID を持たない塊 (m-7 の説明コメント) が別ファイルへ移ったための**位置ずれ**であり、40c を満たしていても出る (逐語一致と差 1 種は diff で確認済み)。**Z4-4 のとおり `--base` は来歴の証拠に使わない**ので、この赤は判定に使わない。
+- **手順 0 の走査: 分類の無い参照 0 件。** §5.41 の「付ける / 付けない」の一覧が全件を覆っていた。**WP-3e〜3i では毎回取りこぼしており、独立レビューだけが順に 3・8・1・5・2 件を見つけていた** (引き継ぎ書 `docs/work-orders/HANDOVER_20260916_FABLE.md` §6)。manifest 起草時に走査を完了条件として書いた効果が出た最初の WP である。
+- **レビュー**: 監督の差分確認による差し戻し S-1 (1 件) と、独立 Opus のコードレビュー (高 1 / 中 1 / 低 3 の計 5 件。**全件受け入れ**) による差し戻し 2。クラスの引き上げは無い (Class B のまま。契約・不変条件・`_ISOMORPHIC_TARGETS`・`security/`・`conformance-tests/` に差分 0 を独立レビューが実測)。
+- **root gate** (監督、`tools/dev/gate.py`): `3422 passed, 2 subtests passed in 386.48s (0:06:26)`、`judge=PASS`、`pg_database/pg_roles diff 0`、`info=shared pg_database/pg_roles diff 0`。exit 0。R-44 WP-2 統合後の形なので、3 行目は gate 自身が起動した使い捨てクラスタの差分であり**判定に使う**。4 行目の `info=shared` は共有クラスタの情報であり判定に使わない。着手時の期待値は新規テスト 4 本を前提に `3421` だったが、中-1 で新規テストが 5 本になったので `3422` である。統合の直前に main (`b42e7e9`) を取り込んでからゲートを回した (低-3)。
+- **教訓**:
+  - **役割ごとの権限を manifest の完了条件に織り込む。** 完了条件 12 と 15 は記録を要するが、記録は監督のみが行う。manifest は実装担当に実行不能な条件を割り当てていた。独立レビューもこれを検出しなかった (test id と実測値は照合したが、役割ごとの権限までは見ていない)。裁定 W4-4 で監督の監査照合に変えた。
+  - **チェッカーが読む形と、人が読む形は違う。** 訂正の記録の `old:` / `new:` は、チェッカーが `_flatten` した本文に対して照合する。原文の見た目のまま写すと 0 件一致で赤になる。
+  - **読み手 0 の判定は、移動した名前だけでなく、その名前を読んでいた import にも掛ける。** 片側だけに適用すると、同じ変更セットの中で基準が 2 通りになる (S-1)。
+- **次の WP**: WP-4b (PG1 → 既存 `r2db-api/src/r2db_api/postgres_types.py` へ追加)。以後 4c (PG3)・4d (PG2 + `_bind_value`) の直列である (Z4-2、Z4-7)。W4-4 (d) により、4b〜4d の来歴の証拠と訂正の記録の変異も監督が行う。作業指示書 §5.45 の訂正註 2〜4 は 4b〜4d の manifest に掛かる。PG4 は Z4-1 で範囲外とした。
