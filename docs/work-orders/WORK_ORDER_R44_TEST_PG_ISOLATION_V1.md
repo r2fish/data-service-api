@@ -198,6 +198,11 @@
 - `conformance-tests/socket_harness.py` と `real_server_*.py`: subprocess の uvicorn に `reserve_port()` のソケットを `pass_fds` と `--fd` で渡す。先に F-16 の spike を行う (設計 D-7)。
 - nginx の bind 再試行を 3 回にし、失敗ごとに `error.log` を残す (Q-8)。docstring の「1 回だけ」には裁定の変更を註で残す。
 
+### 4.1 WP-4 で直す積み残し (2026-09-16 追記)
+
+- **`handover_ready.py` の「gate が走っていない」判定が広すぎる。** 実装は排他ロックを試すので、gate ではない普通の pytest が共有ロックを持っているだけでも NOT READY になる (2026-09-16 実測: 他セッションの suite が走っている間、引き継ぎの判定が通らなかった)。判定は `gate.intent` の有無 (と生存) で行い、共有ロックの保持者がいることは NOT READY の理由にしない。テストと変異を足す。
+- WP-2 で直さずに残した軽微な 3 件 (§3.2 (i)) もここで扱う。
+
 ## 5. WP-4 — 規律・文書・CI の改訂 (枠)
 
 - 設計 §5 の一覧を改訂する。TimeZone を CI にも明示し (Q-6)、superuser 名は既に `postgres` で揃う (Q-7)。
