@@ -47,7 +47,7 @@
 |---|---|---|---|
 | WP-A | `0fa4648` (縮小版 WP-5。依頼者指示 `docs/work-orders/REQUESTER_DIRECTIVE_20260916_R37_CLOSURE_R45_PRIORITY.md`) | `0fa4648` | 全件実在 (設計 §3・§3.1 の名前、欠落 0) |
 | WP-B | (着手時に記入) | (着手時に記入) | (着手時に記入) |
-| WP-C | (着手時に記入) | (着手時に記入) | (着手時に記入) |
+| WP-C | `0fa4648` | `9dd7e02` (WP-A 統合後。WP-B より先に着手 — 監督が規模の小さい WP-C を先にした) | 全件実在 (欠落 0) |
 | WP-D | (着手時に記入) | (着手時に記入) | (着手時に記入) |
 
 ### 2.2 全 WP に掛かる規律
@@ -385,6 +385,29 @@ python3 tools/public_value_scan.py MitateDB-api/src/mitatedb_api/ops.py MitateDB
 | 50 | 本表に変異も監査照合も持たない行が無い | **監査照合**: 本表の行数と対応数を残す | — |
 
 **件数 (下限)**: 完了条件 18 件 = 変異を持つ行 14 件 (変異 15 件。45a′ は 2 件) + 監査照合 4 件 (W5-C・46・47・50)。
+
+### 5.1 WP-C の訂正註と監督裁定 (2026-09-16〜17、統合時に監督が追記。§5 の本文は書き換えない)
+
+**依頼者裁定 (逐語、2026-09-17)**: 「台帳に 1 行起票するだけにする」 — `b87d1c85` より前の 0003 で provision された application を現行の `upgrade-applications` が台帳を読む段階で `InsufficientPrivilege` により upgrade できない欠陥 (WP-C の起点のテストが発見。監督が「R-45 の中で直す」を推奨し、依頼者が起票のみを選んだ) は、`docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-47 に起票し、本書では直さない。
+
+**訂正註 C-1 (触ったファイル)**: §5 の表に加え、`MitateDB-api/tests/test_ops_upgrade.py`・`MitateDB-api/tests/test_ops.py`・`MitateDB-api/tests/test_main.py` (`--lock-timeout` の追加。C-1) と `.github/workflows/ci.yml` (`conformance` job の checkout に `fetch-depth: 0`。C-12) を触った。新規ファイル名は `MitateDB-api/tests/test_platform_migration_reapply.py` のまま。
+
+**訂正註 C-2 (完了条件の読み替え)**: 44 の変異先は `ops.py` ではなく `0008_platform_upgrades_upgrade.sql` の台帳 INSERT (C-2)。45c の変異はファイル側だけ (C-5)。W3-1 の件数は「起点の列の長さ + 1 − 対象外の数」(C-8・C-11)。起点の列は 0004 を除く 11 ファイル、parametrize される起点は `[0, 1, 2, 7, 8, 9, 10, 11]`、対象外 `{3, 4, 5, 6}` (C-11)。
+
+**監督裁定 C-1〜C-12 (実装担当への裁定の本文。再実行の手順と報告の形の指示は省いた。C-1〜C-3 は着手時の停止報告への裁定、C-4〜C-12 は差し戻しとレビューへの裁定)**
+
+- C-1 `--lock-timeout` は `upgrade-applications` と `deprovision` の CLI で既定値の無い必須引数にし、`_run_upgrade_script` / `_run_deprovision_script` の Python 引数も既定値を持たせない (W-7 のとおり)。既存テストの呼出し箇所を直すため、触るファイルに `MitateDB-api/tests/test_ops_upgrade.py`・`MitateDB-api/tests/test_ops.py`・`MitateDB-api/tests/test_main.py` を足す。直し方は呼出し箇所に合成値の `--lock-timeout` を明示で足す。共通のテスト helper (`_run_ops` 等) に既定で注入する形は、その helper が `_ISOMORPHIC_TARGETS` に登録されていない場合に限り許す。W7-C1 / W7-C2 のテストは引数なしで CLI を呼び、使用法エラーで止まり psql を起動しないことを確かめる。
+- C-2 完了条件 44 の変異先を読み替える: 「`ops.py`: 台帳への記録を外す」→「`upgrade-applications` の経路で実際に流れる per-application upgrade スクリプトのうち 1 つ (`MitateDB-api/migrations/0008_platform_upgrades_upgrade.sql` を第一候補) の台帳への INSERT を外す」。赤になることを実測する。
+- C-3 `lock_timeout` の渡し方は、`_psql_connection_env` が返した env に `PGOPTIONS` の `-c lock_timeout=<値>` を足す形でよい。DSN の `options` と両方ある場合は連結して両方を効かせる。値は CLI で検証し、不正なら固定文言で拒否する。値の検証のテストと変異を足す。r2db-api には本 WP で手を入れない。
+- C-4 W-3 は裁定済みの完了条件であり、見送れない。migration 列のすべての接頭辞 N を parametrize し、各 N について適用 → 全部適用 → もう一度適用し、2 回目の終了コード 0 と `updated_at` を除いた差分 0 を assert する。39〜41 はこの接頭辞テストの中で満たす。W3-1 の静的テストは残す。42〜44 は代表起点のままでよい。
+- C-5 45c は 0011 が `_run_upgrade_script` を経由しないので、変異はファイル側だけを外す形に直す。
+- C-6 起点の列は `MitateDB-api/migrations/*.sql` を番号順に並べたもののうち、`0004` (deprovision の雛形) だけを除いた列とする。接頭辞 N は、この列の先頭 N 個を実際の運用の形で適用した状態: platform 用のファイルは platform DB に、`:app_id` を取る per-application のファイルは `0003` で provision した 1 件の application に当てる。
+- C-7 再適用するのはアップグレードの手順で再実行されるもの: platform migration の 0007 / 0011 / 0012 と、per-application upgrade (0006・0008〜0010 を `upgrade-applications` の経路で、`--lock-timeout` を付けて)。bootstrap (0001・0002)・provisioning (0003) は対象外、種別の実測で 0005 が platform migration と分かれば再適用に含める。
+- C-8 起点の列をモジュール定数にまとめ、parametrize と W3-1 が同じ定数を使う。
+- C-9 起点 N (N < 列の長さ) では、列の (N+1) 番目のファイルを追加したコミットの親の時点のファイル内容で、列の先頭 N 個を適用する。N = 列の長さでは HEAD の内容を使う。その後 HEAD の内容で列の全部を適用し、C-7 の対象をもう一度適用する。少なくとも 1 つの起点で使った過去の内容が HEAD と異なることを assert する。git の履歴が読めないときは skip せず fail する。
+- C-10 起点の適用後に per-application の番号 (6・8・9・10) の台帳の行を消してから `upgrade-applications` を流し、実際に本文が実行されることを assert する。
+- C-11 (依頼者裁定「台帳に 1 行起票するだけにする」を受けて) `b87d1c85` より前の 0003 で provision された application を現行の ops が upgrade できない欠陥は台帳 R-47 に起票のみとし、該当する起点は skip ではなく parametrize に含めない。判定は機械的に行う: 起点で使う過去の 0003 に public schema の USAGE の provision role への付与が無く、かつその起点の列に 0008 が含まれない。対象外の集合を pin し、現在 {3, 4, 5, 6} であることを assert する。
+- C-12 `.github/workflows/ci.yml` の、MitateDB-api/tests を走らせる job (`conformance`) の `actions/checkout` に `fetch-depth: 0` を足す。
 
 ## 6. WP-D — runbook の platform 層と upgrade の手順 (Class D)
 

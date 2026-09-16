@@ -16,7 +16,7 @@ independent parts:
 `os.environ.get(ADMIN_DSN_ENV, "")` -- `psycopg.connect("")` still falls
 back to the shared cluster via libpq's own defaults, silently, past every
 other check in this repository. `test_admin_dsn_env_definitions_are_
-pinned_to_23_files` and `test_every_admin_dsn_reader_raises_when_the_
+pinned_to_24_files` and `test_every_admin_dsn_reader_raises_when_the_
 environment_variable_is_unset` read the AST of every module-level
 `ADMIN_DSN_ENV` definition's own reader function(s) directly, not a
 string search (§1.7 の 52 -- a check must read the property a function
@@ -49,7 +49,7 @@ checked against a complete, non-fragment constant. String concatenation
 built through anything other than adjacent literals (e.g. `+`), and
 libpq's out-of-order key spelling (`port=5432 host=/tmp`), still close
 over this static walk. The primary guarantee against a re-introduced
-default is (d-1) -- every one of the 23 readers raising on empty -- not
+default is (d-1) -- every one of the 24 readers raising on empty -- not
 this scan, which is secondary (D-4's "再導入されない検査" is not read
 here as an all-quantified claim).
 
@@ -159,7 +159,7 @@ def _direct_body_nodes(func: ast.AST):
 def _reads_admin_dsn_env(func: ast.FunctionDef) -> bool:
     """True for the function that actually FETCHES `ADMIN_DSN_ENV` from
     the environment -- named `_admin_dsn`/`admin_dsn` in every one of the
-    23 files (work order §4.2 (a)'s own 3-way reader enumeration) and
+    24 files (work order §4.2 (a)'s own 3-way reader enumeration) and
     referencing the name in its own body. Narrower than "any function
     mentioning the name" on purpose: several of these files also build a
     `pytest.fail`/exception MESSAGE elsewhere that interpolates
@@ -262,15 +262,15 @@ def test_scan_covers_at_least_one_file() -> None:
     assert len(files) >= 1, "git ls-files -- '*.py' returned no files"
 
 
-def test_admin_dsn_env_definitions_are_pinned_to_23_files() -> None:
-    """Completion condition 5 (R-2): exactly 23 tracked .py files define
+def test_admin_dsn_env_definitions_are_pinned_to_24_files() -> None:
+    """Completion condition 5 (R-2): exactly 24 tracked .py files define
     `ADMIN_DSN_ENV` at module level (work order §4.2 (a))."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
-    assert len(files) == 23, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
+    assert len(files) == 24, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
 
 
 def test_every_admin_dsn_reader_raises_when_the_environment_variable_is_unset() -> None:
-    """Completion condition 6 (R-2): every one of the 23 files' own
+    """Completion condition 6 (R-2): every one of the 24 files' own
     `ADMIN_DSN_ENV` reader function(s) has a falsy check + `raise` (AST,
     not string search -- §1.7 の 52)."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
