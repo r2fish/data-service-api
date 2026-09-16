@@ -122,7 +122,12 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # `postgres_like.py`, each leaving a facade re-export import in place of
     # the removed body; `_fail_client_value`'s own single `fail()` call is
     # otherwise unchanged.
-    ("postgres.py", 1523),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # R-37 WP-4b (2026-09-16): line shift only (1523 -> 1472) -- `_DOMAIN_TO_
+    # DECLARED`/`_SQL_TYPE_TO_DECLARED`/`_TableInfo` moved to
+    # `postgres_types.py`, leaving a facade re-export import in place of the
+    # removed body; `_fail_client_value`'s own single `fail()` call is
+    # otherwise unchanged.
+    ("postgres.py", 1472),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
