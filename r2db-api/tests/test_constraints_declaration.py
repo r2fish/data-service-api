@@ -659,6 +659,16 @@ def test_pg_ops_upgrade_applications_retrofits_the_side_table_and_unblocks_alter
     monkeypatch.setenv("R2DB_PLATFORM_SCHEMA", f"{platform.prefix}_registry")
     monkeypatch.setenv("R2DB_MIGRATIONS_DIR", str(tmp_path))
     assert 10 in platform_upgrades.PLATFORM_UPGRADE_NUMBERS  # this test observes the REAL package constant
+    # design D-2: this
+    # test's own throwaway-cluster launcher (`tools/testpg/dsa_testpg.
+    # py`) exports `PGPORT`/`PGUSER`/`PGPASSFILE` ambiently at the
+    # PROCESS level; `platform.control_dsn` above already carries every
+    # connection parameter `upgrade-applications` needs explicitly, so
+    # those ambient exports are pure interference for `_psql_connection_
+    # env`'s own A-13 fail-closed check (`ops.main` below runs IN-
+    # PROCESS, so `os.environ` itself must be cleared).
+    for name in (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY):
+        monkeypatch.delenv(name, raising=False)
     rc = ops.main(["upgrade-applications", "--application", app_a.slug])
     assert rc == 0
 

@@ -39,6 +39,24 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import r2db_api.ops as ops
 import r2db_api.platform_upgrades as platform_upgrades
 
+
+@pytest.fixture(autouse=True)
+def _clear_ambient_pg_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """design D-2: this
+    file's own throwaway-cluster launcher (`tools/testpg/dsa_testpg.py`)
+    deliberately exports `PGPORT`/`PGUSER`/`PGPASSFILE` at the PROCESS
+    level so a bare `psql`/libpq call defaults to the same cluster --
+    convenient for manual use, but every DSN in this file already carries
+    its own host/port/user/password explicitly, so those ambient exports
+    are pure interference for `_psql_connection_env`'s own A-13 fail-
+    closed check (a connection-setting variable the DSN itself does not
+    override). Cleared once per test, for every test in this file, since
+    this peer's own tests call `ops.cmd_upgrade_applications`/`ops.main`
+    in-process and read `os.environ` directly."""
+    for name in (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY):
+        monkeypatch.delenv(name, raising=False)
+
+
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
 
@@ -711,3 +729,338 @@ def test_upgrade_applications_tally_line_counts_one_of_each_outcome(
         deprovision_app(ops_env, "goodagg")
         deprovision_app(ops_env, "failapp")
         deprovision_app(ops_env, "skipagg")
+
+
+# ===========================================================================
+# Completion conditions 19-4/19-5: in-process unit tests, monkeypatching `subprocess.run` and the
+# registry/ledger lookups rather than requiring a real failing migration
+# script or a live registry -- the property under test (argv/env shape,
+# redaction of a psql failure's own captured output) does not depend on
+# which SQL actually ran. `_run_deprovision_script` has no r2db-api
+# counterpart (design D-9's own asymmetry, confirmed by static inventory) so there is no 19-6 row on this peer.
+# ===========================================================================
+
+_SENTINEL_DSN = "postgresql://sentinel_user_c3f1:sentinel_pw_7a2e@sentinel-host-b91d.invalid:6543/sentinel_db_44de"
+_SENTINEL_VALUES = ("sentinel_user_c3f1", "sentinel_pw_7a2e", "sentinel-host-b91d.invalid", "sentinel_db_44de")
+#: A-14 (rework 2): a canned `psql --version` output the fakes below
+#: return so a mocked `subprocess.run` still satisfies the version gate
+#: `_run_upgrade_script`/`_run_deprovision_script` now check first.
+_FAKE_PSQL_VERSION_STDOUT = "psql (PostgreSQL) 16.14 (Homebrew)\n"
+
+
+def test_run_upgrade_script_passes_connection_params_via_env_never_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Completion condition 19-5: none of the DSN's own 4 sentinel values
+    reach the psql subprocess's own argv; all 4 reach it through the
+    matching libpq environment variable instead. Non-空振り: `calls` is
+    asserted non-empty before inspecting its content."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001 -- matches subprocess.run's own loose signature
+        if cmd[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=_FAKE_PSQL_VERSION_STDOUT, stderr="")
+        calls.append((list(cmd), kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1")
+
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    argv_text = " ".join(cmd)
+    for value in _SENTINEL_VALUES:
+        assert value not in argv_text, f"{value!r} leaked into psql argv: {cmd!r}"
+    env = kwargs["env"]
+    assert env["PGUSER"] == "sentinel_user_c3f1"
+    assert env["PGPASSWORD"] == "sentinel_pw_7a2e"
+    assert env["PGHOST"] == "sentinel-host-b91d.invalid"
+    assert env["PGDATABASE"] == "sentinel_db_44de"
+
+
+class _FakeControlConn:
+    """Bare stand-in for `with psycopg.connect(provision_dsn) as conn:` --
+    only `.info.user` and context-manager protocol are ever touched on
+    this peer's own `cmd_upgrade_applications`, before this test's own
+    monkeypatches take over every registry/ledger read."""
+
+    def __enter__(self) -> "_FakeControlConn":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    @property
+    def info(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(user="fake_provision_role")
+
+
+def test_cmd_upgrade_applications_redacts_connection_values_from_a_failed_psql_output(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completion condition 19-4 (r2db-api side): `cmd_upgrade_applications`'s
+    own `failure_detail` (a failed psql invocation's stdout/stderr tail)
+    has every one of the DSN's 4 sentinel values redacted before it is
+    folded into this application's own printed output block -- the SQL-
+    level part of the diagnostic (unrelated to any of the 4 values)
+    survives untouched."""
+    monkeypatch.setattr(ops, "_control_dsn", lambda: _SENTINEL_DSN)
+    monkeypatch.setattr(ops.psycopg, "connect", lambda dsn, **kw: _FakeControlConn())
+    monkeypatch.setattr(
+        ops, "_registry_applications_for_upgrade",
+        lambda conn, *, application: [
+            {"application_slug": "app1", "database_name": "app1_db", "runtime_role": "app1_rt", "developer_role": "app1_dv"},
+        ],
+    )
+    monkeypatch.setattr(ops, "_read_ledger_applied", lambda app_dsn: frozenset())
+    monkeypatch.setattr(
+        ops.platform_upgrades, "discover_upgrade_scripts",
+        lambda migrations_dir: {9: Path("/nonexistent/0009_does_not_matter.sql")},
+    )
+
+    def _fake_run_upgrade_script(app_dsn, script, app_slug):  # noqa: ANN001
+        raw = (
+            f"psql: error: connection to server at \"sentinel-host-b91d.invalid\", port 6543 failed\n"
+            f"FATAL:  password authentication failed for user \"sentinel_user_c3f1\"\n"
+            f"detail: database \"sentinel_db_44de\" pending; secret sentinel_pw_7a2e rejected\n"
+            f"ERROR:  syntax error at or near \"CREATE\""
+        )
+        return subprocess.CompletedProcess(["psql"], 1, stdout="", stderr=raw)
+
+    monkeypatch.setattr(ops, "_run_upgrade_script", _fake_run_upgrade_script)
+
+    args = types.SimpleNamespace(application=None, script=9, dry_run=False)
+    rc = ops.cmd_upgrade_applications(args)
+    captured = capsys.readouterr()
+
+    assert rc != 0  # a real per-application failure, not a clean run
+    for value in _SENTINEL_VALUES:
+        assert value not in captured.out, f"{value!r} leaked into cmd_upgrade_applications output: {captured.out!r}"
+    assert "<redacted>" in captured.out
+    assert "syntax error at or near" in captured.out  # SQL-level diagnostic survives
+
+
+def test_redact_connection_values_leaves_unrelated_text_untouched() -> None:
+    """Direct unit test of `_redact_connection_values` itself: all 4
+    sentinel values disappear, and text that shares no substring with any
+    of them survives byte-for-byte."""
+    text = "before " + " ".join(_SENTINEL_VALUES) + " after; unique-marker-9f21 stays"
+    redacted = ops._redact_connection_values(text, _SENTINEL_DSN)
+    for value in _SENTINEL_VALUES:
+        assert value not in redacted
+    assert "unique-marker-9f21 stays" in redacted
+    assert redacted.count("<redacted>") == 4
+
+
+# ===========================================================================
+# A code-review probe (synthetic values only) found 3 gaps in the
+# first pass -- a sequential per-value `str.replace` could leave a
+# longer/more-sensitive value's own tail exposed when a shorter value is
+# its literal prefix; a multi-host DSN's own comma-joined `host`/
+# `hostaddr`/`port` conninfo value never matches the raw diagnostic text
+# (which names each host/port separately); the allow-list only covered 7
+# keys and the child psql process inherited the PARENT's own `PG*`
+# environment for any parameter the DSN itself did not set.
+# ===========================================================================
+
+
+def test_redact_connection_values_handles_prefix_overlap_and_multi_host_dsn() -> None:
+    """user (`svcuser`) is a literal PREFIX of both password
+    (`svcuser_SECRETTAIL9x3f`) and dbname (`svcuser_DBTAIL7e2a`); host/port
+    are a 2-element, comma-joined multi-host DSN. Checking only the 3
+    FULL values would pass even with the prefix-overlap bug this test
+    exists to catch (a sequential, non-length-ordered replace redacts the
+    SHORT `svcuser` prefix first and leaves each longer value's own TAIL
+    -- `_SECRETTAIL9x3f`/`_DBTAIL7e2a` -- exposed as leftover plain text
+    beside the `<redacted>` marker); asserting the tails absent directly
+    is what actually exercises the longest-first ordering."""
+    dsn = "postgresql://svcuser:svcuser_SECRETTAIL9x3f@hostA.invalid:5432,hostB.invalid:5433/svcuser_DBTAIL7e2a"
+    text = (
+        'FATAL: password authentication failed for user "svcuser"; '
+        "secret was svcuser_SECRETTAIL9x3f; "
+        'connection to server at "hostA.invalid", port 5432 failed; '
+        'connection to server at "hostB.invalid", port 5433 failed; '
+        'dbname "svcuser_DBTAIL7e2a" pending'
+    )
+    redacted = ops._redact_connection_values(text, dsn)
+    for value in (
+        "svcuser_SECRETTAIL9x3f", "svcuser_DBTAIL7e2a", "svcuser",
+        "_SECRETTAIL9x3f", "_DBTAIL7e2a",  # the TAILS alone -- see docstring
+        "hostA.invalid", "hostB.invalid", "5432", "5433",
+    ):
+        assert value not in redacted, f"{value!r} leaked into redacted output: {redacted!r}"
+
+
+def test_psql_connection_env_rejects_a_dsn_key_with_no_libpq_env_var_form(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`keepalives` is a real libpq connection parameter with NO `PG*`
+    environment-variable form (absent from the local PostgreSQL 16
+    `libpq-envars` documentation) -- rejected via `_die` (SystemExit(2)),
+    naming the key but never the value."""
+    dsn = "host=h.invalid dbname=d keepalives=sentinel_value_should_not_leak_7f3a"
+    with pytest.raises(SystemExit) as excinfo:
+        ops._psql_connection_env(dsn)
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "keepalives" in captured.err
+    assert "sentinel_value_should_not_leak_7f3a" not in captured.err
+
+
+def test_psql_connection_env_accepts_new_allow_listed_keys() -> None:
+    """`sslrootcert`/`connect_timeout` are in the expanded allow-list
+    (local PostgreSQL 16 libpq documentation) and reach the child
+    environment under their own `PG*` names."""
+    dsn = "host=h.invalid dbname=d sslrootcert=/etc/ssl/root.pem connect_timeout=5"
+    env = ops._psql_connection_env(dsn)
+    assert env["PGSSLROOTCERT"] == "/etc/ssl/root.pem"
+    assert env["PGCONNECT_TIMEOUT"] == "5"
+
+
+def test_psql_connection_env_strips_parent_pg_star_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A-9: `PGUSER`/`PGPASSWORD` the parent process happens to carry are
+    overridden by the DSN's own values (never merely left in place), and
+    `PGTZ` -- a parent `PG*` variable with NO `conninfo` keyword at all,
+    so it is outside A-13's own fail-closed check below and exercises
+    the GENERAL `PG*`-stripping step on its own -- must not survive
+    either."""
+    monkeypatch.setenv("PGUSER", "parent_user_should_not_survive")
+    monkeypatch.setenv("PGPASSWORD", "parent_password_should_not_survive")
+    monkeypatch.setenv("PGTZ", "parent_tz_should_not_survive")
+    dsn = "host=h.invalid dbname=d user=real_user password=real_password"
+    env = ops._psql_connection_env(dsn)
+    assert env["PGUSER"] == "real_user"
+    assert env["PGPASSWORD"] == "real_password"
+    assert "PGTZ" not in env
+    assert "parent_tz_should_not_survive" not in env.values()
+
+
+def test_psql_connection_env_rejects_a_parent_connection_var_the_dsn_does_not_override(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A-13: `PGSSLMODE` set in the parent's own environment, with no
+    `sslmode` in the DSN to override it, fails closed -- the psql child
+    must never silently inherit a connection setting the DSN itself never
+    described. Names the variable, never a value."""
+    monkeypatch.setenv("PGSSLMODE", "verify-full")
+    dsn = "host=h.invalid dbname=d"
+    with pytest.raises(SystemExit) as excinfo:
+        ops._psql_connection_env(dsn)
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "PGSSLMODE" in captured.err
+
+
+def test_psql_connection_env_accepts_when_dsn_overrides_the_parent_connection_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A-13: the SAME parent `PGSSLMODE` is fine once the DSN itself
+    provides `sslmode=`."""
+    monkeypatch.setenv("PGSSLMODE", "verify-full")
+    dsn = "host=h.invalid dbname=d sslmode=require"
+    env = ops._psql_connection_env(dsn)
+    assert env["PGSSLMODE"] == "require"
+
+
+def test_psql_connection_env_rejects_a_parent_pgservicefile_the_dsn_can_never_override(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`PGSERVICEFILE` has no `conninfo` keyword of its own, so no DSN can
+    ever override it -- confirms it is still checked even though it is
+    absent from `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY`'s own values. Names the
+    variable, never a value."""
+    monkeypatch.setenv("PGSERVICEFILE", "/some/path/pg_service.conf")
+    dsn = "host=h.invalid dbname=d"
+    with pytest.raises(SystemExit) as excinfo:
+        ops._psql_connection_env(dsn)
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "PGSERVICEFILE" in captured.err
+    assert "/some/path/pg_service.conf" not in captured.err
+
+
+def test_psql_connection_env_rejects_a_parent_pgsysconfdir_the_dsn_can_never_override(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`PGSYSCONFDIR` has no `conninfo` keyword of its own either -- same
+    check as `PGSERVICEFILE` above, for the other of the two variables
+    named explicitly in `_LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_
+    KEY`."""
+    monkeypatch.setenv("PGSYSCONFDIR", "/some/etc/postgresql-common")
+    dsn = "host=h.invalid dbname=d"
+    with pytest.raises(SystemExit) as excinfo:
+        ops._psql_connection_env(dsn)
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "PGSYSCONFDIR" in captured.err
+    assert "/some/etc/postgresql-common" not in captured.err
+
+
+def test_require_psql_16_or_newer_rejects_an_older_or_unparseable_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A-14: `psql --version` output naming a pre-16 major version, or
+    one this module cannot parse at all, ends the run via `_die`."""
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        assert cmd == ["psql", "--version"]
+        return subprocess.CompletedProcess(cmd, 0, stdout="psql (PostgreSQL) 15.4\n", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    with pytest.raises(SystemExit) as excinfo:
+        ops._require_psql_16_or_newer()
+    assert excinfo.value.code == 2
+
+
+def test_require_psql_16_or_newer_rejects_unparseable_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        return subprocess.CompletedProcess(cmd, 0, stdout="not a version string\n", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    with pytest.raises(SystemExit) as excinfo:
+        ops._require_psql_16_or_newer()
+    assert excinfo.value.code == 2
+
+
+def test_require_psql_16_or_newer_accepts_16(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        return subprocess.CompletedProcess(cmd, 0, stdout="psql (PostgreSQL) 16.14 (Homebrew)\n", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    ops._require_psql_16_or_newer()  # must not raise
+
+
+
+def test_require_psql_16_or_newer_rejects_when_the_binary_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing psql binary (`FileNotFoundError`, the OS-level failure a
+    real `subprocess.run` raises when the executable is absent from
+    `PATH`) ends the run via `_die`, the same as an unparseable/too-old
+    version."""
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        raise FileNotFoundError(2, "No such file or directory", "psql")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    with pytest.raises(SystemExit) as excinfo:
+        ops._require_psql_16_or_newer()
+    assert excinfo.value.code == 2
+
+
+def test_run_upgrade_script_calls_the_psql_version_gate_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A-14: `_run_upgrade_script` calls `_require_psql_16_or_newer` (a
+    `["psql", "--version"]` subprocess call) before its own real psql
+    invocation -- removing that call site would leave an old/broken psql
+    binary undetected."""
+    version_calls = 0
+    main_calls = 0
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        nonlocal version_calls, main_calls
+        if cmd[:2] == ["psql", "--version"]:
+            version_calls += 1
+            return subprocess.CompletedProcess(cmd, 0, stdout=_FAKE_PSQL_VERSION_STDOUT, stderr="")
+        main_calls += 1
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1")
+    assert version_calls == 1
+    assert main_calls == 1

@@ -1229,7 +1229,7 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     try:
         conn = psycopg.connect(dsn, autocommit=True)
     except psycopg.Error as exc:
-        print(f"error: cannot connect to platform database: {exc}", file=sys.stderr)
+        print(f"error: cannot connect to platform database ({type(exc).__name__})", file=sys.stderr)
         return 2
     try:
         rc = _verify_declarations_checks(conn, args, schema, dsn)
@@ -1278,14 +1278,178 @@ def _read_ledger_applied(app_dsn: str) -> frozenset[int] | None:
         conn.close()
 
 
+#: design D-2: the complete set of `conninfo_to_dict` keys that have a
+#: known libpq (PostgreSQL 16) environment-variable form -- every psql
+#: subprocess invocation below carries its connection parameters through
+#: exactly these variables, never argv. A DSN key outside this table is
+#: rejected outright (`_psql_connection_env` calls `_die`) rather than
+#: silently dropped, which would let the connection fall back to libpq's
+#: own default for that parameter unnoticed. Source: local PostgreSQL 16
+#: libpq documentation, "Environment Variables" (the first, connection-
+#: parameter-default group only -- the later PGDATESTYLE/PGTZ/PGGEQO/
+#: PGSYSCONFDIR/PGLOCALEDIR group sets session/library behavior, not a
+#: connection parameter, and `PGSERVICEFILE` has no `conninfo` keyword of
+#: its own to key this table by).
+_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY: dict[str, str] = {
+    "host": "PGHOST",
+    "hostaddr": "PGHOSTADDR",
+    "port": "PGPORT",
+    "dbname": "PGDATABASE",
+    "user": "PGUSER",
+    "password": "PGPASSWORD",
+    "passfile": "PGPASSFILE",
+    "require_auth": "PGREQUIREAUTH",
+    "channel_binding": "PGCHANNELBINDING",
+    "service": "PGSERVICE",
+    "options": "PGOPTIONS",
+    "application_name": "PGAPPNAME",
+    "sslmode": "PGSSLMODE",
+    "requiressl": "PGREQUIRESSL",
+    "sslcompression": "PGSSLCOMPRESSION",
+    "sslcert": "PGSSLCERT",
+    "sslkey": "PGSSLKEY",
+    "sslcertmode": "PGSSLCERTMODE",
+    "sslrootcert": "PGSSLROOTCERT",
+    "sslcrl": "PGSSLCRL",
+    "sslcrldir": "PGSSLCRLDIR",
+    "sslsni": "PGSSLSNI",
+    "requirepeer": "PGREQUIREPEER",
+    "ssl_min_protocol_version": "PGSSLMINPROTOCOLVERSION",
+    "ssl_max_protocol_version": "PGSSLMAXPROTOCOLVERSION",
+    "gssencmode": "PGGSSENCMODE",
+    "krbsrvname": "PGKRBSRVNAME",
+    "gsslib": "PGGSSLIB",
+    "gssdelegation": "PGGSSDELEGATION",
+    "connect_timeout": "PGCONNECT_TIMEOUT",
+    "client_encoding": "PGCLIENTENCODING",
+    "target_session_attrs": "PGTARGETSESSIONATTRS",
+    "load_balance_hosts": "PGLOADBALANCEHOSTS",
+}
+
+#: design D-2: `PGSERVICEFILE`/`PGSYSCONFDIR` configure which FILES libpq
+#: reads for `service=`/system-wide settings -- connection-relevant, but
+#: neither has a `conninfo` keyword of its own, so
+#: `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY`'s own values alone would miss them
+#: when checking for a leftover parent setting the DSN cannot override.
+_LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY: tuple[str, ...] = ("PGSERVICEFILE", "PGSYSCONFDIR")
+
+_PSQL_VERSION_RE = re.compile(r"PostgreSQL\)\s*(\d+)")
+
+
+def _require_psql_16_or_newer() -> None:
+    """design D-2: every psql subprocess invocation below calls this
+    first. A psql binary older than PostgreSQL 16, one whose own
+    `--version` output this module cannot parse at all, or a psql binary
+    not found on `PATH` at all, ends the run via `_die` -- a fixed
+    message, never the raw subprocess output."""
+    try:
+        result = subprocess.run(["psql", "--version"], capture_output=True, text=True)
+    except OSError:
+        _die("psql binary could not be started; refusing to run a psql subprocess")
+    match = _PSQL_VERSION_RE.search(result.stdout)
+    if match is None or int(match.group(1)) < 16:
+        _die("psql binary is missing, unreadable, or older than PostgreSQL 16; refusing to run a psql subprocess")
+
+
+def _psql_connection_env(dsn: str) -> dict[str, str]:
+    """design D-2: builds the environment for a psql subprocess invocation
+    from `dsn`'s own connection parameters -- never on argv, which is
+    visible to every OTHER user on the host via `ps`/`/proc`, while these
+    env vars are visible only to this process, its children, and root.
+    The parent process' own `PG*` variables are stripped first, so a DSN
+    that omits a parameter never inherits a stray value silently from the
+    caller's own environment (e.g. an operator's own `PGPASSWORD` or
+    `PGSERVICE` reaching a psql invocation the DSN never asked for). A
+    `conninfo_to_dict` key outside `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY` ends
+    the run the same way an existing ops configuration error does, naming
+    the key (never a secret) so the operator can act on it. Beyond that,
+    if the PARENT process still carries a connection-setting variable
+    (this table's own values, or `_LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_
+    CONNINFO_KEY`) that the DSN itself never overrides, the run ends the
+    same way, naming the variable -- never its value -- rather than let
+    the psql child silently inherit a setting from this process' own
+    environment that the DSN never described (fail-closed: psycopg's own
+    connection and psql's own connection must agree on every setting).
+    Isomorphic with MitateDB-api's own same-named helper (`mitatedb_api/
+    ops.py::_psql_connection_env`).
+    """
+    params = conninfo_to_dict(dsn)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
+    dsn_env_names: set[str] = set()
+    for key, value in params.items():
+        if value in (None, ""):
+            continue
+        env_name = _LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.get(key)
+        if env_name is None:
+            _die(
+                f"DSN parameter {key!r} has no known libpq (PostgreSQL 16) environment-variable "
+                "form; refusing to pass it to a psql subprocess"
+            )
+        env[env_name] = str(value)
+        dsn_env_names.add(env_name)
+    leftover = sorted(
+        name
+        for name in (*_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *_LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY)
+        if name not in dsn_env_names and os.environ.get(name)
+    )
+    if leftover:
+        _die(
+            "the following connection-setting environment variable(s) are set in this process' "
+            f"own environment but not overridden by the DSN: {', '.join(leftover)}; add the "
+            "matching DSN parameter, or unset the variable, before retrying"
+        )
+    return env
+
+def _redact_connection_values(text: str, dsn: str) -> str:
+    """design D-2: replaces every occurrence of a connection-parameter
+    VALUE (`user`/`password`/`host`/`hostaddr`/`port`/`dbname`, as
+    `conninfo_to_dict` parses `dsn`) with a fixed marker, everywhere it
+    occurs in `text` (a raw exception's own `str(exc)`, or a psql
+    subprocess's own captured stdout/stderr) -- never a DSN-shaped regex
+    guess (design D-2: 推測のマスクはしない). `host`/`hostaddr`/`port` are
+    split on `,` first (a multi-host DSN's own conninfo value for these
+    three keys is comma-joined, but the raw diagnostic text names each
+    host/port separately, never comma-joined, so redacting the joined
+    string would silently miss every one of them). Every value is then
+    escaped and joined into ONE regular expression, longest value first,
+    and substituted in a single pass -- a shorter value that is a literal
+    PREFIX of a longer one (e.g. a `user` value that prefixes a `password`
+    value) must be matched as part of the LONGER alternative first, or a
+    sequential per-value `str.replace` would consume only the shorter
+    match and leave the remaining tail of the longer, more sensitive
+    value exposed un-redacted. A SQL-level diagnostic (a constraint name,
+    a syntax error's own quoted token) is unaffected unless it happens to
+    collide with one of these values. Isomorphic with MitateDB-api's own
+    same-named helper (`mitatedb_api/ops.py::_redact_connection_values`).
+    """
+    try:
+        params = conninfo_to_dict(dsn)
+    except psycopg.Error:
+        return text
+    values: set[str] = set()
+    for key in ("user", "password", "host", "hostaddr", "port", "dbname"):
+        raw = params.get(key)
+        if not raw:
+            continue
+        raw = str(raw)
+        if key in ("host", "hostaddr", "port"):
+            values.update(part for part in raw.split(",") if part)
+        else:
+            values.add(raw)
+    if not values:
+        return text
+    pattern = "|".join(re.escape(v) for v in sorted(values, key=len, reverse=True))
+    return re.sub(pattern, "<redacted>", text)
+
 def _run_upgrade_script(app_dsn: str, script: Path, app_slug: str) -> "subprocess.CompletedProcess[str]":
     """Call shape ONLY copied from MitateDB-api's own `_run_deprovision_script` (design D-4(b)) -- the psql `-v` variable name is r2db's own (`platform_upgrades.UPGRADE_SCRIPT_VARIABLE`, `app_slug`; MitateDB's own realization uses `app_id` instead, design §3.10's own peer-pair table). Never `_die`s on a non-zero exit -- the caller decides how one application's own failure affects the rest of the run.
 
     History: CH-0326
     """
+    _require_psql_16_or_newer()
     return subprocess.run(
-        ["psql", app_dsn, "-v", "ON_ERROR_STOP=1", "-v", f"{platform_upgrades.UPGRADE_SCRIPT_VARIABLE}={app_slug}", "-f", str(script)],
-        capture_output=True, text=True,
+        ["psql", "-v", "ON_ERROR_STOP=1", "-v", f"{platform_upgrades.UPGRADE_SCRIPT_VARIABLE}={app_slug}", "-f", str(script)],
+        capture_output=True, text=True, env=_psql_connection_env(app_dsn),
     )
 
 
@@ -1401,7 +1565,9 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
                 cleanup_sql = f"REVOKE {app['developer_role']} FROM {provision_role};"
                 # M-3 (tail source unified with MitateDB-api's own `_run_upgrade_script` by delta 監査): a failed psql invocation's own stdout+stderr is the ONLY place the actual PostgreSQL error text lives -- before this fix `_run_upgrade_script`'s own `CompletedProcess` was discarded except for `.returncode`, so an operator staring at "failed=[N]" had no way to learn WHY short of re-running the script by hand. Both streams are joined (`psql`'s own `ON_ERROR_STOP=1` failure text can land on either, depending on the failing statement) before taking the tail (last ~20 lines), folded into this application's own output block below (`_print_upgrade_result`), not the full capture -- an unbounded dump would risk burying the per-application summary line under an unrelated wall of output for a script that fails early with a long preamble already printed.
                 # history: CH-0331
-                failure_detail = "\n".join(f"{result.stdout}\n{result.stderr}".splitlines()[-20:])
+                failure_detail = _redact_connection_values(
+                    "\n".join(f"{result.stdout}\n{result.stderr}".splitlines()[-20:]), provision_dsn,
+                )
                 break
             applied_now.add(number)
         applied_after = frozenset(applied_now)
@@ -1690,7 +1856,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc.code}: {exc.message}", file=sys.stderr)
         return 1
     except psycopg.Error as exc:
-        print(f"error: database operation failed: {exc}", file=sys.stderr)
+        print(f"error: database operation failed ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        # design D-2: every OTHER exception reaching this top level is
+        # reported the SAME way -- exception TYPE NAME plus fixed text,
+        # never `str(exc)` and never a traceback (SI-10's own "raw stack
+        # traces in public responses" -- this CLI's own stderr is that
+        # surface for an operator running it). `BaseException` subclasses
+        # that are NOT `Exception` (`SystemExit`/`KeyboardInterrupt`,
+        # `argparse`'s own `--help`/usage-error exit) are deliberately
+        # left uncaught.
+        print(f"error: unexpected failure ({type(exc).__name__})", file=sys.stderr)
         return 1
 
 
