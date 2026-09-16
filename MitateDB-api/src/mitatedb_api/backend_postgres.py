@@ -92,7 +92,7 @@ from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
                      PlatformUpgradePending, ResourceLimitError,
                      StorageConfigurationError, ValidationError, violation)
 from .identifiers import validate_identifier
-from .field_types import CONTRACT_TYPES, FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
+from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
 # `_INT_DOMAIN_RANGES`/`_check_domain` are re-exported for facade
 # compatibility (design D-2); not referenced elsewhere in this module.
