@@ -26,6 +26,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+import mitatedb_api.ops as ops
 from .control_plane_harness import control_platform  # noqa: F401 (fixture)
 from mitatedb_api.control_credential_store_postgres import PostgresControlCredentialStore
 from mitatedb_api.control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
@@ -96,6 +97,16 @@ def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER
         env["MITATEDB_MIGRATIONS_DIR"] = str(migrations_dir)
     else:
         env.pop("MITATEDB_MIGRATIONS_DIR", None)
+    # design D-2: this
+    # file's own throwaway-cluster launcher (`tools/testpg/dsa_testpg.
+    # py`) exports `PGPORT`/`PGUSER`/`PGPASSFILE` ambiently so a bare
+    # `psql`/libpq call defaults to the SAME cluster -- `provision_dsn`
+    # above already carries every connection parameter `deprovision`
+    # needs explicitly, so those ambient exports are pure interference
+    # for `_psql_connection_env`'s own A-13 fail-closed check inside the
+    # CHILD process spawned below.
+    for name in (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY):
+        env.pop(name, None)
     return subprocess.run(
         [sys.executable, "-m", "mitatedb_api.ops", *args], capture_output=True, text=True, env=env)
 

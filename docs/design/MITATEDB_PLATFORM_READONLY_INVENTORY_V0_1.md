@@ -1,4 +1,4 @@
-# MitateDB platform の読み取り専用 inventory 設計メモ（v0.5）
+# MitateDB platform の読み取り専用 inventory 設計メモ（v0.6）
 
 - 状態: **設計レビュー 2 回反映済み、依頼者裁定済み（2026-09-16、§6 冒頭）。作業指示書の起草待ち。** ~~設計レビュー 2 回反映済み、依頼者判断待ち（Q-1〜Q-7）。~~ 本書の手順はまだ実行してよい手順ではない。本番を読むのは、本書の経路が設計レビューで受け入れられた後である（`docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 C の制約）。
 - 台帳: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-45**（v1.50）。起票物は `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` の手順 1。
@@ -14,6 +14,7 @@
   - v0.4（2026-09-16）設計レビュー 2 回目（§10）の指摘をすべて反映し、監督裁定 Z-24〜Z-33 と WP 分割の指示を §9.3 に逐語で置いた。主な変更: 出力を stdout の 1 経路に限り dbname の番兵の扱いを分けた（D-2・D-11、Z-24）、Mitate への報告語の対応（§1.2、Z-25）、(1) を接続名と unix socket の path の比較に改めた（D-1、Z-26。Z-14 の案を覆した）、(8) の式を作り直した（D-1、Z-27。Z-20 を覆した）、読み取り専用を接続の単位に改め spy で全接続を検査する（D-3、Z-28）、(7) の env の継承（D-1、Z-29）、存在しない role / database の 2 経路（D-2、Z-30）、Q-1・Q-2 に案 (c)（Z-31）、Q-6（Z-32）と Q-7、§7 の表の更新（Z-33）、§9 の覆った裁定への註、§11 の WP 分割案。
   - v0.4 追補（2026-09-16）起草担当の疑義への監督裁定 Z-34〜Z-36 を §9.3 に逐語で足し、(1) の Cloud SQL Auth Proxy の unix socket モードの前提（D-1、§7 の 9b、§8）、起草担当の対応の採用（Q-1 (c)・Q-5・Q-7・§7 の 2a・45a′）、(8) の対象 role の確定規則（D-1、§7 の 34c、§8）を本文・§7・§8 に合わせた。
   - v0.5（2026-09-16）§6 の Q-1〜Q-7 に依頼者裁定を逐語で記録した（すべて監督の推奨を採用）。本文の決定・§7 は変えていない。
+  - v0.6（2026-09-16）末尾に §12（WP-A の実施記録）を足した。本文の決定は変えていない。
 
 ## 1. 問題
 
@@ -627,3 +628,15 @@ Z-5 は欠番である。第 1 次の起草の疑義 5（r2db-api の扱い）�
 
 - WP-A と WP-B は `MitateDB-api/src/mitatedb_api/ops.py` を共に触るので並行にせず直列にする。並行にする WP は、触るファイルの重なりが 0 であることを作業指示書の表と実ファイル名で示す（§1.2 の 16・17）。
 - 47・50 は全 WP に掛かる。変更クラスは D-7 と §6 Q-6 の裁定に従い、作業指示書で WP ごとに `RM` §9 の 8 の表で判定する。
+
+## 12. 実施記録
+
+### 12.1 WP-A — 両 peer の ops の例外・接続情報の出力 (2026-09-16)
+
+- 基点 main `0fa4648`、作業指示書 `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` §3・§3.1 (訂正註 A-1〜A-3、監督裁定 A-1〜A-20)。
+- **統制** (両 peer の `ops.py`): 例外は型名と固定文言だけを出し traceback を出さない。psql の出力と例外文字列は、実際に渡した接続値 (user・password・host・hostaddr・port・dbname。host 系はカンマで分割) を長い順の一括置換で伏せてから出す。psql には接続情報を argv ではなく libpq の環境変数で渡し、環境変数形の無い conninfo キー、DSN が上書きしない接続設定変数が親の環境にある状態、psql 16 未満・不在をいずれも固定文言で拒否する。`_redact_connection_values` と `_psql_connection_env` を `_ISOMORPHIC_TARGETS` に登録した (136 → 138)。`_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY` は表の仕組みが module 定数を扱えないので未登録 (現時点で両 peer 同一)。
+- **§3.1 の訂正**: `_app_dsn` の `conninfo_to_dict` の解析失敗は psycopg 以外の例外ではなく `psycopg.ProgrammingError` だった (経路 2 に落ちる。結論は同じ)。
+- **証拠**: 変異 39 件すべて期待どおり。両 peer の suite `MitateDB-api/tests` `1152 passed, 2 subtests passed`・`r2db-api/tests` `1330 passed` (基点 1126 / 1308)。root gate **`3499 passed, 2 subtests passed`**、judge=PASS、実行クラスタ差分 0 (基点 3451 + 48)。`python3 tools/check_comment_provenance.py --register` OK (427 CH-ID)。`--base 0fa4648` の赤 35 件は §4.1(1) 2 件、CH-ID の無い新規の塊 12 件、位置ずれ 21 件 (MitateDB のみ) の類型で、新規コメントには CH-ID を付けない (設計 `docs/design/CODE_COMMENT_PROVENANCE_V1.md` D-1・D-2)。公開値スキャン flagged 0。`security/CONTROL_MAPPING.md` Version 2.1、SI-10 の両 peer ブロックに統制と証拠を追加 (Q-6 (a) の版付きの security-contract 決定)。
+- **レビュー**: 独立コードレビュー 3 回 (差し戻し 2 回)。確実なバグとして、伏字の置換順による接頭辞の漏れと、複数ホストの DSN で伏字が効かないことを直した。A-9 (`PG*` の一律除去) が TLS 設定の格下げを生むことが 2 回目で分かり、A-13 (上書きされない接続設定変数の拒否) で閉じた。
+- **WP-D の runbook に書く事項**: ops を動かすホストの psql は 16 以上。接続設定の環境変数 (`PGHOST`・`PGPORT`・`PGUSER`・`PGPASSWORD`・`PGPASSFILE`・`PGSSLMODE`・`PGSSLROOTCERT`・`PGSERVICE`・`PGSERVICEFILE`・`PGSYSCONFDIR` 等) を export したまま upgrade-applications / deprovision を実行すると変数名つきで拒否されるので、DSN に明記する (`passfile=`・`sslrootcert=` 等) か unset する。`~/.pgpass` の既定の読み込みは影響を受けない。
+- **残存 (低)**: 1 文字などの極端に短い接続値は、無関係な文字まで伏字にする (過剰に伏せる側であり漏洩ではない)。

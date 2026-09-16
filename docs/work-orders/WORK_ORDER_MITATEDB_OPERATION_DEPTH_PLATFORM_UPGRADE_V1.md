@@ -45,7 +45,7 @@
 
 | WP | R-37 WP-5 の統合コミット | 基点 main | 名前の再照合の結果 |
 |---|---|---|---|
-| WP-A | (着手時に記入) | (着手時に記入) | (着手時に記入) |
+| WP-A | `0fa4648` (縮小版 WP-5。依頼者指示 `docs/work-orders/REQUESTER_DIRECTIVE_20260916_R37_CLOSURE_R45_PRIORITY.md`) | `0fa4648` | 全件実在 (設計 §3・§3.1 の名前、欠落 0) |
 | WP-B | (着手時に記入) | (着手時に記入) | (着手時に記入) |
 | WP-C | (着手時に記入) | (着手時に記入) | (着手時に記入) |
 | WP-D | (着手時に記入) | (着手時に記入) | (着手時に記入) |
@@ -192,6 +192,50 @@ python3 tools/public_value_scan.py <変更したファイル>
 | 50 | 本表に変異も監査照合も持たない行が無い (§1.5 の 40) | **監査照合**: 本表 (19-n を含む) の行数と対応数を残す | — |
 
 **件数 (下限)**: 完了条件 8 件 (19-n を除く) = 変異を持つ行 4 件 (16・17・18・48。変異 5 件) + 監査照合 4 件 (19・49・47・50)。19-n は棚卸しの結果で増える。
+
+### 3.1 WP-A の訂正註と監督裁定 (2026-09-16、統合時に監督が追記。§3 の本文は書き換えない)
+
+**訂正註 A-1 (触ったファイル)**: §2.5 の WP-A の行に加え、次を触った。`MitateDB-api/tests/test_ops_upgrade.py`・`r2db-api/tests/test_ops_upgrade.py` (19-4〜19-6 と A-13・A-14 のテスト)、`MitateDB-api/tests/test_ops.py`・`MitateDB-api/tests/test_main.py`・`r2db-api/tests/test_application_audit.py`・`r2db-api/tests/test_constraints_declaration.py` (A-13 がテスト基盤 `tools/testpg/dsa_testpg.py` のプロセス全体への `PG*` の export と衝突したため、ops の subprocess 起動・`ops.main` 直接呼出しの箇所だけで `PG*` を除く。接続先・認証は DSN に明記された値のままであることを独立レビューが確認)。`_ISOMORPHIC_TARGETS` 登録済みの helper の本体には触れていない。
+
+**訂正註 A-2 (19-n の行)**: 棚卸し (経路 1〜8) の結果、次を足す。経路 1 は 16・17 に統合、経路 7・8 は修正不要。
+
+| # | 完了条件 | 変異 | 赤になる test id |
+|---|---|---|---|
+| 19-2 | 両 peer の `main()` の psycopg.Error は型名と固定文言だけ | 生の例外文字列に戻す | `test_main_psycopg_error_handler_never_prints_the_raw_exception_text` |
+| 19-3 | 両 peer の `main()` は psycopg 以外の例外も traceback なしで固定文言 | `except Exception` を狭める | `test_main_catches_non_psycopg_exceptions_without_a_traceback` |
+| 19-4 | psql 出力・`str(exc)` は実際の接続値を長い順・カンマ分割で伏せてから出す (MitateDB `_run_upgrade_script`・`_upgrade_one_application`、r2db `cmd_upgrade_applications`) | 伏せる呼出しを外す / 長い順を外す / カンマ分割を外す | `test_*_redacts_*` 系 |
+| 19-5 | psql の argv に接続情報を置かず libpq の環境変数で渡す (3 箇所)。環境変数形の無い conninfo キーは拒否、親の `PG*` は除き、DSN が上書きしない接続設定変数が親にあれば拒否、psql 16 未満・不在は拒否 | argv に DSN を戻す / 拒否を外す / `PG*` 除去を外す / 版確認を外す 等 | `test_*_passes_connection_params_via_env_never_argv` ほか |
+| 19-6 | MitateDB `_run_deprovision_script` の `_die` も伏せてから出す | 伏せる呼出しを外す | `test_run_deprovision_script_redacts_connection_values_before_dying` |
+
+変異は最終 39 件すべて期待どおり (`restores verified 3/3 files (sha256 x2)`)。RV2 (`env.setdefault`) は A-9 の `PG*` 除去で等価変異になったので spec から外した。
+
+**訂正註 A-3 (設計 §3.1 の例示)**: 「psycopg 以外の例外」の例に挙げた `_app_dsn` の `conninfo_to_dict` の解析失敗は、実測では `psycopg.ProgrammingError` (psycopg.Error の派生) であり経路 2 に落ちる。結論 (出力に漏れる経路であり同じ修正で塞がる) は変わらない。
+
+**監督裁定 A-1〜A-20 (逐語)**
+
+- A-1 (経路 1・2・3、19-2・19-3) 棚卸しのとおり直す。両 peer の `main()` は psycopg.Error とそれ以外の全例外を捕まえ、例外の型名と固定文言だけを stderr に出して非 0 で終わる (traceback を出さない)。経路 1 は完了条件 16・17 に統合する。
+- A-2 (経路 4・6、19-4・19-6) psql の出力と `str(exc)` を**捨てずに、実際に渡した接続パラメータの値を完全一致で伏せてから**出す。伏せる対象は、ツールが psql / psycopg に渡した接続情報を `conninfo_to_dict` で分解した user・password・host・hostaddr・port・dbname の各値 (空でないもの) で、出力中の出現をすべて固定の伏字 (`<redacted>`) に置き換える。推測のマスク (正規表現で DSN らしきものを探す) はしない。SQL のエラー (制約違反・構文エラー等) の診断は残る。テストは設計 D-2 の 3 段 (経路を通った → 生の出力に番兵がある → 出力に番兵が無い) で、番兵を 4 要素それぞれに置く。変異 = 伏せる処理を外す → 赤。伏せる helper は両 peer に同名で置き (r2db は `cmd_upgrade_applications` の `failure_detail` に掛ける。r2db に deprovision の psql 呼出しは無いのでその経路は MitateDB のみ)、`_ISOMORPHIC_TARGETS` に登録する。
+- A-3 (経路 5、19-5) psql の argv に DSN を置かない。接続パラメータは `subprocess.run(..., env=...)` で libpq の環境変数 (`PGHOST`・`PGPORT`・`PGUSER`・`PGPASSWORD`・`PGDATABASE`・必要なら `PGSSLMODE` 等、`conninfo_to_dict` の結果から) として渡し、argv には接続情報を含めない。根拠: argv は同じホストの他ユーザーからプロセス一覧で見えるが、環境変数は同じユーザーと root に限られる。`conninfo_to_dict` のキーのうち libpq の環境変数に対応しないものがあれば、その DSN は拒否して固定文言で終わる (黙って落とさない)。テスト: 番兵入りの DSN で、subprocess に渡る argv に 4 要素の番兵がどれも無いこと (subprocess.run を spy)、かつ env に正しく渡ること。変異 = DSN を argv に戻す → 赤。**MitateDB の `_run_upgrade_script`・`_run_deprovision_script`、r2db の `_run_upgrade_script` の全部に掛ける。**これらは WP-C (lock_timeout を渡す) と同じ関数だが、WP-C は WP-A の統合後なので重ならない。
+- A-4 (経路 7・8) 修正しない。経路 8 (設計 §3.1 の「psycopg 以外の例外」の例示が実際は psycopg.ProgrammingError) は、監督が WP-A の実施記録で設計に訂正として記録する。
+- A-5 (CONTROL_MAPPING) 対応行は **SI-10 (Error and Information Non-Disclosure) の両 peer のブロック**に足す。SI-14 の r2db ブロック (残り 78 文字) には足さない。Version 行を 2.0 → 2.1 にする。
+- A-6 (19-n の表) 修正した経路ごとに 19-2・19-3・19-4・19-5・19-6 の行 (完了条件・変異・赤になる test id) を報告に書く。作業指示書への訂正註は監督が統合時に書く (実装担当は docs/ を触らない)。
+
+- A-7 (指摘 1・2) レビューの修正案のとおり: host・hostaddr・port はカンマで要素に分け、対象値は空を除き重複を除いて**長い順**に並べ、`re.escape` した値を `|` でつないだ 1 つの正規表現で一度に置換する。両 peer 同じ形。
+- A-8 (指摘 3) 許可表は、`conninfo_to_dict` が返しうるキーのうち **libpq (PostgreSQL 16) の文書に環境変数形があるキーをすべて**含める (host・hostaddr・port・dbname・user・password・passfile・channel_binding・service・options・application_name・connect_timeout・client_encoding・sslmode・sslcompression・sslcert・sslkey・sslrootcert・sslcrl・sslcrldir・sslsni・requirepeer・ssl_min_protocol_version・ssl_max_protocol_version・gssencmode・krbsrvname・gsslib・gssdelegation・target_session_attrs・load_balance_hosts・require_auth — 実装担当が文書と照合し、表とその出所を報告する)。環境変数形の無いキーは、**キー名を含む固定文言**で拒否し、既存の ops の設定エラーと同じ終了経路 (`_die` 等) で終える。キー名は秘密ではないので出してよい。値は出さない。エラー文を事実に合わせる。
+- A-9 (指摘 5) 子プロセスの env は、親の env から **`PG` で始まる変数をすべて除いた**うえで DSN 由来の値を入れる (DSN に無い接続設定が親の `PGPASSWORD`・`PGSERVICE` 等で黙って補われないようにする)。テストは `monkeypatch.setenv` で親に `PGUSER`・`PGPASSWORD`・`PGSERVICE` を置き、子の env にそれらが残らない / DSN の値が入ることを確かめる。
+- A-10 (指摘 6) src の新規コメント・docstring から経緯トークンを除き、CH-ID を採番して両 peer の `docs/code-history/<peer>/ops.md` に登録する (触ってよいパスに追加)。§4.1(2) の 21 件は 1 件ずつ分類して報告する: 位置ずれ (作業指示書 `WORK_ORDER_R37_WP0_INVENTORY_V1.md` §5.45 の訂正註 5 の類型) なら理由を書き、それ以外は直す。
+- A-11 (指摘 8・既決) 両 peer に同名で置いた `_psql_connection_env` と `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY` を `_ISOMORPHIC_TARGETS` に登録する。表の仕組みが module 定数を扱えなければ、登録せずにその旨を報告する (その場合は監督が扱いを決める)。件数 pin を実測で更新する。
+- A-12 (指摘 7) 修正後の実測に合わせて CONTROL_MAPPING.md SI-10 の文言を直す (主張は実測の後、§1.5 の 34)。
+
+- A-13 (指摘 1。A-9 を補う) 子の env からの `PG*` 除去は維持する。加えて、**親の env にある接続設定の変数のうち DSN が上書きしないもの** (許可表の全環境変数と `PGSERVICEFILE`・`PGSYSCONFDIR`) が 1 つでもあれば、実行前に**変数名だけを含む固定文言**で `_die` する (値は出さない)。psycopg の接続と psql の接続の設定が食い違う状態を作らず、運用者に DSN への明記を求める (fail-closed)。テスト: 親に `PGSSLMODE` を置き DSN に sslmode が無ければ拒否、DSN に sslmode があれば受理。変異: 拒否を外す → 赤。このテストは RV3 (`k != "PGSERVICE"` への弱め) も赤にする形にする。
+- A-14 (指摘 2) psql を起動する前に `psql --version` を読み、メジャー版が 16 未満、または版を読めなければ固定文言で `_die` する。テストは subprocess を spy して 15 と読めない出力で拒否、16 で受理。変異: 版の確認を外す → 赤。
+- A-15 (指摘 3) provenance は判定 (b)。CH-0538〜0545 と両 peer の companion の 8 節を撤回し、新規のコメント・docstring は CH-ID を付けず経緯トークンを持たない形で残す。`--base 0fa4648` の結果を再取得し、残る赤を類型ごとに報告する (新しい塊の「CH-ID の無い塊の追加」、位置ずれ 21 件)。
+- A-16 (指摘 4・5・6) RV2 2 件は spec から外し、等価変異として報告に 1 行残す。CONTROL_MAPPING.md は Version 行と主張行から経緯の叙述 (「rework 1」「差し戻し」「rulings A-…」) を除き、今日の統制と証拠だけにする。A-13・A-14 を主張に反映する (実測の後に書く)。
+
+- A-17 (指摘 1) 両 peer の test_ops_upgrade.py に、親に `PGSERVICEFILE` だけ / `PGSYSCONFDIR` だけを置いた場合に拒否され、変数名だけが出て値が出ないテストを足す。変異 RV4 を両 peer 分 spec に加え、赤を確認。
+- A-18 (指摘 2) `_require_psql_16_or_newer` は psql が無い (`FileNotFoundError` / `OSError`) ときも固定文言で `_die` する (両 peer 同じ形)。テストと変異 (捕捉を外す → 赤) を足し、CONTROL_MAPPING の主張を実動作に合わせる。
+- A-19 (指摘 3) CONTROL_MAPPING.md の Version は main から見た次の版 **2.1** にする。
+- A-20 (指摘 4) テストのコメントから経緯語を除き、何を確かめるかだけを書く。
 
 ## 4. WP-B — MitateDB-api の `inventory` (DB 層、Class D)
 

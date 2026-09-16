@@ -468,6 +468,60 @@ def test_verify_declarations_exits_2_when_platform_database_is_unreachable(
     assert rc == 2
 
 
+# Completion condition 16:
+# the connect-failure branch of `cmd_verify_declarations` prints ONLY the
+# caught exception's own TYPE NAME plus fixed text, never `str(exc)` --
+# `_CONNECT_FAILURE_SENTINELS` below places one distinct synthetic value
+# per DSN element (design D-2's own "user・password・host・dbname の全部
+# に、別々の値で置く") into a raw exception message shaped like a real
+# libpq failure for that element, so each parametrize case is non-空振り
+# (`assert sentinel in raw_message` below fails loudly if a table entry's
+# own message text stops actually containing its sentinel).
+_CONNECT_FAILURE_SENTINELS: dict[str, tuple[str, str]] = {
+    "host": (
+        "sentinel-host-f16a2c.invalid",
+        'could not translate host name "sentinel-host-f16a2c.invalid" to address: nodename nor servname provided, or not known',
+    ),
+    "user": (
+        "sentinel_user_9d3e",
+        'FATAL:  role "sentinel_user_9d3e" does not exist',
+    ),
+    "dbname": (
+        "sentinel_db_7b1f",
+        'FATAL:  database "sentinel_db_7b1f" does not exist',
+    ),
+    "password": (
+        "sentinel-pw-4c2a",
+        'invalid percent-encoded token: "sentinel-pw-4c2a"',
+    ),
+}
+
+
+@pytest.mark.parametrize("element", sorted(_CONNECT_FAILURE_SENTINELS))
+def test_verify_declarations_connect_failure_never_prints_the_raw_exception_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], element: str,
+) -> None:
+    """Completion condition 16 (design D-2's 3-step assert): (1) the
+    connect-failure path is actually taken (exit code 2), (2) the RAW
+    `psycopg.Error` this branch caught really does carry this element's
+    own sentinel (non-空振り), and yet (3) neither stdout nor stderr
+    contains that sentinel anywhere -- only the exception's own type
+    name."""
+    sentinel, raw_message = _CONNECT_FAILURE_SENTINELS[element]
+    assert sentinel in raw_message
+
+    def _fake_connect(dsn: str, **kwargs: object) -> None:
+        raise psycopg.OperationalError(raw_message)
+
+    monkeypatch.setattr(ops.psycopg, "connect", _fake_connect)
+    rc = _run_verify(monkeypatch, dsn="host=irrelevant dbname=irrelevant", schema="whatever")
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert "OperationalError" in captured.err
+
+
 def test_verify_declarations_exits_1_when_dsn_env_var_is_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -810,3 +864,63 @@ def test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_ever
             with conn.cursor() as cur:
                 cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 5").format(sql.Identifier(platform.provision_role)))
             conn.commit()
+
+
+# ===========================================================================
+# Completion conditions 19-2/19-3: `main()`'s OWN top-level exception handlers -- exercised through
+# `show-declarations`, a subcommand with no LOCAL `except psycopg.Error`
+# of its own (design §3.1: "cmd_show_declarations/cmd_upgrade_status の
+# 未捕捉の接続例外もここに落ちる"), so a faked `psycopg.connect` failure
+# here reaches `main()`'s own handlers directly, not a subcommand-local
+# one already covered above.
+# ===========================================================================
+
+
+def test_main_psycopg_error_handler_never_prints_the_raw_exception_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completion condition 19-2: `main()`'s own `except psycopg.Error`
+    branch (reached here via `show-declarations`, which has no local
+    connect-failure handler of its own) prints only the exception's own
+    type name, never `str(exc)`."""
+    sentinel = "sentinel-main-psycopg-8a1c"
+    raw_message = f'FATAL:  role "{sentinel}" does not exist'
+    assert sentinel in raw_message
+
+    def _fake_connect(dsn: str, **kwargs: object) -> None:
+        raise psycopg.OperationalError(raw_message)
+
+    monkeypatch.setattr(ops.psycopg, "connect", _fake_connect)
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", "host=irrelevant dbname=irrelevant")
+    monkeypatch.setenv("MITATEDB_PLATFORM_SCHEMA", "whatever")
+    rc = ops.main(["show-declarations"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert "OperationalError" in captured.err
+
+
+def test_main_catches_non_psycopg_exceptions_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completion condition 19-3: an exception that is NOT a `psycopg.
+    Error` (here, a plain `RuntimeError` carrying a sentinel, standing in
+    for "psycopg 以外の例外" per design §3.1) reaching `main()` is
+    reported the same way -- type name plus fixed text, never a Python
+    traceback and never the sentinel."""
+    sentinel = "sentinel-main-nonpsycopg-3f9d"
+
+    def _fake_connect(dsn: str, **kwargs: object) -> None:
+        raise RuntimeError(f"unexpected failure touching {sentinel}")
+
+    monkeypatch.setattr(ops.psycopg, "connect", _fake_connect)
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", "host=irrelevant dbname=irrelevant")
+    monkeypatch.setenv("MITATEDB_PLATFORM_SCHEMA", "whatever")
+    rc = ops.main(["show-declarations"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+    assert "Traceback" not in captured.err
+    assert "RuntimeError" in captured.err

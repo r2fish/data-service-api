@@ -2199,7 +2199,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_136_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_138_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2439,6 +2439,24 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # body, not a standalone symbol.
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_checks"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "cmd_verify_declarations"),
+    # R-45 WP-A (design D-2, supervisor ruling A-2, 2026-09-16): the
+    # connection-parameter redaction helper both peers' own `_upgrade_
+    # one_application`/`cmd_upgrade_applications` and `_run_deprovision_
+    # script` now call before folding a psql failure's own stdout/stderr
+    # (or a raw connection exception's own `str(exc)`) into output --
+    # verified normalize-and-diff equal before adding.
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_redact_connection_values"),
+    # R-45 WP-A 差し戻し 1 (supervisor ruling A-11, 2026-09-16): the psql
+    # subprocess environment-builder helper, isomorphic with the redaction
+    # helper immediately above (verified normalize-and-diff equal before
+    # adding). `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY` (a module-level `dict`
+    # constant, `ast.AnnAssign`) is deliberately NOT a row here --
+    # `_isomorphic_symbol_source`'s own module-level matcher (below) only
+    # resolves an `ast.FunctionDef`/`ast.AsyncFunctionDef`/`ast.ClassDef`
+    # or a bare `ast.Assign` target, never an annotated assignment, so a
+    # `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY` row would not resolve against its
+    # own tree at all.
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_psql_connection_env"),
     # Same round, same ruling item 1's second half: five same-named
     # `tests/test_ops_verify_declarations.py` module-level constants the
     # rework round's own normalize-and-diff run found byte-identical
@@ -2659,7 +2677,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_136_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_138_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2702,7 +2720,16 @@ def test_isomorphic_target_table_is_pinned_to_its_current_136_rows() -> None:
     nodes` AST-scanning test helpers (WP-8c's own F-7 rework) all at once,
     each verified normalize-and-diff equal before adding -- see this
     table's own comment immediately above the new rows for the candidates
-    checked and deliberately NOT added:
+    checked and deliberately NOT added; widened a twelfth time by R-45
+    WP-A (design D-2, supervisor ruling A-2, 2026-09-16), once the
+    connection-parameter redaction helper (`_redact_connection_values`)
+    landed identically on both peers, verified normalize-and-diff equal
+    before adding; widened a thirteenth time by the R-45 WP-A 差し戻し 1
+    round (supervisor ruling A-11), once the psql-subprocess environment
+    builder (`_psql_connection_env`) was found isomorphic too (its own
+    module-level allow-list constant, `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY`,
+    is an annotated assignment this table's own matcher cannot resolve,
+    so it stays unregistered -- see the comment beside its own row):
     a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
@@ -2734,7 +2761,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_136_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_136_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_138_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2859,6 +2886,8 @@ def test_isomorphic_target_table_is_pinned_to_its_current_136_rows() -> None:
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_verify_declarations_exits_0_when_every_check_passes"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_checks"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "cmd_verify_declarations"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_redact_connection_values"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_psql_connection_env"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATIONS_DIR"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
@@ -2968,7 +2997,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_136_rows() -> None:
         ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_parse_handler"),
         ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_authenticate_call_nodes"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 136
+    assert len(_ISOMORPHIC_TARGETS) == 138
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:

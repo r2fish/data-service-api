@@ -438,6 +438,18 @@ def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_a
     monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
     monkeypatch.setenv("MITATEDB_PLATFORM_SCHEMA", platform.registry_schema)
     monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(tmp_path))
+    # design D-2: this
+    # test's own throwaway-cluster launcher (`tools/testpg/dsa_testpg.
+    # py`) exports `PGPORT`/`PGUSER`/`PGPASSFILE` ambiently at the
+    # PROCESS level; `platform.provision_dsn` above already carries every
+    # connection parameter `upgrade-applications` needs explicitly, so
+    # those ambient exports are pure interference for `_psql_connection_
+    # env`'s own A-13 fail-closed check (`ops.main` below runs IN-
+    # PROCESS, unlike `test_ops_upgrade.py`'s own subprocess-based
+    # `_run_ops`, so `os.environ` itself -- not a copy -- must be
+    # cleared).
+    for name in (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY):
+        monkeypatch.delenv(name, raising=False)
     rc = ops.main(["upgrade-applications", "--application", h1_bad_app.app_id])
     assert rc == 0
 
