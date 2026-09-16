@@ -19,7 +19,8 @@ Design constraints this file is written to satisfy:
   content and executes it as a `str`. `_run`, the single choke point every
   *client-influenced* statement passes through, is typed to accept only
   `psycopg.sql.Composed`/`psycopg.sql.SQL` and raises `TypeError` for
-  anything else. Every SQL fragment built anywhere below that carries a
+  anything else. Every SQL fragment built anywhere below (and in
+  `postgres_sql.py`) that carries a
   client-supplied identifier/operator/value is constructed via
   `sql.SQL(...)`/`sql.Identifier`/`sql.Literal`/`sql.Placeholder`, never an
   f-string or `%`-formatted plain string, and never bypasses `_run`. The
@@ -104,7 +105,13 @@ from .backend import StorageBackend as _StorageBackend
 from .errors import fail, violation
 from .limits import ResourceLimits
 from . import platform_upgrades
+# `_escape_like_literal` is not used directly in this module (its one
+# call site, inside `_predicate_sql`, moved to `postgres_sql.py`); the
+# import exists only as a facade-compat re-export for `r2db-api/tests/
+# test_postgres.py`'s own facade test, which still imports it from
+# `postgres`.
 from .postgres_like import _escape_like_literal
+from .postgres_sql import _append_revision_predicate, _bind_value, _order_by_sql, _predicate_sql, _select_statement, _text_expression, _where_clause
 # `_FIELD_TYPE_SQL`/`_JSONB_SQL` are not used directly in this module; the import exists only as a facade-compat re-export for callers that still import them from `postgres`.
 # history: CH-0002
 from .postgres_types import _DOMAIN_TO_DECLARED, _FIELD_TYPE_SQL, _JSONB_SQL, _SQL_TYPE_TO_DECLARED, _TableInfo, _column_type_sql
@@ -213,15 +220,6 @@ _RESERVED_INTERNAL_PREFIX = "_r2db"
 # `PostgresCredentialStore`.
 _DEFAULT_CONNECT_TIMEOUT_S = 5
 _DEFAULT_ACQUIRE_TIMEOUT_S = 10.0
-
-_COMPARISON_OPERATORS: dict[str, sql.SQL] = {
-    "eq": sql.SQL("="),
-    "ne": sql.SQL("<>"),
-    "lt": sql.SQL("<"),
-    "lte": sql.SQL("<="),
-    "gt": sql.SQL(">"),
-    "gte": sql.SQL(">="),
-}
 
 
 def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] = ()) -> None:
@@ -1199,7 +1197,7 @@ class PostgresCell:
                     if cursor is not None:
                         offset = _decode_cursor(cursor, shape)
                     where_sql, where_params = self._where_clause(where, table_info.columns)
-                    statement = self._select_statement(entity, select, where_sql, order_spec, offset, page_size)
+                    statement = self._select_statement(entity, select, where_sql, order_spec, offset, page_size, revision_column=_REVISION_COLUMN)
                     with conn.cursor() as cur:
                         _run(cur, statement, where_params)
                         rows = cur.fetchall()
@@ -1217,7 +1215,7 @@ class PostgresCell:
         has_more = len(rows) > page_size
         page_rows = rows[:page_size]
         # Every row was selected as `select ++ [_r2db_revision::text]`
-        # (`_select_statement`, below) -- the revision is always the last
+        # (`_select_statement`, below (now in `postgres_sql.py`)) -- the revision is always the last
         # column, index-aligned with `page_rows` (R-4: capability
         # `revision_preconditions: enabled` means every entity is mutable,
         # so a query response always includes revisions).
@@ -1226,39 +1224,8 @@ class PostgresCell:
         next_cursor = _encode_cursor(offset + page_size, shape) if has_more else None
         return QueryOutcome(items=items, revisions=revisions, has_more=has_more, next_cursor=next_cursor)
 
-    def _select_statement(
-        self,
-        entity: str,
-        select: list[str],
-        where_sql: sql.Composed | None,
-        order_spec: list[tuple[str, str]],
-        offset: int,
-        page_size: int,
-    ) -> sql.Composed:
-        columns = sql.SQL(", ").join(sql.Identifier(f) for f in select)
-        revision = sql.SQL("{col}::text").format(col=sql.Identifier(_REVISION_COLUMN))
-        statement = sql.SQL("SELECT {columns}, {revision} FROM {table}").format(columns=columns, revision=revision, table=sql.Identifier(entity))
-        if where_sql is not None:
-            statement = sql.SQL("{base} WHERE {where}").format(base=statement, where=where_sql)
-        statement = sql.SQL("{base} ORDER BY {order}").format(base=statement, order=self._order_by_sql(order_spec))
-        # NULL placement (ASC -> NULLS LAST, DESC -> NULLS FIRST) is PostgreSQL's own default when no NULLS clause is given, which is exactly the semantics `ApplicationCell._sort_key` was written to match -- no explicit NULLS FIRST/LAST needed here. Likewise, a
-        # plain (untyped/JSONB) column's own cross-type ordering (ascending:
-        # String < Number < Boolean < Array < Object) falls directly out of
-        # PostgreSQL's native `jsonb` comparison operators.
-        #
-        # `offset`/`page_size` are always server-computed, already-validated
-        # non-negative integers (never client-supplied text) by this point
-        # -- `sql.Literal` here is composing a trusted value, the same
-        # pattern `_set_timeouts` already uses for its own computed values.
-        # history: CH-0026
-        return sql.SQL("{base} OFFSET {offset} LIMIT {limit}").format(base=statement, offset=sql.Literal(int(offset)), limit=sql.Literal(int(page_size) + 1))
-
-    def _order_by_sql(self, order_spec: list[tuple[str, str]]) -> sql.Composed:
-        parts = [
-            sql.SQL("{col} {direction}").format(col=sql.Identifier(field_name), direction=sql.SQL("ASC" if direction == "asc" else "DESC"))
-            for field_name, direction in order_spec
-        ]
-        return sql.SQL(", ").join(parts)
+    _select_statement = staticmethod(_select_statement)
+    _order_by_sql = staticmethod(_order_by_sql)
 
     # ---- mutations -------------------------------------------------------
 
@@ -1471,16 +1438,7 @@ class PostgresCell:
         """
         fail("VALIDATION_FAILED", "A value in this request is not acceptable to the underlying storage.")
 
-    def _bind_value(self, value: Any, field_type: str | None) -> Any:
-        """R-7 addendum (M-B, confirmed empirically against a real server): a JSON `null` must bind as SQL `NULL` for every column shape, typed or untyped -- `Jsonb(None)` would instead produce the JSONB literal `'null'::jsonb` for an untyped column, which would make `is_null` predicates and `order_by` NULL placement diverge from `ApplicationCell`'s own null semantics. A non-null value binds as a native parameter for a scalar-typed column (`string`/`integer`/`number`/`boolean`) or wrapped in `Jsonb(...)` for an untyped column *or* an `object`/`array` one -- the latter two are still physically `jsonb` underneath their DOMAIN (object/array DOMAIN unification), so psycopg must still be told to serialize the value as jsonb, exactly as for an untyped column.
-
-        History: CH-0041
-        """
-        if value is None:
-            return None
-        if field_type is None or field_type in ("object", "array"):
-            return Jsonb(value)
-        return value
+    _bind_value = staticmethod(_bind_value)
 
     def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo", operation_index: int) -> tuple[int, dict[str, Any] | None, bool]:
         field_types = table_info.columns
@@ -1548,30 +1506,7 @@ class PostgresCell:
         affected = self._update(conn, entity, bound.values, where_sql, where_params, field_types, bound.expected_revision)
         return affected, None, False
 
-    def _append_revision_predicate(self, where_sql: sql.Composed | None, where_params: list[Any], expected_revision: str | None) -> tuple[sql.Composed | None, list[Any]]:
-        """an `expected_revision` precondition is folded into the same WHERE clause as the caller's own predicate (`<predicate> AND _r2db_revision::text = $expected`), so the comparison and the write are one atomic statement (the contract's revision-precondition clause 5) rather than a separate read-then-write.
-
-        The comparison casts the `uuid` column to `text` rather than
-        binding `expected_revision` as a (contextually inferred) `uuid`
-        parameter: `expected_revision` is an arbitrary contract-opaque
-        client string (`bind_mutation` only bounds its length, since the
-        contract never requires it to look like a UUID), and PostgreSQL
-        raises a hard `invalid input syntax for type uuid` error -- not
-        just "does not match" -- for a non-UUID-shaped one. `ApplicationCell`
-        stores/compares revisions as plain Python strings, so a garbage
-        `expected_revision` there simply fails to match any row (resolving
-        to `PRECONDITION_FAILED`/`NOT_FOUND` the normal way); casting to
-        `text` here is what keeps that same "never matches, never raises"
-        behaviour on this backend too, instead of a `SERVICE_UNAVAILABLE`
-        this predicate's own value should never be able to trigger.
-
-        History: CH-0045
-        """
-        if expected_revision is None:
-            return where_sql, list(where_params)
-        revision_clause = sql.SQL("{col}::text = {ph}").format(col=sql.Identifier(_REVISION_COLUMN), ph=sql.Placeholder())
-        combined = sql.SQL("{w} AND {r}").format(w=where_sql, r=revision_clause) if where_sql is not None else revision_clause
-        return combined, list(where_params) + [expected_revision]
+    _append_revision_predicate = staticmethod(_append_revision_predicate)
 
     def _resolve_precondition_miss(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, where_sql: sql.Composed | None, where_params: list[Any]) -> None:
         """when a revision-qualified UPDATE/DELETE affects zero rows, re-evaluate the caller's own predicate alone (no revision clause), in the same transaction, to decide which of the two failures applies -- `PRECONDITION_FAILED` (a row exists, but its revision was not the one asserted) or `NOT_FOUND` (no row matches the predicate at all, so there was no row to assert about).
@@ -1622,7 +1557,7 @@ class PostgresCell:
             # this branch is only reachable without a precondition -- `bind_mutation` already rejects an empty- `values` `update` carrying `expected_revision` outright, so a precondition is never silently discarded here.
             # history: CH-0047
             return self._count(conn, table, where_sql, where_params)
-        full_where_sql, full_params = self._append_revision_predicate(where_sql, where_params, expected_revision)
+        full_where_sql, full_params = self._append_revision_predicate(where_sql, where_params, expected_revision, revision_column=_REVISION_COLUMN)
         revision_bump = sql.SQL("{col} = gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
         if values:
             assignments = sql.SQL(", ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(key), ph=sql.Placeholder()) for key in values)
@@ -1641,7 +1576,7 @@ class PostgresCell:
 
     def _delete(self, conn: "psycopg.Connection[Any]", entity: str, where_sql: sql.Composed | None, where_params: list[Any], expected_revision: str | None) -> int:
         table = sql.Identifier(entity)
-        full_where_sql, full_params = self._append_revision_predicate(where_sql, where_params, expected_revision)
+        full_where_sql, full_params = self._append_revision_predicate(where_sql, where_params, expected_revision, revision_column=_REVISION_COLUMN)
         statement = sql.SQL("DELETE FROM {table} WHERE {where}").format(table=table, where=full_where_sql)
         with conn.cursor() as cur:
             _run(cur, statement, full_params)
@@ -1737,7 +1672,7 @@ class PostgresCell:
         if bound.expected_revision is not None:
             # a precondition never resolves an upsert to an insert -- no key match is NOT_FOUND (via `_resolve_precondition_miss`), exactly like update/delete.
             # history: CH-0051
-            full_where_sql, full_params = self._append_revision_predicate(key_where_sql, key_where_params, bound.expected_revision)
+            full_where_sql, full_params = self._append_revision_predicate(key_where_sql, key_where_params, bound.expected_revision, revision_column=_REVISION_COLUMN)
             statement = sql.SQL("UPDATE {table} SET {set} WHERE {where}").format(table=table, set=set_clause, where=full_where_sql)
             with conn.cursor() as cur:
                 _run(cur, statement, update_value_params + full_params)
@@ -1771,85 +1706,9 @@ class PostgresCell:
 
     # ---- predicate/WHERE composition ------------------------------------
 
-    def _where_clause(self, where: list[Predicate], field_types: dict[str, str | None]) -> tuple[sql.Composed | None, list[Any]]:
-        if not where:
-            return None, []
-        fragments: list[sql.Composed] = []
-        params: list[Any] = []
-        for predicate in where:
-            fragment, values = self._predicate_sql(predicate, field_types.get(predicate.field))
-            fragments.append(fragment)
-            params.extend(values)
-        return sql.SQL(" AND ").join(fragments), params
-
-    def _text_expression(self, column: sql.Identifier, field_type: str | None) -> sql.Composed:
-        """The text form of `column` that `contains`/`matches` compare
-        against. "非 text 列は従来どおり ::text に対して適用" -- a typed non-text column's plain `::text` cast is exactly this (a numeric/boolean column's text representation carries no quoting ambiguity). An *untyped* (JSONB-equivalent) column is different:
-        PostgreSQL's own `::text` cast on jsonb returns the JSON text
-        representation, which wraps a JSON **string** value in literal
-        double quotes (`"hello"`, not `hello`) -- silently breaking a full-
-        string-anchored `matches` pattern and shifting every `contains`
-        substring offset by one quote character, for exactly the columns
-        most likely to hold free-text data. `#>> '{}'` (the same "unwrap a
-        top-level jsonb scalar to text" idiom `->>`/`#>>` use for a keyed
-        value) recovers the bare string PostgreSQL's own client already
-        knows, and returns the same non-quoted text `::text` would for a
-        non-string JSON scalar (number/boolean/null) or an object/array --
-        it only differs from `::text` in the case that would otherwise be
-        wrong. This is what keeps the two backends' behaviour for a string-
-        typed field in parity, whether the client declared it via `add_field
-        field_type: "string"` or left it untyped.
-
-        History: CH-0053
-        """
-        if field_type is None:
-            return sql.SQL("(") + column + sql.SQL(" #>> '{}')")
-        return column + sql.SQL("::text")
-
-    def _predicate_sql(self, predicate: Predicate, field_type: str | None) -> tuple[sql.Composed, list[Any]]:
-        column = sql.Identifier(predicate.field)
-        if predicate.operator == "is_null":
-            return sql.SQL("{col} IS NULL").format(col=column), []
-        if predicate.operator == "in":
-            # M-3 (rulings addendum 2)/R-2: unreachable in practice -- both
-            # call sites of `_where_clause` (`query`/`_apply` above) already
-            # run `_validate_predicate_types` first, which now rejects an
-            # empty/non-list `in` value at the shared choke point before
-            # any SQL is built. Kept as a defensive fallback with the same
-            # 4-key vocabulary that choke point uses (never a bare
-            # `fail()`), mirroring `_predicate_sql`'s "Unsupported filter
-            # operator" fallback below.
-            if not isinstance(predicate.value, list) or not predicate.value:
-                fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
-            placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in predicate.value)
-            # each element gets the same per-column type-aware bind (native for a typed column, `Jsonb(...)` for an untyped one, SQL NULL for a JSON null) as every other value position -- never a blanket `Jsonb(v)`.
-            # history: CH-0054
-            return sql.SQL("{col} IN ({items})").format(col=column, items=placeholders), [self._bind_value(v, field_type) for v in predicate.value]
-        if predicate.operator in ("contains", "matches"):
-            text_column = self._text_expression(column, field_type)
-            if predicate.operator == "contains":
-                # literal substring containment -- `%`/`_`/`\` in the value are escaped before being wrapped in `%...%`, so no character of the value is ever interpreted as a wildcard. `_validate_predicate_types`
-                # (called by every caller of this method) has already
-                # required `predicate.value` to be a string by this point.
-                # history: CH-0055
-                escaped = _escape_like_literal(predicate.value)
-                pattern = f"%{escaped}%"
-            else:
-                # the client's pattern already uses exactly SQL LIKE's own wildcard grammar (`%`/`_`/`\`-escape) -- bound as-is, no transformation.
-                # history: CH-0056
-                pattern = predicate.value
-            return sql.SQL("{col} LIKE {ph} ESCAPE '\\'").format(col=text_column, ph=sql.Placeholder()), [pattern]
-        operator = _COMPARISON_OPERATORS.get(predicate.operator)
-        if operator is None:
-            # Unreachable in practice: `predicate.validate()` (called by
-            # `validate_predicates`, upstream of every caller here) already
-            # rejects any operator outside `structured.OPERATORS` (now in `mutation_binding.py`). Kept as
-            # an explicit, fixed-literal-only fallback rather than trusting
-            # that invariant silently (D-4: "operators map to fixed
-            # literals"). this is a redundant application-level shape backstop, not a storage-rejection translation -- so it is NOT allowlist-eligible (`layer_rule`'s defence-in-depth exemption is for backend/storage denials only); it carries the same 4-key vocabulary `Predicate.validate`'s own operator check uses (`errors.violation("capability", ...)`), no field-index available this deep, so a generic `"where"` path.
-            # history: CH-0057
-            fail("VALIDATION_FAILED", "Unsupported filter operator.", details=violation("capability", field="where"))
-        return sql.SQL("{col} {op} {ph}").format(col=column, op=operator, ph=sql.Placeholder()), [self._bind_value(predicate.value, field_type)]
+    _where_clause = staticmethod(_where_clause)
+    _text_expression = staticmethod(_text_expression)
+    _predicate_sql = staticmethod(_predicate_sql)
 
     # ---- schema ----------------------------------------------------------
 

@@ -92,6 +92,7 @@ def _entries_to_dict(entries: list[tuple[str, _T]]) -> tuple[dict[str, _T], list
 LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, frozenset[str]]]] = {
     "r2db": [
         ("postgres_types.py", frozenset({"psycopg", "dataclasses", "typing"})),
+        ("postgres_sql.py", frozenset({"psycopg", "typing", ".postgres_like", ".errors"})),
         ("postgres_like.py", frozenset()),
         ("audit_counts.py", frozenset()),
         ("value_nul.py", frozenset({"typing"})),

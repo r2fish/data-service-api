@@ -81,7 +81,17 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 #: those functions moved with (already 4-key, moved verbatim) and must
 #: stay in `SCANNED_MODULES` for the same reason as `value_types.py`
 #: above.
-SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py", "request_shape.py", "mutation_binding.py", "schema_binding.py")
+#: R-37 WP-4c (2026-09-16): `postgres_sql.py` holds `_predicate_sql`
+#: (plus `_select_statement`/`_order_by_sql`/`_bind_value`/`_append_
+#: revision_predicate`/`_where_clause`/`_text_expression`, none of which
+#: carry a vocabulary `fail(...)` site), extracted from `postgres.py` --
+#: it carries the 2 `fail("VALIDATION_FAILED", ...)` call sites
+#: `_predicate_sql` moved with (already 4-key, moved verbatim) and must
+#: stay in `SCANNED_MODULES` for the same reason as `schema_binding.py`
+#: above. Unlike those leaves, `postgres.py` itself is not a member of
+#: the `counts` dict's own module tuple (Z4-6: the backend layer was
+#: never pinned there), so there is no matching subtraction to record.
+SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py", "request_shape.py", "mutation_binding.py", "schema_binding.py", "postgres_sql.py")
 
 _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED"}
 
@@ -127,7 +137,16 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # `postgres_types.py`, leaving a facade re-export import in place of the
     # removed body; `_fail_client_value`'s own single `fail()` call is
     # otherwise unchanged.
-    ("postgres.py", 1472),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # R-37 WP-4c (2026-09-16): line shift only (1472 -> 1439) -- `_COMPARISON_
+    # OPERATORS`/`_select_statement`/`_order_by_sql`/`_bind_value`/`_append_
+    # revision_predicate`/`_where_clause`/`_text_expression`/`_predicate_sql`
+    # moved to `postgres_sql.py`, leaving a delegation attribute (or, for
+    # `_COMPARISON_OPERATORS`, nothing -- it had no external reader) in place
+    # of each removed body, and a facade-compat import of `_escape_like_
+    # literal` (still read by `test_postgres.py`'s own facade test) net +7
+    # lines above; `_fail_client_value`'s own single `fail()` call is
+    # otherwise unchanged.
+    ("postgres.py", 1439),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
@@ -368,7 +387,7 @@ def test_ast_full_count_matches_the_audit_site_count():
     R-8/M-8: re-pinned to the measured post-merge count (`limits.py`'s
     4 inline budget denials were folded into 1 `_budget_denied` helper by
     the R-5/R-6 pair-closing merge, `violated_declaration` preserved)."""
-    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py", "request_shape.py", "mutation_binding.py", "schema_binding.py")}
+    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py", "identifier_rules.py", "paging.py", "value_types.py", "request_shape.py", "mutation_binding.py", "schema_binding.py", "postgres_sql.py")}
     assert counts == {
         # R-37 WP-1e (2026-09-14): -1 -- `_wildcard_pattern`'s own bare
         # trailing-backslash `fail("VALIDATION_FAILED", ...)` site
@@ -438,6 +457,14 @@ def test_ast_full_count_matches_the_audit_site_count():
         # site `_fail_constraint_declaration` carried in `structured.py`
         # before the move, unchanged in wording or `details=` shape.
         "schema_binding.py": 1,
+        # R-37 WP-4c (2026-09-16): the 2 `fail("VALIDATION_FAILED", ...)`
+        # sites `_predicate_sql` carried in `postgres.py` before the move
+        # ("Filter value is incompatible with the selected operator."/
+        # "Unsupported filter operator."), unchanged in wording or
+        # `details=` shape. `postgres.py` itself is not in this dict (Z4-6
+        # asymmetry: it was never a member of this tuple, so there is
+        # nothing to subtract).
+        "postgres_sql.py": 2,
     }, counts
     assert sum(counts.values()) >= 76, counts
 
