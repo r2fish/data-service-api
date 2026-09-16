@@ -130,3 +130,55 @@
 ### 独立設計レビューで見てもらう点
 
 **(2) の循環 import 検査が、設計 §4 の「import graph を確認する」の範囲に収まるか** (§1.5 の 37 の設計外の拡張に当たらないか)。監督の見立ては「範囲内」 — 一度きりの手作業の確認は変異を対応付けられず (§1.5 の 33)、閉止条件の「依存方向」を持続的に保てるのはテストの形だけであるため。
+
+---
+
+## 付録 C. 追加の依頼 — MitateDB の platform upgrade (Mitate F9 の阻害要因) の起票と、読み取り専用の運用経路の設計 (2026-09-16、本書の統合後に受領)
+
+**受領の経路**: 依頼者の依頼を、Mitate の監督セッションが本チャットへ中継した。本チャットはモデル呼び出しの上限を超えて引き継ぎ済みだったので、§1.10 の 67 に従い**着手せず、本付録に記録して次のチャットへ渡す。**
+
+### 順序 (依頼の指定)
+
+- **現在の R-37 の WP を中断しない。**次の区切り (WP と WP の間) で起票と設計に着手する。
+- **実装・テスト・runbook の変更は、R-37 が MitateDB-api のコードを動かし終えるまで始めない** (R-37 WP-5 は `MitateDB-api/src/mitatedb_api/backend_postgres.py` と `config.py` の import を削る)。
+- **本書 §3 との関係 (監督の見立て。次のチャットが判断し直してよい)**: 起票 (下の 1) と設計 (下の 2) は文書だけなので、§3 の 1 (スキャナ) と 2 (WP-5) の区切りで着手できる。実装は WP-5 の統合後。
+
+### 背景 (Mitate 側で確定済み。要約)
+
+- Mitate F9: mitate-application は起動時に Data Service の capability `limits.operation_depth` が必要深さ以上であることを確かめ、満たさなければ起動を拒む。実装・受け入れ済み。
+- 2026-09-13 の実環境確認で F9 は阻害された: 本番の MitateDB Data は運用変数で深さ 13 を設定しているが、稼働中の image が古く、認証済み `GET /v1/capabilities` が `limits.operation_depth` を返さない。F9 を含む mitate-application の revision は起動ゲートで拒否され、traffic は旧 revision のまま。**現行の Data / Control のテンプレートは旧式の base URL 設定 (`MITATEDB_DATA_BASE_URL` / `MITATEDB_CONTROL_BASE_URL`) を持ち、Mitate の互換条件 (Gate-0) を満たさない。**
+- **Mitate 側の正本 (読み取り専用。Mitate は Decision・設計・作業指示書・引き継ぎ書だけを持ち、SQL・Cloud Run 手順・運用資産・実装・テストは data-service-api が持つ)**: `../Mitate/decisions/DM-0052-data-service-platform-upgrade-for-operation-depth.json`、`../Mitate/docs/design/data-service-operation-depth-platform-upgrade.md` v1.2、`../Mitate/docs/work-orders/data-service-operation-depth-platform-upgrade.md` v1.2 (WP-1 は 2026-09-14 に「blocked — platform remediation required」)、F9 検証側 `../Mitate/docs/design/f9-data-service-production-validation.md` v2.1 と `../Mitate/decisions/DM-0051-f9-candidate-validation-transport.json`。
+- **WP-1 が止まった理由 = Gate-0 の本当の阻害要因**: DSN・credential・token を一切出力せずに次の状態を読める運用経路が無い — (1) isolated / production の組、(2) platform declarations、(3) migration とアプリケーションごとの upgrade 状態、(4) credential registry の参照、(5) rollback の可逆性、(6) DDL のロックと停止時間の上限。**不明の状態は阻害として扱う。**
+
+### 未コミットの起票物 (片付けが要る)
+
+- worktree `.claude/worktrees/mitatedb-operation-depth-platform-plan` (branch `codex/mitatedb-operation-depth-platform-plan`、2026-09-14) に未コミットの変更 2 件がある (監督が 2026-09-16 に `git status` で実在を確認)。
+  - `docs/design/ROADMAP_POST_PHASE7_V1.md` の差分 (台帳行を v1.14 として足すもの)
+  - 新規 `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` (Class D。手順 1 が読み取り専用の経路での状態確認)
+- **その起票は台帳番号 R-37 を使っているが、main では R-37 はモジュール分割のリファクタに使われ、台帳は v1.49。番号が衝突しているので、そのままコミットしない。**
+- **監督の実測 (2026-09-16、main `9494451`)**: 台帳 §8 の最大番号は **R-44**。空き番号は **最大番号の次の番号の見込み** (台帳にまだ行が無いので本書では番号を名指ししない — 書くと `tools/check_doc_refs.py` が未定義の参照として止める。着手時に取り直すこと)。
+- **依頼**: 起票物を読み、空き番号を割り当て、現在の main の台帳 (v1.49 以降) へ当て直す。**worktree の差分は取り込んだ後に自分の方法で片付ける (取り込む前に消さない)。**
+
+### やること (順)
+
+1. **起票物を新しい台帳番号で main へ入れる** (本リポジトリの commit / merge の規約どおり)。
+2. **読み取り専用の運用経路の設計を書く。**
+   - 材料: `MitateDB-api/src/mitatedb_api/ops.py` の `show-declarations` / `verify-declarations` / `upgrade-status` サブコマンド、`MitateDB-api/docs/cloud-run-cloud-sql.md`、`MitateDB-api/migrations/0007` / `0011` / `0012`、`conformance-tests/test_c05_limit_declaration_agreement.py`。
+   - 欠けているもの: 上の 6 状態を **DSN・credential・token を一切出力せずに**読み、**不明の状態を fail-closed で blocked と報告する**経路。
+   - **R-37 が MitateDB-api のコードを動かしているので、既存コードは行番号ではなくファイル名と関数名または CLI サブコマンド名で引き、基点コミットを記録する。**
+3. **後続の WP は本リポジトリの設計・レビューの手順を経てから**: isolation で同じ候補 digest を使い `operation_depth=13` の公開・13 の受理・14 の拒否を証明する → 本番 Data / Control の更新 → 独立監査。
+
+### 制約 (依頼の指定。いずれも厳守)
+
+- **本番を変えない**: migration、declaration、restart、candidate、traffic、Job、bridge、probe、fixture、promotion をしない。secret の rotate / revoke / delete をしない。Cloud SQL のリソースを消さない。**credential の値を決して出力しない経路が設計とレビューで受け入れられるまでは、読むことさえしない。**
+- **DSN・credential・token・credential を含む URL を、出力・ログ・文書・コミットのどこにも置かない** (`CLAUDE.md` の Public Repository Security Gate)。
+- **共通の Data Service API の spec、Mitate の契約、mitate-application の F9 ゲートを変えない。**
+- `MitateDB-api/docs/f9-execution-assets-v1/` (`7cd1d80`) は**参照用に限り、証拠として使わない** (同ディレクトリの README)。
+- **依頼者が言うまで push しない。**
+- **変更クラスは D の見込み。最終判定は `RM` §9 の 8 の表で行う。**
+
+### 依頼者への報告事項 (Mitate の監督が Mitate の引き継ぎ書に記録する)
+
+- 新しく割り当てた台帳番号と、起票物を取り込んだコミット。
+- 読み取り専用の経路の設計の所在と状態 (レビュー前 / 後)。
+- 経路が使えるようになったら、**DM-0052 Gate-0 の各項目** (上の 6 状態 + 旧式の base URL 設定の有無) を **confirmed / blocked / unknown** で。Mitate はこれで F9 Gate-0 を判定し直す。
