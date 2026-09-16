@@ -20,7 +20,11 @@ Run directly:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -199,3 +203,88 @@ def test_perf_row_format_is_stable():
         "PERF peer=r2db-api plug=r2db-api-socket transport=socket op=query n=3 "
         "p50_ms=2.000 p95_ms=2.900 backend_calls=1.00 concurrency=3"
     )
+
+
+_FAKE_CLUSTER_ENV = {
+    "R2DB_TEST_ADMIN_DSN": "host=/fake/s port=5432 dbname=postgres user=postgres",
+    "MITATEDB_TEST_ADMIN_DSN": "host=/fake/s port=5432 dbname=postgres user=postgres",
+    "PGHOST": "/fake/s", "PGPORT": "5432", "PGUSER": "postgres", "PGPASSFILE": "/fake/pgpass",
+}
+
+
+def test_perf_baseline_takes_the_exclusive_lock_and_uses_its_own_cluster(tmp_path, monkeypatch):
+    """WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1
+    table row 8): perf_baseline.py takes the exclusive suite lock around its
+    own measurement run AND measures against its own dedicated cluster, not
+    whatever `R2DB_TEST_ADMIN_DSN`/`PGHOST` etc. happened to already be in
+    the environment (review test-gap 6: a prior version of this test faked
+    `Cluster.env()` as `{}`, so nothing distinguished "used the cluster's
+    own connection env" from "used none at all").
+
+    Lock: proven from a second process's shared acquisition timing out
+    against the SAME (tmp_path, never the machine's real per-uid) base dir
+    while `main()` is "running" (the fake cluster's own context manager does
+    the probe synchronously, since the exclusive lock is already held by the
+    time `dsa_testpg.cluster()` is even reached).
+    Dedicated cluster: `_run` (the actual measurement entry point) is spied
+    on to capture `os.environ` at the moment it is called, and asserted to
+    carry the fake cluster's own `PGHOST`/`PGPASSFILE`/DSNs -- not whatever
+    `main()` was invoked with.
+    `--registry` points at an empty adapters list so no real adapter/
+    Postgres is ever touched.
+
+    mutation 1 (`tools/perf_baseline.py`): remove the `with dsa_testpg.
+    suite_lock(...):` wrapper in `main()` -- red because the probe
+    subprocess's shared acquisition would then succeed (exit 0) instead of
+    timing out (exit 75).
+    mutation 2 (`tools/perf_baseline.py`): drop `os.environ.update(c.env())`
+    -- red because `seen_env` would then miss the fake cluster's own
+    `PGHOST`/`PGPASSFILE`.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"adapters": []}), encoding="utf-8")
+
+    script = (
+        "import pathlib, sys; sys.path.insert(0, %r); import dsa_testpg\n"
+        "try:\n"
+        "    with dsa_testpg.suite_lock(False, 0.3, base=pathlib.Path(%r)):\n"
+        "        pass\n"
+        "except dsa_testpg.TestPgError:\n"
+        "    sys.exit(75)\n"
+        "sys.exit(0)\n"
+    ) % (str(pb.TESTPG_DIR), str(base))
+
+    class _FakeCluster:
+        def env(self):
+            return dict(_FAKE_CLUSTER_ENV)
+
+    @contextlib.contextmanager
+    def fake_cluster():
+        probe = subprocess.run([sys.executable, "-c", script])
+        assert probe.returncode == 75, (
+            "a second process's shared acquisition must time out while perf_baseline holds the exclusive lock"
+        )
+        yield _FakeCluster()
+
+    monkeypatch.setattr(pb.dsa_testpg, "cluster", fake_cluster)
+
+    seen_env: dict[str, str] = {}
+    real_run = pb._run
+
+    def spy_run(args):
+        seen_env.update(os.environ)
+        return real_run(args)
+
+    monkeypatch.setattr(pb, "_run", spy_run)
+
+    code = pb.main(["--registry", str(registry)])
+    assert code == 0
+    for key, value in _FAKE_CLUSTER_ENV.items():
+        assert seen_env.get(key) == value, f"_run saw {key}={seen_env.get(key)!r}, expected the cluster's own {value!r}"
+    # The exclusive lock is released on the way out: a fresh shared acquisition now succeeds.
+    handle = pb.dsa_testpg._acquire_suite_lock(exclusive=False, wait=1.0, base=base)
+    handle.release()

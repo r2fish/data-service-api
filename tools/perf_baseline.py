@@ -65,6 +65,15 @@ See `tools/PERF_BASELINE_README.md` for the full limitations list.
 Usage:
     ./.venv/bin/python tools/perf_baseline.py [--n N] [--warmup N] [--registry PATH]
 
+WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (d)):
+measurement runs against this tool's own throwaway PostgreSQL cluster
+(`tools/testpg/dsa_testpg.py`'s own `cluster()`), started only after taking
+the exclusive suite lock (`dsa_testpg.suite_lock`) -- the same lock
+`tools/dev/gate.py` takes, so a perf run and a gate run (or two perf runs)
+can never overlap. `main()` returns exit 75 when that lock times out (never
+silently degrades to measuring against whatever PostgreSQL happens to be
+reachable).
+
 Standard library only, at the top of this file (tools/ convention, see
 `tools/public_value_scan.py`'s own module docstring) -- everything this
 tool actually touches beyond the standard library (httpx, psycopg, ...)
@@ -81,6 +90,7 @@ import importlib
 import inspect
 import json
 import math
+import os
 import platform
 import subprocess
 import sys
@@ -91,9 +101,12 @@ from typing import Any, Callable, Iterator
 ROOT = Path(__file__).resolve().parents[1]
 CONFORMANCE_TESTS_DIR = ROOT / "conformance-tests"
 REGISTRY_PATH = CONFORMANCE_TESTS_DIR / "registry.json"
+TESTPG_DIR = ROOT / "tools" / "testpg"
 
 if str(CONFORMANCE_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(CONFORMANCE_TESTS_DIR))
+if str(TESTPG_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTPG_DIR))
 
 from adapter import (  # noqa: E402  (path insertion above must run first)
     BatchOperation,
@@ -101,6 +114,13 @@ from adapter import (  # noqa: E402  (path insertion above must run first)
     ScopedBatchOperation,
     fresh_identifier,
 )
+import dsa_testpg  # noqa: E402  (WP-2, docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (d):
+# perf_baseline measures against its own throwaway cluster, under the
+# exclusive suite lock -- never the shared local PostgreSQL)
+
+REFUSED = 75  # matches tools/dev/_devlib.py's own REFUSED; this file stays
+# standard-library only at the top (module docstring) and does not import
+# tools/dev, so this is a local literal, not an import of dl.REFUSED.
 
 _BATCH_OPS = 5  # design D-6 decision 1: batch op count is fixed at 5.
 _CROSS_ENTITY_OPS = 2  # not fixed by design; this tool's own choice -- see
@@ -941,14 +961,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    if args.concurrency < 1:
-        parser.error("--concurrency must be >= 1")
-
-    print(_perfrun_line())
-
+def _run(args: argparse.Namespace) -> int:
     built = _discover_and_build(args.registry)
     exit_code = 0
     try:
@@ -964,6 +977,28 @@ def main(argv: list[str] | None = None) -> int:
             with contextlib.suppress(Exception):
                 adapter_obj.close()
     return exit_code
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.concurrency < 1:
+        parser.error("--concurrency must be >= 1")
+
+    print(_perfrun_line())
+
+    stage = "lock"
+    try:
+        with dsa_testpg.suite_lock(exclusive=True, wait=dsa_testpg.DEFAULT_LOCK_WAIT):
+            stage = "cluster"
+            with dsa_testpg.cluster() as c:
+                stage = "run"
+                os.environ.update(c.env())
+                os.environ.pop("PGPASSWORD", None)
+                return _run(args)
+    except dsa_testpg.TestPgError as exc:
+        print(f"perf_baseline: {exc}", file=sys.stderr)
+        return REFUSED if stage == "lock" else 1
 
 
 if __name__ == "__main__":

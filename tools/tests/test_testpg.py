@@ -31,6 +31,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -55,16 +56,40 @@ def _load():
 
 dsa = _load()
 
-_ENV_NAMES = (dsa.ENV_MODE, dsa.R2DB_DSN, dsa.MITATEDB_DSN, dsa.ENV_BINDIR, dsa.ENV_REPORT,
-              "PYTEST_XDIST_WORKER", "PGHOST", "PGPORT", "PGUSER", "PGPASSFILE", "PGPASSWORD")
+# WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (a)):
+# captured BEFORE the autouse fixture below patches `dsa._acquire_suite_lock`
+# to a no-op -- the handful of tests that actually exercise real locking call
+# this directly (always with an explicit tmp_path `base`), bypassing the
+# patched module attribute entirely.
+_real_acquire_suite_lock = dsa._acquire_suite_lock
+
+
+class _FakeLockHandle:
+    """What the autouse fixture's own `_acquire_suite_lock` stub hands back:
+    a harmless no-op `release()`, so `ensure_for_pytest()`'s owned-mode path
+    (and `stop_owned()`) work without ever touching a real lock file."""
+
+    def release(self) -> None:
+        pass
+
+
+_ENV_NAMES = (dsa.ENV_MODE, dsa.R2DB_DSN, dsa.MITATEDB_DSN, dsa.ENV_BINDIR, dsa.ENV_REPORT, dsa.ENV_LOCK_WAIT,
+              dsa.ENV_LOCK_HELD, "PYTEST_XDIST_WORKER", "PGHOST", "PGPORT", "PGUSER", "PGPASSFILE", "PGPASSWORD")
 
 
 @pytest.fixture(autouse=True)
 def _isolated_state(monkeypatch):
     """Every decision-table test starts from a clean slate: none of the
-    module's own env vars set, and no `_owned_cluster` left over from a
-    previous test (the real module keeps that as global state, exactly as
-    a single pytest process would across its three conftest.py imports).
+    module's own env vars set, and no `_owned_cluster` / `_owned_lock` left
+    over from a previous test (the real module keeps that as global state,
+    exactly as a single pytest process would across its three conftest.py
+    imports).
+
+    `_acquire_suite_lock` is stubbed to a harmless no-op EVERY test (never
+    the machine's real, per-uid base dir -- shared with any concurrently
+    running gate.py / pytest on this machine): the lock-specific tests below
+    call `_real_acquire_suite_lock` directly instead, always against an
+    explicit tmp_path `base`.
 
     The teardown also stops a REAL cluster if one is somehow left behind in
     `dsa._owned_cluster` -- normally impossible (every test that reaches the
@@ -74,14 +99,22 @@ def _isolated_state(monkeypatch):
     this keeps such a bug from leaking a real postgres process."""
     for name in _ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(dsa, "_acquire_suite_lock", lambda *a, **k: _FakeLockHandle())
     dsa._owned_cluster = None
+    dsa._owned_lock = None
     yield
     if dsa._owned_cluster is not None:
         try:
             dsa._owned_cluster.stop()
         except Exception:
             pass
+    if dsa._owned_lock is not None:
+        try:
+            dsa._owned_lock.release()
+        except Exception:
+            pass
     dsa._owned_cluster = None
+    dsa._owned_lock = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +128,25 @@ def test_external_with_both_dsns_is_accepted_and_does_not_start(monkeypatch):
     monkeypatch.setattr(dsa, "start", lambda: pytest.fail("must not start a cluster"))
     dsa.ensure_for_pytest()  # does not raise
     assert dsa._owned_cluster is None
+
+
+def test_external_mode_takes_no_lock(monkeypatch):
+    """work order §3.1 (a): `ensure_for_pytest()` in `external` mode must
+    never call `_acquire_suite_lock` at all -- gate.py already holds the
+    exclusive lock for the pytest run it is about to launch with
+    DSA_TEST_PG=external, and flock's own per-open-file-description
+    semantics mean a second, same-process acquisition attempt on the same
+    lock file (even just LOCK_SH) would block forever, deadlocking gate
+    against itself.
+
+    mutation (`dsa_testpg.py`): make external ALSO take the lock -- this
+    test goes red because `_acquire_suite_lock` would then be called at all.
+    """
+    monkeypatch.setenv(dsa.ENV_MODE, "external")
+    monkeypatch.setenv(dsa.R2DB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
+    monkeypatch.setenv(dsa.MITATEDB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
+    monkeypatch.setattr(dsa, "_acquire_suite_lock", lambda *a, **k: pytest.fail("must not take any lock in external mode"))
+    dsa.ensure_for_pytest()  # does not raise
 
 
 def test_external_missing_a_dsn_fails(monkeypatch):
@@ -181,9 +233,31 @@ def test_unset_mode_with_no_dsn_starts_a_cluster_and_exports_its_env(monkeypatch
     monkeypatch.setattr(dsa.atexit, "register", lambda fn: registered.append(fn))
     monkeypatch.setenv("PGPASSWORD", "must-be-removed")
 
+    # work order §3.1 (a): owned mode takes the shared suite lock for the
+    # run's whole life -- a distinguishable fake (not the autouse default)
+    # so this test can see it was actually acquired and later released.
+    lock_calls = []
+
+    class _TrackedLock:
+        def __init__(self):
+            self.released = False
+
+        def release(self):
+            self.released = True
+
+    tracked = _TrackedLock()
+
+    def fake_acquire(exclusive, wait, base=None):
+        lock_calls.append((exclusive, wait))
+        return tracked
+
+    monkeypatch.setattr(dsa, "_acquire_suite_lock", fake_acquire)
+
     dsa.ensure_for_pytest()
 
     assert dsa._owned_cluster is fake
+    assert dsa._owned_lock is tracked
+    assert lock_calls == [(False, dsa.DEFAULT_LOCK_WAIT)]
     assert os.environ[dsa.ENV_MODE] == "owned:run-fakeid"
     assert os.environ["PGHOST"] == "/fake/s"
     assert os.environ[dsa.R2DB_DSN] == fake.env()[dsa.R2DB_DSN]
@@ -195,11 +269,61 @@ def test_unset_mode_with_no_dsn_starts_a_cluster_and_exports_its_env(monkeypatch
     monkeypatch.setattr(dsa, "start", lambda: pytest.fail("must not start twice"))
     dsa.ensure_for_pytest()
     assert dsa._owned_cluster is fake
+    assert len(lock_calls) == 1  # no second acquisition either
 
     dsa.stop_owned()
     assert fake.stopped
+    assert tracked.released
     assert dsa._owned_cluster is None
+    assert dsa._owned_lock is None
     dsa.stop_owned()  # idempotent
+
+
+def test_unset_mode_honors_the_lock_wait_env_var(monkeypatch, tmp_path):
+    fake = _FakeCluster(tmp_path / "run-fakeid-waitenv")
+    monkeypatch.setattr(dsa, "start", lambda: fake)
+    monkeypatch.setattr(dsa.atexit, "register", lambda fn: None)
+    monkeypatch.setenv(dsa.ENV_LOCK_WAIT, "42.5")
+    seen = {}
+
+    def fake_acquire(exclusive, wait, base=None):
+        seen["wait"] = wait
+        return _FakeLockHandle()
+
+    monkeypatch.setattr(dsa, "_acquire_suite_lock", fake_acquire)
+
+    dsa.ensure_for_pytest()
+
+    assert seen["wait"] == 42.5
+    dsa.stop_owned()
+
+
+def test_unset_mode_skips_the_lock_when_an_ancestor_already_holds_it(monkeypatch, tmp_path):
+    """review B-1: gate.py (or any owned-mode pytest THIS process's own
+    suite spawns as a genuine nested subprocess, e.g. conformance-tests/
+    test_testpg_cluster.py's nested-controller tests) sets DSA_TEST_PG_
+    LOCK_HELD on the child's env -- an ancestor already holds the suite
+    lock for this whole process tree, so acquiring it again here would
+    deadlock (the ancestor cannot release it until this very process tree,
+    including this child, finishes). The owned branch must still start a
+    cluster and export its env; it just must not touch the lock.
+
+    mutation (`dsa_testpg.py`): remove the `if not os.environ.get(ENV_LOCK_
+    HELD):` guard (always acquire) -- this test goes red because
+    `_acquire_suite_lock` would then be called despite the env var."""
+    fake = _FakeCluster(tmp_path / "run-fakeid-lockheld")
+    monkeypatch.setattr(dsa, "start", lambda: fake)
+    monkeypatch.setattr(dsa.atexit, "register", lambda fn: None)
+    monkeypatch.setenv(dsa.ENV_LOCK_HELD, "1")
+    monkeypatch.setattr(dsa, "_acquire_suite_lock", lambda *a, **k: pytest.fail("must not take the lock when an ancestor already holds it"))
+
+    dsa.ensure_for_pytest()
+
+    assert dsa._owned_cluster is fake
+    assert dsa._owned_lock is None
+    assert os.environ[dsa.ENV_MODE] == "owned:run-fakeid-lockheld"
+    dsa.stop_owned()  # idempotent even with no lock to release
+    assert dsa._owned_cluster is None
 
 
 def test_unset_mode_with_no_dsn_writes_the_report_file_when_requested(monkeypatch, tmp_path):
@@ -480,3 +604,188 @@ def test_looks_like_our_postmaster(tmp_path):
         proc.kill()
         proc.wait(timeout=10)
     assert dsa._looks_like_our_postmaster(proc.pid, marker) is False  # dead now
+
+
+# ---------------------------------------------------------------------------
+# suite_lock() / gate_running() (work order §3.1 (a), WP-2). Every test below
+# passes an explicit tmp_path `base` (or calls `_real_acquire_suite_lock`
+# directly, bypassing the autouse fixture's no-op stub) -- never the real,
+# per-uid base dir this machine's other concurrent sessions share.
+# ---------------------------------------------------------------------------
+
+def test_suite_lock_exclusive_excludes_shared(tmp_path):
+    """Uses `_real_acquire_suite_lock` directly on BOTH sides -- not
+    `dsa.suite_lock`, whose internal call to `_acquire_suite_lock` is a bare
+    module-global lookup the autouse fixture above has stubbed to a no-op
+    for every test (necessarily, to keep `ensure_for_pytest()`'s owned-mode
+    path from touching a real lock); going through the wrapper here would
+    silently exercise the fake, not the real locking logic under test."""
+    base = tmp_path / "base"
+    base.mkdir()
+    handle = _real_acquire_suite_lock(exclusive=True, wait=5.0, base=base)
+    try:
+        with pytest.raises(dsa.TestPgError, match="timed out"):
+            _real_acquire_suite_lock(exclusive=False, wait=0.3, base=base)
+    finally:
+        handle.release()
+
+
+def test_suite_lock_shared_allows_concurrent_shared(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    h1 = _real_acquire_suite_lock(exclusive=False, wait=1.0, base=base)
+    try:
+        h2 = _real_acquire_suite_lock(exclusive=False, wait=1.0, base=base)
+        h2.release()
+    finally:
+        h1.release()
+
+
+def test_suite_lock_context_manager_acquires_and_releases(tmp_path, monkeypatch):
+    """Coverage for the `suite_lock()` context-manager wrapper itself
+    (rather than `_acquire_suite_lock` directly): restores the real
+    `_acquire_suite_lock` for this one test only, since `dsa.suite_lock`
+    calls it by its own bare module-global name."""
+    monkeypatch.setattr(dsa, "_acquire_suite_lock", _real_acquire_suite_lock)
+    base = tmp_path / "base"
+    base.mkdir()
+    intent = dsa._intent_path(base)
+    with dsa.suite_lock(True, 5.0, base=base):
+        assert intent.exists()
+    assert not intent.exists()
+
+
+def test_suite_lock_second_exclusive_is_refused_immediately(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    handle = _real_acquire_suite_lock(exclusive=True, wait=5.0, base=base)
+    try:
+        with pytest.raises(dsa.TestPgError, match="gate intent already present"):
+            _real_acquire_suite_lock(exclusive=True, wait=0.3, base=base)
+    finally:
+        handle.release()
+
+
+def test_shared_lock_waits_for_gate_intent(tmp_path):
+    """WP-2 §3.1 table row 5: a shared acquisition waits for `gate.intent`
+    to stop being LIVE before even trying to flock (gate-starvation
+    prevention) -- a genuinely live intent (review M-1: its own flock
+    actually held, not merely the file existing; a bare `write_text` alone
+    is now correctly treated as stale and would proceed immediately, see
+    the dedicated stale-intent tests below).
+
+    mutation (`dsa_testpg.py`): remove the `while _intent_is_live(intent):
+    ...` wait -- this test goes red because a shared acquisition would then
+    succeed immediately despite a live intent.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    holder = _real_acquire_suite_lock(exclusive=True, wait=1.0, base=base)
+    try:
+        with pytest.raises(dsa.TestPgError, match="gate intent"):
+            _real_acquire_suite_lock(exclusive=False, wait=0.3, base=base)
+    finally:
+        holder.release()
+
+
+def test_shared_lock_proceeds_once_gate_intent_clears(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    holder = _real_acquire_suite_lock(exclusive=True, wait=1.0, base=base)
+
+    def release_soon():
+        time.sleep(0.2)
+        holder.release()
+
+    threading.Thread(target=release_soon, daemon=True).start()
+    handle = _real_acquire_suite_lock(exclusive=False, wait=5.0, base=base)
+    handle.release()
+
+
+def test_stale_gate_intent_does_not_block_a_shared_acquisition(tmp_path):
+    """review M-1: a stale `gate.intent` (present, but no live flock -- a
+    crashed gate's own leftover) must not make a shared acquirer wait at
+    all, and is cleaned up as a side effect.
+
+    mutation (`dsa_testpg.py`): make `_intent_is_live()` return True
+    whenever the file merely exists (drop the flock check) -- this test
+    goes red because the acquisition would then time out instead of
+    succeeding immediately."""
+    base = tmp_path / "base"
+    base.mkdir()
+    intent = dsa._intent_path(base)
+    intent.write_text("")
+    handle = _real_acquire_suite_lock(exclusive=False, wait=0.5, base=base)
+    handle.release()
+    assert not intent.exists()
+
+
+def test_stale_gate_intent_does_not_refuse_a_new_gate(tmp_path):
+    """review M-1: a stale `gate.intent` must not refuse a NEW gate's own
+    exclusive acquisition either -- it is silently reclaimed (stamped with
+    the new gate's own pid) rather than treated as "another gate running"."""
+    base = tmp_path / "base"
+    base.mkdir()
+    intent = dsa._intent_path(base)
+    intent.write_text("")
+    handle = _real_acquire_suite_lock(exclusive=True, wait=0.5, base=base)
+    try:
+        assert intent.read_text() == str(os.getpid())
+    finally:
+        handle.release()
+    assert not intent.exists()
+
+
+def test_gate_running_detects_a_live_intent_and_a_live_lock(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    assert dsa.gate_running(base=base) == (False, "")
+
+    # review M-1: a LIVE intent (its own flock actually held) -- not merely a file that exists.
+    handle = _real_acquire_suite_lock(exclusive=True, wait=1.0, base=base)
+    try:
+        running, reason = dsa.gate_running(base=base)
+        assert running and "gate intent" in reason
+    finally:
+        handle.release()
+    assert dsa.gate_running(base=base) == (False, "")
+
+    lock_path = dsa._suite_lock_path(base)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        running, reason = dsa.gate_running(base=base)
+        assert running and "suite lock held" in reason
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert dsa.gate_running(base=base) == (False, "")
+
+
+def test_gate_running_reports_a_stale_intent_as_not_running_and_cleans_it_up(tmp_path):
+    """review M-1: `gate_running()` must VERIFY liveness (a real flock on
+    the intent file), never merely infer it from the file's existence -- a
+    stale `gate.intent` (a `kill -9`ed or crashed gate's own leftover, no
+    live flock) must report `(False, "")`, not wedge `handover_ready.py`
+    into NOT READY forever, and is removed here as a side effect.
+
+    mutation (`dsa_testpg.py`): make `gate_running()` treat mere existence
+    of `gate.intent` as live again (drop the `_intent_is_live()` call) --
+    this test goes red because a stale file would then report `True`."""
+    base = tmp_path / "base"
+    base.mkdir()
+    intent = dsa._intent_path(base)
+    intent.write_text("")
+    assert dsa.gate_running(base=base) == (False, "")
+    assert not intent.exists()
+
+
+def test_gate_running_never_blocks_or_leaves_the_lock_held(tmp_path):
+    """gate_running() is read-only: a caller must be able to acquire the
+    exclusive lock immediately afterward, proving the probe released
+    whatever it (possibly) took."""
+    base = tmp_path / "base"
+    base.mkdir()
+    assert dsa.gate_running(base=base) == (False, "")
+    handle = _real_acquire_suite_lock(exclusive=True, wait=0.3, base=base)
+    handle.release()

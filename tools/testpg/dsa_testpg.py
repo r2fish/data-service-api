@@ -24,6 +24,9 @@ Three ways to get a cluster:
   - `start()` / `cluster()` (context manager) -- direct Python API for a
     non-pytest caller (`tools/dev/gate.py`, `tools/perf_baseline.py`, the
     integration tests in `conformance-tests/test_testpg_cluster.py`).
+    `tools/dev/gate.py` and `tools/perf_baseline.py` also take `suite_lock()`
+    exclusively around their own run (work order §3.1 (a)); every owned-mode
+    `ensure_for_pytest()` run takes it shared for its own whole lifetime.
   - `python tools/testpg/dsa_testpg.py run -- <command...>` -- starts a
     cluster, execs `<command...>` with its environment, stops the cluster,
     and returns the command's exit code.
@@ -91,6 +94,31 @@ ENV_REPORT = "DSA_TEST_PG_REPORT"
 R2DB_DSN = "R2DB_TEST_ADMIN_DSN"
 MITATEDB_DSN = "MITATEDB_TEST_ADMIN_DSN"
 _DSN_NAMES = (R2DB_DSN, MITATEDB_DSN)
+
+# Work order §3.1 (a) (WP-2, docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md,
+# design docs/design/TEST_POSTGRES_ISOLATION_V0_1.md v0.2 D-5/D-6, decision Q-2 (a)):
+# the exclusive/shared suite lock that replaces the old `ps`-based "other pytest"
+# poll and the gate-hold flag file. `SUITE_LOCK_NAME`/`GATE_INTENT_NAME` live
+# directly under the base dir (never inside a `run-*` run directory), so
+# `sweep()`'s own `run-*`/`.starting-*` globs never touch them.
+SUITE_LOCK_NAME = "suite.lock"
+GATE_INTENT_NAME = "gate.intent"
+DEFAULT_LOCK_WAIT = 1800.0  # tools/dev's own --wait default budget elsewhere; the
+# fallback used here when a caller does not say how long to wait
+_LOCK_POLL = 0.2  # suite lock acquisition's own retry interval
+ENV_LOCK_WAIT = "DSA_TEST_PG_LOCK_WAIT"  # pt.py/mutate.py forward their own --wait
+# through this env var to the pytest subprocess's owned-mode lock acquisition
+# below (work order §3.1 (c): "--wait は「gate の排他ロックが解けるまでの待ち」に意味を変える")
+ENV_LOCK_HELD = "DSA_TEST_PG_LOCK_HELD"  # review B-1 (WP-2): set by gate.py (and any other
+# exclusive holder that spawns an owned-mode NESTED pytest -- e.g. the root suite's own
+# conformance-tests/test_testpg_cluster.py, which launches a genuine owned-mode controller
+# as a subprocess) on the child's env. An ancestor process already holds the suite lock for
+# this whole process tree, so the owned branch below must not try to acquire it again --
+# doing so would DEADLOCK, not merely double-lock: the ancestor is itself blocked inside the
+# very suite run this child is part of, so it can never release the lock for the child to
+# wait out. Never stripped by that test's own `_clean_dsa_env()` (a fixed name list plus
+# `PYTEST_*`, `conformance-tests/test_testpg_cluster.py:44-47`) -- verified by reading, not
+# something this WP is allowed to edit (conformance-tests/ is WP-2's own "触らないファイル").
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +196,225 @@ def cluster():
         yield c
     finally:
         c.stop()
+
+
+# ---------------------------------------------------------------------------
+# suite_lock(): exclusive (gate.py / perf_baseline.py) vs shared (every other
+# owned-mode pytest run) mutual exclusion (work order §3.1 (a)). This is a
+# real flock(2), not a re-checked file: once a caller decides to acquire, the
+# flock call itself is what serializes concurrent acquirers, so there is no
+# gap between "checked" and "got it" the way there would be with a plain
+# file-existence check. `gate.intent` exists only to stop a steady stream of
+# NEW shared acquisitions from starving a pending exclusive one (flock is not
+# guaranteed fair): a shared acquirer waits for it to stop being LIVE before
+# even trying to flock `suite.lock` -- liveness is itself verified by a
+# flock ON the intent file (review M-1, `_intent_is_live()` below), never
+# merely inferred from the file's existence, so a gate that died without
+# running its own cleanup (`kill -9`, a crash) cannot wedge every future
+# acquirer forever.
+# ---------------------------------------------------------------------------
+
+def _intent_path(base: Path) -> Path:
+    return base / GATE_INTENT_NAME
+
+
+def _suite_lock_path(base: Path) -> Path:
+    return base / SUITE_LOCK_NAME
+
+
+def _intent_is_live(intent: Path) -> bool:
+    """True only if a REAL, live gate holds `gate.intent`'s own flock
+    (review M-1): liveness must be VERIFIED, never merely inferred from the
+    file's existence -- the exclusive branch below used to create it with
+    `O_EXCL` and remove it only from `release()`, so a gate killed with
+    `kill -9` (or a machine crash mid-gate) left the file behind forever;
+    every subsequent shared acquirer then spun for its own full `wait`
+    budget, every new gate was refused immediately, and `gate_running()`
+    reported READY-blocking forever -- the whole machine wedged.
+
+    A file whose flock CAN be taken (`LOCK_EX|LOCK_NB` succeeds) is stale:
+    the kernel already dropped whatever lock a dead process held, exactly
+    as for `owner.lock`/`sweep()` (`_looks_like_our_postmaster`'s own
+    reasoning). This function reclaims that flock just long enough to
+    confirm staleness, then releases it and removes the file -- so callers
+    (a shared waiter, `gate_running()`, `sweep()`) never have to special-
+    case "stale" themselves; they simply see "not live" and proceed."""
+    try:
+        fd = os.open(intent, os.O_RDWR)
+    except OSError:
+        return False  # already gone -- never existed, or another racer's own cleanup
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True  # a live gate holds it
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        intent.unlink(missing_ok=True)
+        return False
+    finally:
+        os.close(fd)
+
+
+class _SuiteLockHandle:
+    """What `_acquire_suite_lock()` returns. `release()` is idempotent so it
+    is safe both from a `with suite_lock(...):` block's own `finally` and
+    from `stop_owned()` (owned-mode `ensure_for_pytest()` holds one of these
+    across the whole pytest run, past any single `with` block)."""
+
+    def __init__(self, fd: int, intent_fd: int | None, intent: Path | None) -> None:
+        self._fd = fd
+        self._intent_fd = intent_fd
+        self._intent = intent
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            if self._intent_fd is not None:
+                try:
+                    fcntl.flock(self._intent_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(self._intent_fd)
+                    if self._intent is not None:
+                        self._intent.unlink(missing_ok=True)
+
+
+def _acquire_suite_lock(exclusive: bool, wait: float, base: Path | None = None) -> _SuiteLockHandle:
+    """`wait` is one shared budget covering both phases below (never two
+    separate `wait`-length waits stacked). Exclusive: claims `gate.intent`'s
+    OWN flock first -- `TestPgError` immediately (no waiting) if a LIVE gate
+    already holds it (work order §3.1 (b): "gate は... 排他ロックを取る"),
+    reclaiming it silently if it is merely a stale leftover (review M-1) --
+    then flocks `LOCK_EX` on `suite.lock`. Shared: waits for the intent to
+    stop being LIVE (`_intent_is_live()`, not mere existence), then flocks
+    `LOCK_SH`. Either flock acquisition polls `LOCK_NB` at `_LOCK_POLL`
+    (`fcntl.flock` has no native timeout) and raises `TestPgError` past the
+    deadline, cleaning up whatever this call itself created (the intent
+    file/flock, the open fd) before re-raising -- never leaves a stray
+    `gate.intent` or leaks an fd on a timeout."""
+    base = _base_dir() if base is None else base
+    deadline = time.monotonic() + wait
+    intent = _intent_path(base)
+    intent_fd = None
+    if exclusive:
+        intent_fd = os.open(intent, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(intent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(intent_fd)
+            raise TestPgError(f"gate intent already present (another gate running?): {intent}")
+        # Own the flock now (freshly created, or reclaimed from a stale leftover either way) --
+        # record OUR pid so a future stale-check has something meaningful to have overwritten.
+        os.ftruncate(intent_fd, 0)
+        os.write(intent_fd, str(os.getpid()).encode("ascii"))
+    else:
+        while _intent_is_live(intent):
+            if time.monotonic() >= deadline:
+                raise TestPgError(f"timed out after {wait}s waiting for gate intent to clear: {intent}")
+            time.sleep(_LOCK_POLL)
+    lock_path = _suite_lock_path(base)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    want = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, want | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TestPgError(
+                        f"timed out after {wait}s waiting for the "
+                        f"{'exclusive' if exclusive else 'shared'} suite lock: {lock_path}"
+                    )
+                time.sleep(_LOCK_POLL)
+    except BaseException:
+        os.close(fd)
+        if intent_fd is not None:
+            fcntl.flock(intent_fd, fcntl.LOCK_UN)
+            os.close(intent_fd)
+            intent.unlink(missing_ok=True)
+        raise
+    return _SuiteLockHandle(fd, intent_fd, intent if intent_fd is not None else None)
+
+
+@contextmanager
+def suite_lock(exclusive: bool, wait: float, base: Path | None = None):
+    """`with suite_lock(True, 1800):` -- gate.py / perf_baseline.py's own
+    single-run exclusivity. Every other pytest run's own shared hold is
+    taken directly via `_acquire_suite_lock()` by `ensure_for_pytest()`
+    instead (see its own call site below), not through this context
+    manager, because it must outlive any single `with` block: it is held
+    for the whole pytest run and released by `stop_owned()`."""
+    handle = _acquire_suite_lock(exclusive, wait, base)
+    try:
+        yield
+    finally:
+        handle.release()
+
+
+def _resolve_base_dir_readonly(uid: int | None = None, tmp_root: Path | None = None) -> Path | None:
+    """Same path formula as `_base_dir()`, but NEVER creates anything
+    (review MINOR-4): `gate_running()` is documented read-only, and
+    `_base_dir()` itself always `mkdir`s (side effect a probe must not
+    have). Returns None when the base dir does not exist yet (or fails
+    `_base_dir()`'s own symlink/foreign-owner checks -- a probe reports
+    "not running" rather than raising)."""
+    uid = os.getuid() if uid is None else uid
+    tmp_root = tmp_root if tmp_root is not None else Path(tempfile.gettempdir())
+    base = tmp_root / f"dsa-testpg-{uid}"
+    try:
+        if not base.is_dir():
+            return None
+        st = base.lstat()
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != uid:
+            return None
+    except OSError:
+        return None
+    return base
+
+
+def gate_running(base: Path | None = None) -> tuple[bool, str]:
+    """Non-blocking, read-only probe for `tools/dev/handover_ready.py` (work
+    order §3.1 (c): replaces its old "no pytest process" + "gate-hold flag
+    absent" pair with this single check). True when `gate.intent` is LIVE
+    (review M-1: verified via `_intent_is_live()`, not mere existence -- a
+    stale intent from a crashed gate is cleaned up as a side effect and
+    correctly reported as "not running"), or when the exclusive lock cannot
+    be taken without blocking -- which is also true whenever ANY owned-mode
+    pytest run currently holds the shared lock, so this one check subsumes
+    both of the checks it replaces. Never blocks, never waits, and (review
+    MINOR-4) never CREATES the base dir or the lock file when neither
+    already exists: a failed `LOCK_NB` attempt returns immediately, and a
+    successful one is released immediately, so this probe itself can never
+    delay or starve a real waiter, or materialize state that was never
+    there."""
+    if base is None:
+        base = _resolve_base_dir_readonly()
+        if base is None:
+            return False, ""
+    elif not base.is_dir():
+        return False, ""
+    intent = _intent_path(base)
+    if intent.exists() and _intent_is_live(intent):
+        return True, f"gate intent present: {intent}"
+    lock_path = _suite_lock_path(base)
+    if not lock_path.exists():
+        return False, ""
+    fd = os.open(lock_path, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True, f"suite lock held: {lock_path}"
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False, ""
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +590,12 @@ def sweep(base: Path | None = None) -> None:
     B-2: the previous re-derivation bypassed it, including for the public
     `sweep` CLI subcommand, and `rmtree` is exactly the operation that
     guard exists to gate). A caller that already validated a `base` (or is
-    a test exercising a `tmp_path`) may still pass one explicitly."""
+    a test exercising a `tmp_path`) may still pass one explicitly.
+
+    Also cleans up a stale `gate.intent` (review M-1: a gate `kill -9`ed or
+    crashed leaves that file behind, and only its own `release()` used to
+    remove it -- `_intent_is_live()` verifies liveness via flock and
+    unlinks the file itself when it is stale; a live one is left alone)."""
     base = _base_dir() if base is None else base
     if not base.is_dir():
         return
@@ -351,6 +603,9 @@ def sweep(base: Path | None = None) -> None:
         _sweep_one(run_dir)
     for staging_dir in sorted(base.glob(f"{STAGING_PREFIX}*")):
         _sweep_stale_staging(staging_dir)
+    intent = _intent_path(base)
+    if intent.exists():
+        _intent_is_live(intent)  # review M-1: side effect only -- unlinks it if stale, leaves a live one alone
 
 
 def _sweep_stale_staging(staging_dir: Path) -> None:
@@ -628,6 +883,7 @@ _MODE_DOC = """Decision table for DSA_TEST_PG (work order §2.1):
 """
 
 _owned_cluster: Cluster | None = None  # non-None only in the process that itself started one
+_owned_lock: "_SuiteLockHandle | None" = None  # the shared suite lock that process holds for the run's whole life
 
 
 def _is_xdist_worker() -> bool:
@@ -650,7 +906,7 @@ def _is_xdist_worker() -> bool:
 def ensure_for_pytest() -> None:
     """Idempotent. Called at import time by each of the three `conftest.py`
     files (design D-1). See `_MODE_DOC` for the full decision table."""
-    global _owned_cluster
+    global _owned_cluster, _owned_lock
     if _owned_cluster is not None:
         return  # this process already started one; the root+peer conftest both import this module
 
@@ -658,6 +914,12 @@ def ensure_for_pytest() -> None:
 
     if mode == "external":
         _require_env(_DSN_NAMES, "DSA_TEST_PG=external")
+        # Work order §3.1 (a): never take the shared lock here. This is the
+        # mode gate.py itself launches its own child pytest with, WHILE
+        # already holding the exclusive lock -- flock(2)'s per-open-file-
+        # description semantics mean a second, same-process acquisition
+        # attempt on the same lock file (even just LOCK_SH) would block
+        # forever, deadlocking gate against itself.
         return
 
     if mode is not None and mode.startswith("owned:"):
@@ -678,8 +940,37 @@ def ensure_for_pytest() -> None:
                 "whether to use that DSN or start a throwaway cluster; set DSA_TEST_PG=external "
                 "to use it, or unset it to start a throwaway cluster"
             )
-        c = start()
+        # Work order §3.1 (a): owned mode is the ONLY branch that takes the
+        # shared suite lock -- held for the run's whole life, released by
+        # stop_owned() below. Acquired BEFORE start() so a process that
+        # would have to wait for a running gate never spins up (and then
+        # tears down) a cluster it could not actually use meanwhile.
+        #
+        # review B-1: unless an ANCESTOR process already holds the suite
+        # lock for this whole process tree (DSA_TEST_PG_LOCK_HELD -- set by
+        # gate.py on the env of the pytest child it launches with
+        # DSA_TEST_PG=external, and inherited from there by any owned-mode
+        # pytest THAT process spawns in turn, e.g. conformance-tests/
+        # test_testpg_cluster.py's own nested-controller tests). Acquiring
+        # again here would not merely double-lock: the ancestor is itself
+        # blocked inside the very suite run this process is part of, so it
+        # can never release the lock for this wait to succeed -- a genuine
+        # deadlock, not a slow path.
+        lock = None
+        if not os.environ.get(ENV_LOCK_HELD):
+            try:
+                wait = float(os.environ.get(ENV_LOCK_WAIT, DEFAULT_LOCK_WAIT))
+            except ValueError as exc:
+                raise TestPgError(f"{ENV_LOCK_WAIT}={os.environ[ENV_LOCK_WAIT]!r} is not a number") from exc
+            lock = _acquire_suite_lock(exclusive=False, wait=wait)
+        try:
+            c = start()
+        except BaseException:
+            if lock is not None:
+                lock.release()
+            raise
         _owned_cluster = c
+        _owned_lock = lock
         os.environ.update(c.env())
         os.environ.pop("PGPASSWORD", None)  # never let a stray password override PGPASSFILE
         os.environ[ENV_MODE] = f"owned:{c.run_dir.name}"
@@ -701,12 +992,18 @@ def _require_env(names, context: str) -> None:
 def stop_owned() -> None:
     """Stop the cluster THIS process started via `ensure_for_pytest()`, if
     any (idempotent -- safe to call from both `pytest_unconfigure` and the
-    `atexit` safety net)."""
-    global _owned_cluster
+    `atexit` safety net), and release the shared suite lock that same call
+    took (work order §3.1 (a))."""
+    global _owned_cluster, _owned_lock
     if _owned_cluster is None:
         return
     c, _owned_cluster = _owned_cluster, None
-    c.stop()
+    lock, _owned_lock = _owned_lock, None
+    try:
+        c.stop()
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 # ---------------------------------------------------------------------------

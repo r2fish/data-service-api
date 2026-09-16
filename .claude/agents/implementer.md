@@ -12,7 +12,7 @@ tools: Read, Grep, Glob, Bash, Write, Edit
 - 担当 worktree(`.claude/worktrees/<name>`)の絶対パスと branch 名
 - 作業指示書のパス(`docs/work-orders/WORK_ORDER_*.md`)と WP 番号、正本設計文書(`docs/design/`)のパスと参照節
 - タスク(WP の内容・完了条件・完了条件ごとの変異)
-- 道具の引数: `tools/dev/pt.py` の対象(peer 別 suite と担当ファイルの conformance)、`tools/dev/mutate.py` の spec の置き場、gate-hold flag の指定(`--hold`)
+- 道具の引数: `tools/dev/pt.py` の対象(peer 別 suite と担当ファイルの conformance)、`tools/dev/mutate.py` の spec の置き場(`--hold` は R-44 WP-2 で廃止 -- 排他は `tools/testpg/dsa_testpg.py` の suite lock が担い、`pt.py`/`mutate.py` はそれぞれ独自の `--wait` を持つ)
 - scratchpad の位置
 
 欠けていれば推測で埋めず、作業を始める前に報告して止まる。

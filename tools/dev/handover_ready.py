@@ -8,16 +8,21 @@ watches for, which stops its reminders).
 
 Usage:
     tools/dev/handover_ready.py [-C DIR] --no-running-agents [--worktree PATH ...]
-                                [--hold PATH|-] [--handover PATH]
+                                [--handover PATH]
 
     --no-running-agents  the chat states that no subagent or background task of its own is
                          still running (not machine-checkable; required, so it is said explicitly)
     --worktree PATH      a worktree this chat worked in: must be clean with its HEAD in main
     --handover PATH      handover document (repository-relative); must exist in main's tree
 
-Checks: the statement above; no pytest process; the gate-hold flag absent; the
-main checkout on main and clean; no unfinished mutation journal in any worktree;
-each --worktree clean and merged; the handover document committed on main.
+Checks: the statement above; gate not running (WP-2, docs/work-orders/
+WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (c): replaces the former "no
+pytest process" + "gate-hold flag absent" pair with `dsa_testpg.gate_running()`
+-- true when `gate.intent` is present or the exclusive suite lock cannot be
+taken without blocking, which also covers "some pytest run is still active"
+since every owned-mode run holds that lock's shared side); the main checkout
+on main and clean; no unfinished mutation journal in any worktree; each
+--worktree clean and merged; the handover document committed on main.
 Output: one line per check, then READY or NOT READY; with --handover and READY,
 the continuation prompt between BEGIN/END lines.
 Exit: 0 READY; 1 NOT READY; 78 precondition error.
@@ -31,6 +36,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _devlib as dl  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "testpg"))
+import dsa_testpg  # noqa: E402
 
 HANDOVER_MARKER = "HANDOVER-CONTINUATION"  # same literal as turn_budget_hook.py
 
@@ -52,17 +60,13 @@ def continuation_prompt(main_root: Path, handover: str, sha: str) -> str:
     ])
 
 
-def check(cwd: Path, running_agents_denied: bool, own_worktrees: list[str], flag: Path | None,
+def check(cwd: Path, running_agents_denied: bool, own_worktrees: list[str],
           handover: str | None, out=sys.stdout) -> int:
     main_root = dl.main_checkout(cwd)
     results: list[tuple[bool, str]] = []
     results.append((running_agents_denied, "no running subagents / background tasks (stated by the chat)"))
-    try:
-        others = dl.current_other_pytest()
-        results.append((not others, "no pytest process" + (f" (pids {[p for p, _ in others]})" if others else "")))
-    except dl.DevError as exc:
-        results.append((False, f"pytest check failed: {exc}"))
-    results.append((flag is None or not flag.exists(), f"gate-hold flag absent{'' if flag is None else f' ({flag})'}"))
+    running, reason = dsa_testpg.gate_running()
+    results.append((not running, "gate not running (no intent, exclusive lock free)" + (f" -- {reason}" if running else "")))
     branch = dl.git(main_root, "branch", "--show-current").strip()
     dirty = dl.git(main_root, "status", "--porcelain", "--untracked-files=all").strip()
     results.append((branch == "main" and not dirty, f"main checkout on main and clean (branch={branch}, dirty={len(dirty.splitlines())})"))
@@ -100,11 +104,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-C", dest="cwd", default=".")
     parser.add_argument("--no-running-agents", action="store_true")
     parser.add_argument("--worktree", action="append", default=[])
-    parser.add_argument("--hold")
     parser.add_argument("--handover")
     ns = parser.parse_args(argv)
     try:
-        return check(Path(ns.cwd).resolve(), ns.no_running_agents, ns.worktree, dl.hold_flag(ns.hold), ns.handover)
+        return check(Path(ns.cwd).resolve(), ns.no_running_agents, ns.worktree, ns.handover)
     except dl.DevError as exc:
         print(f"handover_ready: ERROR -- {exc}")
         return dl.ERROR

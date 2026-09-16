@@ -105,8 +105,8 @@ scratchpad: {scratchpad}
 タスク: {WP の内容・完了条件・完了条件ごとの変異}
 テスト: tools/dev/pt.py -C .claude/worktrees/{name} -- {peer 別 suite と担当 conformance のパス} -q
 変異: tools/dev/mutate.py "{scratchpad}/{name}-mutations.json" -C .claude/worktrees/{name}
-gate-hold flag: {--hold のパス | 「--hold -」（監督ゲート無し）}
 注意: suite 全体を回さない。commit / merge / gate.py / finalize.py は監督が行う。下請け Agent を使わない。
+（R-44 WP-2 で `--hold` は廃止。排他は `tools/testpg/dsa_testpg.py` の suite lock が担い、`pt.py`/`mutate.py` はそれぞれ独自の `--wait` を持つ。）
 ```
 
 ## 3. 起草 (`drafter`)

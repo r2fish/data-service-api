@@ -3,6 +3,15 @@
 tools/dev/ turns procedures that docs/work-orders/OPERATING_CONDITIONS.md
 makes agents repeat by hand into single commands, so one tool call replaces
 several (see tools/dev/README.md). Standard library only.
+
+WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (c)):
+`hold_flag()` / `blockers()` / `wait_clear()` / `other_pytest()` /
+`current_other_pytest()` / `parse_ps()` and the gate-hold flag file they
+served are removed. PostgreSQL exclusivity is now a real flock
+(`tools/testpg/dsa_testpg.py`'s own `suite_lock()`), taken by gate.py /
+perf_baseline.py directly and by every owned-mode pytest run via its own
+conftest.py -- never re-derived here by scanning `ps`. Only the mutation-
+journal check survives, renamed `journal_blocker()`.
 """
 from __future__ import annotations
 
@@ -14,12 +23,12 @@ import tempfile
 import time
 from pathlib import Path
 
-HOLD_FLAG_NAME = "gate-hold.flag"
 JOURNAL_NAME = "dev-mutate-journal.json"
 
 # Exit codes kept clear of pytest's own 0-5.
 RESTORE_FAILED = 70  # a mutated file could not be verified as restored
-REFUSED = 75         # refused to start: hold flag, other pytest, unfinished mutation journal
+REFUSED = 75         # refused to start: unfinished mutation journal, or (gate.py/perf_baseline.py)
+                     # the exclusive suite lock timed out (dsa_testpg.TestPgError)
 PARTIAL = 76         # finalize: committed, but not (fully) merged
 ERROR = 78           # precondition / usage error
 
@@ -78,101 +87,68 @@ def stamp() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Gate hold flag and other pytest processes (OPERATING_CONDITIONS 1.3-20, 2-18)
+# Mutation journal (OPERATING_CONDITIONS 1.4-28..31)
 # ---------------------------------------------------------------------------
 
-def hold_flag(explicit: str | None) -> Path | None:
-    """Resolve the supervisor's gate-hold flag.
-
-    Order: --hold PATH, $GATE_HOLD_FLAG, $SP/gate-hold.flag. `--hold -` states
-    that no supervisor gate exists in this session and returns None. With no
-    source at all this raises: an unknown flag location must not silently
-    count as "no hold" (OPERATING_CONDITIONS 1.3-26)."""
-    if explicit == "-":
-        return None
-    if explicit:
-        return Path(explicit)
-    env = os.environ.get("GATE_HOLD_FLAG")
-    if env:
-        return Path(env)
-    sp = os.environ.get("SP")
-    if sp:
-        return Path(sp) / HOLD_FLAG_NAME
-    raise DevError("gate-hold flag location unknown: set SP or GATE_HOLD_FLAG, or pass --hold PATH (or --hold - when no supervisor gate exists)")
+def journal_blocker(root: Path) -> str | None:
+    """The one blocker `blockers()` used to check besides the gate-hold flag
+    and the `ps` poll (WP-2 §3.1 (c) keeps only this part): an unfinished
+    `mutate.py` run left a journal in this worktree's git dir. None when
+    clear."""
+    path = journal_path(root)
+    if path.exists():
+        return f"unfinished mutation run: {path} (run tools/dev/mutate.py --recover)"
+    return None
 
 
-_PYTEST_ARGS_RE = re.compile(r"(?:^|\s)-m\s+pytest(?:\s|$)|(?:^|\s|/)(?:py\.test|pytest)(?:\s|$)")
+# ---------------------------------------------------------------------------
+# Suite-lock timeout detection (review M-3, WP-2 §3.1 (a)/(c)): pt.py and
+# mutate.py both launch a pytest subprocess whose OWN owned-mode conftest.py
+# may block waiting for gate.py's exclusive suite lock, then fail at
+# collection time with `dsa_testpg.TestPgError` when that wait times out --
+# an ordinary pytest usage/collection error (exit 2-4) indistinguishable
+# from a real breakage by exit code alone. Detected here by the launcher's
+# own, fixed error text (never a DSN or password -- `tools/testpg/
+# dsa_testpg.py`'s own module docstring) rather than re-deriving the
+# condition from `dsa_testpg.gate_running()`, which only reports "right
+# now", not "at the moment this subprocess's own conftest.py actually
+# tried" -- a real race window a pre-check cannot close.
+#
+# The marker text alone is NOT enough (found the hard way, running this
+# tool's own WP-2 mutation spec against tools/tests/test_testpg.py: a
+# mutation of `_acquire_suite_lock` legitimately made a unit test's OWN
+# `_real_acquire_suite_lock(...)` call raise a real `TestPgError` whose
+# message happens to contain "waiting for the shared suite lock" -- that is
+# the mutation's own INTENDED, scored "red", not an infrastructure timeout,
+# and pytest reported it as an ordinary test FAILURE with a normal tally
+# line). So this also requires that NOTHING was actually collected/run
+# (work order review M-3's own wording): either no parseable tally line at
+# all (pytest aborted before it could even report one -- the real shape of
+# a conftest.py import-time TestPgError), or a tally whose `passed`/`failed`
+# are both zero (only `errors`/`no tests ran`). A run that did complete and
+# report real passed/failed counts is never treated as a lock timeout, no
+# matter what text appears inside an assertion message.
+# ---------------------------------------------------------------------------
+
+_LOCK_TIMEOUT_MARKERS = (
+    "waiting for gate intent to clear",
+    "waiting for the exclusive suite lock",
+    "waiting for the shared suite lock",
+)
 
 
-def parse_ps(text: str) -> list[tuple[int, int, str]]:
-    """Rows of `ps -eo pid=,ppid=,args=` as (pid, ppid, args)."""
-    rows = []
-    for line in text.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-            rows.append((int(parts[0]), int(parts[1]), parts[2] if len(parts) == 3 else ""))
-    return rows
-
-
-def other_pytest(ps_text: str, self_pid: int) -> list[tuple[int, str]]:
-    """pytest processes outside `self_pid`'s own chain (its ancestors and descendants).
-
-    Only processes whose executable is python or pytest count, so a waiting
-    shell or `grep pytest` never matches itself (OPERATING_CONDITIONS 2-18).
-    The executable is matched on its basename, case-insensitively, so the
-    truncated/capitalised `comm` of this machine does not matter."""
-    rows = parse_ps(ps_text)
-    parent = {pid: ppid for pid, ppid, _ in rows}
-    skip = {self_pid}
-    pid = self_pid
-    while pid in parent and parent[pid] not in skip and parent[pid] > 0:
-        pid = parent[pid]
-        skip.add(pid)
-    frontier = [self_pid]
-    while frontier:
-        children = [p for p, pp, _ in rows if pp in frontier and p not in skip]
-        skip.update(children)
-        frontier = children
-    hits = []
-    for pid, _, args in rows:
-        if pid in skip or not args:
-            continue
-        exe = os.path.basename(args.split(None, 1)[0]).lower()
-        if ("python" in exe or exe in ("pytest", "py.test")) and _PYTEST_ARGS_RE.search(args):
-            hits.append((pid, args))
-    return hits
-
-
-def current_other_pytest() -> list[tuple[int, str]]:
-    try:
-        proc = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, check=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise DevError(f"cannot list processes: {exc}") from exc
-    text = proc.stdout.decode("utf-8", errors="replace")
-    if not any(pid == 1 for pid, _, _ in parse_ps(text)):
-        raise DevError("process list looks incomplete (no PID 1); cannot check for other pytest")
-    return other_pytest(text, os.getpid())
-
-
-def blockers(flag: Path | None, root: Path | None = None) -> list[str]:
-    reasons = []
-    if flag is not None and flag.exists():
-        reasons.append(f"gate hold flag present: {flag}")
-    if root is not None and journal_path(root).exists():
-        reasons.append(f"unfinished mutation run: {journal_path(root)} (run tools/dev/mutate.py --recover)")
-    for pid, args in current_other_pytest():
-        reasons.append(f"other pytest running: pid={pid} {args[:120]}")
-    return reasons
-
-
-def wait_clear(flag: Path | None, wait_seconds: float, root: Path | None = None, poll: float = 5.0) -> list[str]:
-    """Blockers left after waiting up to `wait_seconds` (empty = clear)."""
-    deadline = time.monotonic() + wait_seconds
-    while True:
-        reasons = blockers(flag, root)
-        if not reasons or time.monotonic() >= deadline:
-            return reasons
-        time.sleep(poll)
+def lock_timeout_detected(output: str, tally: str | None) -> bool:
+    """True when `output` (a pytest subprocess's combined stdout+stderr)
+    contains `dsa_testpg.TestPgError`'s own suite-lock-timeout message AND
+    `tally` (its own `tally_line(output)`) shows nothing was actually
+    collected/run -- see this section's own module comment for why both
+    conditions are required."""
+    if not any(marker in output for marker in _LOCK_TIMEOUT_MARKERS):
+        return False
+    counts = parse_counts(tally)
+    if counts is None:
+        return True
+    return not counts.get("passed") and not counts.get("failed")
 
 
 # ---------------------------------------------------------------------------
