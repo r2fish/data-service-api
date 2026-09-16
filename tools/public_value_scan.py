@@ -224,10 +224,12 @@ def r1_domain_allowed(domain: str, placeholder_removed: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 # R2_url -- scheme URL
 # Deny (always flag): *.run.app, *.cloudfunctions.net
-# Allow: localhost, 127.0.0.1, github.com, pypi.org, python.org,
-#        postgresql.org, json-schema.org, cloud.google.com,
-#        *.googleapis.com, official docs (sqlite.org: SQLite datatype
-#        reference cited by MitateDB-api/src/mitatedb_api/backend_sqlite.py)
+# Allow: localhost, 127.0.0.1, metadata.google.internal (exact only,
+#        R2_url only -- see R2_URL_ALLOW_HOST_EXACT), github.com,
+#        pypi.org, python.org, postgresql.org, json-schema.org,
+#        cloud.google.com, *.googleapis.com, official docs (sqlite.org:
+#        SQLite datatype reference cited by
+#        MitateDB-api/src/mitatedb_api/backend_sqlite.py)
 # ---------------------------------------------------------------------------
 R2_URL_RE = re.compile(r"https?://[^\s\"'`<>()\[\]{}]+", re.IGNORECASE)
 # IGNORECASE here too: if this failed to match an uppercase-scheme URL
@@ -238,6 +240,21 @@ R2_URL_RE = re.compile(r"https?://[^\s\"'`<>()\[\]{}]+", re.IGNORECASE)
 R2_URL_HOST_RE = re.compile(r"^https?://([^/:\s]+)", re.IGNORECASE)
 
 R2_ALLOW_HOST_EXACT = {"localhost", "127.0.0.1"}
+R2_URL_ALLOW_HOST_EXACT = {
+    # The GCE metadata server's fixed hostname, reached from every GCP VM
+    # to fetch instance identity tokens. Used in a `http://` URL in
+    # MitateDB-api/docs/f9-execution-assets-v1/f9-revision-proxy.py:22. A
+    # public, documented GCP constant, not a project-specific value (the
+    # audience value appended to the URL is a runtime variable, not a
+    # literal). Exact match only, not a suffix: a suffix entry would also
+    # allow a real subdomain of this host (e.g. a hypothetical
+    # `sub.metadata.google.internal`), which is not this one specific,
+    # fixed hostname. Applies to R2_url only -- the source occurrence is a
+    # scheme URL, not a bare FQDN, so this entry is not read by
+    # r2_fqdn_flag (a bare `metadata.google.internal` mention is outside
+    # R2_fqdn's TLD-limited set regardless, see R2_FQDN_TLDS below).
+    "metadata.google.internal",
+}
 R2_ALLOW_HOST_SUFFIXES = (
     "github.com",
     "pypi.org",
@@ -305,6 +322,8 @@ def r2_url_flag(host: str, placeholder_removed: bool = False) -> bool:
         )
     if h in R2_ALLOW_HOST_EXACT:
         return False
+    if h in R2_URL_ALLOW_HOST_EXACT:
+        return False
     if "." not in h:
         return False  # not a resolvable FQDN shape at all
     if r1_domain_allowed(h, placeholder_removed):
@@ -324,11 +343,26 @@ def r2_url_flag(host: str, placeholder_removed: bool = False) -> bool:
 # docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md
 # Appendix A.1, re-run against the WP-1 rework as the tree scan's
 # `total_flagged=0` aggregate line).
+# Allow (exact only, R2_fqdn only): a corporate domain -- see
+# R2_FQDN_ALLOW_HOST_EXACT below.
 # ---------------------------------------------------------------------------
 R2_FQDN_RE = re.compile(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", re.IGNORECASE)
 R2_FQDN_TLDS = {"com", "net", "org", "jp", "io", "cloud", "info", "biz"}
 R2_FQDN_DENY_SUFFIXES = ("run.app", "gserviceaccount.com")
 R2_FQDN_BARE_GENERIC = {"run.app", "gserviceaccount.com", "iam.gserviceaccount.com"}
+R2_FQDN_ALLOW_HOST_EXACT = {
+    # Google's own corporate domain, exact match only. This is the bare
+    # FQDN used as the GCR image-path namespace in the `FROM` line of
+    # MitateDB-api/docs/f9-execution-assets-v1/Dockerfile:3 (Google's
+    # official Cloud SDK base image). A public Google constant, not a
+    # project-specific value. Exact match only, not a suffix: a suffix
+    # entry would also allow any real subdomain of this host by matching
+    # at the label boundary, not just this one exact hostname. Applies to
+    # R2_fqdn only -- the source occurrence is a bare FQDN inside an image
+    # path, not a scheme URL, so a scheme URL naming this same host is
+    # still flagged by r2_url_flag (not covered by this exact-match set).
+    "google.com",
+}
 
 
 def _is_code_attribute_chain(h: str) -> bool:
@@ -367,6 +401,8 @@ def r2_fqdn_flag(host: str, placeholder_removed: bool = False) -> bool:
             h, R2_FQDN_BARE_GENERIC, placeholder_removed
         )
     if h in R2_ALLOW_HOST_EXACT:
+        return False
+    if h in R2_FQDN_ALLOW_HOST_EXACT:
         return False
     if r1_domain_allowed(h, placeholder_removed):
         return False  # shared placeholder-domain convention: *.invalid / *.test / example.*
