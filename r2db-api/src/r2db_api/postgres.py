@@ -91,7 +91,7 @@ import queue
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Sequence
 
 import psycopg
@@ -107,7 +107,7 @@ from . import platform_upgrades
 from .postgres_like import _escape_like_literal
 # `_FIELD_TYPE_SQL`/`_JSONB_SQL` are not used directly in this module; the import exists only as a facade-compat re-export for callers that still import them from `postgres`.
 # history: CH-0002
-from .postgres_types import _FIELD_TYPE_SQL, _JSONB_SQL, _column_type_sql
+from .postgres_types import _DOMAIN_TO_DECLARED, _FIELD_TYPE_SQL, _JSONB_SQL, _SQL_TYPE_TO_DECLARED, _TableInfo, _column_type_sql
 from .structured import (
     BoundMutation,
     ConstraintPatch,
@@ -202,29 +202,6 @@ _ID_COLUMN = "id"
 _REVISION_COLUMN = "_r2db_revision"
 _RESERVED_INTERNAL_PREFIX = "_r2db"
 
-# The two DOMAIN types' own bare names (as `information_schema.columns.domain_name` reports them -- unqualified confirmed empirically), mapped back to the shared `r2db_api.structured` vocabulary string `_load_catalog` reports for such a column's declared type.
-# history: CH-0005
-_DOMAIN_TO_DECLARED: dict[str, str] = {
-    "_r2db_json_object": "object",
-    "_r2db_json_array": "array",
-}
-
-# The inverse mapping, used by `_load_catalog` to recover each column's
-# declared type (in the shared `r2db_api.structured` vocabulary: "string"/
-# "integer"/"number"/"boolean", or `None` for untyped/JSONB-equivalent) from
-# PostgreSQL's own `information_schema.columns.data_type` reporting, for a
-# column that is *not* one of the two DOMAINs above (`_DOMAIN_TO_DECLARED`
-# is consulted first -- see `_load_catalog`). `id` also happens to be
-# `bigint` (looked up through this same table -- it is not a distinct
-# physical type from a user-declared `field_type: "integer"` column, only a
-# distinct *role*, which `_load_catalog` tracks separately).
-_SQL_TYPE_TO_DECLARED: dict[str, str] = {
-    "text": "string",
-    "bigint": "integer",
-    "double precision": "number",
-    "boolean": "boolean",
-}
-
 # `_RolePool`'s own bounded-wait defaults (review fix: neither of these
 # existed before -- a connect attempt against an unreachable target had no
 # timeout at all, and a caller waiting for a pooled connection to free up
@@ -245,34 +222,6 @@ _COMPARISON_OPERATORS: dict[str, sql.SQL] = {
     "gt": sql.SQL(">"),
     "gte": sql.SQL(">="),
 }
-
-
-@dataclass
-class _TableInfo:
-    """One entity table's live shape, as re-derived from PostgreSQL's own catalog by `PostgresCell._load_catalog` on every call (never cached across calls, never trusted as a standing assumption --).
-
-    `columns`: declared field name -> declared type in the shared
-    `r2db_api.structured` vocabulary (`"string"`/`"integer"`/`"number"`/
-    `"boolean"`/`"object"`/`"array"`), or `None` for an untyped/JSONB-
-    equivalent column. `"object"`/`"array"` are recovered from PostgreSQL's own `information_schema.columns.domain_name` ("object/array の DOMAIN 型統一") -- a plain `jsonb` column with no domain reports `None`. Includes `"id"` (always `"integer"`); never includes the invisible `"_r2db_revision"` column.
-
-    `indexes`: client index name -> `{"physical": <table>__<index> name,
-    "fields": (declared field name, ...), "unique": bool}`, covering every
-    index `PostgresCell.apply_schema`'s own `create_index` has created on
-    this table (both unique and non-unique -- SI-08/R-5: both count toward
-    `schema_objects`), excluding the primary key on `id` (R-1/§2: an
-    address, not a domain uniqueness declaration).
-
-    History: CH-0006
-    """
-
-    columns: dict[str, str | None]
-    indexes: dict[str, dict[str, Any]]
-    # Contract 1.7.0: this entity's own declared `enum`/`nullable` constraints, read from the side-table registry (`_load_field_constraints` below) -- field name -> `FieldConstraints`, present ONLY for a field something was actually declared on (`FieldConstraints.is_declared`), same "absence = default" convention `columns`/`indexes` above never needed (there is no "undeclared column"). Defaults to `{}` so every EXISTING call site that builds a
-    # `_TableInfo` without constraints in mind (there are none left after
-    # this WP, but a future one) keeps working.
-    # history: CH-0101
-    constraints: dict[str, "FieldConstraints"] = field(default_factory=dict)
 
 
 def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] = ()) -> None:

@@ -3323,3 +3323,89 @@ def test_schema_binding_developer_gate_precedes_shape_checks():
         )
     assert exc.value.code == "FORBIDDEN"
     assert exc.value.status == 403
+
+
+def test_postgres_types_leaf_preserves_postgres_facade():
+    """R-37 WP-4b (PG1): `postgres.py` reads `_DOMAIN_TO_DECLARED`/
+    `_SQL_TYPE_TO_DECLARED`/`_TableInfo` from the leaf `postgres_types.py`
+    as the exact same objects -- facade identity only, not shape (the
+    dedicated tests below pin the literal values/shape)."""
+    from r2db_api import postgres
+    from r2db_api import postgres_types
+
+    names = ["_DOMAIN_TO_DECLARED", "_SQL_TYPE_TO_DECLARED", "_TableInfo"]
+    for name in names:
+        assert getattr(postgres, name) is getattr(postgres_types, name), name
+
+
+def test_postgres_types_catalog_maps_are_literal():
+    """R-37 WP-4b (PG1): `_DOMAIN_TO_DECLARED` (the two DOMAIN types' own
+    bare catalog names -> the shared `r2db_api.structured` declared-type
+    vocabulary) and `_SQL_TYPE_TO_DECLARED` (the inverse,
+    `information_schema.columns.data_type` -> declared-type vocabulary)
+    keep their exact pre-move contents after the move. The closed-
+    vocabulary boundary this pins is `postgres.py`'s own two `_load_
+    catalog` call sites (`_DOMAIN_TO_DECLARED.get`/`_SQL_TYPE_TO_DECLARED.
+    get`), not this dict's own contents (independent code review 中-1: a
+    bare `not in` assertion on the dict here is already implied by the
+    `==` above and stays green even when a call site silently falls back
+    an unrecognized value to some entry instead of `None`) -- this reads
+    `postgres.py`'s own source via `ast` and fixes that NEITHER call site
+    passes a default, so an unrecognized `domain_name`/`data_type` can
+    only ever resolve to `None` (untyped/JSONB), never a fabricated
+    declared type."""
+    import ast
+
+    from r2db_api import postgres
+    from r2db_api.postgres_types import _DOMAIN_TO_DECLARED, _SQL_TYPE_TO_DECLARED
+
+    assert _DOMAIN_TO_DECLARED == {
+        "_r2db_json_object": "object",
+        "_r2db_json_array": "array",
+    }
+
+    assert _SQL_TYPE_TO_DECLARED == {
+        "text": "string",
+        "bigint": "integer",
+        "double precision": "number",
+        "boolean": "boolean",
+    }
+
+    tree = ast.parse(open(postgres.__file__, encoding="utf-8").read())
+    get_call_arg_counts = {
+        node.func.value.id: len(node.args)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in ("_DOMAIN_TO_DECLARED", "_SQL_TYPE_TO_DECLARED")
+    }
+    assert get_call_arg_counts == {"_DOMAIN_TO_DECLARED": 1, "_SQL_TYPE_TO_DECLARED": 1}
+
+
+def test_table_info_fields_and_defaults():
+    """R-37 WP-4b (PG1): `_TableInfo` keeps its exact pre-move field
+    names/order after the move to `postgres_types.py`, `columns`/
+    `indexes` are still required (no default), and `constraints` still
+    defaults to a FRESH `{}` per instance every call -- `dataclasses.
+    field(default_factory=dict)`, never a single shared mutable default
+    two separate `_TableInfo` instances would silently alias."""
+    from dataclasses import MISSING, fields
+
+    from r2db_api.postgres_types import _TableInfo
+
+    names_and_defaults = [(f.name, f.default) for f in fields(_TableInfo)]
+    assert names_and_defaults == [
+        ("columns", MISSING),
+        ("indexes", MISSING),
+        ("constraints", MISSING),
+    ]
+    assert [f.name for f in fields(_TableInfo) if f.default_factory is not MISSING] == ["constraints"]
+
+    first = _TableInfo(columns={}, indexes={})
+    second = _TableInfo(columns={}, indexes={})
+    assert first.constraints == {}
+    assert second.constraints == {}
+    first.constraints["widgets"] = "sentinel"
+    assert second.constraints == {}

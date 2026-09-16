@@ -91,7 +91,7 @@ def _entries_to_dict(entries: list[tuple[str, _T]]) -> tuple[dict[str, _T], list
 # values are AST import names; `__future__` is always allowed and omitted.
 LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, frozenset[str]]]] = {
     "r2db": [
-        ("postgres_types.py", frozenset({"psycopg"})),
+        ("postgres_types.py", frozenset({"psycopg", "dataclasses", "typing"})),
         ("postgres_like.py", frozenset()),
         ("audit_counts.py", frozenset()),
         ("value_nul.py", frozenset({"typing"})),

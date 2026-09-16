@@ -1,11 +1,16 @@
-"""PostgreSQL DDL type objects for the r2db storage backend.
+"""PostgreSQL type objects and catalog value maps for the r2db storage backend.
 
-This is a pure leaf: it only maps an already validated contract field-type
-word to a psycopg SQL composition object.  It neither opens a connection nor
-executes SQL; catalog validation and every transaction boundary remain in
-``postgres.PostgresCell``.
+This is a pure leaf: it maps an already validated contract field-type word
+to a psycopg SQL composition object, maps PostgreSQL's own catalog
+type/domain reporting back to the shared declared-type vocabulary, and
+holds the ``_TableInfo`` record ``PostgresCell._load_catalog`` fills in. It
+neither opens a connection nor executes SQL; catalog validation and every
+transaction boundary remain in ``postgres.PostgresCell``.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
 
 from psycopg import sql
 
@@ -50,3 +55,55 @@ def _column_type_sql(field_type: str | None) -> sql.SQL | sql.Identifier:
     if field_type is None:
         return _JSONB_SQL
     return _FIELD_TYPE_SQL.get(field_type, _JSONB_SQL)
+
+
+# The two DOMAIN types' own bare names (as `information_schema.columns.domain_name` reports them -- unqualified confirmed empirically), mapped back to the shared `r2db_api.structured` vocabulary string `_load_catalog` reports for such a column's declared type.
+# history: CH-0005
+_DOMAIN_TO_DECLARED: dict[str, str] = {
+    "_r2db_json_object": "object",
+    "_r2db_json_array": "array",
+}
+
+# The inverse mapping, used by `_load_catalog` to recover each column's
+# declared type (in the shared `r2db_api.structured` vocabulary: "string"/
+# "integer"/"number"/"boolean", or `None` for untyped/JSONB-equivalent) from
+# PostgreSQL's own `information_schema.columns.data_type` reporting, for a
+# column that is *not* one of the two DOMAINs above (`_DOMAIN_TO_DECLARED`
+# is consulted first -- see `_load_catalog`). `id` also happens to be
+# `bigint` (looked up through this same table -- it is not a distinct
+# physical type from a user-declared `field_type: "integer"` column, only a
+# distinct *role*, which `_load_catalog` tracks separately).
+_SQL_TYPE_TO_DECLARED: dict[str, str] = {
+    "text": "string",
+    "bigint": "integer",
+    "double precision": "number",
+    "boolean": "boolean",
+}
+
+
+@dataclass
+class _TableInfo:
+    """One entity table's live shape, as re-derived from PostgreSQL's own catalog by `PostgresCell._load_catalog` on every call (never cached across calls, never trusted as a standing assumption --).
+
+    `columns`: declared field name -> declared type in the shared
+    `r2db_api.structured` vocabulary (`"string"`/`"integer"`/`"number"`/
+    `"boolean"`/`"object"`/`"array"`), or `None` for an untyped/JSONB-
+    equivalent column. `"object"`/`"array"` are recovered from PostgreSQL's own `information_schema.columns.domain_name` ("object/array の DOMAIN 型統一") -- a plain `jsonb` column with no domain reports `None`. Includes `"id"` (always `"integer"`); never includes the invisible `"_r2db_revision"` column.
+
+    `indexes`: client index name -> `{"physical": <table>__<index> name,
+    "fields": (declared field name, ...), "unique": bool}`, covering every
+    index `PostgresCell.apply_schema`'s own `create_index` has created on
+    this table (both unique and non-unique -- SI-08/R-5: both count toward
+    `schema_objects`), excluding the primary key on `id` (R-1/§2: an
+    address, not a domain uniqueness declaration).
+
+    History: CH-0006
+    """
+
+    columns: dict[str, str | None]
+    indexes: dict[str, dict[str, Any]]
+    # Contract 1.7.0: this entity's own declared `enum`/`nullable` constraints, read from the side-table registry (`_load_field_constraints` below (in `postgres.py`)) -- field name -> `FieldConstraints`, present ONLY for a field something was actually declared on (`FieldConstraints.is_declared`), same "absence = default" convention `columns`/`indexes` above never needed (there is no "undeclared column"). Defaults to `{}` so every EXISTING call site that builds a
+    # `_TableInfo` without constraints in mind (there are none left after
+    # this WP, but a future one) keeps working.
+    # history: CH-0101
+    constraints: dict[str, "FieldConstraints"] = field(default_factory=dict)
