@@ -2,6 +2,9 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.20 (2026-09-16)。** 基点 `2e94bbf` (WP-4b を統合済み)。WP-4b の実施で判明した 2 件を **訂正註 6・7** として §5.45 の末尾に足した (閉語彙外・例外経路の条件の強化、0f の読み方の非対称)。どちらも **WP-4c に掛かる**。§5.42 の本文・表・完了条件と既存の版数行・訂正註はいずれも書き換えていない (§1.8 の 56・57)。設計側の記録は `docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` (v1.20) §10.17。
+- **v1.19 (2026-09-16)。** 基点 `bec2eeb` (WP-4a とその記録を統合済み)。依頼者裁定により §5.43 (WP-4c) と §5.44 (WP-4d) を 1 つの WP (呼称 **WP-4c**) として実施する訂正註を §5.45 の末尾に足した。§5.43・§5.44 の本文、Z4-2 の行、既存の版数行はいずれも書き換えていない (§1.8 の 56・57)。
+- **v1.18 (2026-09-16)。** 基点 `acb257e` (WP-4a を統合済み)。WP-4a の実装中の監督裁定 W4-4 (第 4 次) と、独立コードレビュー由来の訂正註 4 件、WP-5 候補 1 件を §5.45 に足した。既存の行は書き換えていない。設計側の記録は `docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` (v1.19) §10.16。
 - **v1.17 (2026-09-16)。** 基点 `ba98255` (R-37 WP-3 完了、R-44 WP-1 統合済み)。§5.40〜§5.45 を追記した。内容は、WP-4 (PG1・PG3・PG2 と BP3) の実測、監督裁定 Z4-1〜Z4-8、4 件の manifest (WP-4a〜4d)、第 2 次・第 3 次の監督裁定、PG4 を範囲外とした根拠の記録である。既存の行は書き換えていない。独立レビュー反映: A-1〜A-3、B-1〜B-3、C-1〜C-10 (全 16 件を採用)。**独立レビュー反映済み。**
 - **v1.16 (2026-09-16)。** 基点 `a48cfa1` (WP-3h を統合済み)。WP-3i の実装中の監督裁定 W3-23 を §5.39 の裁定表に足し、§5.38 に訂正註を足した。既存の行は書き換えていない。
 - **v1.15 (2026-09-16)。** 基点 `ffd6493` (WP-3g と R-22 変更セット 0i を統合済み)。WP-3h の実装中の監督裁定 W3-21・W3-22 を §5.39 の裁定表に足し、§5.37 に訂正註を足した。既存の行は書き換えていない。
@@ -1883,6 +1886,203 @@ R-44 WP-2 の統合後は同じ道具の `--wait` の形になる (`tools/dev/pt
 - W4-3 の適用範囲についての起草側の分類: 裁定は repo 全体の静的走査についてであり、`postgres.py` の module docstring (CH-0001) L22-23 の `below` の扱いは覆っていない。**WF-5 (i) の機械適用として「付ける」に分類し、WP-4c で括弧書きと §CH-0001 の訂正の記録を足す** (§5.43)。この分類を覆す場合は監督裁定を要する。
 
 **依頼者判断待ち**: 無し。WP-4 は Class B (実装のみ。契約・不変条件・`_ISOMORPHIC_TARGETS` に触れない) であり、上記はいずれも監督裁定の範囲である。
+
+**訂正註・裁定 2026-09-16 (WP-4a の実装と独立コードレビュー)。上の本文・表・裁定は起草時および第 2 次・第 3 次裁定時の原文であり、消さずに残す (`OPERATING_CONDITIONS.md` §1.8 の 57)。下の 1〜5 は WP-4a だけでなく §5.42 (4b)・§5.43 (4c)・§5.44 (4d) にも掛かる。**
+
+**1. 監督裁定 (第 4 次。W4-4。逐語)**
+
+発見 (WP-4a の実装担当、実装時): §5.41 の完了条件 **12** (CH-0340 の訂正の記録を消す変異 → 0f が赤) と **15** (来歴の証拠 = 記録後の HEAD での `tools/tests` 0f) は、**どちらも記録 (`git` への反映) を要する**。しかしそれは監督のみが行う (`OPERATING_CONDITIONS.md` §1.1 の 2)。本セッションの hook は、worktree の場所によらず subagent からのそれを一律に拒む。**したがって manifest は、実装担当に実行不能な完了条件を割り当てていた。** §5.40 の「CH-ID のファイルまたぎ移動」の証拠の段も同じ形で、**4b・4c・4d にも同じく掛かる** (3 件とも CH-ID を移す)。独立レビューはこれを検出しなかった (test id と実測値は照合したが、役割ごとの権限までは見ていない)。
+
+| # | 裁定 |
+|---|---|
+| W4-4 (a) | **来歴の証拠 (完了条件 15) と、訂正の記録の変異 (完了条件 12) は監督が行う。** 実装担当の完了条件から外し、**「監督が実施する」と明記した監査照合**に変える。実装担当は変異の spec (`old` / `new` の文字列) を用意して報告するところまでを担当する |
+| W4-4 (b) | **使い捨て clone は使わない。** 監督は `tools/dev/finalize.py --no-merge` で WP branch に記録し、**その HEAD で `tools/tests` を流して 0f の集計行を取る**。これが来歴の証拠である。証拠が緑であることを確かめてから main へ統合する。clone を作る理由は「実装担当が記録できないこと」だったが、監督は記録できるので、その回り道は要らない |
+| W4-4 (c) | 完了条件 12 の変異は、(b) の記録の後に**監督が**作業ツリー側で当て、`tools/tests` の 0f が赤になることを確かめ、§1.4 の 29〜31 の規律 (scratchpad backup からの `cp` で復元、`sleep 3` の後に sha256 を 2 回照合、変異文字列の全文 grep 0 件) で戻す。0f が作業ツリーの companion を読まず git から読む形であれば、その場で判明するので、**その場合は捨て branch 上の記録で取り直し、結果を記録する** |
+| W4-4 (d) | **4b・4c・4d の manifest にも同じ読み替えを掛ける。** 3 件とも CH-ID を移すので、来歴の証拠と訂正の記録の変異は同じく監督が行う |
+| W4-4 (e) | 本件は §1.8 の 57 に従い、作業指示書の本文を書き換えず、**§5.45 に訂正註として記録する**。4a の統合時に他の記録とまとめて 1 つにする |
+
+WP-4a での実施結果: 完了条件 15 は `dd59cd4` の HEAD で `tools/tests` `486 passed` (0f 緑)。完了条件 12 の変異 (M12) は監督が当て、予想どおり赤になり、復元を確かめた (`mutate: 1 mutations, 1 as expected, restores verified 1/1 files (sha256 x2)`)。0f が作業ツリーの companion を読む形であることは実測で確かめたので、W4-4 (c) の「捨て branch で取り直す」枝には入らなかった。
+
+**2. 訂正の記録の `old:` / `new:` の書き方 (独立コードレビュー 高-1。4b〜4d にも掛かる)**
+
+`docs/code-history/` の節に書く訂正の記録の `old:` / `new:` は、**コメント記号 `# ` を落とし、行の折り返しを連結した 1 行**で書く。`tools/check_comment_provenance.py` の `_apply_corrections` は、companion を `_flatten` した本文 (コメント記号を落とし行を連結したもの) に対して `old` の **1 件一致**を要求する。したがって `# ` 接頭や折り返しを含む断片を写すと 0 件一致になり、`FAIL (§9f) … old sentence occurs 0 time(s) in the basis (expected exactly 1)` になる。前例は `docs/code-history/MitateDB-api/http.md`:699 (CH-0208) と `docs/code-history/r2db-api/service.md`:409 である。
+
+**WP-4a の初稿はこれを誤り、独立レビューだけが検出した。** HEAD の blob 同士でも同じ赤が出るので、記録に入れても 0f は赤のままであり、W4-4 (b) の来歴の証拠も W4-4 (c) の変異も成立しなかった。初稿時点の実装担当の報告「`tools/tests` の 1 赤は未コミットの新 leaf だけが理由」は実測に反していた (§1.5 の 34「主張は実測の後」)。**4b・4c・4d の 3 件とも CH-ID の塊に括弧書きを足すので、同じ落とし穴に掛かる** — 4b は §5.42 のとおり移動範囲に CH-0005・CH-0006・CH-0101 の 3 件があり、L271 の `below` へ括弧書きを付けるので **§CH-0101 に訂正の記録を書く**。4c は §5.43 の CH-0001 ほか、4d は §5.44 の CH-0054 ほかである。各 WP は、訂正の記録を書いた後に `python3 tools/check_comment_provenance.py --base <基点> <対象 src>` を走らせ、§9f が出ないことを確かめてから報告する。なお逐語写しの本文 (fence の中) は 1 文字も変えない (A-2 (4))。
+
+**3. 完了条件と変異の追加 (独立コードレビュー 中-1。4b〜4d にも掛かる)**
+
+§5.41 の完了条件に **16「operator は閉じた表から引き、閉語彙外は黙って既定値に落ちない」** を足し、変異 **M13** (`postgres_sql.py` の `_OPERATOR_SQL[item.operator]` を `_OPERATOR_SQL.get(item.operator, sql.SQL("="))` にする) を実測した。理由は、この変異が manifest の新規 4 本すべてを緑のまま通過したからである (完了条件 5 のテストは辞書の中身を pin するだけで、参照の閉じ方を pin しない)。設計 §5.1 の 2 が「正常値だけでなく、境界値、型違い、**閉語彙外、例外経路**を含める」を必須の証拠に挙げているので、これは設計外の拡張ではなく **manifest の取りこぼしの補充**である。あわせて、空の `in` 値 (`Filter("f","in",[])`) を leaf 単体は `IN ()` に組み、防いでいるのは `cell.py`:3370 の「in filter requires values」で **leaf の外である**という分担の事実を、足した新規テストの docstring に 1 文書き留めた (40b の意図。挙動は変えない)。
+
+**4b・4c・4d の新規テストにも、閉語彙外・例外経路の場面を 1 つ以上置く。**
+
+これに伴う件数の更新: 4a の**完了条件は 15 → 16、変異は 12 → 13、新規テストは 4 → 5** である。**変異 13 の内訳は、実装担当 12 (M1〜M11 と M13)、監督 1 (M12、完了条件 12) である。**上の「新規テストの数 (C-2)」の行は 4a 4 / 計 18 であるが、**§1.8 の 56 のとおり消さず、本註で上書きする**: 実績は **4a 5 / 計 19** (4b 3・4c 5・4d 6 は未着手のまま) として読む。完了ゲートの期待値も `3421` → **`3422 passed, 2 subtests passed`** に変わり、実測はこの値である。
+
+**4. 読み手を失ったものの検査 (差し戻し S-1。4b〜4d の完了条件に監査照合として足す)**
+
+抽出 WP では、**移動によって読み手を失った import・定数・再 export が移動元に残っていないか**を、**移動前の HEAD と AST の参照件数を比較して**確かめる。手順は、`ast.Name` の参照件数を import 名ごとに数え、`git show HEAD` の同じ集計と比べて「移動が原因で 0 になったもの」だけを取り出す形である。
+
+WP-4a では `MitateDB-api/src/mitatedb_api/backend_postgres.py`:90 の `from .backend import SQL_OPERATOR_TOKENS, UNCHANGED` のうち `SQL_OPERATOR_TOKENS` の 1 件が見つかり、第 2 次裁定 6 と同じ基準で削った (`UNCHANGED` は読み手 5 なので残した)。**suite でも変異でも検出されない種類の欠陥である** — 壊れるのは実行時の挙動ではなく、設計 D-1 の「依存グラフを細くする」という主張と、同じ変更セット内での裁定 6 の適用の一貫性、および後続 WP・WP-5 が引く前例である。**4b・4c・4d の完了条件に監査照合として足す。**
+
+**5. `--base` の §4.1 の赤の読み方 (独立コードレビュー 低-2。4b〜4d にも掛かる)**
+
+CH-ID を持たない塊が別ファイルへ移ると、`tools/check_comment_provenance.py --base <親>` は移動元で §4.1 の赤を出す。WP-4a では `backend_postgres.py`:130・:131 ほか 8 件で出た。これは m-7 の説明コメント (CH-ID 無し) の移動による**位置ずれ**によるものであり、**40c を満たしていても出る** (移動先 `postgres_sql.py` L20-24 と旧 L130-134 の逐語一致、本体の差が `self` 引数の除去 1 種だけであることは diff で確認済み)。**Z4-4 のとおり `--base` は来歴の証拠に使わない**ので、この赤は判定に使わない。完了条件 14 (逐語移動と位置参照) の監査照合の材料として記録する。
+
+**既知の穴への追加 (WP-5 候補。移動前から存在。WP-4 の範囲外。R-39 候補)**
+
+`MitateDB-api/src/mitatedb_api/backend_postgres.py` には WP-4a 以前から読み手 0 の import が **5 件**ある — `CONTRACT_TYPES`、`_INT_DOMAIN_RANGES`、`_check_domain`、`_RESERVED_EXACT`、`_RESERVED_PREFIX` (WP-4a の AST 参照件数の全件比較で確認。いずれも移動前から 0 件で、本 WP が読み手を失わせたものではない)。うち `_INT_DOMAIN_RANGES` と `_check_domain` の 2 件は、既存コメントが「re-exported for facade compatibility; not referenced elsewhere」と明記しており、意図的な facade 再 export である。残る `CONTRACT_TYPES`・`_RESERVED_EXACT`・`_RESERVED_PREFIX` の 3 件に同じ明記があるかは **WP-5 (facade 縮小と閉止) で確かめる**。設計 §4 の WP-5 は「export を消す場合は個別に根拠と回帰証拠を添え、通常の変更クラス判定を再実施する」と定めるので、**WP-4 では触らない。**
+
+---
+
+**訂正註 2026-09-16 (依頼者裁定。WP-4c と WP-4d を 1 つの WP にまとめる)**
+
+**1. 依頼者裁定 (逐語。§1.7 の 51 のとおり再審議しない)**
+
+> 4c・4dをまとめてください。
+
+経緯: 監督が 1 WP あたりのコード変更の小ささと証拠作業の比率を報告し、「1 WP あたりの重さを軽くするか、残りの 4c・4d をまとめるかはご判断の余地がある」と示したことへの回答である。
+
+**本裁定は Z4-2 の一部を覆す。** Z4-2 は「4 件の直列 WP に分ける。4a = BP3、4b = PG1、4c = PG3、4d = PG2 + `_bind_value`」と定め、§5.40 の却下した代替案は「PG2 と PG3 を 1 つの WP にまとめる」を「移動名が 8 になり、Z4-2 の理由に反する」として退けていた。**§1.8 の 56 のとおり Z4-2 とその根拠・却下理由の行は消さず、本註で上書きする。**Z4-1・Z4-3〜Z4-6・Z4-8 は変わらない。Z4-7 (直列。並行しない) も変わらない (件数だけが 4 件から 3 件になる)。
+
+**2. 統合後の WP-4c の定義**
+
+- **呼称は WP-4c** とし、§5.44 の「WP-4d」という呼称は以後使わない (統合後の WP-4c に含まれる)。
+- **移動する 8 名**: PG3 の `_select_statement`・`_order_by_sql`・`_append_revision_predicate` (§5.43)、PG2 の `_COMPARISON_OPERATORS`・`_where_clause`・`_text_expression`・`_predicate_sql` と `_bind_value` (§5.44、Z4-3)。
+- **移動先**: 新規 `r2db-api/src/r2db_api/postgres_sql.py` (Z4-8)。1 つの変更セットで新規作成し、8 名をまとめて置く。
+- **着手条件**: **WP-4b の統合後**に着手する (`postgres.py`・`r2db-api/tests/test_foundation.py`・`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`・`tools/tests/test_leaf_import_direction.py` を共有するため。Z4-7)。行番号は 4b の統合後に取り直す (§5.40 と同じ)。
+- **WP-4 は 4a → 4b → 4c の 3 件の直列**になる (Z4-2 の 4 件を 3 件に改める)。PG4 は Z4-1 のとおり範囲外である。
+- **§5.45 の既存の訂正註 1〜5 (W4-4、訂正の記録の `old:`/`new:` の書式、閉語彙外・例外経路、読み手を失ったものの検査、`--base` の §4.1 の赤の読み方) は、統合後の WP-4c にもそのまま掛かる。**
+
+**3. 実測 (§5.43 と §5.44 の実測欄を統合した 1 つの表)**
+
+「統合の型」欄は、**1 回**=まとめたことで作業が 1 度で済む欄、**和**=2 つの manifest の値の和を取る欄、**据置**=どちらか一方にしか無く、そのまま持ち越す欄である。値はすべて §5.43・§5.44 の実測 (`ed265f4`) をそのまま引いたものであり、**着手時に 4b の統合後で取り直す。**
+
+| 項目 | 統合後 (出所) | 統合の型 |
+|---|---|---|
+| 移動範囲 | **8 名、5 塊、計 154 行**。PG3 = L1280-1312 (`_select_statement` 26 行・`_order_by_sql` 6 行、間の空行を含む 33 行)、L1602-1625 (`_append_revision_predicate` 24 行) の 2 塊 57 行 (§5.43)。PG2 + `_bind_value` = L240-247 (`_COMPARISON_OPERATORS` 8 行)、L1525-1534 (`_bind_value` 10 行。C-2 の訂正後の値)、L1825-1903 (`_where_clause` 10 行・`_text_expression` 23 行・`_predicate_sql` 44 行、間の空行を含む 79 行) の 3 塊 97 行 (§5.44) | 和 |
+| 飛び石 | §5.43・§5.44 の飛び石の指定をそのまま両方守る。L1313-1601 は動かさない (L1314 の `# ---- mutations ----` 以下)。L1823 の `# ---- predicate/WHERE composition ----` は facade に残し、その直後に PG2 側の委譲属性を置く。`_fail_client_value` (`def` は L1507。§3 の除外。C-3) には触らない | 和 |
+| leaf の中の並び (監督裁定 2026-09-16) | **移動前の `postgres.py` での出現順をそのまま保つ。** 着手時の裁量を無くし、逐語移動 (40c) の照合を「出現順も含めて機械的に確かめられる」形にするためである。§5.43 の「leaf の中は `_select_statement` → `_order_by_sql` → `_append_revision_predicate` の順」はこの順に含まれる。**移動前後で出現順が一致することを完了条件 29 の監査照合に含める。** 移動前の実測の行番号は `_COMPARISON_OPERATORS` L240 / `_select_statement` L1280 / `_order_by_sql` L1306 / `_bind_value` L1525 / `_append_revision_predicate` L1602 / `_where_clause` L1825 / `_text_expression` / `_predicate_sql` (L1825-1903 の塊の中) である。**着手時に 4b の統合後で取り直した行番号の昇順で並べ、その一覧を報告に貼る** | 監督裁定 (1 回) |
+| 本体の変更 | §5.43 の 3 種と §5.44 の 4 種の和。(a) 関数 7 つ (定数 `_COMPARISON_OPERATORS` を除く 7 名) から `self` 引数を除く、(b) `self._order_by_sql` (L1294) → `_order_by_sql`、(c) `_select_statement`・`_append_revision_predicate` に既定値の無い引数 `revision_column` を足し `_REVISION_COLUMN` (L1290・L1623) を置き換える (W4-1)、(d) `self._predicate_sql` (L1831) → `_predicate_sql`、(e) `self._text_expression` (L1880) → `_text_expression`、(f) `self._bind_value` (L1878・L1903) → `_bind_value`。`_order_by_sql`・`_append_revision_predicate`・`_text_expression`・`_bind_value` は `self` を 1 度も参照しない (実測)。差は W3-3・W3-12 と同じく列挙してログに残す | 和 |
+| 列名定数の扱い (W4-1) | §5.43 のまま。`_REVISION_COLUMN` (L202) は動かさず、移動範囲の外の読み手 4 箇所 (L926・L1677・L1779・L2294。B-3 の訂正後の値) を保つ。facade の呼出し箇所 L1253 (`query`)・L1676 (`_update`)・L1695 (`_delete`)・L1791 (`_apply_upsert`) が `_REVISION_COLUMN` を渡す。`_ID_COLUMN` (L201) は 3 関数のいずれも読まない (実測)。着手時の実測で読んでいたら同じく既定値の無い引数で渡す | 据置 |
+| facade に残すもの | **委譲属性 7 つ**。PG3 側 3 つ (`_select_statement`・`_order_by_sql`・`_append_revision_predicate`) と PG2 側 4 つ (`_where_clause`・`_text_expression`・`_predicate_sql`・`_bind_value`)。いずれも `= staticmethod(...)` の形 (WP-3i と同じ。Z4-3)。呼出し元は §5.43 の 4 箇所 (L1253・L1676・L1695・L1791) と §5.44 の L1252 (`query`)・L1581 (`_apply`)・`self._bind_value` の 6 箇所 (L1655・L1681・L1752・L1783・L1806・L2177) がそのまま動く (PG3 側は引数が 1 つ増える)。`_COMPARISON_OPERATORS` は移動後 `postgres.py` に読み手が残らない (module docstring L16 が名前で言及するだけ) ので、第 2 次裁定 6 に従う (読み手 0 を実測で示して削るか、再 export として残すか。削る場合は根拠と回帰証拠を WP 記録に添える) | 和 |
+| leaf の新規作成 | 1 つの変更セットで 1 回だけ作る (§5.43 で作り §5.44 で足す 2 段階を 1 回にする) | 1 回 |
+| `postgres.py` の import 行 | leaf からの import 行の編集は **1 回**(§5.43 の 1 行と §5.44 の 1 行を 1 回にまとめる) | 1 回 |
+| leaf の import | §5.44 の集合をそのまま採る: `psycopg` (`from psycopg import sql`)、`typing` (`Any`)、`psycopg.types.json` の `Jsonb` (`psycopg` に正規化)、`.postgres_like` (`_escape_like_literal`)、`.errors` (`fail`・`violation`)。**許可集合は `{"psycopg", "typing", ".postgres_like", ".errors"}`** (§5.43 の `{"psycopg", "typing"}` との和)。`postgres.py` は import しない (循環)。`.postgres_like` は import を持たない 12 行の leaf で循環にならない (実測)。**`Predicate` は import しない** (W4-2。`from __future__ import annotations` の下で注釈は評価されない。`TYPE_CHECKING` も使わない。前例は `inmemory_predicate.py` L14 / L95。C-7) | 和 (1 行) |
+| denial・件数 pin (Z4-6) | 移動範囲の 4-key denial は **2 件**。PG3 側は 0 件 (§5.43 の実測)、PG2 側が L1874 (`"Filter value is incompatible with the selected operator."`、`violation("request_schema", field="where")`) と L1902 (`"Unsupported filter operator."`、`violation("capability", field="where")`)、いずれも `_predicate_sql` の中 (§5.44)。**移動元 `postgres.py` は `counts` 辞書に含まれないので減算コメントを書かない。移動先は `counts` 辞書に `"postgres_sql.py": 2` を 1 回だけ足し、前例と同じ形の由来コメント (どの method が移す前に持っていた何件か) を添える** | 和 (追加は 1 回) |
+| `SCANNED_MODULES`・sib tuple | `SCANNED_MODULES` (L84) に `postgres_sql.py` を **1 回**足す (40b)。§5.43 の「差分 0、追加は WP-4d で行う」は、統合により本 WP の中で行う。sib の固定 module 集合は in-memory 側の集合なので backend 層の `postgres_sql.py` は足さない (差分 0)。`test_backend_layer_allowlist_is_confined_to_postgres_py` の前提 (allowlist は `postgres.py` だけ) も変わらない | 1 回 |
+| 行番号 allowlist (Z4-5) | `("postgres.py", 1523)` の更新は **1 回**。行送りの要因は §5.43 (L1280-1312 の削除、import 1 行と委譲属性の増減) と §5.44 (L240-247 の削除) の**両方**であり、**実測は合算後の値を取る**。L1525-1534 と L1602-1625・L1825-1903 は L1523 より下なので効かない。既存の前例と同じ形の行送りコメントを 1 件足す | 1 回 (実測は合算値) |
+| CH-ID (Z4-4) | **8 件**が移動範囲にある。PG3 側 2 件 = CH-0026 (L1304、`_select_statement` の `OFFSET`/`LIMIT` のコメント)、CH-0045 (L1619、`_append_revision_predicate` の docstring)。PG2 側 6 件 = CH-0041 (L1528、`_bind_value` の docstring)、CH-0053 (L1854、`_text_expression` の docstring)、CH-0054 (L1877)、CH-0055 (L1885)、CH-0056 (L1890)、CH-0057 (L1901)。8 件とも `docs/code-history/r2db-api/postgres.md` に節がある (L599・L907・L850・L1046・L1074・L1087・L1102・L1114)。**節は動かさず**、`# history:` / `History:` の行を逐語で一緒に移す。`_COMPARISON_OPERATORS` (L240-247) に CH-ID は無い | 和 |
+| 位置参照 (WF-5) — 付ける | **3 箇所**。(1) `postgres.py` L1271 の「… (`_select_statement`, below)」の `below` の直後に「(now in `postgres_sql.py`)」(この塊に CH-ID は無いので訂正の記録は書かない。直前の CH-0025 は L1264 の別の塊)。(2) module docstring L22-23 の `below` の直後に「(and in `postgres_sql.py`)」(**この塊は CH-0001 を持つ**ので §CH-0001 に §5.27 の形式の訂正の記録を書く。WF-5 (iv)、W3-22 の R2 の前例)。(3) CH-0054 のコメント L1866 の「both call sites of `_where_clause` (`query`/`_apply` above)」の `above` の直後に「(in `postgres.py`)」(**この塊は CH-0054 を持つ**ので §CH-0054 にも訂正の記録を書く。第 2 次裁定 5)。**訂正の記録は §CH-0001 と §CH-0054 の 2 件**である。§5.44 の「(2) は WP-4c が既に足しているので 4d では変えない」は、統合により**同じ変更セットで 1 回足す**と読む | 和 (2・3 は 1 回ずつ) |
+| 位置参照 (WF-5) — 付けない | §5.43 と §5.44 の「付けない」一覧の和をそのまま守る。CH-0026 の「the same pattern `_set_timeouts` already uses」と同じ塊の「`sql.Literal` here」、`ApplicationCell._sort_key`・`bind_mutation`・`ApplicationCell` の名前 / 修飾名 (WF-5 (ii))、module docstring L16 の `_COMPARISON_OPERATORS` (名前だけ。**本 WP で移るが文は真のまま**)、CH-0057 の「`structured.OPERATORS` (now in `mutation_binding.py`)」(WP-3f で正しく直っており指す先は変わらない)、CH-0055 の `_validate_predicate_types`・CH-0041 の `ApplicationCell`・CH-0053 の `add_field`、`pg_text_format.py` L7 と `inmemory_predicate.py` L67・L79 の `PostgresCell._text_expression` (委譲属性で同じ修飾名から読める)、`r2db-api/tests/test_postgres.py` L1483 の「fallback in `_predicate_sql`」、`postgres.py` L2166 の「`_bind_value` (never a bare member)」、`docs/code-history/` の登録簿の節 (Z4-4)、`docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md` の表。**「確かめたものとして記録する」扱いの件もそのまま引き継ぐ** | 和 |
+| 新規テスト | **11 本** (§5.43 の 5 本 + §5.44 の 6 本)。いずれも `r2db-api/tests/test_foundation.py`。**§5.44 の「触るファイル」欄の「新規テスト 5 本」は §5.44 内部の誤記である** — 独立レビュー A-1 の 5 → 6 の訂正が §5.45 の「新規テストの数 (C-2)」の行だけに入り、同欄に及ばなかったもので、§5.44 の完了条件 1〜6 は 6 本とも新規テストである。**6 が正**とし、§1.8 の 57 のとおり §5.44 の本文は書き換えない | 和 |
+
+**4. 触るファイル / 触らないファイル (§5.43 と §5.44 の和集合。互いに触るものは 触らない 側から除く)**
+
+| 触るファイル (6) | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/postgres.py` (移動範囲 5 塊、import 1 行、委譲属性 7 行、PG3 側の呼出し 4 箇所の引数、L1271 と module docstring の括弧書き)、新規 `r2db-api/src/r2db_api/postgres_sql.py` (8 名と import)、`r2db-api/tests/test_foundation.py` (新規テスト 11 本)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` (`SCANNED_MODULES`、`counts` 辞書、allowlist 1 件の行送りと行送りコメント)、`docs/code-history/r2db-api/postgres.md` (§CH-0001 と §CH-0054 の訂正の記録だけ)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行と許可集合 1 行) | `structured.py`、`mutation_binding.py`、`postgres_types.py`、`postgres_like.py` (import するだけで編集しない)、`pg_text_format.py`、`inmemory_predicate.py`、`service.py`、`r2db-api/tests/test_postgres.py`、`r2db-api/tests/test_audit_query.py`、`conformance-tests/`、MitateDB-api 全部、`docs/design/`、roadmap |
+
+**5. 完了条件 → 変異 → 赤になる test id (§5.43 と §5.44 の表の和から重複を除き、1 から振り直した)**
+
+「出所」欄の `43-n` は §5.43 の完了条件 n、`44-n` は §5.44 の完了条件 n、`註-n` は §5.45 の訂正註 n、`枠-n` は本註の 6 の項目 n を指す。**「監督」と記した行は W4-4 (a)(d) により監督が実施する監査照合であり、実装担当は変異の `old` / `new` の spec を用意して報告するところまでを担当する。**
+
+| # | 出所 | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) | 実施 |
+|---|---|---|---|---|---|
+| 1 | 43-1 | facade 互換 (PG3 側の 3 委譲属性が leaf を指す) | `postgres.py`: `_select_statement = staticmethod(_select_statement)` の行を消す | `r2db-api/tests/test_foundation.py::test_postgres_sql_leaf_preserves_postgres_delegates` (新規) | 実装担当 |
+| 2 | 44-1 | facade 互換 (PG2 側の 4 委譲属性が leaf を指す) | `postgres.py`: `_bind_value = staticmethod(_bind_value)` の行を消す | `r2db-api/tests/test_foundation.py::test_postgres_sql_leaf_preserves_predicate_delegates` (新規) | 実装担当 |
+| 3 | 43-2 | SELECT 文の並び (列 + revision、FROM、WHERE、ORDER BY、OFFSET、LIMIT) が逐語 | `postgres_sql.py`: `"{base} OFFSET {offset} LIMIT {limit}"` の `OFFSET`/`LIMIT` の順を入れ替える | `::test_select_statement_is_composed_literally` (新規) | 実装担当 |
+| 4 | 43-3 | 先読み 1 行 (`page_size + 1`) を取る | `postgres_sql.py`: `limit=sql.Literal(int(page_size) + 1)` を `int(page_size)` にする | 3 の新規テスト。`r2db-api/tests/test_postgres.py` の `has_more` を確かめる既存テスト | 実装担当 |
+| 5 | 43-4 | ORDER BY の direction は固定リテラルの 2 値だけ | `postgres_sql.py`: `sql.SQL("ASC" if direction == "asc" else "DESC")` を `sql.SQL("ASC")` にする | `::test_order_by_sql_uses_only_fixed_direction_literals` (新規) | 実装担当 |
+| 6 | 43-5 | revision 述語は `::text` の比較を placeholder で束縛する (W4-3) | `postgres_sql.py`: `ph=sql.Placeholder()` を `ph=sql.SQL(expected_revision)` にする | `::test_append_revision_predicate_binds_the_expected_revision` (新規) | 実装担当 |
+| 7 | 43-6 | `expected_revision` が `None` のときは述語も params も変えない | `postgres_sql.py`: `if expected_revision is None:` を `if False:` にする | 6 の新規テスト | 実装担当 |
+| 8 | 43-7 | leaf は列名を既定値の無い引数で受け、module 定数を読まない (W4-1) | `postgres_sql.py`: `revision_column` の引数に既定値 `= "_r2db_revision"` を足す | `::test_postgres_sql_takes_column_names_as_required_arguments` (新規) | 実装担当 |
+| 9 | 44-2 | 比較演算子は閉じた表の固定リテラルだけ | `postgres_sql.py`: `_COMPARISON_OPERATORS` の `"ne": sql.SQL("<>")` を `sql.SQL("=")` にする | `::test_comparison_operators_are_literal` (新規) | 実装担当 |
+| 10 | 44-3 | 述語の値は placeholder 経由でしか SQL に入らない (W4-3) | `postgres_sql.py`: `sql.SQL("{col} {op} {ph}")` の `ph=sql.Placeholder()` を、値を埋めた `sql.SQL(...)` に置換する | `::test_predicate_sql_never_inlines_a_value` (新規) | 実装担当 |
+| 11 | 44-4 | `contains` は LIKE のワイルドカードを escape し、`matches` はしない | `postgres_sql.py`: `escaped = _escape_like_literal(predicate.value)` を `escaped = predicate.value` にする | `::test_predicate_sql_escapes_only_contains_patterns` (新規) | 実装担当 |
+| 12 | 44-5 | 型なし列の text 表現は `#>> '{}'`、型つきは `::text` | `postgres_sql.py`: `_text_expression` の `if field_type is None:` を `if False:` にする | `::test_text_expression_unwraps_only_untyped_columns` (新規) | 実装担当 |
+| 13 | 44-6 | 値の束縛 (`None` → SQL NULL、型なし / `object` / `array` → `Jsonb`、それ以外は素の値) | `postgres_sql.py`: `if field_type is None or field_type in ("object", "array"):` から `"array"` を外す | `::test_bind_value_wraps_only_json_shaped_columns` (新規) | 実装担当 |
+| 14 | 44-7 | 移した 2 件の denial が 4-key のまま | `postgres_sql.py`: L1902 相当の `fail("VALIDATION_FAILED", "Unsupported filter operator.", details=violation("capability", field="where"))` から、部分文字列 `, details=violation("capability", field="where")` だけを取り除く (行は残す。現物は 1 行で末尾カンマも無い — B-1) | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` | 実装担当 |
+| 15 | 44-8 (43-11 を吸収) | 移動先が `SCANNED_MODULES` に入る (40b) | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`: `SCANNED_MODULES` から `postgres_sql.py` を外す | `::test_every_module_with_a_vocabulary_denial_is_accounted_for` | 実装担当 |
+| 16 | 44-9 | 件数 pin (`postgres_sql.py` 2。移動元は pin されない。Z4-6) | `postgres_sql.py`: 4-key の `fail("VALIDATION_FAILED", …, details=violation(…))` を持つ孤立した関数を 1 つ足す (**import は足さない**。B-2) | `::test_ast_full_count_matches_the_audit_site_count` (`{'postgres_sql.py': 3} != {'postgres_sql.py': 2}`) | 実装担当 |
+| 17 | 43-8 = 44-10 | 行番号 allowlist の行送り (40b、Z4-5) | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`: 更新した `("postgres.py", <実測値>)` を WP-4b の値に戻す | `::test_allowlist_entries_match_real_bare_call_sites` | 実装担当 |
+| 18 | 43-9 = 44-11 | leaf の import が許可リストの内だけ | `postgres_sql.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` | 実装担当 |
+| 19 | 44-12 | leaf は注釈対象の型を import しない (W4-2。注釈対象は `_predicate_sql(predicate: Predicate, …)` と `_where_clause(where: list[Predicate], …)` の 2 箇所。C-8) | `postgres_sql.py`: `from .structured import Predicate` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` | 実装担当 |
+| 20 | 43-10 = 44-13 | 新 leaf が分類される | `tools/tests/test_leaf_import_direction.py`: 一覧から `postgres_sql.py` の行を消す | `::test_every_src_module_is_classified` | 実装担当 |
+| 21 | 43-12 | CH-ID が塊と一緒に移る (PG3 側の 2 件) | `postgres_sql.py`: `_append_revision_predicate` の `History: CH-0045` を `History: CH-0026` に差し替える | 記録した HEAD で `tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green` | **監督** |
+| 22 | 44-14 | CH-ID が塊と一緒に移る (PG2 側の 6 件) | `postgres_sql.py`: `_predicate_sql` の `# history: CH-0057` を `# history: CH-0056` に差し替える | 同上 | **監督** |
+| 23 | 43-13 | §CH-0001 の訂正の記録 (WF-5 (iv)) | `docs/code-history/r2db-api/postgres.md`: §CH-0001 に足した訂正の記録を消す | 同上 | **監督** |
+| 24 | 44-15 | §CH-0054 の訂正の記録 (WF-5 (iv)) | `docs/code-history/r2db-api/postgres.md`: §CH-0054 に足した訂正の記録を消す | 同上 | **監督** |
+| 25 | 43-14 + 44-16 + 枠-1・枠-2 | 手順 0 の走査 (§5.40)。**8 名を一括ではなく名前ごとに走査し、名前ごとの件数と `file:line` を報告に分けて貼る**。あわせて `_REVISION_COLUMN`・`_ID_COLUMN` も走査する。**分類 (「付ける」「付けない」) の無い参照が 1 件でもあれば止まる** (W3-23 の逸脱を前例にしない) | **監査照合**: 名前ごとの実行コマンドと出力を報告に貼り、設計 §10 に残す。分類の無い参照が 0 件であること | — | 実装担当 |
+| 26 | 枠-3 | 独立コードレビューが、手順 0 の走査を実装担当とは別に自分でやり直す (WP-4a で実際に機能した) | **監査照合**: 独立レビューが自分で流した走査の実行コマンドと出力を、実装担当の報告と突き合わせた結果を差し戻し文書に残すこと | — | 独立レビュー |
+| 27 | 43-15 + 44-17 | 本体は列挙した差を除き同一 | **監査照合**: 上の「本体の変更」欄の (a)〜(f) の 6 種を戻した leaf の本体が、移動前と AST で一致する。差の列挙をログに残す | — | 実装担当 |
+| 28 | 註-4 | 移動によって読み手を失った import・定数・再 export が移動元に残っていない | **監査照合**: `ast.Name` の参照件数を import 名ごとに数え、移動前の HEAD (`git show HEAD`) の同じ集計と比べ、「移動が原因で 0 になったもの」だけを取り出す。見つかったものは第 2 次裁定 6 と同じ基準で扱い、根拠と回帰証拠を記録に添える | — | 実装担当 |
+| 29 | 43-16 + 44-18 + 監督裁定 (leaf の中の並び) | 逐語移動と位置参照 (40c)、**および出現順の保存** | **監査照合**: docstring・コメント・`# history:` 行が逐語。括弧書きは上の「付ける」3 箇所 (L1271、module docstring、CH-0054 の L1866) だけであること。**あわせて、leaf の 8 名の出現順が移動前の `postgres.py` での出現順と一致することを、移動前の HEAD の行番号順の一覧と leaf の定義順の一覧を並べて示す** | — | 実装担当 |
+| 30 | 43-17 + 44-19 (前半) | 同型・統合 | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0 (WF-1)、WF-4、WF-6 | — | 実装担当 |
+| 31 | 43-17 + 44-19 (後半)、W4-4 (a)(b)(d) | 来歴の証拠 | **監査照合 (監督が実施)**: 監督が `tools/dev/finalize.py --no-merge` で WP branch に記録し、**その HEAD で `tools/tests` を流して 0f の集計行を取る**。使い捨て clone は使わない。緑を確かめてから統合する。`--base <親>` の §4.1 の赤は判定に使わない (Z4-4、訂正註 5) | — | **監督** |
+| 32 | §1.5 の 40 (**両 manifest の欠落の補充**) | 上の表に、対応する変異も監査照合も無い完了条件の行が 1 つも無い | **監査照合**: 1〜31 の各行に「変異」または「監査照合」が入っていることを照合し、結果を報告に貼る | — | 実装担当 |
+
+**件数 (下限)**: **完了条件 32 件** = 変異 24 件 (実装担当 20 = 1〜20、監督 4 = 21〜24) + 監査照合 8 件 (25〜32。うち 31 は監督、26 は独立レビュー)。**新規テスト 11 本。**
+
+完了条件 32 は §5.43・§5.44 のどちらにも無く、両 manifest の和を 1 件超える。これは規律 §1.5 の 40 がすべての WP に必須とする行の**欠落の補充**であり、統合によって増やしたものではない。**32 / 24 / 11 はいずれも着手時の下限である** (下の 7 を見よ)。
+
+**6. まとめたことによる危険と、その打ち消し (完了条件として明記した項目)**
+
+Z4-2 の理由 (1 WP あたりの移動名が増えると範囲外の位置参照を取りこぼす。WP-3e〜3i では独立レビューだけが順に 3・8・1・5・2 件を見つけた) は本裁定でも消えていない。したがって次の 4 つを完了条件に置いた。
+
+1. **手順 0 の走査は、8 名を一括ではなく名前ごとに行い、名前ごとの件数と `file:line` を報告に分けて貼る** (完了条件 25)。一括の走査は、名前ごとの取りこぼしを集計の中に隠す。
+2. **分類の無い参照が 1 件でもあれば止まる** (完了条件 25 の後段)。W3-23 の逸脱を前例にしない。
+3. **独立コードレビューは、手順 0 の走査を実装担当とは別に自分でやり直す** (完了条件 26)。WP-4a で実際に機能した。
+4. **CH-ID は PG3 側 (CH-0026・CH-0045 と範囲外の CH-0001) と PG2 側 (CH-0041・CH-0053〜CH-0057) の両方が入るので、訂正の記録も両方書く** (完了条件 23・24)。§5.45 の訂正註 2 (`_flatten` 後の 1 行で書く) がそのまま掛かる。
+
+**7. 件数の更新 (§1.8 の 56 のとおり、既存の行を消さずに本註で上書きする)**
+
+- §5.45 の「**新規テストの数 (C-2)**」の行 (「4a 4、4b 3、4c 5、4d 6、**計 18**」) と、訂正註 3 の上書き (「実績は **4a 5 / 計 19**」) は、**いずれも消さずに残す**。本註で次のとおり読む: **4a 5 (実績) / 4b 3 (未着手) / 統合後の 4c 11 (未着手、下限) の 3 件、計 19 (下限)。**総数の下限 19 は変わらず、内訳が 4 件から 3 件になる。
+- **完了ゲートの期待値**: **WP-4b の統合後の集計行 + 11 (下限)**。**監督は完了ゲートの直前に、実装担当が実際に足した新規テストの数を確かめてから期待値を出す。**絶対値は 4b が未統合のため本註では書かない (訂正註 3 が記した WP-4a 統合時点の実測は `3422 passed, 2 subtests passed` である)。R-44 側の新規テストと同時に動くので、期待値は統合の直前に main を取り込んでから出す (§5.40)。
+- **完了条件・変異の実績の記録**: 統合後の WP-4c の実績 (下限である完了条件 32・変異 24・新規テスト 11 に対する実測) は、設計 `docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` §10 の WP-4c 実施記録に書く (§10.16 の WP-4a 実施記録と同じ形)。
+- **件数は固定値ではなく下限である (監督裁定 2026-09-16)。**訂正註 3 の「閉語彙外・例外経路の場面を新規テストに 1 つ以上置く」は統合後の WP-4c にも掛かり、**PG2 の経路と PG3 の経路それぞれに新しい場面を要求しうる**。WP-4a では同じ指摘 (独立コードレビュー 中-1) で完了条件が 15 → 16、変異が 12 → 13、新規テストが 4 → 5 に増えた。したがって **完了条件 32・変異 24・新規テスト 11 は着手時の下限**であり、**実装担当は訂正註 3 を満たすために必要なら足す。監督は完了ゲートの直前に実際の新規テスト数を確かめてから期待値を出す。**
+
+**8. §5.45 の既存の訂正註との関係**
+
+§5.45 の訂正註 **1〜5** (W4-4 の 4 裁定、訂正の記録の `old:`/`new:` の書式、閉語彙外・例外経路の完了条件と変異、読み手を失ったものの検査、`--base` の §4.1 の赤の読み方) は、**統合後の WP-4c にもそのまま掛かる** (それぞれ完了条件 21〜24・31、7 の項、25〜32 の表、28、31 に織り込んである)。
+
+---
+
+---
+
+**訂正註 2026-09-16 (WP-4b の実装と独立コードレビュー)。上の本文・表・裁定・訂正註はいずれも当時の原文であり、消さずに残す (`OPERATING_CONDITIONS.md` §1.8 の 57)。下の 6・7 は上の訂正註 1〜5 の番号を継ぐものであり、**統合後の WP-4c (§5.43 + §5.44) に掛かる**。**
+
+**6. 閉語彙外・例外経路の完了条件の強化 (訂正註 3 の上書き。独立コードレビュー 中-1。WP-4c に掛かる)**
+
+訂正註 3 は「**4b・4c・4d の新規テストにも、閉語彙外・例外経路の場面を 1 つ以上置く**」と書いた。**この書き方では足りない。assertion を足すだけでは満たせない**ことが、WP-4a と WP-4b の **2 回続けて**明らかになった。原因は 2 回とも同じで、**既存の等値 assertion に論理的に含意される assertion を足していた**ことである (§1.5 の 32 の空振り)。
+
+- WP-4a: 完了条件 5 のテストは `_OPERATOR_SQL` の中身を pin するだけで、参照の閉じ方を pin しなかった。`_OPERATOR_SQL[item.operator]` → `.get(item.operator, sql.SQL("="))` の変異が新規 4 本すべてを緑のまま通過した (完了条件 16 と変異 M13 を足して補充)。
+- WP-4b: 足した 2 行 (`assert "_r2db_json_unknown" not in _DOMAIN_TO_DECLARED`・`assert "smallint" not in _SQL_TYPE_TO_DECLARED`) は、直前の `==` による辞書全体の固定に含意される。呼出し側 `r2db-api/src/r2db_api/postgres.py`:891 の `_SQL_TYPE_TO_DECLARED.get(data_type)` → `.get(data_type, "string")` の変異が**新規 3 本とも緑で素通り**した。**独立レビューが自作変異で実証して初めて分かった。**
+
+**以後、閉語彙外・例外経路の完了条件は次を満たす。**
+
+1. **番号付きの変異を 1 つ持つ。**完了条件の表に `file:操作` と赤になる test id を書き、他の完了条件と同じ形で番号を振る。監査照合にしない。
+2. **実装担当がその変異を当てて赤になった実測を報告に添える** (`tools/dev/mutate.py` の `expect=red got=red OK` の行)。§1.5 の 32 (「X を壊す変異を赤にした実測を添える」) を**この条件に明示的に掛ける**。assertion を足しただけで満たしたことにしない。
+3. **テストは、断言が及ぶ経路 (呼出し側を含む) を実際に実行する。**それが難しい場合は、AST で**呼出しサイトの形**を固定する (WP-4b は `postgres.py` を `ast` で読み、2 つの `.get` 呼出しの引数が 1 個であること = 既定値を取らないことを固定した)。**表・定数・辞書の中身を pin するだけのテストでは足りない。**
+4. **テストの docstring は、テストが実際に固定する範囲までしか断言しない** (§1.5 の 34)。WP-4b の初稿は呼出し側の fallback まで断言しながら、呼出し側を 1 行も実行していなかった。
+
+これに伴う件数の更新: **4b の完了条件は 13 → 14、変異は 8 → 9 である** (内訳は実装担当 9 = M1〜M9、監督 2 = S1・S2 の計 11 変異 + 監査照合 3)。新規テストは 3 本のまま (差し替えで対応した)。上の「新規テストの数 (C-2)」の行と訂正註 3 の上書き行は、§1.8 の 56 のとおり消さず、本註で次のとおり読む: **4a 5 (実績) / 4b 3 (実績) / 統合後の 4c 11 (未着手、下限)。** WP-4b の完了ゲートの期待値は 4a 統合後の `3422` + 3 = **`3425 passed, 2 subtests passed`** であり、実測はこの値である。**統合後の WP-4c の期待値は `3425` + 実際の新規テスト数 (下限 11) であり、監督は完了ゲートの直前に実数を確かめてから出す** (依頼者裁定の訂正註 7 の項のとおり、件数は下限である)。
+
+**7. 0f の読み方の非対称 (W4-4 (c) の枝の実測。WP-4c に掛かる)**
+
+`tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green` は、**src を記録済みのツリーから読み、companion (`docs/code-history/` の登録簿) を作業ツリーから読む。**この非対称の帰結は次の 2 つである。
+
+- **companion 側の変異は、作業ツリーのままで赤になる。**WP-4a の M12 (CH-0340 の訂正の記録を消す) と WP-4b の S1 (§CH-0101 に足した訂正の記録を消す) はいずれも作業ツリーで赤になった (S1: `expect=red got=red OK | 1 failed in 3.27s | restore=ok`)。
+- **src 側の来歴の変異 (`# history:` / `History:` の ID 差し替え等) は、記録しない限り 0f に見えない。**作業ツリーで当てても**緑のまま通る**。WP-4b の S2 (`r2db-api/src/r2db_api/postgres_types.py`:61 のコメント側の `# history: CH-0005` → `# history: CH-0006`) は `expect=red got=green NG | 1 passed` であった。**なお実際に回した S2 は、§5.42 の完了条件 9 が書いた spec (docstring 側の `History: CH-0006` → `History: CH-0005`) とは当てた場所も向きも異なる。守る性質は同じ**であり、**記録には実際に回したほうを書く** (§1.5 の 34)。
+
+**W4-4 (c) はこの枝を想定している** (「0f が作業ツリーの companion を読まず git から読む形であれば、その場で判明するので、その場合は捨て branch 上の記録で取り直し、結果を記録する」)。**src 側の来歴を固定する完了条件は、次の手順で赤を確認する。**
+
+1. W4-4 (b) のとおり `tools/dev/finalize.py --no-merge` で WP branch に記録し、その HEAD で `tools/tests` の 0f が緑であることを確かめる (来歴の証拠)。
+2. その HEAD の上に**捨てコミット**を作り、変異を当てた状態で `tools/tests` を回して 0f が赤になることを確かめる。WP-4b では捨てコミット (当日は `c6bbe30`) で `1 failed, 11 passed, 234 deselected` を得た。**この SHA は 3 の `reset --hard` で到達不能になるので、当日の実施の記録としてのみ残す。再現は SHA ではなく変異の内容で書く** — WP-4b の場合は「`postgres_types.py`:61 の `# history: CH-0005` を `# history: CH-0006` に差し替えたものを記録した HEAD の上の捨てコミットに載せ、0f を回す」である。
+3. `git reset --hard <記録した HEAD>` で戻し、**§1.4 の 30 のとおり `sleep` の後に sha256 を 2 回照合して一致、変異文字列の全文 grep 0 件、作業ツリーがクリーンであることを確かめる。**
+4. 作業ツリーで緑だったことと、捨てコミット上で赤だったことの**両方**を記録に残す。**「作業ツリーで緑だった」を「変異が効かない」と読み違えない。**
+
+**統合前の `tools/tests` の 1 赤の読み方も同じ機構である。** 変更した src がまだ記録されていない間は、記録済みのツリーから読む src 側と作業ツリーの companion 側が食い違うので、**新 leaf を作らない WP でも 0f の 1 件が赤になる** (WP-4b の統合前は `1 failed, 485 passed`、記録後の HEAD では `486 passed`)。この 1 赤を §9f 起因と読み違えない (訂正註 2 の落とし穴)。§9f が出ていないことは `python3 tools/check_comment_provenance.py --base <基点> <対象 src>` で別に確かめる (WP-4b は `--base bec2eeb` で **§9f 0 件**。残る 9 件はすべて §4.1 の位置ずれで、訂正註 5 のとおり判定に使わない)。
+
+**あわせて: 移動先 module 自身の docstring の扱い (独立コードレビュー 中-2。WP-4c に掛かる)。** §5.4x の「本体の変更は無し」は**移動する塊についての条件**であり移動先 module の header docstring は対象外なので、**移動によってその docstring が偽になったら、その WP で直す** (§1.5 の 34。WP-4b は `postgres_types.py`:1-6 の「it only maps … to a psycopg SQL composition object」が逆写像 2 本と `_TableInfo` の流入で偽になったため直した。CH-ID を持たない塊なので `--register` と 0f には影響しない)。
 
 ## 6. 重なり表と監督裁定
 

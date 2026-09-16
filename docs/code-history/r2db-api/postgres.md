@@ -1984,6 +1984,20 @@ startup should degrade to a sane default, not crash the process.
 # this WP, but a future one) keeps working.
 ```
 
+### correction: 2026-09-16
+
+- reason: R-37 WP-4b -- postgres.py's `_DOMAIN_TO_DECLARED`/`_SQL_TYPE_TO_DECLARED`/`_TableInfo` moved to postgres_types.py; `_load_field_constraints` stays in postgres.py, so the pointer gets a 40c position bracket
+
+old:
+```
+(`_load_field_constraints` below)
+```
+
+new:
+```
+(`_load_field_constraints` below (in `postgres.py`))
+```
+
 ## CH-0102
 
 - moved from: `src/r2db_api/postgres.py` (`<module>`)
