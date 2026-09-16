@@ -227,7 +227,17 @@ def ledger_numbers(admin_dsn: str, database: str) -> frozenset[int]:
         conn.close()
 
 
+#: `_run_ops`'s own default for `upgrade-applications`' now-required
+#: `--lock-timeout` (design W-1/W-7) -- every caller here is a per-test
+#: PostgreSQL exercise, never a real deployment, so any accepted value
+#: does; a caller exercising `--lock-timeout` itself passes its own value
+#: in `args` and this default is skipped.
+_TEST_LOCK_TIMEOUT = "5000ms"
+
+
 def _run_ops(platform: types.SimpleNamespace, *args: str) -> subprocess.CompletedProcess:
+    if args and args[0] == "upgrade-applications" and "--lock-timeout" not in args:
+        args = (*args, "--lock-timeout", _TEST_LOCK_TIMEOUT)
     env = dict(os.environ)
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
@@ -440,7 +450,7 @@ def test_upgrade_applications_usage_error_without_provision_dsn() -> None:
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
     env.pop("MITATEDB_PROVISION_DSN", None)
     result = subprocess.run(
-        [sys.executable, "-m", "mitatedb_api.ops", "upgrade-applications"],
+        [sys.executable, "-m", "mitatedb_api.ops", "upgrade-applications", "--lock-timeout", _TEST_LOCK_TIMEOUT],
         capture_output=True, text=True, env=env,
     )
     assert result.returncode == 2, result.stdout + result.stderr
@@ -667,7 +677,7 @@ def test_upgrade_applications_enumeration_failure_is_exit_code_1(platform: types
     ):
         env.pop(removed, None)
     result = subprocess.run(
-        [sys.executable, "-m", "mitatedb_api.ops", "upgrade-applications"],
+        [sys.executable, "-m", "mitatedb_api.ops", "upgrade-applications", "--lock-timeout", _TEST_LOCK_TIMEOUT],
         capture_output=True, text=True, env=env,
     )
     assert result.returncode == 1, result.stdout + result.stderr
@@ -786,7 +796,7 @@ def test_run_upgrade_script_passes_connection_params_via_env_never_argv(monkeypa
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
-    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1")
+    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1", "5000ms")
 
     assert len(calls) == 1
     cmd, kwargs = calls[0]
@@ -819,7 +829,7 @@ def test_run_deprovision_script_passes_connection_params_via_env_never_argv(
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
-    ops._run_deprovision_script(_SENTINEL_DSN, "app1")
+    ops._run_deprovision_script(_SENTINEL_DSN, "app1", "5000ms")
 
     assert len(calls) == 1
     cmd, kwargs = calls[0]
@@ -854,7 +864,7 @@ def test_run_upgrade_script_redacts_connection_values_from_a_failed_psql_output(
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=raw)
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
-    ok, output = ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1")
+    ok, output = ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1", "5000ms")
 
     assert ok is False
     for value in _SENTINEL_VALUES:
@@ -882,7 +892,7 @@ def test_run_deprovision_script_redacts_connection_values_before_dying(
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
     with pytest.raises(SystemExit) as excinfo:
-        ops._run_deprovision_script(_SENTINEL_DSN, "app1")
+        ops._run_deprovision_script(_SENTINEL_DSN, "app1", "5000ms")
     assert excinfo.value.code == 2
     captured = capsys.readouterr()
     for value in _SENTINEL_VALUES:
@@ -928,7 +938,7 @@ def test_upgrade_one_application_redacts_connection_values_on_connect_failure(
     result = ops._upgrade_one_application(
         provision_dsn=sentinel_dsn, provision_role="prov_role", application_id="app1",
         database_name="sentinel_db_44de", developer_role="app1_dv",
-        migrations_by_number={}, script_filter=None, dry_run=False,
+        migrations_by_number={}, script_filter=None, dry_run=False, lock_timeout="5000ms",
     )
     assert result.failure_detail is not None
     for value in _SENTINEL_VALUES:
@@ -1153,7 +1163,7 @@ def test_run_upgrade_script_calls_the_psql_version_gate_first(monkeypatch: pytes
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
-    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1")
+    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1", "5000ms")
     assert version_calls == 1
     assert main_calls == 1
 
@@ -1178,6 +1188,6 @@ def test_run_deprovision_script_calls_the_psql_version_gate_first(
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
-    ops._run_deprovision_script(_SENTINEL_DSN, "app1")
+    ops._run_deprovision_script(_SENTINEL_DSN, "app1", "5000ms")
     assert version_calls == 1
     assert main_calls == 1

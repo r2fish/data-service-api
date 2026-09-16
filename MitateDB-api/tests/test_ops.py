@@ -40,10 +40,20 @@ _APP_PEPPER = "ops-cli-test-app-pepper-0000000000"
 _CONTROL_PEPPER = "ops-cli-test-control-pepper-0000000"
 
 
+#: `_run_ops`'s own default for `deprovision`'s now-required `--lock-
+#: timeout` (design W-1/W-7) -- every caller here is a per-test
+#: PostgreSQL exercise, never a real deployment, so any accepted value
+#: does; a caller exercising `--lock-timeout` itself passes its own value
+#: in `args` and this default is skipped.
+_TEST_LOCK_TIMEOUT = "5000ms"
+
+
 def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER,
              app_pepper: "str | None" = _APP_PEPPER, actor_credential_id: "str | None" = None,
              actor_secret: "str | None" = None, provision_dsn: "str | None" = None,
              migrations_dir: "Path | None" = None) -> subprocess.CompletedProcess:
+    if args and args[0] == "deprovision" and "--lock-timeout" not in args:
+        args = (*args, "--lock-timeout", _TEST_LOCK_TIMEOUT)
     env = dict(os.environ)
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")

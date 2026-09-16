@@ -1,4 +1,4 @@
-# MitateDB platform の読み取り専用 inventory 設計メモ（v0.6）
+# MitateDB platform の読み取り専用 inventory 設計メモ（v0.7）
 
 - 状態: **設計レビュー 2 回反映済み、依頼者裁定済み（2026-09-16、§6 冒頭）。作業指示書の起草待ち。** ~~設計レビュー 2 回反映済み、依頼者判断待ち（Q-1〜Q-7）。~~ 本書の手順はまだ実行してよい手順ではない。本番を読むのは、本書の経路が設計レビューで受け入れられた後である（`docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 C の制約）。
 - 台帳: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-45**（v1.50）。起票物は `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` の手順 1。
@@ -15,6 +15,7 @@
   - v0.4 追補（2026-09-16）起草担当の疑義への監督裁定 Z-34〜Z-36 を §9.3 に逐語で足し、(1) の Cloud SQL Auth Proxy の unix socket モードの前提（D-1、§7 の 9b、§8）、起草担当の対応の採用（Q-1 (c)・Q-5・Q-7・§7 の 2a・45a′）、(8) の対象 role の確定規則（D-1、§7 の 34c、§8）を本文・§7・§8 に合わせた。
   - v0.5（2026-09-16）§6 の Q-1〜Q-7 に依頼者裁定を逐語で記録した（すべて監督の推奨を採用）。本文の決定・§7 は変えていない。
   - v0.6（2026-09-16）末尾に §12（WP-A の実施記録）を足した。本文の決定は変えていない。
+  - v0.7（2026-09-17）§12.2（WP-C の実施記録）を足した。本文の決定は変えていない。
 
 ## 1. 問題
 
@@ -640,3 +641,13 @@ Z-5 は欠番である。第 1 次の起草の疑義 5（r2db-api の扱い）�
 - **レビュー**: 独立コードレビュー 3 回 (差し戻し 2 回)。確実なバグとして、伏字の置換順による接頭辞の漏れと、複数ホストの DSN で伏字が効かないことを直した。A-9 (`PG*` の一律除去) が TLS 設定の格下げを生むことが 2 回目で分かり、A-13 (上書きされない接続設定変数の拒否) で閉じた。
 - **WP-D の runbook に書く事項**: ops を動かすホストの psql は 16 以上。接続設定の環境変数 (`PGHOST`・`PGPORT`・`PGUSER`・`PGPASSWORD`・`PGPASSFILE`・`PGSSLMODE`・`PGSSLROOTCERT`・`PGSERVICE`・`PGSERVICEFILE`・`PGSYSCONFDIR` 等) を export したまま upgrade-applications / deprovision を実行すると変数名つきで拒否されるので、DSN に明記する (`passfile=`・`sslrootcert=` 等) か unset する。`~/.pgpass` の既定の読み込みは影響を受けない。
 - **残存 (低)**: 1 文字などの極端に短い接続値は、無関係な文字まで伏字にする (過剰に伏せる側であり漏洩ではない)。
+
+### 12.2 WP-C — (10) の migration 再実行性と適用時の `lock_timeout` (2026-09-17)
+
+- 基点 main `9dd7e02` (WP-A 統合後。WP-B より先)。作業指示書 §5・§5.1 (訂正註 C-1・C-2、監督裁定 C-1〜C-12、依頼者裁定)。
+- **統制** (MitateDB-api の `ops.py`): `upgrade-applications` と `deprovision` は既定値の無い必須の `--lock-timeout` を取り、値を検証して (不正は入力値を含まない固定文言で拒否)、psql に `PGOPTIONS` の `-c lock_timeout=<値>` として DSN の `options` に連結して渡す。per-application upgrade と deprovision の psql の各ロック待ちに上限がある。argv の `ON_ERROR_STOP=1` は両経路で静的に固定した。
+- **(10) のリポジトリ側の証拠** (`MitateDB-api/tests/test_platform_migration_reapply.py`): 起点の列は `migrations/*.sql` から 0004 を除いた 11 ファイル。起点 N は、列の (N+1) 番目のファイルを追加したコミットの親の内容で先頭 N 個を実際の運用の形 (platform DB / provision した application) で適用し、HEAD の内容で全部を適用してから、アップグレードで再実行されるもの (0005・0007・0011・0012 と `upgrade-applications` 経由の 0006・0008〜0010) をもう一度適用して、終了コード 0 と差分 0 (`updated_at` を除く。ロール設定・宣言値・制約・ACL・関数定義・CONNECTION LIMIT・台帳) を確かめる。過去の内容が HEAD と異なる起点で実際にその内容が適用されたことを assert する。手動で入れた ACL・関数本体・ロール設定のずれを再適用が戻すことも確かめる。git の履歴が読めなければ fail する (CI の `conformance` job は `fetch-depth: 0`)。
+- **(10) の限界 (R-47)**: 0003 に public schema の USAGE の provision role への付与が入る前 (`b87d1c85` より前) の版で provision され、0008 が未適用の application は、現行の ops の upgrade が台帳を読めず失敗する。その起点 {3, 4, 5, 6} は対象外として pin した。**本番にこの状態の application があれば、Gate-0 の (3)・(10) は blocked になる。**
+- **証拠**: 変異 30 件すべて期待どおり (`restores verified 7/7 files (sha256 x2)`)。`MitateDB-api/tests` `1183 passed, 2 subtests passed` (基点 1152)。root gate **`3530 passed, 2 subtests passed`**、judge=PASS、実行クラスタ差分 0 (基点 3499 + 31)。`--register` OK (427 CH-ID)。公開値スキャン flagged 0。`security/CONTROL_MAPPING.md` Version 2.2 (SI-08 の MitateDB ブロック)。
+- **レビュー**: 独立コードレビュー 5 回 (差し戻し 4 回)。起点の parametrize が状態を変えていない、per-application の本文が一度も実行されていない、起点の脱落を検出しない、判定文字列が実ファイルの空白と合わない、の各欠陥を直した。
+- **作業中の事象**: Google Drive 同期で、変異の復元照合の後に `ops.py` の argv から `ON_ERROR_STOP=1` が消えた状態が 1 度観測され、実装担当が復元して再実行した (`OPERATING_CONDITIONS.md` §2 の 10)。統合前の最終状態で `ON_ERROR_STOP` の grep と変異の残骸 0 を確かめた。

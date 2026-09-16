@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **2.1** (2026-09-16; SI-10 gains the ops CLI's exception/DSN-redaction control and evidence, both peers -- docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md D-2)
+Version: **2.2** (2026-09-16; SI-08 gains MitateDB-api's per-application-upgrade/deprovision psql `lock_timeout` control and evidence -- docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md D-5)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -551,10 +551,12 @@ file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A blo
 - One holder is shared by every application in the process, so the bound is deployment-wide, not per-application -- `MitateDB-api/tests/test_application_plane_limits.py::test_limit_holder_is_shared_across_applications_in_one_process`, `MitateDB-api/tests/test_preauth_concurrency_bound.py::test_unauthenticated_flood_is_bounded_by_concurrency`, `::test_http_plane_denies_concurrency_before_requests_per_minute`, `::test_concurrency_hold_spans_the_gap_between_authentication_and_dispatch`, `::test_slot_is_released_after_a_401_ending_request`, `::test_slot_is_released_after_a_validation_failed_ending_request`, `::test_concurrency_slot_is_acquired_exactly_once_per_handler`.
 - (e) Handlers delegate the synchronous section to the threadpool, and `ApplicationCell._lock` now covers the WHOLE lookup -> pass-1 -> pass-2 sequence inside that slot (the separate `_idempotency_lock_scope` helper is gone: the outer cell lock is the in-process serializer, `_idempotency_pg_scope` the cross-process one).
 - That lock is per `ApplicationCell`, so requests against the SAME application serialize while different applications hold different locks -- `MitateDB-api/tests/test_threadpool_offload.py::test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_race`, `::test_sync_section_runs_off_the_event_loop`, `::test_post_query_sync_section_runs_off_the_event_loop`, `::test_post_mutate_sync_section_runs_off_the_event_loop`, `::test_post_cross_entity_mutate_sync_section_runs_off_the_event_loop`, `::test_control_post_issue_credential_sync_section_runs_off_the_event_loop`, `::test_body_read_stays_on_the_loop`, `::test_limiter_state_is_thread_safe`, `::test_pool_acquire_is_thread_safe`, `::test_concurrency_slot_check_then_increment_is_inside_the_active_lock`, and the concurrent same-key idempotency forms `MitateDB-api/tests/test_idempotency_concurrency.py::test_memory_same_key_same_digest_concurrent_executes_exactly_once`, `::test_postgres_same_key_same_digest_concurrent_executes_exactly_once`.
+- The per-application-upgrade/deprovision psql invocations (`_run_upgrade_script`/`_run_deprovision_script`) require a `--lock-timeout` value with no default, set on the psql session via `PGOPTIONS`'s own `-c lock_timeout=<value>` (appended to, never overwriting, the DSN's own `options` value if any) so each of these two psql invocations' own catalog-lock wait has an upper bound rather than none -- the CLI rejects both a missing value and one that is not a positive integer optionally followed by `ms`/`s`/`min`, before any psql subprocess starts.
 
 #### Evidence
 
 - common-suite coverage is C-16's own V3 (see SI-11 row).
+- `MitateDB-api/tests/test_platform_migration_reapply.py::test_run_upgrade_script_passes_lock_timeout_via_pgoptions`, `::test_run_deprovision_script_passes_lock_timeout_via_pgoptions`, `::test_run_upgrade_script_keeps_the_dsns_own_pgoptions_alongside_lock_timeout`, `::test_upgrade_applications_without_lock_timeout_is_a_usage_error`, `::test_deprovision_without_lock_timeout_is_a_usage_error`, `::test_upgrade_applications_rejects_a_malformed_lock_timeout_value`, `::test_deprovision_rejects_a_malformed_lock_timeout_value`, `::test_deprovision_accepts_a_well_formed_lock_timeout_value`.
 
 #### Status
 

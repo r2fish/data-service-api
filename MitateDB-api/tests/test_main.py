@@ -450,7 +450,7 @@ def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_a
     # cleared).
     for name in (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY):
         monkeypatch.delenv(name, raising=False)
-    rc = ops.main(["upgrade-applications", "--application", h1_bad_app.app_id])
+    rc = ops.main(["upgrade-applications", "--application", h1_bad_app.app_id, "--lock-timeout", "5000ms"])
     assert rc == 0
 
     # "Restart" -- a fresh `build_app` call re-reads the ledger this

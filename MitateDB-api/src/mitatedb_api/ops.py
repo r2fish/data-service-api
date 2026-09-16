@@ -624,6 +624,27 @@ def _require_psql_16_or_newer() -> None:
         _die("psql binary is missing, unreadable, or older than PostgreSQL 16; refusing to run a psql subprocess")
 
 
+#: A PostgreSQL GUC duration -- a positive integer optionally followed by
+#: one of PostgreSQL's own `ms`/`s`/`min` unit suffixes -- never `0`
+#: (which PostgreSQL itself reads as "no timeout") and never any other
+#: unit PostgreSQL also accepts (`h`/`d`), so the CLI's own accepted
+#: vocabulary stays a strict subset of PostgreSQL's.
+_LOCK_TIMEOUT_VALUE_RE = re.compile(r"^[1-9][0-9]*(ms|s|min)?$")
+
+
+def _validate_lock_timeout_value(value: str) -> str:
+    """Rejects a `--lock-timeout` value that does not match `_LOCK_
+    TIMEOUT_VALUE_RE` before it ever reaches a psql subprocess, via the
+    same fixed-message `_die` every other usage error in this module
+    already uses. The rejected value itself is never echoed back."""
+    if not _LOCK_TIMEOUT_VALUE_RE.fullmatch(value):
+        _die(
+            "--lock-timeout value must be a positive integer optionally "
+            "followed by ms, s, or min"
+        )
+    return value
+
+
 def _psql_connection_env(dsn: str) -> dict[str, str]:
     """design D-2: builds the environment for a psql subprocess invocation
     from `dsn`'s own connection parameters -- never on argv, which is
@@ -715,14 +736,28 @@ def _redact_connection_values(text: str, dsn: str) -> str:
     return re.sub(pattern, "<redacted>", text)
 
 
-def _run_deprovision_script(dsn: str, application_id: str) -> None:
+def _with_lock_timeout_option(existing_pgoptions: "str | None", lock_timeout: str) -> str:
+    """Appends a `-c lock_timeout=<value>` startup option to `existing_
+    pgoptions` (the value `_psql_connection_env`'s own `options`-key
+    mapping already placed there, if the DSN itself carried one) rather
+    than replacing it -- a DSN-supplied `options` value keeps taking
+    effect alongside the lock timeout, never silently dropped."""
+    option = f"-c lock_timeout={lock_timeout}"
+    if existing_pgoptions:
+        return f"{existing_pgoptions} {option}"
+    return option
+
+
+def _run_deprovision_script(dsn: str, application_id: str, lock_timeout: str) -> None:
     script = _migrations_dir() / "0004_deprovision_application.sql"
     if not script.exists():
         _die(f"deprovision script not found at {script} (set MITATEDB_MIGRATIONS_DIR to override)")
     _require_psql_16_or_newer()
+    env = _psql_connection_env(dsn)
+    env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)
     result = subprocess.run(
         ["psql", "-v", "ON_ERROR_STOP=1", "-v", f"app_id={application_id}", "-f", str(script)],
-        capture_output=True, text=True, env=_psql_connection_env(dsn),
+        capture_output=True, text=True, env=env,
     )
     if result.returncode != 0:
         _die(_redact_connection_values(f"deprovision script failed:\n{result.stdout}\n{result.stderr}", dsn))
@@ -742,6 +777,7 @@ def cmd_deprovision(args: argparse.Namespace) -> int:
     application_id = args.application_id
     if not _APPLICATION_ID_PATTERN.fullmatch(application_id):
         raise ValidationError(f"application_id must match {_APPLICATION_ID_PATTERN.pattern!r}")
+    lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
     dsn = _provision_dsn()
     registered_at = _lookup_application_registered_at(dsn, application_id)
     phrase = _deprovision_confirmation_phrase(application_id, registered_at)
@@ -755,7 +791,7 @@ def cmd_deprovision(args: argparse.Namespace) -> int:
                 "recovery": None,
             },
         ))
-    _run_deprovision_script(dsn, application_id)
+    _run_deprovision_script(dsn, application_id, lock_timeout)
     print(f"application {application_id} deprovisioned")
     return 0
 
@@ -1611,7 +1647,7 @@ def _registry_applications_for_upgrade(
     return rows
 
 
-def _run_upgrade_script(provision_dsn: str, script: Path, application_id: str) -> tuple[bool, str]:
+def _run_upgrade_script(provision_dsn: str, script: Path, application_id: str, lock_timeout: str) -> tuple[bool, str]:
     """the `psql` subprocess call shape this peer newly carries
     (`MitateDB-api/src/mitatedb_api/ops.py::_run_deprovision_script`'s own
     call shape, followed here -- never `_die`, which would exit immediately
@@ -1630,17 +1666,19 @@ def _run_upgrade_script(provision_dsn: str, script: Path, application_id: str) -
     History: CH-0429
     """
     _require_psql_16_or_newer()
+    env = _psql_connection_env(provision_dsn)
+    env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)
     result = subprocess.run(
         ["psql", "-v", "ON_ERROR_STOP=1",
          "-v", f"{platform_upgrades.UPGRADE_SCRIPT_VARIABLE}={application_id}", "-f", str(script)],
-        capture_output=True, text=True, env=_psql_connection_env(provision_dsn),
+        capture_output=True, text=True, env=env,
     )
     return result.returncode == 0, _redact_connection_values(f"{result.stdout}\n{result.stderr}", provision_dsn)
 
 
 def _upgrade_one_application(
     *, provision_dsn: str, provision_role: str, application_id: str, database_name: str, developer_role: str,
-    migrations_by_number: dict[int, Path], script_filter: Optional[int], dry_run: bool,
+    migrations_by_number: dict[int, Path], script_filter: Optional[int], dry_run: bool, lock_timeout: str,
 ) -> platform_upgrades.ApplicationUpgradeResult:
     """Design D-4(b)/(c)/(d): one application's own full upgrade cycle --
     read the ledger, apply every pending number in ascending order (or
@@ -1694,7 +1732,7 @@ def _upgrade_one_application(
                 if script is None:
                     failed.append(number)
                     break
-                ok, output = _run_upgrade_script(provision_dsn, script, application_id)
+                ok, output = _run_upgrade_script(provision_dsn, script, application_id, lock_timeout)
                 if ok:
                     applied_now.append(number)
                 else:
@@ -1842,6 +1880,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
     # report -- mirrors r2db-api's own identical `not args.dry_run` guard).
     if args.script is not None and not args.dry_run and args.script not in migrations_by_number:
         _die(f"no per-application upgrade script found for upgrade number {args.script} under {_migrations_dir()}")
+    lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
     conn = psycopg.connect(provision_dsn)
     try:
         provision_role = conninfo_to_dict(provision_dsn).get("user") or conn.info.user
@@ -1881,7 +1920,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
         results.append(_upgrade_one_application(
             provision_dsn=provision_dsn, provision_role=provision_role, application_id=application_id,
             database_name=database_name, developer_role=developer_role, migrations_by_number=migrations_by_number,
-            script_filter=args.script, dry_run=args.dry_run,
+            script_filter=args.script, dry_run=args.dry_run, lock_timeout=lock_timeout,
         ))
     _print_upgrade_results(results, dry_run=args.dry_run)
     return platform_upgrades.summarize_upgrade_run(results, dry_run=args.dry_run)
@@ -2097,6 +2136,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--confirm", default=None, metavar="PHRASE",
         help="echo the required_confirmation phrase from a prior refusal's stderr declaration to proceed",
     )
+    p.add_argument(
+        "--lock-timeout", required=True, metavar="VALUE",
+        help="lock_timeout to set on the psql session before running the deprovision script "
+             "(a positive integer optionally followed by ms, s, or min; no default)",
+    )
     p.set_defaults(func=cmd_deprovision)
 
     # ---- Q4 phase declaration-management command family -- provision
@@ -2185,6 +2229,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--application", default=None, metavar="ID", help="limit to one application id")
     p.add_argument("--script", type=int, default=None, metavar="NNNN", help="limit to one upgrade number")
     p.add_argument("--dry-run", action="store_true", help="report applied/pending only, apply nothing")
+    p.add_argument(
+        "--lock-timeout", required=True, metavar="VALUE",
+        help="lock_timeout to set on the psql session before running each per-application upgrade script "
+             "(a positive integer optionally followed by ms, s, or min; no default)",
+    )
     p.set_defaults(func=cmd_upgrade_applications)
 
     p = sub.add_parser(
