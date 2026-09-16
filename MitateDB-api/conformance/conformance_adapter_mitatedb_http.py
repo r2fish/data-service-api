@@ -170,7 +170,6 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 # one shared convention across every PostgreSQL-backed test/harness in this
 # package for "where is the local admin/superuser connection".
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 _SCHEMA_REVISION_TABLE = "_mdb_schema_revision"
 # Phase 6 WP-3 (design D-3): the declared-type registry table itself --
@@ -204,7 +203,14 @@ _PORT_FIELD_TYPE_TO_WIRE = {"text": "string", "integer": "integer"}
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:

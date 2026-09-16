@@ -151,7 +151,6 @@ def _peer_env_prefixes_removed_from_os_environ():
 # this repository's own throwaway-provisioning tests" -- deliberately
 # reused rather than inventing a fourth name for the identical question.
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 # This launcher's own prefix shape, distinct from every other throwaway-
 # prefix convention already in this repository ("r2dbtest*"/"r2dbsvc*"/
@@ -175,7 +174,14 @@ class LauncherStartupError(RuntimeError):
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:
@@ -490,6 +496,15 @@ class RealServerR2db:
         self._runtime_secret: Optional[str] = None
         self._data_handle: Optional[sh.UvicornSubprocessHandle] = None
         self._control_handle: Optional[sh.UvicornSubprocessHandle] = None
+        # R-44 WP-3 (e), W44-3-9: the data/control upstream port
+        # reservations this launcher itself owns for its whole lifetime --
+        # `start()` mints both and `restart()` hands the SAME two objects
+        # back to `start_uvicorn_subprocess(reserved=...)` (never a fresh
+        # `reserve_port()`), so a restart never re-opens the bind-race
+        # window `port=<int>` re-binding used to leave; `stop()` closes
+        # both.
+        self._data_reservation: Optional[sh.ReservedPort] = None
+        self._control_reservation: Optional[sh.ReservedPort] = None
         self._nginx: Optional[sh.NginxHandle] = None
         self._nginx_prefix_dir: Optional[Path] = None
         self._listen_port: Optional[int] = None
@@ -627,14 +642,24 @@ class RealServerR2db:
             assert self._script_dir is not None
             pidfile_data = self._script_dir / "uvicorn-data.pid"
             pidfile_control = self._script_dir / "uvicorn-control.pid"
+            # R-44 WP-3 (e): each upstream gets its OWN `reserve_port()`
+            # reservation, held by THIS launcher (never the handle -- W44-
+            # 3-5's own caller-owns-when-reserved-is-given rule) for as
+            # long as the surface lives, so `restart()` below can hand the
+            # identical reservation back in rather than re-binding a bare
+            # port number.
+            self._data_reservation = sh.reserve_port()
             with _peer_env_prefixes_removed_from_os_environ():
                 self._data_handle = sh.start_uvicorn_subprocess(
-                    "r2db_api.main:app", pidfile=pidfile_data, env=_with_pythonpath(self._app_env()),
+                    "r2db_api.main:app", pidfile=pidfile_data,
+                    reserved=self._data_reservation, env=_with_pythonpath(self._app_env()),
                 )
             self._record("uvicorn_data_start")
+            self._control_reservation = sh.reserve_port()
             with _peer_env_prefixes_removed_from_os_environ():
                 self._control_handle = sh.start_uvicorn_subprocess(
-                    "r2db_api.control_main:app", pidfile=pidfile_control, env=_with_pythonpath(self._control_env()),
+                    "r2db_api.control_main:app", pidfile=pidfile_control,
+                    reserved=self._control_reservation, env=_with_pythonpath(self._control_env()),
                 )
             self._record("uvicorn_control_start")
 
@@ -692,20 +717,27 @@ class RealServerR2db:
             raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings_result.stdout}\n{ceilings_result.stderr}")
         self._record("declare_process_ceilings_restart")
 
-        data_port = self._data_handle.port
-        control_port = self._control_handle.port
+        # R-44 WP-3 (e), W44-3-9: the SAME two reservations `start()`
+        # minted are handed back in below (never a fresh `reserve_port()`
+        # / a bare `port=<int>` re-bind) -- this is what actually closes
+        # the bind-race window a restart used to re-open (W44-3-5's own
+        # reason 1: nginx's conf already names these upstream ports and
+        # never reloads).
+        assert self._data_reservation is not None and self._control_reservation is not None
         self._data_handle.stop()
         self._control_handle.stop()
 
         assert self._script_dir is not None
         with _peer_env_prefixes_removed_from_os_environ():
             self._data_handle = sh.start_uvicorn_subprocess(
-                "r2db_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid", port=data_port, env=_with_pythonpath(self._app_env()),
+                "r2db_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid",
+                reserved=self._data_reservation, env=_with_pythonpath(self._app_env()),
             )
         self._record("uvicorn_data_restart")
         with _peer_env_prefixes_removed_from_os_environ():
             self._control_handle = sh.start_uvicorn_subprocess(
-                "r2db_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid", port=control_port, env=_with_pythonpath(self._control_env()),
+                "r2db_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid",
+                reserved=self._control_reservation, env=_with_pythonpath(self._control_env()),
             )
         self._record("uvicorn_control_restart")
 
@@ -724,6 +756,18 @@ class RealServerR2db:
                 self._nginx.stop()
             except Exception:  # noqa: BLE001
                 pass
+        # R-44 WP-3 (e), W44-3-5: this launcher (never the handle) owns
+        # the data/control port reservations for its whole lifetime --
+        # closing them here, alongside the two uvicorn subprocesses and
+        # nginx above, is what actually releases the ports; `start_
+        # uvicorn_subprocess(reserved=...)` never closes a caller-supplied
+        # reservation itself.
+        for reservation in (self._data_reservation, self._control_reservation):
+            if reservation is not None:
+                try:
+                    reservation.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def stop(self) -> None:
         """Stops both uvicorn subprocesses and nginx, then drops the
@@ -740,6 +784,8 @@ class RealServerR2db:
         self._best_effort_stop_processes()
         self._data_handle = None
         self._control_handle = None
+        self._data_reservation = None
+        self._control_reservation = None
         self._nginx = None
         if self._nginx_prefix_dir is not None:
             shutil.rmtree(self._nginx_prefix_dir, ignore_errors=True)
@@ -818,11 +864,20 @@ class RealServerR2db:
             # -- `subprocess.run` (not the harness' fire-and-forget
             # `Popen`) is used here specifically so this call blocks until
             # that failure actually happens and captures its real stderr.
-            free_port = sh.free_port()
-            result = subprocess.run(
-                [sys.executable, "-m", "uvicorn", "r2db_api.main:app", "--host", "127.0.0.1", "--port", str(free_port)],
-                env=env, capture_output=True, text=True, timeout=30,
-            )
+            # R-44 WP-3 (e), R-19: a `reserve_port()` reservation, handed
+            # to uvicorn via `--fd`/`pass_fds` (never a bare `--port`), so
+            # this fail-fast observation is never confused with a lost
+            # bind race against some concurrent xdist worker's own
+            # harness surface.
+            f15_reservation = sh.reserve_port()
+            try:
+                f15_fd = f15_reservation.sock.fileno()
+                result = subprocess.run(
+                    [sys.executable, "-m", "uvicorn", "r2db_api.main:app", "--host", "127.0.0.1", "--fd", str(f15_fd)],
+                    env=env, capture_output=True, text=True, timeout=30, pass_fds=(f15_fd,),
+                )
+            finally:
+                f15_reservation.close()
             return result
         finally:
             _sweep_prefix(_admin_dsn(), prefix)
@@ -903,11 +958,19 @@ class RealServerR2db:
             finally:
                 admin.close()
 
-            lowered_port = sh.free_port()
-            lowered_result = subprocess.run(
-                [sys.executable, "-m", "uvicorn", "r2db_api.main:app", "--host", "127.0.0.1", "--port", str(lowered_port)],
-                env=env, capture_output=True, text=True, timeout=30,
-            )
+            # R-44 WP-3 (e), R-19: same treatment as `attempt_start_
+            # without_process_ceilings`'s own F-15 call above -- a
+            # `reserve_port()` reservation handed to uvicorn via `--fd`/
+            # `pass_fds`, never a bare `--port`.
+            lowered_reservation = sh.reserve_port()
+            try:
+                lowered_fd = lowered_reservation.sock.fileno()
+                lowered_result = subprocess.run(
+                    [sys.executable, "-m", "uvicorn", "r2db_api.main:app", "--host", "127.0.0.1", "--fd", str(lowered_fd)],
+                    env=env, capture_output=True, text=True, timeout=30, pass_fds=(lowered_fd,),
+                )
+            finally:
+                lowered_reservation.close()
 
             admin = psycopg.connect(_admin_dsn(), autocommit=True)
             try:
@@ -916,15 +979,17 @@ class RealServerR2db:
             finally:
                 admin.close()
 
-            restored_port = sh.free_port()
+            # R-44 WP-3 (e), W44-3-10: `reserved` is omitted -- `start_
+            # uvicorn_subprocess` mints its own `reserve_port()` reservation
+            # and the returned handle owns it (closed by `restored_handle.
+            # stop()` below).
             with _peer_env_prefixes_removed_from_os_environ():
                 restored_handle = sh.start_uvicorn_subprocess(
-                    "r2db_api.main:app", pidfile=script_dir / "uvicorn-f16-restored.pid",
-                    port=restored_port, env=env,
+                    "r2db_api.main:app", pidfile=script_dir / "uvicorn-f16-restored.pid", env=env,
                 )
             restored_started = False
             try:
-                sh.wait_until_ready(f"http://127.0.0.1:{restored_port}/v1/capabilities", label="r2db f16 restored")
+                sh.wait_until_ready(f"http://127.0.0.1:{restored_handle.port}/v1/capabilities", label="r2db f16 restored")
                 restored_started = True
             except Exception:  # noqa: BLE001 -- reported to the caller as `restored_started=False`, not raised
                 restored_started = False

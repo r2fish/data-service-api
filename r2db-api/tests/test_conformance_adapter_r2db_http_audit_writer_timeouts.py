@@ -62,11 +62,17 @@ import conformance_adapter_r2db_http as _http_module  # noqa: E402
 from r2db_api.credential_store import PostgresApplicationAuditSink  # noqa: E402
 
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _show(conn: "psycopg.Connection", setting: str) -> str:

@@ -77,11 +77,17 @@ from mitatedb_api.application_audit import (  # noqa: E402
 from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text  # noqa: E402
 
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _show_ms(conn: "psycopg.Connection", setting: str) -> int:

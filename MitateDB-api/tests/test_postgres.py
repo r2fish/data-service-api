@@ -57,7 +57,6 @@ from mitatedb_api.errors import (AuthenticationError, AuthorizationStateUnavaila
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 # R-4 "prefix-anchored sweep + advisory lock": a fixed, arbitrary 63-bit
 # advisory-lock key, held only around this module's own enumerate-then-drop
@@ -68,7 +67,27 @@ _SWEEP_LOCK_KEY = 0x4D544442535750  # ASCII "MTDBSWP", arbitrary but stable
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
+
+
+def test_admin_dsn_requires_the_environment_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-44 WP-3 (a) completion condition 8: `_admin_dsn()` raises when
+    `MITATEDB_TEST_ADMIN_DSN` is unset or empty -- there is no
+    shared-cluster default to fall back to any more (design D-4)."""
+    monkeypatch.delenv(ADMIN_DSN_ENV, raising=False)
+    with pytest.raises(RuntimeError):
+        _admin_dsn()
+
+    monkeypatch.setenv(ADMIN_DSN_ENV, "")
+    with pytest.raises(RuntimeError):
+        _admin_dsn()
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:
@@ -96,8 +115,8 @@ def _require_admin_connection() -> None:
         pytest.fail(
             "test_postgres.py requires a reachable local PostgreSQL server. "
             f"Connecting with {ADMIN_DSN_ENV}={dsn!r} failed: {exc}. "
-            f"Set {ADMIN_DSN_ENV} to a reachable admin/superuser DSN "
-            "(e.g. 'host=/tmp port=5432 dbname=postgres'). These tests must "
+            f"{ADMIN_DSN_ENV} is set by tools/testpg/dsa_testpg.py for each "
+            "test run; there is no shared-cluster default. These tests must "
             "not be skipped (design docs/design/"
             "MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md R-8).",
             pytrace=False,
@@ -2583,14 +2602,14 @@ def test_postgres_credential_store_construction_rejects_a_missing_or_short_peppe
     that somehow starts with no real pepper configured must never come up
     able to authenticate anything."""
     with pytest.raises(ValueError):
-        PostgresCredentialStore("host=/tmp port=5432 dbname=postgres", pepper=None)
+        PostgresCredentialStore("host=/tmp port=1 dbname=mitatedb_credential_store_construction_missing_pepper", pepper=None)
     with pytest.raises(ValueError):
-        PostgresCredentialStore("host=/tmp port=5432 dbname=postgres", pepper="too-short")
+        PostgresCredentialStore("host=/tmp port=1 dbname=mitatedb_credential_store_construction_short_pepper", pepper="too-short")
 
 
 def test_postgres_credential_pepper_env_var_is_honored_when_no_explicit_pepper_is_given(monkeypatch) -> None:
     monkeypatch.setenv("MITATEDB_CREDENTIAL_PEPPER", _PARITY_PEPPER)
-    store = PostgresCredentialStore("host=/tmp port=5432 dbname=postgres")
+    store = PostgresCredentialStore("host=/tmp port=1 dbname=mitatedb_credential_store_pepper_env_var_placeholder")
     assert store is not None  # construction alone must not touch the network
 
 

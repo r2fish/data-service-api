@@ -14,6 +14,7 @@ from typing import Iterator
 import psycopg
 import pytest
 
+from . import control_plane_harness
 from .control_plane_harness import control_platform  # noqa: F401 (fixture)
 from mitatedb_api.control_credential_store_postgres import PostgresControlCredentialStore
 from mitatedb_api.control_plane import (ControlPlaneLimits, ControlPlaneService,
@@ -65,6 +66,21 @@ def _bootstrapped(backend, limits=None):
     rotated = service.rotate_credential(secret, credential_id)
     rotated_secret = rotated["secret"]
     return service, credential_id, rotated_secret
+
+
+def test_admin_dsn_requires_the_environment_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-44 WP-3 (a) completion condition 9: `control_plane_harness.
+    admin_dsn()` raises when `MITATEDB_TEST_ADMIN_DSN` is unset or empty.
+    Unlike every other test in this module, this one never connects to
+    PostgreSQL -- no `control_platform` fixture, `monkeypatch.delenv`/
+    `monkeypatch.setenv` only (work order §4.2 (a))."""
+    monkeypatch.delenv(control_plane_harness.ADMIN_DSN_ENV, raising=False)
+    with pytest.raises(RuntimeError):
+        control_plane_harness.admin_dsn()
+
+    monkeypatch.setenv(control_plane_harness.ADMIN_DSN_ENV, "")
+    with pytest.raises(RuntimeError):
+        control_plane_harness.admin_dsn()
 
 
 def test_register_issue_list_revoke_round_trip_against_real_postgres(backend) -> None:

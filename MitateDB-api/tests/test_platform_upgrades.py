@@ -41,7 +41,6 @@ from mitatedb_api.platform_upgrades import (LEDGER_TABLE_NAME, PEER_MODULE, PLAT
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 # 常設規律 6 (Q4 phase, work order §4 変更対象 D): the two BEGIN/END
 # marker comments `0003_provision_application.sql` itself carries around
@@ -67,7 +66,14 @@ def _legacy_0003_text() -> str:
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:

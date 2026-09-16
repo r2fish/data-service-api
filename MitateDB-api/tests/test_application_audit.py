@@ -66,7 +66,6 @@ from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 _APP_PEPPER = "application-audit-postgres-app-pepper-x"
 # Phase 6 WP-3 (design D-2): `MITATEDB_DATA_BASE_URL`/`_CONTROL_BASE_URL`
@@ -127,7 +126,14 @@ MIGRATION_NAMES = (
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:
@@ -609,9 +615,15 @@ def test_application_audit_sink_no_longer_accepts_a_timeout_constructor_argument
     and ignoring them (which would be a worse, silent-degradation form of
     the SAME bug this WP exists to close)."""
     with pytest.raises(TypeError):
-        PostgresApplicationAuditSink("host=/tmp dbname=x", statement_timeout_ms=1000)
+        PostgresApplicationAuditSink(
+            "host=/tmp port=1 dbname=mitatedb_application_audit_sink_statement_timeout_unreachable",
+            statement_timeout_ms=1000,
+        )
     with pytest.raises(TypeError):
-        PostgresApplicationAuditSink("host=/tmp dbname=x", idle_in_transaction_session_timeout_ms=1000)
+        PostgresApplicationAuditSink(
+            "host=/tmp port=1 dbname=mitatedb_application_audit_sink_idle_timeout_unreachable",
+            idle_in_transaction_session_timeout_ms=1000,
+        )
 
 
 def _capturing_subclass(base_cls):

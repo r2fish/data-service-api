@@ -2,7 +2,7 @@
 
 - 状態: **依頼者裁定済み（2026-09-16、§6 の Q-1〜Q-9 はすべて推奨を採用）**。作業は作業指示書 `docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md` で行う。台帳は計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-44**。
 - 起票: 2026-09-16。契機は §1.1 の 3 件。設計レビュー 1 回（同日、§9）の指摘を反映済み。
-- 改版: v0.1（2026-09-16）起票。v0.2（2026-09-16）§6 に依頼者裁定を、§3.4 に起動の試走結果を、D-2 に `LC_ALL` の必要性を追記した。
+- 改版: v0.1（2026-09-16）起票。v0.2（2026-09-16）§6 に依頼者裁定を、§3.4 に起動の試走結果を、D-2 に `LC_ALL` の必要性を追記した。 v0.3（2026-09-16）§10 に WP-3 の実施記録（F-16 spike の実測、D-7 からの逸脱、完了ゲート、§7 の分担、並列 2 本 × 3 回、監査照合、WP-4 への積み残し）を追記した。
 - 公開規律: 実 DSN・パスワードを置かない（`docs/work-orders/OPERATING_CONDITIONS.md` §2 の 13）。DSN は形だけを書く。
 
 ## 1. 問題
@@ -175,7 +175,7 @@
 
 ## 8. 未確認の点
 
-- uvicorn の `--fd` に TCP のソケットを渡したときの実際の挙動。
+- uvicorn の `--fd` に TCP のソケットを渡したときの実際の挙動。【解消 2026-09-16】§10.1 で実測した（WP-3 の F-16 spike）。
 - `initdb` と起動にかかる時間。毎回の `--collect-only` と `tools/check_collection_floor.py` も払うので記録する（roadmap R-20 の「先に測る」）。【解消 2026-09-16】§3.4 で 1 秒未満を実測した。
 - Claude Code の sandbox の下で、subprocess が `$TMPDIR` 配下にディレクトリを作り、postmaster を起動できること。【解消 2026-09-16】§3.4 で起動できた。
 - `postgres:16` イメージの既定の TimeZone（UTC と見込む）。
@@ -209,3 +209,69 @@
 | m-10 | roadmap R-44 の記述 | R-44 行を更新 |
 | m-11 | trust 依存のテストは低リスク | §8 |
 | m-12 | セマフォは問題なし | 対応不要 |
+
+## 10. WP-3 の実施記録（2026-09-16、v0.3 追記）
+
+作業指示書 `docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md` の §4.2（manifest v1.3）・§4.3・§4.4・§4.5。基点は main `b6c78ab`（起草時は `acb257e`。実装中に別セッションが R-37 WP-4a 記録・WP-4b・WP-4c/4d 統合裁定を入れて進んだ。触るファイルの重なりは再照合して 0 件）。変更クラスは **D**（`_ISOMORPHIC_TARGETS` の集合が 137 → 136 に減る）。契約は **1.8.0 据え置き**、`spec/` と `security/` は触っていない。
+
+### 10.1 D-7 の未確認点の解消（F-16 の spike。監督実施）
+
+§8 の「uvicorn の `--fd` に TCP のソケットを渡したときの実際の挙動」を実測した（`uvicorn` 0.52.4）。
+
+1. `bind()`+`listen()` した親のソケットを `subprocess.Popen(..., pass_fds=(fd,))` と `python -m uvicorn <app> --fd <fd>` で渡すと、子はそのソケットで実際に serve する（HTTP 401 を受領）。
+2. 子から見える fd 番号は親の `fileno()` と同じである（`pass_fds` は番号を振り直さない）。
+3. 子が死んだ後、親がまだ listening ソケットを持つ状態では、素の TCP `connect()` は **成功する**（kernel が親の backlog に入れる）が、本物の HTTP GET は **1.00 秒で `TimeoutError`** になる。
+4. 親が自分の複製を閉じた後は `ConnectionRefusedError` になる。
+
+帰結: `wait_until_ready` は素の connect ではなく HTTP status < 500 を要求するので、事前 listen したソケットを渡しても「起動失敗を期待する」試行の意味は保たれる。3 の前半により、**素の connect を成否の判定に使う経路を新設してはならない**。§8 の当該項目は解消とする。
+
+### 10.2 D-7 からの逸脱（監督裁定 W44-3-5 / W44-3-9 / W44-3-10）
+
+D-7 の「親は起動後に自分の複製を閉じる」は **採らなかった**。予約の所有権は、`reserved=` を渡した呼び出し側が持ち、省いたときは handle が持って `stop()` で閉じる。理由は 2 つある。(i) `real_server_*.py` の `restart` は uvicorn を止めて**同じポートで**起動し直す（nginx の conf が upstream ポートを固定し、nginx は再読込しない）ので、親が閉じるとその間にポートを奪われる隙が戻る。(ii) `conformance-tests/test_c26_composition_root.py` が `launcher.stop()` の後に全ポートで `not _port_has_listener(port)` を要求しており、閉じ忘れれば既存のテストが赤くなる。適用範囲は各 peer 7 経路（start 2・restart 2・F-15 1・F-16 lowered 1・F-16 restored 1）と、`start_uvicorn_subprocess` / `start_uvicorn_thread` の既定経路である。`start_uvicorn_subprocess` の `port: Optional[int]` 引数は、予約を伴わない再 bind の経路を将来また選べてしまうので削除した。
+
+### 10.3 完了ゲート（監督が単独実行）
+
+1 本目（`15:05:25` 開始）は `-C` を渡し忘れて **main のチェックアウトを回していた**ため破棄した（作業指示書 §4.5）。正本は 2 本目（`15:12:28` 開始、`-C .claude/worktrees/r44-wp3`）である。
+
+```
+gate: 3439 passed, 2 subtests passed in 324.18s (0:05:24)
+gate: judge=PASS
+gate: pg_database/pg_roles diff 0
+gate: info=shared pg_database/pg_roles diff 0
+```
+
+実行後の残骸は `suite.lock` のみ。`tools/tests` は **492**。集計行の増分 +14 は内訳と一致する（peer suite 3・conformance 11）。
+
+### 10.4 §7 の完了条件の充足（WP-3 / WP-4 の分担）
+
+| # | 完了条件 | 判定 |
+|---|---|---|
+| 1 | 専用クラスタ上の完了ゲートの集計行が直前の main の集計行と一致する | **WP-3 で充足**。10.3 のとおり、main `b6c78ab` の `3425` + 新規 14 本 = `3439` |
+| 2 | 実行のクラスタの前後差分が 0 で、共有クラスタに変化が無い | **WP-3 で充足**。実行クラスタ差分 0（判定）、`info=shared … 0`（情報、裁定 Q-3） |
+| 3 | 起動の形 5 種でそれぞれ専用クラスタが使われる | **WP-4 に残る**。仕組みは WP-1 が入れた。5 種を通した確認と記録は WP-4 |
+| 4 | `pytest tools/tests` がクラスタを起動しない | **WP-4 に残る**（実質は WP-1 で充足し §2.6 (a-1) に監査照合がある）。WP-3 は `tools/tests` に 1 ファイル足したので、そのファイルが PostgreSQL を要さないことだけを守った |
+| 5 | suite を 2 本並列に 3 回、毎回両方の集計行が一致する | **WP-3 で充足**。10.5 のとおり 6 本すべて `3439 passed, 2 subtests passed` |
+
+### 10.5 並列 2 本 × 3 回の実測（完了条件 31。裁定 W44-3-12）
+
+WP-2 では実施されないまま残っていた（引き継ぎ書 `HANDOVER_20260916_R44_FABLE.md` §3 の 3）。同一 SHA `b3e647d` の 2 worktree で `tools/dev/pt.py -C <worktree> --wait 1800 -- -q -n 5 --dist loadgroup` を同時に開始することを 3 回行った。
+
+| 回 | 開始 | A | B |
+|---|---|---|---|
+| 1 | 15:18:29 | `3439 passed, 2 subtests passed in 511.74s` | `3439 passed, 2 subtests passed in 514.93s` |
+| 2 | 15:27:16 | `3439 passed, 2 subtests passed in 534.35s` | `3439 passed, 2 subtests passed in 534.39s` |
+| 3 | 15:36:22 | `3439 passed, 2 subtests passed in 582.20s` | `3439 passed, 2 subtests passed in 583.98s` |
+
+6 本とも単独のゲートと同じ `3439` であり、並列でも集計行は揺れなかった。所要は単独 5 分 24 秒に対し 8 分 31 秒 → 9 分 43 秒と回を追って伸びる（資源の取り合い。§2 の「許容」のとおり）。残骸は `suite.lock` のみ、`postgres -D` は共有クラスタの 1 件だけで、使い捨てクラスタの取り残しは無かった。**roadmap R-42（期限切れの要求の成否が負荷で揺れる）は未修正のままであり、本実測はそれが今回の 3 回では表面化しなかったことを示すにとどまる。**
+
+### 10.6 監査照合の記録（完了条件 29・30・32。§1.5 の 40）
+
+- **29（覆した判定の旧文を消さず註を足した）**: 対象は 5 箇所（作業指示書 §4.4 (a)）。`git diff b6c78ab..HEAD` の削除側を旧文の語で走査し、**散文の削除は 2 行だけ**であることを確認した。(i) `conformance-tests/socket_harness.py` の `start_nginx_with_bind_retry` の docstring の `文言どおり「1 回だけ」)."""` — 「EXACTLY ONCE」「1 回だけ」の文そのものは逐語で残っており、docstring の終端が註の後ろへ移動したための差分である。(ii) 同ファイル `start_uvicorn_thread` の docstring の「the pre-existing bind-inside-uvicorn behavior via `free_port()`)」から **`via \`free_port()\`` の 4 語が実際に削られた**。これは裁定ではなく機構の記述であり、R-8 により偽になった記述である（`port=` を明示した経路はもともと `free_port()` を呼ばない）。直後に日付付きの註が入り、正しい機構（既定経路は `reserve_port()`、`free_port()` 自体は健全性テストで健在）を述べている。**監督はこの 1 件を、旧文の保存ではなく記述の訂正として認める**（§1.5 の 34「主張は実測の後」）。残り 5 箇所の註はすべて追加のみである。
+- **30（Class D の discharge）**: 作業指示書 §4.2 の「変更クラス」の段落と commit `6fedec1` の message の双方に、依頼者裁定の逐語「R-21/R-28 と同じ形で D として進める (推奨)」と、「内容は開発基盤（テスト用 PostgreSQL の実行ごとの分離）の変更であり security-contract の変更ではない」「契約は 1.8.0 のまま据え置き」「集合の減少は同型性保証の弱体化ではない」の各文があることを確認した。
+- **32（対応漏れが無い／表に現れない新規テストを作らない）**: 表の 1〜33 のうち変異の列が空なのは 29〜32 の 4 行だけであり、その 4 行に監査照合の手順がある。`git diff b6c78ab..HEAD` が足した `def test_` は 21 行、うち 2 行は行数 pin の改名（`_137_rows` → `_136_rows`）なので **新規テストは 19 本**である。19 本すべてが表の 1〜9・16〜20・23・25〜28・33 のいずれかに現れ、表に無い新規テストは無い。
+
+### 10.7 WP-4 へ送った積み残し（作業指示書 §4.1）
+
+- nginx の bind 再試行は `start_nginx_with_bind_retry` の 1 経路にしか掛かっていない。素の `start_nginx()` を直呼びする 4 経路（両 peer の `conformance/real_server_*.py` と `conformance/conformance_adapter_*_socket.py`）は listen ポートを宣言済み URL に焼いてから起動するので、別ポートでの再試行には `declare-surfaces` のやり直しという設計判断が要る。
+- `tools/testpg/dsa_testpg.py` の `external` 分岐は DSN 2 本しか要求せず `PGHOST` を要求しない。host を書かない接続は `external` では共有クラスタへ届く（CI は libpq 既定のソケットに何も無いので失敗して露見する。黙るのは手元で `DSA_TEST_PG=external` に DSN だけを渡した場合である）。
+- `handover_ready.py` の判定が広すぎる件と WP-2 で残した軽微な 3 件（§4.1 の既存項目）。

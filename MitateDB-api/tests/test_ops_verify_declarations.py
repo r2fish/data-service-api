@@ -41,7 +41,6 @@ from mitatedb_api.platform_declarations import PlatformDeclarationError, check_r
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 MIGRATION_NAMES = (
     "0001_bootstrap_platform.sql",
@@ -80,7 +79,14 @@ _CONTROL_URL = "https://ops-verify-test.example.invalid/control/v1"
 def _admin_dsn() -> str:
     import os
 
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:
