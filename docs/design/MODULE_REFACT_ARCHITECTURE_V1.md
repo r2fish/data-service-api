@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.22 (2026-09-16)。** 直後の v1.21 行は当時の改版履歴として保存する。v1.22 は既存の本文を書き換えず、末尾に **§10.19 (WP-5 実施記録と R-37 の閉止)** を追記した。
 - **現行版: v1.21 (2026-09-16)。** 直後の v1.20 行は当時の改版履歴として保存する。v1.21 は既存の本文を書き換えず、末尾に **§10.18 (WP-4c 実施記録、および WP-4 の完了)** を追記した記録である。
 - **現行版: v1.20 (2026-09-16)。** 直後の v1.19 行は当時の改版履歴として保存する。v1.20 は既存の本文を書き換えず、末尾に **§10.17 (WP-4b 実施記録)** を追記した記録である。
 - **現行版: v1.19 (2026-09-16)。** 直後の v1.18 行は当時の改版履歴として保存する。v1.19 は既存の本文を書き換えず、末尾に **§10.16 (WP-4a 実施記録)** を追記した記録である。
@@ -687,3 +688,12 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 - **次は WP-5 (facade 縮小と閉止。設計 §4 の最後の WP)** である。R-37 は開いたままであり、WP-5 の manifest は未作成である。**本 WP が WP-5 に引き渡す材料**は、(i) 作業指示書 §5.45 の訂正註 8 の 7 項目 (いずれも WP-5 に掛かる)、(ii) 読み手 0 のまま移動前から残る `_FIELD_TYPE_SQL`・`_JSONB_SQL`・`BoundMutation`・`ConstraintPatch` (本 WP 起因ではない。WP-5 候補)、(iii) `_escape_like_literal` と `_FIELD_TYPE_SQL`/`_JSONB_SQL` の facade 再 export が外部のテストに読まれているという実測 (§10.18 の裁定 1) である。
 
 ---
+
+### 10.19 WP-5 (閉止のみ) 実施記録と R-37 の閉止 (2026-09-16、v1.22 追記)
+
+**依頼者指示 `docs/work-orders/REQUESTER_DIRECTIVE_20260916_R37_CLOSURE_R45_PRIORITY.md` (main `c899813`) により、WP-5 は作業指示書 §5.46 の Z5-1 のうち (3)(4)(6) だけを行った。** (1) SQL 安全性の静的走査、(2) 循環 import の静的検査、(5) 文字列注釈の読み手検査は行わず、roadmap R-37 行に閉止後の残余 (未着手) として記録した。実装途中だった (1)(2) のテスト 2 本はコミットしていない。
+
+- **(3) 削除**: `MitateDB-api/src/mitatedb_api/backend_postgres.py` の import から `CONTRACT_TYPES`、`MitateDB-api/src/mitatedb_api/config.py` の import から `build_surfaces` の各 1 名。**再照合** (指示 §3.1 の置き換え): 監督が `git grep -n -F <名前>` を main `c899813` の全追跡ファイル (`MitateDB-api/docs/f9-execution-assets-v1/` を除く) に掛けた。`CONTRACT_TYPES` 23 行 / 10 ファイル、`build_surfaces` 21 行 / 8 ファイル。削除する import 行以外はすべて、定義元 (`field_types` / `surfaces`) の定義・修飾名の言及、`.surfaces` からの直接 import (`capabilities_document.py`・`control_composition.py`・`MitateDB-api/conformance/conformance_adapter_mitatedb.py`)、文書中の言及であり、`backend_postgres` / `config` 経由の読み手は 0。handover `docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 B の A と一致。独立コードレビューも同じ結論 (読み手 0)。
+- **回帰証拠** (Z5-14、`tools/dev/pt.py`、実装担当): 削除前 `MitateDB-api/tests` `1126 passed, 2 subtests passed`・`r2db-api/tests` `1308 passed`・`tools/tests` `497 passed` (範囲外になった新規 5 本を含む時点)、削除後も同数。root gate (監督、`tools/dev/gate.py -C .claude/worktrees/r37-wp5`): **`3451 passed, 2 subtests passed`**、`judge=PASS`、実行クラスタの差分 0 — 直前の main と同数で、テストの増減が無いことと一致する。`COLLECTION_FLOOR` は変えていない。`_ISOMORPHIC_TARGETS`・`spec/`・`security/`・`conformance-tests/` の差分 0。
+- **(4) 意図的な facade 互換として残す再 export と委譲**: `backend_postgres.py` の `_INT_DOMAIN_RANGES`・`_check_domain` (facade 明記コメント) と `_RESERVED_EXACT`・`_RESERVED_PREFIX` (`MitateDB-api/tests/test_postgres.py` の facade identity test が読む)。r2db の `_escape_like_literal`・`_FIELD_TYPE_SQL`・`_JSONB_SQL` (外部テストが読む。作業指示書 §5.45 の訂正註 8-4)。`staticmethod` 委譲は r2db `postgres.py` 7、MitateDB `backend_postgres.py` 1、`cell.py` 3。
+- **(6) R-37 の閉止**: 閉止条件「責務・依存方向・回帰証拠」(§4 WP-5) に対する記録は、WP-1〜WP-4 の実施記録 §10.1〜§10.18 と依頼者指示 §2 の表に置く。各抽出は leaf の import 方向テスト (`tools/tests/test_leaf_import_direction.py`) と両 peer の suite・root gate を回帰証拠として統合された。**line count は減っていない** (指示 §2: `cell.py` 3,757 行、`postgres.py` 2,353 行) が、§4 WP-5 のとおり成果指標ではなく閉止の障害にしない。**R-37 はこれで閉じる。**

@@ -5,7 +5,7 @@ import os
 from typing import Any, Optional
 
 from .errors import ResourceLimitError, ValidationError
-from .surfaces import build_surfaces, validate_control_base_url, validate_data_base_url
+from .surfaces import validate_control_base_url, validate_data_base_url
 
 
 @dataclass(frozen=True)
