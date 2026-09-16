@@ -329,11 +329,25 @@ def test_c26_no_residue_after_shutdown(launcher_class: type) -> None:
     control_pid = launcher._control_handle.process.pid  # noqa: SLF001
     nginx_pid = launcher._nginx.process.pid  # noqa: SLF001
     ports = [launcher._data_handle.port, launcher._control_handle.port, launcher._listen_port]  # noqa: SLF001
+    # R-44 WP-3 (e): local references to the two OWNED `ReservedPort`
+    # objects, kept alive independently of `launcher._data_reservation`/
+    # `_control_reservation` (which `stop()` sets to `None`) -- `ReservedPort`
+    # itself defines no `__del__`; it is the `socket.socket` object it wraps
+    # (`.sock`) that has its OWN finalizer, and CPython's refcounting would
+    # drop the last reference to that socket (and therefore run that
+    # finalizer, closing the underlying fd) the INSTANT the launcher's own
+    # attribute is nulled, even if `stop()` itself never called `.close()`
+    # explicitly; holding a SEPARATE reference here is what lets `.sock.
+    # fileno()` below observe `stop()`'s own explicit close (or its
+    # absence) rather than an accidental GC side effect that would
+    # otherwise mask that same absence.
+    data_reservation = launcher._data_reservation  # noqa: SLF001
+    control_reservation = launcher._control_reservation  # noqa: SLF001
     prefix = launcher._prefix  # noqa: SLF001
     script_dir = launcher._script_dir  # noqa: SLF001
     nginx_prefix_dir = launcher._nginx_prefix_dir  # noqa: SLF001
     module = sys.modules[launcher_class.__module__]
-    admin_dsn = os.environ.get(module.ADMIN_DSN_ENV, module.ADMIN_DSN_DEFAULT)
+    admin_dsn = module._admin_dsn()  # noqa: SLF001 -- R-44 WP-3: no shared-cluster default left to fall back to
 
     launcher.stop()
 
@@ -345,6 +359,12 @@ def test_c26_no_residue_after_shutdown(launcher_class: type) -> None:
 
     for port in ports:
         assert not sh._port_has_listener(port), f"port {port} still has a listener after stop()"  # noqa: SLF001
+
+    for reservation, label in ((data_reservation, "data"), (control_reservation, "control")):
+        assert reservation is not None, f"{label} reservation was never captured"
+        assert reservation.sock.fileno() == -1, (
+            f"{label} reservation's own socket is still open (fd {reservation.sock.fileno()}) after stop()"
+        )
 
     # F4: the throwaway platform DB/role and both temp dirs are gone too.
     assert prefix is not None
@@ -402,11 +422,22 @@ def test_c26_start_failure_leaves_no_residue(launcher_class: type, monkeypatch: 
     original_reserve_port = sh.reserve_port
     original_start_uvicorn_subprocess = sh.start_uvicorn_subprocess
     original_claim_prefix_lock = module._claim_prefix_lock
-    captured: dict[str, Any] = {"uvicorn_calls": 0}
+    captured: dict[str, Any] = {"uvicorn_calls": 0, "reservation_ports": []}
 
     def _capturing_reserve_port():
+        # R-44 WP-3 (e), R-5: `start()` now reserves THREE ports before
+        # nginx ever starts -- its own listen port (first), then the
+        # data/control upstream reservations `start_uvicorn_subprocess(
+        # reserved=...)` consumes (second/third) -- and the injected
+        # failure below happens on the SECOND `start_uvicorn_subprocess`
+        # call (control), i.e. AFTER all three `reserve_port()` calls have
+        # already happened. Recording every call in a LIST (never
+        # overwriting a single slot) is what lets this test still observe
+        # the EARLIER reservations once the count grows past 1 -- a bare
+        # single-slot capture would silently stop observing them the
+        # instant a second/third call occurred.
         reservation = original_reserve_port()
-        captured["reservation_port"] = reservation.port
+        captured["reservation_ports"].append(reservation.port)
         return reservation
 
     def _flaky_start_uvicorn_subprocess(*args, **kwargs):
@@ -448,6 +479,8 @@ def test_c26_start_failure_leaves_no_residue(launcher_class: type, monkeypatch: 
     assert launcher._nginx_prefix_dir is None  # noqa: SLF001
     assert launcher._data_handle is None  # noqa: SLF001
     assert launcher._control_handle is None  # noqa: SLF001
+    assert launcher._data_reservation is None  # noqa: SLF001 -- R-44 WP-3 (e)
+    assert launcher._control_reservation is None  # noqa: SLF001
 
     # the ALREADY-STARTED data uvicorn subprocess (started before the
     # SECOND uvicorn start injected its own failure) was actually killed,
@@ -455,11 +488,27 @@ def test_c26_start_failure_leaves_no_residue(launcher_class: type, monkeypatch: 
     data_pid = captured["data_handle"].process.pid
     assert not _pid_alive(data_pid), f"data uvicorn (pid {data_pid}) is still alive after a failed start()"
 
-    # the reserved (but never nginx-bound) listen port was released.
-    assert not sh._port_has_listener(captured["reservation_port"]), (  # noqa: SLF001
-        f"port {captured['reservation_port']} (reserved but never bound by nginx) "
-        f"still has a listener after a failed start()"
+    # R-44 WP-3 (e), R-5: every one of the 3 `reserve_port()` calls
+    # `start()` made before the injected failure (nginx's own listen port,
+    # then the data/control upstream reservations) was genuinely released
+    # -- named individually rather than folded into one generic loop, so
+    # nginx's own listen port (the FIRST reservation `start()` ever makes,
+    # design's own fixed ordering) is checked by name, not merely as "one
+    # of the ports".
+    assert len(captured["reservation_ports"]) == 3, (
+        f"expected exactly 3 reserve_port() calls (nginx listen + data + control) before the "
+        f"injected failure, got {captured['reservation_ports']!r}"
     )
+    nginx_listen_reservation_port, data_reservation_port, control_reservation_port = captured["reservation_ports"]
+    assert not sh._port_has_listener(nginx_listen_reservation_port), (  # noqa: SLF001
+        f"nginx's own listen port {nginx_listen_reservation_port} (reserved but never bound by nginx, "
+        f"since the injected failure happens before nginx ever starts) still has a listener after a "
+        f"failed start()"
+    )
+    for port in (data_reservation_port, control_reservation_port):
+        assert not sh._port_has_listener(port), (  # noqa: SLF001
+            f"upstream reservation port {port} still has a listener after a failed start()"
+        )
 
     # No throwaway platform database/role under THIS test's own prefix
     # survives either -- never the whole `_PREFIX_TAG` tag (see
@@ -469,7 +518,7 @@ def test_c26_start_failure_leaves_no_residue(launcher_class: type, monkeypatch: 
     # in-process retry loop the same tolerance for a backend connection
     # Postgres has not yet noticed is closed.
     prefix = captured["prefix"]
-    admin_dsn = os.environ.get(module.ADMIN_DSN_ENV, module.ADMIN_DSN_DEFAULT)
+    admin_dsn = module._admin_dsn()  # noqa: SLF001 -- R-44 WP-3: no shared-cluster default left to fall back to
     deadline = time.monotonic() + 20.0
     remaining_databases = remaining_roles = None
     while time.monotonic() < deadline:

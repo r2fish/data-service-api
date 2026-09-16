@@ -55,11 +55,30 @@ from r2db_api.structured import ApplicationCell, Predicate
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
+
+
+def test_admin_dsn_requires_the_environment_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-44 WP-3 (a) completion condition 7: `_admin_dsn()` raises when
+    `R2DB_TEST_ADMIN_DSN` is unset or empty -- there is no shared-cluster
+    default to fall back to any more (design D-4)."""
+    monkeypatch.delenv(ADMIN_DSN_ENV, raising=False)
+    with pytest.raises(RuntimeError):
+        _admin_dsn()
+
+    monkeypatch.setenv(ADMIN_DSN_ENV, "")
+    with pytest.raises(RuntimeError):
+        _admin_dsn()
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:
@@ -87,10 +106,9 @@ def _require_admin_connection() -> None:
         pytest.fail(
             "test_postgres.py requires a reachable local PostgreSQL server. "
             f"Connecting with {ADMIN_DSN_ENV}={dsn!r} failed: {exc}. "
-            f"Set {ADMIN_DSN_ENV} to a reachable admin/superuser DSN "
-            "(e.g. 'host=/tmp port=5432 dbname=postgres' or "
-            "'postgresql://user:pass@example.invalid:5432/postgres' against "
-            "the VPS). These tests must not be skipped (§5.3 C-5).",
+            f"{ADMIN_DSN_ENV} is set by tools/testpg/dsa_testpg.py for each "
+            "test run; there is no shared-cluster default. These tests must "
+            "not be skipped (§5.3 C-5).",
             pytrace=False,
         )
 

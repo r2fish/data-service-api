@@ -53,7 +53,9 @@ proxy management that carries no contract-level meaning of its own:
       accept a pre-opened socket the way uvicorn can) via `start_nginx_
       with_bind_retry` (F-2 (a) 後半差し戻し, 監督裁定 2026-09-08), which
       retries EXACTLY ONCE on a freshly reserved port if nginx exits
-      immediately (a lost bind race) on the first one.
+      immediately (a lost bind race) on the first one. 【追記 2026-09-16、
+      R-44 Q-8(依頼者裁定)】改訂され、いまは 3 回まで試行する
+      (`start_nginx_with_bind_retry`'s own docstring)。
   (i) a port ledger (`RealSocketSurface._start`'s own `ports.json`, F-3)
       -- every port a surface claims (nginx's own listen port, and both
       upstreams') is recorded under the SAME marker-bearing prefix
@@ -452,6 +454,17 @@ def start_nginx(nginx_bin: str, conf_path: Path, prefix: Path) -> NginxHandle:
 #: slowed down.
 NGINX_BIND_RETRY_CHECK_S = 0.3
 
+#: R-44 Q-8 (依頼者裁定 2026-09-16): total number of bind attempts `start_
+#: nginx_with_bind_retry` makes before giving up. The loop bound AND the
+#: give-up check below are BOTH derived from this SAME constant (never a
+#: separate literal `3` hardcoded at the give-up check) -- a give-up
+#: condition hardcoded independently of the loop's own range would keep
+#: firing at the SAME attempt number even if the range were later widened
+#: (or narrowed), silently decoupling "how many attempts the loop can
+#: make" from "when it actually gives up" -- exactly the shape a mutation
+#: on the loop range alone would then fail to observe at all.
+NGINX_BIND_MAX_ATTEMPTS = 3
+
 
 def start_nginx_with_bind_retry(
     nginx_bin: str,
@@ -491,9 +504,19 @@ def start_nginx_with_bind_retry(
     Either way, this function retries EXACTLY ONCE on a freshly reserved
     port. A second failure raises `HarnessStartupError` with the failed
     attempt's own `error.log` contents; there is no third attempt (裁定の
-    文言どおり「1 回だけ」)."""
-    last_error_log = ""
-    for attempt in (1, 2):
+    文言どおり「1 回だけ」).
+
+    【追記 2026-09-16、R-44 Q-8(依頼者裁定)】上の「EXACTLY ONCE」/「1 回だ
+    け」は 2026-09-08 時点の裁定の記録として残す。裁定は同日 R-44 Q-8 で改
+    訂され、以下は **3 回** まで試行する。失敗した試行ごとの `error.log`
+    は `error.attempt<N>.log`(`prefix` 配下)として個別に残る -- 次の試行
+    の開始時に `error.log` 自体は毎回truncateされるが(同じ理由: 前の試行
+    の "bind() ... failed" 行を次の試行の判定が誤検知しないため)、その直
+    前に読み取った内容は上書きされずに退避される。3 回目の失敗で送出する
+    `HarnessStartupError` は全試行分の `error.log` を含む。4 回目の試行は
+    無い。"""
+    failed_attempt_logs: list[str] = []
+    for attempt in range(1, NGINX_BIND_MAX_ATTEMPTS + 1):
         reservation = reserve_port()
         listen_port = reservation.port
         reservation.close()  # bind/close reservation -- narrows, does not eliminate, the TOCTOU window
@@ -515,7 +538,9 @@ def start_nginx_with_bind_retry(
         # and nginx OPENS IT FOR APPEND, so a retry's own poll below would
         # otherwise see attempt 1's own already-logged "bind() ... failed"
         # line and misdiagnose attempt 2 (which may have genuinely
-        # succeeded) as a repeat failure.
+        # succeeded) as a repeat failure. The PREVIOUS attempt's own text
+        # (if any) was already copied out to its own `error.attempt<N>.log`
+        # below before this truncation runs.
         error_log = prefix / "error.log"
         error_log.write_text("")
 
@@ -544,11 +569,18 @@ def start_nginx_with_bind_retry(
         _terminate_then_kill(handle.process, timeout_s=5.0)
         with _suppress(FileNotFoundError):
             handle.pidfile.unlink()
-        last_error_log = error_log.read_text() if error_log.exists() else "(no error.log)"
-        if attempt == 2:
+        attempt_log_text = error_log.read_text() if error_log.exists() else "(no error.log)"
+        # R-44 Q-8 (依頼者裁定 2026-09-16): preserve THIS failed attempt's
+        # own error.log under an attempt-numbered name -- never overwritten
+        # by the next attempt's own truncate-then-retry above -- so a 3rd-
+        # attempt exhaustion's final HarnessStartupError can quote every
+        # attempt, not only the last.
+        (prefix / f"error.attempt{attempt}.log").write_text(attempt_log_text)
+        failed_attempt_logs.append(f"attempt {attempt} (port {listen_port}):\n{attempt_log_text}")
+        if attempt == NGINX_BIND_MAX_ATTEMPTS:
             raise HarnessStartupError(
-                f"nginx failed to bind port {listen_port} even after one retry on a "
-                f"freshly reserved port -- last nginx error.log:\n{last_error_log}"
+                f"nginx failed to bind a port even after {NGINX_BIND_MAX_ATTEMPTS} attempts on freshly "
+                f"reserved ports -- error.log from every attempt:\n" + "\n\n".join(failed_attempt_logs)
             )
     raise AssertionError("unreachable")  # pragma: no cover
 
@@ -567,6 +599,12 @@ class UvicornThreadHandle:
     server: "uvicorn.Server"
     thread: threading.Thread
     port: int
+    # R-44 WP-3 (e), R-8: set only on the DEFAULT path (neither `reserved`
+    # nor `port` given to `start_uvicorn_thread`) -- this handle then owns
+    # the reservation `start_uvicorn_thread` minted for itself and closes
+    # it in `stop()` below. `None` on every other path (a caller-supplied
+    # `reserved`/`port` is never this handle's to close).
+    _owned_reservation: Optional[ReservedPort] = field(default=None, repr=False)
 
     def stop(self, *, timeout_s: float = 10.0) -> None:
         self.server.should_exit = True
@@ -575,6 +613,16 @@ class UvicornThreadHandle:
             raise HarnessStartupError(
                 f"uvicorn thread on port {self.port} did not stop within {timeout_s}s"
             )
+        # R-8: idempotent -- uvicorn's own `Server.run(sockets=[...])`
+        # already closes every socket it was handed as part of its own
+        # shutdown (measured directly against this venv's installed
+        # uvicorn), so this is very often closing an already-closed
+        # socket; `ReservedPort.close()` suppresses `OSError`, and a
+        # second call to THIS `stop()` (idempotent itself: `self.thread.
+        # join()` on an already-joined thread is a safe no-op) closes the
+        # same (already-closed) reservation again just as harmlessly.
+        if self._owned_reservation is not None:
+            self._owned_reservation.close()
 
 
 def start_uvicorn_thread(
@@ -601,7 +649,16 @@ def start_uvicorn_thread(
     value()` URL built before this function is even called) is
     GUARANTEED to be the one the server actually answers on. Mutually
     exclusive with `port` (an explicit `port=` with no `reserved` keeps
-    the pre-existing bind-inside-uvicorn behavior via `free_port()`).
+    the pre-existing bind-inside-uvicorn behavior).
+
+    【追記 2026-09-16、R-44 WP-3 (e)、R-8】When BOTH `reserved` and `port`
+    are omitted, this function now reserves its own port via `reserve_
+    port()` (never `free_port()`'s bind-and-release) -- the same TOCTOU-
+    closing behavior a caller-supplied `reserved` already gets, just
+    minted here instead. The returned handle OWNS this reservation and
+    closes it in `.stop()`. `free_port()` itself is unchanged and still
+    used directly by this module's own health test
+    (`test_socket_harness.py`'s `test_free_port_returns_a_bindable_port`).
 
     `graceful_shutdown_s` is uvicorn's own `timeout_graceful_shutdown`
     (its default, unset, is `None` -- an UNBOUNDED wait for in-flight
@@ -611,33 +668,50 @@ def start_uvicorn_thread(
     responsibility exists to make unconditional). A real, finite value
     here is what lets `.stop()`'s own bounded `thread.join(timeout_s=...)`
     actually mean something."""
+    owned_reservation: Optional[ReservedPort] = None
     sockets: Optional[List[socket.socket]]
     if reserved is not None:
         bound_port = reserved.port
         sockets = [reserved.sock]
-    else:
-        bound_port = port if port is not None else free_port()
+    elif port is not None:
+        bound_port = port
         sockets = None
-    config = uvicorn.Config(
-        app, host="127.0.0.1", port=bound_port, log_level="warning", lifespan="off",
-        timeout_graceful_shutdown=graceful_shutdown_s,
-    )
-    server = uvicorn.Server(config)
-    thread = threading.Thread(
-        target=lambda: server.run(sockets=sockets),
-        name=f"socket-harness-uvicorn-{bound_port}", daemon=True,
-    )
-    thread.start()
-    deadline = time.monotonic() + start_timeout_s
-    while not server.started and time.monotonic() < deadline and thread.is_alive():
-        time.sleep(0.02)
-    if not server.started:
-        server.should_exit = True
-        thread.join(timeout=5.0)
-        raise HarnessStartupError(
-            f"uvicorn did not start on 127.0.0.1:{bound_port} within {start_timeout_s}s"
+    else:
+        owned_reservation = reserve_port()
+        bound_port = owned_reservation.port
+        sockets = [owned_reservation.sock]
+    # コードレビュー 1 回目差し戻し 2 (監督裁定 2026-09-16): `uvicorn.Config`/
+    # `uvicorn.Server`/`Thread.start()` のいずれかが送出すると、それまでは
+    # handle が返らないので `owned_reservation` を閉じる先が無く、予約した
+    # ソケットが listen したまま漏れていた。ここから `return` までを 1 つの
+    # `try` で囲み、`except BaseException:` で一元的に閉じてから re-raise
+    # する(旧来 `server.started is False` の分岐にだけあった close はこの
+    # 一元処理に統合し、重複させない)。
+    try:
+        config = uvicorn.Config(
+            app, host="127.0.0.1", port=bound_port, log_level="warning", lifespan="off",
+            timeout_graceful_shutdown=graceful_shutdown_s,
         )
-    return UvicornThreadHandle(server=server, thread=thread, port=bound_port)
+        server = uvicorn.Server(config)
+        thread = threading.Thread(
+            target=lambda: server.run(sockets=sockets),
+            name=f"socket-harness-uvicorn-{bound_port}", daemon=True,
+        )
+        thread.start()
+        deadline = time.monotonic() + start_timeout_s
+        while not server.started and time.monotonic() < deadline and thread.is_alive():
+            time.sleep(0.02)
+        if not server.started:
+            server.should_exit = True
+            thread.join(timeout=5.0)
+            raise HarnessStartupError(
+                f"uvicorn did not start on 127.0.0.1:{bound_port} within {start_timeout_s}s"
+            )
+    except BaseException:
+        if owned_reservation is not None:
+            owned_reservation.close()
+        raise
+    return UvicornThreadHandle(server=server, thread=thread, port=bound_port, _owned_reservation=owned_reservation)
 
 
 @dataclass
@@ -650,18 +724,27 @@ class UvicornSubprocessHandle:
     process: subprocess.Popen
     port: int
     pidfile: Path
+    # R-44 WP-3 (e), W44-3-10: set only on the DEFAULT path (`reserved`
+    # omitted from `start_uvicorn_subprocess`) -- this handle then owns
+    # the reservation and closes it in `stop()`. `None` when the caller
+    # supplied its own `reserved=`: ownership stays with the caller (a
+    # C-26 launcher holds it for its whole lifetime so `restart()` can
+    # reuse it -- W44-3-5), and this `stop()` never touches it.
+    _owned_reservation: Optional["ReservedPort"] = field(default=None, repr=False)
 
     def stop(self, *, timeout_s: float = 10.0) -> None:
         _terminate_then_kill(self.process, timeout_s=timeout_s)
         with _suppress(FileNotFoundError):
             self.pidfile.unlink()
+        if self._owned_reservation is not None:
+            self._owned_reservation.close()
 
 
 def start_uvicorn_subprocess(
     app_import_string: str,
     *,
     pidfile: Path,
-    port: Optional[int] = None,
+    reserved: Optional[ReservedPort] = None,
     env: Optional[Mapping[str, str]] = None,
     cwd: Optional[Path] = None,
 ) -> UvicornSubprocessHandle:
@@ -676,20 +759,59 @@ def start_uvicorn_subprocess(
     process, it does not itself block on readiness (the two peers' own
     composition roots take different amounts of time to become
     reachable, and a caller may want to start both upstreams before
-    waiting on either)."""
-    bound_port = port if port is not None else free_port()
-    merged_env = dict(os.environ)
-    if env:
-        merged_env.update(env)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", app_import_string, "--host", "127.0.0.1", "--port", str(bound_port)],
-        env=merged_env,
-        cwd=str(cwd) if cwd is not None else None,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    pidfile.write_text(str(process.pid))
-    return UvicornSubprocessHandle(process=process, port=bound_port, pidfile=pidfile)
+    waiting on either).
+
+    【追記 2026-09-16、R-44 WP-3 (e)、W44-3-5、W44-3-10】`reserved` (a
+    `ReservedPort` from `reserve_port()`) is handed to the child via
+    `--fd <reserved.sock.fileno()>` + `pass_fds=(fileno,)` -- the SAME fd
+    number in the child as in this process (`pass_fds` never renumbers),
+    measured directly against this venv's installed uvicorn (F-16 spike,
+    監督実施 2026-09-16): the child genuinely serves on it. Ownership of
+    a CALLER-supplied `reserved` stays with the CALLER (W44-3-5's own
+    deviation from design D-7's "parent closes its own copy after
+    startup" -- a C-26 launcher's `restart()` needs the SAME reservation
+    to still be open across a stop/start of this function, or the bind-
+    race window a `port=<int>` re-bind used to leave would come back);
+    this function/handle never closes it. When `reserved` is omitted,
+    this function mints its OWN reservation via `reserve_port()` and the
+    RETURNED HANDLE owns it (closed by `UvicornSubprocessHandle.stop()`).
+    The former `port: Optional[int]` parameter is removed outright (W44-
+    3-10, 監督裁定 2026-09-16): after W44-3-9 moved every real caller in
+    this repository onto `reserved=`, no caller of this parameter was
+    left, and keeping it would leave a bind-race-prone re-bind-by-number
+    path selectable again in the future."""
+    owned_reservation: Optional[ReservedPort] = None
+    if reserved is not None:
+        reservation = reserved
+    else:
+        reservation = reserve_port()
+        owned_reservation = reservation
+    bound_port = reservation.port
+    fd = reservation.sock.fileno()
+    # コードレビュー 1 回目差し戻し 2 (監督裁定 2026-09-16): `subprocess.
+    # Popen`/`pidfile.write_text` のいずれかが送出すると、それまでは handle
+    # が返らないので `owned_reservation` を閉じる先が無く、予約したソケッ
+    # トが listen したまま漏れていた。ここから `return` までを 1 つの
+    # `try` で囲み、`except BaseException:` で `owned_reservation is not
+    # None` のときだけ閉じてから re-raise する。
+    try:
+        merged_env = dict(os.environ)
+        if env:
+            merged_env.update(env)
+        process = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", app_import_string, "--host", "127.0.0.1", "--fd", str(fd)],
+            env=merged_env,
+            cwd=str(cwd) if cwd is not None else None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            pass_fds=(fd,),
+        )
+        pidfile.write_text(str(process.pid))
+    except BaseException:
+        if owned_reservation is not None:
+            owned_reservation.close()
+        raise
+    return UvicornSubprocessHandle(process=process, port=bound_port, pidfile=pidfile, _owned_reservation=owned_reservation)
 
 
 # ---------------------------------------------------------------------------
@@ -985,7 +1107,9 @@ class RealSocketSurface:
             # own harness surface, claims the port between the
             # reservation's own close and nginx's own later real bind)
             # gets exactly ONE retry on a freshly reserved port --
-            # `start_nginx_with_bind_retry`'s own docstring. `nginx -t`
+            # `start_nginx_with_bind_retry`'s own docstring.
+            # 【追記 2026-09-16、R-44 Q-8(依頼者裁定)】`NGINX_BIND_MAX_
+            # ATTEMPTS`(= 3)回まで試行する形に改められた。`nginx -t`
             # still runs before every attempt, retry included (design D-2
             # (b) has no exception for a retried attempt).
             self._nginx, listen_port = start_nginx_with_bind_retry(

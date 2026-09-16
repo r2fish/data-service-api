@@ -881,6 +881,162 @@ def test_uvicorn_subprocess_starts_becomes_ready_and_stops(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# R-44 WP-3 (e), W44-3-5/W44-3-10 (監督裁定 2026-09-16): the subprocess-
+# version launcher now hands a `reserve_port()` reservation to uvicorn via
+# `--fd`/`pass_fds` (never a bare `--port <number>`), and the FORMER `port:
+# Optional[int]` parameter is removed outright.
+# ---------------------------------------------------------------------------
+
+
+def test_uvicorn_subprocess_serves_on_the_reserved_socket(tmp_path, monkeypatch):
+    """The subprocess launcher's DEFAULT path (`reserved` omitted) hands
+    its own `reserve_port()` reservation to uvicorn via `--fd`/`pass_fds`
+    -- read directly off a monkeypatched `subprocess.Popen` (never source
+    text, `OPERATING_CONDITIONS.md` §1.7 の 52), then confirms uvicorn
+    genuinely serves on it.
+
+    mutation (`socket_harness.py`): replace the `"--fd", str(fd)` pair in
+    `start_uvicorn_subprocess`'s own argv with `"--port", str(bound_port)`
+    -- this test goes red because the captured argv no longer contains
+    `--fd` at all.
+    """
+    module_path = tmp_path / "conf_socket_probe_app_fd.py"
+    module_path.write_text(_PROBE_APP_SOURCE)
+    real_popen = sh.subprocess.Popen
+    captured: dict = {}
+
+    def _capturing_popen(argv, *args, **kwargs):
+        captured["argv"] = list(argv)
+        captured["pass_fds"] = kwargs.get("pass_fds")
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(sh.subprocess, "Popen", _capturing_popen)
+    handle = sh.start_uvicorn_subprocess(
+        "conf_socket_probe_app_fd:app", pidfile=tmp_path / "probe_fd.pid", cwd=tmp_path,
+    )
+    try:
+        assert "--fd" in captured["argv"], f"argv carries no --fd: {captured['argv']!r}"
+        fd_index = captured["argv"].index("--fd")
+        fd_value = int(captured["argv"][fd_index + 1])
+        assert captured["pass_fds"] is not None and fd_value in captured["pass_fds"], (
+            f"pass_fds {captured['pass_fds']!r} does not include its own --fd value {fd_value}"
+        )
+        assert "--port" not in captured["argv"], f"argv still carries --port: {captured['argv']!r}"
+        sh.wait_until_ready(f"http://127.0.0.1:{handle.port}/anything", timeout_s=10.0, label="probe-fd")
+        status, _ = _get(f"http://127.0.0.1:{handle.port}/anything")
+        assert status == 401
+    finally:
+        handle.stop()
+
+
+def test_start_uvicorn_subprocess_never_closes_a_caller_supplied_reservation(tmp_path):
+    """W44-3-10 / W44-3-5: when the CALLER supplies its own `reserved=`,
+    ownership stays with the caller -- neither `start_uvicorn_subprocess`
+    nor the returned handle's own `.stop()` may close it (a C-26 launcher
+    holds this SAME reservation across a `restart()`'s stop-then-start).
+
+    mutation (`socket_harness.py`): flip the ownership condition in
+    `start_uvicorn_subprocess` (the `if reserved is not None:` branch) so
+    a caller-supplied `reserved` is ALSO treated as owned by the handle --
+    this test goes red because `reserved.sock.fileno()` becomes `-1`
+    (closed) after `handle.stop()` below.
+    """
+    module_path = tmp_path / "conf_socket_probe_app_owned.py"
+    module_path.write_text(_PROBE_APP_SOURCE)
+    reserved = sh.reserve_port()
+    handle = sh.start_uvicorn_subprocess(
+        "conf_socket_probe_app_owned:app", pidfile=tmp_path / "probe_owned.pid",
+        reserved=reserved, cwd=tmp_path,
+    )
+    try:
+        sh.wait_until_ready(f"http://127.0.0.1:{handle.port}/anything", timeout_s=10.0, label="probe-owned")
+    finally:
+        handle.stop()
+    assert reserved.sock.fileno() != -1, (
+        "start_uvicorn_subprocess must never close a caller-supplied reservation"
+    )
+    reserved.close()
+
+
+def test_uvicorn_subprocess_releases_its_own_reservation_on_stop(tmp_path):
+    """W44-3-10: when `reserved` is OMITTED, `start_uvicorn_subprocess`
+    mints its own reservation and the returned HANDLE owns it -- `.stop()`
+    must close it, never leave it dangling.
+
+    mutation (`socket_harness.py`): drop the `if self._owned_reservation
+    is not None: self._owned_reservation.close()` line from `UvicornSub
+    processHandle.stop()` -- this test goes red on both assertions below.
+    """
+    module_path = tmp_path / "conf_socket_probe_app_default.py"
+    module_path.write_text(_PROBE_APP_SOURCE)
+    handle = sh.start_uvicorn_subprocess(
+        "conf_socket_probe_app_default:app", pidfile=tmp_path / "probe_default.pid", cwd=tmp_path,
+    )
+    port = handle.port
+    owned = handle._owned_reservation  # noqa: SLF001 -- residue observation only
+    assert owned is not None, "the default path must own a reservation"
+    sh.wait_until_ready(f"http://127.0.0.1:{port}/anything", timeout_s=10.0, label="probe-default")
+    handle.stop()
+    assert owned.sock.fileno() == -1, "start_uvicorn_subprocess's own reservation must be closed on stop()"
+    assert not sh._port_has_listener(port), f"port {port} still has a listener after stop()"  # noqa: SLF001
+
+
+def test_start_uvicorn_subprocess_has_no_port_argument():
+    """W44-3-10 (監督裁定 2026-09-16): the former `port: Optional[int]`
+    parameter is removed outright -- no caller in this repository was left
+    after W44-3-9 moved every real call site onto `reserved=`.
+
+    mutation (`socket_harness.py`): re-add `port: Optional[int] = None,`
+    to `start_uvicorn_subprocess`'s own signature -- this test goes red
+    because `"port"` then reappears in `inspect.signature(...).parameters`.
+    """
+    import inspect
+
+    params = inspect.signature(sh.start_uvicorn_subprocess).parameters
+    assert "port" not in params, f"start_uvicorn_subprocess still has a 'port' parameter: {params!r}"
+
+
+def test_start_uvicorn_subprocess_closes_its_own_reservation_when_popen_fails(monkeypatch, tmp_path):
+    """コードレビュー1回目差し戻し2(監督裁定2026-09-16): `reserve_port()`で
+    採番した直後、`subprocess.Popen`/`pidfile.write_text`のいずれかが送出
+    すると、handleが返らないので`owned_reservation`を閉じる先が無く、予約
+    したソケットがlistenしたまま漏れていた。`start_uvicorn_subprocess`の
+    `try`/`except BaseException:`が、例外経路でも`owned_reservation`(既定
+    経路でこの関数自身が採番したもの)を閉じることを直接確認する。
+
+    mutation (`socket_harness.py`): `start_uvicorn_subprocess`の
+    `except BaseException:`節の`owned_reservation.close()`を`pass`に置き
+    換える -- このテストは、`Popen`失敗後も予約ソケットがまだlistenして
+    いる(closeされていない)ことを検出して赤になる。
+    """
+    real_reserve_port = sh.reserve_port
+    captured: dict = {}
+
+    def _capturing_reserve_port():
+        reservation = real_reserve_port()
+        captured["reservation"] = reservation
+        return reservation
+
+    def _raising_popen(*args, **kwargs):
+        raise OSError("injected Popen failure for the exception-safety test")
+
+    monkeypatch.setattr(sh, "reserve_port", _capturing_reserve_port)
+    monkeypatch.setattr(sh.subprocess, "Popen", _raising_popen)
+
+    with pytest.raises(OSError):
+        sh.start_uvicorn_subprocess(
+            "conf_socket_probe_app_exc:app", pidfile=tmp_path / "probe_exc.pid", cwd=tmp_path,
+        )
+
+    reservation = captured.get("reservation")
+    assert reservation is not None, "reserve_port() was never called on the default (owned) path"
+    assert reservation.sock.fileno() == -1, (
+        "start_uvicorn_subprocess must close its own reservation when Popen raises, "
+        f"but fd is {reservation.sock.fileno()} (still open)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # F-2 (a) (監督裁定 2026-09-08): a port can be RESERVED (bound + listening)
 # before the server that will answer on it starts, and handed straight to
 # uvicorn's own `Server.run(sockets=[...])`.
@@ -977,6 +1133,47 @@ def test_uvicorn_thread_serves_on_a_pre_reserved_socket():
         handle.stop()
 
 
+def test_start_uvicorn_thread_serves_on_a_port_it_reserved_itself(monkeypatch):
+    """R-44 WP-3 (e), R-8 (design §3.2's own named most-frequent-path
+    finding): the DEFAULT path (`reserved` AND `port` both omitted) now
+    calls `reserve_port()` internally, never `free_port()` -- the same
+    TOCTOU-closing behavior a caller-supplied `reserved=` already got,
+    just minted here instead.
+
+    mutation (`socket_harness.py`): revert `start_uvicorn_thread`'s
+    default branch back to `free_port()` -- this test goes red because
+    `counters["free"]` becomes 1 (asserted to stay 0 below) while
+    `counters["reserve"]` stays 0 (asserted to become 1).
+    """
+    app = _json_app()
+    real_reserve_port = sh.reserve_port
+    real_free_port = sh.free_port
+    counters = {"reserve": 0, "free": 0}
+
+    def _counting_reserve_port():
+        counters["reserve"] += 1
+        return real_reserve_port()
+
+    def _counting_free_port():
+        counters["free"] += 1
+        return real_free_port()
+
+    monkeypatch.setattr(sh, "reserve_port", _counting_reserve_port)
+    monkeypatch.setattr(sh, "free_port", _counting_free_port)
+
+    handle = sh.start_uvicorn_thread(app, start_timeout_s=10.0)
+    try:
+        assert counters["reserve"] == 1, f"expected exactly one reserve_port() call, got {counters!r}"
+        assert counters["free"] == 0, f"expected free_port() never called on the default path, got {counters!r}"
+        status, _ = _get(f"http://127.0.0.1:{handle.port}/v1/capabilities", timeout=10.0)
+        assert status == 401
+    finally:
+        handle.stop()
+        # R-8: `.stop()` is idempotent (uvicorn's own shutdown already
+        # closes the reservation's socket) -- a second call must not raise.
+        handle.stop()
+
+
 def test_start_nginx_with_bind_retry_moves_to_a_different_port_when_the_first_bind_fails(monkeypatch):
     """F-2 (a) 後半差し戻し (監督裁定 2026-09-08): nginx's own listen port
     is reserved (bind+listen, then close) rather than picked with a bare
@@ -990,6 +1187,14 @@ def test_start_nginx_with_bind_retry_moves_to_a_different_port_when_the_first_bi
     immediate exit and retries EXACTLY ONCE on a freshly reserved,
     genuinely free port, ending up actually serving there.
 
+    【追記 2026-09-16、R-44 Q-8(依頼者裁定)】this test only forces ONE
+    failure, so it still observes exactly one retry (2 total `reserve_
+    port()` calls) even under the revised 3-attempt policy -- it is not
+    itself a claim that one retry is the maximum; see `test_start_nginx_
+    with_bind_retry_succeeds_on_the_third_port` (a 3rd-attempt success)
+    and `test_start_nginx_with_bind_retry_gives_up_after_three_attempts`
+    (all 3 exhausted) for the fuller policy.
+
     mutation (`socket_harness.py`): remove the retry loop from `start_
     nginx_with_bind_retry` (raise/fail on the first attempt instead) --
     this test goes red because `RealSocketSurface.base_url` then raises
@@ -997,11 +1202,20 @@ def test_start_nginx_with_bind_retry_moves_to_a_different_port_when_the_first_bi
     """
     occupied = sh.reserve_port()  # stands in for a concurrent winner of the bind race
     real_reserve_port = sh.reserve_port
-    call_count = {"n": 0}
+    call_count = {"n": 0, "nginx": 0}
 
     def fake_reserve_port():
         call_count["n"] += 1
-        if call_count["n"] == 1:
+        # R-44 WP-3 (e), R-8: `RealSocketSurface._start()` now ALSO calls
+        # `reserve_port()` for its own data/control uvicorn upstreams
+        # (`start_uvicorn_thread`'s own new default path) BEFORE it ever
+        # reaches nginx -- always exactly 2 such calls, in that fixed
+        # order, before this function's own retry loop begins. Only calls
+        # AFTER those 2 are "nginx calls" for the purpose of this test.
+        if call_count["n"] <= 2:
+            return real_reserve_port()
+        call_count["nginx"] += 1
+        if call_count["nginx"] == 1:
             # A throwaway, never-bound socket object -- only `.port` and
             # `.close()` (a no-op close of an unbound socket) are ever
             # touched by the code under test; the ACTUAL occupancy of
@@ -1020,12 +1234,156 @@ def test_start_nginx_with_bind_retry_moves_to_a_different_port_when_the_first_bi
         assert listen_port != occupied.port, (
             "the surface must have moved to a DIFFERENT port after the first bind failed"
         )
-        assert call_count["n"] == 2, "exactly one retry (2 total reserve_port() calls) must have occurred"
+        assert call_count["nginx"] == 2, (
+            "exactly one retry (2 total nginx-side reserve_port() calls) must have occurred in THIS "
+            "scenario (one forced failure) -- this is a per-scenario count, not a claim that one retry "
+            "is the global maximum (up to 2 retries/3 attempts are now possible, R-44 Q-8)"
+        )
         status, _ = _get(f"{base_url}/v1/capabilities", timeout=10.0)
         assert status == 401
     finally:
         surface.stop()
         occupied.close()
+
+
+def test_start_nginx_with_bind_retry_succeeds_on_the_third_port(monkeypatch):
+    """R-44 Q-8 (依頼者裁定 2026-09-16): `start_nginx_with_bind_retry` goes
+    through a genuine 3RD attempt -- the first two reserved ports are both
+    occupied by a real, live listening socket (standing in for two
+    concurrent winners of the bind race), the third is left free.
+
+    mutation (`socket_harness.py`): change `NGINX_BIND_MAX_ATTEMPTS = 3` to
+    `NGINX_BIND_MAX_ATTEMPTS = 2` -- both the retry loop's own range AND
+    the give-up check are derived from this ONE constant (never a
+    separately hardcoded `3`), so this test goes red because `start_nginx_
+    with_bind_retry` then gives up (raises `HarnessStartupError`) after
+    only 2 attempts, before ever reaching the 3rd (genuinely free)
+    reserved port.
+    """
+    occupied_1 = sh.reserve_port()
+    occupied_2 = sh.reserve_port()
+    real_reserve_port = sh.reserve_port
+    call_count = {"n": 0, "nginx": 0}
+
+    def fake_reserve_port():
+        call_count["n"] += 1
+        if call_count["n"] <= 2:  # the surface's own data/control upstream reservations, R-8
+            return real_reserve_port()
+        call_count["nginx"] += 1
+        if call_count["nginx"] == 1:
+            return sh.ReservedPort(port=occupied_1.port, sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+        if call_count["nginx"] == 2:
+            return sh.ReservedPort(port=occupied_2.port, sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+        return real_reserve_port()
+
+    monkeypatch.setattr(sh, "reserve_port", fake_reserve_port)
+    app = _json_app()
+    surface = sh.RealSocketSurface(data_app=app, control_app=app)
+    try:
+        base_url = surface.base_url
+        listen_port = int(base_url.rsplit(":", 1)[1])
+        assert listen_port not in (occupied_1.port, occupied_2.port), (
+            "the surface must have moved past BOTH occupied ports to the 3rd, genuinely free one"
+        )
+        assert call_count["nginx"] == 3, (
+            f"expected exactly 3 nginx-side reserve_port() calls (2 failures + 1 success), "
+            f"got {call_count['nginx']}"
+        )
+        status, _ = _get(f"{base_url}/v1/capabilities", timeout=10.0)
+        assert status == 401
+    finally:
+        surface.stop()
+        occupied_1.close()
+        occupied_2.close()
+
+
+def test_start_nginx_with_bind_retry_gives_up_after_three_attempts(tmp_path, monkeypatch):
+    """R-44 Q-8: all 3 attempts occupied -> `HarnessStartupError`, and
+    there is no 4th attempt (`reserve_port()` is called exactly 3 times on
+    nginx's own side, never a 4th).
+
+    mutation (`socket_harness.py`): change `NGINX_BIND_MAX_ATTEMPTS = 3` to
+    `NGINX_BIND_MAX_ATTEMPTS = 4` -- this test goes red because a 4th
+    nginx-side `reserve_port()` call occurs (asserted not to, below) and
+    the surface then succeeds on that 4th, still-free port instead of
+    raising.
+    """
+    occupied = [sh.reserve_port() for _ in range(3)]
+    real_reserve_port = sh.reserve_port
+    call_count = {"n": 0, "nginx": 0}
+
+    def fake_reserve_port():
+        call_count["n"] += 1
+        if call_count["n"] <= 2:  # the surface's own data/control upstream reservations, R-8
+            return real_reserve_port()
+        call_count["nginx"] += 1
+        if call_count["nginx"] <= 3:
+            return sh.ReservedPort(
+                port=occupied[call_count["nginx"] - 1].port,
+                sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM),
+            )
+        return real_reserve_port()
+
+    monkeypatch.setattr(sh, "reserve_port", fake_reserve_port)
+    app = _json_app()
+    prefix = tmp_path / "nginx-give-up"
+    prefix.mkdir()
+    surface = sh.RealSocketSurface(data_app=app, control_app=app, work_dir=prefix)
+    try:
+        with pytest.raises(sh.HarnessStartupError):
+            surface.base_url
+        assert call_count["nginx"] == 3, (
+            f"expected exactly 3 nginx-side reserve_port() calls (no 4th attempt), got {call_count['nginx']}"
+        )
+    finally:
+        surface.stop()
+        for reservation in occupied:
+            reservation.close()
+
+
+def test_failed_nginx_attempts_keep_their_error_logs(tmp_path, monkeypatch):
+    """R-44 Q-8: each FAILED attempt's own `error.log` is preserved under
+    an attempt-numbered file (`error.attempt<N>.log`) -- never overwritten
+    by the next attempt's own truncate-then-retry.
+
+    mutation (`socket_harness.py`): replace the `(prefix / f"error.
+    attempt{attempt}.log").write_text(attempt_log_text)` line with `pass`
+    -- this test goes red because no `error.attempt*.log` file exists
+    after the 3-attempt exhaustion below.
+    """
+    occupied = [sh.reserve_port() for _ in range(3)]
+    real_reserve_port = sh.reserve_port
+    call_count = {"n": 0, "nginx": 0}
+
+    def fake_reserve_port():
+        call_count["n"] += 1
+        if call_count["n"] <= 2:  # the surface's own data/control upstream reservations, R-8
+            return real_reserve_port()
+        call_count["nginx"] += 1
+        if call_count["nginx"] <= 3:
+            return sh.ReservedPort(
+                port=occupied[call_count["nginx"] - 1].port,
+                sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM),
+            )
+        return real_reserve_port()
+
+    monkeypatch.setattr(sh, "reserve_port", fake_reserve_port)
+    app = _json_app()
+    prefix = tmp_path / "nginx-keep-logs"
+    prefix.mkdir()
+    surface = sh.RealSocketSurface(data_app=app, control_app=app, work_dir=prefix)
+    try:
+        with pytest.raises(sh.HarnessStartupError):
+            surface.base_url
+        harness_prefix = prefix / sh.NGINX_PREFIX_MARKER
+        preserved = sorted(harness_prefix.glob("error.attempt*.log"))
+        assert len(preserved) == 3, f"expected 3 preserved per-attempt error.log files, got {preserved!r}"
+        for log_path in preserved:
+            assert log_path.read_text(), f"{log_path} must not be empty"
+    finally:
+        surface.stop()
+        for reservation in occupied:
+            reservation.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1135,3 +1493,84 @@ def test_free_port_returns_a_bindable_port():
     port = sh.free_port()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", port))  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# R-44 WP-3 (e), R-19: the C-26 launchers' own F-15/F-16 blocking
+# `subprocess.run` call sites hand uvicorn a `reserve_port()` reservation
+# via `--fd`/`pass_fds`, never a bare `--port <number>`.
+# ---------------------------------------------------------------------------
+
+
+def test_f15_and_f16_paths_hand_their_reserved_socket_to_uvicorn(launcher_class: type, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-19 (design D-7): `attempt_start_without_process_ceilings` (F-15)
+    and `attempt_start_with_lowered_role_limit`'s own first, fail-fast
+    `subprocess.run` call (F-16-lowered) both build their blocking
+    `python -m uvicorn` invocation around a `reserve_port()`-owned socket
+    -- read directly off a monkeypatched `subprocess.run` (never the
+    source text, `OPERATING_CONDITIONS.md` §1.7 の 52), which delegates
+    through to the REAL `subprocess.run` so both real, blocking calls
+    still genuinely happen (a real throwaway platform is still
+    provisioned and torn down by each `attempt_start_*` call below).
+
+    mutation (`real_server_r2db.py`): replace the F-16-lowered
+    `subprocess.run` call's `"--fd", str(lowered_fd)` with `"--port",
+    str(lowered_reservation.port)` -- this test goes red on the r2db
+    side's F-16-lowered assertion below because the captured argv no
+    longer contains `--fd` at all.
+
+    Each `attempt_start_*` call ALSO runs several other real `subprocess.
+    run` calls first (`psql` against the throwaway platform's own
+    migrations, the real `ops declare-surfaces`/`declare-process-
+    ceilings` CLI) -- all captured by the SAME process-wide `subprocess.
+    run` patch (monkeypatching a module object patches every importer of
+    it, `subprocess` included).
+
+    【改訂 2026-09-16、コードレビュー 1 回目差し戻し 5、監督裁定】the
+    previous form read `calls[-1]` (the LAST captured call) on the
+    assumption that nothing after the uvicorn invocation ever calls
+    `subprocess.run` again -- true today for both `attempt_start_*`
+    methods, but a proxy for the property this test actually cares about
+    ("uvicorn was launched via `--fd`"), not that property itself
+    (`OPERATING_CONDITIONS.md` §1.7 の 52): a FUTURE `finally`/cleanup
+    step that also called `subprocess.run` would silently make this
+    assertion read the WRONG call, going red for a call-ORDER reason
+    unrelated to `--fd`/`pass_fds` at all. This filters `calls` down to
+    the ones whose own argv actually names `uvicorn` and asserts there is
+    EXACTLY ONE such call, then reads THAT one -- independent of where in
+    the call sequence it happened to land.
+    """
+    module = sys.modules[launcher_class.__module__]
+    real_run = module.subprocess.run
+    calls: list[dict] = []
+
+    def _capturing_run(argv, *args, **kwargs):
+        calls.append({"argv": list(argv), "pass_fds": kwargs.get("pass_fds")})
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", _capturing_run)
+
+    def _assert_the_uvicorn_call_uses_fd(label: str) -> None:
+        uvicorn_calls = [c for c in calls if "uvicorn" in c["argv"]]
+        assert len(uvicorn_calls) == 1, (
+            f"{label}: expected exactly one subprocess.run call whose argv names 'uvicorn', "
+            f"got {len(uvicorn_calls)}: {uvicorn_calls!r}"
+        )
+        call = uvicorn_calls[0]
+        argv = call["argv"]
+        assert "--fd" in argv, f"{label} argv carries no --fd: {argv!r}"
+        fd_index = argv.index("--fd")
+        fd_value = int(argv[fd_index + 1])
+        assert call["pass_fds"] is not None and fd_value in call["pass_fds"], (
+            f"{label} pass_fds {call['pass_fds']!r} does not include its own --fd value {fd_value}"
+        )
+        assert "--port" not in argv, f"{label} argv still carries --port: {argv!r}"
+
+    launcher_f15 = launcher_class()
+    launcher_f15.attempt_start_without_process_ceilings()
+    _assert_the_uvicorn_call_uses_fd("F-15")
+
+    calls.clear()
+    launcher_f16 = launcher_class()
+    launcher_f16.attempt_start_with_lowered_role_limit()
+    _assert_the_uvicorn_call_uses_fd("F-16-lowered")

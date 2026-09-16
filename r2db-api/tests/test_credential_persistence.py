@@ -54,12 +54,18 @@ from r2db_api.structured import delete_credential_confirmation_phrase
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 PEPPER = "synthetic-test-pepper-credential-persistence-0000"
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:

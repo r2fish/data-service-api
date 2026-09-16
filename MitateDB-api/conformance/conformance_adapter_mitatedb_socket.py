@@ -189,6 +189,12 @@ class _AppSocketSurface:
             # choice for its own two upstreams) -- only the EXTERNALLY
             # dialed `listen_port` below needs to be the specific number
             # `_surfaces_value()` already committed to a declared URL.
+            # 【追記 2026-09-16、R-44 WP-3 (e)、R-8、監督裁定 W44-3-14】
+            # `start_uvicorn_thread` の既定経路は `free_port()` ではなく
+            # `reserve_port()` に改められた(`conformance-tests/socket_
+            # harness.py` の `start_uvicorn_thread`)。この呼び出しに `port=`/
+            # `reserved=` を渡していないこの1行は、いまは `reserve_port()`
+            # で採番される。
             self._uvicorn_handle = sh.start_uvicorn_thread(self.app)
 
             assert self._listen_reservation is not None, "_AppSocketSurface._start() called twice"

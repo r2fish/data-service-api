@@ -384,7 +384,7 @@ F-15 / F-16 の blocking な `subprocess.run` の経路は `returncode != 0` と
 
 新規テストの略記: `T-scan` = `tools/tests/test_no_shared_cluster_defaults.py`、`T-sock` = `conformance-tests/test_socket_harness.py`、`T-c26` = `conformance-tests/test_c26_composition_root.py`。
 
-完了条件は **32 件**、うち変異を持つものが **28 件**、監査照合が **4 件**(29〜32)である。
+完了条件は **33 件**、うち変異を持つものが **29 件**、監査照合が **4 件**(29〜32)である。**【追記 2026-09-16、コードレビュー 1 回目の後】** 完了条件 33 を末尾に足した (§4.4 の (b))。
 
 **「赤になるテスト」の欄は予想である。実装担当が実測で埋め、予想と実測が食い違ったら報告に書く(§1.5 の 34、R-21)。**
 
@@ -422,6 +422,7 @@ F-15 / F-16 の blocking な `subprocess.run` の経路は `returncode != 0` と
 | 30 | Class D の discharge 文言が manifest と commit message にある | **監査照合**(変異なし) | — | — |
 | 31 | suite を 2 本並列に 3 回走らせ、毎回両方の集計行が一致する(R-11) | **監査照合**(変異なし) | — | — |
 | 32 | 上の 1〜31 のすべてに変異または監査照合が対応し、対応の無い行が無い。表に現れない新規テストを作らない(R-15) | **監査照合**(変異なし) | — | — |
+| 33 | `start_uvicorn_subprocess` / `start_uvicorn_thread` の例外経路で、自分が採番した予約を閉じてから送出する(§4.4 の (b)) | `conformance-tests/socket_harness.py`: 例外経路の `close()` を `pass` に置き換える | red | `T-sock`(例外経路の新規テスト。実測で埋める) |
 
 **変異のアンカーの一意性 (R-4)**
 
@@ -436,7 +437,7 @@ F-15 / F-16 の blocking な `subprocess.run` の経路は `returncode != 0` と
 - **29**: 対象は 3 箇所である。(i) `conformance-tests/socket_harness.py` の `start_nginx_with_bind_retry` の docstring の「EXACTLY ONCE」/「1 回だけ」の文、(ii) 同じ趣旨を書く `T-sock` の既存テストの docstring、(iii) 両 peer の `tests/test_audit_query.py` の `ADMIN_DSN_DEFAULT` 登録の経緯コメント(r2db 側 L2660 付近)。手順: 監督が `git diff acb257e -- <各ファイル>` を取り、(i)〜(iii) の旧文の行が削除側にも書き換え側にも現れず、直後に日付付きの註が **追加**されていることだけを確認する。追加した註の逐語と、確認した diff の該当行を `docs/design/TEST_POSTGRES_ISOLATION_V0_1.md` の WP-3 の記録に残す。
 - **30**: 監督が本 §4.2 の「変更クラス」の段落と、commit 直前の commit message の下書きを並べ、依頼者裁定の逐語と「内容は開発基盤の変更であり security-contract の変更ではない」の文が両方にあることを確認する。確認した逐語を同じ設計文書の WP-3 の記録に残す。
 - **31 (R-11)**: gate は排他ロックを取るので **gate を 2 本並列に走らせるのではない**。比較の対象は **通常の実行 2 本どうしの集計行**である。完了ゲートの **後**に、監督が 2 つの worktree で `tools/dev/pt.py -C <worktree> --wait 1800 -- -q -n 5 --dist loadgroup` を同時に開始する。これを 3 回。毎回、2 本の集計行が互いに一致することを確かめる。6 行を実装報告に verbatim で貼り、同じ設計文書の WP-3 の記録に残す。2 本目の worktree は監督が実測時に作る。
-- **32 (R-16)**: 監督が本表の 1〜31 を上から読み、変異の列が空の行が 29〜32 の 4 行だけであり、その 4 行に監査照合の手順があること、および WP-3 が足した新規テストが全て本表のいずれかの行に現れることを確認する。確認した結果を同じ設計文書の WP-3 の記録に残す(報告 1 行では足りない。§1.5 の 40)。
+- **32 (R-16)**: 監督が本表の 1〜33 を上から読み、変異の列が空の行が 29〜32 の 4 行だけであり、その 4 行に監査照合の手順があること、および WP-3 が足した新規テストが全て本表のいずれかの行に現れることを確認する。確認した結果を同じ設計文書の WP-3 の記録に残す(報告 1 行では足りない。§1.5 の 40)。
 
 #### (i) 完了ゲート
 
@@ -462,6 +463,35 @@ F-15 / F-16 の blocking な `subprocess.run` の経路は `returncode != 0` と
 #### (k) 並行作業
 
 R-37 WP-4b〜4d(セッション `cranky-curie-ac6645-18`)との触るファイルの重なりは **0** である(監督実測 + 相手セッションの回答 2026-09-16)。相手の manifest(`docs/work-orders/WORK_ORDER_R37_WP0_INVENTORY_V1.md` §5.42〜§5.44)は 3 件とも `r2db-api/tests/test_postgres.py` と `r2db-api/tests/test_audit_query.py` を「触らないファイル」に明記しており、`_ISOMORPHIC_TARGETS` は 3 件とも差分 0 を完了条件にしている。唯一の含み: 位置参照の走査で `r2db-api/tests/test_postgres.py` に括弧書き 1 箇所が要る可能性があり、その場合は相手が着手前に連絡する。連絡があれば実装担当は監督に上げ、自分では調整しない。
+
+### 4.3 WP-3 の訂正註 (2026-09-16、実装中。§4.2 の本文は書き換えない)
+
+- **(a) (d-2) の 1 と R-18 の食い違いの裁定 (監督裁定 W44-3-13)。** (d-2) の 1 は走査を `host=/tmp` (port の有無を問わない) に広げたが、(g) は R-18 の「意図的な到達不能値は走査に当たらず範囲外」と書いており、文面上は両立しない。実装担当の申告により監督が裁定する。**`host=/tmp` の直後が `port=1` (単語境界) のときだけ除外する形を採る。** 理由は 2 つある。(i) 危険は「共有クラスタに届くこと」であり、`port=1` は socket ファイル `.s.PGSQL.1` が存在しないので届かない。除外はファイル名の allowlist ではなく、**その分岐が実際に依存している性質そのもの**を読む形になる (§1.7 の 52)。(ii) 監督実測 (2026-09-16、worktree `r44-wp3`) により、リポジトリ内の意図的な到達不能値は **11 箇所すべてが `host=/tmp port=1 dbname=<説明的な名前>` の形**で揃っている (`MitateDB-api/tests/test_application_audit.py:619`・`:624`、`MitateDB-api/tests/test_http.py:275`、両 peer の `tests/test_ops_verify_declarations.py:467`・`:433`、`MitateDB-api/tests/test_postgres.py:2605`・`:2607`・`:2612`、`r2db-api/conformance/conformance_adapter_r2db_http.py:121`、`r2db-api/tests/test_audit_query.py:51`、`r2db-api/tests/test_control_http.py:714`、`r2db-api/tests/test_surfaces_env.py:260`)。ファイル名の allowlist にすると 11 件が陳腐化の対象になる。採らなかった案: 一般規定どおり port を問わず一致させ、11 件を allowlist に足す。
+
+- **(b) §4.2 (b) の 3 項の対象が 2 行足りなかった (監督が追認)。** (b) の 3 項は `MitateDB-api/tests/test_postgres.py` の 3 行だけを挙げていたが、`MitateDB-api/tests/test_application_audit.py` の `PostgresApplicationAuditSink("host=/tmp dbname=...", ...)` 2 行 (現 `:619`・`:624`) も (d-2) の 1 の真陽性である。設計レビュー 2 回目の M-1 の (i) が予告していた形である。同ファイルは (a) の 23 ファイルの 1 つで触ってよいので、実装担当が既存の `port=1` の慣行へ書き換えた。監督が追認する。
+
+- **(c) (d-2) の 3 の偽陽性を 2 条件で絞った (監督が追認)。** 「`dbname=` を含み `host=` も URL の host も持たない DSN リテラル」を文字どおり実装すると、f-string の断片 (`tools/testpg/dsa_testpg.py`、`tools/tests/test_testpg.py`) と、SI-10 の leak-scan が使う裸のトークン `"dbname="` (`r2db-api/tests/test_l5_si10_details_leak_scan.py`、`MitateDB-api/tests/test_denial_details_and_request_id.py`) に当たる。実装担当が (i) `dbname=` の直後に 1 文字以上を要求する、(ii) 3 は f-string の断片には適用しない (1 と 2 は適用する)、の 2 条件を足した。**絞り込みの理由は検査ファイル自身の docstring ((d-5) の限界の記述) に残す。**
+
+- **(d) allowlist は実測 4 件になった (監督が追認)。** (d-4) の表の 2 件 (`tools/dev/gate.py` = 2、`tools/testpg/dsa_testpg.py` = 1) に加え、(d-2) の 3 に当たる意図的な既存箇所として `conformance-tests/test_testpg_cluster.py` と `MitateDB-api/tests/test_control_credentials.py` が入る。**`conformance-tests/test_testpg_cluster.py` の実測は 2 件**であり、(d-4) が挙げた `:96` の 1 箇所だけではない (もう 1 件は f-string の実行スクリプトの中)。**実測を正とする。**
+
+### 4.4 WP-3 のコードレビュー 1 回目の裁定 (2026-09-16。§4.2・§4.3 の本文は書き換えない)
+
+独立コードレビュー 1 回目 (Class D。MAJOR 1 / MINOR 4 / 改善案 2) に監督が裁定を出した。差し戻しの正本は
+$SP の `wp3-rework-1.md` (非追跡) であり、本節はその結論だけを残す。
+
+- **(a) 完了条件 29 の監査対象は 3 箇所ではなく 5 箇所である (監督裁定)。** §4.2 (h) の 29 は (i) `start_nginx_with_bind_retry` の docstring、(ii) `T-sock` の既存テストの docstring、(iii) 両 peer の `tests/test_audit_query.py` の経緯コメント の 3 つを挙げていたが、実装で註を足した箇所は 5 つになった。加わるのは (iv) `conformance-tests/socket_harness.py` の module docstring (h) の項 (実装担当が同一ファイル内の重複記述の整合のために追記。監督が追認)、(v) 同ファイルの `RealSocketSurface._start` の呼び出し元コメント (`:1085-1089`。レビュー MAJOR-1。旧文「exactly ONE retry」が無註で残り、参照先の docstring の「3 回」と矛盾していた) である。29 の監査手順はこの 5 箇所に掛ける。
+
+- **(b) 完了条件 33 を足した (監督裁定)。** `start_uvicorn_subprocess` (`:774-793`) と `start_uvicorn_thread` (`:679-694`) は、`reserve_port()` で採番した直後の `subprocess.Popen` / `pidfile.write_text` / `uvicorn.Config` / `thread.start()` が送出すると、handle が返らないので**自分が採番した予約を閉じる先が無い**。消えた tmpdir 配下の `pidfile` で `FileNotFoundError` が出ると、そのポートが process の寿命の間 listen し続け、後続の `_port_has_listener` による残渣検査が持ち主不明の listener を見る。R-44 が常態化させる並列 2 本では、もう一方の実行の残渣検査にも当たる。採番から `return` までを `try` で囲み、`except BaseException:` で自分の予約だけを閉じてから `raise` する。変異 1 件を対応させる。
+
+- **(c) W44-3-14 (監督裁定 2026-09-16)。** `MitateDB-api/conformance/conformance_adapter_mitatedb_socket.py:186-188` の「`start_uvicorn_thread` 自身の `free_port()` fallback」の記述は、R-8 (既定経路の `reserve_port()` 化) により偽になる。同ファイルは §4.2 (g) の触るファイル一覧に無いが、**`.github/workflows/ci.yml` のコメントを WP-3 で直したのと同じ理由 — WP-3 の統合と同時に偽になる文は WP-3 が直す — により、このコメント 1 件だけを直す。** 素の `start_nginx()` 直呼び (再試行 0 回) は §4.1 の積み残しのままであり、触らない。r2db 側に対応する文が無いので同型性テストでは捕まらない (実装担当が `grep` で確かめて報告する)。
+
+- **(d) `_assert_last_call_uses_fd` を順序依存から外す (監督裁定)。** レビューの判定は「順序依存だが脆くはない」だったが、「最後の `subprocess.run` が uvicorn である」は、その分岐が実際に依存している性質 (「uvicorn を `--fd` で起動した」) の**代理**である (§1.7 の 52)。`"uvicorn" in argv` で絞って `len == 1` を assert する形へ直す。
+
+- **(e) 監督が追認したもの (直さない)。** `NGINX_BIND_MAX_ATTEMPTS` の新設 (レビューが挙動不変を確認。完了条件 26 を意味のあるものにするために必須)、予約の close を `_best_effort_stop_processes()` に置いたこと (唯一の呼び出し元が `stop()`。検査は GC 任せではないとレビューが判定)、完了条件 23 を両 peer のパラメータ化 1 本にしたこと。
+
+- **(f) `tools/tests/test_no_shared_cluster_defaults.py` の実測は追跡後に取り直す (レビュー MINOR-5)。** 同ファイルは未追跡のうちは `git ls-files` に載らず、allowlist の自己参照項目が死んでいる。**監督は完了ゲートの前に同ファイルを `git add` し、追跡された状態で `tools/tests` を回した集計行を正本とする。**
+
+- **(g) §4.2 (h) の 18 行の「赤になるテスト」欄は予想が外れた (§1.5 の 34)。** C-26 の実 launcher は `reserved=` を常に明示で渡すので既定オウン経路を通らず、`T-c26` は無関係である。実測では `T-sock::test_uvicorn_subprocess_releases_its_own_reservation_on_stop` の 1 本だけが赤になる。予想欄は本註で訂正し、表の本文は書き換えない (§1.8 の 57)。
 
 ## 5. WP-4 — 規律・文書・CI の改訂 (枠)
 

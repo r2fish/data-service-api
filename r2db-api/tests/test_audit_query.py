@@ -71,7 +71,6 @@ pytestmark = pytest.mark.anyio
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
-ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 APP_PEPPER = "synthetic-test-pepper-audit-query-app-0000"
 CONTROL_PEPPER = "synthetic-test-pepper-audit-query-ctl-0000"
 
@@ -127,7 +126,14 @@ _GENEROUS_LIMITS = ControlPlaneLimits(
 
 
 def _admin_dsn() -> str:
-    return os.environ.get(ADMIN_DSN_ENV, ADMIN_DSN_DEFAULT)
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; "
+            "there is no shared-cluster default."
+        )
+    return dsn
 
 
 def _dsn_with(base_dsn: str, **overrides: str) -> str:
@@ -2402,7 +2408,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_137_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_136_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2667,7 +2673,8 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # per-peer tuple by name only, so its OWN text does not carry the
     # per-peer difference), and `_CONTROL_URL`/`_DATA_URL` (identical
     # `*.example.invalid` synthetic fixture URLs both sides).
-    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "ADMIN_DSN_DEFAULT"),
+    # 追記 2026-09-16 (R-44 WP-3、D-4): `ADMIN_DSN_DEFAULT` はこの変更セットで
+    # 削除された。上の経緯コメントは書き換えない。登録行のみここで消す。
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATIONS_DIR"),
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
@@ -2873,7 +2880,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_137_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_136_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2948,7 +2955,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_137_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_137_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_136_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3073,7 +3080,6 @@ def test_isomorphic_target_table_is_pinned_to_its_current_137_rows() -> None:
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_verify_declarations_exits_0_when_every_check_passes"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_checks"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "cmd_verify_declarations"),
-        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "ADMIN_DSN_DEFAULT"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATIONS_DIR"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
@@ -3183,7 +3189,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_137_rows() -> None:
         ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_parse_handler"),
         ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_authenticate_call_nodes"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 137
+    assert len(_ISOMORPHIC_TARGETS) == 136
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:

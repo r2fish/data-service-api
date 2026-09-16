@@ -79,6 +79,11 @@ env:
   # which does not reach a server published on a loopback TCP port --
   # both must be overridden here (design D-3; conformance-tests/
   # README.md "Running against real PostgreSQL").
+  # 【追記 2026-09-16、R-44 WP-3】上の「デフォルトは unix-socket DSN」は
+  # WP-3 の統合により偽になった -- 既定値は追跡 .py から削除され、未設定は
+  # fail になる(tools/tests/test_no_shared_cluster_defaults.py)。この env
+  # ブロックの値そのもの(job の構成含む)は WP-3 では変えていない -- 正式
+  # な改訂は WP-4。
   R2DB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
   MITATEDB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
   # tools/testpg/dsa_testpg.py (work order docs/work-orders/WORK_ORDER_R44_
