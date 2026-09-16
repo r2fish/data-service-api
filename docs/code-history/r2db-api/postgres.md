@@ -105,6 +105,20 @@ preconditions, `contains`/`matches` literal/wildcard semantics against
 SQL's own three-valued logic, and object/array typing), identically.
 ```
 
+### correction: 2026-09-16
+
+- reason: R-37 WP-4c -- postgres.py's `_select_statement`/`_order_by_sql`/`_append_revision_predicate`/`_COMPARISON_OPERATORS`/`_where_clause`/`_text_expression`/`_predicate_sql`/`_bind_value` moved to postgres_sql.py; the pointer gets a 40c position bracket
+
+old:
+```
+built anywhere below that carries a client-supplied identifier/operator/value
+```
+
+new:
+```
+built anywhere below (and in `postgres_sql.py`) that carries a client-supplied identifier/operator/value
+```
+
 ## CH-0002
 
 - moved from: `src/r2db_api/postgres.py` (`<module>`)

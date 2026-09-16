@@ -3409,3 +3409,280 @@ def test_table_info_fields_and_defaults():
     assert second.constraints == {}
     first.constraints["widgets"] = "sentinel"
     assert second.constraints == {}
+
+
+def test_postgres_sql_leaf_preserves_postgres_delegates():
+    """R-37 WP-4c (PG3): `postgres.PostgresCell` keeps `_select_statement`/
+    `_order_by_sql`/`_append_revision_predicate` as the exact same objects
+    the new leaf `postgres_sql.py` defines -- facade identity only, not
+    shape (dedicated tests below pin the literal SQL shape)."""
+    from r2db_api.postgres import PostgresCell
+    from r2db_api import postgres_sql
+
+    names = ["_select_statement", "_order_by_sql", "_append_revision_predicate"]
+    for name in names:
+        assert getattr(PostgresCell, name) is getattr(postgres_sql, name), name
+
+
+def test_postgres_sql_leaf_preserves_predicate_delegates():
+    """R-37 WP-4c (PG2 + `_bind_value`): `postgres.PostgresCell` keeps
+    `_where_clause`/`_text_expression`/`_predicate_sql`/`_bind_value` as
+    the exact same objects the new leaf `postgres_sql.py` defines --
+    facade identity only, not shape. `_COMPARISON_OPERATORS` has no
+    delegation attribute at all (第 2 次裁定 6: its only remaining
+    mention in `postgres.py` after the move is the module docstring's
+    bare name, a name-only reference that stays true without a live
+    binding -- confirmed here as a read-hands-0 fact, not merely
+    asserted)."""
+    from r2db_api import postgres
+    from r2db_api.postgres import PostgresCell
+    from r2db_api import postgres_sql
+
+    names = ["_where_clause", "_text_expression", "_predicate_sql", "_bind_value"]
+    for name in names:
+        assert getattr(PostgresCell, name) is getattr(postgres_sql, name), name
+
+    assert not hasattr(postgres, "_COMPARISON_OPERATORS")
+    assert not hasattr(PostgresCell, "_COMPARISON_OPERATORS")
+
+
+def test_select_statement_is_composed_literally():
+    """R-37 WP-4c (PG3): `_select_statement` composes `SELECT <cols>,
+    <revision col>::text FROM <table> [WHERE ...] ORDER BY <order> OFFSET
+    <offset> LIMIT <page_size + 1>` as a literal `psycopg.sql.Composed`
+    fragment sequence -- built and compared without ever calling
+    `.as_string()` (which would need a live connection to quote against).
+    Pins both the OFFSET-before-LIMIT ordering and the `page_size + 1`
+    look-ahead row in one assertion: swapping the OFFSET/LIMIT clause
+    order, or dropping the `+ 1`, each changes the composed fragment
+    sequence directly."""
+    from psycopg import sql
+
+    from r2db_api.postgres_sql import _select_statement
+
+    result = _select_statement(
+        "widgets",
+        ["name", "age"],
+        None,
+        [("name", "asc"), ("age", "desc")],
+        5,
+        10,
+        revision_column="_r2db_revision",
+    )
+
+    columns = sql.SQL(", ").join([sql.Identifier("name"), sql.Identifier("age")])
+    revision = sql.SQL("{col}::text").format(col=sql.Identifier("_r2db_revision"))
+    base = sql.SQL("SELECT {columns}, {revision} FROM {table}").format(columns=columns, revision=revision, table=sql.Identifier("widgets"))
+    order = sql.SQL(", ").join([
+        sql.SQL("{col} {direction}").format(col=sql.Identifier("name"), direction=sql.SQL("ASC")),
+        sql.SQL("{col} {direction}").format(col=sql.Identifier("age"), direction=sql.SQL("DESC")),
+    ])
+    base = sql.SQL("{base} ORDER BY {order}").format(base=base, order=order)
+    expected = sql.SQL("{base} OFFSET {offset} LIMIT {limit}").format(base=base, offset=sql.Literal(5), limit=sql.Literal(11))
+
+    assert result == expected
+
+
+def test_order_by_sql_uses_only_fixed_direction_literals():
+    """R-37 WP-4c (PG3): each `(field, direction)` pair composes to
+    `<col> ASC` or `<col> DESC` -- exactly those two fixed `sql.SQL`
+    literals, joined by `", "`, never the client's own direction string
+    interpolated directly. Both directions and multiple terms are pinned
+    in one call so a change collapsing the ternary to a single constant
+    direction is caught regardless of which literal it collapses to."""
+    from psycopg import sql
+
+    from r2db_api.postgres_sql import _order_by_sql
+
+    result = _order_by_sql([("name", "asc"), ("age", "desc"), ("id", "asc")])
+    expected = sql.SQL(", ").join([
+        sql.SQL("{col} {direction}").format(col=sql.Identifier("name"), direction=sql.SQL("ASC")),
+        sql.SQL("{col} {direction}").format(col=sql.Identifier("age"), direction=sql.SQL("DESC")),
+        sql.SQL("{col} {direction}").format(col=sql.Identifier("id"), direction=sql.SQL("ASC")),
+    ])
+    assert result == expected
+
+
+def test_append_revision_predicate_binds_the_expected_revision():
+    """R-37 WP-4c (PG3, D-4 / design §5.2 "SQL 安全性"): a non-`None`
+    `expected_revision` is folded in as `<where> AND <revision col>::text
+    = <placeholder>`, with the revision value bound only through
+    `params` (never interpolated into the SQL text) -- and appended at
+    the END of the params list, after the caller's own `where_params`.
+    `expected_revision is None` leaves both the SQL and the params list
+    completely unchanged (a genuinely fresh copy, not the same list
+    object)."""
+    from psycopg import sql
+
+    from r2db_api.postgres_sql import _append_revision_predicate
+
+    where_sql = sql.SQL("{col} = {ph}").format(col=sql.Identifier("name"), ph=sql.Placeholder())
+    where_params = ["alice"]
+
+    combined_sql, combined_params = _append_revision_predicate(where_sql, where_params, "rev-123", revision_column="_r2db_revision")
+    expected_clause = sql.SQL("{col}::text = {ph}").format(col=sql.Identifier("_r2db_revision"), ph=sql.Placeholder())
+    expected_combined = sql.SQL("{w} AND {r}").format(w=where_sql, r=expected_clause)
+    assert combined_sql == expected_combined
+    assert combined_params == ["alice", "rev-123"]
+    assert combined_params[-1] == "rev-123"
+
+    unchanged_sql, unchanged_params = _append_revision_predicate(where_sql, where_params, None, revision_column="_r2db_revision")
+    assert unchanged_sql == where_sql
+    assert unchanged_params == ["alice"]
+    assert unchanged_params is not where_params
+
+
+def test_postgres_sql_takes_column_names_as_required_arguments():
+    """R-37 WP-4c (W4-1): `_select_statement`/`_append_revision_predicate`
+    take `revision_column` as an argument with NO default -- the leaf
+    never reads a module-level `_REVISION_COLUMN`/`_ID_COLUMN` constant
+    (neither name exists in `postgres_sql`'s own namespace at all;
+    `postgres.py`'s facade caller is what supplies the real column name)."""
+    import inspect
+
+    from r2db_api import postgres_sql
+    from r2db_api.postgres_sql import _append_revision_predicate, _select_statement
+
+    for fn in (_select_statement, _append_revision_predicate):
+        param = inspect.signature(fn).parameters["revision_column"]
+        assert param.default is inspect.Parameter.empty, fn.__name__
+
+    assert not hasattr(postgres_sql, "_REVISION_COLUMN")
+    assert not hasattr(postgres_sql, "_ID_COLUMN")
+
+
+def test_comparison_operators_are_literal():
+    """R-37 WP-4c (PG2): `_COMPARISON_OPERATORS` keeps its exact pre-move
+    6-entry contents (each a fixed `sql.SQL` literal, never a client
+    operator string written into SQL text)."""
+    from psycopg import sql
+
+    from r2db_api.postgres_sql import _COMPARISON_OPERATORS
+
+    assert _COMPARISON_OPERATORS == {
+        "eq": sql.SQL("="),
+        "ne": sql.SQL("<>"),
+        "lt": sql.SQL("<"),
+        "lte": sql.SQL("<="),
+        "gt": sql.SQL(">"),
+        "gte": sql.SQL(">="),
+    }
+
+
+def test_comparison_operator_lookup_has_no_fallback_default():
+    """R-37 WP-4c, closing the same gap independent code review found
+    twice in a row (WP-4a M13/完了条件16, WP-4b 中-1/S1-S2, work order
+    §5.45 訂正註 6): a lookup miss must actually RAISE, not silently
+    resolve to some literal -- exercised directly by calling
+    `_predicate_sql` with an out-of-vocabulary operator and pinning both
+    the raised `code` and the exact `details`. `_COMPARISON_OPERATORS.get
+    (item.operator, sql.SQL("="))`, or any other rewrite of the lookup
+    that stops raising for a miss (`or sql.SQL("=")`, a `try`/`except`
+    fallback, ...), fails this directly. The `ast` check below only pins
+    the ONE `_COMPARISON_OPERATORS.get(...)` call site's own argument
+    count (still real evidence against the specific no-default-arg
+    rewrite it targets) -- it is not a substitute for the execution-path
+    assertion above it (独立コードレビュー 高-1: the earlier, AST-only
+    version of this test let `.get(predicate.operator) or sql.SQL("=")`
+    through, 189 tests green)."""
+    import ast
+
+    from r2db_api import postgres_sql
+    from r2db_api.postgres_sql import _predicate_sql
+
+    with pytest.raises(FoundationError) as exc:
+        _predicate_sql(Predicate(field="f", operator="bogus", value=1), None)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "capability", "field": "where"}
+
+    tree = ast.parse(open(postgres_sql.__file__, encoding="utf-8").read())
+    arg_counts = [
+        len(node.args)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_COMPARISON_OPERATORS"
+    ]
+    assert arg_counts == [1]
+
+
+def test_predicate_sql_never_inlines_a_value():
+    """R-37 WP-4c (PG2, D-4 / design §5.2 "SQL 安全性"): an `eq`/`ne`/`lt`/
+    `lte`/`gt`/`gte` predicate's value reaches SQL only through
+    `sql.Placeholder()` -- never interpolated as text, even a value
+    containing a quote character. Composed structurally (never via
+    `.as_string()`); the value appears ONLY in the returned params list."""
+    from psycopg import sql
+
+    from r2db_api.postgres_sql import _predicate_sql
+
+    predicate = Predicate(field="name", operator="eq", value="o'brien")
+    result_sql, params = _predicate_sql(predicate, "string")
+
+    expected = sql.SQL("{col} {op} {ph}").format(col=sql.Identifier("name"), op=sql.SQL("="), ph=sql.Placeholder())
+    assert result_sql == expected
+    assert params == ["o'brien"]
+
+
+def test_predicate_sql_escapes_only_contains_patterns():
+    """R-37 WP-4c (PG2): `contains` escapes `%`/`_`/`\\` in the value (via
+    `_escape_like_literal`, an existing stable leaf -- not re-tested here)
+    before wrapping it in `%...%`; `matches` binds the client's own
+    pattern completely unescaped, wildcards included. Both compare
+    against `_escape_like_literal`'s own real output, not a hand-computed
+    literal, so this pins the WIRING (escape-then-wrap for `contains`,
+    no escaping at all for `matches`), not `_escape_like_literal`'s own
+    escaping rules."""
+    from r2db_api.postgres_like import _escape_like_literal
+    from r2db_api.postgres_sql import _predicate_sql
+
+    value = "50%_off\\"
+
+    contains_pred = Predicate(field="name", operator="contains", value=value)
+    _, contains_params = _predicate_sql(contains_pred, "string")
+    assert contains_params == [f"%{_escape_like_literal(value)}%"]
+
+    matches_pred = Predicate(field="name", operator="matches", value=value)
+    _, matches_params = _predicate_sql(matches_pred, "string")
+    assert matches_params == [value]
+
+
+def test_text_expression_unwraps_only_untyped_columns():
+    """R-37 WP-4c (PG2): an untyped (JSONB-equivalent) column's text form
+    is `(col #>> '{}')` (unwraps a JSON string without surrounding quotes);
+    a declared-typed column's text form is the plain `col::text` cast."""
+    from psycopg import sql
+
+    from r2db_api.postgres_sql import _text_expression
+
+    column = sql.Identifier("name")
+    untyped = _text_expression(column, None)
+    typed = _text_expression(column, "string")
+
+    assert untyped == sql.SQL("(") + column + sql.SQL(" #>> '{}')")
+    assert typed == column + sql.SQL("::text")
+
+
+def test_bind_value_wraps_only_json_shaped_columns():
+    """R-37 WP-4c (PG2 + `_bind_value`): `None` always binds as SQL NULL
+    regardless of column shape; an untyped, `object`-declared, or
+    `array`-declared value binds wrapped in `Jsonb(...)`; every other
+    (scalar-typed) value binds as the bare native parameter."""
+    from psycopg.types.json import Jsonb
+
+    from r2db_api.postgres_sql import _bind_value
+
+    assert _bind_value(None, "string") is None
+    assert _bind_value(None, None) is None
+
+    untyped = _bind_value({"a": 1}, None)
+    obj = _bind_value({"a": 1}, "object")
+    arr = _bind_value([1, 2], "array")
+    scalar = _bind_value(5, "integer")
+
+    assert isinstance(untyped, Jsonb) and untyped.obj == {"a": 1}
+    assert isinstance(obj, Jsonb) and obj.obj == {"a": 1}
+    assert isinstance(arr, Jsonb) and arr.obj == [1, 2]
+    assert scalar == 5 and not isinstance(scalar, Jsonb)
