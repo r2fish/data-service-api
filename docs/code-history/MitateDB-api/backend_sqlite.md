@@ -98,6 +98,20 @@ postgres.py`'s identical `None`-means-unbounded convention.
 # whether `cell.py`'s own allowlist is ever weakened or bypassed.
 ```
 
+### correction: 2026-09-16
+
+- reason: R-37 WP-4a -- backend_postgres.py's `_where_sql`/`_OPERATOR_SQL`/`_DIRECTION_SQL` moved to `postgres_sql.py`; the pointer gets a 40c position bracket
+
+old:
+```
+`backend_postgres.py`'s own `_DIRECTION_SQL` constant dict (WP-2.5)
+```
+
+new:
+```
+`backend_postgres.py`'s own `_DIRECTION_SQL` (now in `postgres_sql.py`) constant dict (WP-2.5)
+```
+
 ## CH-0341
 
 - moved from: `src/mitatedb_api/backend_sqlite.py` (`SQLiteBackend.__init__`)

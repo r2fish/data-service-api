@@ -87,7 +87,7 @@ import time
 import psycopg
 from psycopg import sql
 
-from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
+from .backend import UNCHANGED
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
                      PlatformUpgradePending, ResourceLimitError,
                      StorageConfigurationError, ValidationError, violation)
@@ -99,6 +99,7 @@ from . import platform_upgrades
 from .postgres_value_domain import _INT_DOMAIN_RANGES, _validate_value_domain, _check_domain
 from .postgres_reserved_names import _RESERVED_EXACT, _RESERVED_PREFIX, _check_reserved_name
 from .postgres_types import _TYPE_SQL, _DOMAIN_BY_DATA_TYPE, _TEXT_DOMAIN_BY_DECLARED_TYPE
+from .postgres_sql import _DIRECTION_SQL, _where_sql
 
 
 def _guard_pending_platform_upgrades(method):
@@ -126,12 +127,6 @@ def _guard_pending_platform_upgrades(method):
         return method(self, *args, **kwargs)
     return _wrapped
 
-
-# m-7: operator-token and ORDER BY direction lookups, precomposed as
-# `sql.SQL` constants (never a bare Python string concatenated with `+`
-# into a statement fragment).
-_OPERATOR_SQL = {name: sql.SQL(token) for name, token in SQL_OPERATOR_TOKENS.items()}
-_DIRECTION_SQL = {"asc": sql.SQL("ASC"), "desc": sql.SQL("DESC")}
 
 # Bookkeeping table name (provisioned by `migrations/0003_provision_
 # application.sql`, mirroring r2db-api's own `_r2db_schema_revision`
@@ -1149,21 +1144,7 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # DML (runtime connection only -- R-1)
     # ------------------------------------------------------------------
-    def _where_sql(self, filters):
-        if not filters:
-            return sql.SQL(""), []
-        clauses = []
-        params = []
-        for item in filters:
-            column = sql.Identifier(item.field)
-            if item.operator == "in":
-                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in item.value)
-                clauses.append(sql.SQL("{} IN ({})").format(column, placeholders))
-                params.extend(item.value)
-            else:
-                clauses.append(sql.SQL("{} {} %s").format(column, _OPERATOR_SQL[item.operator]))
-                params.append(item.value)
-        return sql.SQL(" WHERE ") + sql.SQL(" AND ").join(clauses), params
+    _where_sql = staticmethod(_where_sql)
 
     @_guard_pending_platform_upgrades
     def insert(self, collection, fields, params, *, deadline=None):

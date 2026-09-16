@@ -1415,7 +1415,7 @@ def test_postgres_backend_rejects_an_injection_shaped_order_by_direction(app_a) 
     """M-4 (independent WP-3 review): a direct, backend-level test --
     bypassing `cell.py` entirely, exactly mirroring `MitateDB-api/tests/
     test_order_by_direction_hardening.py`'s identical SQLite-backend test
-    -- proving `PostgresBackend.read()`'s own `_DIRECTION_SQL` closed dict
+    -- proving `PostgresBackend.read()`'s own `_DIRECTION_SQL` (now in `postgres_sql.py`) closed dict
     lookup rejects an unexpected `direction` value with `errors.
     ValidationError` (a classified failure, not the raw, untranslated
     `KeyError` this call site used to raise before this fix -- that
