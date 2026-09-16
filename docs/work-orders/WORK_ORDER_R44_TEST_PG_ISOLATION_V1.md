@@ -493,6 +493,31 @@ $SP の `wp3-rework-1.md` (非追跡) であり、本節はその結論だけを
 
 - **(g) §4.2 (h) の 18 行の「赤になるテスト」欄は予想が外れた (§1.5 の 34)。** C-26 の実 launcher は `reserved=` を常に明示で渡すので既定オウン経路を通らず、`T-c26` は無関係である。実測では `T-sock::test_uvicorn_subprocess_releases_its_own_reservation_on_stop` の 1 本だけが赤になる。予想欄は本註で訂正し、表の本文は書き換えない (§1.8 の 57)。
 
+### 4.5 WP-3 の完了ゲートの記録 (2026-09-16)
+
+- **1 本目 (`15:05:25` 開始) は破棄した。** `tools/dev/gate.py` を `-C` 無しで呼んだため、**担当 worktree ではなく main のチェックアウトで root suite を回していた**。出力は `3425 passed, 2 subtests passed` / judge=PASS / 実行クラスタの差分 0 / `info=shared … 0` であり、これは **WP-3 の差分を 1 行も含まない main (`b6c78ab`) の値**である (`acb257e` の `3422` に、同じ時間帯に別セッションが統合した R-37 WP-4b の新規テスト 3 本を足した数と一致する)。**教訓: `gate.py` は既定でカレントのチェックアウトを回す。worktree の変更を測るときは `-C <worktree>` を必ず渡す。** `pt.py` / `mutate.py` / `finalize.py` は `-C` を必須にしているが `gate.py` は既定を持つので、渡し忘れが集計行に出ない形で起きる。
+- **基点の移動。** WP-3 の起草時の基点は main `acb257e` だったが、実装中に別セッションが R-37 WP-4a の記録・WP-4b・WP-4c/4d の統合裁定を main へ入れ、**`b6c78ab` へ進んだ**。監督が触るファイルを再照合し、**重なりは引き続き 0 件**であることを確かめた (相手が触ったのは `r2db-api/src/r2db_api/postgres.py`・`postgres_types.py`、`r2db-api/tests/test_foundation.py`、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`、`tools/tests/test_leaf_import_direction.py` と docs である)。WP-3 の commit (`6fedec1`) の後に main を branch へ取り込んでから、ゲートを取り直した。
+- **2 本目が正本である (`15:12:28` 開始、`-C .claude/worktrees/r44-wp3`)。**
+
+```
+gate: 3439 passed, 2 subtests passed in 324.18s (0:05:24)
+gate: judge=PASS
+gate: pg_database/pg_roles diff 0
+gate: info=shared pg_database/pg_roles diff 0
+```
+
+  実行後に残ったのは `suite.lock` だけであり、`run-*` も `gate.intent` も無い。集計行の増分は実測と一致する: main `b6c78ab` の `3425` に、peer suite の新規 3 本 (両 peer の `tests/test_postgres.py` 各 1、`MitateDB-api/tests/test_control_plane_postgres.py` 1) と conformance の新規 11 本 (`T-sock` の 9 関数のうち `test_f15_and_f16_paths_hand_their_reserved_socket_to_uvicorn` が `launcher_class` で 2 項目になるので 10、加えて例外経路の新規テスト 1) を足した数である。`tools/tests` は **492** (WP-2 の基準 486 + 新設 6)。
+
+- **設計 §7 の完了条件 5 の実測 (完了条件 31、裁定 W44-3-12・R-11)。** ゲートの後、同一 SHA (`b3e647d`) の 2 つの worktree (`r44-wp3` と `r44-wp3-par`) で `tools/dev/pt.py -C <worktree> --wait 1800 -- -q -n 5 --dist loadgroup` を同時に開始することを 3 回行った。**6 本すべて集計行が一致した。**
+
+| 回 | 開始 | A (`r44-wp3`) | B (`r44-wp3-par`) |
+|---|---|---|---|
+| 1 | 15:18:29 | `3439 passed, 2 subtests passed in 511.74s` | `3439 passed, 2 subtests passed in 514.93s` |
+| 2 | 15:27:16 | `3439 passed, 2 subtests passed in 534.35s` | `3439 passed, 2 subtests passed in 534.39s` |
+| 3 | 15:36:22 | `3439 passed, 2 subtests passed in 582.20s` | `3439 passed, 2 subtests passed in 583.98s` |
+
+  6 本とも単独のゲートと同じ `3439` であり、**並列でも集計行は揺れなかった**。所要は単独の 5 分 24 秒に対し並列で 8 分 31 秒 → 9 分 43 秒と伸びており、回を追って伸びるのは資源の取り合いによる (設計 §2 の「許容」のとおり)。実行後の残骸は `suite.lock` のみで、`postgres -D` は共有クラスタの 1 件だけである (使い捨てクラスタの取り残しは無い)。**roadmap R-42 (期限切れの要求の成否が負荷で揺れる) は未修正のままであり、本実測はそれが今回の 3 回では表面化しなかったことを示すにとどまる。**
+
 ## 5. WP-4 — 規律・文書・CI の改訂 (枠)
 
 - 設計 §5 の一覧を改訂する。TimeZone を CI にも明示し (Q-6)、superuser 名は既に `postgres` で揃う (Q-7)。
