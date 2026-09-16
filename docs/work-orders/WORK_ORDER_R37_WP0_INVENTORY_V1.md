@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.22 (2026-09-16)。** 基点 `abcb2b6` (実測 A〜F の基点は `2ed3a3d`。間の変更は文書・`MitateDB-api/docs/f9-execution-assets-v1/`・`tools/public_value_scan.py` だけ)。R-37 の最後の WP である WP-5 (facade 縮小と閉止) の manifest を **§5.46** として足した。枠は引き継ぎ書 `docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 B (裁定 Z5-1〜Z5-8)。起草時の疑義への監督裁定 **Z5-9〜Z5-14** (第 2 次) を §5.46 に逐語で置き、完了条件と変異の表をそれに合わせた。続いて設計レビューへの監督裁定 **Z5-15〜Z5-21** (第 3 次) を同じく逐語で置き (Z5-9 の例の訂正、Z5-10 の許可規則と絞り込みを覆す)、本文と表を振り直した。既存の版数行・§5.45 までの本文・訂正註 1〜8 はいずれも書き換えていない (§1.8 の 56・57)。**独立設計レビュー待ち。**
 - **v1.21 (2026-09-16)。** 基点 `fdaf9e8` (WP-4c を統合済み)。WP-4c の実施と独立コードレビューで判明した 7 件を **訂正註 8 (8-1〜8-7)** として §5.45 の末尾に足した。**7 件はいずれも WP-5 (facade 縮小と閉止) に掛かる。**§5.43・§5.44・統合後の manifest の本文・表・完了条件と、既存の版数行・訂正註 1〜7 はいずれも書き換えていない (§1.8 の 56・57)。設計側の記録は `docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` (v1.21) §10.18。
 - **v1.20 (2026-09-16)。** 基点 `2e94bbf` (WP-4b を統合済み)。WP-4b の実施で判明した 2 件を **訂正註 6・7** として §5.45 の末尾に足した (閉語彙外・例外経路の条件の強化、0f の読み方の非対称)。どちらも **WP-4c に掛かる**。§5.42 の本文・表・完了条件と既存の版数行・訂正註はいずれも書き換えていない (§1.8 の 56・57)。設計側の記録は `docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` (v1.20) §10.17。
 - **v1.19 (2026-09-16)。** 基点 `bec2eeb` (WP-4a とその記録を統合済み)。依頼者裁定により §5.43 (WP-4c) と §5.44 (WP-4d) を 1 つの WP (呼称 **WP-4c**) として実施する訂正註を §5.45 の末尾に足した。§5.43・§5.44 の本文、Z4-2 の行、既存の版数行はいずれも書き換えていない (§1.8 の 56・57)。
@@ -2130,6 +2131,168 @@ class の method (8 スペース) から module の関数 (4 スペース) へ�
 - **この違いは不統一ではなく、検査の目的の反映である**: 「公開されるものに何が入っているか」を見る検査は `git ls-files` が筋であり (未追跡はまだ公開の対象ではない)、「コードが実際にどう依存しているか」を見る検査は `rglob` が正しい。
 - **`tools/tests` は root suite の外なので `gate.py` では 1 本も走らない** (`tools/tests/pytest.ini` が根であり `testpaths` の外)。走るのは `finalize.py --tools-tests` の段である。**したがって、この層の赤はゲートが緑で通った後に出る。**手前で確かめるには `tools/dev/pt.py -C <worktree> --wait 1800 -- tools/tests -q` を回す。
 - **W4-4 (b) の手順がこの穴を塞いでいる**: `finalize.py --no-merge` で**記録してから** `tools/tests` を回すので、その時点で新規ファイルは必ず追跡済みであり、`git ls-files` 系の検査も正しく見える。**穴が残るのは「記録する前に手で `tools/tests` を回し、その集計行を正本にする」経路だけである** (別セッションが実際に踏み、レビューに指摘された)。
+
+### 5.46 WP-5 — facade 縮小と閉止 (R-37 の最後の WP。v1.22 追記、**独立設計レビュー反映済み**)
+
+**枠**: 引き継ぎ書 `docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 B (監督が確定。問題設定・守るべき条件・実測 A〜F・裁定 Z5-1〜Z5-8・却下した代替案) を前提に読む。本節は枠を言い換えず、実測 A〜F は同付録の記号で指す。正本設計は `docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` §1.1・§1.2・§3.2・§4 の WP-5 節・§5・§6・§7。§5.45 の訂正註 1〜8 はすべて掛かる (訂正註 8 は 8-1〜8-7 とも WP-5 に掛かると明記している)。
+
+**監督裁定 (Z5-1〜Z5-8。同付録からの逐語)**:
+
+| # | 裁定 | 根拠 |
+|---|---|---|
+| Z5-1 | **WP-5 の範囲は次の 6 つ。**(1) **SQL 安全性の静的走査の新設** (設計 D-4 が要求し、W4-3 が WP-5 へ送ったもの)、(2) **循環 import の静的検査の新設**、(3) **真に読み手 0 の import 2 件の削除**、(4) **残る再 export を「意図的な facade 互換」として記録**、(5) **読み手検査の偽陰性 (文字列注釈) の手当て**、(6) **R-37 の閉止記録** | (1) は設計 D-4 の「client-influenced statement が plain `str` で到達できない性質を新 module を含む走査で確認する」に対応する機構が 0 件。(2) は設計 §4 WP-5 の「import graph を確認する」の機械化された形で、現在は静的テストが無い |
+| Z5-2 | **テストの削除は行わない。**重複候補 1 件は **R-39 候補として記録** | 設計 §5.3 は `COLLECTION_FLOOR` が「大幅な収集減の検知器であって、テストを削除していない証明ではない」と述べ、実測では削除を検出する道具が無い。**削除の根拠より、削除を検出する手段が無いことのほうが重い** |
+| Z5-3 | **SQL 安全性の走査は SQL キーワードの文字列一致で作らない。**AST で「execute の choke point に到達する値がどう構築されたか」を見る形にする | 監督実測: キーワード一致だと `r2db-api/src/r2db_api/delete_confirmation.py`:127・138・163・243 の削除確認の句 (利用者が打ち込む文字列で SQL ではない) と `MitateDB-api/src/mitatedb_api/ops.py`:798 のエラーメッセージが偽陽性になる |
+| Z5-4 | **削除する読み手 0 の import は 2 件だけ** (`CONTRACT_TYPES`、`config.py` の `build_surfaces`)。**他の候補は削らない** | 上の A の再照合。facade identity test が読むもの・facade 明記があるものは削れない |
+| Z5-5 | **読み手検査 (訂正註 4) の偽陰性を手当てする。**文字列注釈を扱うか、扱えないことを明記して手作業の照合を完了条件にする | WP-4 が確立した検査手法そのものの穴であり、WP-5 の削除判断がこの手法に依存する |
+| Z5-6 | **Class B。**`_ISOMORPHIC_TARGETS` に触れない (差分 0 を完了条件にする)。`spec/`・`security/`・`conformance-tests/` に触れない | 削除は peer の private な import 2 件、新設は `tools/tests/` のテスト |
+| Z5-7 | **1 つの WP として行う** (依頼者の統合の方針に沿う)。**完了条件は (1)〜(6) ごとに分ける** | 依頼者裁定「4c・4dをまとめてください。」の方針。規模は WP-4c より小さい |
+| Z5-8 | **新設する 2 つの走査は走査対象を両 peer の `src/` に明示的に限る。**peer のディレクトリ全体を `rglob` しない | `7cd1d80` が `MitateDB-api/docs/f9-execution-assets-v1/` に `.py` 3 件を置いた。レビューされていない参照用コードで、`MitateDB-api/` を `rglob` すると判定に混ざる |
+
+**監督裁定 (第 2 次、2026-09-16、Z5-9〜Z5-14。起草時の疑義への裁定。`wp5-rulings-1.md` からの逐語)**:
+
+| # | 裁定 |
+|---|---|
+| Z5-9 | (choke point の名前の重複) choke point は **module の修飾名 + クラス名 + メソッド名**で引く (例: `r2db_api.postgres` の backend クラスの `_run`)。裸の関数名で引かない。 |
+| Z5-10 | (走査範囲) Z5-3 の「choke point に到達する値」を、D-4 の性質 (client-influenced statement が plain str で到達できない) に合わせて**psycopg を import する両 peer `src/` module の全 `.execute(` / `.executemany(` 呼び出し**へ広げる。第 1 引数が次のいずれかなら許可: (a) 文字列リテラル (静的 SQL)、(b) `sql.SQL(<文字列リテラル>)`・`sql.Identifier` / `sql.Literal` / `sql.Placeholder` と、それらの `.format()` / `.join()` / `+` による合成、(c) 上の (a)(b) だけから作られた module 定数、(d) choke point の引数 (呼び出し元で同じ規則が掛かる)。それ以外 (f-string、`%`、`str +`、`sql.SQL(<非リテラル>)`) は赤。判定できない既存箇所は**理由付きの明示許可表 + 件数 pin** に置き、実装担当は件数と理由を報告する (監督が採否を裁定)。`backend_sqlite.py` は PostgreSQL ではないので走査外とし、理由を書く。 |
+| Z5-11 | (変異) (1) の変異に次を足す: `sql.SQL(<f-string>)` を choke point に渡す一時呼び出し → 赤、直接 `.execute(` へ f-string を渡す一時呼び出し → 赤。plain str だけの変異は実行時ガードと重なるので単独では足りない。 |
+| Z5-12 | (循環 import) graph は**関数内 import と `TYPE_CHECKING` 下の import を含む全辺**で循環 0 を assert する (閉止条件の「依存方向」を最も強く固定する。現状は含めても 0)。将来の意図的な例外は監督裁定を要すると書く。 |
+| Z5-13 | ((5) 文字列注釈) **第一案を採る。**ただし恒久テストにはせず、WP-5 の読み手検査スクリプト (scratchpad) が文字列注釈を parse して読み手に数える。空振り防止として、既知の文字列注釈の読み手 (`MitateDB-api/src/mitatedb_api/http.py`、`audit_query.py` — 関数名で引く) がスクリプトで読み手として数えられることを実装担当が実測して報告する。この確認を完了条件 14 の「監査照合」とする。 |
+| Z5-14 | (削除と 40a) §1.5 の 40a を削除にも準用する: (3) のコミット前に両 peer の suite の集計行を記録する。 |
+| (番号なし) | 新規テスト 2 件のファイル名は起草案のとおりでよい。 |
+
+- **Z5-13 の「完了条件 14」は起草時の番号である。**裁定の反映で表を振り直したので、第 2 次の表では**完了条件 18** に当たった (裁定の文言は逐語のまま残す。第 3 次の番号は下の第 3 次裁定の註を見よ)。
+
+**監督裁定 (第 3 次、2026-09-16、Z5-15〜Z5-21。設計レビューの指摘 高 2・中 5・低 2 への対応。`wp5-rulings-2.md` からの逐語)**:
+
+| # | 裁定 |
+|---|---|
+| Z5-15 | (Z5-9 の訂正註) Z5-9 の例「backend クラスの `_run`」は誤り。両 choke point は module 直下の関数であり、修飾名は **module + 関数名** (`r2db_api.postgres._run`、`mitatedb_api.backend_postgres._execute`) で引く。Z5-9 の本文は残し、本項を訂正註として置く。 |
+| Z5-16 | (高 1) Z5-10 の規則 (a)〜(d) を**データの流れを追わない 2 本立て**に置き換える (Z5-10 の本文は残し、本項で覆す)。規則 1: 走査 module 内のすべての `sql.SQL(...)` の引数は、**静的に文字列リテラルへ畳める式**に限る — 文字列リテラル、リテラル同士の `+`、同じ関数内または module 内の全代入がそれ自体静的に畳める名前。呼出し位置を問わない。規則 2: すべての実行呼出し (下の Z5-17) の第 1 引数に、f-string・`%` 書式・`str` の `+` 連結・`.format()` を**直接**置かない (`sql.SQL` / `sql.Composed` の `.format()` / `.join()` は除く)。規則で畳めない既存箇所は理由付きの明示許可表 + 件数 pin。実装担当は件数と理由を報告し、採否は監督が裁定する。レビュー実測で問題になった `sql.SQL(base_statement + "…")` 4 件と `sql.SQL(<module 定数>)` 3 件は、規則 1 で畳めるかを実装担当が実測する。 |
+| Z5-17 | (高 2) 「実行呼出し」は `.execute(` / `.executemany(` と、次の名前付き関数の呼出しを指す: 両 choke point (Z5-15) と、同名の wrapper 4 つ (MitateDB `mitatedb_api.control_plane`・`mitatedb_api.credential_store_postgres`・`mitatedb_api.control_credential_store_postgres` の `_execute`、r2db `r2db_api.credential_store` の `_execute`)。いずれも修飾名で列挙し、規則 2 を呼出し側に掛ける。 |
+| Z5-18 | (中 1) 走査対象は両 peer の `src/` 配下の**全 module を AST で発見**し、`backend_sqlite.py` だけを理由付きで名指し除外する (psycopg を import するかで絞らない)。発見した集合を pin する。変異 8 は「発見の結果から 1 module を落とす」、変異 10 は「psycopg を import しない新規 module に、引数の cursor へ f-string を渡す実行呼出しを置く」にする。 |
+| Z5-19 | (中 2・中 3・低 2) 変異 10 の tests は構築形テストの node id 1 本に絞る。変異 6 は psycopg を import する module (例 `r2db-api/src/r2db_api/ops.py`) に、実行呼出しに渡らない f-string の SQL 風文字列を足す形 (緑の期待) にする。`.format()` の引数の中の `sql.SQL(<f-string>)` を赤にする変異を 1 件足す。 |
+| Z5-20 | (中 4) import graph の作り方を明記する: `from . import X` は submodule X に解決する。親 package の暗黙の import は辺に数えない。関数内・`TYPE_CHECKING` 下の import も辺に数える (Z5-12)。根拠欄に設計 §5.1 の 1 (全 WP に「循環 import がない静的照合」) を足す。 |
+| Z5-21 | (中 5・低 1) Z5-4 の再照合の範囲を「`git ls-files` の全 `.py` (`MitateDB-api/docs/f9-execution-assets-v1/` の 3 件を除く) と `docs/code-history/`」にする (両 peer の `conformance/` と各 `conftest.py` を含む)。「完了条件 15」の残りを 19 に直す。 |
+
+- **覆した項**: Z5-9 の例は Z5-15 が訂正する。Z5-10 の許可規則 (a)〜(d) は Z5-16 が覆し、Z5-10 の「psycopg を import する … module」の絞り込みは Z5-18 が覆す (Z5-10 の `backend_sqlite.py` の走査外と、明示許可表 + 件数 pin は Z5-16・Z5-18 で引き継がれる)。第 2 次の行はいずれも消さずに残す (§1.8 の 56)。
+- **裁定の中の番号**: Z5-18・Z5-19 の「変異 6・8・10」は第 2 次の表の番号であり、下の表ではそれぞれ**完了条件 8・10・12** に当たる。Z5-21 の「19 に直す」は第 2 次の表の番号であり、下の表では**完了条件 22** に当たる。Z5-13 の「完了条件 14」は下の表の**完了条件 21** に当たる (裁定の文言は逐語のまま残す)。
+
+**基点**:
+
+- 実測 A〜F の基点は main `2ed3a3d` (付録 B)。本 manifest の基点は main `abcb2b6` である。`2ed3a3d..abcb2b6` で main へ入ったのは文書、`MitateDB-api/docs/f9-execution-assets-v1/` の参照用ファイル、`tools/public_value_scan.py` の許可追加だけであり (起草時に `git diff --name-only 2ed3a3d..abcb2b6` で照合)、両 peer の `src/`・`tests/` に触れていない。**したがって A〜F の実測は src について有効である。**
+- **完了条件 (3) の前提**: 実装担当は着手時に、A の 2 件 (`MitateDB-api/src/mitatedb_api/backend_postgres.py`:95 の `CONTRACT_TYPES`、`MitateDB-api/src/mitatedb_api/config.py`:8 の `build_surfaces`) を再照合する。照合は訂正註 4 の検査を訂正註 8-4 の範囲 (その module を facade として読む外部のファイル。テストを含む) で行い、あわせて 2 名を `git ls-files` の全 `.py` (`MitateDB-api/docs/f9-execution-assets-v1/` の 3 件を除く。両 peer の `conformance/` と各 `conftest.py` を含む) と `docs/code-history/` で名前ごとに走査して (Z5-21)、件数と `file:line` を報告に貼る (§5.40 の手順 0 の形)。**付録 B の A と食い違う参照が 1 件でもあれば、そこで止まって監督へ上げる。**文字列注釈の扱いは (5) に従うので、**(5) は (3) より先に行う** (Z5-5 の根拠「WP-5 の削除判断がこの手法に依存する」)。
+
+**変更クラスと範囲**: Class B (Z5-6)。`_ISOMORPHIC_TARGETS` の差分 0。`spec/`・`security/`・`conformance-tests/` に触れない。**テストは削除しない** (Z5-2)。`tools/tests` は root suite の `testpaths` の外であり、**`gate.py` では 1 本も走らない** (訂正註 8-7)。新設の 2 テストは `tools/dev/pt.py … -- tools/tests` と `finalize.py --tools-tests` の段でだけ走る。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/backend_postgres.py` (L95 の import から `CONTRACT_TYPES` の 1 名を外すだけ)、`MitateDB-api/src/mitatedb_api/config.py` (L8 の import から `build_surfaces` の 1 名を外すだけ)、新規 `tools/tests/test_sql_statement_safety_scan.py` ((1)。ファイル名は起草案のとおり。第 2 次裁定)、新規 `tools/tests/test_src_import_cycles.py` ((2)。ファイル名は起草案のとおり。第 2 次裁定) | `spec/`、`security/`、`conformance-tests/`、両 peer の `tests/test_audit_query.py` (`_ISOMORPHIC_TARGETS`)、`r2db-api/src/` 全部 (変異の一時編集を除く)、`r2db-api/tests/`、`MitateDB-api/tests/`、`MitateDB-api/docs/f9-execution-assets-v1/`、`tools/tests/test_leaf_import_direction.py`、`docs/code-history/`、`docs/design/`、roadmap (記録は監督) |
+
+- src の変更は import 行の名前の削除 2 件だけであり、コメント・docstring を変えない。したがって位置参照の括弧書きと `docs/code-history/` の訂正の記録は生じない。src に経緯トークンを足さない (訂正註 8-1)。
+- **新規ファイルの列挙方法の実測 (訂正註 8-7)**: 新設する 2 テストが `src/` の module をどう列挙するか (`rglob` / `glob` 系か `git ls-files` 系か) を、実装したコードの該当行 (`file:line`) で報告に書く。完了条件 12 の変異の赤が作業ツリーで見えるかどうかはこの実測で決まる。
+
+**新規テストの数**: root collection の増分は **0** (新設は `tools/tests` だけ。削除 0)。完了ゲートの期待値は**直前の main の root 集計行と同数**である。`tools/tests` の増分は実装担当が実際に足した node id の数であり、監督は統合の直前に collect-only で確かめる。
+
+**実行するコマンド** (`WT` は監督が割り当てる worktree、`SP` は scratchpad。**実装担当は suite 全体・`conformance-tests`・`gate.py` を回さない** — 引き継ぎ書 `docs/work-orders/HANDOVER_20260916_FABLE2.md` §6 の最後の項。変異の spec は完了条件表の変異 1 行につき 1 件):
+
+```bash
+tools/dev/pt.py --wait 1800 -C "$WT" -- tools/tests/test_sql_statement_safety_scan.py tools/tests/test_src_import_cycles.py -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- tools/tests -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests -q     # (3) の削除の前と後
+tools/dev/pt.py --wait 1800 -C "$WT" -- r2db-api/tests -q         # (3) の削除の前と後
+tools/dev/mutate.py "$SP/wp5-mutations.json" -C "$WT" --wait 1800
+tools/dev/gate.py -C "$WT" --label wp5                            # 監督のみ。run_in_background
+```
+
+spec の形の例 (完了条件 3。`old` は着手時に対象ファイルで 1 件一致する行を選ぶ):
+
+```json
+{"pytest": ["-q", "tools/tests/test_sql_statement_safety_scan.py"],
+ "mutations": [
+  {"id": "M3", "expect": "red",
+   "file": "MitateDB-api/src/mitatedb_api/backend_postgres.py",
+   "old": "<1 件一致する既存行>",
+   "new": "<既存行>\ndef _wp5_mutant(cursor, table):\n    _execute(cursor, f\"SELECT * FROM {table}\")\n",
+   "tests": ["tools/tests/test_sql_statement_safety_scan.py"]}]}
+```
+
+#### (1) SQL 安全性の静的走査 (Z5-1 (1)、Z5-3、Z5-8〜Z5-11、Z5-15〜Z5-19)
+
+- 形: AST で、SQL の構築形を見る (Z5-3)。SQL キーワードの文字列一致で作らない。**データの流れは追わない** (Z5-16)。
+- 走査対象 (Z5-18): 両 peer の `src/` 配下の**全 module を AST で発見**し、発見した集合を pin する。psycopg を import するかで絞らない。`MitateDB-api/src/mitatedb_api/backend_sqlite.py` だけを、理由 (PostgreSQL ではない) を書いて名指しで除外する。走査の根は両 peer の `src/` に明示的に限る (Z5-8)。
+- 規則 1 (Z5-16): 走査 module 内のすべての `sql.SQL(...)` の引数は、静的に文字列リテラルへ畳める式に限る。呼出し位置を問わない。
+- 規則 2 (Z5-16): すべての実行呼出しの第 1 引数に、f-string・`%` 書式・`str` の `+` 連結・`.format()` を直接置かない (`sql.SQL` / `sql.Composed` の `.format()` / `.join()` は除く)。
+- 実行呼出し (Z5-17): `.execute(` / `.executemany(` と、修飾名で列挙した 6 関数 — choke point `r2db_api.postgres._run`・`mitatedb_api.backend_postgres._execute` (Z5-15。裸の関数名で引かない) と wrapper `mitatedb_api.control_plane._execute`・`mitatedb_api.credential_store_postgres._execute`・`mitatedb_api.control_credential_store_postgres._execute`・`r2db_api.credential_store._execute` — の呼出し。
+- 規則で畳めない既存箇所は、理由付きの明示許可表と件数 pin に置く。**実装担当は許可表の件数と各行の理由を報告し、採否は監督が裁定する** (Z5-16)。レビュー実測の `sql.SQL(base_statement + "…")` 4 件と `sql.SQL(<module 定数>)` 3 件は、規則 1 で畳めるかを実装担当が実測して報告する。
+- 空振り禁止 (§1.5 の 32): 各 peer について、`sql.SQL(...)` と各実行呼出し (6 関数と `.execute(` / `.executemany(`) を 1 件以上観測したことを assert する。
+- 実測 B のとおり、両 choke point は `isinstance(statement, (sql.SQL, sql.Composed))` の実行時ガードを持つ。plain `str` の変異だけではこのガードと重なるので、`sql.SQL(<f-string>)`・`.format()` の引数の中の `sql.SQL(<f-string>)`・直接 `.execute(` の変異を併せて置く (Z5-11、Z5-19)。
+- 触ってよいパス: `tools/tests/test_sql_statement_safety_scan.py` (新規)。変異の一時編集は下表のとおり。
+
+#### (2) 循環 import の静的検査 (Z5-1 (2)、Z5-8、Z5-12、Z5-20)
+
+- 形: 両 peer の `src/` の import graph を AST で組み、**関数内 import と `TYPE_CHECKING` 下の import を含む全辺**で循環が 0 であることを assert する (Z5-12)。観測した module 数と edge 数が 1 以上であることも assert する (§1.5 の 32)。走査対象は両 peer の `src/` に明示的に限る (Z5-8)。
+- graph の作り方 (Z5-20): `from . import X` は submodule X に解決する。親 package の暗黙の import は辺に数えない (両 peer の `__init__.py` は submodule を import するので、数えると現状の src で循環が出る — 起草時の実測)。
+- 根拠 (Z5-20): 設計 §5.1 の 1 (全 WP に「循環 import がない静的照合」) と、付録 B の Z5-1 の根拠。
+- **将来の意図的な例外 (循環を許す辺) は監督裁定を要する** (Z5-12)。テストの docstring にもその旨を書く。
+- **設計の範囲についての監督の見立て (付録 B の「独立設計レビューで見てもらう点」から逐語)**: 「**(2) の循環 import 検査が、設計 §4 の「import graph を確認する」の範囲に収まるか** (§1.5 の 37 の設計外の拡張に当たらないか)。監督の見立ては「範囲内」 — 一度きりの手作業の確認は変異を対応付けられず (§1.5 の 33)、閉止条件の「依存方向」を持続的に保てるのはテストの形だけであるため。」**独立設計レビューはこの点を見る。**
+- 触ってよいパス: `tools/tests/test_src_import_cycles.py` (新規)。変異の一時編集は下表のとおり。
+
+#### (3) 読み手 0 の import 2 件の削除 (Z5-1 (3)、Z5-4)
+
+- 削除は `CONTRACT_TYPES` (`backend_postgres.py`:95) と `build_surfaces` (`config.py`:8) の **2 件だけ**。他の候補 (facade identity test が読むもの、facade 明記があるもの) は削らない (Z5-4)。
+- 前提: 上の「基点」の再照合と (5) の完了。
+- **§1.5 の 40a を削除にも準用する** (Z5-14): (3) のコミット前に両 peer の suite の集計行を記録する。
+- **回帰証拠**: 削除の前と後で、両 peer の suite と `tools/tests` を `tools/dev/pt.py` で回し、4 本の集計行 (前後 × 2 peer と `tools/tests`) を報告に貼る (設計 §4 WP-5 の「export を消す … 場合は個別に根拠と回帰証拠を添え」)。根拠は再照合の出力である。
+- 触ってよいパス: `MitateDB-api/src/mitatedb_api/backend_postgres.py`・`MitateDB-api/src/mitatedb_api/config.py` (各 import 行の 1 名だけ)。
+
+#### (4) 残る再 export の記録 (Z5-1 (4))
+
+- 削らずに残す再 export を、module・名前・残す根拠 (facade identity test の `file:line`、または facade 明記コメントの `file:line`) の一覧にして報告に貼る。実測 A が挙げた `_RESERVED_EXACT`/`_RESERVED_PREFIX` (`MitateDB-api/tests/test_postgres.py`:1666-1670 が読む) と `_INT_DOMAIN_RANGES`/`_check_domain` (facade 明記) を含める。実測 C の委譲属性 (`staticmethod` 委譲。r2db `postgres.py` 7・MitateDB `backend_postgres.py` 1・`cell.py` 3) も同じ一覧に置く。
+- 変異を持たない。**監査照合** (完了条件 20)。記録先は設計 `docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` §10 の WP-5 実施記録 (監督が書く)。
+
+#### (5) 読み手検査の偽陰性 (文字列注釈) の手当て (Z5-1 (5)、Z5-5、Z5-13)
+
+実測 A の既知の限界 (文字列注釈は `ast.Name` に現れない。該当: `MitateDB-api/src/mitatedb_api/http.py`:17・486、`MitateDB-api/src/mitatedb_api/audit_query.py`:32・228・280・391) に対し、**第一案を採る** (Z5-13)。
+
+- WP-5 の読み手検査スクリプト (scratchpad に置く。恒久テストにしない) が、注釈位置 (引数・戻り値・`AnnAssign` の annotation) にある `ast.Constant` の `str` を式として parse し、現れる名前を読み手として数える。
+- 空振り防止: 既知の文字列注釈の読み手 (`http.py`・`audit_query.py`。**関数名で引く**) がスクリプトで読み手として数えられることを実装担当が実測し、関数名・名前・件数を報告に貼る。**監査照合** (完了条件 21)。
+- 触ってよいパス: scratchpad のスクリプトだけ (repo には置かない)。
+- (起草時に両論で置いた第二案 (扱えないことを明記して手作業で照合する) は Z5-13 により採らない。)
+
+#### (6) R-37 の閉止記録 (Z5-1 (6))
+
+- 設計 §4 WP-5 の閉止条件 (「line count は成果指標ではなく、責務・依存方向・回帰証拠が閉止条件である」) に対する記録を残す。変異を持たない。**監査照合** (完了条件 22)。記録は監督が行う (設計 §10 と roadmap R-37)。照合対象は完了条件 22 の行に列挙する (Z5-21)。
+
+**完了条件 → 変異 → 赤になる test id** (第 3 次裁定で振り直した。以下「構築形テスト」は `tools/tests/test_sql_statement_safety_scan.py` の規則 1・2 を assert する新規テストの node id 1 本、「pin テスト」は同ファイルの発見集合・許可表の件数を assert する新規テストを指す)
+
+| # | 枠 | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) | 実施 |
+|---|---|---|---|---|---|
+| 1 | (1) | 実行呼出しを修飾名で引き (Z5-15、Z5-17)、各 peer で `sql.SQL(...)` と実行呼出しを 1 件以上観測する (空振り禁止) | `tools/tests/test_sql_statement_safety_scan.py`: 修飾名 `r2db_api.postgres._run` を存在しない名前に差し替える | 同ファイルの観測件数の assert (新規) | 実装担当 |
+| 2 | (1) | 規則 2: r2db の choke point に f-string を直接渡したら赤 | `r2db-api/src/r2db_api/postgres.py`: `_run(cursor, f"SELECT … {x}")` を行う一時関数を 1 つ足す | 構築形テスト | 実装担当 |
+| 3 | (1) | 規則 2: MitateDB の choke point に f-string を直接渡したら赤 | `MitateDB-api/src/mitatedb_api/backend_postgres.py`: `_execute(cursor, f"SELECT … {x}")` を行う一時関数を 1 つ足す (spec の例は上) | 構築形テスト | 実装担当 |
+| 4 | (1) | 規則 1: `sql.SQL(...)` の引数は静的に畳める式に限る (Z5-16) | 3 件。`r2db-api/src/r2db_api/postgres.py`・`MitateDB-api/src/mitatedb_api/backend_postgres.py`: それぞれ `sql.SQL(f"SELECT … {x}")` を choke point に渡す一時関数を足す。`r2db-api/src/r2db_api/postgres.py`: 一時関数の中で `q = "SELECT 1"` の後に `q = f"SELECT {x}"` と再代入し、`sql.SQL(q)` を作る (全代入が静的でない名前) | 構築形テスト | 実装担当 |
+| 5 | (1) | 規則 1 は呼出し位置を問わない: `.format()` の引数の中の `sql.SQL(<f-string>)` も赤 (Z5-19) | `MitateDB-api/src/mitatedb_api/backend_postgres.py`: `sql.SQL("SELECT {} FROM t").format(sql.SQL(f"{x}"))` を choke point に渡す一時関数を足す | 構築形テスト | 実装担当 |
+| 6 | (1) | 規則 2: choke point を通らない直接の `.execute(` に f-string が渡ったら赤 (Z5-17) | 2 件。`r2db-api/src/r2db_api/ops.py`・`MitateDB-api/src/mitatedb_api/ops.py`: それぞれ `cursor.execute(f"SELECT … {x}")` を行う一時関数を足す | 構築形テスト | 実装担当 |
+| 7 | (1) | 規則 2 は同名の wrapper 4 つの呼出しにも掛かる (Z5-17) | `r2db-api/src/r2db_api/credential_store.py`: `_execute(cursor, f"SELECT … {x}")` を行う一時関数を足す | 構築形テスト | 実装担当 |
+| 8 | (1) | SQL キーワードの文字列一致で作らない (Z5-3。実行呼出しに渡らない SQL 風の f-string は赤にしない) | `r2db-api/src/r2db_api/ops.py` (psycopg を import する module): どの実行呼出しにも渡らない f-string の SQL 風文字列 (`f"SELECT … FROM {x}"`) を 1 つ足す。**`expect: green`** (Z5-19。2〜7 の赤と対にして、判定が構築形で決まることを示す) | 構築形テストが緑のまま | 実装担当 |
+| 9 | (1) | 走査の根は両 peer の `src/` に限る (Z5-8) | `tools/tests/test_sql_statement_safety_scan.py`: MitateDB の走査の根を `MitateDB-api/src` から `MitateDB-api` に広げる (`MitateDB-api/docs/f9-execution-assets-v1/` の `.py` 3 件が混ざる) | pin テスト | 実装担当 |
+| 10 | (1) | `src/` の全 module を AST で発見し、`backend_sqlite.py` だけを理由付きで除外した集合が pin されている (Z5-18) | 2 件。`tools/tests/test_sql_statement_safety_scan.py`: 発見の結果から 1 module を落とす。名指し除外から `backend_sqlite.py` を外す | pin テスト | 実装担当 |
+| 11 | (1) | 規則で畳めない既存箇所の明示許可表が理由付きで件数 pin されている (Z5-16) | `tools/tests/test_sql_statement_safety_scan.py`: 許可表から 1 行を外す (許可表が 0 件なら、存在しない箇所を指す行を 1 つ足す) | pin テストまたは構築形テスト | 実装担当 |
+| 12 | (1) | 新しい module を、psycopg を import しなくても走査する (設計 D-4「新 module を含む走査」、Z5-18、訂正註 8-7) | 両 peer のいずれかの `src/` に **psycopg を import しない**新規 module を 1 つ足し、引数の cursor へ f-string を渡す実行呼出し (`cursor.execute(f"SELECT … {x}")`) を置く | **構築形テストの node id 1 本だけを tests に指定する** (Z5-19)。列挙が `git ls-files` 系なら作業ツリーでは見えないので、実測した列挙方法を報告に書き、監督が §5.45 の訂正註 7 の手順 (記録した HEAD の上の捨てコミット) で赤を確かめる | 実装担当 (列挙が `git ls-files` 系なら監督) |
+| 13 | (2) | r2db の `src/` に循環 import が無い (module 先頭の import) | `r2db-api/src/r2db_api/postgres_sql.py`: 先頭に `from .postgres import _run` を 1 行足す | `tools/tests/test_src_import_cycles.py` の循環 0 の assert (新規) | 実装担当 |
+| 14 | (2) | MitateDB の `src/` に循環 import が無い (module 先頭の import) | `MitateDB-api/src/mitatedb_api/postgres_sql.py`: 先頭に `from .backend_postgres import _execute` を 1 行足す | 13 と同じ | 実装担当 |
+| 15 | (2) | 関数内 import と `TYPE_CHECKING` 下の import も辺に数える (Z5-12) | 2 件。`r2db-api/src/r2db_api/postgres_sql.py`: 既存の関数の本体の先頭に `from .postgres import _run` を足す。`MitateDB-api/src/mitatedb_api/postgres_sql.py`: `if TYPE_CHECKING:` の下に `from .backend_postgres import _execute` を足す (`TYPE_CHECKING` の import を含む) | 13 と同じ | 実装担当 |
+| 16 | (2) | `from . import X` は submodule X に解決し、親 package の暗黙の import は辺に数えない (Z5-20) | 2 件。`r2db-api/src/r2db_api/platform_upgrades.py`: `from . import ops` を 1 行足す (`ops.py` は `from . import platform_upgrades` を持つ) → 赤。`tools/tests/test_src_import_cycles.py`: 各 module から親 package (`__init__`) への辺を足す形に変える → 現状の src で赤 | 13 と同じ | 実装担当 |
+| 17 | (2) | 走査対象は両 peer の `src/` に限り、module 数・edge 数を 1 以上観測する (Z5-8、空振り禁止) | 2 件。`tools/tests/test_src_import_cycles.py`: 列挙から 1 module を外す。MitateDB の根を `MitateDB-api` に広げる | `tools/tests/test_src_import_cycles.py` の集合または件数の pin (新規) | 実装担当 |
+| 18 | (3) | `backend_postgres.py` から削るのは `CONTRACT_TYPES` だけで、読み手のある再 export は残す (Z5-4) | `MitateDB-api/src/mitatedb_api/backend_postgres.py`: 対照として `_RESERVED_EXACT` を import から外す | `MitateDB-api/tests/test_postgres.py::test_postgres_reserved_names_leaf_preserves_backend_postgres_facade` | 実装担当 |
+| 19 | (3) | `config.py` から削るのは `build_surfaces` だけで、読み手のある名前は残す (Z5-4) | `MitateDB-api/src/mitatedb_api/config.py`: 対照として `validate_data_base_url` を import から外す | `MitateDB-api/tests/test_config.py::test_from_env_accepts_a_well_formed_data_base_url` (着手時に赤の実測で確かめる) | 実装担当 |
+| 20 | (4) | 残る再 export と委譲属性を「意図的な facade 互換」として記録する | **監査照合**: (4) の一覧 (module・名前・根拠の `file:line`) を報告に貼り、設計 §10 に残す | — | 実装担当 (記録は監督) |
+| 21 | (5) | 読み手検査が文字列注釈で偽陰性にならない (Z5-13) | **監査照合**: scratchpad の読み手検査スクリプトが、既知の文字列注釈の読み手 (`http.py`・`audit_query.py`。関数名で引く) を読み手として数えた実測 (実行コマンド、関数名・名前・件数) を報告に貼り、設計 §10 に残す | — | 実装担当 |
+| 22 | (6) | R-37 の閉止記録 | **監査照合**: 次をすべて設計 §10 の WP-5 実施記録と roadmap R-37 に残す。(a) 完了条件 1〜19 の `mutate.py` の出力行、(b) (3) の削除前後の集計行 (Z5-14 のとおり、コミット前の両 peer の suite の集計行を含む)、(c) `_ISOMORPHIC_TARGETS` の差分 0 (Z5-6)、(d) `spec/`・`security/`・`conformance-tests/` の差分 0 と `tools/change_class.py` の判定 (Class B)、(e) §1 の取得コマンドによる node id 一覧の前後 diff が `tools/tests` の新規テストだけで、削除 0 であること (Z5-2、設計 §5.3)、(f) 実測 D の重複候補 1 件 (`_escape_like_literal`) を R-39 候補として記録したこと (Z5-2)、(g) root gate の集計行が直前の main と同数であること、(h) 記録した HEAD での `tools/tests` の集計行 (W4-4 (b))、(i) (1) の明示許可表の件数・理由と監督の採否 (Z5-16)、(j) (3) の再照合の実行コマンドと出力 (Z5-21) | — | **監督** |
+| 23 | §1.5 の 40 | 上の表に、変異も監査照合も無い完了条件の行が 1 つも無い | **監査照合**: 1〜22 の各行に「変異」または「監査照合」が入っていることを照合し、結果を報告に貼る | — | 実装担当 |
+
+**件数 (下限)**: 完了条件 23 件 = 変異を持つ行 19 件 (1〜19。変異は 25 件 — 4 は 3 件、6・10・15・16・17 は各 2 件、8 は `expect: green`) + 監査照合 4 件 (20〜23。22 は監督)。§5.45 の訂正註 6 のとおり、実装担当は変異が素通りする場面を見つけたら足す。
 
 ---
 
