@@ -30,6 +30,7 @@
 
 - **v1.0 (2026-09-16)。** 本節以降を Change Set Manifest として追記した。
 - **v1.1 (2026-09-16)。** 起草時の疑義 1〜6 への監督裁定 W-1〜W-6 と、反映時の疑義への監督裁定 W-7・W-8 を §2.8 に逐語で置き、§2.3〜§2.6 と各 WP に反映した (v1.0 は未コミットの起草版であり、受け入れ前なので本文に反映した)。
+- **v1.2 (2026-09-17)。** 台帳 R-45 の WP-E (依頼者裁定 2026-09-17 の (a)〜(e) による 4 件と、起草時の疑義・独立設計レビューの指摘への監督裁定 E-R1〜E-R20) を §6A に、WP-D の訂正註を §6.1 に追記した。§7 の番号を保つため WP-E の節は §6A とした。§1〜§6 と §7 の既存の本文は書き換えていない。
 - 設計: `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` v0.5 (以下「設計」。設計レビュー 2 回反映済み、依頼者裁定 Q-1〜Q-7 はすべて推奨を採用、設計 §6 冒頭の表)。本書は設計の決定 D-1〜D-11、裁定 Z-1〜Z-36、依頼者裁定 Q-1〜Q-7 と、本書 §2.8 の監督裁定 W-1〜W-8 を WP に割り付ける。裁定文・却下案・背景は写さず設計の節番号で指す (`RM` §9 の 9)。
 - 台帳: `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-45 (v1.52)。
 - 本書で条項番号だけを書くとき (「§1.5 の 40」等) は `docs/work-orders/OPERATING_CONDITIONS.md` の条項を指す。
@@ -495,6 +496,207 @@ python3 tools/public_value_scan.py MitateDB-api/docs/cloud-run-cloud-sql.md secu
 | 50 | 本表に監査照合を持たない行が無い | 本表の行数と対応数 |
 
 **件数**: 完了条件 19 件 = 監査照合 19 件 (変異 0 件。runbook は実行コードを持たず、設計 §7 と W-1・W-6 がこれらの行を監査照合と定める)。
+
+### 6.1 WP-D の訂正註 (2026-09-17、v1.2 で追記。§6 の本文は書き換えない)
+
+**訂正註 WPD-1 (順序と仕上げ)**: WP-D は §6A の WP-E の統合後に仕上げる。仕上げには、runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` の既存の古い手順 (`--lock-timeout` の欠落、DSN を argv に置く psql の呼出し、TCP の Cloud SQL Auth Proxy) の書き直しを含め、英語で書く (§6A 冒頭の依頼者裁定の (f))。
+
+**訂正註 WPD-2 (未コミットの起草)**: WP-D の未コミットの起草 (runbook の §10 と `security/CONTROL_MAPPING.md` の変更) は worktree `.claude/worktrees/r45-wpd` に残っている。WP-E の統合後の main で基点を取り直してから扱う。
+
+**訂正註 WPD-3 (W7-D1 の読み替え、§6A.2 の E-R8)**: §6 の W7-D1 と規則のうち「0007 / 0011 / 0012 は psql に `PGOPTIONS` 経由で表の値を渡す」は、「0005 / 0007 / 0011 / 0012 の適用は WP-E の E4 のサブコマンドに `--lock-timeout` と表の値を渡す」と読み替える (0005 は E4 が受け付ける集合に含まれるので、runbook の表にも行を置く。§6A.2 の E-R12・E-R20 の L6)。runbook に手で `PGOPTIONS` を組む手順は書かない。本番での実行の範囲は §6A.2 の E-R18 に従う。
+
+## 6A. WP-E — `inventory` の (6)・(8) の判定の直しと platform migration の適用サブコマンド (Class D)
+
+### 6A.1 依頼者裁定 (逐語)
+
+> 依頼者の回答 (2026-09-17。Mitate の監督セッションが中継し、本チャットで依頼者が「はい」と確認した。逐語):
+>
+> 1 を選びます。条件:
+> (a) WP-E は 1 本・manifest 1 本、範囲は提示の 4 件だけ。他の発見は台帳 1 行のみ(依頼者指示 REQUESTER_DIRECTIVE_20260916 §3.3)。
+> (b) role の lock_timeout を判定から外すのは、DDL を流す全経路(platform migration・アプリ単位 upgrade・deprovision)で --lock-timeout が必須であることをテストで固定したうえで。4 件目(platform migration の公開サブコマンド)と対で受け入れる。
+> (c) Control 未配備の 0 は、操作者が明示の引数で未配備を宣言した場合だけ受け付ける。読めない・不明は blocked のまま(不明を未配備と読み替えない)。
+> (d) 新サブコマンドは本番に対して実行しない。試験は使い捨て PostgreSQL のみ。HANDOVER_20260916_FABLE2 付録 C の制約は継続。
+> (e) クラス D の独立設計レビュー・コードレビュー・監査は省かない。記録は WP ごと 1 回。
+> (f) runbook と security/CONTROL_MAPPING.md の英語は了承。引き継ぎ書に依頼者向けの日本語要約(手順の流れと Gate-0 各項目の読み方)を 1 節入れる。
+> (g) WP-E の枠決めまでをこのチャットで行い、引き継ぎ書を書いて次のチャットへ移る。次の監督チャットは Fable で開く(OPERATING_CONDITIONS §1.1 の 1 と ROLES の役割表は main 4410c72 で更新済み)。
+>
+> 契約版数 1.8.0 据え置き(spec を変えない)とクラス D は提示のとおりで了承です。
+
+(裁定中の依頼者指示は `docs/work-orders/REQUESTER_DIRECTIVE_20260916_R37_CLOSURE_R45_PRIORITY.md`、引き継ぎ書は `docs/work-orders/HANDOVER_20260916_FABLE2.md` を指す。)
+
+### 6A.2 監督裁定 (E-R1〜E-R20、2026-09-17。v1.2 の起草時の疑義・確認事項と、manifest の独立設計レビューの指摘への裁定。逐語)
+
+| 裁定 | 本文 (逐語) |
+|---|---|
+| E-R1 | (0007 の psql 変数) E4 のサブコマンドは、migration ファイルごとに必要な psql 変数を静的な表で持ち (例 0007 → `api_role`・`controlplane_role`)、対応する引数 (`--api-role`・`--controlplane-role`。role 名は秘密ではない) を受け取る。表にある変数の引数が欠けていれば固定文言で拒否、表に無い引数を渡しても拒否。表と各ファイルが実際に参照する `:変数` の集合が一致することをテストで固定する。 |
+| E-R2 | (`MITATEDB_MIGRATIONS_DIR`) 既存の設定としてディレクトリの解決に使ってよい (使い捨てのディレクトリでの試験のため)。「任意パスを受け付けない」は、引数を**ファイル名**に限り (パス区切りを含めば拒否)、既知の platform migration の名前の列挙に一致し、解決したパスがそのディレクトリの中にあることで満たす。 |
+| E-R3 | (「DDL を流す」の範囲) 依頼者裁定 (b) が列挙した 3 経路 — platform migration (E4)・per-application upgrade・deprovision — を「psql でファイルを流すサブコマンド」として定義し、その集合と `--lock-timeout` 必須の集合の一致を固定する。psycopg で設定を書く `set-platform-timeouts`・`declare-*` はファイルを流さない設定操作として集合の外とし、その理由を本文に書く (台帳は起こさない)。 |
+| E-R4 | (E2 の入力) 合計 (新旧の合計) が単体の上限より小さい入力は矛盾として固定文言で拒否する (終了コード 1)。 |
+| E-R5 | (E3 と宣言表) `--control-not-deployed` のとき、Control の宣言値は「許される上限」を表すので未配備との食い違いにしない。Control 側の宣言との比較は行わず、余力の計算で Control の process 数と auditreader の接続を 0 とする。出力に `control_deployed: false` を持たせ (キー集合の pin を更新)、判定語は変えない。 |
+| E-R6 | (CONTROL_MAPPING) E1〜E3 で事実でなくなる SI-08 の既存の (6)・(8) の主張は、同じ行を事実に合わせて直す (新しい行は足さない。ブロック長 15,200 以内を実測)。E4 の新しい統制の行は SI-09 に置く。英語。 |
+| E-R7 | (設計レビュー) 手順に「manifest の独立設計レビュー 1 回」を実装の前に置く (本チャットで監督が実施する。依頼者裁定 (e))。 |
+| E-R8 | (WP-D の W7-D1) 0007 / 0011 / 0012 の適用は E4 のサブコマンドに `--lock-timeout` と表の値を渡す形に読み替える (手で `PGOPTIONS` を組む手順は書かない)。§6.1 の訂正註に書く。 |
+| E-R9 | (名前) 起草案の名前 (サブコマンド名・引数名) をそのまま採る。 |
+| E-R10 | (`control_deployed`) (8) の項目の中に置き、常に出す (宣言が無ければ `true`、`--control-not-deployed` のとき `false`)。両方を完了条件と変異で固定し、キー集合の pin を更新する。 |
+| E-R11 | (E3-6) 未配備を宣言したとき、Control が使う role (controlplane・auditreader) は (8) の -1 の検査と余力の計算の対象から外す。(6) の実行時設定では、role が存在する限り従来どおり読む。 |
+| E-R12 | (E4 の受け付けるファイルと WP-C のテスト) E4 が受け付けるのは、`:app_id` を取らずアップグレードで再実行される platform migration の 0005・0007・0011・0012 だけ (bootstrap の 0001・0002 は初回構築の手順であり受け付けない)。この集合を定数で pin し、ディレクトリの `:app_id` を取らないファイルとの差が bootstrap の 2 件だけであることを assert する。WP-C の再実行性テストのうち、0005・0007・0011・0012 の「もう一度適用」は E4 のサブコマンド経由に置き換える (同じ変更セット。起点までの過去の内容の適用は psql の直接実行のまま)。 |
+| E-R13 | (H1) E4 経由の再適用テストは、適用の直前に対象オブジェクトの状態を手でずらし (ACL・関数本体・ロール設定・宣言の制約など、その migration が作るもの)、E4 のサブコマンドで元に戻ることを assert する形にする。変異「psql を起動せず 0 を返す」を赤で固定する。WP-C の証拠を弱めない。 |
+| E-R14 | (H2) E1 の行に、本番では E1 の後も (6) が unknown のままであること (auditreader と application の runtime / developer role に `statement_timeout` を設定する経路が無い) と、role の `lock_timeout` はもともと DDL を流す provision role の歯止めではなかったことを書く。(6) を confirmed にする作業は範囲 (a) の外なので、監督が台帳に **R-48** として 1 行起票する (本 manifest のコミットで roadmap に足す。文面は監督が書くので本文には「R-48」の参照だけ置く)。 |
+| E-R15 | (M1) (b) の集合は「psql の起動」または「`_migrations_dir()`・`discover_upgrade_scripts` の呼出し」に到達するサブコマンドの和として AST で導き、`--lock-timeout` 必須の集合と一致させる。加えて psql を起動する全関数が `_with_lock_timeout_option` を通ることを静的に assert する。E1-5 の本文とテスト名を「3 つを含み、`set-platform-timeouts`・`declare-*` を含まない」に揃える。 |
+| E-R16 | (M2) E3-8 (iv) は `--control-not-deployed` の有無の両方で回すと明記する。 |
+| E-R17 | (M3) §6A.4 の手順に、統合時に監督が設計メモの D-1 (6)・(8)、§7 の 33b、§12.3 の該当記述に打ち消し線と註を入れる記録手順を足す。 |
+| E-R18 | (M4) E4 行に (d) の範囲を書く: WP-E・WP-D の作業では E4 を本番に対して実行しない。本番での適用は本書 §7 の後続 (isolated での証明 → 独立監査 → 本番更新) で、依頼者の承認の後にだけ行う。 |
+| E-R19 | (M5) CONTROL_MAPPING: E1-4 の網羅の主張は SI-09 に置く。SI-08 は (6)・(8) の既存の主張と証拠のテスト名を**置き換え**で直し (追記しない)、ブロック長を実測する。15,200 を超えるならその時点で止まって監督へ上げる。 |
+| E-R20 | (L1〜L7) すべて反映する。L1: `inventory` の入力の検証による拒否 (E-R4、E3-2・E3-3、argparse の使用法エラーを含む) は終了コード 1 (判定の 2 と区別する)。E4 の拒否は ops の既存の `_die` の規約に従い、その値を本文に書く。L2: `--` コメントと `::` キャストを除いて `:変数` を抽出する規則。L3: 両側を resolve して比べ、`MITATEDB_MIGRATIONS_DIR` が信頼境界であることを書く。L4: 件数を数え直す。L5: `check_comment_provenance.py --base` と `docs/code-history/MitateDB-api/` を手順と触るファイルに足す (新規コメントに CH-ID は付けない)。L6: WPD-3 に 0005 を足す。L7: role は付与から見つける実装に合わせて書き、Control の role が 1 つも無い場合は除外対象が空になるだけ、と書く。 |
+
+### 6A.3 目的と範囲
+
+**目的**: WP-B で統合された `inventory` の (6)・(8) の判定を次の E1〜E3 のとおり直し、platform migration を適用する公開サブコマンド E4 を足す。範囲はこの 4 件だけとし (裁定 (a))、作業中の他の発見は台帳に 1 行起票するだけにして本 WP では直さない。
+
+| # | 内容 |
+|---|---|
+| E1 | (6) の実行時設定の判定から role の `lock_timeout` を外す (`statement_timeout` と CONNECTION LIMIT は残す)。**条件 (裁定 (b))**: DDL を流す全経路 (E4 の新サブコマンド・`upgrade-applications`・`deprovision`) で `--lock-timeout` が既定値の無い必須引数であることを 1 つのテストで網羅的に固定する。**E1 と E4 は同じ変更セットで入れる**。**本番での帰結 (E-R14)**: E1 の後も本番の (6) は unknown のままである。`mitatedbsvc_auditreader` と application の runtime / developer role に `statement_timeout` を設定する経路が無いためである。また (6) の対象 role に DDL を流す provision role は含まれず、role の `lock_timeout` はもともと DDL の経路の歯止めではなかった (DDL の経路の歯止めは (b) の必須の `--lock-timeout` である)。(6) を confirmed にする作業は範囲 (a) の外であり、台帳の R-48 で扱う |
+| E2 | (8) の「宣言との比較」と「余力の計算」を分ける (合計が上限より小さい入力は拒否。E-R4)。宣言 (`process_ceilings`) との食い違いは各 revision 単体の上限 (新 candidate の Data / Control の上限) で判定し、余力は traffic 移行中に同時に動きうる新旧 revision の合計で計算する。引数を分け、旧来の 1 つの引数 (`--data-process-count` / `--control-process-count`) で両方を兼ねる形は残さない |
+| E3 | Control 未配備: 操作者が明示の引数で未配備を宣言したときだけ Control の process 数 0 を受け付ける (裁定 (c)。宣言表との扱いは E-R5)。この引数と Control の数の引数の同時指定は拒否する。どちらも無ければ従来どおり (読めない・不明は blocked / unknown のまま。未配備と読み替えない) |
+| E4 | platform migration (`:app_id` を取らないもの) を適用する公開サブコマンド。DSN は環境変数だけ、`ON_ERROR_STOP=1`、既定値の無い必須の `--lock-timeout`、出力は伏字。適用対象は migration ディレクトリの既知のファイル名に限り (E-R2)、ファイルごとの psql 変数は静的な表と対応する引数で渡す (E-R1)。**(d) の範囲 (E-R18)**: WP-E・WP-D の作業では E4 を本番に対して実行しない。試験は使い捨ての PostgreSQL だけで行う。本番での適用は本書 §7 の後続 (isolated での証明 → 独立監査 → 本番更新) で、依頼者の承認の後にだけ行う |
+
+**名前** (E-R9・E-R1・E-R10 で確定。`--api-role`・`--controlplane-role`、(8) の項目のキー `control_deployed` を含む): サブコマンド `apply-platform-migration`、引数 `--data-process-ceiling` / `--data-process-count-total` / `--control-process-ceiling` / `--control-process-count-total` / `--control-not-deployed`、新規テストファイル `MitateDB-api/tests/test_ops_apply_platform_migration.py`。以下の表はこの名前で書く。
+
+**E1 の「DDL を流すサブコマンド」の範囲 (E-R3・E-R15)**: 依頼者裁定 (b) の 3 経路 (E4 のサブコマンド・`upgrade-applications`・`deprovision`) を「psql で migration ファイルを流すサブコマンド」と定義する。テストでは、この集合を、処理関数からモジュール内の呼出しを AST で静的にたどって (i) psql の subprocess の起動、(ii) `_migrations_dir()` または `platform_upgrades.discover_upgrade_scripts` の呼出し、のどちらかに到達するサブコマンドの和として導く。あわせて、psql を起動する全関数が `_with_lock_timeout_option` を通して `PGOPTIONS` を組むことを静的に assert する。`set-platform-timeouts` と `declare-*` は psycopg で設定の値を書く操作であり、migration ファイルを流さないので集合の外とする。これらはファイルに書かれた DDL を流さず、ツール自身が組んだ文 (`ALTER ROLE ... SET` 1 組、宣言の行の upsert) だけを実行するためである。
+
+### 6A.4 変更クラス・契約版数・手順
+
+- **Class D** (`security/CONTROL_MAPPING.md` に触れる。§2.3 の W-5 と同じ理由)。**契約版数は 1.8.0 のまま据え置く** (`spec/` に触れない)。
+- 手順: 本 manifest の独立設計レビュー 1 回 (実装の前。監督が実施する。E-R7) → `implementer` (テンプレ 2) → `reviewer` (テンプレ 5、コードレビュー) → 監督の統合前ゲート → (WP-D の仕上げの後) `evidence-auditor` (テンプレ 6) を 1 回 (裁定 (e))。記録は WP ごとに 1 回。
+- **記録 (E-R17)**: 統合時に監督が、設計メモ `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` の D-1 の (6) (role 設定の `statement_timeout` / `lock_timeout` の有無を読む記述。E1 で覆る)・(8) (Z-27 の「process 数は新旧 revision の合計、宣言と食い違えば blocked」。E2 で覆る)、§7 の 33b、§12.3 の該当記述に打ち消し線と註 (覆した根拠と日付) を入れ、版数を上げる (§1.8 の 56)。実装担当は `docs/design/` に触れない。
+- MitateDB-api のみの変更であり、`_ISOMORPHIC_TARGETS` に触れない想定である。触れる必要が出たら止まって監督へ上げる (着手時の手順 2)。
+
+### 6A.5 基点と重なり
+
+**基点**: 本書 v1.2 を含む main。WP-D の仕上げより前に着手し、WP-D は WP-E の統合後に基点を取り直す (§6.1 の訂正註 WPD-1)。
+
+基点の記録欄 (監督が着手時に記入する。記入するまで着手しない):
+
+| WP | 基点 main | 名前の再照合の結果 | `_ISOMORPHIC_TARGETS` の照合の結果 |
+|---|---|---|---|
+| WP-E | (着手時に記入) | (着手時に記入) | (着手時に記入) |
+
+| 組 | 重なり (実ファイル名) | 扱い |
+|---|---|---|
+| WP-E と WP-D | `security/CONTROL_MAPPING.md` (`.claude/worktrees/r45-wpd` の未コミットの起草が変更している)。加えて WP-D の runbook は WP-E で変わる `inventory` の引数と E4 のサブコマンドを手順に書く | **直列。WP-D は WP-E の統合後** |
+| WP-E と WP-A〜WP-C | なし (いずれも統合済み) | — |
+
+### 6A.6 触るファイル・触らないファイル
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/ops.py` (`_inventory_ddl_lock_declaration`・`_inventory_connection_headroom`・`inventory` の引数定義 (E1〜E3)、E4 の新サブコマンドとその関数)、`MitateDB-api/tests/test_ops_inventory.py` (E1〜E3 に合わせた既存テストの更新と新規テスト)、`MitateDB-api/tests/test_ops_apply_platform_migration.py` (新規。E1 の網羅テストと E4)、`MitateDB-api/tests/test_platform_migration_reapply.py` (0005・0007・0011・0012 の「もう一度適用」の E4 経由への置き換え。E-R12)、`security/CONTROL_MAPPING.md` (英語。SI-08 は既存の (6)・(8) の主張と証拠のテスト名を置き換えで直すだけで追記しない — §4.1 の B-19、E-R6・E-R19。E4 と E1-4 の網羅の主張は SI-09)、`docs/code-history/MitateDB-api/` (`check_comment_provenance.py` の結果で登録の更新が要る場合だけ。新規のコメント・docstring に CH-ID は付けない。§3.1 の A-15、E-R20 の L5)、`tools/tests/test_no_shared_cluster_defaults.py` の件数 pin (実測で変わる場合だけ。§1.5 の 40b) | §2.2 の全 WP 共通、`r2db-api/` 全部、両 peer の `tests/test_audit_query.py` (`_ISOMORPHIC_TARGETS`)、`_ISOMORPHIC_TARGETS` 登録済みの helper の本体 (`_psql_connection_env`・`_redact_connection_values` ほか。呼ぶのはよい)、`_run_upgrade_script`・`_run_deprovision_script`・`_require_psql_16_or_newer`・`_with_lock_timeout_option`・`_validate_lock_timeout_value` の振る舞い (呼ぶのはよい)、`MitateDB-api/src/mitatedb_api/platform_declarations.py`・`platform_upgrades.py`・`config.py` (読むだけ)、`MitateDB-api/migrations/` (変異の一時編集を除く)、`MitateDB-api/docs/` (runbook は WP-D が扱う)、`MitateDB-api/tests/test_ops_verify_declarations.py`、`.github/` |
+
+### 6A.7 着手時の手順
+
+1. §2.1 と同じ要領で、本節が引く名前 (`_inventory_ddl_lock_declaration`・`_inventory_connection_headroom`・`_inventory_positive_int`・`cmd_inventory`・`_build_parser`・`cmd_upgrade_applications`・`cmd_deprovision`・`_run_upgrade_script`・`_run_deprovision_script`・`_psql_connection_env`・`_require_psql_16_or_newer`・`_with_lock_timeout_option`・`_validate_lock_timeout_value`・`_redact_connection_values`・`_migrations_dir`、`test_platform_migration_reapply.py` の `test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix`・`_REAPPLY_PLATFORM_MIGRATION_FILENAMES`) が基点に実在することを `grep` で再照合する。1 件でも無ければ止まって監督へ上げる。
+2. `MitateDB-api/tests/test_audit_query.py` の `_ISOMORPHIC_TARGETS` を読み、本 WP で本体を変える関数が 1 つも登録されていないことを確かめて報告する。登録済みの本体を変える必要が出たら止まって監督へ上げる (§1.5 の 37)。
+3. E4 について実測して報告し、監督の裁定を得てから実装する: (i) E-R12 の集合 (0005・0007・0011・0012) の各ファイルが参照する `:変数` の集合 (E-R1 の表の元になる。`--` コメントと `::` キャストを除いて抽出する。E-R20 の L2)、(ii) 各ファイルを `MITATEDB_PROVISION_DSN` の role で使い捨てクラスタに適用できるか、(iii) E4-10・E4-12 で適用の直前にずらす対象 (各ファイルが作る ACL・関数本体・ロール設定・宣言の制約など。E-R13) のファイルごとの一覧。
+4. E1 の網羅テストについて、§6A.3 の E-R15 の導き方 (AST で (i) psql の起動、(ii) `_migrations_dir()`・`discover_upgrade_scripts` の呼出しに到達するサブコマンドの和) で得た基点の集合と、psql を起動する関数の一覧を報告する。集合が `upgrade-applications`・`deprovision` 以外を含んだら止まって監督へ上げる。
+5. E2 で引数名を変えることで直す既存テスト・`security/CONTROL_MAPPING.md` の行を列挙して報告する。
+6. `security/CONTROL_MAPPING.md` の SI-08 の MitateDB ブロックのうち E1〜E3 で事実でなくなる (6)・(8) の行を列挙して報告する (E-R6)。置き換えで直した後のブロック長を実測し、15,200 を超えるならその時点で止まって監督へ上げる (E-R19)。
+7. `tools/tests/test_no_shared_cluster_defaults.py` の件数 pin が新規テストファイルで変わるかを実測して報告する。
+
+### 6A.8 実行するコマンド
+
+実装担当は `MitateDB-api/tests` 全体・root suite・`conformance-tests`・`tools/dev/gate.py` を回さない (§2.2)。次だけを回す。
+
+```bash
+tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests/test_ops_inventory.py -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests/test_ops_apply_platform_migration.py -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests/test_platform_migration_reapply.py -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- tools/tests/test_no_shared_cluster_defaults.py -q
+tools/dev/mutate.py "$SP/r45-wpe-mutations.json" -C "$WT" --wait 1800
+python3 tools/public_value_scan.py MitateDB-api/src/mitatedb_api/ops.py MitateDB-api/tests/test_ops_inventory.py MitateDB-api/tests/test_ops_apply_platform_migration.py MitateDB-api/tests/test_platform_migration_reapply.py security/CONTROL_MAPPING.md
+python3 tools/check_comment_provenance.py --base "<基点 main>" MitateDB-api/src/mitatedb_api/ops.py
+python3 tools/check_comment_provenance.py --register
+```
+
+`test_platform_migration_reapply.py` は E-R12 の置き換えがあるので回す。変異定義は §2.7 の形で 1 変異 1 件、変異ごとに赤になる test id を名指しする。`security/CONTROL_MAPPING.md` の該当ブロックの文字数は scratchpad のスクリプトで測って報告する (§2.4)。E4 のテストの接続先は使い捨ての PostgreSQL (テスト基盤の管理 DSN) だけとする (裁定 (d))。
+
+### 6A.9 完了条件 → 変異 → 赤になる test id
+
+変異の `file` は、特記の無い行は `MitateDB-api/src/mitatedb_api/ops.py`。赤になるテストの名前は予想であり、実装担当が実名に置き換えて報告する。「inv」は `MitateDB-api/tests/test_ops_inventory.py`、「apm」は `MitateDB-api/tests/test_ops_apply_platform_migration.py`。
+
+**E1 — (6) から role の `lock_timeout` を外す (E4 と同じ変更セット)**
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| E1-1 | 対象 role の全部に `statement_timeout` が (`setdatabase = 0` で) あり CONNECTION LIMIT が有効なら、`lock_timeout` が無くても (6) は confirmed | `_inventory_ddl_lock_declaration` の必須キーに `lock_timeout` を戻す | inv: role に `lock_timeout` が無くても confirmed になるテスト (既存の `test_inventory_ddl_lock_is_unknown_when_lock_timeout_not_declared` はこのテストに置き換える) |
+| E1-2 | 対象 role のどれかに `statement_timeout` が無ければ (6) は unknown のまま | 必須キーから `statement_timeout` を外す | inv: `statement_timeout` 欠落で unknown のテスト |
+| E1-3 | 対象 role のどれかの CONNECTION LIMIT が -1 または読めなければ (6) は unknown のまま | `_inventory_ddl_lock_declaration` の -1 の検査を外す | inv: `test_inventory_ddl_lock_minus_one_connection_limit_is_unknown` |
+| E1-4 | `_build_parser()` のサブコマンドを列挙し、「psql で migration ファイルを流すサブコマンド」(E-R3) の集合と「`--lock-timeout` が既定値の無い必須引数であるサブコマンド」の集合が一致することを 1 つのテストで assert する。前者は手で列挙した定数でなく、AST で (i) psql の起動、(ii) `_migrations_dir()`・`discover_upgrade_scripts` の呼出しに到達するサブコマンドの和として導く (E-R15) | 5 件。(i) E4 のサブコマンドの `--lock-timeout` を必須でなくする。(ii) `upgrade-applications` の `--lock-timeout` に既定値を与え必須を外す。(iii) E4 の適用関数を呼ぶサブコマンドを `--lock-timeout` なしで 1 つ足す。(iv) DDL を流さないサブコマンド (例 `list-applications`) に必須の `--lock-timeout` を足す。(v) `_migrations_dir()` を呼ぶが psql を直接起動しないサブコマンドを `--lock-timeout` なしで 1 つ足す | apm: 集合の一致のテスト (5 件とも同じテスト) |
+| E1-5 | 導いた集合が `upgrade-applications`・`deprovision`・E4 のサブコマンドの 3 つを含み、`set-platform-timeouts`・`declare-*` を含まない (空振り禁止、E-R3・E-R15) | 導く処理が間接呼出しをたどらない形にする (直接呼出しだけを見る) | apm: 導いた集合が 3 つを含み `set-platform-timeouts`・`declare-*` を含まないテスト |
+| E1-7 | psql を起動する全関数 (`_run_upgrade_script`・`_run_deprovision_script`・E4 の適用関数) が `_with_lock_timeout_option` を通して `PGOPTIONS` を組む (AST の静的テスト。E-R15) | `_run_deprovision_script` から `_with_lock_timeout_option` の呼出しを外す | apm: psql を起動する全関数が `_with_lock_timeout_option` を通る静的テスト |
+| E1-6 | E1 と E4 が同じ変更セット (同じ統合コミット) に入っている (裁定 (b)) | **監査照合**: 統合コミットの `git show --stat` の該当行 (E1 と E4 の変更ファイル) を逐語で設計に残す | — |
+
+**E2 — (8) の宣言との比較と余力の計算を分ける**
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| E2-1 | `inventory` の (8) の process 数の引数は `--data-process-ceiling`・`--data-process-count-total`・`--control-process-ceiling`・`--control-process-count-total` だけで、いずれも正の整数 (B-7・B-10)。`--data-process-count`・`--control-process-count` は存在しない | `--data-process-count` を引数定義に戻す | inv: 引数の集合を pin するテスト |
+| E2-2 | 宣言との比較は各 revision 単体の上限で行う: 上限 = 宣言、合計 > 宣言 のとき比較では blocked にしない | 宣言を合計と比べる形にする | inv: 合計が宣言を超えても上限が一致すれば比較で blocked にならないテスト |
+| E2-3 | Data の上限と宣言の `data` が食い違えば blocked | Data の比較を外す | inv: Data の上限の食い違いのテスト |
+| E2-4 | Control の上限と宣言の `control` が食い違えば blocked | Control の比較を外す | inv: Control の上限の食い違いのテスト |
+| E2-5 | 条件 1 (role ごと) の需要は合計から計算する: 上限では収まり合計では CONNECTION LIMIT を超える場合 blocked | 条件 1 の需要を上限から計算する | inv: 条件 1 が合計で超えるテスト |
+| E2-6 | 条件 2 (全体) の需要は合計から計算する: 上限では収まり合計では `max_connections` を超える場合 blocked | 条件 2 の需要を上限から計算する | inv: 条件 2 が合計で超えるテスト |
+| E2-7 | 4 つの引数のどれかが無ければ (8) は unknown (E3 の未配備の宣言を除く)。欠けた値を他の引数で補わない | 合計が無いとき上限で補う | inv: 合計の欠落で unknown のテスト |
+| E2-8 | 合計が単体の上限より小さい入力 (Data・Control のどちらでも) は矛盾として固定文言で拒否し、終了コード 1 (入力値を出さない。E-R4) | 2 件。(i) Data 側の検査を外す。(ii) Control 側の検査を外す | inv: Data の合計 < 上限の拒否のテスト、Control の合計 < 上限の拒否のテスト |
+| E2-9 | `inventory` の入力の検証による拒否 (E2-8、E3-2・E3-3、argparse の使用法エラー。例: 0 や負の process 数) はすべて終了コード 1 で、判定の終了コード 2 と区別する (E-R20 の L1。この値に合わせて WP-B の既存の拒否のテストを更新する) | `inventory` の argparse の使用法エラーを既定の終了コード 2 に戻す | inv: `--concurrency 0` の拒否が終了コード 1 のテスト |
+
+**E3 — Control 未配備の明示の宣言**
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| E3-1 | `--control-not-deployed` を指定し Control の数の引数を指定しないとき、Control の process 数と auditreader の接続を 0 として (8) の余力を計算する (Control の数の欠落を理由に unknown にしない。E-R5) | 未配備の宣言を無視して従来の欠落扱い (unknown) にする | inv: 未配備の宣言で (8) が計算されるテスト |
+| E3-2 | `--control-not-deployed` と `--control-process-ceiling` の同時指定は固定文言で拒否し、終了コード 1 (DB に接続しない。E-R20 の L1) | 同時指定の拒否を外す (上限の側) | inv: 上限との同時指定の拒否のテスト |
+| E3-3 | `--control-not-deployed` と `--control-process-count-total` の同時指定は固定文言で拒否し、終了コード 1 (DB に接続しない。E-R20 の L1) | 同時指定の拒否を外す (合計の側) | inv: 合計との同時指定の拒否のテスト |
+| E3-4 | 未配備の宣言も Control の数も無ければ (8) は unknown のまま (不明を未配備と読み替えない) | Control の数が無いとき 0 で補う | inv: どちらも無いときの unknown のテスト |
+| E3-5 | 未配備の宣言時は Control 側の宣言 (`process_ceilings` の `control`) との比較を行わない。宣言値は許される上限を表すので、未配備との食い違いにしない (E-R5) | 未配備の宣言時に Control の宣言を 0 と比べて blocked にする | inv: 未配備の宣言時に Control の宣言値があっても比較で blocked にならないテスト |
+| E3-6 | 未配備の宣言時、Control が使う role (`_inventory_role_classes` が表への付与から見つけた controlplane と auditreader の role) を (8) の -1 の検査と余力の計算の対象から外す: これらの role が -1 でも (8) を unknown にしない。Control の role が 1 つも見つからなければ除外の対象が空になるだけで、そのことを理由に unknown にしない (E-R11、E-R20 の L7) | 2 件。(i) 未配備の宣言時も Control の role を (8) の -1 の検査に残す。(ii) 未配備の宣言時も Control の role が 0 件なら unknown にする | (i) inv: 未配備の宣言時に auditreader の role が -1 でも (8) が unknown にならないテスト、(ii) inv: 未配備の宣言時に Control の role が付与から見つからなくても unknown にならないテスト |
+| E3-9 | 未配備の宣言時も (6) の実行時設定は、付与から見つけた Control の role が存在する限り従来どおり対象に含めて読む (E-R11) | `--control-not-deployed` のとき (6) の対象から Control の role を外す | inv: 未配備の宣言時に controlplane の role の -1 で (6) が unknown のテスト |
+| E3-7 | 未配備の宣言時も Data の上限と宣言の比較 (E2-3) は行う | 未配備の宣言時に宣言との比較を丸ごと飛ばす | inv: 未配備の宣言時の Data の食い違いで blocked のテスト |
+| E3-8 | (8) の項目は `control_deployed` を常に持つ: `--control-not-deployed` が無ければ `true`、あれば `false`。判定語は W-2 の語彙のまま。キー集合の pin (W2-1 の `test_inventory_top_level_and_item_keys_are_pinned`) をこのキーに合わせて更新する (E-R5・E-R10) | 4 件。(i) `control_deployed` を (8) の項目から落とす。(ii) 常に `true` を出す。(iii) 常に `false` を出す。(iv) 未配備の宣言時に語彙外の判定語を出す | (i) inv: `test_inventory_top_level_and_item_keys_are_pinned`、(ii) inv: 未配備の宣言時の `false` のテスト、(iii) inv: 宣言が無いときの `true` のテスト、(iv) inv: `test_inventory_judgment_vocabulary_is_closed` (`--control-not-deployed` の有無の両方で回す。E-R16) |
+
+**E4 — platform migration の適用サブコマンド (WP-E・WP-D の作業では本番に対して実行しない。試験は使い捨ての PostgreSQL だけ。E-R18)**
+
+E4 の拒否は ops の既存の `_die` の規約に従い、stderr に固定文言を出して終了コード 2 で終わる (E-R20 の L1。`--lock-timeout` の欠落は argparse の使用法エラーで同じく 2)。
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| E4-1 | 引数はファイル名に限り、既知の platform migration の名前の列挙 (モジュール定数) に一致し、`_migrations_dir()` (`MITATEDB_MIGRATIONS_DIR` を含む) のディレクトリとファイルの両方を resolve して比べ、ファイルがそのディレクトリの中にあるときだけ受け付ける。`MITATEDB_MIGRATIONS_DIR` は operator が設定する信頼境界であり、検査はそのディレクトリの外へ出ることを防ぐ (E-R20 の L3)。パス区切りを含む値・列挙に無い名前・per-application のファイル・ディレクトリの外に解決されるもの (例: 外を指す symlink) は、psql を起動せず `_die` の固定文言 (終了コード 2) で拒否する (入力値を出さない。E-R2) | 5 件。(i) 列挙の照合を外しディレクトリの任意のファイルを受け付ける。(ii) パス区切りの拒否を外す。(iii) 解決したパスがディレクトリの中にあることの検査を外す。(iv) 拒否文言に入力値を含める。(v) ファイルの側だけを resolve し、ディレクトリの側を resolve しない | (i) apm: 列挙に無い名前の拒否のテスト、(ii) apm: パス区切りの拒否のテスト、(iii) apm: 外を指す symlink の拒否のテスト、(iv) apm: 拒否文言に入力値が無いテスト (いずれも subprocess を spy し起動 0 件)、(v) apm: `MITATEDB_MIGRATIONS_DIR` 自体が symlink を経由するパスでも既知のファイルを受け付けるテスト |
+| E4-2 | 受け付けるファイルの定数を `0005_application_audit.sql`・`0007_platform_declarations.sql`・`0011_process_ceilings.sql`・`0012_role_connection_limits.sql` に pin し、各ファイルが実在して psql 変数 `app_id` を参照しないこと、ディレクトリの `app_id` を参照しないファイルとの差がちょうど `0001_bootstrap_platform.sql`・`0002_registry_and_functions.sql` の 2 件であることを assert する (静的テスト。E-R12) | 2 件。(i) 定数に `0008_platform_upgrades_upgrade.sql` を足す。(ii) 定数に `0002_registry_and_functions.sql` を足す | apm: 定数の pin と差の静的テスト (2 件とも) |
+| E4-3 | DSN は環境変数だけで受け取り、DSN を受け取る引数を持たない (静的テスト。設計 Z-8) | DSN を受け取る引数を足す | apm: 引数の静的テスト |
+| E4-4 | psql の接続情報は `_psql_connection_env` で環境変数として渡し、argv に DSN の 4 要素の番兵が無い。親の環境に DSN が上書きしない接続設定変数があれば変数名だけの固定文言で拒否する (§3.1 の A-9・A-13) | 2 件。(i) argv に DSN を置く。(ii) `_psql_connection_env` を呼ばず親の環境をそのまま psql に渡す | (i) apm: argv に番兵が無いテスト (subprocess を spy)。(ii) apm: 親に `PGSSLMODE` を置いたときの拒否のテスト |
+| E4-5 | psql を起動する前に `_require_psql_16_or_newer` を呼ぶ | その呼出しを外す | apm: psql 15 の版表示で拒否されるテスト |
+| E4-6 | psql の argv に `ON_ERROR_STOP=1` を渡す (静的テスト) | argv から外す | apm: argv の `ON_ERROR_STOP` のテスト |
+| E4-7 | `--lock-timeout` の値を `_validate_lock_timeout_value` で検証し、`_with_lock_timeout_option` で DSN の `options` に連結して `PGOPTIONS` で渡す (必須・既定値なしは E1-4) | 2 件。(i) `PGOPTIONS` に渡さない。(ii) 値の検証を外す | apm: `PGOPTIONS` のテスト、不正値の拒否のテスト |
+| E4-8 | psql の出力と失敗時の文言は `_redact_connection_values` で伏せてから出す (設計 D-2 の 3 段の assert、番兵は 4 要素) | 伏せる呼出しを外す | apm: 伏字のテスト |
+| E4-9 | psql が非 0 で終わればサブコマンドも非 0 で終わる。使い捨てクラスタで 0007 を欠いた 0011 の適用が非 0 になる | psql の終了コードを無視して 0 を返す | apm: 依存先の欠落で非 0 のテスト |
+| E4-10 | 使い捨てクラスタで 0005 / 0007 / 0011 / 0012 のそれぞれについて、適用済みの状態から、そのファイルが作るオブジェクト (ACL・関数本体・ロール設定・宣言の制約など) を手でずらし、サブコマンド経由 (0007 は `--api-role`・`--controlplane-role` を付けて) で適用して終了コード 0 と元の状態に戻ったことを assert する。続けてもう一度適用し、終了コード 0、`updated_at` を除いて差分 0 (WP-C の比較の形。E-R13) | psql を起動せずに 0 を返す | apm: ずらした状態をサブコマンド経由の適用が戻すテスト |
+| E4-13 | ファイルごとに必要な psql 変数を静的な表で持ち、対応する引数 (`--api-role`・`--controlplane-role`) で受け取って psql に `-v` で渡す。表にある変数の引数が欠ければ、表に無い引数を渡せば、いずれも psql を起動せず固定文言で拒否する。表と各ファイルが実際に参照する `:変数` の集合が一致する (静的テスト。E-R1)。`:変数` は `--` コメントを除き、`::` キャストを除いて抽出し、この抽出規則を合成の SQL 文字列で確かめる (E-R20 の L2)。拒否は `_die` の固定文言 (終了コード 2) | 5 件。(i) 欠けた引数の拒否を外す。(ii) 表に無い引数の拒否を外す。(iii) 表から 0007 の `controlplane_role` を外す。(iv) 抽出で `--` コメントを除かない。(v) 抽出で `::` キャストを除かない | (i) apm: 0007 に `--controlplane-role` が無いときの拒否のテスト、(ii) apm: 0011 に `--api-role` を渡したときの拒否のテスト、(iii) apm: 表とファイルの `:変数` の一致のテスト、(iv)(v) apm: コメント中の `:変数` とキャストを拾わない抽出規則のテスト (合成の SQL) |
+| E4-11 | E4 の試験の接続先は使い捨ての PostgreSQL だけで、本番の接続先・runbook の実行手順を置かない (裁定 (d)) | **監査照合**: 新規テストファイルの接続先の出所 (テスト基盤の管理 DSN の環境変数名) の `file:line` と、`public_value_scan.py` の集計行を逐語で設計に残す | — |
+| E4-12 | `test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` のうち 0005・0007・0011・0012 の「もう一度適用」を E4 のサブコマンド経由 (`--lock-timeout` と 0007 の role の引数を付けて) に置き換える。起点までの過去の内容の適用は psql の直接実行のまま。E4 による適用の直前に、そのファイルが作るオブジェクトの状態を手でずらし、E4 の適用で元に戻ることを assert したうえで、WP-C の比較 (終了コード 0、`updated_at` を除く差分 0) を保つ。WP-C の証拠を弱めない。置き換えは本 WP の変更セットで行う (E-R12・E-R13) | E4-10 と同じ操作 (psql を起動せずに 0 を返す) を別の変異 id で定義する | `MitateDB-api/tests/test_platform_migration_reapply.py::test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` |
+
+**共通**
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| E-40b | 新規テストファイルで件数 pin の対象が増減したら、`tools/tests/test_no_shared_cluster_defaults.py` の pin を実測で同じ変更セットで更新する (§1.5 の 40b) | pin を基点の件数に戻す (増減が無い場合は **監査照合**: 実測のコマンドと件数を逐語で残す) | `tools/tests/test_no_shared_cluster_defaults.py::test_admin_dsn_env_definitions_are_pinned_to_25_files` (件数は基点の名前) |
+| E-CM | 本 WP のテストと同じ変更セットで `security/CONTROL_MAPPING.md` (英語) を更新する: SI-08 の MitateDB ブロックは E1〜E3 で事実でなくなる (6)・(8) の既存の主張と証拠のテスト名を置き換えで直し (追記しない)、ブロック長を実測する (15,200 を超えるならその時点で止まって監督へ上げる)。E4 の統制と E1-4・E1-7 の網羅の主張は SI-09 の MitateDB ブロックに置く。Version 行の minor を main から 1 つ上げる (E-R6・E-R19) | **監査照合**: 置き換えた行と足した行、Version 行の前後、SI-08・SI-09 の MitateDB ブロックの文字数の実測を逐語で設計に残す | — |
+| E-47 | 追加・変更したコード・テスト・fixture に実値が無い (C5) | **監査照合**: `public_value_scan.py` の集計行を逐語で残す | — |
+| E-50 | 本表に変異も監査照合も持たない行が無い (§1.5 の 40) | **監査照合**: 本表の行数と対応数を残す | — |
+
+**件数 (下限)**: 完了条件 42 件 = 変異を持つ行 37 件 (E1-1〜E1-5、E1-7、E2-1〜E2-9、E3-1〜E3-9、E4-1〜E4-10、E4-12、E4-13、E-40b) + 監査照合 5 件 (E1-6・E4-11・E-CM・E-47・E-50)。変異は 57 件 (E1-4・E4-1・E4-13 の各 5 件、E3-8 の 4 件、E2-8・E3-6・E4-2・E4-4・E4-7 の各 2 件、他の 28 行の各 1 件。E-R20 の L4 で数え直した)。E-40b は件数 pin に増減が無ければ監査照合の行に変わる。
+
+### 6A.10 監督の確認事項
+
+なし (起草案の確認事項と設計レビューの指摘はすべて §6A.2 の E-R1〜E-R20 で決まった)。
 
 ## 7. 本書の範囲外の後続 (列挙のみ。本書の WP では行わない)
 
