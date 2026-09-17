@@ -46,7 +46,7 @@
 | WP | R-37 WP-5 の統合コミット | 基点 main | 名前の再照合の結果 |
 |---|---|---|---|
 | WP-A | `0fa4648` (縮小版 WP-5。依頼者指示 `docs/work-orders/REQUESTER_DIRECTIVE_20260916_R37_CLOSURE_R45_PRIORITY.md`) | `0fa4648` | 全件実在 (設計 §3・§3.1 の名前、欠落 0) |
-| WP-B | (着手時に記入) | (着手時に記入) | (着手時に記入) |
+| WP-B | `0fa4648` | `8a2fe41` (WP-A・WP-C 統合後) | 全件実在 (欠落 0) |
 | WP-C | `0fa4648` | `9dd7e02` (WP-A 統合後。WP-B より先に着手 — 監督が規模の小さい WP-C を先にした) | 全件実在 (欠落 0) |
 | WP-D | (着手時に記入) | (着手時に記入) | (着手時に記入) |
 
@@ -330,6 +330,36 @@ python3 tools/public_value_scan.py MitateDB-api/src/mitatedb_api/ops.py MitateDB
 | 50 | 本表に変異も監査照合も持たない行が無い | **監査照合**: 本表の行数と対応数を残す | — |
 
 **件数 (下限)**: 完了条件 57 件 = 変異を持つ行 53 件 + 監査照合 4 件 (15・W5-B・47・50)。変異は 1 行 1 件 (53 件)。
+
+### 4.1 WP-B の訂正註と監督裁定 (2026-09-17、統合時に監督が追記。§4 の本文は書き換えない)
+
+**訂正註 B-1 (完了条件の移動)**: 33a (新旧 revision の process 数の合計の正しさ) は、operator が platform 層で読んで引数で渡す形になったので WP-D の runbook の監査照合へ移す (B-7)。
+
+**訂正註 B-2 (DB 層の出力)**: (5) は DB 層の出力に含めず、(6) は実行時設定の部分だけを判定する。判定していない部分は `unjudged_items` に `runbook-acceptance` として並べる (B-8・B-12)。終了コード 0 は DB 層が判定する全項目が confirmed のとき。DB 層では (5) と (6) のロック・停止時間の部分が常に判定外なので、全体の ready は WP-D の runbook の手順で受理記録と合わせて出す。
+
+**訂正註 B-3 (WP-D への引き継ぎ)**: WP-D は `security/CONTROL_MAPPING.md` の SI-08 に行を足さない (B-19)。
+
+**監督裁定 B-1〜B-19 (実装担当への裁定の本文。再実行の手順と報告の形の指示は省いた)**
+
+- B-1 inventory の読み取りの各接続に `lock_timeout=3000ms`・`statement_timeout=5000ms` をモジュール定数で掛け、静的に pin する。超過はその項目 unknown。
+- B-2 `mitatedbsvc_auditreader` は Control の process だけが使う (`control_composition.py`、`main.py` は除外) と実測で確定したので、(8) では Control 側だけで数える。Z-36 の「両方で数える」は確定までの暫定だった。将来 Data 側が使い始めたら赤になるテストで固定する。
+- B-3 `platform_declarations.py` の private 定数を `inventory` から import して使ってよい (読むだけ)。値を複製しない。同じオブジェクトを使うことを identity で確かめる。
+- B-4 (3) の台帳の読み取りは application ごとに `InsufficientPrivilege` を捕まえ、その application の (3) を blocked (固定の理由語、例外文字列を出さない) にし、全体も blocked。他の application の判定は続ける。R-47 の状態の application でテストする。秘密の列を SELECT しないことを静的に固定する。
+- B-5 (指摘 6) 設計 D-1 と Z-9 のとおり実装する: (6) の実行時設定の部分 (対象 role の CONNECTION LIMIT と `pg_db_role_setting` の `lock_timeout` / `statement_timeout`) を DB 層で読む。(4) は総件数に加えて状態 (enabled / revoked / must_rotate) ごとの件数を出す (credential_id は出さない)。inventory のクエリが返す列名 (`cursor.description`) を許可リストと照合するテストを置き、秘密の列が 1 つでも返れば赤。
+- B-6 (疑義 ii) `PlatformDeclarationError` を分ける: 未適用・未宣言 (表や行が無い = F-8 / F-3 / F-4 / F-15 の欠落) は confirmed + `remediation-required` の注記。値が不正 (F-5 / F-4b / F-15 の形の違反) は **blocked** (理由は固定の語)。どちらもテストと変異を置く。
+- B-7 (疑義 iii) CLI の数値引数は正の整数だけを受け付け (0・負を固定文言で拒否)、テストと変異を置く。新旧 revision の process 数の合計は operator が platform 層で読んで引数で渡す形のままとし、その読み方と合計の正しさは WP-D の runbook の監査照合で扱う (33a を WP-D へ移す。統合時に作業指示書へ訂正註)。
+- B-8 (疑義 iv) Q-1 (c)・Q-2 (c) により、(5) rollback の可逆性と、(6) のうちロック種別・停止時間の上限の部分は、runbook の表の独立レビューの受理記録で判定する (DB 層では判定しない)。したがって DB 層の出力は、DB 層が判定する項目だけを持つ: (5) は出力に含めない。(6) は実行時設定の部分だけを判定する。JSON に「DB 層で判定していない項目」のリスト (項目番号と固定の理由語 `runbook-acceptance` だけ) を置き、W-2 の判定語の語彙は変えない。終了コード 0 は DB 層が判定する全項目 confirmed を意味する。全体の ready は runbook の手順で両層と受理記録を合わせて出す (WP-D)。キー集合の pin を更新し、判定していない項目のリストの pin と変異を置く。
+- B-9 (軽微 8) すべて直す: 11 / 11a / 11b / 12 の第 1 段で固定文言を assert、W4-4 と R30 は赤 (exit 1) になる形に直す (error 化させない)、`_inventory_connect` で `SET` が失敗したら接続を閉じる (テスト付き)、`reason` の語彙を pin する。
+- B-10 process 数と concurrency 系の引数は正の整数、`--reserved-connections` は 0 以上の整数。
+- B-11 (6) の実行時設定で読む role は (8) と同じ集合 (auditreader を含む)。
+- B-12 `unjudged_items` には (5) と、(6) のロック種別・停止時間の上限の部分 (`part` = `lock-and-downtime`) を入れる。`part` の語彙を pin。`ddl_lock` の判定は実行時設定の部分だけ。
+- B-13 (1) `connection` にも `judgment` を持たせ、match / mismatch / unknown を confirmed / blocked / unknown に対応付ける。終了コードは全項目の `judgment` から計算する。
+- B-14 (8) の宣言読み取り: `psycopg.Error` → unknown、宣言の欠落 → unknown + `remediation-required`、値の不正 → blocked。
+- B-15 B-11 のとおり、(6) の対象 role はアプリケーションの `_rt` / `_dv` を含む (8) と同じ集合。
+- B-16 `security/CONTROL_MAPPING.md` の Version は main から 1 つ上げる。経緯語を除き、主張を実装に合わせる。CONNECTION LIMIT は値まで確かめる実装にする。
+- B-17 SI-08 の文字数 (上限まで残り 16 字になった件): 既存の行は変えず、本 WP が足した行だけを簡潔に書き直す。主張は落とさない。
+- B-18 B-17 の書き直しで抜けた主張 3 つ ((a) -1 を unknown にするのは対象 role の集合の中だけ、(b) auditreader の接続を pool するのは `control_composition.build_control_service` だけ、(c) 宣言の欠落と値の不正の区別) を戻し、証拠のテスト名をファイルのパスを 1 回だけ書いて個別に列挙する。
+- B-19 (統合時) SI-08 の MitateDB ブロックは 14,809 字 (上限 15,200) で受け入れる。B-17・B-18 で置いた目安 14,500 字は、主張と証拠を落とさないことを優先して外す。**後続の WP-D は SI-08 に行を足さず、runbook の受理記録を適切な別の SI に置く。**
 
 ## 5. WP-C — (10) の migration 再実行性テストと適用時の `lock_timeout` (Class D)
 
