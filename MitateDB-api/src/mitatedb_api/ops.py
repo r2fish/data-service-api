@@ -1990,6 +1990,577 @@ def cmd_upgrade_status(args: argparse.Namespace) -> int:
     return platform_upgrades.summarize_upgrade_run(results, dry_run=True)
 
 
+# ===========================================================================
+# `inventory`: read-only Gate-0 DB-layer judgments (design docs/design/
+# MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md). Never mounted on any HTTP
+# surface, never changes platform state, never takes a DSN on argv (only
+# MITATEDB_PROVISION_DSN). Prints exactly one JSON object to stdout and
+# nothing else; every other subcommand above is unaffected. The DB layer
+# judges only the items it can read on its own; item (5) (rollback
+# compatibility) and the declared-lock/maintenance-window half of item (6)
+# are judged by the platform runbook's own independent-review acceptance
+# record, never here -- `unjudged_items` below names the item numbers this
+# subcommand has no opinion on at all.
+# ===========================================================================
+
+#: Session-level bounds every connection this subcommand opens carries, so
+#: a long-held lock elsewhere in the platform (a running migration, an
+#: application upgrade) cannot make a Gate-0 read hang -- exceeding either
+#: one turns the item being read into `unknown` rather than blocking.
+_INVENTORY_LOCK_TIMEOUT_MS = 3000
+_INVENTORY_STATEMENT_TIMEOUT_MS = 5000
+
+#: The largest number of connections `inventory`'s own single-threaded
+#: run ever holds open at once (one platform connection, plus at most one
+#: application connection at a time -- opened, read, and closed before the
+#: next). Folded into the connection-headroom reserve below.
+_INVENTORY_MAX_CONCURRENT_CONNECTIONS = 2
+
+#: The closed judgment vocabulary every item below returns (never a fourth
+#: word). `_INVENTORY_COMPARISONS` is item (1)'s own smaller, separate
+#: vocabulary (a comparison result, not a state judgment). `_INVENTORY_
+#: REASONS` is the closed set of fixed reason words a `blocked` judgment
+#: may carry -- never the underlying exception text.
+_INVENTORY_JUDGMENTS = frozenset({"confirmed", "blocked", "unknown"})
+_INVENTORY_COMPARISONS = frozenset({"match", "mismatch", "unknown"})
+_INVENTORY_REASONS = frozenset({"ledger-unreadable", "declaration-invalid"})
+
+#: Printed on stderr, at exit code 1, whenever this subcommand itself
+#: fails before it can produce any item judgment at all (a missing DSN, an
+#: unreadable read-only setting) -- never the underlying exception text.
+_INVENTORY_TOOL_FAILURE_MESSAGE = "error: inventory could not run"
+
+#: Column allow-lists for item (4) -- `credential_id`/`digest` never
+#: appear: a caller can enumerate/re-identify a credential from its id,
+#: and the digest is the one column this table stores that a read-only
+#: inventory tool has no business ever projecting. Positions are fixed by
+#: this tuple's own order (`_inventory_credentials` indexes rows
+#: positionally rather than by re-deriving indices at read time).
+_INVENTORY_CREDENTIAL_COLUMNS: tuple[str, ...] = ("role", "enabled", "revoked")
+_INVENTORY_CONTROL_CREDENTIAL_COLUMNS: tuple[str, ...] = ("role", "enabled", "revoked", "must_rotate")
+
+#: The exact top-level key set `inventory`'s own JSON output carries --
+#: checked by a static test, never widened ad hoc. There is no "ready"
+#: key anywhere in this shape: Gate-0's overall readiness is a
+#: runbook-level judgment across BOTH the DB and platform layers, never
+#: something this DB-layer-only subcommand can compute or publish on its
+#: own. Item (5) has no key at all (DB layer never judges it); item (6)'s
+#: own key covers only its runtime-settings half.
+_INVENTORY_TOP_LEVEL_KEYS = frozenset({
+    "connection", "declarations", "migrations", "credentials",
+    "ddl_lock", "connection_headroom", "unjudged_items",
+})
+
+#: The fixed, pinned content of the `unjudged_items` key: the Gate-0
+#: item/part pairs this DB-layer subcommand never judges at all, each
+#: with the fixed reason word `runbook-acceptance` (the platform
+#: runbook's own independent-review acceptance record judges them
+#: instead). Item (5) is unjudged in full (`part` "all"); item (6)'s
+#: declared lock-type/stop-time-limit half is unjudged too (`part`
+#: "lock-and-downtime") -- item (6) still has its own `ddl_lock` key,
+#: since its runtime-settings half IS judged here.
+_INVENTORY_UNJUDGED_PARTS = frozenset({"all", "lock-and-downtime"})
+_INVENTORY_UNJUDGED_ITEMS: tuple[dict, ...] = (
+    {"item": 5, "part": "all", "reason": "runbook-acceptance"},
+    {"item": 6, "part": "lock-and-downtime", "reason": "runbook-acceptance"},
+)
+
+
+def _inventory_positive_int(value: str) -> int:
+    """`argparse` `type=` for `--concurrency`/`--data-process-count`/
+    `--control-process-count` -- 0 and negative values are usage errors
+    (argparse's own fixed, templated message via `parser.error()`,
+    SystemExit(2)), never silently accepted as if they meant "no input"
+    the way omitting the argument entirely does."""
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return parsed
+
+
+def _inventory_nonnegative_int(value: str) -> int:
+    """`argparse` `type=` for `--reserved-connections` only -- unlike the
+    other three numeric arguments, `0` is a genuine value here ("no
+    reserve"), so only negative values (and non-integer text) are usage
+    errors."""
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {value!r}")
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {value!r}")
+    return parsed
+
+
+def _inventory_connect(dsn: str) -> "psycopg.Connection":
+    """The only `psycopg.connect` call this subcommand's own code makes --
+    every connection `inventory` opens, the platform connection and each
+    application connection alike, goes through here, so the read-only
+    setting and the two session timeouts above apply uniformly, and a
+    test spying on `psycopg.connect` catches every one of them.
+    `autocommit` is always on: none of `inventory`'s own reads need a
+    held-open transaction, and it lets the existing `read_applied_
+    upgrade_numbers` helper's own `conn.rollback()` (its `UndefinedTable`
+    recovery path) run against this connection without disturbing a `SET`
+    statement issued moments before -- `SET` inside an open, later-
+    rolled-back transaction would itself be rolled back, silently undoing
+    the timeouts this function just applied. If any of the three `SET`
+    statements themselves fails, the connection is closed before the
+    exception propagates -- never leaked half-configured."""
+    conn = psycopg.connect(dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET default_transaction_read_only = on")
+            cur.execute(sql.SQL("SET lock_timeout = {}").format(sql.Literal(f"{_INVENTORY_LOCK_TIMEOUT_MS}ms")))
+            cur.execute(sql.SQL("SET statement_timeout = {}").format(sql.Literal(f"{_INVENTORY_STATEMENT_TIMEOUT_MS}ms")))
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _inventory_confirmed_read_only(conn: "psycopg.Connection") -> bool:
+    """Reads back `transaction_read_only` on an already-open connection --
+    never assumed true merely because `_inventory_connect` just set it."""
+    with conn.cursor() as cur:
+        cur.execute("SHOW transaction_read_only")
+        (value,) = cur.fetchone()
+    return value == "on"
+
+
+#: (1)'s own `comparison` -> W-2 `judgment` mapping (supervisor ruling
+#: B-13): `match` is the confirmed case, `mismatch` is a real blocker
+#: (design Z-26: the DB/platform pair does not agree, never merely
+#: "unreadable"), `unknown` stays `unknown`.
+_INVENTORY_COMPARISON_TO_JUDGMENT = {"match": "confirmed", "mismatch": "blocked", "unknown": "unknown"}
+
+
+def _inventory_connection_match(dsn: str, connection_name: "Optional[str]") -> dict:
+    """(1): compares the platform-layer-supplied Cloud SQL connection name
+    against the unix socket directory this SAME process' own DSN names --
+    never a value read from the database itself. A missing argument, or a
+    DSN whose `host` is not a unix socket path (a TCP/loopback DSN),
+    leaves this `unknown`; the connection target itself is never part of
+    the output. Carries BOTH `comparison` (`match`/`mismatch`/`unknown`,
+    Z-26's own vocabulary) and `judgment` (W-2's own closed vocabulary,
+    supervisor ruling B-13) -- `_inventory_exit_code` reads `judgment`
+    here exactly like every other item, never `comparison` directly."""
+    comparison = _inventory_connection_comparison(dsn, connection_name)
+    return {"comparison": comparison, "judgment": _INVENTORY_COMPARISON_TO_JUDGMENT[comparison]}
+
+
+def _inventory_connection_comparison(dsn: str, connection_name: "Optional[str]") -> str:
+    if not connection_name:
+        return "unknown"
+    try:
+        params = conninfo_to_dict(dsn)
+    except psycopg.Error:
+        return "unknown"
+    host = params.get("host") or ""
+    if not host.startswith("/"):
+        return "unknown"
+    if host.rstrip("/").endswith("/" + connection_name):
+        return "match"
+    return "mismatch"
+
+
+def _inventory_role_classes(conn: "psycopg.Connection", schema: str) -> tuple:
+    """`(api_roles, control_roles, auditreader_roles)` -- the same
+    table-grant discovery `platform_declarations.check_role_connection_
+    limits` uses internally (never a fixed literal role name), shared by
+    item (6) and item (8) so the target-role definition never drifts
+    between the two. May raise `psycopg.Error`; every caller catches it."""
+    api_owner = platform_declarations._table_owner(conn, schema, "application_audit")
+    api_roles = [
+        role for role in platform_declarations._roles_with_table_privilege(conn, schema, "application_audit", "INSERT")
+        if role != api_owner
+    ]
+    control_owner = platform_declarations._table_owner(conn, schema, "control_audit")
+    control_roles = [
+        role for role in platform_declarations._roles_with_table_privilege(conn, schema, "control_audit", "INSERT")
+        if role != control_owner
+    ]
+    reader_app = set(platform_declarations._roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
+    reader_control = set(platform_declarations._roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
+    auditreader_roles = sorted(role for role in (reader_app & reader_control) if role != api_owner and role != control_owner)
+    return api_roles, control_roles, auditreader_roles
+
+
+#: `read_platform_declarations`'s own missing-row message for `process_
+#: ceilings` (the one `PlatformDeclarationError` whose code, `F-15`, is
+#: shared with two DIFFERENT shape-violation messages) starts with this
+#: exact prefix -- the only reliable way to tell "the row itself is
+#: absent" (confirmed + remediation-required, like F-8/F-3/F-4) apart
+#: from "the row exists but its value is malformed" (blocked) without a
+#: second query, since both raise the identical `code="F-15"`.
+_INVENTORY_F15_MISSING_MARKER = "no 'process_ceilings' row in"
+
+
+def _inventory_declaration_error_is_missing(exc: "platform_declarations.PlatformDeclarationError") -> bool:
+    if exc.code in ("F-8", "F-3", "F-4"):
+        return True
+    if exc.code == "F-15" and _INVENTORY_F15_MISSING_MARKER in str(exc):
+        return True
+    return False
+
+
+def _inventory_declarations(conn: "psycopg.Connection", schema: str) -> dict:
+    """(2): platform declarations, via the SAME read function every other
+    subcommand already uses. A declaration that does not exist yet at all
+    (the table, or one of its required rows, is simply absent -- F-8 / F-3
+    / F-4 / F-15's own missing-row case) is a known, recoverable gap --
+    confirmed with `remediation_required`. A declaration that DOES exist
+    but fails its own value validation (F-5 / F-4b / F-15's own shape/value
+    case -- hand-edited into a malformed shape) is `blocked` with the fixed
+    reason `declaration-invalid`, never confirmed by treating a corrupt
+    value as equivalent to an absent one."""
+    try:
+        platform_declarations.read_platform_declarations(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.MIGRATION_NUMBER,
+        )
+    except platform_declarations.PlatformDeclarationError as exc:
+        if _inventory_declaration_error_is_missing(exc):
+            return {"judgment": "confirmed", "remediation_required": True, "reason": None}
+        return {"judgment": "blocked", "remediation_required": False, "reason": "declaration-invalid"}
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False, "reason": None}
+    return {"judgment": "confirmed", "remediation_required": False, "reason": None}
+
+
+def _inventory_migrations(conn: "psycopg.Connection", provision_dsn: str, schema: str) -> dict:
+    """(3): per-application migration/upgrade ledger state. A registered
+    but never-provisioned application is counted, never confirmed/blocked/
+    unknown on its own. A connection failure, or any `read_applied_
+    upgrade_numbers` failure OTHER than the two named below, leaves this
+    item `unknown` for that application (never crashes the whole
+    subcommand -- every other application is still visited).
+    `InsufficientPrivilege` specifically (a pre-0008 application
+    provisioned before the provision role's own `GRANT USAGE ON SCHEMA
+    public` existed, roadmap R-47) is reported `blocked` with the fixed
+    reason `ledger-unreadable` -- never the raw exception text -- since
+    that application genuinely cannot be upgraded by the current tooling,
+    not merely unreadable right now."""
+    try:
+        applications = _registry_applications_for_upgrade(conn, schema=schema, application_id=None)
+        applications_table = sql.Identifier(schema, "applications")
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("SELECT count(*) FROM {table} WHERE database_name IS NULL").format(table=applications_table))
+            (registered_only_count,) = cur.fetchone()
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False, "reason": None, "registered_only_count": 0}
+
+    judgment = "confirmed"
+    remediation_required = False
+    reason = None
+    for application_id, database_name, _developer_role in applications:
+        app_dsn = _app_dsn(provision_dsn, database_name)
+        try:
+            app_conn = _inventory_connect(app_dsn)
+        except psycopg.Error:
+            if judgment != "blocked":
+                judgment = "unknown"
+            continue
+        try:
+            if not _inventory_confirmed_read_only(app_conn):
+                if judgment != "blocked":
+                    judgment = "unknown"
+                continue
+            try:
+                applied = platform_upgrades.read_applied_upgrade_numbers(
+                    app_conn, ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME)
+            except psycopg.errors.InsufficientPrivilege:
+                judgment = "blocked"
+                reason = "ledger-unreadable"
+                continue
+            except psycopg.Error:
+                if judgment != "blocked":
+                    judgment = "unknown"
+                continue
+        finally:
+            app_conn.close()
+        if applied is None:
+            remediation_required = True
+        elif platform_upgrades.pending_upgrade_numbers(applied, platform_upgrades.PLATFORM_UPGRADE_NUMBERS):
+            remediation_required = True
+    return {
+        "judgment": judgment, "remediation_required": remediation_required,
+        "reason": reason, "registered_only_count": registered_only_count,
+    }
+
+
+def _inventory_select_credential_rows(conn: "psycopg.Connection", schema: str, table_name: str, columns: "tuple[str, ...]") -> list:
+    """The one query item (4) sends per table -- column list built
+    entirely from `columns` (an allow-list constant), never `SELECT *`.
+    Returns full rows (not merely a count) so the caller can aggregate
+    per-state counts; positional, matching `columns`'s own order."""
+    table = sql.Identifier(schema, table_name)
+    projection = sql.SQL(", ").join(sql.Identifier(column) for column in columns)
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT {columns} FROM {table}").format(columns=projection, table=table))
+        return cur.fetchall()
+
+
+def _inventory_credentials(conn: "psycopg.Connection", schema: str) -> dict:
+    """(4): credential registry, projected to non-secret columns only --
+    `credential_id`/`digest` never appear in the SELECT list, regardless
+    of what the connecting role could technically read. Reports the total
+    row count PLUS per-state counts (`enabled`/`revoked` across both
+    tables, `must_rotate` -- `control_credentials` only, the only one of
+    the two tables with that column). A permission shortfall on either
+    table leaves this `unknown`, never confirmed by skipping the table."""
+    try:
+        credential_rows = _inventory_select_credential_rows(conn, schema, "credentials", _INVENTORY_CREDENTIAL_COLUMNS)
+        control_credential_rows = _inventory_select_credential_rows(
+            conn, schema, "control_credentials", _INVENTORY_CONTROL_CREDENTIAL_COLUMNS)
+    except psycopg.Error:
+        return {
+            "judgment": "unknown", "remediation_required": False,
+            "total_count": 0, "enabled_count": 0, "revoked_count": 0, "must_rotate_count": 0,
+        }
+    # Positional indices fixed by `_INVENTORY_CREDENTIAL_COLUMNS`/
+    # `_INVENTORY_CONTROL_CREDENTIAL_COLUMNS`'s own declared order above:
+    # ("role", "enabled", "revoked"[, "must_rotate"]).
+    enabled_count = sum(1 for row in credential_rows if row[1]) + sum(1 for row in control_credential_rows if row[1])
+    revoked_count = sum(1 for row in credential_rows if row[2]) + sum(1 for row in control_credential_rows if row[2])
+    must_rotate_count = sum(1 for row in control_credential_rows if row[3])
+    return {
+        "judgment": "confirmed", "remediation_required": False,
+        "total_count": len(credential_rows) + len(control_credential_rows),
+        "enabled_count": enabled_count, "revoked_count": revoked_count, "must_rotate_count": must_rotate_count,
+    }
+
+
+def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> dict:
+    """(6), runtime-settings half only (design D-1/Z-9, supervisor rulings
+    B-5/B-8/B-11/B-15): reads the target roles' (the SAME full set item
+    (8) discovers -- `api_roles`/`control_roles`/`auditreader_roles` by
+    table grant, PLUS every provisioned application's own `runtime_role`/
+    `developer_role`, B-15) `CONNECTION LIMIT` and whether `pg_db_role_
+    setting` declares BOTH `lock_timeout` and `statement_timeout` for
+    each. `CONNECTION LIMIT` is confirmed up to its actual VALUE, not
+    merely its presence (supervisor ruling B-16): `-1` (unlimited) is
+    unknown here too, the SAME sentinel item (8) already treats specially
+    for this identical role set. The declared lock-type/stop-time-limit
+    half of item (6) is judged by the platform runbook's own
+    independent-review acceptance record instead (`_INVENTORY_UNJUDGED_
+    ITEMS`'s own `{"item": 6, "part": "lock-and-downtime", ...}` entry),
+    never here -- item (6) still keeps its own `ddl_lock` key because this
+    runtime-settings half DOES get a real judgment."""
+    try:
+        api_roles, control_roles, auditreader_roles = _inventory_role_classes(conn, schema)
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False}
+    try:
+        with conn.cursor() as cur:
+            applications_table = sql.Identifier(schema, "applications")
+            cur.execute(sql.SQL(
+                "SELECT runtime_role, developer_role FROM {table} "
+                "WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL"
+            ).format(table=applications_table))
+            app_roles = cur.fetchall()
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False}
+    target_roles = (
+        api_roles + control_roles + auditreader_roles
+        + [name for pair in app_roles for name in pair]
+    )
+    if not target_roles:
+        return {"judgment": "unknown", "remediation_required": False}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(%s)", [target_roles])
+            limits = dict(cur.fetchall())
+        if any(limits.get(role) is None or limits.get(role) == -1 for role in target_roles):
+            return {"judgment": "unknown", "remediation_required": False}
+        for role in target_roles:
+            declared_keys: set = set()
+            for setdatabase, _datname, setconfig in platform_declarations._role_setting_rows(conn, role):
+                if setdatabase == 0 and setconfig:
+                    declared_keys.update(entry.split("=", 1)[0] for entry in setconfig)
+            if not {"lock_timeout", "statement_timeout"} <= declared_keys:
+                return {"judgment": "unknown", "remediation_required": False}
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False}
+    return {"judgment": "confirmed", "remediation_required": False}
+
+
+def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args: argparse.Namespace) -> dict:
+    """(8): connection headroom across the three platform-plane role
+    classes and every provisioned application's own runtime/developer
+    roles. Every input this function cannot itself read from the database
+    -- `concurrency`, both process counts, the connection reserve -- comes
+    in as an explicit argument; a caller that omits one leaves this
+    `unknown` rather than falling back to a code-level default (`ops
+    verify-declarations`'s own F-16 check is a DIFFERENT, single-process
+    floor check and is never consulted here). Role names are discovered
+    by table grant (`_inventory_role_classes`), rather than assumed from a
+    fixed literal name, so a throwaway/rewritten-prefix cluster is handled
+    the same way a real deployment is. `mitatedbsvc_auditreader` is
+    counted only under the Control-plane process count (measured: only
+    `mitatedb_api.control_composition.build_control_service` ever pools a
+    connection against it, `mitatedb_api.main.build_app` never does)."""
+    concurrency = args.concurrency
+    data_process_count = args.data_process_count
+    control_process_count = args.control_process_count
+    reserved_connections = args.reserved_connections
+    if concurrency is None:
+        return {"judgment": "unknown", "remediation_required": False}
+    if data_process_count is None or control_process_count is None:
+        return {"judgment": "unknown", "remediation_required": False}
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
+        max_connections = int(max_connections_text)
+    except (psycopg.Error, ValueError, TypeError):
+        return {"judgment": "unknown", "remediation_required": False}
+
+    try:
+        api_roles, control_roles, auditreader_roles = _inventory_role_classes(conn, schema)
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False}
+
+    if not api_roles or not control_roles:
+        return {"judgment": "unknown", "remediation_required": False}
+
+    try:
+        with conn.cursor() as cur:
+            applications_table = sql.Identifier(schema, "applications")
+            cur.execute(sql.SQL(
+                "SELECT runtime_role, developer_role FROM {table} "
+                "WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL ORDER BY application_id"
+            ).format(table=applications_table))
+            app_roles = cur.fetchall()
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False}
+
+    role_names = sorted(
+        set(api_roles) | set(control_roles) | set(auditreader_roles)
+        | {name for pair in app_roles for name in pair}
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(%s)", [role_names])
+            limits = dict(cur.fetchall())
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False}
+
+    if any(limits.get(name) == -1 for name in role_names):
+        return {"judgment": "unknown", "remediation_required": False}
+
+    api_floor = platform_declarations._API_ROLE_STORE_COUNT * concurrency
+    controlplane_floor = platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR
+    auditreader_floor = platform_declarations._AUDITREADER_ROLE_POOL_FLOOR
+
+    api_demand = data_process_count * api_floor
+    controlplane_demand = control_process_count * controlplane_floor
+    auditreader_demand = control_process_count * auditreader_floor if auditreader_roles else 0
+
+    condition_1_ok = True
+    for role in api_roles:
+        if limits.get(role, 0) < api_demand:
+            condition_1_ok = False
+    for role in control_roles:
+        if limits.get(role, 0) < controlplane_demand:
+            condition_1_ok = False
+    for role in auditreader_roles:
+        if limits.get(role, 0) < auditreader_demand:
+            condition_1_ok = False
+    app_role_demand = data_process_count * concurrency
+    for runtime_role, developer_role in app_roles:
+        if limits.get(runtime_role, 0) < app_role_demand or limits.get(developer_role, 0) < app_role_demand:
+            condition_1_ok = False
+
+    try:
+        declarations = platform_declarations.read_platform_declarations(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.MIGRATION_NUMBER,
+        )
+    except platform_declarations.PlatformDeclarationError as exc:
+        # B-14: a missing declaration means headroom genuinely cannot be
+        # cross-checked against the declared process_ceilings -- unknown
+        # with remediation_required, never silently skipped. A PRESENT
+        # but malformed declaration is blocked, never treated as absent.
+        if _inventory_declaration_error_is_missing(exc):
+            return {"judgment": "unknown", "remediation_required": True}
+        return {"judgment": "blocked", "remediation_required": False}
+    except psycopg.Error:
+        return {"judgment": "unknown", "remediation_required": False}
+    declared_process_ceilings = declarations.process_ceilings
+
+    if (
+        declared_process_ceilings.data != data_process_count
+        or declared_process_ceilings.control != control_process_count
+    ):
+        return {"judgment": "blocked", "remediation_required": False}
+
+    if not condition_1_ok:
+        return {"judgment": "blocked", "remediation_required": False}
+
+    app_shared_demand = app_role_demand if app_roles else 0
+    total_demand = api_demand + controlplane_demand + auditreader_demand + app_shared_demand + _INVENTORY_MAX_CONCURRENT_CONNECTIONS
+
+    if reserved_connections is None:
+        return {"judgment": "unknown", "remediation_required": False}
+
+    if total_demand + reserved_connections > max_connections:
+        return {"judgment": "blocked", "remediation_required": False}
+
+    return {"judgment": "confirmed", "remediation_required": False}
+
+
+def _inventory_exit_code(report: dict) -> int:
+    """0 only when every DB-layer-judged item is confirmed (item (1) now
+    carries its OWN `judgment`, mapped from `comparison` by
+    `_INVENTORY_COMPARISON_TO_JUDGMENT`, supervisor ruling B-13 -- read
+    exactly like every other item's `judgment`; `unjudged_items` is
+    metadata, never itself an item); 2 whenever any judged item is
+    blocked/unknown -- never 1, which `cmd_inventory` reserves for a
+    failure that happens before any item judgment exists at all."""
+    for key, item in report.items():
+        if key == "unjudged_items":
+            continue
+        if item["judgment"] != "confirmed":
+            return 2
+    return 0
+
+
+def cmd_inventory(args: argparse.Namespace) -> int:
+    """Gate-0 DB-layer read-only judgments. Prints exactly one JSON
+    object to stdout; never writes a file of its own. A connection
+    failure propagates to `main`'s own top-level `except psycopg.Error`
+    handler (type name and fixed text only, exit 1) -- there is nothing
+    item-specific to report before a connection to the platform database
+    even exists."""
+    dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
+    if not dsn:
+        print(_INVENTORY_TOOL_FAILURE_MESSAGE, file=sys.stderr)
+        return 1
+    schema = _schema()
+    conn = _inventory_connect(dsn)
+    try:
+        if not _inventory_confirmed_read_only(conn):
+            print(_INVENTORY_TOOL_FAILURE_MESSAGE, file=sys.stderr)
+            return 1
+        report = {
+            "connection": _inventory_connection_match(dsn, args.cloud_sql_connection_name),
+            "declarations": _inventory_declarations(conn, schema),
+            "migrations": _inventory_migrations(conn, dsn, schema),
+            "credentials": _inventory_credentials(conn, schema),
+            "ddl_lock": _inventory_ddl_lock_declaration(conn, schema),
+            "connection_headroom": _inventory_connection_headroom(conn, schema, args),
+            "unjudged_items": list(_INVENTORY_UNJUDGED_ITEMS),
+        }
+    finally:
+        conn.close()
+    print(json.dumps(report, sort_keys=True))
+    return _inventory_exit_code(report)
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m mitatedb_api.ops",
@@ -2244,6 +2815,39 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--application", default=None, metavar="ID", help="limit to one application id")
     p.set_defaults(func=cmd_upgrade_status)
+
+    p = sub.add_parser(
+        "inventory",
+        help="read-only Gate-0 DB-layer judgments -- never mounted on any HTTP surface, never touches "
+             "platform state. Prints one JSON object to stdout. Requires MITATEDB_PROVISION_DSN (env only, "
+             "never an argument)",
+    )
+    p.add_argument(
+        "--cloud-sql-connection-name", default=None, metavar="NAME",
+        help="the Cloud SQL instance connection name the platform layer read from the running revision -- "
+             "omit to leave item (1) unknown",
+    )
+    p.add_argument(
+        "--concurrency", type=_inventory_positive_int, default=None, metavar="N",
+        help="the platform's declared MITATEDB_MAX_CONCURRENCY value (a positive integer) -- omit to leave "
+             "item (8) unknown",
+    )
+    p.add_argument(
+        "--data-process-count", type=_inventory_positive_int, default=None, metavar="N",
+        help="Data-plane process count (new+old revision, already summed by the platform layer; a positive "
+             "integer) -- omit to leave item (8) unknown",
+    )
+    p.add_argument(
+        "--control-process-count", type=_inventory_positive_int, default=None, metavar="N",
+        help="Control-plane process count (new+old revision, already summed by the platform layer; a "
+             "positive integer) -- omit to leave item (8) unknown",
+    )
+    p.add_argument(
+        "--reserved-connections", type=_inventory_nonnegative_int, default=None, metavar="N",
+        help="platform-layer connection reserve (superuser_reserved_connections plus any Cloud SQL reserve; "
+             "a non-negative integer -- 0 means no reserve) -- omit to leave item (8)'s aggregate check unknown",
+    )
+    p.set_defaults(func=cmd_inventory)
 
     return parser
 

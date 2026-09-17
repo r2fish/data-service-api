@@ -1,4 +1,4 @@
-# MitateDB platform の読み取り専用 inventory 設計メモ（v0.7）
+# MitateDB platform の読み取り専用 inventory 設計メモ（v0.8）
 
 - 状態: **設計レビュー 2 回反映済み、依頼者裁定済み（2026-09-16、§6 冒頭）。作業指示書の起草待ち。** ~~設計レビュー 2 回反映済み、依頼者判断待ち（Q-1〜Q-7）。~~ 本書の手順はまだ実行してよい手順ではない。本番を読むのは、本書の経路が設計レビューで受け入れられた後である（`docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 C の制約）。
 - 台帳: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-45**（v1.50）。起票物は `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` の手順 1。
@@ -16,6 +16,7 @@
   - v0.5（2026-09-16）§6 の Q-1〜Q-7 に依頼者裁定を逐語で記録した（すべて監督の推奨を採用）。本文の決定・§7 は変えていない。
   - v0.6（2026-09-16）末尾に §12（WP-A の実施記録）を足した。本文の決定は変えていない。
   - v0.7（2026-09-17）§12.2（WP-C の実施記録）を足した。本文の決定は変えていない。
+  - v0.8（2026-09-17）§12.3（WP-B の実施記録）を足した。本文の決定は変えていない。
 
 ## 1. 問題
 
@@ -651,3 +652,11 @@ Z-5 は欠番である。第 1 次の起草の疑義 5（r2db-api の扱い）�
 - **証拠**: 変異 30 件すべて期待どおり (`restores verified 7/7 files (sha256 x2)`)。`MitateDB-api/tests` `1183 passed, 2 subtests passed` (基点 1152)。root gate **`3530 passed, 2 subtests passed`**、judge=PASS、実行クラスタ差分 0 (基点 3499 + 31)。`--register` OK (427 CH-ID)。公開値スキャン flagged 0。`security/CONTROL_MAPPING.md` Version 2.2 (SI-08 の MitateDB ブロック)。
 - **レビュー**: 独立コードレビュー 5 回 (差し戻し 4 回)。起点の parametrize が状態を変えていない、per-application の本文が一度も実行されていない、起点の脱落を検出しない、判定文字列が実ファイルの空白と合わない、の各欠陥を直した。
 - **作業中の事象**: Google Drive 同期で、変異の復元照合の後に `ops.py` の argv から `ON_ERROR_STOP=1` が消えた状態が 1 度観測され、実装担当が復元して再実行した (`OPERATING_CONDITIONS.md` §2 の 10)。統合前の最終状態で `ON_ERROR_STOP` の grep と変異の残骸 0 を確かめた。
+
+### 12.3 WP-B — MitateDB-api の `inventory` (DB 層) (2026-09-17)
+
+- 基点 main `8a2fe41` (WP-A・WP-C 統合後)。作業指示書 §4・§4.1 (訂正註 B-1〜B-3、監督裁定 B-1〜B-19)。
+- **統制** (`ops.py` の `inventory`): DB 層が判定する項目 (1) 接続先の突き合わせ (`comparison` = match / mismatch / unknown と `judgment`)、(2) 宣言 (欠落は confirmed + `remediation-required`、値の不正は blocked)、(3) migration と application ごとの upgrade 状態 (台帳を読めない application は blocked)、(4) credential registry の件数と状態ごとの件数 (credential_id と秘密の列は読まない。返る列名を許可リストで固定)、(6) の実行時設定 (対象 role の CONNECTION LIMIT の値と `lock_timeout` / `statement_timeout`)、(8) 接続数の余力 (Data の process 数 × concurrency のアプリケーション role の需要、Control だけが使う auditreader、宣言と実際の process 上限の食い違いは blocked、-1 は対象 role の中だけ unknown) を JSON で出す。(5) と (6) のロック・停止時間の部分は `unjudged_items` (`runbook-acceptance`)。終了コードは 0 = 判定した全項目 confirmed、2 = いずれかが blocked / unknown、1 = ツール自身の失敗 (固定文言)。すべての接続 (application DB を含む) を接続単位で読み取り専用にして読み戻し、確かめられない接続は読まずに unknown。各接続に `lock_timeout=3000ms`・`statement_timeout=5000ms`。DSN は環境変数だけで受け取り、user / password / host は全経路で、dbname は識別フィールド以外で出力しない。
+- **証拠**: `MitateDB-api/tests/test_ops_inventory.py` 80 テスト、変異 82 件すべて期待どおり。`MitateDB-api/tests` `1263 passed, 2 subtests passed` (基点 1183)。root gate **`3610 passed, 2 subtests passed`**、judge=PASS、実行クラスタ差分 0 (基点 3530 + 80)。`--register` OK (427 CH-ID)。公開値スキャン flagged 0。`security/CONTROL_MAPPING.md` Version 2.3 (SI-08・SI-09・SI-10 の MitateDB ブロック。SI-08 は 14,809 字 / 上限 15,200)。
+- **レビュー**: 独立コードレビュー 5 回 (差し戻し 4 回)。接続数の式に Data の process 数が掛かっていない、application 接続の読み取り専用を確かめていない、書き込み拒否を 1 接続でしか試していない、宣言読み取りの失敗が confirmed に進む、user の番兵が DSN に入っていない、を直した。**実装担当が「直した」と報告した項目が 2 回続けて直っていなかった** — 以後、修正の報告には file:line とその箇所だけを壊す変異の赤を必須にした。
+- **本番の Gate-0 への帰結**: DB 層だけでは (5) と (6) のロック・停止時間の部分が判定外なので終了コード 0 でも全体は ready ではない。全体は WP-D の runbook で、表の独立レビューの受理記録と platform 層を合わせて判定する。R-47 の状態の application があれば (3) は blocked。
