@@ -982,7 +982,7 @@ python3 tools/check_comment_provenance.py --register
 
 **訂正註 F-4 (`security/CONTROL_MAPPING_HISTORY.md`)**: §2.2 は同ファイルを触らないパス (「追加だけで旧文の移動は生じない」) としている。本 WP は SI-08 の (6) の主張そのものの**訂正**であり、`security/CONTROL_MAPPING.md` 冒頭の Update convention が「訂正は現行行を書き換え、旧文は逐語・無編集で `CONTROL_MAPPING_HISTORY.md` へ移す」と定めるため、統合時に監督が同ファイルの SI-08 の節へ旧文 1 行 (基点の (6) の Control の bullet) を逐語で足した。実装担当は同ファイルに触れていない。足した内容は監査照合 F-CM に記録する。
 
-**訂正註 F-5 (`_added_commit` の未追跡ファイルの扱い、差し戻し 1 の R1-3)**: `MitateDB-api/tests/test_platform_migration_reapply.py` の `_added_commit` は、**未追跡のときだけ** `None` を返す (`git ls-files --error-unmatch` が失敗した場合)。追跡済みで `git log --diff-filter=A` が空なら従来どおり `RuntimeError` を出す。0013 は統合の前は未追跡であり、統合によって追跡済みに変わるため、統合後に監督が `MitateDB-api/tests/test_platform_migration_reapply.py::test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` を再実行して、追跡済みの経路でも緑であることを確かめる。**結果: (統合後に監督が記入)**
+**訂正註 F-5 (`_added_commit` の未追跡ファイルの扱い、差し戻し 1 の R1-3)**: `MitateDB-api/tests/test_platform_migration_reapply.py` の `_added_commit` は、**未追跡のときだけ** `None` を返す (`git ls-files --error-unmatch` が失敗した場合)。追跡済みで `git log --diff-filter=A` が空なら従来どおり `RuntimeError` を出す。0013 は統合の前は未追跡であり、統合によって追跡済みに変わるため、統合後に監督が `MitateDB-api/tests/test_platform_migration_reapply.py::test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` を再実行して、追跡済みの経路でも緑であることを確かめる。**結果: 統合後 (0013 が追跡済みの状態) に `MitateDB-api/tests/test_platform_migration_reapply.py` を再実行し `32 passed`。追跡済みの経路で起点 `[11]` が緑である**
 
 **監督裁定 F-S1〜F-S10 (第 1 段の実測への裁定。2026-09-17。逐語)**
 
@@ -1032,7 +1032,7 @@ gate: 3688 passed, 2 subtests passed in 299.61s (0:04:59)
 gate: judge=PASS
 ```
 
-**統合コミット**: (統合時に監督が記入)
+**統合コミット**: 作業コミット `467b932`、main へのマージ `1620563` (2026-09-18)
 
 ## 7. 本書の範囲外の後続 (列挙のみ。本書の WP では行わない)
 
