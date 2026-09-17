@@ -120,10 +120,15 @@ _PLATFORM_MIGRATION_NAMES = (
     "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
     "0005_application_audit.sql", "0007_platform_declarations.sql",
     "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
+    "0013_role_statement_timeouts.sql",
 )
 
 
-def _bootstrap(prefix: str) -> types.SimpleNamespace:
+def _bootstrap(prefix: str, *, apply_0013: bool = True) -> types.SimpleNamespace:
+    """`apply_0013=False` stops right after `0012` -- used by the one test
+    that observes 0013's own per-application loop (section 2) declaring
+    `statement_timeout` retroactively on roles provisioned before 0013
+    first ran."""
     admin_dsn = _admin_dsn()
     provision_role = f"{prefix}svc_provision"
     api_role = f"{prefix}svc_api"
@@ -150,12 +155,37 @@ def _bootstrap(prefix: str) -> types.SimpleNamespace:
     )
     _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
     _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+    if apply_0013:
+        _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
 
     return types.SimpleNamespace(
         prefix=prefix, admin_dsn=admin_dsn, provision_dsn=provision_dsn, provision_role=provision_role,
         api_role=api_role, controlplane_role=controlplane_role, platform_db=platform_db, schema=schema,
         migrations_dir=rewritten_dir, migration_paths=rewritten,
     )
+
+
+def _provision_app_via_function(dsn: str, schema: str, app_id: str) -> "tuple[str, str, str]":
+    """Calls `begin_provision_application` directly (never the full 0003
+    script) -- enough to observe 0013's own role-setting behavior without
+    also creating a real per-application database this test would then
+    have to clean up. `database_name` stays NULL on the registry row
+    until `finish_provision_application` runs (0003's own job, never
+    called here), so calling this twice for the SAME `app_id` is not
+    rejected as already-provisioned -- it instead exercises `CREATE
+    ROLE`'s own `duplicate_object` fallback branch."""
+    conn = psycopg.connect(dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT * FROM {fn}(%s, %s, %s)").format(
+                    fn=sql.Identifier(schema, "begin_provision_application")),
+                [app_id, secrets.token_urlsafe(24), secrets.token_urlsafe(24)],
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return row[0], row[1], row[2]
 
 
 def _clear_ambient_pg_connection_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,8 +203,8 @@ def _clear_ambient_pg_connection_env_vars(monkeypatch: pytest.MonkeyPatch) -> No
 
 @pytest.fixture()
 def platform() -> Iterator[types.SimpleNamespace]:
-    """A fresh, throwaway platform through 0001/0002/0005/0007/0011/0012
-    -- one per test, never shared (several tests drift role settings,
+    """A fresh, throwaway platform through 0001/0002/0005/0007/0011/0012/
+    0013 -- one per test, never shared (several tests drift role settings,
     constraints, ACLs, and function bodies). Does NOT clear the ambient
     libpq connection variables the test-infra cluster exports (`_run_
     apply` does that, right before the one in-process `ops.main` call
@@ -292,13 +322,14 @@ def test_apply_platform_migration_accepts_a_known_file_through_a_symlinked_migra
 
 
 def test_apply_platform_migration_accepted_filenames_are_pinned_and_exist_without_app_id():
-    """The accepted-file constant is pinned to the 4 named files;
+    """The accepted-file constant is pinned to the 5 named files;
     each is real and references no `:app_id` psql variable; the
     directory's own `:app_id`-free files differ from this set by exactly
     the 2 bootstrap-only migrations."""
     assert ops._PLATFORM_MIGRATION_FILENAMES == (
         "0005_application_audit.sql", "0007_platform_declarations.sql",
         "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
+        "0013_role_statement_timeouts.sql",
     )
     no_app_id_files = set()
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
@@ -649,6 +680,446 @@ def test_apply_platform_migration_0012_restores_a_manually_drifted_function_body
 
 
 # ===========================================================================
+# 0013 -- role-level statement_timeout for auditreader and every
+# application's own runtime/developer role
+# ===========================================================================
+
+
+def test_apply_platform_migration_0013_sets_statement_timeout_on_auditreader_database_independently(platform):
+    """0013's own bootstrap application already declared
+    `mitatedbsvc_auditreader`'s `statement_timeout`, database-
+    independently (`setdatabase = 0`, the row `_role_setting` reads)."""
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    assert _role_setting(platform.provision_dsn, auditreader_role) == ["statement_timeout=5000ms"]
+
+
+def test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_application_roles(monkeypatch):
+    """0013's own per-application loop (section 2) retroactively
+    declares `statement_timeout` on BOTH the runtime and developer role
+    of every application already provisioned BEFORE 0013 first ran,
+    observed across 2 applications (a single application could not tell
+    this apart from a coincidence)."""
+    _require_admin_connection()
+    admin_dsn = _admin_dsn()
+    prefix = f"r45wpef102{secrets.token_hex(4)}"
+    try:
+        platform = _bootstrap(prefix, apply_0013=False)
+    except Exception:
+        _sweep_prefix(admin_dsn, prefix)
+        raise
+    try:
+        _d1, rt1, dv1 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f102a")
+        _d2, rt2, dv2 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f102b")
+        for role in (rt1, dv1, rt2, dv2):
+            assert _role_setting(platform.provision_dsn, role) is None
+        rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+        assert rc == 0
+        for role in (rt1, dv1, rt2, dv2):
+            assert _role_setting(platform.provision_dsn, role) == ["statement_timeout=5000ms"]
+    finally:
+        _sweep_prefix(admin_dsn, prefix)
+
+
+def test_apply_platform_migration_0013_succeeds_with_an_unprovisioned_registry_row(monkeypatch, platform):
+    """A registry row that is registered but never provisioned
+    (`runtime_role` NULL) is filtered out by the loop's own `WHERE`
+    clause before either column's own value is ever read -- 0013 still
+    succeeds, and the loop never touches a role an unfiltered row's own
+    `developer_role` column happens to name (here, the unrelated
+    provision role itself, which is a real row in `pg_roles`)."""
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("INSERT INTO {table} (application_id, developer_role) VALUES (%s, %s)").format(
+                    table=sql.Identifier(platform.schema, "applications")),
+                ["f103", platform.provision_role],
+            )
+    finally:
+        conn.close()
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    assert _role_setting(platform.provision_dsn, platform.provision_role) is None
+
+
+def test_apply_platform_migration_0013_sets_statement_timeout_on_both_branches_of_begin_provision_application(platform):
+    """The first call to `begin_provision_application` for a
+    fresh `application_id` takes the `CREATE ROLE` branch; calling it
+    again for the SAME `application_id` (its own `database_name` column
+    stays NULL until `finish_provision_application` runs, so this is not
+    rejected as already-provisioned) takes the `duplicate_object` ->
+    `ALTER ROLE` fallback branch instead -- both branches leave BOTH
+    roles with the SAME `statement_timeout` declaration."""
+    _database_name, runtime_role, developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f104")
+    assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
+    assert _role_setting(platform.provision_dsn, developer_role) == ["statement_timeout=5000ms"]
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(runtime_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(developer_role)))
+    finally:
+        admin.close()
+    assert _role_setting(platform.provision_dsn, runtime_role) is None
+    assert _role_setting(platform.provision_dsn, developer_role) is None
+
+    _database_name_2, runtime_role_2, developer_role_2 = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f104")
+    assert runtime_role_2 == runtime_role and developer_role_2 == developer_role
+    assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
+    assert _role_setting(platform.provision_dsn, developer_role) == ["statement_timeout=5000ms"]
+
+
+def _extract_function_block(text: str, function_name: str) -> "list[str]":
+    lines = text.splitlines()
+    start = end = None
+    for i, line in enumerate(lines):
+        if start is None and f"CREATE OR REPLACE FUNCTION mitatedb_registry.{function_name}(" in line:
+            start = i
+        if start is not None and line.startswith(f"REVOKE ALL ON FUNCTION mitatedb_registry.{function_name}("):
+            end = i
+            break
+    assert start is not None and end is not None, (function_name, start, end)
+    return lines[start:end + 1]
+
+
+def test_apply_platform_migration_0013_function_body_differs_from_0012_only_by_the_added_statement_timeout_lines():
+    """0013's own `CREATE OR REPLACE FUNCTION begin_provision_
+    application` differs from 0012's identical block ONLY by 4 added
+    `ALTER ROLE ... SET statement_timeout` lines (one per role, in both
+    the `CREATE ROLE` branch and its own `duplicate_object` fallback) --
+    CONNECTION LIMIT 36, the `application_id` pattern, the NAMEDATALEN
+    check, the password-length check, the double-provision exception,
+    `assert_role_has_no_memberships`, and the returned columns are all
+    unchanged. The comparison is ORDER-PRESERVING: removing the added
+    lines from 0013's own body must leave the EXACT line sequence 0012
+    has, not merely the same multiset -- a reordered or misplaced branch
+    would pass a multiset-only comparison but fails this one."""
+    text_0012 = (MIGRATIONS_DIR / "0012_role_connection_limits.sql").read_text()
+    text_0013 = (MIGRATIONS_DIR / "0013_role_statement_timeouts.sql").read_text()
+    lines_0012 = [line.strip() for line in _extract_function_block(text_0012, "begin_provision_application")]
+    lines_0013 = [line.strip() for line in _extract_function_block(text_0013, "begin_provision_application")]
+    added_runtime_line = "EXECUTE format('ALTER ROLE %I SET statement_timeout = %L', v_runtime_role, '5000ms');"
+    added_developer_line = "EXECUTE format('ALTER ROLE %I SET statement_timeout = %L', v_developer_role, '5000ms');"
+    filtered_0013 = [line for line in lines_0013 if line not in (added_runtime_line, added_developer_line)]
+    assert filtered_0013 == lines_0012
+    assert lines_0013.count(added_runtime_line) == 2
+    assert lines_0013.count(added_developer_line) == 2
+
+
+def test_apply_platform_migration_0013_statement_timeout_values_are_a_single_positive_literal():
+    """Every place 0013's own body places a `statement_timeout` value --
+    the auditreader `ALTER ROLE` (section 1) and the 4 provisioning-time
+    `EXECUTE format(...)` calls' own value argument (section 3) -- carries
+    the exact SAME literal (the last quoted substring on each matching,
+    comment-stripped line), never a mix of values; that one literal
+    parses to a POSITIVE number of milliseconds through `pg_timeouts.
+    ms_from_pg_timeout_text` (0 or negative would make `inventory`'s own
+    item (6) `blocked` rather than `confirmed`)."""
+    import re
+
+    text = ops._strip_sql_line_comments((MIGRATIONS_DIR / "0013_role_statement_timeouts.sql").read_text())
+    values = []
+    for line in text.splitlines():
+        if "statement_timeout" not in line:
+            continue
+        quoted = re.findall(r"'([^']*)'", line)
+        if quoted:
+            values.append(quoted[-1])
+    assert len(values) >= 1
+    assert len(values) == 7
+    assert set(values) == {"5000ms"}
+    assert ops.pg_timeouts.ms_from_pg_timeout_text(values[0]) > 0
+
+
+def test_apply_platform_migration_accepts_0013_via_the_subcommand(monkeypatch, platform):
+    """0013 is accepted by name through the real subcommand
+    (not merely present in the pinned constant)."""
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+
+
+def test_apply_platform_migration_variable_table_keys_match_the_filenames_constant():
+    """`_PLATFORM_MIGRATION_VARIABLE_TABLE`'s own key set
+    equals `_PLATFORM_MIGRATION_FILENAMES` exactly -- no accepted file
+    missing a variable-table entry, no stale entry for a file no longer
+    accepted."""
+    assert set(ops._PLATFORM_MIGRATION_VARIABLE_TABLE.keys()) == set(ops._PLATFORM_MIGRATION_FILENAMES)
+
+
+def test_apply_platform_migration_0013_revokes_public_execute_on_the_replaced_function(monkeypatch, platform):
+    """0013's own `REVOKE ALL ON FUNCTION ... FROM PUBLIC`
+    runs every time it (re)applies the function -- a hand-added PUBLIC
+    EXECUTE grant does not survive a reapplication of 0013 (0012's own
+    prior REVOKE would already leave the ACL clean on a fresh bootstrap,
+    so this test grants PUBLIC EXECUTE back by hand first to prove 0013's
+    OWN REVOKE, not merely 0012's, is what keeps it closed)."""
+    function_signature = f"{platform.schema}.begin_provision_application(text, text, text)"
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {fn} TO PUBLIC").format(fn=sql.SQL(function_signature)))
+    finally:
+        conn.close()
+    _, acl = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
+    assert _acl_has_public_grantee(acl)
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    _, acl = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
+    assert not _acl_has_public_grantee(acl)
+
+
+def test_apply_platform_migration_0013_restores_manually_drifted_settings_and_function_body(monkeypatch, platform):
+    """Hand-drifted `mitatedbsvc_auditreader` setting, a
+    pre-existing application's own runtime-role setting, and the
+    replaced `begin_provision_application` body all get restored by
+    re-applying 0013 through `apply-platform-migration`; a second
+    re-application changes nothing further."""
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    _database_name, runtime_role, _developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f111")
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(auditreader_role)))
+    finally:
+        admin.close()
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(runtime_role)))
+    finally:
+        conn.close()
+    marker = "NAMEDATALEN"
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "CREATE OR REPLACE FUNCTION {fn}(p_app_id text, p_runtime_password text, "
+                    "p_developer_password text) RETURNS TABLE(database_name text, runtime_role text, "
+                    "developer_role text) LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'drifted stub'; END; $fn$"
+                ).format(fn=sql.Identifier(platform.schema, "begin_provision_application")))
+    finally:
+        conn.close()
+
+    assert _role_setting(platform.provision_dsn, auditreader_role) is None
+    assert _role_setting(platform.provision_dsn, runtime_role) is None
+    drifted_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
+    assert marker not in drifted_def
+
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    assert _role_setting(platform.provision_dsn, auditreader_role) == ["statement_timeout=5000ms"]
+    assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
+    restored_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
+    assert marker in restored_def
+    assert "drifted stub" not in restored_def
+
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    assert _role_setting(platform.provision_dsn, auditreader_role) == ["statement_timeout=5000ms"]
+    assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
+
+
+def test_apply_platform_migration_0013_then_0012_then_0013_restores_new_application_setting(monkeypatch, platform):
+    """0012 and 0013 `CREATE OR REPLACE` the
+    identical function -- applying 0012 alone after 0013 drops the
+    `statement_timeout` lines for FUTURE applications; applying 0013 once
+    more restores them, observed on an application provisioned after the
+    stray 0012 re-application."""
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    rc = _run_apply(monkeypatch, platform, "0012_role_connection_limits.sql")
+    assert rc == 0
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    _database_name, runtime_role, developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f113")
+    assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
+    assert _role_setting(platform.provision_dsn, developer_role) == ["statement_timeout=5000ms"]
+
+
+def test_apply_platform_migration_0013_is_transactional_and_rolls_back_on_permission_failure(monkeypatch, platform):
+    """A per-application role 0013's own applying role
+    (`mitatedbsvc_provision`) lacks ADMIN OPTION on (created directly by
+    the cluster admin, not by `begin_provision_application`, so
+    CREATEROLE's own implicit ADMIN OPTION never attaches) makes the
+    whole loop fail; the auditreader `ALTER ROLE` from section 1 rolls
+    back with it, so nothing is left half-applied."""
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(auditreader_role)))
+    finally:
+        admin.close()
+    assert _role_setting(platform.provision_dsn, auditreader_role) is None
+
+    foreign_role = f"{platform.prefix}foreignrole"
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL(
+                "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT"
+            ).format(sql.Identifier(foreign_role), sql.Literal(secrets.token_urlsafe(24))))
+    finally:
+        admin.close()
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (application_id, runtime_role, developer_role) VALUES (%s, %s, %s)"
+                ).format(table=sql.Identifier(platform.schema, "applications")),
+                ["f114", foreign_role, foreign_role],
+            )
+    finally:
+        conn.close()
+
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc != 0
+    assert _role_setting(platform.provision_dsn, auditreader_role) is None
+
+
+def test_apply_platform_migration_0013_skips_a_registry_row_with_no_matching_role(monkeypatch, platform):
+    """A registry row naming a role `pg_roles` no longer
+    carries (a deprovisioned application whose own row survived) is
+    skipped rather than aborting the whole migration; that row's own
+    role never picks up the setting, since 0013 never touched it."""
+    ghost_runtime = f"{platform.prefix}_app_f115_rt"
+    ghost_developer = f"{platform.prefix}_app_f115_dv"
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (application_id, runtime_role, developer_role) VALUES (%s, %s, %s)"
+                ).format(table=sql.Identifier(platform.schema, "applications")),
+                ["f115", ghost_runtime, ghost_developer],
+            )
+    finally:
+        conn.close()
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    assert _role_setting(platform.provision_dsn, ghost_runtime) is None
+
+
+def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_different_role(monkeypatch):
+    """A cluster where `mitatedbsvc_auditreader` was
+    created by the cluster admin role directly (never by the applying
+    provision role, so CREATEROLE's own implicit ADMIN OPTION never
+    attaches to it) makes 0013 fail with a non-zero exit code through
+    `apply-platform-migration`; neither an application role setting nor
+    the replaced function body ever appear."""
+    _require_admin_connection()
+    admin_dsn = _admin_dsn()
+    prefix = f"r45wpef118{secrets.token_hex(4)}"
+    provision_role = f"{prefix}svc_provision"
+    api_role = f"{prefix}svc_api"
+    controlplane_role = f"{prefix}svc_controlplane"
+    platform_db = f"{prefix}_platform"
+    schema = f"{prefix}_registry"
+    provision_password = secrets.token_urlsafe(24)
+    auditreader_role = f"{prefix}svc_auditreader"
+
+    rewritten_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_f118_"))
+    rewritten: "dict[str, Path]" = {}
+    for name in (
+        "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
+        "0007_platform_declarations.sql", "0011_process_ceilings.sql",
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+    ):
+        text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
+        out = rewritten_dir / name
+        out.write_text(text)
+        rewritten[name] = out
+    try:
+        _run_psql(admin_dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
+        provision_dsn = _dsn_with(admin_dsn, user=provision_role, password=provision_password, dbname=platform_db)
+        _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
+        # 0005 is never applied in this fixture at all (the cluster admin
+        # creates `mitatedbsvc_auditreader` directly instead) -- this has
+        # no bearing on this test's own subject, CREATEROLE's own
+        # implicit ADMIN OPTION, granted only to a role's own creator.
+        admin = psycopg.connect(admin_dsn, autocommit=True)
+        try:
+            with admin.cursor() as cur:
+                cur.execute(sql.SQL(
+                    "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 5"
+                ).format(sql.Identifier(auditreader_role), sql.Literal(secrets.token_urlsafe(24))))
+        finally:
+            admin.close()
+        _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"],
+                 {"api_role": api_role, "controlplane_role": controlplane_role})
+        _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
+        _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+
+        monkeypatch.setenv("MITATEDB_PROVISION_DSN", provision_dsn)
+        monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(rewritten_dir))
+        _clear_ambient_pg_connection_env_vars(monkeypatch)
+        try:
+            rc = ops.main(["apply-platform-migration", "0013_role_statement_timeouts.sql", "--lock-timeout", _TEST_LOCK_TIMEOUT])
+        except SystemExit as exc:
+            rc = exc.code
+        assert rc != 0
+        assert _role_setting(provision_dsn, auditreader_role) is None
+        function_def, _ = _function_def_and_acl(provision_dsn, schema, "begin_provision_application")
+        assert "statement_timeout" not in (function_def or "")
+    finally:
+        _sweep_prefix(admin_dsn, prefix)
+
+
+def test_apply_platform_migration_0013_section_3_permission_failure_rolls_back_sections_1_and_2(monkeypatch, platform):
+    """Section 1 (the auditreader `ALTER ROLE`), section 2 (the
+    per-application loop), and section 3 (`CREATE OR REPLACE FUNCTION`)
+    all run inside the SAME transaction -- a permission failure confined
+    to section 3 (the applying role no longer owns `begin_provision_
+    application`, so `CREATE OR REPLACE FUNCTION` is refused) rolls back
+    section 1 and section 2's own changes from THIS run too, not merely
+    section 3's own attempted change."""
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    _database_name, runtime_role, _developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f119")
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(auditreader_role)))
+    finally:
+        admin.close()
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(runtime_role)))
+    finally:
+        conn.close()
+    assert _role_setting(platform.provision_dsn, auditreader_role) is None
+    assert _role_setting(platform.provision_dsn, runtime_role) is None
+
+    other_owner = conninfo_to_dict(platform.admin_dsn)["user"]
+    admin_on_platform_db = psycopg.connect(
+        _dsn_with(platform.admin_dsn, dbname=platform.platform_db), autocommit=True)
+    try:
+        with admin_on_platform_db.cursor() as cur:
+            cur.execute(sql.SQL(
+                "ALTER FUNCTION {}.begin_provision_application(text, text, text) OWNER TO {}"
+            ).format(sql.Identifier(platform.schema), sql.Identifier(other_owner)))
+    finally:
+        admin_on_platform_db.close()
+
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc != 0
+    assert _role_setting(platform.provision_dsn, auditreader_role) is None
+    assert _role_setting(platform.provision_dsn, runtime_role) is None
+
+
+# ===========================================================================
 # audit-only -- the connection target used by every test above
 # ===========================================================================
 
@@ -700,7 +1171,7 @@ def test_apply_platform_migration_variables_are_referenced_only_in_quoted_form()
     """psql's own quoted interpolation
     (`:"name"`/`:'name'`) is what makes a role-name argument safe to
     substitute into DDL -- no value validation is layered on top of it.
-    Each of the 4 accepted platform migration files
+    Each of the 5 accepted platform migration files
     references its own psql variables only through that quoted form; a
     bare `:name` reference is never present. 0007 has at least one
     quoted reference (non-vacuous)."""

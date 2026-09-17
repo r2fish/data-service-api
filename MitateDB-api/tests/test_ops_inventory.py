@@ -16,6 +16,7 @@ and the roadmap R-47 per-application `InsufficientPrivilege` handling.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import subprocess
 import tempfile
@@ -123,7 +124,11 @@ def _historical_0003(commit: str) -> str:
     return result.stdout
 
 
-def _bootstrap(prefix: str) -> types.SimpleNamespace:
+def _bootstrap(prefix: str, *, apply_0013: bool = True) -> types.SimpleNamespace:
+    """`apply_0013=False` stops right after `0012` -- used by the one test
+    that observes `apply-platform-migration` itself turning item (6) from
+    `unknown` into `confirmed`. Every other caller applies 0013
+    unconditionally, like 0012, since 0013 depends only on 0005/0012."""
     admin_dsn = _admin_dsn()
     provision_role = f"{prefix}svc_provision"
     api_role = f"{prefix}svc_api"
@@ -137,6 +142,7 @@ def _bootstrap(prefix: str) -> types.SimpleNamespace:
     for name in (
         "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
         "0005_application_audit.sql", "0012_role_connection_limits.sql",
+        "0013_role_statement_timeouts.sql",
         "0007_platform_declarations.sql", "0011_process_ceilings.sql",
         "0003_provision_application.sql",
     ):
@@ -154,6 +160,8 @@ def _bootstrap(prefix: str) -> types.SimpleNamespace:
     _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
     _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
     _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+    if apply_0013:
+        _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
     _run_psql(
         provision_dsn, rewritten["0007_platform_declarations.sql"],
         {"api_role": api_role, "controlplane_role": controlplane_role},
@@ -166,14 +174,15 @@ def _bootstrap(prefix: str) -> types.SimpleNamespace:
         platform_db=platform_db, schema=schema,
         provision_script=rewritten["0003_provision_application.sql"],
         historical_provision_script=rewritten["0003_historical_pre_r47.sql"],
+        migrations_dir=rewritten_dir,
     )
 
 
 @pytest.fixture()
 def platform() -> Iterator[types.SimpleNamespace]:
-    """A fresh, throwaway platform through 0001/0002/0005/0012/0007/0011 --
-    one per test, never shared (several tests mutate CONNECTION LIMITs and
-    hold locks)."""
+    """A fresh, throwaway platform through 0001/0002/0005/0012/0007/0011/
+    0013 -- one per test, never shared (several tests mutate CONNECTION
+    LIMITs and hold locks)."""
     _require_admin_connection()
     prefix = f"r45wpbinv{secrets.token_hex(4)}"
     admin_dsn = _admin_dsn()
@@ -198,9 +207,10 @@ def _declare_golden_path(monkeypatch: pytest.MonkeyPatch, platform: types.Simple
 def _declare_role_lock_timeouts(platform: types.SimpleNamespace) -> None:
     """`0007` declares only `statement_timeout`/`idle_in_transaction_
     session_timeout` on the two writer roles -- `lock_timeout` is never
-    part of that migration, and NEITHER timeout is ever declared on
-    `mitatedbsvc_auditreader` (created by `0005`). Tests that need item
-    (6)'s runtime-settings half to read `confirmed` add both here,
+    part of that migration, and 0013's own default bootstrap declares
+    only `statement_timeout` on `mitatedbsvc_auditreader` (never
+    `lock_timeout`). Tests that need item (6)'s runtime-settings half to
+    read `confirmed` add both here,
     mirroring an operator's own `ALTER ROLE ... SET lock_timeout`/`SET
     statement_timeout` run after 0007 -- covering the SAME full role set
     item (8) discovers (api/controlplane/auditreader)."""
@@ -211,6 +221,30 @@ def _declare_role_lock_timeouts(platform: types.SimpleNamespace) -> None:
             for role in (platform.api_role, platform.controlplane_role, auditreader_role):
                 cur.execute(sql.SQL("ALTER ROLE {} SET lock_timeout = '3000ms'").format(sql.Identifier(role)))
                 cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(sql.Identifier(role)))
+    finally:
+        admin.close()
+
+
+def _reset_role_statement_timeout(admin_dsn: str, role: str) -> None:
+    """Undoes a role-level `statement_timeout` declaration -- used to put
+    a role back into the undeclared state 0013 no longer leaves it in by
+    default (0013 sets this on `mitatedbsvc_auditreader` and every
+    provisioned application's own runtime/developer role
+    unconditionally)."""
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(role)))
+    finally:
+        admin.close()
+
+
+def _set_role_statement_timeout(admin_dsn: str, role: str, value: str) -> None:
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = {}").format(
+                sql.Identifier(role), sql.SQL(value)))
     finally:
         admin.close()
 
@@ -316,7 +350,7 @@ def test_inventory_top_level_and_item_keys_are_pinned(monkeypatch, capsys, platf
     assert set(report["credentials"].keys()) == {
         "judgment", "remediation_required", "total_count", "enabled_count", "revoked_count", "must_rotate_count",
     }
-    assert set(report["ddl_lock"].keys()) == {"judgment", "remediation_required"}
+    assert set(report["ddl_lock"].keys()) == {"judgment", "remediation_required", "reason"}
     assert set(report["connection_headroom"].keys()) == {"judgment", "remediation_required", "control_deployed"}
     assert report["unjudged_items"] == [
         {"item": 5, "part": "all", "reason": "runbook-acceptance"},
@@ -353,7 +387,8 @@ def test_inventory_judgment_vocabulary_is_closed(monkeypatch, capsys, platform):
 def test_inventory_reason_vocabulary_is_pinned():
     """the closed set of fixed reason
     words a `blocked` judgment may carry."""
-    assert ops._INVENTORY_REASONS == frozenset({"ledger-unreadable", "declaration-invalid"})
+    assert ops._INVENTORY_REASONS == frozenset(
+        {"ledger-unreadable", "declaration-invalid", "statement-timeout-unbounded"})
 
 
 def test_inventory_unjudged_parts_vocabulary_is_pinned():
@@ -363,16 +398,28 @@ def test_inventory_unjudged_parts_vocabulary_is_pinned():
 
 
 def test_inventory_exit_code_is_2_when_any_item_is_not_confirmed(monkeypatch, capsys, platform):
-    """2a and W4-1: with no `lock_timeout` declared
-    on either writer role, item (6) is naturally `unknown` even with item
-    (1) forced to `match` -- the exit code must be exactly 2 (not 0, not
-    1)."""
+    """2a and W4-1: with `mitatedbsvc_auditreader`'s own
+    `statement_timeout` (declared by 0013's default bootstrap) reset away,
+    item (6) is `unknown` even with item (1) forced to `match` -- the exit
+    code must be exactly 2 (not 0, not 1)."""
     _declare_golden_path(monkeypatch, platform)
+    _reset_role_statement_timeout(platform.admin_dsn, f"{platform.prefix}svc_auditreader")
     host = conninfo_to_dict(platform.provision_dsn)["host"]
     connection_name = Path(host).name
     rc, report, _out, _err = _run_inventory(monkeypatch, capsys, platform, cloud_sql_connection_name=connection_name, **_HEADROOM_OK)
     assert report["connection"]["comparison"] == "match"
     assert report["ddl_lock"]["judgment"] == "unknown"
+    assert rc == 2
+
+
+def test_inventory_exit_code_is_2_when_ddl_lock_is_blocked(monkeypatch, capsys, platform):
+    """A blocked item (6) exits 2, the same as any other
+    non-confirmed judgment -- never 1, which `cmd_inventory` reserves for
+    a failure before any item judgment exists at all."""
+    _declare_role_lock_timeouts(platform)
+    _set_role_statement_timeout(platform.admin_dsn, f"{platform.prefix}svc_auditreader", "0")
+    rc, report, _out, _err = _run_inventory(monkeypatch, capsys, platform, **_HEADROOM_OK)
+    assert report["ddl_lock"]["judgment"] == "blocked"
     assert rc == 2
 
 
@@ -1060,13 +1107,16 @@ def test_inventory_ddl_lock_is_confirmed_without_lock_timeout_declared(platform)
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "confirmed", "remediation_required": False}
+    assert report == {"judgment": "confirmed", "remediation_required": False, "reason": None}
 
 
 def test_inventory_ddl_lock_is_unknown_when_statement_timeout_not_declared(platform):
     """`lock_timeout` declared alone (never
     `statement_timeout`) on every target role still leaves item (6)
-    unknown -- `lock_timeout` alone is never sufficient."""
+    unknown -- `lock_timeout` alone is never sufficient. Resets
+    `mitatedbsvc_auditreader`'s own `statement_timeout` (declared by
+    0013's default bootstrap) back to undeclared first."""
+    _reset_role_statement_timeout(platform.admin_dsn, f"{platform.prefix}svc_auditreader")
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
@@ -1079,7 +1129,7 @@ def test_inventory_ddl_lock_is_unknown_when_statement_timeout_not_declared(platf
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
 def test_inventory_ddl_lock_is_confirmed_when_role_settings_are_declared(platform):
@@ -1093,14 +1143,37 @@ def test_inventory_ddl_lock_is_confirmed_when_role_settings_are_declared(platfor
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "confirmed", "remediation_required": False}
+    assert report == {"judgment": "confirmed", "remediation_required": False, "reason": None}
+
+
+def test_inventory_ddl_lock_key_set_is_the_same_on_the_psycopg_error_path(monkeypatch, platform):
+    """A `psycopg.Error` while discovering item (6)'s own target roles
+    (`_inventory_role_classes`) still returns the SAME key set as every
+    other outcome (`judgment`/`remediation_required`/`reason`) -- the
+    confirmed, unknown (undeclared, `-1` CONNECTION LIMIT), and blocked
+    paths are each already pinned to this exact dict shape by the other
+    tests in this file; this is the one remaining return path (the
+    `psycopg.Error` early returns) none of them exercises."""
+    def _raise(conn, schema):
+        raise psycopg.OperationalError("synthetic failure")
+
+    monkeypatch.setattr(ops, "_inventory_role_classes", _raise)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
 def test_inventory_ddl_lock_target_roles_include_auditreader(platform):
     """Item (6)'s target roles are the SAME
     full set item (8) discovers (api/controlplane/auditreader) -- with
     `lock_timeout`/`statement_timeout` declared on api/controlplane ONLY
-    (never on `mitatedbsvc_auditreader`), the item stays unknown."""
+    (and `mitatedbsvc_auditreader`'s own `statement_timeout`, declared by
+    0013's default bootstrap, reset back to undeclared), the item
+    stays unknown."""
+    _reset_role_statement_timeout(platform.admin_dsn, f"{platform.prefix}svc_auditreader")
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
@@ -1114,7 +1187,212 @@ def test_inventory_ddl_lock_target_roles_include_auditreader(platform):
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
+
+
+def test_inventory_ddl_lock_is_confirmed_by_default_bootstrap_alone(platform):
+    """`statement_timeout` is already declared, database-
+    independently, on every platform-plane role by 0007 (api/
+    controlplane) and 0013 (`mitatedbsvc_auditreader`) alone, with each
+    role's `CONNECTION LIMIT` already set by 0012 -- item (6) reads
+    confirmed with no further declaration step and no application
+    provisioned yet."""
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "confirmed", "remediation_required": False, "reason": None}
+
+
+def test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_zero(platform):
+    """`mitatedbsvc_auditreader`'s own
+    `statement_timeout` (declared by 0013's default bootstrap) explicitly
+    set to `0` (PostgreSQL's own disabled rendering) makes item (6)
+    blocked with the fixed reason, `remediation_required` staying
+    `False`, and the item still carries a `reason` key in the blocked
+    case."""
+    _declare_role_lock_timeouts(platform)
+    _set_role_statement_timeout(platform.admin_dsn, f"{platform.prefix}svc_auditreader", "0")
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "blocked", "remediation_required": False, "reason": "statement-timeout-unbounded"}
+    assert set(report.keys()) == {"judgment", "remediation_required", "reason"}
+
+
+def test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_negative(monkeypatch, platform):
+    """PostgreSQL itself refuses a negative `statement_timeout`
+    on a real role, so this observes the judgment through a
+    substitute reader returning one negative declared value for
+    `mitatedbsvc_auditreader` only -- every other role is still read for
+    real."""
+    _declare_role_lock_timeouts(platform)
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    original = platform_declarations._role_setting_rows
+
+    def _fake(conn, role_name):
+        if role_name == auditreader_role:
+            return [(0, None, ["statement_timeout=-5000"])]
+        return original(conn, role_name)
+
+    monkeypatch.setattr(platform_declarations, "_role_setting_rows", _fake)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "blocked", "remediation_required": False, "reason": "statement-timeout-unbounded"}
+
+
+def test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_unparseable(monkeypatch, platform):
+    """An unrecognized `statement_timeout` rendering
+    (never producible on a real role) is blocked, never confirmed
+    or unknown, its own raw text never surfacing in the output, and the
+    judgment stays inside the closed vocabulary."""
+    _declare_role_lock_timeouts(platform)
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    original = platform_declarations._role_setting_rows
+
+    def _fake(conn, role_name):
+        if role_name == auditreader_role:
+            return [(0, None, ["statement_timeout=not-a-timeout"])]
+        return original(conn, role_name)
+
+    monkeypatch.setattr(platform_declarations, "_role_setting_rows", _fake)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "blocked", "remediation_required": False, "reason": "statement-timeout-unbounded"}
+    assert report["judgment"] in ops._INVENTORY_JUDGMENTS
+    assert "not-a-timeout" not in json.dumps(report)
+
+
+def test_inventory_ddl_lock_is_blocked_when_only_the_application_runtime_role_is_unbounded(monkeypatch, platform):
+    """Every other target role stays positively bounded; only
+    the provisioned application's own runtime role is set to `0`."""
+    _declare_golden_path(monkeypatch, platform)
+    _declare_role_lock_timeouts(platform)
+    app_database = _provision_app(platform, "app1")
+    _set_role_statement_timeout(platform.admin_dsn, f"{app_database}_rt", "0")
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "blocked", "remediation_required": False, "reason": "statement-timeout-unbounded"}
+
+
+def test_inventory_ddl_lock_is_blocked_when_only_the_application_developer_role_is_unbounded(monkeypatch, platform):
+    """Same property as the runtime-role test above, for the
+    developer role."""
+    _declare_golden_path(monkeypatch, platform)
+    _declare_role_lock_timeouts(platform)
+    app_database = _provision_app(platform, "app1")
+    _set_role_statement_timeout(platform.admin_dsn, f"{app_database}_dv", "0")
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "blocked", "remediation_required": False, "reason": "statement-timeout-unbounded"}
+
+
+def test_inventory_ddl_lock_blocked_outranks_unknown_when_mixed_with_an_undeclared_role(monkeypatch, platform):
+    """One provisioned application role at `0` (blocked) and its
+    own sibling role reset to undeclared (unknown) -- the combined
+    judgment across the whole target set is `blocked`, mirroring item
+    (3)'s own judgment-combining rule."""
+    _declare_golden_path(monkeypatch, platform)
+    _declare_role_lock_timeouts(platform)
+    app_database = _provision_app(platform, "app1")
+    _set_role_statement_timeout(platform.admin_dsn, f"{app_database}_rt", "0")
+    _reset_role_statement_timeout(platform.admin_dsn, f"{app_database}_dv")
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_ddl_lock_minus_one_and_zero_statement_timeout_mixture_is_unknown(platform):
+    """The CONNECTION LIMIT early return happens before
+    any role's `statement_timeout` value is read, so a `-1` CONNECTION
+    LIMIT on `controlplane_role` mixed with a `0` `statement_timeout` on
+    `api_role` still reads unknown, never blocked -- the "blocked
+    outranks unknown" rule applies only between `statement_timeout`
+    value judgments, never back across this early return."""
+    _declare_role_lock_timeouts(platform)
+    _set_role_statement_timeout(platform.admin_dsn, platform.api_role, "0")
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(sql.Identifier(platform.controlplane_role)))
+    finally:
+        admin.close()
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
+
+
+def test_inventory_ddl_lock_confirmed_after_apply_platform_migration_0013(monkeypatch, capsys):
+    """A platform bootstrapped only through 0012
+    (0013 not yet applied) reads item (6) as unknown; applying 0013 alone
+    through `apply-platform-migration` -- no further declaration step --
+    makes it confirmed."""
+    _require_admin_connection()
+    admin_dsn = _admin_dsn()
+    prefix = f"r45wpbinvf29{secrets.token_hex(4)}"
+    try:
+        info = _bootstrap(prefix, apply_0013=False)
+    except Exception:
+        _sweep_prefix(admin_dsn, prefix)
+        raise
+    try:
+        _declare_golden_path(monkeypatch, info)
+        conn = ops._inventory_connect(info.provision_dsn)
+        try:
+            before = ops._inventory_ddl_lock_declaration(conn, info.schema)
+        finally:
+            conn.close()
+        assert before["judgment"] == "unknown"
+
+        # `apply-platform-migration` refuses a leftover ambient libpq
+        # connection variable the DSN itself does not cover (e.g. the
+        # test infrastructure's own `PGPASSFILE`) -- cleared here, for
+        # this ONE call only, and restored immediately after so `admin_
+        # dsn` (which has no embedded password of its own, unlike
+        # `info.provision_dsn`) keeps working for this test's own later
+        # `_sweep_prefix` cleanup.
+        ambient_names = (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY)
+        saved_ambient = {name: os.environ.get(name) for name in ambient_names}
+        for name in ambient_names:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(info.migrations_dir))
+        rc = ops.main([
+            "apply-platform-migration", "0013_role_statement_timeouts.sql", "--lock-timeout", "5000ms",
+        ])
+        for name, value in saved_ambient.items():
+            if value is not None:
+                monkeypatch.setenv(name, value)
+        assert rc == 0
+
+        conn = ops._inventory_connect(info.provision_dsn)
+        try:
+            after = ops._inventory_ddl_lock_declaration(conn, info.schema)
+        finally:
+            conn.close()
+        assert after == {"judgment": "confirmed", "remediation_required": False, "reason": None}
+    finally:
+        _sweep_prefix(admin_dsn, prefix)
 
 
 # ===========================================================================
@@ -1685,24 +1963,28 @@ def test_inventory_ddl_lock_ignores_a_per_database_scoped_setting(platform):
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
 def test_inventory_ddl_lock_target_roles_include_application_roles(monkeypatch, platform):
     """Item (6)'s target roles include every
     provisioned application's own `runtime_role`/`developer_role`, the
-    SAME full set item (8) discovers -- lacking the declaration there
-    (never declared on ANY role by any migration) leaves item (6)
-    unknown even when every platform-plane role has it."""
+    SAME full set item (8) discovers -- resetting both roles' own
+    `statement_timeout` (declared automatically by 0013's
+    `begin_provision_application` at provisioning time) back to
+    undeclared leaves item (6) unknown even when every platform-plane
+    role has it."""
     _declare_golden_path(monkeypatch, platform)
     _declare_role_lock_timeouts(platform)
-    _provision_app(platform, "app1")
+    app_database = _provision_app(platform, "app1")
+    _reset_role_statement_timeout(platform.admin_dsn, f"{app_database}_rt")
+    _reset_role_statement_timeout(platform.admin_dsn, f"{app_database}_dv")
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
 def test_inventory_ddl_lock_minus_one_connection_limit_is_unknown(platform):
@@ -1720,7 +2002,7 @@ def test_inventory_ddl_lock_minus_one_connection_limit_is_unknown(platform):
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
 def test_inventory_connection_headroom_auditreader_counted_under_control_only(monkeypatch, platform):
@@ -2116,7 +2398,7 @@ def test_inventory_ddl_lock_control_not_deployed_does_not_exclude_controlplane_r
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
 def test_inventory_ddl_lock_via_cli_control_not_deployed_still_reads_controlplane_role(monkeypatch, capsys, platform):
@@ -2138,7 +2420,7 @@ def test_inventory_ddl_lock_via_cli_control_not_deployed_still_reads_controlplan
     kwargs.pop("control_process_count_total")
     kwargs["control_not_deployed"] = True
     _rc, report, _out, _err = _run_inventory(monkeypatch, capsys, platform, **kwargs)
-    assert report["ddl_lock"] == {"judgment": "unknown", "remediation_required": False}
+    assert report["ddl_lock"] == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
 def _function_source_from_file(path: Path, function_name: str) -> str:

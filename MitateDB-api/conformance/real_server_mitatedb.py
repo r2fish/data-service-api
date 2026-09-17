@@ -365,6 +365,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0007_platform_declarations.sql",
         "0011_process_ceilings.sql",
         "0012_role_connection_limits.sql",
+        "0013_role_statement_timeouts.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -385,6 +386,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
     _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
     _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+    _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
 
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:

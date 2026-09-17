@@ -107,6 +107,12 @@ MIGRATION_NAMES = (
     # `main.build_app`/`build_control_service`) now depends on this
     # migration + the row seeded below, or fails startup with F-15.
     "0011_process_ceilings.sql",
+    # Sets a role-level `statement_timeout` on `mitatedbsvc_auditreader`
+    # and every application's own runtime/developer role -- names
+    # `mitatedbsvc_auditreader` directly, so the fixture applies it AFTER
+    # 0005 (which creates that role), not right after 0012 like the
+    # other migrations above.
+    "0013_role_statement_timeouts.sql",
 )
 
 
@@ -290,6 +296,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
                 cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(auditreader_role), sql.Literal(auditreader_password)))
         finally:
             admin.close()
+        _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise

@@ -181,6 +181,12 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*MitateDB-api control claim, `ops inventory` item (6), superseded 2026-09-18 (Version 2.5), verbatim:*
+
+- item (6)'s runtime-settings half confirms once `statement_timeout` is declared database-independently (`setdatabase = 0`) and every target role in item (8)'s SAME set has a real, non-`-1` `CONNECTION LIMIT` (`lock_timeout` is not judged -- no role here runs DDL); its lock-type/downtime half, and item (5) in full, are named in `unjudged_items` instead (closed `part` vocabulary, fixed reason `runbook-acceptance`).
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
