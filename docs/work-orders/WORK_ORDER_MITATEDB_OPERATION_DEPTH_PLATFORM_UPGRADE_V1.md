@@ -32,6 +32,7 @@
 - **v1.1 (2026-09-16)。** 起草時の疑義 1〜6 への監督裁定 W-1〜W-6 と、反映時の疑義への監督裁定 W-7・W-8 を §2.8 に逐語で置き、§2.3〜§2.6 と各 WP に反映した (v1.0 は未コミットの起草版であり、受け入れ前なので本文に反映した)。
 - **v1.2 (2026-09-17)。** 台帳 R-45 の WP-E (依頼者裁定 2026-09-17 の (a)〜(e) による 4 件と、起草時の疑義・独立設計レビューの指摘への監督裁定 E-R1〜E-R20) を §6A に、WP-D の訂正註を §6.1 に追記した。§7 の番号を保つため WP-E の節は §6A とした。§1〜§6 と §7 の既存の本文は書き換えていない。
 - **v1.3 (2026-09-17)。** WP-E の統合時の訂正註 E-1〜E-5、監督裁定 E-S1〜E-S11、監査照合の逐語記録 5 件を §6A.11 に、依頼者の回答 (R-48・R-47・条件 (d)) を §6A.12 に追記した。§6A の本文と §1〜§7 の既存の本文は書き換えていない。R-48 は本書の WP-F (WP-E の次の 1 本) で解消する (§6A.12。枠決めは別途 §6B)。
+- **v1.4 (2026-09-17)。** 台帳 R-48 を解消する WP-F (依頼者裁定 2026-09-17 の「migration 0013 の形」と監督裁定 F-R1〜F-R33) の manifest を §6B に、WP-D の訂正註 WPD-4 を §6.1 に追記し、§6A.11 の E1-6 の監査照合の記録を統合コミットの実測で埋めた。§7 の番号を保つため WP-F の節は §6B とした。§6A の本文と §1〜§7 の既存の本文は書き換えていない。
 - 設計: `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` v0.5 (以下「設計」。設計レビュー 2 回反映済み、依頼者裁定 Q-1〜Q-7 はすべて推奨を採用、設計 §6 冒頭の表)。本書は設計の決定 D-1〜D-11、裁定 Z-1〜Z-36、依頼者裁定 Q-1〜Q-7 と、本書 §2.8 の監督裁定 W-1〜W-8 を WP に割り付ける。裁定文・却下案・背景は写さず設計の節番号で指す (`RM` §9 の 9)。
 - 台帳: `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-45 (v1.52)。
 - 本書で条項番号だけを書くとき (「§1.5 の 40」等) は `docs/work-orders/OPERATING_CONDITIONS.md` の条項を指す。
@@ -506,6 +507,8 @@ python3 tools/public_value_scan.py MitateDB-api/docs/cloud-run-cloud-sql.md secu
 
 **訂正註 WPD-3 (W7-D1 の読み替え、§6A.2 の E-R8)**: §6 の W7-D1 と規則のうち「0007 / 0011 / 0012 は psql に `PGOPTIONS` 経由で表の値を渡す」は、「0005 / 0007 / 0011 / 0012 の適用は WP-E の E4 のサブコマンドに `--lock-timeout` と表の値を渡す」と読み替える (0005 は E4 が受け付ける集合に含まれるので、runbook の表にも行を置く。§6A.2 の E-R12・E-R20 の L6)。runbook に手で `PGOPTIONS` を組む手順は書かない。本番での実行の範囲は §6A.2 の E-R18 に従う。
 
+**訂正註 WPD-4 (WP-F との順序、v1.4 で追記)**: WP-D は §6B の WP-F の統合後に基点を取り直し、runbook に 0013 (`0013_role_statement_timeouts.sql`) の適用手順 (`apply-platform-migration`) を足す。さらに、runbook は platform migration を常に番号順に一式 (0005・0007・0011・0012・0013) で適用し、1 本だけを順序を外して適用しないと書く (§6B.2 の F-R22 の (ii)。0012 と 0013 は同じ関数を `CREATE OR REPLACE` する)。
+
 ## 6A. WP-E — `inventory` の (6)・(8) の判定の直しと platform migration の適用サブコマンド (Class D)
 
 ### 6A.1 依頼者裁定 (逐語)
@@ -727,7 +730,7 @@ E4 の拒否は ops の既存の `_die` の規約に従い、stderr に固定文
 
 **監査照合の逐語記録 (§6A.9 の 5 件。§1.5 の 40)**
 
-- **E1-6** (E1 と E4 が同じ統合コミット): 統合コミットの `git show --stat` の該当行 — (統合後に監督が記入)
+- **E1-6** (E1 と E4 が同じ統合コミット): 統合コミット `6dea423` (main へのマージ `d13b2bb`) の `git show --stat`: `MitateDB-api/src/mitatedb_api/ops.py | 429`、`MitateDB-api/tests/test_ops_apply_platform_migration.py | 917`、`MitateDB-api/tests/test_ops_inventory.py | 616`、`MitateDB-api/tests/test_platform_migration_reapply.py | 74`、`security/CONTROL_MAPPING.md | 22`、`tools/tests/test_no_shared_cluster_defaults.py | 8` (E1 と E4 の変更は同じコミットに入っている)。集計行は `9 files changed, 1983 insertions(+), 160 deletions(-)`。上は E1・E4 に当たる該当行。ほかに `docs/` の 3 ファイル。
 - **E4-11** (試験の接続先): 新規テストファイル `MitateDB-api/tests/test_ops_apply_platform_migration.py` の `ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"` と、それだけを読む `_admin_dsn()` が接続先の出所である。本番の接続先・runbook の実行手順は置いていない。`python3 tools/public_value_scan.py` の集計行は `files_scanned=6 total_flagged=0`。
 - **E-CM** (`security/CONTROL_MAPPING.md`): Version 行は 2.3 → 2.4。SI-08 の MitateDB ブロックは (6)・(8) の主張と証拠のテスト名の**置き換えのみ**で行数の増減 0、ブロック長 15,187 字 / 上限 15,200 (**残り 13 字。後続の WP-D・WP-F は SI-08 に文字を足せない**)。SI-09 の MitateDB ブロックは 6,867 字 (`apply-platform-migration` の統制と、DDL を流すサブコマンドの集合 = `--lock-timeout` 必須の集合の主張を追加)。最長行 1,384 字 / 上限 1,400。
 - **E-47** (実値が無い): `python3 tools/public_value_scan.py` の集計行は `files_scanned=6 total_flagged=0`。
@@ -744,6 +747,208 @@ E4 の拒否は ops の既存の `_die` の規約に従い、stderr に固定文
 - 帰結 1 (回答 1): R-48 は本書の **WP-F** (WP-E の次の 1 本) で解消する。WP-F の枠決めは別途 §6B に置く。
 - 帰結 2 (回答 2): R-47 は起票のままとし、本書では直さない。
 - 帰結 3 (回答 3): §6A.2 の E-R18 の読みは確定である (条件 (d) は恒久の禁止ではない)。
+
+## 6B. WP-F — auditreader と application role の `statement_timeout` を設定する platform migration と (6) の値の検査 (Class D)
+
+### 6B.1 依頼者裁定 (逐語)
+
+§6A.12 の依頼者の回答の 1 が本 WP の条件である (同節の逐語。ここに回答 1 の段落を再掲する):
+
+> 1. R-48 は R-45 の中で解消する。WP-E の次に WP-F を 1 本足す。(6) の要求は緩めず、auditreader と application ごとの runtime / developer role に statement_timeout を設定する経路を足す(既存の set-platform-timeouts の拡張を第一候補。別の形が良ければ枠決めで両論を示す)。条件は WP-E の (a)(d)(e) と同じ: 1 本・manifest 1 本・範囲はこの 1 件だけ、本番に実行しない、クラス D の独立設計レビュー・コードレビュー・監査は省かない。
+
+上の「別の形が良ければ枠決めで両論を示す」に対する枠決めの依頼者裁定 (2026-09-17、本チャット。逐語):
+
+> 監督の提示 (要旨): WP-F の形は (A) platform migration 0013 (auditreader と既存の全 application の runtime / developer role に ALTER ROLE ... SET statement_timeout を掛け、begin_provision_application を置き換えて新規 role にも作成時に掛ける。適用は apply-platform-migration。set-platform-timeouts は触らない。値は manifest の着手時に実測して裁定)、(B) set-platform-timeouts の拡張、(C) 両方、のどれか。監督の推奨は (A)。
+> 依頼者:「推奨は、将来においてベストなものですか」
+> 監督の回答 (要旨): はい。正しさが運用の記憶に頼らない / 値の正本が 1 か所 / set-platform-timeouts の意味を壊さない。未確定は値そのもの (着手時に実測して裁定) と、(6) が設定の有無しか見ない点。
+> 依頼者:「migration 0013 の形 で枠決め。
+> (6) の値の検査の扱いはあなたはどう考えます？」
+> 監督の回答 (要旨): WP-F に含めるべき。検査は「正の値であること」だけ (0013 の定数との一致は見ない)。値が 0 または解釈できないときは blocked、設定が無いときは従来どおり unknown。
+> 依頼者:「はい」
+
+### 6B.2 監督裁定 (F-R1〜F-R33、2026-09-17。F-R1〜F-R12 は依頼者裁定を受けた枠、F-R13〜F-R19 は起草時の疑義 1〜7、F-R20〜F-R33 は独立設計レビュー 1 回の指摘への裁定。逐語)
+
+| 裁定 | 本文 (逐語) |
+|---|---|
+| F-R1 | (形) platform migration `MitateDB-api/migrations/0013_role_statement_timeouts.sql` を 1 本足す。`:app_id` を取らない。内容は (1) `mitatedbsvc_auditreader` に `ALTER ROLE ... SET statement_timeout`、(2) `applications` 表の既存の全 application の runtime / developer role に同じ設定 (0012 の CONNECTION LIMIT のループと同じ型)、(3) `begin_provision_application` を `CREATE OR REPLACE` し、role の新規作成の枝と既存 role の枝の両方で `ALTER ROLE ... SET statement_timeout` を掛ける。0012 の関数本体から変えるのはこの追加だけ (CONNECTION LIMIT ほかの振る舞いを変えない)。 |
+| F-R2 | (対象外) api・controlplane role (0007 と `set-platform-timeouts` が扱う)、`idle_in_transaction_session_timeout`、`lock_timeout`、`set-platform-timeouts`・`declare-*`・`verify-declarations` の振る舞い、r2db-api。値を後から変える ops の道具は足さない (値の正本は migration。変えるときは新しい migration)。 |
+| F-R3 | (値) 値は着手時の実測の後に監督が裁定する。実測するもの: 対象 role (auditreader、runtime、developer) の接続で、アプリケーションが `SET LOCAL statement_timeout` を掛けずに実行する文 (`backend_postgres.py` の `deadline is None` の経路、auditreader の監査クエリ、pool の接続確立時の文、developer role の DDL の経路) の一覧と、それぞれに既存の上限があるか。候補値と根拠を報告する。裁定までは定数を仮置きし、裁定後に 1 か所 (migration) だけを直す形にする。 |
+| F-R4 | (再実行性) 0013 は何度適用しても同じ状態になる。`apply-platform-migration` が受け付ける名前の定数 (WP-E の E4-2 の pin、psql 変数の表) に 0013 を足し、`test_platform_migration_reapply.py` の再適用と「手でずらして戻る」の対象に 0013 を足す (ずらす対象: auditreader の設定を外す、既存 application の role の設定を外す、関数本体)。WP-C・WP-E の証拠を弱めない。 |
+| F-R5 | ((6) の値の検査) `_inventory_ddl_lock_declaration` は、対象 role の `statement_timeout` の設定値を既存の `pg_timeouts` の正規化で解釈し、正の値のときだけ条件を満たすとする。値が 0 (無制限) または解釈できないときは **blocked**、設定が無いときは従来どおり **unknown**。0013 の定数との一致は見ない。blocked と unknown が混在するときの優先は既存の判定の規約 (`_inventory_exit_code` ほか) を読んで manifest に書き、疑義があれば報告で上げる。出力に設定値そのものは出さない (判定語だけ。既存のキー集合の pin を変えない方向で。変える必要があれば報告で上げる)。 |
+| F-R6 | (migration の追加の波及) 新しい migration 番号の追加は、migration を列挙する全箇所に波及する。着手時に `git grep -l 0012_role_connection_limits` (基点で 18 ファイル、44 箇所) を実測し、0013 を足す箇所・足さない箇所を file:line で列挙して報告し、監督の裁定の後に実装する。`MitateDB-api/conformance/` と tests の bootstrap helper のうち `_ISOMORPHIC_TARGETS` 登録済みの本体に触る必要が出たら止まって上げる。`conformance-tests/`・`spec/` には触れない。`tools/control_mapping_axes.tsv` と `MitateDB-api/docs/` (runbook) の扱い: runbook は WP-D が扱うので触らない (WP-D の訂正註に「0013 の適用手順を足す」を 1 行足す — §6.1 に WPD-n として)。 |
+| F-R7 | (権限) 0013 を provision role (`MITATEDB_PROVISION_DSN` 相当) で使い捨てクラスタに適用できることを、着手時に実測する (PostgreSQL 16 の CREATEROLE と ADMIN OPTION。auditreader は 0005 が、application role は `begin_provision_application` が作る)。できない場合は止まって上げる。 |
+| F-R8 | (upgrade との関係) 0013 は platform migration であり per-application upgrade (`*_upgrade.sql`、台帳) ではない。`inventory` の (3) の「未適用の platform migration」の検出が 0013 を数えるか、`platform_declarations.MIGRATION_NUMBER` などの定数に波及があるかは F-R6 の実測に含める。 |
+| F-R9 | (CONTROL_MAPPING) 英語。SI-08 の MitateDB ブロックは 15,187 / 15,200 字で **文字を足せない**。(6) の既存の主張が F-R5 で変わる部分は同じ行の中の置き換えで直し、置き換え後の長さを実測する (超えるなら止まって上げる)。0013 の新しい統制 (role は作成時に statement_timeout を持つ、既存にも掛ける) は SI-09 か、内容に合う別の SI の MitateDB ブロックに置き、どこに置くかを着手時に提案して監督が裁定する。Version の minor を +1。 |
+| F-R10 | (条件) 依頼者の条件 (a)(d)(e): WP-F は 1 本・manifest 1 本・範囲はこの 1 件 (0013 と (6) の値の検査) だけ。他の発見は台帳 1 行。0013 と `apply-platform-migration` を本番に対して実行しない。試験は使い捨ての PostgreSQL だけ。Class D の独立設計レビュー (manifest に 1 回、実装の前)・コードレビュー・受け入れ監査は省かない。記録は WP ごとに 1 回。 |
+| F-R11 | (コメントの規律) 新規のコメント・docstring・SQL のコメントに CH-ID・WP 名・裁定番号・manifest の番号・差し戻しの番号・経緯語を書かない (英語、現在形の事実だけ)。変異を成立させるためだけのコードを製品コードに足さない (変異は「足す」形でも書ける)。 |
+| F-R12 | (契約とクラス) `spec/` に触れない。契約版数 1.8.0 据え置き。Class D (`security/CONTROL_MAPPING.md`)。 |
+| F-R13 | (疑義 1) (6) の blocked は既存の規約に合わせて `reason` を持つ。`_INVENTORY_REASONS` に固定語 `statement-timeout-unbounded` を 1 つ足し (語彙の pin を更新)、(6) の項目のキーの形は既存の blocked の項目と同じにする (blocked のときだけ `reason` を持つのか常に持つのかは、(2)・(3) の既存の形に合わせる。着手時に実測して報告)。キー集合の pin はこれに合わせて更新する。F-R5 の「pin を変えない方向」はこの点で上書きする。設定値そのものは出さない。 |
+| F-R14 | (疑義 2) 「値が 0」は使い捨てクラスタの実 role で観測する。「解釈できない値」は PostgreSQL が `ALTER ROLE ... SET` の時点で拒否して作れない場合に限り、設定を読む関数 (`platform_declarations._role_setting_rows`) をテストで差し替えて観測してよい。作れるかどうかを着手時に実測して報告する。 |
+| F-R15 | (疑義 3) (6) の blocked の `remediation_required` は False のまま。 |
+| F-R16 | (疑義 4) テストは新規ファイルを作らず既存の 3 ファイルに足す (起草の提案どおり)。件数 pin は変わらない見込みなので F-40b は監査照合とし、実測のコマンドと件数を残す。 |
+| F-R17 | (疑義 5) F-R3 (値) と F-R6 (波及) は着手時の 1 回の報告にまとめ、監督が同時に裁定する。報告には、候補値のもとで `MitateDB-api/tests` 全体が緑になるかの見込み (期限なしで走る文のうち候補値を超えうるもの) を含める。 |
+| F-R18 | (疑義 6) 0013 は 0005 が作る role を 0005 と同じ literal で名指す (形を変えない)。付与から見つかる auditreader が literal と違う環境では、その role は 0013 の対象にならず (6) が unknown / blocked として見える — これを §6B.3 に 1 文で書く。 |
+| F-R19 | (疑義 7) migration の番号は peer 間で対応させる対象ではない (MitateDB の 0012 と r2db-api の 0013 が既に同じ内容で番号が違う)。非対称は統合時に監督が設計メモの実施記録に 1 行で記録する。`security/CONTROL_MAPPING.md` には書かない。 |
+| F-R20 | (高1) テストの既定の bootstrap は本番と同じく 0013 まで適用する (F-R6 の原則)。0013 より前の状態や「設定の無い role」に依存するテスト (`test_ops_inventory.py` の `..._is_unknown_when_statement_timeout_not_declared`・`..._target_roles_include_auditreader`・終了コード 2 の 2 件ほか) は、その状態をテストの中で明示的に作る (0012 までで止める bootstrap の引数、または対象 role の `ALTER ROLE ... RESET statement_timeout`)。どちらを使うかは実装担当がテストごとに選び報告する。F2-9 は「0012 までの platform で (6) が unknown → `apply-platform-migration` で 0013 を適用 → confirmed」を 1 つのテストで観測する。F-C1 の変異は「既定の bootstrap の列から 0013 を外す」で、赤になるのは「既定の platform で (6) が confirmed」のテストとする。F2-4・F2-5・F2-8 の「赤になる test id」をこの形に合わせて直す。 |
+| F-R21 | (高2) migration を列挙する各箇所では、0012 を足したときの位置の前例に従う。`MitateDB-api/tests/test_ops_verify_declarations.py` の `MIGRATION_NAMES` は末尾 2 件を slice で落とす定数 (`_ISOMORPHIC_TARGETS` 登録済み) に効くので、0013 は 0012 の直後 (0007 の前) に置き、slice が落とす 2 件が変わらないことを assert で確かめて報告する。登録済みの定数・helper の式は変えない。 |
+| F-R22 | (高3) 0012 と 0013 は同じ関数を `CREATE OR REPLACE` するので、0013 の後に 0012 だけを再適用すると新規 role への設定が消える。扱い: (i) 0013 のヘッダのコメントに順序の依存を現在形で書く。(ii) WPD-4 を広げる: runbook は platform migration を常に番号順に一式 (0005・0007・0011・0012・0013) で適用し、1 本だけを順序を外して適用しないと書く。(iii) 完了条件を 1 件足す: 0013 → 0012 → 0013 の順で適用した後に provision した application の両 role に設定が付く。変異: 0013 の関数の置き換えを外す。(iv) §6B.3 に 1 文: 順序を外した場合の補償は、次の `inventory` で新規 application の (6) が unknown になることだけである。 |
+| F-R23 | (中4) SI-08 の (6) の主張は同じ行の中の最小の置き換えで直す。上限を超える場合は、WP-B・WP-E が書いた SI-08 の MitateDB の行の言い回しを詰めて収める (主張と証拠のテスト名を 1 つも落とさない。§4.1 の B-17・B-18 の前例)。それでも超えるなら止まって上げる。文字数は `conformance-tests/test_control_mapping_register.py` と同じ分解 (claims を単一空白で join) で測る — 素朴な計測は 147 字ずれる。 |
+| F-R24 | (中5) F-CM に SI-09 の MitateDB ブロックの実測更新を足す: テスト件数、受け付けるファイルの数 (4→5)、再適用テストの名前。既存のテスト `test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` は改名しない (docstring に対象ファイルを書く)。 |
+| F-R25 | (中6) 既存の早期 return は変えない: CONNECTION LIMIT が -1 / 読めない role があれば、値を判定する前に unknown。`psycopg.Error` も unknown。「blocked が unknown より強い」は statement_timeout の値の判定どうしの間だけに当てはまる、と §6B.3 に書く。F2-6 に「CONNECTION LIMIT -1 の role と値 0 の role の混在は unknown」を足し、変異 (早期 return を値の判定の後ろへ動かす) を対応させる。どちらも終了コードは 2。 |
+| F-R26 | (中7) 負の値も blocked。F2-2 に負値を足し、変異を「`> 0` を `!= 0` にする」にする。負値を実 role に設定できない場合の観測は F-R14 の差し替えでよい。 |
+| F-R27 | (中8 前半) F-R7 の実測に「auditreader を provision role 以外 (使い捨てクラスタの管理 role) が先に作った状態で、provision role が 0013 を適用できるか」を足す。0013 は 1 つのトランザクションで走り、途中で失敗したら何も残らないことを完了条件にする (変異: トランザクションの囲みを外す、または観測できる形で)。適用できない場合の運用上の扱いは、実測の報告の後に監督が裁定する (F-R17 と同じ報告に含める)。 |
+| F-R28 | (中8 後半) 0013 の既存 application のループは、`pg_roles` に無い role 名の行を飛ばす (deprovision の途中で落ちた行で migration 全体が落ちないように)。完了条件と変異を 1 件足す。飛ばした行は (6) の側で confirmed にならないことも同じテストで観測する。 |
+| F-R29 | (中9) F-R3 の実測項目に足す: (a) role の既定値と `SET LOCAL` の優先関係 (要求の経路は `SET LOCAL` が上書きする)、(b) 接続の `options` / `PGOPTIONS` で statement_timeout を渡す経路が無いこと、(c) 起動時の application ごとの台帳の読みと `main.build_app` の eager なループ、`deadline` が None の DDL の経路、(d) conformance の bootstrap (レビューが挙げた 5 箇所) に 0013 を足すと suite 全体が role の既定値の下で走ること。実装担当は conformance を回さない — conformance を含む root suite は監督の完了ゲートが証拠になる。報告には緑の見込みだけを書く。 |
+| F-R30 | (佐10) E1-6 の記入に、集計行 `9 files changed, 1983 insertions(+), 160 deletions(-)` と「上は E1・E4 に当たる該当行。ほかに `docs/` の 3 ファイル」を添える。 |
+| F-R31 | (佐11) `_PLATFORM_MIGRATION_VARIABLE_TABLE` のキー集合が `_PLATFORM_MIGRATION_FILENAMES` と一致する静的テストを完了条件に 1 件足す (変異: 表から 0013 のキーを外す)。 |
+| F-R32 | (佐12) 0013 の末尾に 0012 と同じ `REVOKE ALL ON FUNCTION ... FROM PUBLIC` を置き、関数の ACL が 0012 の適用後と同じであることを F1 の完了条件に含める。 |
+| F-R33 | (佐13・14) `MitateDB-api/tests` 全体は `tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests -q -n 5 --dist loadgroup` で 1 回 (Bash timeout 600000。超える場合はディレクトリを 2 分割)。`tools/control_mapping_axes.tsv` は一回限りの入力で live な検査が無いので触らない、と §6B.6 に書く。 |
+
+### 6B.3 目的と範囲
+
+**目的**: 台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-48** (auditreader と application ごとの runtime / developer role に `statement_timeout` を設定する経路が無い) を解消し、あわせて (6) の実行時設定の判定を「設定の有無」から「値が正であること」に進める。範囲は次の F1・F2 (0013 と (6) の値の検査の 1 件) だけとし (依頼者の条件 (a)、F-R10)、作業中の他の発見は台帳に 1 行起票するだけにして本 WP では直さない。
+
+| # | 内容 |
+|---|---|
+| F1 | platform migration `MitateDB-api/migrations/0013_role_statement_timeouts.sql` を 1 本足す (F-R1)。(1) `mitatedbsvc_auditreader` に `ALTER ROLE ... SET statement_timeout`、(2) `mitatedb_registry.applications` の既存の全 application の runtime / developer role に同じ設定 (`0012_role_connection_limits.sql` の第 2 節の CONNECTION LIMIT のループと同じ型。`runtime_role`・`developer_role` が NULL でない行だけを対象にする同じ絞りを含む)、(3) `begin_provision_application` の `CREATE OR REPLACE` で、role の新規作成の枝と既存 role の枝 (`duplicate_object` の fallback) の両方に同じ設定を足す。0012 の関数本体から変えるのはこの追加だけ。`:app_id` を取らず psql 変数を 1 つも参照しない。適用は WP-E の `apply-platform-migration` (F-R4) |
+| F2 | (6) の実行時設定の半分 (`_inventory_ddl_lock_declaration`) が、対象 role の `statement_timeout` の設定値を既存の正規化 (`mitatedb_api.pg_timeouts.ms_from_pg_timeout_text`) で解釈し、**正の値のときだけ**条件を満たすとする (F-R5)。正でない値 (0 = 無制限、および負の値。F-R26) と解釈できない値は blocked、設定が無いときは従来どおり unknown。0013 の定数との一致は見ない。blocked のときは既存の blocked の項目と同じ形で `reason` に固定語 `statement-timeout-unbounded` を持ち (F-R13)、`remediation_required` は False のままとする (F-R15)。対象 role の集合 (`_inventory_role_classes` が表への付与から見つける api / control / auditreader の role と、provision 済みの全 application の runtime / developer role) と CONNECTION LIMIT の判定は変えない |
+
+**名前** (F-R1 で確定。着手時に再照合する): migration `0013_role_statement_timeouts.sql`。**テストの置き場**は既存の 3 ファイル (`MitateDB-api/tests/test_ops_apply_platform_migration.py`・`MitateDB-api/tests/test_platform_migration_reapply.py`・`MitateDB-api/tests/test_ops_inventory.py`) に足す (F-R16 で確定。新規テストファイルを作らない)。以下の表はこの置き場で書く。
+
+**blocked と unknown の混在の優先 (F-R5 の指示に対する既存の規約の読み)**: 既存の (3) の判定は、role / application をまたぐ判定を 1 つにまとめるとき `blocked` を上書きしない形 (`if judgment != "blocked": judgment = "unknown"`) を採っており、**blocked が unknown より強い**。(6) も同じ規約に従い、対象 role のどれかが blocked なら項目全体を blocked、blocked が無く unknown があれば unknown とする。終了コードは `_inventory_exit_code` の規約のまま (confirmed 以外はすべて 2。1 は項目の判定が 1 つも無いまま失敗したときだけ) で、blocked と unknown を終了コードで区別しない。**この「blocked が unknown より強い」は `statement_timeout` の値の判定どうしの間だけに当てはまる (F-R25)。** 既存の早期 return は変えない: CONNECTION LIMIT が -1 または読めない role があれば値を判定する前に unknown、`psycopg.Error` も unknown である。
+
+**0013 が名指す role と (6) が role を見つける方法の差 (F-R18)**: 0013 は 0005 が作る role を 0005 と同じ literal (`mitatedbsvc_auditreader`) で名指すので、付与から見つかる auditreader がこの literal と違う環境では、その role は 0013 の対象にならず (6) が unknown / blocked として見える。
+
+**適用の順序 (F-R22)**: 0012 と 0013 は同じ関数を `CREATE OR REPLACE` するので、0013 の後に 0012 だけを再適用すると新規 role への設定が消える。順序を外した場合の補償は、次の `inventory` で新規 application の (6) が unknown になることだけである。
+
+**対象外** (F-R2): api・controlplane role の設定 (0007 と `set-platform-timeouts` が扱う)、`idle_in_transaction_session_timeout`、`lock_timeout`、`set-platform-timeouts`・`declare-*`・`verify-declarations` の振る舞い、r2db-api、値を後から変える ops の道具 (値の正本は migration。変えるときは新しい migration)、(8) の余力の計算。
+
+### 6B.4 変更クラス・契約版数・手順
+
+- **Class D** (`security/CONTROL_MAPPING.md` に触れる。§2.3 の W-5 と同じ理由、F-R12)。**契約版数は 1.8.0 のまま据え置く** (`spec/` に触れない)。
+- 手順: 本 manifest の独立設計レビュー 1 回 (実装の前。監督が実施する。**実施済み (2026-09-17)。指摘は F-R20〜F-R33 で反映**) → `implementer` (テンプレ 2) → `reviewer` (テンプレ 5、コードレビュー) → 監督の統合前ゲート → `evidence-auditor` (テンプレ 6) を 1 回 (F-R10、依頼者の条件 (e))。記録は WP ごとに 1 回。
+- **記録 (統合時に監督が行う)**: 設計メモ `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` に §12.5 を足し、D-1 の (6) の「role 設定の `statement_timeout` の有無を読む」記述を F2 が覆した根拠と日付で訂正して版数を上げる (§1.8 の 56。行を消さない)。`docs/design/ROADMAP_POST_PHASE7_V1.md` の R-48 の行に解消を追記する。実装担当は `docs/design/` に触れない。
+- MitateDB-api のみの変更であり、`_ISOMORPHIC_TARGETS` に触れない想定である。触れる必要が出たら止まって監督へ上げる (§6B.7 の 2、F-R6)。
+
+### 6B.5 基点と重なり
+
+**基点**: 本書 v1.4 を含む main (WP-E の統合後)。
+
+基点の記録欄 (監督が着手時に記入する。記入するまで着手しない):
+
+| WP | 基点 main | 名前の再照合の結果 | `_ISOMORPHIC_TARGETS` の照合の結果 |
+|---|---|---|---|
+| WP-F | (着手時に記入) | (着手時に記入) | (着手時に記入) |
+
+| 組 | 重なり (実ファイル名) | 扱い |
+|---|---|---|
+| WP-F と WP-D | `security/CONTROL_MAPPING.md`。加えて WP-D の runbook は 0013 の適用手順を書く | **直列。WP-F → WP-D** (WP-D は WP-F の統合後に基点を取り直す。§6.1 の訂正註 WPD-4) |
+| WP-F と WP-A〜WP-C・WP-E | なし (いずれも統合済み) | — |
+
+並行して動かす WP は無い (§1.2 の 16・17 の照合の対象になる組は WP-D だけで、その組は重なりが 0 でないので直列にする)。
+
+### 6B.6 触るファイル・触らないファイル
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/migrations/0013_role_statement_timeouts.sql` (新規。F1)、`MitateDB-api/src/mitatedb_api/ops.py` (`_inventory_ddl_lock_declaration` の値の解釈 (F2)、`_INVENTORY_REASONS` への固定語 `statement-timeout-unbounded` の追加 (F-R13)、そして`_PLATFORM_MIGRATION_FILENAMES`・`_PLATFORM_MIGRATION_VARIABLE_TABLE` への 0013 の追加 (F-R4))、`MitateDB-api/tests/test_ops_inventory.py`、`MitateDB-api/tests/test_ops_apply_platform_migration.py`、`MitateDB-api/tests/test_platform_migration_reapply.py`、migration を列挙する箇所のうち F-R6 の裁定で 0013 を足すもの (位置は 0012 の直後。F-R21。着手時の実測と監督の裁定で確定し、訂正註で本表に足す)、`security/CONTROL_MAPPING.md` (英語。SI-08 は置き換えのみで文字を足さない。0013 の統制の置き場は F-R9 の裁定)、`docs/code-history/MitateDB-api/` (`check_comment_provenance.py` の結果で登録の更新が要る場合だけ。新規のコメント・docstring に CH-ID は付けない。F-R11)、`tools/tests/test_no_shared_cluster_defaults.py` の件数 pin (F-R16: 変わらない見込み。実測で変わったら止まって監督へ上げる。§1.5 の 40b) | §2.2 の全 WP 共通、`r2db-api/` 全部、`MitateDB-api/migrations/` の既存の 12 本 (変異の一時編集を除く)、両 peer の `tests/test_audit_query.py` (`_ISOMORPHIC_TARGETS`)、`_ISOMORPHIC_TARGETS` 登録済みの本体 (`MitateDB-api/conformance/` と tests の bootstrap helper を含む。呼ぶのはよい。触る必要が出たら止まって上げる)、`cmd_set_platform_timeouts`・`cmd_declare_*`・`cmd_verify_declarations`・`_inventory_connection_headroom` ((8)) の振る舞い (読む・呼ぶのはよい)、`MitateDB-api/src/mitatedb_api/pg_timeouts.py`・`platform_declarations.py`・`platform_upgrades.py`・`backend_postgres.py` (読むだけ)、`MitateDB-api/docs/` (runbook は WP-D が扱う)、`tools/control_mapping_axes.tsv` (一回限りの入力で live な検査が無い。F-R33)、`.github/` |
+
+### 6B.7 着手時の手順
+
+1. §2.1 と同じ要領で、本節が引く名前が基点に実在することを `grep` で再照合する: `_inventory_ddl_lock_declaration`・`_inventory_role_classes`・`_inventory_exit_code`・`_INVENTORY_JUDGMENTS`・`_INVENTORY_REASONS`・`_PLATFORM_MIGRATION_FILENAMES`・`_PLATFORM_MIGRATION_VARIABLE_TABLE`・`cmd_apply_platform_migration`・`_migrations_dir`、`platform_declarations._role_setting_rows`・`platform_declarations.MIGRATION_NUMBER`・`pg_timeouts.ms_from_pg_timeout_text`、`mitatedb_registry.begin_provision_application`、`MitateDB-api/tests/test_ops_inventory.py` の `test_inventory_ddl_lock_is_confirmed_when_role_settings_are_declared`・`test_inventory_ddl_lock_is_unknown_when_statement_timeout_not_declared`・`test_inventory_ddl_lock_is_confirmed_without_lock_timeout_declared`・`test_inventory_ddl_lock_target_roles_include_auditreader`・`test_inventory_ddl_lock_target_roles_include_application_roles`・`test_inventory_ddl_lock_ignores_a_per_database_scoped_setting`・`test_inventory_ddl_lock_minus_one_connection_limit_is_unknown`・`test_inventory_top_level_and_item_keys_are_pinned`・`test_inventory_judgment_vocabulary_is_closed`・`test_inventory_reason_vocabulary_is_pinned`・`test_inventory_exit_code_is_2_when_any_item_is_not_confirmed`・`_bootstrap`、`MitateDB-api/tests/test_ops_apply_platform_migration.py` の `test_apply_platform_migration_accepted_filenames_are_pinned_and_exist_without_app_id`・`test_apply_platform_migration_variable_table_matches_each_files_own_references`・`test_apply_platform_migration_variables_are_referenced_only_in_quoted_form`・`test_apply_platform_migration_0012_restores_a_manually_drifted_function_body`、`MitateDB-api/tests/test_platform_migration_reapply.py` の `_REAPPLY_PLATFORM_MIGRATION_FILENAMES`・`_REAPPLY_MIGRATION_SEQUENCE`・`_drift_platform_objects_before_reapplication`・`test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix`・`test_reapply_starting_points_cover_every_migration_file_as_a_contiguous_prefix`・`test_excluded_starting_points_are_pinned`・`test_platform_migrations_declare_on_error_stop_in_the_file`、`tools/tests/test_no_shared_cluster_defaults.py` の `test_admin_dsn_env_definitions_are_pinned_to_26_files`。1 件でも無ければ止まって監督へ上げる。
+2. `MitateDB-api/tests/test_audit_query.py` の `_ISOMORPHIC_TARGETS` を読み、本 WP で本体を変える関数・定数が 1 つも登録されていないことを確かめて報告する。登録済みの本体を変える必要が出たら止まって監督へ上げる (§1.5 の 37、F-R6)。
+3. **F-R3 の実測 (値)**: 対象 role (auditreader、application の runtime、developer) の接続で `SET LOCAL statement_timeout` を掛けずに実行する文の一覧 (`backend_postgres.py` の `deadline is None` の経路、auditreader の監査クエリ、pool の接続確立時の文、developer role の DDL の経路) と、それぞれに既存の上限があるかを実測し、候補値と根拠を報告する。さらに次を実測する (F-R29): (a) role の既定値と `SET LOCAL` の優先関係 (要求の経路は `SET LOCAL` が上書きする)、(b) 接続の `options` / `PGOPTIONS` で `statement_timeout` を渡す経路が無いこと、(c) 起動時の application ごとの台帳の読みと `main.build_app` の eager なループ、`deadline` が None の DDL の経路、(d) conformance の bootstrap (レビューが挙げた 5 箇所) に 0013 を足すと suite 全体が role の既定値の下で走ること。実装担当は conformance を回さない (conformance を含む root suite は監督の完了ゲートが証拠になる) ので、報告には緑の見込みだけを書く。報告には、候補値のもとで `MitateDB-api/tests` 全体が緑になるかの見込み (期限なしで走る文のうち候補値を超えうるもの) を含める (F-R17)。**この実測は次の 4 (F-R6) と 1 回の報告にまとめ、監督が同時に裁定する (F-R17)。** 裁定までは 0013 の中で定数を仮置きし、裁定後に migration の 1 か所だけを直す。
+4. **F-R6 の実測 (波及)**: `git grep -l 0012_role_connection_limits` (基点で 18 ファイル・44 箇所) を実測し、0013 を足す箇所・足さない箇所を `file:line` で列挙して報告する。`tools/control_mapping_axes.tsv` の扱いも報告に含める (F-R33 で触らないと決まっている)。0013 を足す位置は 0012 を足したときの前例に従い、0012 の直後とする。`MitateDB-api/tests/test_ops_verify_declarations.py` の `MIGRATION_NAMES` は末尾 2 件を slice で落とす定数 (`_ISOMORPHIC_TARGETS` 登録済み) に効くので、0013 は 0012 の直後 (0007 の前) に置き、`MIGRATION_NAMES_WITHOUT_DECLARATIONS` の slice が落とす 2 件が `{0007, 0011}` のままであることを assert で確かめて報告する。登録済みの定数・helper の式は変えない (F-R21)。**上の 3 (F-R3) と 1 回の報告にまとめ、監督の同時の裁定の後に実装する (F-R17)。** `MitateDB-api/conformance/` と tests の bootstrap helper のうち `_ISOMORPHIC_TARGETS` 登録済みの本体に触る必要が出たら止まって上げる。`conformance-tests/`・`spec/` には触れない。runbook は WP-D が扱うので触らない。
+5. **F-R7 の実測 (権限)**: 0013 を provision role (`MITATEDB_PROVISION_DSN` 相当) で使い捨てクラスタに適用できることを実測して報告する (PostgreSQL 16 の CREATEROLE と ADMIN OPTION。auditreader は 0005 が、application role は `begin_provision_application` が作る)。あわせて「auditreader を provision role 以外 (使い捨てクラスタの管理 role) が先に作った状態で、provision role が 0013 を適用できるか」を実測する (F-R27)。できない場合は止まって上げる。適用できない場合の運用上の扱いは、この実測の報告 (F-R17 と同じ 1 回の報告) の後に監督が裁定する。
+6. **F-R8 の実測 (upgrade との関係)**: `inventory` の (3) の「未適用の platform migration」の検出が 0013 を数えるか、`platform_declarations.MIGRATION_NUMBER`・`PROCESS_CEILINGS_MIGRATION_NUMBER`・`platform_upgrades.PLATFORM_UPGRADE_NUMBERS` などの定数に波及があるかを実測して報告する。
+7. **F-R9 の実測 (CONTROL_MAPPING)**: SI-08 の MitateDB ブロックのうち F2 で事実でなくなる (6) の行を列挙し、同じ行の中の置き換えで直した後のブロック長を実測して報告する (基点 15,187 / 上限 15,200 = 残り 13 字)。文字数は `conformance-tests/test_control_mapping_register.py` と同じ分解 (claims を単一空白で join) で測る — 素朴な計測は 147 字ずれる。上限を超える場合は WP-B・WP-E が書いた SI-08 の MitateDB の行の言い回しを詰めて収め (主張と証拠のテスト名を 1 つも落とさない。§4.1 の B-17・B-18 の前例)、それでも超えるなら止まって監督へ上げる (F-R23)。0013 の新しい統制をどの SI の MitateDB ブロックに置くかを提案し、監督の裁定を得る。
+8. `tools/tests/test_no_shared_cluster_defaults.py` の件数 pin が変わらないことを実測し、コマンドと件数を F-40b の監査照合の記録として残す (F-R16。テストの置き場は F-R16 で確定しているので、新規テストファイルを作らない)。
+9. F-R3 の裁定値を入れた状態で `MitateDB-api/tests` 全体を 1 回回し (§6B.8)、0013 を足した bootstrap の下で既存のテストが赤にならないことを集計行で報告する。赤が出たら、値 (F-R3) と波及 (F-R6) の両方に関わるので止まって監督へ上げる。
+10. **F-R13 の形の実測**: 既存の (2)・(3) の項目が `reason` を blocked のときだけ持つのか常に持つのかを実測して報告し、(6) の項目のキーの形をその形に合わせる。キー集合の pin (`test_inventory_top_level_and_item_keys_are_pinned`) と語彙の pin (`test_inventory_reason_vocabulary_is_pinned`) を実測で更新する。
+11. **F-R14 の実測**: `ALTER ROLE ... SET statement_timeout` で `ms_from_pg_timeout_text` が解釈できない値を実 role に設定できるかを実測して報告する。できない場合に限り、F2-3 と F2-2 の負値の観測は `platform_declarations._role_setting_rows` をテストで差し替えて行う (F-R14・F-R26)。
+12. **F-R20 のテストの作り方**: テストの既定の bootstrap は本番と同じく 0013 まで適用する。0013 より前の状態や「設定の無い role」に依存するテスト (`test_inventory_ddl_lock_is_unknown_when_statement_timeout_not_declared`・`test_inventory_ddl_lock_target_roles_include_auditreader`・終了コード 2 の 2 件ほか) は、その状態をテストの中で明示的に作る (0012 までで止める bootstrap の引数、または対象 role の `ALTER ROLE ... RESET statement_timeout`)。どちらを使うかをテストごとに選んで報告する。
+
+### 6B.8 実行するコマンド
+
+実装担当は root suite・`conformance-tests`・`tools/dev/gate.py` を回さない (§2.2)。次だけを回す。`WT` は監督が割り当てる worktree、`SP` は scratchpad (§2.7)。
+
+```bash
+tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests/test_ops_inventory.py -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests/test_ops_apply_platform_migration.py -q
+tools/dev/pt.py --wait 3600 -C "$WT" -- MitateDB-api/tests/test_platform_migration_reapply.py -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- tools/tests/test_no_shared_cluster_defaults.py -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- <F-R6 の裁定で触ったテストファイル> -q
+tools/dev/pt.py --wait 1800 -C "$WT" -- MitateDB-api/tests -q -n 5 --dist loadgroup
+tools/dev/mutate.py "$SP/r45-wpf-mutations.json" -C "$WT" --wait 3600
+python3 tools/public_value_scan.py MitateDB-api/migrations/0013_role_statement_timeouts.sql MitateDB-api/src/mitatedb_api/ops.py MitateDB-api/tests/test_ops_inventory.py MitateDB-api/tests/test_ops_apply_platform_migration.py MitateDB-api/tests/test_platform_migration_reapply.py security/CONTROL_MAPPING.md
+python3 tools/check_comment_provenance.py --base "<基点 main>" MitateDB-api/src/mitatedb_api/ops.py
+python3 tools/check_comment_provenance.py --register
+```
+
+- **`MitateDB-api/tests` 全体を 1 回**回すのは、migration を 1 本足すことで tests / conformance の bootstrap helper の列挙に波及するためである (§1.5 の 40a に準じ、波及を peer suite で確かめる)。回すのは F-R6 の裁定を反映した後と、仕上げの 1 回 (Bash の timeout は 600000。超える場合はディレクトリを 2 分割して回す。F-R33)。`conformance-tests` と root suite は回さない (§2.2。conformance を含む root suite は監督の完了ゲートが証拠になる。F-R29)。
+- 変異定義は §2.7 の形で 1 変異 1 件、変異ごとに赤になる test id を名指しする。migration ファイルを変異の対象にするときも同じ形で、変異は一時編集として `mutate.py` が戻す。
+- `security/CONTROL_MAPPING.md` の該当ブロックの文字数は scratchpad のスクリプトで測って報告する (§2.4)。
+- 0013 と `apply-platform-migration` の試験の接続先は使い捨ての PostgreSQL (テスト基盤の管理 DSN) だけとする。本番に対しては実行しない (F-R10、依頼者の条件 (d)、§6A.2 の E-R18)。
+
+### 6B.9 完了条件 → 変異 → 赤になる test id
+
+変異の `file` は、特記の無い行は `MitateDB-api/migrations/0013_role_statement_timeouts.sql`。赤になるテストの名前は予想であり、実装担当が実名に置き換えて報告する。「inv」は `MitateDB-api/tests/test_ops_inventory.py`、「apm」は `MitateDB-api/tests/test_ops_apply_platform_migration.py`、「reapp」は `MitateDB-api/tests/test_platform_migration_reapply.py`。
+
+**F1 — platform migration 0013 (本番に対して実行しない。試験は使い捨ての PostgreSQL だけ。F-R10)**
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| F1-1 | 0013 の適用後、`mitatedbsvc_auditreader` に `statement_timeout` の設定が付く (使い捨てクラスタで `pg_db_role_setting` を読む) | 0013 の auditreader への `ALTER ROLE ... SET` を外す | apm: 0013 適用後に auditreader の設定を読むテスト |
+| F1-2 | 0013 の適用前に provision 済みだった application の runtime role と developer role の**両方**に同じ設定が付く。**application 2 本以上で観測する** (1 本だけの空振りを防ぐ) | 2 件。(i) ループから `runtime_role` の `ALTER ROLE` を外す。(ii) ループから `developer_role` の `ALTER ROLE` を外す | (i) apm: 既存 2 application の runtime role の設定のテスト、(ii) 同じテストの developer role 側 |
+| F1-3 | ループの対象は `runtime_role`・`developer_role` がどちらも NULL でない行だけで (0012 の第 2 節と同じ絞り)、登録のみで未 provision の行があるクラスタでも 0013 は終了コード 0 で終わる | ループの `WHERE` の絞りを外す | apm: 登録のみの行がある状態で 0013 が成功するテスト |
+| F1-4 | 0013 の後に provision した application の runtime role と developer role の両方に、role の**新規作成の枝**で同じ設定が付く | 2 件。(i) 新規作成の枝の runtime role の設定を外す。(ii) 同じ枝の developer role の設定を外す | (i)(ii) apm: 0013 適用後に provision した application の両 role の設定のテスト |
+| F1-5 | role が既に存在する枝 (`duplicate_object` の fallback) を通ったときも、両 role に同じ設定が付く | 2 件。(i) fallback の枝の runtime role の設定を外す。(ii) 同じ枝の developer role の設定を外す | (i)(ii) apm: role が先に存在する状態で `begin_provision_application` を呼ぶテスト |
+| F1-6 | `begin_provision_application` の 0012 からの差分は `statement_timeout` の追加行だけである (静的照合: 0012 と 0013 の関数本体を比べ、追加行以外の差が 0)。CONNECTION LIMIT 36、`application_id` の正規表現、NAMEDATALEN の検査、password の長さの検査、二重 provision の例外、`assert_role_has_no_memberships`、戻り値が変わらない | 2 件。(i) 0013 の関数の CONNECTION LIMIT の値を 36 以外にする。(ii) 0013 の関数から `assert_role_has_no_memberships` の `PERFORM` を落とす | (i) apm: 関数本体の静的照合のテスト (と既存の CONNECTION LIMIT の検査)、(ii) apm: 同じ静的照合のテスト |
+| F1-7 | 付く設定は database 非依存である (`pg_db_role_setting.setdatabase = 0`)。(6) が読むのはこの行である | 0013 の `ALTER ROLE ... SET` に `IN DATABASE` を付ける | apm: `setdatabase = 0` を確かめるテスト (既存の `test_inventory_ddl_lock_ignores_a_per_database_scoped_setting` と同じ観点) |
+| F1-8 | 0013 は psql 変数を 1 つも参照せず (`:app_id` を含む)、`_PLATFORM_MIGRATION_VARIABLE_TABLE` の 0013 の欄が空で、実際の `:変数` の集合と一致する | 0013 に `:app_id` の参照を 1 箇所足す | apm: `test_apply_platform_migration_variable_table_matches_each_files_own_references`・`test_apply_platform_migration_accepted_filenames_are_pinned_and_exist_without_app_id` |
+| F1-9 | `apply-platform-migration` が 0013 を受け付ける: `_PLATFORM_MIGRATION_FILENAMES` に 0013 を足し、E4-2 の pin の静的テスト (実在・`app_id` 非参照・`app_id` を参照しないファイルとの差が `0001`・`0002` の 2 件) を実測で更新する | `_PLATFORM_MIGRATION_FILENAMES` から 0013 を外す (`file` は `MitateDB-api/src/mitatedb_api/ops.py`) | apm: `test_apply_platform_migration_accepted_filenames_are_pinned_and_exist_without_app_id` と、0013 をサブコマンド経由で適用するテスト |
+| F1-10 | 0013 は自分自身で `\set ON_ERROR_STOP on` を持つ (既存の静的テストの対象に 0013 を足す) | 0013 から `\set ON_ERROR_STOP on` を消す | reapp: `test_platform_migrations_declare_on_error_stop_in_the_file` |
+| F1-11 | 使い捨てクラスタで、0013 の適用済みの状態から F-R4 の 3 対象 (auditreader の設定を外す・既存 application の role の設定を外す・関数本体をずらす) を手でずらし、`apply-platform-migration` 経由の適用で終了コード 0 かつ 3 対象が元に戻る。続けてもう一度適用して終了コード 0、`updated_at` を除いて差分 0 (WP-C・E4-10 の比較の形) | 0013 の `CREATE OR REPLACE FUNCTION` のブロックを丸ごと外す | apm: ずらした 3 対象が 0013 の適用で戻るテスト |
+| F1-12 | `_REAPPLY_PLATFORM_MIGRATION_FILENAMES` に 0013 を足し、`_drift_platform_objects_before_reapplication` に F-R4 の 3 対象のずらしを、`_snapshot()` に auditreader と application の runtime / developer role の設定を足す (`_snapshot()` の既存の比較項目を 1 つも減らさない)。起点の列は `migrations/*.sql` の走査から導かれるので 0013 の追加で自動的に伸びる — `test_reapply_starting_points_cover_every_migration_file_as_a_contiguous_prefix` と `test_excluded_starting_points_are_pinned` が実測で通ることを確かめ、通らなければ止まって監督へ上げる。WP-C・WP-E の証拠を弱めない | `_REAPPLY_PLATFORM_MIGRATION_FILENAMES` から 0013 を外す (`file` は `MitateDB-api/tests/test_platform_migration_reapply.py`) | reapp: `test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` |
+| F1-13 | 0013 → 0012 → 0013 の順で適用した後に provision した application の両 role に設定が付く (0012 と 0013 は同じ関数を `CREATE OR REPLACE` する。F-R22 の (iii)) | 0013 の関数の置き換えを外す | apm: 0013 → 0012 → 0013 の順の後の provision のテスト |
+| F1-14 | 0013 は 1 つのトランザクションで走り、途中で失敗したら何も残らない (F-R27) | トランザクションの囲みを外す | apm: ループの途中で失敗する状態を作り、auditreader の設定も残らないことを確かめるテスト |
+| F1-15 | 既存 application のループは `pg_roles` に無い role 名の行を飛ばす (deprovision の途中で落ちた行で migration 全体が落ちない)。飛ばした行は (6) の側で confirmed にならないことを同じテストで観測する (F-R28) | 飛ばす条件を外す | apm: role が無い行を持つ台帳で 0013 が終了コード 0 で終わるテスト |
+| F1-16 | `_PLATFORM_MIGRATION_VARIABLE_TABLE` のキー集合が `_PLATFORM_MIGRATION_FILENAMES` と一致する (静的テスト。F-R31) | 表から 0013 のキーを外す (`file` は `MitateDB-api/src/mitatedb_api/ops.py`) | apm: 表のキー集合とファイル名の定数の一致の静的テスト |
+| F1-17 | 0013 の末尾に 0012 と同じ `REVOKE ALL ON FUNCTION ... FROM PUBLIC` を置き、関数の ACL が 0012 の適用後と同じである (F-R32) | 0013 から `REVOKE ALL ON FUNCTION` を外す | apm: 関数の ACL を読むテスト (reapp の `_function_def_and_acl` と同じ観点) |
+
+**F2 — (6) の実行時設定の値の検査 (F-R5)**
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| F2-1 | 対象 role の全部の `statement_timeout` が正の値 (`setdatabase = 0` の行を `ms_from_pg_timeout_text` で解釈) で CONNECTION LIMIT が有効なら (6) は confirmed | 値を読むキーを `statement_timeout` から別のキー (例 `idle_in_transaction_session_timeout`) に変える (`file` は `MitateDB-api/src/mitatedb_api/ops.py`。以下 F2-8 まで同じ) | inv: 正の値で confirmed になるテスト (既存の `test_inventory_ddl_lock_is_confirmed_when_role_settings_are_declared`) |
+| F2-2 | 対象 role のどれかの値が `0` (無制限) または負の値なら (6) は **blocked** (F-R26。負値を実 role に設定できない場合の観測は F-R14 の差し替えでよい) | 2 件。(i) 値の検査を外し、キーの存在だけで満たしたことにする。(ii) `> 0` を `!= 0` にする | (i) inv: 値 0 で blocked のテスト、(ii) inv: 負値で blocked のテスト |
+| F2-3 | 対象 role のどれかの値が解釈できない (`ms_from_pg_timeout_text` が `ValueError`) なら (6) は **blocked** (例外を外へ漏らさず、値そのものを出さない) | `ValueError` を捕らえて従来どおりの判定 (confirmed / unknown) にする | inv: 解釈できない値で blocked のテスト (観測の形は F-R14: 実 role に設定できない場合に限り `platform_declarations._role_setting_rows` を差し替える) |
+| F2-4 | 対象 role のどれかに `statement_timeout` の設定が無ければ (6) は **unknown** のまま (blocked にしない) | 設定が無いときに blocked を返す | inv: `test_inventory_ddl_lock_is_unknown_when_statement_timeout_not_declared` (既定の bootstrap は 0013 まで適用するので、設定の無い状態はテストの中で明示的に作る。F-R20) |
+| F2-5 | 対象 role のどれか 1 つでも条件を満たさなければ (6) 全体がそうなる。application の runtime role だけが 0、developer role だけが 0、auditreader だけが 0 の 3 通りを個別に観測する (空振り禁止) | 3 件。対象 role の集合から (i) application の `runtime_role`、(ii) `developer_role`、(iii) `auditreader_roles` を外す | (i)(ii) inv: `test_inventory_ddl_lock_target_roles_include_application_roles` と runtime / developer だけ 0 のテスト、(iii) inv: `test_inventory_ddl_lock_target_roles_include_auditreader` と auditreader だけ 0 のテスト (各 role を 0 にする状態はテストの中で明示的に作る。F-R20) |
+| F2-6 | 値の判定どうしの間では blocked が unknown より強い (既存の (3) と同じ規約。§6B.3)。一方で CONNECTION LIMIT が -1 の role と値 0 の role の混在は **unknown** である (既存の早期 return を変えない。F-R25)。いずれも終了コードは 2 | 2 件。(i) 混在時に後から見つかった unknown で blocked を上書きする。(ii) CONNECTION LIMIT の早期 return を値の判定の後ろへ動かす | (i) inv: 一方の role が 0、他方の role が設定なしのときに blocked のテスト、(ii) inv: CONNECTION LIMIT -1 の role と値 0 の role の混在で unknown のテスト |
+| F2-7 | (6) の出力に設定値そのもの (および解釈した ms 値) を出さない。判定語は `_INVENTORY_JUDGMENTS` の語彙のまま (F-R13。キー集合は F2-10 で `reason` の分だけ実測で更新する) | 2 件。(i) (6) の項目に設定値を持つキーを足す。(ii) 値の解釈の経路で語彙外の判定語を返す | (i) inv: `test_inventory_top_level_and_item_keys_are_pinned`、(ii) inv: `test_inventory_judgment_vocabulary_is_closed` |
+| F2-8 | 終了コードの規約が変わらない: (6) が blocked でも `inventory` の終了コードは 2 で、判定の前の失敗の 1 と区別される (`_inventory_exit_code` の規約) | (6) が blocked のとき終了コードを 1 に写す | inv: `test_inventory_exit_code_is_2_when_any_item_is_not_confirmed`・`test_inventory_tool_failure_exit_code_is_1_with_fixed_text_only` (confirmed 以外の状態はテストの中で明示的に作る。F-R20) |
+| F2-9 | **R-48 の解消そのもの**: 1 つのテストで「0012 までの platform で (6) が unknown → `apply-platform-migration` で 0013 を適用 → confirmed」を観測する (空振り禁止。F-R20) | 0013 の auditreader への `ALTER ROLE ... SET` を外す (F1-1 と同じ操作を別の変異 id で定義する。`file` は 0013) | inv: 0013 適用前 unknown・適用後 confirmed のテスト |
+| F2-10 | (6) の blocked は既存の blocked の項目と同じ形で `reason` に固定語 `statement-timeout-unbounded` を持つ。`_INVENTORY_REASONS` にこの語を足し、語彙の pin と (6) のキー集合の pin を実測で更新する (F-R13。blocked のときだけ持つのか常に持つのかは §6B.7 の 10 の実測に合わせる)。語彙外の reason を返さない | 2 件。(i) blocked のとき `reason` を返さない (キーを落とす)。(ii) `_INVENTORY_REASONS` に足した固定語を外し、語彙外の reason を返す形にする | (i) inv: `test_inventory_top_level_and_item_keys_are_pinned`、(ii) inv: `test_inventory_reason_vocabulary_is_pinned` |
+| F2-11 | (6) の blocked の `remediation_required` は False のまま (F-R15) | blocked のとき `remediation_required` を True にする | inv: 値 0 で blocked のときの項目の値を pin するテスト (F2-2 のテストに含める) |
+
+**共通**
+
+| # | 完了条件 | 変異 (操作) | 赤になる test id (予想) |
+|---|---|---|---|
+| F-C1 | migration を列挙する箇所のうち F-R6・F-R21 の裁定で 0013 を足すと決めたものを、同じ変更セットで更新する (位置は 0012 の直後。テストの既定の bootstrap は 0013 まで適用する) | 既定の bootstrap の列から 0013 を外す (`file` は `MitateDB-api/tests/test_ops_inventory.py`) | inv: 既定の platform で (6) が confirmed のテスト (F-R20) |
+| F-C2 | 0013 を足さないと裁定した箇所には足さない (`conformance-tests/`・`spec/`・runbook を含む) | **監査照合**: `git grep -n 0012_role_connection_limits` の実測 (基点 18 ファイル・44 箇所) と、足した箇所・足さない箇所の `file:line` の一覧を逐語で設計に残す | — |
+| F-40b | 新規テストファイルを作らないので (F-R16)、`tools/tests/test_no_shared_cluster_defaults.py` の件数 pin は変わらない (§1.5 の 40b)。実測で変わったら止まって監督へ上げる | **監査照合**: 実測のコマンドと件数 (基点と同じこと) を逐語で設計に残す | — |
+| F-CM | 本 WP のテストと同じ変更セットで `security/CONTROL_MAPPING.md` (英語) を更新する: SI-08 の MitateDB ブロックは F2 で事実でなくなる (6) の主張と証拠のテスト名を同じ行の中の置き換えで直し (文字を足さない)、0013 の統制は F-R9 の裁定の節に置く。あわせて SI-09 の MitateDB ブロックの実測値を更新する: テスト件数、受け付けるファイルの数 (4→5)、再適用テストの名前 (既存の `test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` は改名せず、docstring に対象ファイルを書く。F-R24)。Version 行の minor を main から 1 つ上げる (F-R9) | **監査照合**: 置き換えた行と足した行、Version 行の前後、SI-08 と追記先の節の MitateDB ブロックの文字数・最長行の実測 (`conformance-tests/test_control_mapping_register.py` と同じ分解。F-R23) を逐語で設計に残す | — |
+| F-47 | 追加・変更した migration・コード・テスト・fixture に実値が無い (C5) | **監査照合**: `public_value_scan.py` の集計行を逐語で残す | — |
+| F-PROD | 0013 と `apply-platform-migration` を本番に対して実行していない。試験の接続先は使い捨ての PostgreSQL だけである (F-R10) | **監査照合**: 0013 を適用するテストの接続先の出所 (テスト基盤の管理 DSN の環境変数名) の `file:line` を逐語で設計に残す | — |
+| F-50 | 本表に変異も監査照合も持たない行が無い (§1.5 の 40) | **監査照合**: 本表の行数と対応数を残す | — |
+
+**件数 (下限)**: 完了条件 35 件 = 変異を持つ行 29 件 (F1-1〜F1-17、F2-1〜F2-11、F-C1) + 監査照合 6 件 (F-C2・F-40b・F-CM・F-47・F-PROD・F-50)。変異は 39 件 (F1-2・F1-4・F1-5・F1-6・F2-2・F2-6・F2-7・F2-10 の各 2 件、F2-5 の 3 件、他の 20 行の各 1 件)。
+
+### 6B.10 監督の確認事項
+
+なし (起草時の疑義 7 件は §6B.2 の F-R13〜F-R19 で決まった)。
 
 ## 7. 本書の範囲外の後続 (列挙のみ。本書の WP では行わない)
 
