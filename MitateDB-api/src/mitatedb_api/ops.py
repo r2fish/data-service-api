@@ -157,6 +157,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Json
 
+from . import pg_timeouts
 from . import platform_declarations
 from . import platform_upgrades
 from .control_audit import insert_control_audit_row, read_control_audit_events
@@ -2023,7 +2024,7 @@ _INVENTORY_MAX_CONCURRENT_CONNECTIONS = 2
 #: may carry -- never the underlying exception text.
 _INVENTORY_JUDGMENTS = frozenset({"confirmed", "blocked", "unknown"})
 _INVENTORY_COMPARISONS = frozenset({"match", "mismatch", "unknown"})
-_INVENTORY_REASONS = frozenset({"ledger-unreadable", "declaration-invalid"})
+_INVENTORY_REASONS = frozenset({"ledger-unreadable", "declaration-invalid", "statement-timeout-unbounded"})
 
 #: Printed on stderr, at exit code 1, whenever this subcommand itself
 #: fails before it can produce any item judgment at all (a missing DSN, an
@@ -2343,8 +2344,7 @@ def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> 
     roles' (the SAME full set item (8) discovers -- `api_roles`/`control_
     roles`/`auditreader_roles` by table grant, PLUS every provisioned
     application's own `runtime_role`/`developer_role`) `CONNECTION LIMIT`
-    and whether `pg_db_role_setting` declares `statement_timeout` for
-    each, database-independently (`setdatabase = 0`). `lock_timeout` is
+    and `statement_timeout` declaration. `lock_timeout` is
     not part of this judgment: no role in this target set ever runs DDL
     (the role that does, the provision role, is never a member of this
     set), so a `lock_timeout` role setting here never bounded a DDL wait
@@ -2353,9 +2353,31 @@ def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> 
     `upgrade-applications`/`deprovision`) already carries. `CONNECTION
     LIMIT` is confirmed up to its actual VALUE, not merely its presence:
     `-1` (unlimited) is unknown here too, the SAME sentinel item (8)
-    already treats specially for this identical role set. The declared
-    lock-type/stop-time-limit half of item (6) is judged by the platform
-    runbook's own independent-review acceptance record instead
+    already treats specially for this identical role set; this early
+    return happens before any role's `statement_timeout` value is read,
+    so a `-1` CONNECTION LIMIT never mixes with a `statement_timeout`
+    judgment on the same run. A role's `statement_timeout`, once
+    declared (database-independently, `setdatabase = 0`), is read
+    through the SAME normalization every other timeout comparison in
+    this package uses (`pg_timeouts.ms_from_pg_timeout_text`) and must
+    be a POSITIVE number of milliseconds -- zero (PostgreSQL's own
+    "disabled" rendering) or a negative number are both `blocked` with
+    the fixed reason `statement-timeout-unbounded`, never confirmed by
+    treating "some value is declared" as sufficient on its own. A value
+    `ms_from_pg_timeout_text` cannot parse is `blocked` for the same
+    reason, its own raw text never surfacing in the output. A role
+    carrying no `statement_timeout` declaration at all stays `unknown`,
+    unless some OTHER role in the same target set is already `blocked` --
+    `blocked` outranks `unknown` across this target set, mirroring item
+    (3)'s own judgment-combining rule, but this ranking applies only
+    between `statement_timeout` value judgments; it never reaches back
+    to override the CONNECTION LIMIT early return above. The output
+    always carries a `reason` key (`None` outside the `blocked` case),
+    matching item (2)/(3)'s own shape, and `remediation_required` stays
+    `False` in the `blocked` case -- a positive value the operator must
+    choose, never a gap this tool can safely fill in on its own. The
+    declared lock-type/stop-time-limit half of item (6) is judged by the
+    platform runbook's own independent-review acceptance record instead
     (`_INVENTORY_UNJUDGED_ITEMS`'s own `{"item": 6, "part": "lock-and-
     downtime", ...}` entry), never here -- item (6) still keeps its own
     `ddl_lock` key because this runtime-settings half DOES get a real
@@ -2365,7 +2387,7 @@ def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> 
     try:
         api_roles, control_roles, auditreader_roles = _inventory_role_classes(conn, schema)
     except psycopg.Error:
-        return {"judgment": "unknown", "remediation_required": False}
+        return {"judgment": "unknown", "remediation_required": False, "reason": None}
     try:
         with conn.cursor() as cur:
             applications_table = sql.Identifier(schema, "applications")
@@ -2375,29 +2397,43 @@ def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> 
             ).format(table=applications_table))
             app_roles = cur.fetchall()
     except psycopg.Error:
-        return {"judgment": "unknown", "remediation_required": False}
+        return {"judgment": "unknown", "remediation_required": False, "reason": None}
     target_roles = (
         api_roles + control_roles + auditreader_roles
         + [name for pair in app_roles for name in pair]
     )
     if not target_roles:
-        return {"judgment": "unknown", "remediation_required": False}
+        return {"judgment": "unknown", "remediation_required": False, "reason": None}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(%s)", [target_roles])
             limits = dict(cur.fetchall())
         if any(limits.get(role) is None or limits.get(role) == -1 for role in target_roles):
-            return {"judgment": "unknown", "remediation_required": False}
+            return {"judgment": "unknown", "remediation_required": False, "reason": None}
+        judgment = "confirmed"
         for role in target_roles:
-            declared_keys: set = set()
+            declared_value: "Optional[str]" = None
             for setdatabase, _datname, setconfig in platform_declarations._role_setting_rows(conn, role):
                 if setdatabase == 0 and setconfig:
-                    declared_keys.update(entry.split("=", 1)[0] for entry in setconfig)
-            if "statement_timeout" not in declared_keys:
-                return {"judgment": "unknown", "remediation_required": False}
+                    for entry in setconfig:
+                        key, _sep, value = entry.partition("=")
+                        if key == "statement_timeout":
+                            declared_value = value
+            if declared_value is None:
+                if judgment != "blocked":
+                    judgment = "unknown"
+                continue
+            try:
+                declared_ms = pg_timeouts.ms_from_pg_timeout_text(declared_value)
+            except ValueError:
+                judgment = "blocked"
+                continue
+            if declared_ms <= 0:
+                judgment = "blocked"
     except psycopg.Error:
-        return {"judgment": "unknown", "remediation_required": False}
-    return {"judgment": "confirmed", "remediation_required": False}
+        return {"judgment": "unknown", "remediation_required": False, "reason": None}
+    reason = "statement-timeout-unbounded" if judgment == "blocked" else None
+    return {"judgment": judgment, "remediation_required": False, "reason": reason}
 
 
 def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args: argparse.Namespace) -> dict:
@@ -2593,6 +2629,7 @@ _PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
     "0007_platform_declarations.sql",
     "0011_process_ceilings.sql",
     "0012_role_connection_limits.sql",
+    "0013_role_statement_timeouts.sql",
 )
 
 #: the psql `-v NAME=VALUE` variables each file above references,
@@ -2606,6 +2643,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
     "0007_platform_declarations.sql": ("api_role", "controlplane_role"),
     "0011_process_ceilings.sql": (),
     "0012_role_connection_limits.sql": (),
+    "0013_role_statement_timeouts.sql": (),
 }
 
 #: matches a psql `:name`/`:'name'`/`:"name"` variable

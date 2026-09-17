@@ -191,6 +191,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         # floor and fails startup for every consumer, not just the ones
         # actually about F-16.
         "0012_role_connection_limits.sql",
+        # 0013 is intentionally absent: this fixture never applies 0005, so it has no `mitatedbsvc_auditreader` role for 0013's own `ALTER ROLE` to target.
         # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
         # declarations table + the two service writer roles' timeout role
         # settings -- every test in this repository that calls `main.

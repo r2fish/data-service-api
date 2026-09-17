@@ -141,6 +141,10 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         # `CONNECTION LIMIT` (10, `0002_registry_and_functions.sql`) sits
         # below F-16's own real pool-composition floor and fails startup.
         "0012_role_connection_limits.sql",
+        # Sets a role-level `statement_timeout` on `mitatedbsvc_
+        # auditreader` and every application's own runtime/developer
+        # role -- depends only on 0005/0012 above, run right after 0012.
+        "0013_role_statement_timeouts.sql",
         # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
         # declarations table + the two service writer roles' timeout role
         # settings -- run AFTER 0002 (its own two `ALTER ROLE` targets,
@@ -186,6 +190,7 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
         _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
         _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+        _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         admin = psycopg.connect(dsn, autocommit=True)

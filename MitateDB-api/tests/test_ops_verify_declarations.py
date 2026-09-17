@@ -55,6 +55,13 @@ MIGRATION_NAMES = (
     # isomorphism-pinned symbol, `tests/test_audit_query.py::
     # _ISOMORPHIC_TARGETS`).
     "0012_role_connection_limits.sql",
+    # 0013 sets a role-level `statement_timeout` on `mitatedbsvc_
+    # auditreader` and every provisioned application's own runtime/
+    # developer role -- inserted here for the SAME reason as 0012 above
+    # (before 0007, so `MIGRATION_NAMES_WITHOUT_DECLARATIONS`'s own
+    # `[:-2]` slice still drops exactly `{0007, 0011}`; the assertion
+    # right below `MIGRATION_NAMES_WITHOUT_DECLARATIONS` confirms this).
+    "0013_role_statement_timeouts.sql",
     "0007_platform_declarations.sql",
     # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
     # key`'s own CHECK constraint to accept `process_ceilings`. `_bootstrap`
@@ -71,6 +78,11 @@ MIGRATION_NAMES = (
 #: declarations` in the first place; 0011 only widens a CHECK on a table
 #: that, on THIS fixture, does not exist at all).
 MIGRATION_NAMES_WITHOUT_DECLARATIONS = MIGRATION_NAMES[:-2]
+#: non-vacuous check that inserting 0013 before 0007 (like 0012 before
+#: it) left the slice above dropping exactly the same two migrations.
+assert set(MIGRATION_NAMES) - set(MIGRATION_NAMES_WITHOUT_DECLARATIONS) == {
+    "0007_platform_declarations.sql", "0011_process_ceilings.sql",
+}
 
 _DATA_URL = "https://ops-verify-test.example.invalid/v1"
 _CONTROL_URL = "https://ops-verify-test.example.invalid/control/v1"
@@ -168,6 +180,9 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
     # of which fixture variant (`MIGRATION_NAMES` vs `MIGRATION_NAMES_
     # WITHOUT_DECLARATIONS`) called this function.
     _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+    # 0013: unconditional, like 0012 above -- depends only on 0005/0012
+    # (never on 0007/0011).
+    _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
     if "0007_platform_declarations.sql" in rewritten:
         _run_psql(
             provision_dsn,

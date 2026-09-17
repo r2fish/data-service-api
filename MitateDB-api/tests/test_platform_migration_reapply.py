@@ -118,10 +118,11 @@ def _sweep_prefix(admin_dsn: str, prefix: str) -> None:
 
 @pytest.fixture(scope="module")
 def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleNamespace]:
-    """`0001`+`0002`+`0005`+`0012`+`0007`+`0011`, in the same order
+    """`0001`+`0002`+`0005`+`0012`+`0013`+`0007`+`0011`, in the same order
     `control_plane_harness.bootstrap_control_platform` already applies
-    them (0011 depends on 0007's own table; the other four are order-
-    independent, design D-5 (ii)/0012's own header) -- plus rewritten
+    them (0011 depends on 0007's own table; 0013 depends on 0005/0012;
+    the rest are order-independent, design D-5 (ii)/0012's own header) --
+    plus rewritten
     copies of `0003`/`0004`/`0006`/`0008`/`0009` in the SAME migrations
     directory, for the per-application-upgrade/deprovision tests below
     (never applied by this fixture itself; `provision_app`/`deprovision_
@@ -144,7 +145,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         "0005_application_audit.sql", "0006_declared_field_types_upgrade.sql",
         "0007_platform_declarations.sql", "0008_platform_upgrades_upgrade.sql",
         "0009_field_constraints_upgrade.sql", "0011_process_ceilings.sql",
-        "0012_role_connection_limits.sql",
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -157,6 +158,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql_ok(provision_dsn, rewritten["0002_registry_and_functions.sql"])
         _run_psql_ok(provision_dsn, rewritten["0005_application_audit.sql"])
         _run_psql_ok(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+        _run_psql_ok(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
         _run_psql_ok(provision_dsn, rewritten["0007_platform_declarations.sql"],
                      {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql_ok(provision_dsn, rewritten["0011_process_ceilings.sql"])
@@ -278,6 +280,7 @@ def _run_ops(platform: types.SimpleNamespace, *args: str) -> subprocess.Complete
 # | 0010_idempotency_records_upgrade.sql | per-application upgrade | 同上 |
 # | 0011_process_ceilings.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 |
 # | 0012_role_connection_limits.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (既存 application ロールを更新する内部ループを持つが `:app_id` 引数は取らない) |
+# | 0013_role_statement_timeouts.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (0012 と同型の内部ループを持つ) |
 # ===========================================================================
 
 _REAPPLY_EXCLUDED_FILENAME = "0004_deprovision_application.sql"
@@ -290,6 +293,7 @@ _REAPPLY_STARTING_POINTS = range(len(_REAPPLY_MIGRATION_SEQUENCE) + 1)
 _REAPPLY_PLATFORM_MIGRATION_FILENAMES = (
     "0005_application_audit.sql", "0007_platform_declarations.sql",
     "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
+    "0013_role_statement_timeouts.sql",
 )
 #: per-application upgrade (種別実測) -- 2 回目の適用は運用の経路
 #: (`upgrade-applications --lock-timeout`) を通す。生の psql では呼ばない。
@@ -316,7 +320,22 @@ def _repo_relpath(path: Path) -> str:
     return str(path.relative_to(_REPO_ROOT))
 
 
-def _added_commit(path: Path) -> str:
+def _added_commit(path: Path) -> "str | None":
+    """The oldest commit that added `path`, or `None` when `path` is not
+    tracked by git yet (a migration file still only in the working tree)
+    -- `_historical_files_for_prefix` treats that the same way it treats a
+    prefix boundary this repository's own recorded history does not reach
+    at all: there is no earlier state to read, so every file at that
+    prefix uses its own current content. A TRACKED file whose own `git
+    log --diff-filter=A` comes back empty (a shallow clone or otherwise
+    incomplete local history) raises rather than silently falling back to
+    current content, same as any other git failure below."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", _repo_relpath(path)],
+        cwd=_REPO_ROOT, capture_output=True, text=True,
+    )
+    if tracked.returncode != 0:
+        return None
     result = subprocess.run(
         ["git", "log", "--diff-filter=A", "--format=%H", "--", _repo_relpath(path)],
         cwd=_REPO_ROOT, capture_output=True, text=True,
@@ -325,7 +344,10 @@ def _added_commit(path: Path) -> str:
         raise RuntimeError(f"could not determine the commit that added {path.name}: {result.stderr}")
     commits = result.stdout.strip().splitlines()
     if not commits:
-        raise RuntimeError(f"no commit found that added {path.name}: {result.stderr}")
+        raise RuntimeError(
+            f"{path.name} is tracked by git but its own history has no commit that added it "
+            "(a shallow clone or otherwise incomplete local checkout)"
+        )
     return commits[-1]  # oldest listed line is the original add
 
 
@@ -360,13 +382,17 @@ def _historical_files_for_prefix(prefix_n: int) -> dict:
     file arrived. A file that did not exist yet at that point (it and the
     boundary file were introduced together) falls back to its own current
     content -- there is no earlier state to read. Empty for `prefix_n ==
-    0` (nothing precedes the sequence) or `prefix_n == len(_REAPPLY_
+    0` (nothing precedes the sequence), `prefix_n == len(_REAPPLY_
     MIGRATION_SEQUENCE)` (the largest starting point IS candidate HEAD;
-    this function is never called for it)."""
+    this function is never called for it), or a boundary file with no
+    commit adding it yet (`_added_commit` returns `None`)."""
     if prefix_n <= 0 or prefix_n >= len(_REAPPLY_MIGRATION_SEQUENCE):
         return {}
     boundary = _REAPPLY_MIGRATION_SEQUENCE[prefix_n]
-    parent = _parent_commit(_added_commit(boundary))
+    added_commit = _added_commit(boundary)
+    if added_commit is None:
+        return {}
+    parent = _parent_commit(added_commit)
     historical: dict = {}
     for i in range(prefix_n):
         target = _REAPPLY_MIGRATION_SEQUENCE[i]
@@ -587,14 +613,16 @@ def _role_connlimit(dsn: str, role: str) -> "int | None":
 
 def _drift_platform_objects_before_reapplication(
     admin_dsn: str, provision_dsn: str, registry_schema: str, api_role: str, controlplane_role: str,
+    auditreader_role: str, runtime_role: str,
 ) -> None:
     """manually drifts, for EACH platform migration file
     `apply-platform-migration` is about to re-apply, the ONE object
     that file's own header says it (re)asserts unconditionally on every
     run -- an ACL (0005), a role setting (0007), a declared CHECK
-    constraint (0011), and a function body (0012). Mirrors the SAME
-    drift shapes `test_ops_apply_platform_migration.py`'s own per-file
-    tests use."""
+    constraint (0011), a function body (0012), and two role settings
+    (0013: `mitatedbsvc_auditreader` and one already-provisioned
+    application's own runtime role). Mirrors the SAME drift shapes
+    `test_ops_apply_platform_migration.py`'s own per-file tests use."""
     # 0005: application_audit's own `REVOKE ALL ... FROM PUBLIC` runs
     # every time -- add a PUBLIC grant by hand.
     conn = psycopg.connect(provision_dsn, autocommit=True)
@@ -641,6 +669,18 @@ def _drift_platform_objects_before_reapplication(
                 ).format(fn=sql.Identifier(registry_schema, "begin_provision_application")))
     finally:
         conn.close()
+    # 0013: `mitatedbsvc_auditreader`'s and one already-provisioned
+    # application's own runtime role's `ALTER ROLE ... SET statement_
+    # timeout` both run every time -- hand-change them.
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '9999ms'").format(
+                sql.Identifier(auditreader_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(
+                sql.Identifier(runtime_role)))
+    finally:
+        admin.close()
 
 
 @pytest.mark.parametrize("prefix_n", _REAPPLY_PARAMETRIZED_STARTING_POINTS)
@@ -657,14 +697,15 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
     が存在する (0003 が列の先頭寄りにあるため)。候補 HEAD まで残りを
     (今日の内容で) 適用したのち、台帳から per-application の番号
     (6/8/9/10) を消して `upgrade-applications` を実際に走らせ (未適用が
-    無ければ本文は実行されない)、platform migration (0005/0007/0011/0012)
-    は生の psql をもう一度、per-application upgrade は `upgrade-
-    applications` (`--lock-timeout` 付き、`--script` 無し) をもう一度実行
-    し、すべての終了コードが 0 であることと、`updated_at` を除いた宣言の
-    値・widened 制約定義・ロールの `CONNECTION LIMIT`・タイムアウト設定・
-    台帳の差分が 0 であることを確かめる。bootstrap (0001/0002) と
-    provisioning (0003) は一度だけ流す設計であり、2 回目の適用の対象に
-    含めない。"""
+    無ければ本文は実行されない)、platform migration (0005/0007/0011/0012/
+    0013、`apply-platform-migration` 経由) はもう一度適用し、per-
+    application upgrade は `upgrade-applications` (`--lock-timeout` 付き、
+    `--script` 無し) をもう一度実行し、すべての終了コードが 0 であること
+    と、`updated_at` を除いた宣言の値・widened 制約定義・ロールの
+    `CONNECTION LIMIT`・タイムアウト設定 (auditreader・application の
+    runtime role を含む)・台帳の差分が 0 であることを確かめる。bootstrap
+    (0001/0002) と provisioning (0003) は一度だけ流す設計であり、2 回目
+    の適用の対象に含めない。"""
     _require_admin_connection()
     admin_dsn = _admin_dsn()
     prefix = f"mtdbmreapn{prefix_n}{secrets.token_hex(3)}"
@@ -754,6 +795,7 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
         assert ledger_numbers(admin_dsn, app_database) == frozenset({6, 8, 9, 10})
 
         runtime_role = f"{app_database}_rt"
+        auditreader_role = f"{prefix}svc_auditreader"
 
         def _snapshot() -> tuple:
             return (
@@ -766,6 +808,8 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
                 _function_def_and_acl(provision_dsn, registry_schema, "begin_provision_application"),
                 _role_connection_limits(provision_dsn, api_role, controlplane_role),
                 _role_connlimit(provision_dsn, runtime_role),
+                _role_setting(provision_dsn, auditreader_role),
+                _role_setting(provision_dsn, runtime_role),
                 ledger_numbers(admin_dsn, app_database),
             )
 
@@ -780,7 +824,8 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
         # applications` path (bulk, no `--script`) -- everything is
         # already recorded by now, so this run's own output must show
         # nothing newly applied.
-        _drift_platform_objects_before_reapplication(admin_dsn, provision_dsn, registry_schema, api_role, controlplane_role)
+        _drift_platform_objects_before_reapplication(
+            admin_dsn, provision_dsn, registry_schema, api_role, controlplane_role, auditreader_role, runtime_role)
         for name in _REAPPLY_PLATFORM_MIGRATION_FILENAMES:
             if name == "0007_platform_declarations.sql":
                 r = _run_ops(ns, "apply-platform-migration", name, "--lock-timeout", _TEST_LOCK_TIMEOUT,
@@ -984,10 +1029,15 @@ def test_per_application_upgrade_reapplication_is_idempotent(platform: types.Sim
 
 
 def test_platform_migrations_declare_on_error_stop_in_the_file() -> None:
-    """完了条件45b: 0007/0011/0012 の各ファイルが自分自身で
-    `\\set ON_ERROR_STOP on` を持つ (運用の適用例が argv にこの層を持たない
-    ので、ファイル側がここでの唯一の保証になる)。"""
-    for name in ("0007_platform_declarations.sql", "0011_process_ceilings.sql", "0012_role_connection_limits.sql"):
+    """Every file `apply-platform-migration` accepts
+    (`ops._PLATFORM_MIGRATION_FILENAMES`) carries its own `\\set
+    ON_ERROR_STOP on` -- a real `apply-platform-migration` invocation
+    never puts this layer on the psql argv itself, so the file itself is
+    the only guarantee. Derived from the pinned constant (never a
+    hand-written list) so a future accepted file is covered without an
+    edit here."""
+    assert len(ops._PLATFORM_MIGRATION_FILENAMES) == 5
+    for name in ops._PLATFORM_MIGRATION_FILENAMES:
         text = (MIGRATIONS_DIR / name).read_text()
         assert "\\set ON_ERROR_STOP on" in text, name
 

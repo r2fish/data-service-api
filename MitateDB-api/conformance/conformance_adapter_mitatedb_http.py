@@ -321,6 +321,12 @@ def _bootstrap_platform(
         # declarations-table migrations below (order-independent either
         # way, mirroring r2db-api's own adapter).
         "0012_role_connection_limits.sql",
+        # Sets a role-level `statement_timeout` on `mitatedbsvc_
+        # auditreader` and every application's own runtime/developer role
+        # -- depends only on 0005/0012 above, applied here right after
+        # 0012 (order-independent relative to the declarations-table
+        # migrations below).
+        "0013_role_statement_timeouts.sql",
         # Q4 phase (design D-1/D-2, work order §4 WP-2 変更対象 D):
         # platform declarations table + the two service writer roles'
         # timeout role settings -- THIS adapter's own `build_control_
@@ -362,6 +368,7 @@ def _bootstrap_platform(
     # on those two, so it always runs here regardless of the declarations-
     # table migrations below.
     _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+    _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
     # Q4 phase: platform declarations + writer-role timeouts -- only
     # depends on 0002's two roles, run here (before the password-ALTER
     # block below, order-independent either way).
