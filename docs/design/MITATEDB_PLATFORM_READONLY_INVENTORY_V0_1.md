@@ -1,4 +1,4 @@
-# MitateDB platform の読み取り専用 inventory 設計メモ（v0.8）
+# MitateDB platform の読み取り専用 inventory 設計メモ（v0.9）
 
 - 状態: **設計レビュー 2 回反映済み、依頼者裁定済み（2026-09-16、§6 冒頭）。作業指示書の起草待ち。** ~~設計レビュー 2 回反映済み、依頼者判断待ち（Q-1〜Q-7）。~~ 本書の手順はまだ実行してよい手順ではない。本番を読むのは、本書の経路が設計レビューで受け入れられた後である（`docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 C の制約）。
 - 台帳: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-45**（v1.50）。起票物は `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` の手順 1。
@@ -17,6 +17,7 @@
   - v0.6（2026-09-16）末尾に §12（WP-A の実施記録）を足した。本文の決定は変えていない。
   - v0.7（2026-09-17）§12.2（WP-C の実施記録）を足した。本文の決定は変えていない。
   - v0.8（2026-09-17）§12.3（WP-B の実施記録）を足した。本文の決定は変えていない。
+  - v0.9（2026-09-17）§12.4（WP-E の実施記録）を足し、WP-E で覆した D-1 の (6)・(8)、§7 の 33b、§12.3 の該当記述に打ち消し線と註を入れた（§1.8 の 56）。
 
 ## 1. 問題
 
@@ -122,7 +123,7 @@ Mitate 設計 §3 の Gate-0 を、秘密を出力せず、本番の状態を変
   - 出力は**件数と状態（enabled / revoked / must_rotate 等）の集計だけ**とし、`credential_id` を出さない。registry は列を明示して読み、`digest` 列を読まない。出力の key と `cursor.description` の列名が許可リストに一致することをテストで固定する。
   - 読む権限の取り方は §6 Q-4。権限が無ければ unknown とし、権限を足して読みに行かない（裁定 Z-6）。
 - (5)・(6) の宣言部分: `inventory` の (5)・(6) の判定関数が、互換性・ロックの機械可読な宣言の有無を読む。宣言の形は §6 Q-1・Q-2 で決まるので、決まるまでは宣言が無く unknown を返す（設計レビュー 2 回目の m1）。
-- (6) の実行時設定部分: 対象ロールの `CONNECTION LIMIT` と、ロール設定（`pg_db_role_setting`）の `statement_timeout` / `lock_timeout` の有無を読む。
+- (6) の実行時設定部分: 対象ロールの `CONNECTION LIMIT` と、ロール設定（`pg_db_role_setting`）の `statement_timeout` ~~/ `lock_timeout`~~ の有無を読む。 **【註 2026-09-17】WP-E で覆した。根拠は作業指示書 §6A.1 の依頼者裁定 (b) と §6A.3 の E1。現行は §12.4**
 - (8) の式（v0.3、裁定 Z-13）: ~~（以下の 4 行）~~ **【v0.3 追補で置換 2026-09-16、裁定 Z-20】** 根拠: 需要を role ごとに見るか process ごとに見るかが文言から一意に読めなかった（起草担当の疑義 3）。旧式にあった「`inventory` 自身の接続数の差し引き」は Z-20 の式に含まれないので一度外し、裁定 Z-23 で予約枠に含めて数える形に戻した。
   - ~~入力: `SHOW max_connections`、各 role の `CONNECTION LIMIT`、`process_ceilings` 宣言、process あたりの接続数（明示の引数）。~~
   - ~~需要の上限: 各 role について、宣言された process ceilings から見た接続数を、**traffic 移行中は新旧 revision の合計**として数え、role の `CONNECTION LIMIT` を超えない範囲で合計する。~~
@@ -137,7 +138,7 @@ Mitate 設計 §3 の Gate-0 を、秘密を出力せず、本番の状態を変
 - (8) の式（裁定 Z-27。Z-23・Z-13 は引き継ぐ）:
   - **対象 role**: Data / Control の process が使う全 role。`0012_role_connection_limits.sql` の見出し註による列挙は `mitatedbsvc_api`・`mitatedbsvc_controlplane`・`mitatedbsvc_auditreader`・serving 中の各アプリケーションの `<id>_rt` / `<id>_dv` である。
   - **`mitatedbsvc_provision` は process の role ではないので対象外**とし、`inventory` 自身の provision 接続は予約枠（Z-23）で数える。**`mitatedbsvc_auditreader` をどの process が使うかは実装 WP の着手時にコード（関数名）で確定し、確定するまでは Data と Control の両方で数える**（多めに数える側に倒す）（裁定 Z-36）。
-  - **process 数**: `process_ceilings` の宣言値ではなく、platform 層が読んだ実際の上限（`max-instances` 等）を使う。traffic 移行中は新旧 revision の合計とする。**宣言と実際が食い違えば blocked。**
+  - **process 数**: `process_ceilings` の宣言値ではなく、platform 層が読んだ実際の上限（`max-instances` 等）を使う。~~traffic 移行中は新旧 revision の合計とする。**宣言と実際が食い違えば blocked。**~~ **【註 2026-09-17】WP-E で覆した。宣言との比較は各 revision 単体の上限で行い、新旧の合計は余力の計算にだけ使う（入力を 4 つの引数に分け、合計が単体の上限より小さい入力は拒否する）。根拠は作業指示書 §6A.3 の E2 と §6A.2 の E-R4。現行は §12.4**
   - **process あたり接続数**: role の種類ごとに、コードの定数（pool の大きさ等）を出所として関数名で引く（`mitatedb_api.config.role_pool_size`、`mitatedb_api.platform_declarations.check_role_connection_limits`）。concurrency は許可表の env の値（D-1 platform 層）から与える。
   - **条件 1（role ごと）**: 「新旧 revision の process 数 × その role の process あたり接続数」が、その role の `CONNECTION LIMIT` 以下。
   - **条件 2（全体）**: role の種類ごとの需要の和 + 予約枠が `max_connections` 以下。**concurrency の上限を共有するアプリケーション role は、共有の単位で 1 回だけ数える。**
@@ -487,7 +488,7 @@ Mitate 設計 §3 の Gate-0 を、秘密を出力せず、本番の状態を変
 | 32a | (8) で対象 role 以外の role（組み込み・管理用）の `CONNECTION LIMIT = -1` は unknown の理由にしない（裁定 Z-27） | -1 の検査を全 role に広げる | 赤 |
 | ~~33~~ | ~~(8) 条件 1 の需要は新旧 revision の process 数の合計で数える（裁定 Z-20）~~ **【v0.4 で置換 2026-09-16、裁定 Z-27】** | ~~1 revision 分だけ数える~~ | — |
 | 33a | (8) の process 数は新旧 revision の `max-instances` の合計で数える（裁定 Z-27） | 1 revision 分だけ数える | 赤 |
-| 33b | (8) で `process_ceilings` の宣言と実際の `max-instances` が食い違えば blocked（裁定 Z-27） | 食い違いを無視する | 赤 |
+| 33b | (8) で `process_ceilings` の宣言と ~~実際の `max-instances`~~ が食い違えば blocked（裁定 Z-27） **【註 2026-09-17】WP-E で覆した。宣言と比べるのは各 revision 単体の上限（`--data-process-ceiling` / `--control-process-ceiling`）で、新旧の合計（33a）は余力の計算にだけ使う。根拠は作業指示書 §6A.3 の E2 と §6A.2 の E-R4。現行は §12.4** | 食い違いを無視する | 赤 |
 | 34 | (8) 条件 1: role ごとの需要が role の `CONNECTION LIMIT` 以下でなければ confirmed にしない（裁定 Z-20・Z-27） | 条件 1 の比較を外す | 赤 |
 | 34a | (8) の process あたり接続数を role の種類ごとに、D-1 の関数名で引く定数から取る（`mitatedbsvc_api` は 2 × concurrency 等、裁定 Z-27） | `mitatedbsvc_api` を 1 × concurrency で数える | 赤 |
 | 34b | (8) 条件 2 で、concurrency の上限を共有するアプリケーション role を共有の単位で 1 回だけ数える（裁定 Z-27） | アプリケーションごとに数える | 赤 |
@@ -656,7 +657,16 @@ Z-5 は欠番である。第 1 次の起草の疑義 5（r2db-api の扱い）�
 ### 12.3 WP-B — MitateDB-api の `inventory` (DB 層) (2026-09-17)
 
 - 基点 main `8a2fe41` (WP-A・WP-C 統合後)。作業指示書 §4・§4.1 (訂正註 B-1〜B-3、監督裁定 B-1〜B-19)。
-- **統制** (`ops.py` の `inventory`): DB 層が判定する項目 (1) 接続先の突き合わせ (`comparison` = match / mismatch / unknown と `judgment`)、(2) 宣言 (欠落は confirmed + `remediation-required`、値の不正は blocked)、(3) migration と application ごとの upgrade 状態 (台帳を読めない application は blocked)、(4) credential registry の件数と状態ごとの件数 (credential_id と秘密の列は読まない。返る列名を許可リストで固定)、(6) の実行時設定 (対象 role の CONNECTION LIMIT の値と `lock_timeout` / `statement_timeout`)、(8) 接続数の余力 (Data の process 数 × concurrency のアプリケーション role の需要、Control だけが使う auditreader、宣言と実際の process 上限の食い違いは blocked、-1 は対象 role の中だけ unknown) を JSON で出す。(5) と (6) のロック・停止時間の部分は `unjudged_items` (`runbook-acceptance`)。終了コードは 0 = 判定した全項目 confirmed、2 = いずれかが blocked / unknown、1 = ツール自身の失敗 (固定文言)。すべての接続 (application DB を含む) を接続単位で読み取り専用にして読み戻し、確かめられない接続は読まずに unknown。各接続に `lock_timeout=3000ms`・`statement_timeout=5000ms`。DSN は環境変数だけで受け取り、user / password / host は全経路で、dbname は識別フィールド以外で出力しない。
+- **統制** (`ops.py` の `inventory`): DB 層が判定する項目 (1) 接続先の突き合わせ (`comparison` = match / mismatch / unknown と `judgment`)、(2) 宣言 (欠落は confirmed + `remediation-required`、値の不正は blocked)、(3) migration と application ごとの upgrade 状態 (台帳を読めない application は blocked)、(4) credential registry の件数と状態ごとの件数 (credential_id と秘密の列は読まない。返る列名を許可リストで固定)、(6) の実行時設定 (対象 role の CONNECTION LIMIT の値と ~~`lock_timeout` /~~ `statement_timeout`。**【註 2026-09-17】WP-E で覆した。根拠は作業指示書 §6A.1 の依頼者裁定 (b) と §6A.3 の E1。現行は §12.4**)、(8) 接続数の余力 (Data の process 数 × concurrency のアプリケーション role の需要、Control だけが使う auditreader、~~宣言と実際の process 上限の食い違いは blocked~~ (**【註 2026-09-17】WP-E で覆した。宣言と比べるのは各 revision 単体の上限で、需要の計算は新旧の合計から行う。根拠は作業指示書 §6A.3 の E2。現行は §12.4**)、-1 は対象 role の中だけ unknown) を JSON で出す。(5) と (6) のロック・停止時間の部分は `unjudged_items` (`runbook-acceptance`)。終了コードは 0 = 判定した全項目 confirmed、2 = いずれかが blocked / unknown、1 = ツール自身の失敗 (固定文言)。すべての接続 (application DB を含む) を接続単位で読み取り専用にして読み戻し、確かめられない接続は読まずに unknown。各接続に `lock_timeout=3000ms`・`statement_timeout=5000ms`。DSN は環境変数だけで受け取り、user / password / host は全経路で、dbname は識別フィールド以外で出力しない。
 - **証拠**: `MitateDB-api/tests/test_ops_inventory.py` 80 テスト、変異 82 件すべて期待どおり。`MitateDB-api/tests` `1263 passed, 2 subtests passed` (基点 1183)。root gate **`3610 passed, 2 subtests passed`**、judge=PASS、実行クラスタ差分 0 (基点 3530 + 80)。`--register` OK (427 CH-ID)。公開値スキャン flagged 0。`security/CONTROL_MAPPING.md` Version 2.3 (SI-08・SI-09・SI-10 の MitateDB ブロック。SI-08 は 14,809 字 / 上限 15,200)。
 - **レビュー**: 独立コードレビュー 5 回 (差し戻し 4 回)。接続数の式に Data の process 数が掛かっていない、application 接続の読み取り専用を確かめていない、書き込み拒否を 1 接続でしか試していない、宣言読み取りの失敗が confirmed に進む、user の番兵が DSN に入っていない、を直した。**実装担当が「直した」と報告した項目が 2 回続けて直っていなかった** — 以後、修正の報告には file:line とその箇所だけを壊す変異の赤を必須にした。
 - **本番の Gate-0 への帰結**: DB 層だけでは (5) と (6) のロック・停止時間の部分が判定外なので終了コード 0 でも全体は ready ではない。全体は WP-D の runbook で、表の独立レビューの受理記録と platform 層を合わせて判定する。R-47 の状態の application があれば (3) は blocked。
+
+### 12.4 WP-E — `inventory` の (6)・(8) の直しと `apply-platform-migration` (2026-09-17)
+
+- 基点 main `ea316b1` (WP-B 統合後)。作業指示書 §6A・§6A.11 (訂正註 E-1〜E-5、監督裁定 E-S1〜E-S11、監査照合の逐語記録)・§6A.12 (依頼者の回答)。
+- **統制** (`ops.py`): (6) の実行時設定の判定から role の `lock_timeout` を外した (`statement_timeout` と CONNECTION LIMIT は残る。E1)。(8) は引数を `--data-process-ceiling`・`--data-process-count-total`・`--control-process-ceiling`・`--control-process-count-total` に分け、宣言との比較は各 revision 単体の上限で行い、需要 (API・controlplane・auditreader・application role・全体) は新旧の合計から計算する (E2)。Control 未配備は `--control-not-deployed` の明示の宣言のときだけ受け付け、出力に `control_deployed` を常に持つ (E3)。`inventory` の入力の拒否は未知の引数を含めすべて終了コード 1 (他のサブコマンドは argparse 既定の 2 のまま)。新サブコマンド `apply-platform-migration` は 0005・0007・0011・0012 だけを受け付け、`--lock-timeout` を必須とし、0007 は `--api-role`・`--controlplane-role` を取る (E4)。DDL を流すサブコマンドの集合と `--lock-timeout` 必須の集合の一致は AST の静的テストで固定した。
+- **証拠**: `MitateDB-api/tests/test_ops_inventory.py` 102 テスト (基点 80)、新規 `MitateDB-api/tests/test_ops_apply_platform_migration.py` 29 テスト、`MitateDB-api/tests/test_platform_migration_reapply.py` 31 テスト (件数不変。0005・0007・0011・0012 の 2 回目の適用を `apply-platform-migration` 経由にし、直前に 4 つのオブジェクトをずらし、`_snapshot()` に application_audit の ACL を足した)、`tools/tests/test_no_shared_cluster_defaults.py` の件数 pin 25 → 26。変異 66 件 (manifest の 57 件 + 差し戻しで足した 6 件 + E4-10 の 0007・0011・0012 の個別 3 件) すべて期待どおり。root gate **`3661 passed, 2 subtests passed`**、judge=PASS、実行クラスタの `pg_database` / `pg_roles` 差分 0 (基点 3610 + 51 = `inventory` +22、`apply-platform-migration` +29)。公開値スキャン `files_scanned=6 total_flagged=0`。`check_comment_provenance.py --register` OK (427 CH-ID)、`--base ea316b1` の赤は `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §4.1 の (1)(2) の類型 (CH-ID の無い新しい塊。作業指示書 §3.1 の A-15) だけで history-token 0。`security/CONTROL_MAPPING.md` Version 2.4 (SI-08 は置き換えのみで 15,187 字 / 上限 15,200、SI-09 は 6,867 字)。
+- **レビュー**: 独立コードレビュー 1 回 (重大 2・中 4・軽 5)、差し戻し 2 回 (1 回目は監督の点検による)。直したもの: 変異 28 件が未実行だった、需要の計算が「上限 ≠ 合計」の入力で観測されていなかった (API 以外の 4 項)、「psql を起動する全関数」の静的テストが手書きの列挙だった (AST で導く形に直した)、E4-2 の包含が片方向、新規コメントの経緯語・文字落ち。
+- **作業中の事象と教訓**: (a) 実装担当が、変異を成立させるためだけに製品コードへ常に空の引数を足した (監督が除いた)。変異は「足す」形でも書ける。(b) 実装担当が差し戻しの番号 (「remand 2, item 6」等) を docstring に書いた。以後の発注に「差し戻しの番号も経緯語」と明記する。(c) 実装担当が Google Drive の同期によるテストファイルの巻き戻りを 3 回報告した (`OPERATING_CONDITIONS.md` §2 の 10)。
+- **本番の Gate-0 への帰結**: E1 の後も本番の (6) は unknown のままである (auditreader と application ごとの runtime / developer role に `statement_timeout` を設定する経路が無い)。これは台帳 R-48 として起票済みで、R-45 の WP-F で解消する (依頼者の回答 1。作業指示書 §6A.12)。R-47 の状態の application があれば (3) は blocked で、受け入れ後に本番を読んで該当があれば R-47 を 1 本の WP として開く (依頼者の回答 2)。`apply-platform-migration` は WP-E・WP-D・WP-F の作業では本番に対して実行しない。本番での適用は作業指示書 §7 の後続の手順 (isolated での証明 → 独立監査 → 本番更新) で、依頼者の明示の承認の後だけ行う (依頼者の回答 3)。

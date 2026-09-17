@@ -2067,11 +2067,15 @@ _INVENTORY_UNJUDGED_ITEMS: tuple[dict, ...] = (
 
 
 def _inventory_positive_int(value: str) -> int:
-    """`argparse` `type=` for `--concurrency`/`--data-process-count`/
-    `--control-process-count` -- 0 and negative values are usage errors
-    (argparse's own fixed, templated message via `parser.error()`,
-    SystemExit(2)), never silently accepted as if they meant "no input"
-    the way omitting the argument entirely does."""
+    """`argparse` `type=` for `--concurrency`/`--data-process-ceiling`/
+    `--data-process-count-total`/`--control-process-ceiling`/`--control-
+    process-count-total` -- 0 and negative values are usage errors
+    (argparse's own fixed, templated message via `parser.error()`),
+    never silently accepted as if they meant "no input" the way omitting
+    the argument entirely does. `inventory`'s own subparser remaps this
+    usage error's exit code to 1, never argparse's default 2 (which this
+    subcommand reserves for a completed item judgment) -- see the
+    `p.error` override in `_build_parser`."""
     try:
         parsed = int(value)
     except ValueError:
@@ -2082,10 +2086,10 @@ def _inventory_positive_int(value: str) -> int:
 
 
 def _inventory_nonnegative_int(value: str) -> int:
-    """`argparse` `type=` for `--reserved-connections` only -- unlike the
-    other three numeric arguments, `0` is a genuine value here ("no
-    reserve"), so only negative values (and non-integer text) are usage
-    errors."""
+    """`argparse` `type=` for `--reserved-connections` only -- unlike
+    `inventory`'s other numeric arguments (which use `_inventory_
+    positive_int`), `0` is a genuine value here ("no reserve"), so only
+    negative values (and non-integer text) are usage errors."""
     try:
         parsed = int(value)
     except ValueError:
@@ -2335,21 +2339,29 @@ def _inventory_credentials(conn: "psycopg.Connection", schema: str) -> dict:
 
 
 def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> dict:
-    """(6), runtime-settings half only (design D-1/Z-9, supervisor rulings
-    B-5/B-8/B-11/B-15): reads the target roles' (the SAME full set item
-    (8) discovers -- `api_roles`/`control_roles`/`auditreader_roles` by
-    table grant, PLUS every provisioned application's own `runtime_role`/
-    `developer_role`, B-15) `CONNECTION LIMIT` and whether `pg_db_role_
-    setting` declares BOTH `lock_timeout` and `statement_timeout` for
-    each. `CONNECTION LIMIT` is confirmed up to its actual VALUE, not
-    merely its presence (supervisor ruling B-16): `-1` (unlimited) is
-    unknown here too, the SAME sentinel item (8) already treats specially
-    for this identical role set. The declared lock-type/stop-time-limit
-    half of item (6) is judged by the platform runbook's own
-    independent-review acceptance record instead (`_INVENTORY_UNJUDGED_
-    ITEMS`'s own `{"item": 6, "part": "lock-and-downtime", ...}` entry),
-    never here -- item (6) still keeps its own `ddl_lock` key because this
-    runtime-settings half DOES get a real judgment."""
+    """(6), runtime-settings half only: reads the target
+    roles' (the SAME full set item (8) discovers -- `api_roles`/`control_
+    roles`/`auditreader_roles` by table grant, PLUS every provisioned
+    application's own `runtime_role`/`developer_role`) `CONNECTION LIMIT`
+    and whether `pg_db_role_setting` declares `statement_timeout` for
+    each, database-independently (`setdatabase = 0`). `lock_timeout` is
+    not part of this judgment: no role in this target set ever runs DDL
+    (the role that does, the provision role, is never a member of this
+    set), so a `lock_timeout` role setting here never bounded a DDL wait
+    -- the DDL-wait bound is the required `--lock-timeout` argument every
+    subcommand that applies a migration file (`apply-platform-migration`/
+    `upgrade-applications`/`deprovision`) already carries. `CONNECTION
+    LIMIT` is confirmed up to its actual VALUE, not merely its presence:
+    `-1` (unlimited) is unknown here too, the SAME sentinel item (8)
+    already treats specially for this identical role set. The declared
+    lock-type/stop-time-limit half of item (6) is judged by the platform
+    runbook's own independent-review acceptance record instead
+    (`_INVENTORY_UNJUDGED_ITEMS`'s own `{"item": 6, "part": "lock-and-
+    downtime", ...}` entry), never here -- item (6) still keeps its own
+    `ddl_lock` key because this runtime-settings half DOES get a real
+    judgment. Item (8)'s own `--control-not-deployed` never narrows this
+    item's role set: a role this item finds by grant stays subject to
+    its own judgment for as long as the role itself exists."""
     try:
         api_roles, control_roles, auditreader_roles = _inventory_role_classes(conn, schema)
     except psycopg.Error:
@@ -2381,7 +2393,7 @@ def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> 
             for setdatabase, _datname, setconfig in platform_declarations._role_setting_rows(conn, role):
                 if setdatabase == 0 and setconfig:
                     declared_keys.update(entry.split("=", 1)[0] for entry in setconfig)
-            if not {"lock_timeout", "statement_timeout"} <= declared_keys:
+            if "statement_timeout" not in declared_keys:
                 return {"judgment": "unknown", "remediation_required": False}
     except psycopg.Error:
         return {"judgment": "unknown", "remediation_required": False}
@@ -2391,26 +2403,49 @@ def _inventory_ddl_lock_declaration(conn: "psycopg.Connection", schema: str) -> 
 def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args: argparse.Namespace) -> dict:
     """(8): connection headroom across the three platform-plane role
     classes and every provisioned application's own runtime/developer
-    roles. Every input this function cannot itself read from the database
-    -- `concurrency`, both process counts, the connection reserve -- comes
-    in as an explicit argument; a caller that omits one leaves this
-    `unknown` rather than falling back to a code-level default (`ops
-    verify-declarations`'s own F-16 check is a DIFFERENT, single-process
-    floor check and is never consulted here). Role names are discovered
-    by table grant (`_inventory_role_classes`), rather than assumed from a
-    fixed literal name, so a throwaway/rewritten-prefix cluster is handled
-    the same way a real deployment is. `mitatedbsvc_auditreader` is
-    counted only under the Control-plane process count (measured: only
-    `mitatedb_api.control_composition.build_control_service` ever pools a
-    connection against it, `mitatedb_api.main.build_app` never does)."""
+    roles. Two DIFFERENT numbers feed this item per
+    plane, never one: `--data-process-ceiling`/`--control-process-
+    ceiling` (the NEW candidate revision's own declared maximum,
+    compared against the `process_ceilings` declaration)
+    and `--data-process-count-total`/`--control-process-count-total`
+    (the actual combined process count across however many revisions are
+    concurrently serving traffic, the number role-connection demand is
+    computed from). Neither pair fills in for the other: a caller
+    that omits one of the four leaves this `unknown`
+    (`ops verify-declarations`'s own F-16 check is a DIFFERENT, single-
+    process floor check and is never consulted here). `--control-not-
+    deployed` is the only way Control's own process arguments may be
+    absent: it declares, out loud, that no Control-plane process is
+    deployed yet, so Control's own role classes (`control_roles`/
+    `auditreader_roles`) are excluded from both the `-1` check and the
+    demand calculation, and Control's own declared ceiling is never
+    compared (a declaration is a permitted maximum, not a fact about
+    what is deployed today). Role names are discovered by table
+    grant (`_inventory_role_classes`), rather than assumed from a fixed
+    literal name. `mitatedbsvc_auditreader` is counted only under the
+    Control-plane total (measured: only `mitatedb_api.control_
+    composition.build_control_service` ever pools a connection against
+    it, `mitatedb_api.main.build_app` never does). This item's own output
+    always carries `control_deployed`: `true` unless `--control-
+    not-deployed` was given."""
     concurrency = args.concurrency
-    data_process_count = args.data_process_count
-    control_process_count = args.control_process_count
+    data_process_ceiling = args.data_process_ceiling
+    data_process_count_total = args.data_process_count_total
+    control_not_deployed = args.control_not_deployed
+    control_process_ceiling = args.control_process_ceiling
+    control_process_count_total = args.control_process_count_total
     reserved_connections = args.reserved_connections
+    control_deployed = not control_not_deployed
+
+    def _result(judgment: str, *, remediation_required: bool = False) -> dict:
+        return {"judgment": judgment, "remediation_required": remediation_required, "control_deployed": control_deployed}
+
     if concurrency is None:
-        return {"judgment": "unknown", "remediation_required": False}
-    if data_process_count is None or control_process_count is None:
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
+    if data_process_ceiling is None or data_process_count_total is None:
+        return _result("unknown")
+    if not control_not_deployed and (control_process_ceiling is None or control_process_count_total is None):
+        return _result("unknown")
 
     try:
         with conn.cursor() as cur:
@@ -2418,15 +2453,15 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
             (max_connections_text,) = cur.fetchone()
         max_connections = int(max_connections_text)
     except (psycopg.Error, ValueError, TypeError):
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
 
     try:
         api_roles, control_roles, auditreader_roles = _inventory_role_classes(conn, schema)
     except psycopg.Error:
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
 
-    if not api_roles or not control_roles:
-        return {"judgment": "unknown", "remediation_required": False}
+    if not api_roles or (not control_not_deployed and not control_roles):
+        return _result("unknown")
 
     try:
         with conn.cursor() as cur:
@@ -2437,41 +2472,51 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
             ).format(table=applications_table))
             app_roles = cur.fetchall()
     except psycopg.Error:
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
 
+    # When Control is declared not-deployed, Control's own role
+    # classes are excluded from both the -1 check below and demand --
+    # an empty exclusion set (no such role found by grant) is not itself
+    # a reason to fall back to unknown.
+    excluded_roles = (set(control_roles) | set(auditreader_roles)) if control_not_deployed else set()
     role_names = sorted(
-        set(api_roles) | set(control_roles) | set(auditreader_roles)
-        | {name for pair in app_roles for name in pair}
+        (set(api_roles) | set(control_roles) | set(auditreader_roles) | {name for pair in app_roles for name in pair})
+        - excluded_roles
     )
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(%s)", [role_names])
             limits = dict(cur.fetchall())
     except psycopg.Error:
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
 
     if any(limits.get(name) == -1 for name in role_names):
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
 
     api_floor = platform_declarations._API_ROLE_STORE_COUNT * concurrency
     controlplane_floor = platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR
     auditreader_floor = platform_declarations._AUDITREADER_ROLE_POOL_FLOOR
 
-    api_demand = data_process_count * api_floor
-    controlplane_demand = control_process_count * controlplane_floor
-    auditreader_demand = control_process_count * auditreader_floor if auditreader_roles else 0
+    api_demand = data_process_count_total * api_floor
+    if control_not_deployed:
+        controlplane_demand = 0
+        auditreader_demand = 0
+    else:
+        controlplane_demand = control_process_count_total * controlplane_floor
+        auditreader_demand = control_process_count_total * auditreader_floor if auditreader_roles else 0
 
     condition_1_ok = True
     for role in api_roles:
         if limits.get(role, 0) < api_demand:
             condition_1_ok = False
-    for role in control_roles:
-        if limits.get(role, 0) < controlplane_demand:
-            condition_1_ok = False
-    for role in auditreader_roles:
-        if limits.get(role, 0) < auditreader_demand:
-            condition_1_ok = False
-    app_role_demand = data_process_count * concurrency
+    if not control_not_deployed:
+        for role in control_roles:
+            if limits.get(role, 0) < controlplane_demand:
+                condition_1_ok = False
+        for role in auditreader_roles:
+            if limits.get(role, 0) < auditreader_demand:
+                condition_1_ok = False
+    app_role_demand = data_process_count_total * concurrency
     for runtime_role, developer_role in app_roles:
         if limits.get(runtime_role, 0) < app_role_demand or limits.get(developer_role, 0) < app_role_demand:
             condition_1_ok = False
@@ -2487,31 +2532,33 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
         # with remediation_required, never silently skipped. A PRESENT
         # but malformed declaration is blocked, never treated as absent.
         if _inventory_declaration_error_is_missing(exc):
-            return {"judgment": "unknown", "remediation_required": True}
-        return {"judgment": "blocked", "remediation_required": False}
+            return _result("unknown", remediation_required=True)
+        return _result("blocked")
     except psycopg.Error:
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
     declared_process_ceilings = declarations.process_ceilings
 
-    if (
-        declared_process_ceilings.data != data_process_count
-        or declared_process_ceilings.control != control_process_count
-    ):
-        return {"judgment": "blocked", "remediation_required": False}
+    if declared_process_ceilings.data != data_process_ceiling:
+        return _result("blocked")
+    # Control's own declared ceiling is a permitted maximum, not a
+    # fact about what is deployed today -- never compared when Control
+    # is declared not-deployed.
+    if not control_not_deployed and declared_process_ceilings.control != control_process_ceiling:
+        return _result("blocked")
 
     if not condition_1_ok:
-        return {"judgment": "blocked", "remediation_required": False}
+        return _result("blocked")
 
     app_shared_demand = app_role_demand if app_roles else 0
     total_demand = api_demand + controlplane_demand + auditreader_demand + app_shared_demand + _INVENTORY_MAX_CONCURRENT_CONNECTIONS
 
     if reserved_connections is None:
-        return {"judgment": "unknown", "remediation_required": False}
+        return _result("unknown")
 
     if total_demand + reserved_connections > max_connections:
-        return {"judgment": "blocked", "remediation_required": False}
+        return _result("blocked")
 
-    return {"judgment": "confirmed", "remediation_required": False}
+    return _result("confirmed")
 
 
 def _inventory_exit_code(report: dict) -> int:
@@ -2530,13 +2577,174 @@ def _inventory_exit_code(report: dict) -> int:
     return 0
 
 
+# ===========================================================================
+# `apply-platform-migration` -- applies one platform migration file
+# (never a per-application upgrade, never the bootstrap-only 0001/0002)
+# a second (or later) time against a running cluster. Never run
+# against production before an isolated proof, an independent audit,
+# and requester approval.
+# ===========================================================================
+
+#: the platform migrations `apply-platform-migration` accepts --
+#: every migration that neither takes a `:app_id` psql variable nor is a
+#: bootstrap-only, once-ever migration (0001/0002).
+_PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
+    "0005_application_audit.sql",
+    "0007_platform_declarations.sql",
+    "0011_process_ceilings.sql",
+    "0012_role_connection_limits.sql",
+)
+
+#: the psql `-v NAME=VALUE` variables each file above references,
+#: by filename -- an argument this table does not list for a file is
+#: refused, and a variable the table lists but the operator omitted is
+#: refused too (`_platform_migration_variables`). Equality against each
+#: file's own real `:name` references is a static test
+#: (`test_ops_apply_platform_migration.py`).
+_PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
+    "0005_application_audit.sql": (),
+    "0007_platform_declarations.sql": ("api_role", "controlplane_role"),
+    "0011_process_ceilings.sql": (),
+    "0012_role_connection_limits.sql": (),
+}
+
+#: matches a psql `:name`/`:'name'`/`:"name"` variable
+#: reference, but never a `::` type cast -- the negative lookbehind/
+#: lookahead on both sides of the leading colon reject a colon that is
+#: itself adjacent to another colon.
+_PSQL_VARIABLE_RE = re.compile(
+    r"(?<!:):(?!:)(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\"|([A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def _strip_sql_line_comments(text: str) -> str:
+    """Drops everything from the first `--` onward on each
+    line -- a `:name` reference inside a `--` comment is never a real
+    psql variable reference."""
+    return "\n".join(line[: line.find("--")] if "--" in line else line for line in text.splitlines())
+
+
+def _extract_psql_variables(text: str) -> "set[str]":
+    """Every psql variable `text` references, excluding
+    `--` line comments and `::` type casts."""
+    stripped = _strip_sql_line_comments(text)
+    found: "set[str]" = set()
+    for match in _PSQL_VARIABLE_RE.finditer(stripped):
+        name = match.group(1) or match.group(2) or match.group(3)
+        if name:
+            found.add(name)
+    return found
+
+
+def _resolve_platform_migration_file(filename: str) -> Path:
+    """`filename` must be a bare name (no path separator), a
+    member of `_PLATFORM_MIGRATION_FILENAMES`, and resolve to a real
+    file INSIDE `_migrations_dir()` -- both sides are resolved (symlinks
+    followed) before the containment check, so a migrations directory
+    that is itself a symlink still accepts a known file, while a file
+    that resolves outside the directory (e.g. a symlink planted in its
+    place) is refused. `_migrations_dir()` (`MITATEDB_MIGRATIONS_DIR`) is
+    the operator-set trust boundary this check keeps `filename` inside
+    of. The rejected value itself is never echoed back."""
+    if "/" in filename or (os.sep != "/" and os.sep in filename):
+        _die("apply-platform-migration: FILENAME must not contain a path separator")
+    if filename not in _PLATFORM_MIGRATION_FILENAMES:
+        _die("apply-platform-migration: FILENAME must be one of the known platform migration files")
+    directory = _migrations_dir().resolve()
+    candidate = (directory / filename).resolve()
+    try:
+        candidate.relative_to(directory)
+    except ValueError:
+        _die("apply-platform-migration: resolved migration file path is outside the migrations directory")
+    if not candidate.is_file():
+        _die("apply-platform-migration: migration file not found")
+    return candidate
+
+
+def _platform_migration_variables(filename: str, args: argparse.Namespace) -> "dict[str, str]":
+    """Reconciles the operator-supplied `--api-role`/
+    `--controlplane-role` values against `filename`'s own required set --
+    a missing required variable, or a supplied variable the file does
+    not reference, is refused (fixed message, no psql subprocess
+    started)."""
+    required = _PLATFORM_MIGRATION_VARIABLE_TABLE[filename]
+    supplied: "dict[str, str]" = {}
+    if args.api_role is not None:
+        supplied["api_role"] = args.api_role
+    if args.controlplane_role is not None:
+        supplied["controlplane_role"] = args.controlplane_role
+    missing = [name for name in required if name not in supplied]
+    if missing:
+        _die(f"apply-platform-migration: {filename} requires --{missing[0].replace('_', '-')}")
+    extra = [name for name in supplied if name not in required]
+    if extra:
+        _die(f"apply-platform-migration: {filename} does not accept --{extra[0].replace('_', '-')}")
+    return supplied
+
+
+def cmd_apply_platform_migration(args: argparse.Namespace) -> int:
+    """Applies one platform migration file a second (or later) time
+    against a running cluster. Never run against production before an
+    isolated proof, an independent audit, and requester approval come
+    first. DSN comes from `MITATEDB_PROVISION_DSN` only, never an
+    argument (design Z-8/D-10)."""
+    lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
+    script = _resolve_platform_migration_file(args.file)
+    variables = _platform_migration_variables(args.file, args)
+    dsn = _provision_dsn()
+    _require_psql_16_or_newer()
+    env = _psql_connection_env(dsn)
+    env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)
+    argv = ["psql", "-v", "ON_ERROR_STOP=1"]
+    for name, value in variables.items():
+        argv += ["-v", f"{name}={value}"]
+    argv += ["-f", str(script)]
+    result = subprocess.run(argv, capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        _die(_redact_connection_values(f"apply-platform-migration failed:\n{result.stdout}\n{result.stderr}", dsn))
+    print(f"applied {args.file}")
+    return 0
+
+
+def _inventory_input_reject(message: str) -> NoReturn:
+    """(8)'s own input-shape rejections:
+    exit code 1, never 2 (which this subcommand reserves for a completed
+    item judgment) -- a fixed message, never the rejected value, and no
+    database connection is opened first."""
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _inventory_validate_headroom_inputs(args: argparse.Namespace) -> None:
+    """Item (8)'s input-shape checks that need BOTH halves of an
+    argument pair already parsed, so they cannot live in `argparse`
+    `type=` alone: run before any database connection
+    opens."""
+    if args.control_not_deployed and args.control_process_ceiling is not None:
+        _inventory_input_reject("--control-not-deployed and --control-process-ceiling are mutually exclusive")
+    if args.control_not_deployed and args.control_process_count_total is not None:
+        _inventory_input_reject("--control-not-deployed and --control-process-count-total are mutually exclusive")
+    if (
+        args.data_process_ceiling is not None and args.data_process_count_total is not None
+        and args.data_process_count_total < args.data_process_ceiling
+    ):
+        _inventory_input_reject("--data-process-count-total must not be less than --data-process-ceiling")
+    if (
+        args.control_process_ceiling is not None and args.control_process_count_total is not None
+        and args.control_process_count_total < args.control_process_ceiling
+    ):
+        _inventory_input_reject("--control-process-count-total must not be less than --control-process-ceiling")
+
+
 def cmd_inventory(args: argparse.Namespace) -> int:
     """Gate-0 DB-layer read-only judgments. Prints exactly one JSON
     object to stdout; never writes a file of its own. A connection
     failure propagates to `main`'s own top-level `except psycopg.Error`
     handler (type name and fixed text only, exit 1) -- there is nothing
     item-specific to report before a connection to the platform database
-    even exists."""
+    even exists. Item (8)'s own input-shape checks (`_inventory_validate_
+    headroom_inputs`) run first, before that connection ever opens."""
+    _inventory_validate_headroom_inputs(args)
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:
         print(_INVENTORY_TOOL_FAILURE_MESSAGE, file=sys.stderr)
@@ -2817,6 +3025,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_upgrade_status)
 
     p = sub.add_parser(
+        "apply-platform-migration",
+        help="apply one platform migration file a second (or later) time against MITATEDB_PROVISION_DSN -- "
+             "restricted to the known re-appliable platform migrations (0005/0007/0011/0012; the bootstrap-"
+             "only 0001/0002 are never accepted here). Never run against production during "
+             "this work package -- the isolated proof, independent audit, and requester approval in the "
+             "work order's own section 7 come first",
+    )
+    p.add_argument("file", metavar="FILENAME", help="one of the known platform migration file names (no path)")
+    p.add_argument(
+        "--lock-timeout", required=True, metavar="VALUE",
+        help="lock_timeout to set on the psql session before applying the file (a positive integer optionally "
+             "followed by ms, s, or min; no default)",
+    )
+    p.add_argument("--api-role", default=None, metavar="ROLE", help="0007's own :api_role psql variable")
+    p.add_argument(
+        "--controlplane-role", default=None, metavar="ROLE",
+        help="0007's own :controlplane_role psql variable",
+    )
+    p.set_defaults(func=cmd_apply_platform_migration)
+
+    p = sub.add_parser(
         "inventory",
         help="read-only Gate-0 DB-layer judgments -- never mounted on any HTTP surface, never touches "
              "platform state. Prints one JSON object to stdout. Requires MITATEDB_PROVISION_DSN (env only, "
@@ -2833,14 +3062,31 @@ def _build_parser() -> argparse.ArgumentParser:
              "item (8) unknown",
     )
     p.add_argument(
-        "--data-process-count", type=_inventory_positive_int, default=None, metavar="N",
-        help="Data-plane process count (new+old revision, already summed by the platform layer; a positive "
-             "integer) -- omit to leave item (8) unknown",
+        "--data-process-ceiling", type=_inventory_positive_int, default=None, metavar="N",
+        help="Data-plane process ceiling for the NEW candidate revision (a positive integer, compared "
+             "against the process_ceilings declaration) -- omit to leave item (8) unknown",
     )
     p.add_argument(
-        "--control-process-count", type=_inventory_positive_int, default=None, metavar="N",
-        help="Control-plane process count (new+old revision, already summed by the platform layer; a "
-             "positive integer) -- omit to leave item (8) unknown",
+        "--data-process-count-total", type=_inventory_positive_int, default=None, metavar="N",
+        help="Data-plane process count actually running right now, summed across every concurrently-serving "
+             "revision (a positive integer, used for connection demand) -- omit to leave item (8) unknown",
+    )
+    p.add_argument(
+        "--control-process-ceiling", type=_inventory_positive_int, default=None, metavar="N",
+        help="Control-plane process ceiling for the NEW candidate revision -- omit (with --control-not-"
+             "deployed absent too) to leave item (8) unknown",
+    )
+    p.add_argument(
+        "--control-process-count-total", type=_inventory_positive_int, default=None, metavar="N",
+        help="Control-plane process count actually running right now, summed across every concurrently-"
+             "serving revision -- omit (with --control-not-deployed absent too) to leave item (8) unknown",
+    )
+    p.add_argument(
+        "--control-not-deployed", action="store_true",
+        help="declare that no Control-plane process is deployed yet -- the only way to omit both Control "
+             "process arguments; excludes Control's own roles from item (8)'s -1 check, demand calculation, "
+             "and declaration comparison. Mutually exclusive with --control-process-ceiling/--control-"
+             "process-count-total",
     )
     p.add_argument(
         "--reserved-connections", type=_inventory_nonnegative_int, default=None, metavar="N",
@@ -2849,12 +3095,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_inventory)
 
+    def _inventory_usage_error(message: str, _parser: argparse.ArgumentParser = p) -> NoReturn:
+        # Every argparse usage error against `inventory`'s own
+        # arguments (e.g. `--concurrency 0`) exits 1, never argparse's
+        # default 2 -- this subcommand reserves 2 for a completed item
+        # judgment that is blocked/unknown.
+        _parser.print_usage(sys.stderr)
+        _parser.exit(1, f"{_parser.prog}: error: {message}\n")
+
+    p.error = _inventory_usage_error
+
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args, extra_argv = parser.parse_known_args(argv)
+    if extra_argv:
+        # `inventory`'s own usage-error convention (exit 1, never
+        # argparse's default 2, which this subcommand reserves for a
+        # completed item judgment) extends to unrecognized/extra
+        # arguments too, before any database connection opens -- the
+        # rejected value(s) are never echoed. Every other subcommand
+        # keeps argparse's own default (exit 2) for this same case.
+        if getattr(args, "command", None) == "inventory":
+            print("error: unrecognized arguments", file=sys.stderr)
+            raise SystemExit(1)
+        parser.error(f"unrecognized arguments: {' '.join(extra_argv)}")
     try:
         return args.func(args)
     except FoundationError as exc:

@@ -1,0 +1,917 @@
+"""`ops apply-platform-migration` -- the public subcommand
+that applies one platform migration file (never a per-application
+upgrade, never the bootstrap-only 0001/0002) a second (or later) time
+against a running cluster, and the static coverage proving which
+subcommands' own `--lock-timeout` is required.
+
+Covers: filename validation (enumeration, path separators, directory
+containment, no value echoed on rejection, a symlinked migrations
+directory), the psql-variable table, DSN-via-environment-only
+(design Z-8/D-10), connection-value redaction, the required `--lock-
+timeout`, `ON_ERROR_STOP`, psql 16+, drift-then-restore for each of the
+four accepted files, and the AST-derived "flows DDL" subcommand set.
+
+Test infrastructure: own fixtures, duplicated bootstrap shape from
+`test_ops_inventory.py`/`test_platform_migration_reapply.py`, not
+imported (this repository's own precedent of not taking cross-test-
+module import dependencies). This subcommand is never run against
+production (work order section 7) -- every test below targets a
+throwaway PostgreSQL cluster only.
+"""
+from __future__ import annotations
+
+import ast
+import os
+import secrets
+import subprocess
+import tempfile
+import types
+from pathlib import Path
+from typing import Iterator
+
+import psycopg
+import pytest
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+import mitatedb_api.ops as ops
+
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
+SRC_DIR = Path(ops.__file__).resolve().parent
+OPS_SOURCE_PATH = Path(ops.__file__).resolve()
+ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
+
+_TEST_LOCK_TIMEOUT = "5000ms"
+
+
+def _admin_dsn() -> str:
+    """Embeds ambient `PGPASSFILE` into the returned DSN up front --
+    several tests below clear that ambient variable before an in-process
+    `apply-platform-migration` call, and this DSN must keep working through fixture teardown regardless."""
+    dsn = os.environ.get(ADMIN_DSN_ENV)
+    if not dsn:
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; there is no shared-cluster default."
+        )
+    passfile = os.environ.get("PGPASSFILE")
+    if passfile and "passfile=" not in dsn:
+        params = conninfo_to_dict(dsn)
+        params["passfile"] = passfile
+        dsn = make_conninfo(**params)
+    return dsn
+
+
+def _dsn_with(base_dsn: str, **overrides: str) -> str:
+    params = conninfo_to_dict(base_dsn)
+    params.update(overrides)
+    return make_conninfo(**params)
+
+
+def _run_psql(dsn: str, path: Path, variables: "dict[str, str] | None" = None) -> None:
+    command = ["psql", dsn, "-v", "ON_ERROR_STOP=1"]
+    for key, value in (variables or {}).items():
+        command += ["-v", f"{key}={value}"]
+    command += ["-f", str(path)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"psql failed running {path.name}:\n{result.stdout}\n{result.stderr}")
+
+
+def _require_admin_connection() -> None:
+    try:
+        conn = psycopg.connect(_admin_dsn(), connect_timeout=5)
+        conn.close()
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        pytest.fail(
+            f"test_ops_apply_platform_migration.py requires a reachable local PostgreSQL server: {exc}",
+            pytrace=False,
+        )
+
+
+def _sweep_prefix(admin_dsn: str, prefix: str) -> None:
+    import time
+
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute("SELECT datname FROM pg_database WHERE datname LIKE %s", [f"{prefix}%"])
+            for (database,) in cur.fetchall():
+                for attempt in range(8):
+                    cur.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid() AND backend_type = 'client backend'",
+                        [database],
+                    )
+                    try:
+                        cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database)))
+                        break
+                    except psycopg.errors.ObjectInUse:
+                        admin.rollback()
+                        time.sleep(0.2 * (attempt + 1))
+            cur.execute("SELECT rolname FROM pg_roles WHERE rolname LIKE %s", [f"{prefix}%"])
+            for (role,) in cur.fetchall():
+                cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+    finally:
+        admin.close()
+
+
+_PLATFORM_MIGRATION_NAMES = (
+    "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
+    "0005_application_audit.sql", "0007_platform_declarations.sql",
+    "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
+)
+
+
+def _bootstrap(prefix: str) -> types.SimpleNamespace:
+    admin_dsn = _admin_dsn()
+    provision_role = f"{prefix}svc_provision"
+    api_role = f"{prefix}svc_api"
+    controlplane_role = f"{prefix}svc_controlplane"
+    platform_db = f"{prefix}_platform"
+    schema = f"{prefix}_registry"
+    provision_password = secrets.token_urlsafe(24)
+
+    rewritten_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_"))
+    rewritten: "dict[str, Path]" = {}
+    for name in _PLATFORM_MIGRATION_NAMES:
+        text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
+        out = rewritten_dir / name
+        out.write_text(text)
+        rewritten[name] = out
+
+    _run_psql(admin_dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
+    provision_dsn = _dsn_with(admin_dsn, user=provision_role, password=provision_password, dbname=platform_db)
+    _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
+    _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
+    _run_psql(
+        provision_dsn, rewritten["0007_platform_declarations.sql"],
+        {"api_role": api_role, "controlplane_role": controlplane_role},
+    )
+    _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
+    _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
+
+    return types.SimpleNamespace(
+        prefix=prefix, admin_dsn=admin_dsn, provision_dsn=provision_dsn, provision_role=provision_role,
+        api_role=api_role, controlplane_role=controlplane_role, platform_db=platform_db, schema=schema,
+        migrations_dir=rewritten_dir, migration_paths=rewritten,
+    )
+
+
+def _clear_ambient_pg_connection_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test-infrastructure cluster (`tools/testpg/dsa_testpg.py`)
+    exports `PGPASSFILE` (and may export other libpq connection
+    variables) for the whole pytest process -- ambient values
+    `_psql_connection_env`'s own leftover-variable check correctly
+    refuses to let a psql child inherit silently. Real apply-platform-
+    migration invocations below clear these first; the ONE test that
+    exercises the leftover-variable rejection itself sets its own
+    sentinel back afterward."""
+    for name in (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture()
+def platform() -> Iterator[types.SimpleNamespace]:
+    """A fresh, throwaway platform through 0001/0002/0005/0007/0011/0012
+    -- one per test, never shared (several tests drift role settings,
+    constraints, ACLs, and function bodies). Does NOT clear the ambient
+    libpq connection variables the test-infra cluster exports (`_run_
+    apply` does that, right before the one in-process `ops.main` call
+    that would otherwise inherit them) -- this fixture's own bootstrap
+    psql/psycopg calls need the ambient `PGPASSFILE` for auth."""
+    _require_admin_connection()
+    prefix = f"r45wpeapm{secrets.token_hex(4)}"
+    admin_dsn = _admin_dsn()
+    try:
+        info = _bootstrap(prefix)
+    except Exception:
+        _sweep_prefix(admin_dsn, prefix)
+        raise
+    try:
+        yield info
+    finally:
+        _sweep_prefix(admin_dsn, prefix)
+
+
+def _run_apply(
+    monkeypatch: pytest.MonkeyPatch, platform: types.SimpleNamespace, filename: str,
+    *, clear_ambient: bool = True, **cli_kwargs,
+) -> "int | None":
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
+    monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(platform.migrations_dir))
+    if clear_ambient:
+        _clear_ambient_pg_connection_env_vars(monkeypatch)
+    argv = ["apply-platform-migration", filename]
+    if "lock_timeout" not in cli_kwargs:
+        cli_kwargs["lock_timeout"] = _TEST_LOCK_TIMEOUT
+    for flag, value in cli_kwargs.items():
+        if value is None:
+            continue
+        argv += [f"--{flag.replace('_', '-')}", str(value)]
+    try:
+        return ops.main(argv)
+    except SystemExit as exc:
+        return exc.code
+
+
+# ===========================================================================
+# filename validation
+# ===========================================================================
+
+
+def test_apply_platform_migration_rejects_a_name_outside_the_known_enumeration(monkeypatch, capsys, platform):
+    """A real file that sits in the migrations directory but is
+    NOT in the known enumeration (a bootstrap-only migration) is
+    refused -- no psql subprocess starts."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply(monkeypatch, platform, "0002_registry_and_functions.sql")
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert "0002_registry_and_functions.sql" not in captured.err
+
+
+def test_apply_platform_migration_rejects_a_path_separator(monkeypatch, capsys, platform):
+    """A value containing a path separator is refused with its
+    OWN fixed message (distinct from the enumeration-mismatch message),
+    even one that would resolve harmlessly inside the directory."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply(monkeypatch, platform, "./0007_platform_declarations.sql")
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "error: apply-platform-migration: FILENAME must not contain a path separator"
+
+
+def test_apply_platform_migration_rejects_a_symlink_escaping_the_directory(monkeypatch, capsys, platform):
+    """A known filename that is ITSELF a symlink resolving
+    outside the migrations directory is refused -- no psql subprocess
+    starts, the resolved path is never echoed."""
+    outside_target = Path(tempfile.mkdtemp(prefix="mitatedb_apm_outside_")) / "evil.sql"
+    outside_target.write_text("-- not a real migration\n")
+    (platform.migrations_dir / "0011_process_ceilings.sql").unlink()
+    (platform.migrations_dir / "0011_process_ceilings.sql").symlink_to(outside_target)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql")
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert str(outside_target) not in captured.err
+
+
+def test_apply_platform_migration_rejection_never_echoes_the_input_value(monkeypatch, capsys, platform):
+    """The enumeration-mismatch rejection message never
+    contains the rejected value."""
+    rc = _run_apply(monkeypatch, platform, "not-a-real-migration-name.sql")
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "not-a-real-migration-name.sql" not in captured.err
+
+
+def test_apply_platform_migration_accepts_a_known_file_through_a_symlinked_migrations_directory(monkeypatch, platform):
+    """Resolving BOTH the directory and the candidate file
+    (never the file alone) means a migrations directory that is itself a
+    symlink still accepts a known file."""
+    symlinked_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_parent_")) / "migrations_link"
+    symlinked_dir.symlink_to(platform.migrations_dir, target_is_directory=True)
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
+    monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(symlinked_dir))
+    rc = ops.main([
+        "apply-platform-migration", "0011_process_ceilings.sql", "--lock-timeout", _TEST_LOCK_TIMEOUT,
+    ])
+    assert rc == 0
+
+
+# ===========================================================================
+# the accepted-file constant
+# ===========================================================================
+
+
+def test_apply_platform_migration_accepted_filenames_are_pinned_and_exist_without_app_id():
+    """The accepted-file constant is pinned to the 4 named files;
+    each is real and references no `:app_id` psql variable; the
+    directory's own `:app_id`-free files differ from this set by exactly
+    the 2 bootstrap-only migrations."""
+    assert ops._PLATFORM_MIGRATION_FILENAMES == (
+        "0005_application_audit.sql", "0007_platform_declarations.sql",
+        "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
+    )
+    no_app_id_files = set()
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if "app_id" not in ops._extract_psql_variables(path.read_text()):
+            no_app_id_files.add(path.name)
+    assert set(ops._PLATFORM_MIGRATION_FILENAMES) <= no_app_id_files
+    assert no_app_id_files - set(ops._PLATFORM_MIGRATION_FILENAMES) == {
+        "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
+    }
+    for name in ops._PLATFORM_MIGRATION_FILENAMES:
+        assert (MIGRATIONS_DIR / name).is_file()
+
+
+# ===========================================================================
+# DSN via environment only
+# ===========================================================================
+
+
+def test_apply_platform_migration_has_no_dsn_argument():
+    """The subparser's own argument set never includes anything
+    DSN-shaped (static, design Z-8)."""
+    parser = ops._build_parser()
+    subparsers_action = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+    apm_parser = subparsers_action.choices["apply-platform-migration"]
+    dests = {action.dest for action in apm_parser._actions}
+    assert dests == {"help", "file", "lock_timeout", "api_role", "controlplane_role"}
+
+
+def test_apply_platform_migration_argv_never_carries_a_dsn_sentinel(monkeypatch, platform):
+    """psql's own argv never carries a DSN element -- connection
+    parameters travel only through the subprocess environment."""
+    host_sentinel = conninfo_to_dict(platform.provision_dsn)["host"]
+    captured = {}
+
+    def _fake_run(argv, **kwargs):
+        if argv[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="psql (PostgreSQL) 16.4", stderr="")
+        captured["argv"] = argv
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql")
+    assert rc == 0
+    assert not any(host_sentinel in str(part) for part in captured["argv"])
+    assert captured["env"]["PGHOST"] == host_sentinel
+
+
+def test_apply_platform_migration_rejects_a_leftover_ambient_connection_variable(monkeypatch, capsys, platform):
+    """A connection-setting variable in THIS process' own
+    environment, not overridden by the DSN, is refused by name (never its
+    value) before the migration file is applied (a `psql --version`
+    check may still run first)."""
+    _clear_ambient_pg_connection_env_vars(monkeypatch)
+    monkeypatch.setenv("PGSSLMODE", "verify-full")
+    calls = []
+
+    def _fake_run(argv, **kwargs):
+        if argv[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="psql (PostgreSQL) 16.4", stderr="")
+        calls.append((argv, kwargs))
+        pytest.fail("psql started")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql", clear_ambient=False)
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert "PGSSLMODE" in captured.err
+    assert "verify-full" not in captured.err
+
+
+# ===========================================================================
+# psql invocation shape
+# ===========================================================================
+
+
+def test_apply_platform_migration_requires_psql_16_or_newer(monkeypatch, capsys, platform):
+    """An old/unreadable psql version is refused before the real
+    migration is ever run."""
+    def _fake_run(argv, **kwargs):
+        if argv[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="psql (PostgreSQL) 15.4", stderr="")
+        pytest.fail("psql started past the version check")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql")
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "older than PostgreSQL 16" in captured.err
+
+
+def test_apply_platform_migration_argv_carries_on_error_stop(monkeypatch, platform):
+    """The applied migration's own argv carries `ON_ERROR_STOP=1`
+    (static, real subprocess)."""
+    captured = {}
+    real_run = subprocess.run
+
+    def _spy_run(argv, **kwargs):
+        if argv[:1] == ["psql"] and "--version" not in argv:
+            captured["argv"] = argv
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _spy_run)
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql")
+    assert rc == 0
+    assert "-v" in captured["argv"] and "ON_ERROR_STOP=1" in captured["argv"]
+
+
+def test_apply_platform_migration_lock_timeout_reaches_pgoptions(monkeypatch, platform):
+    """`--lock-timeout` reaches psql through `PGOPTIONS`."""
+    captured = {}
+    real_run = subprocess.run
+
+    def _spy_run(argv, **kwargs):
+        if argv[:1] == ["psql"] and "--version" not in argv:
+            captured["env"] = kwargs.get("env")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _spy_run)
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql", lock_timeout="7000ms")
+    assert rc == 0
+    assert "-c lock_timeout=7000ms" in captured["env"]["PGOPTIONS"]
+
+
+def test_apply_platform_migration_rejects_a_malformed_lock_timeout(monkeypatch, capsys, platform):
+    """An invalid `--lock-timeout` value is refused before any
+    psql subprocess starts."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql", lock_timeout="not-a-value")
+    assert rc == 2
+    assert calls == []
+
+
+def test_apply_platform_migration_redacts_connection_values_on_failure(monkeypatch, capsys, platform):
+    """A psql failure's own captured output is redacted before it
+    reaches stderr."""
+    host_sentinel = conninfo_to_dict(platform.provision_dsn)["host"]
+
+    def _fake_run(argv, **kwargs):
+        if argv[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="psql (PostgreSQL) 16.4", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 1, stdout=f"connection to server at {host_sentinel} failed\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql")
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert host_sentinel not in captured.err
+    assert "<redacted>" in captured.err
+
+
+# ===========================================================================
+# A dependency-missing apply fails by exit code
+# ===========================================================================
+
+
+def test_apply_platform_migration_fails_by_exit_code_when_its_dependency_is_missing(monkeypatch):
+    """0011 depends on 0007's own table -- applying it against a
+    platform that never applied 0007 fails (non-zero), never silently
+    succeeds."""
+    prefix = f"r45wpeapmdep{secrets.token_hex(4)}"
+    admin_dsn = _admin_dsn()
+    provision_password = secrets.token_urlsafe(24)
+    rewritten_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_dep_"))
+    rewritten = {}
+    for name in ("0001_bootstrap_platform.sql", "0002_registry_and_functions.sql", "0011_process_ceilings.sql"):
+        text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
+        out = rewritten_dir / name
+        out.write_text(text)
+        rewritten[name] = out
+    try:
+        _run_psql(admin_dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
+        provision_dsn = _dsn_with(
+            admin_dsn, user=f"{prefix}svc_provision", password=provision_password, dbname=f"{prefix}_platform")
+        _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
+        monkeypatch.setenv("MITATEDB_PROVISION_DSN", provision_dsn)
+        monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(rewritten_dir))
+        _clear_ambient_pg_connection_env_vars(monkeypatch)
+        try:
+            rc = ops.main(["apply-platform-migration", "0011_process_ceilings.sql", "--lock-timeout", _TEST_LOCK_TIMEOUT])
+        except SystemExit as exc:
+            rc = exc.code
+        assert rc != 0
+    finally:
+        _sweep_prefix(admin_dsn, prefix)
+
+
+# ===========================================================================
+# drift-then-restore for each accepted file
+# ===========================================================================
+
+
+def _table_acl(dsn: str, schema: str, table: str) -> list:
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.relacl FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relname = %s",
+                [schema, table],
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def _acl_has_public_grantee(acl: "list | None") -> bool:
+    return any(str(item).startswith("=") for item in (acl or []))
+
+
+def _role_setting(dsn: str, role: str) -> "list[str] | None":
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT s.setconfig FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole "
+                "WHERE r.rolname = %s AND s.setdatabase = 0",
+                [role],
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def _constraint_definition(dsn: str, conname: str) -> str:
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = %s", [conname])
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def _function_def_and_acl(dsn: str, schema: str, function_name: str) -> tuple:
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_get_functiondef(p.oid), p.proacl FROM pg_proc p "
+                "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                "WHERE n.nspname = %s AND p.proname = %s",
+                [schema, function_name],
+            )
+            row = cur.fetchone()
+            return (row[0], row[1]) if row else (None, None)
+    finally:
+        conn.close()
+
+
+def test_apply_platform_migration_0005_restores_a_manually_drifted_public_grant(monkeypatch, platform):
+    """A manually added PUBLIC grant on
+    `application_audit` does not survive an apply-platform-migration
+    re-application of 0005 -- its own `REVOKE ALL ... FROM PUBLIC` runs
+    every time."""
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("GRANT SELECT ON {table} TO PUBLIC").format(
+                table=sql.Identifier(platform.schema, "application_audit")))
+    finally:
+        conn.close()
+    assert _acl_has_public_grantee(_table_acl(platform.provision_dsn, platform.schema, "application_audit"))
+    rc = _run_apply(monkeypatch, platform, "0005_application_audit.sql")
+    assert rc == 0
+    assert not _acl_has_public_grantee(_table_acl(platform.provision_dsn, platform.schema, "application_audit"))
+
+
+def test_apply_platform_migration_0007_restores_a_manually_drifted_role_setting(monkeypatch, platform):
+    """A hand-changed `controlplane_role`
+    session setting does not survive an apply-platform-migration
+    re-application of 0007."""
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '9999ms'").format(
+                sql.Identifier(platform.controlplane_role)))
+    finally:
+        admin.close()
+    drifted = _role_setting(platform.provision_dsn, platform.controlplane_role)
+    assert drifted == ["statement_timeout=9999ms", "idle_in_transaction_session_timeout=5000ms"]
+    rc = _run_apply(
+        monkeypatch, platform, "0007_platform_declarations.sql",
+        api_role=platform.api_role, controlplane_role=platform.controlplane_role,
+    )
+    assert rc == 0
+    reset = _role_setting(platform.provision_dsn, platform.controlplane_role)
+    assert reset == ["statement_timeout=5000ms", "idle_in_transaction_session_timeout=5000ms"]
+
+
+def test_apply_platform_migration_0011_restores_a_manually_drifted_constraint(monkeypatch, platform):
+    """A hand-narrowed
+    `platform_declarations_key_check` does not survive an apply-platform-
+    migration re-application of 0011. Connects with `provision_dsn`
+    (the platform DATABASE, not the cluster-wide superuser connection
+    `admin_dsn` defaults to) since this is a per-database ALTER TABLE,
+    unlike the cluster-wide ALTER ROLE the 0007 test above uses."""
+    admin = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER TABLE {} DROP CONSTRAINT platform_declarations_key_check").format(
+                sql.Identifier(platform.schema, "platform_declarations")))
+            cur.execute(
+                sql.SQL(
+                    "ALTER TABLE {} ADD CONSTRAINT platform_declarations_key_check "
+                    "CHECK (key IN ('surfaces', 'audit_coalescing_window_ms', 'audit_writer_roles'))"
+                ).format(sql.Identifier(platform.schema, "platform_declarations")))
+    finally:
+        admin.close()
+    drifted = _constraint_definition(platform.provision_dsn, "platform_declarations_key_check")
+    assert "process_ceilings" not in drifted
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql")
+    assert rc == 0
+    restored = _constraint_definition(platform.provision_dsn, "platform_declarations_key_check")
+    assert "process_ceilings" in restored
+    assert "audit_writer_roles" in restored
+
+
+def test_apply_platform_migration_0012_restores_a_manually_drifted_function_body(monkeypatch, platform):
+    """A hand-edited
+    `begin_provision_application` body does not survive an apply-
+    platform-migration re-application of 0012."""
+    marker = "NAMEDATALEN"
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "CREATE OR REPLACE FUNCTION {fn}(p_app_id text, p_runtime_password text, "
+                    "p_developer_password text) RETURNS TABLE(database_name text, runtime_role text, "
+                    "developer_role text) LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'drifted stub'; END; $fn$"
+                ).format(fn=sql.Identifier(platform.schema, "begin_provision_application")))
+    finally:
+        conn.close()
+    drifted_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
+    assert marker not in drifted_def
+    rc = _run_apply(monkeypatch, platform, "0012_role_connection_limits.sql")
+    assert rc == 0
+    restored_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
+    assert marker in restored_def
+    assert "drifted stub" not in restored_def
+
+
+# ===========================================================================
+# audit-only -- the connection target used by every test above
+# ===========================================================================
+
+# `_admin_dsn` (this file, line ~44) reads `MITATEDB_TEST_ADMIN_DSN` --
+# the SAME test-infrastructure-managed throwaway-cluster admin DSN every
+# other MitateDB-api test module uses (`tools/testpg/dsa_testpg.py` sets
+# it per run; there is no shared-cluster default, `_admin_dsn`'s own
+# RuntimeError above). No test in this file ever reads a production
+# connection string.
+
+
+# ===========================================================================
+# the psql-variable table and extraction rule
+# ===========================================================================
+
+
+def test_apply_platform_migration_variable_table_matches_each_files_own_references():
+    """The table's own required-variable set for each file
+    matches that file's REAL `:name` references, extracted by
+    `_extract_psql_variables`."""
+    for name, required in ops._PLATFORM_MIGRATION_VARIABLE_TABLE.items():
+        actual = ops._extract_psql_variables((MIGRATIONS_DIR / name).read_text())
+        assert set(required) == actual, (name, required, actual)
+
+
+def test_apply_platform_migration_extraction_excludes_comments_and_casts():
+    """A synthetic SQL string proves the
+    extraction rule excludes `--` line comments and `::` type casts, on
+    both sides of a positive case."""
+    synthetic = "SELECT :'foo'::text, :bar -- a comment mentioning :not_a_variable\n"
+    assert ops._extract_psql_variables(synthetic) == {"foo", "bar"}
+
+
+def _extract_bare_psql_variables(text: str) -> "set[str]":
+    """The subset of `ops._PSQL_VARIABLE_RE`'s own matches that are the
+    BARE `:name` form (never `:'name'`/`:"name"`) -- reuses the SAME
+    regex and comment-stripping rule `ops._extract_psql_variables`
+    applies (`ops._strip_sql_line_comments`), so the quoted-vs-bare
+    judgment never drifts from the real extraction behavior."""
+    stripped = ops._strip_sql_line_comments(text)
+    return {
+        match.group(3)
+        for match in ops._PSQL_VARIABLE_RE.finditer(stripped)
+        if match.group(3)
+    }
+
+
+def test_apply_platform_migration_variables_are_referenced_only_in_quoted_form():
+    """psql's own quoted interpolation
+    (`:"name"`/`:'name'`) is what makes a role-name argument safe to
+    substitute into DDL -- no value validation is layered on top of it.
+    Each of the 4 accepted platform migration files
+    references its own psql variables only through that quoted form; a
+    bare `:name` reference is never present. 0007 has at least one
+    quoted reference (non-vacuous)."""
+    quoted_reference_seen = False
+    for name in ops._PLATFORM_MIGRATION_FILENAMES:
+        text = (MIGRATIONS_DIR / name).read_text()
+        assert _extract_bare_psql_variables(text) == set(), name
+        if ops._extract_psql_variables(text):
+            quoted_reference_seen = True
+    assert quoted_reference_seen
+
+
+def test_bare_psql_variable_detection_catches_a_synthetic_bare_reference():
+    """The bare-form detector is exercised against
+    a synthetic SQL string containing one bare and one quoted reference
+    -- proves the detector is non-vacuous (catches a real bare form,
+    never just an always-empty result)."""
+    synthetic = "SELECT :api_role, :'quoted_role'\n"
+    assert _extract_bare_psql_variables(synthetic) == {"api_role"}
+
+
+def test_apply_platform_migration_missing_required_variable_is_rejected(monkeypatch, capsys, platform):
+    """0007 without `--controlplane-role` is refused before
+    any psql subprocess starts."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply(monkeypatch, platform, "0007_platform_declarations.sql", api_role=platform.api_role)
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert "--controlplane-role" in captured.err
+
+
+def test_apply_platform_migration_unexpected_variable_is_rejected(monkeypatch, capsys, platform):
+    """0011 (which takes no variables) with `--api-role`
+    supplied is refused before any psql subprocess starts."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql", api_role="somerole")
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert "--api-role" in captured.err
+
+
+# ===========================================================================
+# the "flows DDL" subcommand set, derived by AST
+# ===========================================================================
+
+
+def _build_call_graph(tree: "ast.Module") -> "tuple[dict, dict]":
+    graph: "dict[str, set]" = {}
+    sinks: "dict[str, tuple[bool, bool]]" = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            called: "set[str]" = set()
+            hits_psql = False
+            hits_migrations = False
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    func = sub.func
+                    if isinstance(func, ast.Name):
+                        called.add(func.id)
+                        if func.id == "_migrations_dir":
+                            hits_migrations = True
+                    elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                        owner = func.value.id
+                        if owner == "subprocess" and func.attr in ("run", "Popen"):
+                            hits_psql = True
+                        if owner == "platform_upgrades" and func.attr == "discover_upgrade_scripts":
+                            hits_migrations = True
+                        called.add(f"{owner}.{func.attr}")
+            graph[node.name] = called
+            sinks[node.name] = (hits_psql, hits_migrations)
+    return graph, sinks
+
+
+def _reaches_ddl_sink(start: str, graph: dict, sinks: dict) -> bool:
+    seen: "set[str]" = set()
+    stack = [start]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        hits_psql, hits_migrations = sinks.get(name, (False, False))
+        if hits_psql or hits_migrations:
+            return True
+        for callee in graph.get(name, ()):
+            base = callee.split(".")[0]
+            if base in graph and base not in seen:
+                stack.append(base)
+    return False
+
+
+def _find_cmd_registrations(tree: "ast.Module") -> "list[tuple[str, str]]":
+    registrations = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_parser":
+            current_name = None
+            for stmt in ast.walk(node):
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+                    call = stmt.value
+                    if isinstance(call.func, ast.Attribute) and call.func.attr == "add_parser":
+                        if call.args and isinstance(call.args[0], ast.Constant):
+                            current_name = call.args[0].value
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    call = stmt.value
+                    if isinstance(call.func, ast.Attribute) and call.func.attr == "set_defaults":
+                        for kw in call.keywords:
+                            if kw.arg == "func" and isinstance(kw.value, ast.Name):
+                                registrations.append((current_name, kw.value.id))
+    return registrations
+
+
+def _derive_ddl_flowing_subcommands() -> "set[str]":
+    """The set of subcommand NAMES whose own handler function
+    reaches, via direct (module-internal) calls, either a
+    `subprocess.run`/`subprocess.Popen` call or a `_migrations_dir()`/
+    `platform_upgrades.discover_upgrade_scripts` call."""
+    tree = ast.parse(OPS_SOURCE_PATH.read_text(encoding="utf-8"), filename=str(OPS_SOURCE_PATH))
+    graph, sinks = _build_call_graph(tree)
+    registrations = _find_cmd_registrations(tree)
+    return {name for name, func in registrations if _reaches_ddl_sink(func, graph, sinks)}
+
+
+def _required_lock_timeout_subcommands() -> "set[str]":
+    """The set of subcommand names whose own `--lock-timeout` argument is
+    required with no default (read from the built parser, never a
+    hand-written literal set)."""
+    parser = ops._build_parser()
+    subparsers_action = next(a for a in parser._subparsers._group_actions if a.dest == "command")
+    required = set()
+    for name, subparser in subparsers_action.choices.items():
+        for action in subparser._actions:
+            if action.dest == "lock_timeout" and action.required and action.default is None:
+                required.add(name)
+    return required
+
+
+def test_ddl_flowing_subcommands_match_the_required_lock_timeout_set():
+    """The AST-derived "flows DDL" set equals the set of
+    subcommands whose own `--lock-timeout` is a required, no-default
+    argument."""
+    assert _derive_ddl_flowing_subcommands() == _required_lock_timeout_subcommands()
+
+
+def test_ddl_flowing_subcommands_contain_exactly_the_three_expected_and_no_configuration_only_ones():
+    """Non-vacuous: the derived set contains
+    `apply-platform-migration`, `upgrade-applications`, and `deprovision`,
+    and never `set-platform-timeouts`/`declare-surfaces`/`declare-
+    process-ceilings`/`declare-coalescing-window` (psycopg-only
+    configuration writes that never flow a migration file)."""
+    derived = _derive_ddl_flowing_subcommands()
+    assert derived == {"apply-platform-migration", "upgrade-applications", "deprovision"}
+    for name in ("set-platform-timeouts", "declare-surfaces", "declare-process-ceilings", "declare-coalescing-window"):
+        assert name not in derived
+
+
+def _derive_psql_file_launching_functions() -> "set[str]":
+    """Every ops.py function whose own body directly calls
+    `subprocess.run`/`subprocess.Popen` AND contains the literal argv
+    token `"-f"` (a psql `-f FILE` invocation) -- derived from the AST,
+    never a hand-written name list, so a newly added function that
+    launches psql against a migration file is picked up automatically."""
+    tree = ast.parse(OPS_SOURCE_PATH.read_text(encoding="utf-8"), filename=str(OPS_SOURCE_PATH))
+    found: "set[str]" = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls_subprocess = False
+        has_dash_f = False
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                func = sub.func
+                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                    if func.value.id == "subprocess" and func.attr in ("run", "Popen"):
+                        calls_subprocess = True
+            if isinstance(sub, ast.Constant) and sub.value == "-f":
+                has_dash_f = True
+        if calls_subprocess and has_dash_f:
+            found.add(node.name)
+    return found
+
+
+def test_psql_file_launching_functions_are_derived_and_non_vacuous():
+    """The AST-derived set of psql-`-f`-launching functions is never
+    empty, and at the current commit is exactly the 3 functions that
+    apply a migration file through psql today."""
+    derived = _derive_psql_file_launching_functions()
+    assert derived
+    assert derived == {"_run_upgrade_script", "_run_deprovision_script", "cmd_apply_platform_migration"}
+
+
+def test_psql_launching_functions_all_apply_the_lock_timeout_option():
+    """Every function the AST derives as launching psql against a
+    migration file (`-f FILE`) also calls `_with_lock_timeout_option`
+    -- checked directly against each function's own AST body, not
+    merely by running them (static check), and against the DERIVED set
+    rather than a hand-written name list, so a newly added psql-file-
+    launching function that skips it is caught automatically."""
+    tree = ast.parse(OPS_SOURCE_PATH.read_text(encoding="utf-8"), filename=str(OPS_SOURCE_PATH))
+    derived = _derive_psql_file_launching_functions()
+    bodies = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in derived:
+            calls = {
+                sub.func.id for sub in ast.walk(node)
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+            }
+            bodies[node.name] = calls
+    assert set(bodies) == derived
+    for name, calls in bodies.items():
+        assert "_with_lock_timeout_option" in calls, (name, calls)

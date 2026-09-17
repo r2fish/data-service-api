@@ -230,9 +230,13 @@ def _run_inventory(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtur
     monkeypatch.setenv("MITATEDB_PLATFORM_SCHEMA", platform.schema)
     argv = ["inventory"]
     for flag, value in cli_kwargs.items():
-        if value is None:
+        if value is None or value is False:
             continue
-        argv += [f"--{flag.replace('_', '-')}", str(value)]
+        flag_name = f"--{flag.replace('_', '-')}"
+        if value is True:
+            argv.append(flag_name)
+        else:
+            argv += [flag_name, str(value)]
     rc = ops.main(argv)
     captured = capsys.readouterr()
     lines = captured.out.strip().splitlines()
@@ -241,9 +245,16 @@ def _run_inventory(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtur
 
 
 #: `reserved_connections=0` (supervisor ruling unlike the other
-#: three numeric arguments, `--reserved-connections` accepts 0 -- "no
-#: reserve" is a genuine value, not a usage error).
-_HEADROOM_OK = dict(concurrency=2, data_process_count=1, control_process_count=1, reserved_connections=0)
+#: numeric arguments, `--reserved-connections` accepts 0 -- "no
+#: reserve" is a genuine value, not a usage error). Ceiling and total
+#: are the SAME value here (no mid-migration revision overlap in
+#: these golden-path tests), and Control is declared deployed
+#: (`control_not_deployed=False`, omitted from argv).
+_HEADROOM_OK = dict(
+    concurrency=2, data_process_ceiling=1, data_process_count_total=1,
+    control_process_ceiling=1, control_process_count_total=1,
+    control_not_deployed=False, reserved_connections=0,
+)
 
 
 def _headroom_args(**overrides) -> types.SimpleNamespace:
@@ -306,7 +317,7 @@ def test_inventory_top_level_and_item_keys_are_pinned(monkeypatch, capsys, platf
         "judgment", "remediation_required", "total_count", "enabled_count", "revoked_count", "must_rotate_count",
     }
     assert set(report["ddl_lock"].keys()) == {"judgment", "remediation_required"}
-    assert set(report["connection_headroom"].keys()) == {"judgment", "remediation_required"}
+    assert set(report["connection_headroom"].keys()) == {"judgment", "remediation_required", "control_deployed"}
     assert report["unjudged_items"] == [
         {"item": 5, "part": "all", "reason": "runbook-acceptance"},
         {"item": 6, "part": "lock-and-downtime", "reason": "runbook-acceptance"},
@@ -315,15 +326,18 @@ def test_inventory_top_level_and_item_keys_are_pinned(monkeypatch, capsys, platf
 
 
 def test_inventory_judgment_vocabulary_is_closed(monkeypatch, capsys, platform):
-    """W2-2: every judgment word observed across a
-    confirmed run and an all-unknown run stays inside the closed
-    vocabulary."""
+    """Every judgment word observed across a confirmed run, an
+    all-unknown run, and a `--control-not-deployed` run stays inside the
+    closed vocabulary."""
     _declare_golden_path(monkeypatch, platform)
     _rc, confirmed_report, _out, _err = _run_inventory(monkeypatch, capsys, platform, **_HEADROOM_OK)
     _rc2, empty_report, _out2, _err2 = _run_inventory(monkeypatch, capsys, platform)
+    not_deployed_kwargs = dict(_HEADROOM_OK)
+    not_deployed_kwargs.update(control_not_deployed=True, control_process_ceiling=None, control_process_count_total=None)
+    _rc3, not_deployed_report, _out3, _err3 = _run_inventory(monkeypatch, capsys, platform, **not_deployed_kwargs)
     seen_judgments = set()
     seen_comparisons = set()
-    for report in (confirmed_report, empty_report):
+    for report in (confirmed_report, empty_report, not_deployed_report):
         for key, item in report.items():
             if key == "unjudged_items":
                 continue
@@ -333,6 +347,7 @@ def test_inventory_judgment_vocabulary_is_closed(monkeypatch, capsys, platform):
     assert seen_judgments <= ops._INVENTORY_JUDGMENTS
     assert seen_comparisons <= ops._INVENTORY_COMPARISONS
     assert "unknown" in seen_judgments  # non-vacuous: the empty run has real unknowns
+    assert not_deployed_report["connection_headroom"]["control_deployed"] is False
 
 
 def test_inventory_reason_vocabulary_is_pinned():
@@ -419,20 +434,29 @@ def test_inventory_does_not_accept_a_dsn_argument(monkeypatch, capsys, platform)
     dests = {action.dest for action in inventory_parser._actions}
     assert dests == {
         "help", "cloud_sql_connection_name", "concurrency",
-        "data_process_count", "control_process_count", "reserved_connections",
+        "data_process_ceiling", "data_process_count_total",
+        "control_process_ceiling", "control_process_count_total", "control_not_deployed",
+        "reserved_connections",
     }
 
 
 def test_inventory_numeric_arguments_reject_zero_and_negative(capsys):
-    """`--concurrency`/`--data-process-count`/
-    `--control-process-count` accept only a positive integer (0 refused
-    too -- `--reserved-connections`'s own 0-vs-negative behavior is's own separate test below)."""
+    """`--concurrency`/`--data-process-ceiling`/
+    `--data-process-count-total`/`--control-process-ceiling`/`--control-
+    process-count-total` accept only a positive integer (0 refused too --
+    `--reserved-connections`'s own 0-vs-negative behavior has its own
+    separate test below). `inventory`'s own subparser remaps this usage
+    error's exit code to 1, never argparse's default 2 (which this
+    subcommand reserves for a completed item judgment)."""
     parser = ops._build_parser()
-    for flag in ("--concurrency", "--data-process-count", "--control-process-count"):
+    for flag in (
+        "--concurrency", "--data-process-ceiling", "--data-process-count-total",
+        "--control-process-ceiling", "--control-process-count-total",
+    ):
         for bad_value in ("0", "-1", "not-a-number"):
             with pytest.raises(SystemExit) as excinfo:
                 parser.parse_args(["inventory", flag, bad_value])
-            assert excinfo.value.code == 2
+            assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert "positive integer" in captured.err
     # a valid positive value is still accepted
@@ -440,17 +464,43 @@ def test_inventory_numeric_arguments_reject_zero_and_negative(capsys):
     assert ns.concurrency == 3
 
 
+def test_inventory_unrecognized_argument_is_rejected_with_exit_code_1(monkeypatch, capsys):
+    """`inventory`'s own unrecognized-arguments/
+    extra-positional-arguments case exits 1 like every other `inventory`
+    usage error (never argparse's default 2, which this subcommand
+    reserves for a completed item judgment) -- no database connection is
+    attempted (`MITATEDB_PROVISION_DSN` is left unset) and the rejected
+    value is never echoed."""
+    monkeypatch.delenv("MITATEDB_PROVISION_DSN", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main(["inventory", "--no-such-flag"])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "no-such-flag" not in captured.err
+
+
+def test_other_subcommand_unrecognized_argument_still_exits_2(capsys):
+    """Only `inventory` remaps the unrecognized-
+    arguments case to exit 1 -- every other subcommand keeps argparse's
+    own default (exit 2)."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main(["list-applications", "--no-such-flag"])
+    assert excinfo.value.code == 2
+
+
 def test_inventory_reserved_connections_accepts_zero_but_rejects_negative(capsys):
-    """unlike the other three numeric
+    """unlike the other numeric
     arguments, `--reserved-connections` accepts `0` ("no reserve") -- only
-    a negative value (or non-integer text) is a usage error."""
+    a negative value (or non-integer text) is a usage error -- exit
+    code 1, not argparse's default 2 (`inventory`'s own `p.error`
+    override)."""
     parser = ops._build_parser()
     ns = parser.parse_args(["inventory", "--reserved-connections", "0"])
     assert ns.reserved_connections == 0
     for bad_value in ("-1", "not-a-number"):
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(["inventory", "--reserved-connections", bad_value])
-        assert excinfo.value.code == 2
+        assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert "non-negative integer" in captured.err
 
@@ -990,9 +1040,40 @@ def test_inventory_credentials_permission_error_is_unknown(monkeypatch, capsys, 
 # ===========================================================================
 
 
-def test_inventory_ddl_lock_is_unknown_when_lock_timeout_not_declared(platform):
-    """37 (revised,): `0007` never declares
-    `lock_timeout` on either writer role -- unknown by default."""
+def test_inventory_ddl_lock_is_confirmed_without_lock_timeout_declared(platform):
+    """`lock_timeout` is no longer part of
+    this judgment -- confirmed once `statement_timeout` is declared
+    database-independently on every target role (and each role's
+    `CONNECTION LIMIT` is set, already true from `0012`), even though
+    `0007` never declares `lock_timeout` on either writer role at all
+    (replaces the earlier `test_inventory_ddl_lock_is_unknown_when_lock_
+    timeout_not_declared`, from before item (6) dropped `lock_timeout`)."""
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            for role in (platform.api_role, platform.controlplane_role, f"{platform.prefix}svc_auditreader"):
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(sql.Identifier(role)))
+    finally:
+        admin.close()
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "confirmed", "remediation_required": False}
+
+
+def test_inventory_ddl_lock_is_unknown_when_statement_timeout_not_declared(platform):
+    """`lock_timeout` declared alone (never
+    `statement_timeout`) on every target role still leaves item (6)
+    unknown -- `lock_timeout` alone is never sufficient."""
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            for role in (platform.api_role, platform.controlplane_role, f"{platform.prefix}svc_auditreader"):
+                cur.execute(sql.SQL("ALTER ROLE {} SET lock_timeout = '3000ms'").format(sql.Identifier(role)))
+    finally:
+        admin.close()
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
@@ -1210,17 +1291,19 @@ def test_inventory_connection_headroom_concurrency_missing_is_unknown(monkeypatc
         report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args(concurrency=None))
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
 
 
 def test_inventory_connection_headroom_process_count_missing_is_unknown(platform):
-    """31a."""
+    """31a: any ONE of the four process
+    arguments missing (here `--data-process-ceiling`) leaves item (8)
+    unknown -- the other three never fill in for it."""
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
-        report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args(data_process_count=None))
+        report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args(data_process_ceiling=None))
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
 
 
 def test_inventory_connection_headroom_reserved_connections_missing_is_unknown(monkeypatch, platform):
@@ -1231,7 +1314,7 @@ def test_inventory_connection_headroom_reserved_connections_missing_is_unknown(m
         report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args(reserved_connections=None))
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
 
 
 def test_inventory_connection_headroom_max_connections_unreadable_is_unknown(monkeypatch, capsys, platform):
@@ -1269,7 +1352,7 @@ def test_inventory_connection_headroom_minus_one_connection_limit_is_unknown(pla
         report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args())
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
 
 
 def test_inventory_connection_headroom_minus_one_on_an_unrelated_role_is_not_unknown(monkeypatch, platform):
@@ -1296,29 +1379,32 @@ def test_inventory_connection_headroom_data_process_count_overflow_is_blocked(mo
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(data_process_count=20, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(data_process_ceiling=20, data_process_count_total=20, control_process_ceiling=1, control_process_count_total=1))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
 
 
 def test_inventory_connection_headroom_declared_and_actual_process_counts_disagree_is_blocked(monkeypatch, platform):
-    """33b."""
+    """33b: the declared Data ceiling (1)
+    disagrees with the passed `--data-process-ceiling` (2)."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(data_process_count=2, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(data_process_ceiling=2, data_process_count_total=2, control_process_ceiling=1, control_process_count_total=1))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
 
 
 def test_inventory_connection_headroom_control_process_count_mismatch_is_blocked(monkeypatch, platform):
-    """(33b) the
+    """(33b): the
     CONTROL side of the declared-vs-actual comparison is checked
     independently of the DATA side. Declares `control=2` but PASSES
-    `control_process_count=1` (matching data on both sides, and keeping
+    `control_process_ceiling=1` (matching data on both sides, and keeping
     the ACTUAL controlplane demand well under its CONNECTION LIMIT so
     condition 1 alone could never explain a `blocked` result) -- isolates
     the mismatch check itself."""
@@ -1326,7 +1412,8 @@ def test_inventory_connection_headroom_control_process_count_mismatch_is_blocked
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(data_process_count=1, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(data_process_ceiling=1, data_process_count_total=1, control_process_ceiling=1, control_process_count_total=1))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
@@ -1338,7 +1425,8 @@ def test_inventory_connection_headroom_role_coefficient_is_two_times_concurrency
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(concurrency=35, data_process_count=1, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(concurrency=35, data_process_ceiling=1, data_process_count_total=1, control_process_ceiling=1, control_process_count_total=1))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
@@ -1367,7 +1455,10 @@ def test_inventory_connection_headroom_shared_application_role_budget_counts_onc
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
-            _headroom_args(concurrency=concurrency, data_process_count=1, control_process_count=1, reserved_connections=reserved),
+            _headroom_args(
+                concurrency=concurrency, data_process_ceiling=1, data_process_count_total=1,
+                control_process_ceiling=1, control_process_count_total=1, reserved_connections=reserved,
+            ),
         )
     finally:
         conn.close()
@@ -1401,7 +1492,11 @@ def test_inventory_connection_headroom_app_role_condition1_uses_concurrency_not_
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(concurrency=2, data_process_count=1, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=2, data_process_ceiling=1, data_process_count_total=1,
+                control_process_ceiling=1, control_process_count_total=1,
+            ))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
@@ -1409,7 +1504,7 @@ def test_inventory_connection_headroom_app_role_condition1_uses_concurrency_not_
 
 def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_count(monkeypatch, platform):
     """Condition 1's own
-    app-role threshold is `data_process_count * concurrency`, never
+    app-role threshold is `data_process_count_total * concurrency`, never
     `concurrency` alone -- isolated from the platform-plane roles' own
     checks by keeping THEIR demand well under their real `CONNECTION
     LIMIT` (68/20/5) while only the app role's own (lowered) limit is
@@ -1436,21 +1531,29 @@ def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(concurrency=2, data_process_count=3, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=2, data_process_ceiling=3, data_process_count_total=3,
+                control_process_ceiling=1, control_process_count_total=1,
+            ))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
 
 
 def test_inventory_connection_headroom_app_role_overflow_with_named_values(monkeypatch, platform):
-    """data_process_count=2, concurrency=32, against the default `0003`
-    app-role `CONNECTION LIMIT` of 36 -- blocked."""
+    """data_process_count_total=2, concurrency=32, against the default
+    `0003` app-role `CONNECTION LIMIT` of 36 -- blocked."""
     _declare_golden_path(monkeypatch, platform, data=2, control=1)
     _provision_app(platform, "app1")
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(concurrency=32, data_process_count=2, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=32, data_process_ceiling=2, data_process_count_total=2,
+                control_process_ceiling=1, control_process_count_total=1,
+            ))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
@@ -1490,7 +1593,7 @@ def test_inventory_connection_headroom_declaration_missing_is_unknown_with_remed
         report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args())
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": True}
+    assert report == {"judgment": "unknown", "remediation_required": True, "control_deployed": True}
 
 
 def test_inventory_connection_headroom_declaration_connection_failure_is_unknown(monkeypatch, platform):
@@ -1509,7 +1612,7 @@ def test_inventory_connection_headroom_declaration_connection_failure_is_unknown
         report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args())
     finally:
         conn.close()
-    assert report == {"judgment": "unknown", "remediation_required": False}
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
 
 
 def test_inventory_connection_headroom_declaration_shape_violation_is_blocked(monkeypatch, platform):
@@ -1533,7 +1636,7 @@ def test_inventory_connection_headroom_declaration_shape_violation_is_blocked(mo
         report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args())
     finally:
         conn.close()
-    assert report == {"judgment": "blocked", "remediation_required": False}
+    assert report == {"judgment": "blocked", "remediation_required": False, "control_deployed": True}
 
 
 def test_inventory_declarations_f15_missing_only_is_confirmed_with_remediation(monkeypatch, platform):
@@ -1553,24 +1656,25 @@ def test_inventory_declarations_f15_missing_only_is_confirmed_with_remediation(m
 
 
 def test_inventory_ddl_lock_ignores_a_per_database_scoped_setting(platform):
-    """A `lock_timeout`/
-    `statement_timeout` pair declared only for ONE specific database
-    (`setdatabase != 0`) does not count as the role's own database-
-    independent declaration -- stays unknown."""
+    """A `statement_timeout` declared only for
+    ONE specific database (`setdatabase != 0`) does not count as the
+    role's own database-independent declaration -- stays unknown (item
+    (6)'s runtime-settings half no longer reads `lock_timeout` at all,
+    so this targets the property that IS still checked)."""
     _declare_role_lock_timeouts(platform)
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
             cur.execute(
-                sql.SQL("ALTER ROLE {} IN DATABASE {} RESET lock_timeout").format(
+                sql.SQL("ALTER ROLE {} IN DATABASE {} RESET statement_timeout").format(
                     sql.Identifier(platform.api_role), sql.Identifier(platform.platform_db)
                 )
             )
             cur.execute(
-                sql.SQL("ALTER ROLE {} RESET lock_timeout").format(sql.Identifier(platform.api_role))
+                sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(platform.api_role))
             )
             cur.execute(
-                sql.SQL("ALTER ROLE {} IN DATABASE {} SET lock_timeout = '3000ms'").format(
+                sql.SQL("ALTER ROLE {} IN DATABASE {} SET statement_timeout = '3000ms'").format(
                     sql.Identifier(platform.api_role), sql.Identifier(platform.platform_db)
                 )
             )
@@ -1625,10 +1729,416 @@ def test_inventory_connection_headroom_auditreader_counted_under_control_only(mo
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
-            conn, platform.schema, _headroom_args(concurrency=2, data_process_count=2, control_process_count=1))
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=2, data_process_ceiling=2, data_process_count_total=2,
+                control_process_ceiling=1, control_process_count_total=1,
+            ))
     finally:
         conn.close()
     assert report["judgment"] == "confirmed"
+
+
+# ===========================================================================
+# ceiling vs total, input-shape rejection, and --control-not-deployed
+# ===========================================================================
+
+
+def test_inventory_connection_headroom_total_may_exceed_ceiling_without_a_declaration_mismatch(monkeypatch, platform):
+    """The declared/actual comparison is checked
+    against each revision's own CEILING, never against the (larger,
+    traffic-migration) TOTAL -- a total well above the declared ceiling
+    is not, by itself, a declaration mismatch."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=2, data_process_ceiling=1, data_process_count_total=5,
+                control_process_ceiling=1, control_process_count_total=1,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
+
+
+def test_inventory_connection_headroom_condition1_demand_uses_the_total_not_the_ceiling(monkeypatch, platform):
+    """Condition 1's own per-role demand is computed
+    from `--data-process-count-total`, never from `--data-process-
+    ceiling` -- a ceiling of 1 (matching the declaration) would fit
+    comfortably under the API role's own CONNECTION LIMIT (68), but a
+    total of 20 does not."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=2, data_process_ceiling=1, data_process_count_total=20,
+                control_process_ceiling=1, control_process_count_total=1, reserved_connections=0,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_condition2_demand_uses_the_total_not_the_ceiling(monkeypatch, platform):
+    """The aggregate (condition 2) demand against
+    `max_connections` is computed from the process-count TOTALs, never
+    from the ceilings -- every per-role CONNECTION LIMIT is left with
+    ample headroom (so condition 1 alone cannot explain a `blocked`
+    result), and `--reserved-connections` is set so only the TOTAL-based
+    aggregate demand overflows `max_connections`."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
+    finally:
+        admin.close()
+    max_connections = int(max_connections_text)
+    concurrency = 2
+    api_demand = 17 * (2 * concurrency)  # 68, exactly the API role's own CONNECTION LIMIT
+    controlplane_demand = 16
+    auditreader_demand = 4
+    total_demand = api_demand + controlplane_demand + auditreader_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+    reserved = max_connections - total_demand + 1
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=concurrency, data_process_ceiling=1, data_process_count_total=17,
+                control_process_ceiling=1, control_process_count_total=1, reserved_connections=reserved,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_app_role_demand_uses_the_total_not_the_ceiling(monkeypatch, platform):
+    """Condition 1's own per-app-role demand is
+    computed from `--data-process-count-total`, never from `--data-
+    process-ceiling` -- the API role's own CONNECTION LIMIT is raised
+    out of the way so only the app role's own (default) CONNECTION
+    LIMIT (36) can explain a `blocked` result."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    _provision_app(platform, "app1")
+    platform_conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with platform_conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT runtime_role, developer_role FROM {} WHERE application_id = 'app1'").format(
+                    sql.Identifier(platform.schema, "applications")
+                )
+            )
+            (runtime_role, developer_role) = cur.fetchone()
+    finally:
+        platform_conn.close()
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 100000").format(sql.Identifier(platform.api_role)))
+    finally:
+        admin.close()
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=2, data_process_ceiling=1, data_process_count_total=19,
+                control_process_ceiling=1, control_process_count_total=1, reserved_connections=0,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_control_demand_uses_the_total_not_the_ceiling(monkeypatch, platform):
+    """Condition 1's own per-role demand for
+    Control (controlplane/auditreader) is computed from `--control-
+    process-count-total`, never from `--control-process-ceiling` -- a
+    total of 4 against the controlplane role's own (default) CONNECTION
+    LIMIT (20) must still be `blocked` even though a ceiling of 1 would
+    fit comfortably."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=2, data_process_ceiling=1, data_process_count_total=1,
+                control_process_ceiling=1, control_process_count_total=4, reserved_connections=0,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_app_shared_demand_in_the_aggregate_uses_the_total_not_the_ceiling(monkeypatch, platform):
+    """The aggregate (condition 2)'s own
+    contribution from the shared application-role budget is computed
+    from the TOTAL-based `app_role_demand`, never re-derived from the
+    ceiling -- every per-role CONNECTION LIMIT is raised out of the way
+    (so condition 1 alone cannot explain a `blocked` result), Control's
+    own ceiling (1) and total (2) deliberately differ, and only the
+    TOTAL-based aggregate demand overflows `max_connections`."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    _provision_app(platform, "app1")
+    platform_conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with platform_conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT runtime_role, developer_role FROM {} WHERE application_id = 'app1'").format(
+                    sql.Identifier(platform.schema, "applications")
+                )
+            )
+            (runtime_role, developer_role) = cur.fetchone()
+    finally:
+        platform_conn.close()
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 300").format(sql.Identifier(platform.api_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 50").format(sql.Identifier(platform.controlplane_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 10").format(
+                sql.Identifier(f"{platform.prefix}svc_auditreader")))
+            for role in (runtime_role, developer_role):
+                cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 150").format(sql.Identifier(role)))
+    finally:
+        admin.close()
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=1, data_process_ceiling=1, data_process_count_total=100,
+                control_process_ceiling=1, control_process_count_total=2, reserved_connections=0,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_data_total_below_ceiling_is_rejected_with_exit_code_1():
+    """Data's total < ceiling is a contradictory input,
+    refused with a fixed message and exit code 1 (never blocked/2) --
+    input-shape validation runs before any database connection is
+    attempted."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--concurrency", "2",
+            "--data-process-ceiling", "5", "--data-process-count-total", "1",
+            "--control-process-ceiling", "1", "--control-process-count-total", "1",
+            "--reserved-connections", "0",
+        ])
+    assert excinfo.value.code == 1
+
+
+def test_inventory_control_total_below_ceiling_is_rejected_with_exit_code_1(capsys):
+    """Control's total < ceiling is refused the same way,
+    with its own fixed message naming the CONTROL arguments (input
+    values never echoed)."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--concurrency", "2",
+            "--data-process-ceiling", "1", "--data-process-count-total", "1",
+            "--control-process-ceiling", "7", "--control-process-count-total", "3",
+            "--reserved-connections", "0",
+        ])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "error: --control-process-count-total must not be less than --control-process-ceiling"
+    assert "7" not in captured.err and "3" not in captured.err
+
+
+def test_inventory_control_not_deployed_with_ceiling_is_rejected_with_exit_code_1(capsys):
+    """--control-not-deployed and --control-process-ceiling
+    together are refused before any database connection, exit code 1."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--concurrency", "2",
+            "--data-process-ceiling", "1", "--data-process-count-total", "1",
+            "--control-not-deployed", "--control-process-ceiling", "1",
+        ])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "error: --control-not-deployed and --control-process-ceiling are mutually exclusive"
+
+
+def test_inventory_control_not_deployed_with_total_is_rejected_with_exit_code_1(capsys):
+    """--control-not-deployed and --control-process-count-total
+    together are refused before any database connection, exit code 1."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--concurrency", "2",
+            "--data-process-ceiling", "1", "--data-process-count-total", "1",
+            "--control-not-deployed", "--control-process-count-total", "1",
+        ])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "error: --control-not-deployed and --control-process-count-total are mutually exclusive"
+
+
+def test_inventory_connection_headroom_control_not_deployed_computes_with_control_zeroed(monkeypatch, platform):
+    """--control-not-deployed computes (8) with Control's own
+    process count and auditreader connections at 0, never unknown merely
+    because Control's own process arguments are absent."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(control_not_deployed=True, control_process_ceiling=None, control_process_count_total=None))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
+    assert report["control_deployed"] is False
+
+
+def test_inventory_connection_headroom_control_absent_without_the_not_deployed_flag_is_unknown(monkeypatch, platform):
+    """Control's own process arguments missing AND --control-not-
+    deployed absent leaves (8) unknown -- unknown is never silently read
+    as not-deployed."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema, _headroom_args(control_process_ceiling=None, control_process_count_total=None))
+    finally:
+        conn.close()
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
+
+
+def test_inventory_connection_headroom_control_not_deployed_ignores_declared_control_mismatch(monkeypatch, platform):
+    """Control's own declared ceiling (a permitted maximum) is
+    never compared once --control-not-deployed is given, even when the
+    declared value differs wildly from reality."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=99)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(control_not_deployed=True, control_process_ceiling=None, control_process_count_total=None))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
+
+
+def test_inventory_connection_headroom_control_not_deployed_ignores_auditreader_minus_one(monkeypatch, platform):
+    """With --control-not-deployed, auditreader's own
+    CONNECTION LIMIT = -1 is excluded from the -1 check -- (8) is not
+    forced unknown by it."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(
+                sql.Identifier(f"{platform.prefix}svc_auditreader")))
+    finally:
+        admin.close()
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(control_not_deployed=True, control_process_ceiling=None, control_process_count_total=None))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
+
+
+def test_inventory_connection_headroom_control_not_deployed_with_no_control_roles_found_is_not_unknown(monkeypatch, platform):
+    """If no Control-plane role is found by grant at all (the
+    exclusion set is empty), that alone is not a reason to fall back to
+    unknown when --control-not-deployed is given."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    original_role_classes = ops._inventory_role_classes
+    monkeypatch.setattr(
+        ops, "_inventory_role_classes",
+        lambda conn, schema: (original_role_classes(conn, schema)[0], (), ()),
+    )
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(control_not_deployed=True, control_process_ceiling=None, control_process_count_total=None))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
+
+
+def test_inventory_connection_headroom_control_not_deployed_still_checks_data_mismatch(monkeypatch, platform):
+    """--control-not-deployed does not relax the Data-side
+    declared/actual comparison -- a Data ceiling mismatch is
+    still blocked."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                control_not_deployed=True, control_process_ceiling=None, control_process_count_total=None,
+                data_process_ceiling=2, data_process_count_total=2,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_control_deployed_is_true_when_flag_absent(monkeypatch, platform):
+    """control_deployed is true whenever
+    --control-not-deployed was not given (the default)."""
+    _declare_golden_path(monkeypatch, platform)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args())
+    finally:
+        conn.close()
+    assert report["control_deployed"] is True
+
+
+def test_inventory_ddl_lock_control_not_deployed_does_not_exclude_controlplane_role(monkeypatch, platform):
+    """Item (6)'s own runtime-settings judgment keeps reading
+    Control's roles regardless of item (8)'s --control-not-deployed: a
+    controlplane role with CONNECTION LIMIT = -1 still makes (6)
+    unknown."""
+    _declare_role_lock_timeouts(platform)
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(sql.Identifier(platform.controlplane_role)))
+    finally:
+        admin.close()
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_ddl_lock_declaration(conn, platform.schema)
+    finally:
+        conn.close()
+    assert report == {"judgment": "unknown", "remediation_required": False}
+
+
+def test_inventory_ddl_lock_via_cli_control_not_deployed_still_reads_controlplane_role(monkeypatch, capsys, platform):
+    """The full `inventory` CLI invocation, run
+    with item (8)'s own --control-not-deployed, never lets that flag
+    reach item (6): `_inventory_ddl_lock_declaration` takes no `args`
+    at all, so there is no path for the flag to reach it -- a
+    controlplane role with CONNECTION LIMIT = -1 still makes (6)
+    unknown."""
+    _declare_role_lock_timeouts(platform)
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(sql.Identifier(platform.controlplane_role)))
+    finally:
+        admin.close()
+    kwargs = dict(_HEADROOM_OK)
+    kwargs.pop("control_process_ceiling")
+    kwargs.pop("control_process_count_total")
+    kwargs["control_not_deployed"] = True
+    _rc, report, _out, _err = _run_inventory(monkeypatch, capsys, platform, **kwargs)
+    assert report["ddl_lock"] == {"judgment": "unknown", "remediation_required": False}
 
 
 def _function_source_from_file(path: Path, function_name: str) -> str:
