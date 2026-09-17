@@ -585,6 +585,64 @@ def _role_connlimit(dsn: str, role: str) -> "int | None":
         conn.close()
 
 
+def _drift_platform_objects_before_reapplication(
+    admin_dsn: str, provision_dsn: str, registry_schema: str, api_role: str, controlplane_role: str,
+) -> None:
+    """manually drifts, for EACH platform migration file
+    `apply-platform-migration` is about to re-apply, the ONE object
+    that file's own header says it (re)asserts unconditionally on every
+    run -- an ACL (0005), a role setting (0007), a declared CHECK
+    constraint (0011), and a function body (0012). Mirrors the SAME
+    drift shapes `test_ops_apply_platform_migration.py`'s own per-file
+    tests use."""
+    # 0005: application_audit's own `REVOKE ALL ... FROM PUBLIC` runs
+    # every time -- add a PUBLIC grant by hand.
+    conn = psycopg.connect(provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("GRANT SELECT ON {table} TO PUBLIC").format(
+                table=sql.Identifier(registry_schema, "application_audit")))
+    finally:
+        conn.close()
+    # 0007: controlplane_role's own `ALTER ROLE ... SET statement_timeout`
+    # runs every time -- hand-change it.
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '9999ms'").format(
+                sql.Identifier(controlplane_role)))
+    finally:
+        admin.close()
+    # 0011: `platform_declarations_key_check`'s own DROP/ADD CONSTRAINT
+    # runs every time -- hand-narrow it, admitting only the rows 0007
+    # already seeded so the narrowed CHECK itself does not fail to add.
+    conn = psycopg.connect(provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER TABLE {} DROP CONSTRAINT platform_declarations_key_check").format(
+                sql.Identifier(registry_schema, "platform_declarations")))
+            cur.execute(
+                sql.SQL(
+                    "ALTER TABLE {} ADD CONSTRAINT platform_declarations_key_check "
+                    "CHECK (key IN ('surfaces', 'audit_coalescing_window_ms', 'audit_writer_roles'))"
+                ).format(sql.Identifier(registry_schema, "platform_declarations")))
+    finally:
+        conn.close()
+    # 0012: `begin_provision_application`'s own `CREATE OR REPLACE
+    # FUNCTION` runs every time -- hand-edit the body.
+    conn = psycopg.connect(provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "CREATE OR REPLACE FUNCTION {fn}(p_app_id text, p_runtime_password text, "
+                    "p_developer_password text) RETURNS TABLE(database_name text, runtime_role text, "
+                    "developer_role text) LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'drifted stub'; END; $fn$"
+                ).format(fn=sql.Identifier(registry_schema, "begin_provision_application")))
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("prefix_n", _REAPPLY_PARAMETRIZED_STARTING_POINTS)
 def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
     prefix_n: int, tmp_path_factory: pytest.TempPathFactory,
@@ -704,6 +762,7 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
                 _declaration_rows_excluding_updated_at(provision_dsn, registry_schema),
                 _constraint_definition(provision_dsn, "platform_declarations_key_check"),
                 _table_acl(provision_dsn, registry_schema, "platform_declarations"),
+                _table_acl(provision_dsn, registry_schema, "application_audit"),
                 _function_def_and_acl(provision_dsn, registry_schema, "begin_provision_application"),
                 _role_connection_limits(provision_dsn, api_role, controlplane_role),
                 _role_connlimit(provision_dsn, runtime_role),
@@ -712,17 +771,22 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
 
         first = _snapshot()
 
-        # second (deliberate) re-application: platform migrations directly,
-        # per-application upgrades through the operational `upgrade-
+        # second (deliberate) re-application: platform migrations through
+        # `apply-platform-migration` -- each file's
+        # own object is manually drifted immediately beforehand,
+        # so this comparison proves apply-platform-migration actually RESTORES each one, not
+        # merely that a bare re-apply happens to be a no-op. Per-
+        # application upgrades stay on the operational `upgrade-
         # applications` path (bulk, no `--script`) -- everything is
         # already recorded by now, so this run's own output must show
         # nothing newly applied.
+        _drift_platform_objects_before_reapplication(admin_dsn, provision_dsn, registry_schema, api_role, controlplane_role)
         for name in _REAPPLY_PLATFORM_MIGRATION_FILENAMES:
-            target = rewritten[name]
             if name == "0007_platform_declarations.sql":
-                r = _run_psql(provision_dsn, target, {"api_role": api_role, "controlplane_role": controlplane_role})
+                r = _run_ops(ns, "apply-platform-migration", name, "--lock-timeout", _TEST_LOCK_TIMEOUT,
+                            "--api-role", api_role, "--controlplane-role", controlplane_role)
             else:
-                r = _run_psql(provision_dsn, target)
+                r = _run_ops(ns, "apply-platform-migration", name, "--lock-timeout", _TEST_LOCK_TIMEOUT)
             assert r.returncode == 0, f"{name}: {r.stdout + r.stderr}"
         r_upgrade = _run_ops(ns, "upgrade-applications", "--application", _REAPPLY_TEST_APP_ID,
                              "--lock-timeout", _TEST_LOCK_TIMEOUT)
