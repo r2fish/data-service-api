@@ -187,7 +187,42 @@ TCP DSN:
 cloud-sql-proxy --port 5432 example-project:us-central1:mitatedb-platform &
 ```
 
+The proxy also has a unix-socket mode (`cloud-sql-proxy --unix-socket
+<socket-dir> <instance-connection-name>`). **§10's Gate-0 read requires
+that mode**, because its item (1) confirms which Cloud SQL instance is
+being read by matching the instance connection name against the socket
+path inside the DSN -- a TCP DSN carries nothing that identifies the
+instance, so item (1) stays `unknown`. The bootstrap steps in §3 do not
+depend on item (1) and work over either mode.
+
 ## 3. Platform bootstrap (run once)
+
+**Connection settings for every `psql` invocation below go into libpq
+environment variables, never into a conninfo string on argv.** A conninfo
+string (and above all a `password=` inside one) passed as an argument is
+readable by every other user on the host through `ps`/`/proc`, while these
+environment variables are visible only to the process, its children, and
+root -- the same reason `ops.py` builds its own psql subprocess
+environment from the DSN instead of putting the DSN on argv. Export the
+host and port once for this section, and put the database, role, and
+password on each invocation:
+
+```sh
+export PGHOST=127.0.0.1 PGPORT=5432   # §2's proxy in --port mode
+```
+
+(A `~/.pgpass` entry or `PGPASSFILE` is better still than `PGPASSWORD`;
+either is strictly better than a `password=` on argv. §10 uses the
+proxy's unix-socket mode and a different `PGHOST` value.)
+
+**One exception remains, and it is not closed**: the one-time bootstrap
+steps below still pass a password literal on argv -- in a psql variable
+(`-v ..._password="$..."`) and inside a `-c "ALTER ROLE ... PASSWORD
+'...'"` body. A psql variable and a `-c` body have no environment-variable
+form, so those literals are still readable through `ps`/`/proc` for as
+long as the command runs. Invariant 4 below keeps them out of Cloud SQL's
+query log; it does nothing about the host's own process table. Run the
+bootstrap on a host no other user has a session on.
 
 **Invariant 4 (WP-1 review M-7, this runbook's own instance): disable
 statement logging for this session before running any provisioning SQL.**
@@ -216,7 +251,7 @@ provisioning role itself):
 
 ```sh
 export MITATEDBSVC_PROVISION_PASSWORD="$(openssl rand -base64 32)"
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+PGDATABASE=postgres PGUSER=postgres psql \
   -v provision_password="$MITATEDBSVC_PROVISION_PASSWORD" \
   -f MitateDB-api/migrations/0001_bootstrap_platform.sql
 ```
@@ -250,20 +285,20 @@ ROLE` is a no-op the second time; `CREATE DATABASE` now succeeds):
 ```sh
 # 1. Run 0001 as above -- CREATE ROLE succeeds, CREATE DATABASE fails
 #    under ON_ERROR_STOP ("must be able to SET ROLE ...").
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+PGDATABASE=postgres PGUSER=postgres psql \
   -v provision_password="$MITATEDBSVC_PROVISION_PASSWORD" \
   -f MitateDB-api/migrations/0001_bootstrap_platform.sql
 # 2. Grant the missing SET option by hand -- the role now exists, so this
 #    resolves.
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+PGDATABASE=postgres PGUSER=postgres psql \
   -c "GRANT mitatedbsvc_provision TO postgres WITH SET TRUE"
 # 3. Re-run 0001 -- CREATE ROLE is a no-op (role already exists), CREATE
 #    DATABASE now succeeds.
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+PGDATABASE=postgres PGUSER=postgres psql \
   -v provision_password="$MITATEDBSVC_PROVISION_PASSWORD" \
   -f MitateDB-api/migrations/0001_bootstrap_platform.sql
 # 4. Revoke the temporary membership.
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+PGDATABASE=postgres PGUSER=postgres psql \
   -c "REVOKE mitatedbsvc_provision FROM postgres"
 ```
 Keep this only as a fallback for a checkout that predates the in-file fix,
@@ -273,7 +308,8 @@ single `psql -f 0001_...` command above.
 ### 3.2 Registry schema + process roles (migration `0002`)
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
   -f MitateDB-api/migrations/0002_registry_and_functions.sql
 ```
 
@@ -282,9 +318,9 @@ both `NOSUPERUSER NOCREATEDB NOCREATEROLE`) with no password yet -- set one
 for each and record both in Secret Manager:
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" -c \
+PGDATABASE=postgres PGUSER=postgres psql -c \
   "ALTER ROLE mitatedbsvc_api PASSWORD '$(openssl rand -base64 32)'"
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" -c \
+PGDATABASE=postgres PGUSER=postgres psql -c \
   "ALTER ROLE mitatedbsvc_controlplane PASSWORD '$(openssl rand -base64 32)'"
 ```
 
@@ -298,7 +334,8 @@ immediately after it.
 Run once, after `0002`, as the SAME `mitatedbsvc_provision` role/connection:
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
   -f MitateDB-api/migrations/0005_application_audit.sql
 ```
 
@@ -308,7 +345,7 @@ new `mitatedbsvc_auditreader` role (`LOGIN`, `SELECT`-only on BOTH
 `control_audit` and `application_audit`, no password yet):
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" -c \
+PGDATABASE=postgres PGUSER=postgres psql -c \
   "ALTER ROLE mitatedbsvc_auditreader PASSWORD '$(openssl rand -base64 32)'"
 ```
 
@@ -333,7 +370,8 @@ section used to document.
 Apply the platform single-shot migration (idempotent -- safe to re-run):
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
   -v api_role='mitatedbsvc_api' -v controlplane_role='mitatedbsvc_controlplane' \
   -f MitateDB-api/migrations/0007_platform_declarations.sql
 ```
@@ -375,7 +413,8 @@ single-shot migration (also idempotent) and declare the row -- **required
 alongside `surfaces` before either service will start (F-15)**:
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
   -f MitateDB-api/migrations/0011_process_ceilings.sql
 python -m mitatedb_api.ops declare-process-ceilings --data 1 --control 1
 ```
@@ -410,7 +449,8 @@ contract promises. Apply this platform single-shot migration (idempotent
 irrelevant) the `platform_declarations` migration above:
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
   -f MitateDB-api/migrations/0012_role_connection_limits.sql
 ```
 
@@ -456,9 +496,11 @@ authenticated as the writer role each service actually connects as
 writer), confirm both effective values match the declaration:
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_api password=$MITATEDBSVC_API_PASSWORD" -c \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_api PGPASSWORD="$MITATEDBSVC_API_PASSWORD" \
+  psql -c \
   "SHOW statement_timeout; SHOW idle_in_transaction_session_timeout;"
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_controlplane password=$MITATEDBSVC_CONTROLPLANE_PASSWORD" -c \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_controlplane PGPASSWORD="$MITATEDBSVC_CONTROLPLANE_PASSWORD" \
+  psql -c \
   "SHOW statement_timeout; SHOW idle_in_transaction_session_timeout;"
 ```
 
@@ -696,7 +738,10 @@ role, which is INSERT-only on that table). Export this table directly, as
 `mitatedbsvc_auditreader` (`MITATEDB_AUDIT_DSN`) or as the schema owner:
 
 ```
-psql "$MITATEDB_AUDIT_DSN" -c "\copy (SELECT * FROM mitatedb_registry.application_audit \
+# Set PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD from the mitatedb-audit-dsn
+# secret's own fields rather than expanding the whole DSN onto argv, where
+# `ps` makes it readable to every other user on the host (§3's convention).
+psql -c "\copy (SELECT * FROM mitatedb_registry.application_audit \
   WHERE recorded_at < now() - interval '365 days' ORDER BY recorded_at, event_id) \
   TO '<export path>' WITH (FORMAT csv, HEADER)"
 ```
@@ -786,7 +831,8 @@ break-glass CLI's own reach (registration alone leaves `database_name`
 NULL -- the two-state registry, design R-4):
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
   -v app_id='acme' \
   -v runtime_password="$(openssl rand -base64 32)" \
   -v developer_password="$(openssl rand -base64 32)" \
@@ -816,7 +862,8 @@ provisioned before this WP shipped**.
 Run once per EXISTING application, connected as `mitatedbsvc_provision`:
 
 ```sh
-psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
   -v app_id='acme' \
   -f MitateDB-api/migrations/0006_declared_field_types_upgrade.sql
 ```
@@ -891,13 +938,21 @@ deploy's own pre-flight, the same way `ops show-declarations` already is
 
 ```sh
 # Preview first -- applies nothing, reports applied/pending per application.
-python -m mitatedb_api.ops upgrade-applications --dry-run
+python -m mitatedb_api.ops upgrade-applications --dry-run --lock-timeout <value>
 
 # Apply. Visits every application; a failure on one does not stop the rest
 # -- failed applications are listed at the end, each with a REVOKE cleanup
 # line (see below).
-python -m mitatedb_api.ops upgrade-applications
+python -m mitatedb_api.ops upgrade-applications --lock-timeout <value>
 ```
+
+**`--lock-timeout` is required on both forms and has no default** (a
+positive integer, optionally suffixed `ms`/`s`/`min`; `0` is refused
+because PostgreSQL reads it as "no timeout"). It is set on the psql
+session before each per-application upgrade script runs, so a script
+waiting on a lock fails and rolls back instead of queueing behind it
+indefinitely. §10.7's per-application-upgrade row is where the value comes
+from.
 
 `--application <id>` limits either form to one application.
 `enabled` does **not** affect which applications are targeted -- a
@@ -948,7 +1003,8 @@ ruling 2026-09-05) -- it is never exposed on any HTTP surface, and
 1. `python -m mitatedb_api.ops upgrade-status --application <id>` -- confirm
    which numbers are pending (exit `4` means at least one is).
 2. `python -m mitatedb_api.ops upgrade-applications --application <id>
-   --dry-run`, then the same command without `--dry-run`.
+   --dry-run --lock-timeout <value>` (§10.7's per-application-upgrade row),
+   then the same command without `--dry-run`.
 3. If it exits `3`, read that application's failure block: fix the cause,
    issue the printed `REVOKE`, re-run step 2.
 4. **Redeploy or restart the data service** (`gcloud run services update
@@ -983,7 +1039,7 @@ baked into the container image:
 | `mitatedb-control-credential-pepper` | `MITATEDB_CONTROL_CREDENTIAL_PEPPER` value | control service, `ops.py` |
 | `mitatedb-platform-dsn` | `MITATEDB_PLATFORM_DSN` (`mitatedbsvc_api`, unix-socket form, §5) | data service |
 | `mitatedb-controlplane-dsn` | `MITATEDB_CONTROLPLANE_DSN` (`mitatedbsvc_controlplane`, unix-socket form) | control service, `ops.py` |
-| `mitatedb-provision-dsn` | `MITATEDB_PROVISION_DSN` (`mitatedbsvc_provision`) | **operator/break-glass CLI only -- never a Cloud Run service** (§7) |
+| `mitatedb-provision-dsn` | `MITATEDB_PROVISION_DSN` (`mitatedbsvc_provision`; unix-socket form, §5, for §10's Gate-0 read -- item (1) stays `unknown` over a TCP DSN; this secret keeps the `password=` form below, and the only thing that turns it into a `passfile=` form is §10.1's own converter, whose passfile is local and temporary) | **operator/break-glass CLI only -- never a Cloud Run service** (§7) |
 | `mitatedb-app-<id>-{runtime,developer}-dsn` | per-application DSNs, one pair per onboarded application | data service (`MITATEDB_APP_<ID_UPPER>_{RUNTIME,DEVELOPER}_DSN`) |
 
 **The two peppers must be genuinely different values** -- both composition
@@ -1447,12 +1503,11 @@ Run from a checked-out source tree with `PYTHONPATH=MitateDB-api/src`
 (never from inside a running container image -- `docker/Dockerfile`'s own
 footer note; `migrations/` and the CLI's default `0004` script path are
 both source-tree-relative). All bootstrap/reset/break-glass subcommands
-connect directly to Cloud SQL through the Cloud SQL Auth Proxy the same way
-§3 does (`host=127.0.0.1 port=5432 ...` in each DSN below, proxy running in
-the background) -- **never** through either Cloud Run service; this is
-exactly the "the network path to `/control/v1` is unavailable but the
-database is reachable" scenario the CLI exists for (`ops.py`'s own module
-docstring).
+connect directly to Cloud SQL through the Cloud SQL Auth Proxy (proxy
+running in the background) -- **never** through either Cloud Run service;
+this is exactly the "the network path to `/control/v1` is unavailable but
+the database is reachable" scenario the CLI exists for (`ops.py`'s own
+module docstring).
 
 - `bootstrap` / `reset` -- unchanged from WP-5, `MITATEDB_CONTROLPLANE_DSN`
   + `MITATEDB_CONTROL_CREDENTIAL_PEPPER` (+ `MITATEDB_CREDENTIAL_PEPPER`
@@ -1469,13 +1524,31 @@ docstring).
 - `audit-report` -- requires `MITATEDB_PROVISION_DSN` instead (read-only;
   `mitatedbsvc_controlplane` is INSERT-only on `control_audit` and cannot
   read it back -- `mitatedbsvc_provision`, the schema owner, can).
-- `deprovision <application_id> [--confirm PHRASE]` -- requires
-  `MITATEDB_PROVISION_DSN` (it runs `0004_deprovision_application.sql`
-  directly, the same provisioning-level operation §3.4 documents) and,
-  since it is genuinely irreversible, a declare-and-echo confirmation:
-  run once without `--confirm` to get the phrase (printed as JSON to
-  stderr, exit 2, nothing touched), then again with `--confirm
-  '<the printed phrase>'`.
+- `deprovision <application_id> --lock-timeout <value> [--confirm PHRASE]`
+  -- requires `MITATEDB_PROVISION_DSN` (it runs
+  `0004_deprovision_application.sql` directly, the same provisioning-level
+  operation §3.4 documents) and, since it is genuinely irreversible, a
+  declare-and-echo confirmation: run once without `--confirm` to get the
+  phrase (printed as JSON to stderr, exit 2, nothing touched), then again
+  with `--confirm '<the printed phrase>'`. **`--lock-timeout` is required
+  and has no default** (same value shape as `upgrade-applications`;
+  §10.7's deprovision row is where the value comes from).
+- `apply-platform-migration <FILENAME> --lock-timeout <value>
+  [--api-role ROLE --controlplane-role ROLE]` -- requires
+  `MITATEDB_PROVISION_DSN`; re-applies one of the accepted platform
+  migrations (§10.10). **`--lock-timeout` is required and has no default**
+  (§10.7 is where the value comes from).
+- `inventory` -- requires `MITATEDB_PROVISION_DSN`; the read-only Gate-0
+  DB-layer read (§10.5). It opens its own read-only connections and
+  changes nothing.
+
+**Which proxy mode**: over `--port` (TCP) the DSNs below have the
+`host=127.0.0.1 port=5432 ...` shape §2 shows. **`inventory` and the
+platform-upgrade procedure in §10 require the proxy's unix-socket mode
+instead** (§10.1), because item (1) can only be confirmed from a DSN whose
+host path carries the instance connection name. Follow §3's convention for
+every `psql` invocation: libpq environment variables, never a conninfo
+string on argv.
 
 Example (revoking a leaked application credential with the CLI, no HTTP
 access needed):
@@ -1549,7 +1622,9 @@ to escalate, not a runbook typo to silently work around.
    `pg_terminate_backend` to succeed (superuser is not available at all).
    Grant it once, then verify:
    ```sh
-   psql "$MITATEDBSVC_PROVISION_DSN" -c "GRANT pg_signal_backend TO mitatedbsvc_provision"
+   # libpq environment variables from the provision DSN's own fields, never
+   # the DSN on argv (§3's convention).
+   psql -c "GRANT pg_signal_backend TO mitatedbsvc_provision"
    ```
    then run a deprovision (§3.4's own reverse, `0004_deprovision_
    application.sql`, or the break-glass `deprovision` subcommand, §7)
@@ -1609,3 +1684,1418 @@ column) as a dated operator-reported note, without removing the honest
 remaining gaps those rows already record (deprovision/item 4 unexercised,
 `platform_evidence_required_before_production` items beyond the above still
 absent).
+
+## 10. Gate-0 read and platform upgrade procedure
+
+This is the operator procedure for the Gate-0 read (10 items) that runs
+BEFORE any platform upgrade of the Data/Control services, and for the
+upgrade itself (platform migrations `0005`/`0007`/`0011`/`0012`/`0013`,
+per-application upgrades, declarations, removal of the legacy base-URL env
+vars, restart, health, traffic, rollback). The judgment vocabulary
+(confirmed / blocked / unknown, plus the `remediation-required` note) and
+the 10 items themselves are defined in `docs/design/MITATEDB_PLATFORM_
+READONLY_INVENTORY_V0_1.md` sections 1.1/1.2 -- this section does not
+restate them.
+
+The section runs in four stages, in this order:
+
+| Stage | What happens | Where |
+|---|---|---|
+| 1. First read | the platform-layer read and `ops inventory`, then the overall judgment and the report. An item that is not confirmed makes Gate-0 not ready, and the report to the requesting side is `blocked—platform remediation required` with the breakdown | §10.1-§10.5, §10.9 |
+| 2. Platform remediation | the numbered set of platform migrations, the per-application upgrades, the declarations, the env-only change (including the move of traffic onto that revision on a service whose traffic is pinned, and the removal of a tag that keeps a Data revision out of §10.4.3's agreement -- no percentage moves, but it is the same traffic projection), and the reserved-connection count. **This stage is gated by the isolated proof, the independent audit and the requester's approval -- never by Gate-0 ready** | §10.10.1 |
+| 3. Second read | the whole first read again, on every one of the 10 items. **Gate-0 is ready only when all 10 come back confirmed**; an `unknown` that survives this read stops the procedure and is never carried forward as a warning | §10.10.2 |
+| 4. Candidate | deploy the candidate, restart, health, traffic, rollback. **Gate-0 ready gates exactly this stage** | §10.10.3 |
+
+- **The read (§10.1-§10.5) never changes production state**: no DDL, no
+  DML, no declaration replacement, no restart, no traffic change, no API
+  enablement. Stages 2 and 4 do change state, and only they.
+- **Against production, nothing in stage 2 or stage 4 runs until three
+  things are true: the same procedure has been proved against the isolated
+  pair, that evidence has passed an independent audit, and the requester
+  has approved.** All three, not the acceptance record in §10.8 alone.
+- **Nothing in this section has been run against production yet.** The
+  tables in §10.6/§10.7 and the procedure in §10.10 are drafts until
+  §10.8's acceptance record is filled in.
+- Every value below is written as a shape (`<project>`, `<region>`,
+  `<service>`, `<revision>`, `<instance-connection-name>`, ...). An
+  operator supplies the real value at run time only -- never into this
+  repository and never into a report (`docs/security/public-repository-
+  policy.md`).
+- **`unknown` never proceeds (fail-closed)** -- it is never downgraded to
+  a warning and carried forward. What it forbids proceeding to is stage 4:
+  an `unknown` in the first read is what stage 2 exists to clear, and it
+  has to be gone in stage 3 before any candidate is deployed or any
+  traffic is moved.
+
+### 10.1 Preconditions and working environment
+
+- **Where to run**: the root of a checkout of the candidate HEAD, with
+  `PYTHONPATH=MitateDB-api/src` (the same shape §7 documents).
+- **psql**: a PostgreSQL 16-or-newer client. Every `ops` subcommand that
+  starts psql reads `psql --version` first and stops with a fixed message
+  if the binary is missing, unreadable, or older than 16.
+- **Do not export libpq connection variables.** On the path that starts
+  psql, `ops` builds the subprocess environment from the DSN itself and
+  refuses to run when the parent shell still carries a connection-setting
+  variable the DSN does not override (`PGHOST`, `PGPORT`, `PGDATABASE`,
+  `PGUSER`, `PGPASSWORD`, `PGPASSFILE`, `PGSSLMODE`, `PGSSLROOTCERT`,
+  `PGOPTIONS`, `PGSERVICE`, `PGSERVICEFILE`, `PGSYSCONFDIR` and the rest
+  of the same table). The refusal names the variable, never its value. Put
+  what you need into the DSN (`passfile=`, `sslrootcert=`, ...) or unset it
+  first.
+- **That refusal covers only the psql invocations, not the psycopg
+  connections.** It is built where a psql subprocess environment is built,
+  so it guards exactly the three subcommands that start psql
+  (`apply-platform-migration`, and the per-application scripts that
+  `upgrade-applications` and `deprovision` run), and the `psql --version`
+  check sits on the same path. **Every other subcommand connects with
+  psycopg directly and neither check applies**: `inventory`,
+  `show-declarations`, `declare-surfaces`, `declare-process-ceilings`,
+  `declare-coalescing-window`, `set-platform-timeouts`,
+  `verify-declarations` and `upgrade-status` -- and so do the registry
+  connections `upgrade-applications` and `deprovision` themselves open
+  before any script runs. On an unguarded connection libpq quietly fills
+  any connection setting the DSN omits from the parent shell's own `PG*`
+  variables -- a different database, read and reported as if it were the
+  intended one, with nothing in the output to show it. **So the rule above
+  is the operator's own to keep for every subcommand in this section, not
+  something the tool enforces for most of them.** If this shell ran §3
+  (which exports `PGHOST` and `PGPORT`), `unset PGHOST PGPORT` before
+  entering this section, or use a fresh shell:
+
+  ```sh
+  unset PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD PGOPTIONS PGSERVICE
+  ```
+- **Run the Cloud SQL Auth Proxy in unix-socket mode for this section**:
+
+  ```sh
+  cloud-sql-proxy --unix-socket <socket-dir> <instance-connection-name> &
+  ```
+
+  The socket lands at `<socket-dir>/<instance-connection-name>/`, so the
+  provision DSN has the form `host=<socket-dir>/<instance-connection-name>
+  port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision
+  passfile=<passfile path>` -- the same unix-socket shape §5
+  describes for the in-container path. `ops inventory` compares the
+  instance connection name it is given against the socket path inside the
+  DSN and reports `match`/`mismatch`/`unknown` only, never the path
+  itself. **Over a TCP DSN (`host=127.0.0.1 ...`, the shape §2/§3/§7 use
+  for bootstrap and break-glass work) there is nothing in the connection
+  string that identifies which Cloud SQL instance is on the other end, so
+  item (1) stays `unknown` and Gate-0 cannot reach ready.** If the
+  `mitatedb-provision-dsn` secret (§4) holds a TCP DSN, re-record it in
+  unix-socket form before running this section. Do not print the DSN to
+  check its shape -- `inventory`'s own `connection.comparison` value is
+  the check.
+- **Where that passfile comes from.** The secret itself keeps §5's
+  password-bearing form; the `passfile=` form above is derived from it
+  once, at the start of this section, and lives only as long as this
+  section does. Create the private directory and the converter first,
+  under a `umask` that leaves nothing group- or world-readable, outside
+  every git work tree:
+
+  ```sh
+  umask 077
+  MITATEDB_PROVISION_PASSFILE="$(mktemp -d)/provision.passfile"
+  export MITATEDB_PROVISION_PASSFILE
+  ```
+
+  Then save this file as
+  `<the directory that path names>/dsn-to-passfile.py` (an editor, or a
+  `cat >` heredoc typed at the left margin -- it carries no secret of its
+  own, only the conversion):
+
+  ```python
+  import os
+  import sys
+  from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+  params = conninfo_to_dict(os.environ["MITATEDB_PROVISION_DSN"])
+  password = params.pop("password", None)
+  if password is None:
+      print(make_conninfo(**params))
+      sys.exit(0)
+
+  def field(value):
+      return str(value).replace("\\", "\\\\").replace(":", "\\:")
+
+  path = os.environ["MITATEDB_PROVISION_PASSFILE"]
+  line = "*:*:" + ":".join(field(params.get(key, "*")) for key in ("dbname", "user"))
+  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+  with os.fdopen(fd, "w") as handle:
+      handle.write(line + ":" + field(password) + "\n")
+  params["passfile"] = path
+  print(make_conninfo(**params))
+  ```
+
+  The converter writes libpq's own single line
+  (`*:*:<dbname>:<user>:<password>` -- host and port are wildcards, so the
+  line matches however libpq names a unix-socket host when it looks the
+  password up; `:` and `\` inside a field are escaped the way libpq
+  requires) at file mode `0600`, and
+  prints the SAME DSN with `password=` replaced by `passfile=` -- so the
+  password reaches one file and nothing else: not the screen, not argv
+  (the value stays in the environment variable both this script and §10.3
+  already use), not the shell history (the Shell rule below), and not
+  `set -x` output (`set +x` inside the subshell). Nothing here prints the
+  password-bearing DSN, and the printed passfile form is captured by a
+  command substitution rather than shown -- §10.3's own subshell is where
+  it runs, one line after the fetch. A DSN that already names a
+  `passfile=` passes through with the same parameters, so running it
+  twice is safe.
+  **Both `ops` connection paths accept the result**: psycopg reads
+  `passfile=` itself, and the psql path turns each DSN parameter into its
+  own libpq variable, `passfile` into `PGPASSFILE` (which is why the
+  refusal above does not fire on the five variables step 2 and step 11
+  export). Confirm the passfile form authenticates on the isolated pair
+  before using it against production, and use this passfile only with
+  the DSN it was derived from, against the pair this run is reading. **When this section ends, whether it completed or stopped,
+  remove that file and its directory** (`rm -f
+  "$MITATEDB_PROVISION_PASSFILE"` and then the directory `mktemp -d`
+  created, converter included) and leave no copy anywhere else: it is the
+  only place outside Secret Manager that carries the provision password.
+- **gcloud**: run as the operator's existing principal, with prompts
+  disabled, and never enable an API:
+
+  ```sh
+  export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+  export CLOUDSDK_CORE_LOG_HTTP=false
+  ```
+
+  Pass `--quiet` on every gcloud invocation and never pass `--log-http`.
+  **A disabled API, insufficient permission, or a state that needs an
+  interactive answer makes the affected item `unknown`** -- never enable
+  the API and read again. A non-zero gcloud exit status makes every item
+  that depends on that read `unknown`.
+- **Shell**: do not use `set -x`. Leave no history (`set +o history` under
+  bash, or a fresh shell started with an empty `HISTFILE`).
+- **Where the evidence goes**: a private directory on the operator's own
+  machine, outside every git work tree. Confirm that when you create it:
+
+  ```sh
+  mkdir -m 700 <evidence-dir>
+  git -C <evidence-dir> rev-parse --is-inside-work-tree 2>/dev/null && echo "STOP: inside a git work tree"
+  ```
+
+  If `STOP` prints, pick another location. Evidence files are made by
+  redirecting stdout; `inventory` never writes a file of its own. The
+  format is JSON (a gcloud `--format=json(...)`/`value(...)` projection,
+  or `inventory`'s own single JSON line).
+
+### 10.2 Isolated check of `--quiet`'s own default answer (gate before production)
+
+Before §10.4 is run against production even once, confirm and record the
+following in an isolated project. **With no record, or with a record
+showing that an API was enabled, the production read does not start.**
+
+1. In the isolated project pick one API that is currently disabled
+   (`<disabled-api>`; if one of the Cloud Run Admin / Artifact Registry /
+   Secret Manager APIs §10.4 uses is disabled there, use that one).
+
+   ```sh
+   gcloud services list --enabled --project=<isolated-project> --quiet \
+     --filter='config.name=<disabled-api>' --format='value(config.name)'   # must be empty
+   ```
+
+2. In a shell carrying §10.1's two environment variables, run a read
+   command that needs that API, with `--quiet`, and record its exit
+   status.
+3. Run step 1's command again and confirm the output is still empty (the
+   API was not enabled).
+4. Run §10.4's projection expressions (the `--format`/`--flatten`/
+   `--filter` shapes in the table below) against an isolated revision and
+   confirm every field comes back non-empty. If one is empty, fix the
+   expression and re-version this section before going to production.
+
+Record (filled in by the operator; no real values):
+
+| Date | gcloud version | API class used | Exit status of step 2 | Still not enabled (step 3) | Every projection non-empty (step 4) | Recorded by |
+|---|---|---|---|---|---|---|
+| (empty) | | | | | | |
+
+### 10.3 Passing the DSN
+
+- The DSN travels in the environment variable `MITATEDB_PROVISION_DSN`
+  only. `inventory`, `apply-platform-migration`, `upgrade-applications`
+  and `deprovision` all take it from there and none of them accepts a DSN
+  argument.
+- Forbidden: `set -x`, gcloud HTTP logging, letting the DSN reach shell
+  history, expanding the DSN onto argv (including `psql
+  "$MITATEDB_PROVISION_DSN"`), and `echo`/`printf`/writing the DSN to a
+  file. (§10.1's converter writes the password alone to its passfile,
+  never the DSN.)
+- Fetch it from Secret Manager by command substitution straight into the
+  variable, and **keep the variable inside the subshell that runs the
+  subcommand**, so it is not still in the parent shell while §10.4's
+  gcloud reads run:
+
+  ```sh
+  (
+    set +x
+    MITATEDB_PROVISION_DSN="$(gcloud secrets versions access latest \
+      --secret=<provision-dsn-secret> --project=<project> --quiet 2>/dev/null)" || exit 1
+    export MITATEDB_PROVISION_DSN
+    MITATEDB_PROVISION_DSN="$(PYTHONPATH=MitateDB-api/src python3 \
+      "$(dirname "$MITATEDB_PROVISION_PASSFILE")/dsn-to-passfile.py")" || exit 1
+    PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops <subcommand> ...
+  )
+  ```
+
+  `2>/dev/null` keeps a failed fetch from printing gcloud's own error text
+  to the screen. A failed fetch ends the subshell with status 1, and every
+  item that depended on it is `unknown`. The second assignment is §10.1's
+  own converter: what the subcommand then gets is the passfile form, and
+  the password-bearing form never leaves this subshell.
+
+### 10.4 Platform-layer read
+
+**Write only the projected fields into the evidence.** Never write a whole
+revision spec (`describe`'s default output, a bare `--format=json`, or
+`--format=yaml`). Project env NAMES only; read an env VALUE only for the
+env names in the allow-table below. For secrets, keep the env name and the
+version state only -- never the secret's name or value.
+
+The services are Data (`mitatedb-data`, §6.1) and Control
+(`mitatedb-ctrl`, §6.2). On a deployment that runs Control, do each read
+below for both.
+
+**Projection table** (use the expressions §10.2 step 4 confirmed against
+an isolated revision):
+
+| What is read | Command shape | Projection |
+|---|---|---|
+| Traffic allocation | `gcloud run services describe <service> --project=<project> --region=<region> --quiet` | `--format='json(status.traffic[].revisionName,status.traffic[].percent,status.traffic[].tag,status.latestReadyRevisionName)'` |
+| Revision basics | `gcloud run revisions describe <revision> --project=<project> --region=<region> --quiet` | the three annotation keys are projected BY NAME (never the whole `metadata.annotations` map), see the command below |
+| Ready condition | `gcloud run revisions list --service=<service> --project=<project> --region=<region> --quiet --flatten='status.conditions[]' --filter='metadata.name=<revision> AND status.conditions.type=Ready'` | `--format='value(status.conditions.status)'` |
+| Env names in every container | `gcloud run revisions list --service=<service> ... --quiet --flatten='spec.containers[].env[]' --filter='metadata.name=<revision>'` | `--format='value(spec.containers.env.name)'` |
+| Value of an allow-table env | the same, with `--filter='metadata.name=<revision> AND spec.containers.env.name=<allowed-env>'` | `--format='value(spec.containers.env.value)'` |
+| Secret state per env name | the "secret state" shape below | env name and state only |
+| Build provenance | `gcloud artifacts docker images describe '<image>@<digest>' --project=<project> --quiet --show-provenance` | `--format='json(provenance_summary)'` |
+| Local outcome | each command's own exit status | one line appended to `<evidence-dir>/exit-status.txt` |
+
+Name the three annotation keys in the projection itself. **Do not project
+`metadata.annotations` as a whole and narrow it afterwards**: the whole map
+also carries `serving.knative.dev/creator` and `serving.knative.dev/
+lastModifier`, which are operator email addresses (personal data), and a
+projection that reads them at all can leak them into a shell buffer or a
+partially written file:
+
+```sh
+gcloud run revisions describe <revision> --project=<project> --region=<region> --quiet \
+  --format='json(metadata.name,metadata.creationTimestamp,metadata.annotations."autoscaling.knative.dev/maxScale",metadata.annotations."autoscaling.knative.dev/minScale",metadata.annotations."run.googleapis.com/cloudsql-instances",spec.serviceAccountName,spec.containers[].image,status.imageDigest)' \
+  > <evidence-dir>/<service-label>-<revision-label>.json
+```
+
+**Secret state** (the secret's name stays in a shell variable; the
+evidence keeps the env name and the state only):
+
+```sh
+gcloud run revisions list --service=<service> --project=<project> --region=<region> --quiet \
+  --flatten='spec.containers[].env[]' \
+  --filter='metadata.name=<revision> AND spec.containers.env.valueFrom.secretKeyRef.name:*' \
+  --format='value(spec.containers.env.name,spec.containers.env.valueFrom.secretKeyRef.name,spec.containers.env.valueFrom.secretKeyRef.key)' \
+| while IFS="$(printf '\t')" read -r env_name secret_name secret_version; do
+    state="$(gcloud secrets versions describe "${secret_version:-latest}" --secret="$secret_name" \
+      --project=<project> --quiet --format='value(state)' 2>/dev/null)" || state=unreadable
+    printf '%s\t%s\n' "$env_name" "${state:-unreadable}"
+  done > <evidence-dir>/<service-label>-<revision-label>-secret-states.tsv
+```
+
+**Env-value allow-table** (non-secret numeric settings that are inputs to
+a judgment -- the value of an env name NOT in this table is never read):
+
+| Env name | Item it feeds | When unset |
+|---|---|---|
+| `MITATEDB_MAX_CONCURRENCY` | `inventory --concurrency` for item (8) | item (8) is `unknown` -- the code default is never substituted |
+
+Note that §6.1's own deploy command does not set
+`MITATEDB_MAX_CONCURRENCY`; on a deployment that leaves it unset, item (8)
+stays `unknown` until the deployment declares it explicitly.
+
+**Env names that must be present** (if the env-name list for a revision
+does not contain these, the projection is not being read and every item
+depending on that revision is `unknown`):
+
+| Service | Env names |
+|---|---|
+| Data | `MITATEDB_PLATFORM_DSN`, `MITATEDB_CREDENTIAL_PEPPER`, `MITATEDB_SERVE_APPS` |
+| Control | `MITATEDB_CONTROLPLANE_DSN`, `MITATEDB_CREDENTIAL_PEPPER`, `MITATEDB_CONTROL_CREDENTIAL_PEPPER` |
+
+**What makes an item `unknown` (all items)**: a non-zero gcloud exit
+status; a projected field that comes back empty (an empty projection is
+never read as "absent"); an empty env-name list; a missing must-be-present
+env name; an unset allow-table env.
+
+#### 10.4.1 Item (1) isolated/production pair
+
+1. For every Data/Control revision that carries traffic (percent greater
+   than 0, or a tag), read `run.googleapis.com/cloudsql-instances`.
+2. Only when every one of those revisions carries the SAME value AND that
+   value names exactly one connection name, pass it to §10.5's
+   `inventory` as `--cloud-sql-connection-name <instance-connection-
+   name>`. If the value is unreadable, differs between revisions, or names
+   more than one connection, omit the argument and item (1) is `unknown`.
+3. Item (1) is confirmed only when `inventory`'s `connection.comparison`
+   is `match` (`connection.judgment` confirmed). **`mismatch` (the
+   database being read is not the one the revisions use) and `unknown`
+   both stop here** -- do not go on to §10.6 and later.
+4. Record in the evidence whether this read was against the isolated or
+   the production pair.
+
+#### 10.4.2 Item (7) legacy base-URL env vars
+
+Env names in question: `MITATEDB_DATA_BASE_URL`,
+`MITATEDB_CONTROL_BASE_URL`.
+
+1. **Current revision / template**: if either name appears in the env
+   names (across every container) of a traffic-carrying revision or of the
+   service's current template, item (7) is confirmed +
+   `remediation-required`. If neither appears, it is confirmed.
+2. **New candidate / next template**: if the candidate is not deployed at
+   the time of the read, read the deploy command §10.10 step 13 will run
+   (the candidate HEAD's own §6.1/§6.2 shape, plus the env it passes) as
+   the next template.
+   - If the deploy replaces env wholesale (both `--set-env-vars` and
+     `--set-secrets`, or `--clear-env-vars` with `--clear-secrets`), judge
+     on the env names that command passes.
+   - **If the deploy carries existing env forward** (`--update-env-vars`,
+     `--update-secrets`, or a deploy with no env flag at all), apply that
+     command's additions and removals to the env names read in step 1 and
+     judge on the result. **Without an explicit removal of the legacy
+     names, item (7) is blocked** -- the removal is the flag
+
+     ```text
+     --remove-env-vars=MITATEDB_DATA_BASE_URL,MITATEDB_CONTROL_BASE_URL
+     ```
+
+     (one argument, no line break: a break turns `BASE_URL` into a
+     positional argument and gcloud reads it as the service name) or an
+     equivalent.
+   - If either name survives in the result, item (7) is blocked.
+3. After the candidate is deployed (§10.10 step 13), read the candidate
+   revision's env names again; if either name is still there, item (7) is
+   blocked.
+4. The presence of either name on the previous-Ready rollback revision is
+   recorded in the evidence only -- it does not block, and that revision's
+   env is not rewritten.
+
+#### 10.4.3 Item (8) platform-layer inputs
+
+Read item (8)'s arguments as follows and pass them to §10.5. If any one of
+them is not established, omit that argument -- the part of item (8) that
+depends on it is then `unknown`. Note that `inventory` rejects an
+inconsistent pair (a total smaller than the per-revision ceiling) with
+exit status 1 rather than judging it.
+
+| Argument | How it is read |
+|---|---|
+| `--concurrency` | the `MITATEDB_MAX_CONCURRENCY` value carried by the Data revisions that can take traffic: the revisions with traffic percent greater than 0, the revisions reachable by a tag URL, and the candidate (whose value is the one step 13's own deploy command carries, §10.10.3). **Omit the argument when those values are not all the same, and when even one of those revisions has the name unset** -- an unset name means that revision runs on the code's own default, which is not read from the platform and is not what item (8) would then be judging. A revision that is counted in the worst-case total but cannot take traffic (`minScale` 1 or more, percent 0 and no tag) is outside this agreement: it still counts toward the process total below, and the value it carries is not compared |
+| `--data-process-ceiling` | the NEW candidate Data revision's own process ceiling (its `--max-instances`, i.e. `autoscaling.knative.dev/maxScale` once deployed) -- this is the value compared against the `process_ceilings` declaration |
+| `--data-process-count-total` | the WORST-CASE Data process count: the sum of `autoscaling.knative.dev/maxScale` over every revision that can serve at the same time, plus the candidate's own ceiling (the total computed below). **Never the number of instances running at the moment of the read** -- that number is a snapshot, and passing it makes the demand arithmetic too small, so item (8) can come back confirmed on a database that PostgreSQL's own `CONNECTION LIMIT` refusal would hit under load |
+| `--control-process-ceiling` | the same as `--data-process-ceiling`, for Control |
+| `--control-process-count-total` | the same as `--data-process-count-total`, for Control |
+| `--control-not-deployed` | pass this INSTEAD of both Control arguments, and only when no Control process is deployed at all. It is the only way to omit them; it excludes Control's own roles from item (8)'s `CONNECTION LIMIT = -1` check, from the demand arithmetic, and from the declaration comparison, and puts `control_deployed: false` in the output |
+| `--reserved-connections` | `superuser_reserved_connections` plus `reserved_connections` plus whatever Cloud SQL itself reserves. Omit until the source (value and document) for the Cloud SQL reserve is established |
+
+**How the worst-case total is computed** (per service):
+
+1. From §10.4's traffic projection, list the revisions with percent
+   greater than 0, plus the revisions with percent 0 that carry a tag (a
+   tag URL can start an instance too). A revision that appears on several
+   rows is counted once.
+2. From the service's revision list, add the revisions not in step 1 whose
+   `autoscaling.knative.dev/minScale` is 1 or more.
+
+   ```sh
+   gcloud run revisions list --service=<service> --project=<project> --region=<region> --quiet \
+     --format='value(metadata.name,metadata.annotations."autoscaling.knative.dev/minScale")'
+   ```
+
+3. Add the candidate: the `--max-instances` value of the deploy command
+   §10.10 step 13 will run. Once the candidate is deployed, read its
+   `autoscaling.knative.dev/maxScale` back; if it differs from the
+   command's value, redo the Gate-0 read.
+4. Read `autoscaling.knative.dev/maxScale` for each revision from steps
+   1-2. **If even one is empty or not a positive integer, omit the total**
+   -- the Cloud Run default is never substituted.
+5. The total is the sum over steps 1-3.
+
+**How the total is checked**:
+
+- The traffic percentages sum to 100 (if not, the projection is not being
+  read, so omit the total).
+- Keep the addend table in the evidence (the revision's evidence label,
+  which step counted it, and its value) and confirm its row count equals
+  (number of step-1 revisions) + (number of step-2 revisions) + 1 for the
+  candidate.
+- Compute the total twice and get the same answer (shell arithmetic, and
+  either a hand re-read of the addend table or a second operator).
+- If the two disagree, or the addend table and the traffic projection
+  disagree about revision names, omit the total.
+
+#### 10.4.4 Item (9) build provenance, rollback revision, traffic, secrets
+
+1. **Digest reference**: every traffic-carrying revision and the candidate
+   reference `spec.containers[].image` in `@sha256:` digest form. If even
+   one container is referenced by tag, item (9) is `unknown`.
+2. **Provenance**: for each digest, read §10.4's build-provenance
+   projection and keep the source ref and the build input in the
+   evidence. If provenance is unreadable (empty, or no attestation), item
+   (9) is `unknown`. If two revisions on the same digest carry different
+   provenance, item (9) is `unknown`.
+3. **Rollback revision**: the traffic-carrying revisions (and their
+   allocation) at the time of the Gate-0 read are the rollback target.
+   Every one of them must exist with Ready condition `True`. If one is
+   absent or not Ready, item (9) is blocked.
+4. **Traffic allocation**: keep §10.4's traffic projection in the
+   evidence.
+5. **Secrets**: in each revision's secret-state file, every env name's
+   state is `ENABLED`. An `unreadable` entry makes item (9) `unknown`; a
+   `DISABLED`/`DESTROYED` entry makes it blocked.
+6. The service account (`spec.serviceAccountName`) goes into the evidence
+   only.
+
+#### 10.4.5 Item (10) starting prefix N
+
+Item (10) reads no production state; it is judged on the candidate HEAD's
+own repository-side evidence.
+
+1. If there is a record of `MitateDB-api/tests/test_platform_migration_
+   reapply.py` passing at the candidate HEAD's SHA (the CI `conformance`
+   job's result, or a completion-gate tally line), item (10) is confirmed.
+   With no such record it is `unknown`.
+2. In the production Gate-0 read, **the only thing done for item (10) is
+   to record the starting prefix N that corresponds to the source ref item
+   (9) attested for the running revision**:
+
+   ```sh
+   git fetch origin <source-ref>
+   git ls-tree --name-only FETCH_HEAD MitateDB-api/migrations/ \
+     | grep '\.sql$' | grep -v '/0004_deprovision_application\.sql$' | sort
+   ```
+
+   N is the number of output lines. Confirm that the output equals the
+   first N lines of the candidate HEAD's own list (the same
+   `MitateDB-api/migrations/*.sql` sequence in numeric order, minus
+   `0004`) and record N in the evidence. If it does not match (a gap, or a
+   different name), item (10) is `unknown`.
+3. If N is one of the starting points that test excludes
+   (`_REAPPLY_EXCLUDED_STARTING_POINTS`, currently `{3, 4, 5, 6}`), there
+   is no re-application evidence from that starting point: item (10) is
+   blocked, and the upgrade in §10.10 does not start.
+4. If item (9) is `unknown` so that no source ref is established, N cannot
+   be recorded and item (10) is `unknown`.
+
+### 10.5 DB-layer read (`ops inventory`)
+
+Run it in §10.3's subshell, with §10.4's values as arguments (a shape that
+works under bash 3.2 too). **Set the eight variables below in the parent
+shell first, from §10.4's own reads** (`CONNECTION_NAME` from §10.4.1, the
+seven others from §10.4.3); leave a variable unset for every argument
+§10.4 told you to omit, and set `CONTROL_NOT_DEPLOYED` to any non-empty
+value only in the case §10.4.3's table describes:
+
+```sh
+(
+  set +x
+  MITATEDB_PROVISION_DSN="$(gcloud secrets versions access latest \
+    --secret=<provision-dsn-secret> --project=<project> --quiet 2>/dev/null)" || exit 1
+  export MITATEDB_PROVISION_DSN
+  set --
+  [ -n "$CONNECTION_NAME" ]             && set -- "$@" --cloud-sql-connection-name "$CONNECTION_NAME"
+  [ -n "$CONCURRENCY" ]                 && set -- "$@" --concurrency "$CONCURRENCY"
+  [ -n "$DATA_PROCESS_CEILING" ]        && set -- "$@" --data-process-ceiling "$DATA_PROCESS_CEILING"
+  [ -n "$DATA_PROCESS_COUNT_TOTAL" ]    && set -- "$@" --data-process-count-total "$DATA_PROCESS_COUNT_TOTAL"
+  [ -n "$CONTROL_PROCESS_CEILING" ]     && set -- "$@" --control-process-ceiling "$CONTROL_PROCESS_CEILING"
+  [ -n "$CONTROL_PROCESS_COUNT_TOTAL" ] && set -- "$@" --control-process-count-total "$CONTROL_PROCESS_COUNT_TOTAL"
+  [ -n "$CONTROL_NOT_DEPLOYED" ]        && set -- "$@" --control-not-deployed
+  [ -n "$RESERVED_CONNECTIONS" ]        && set -- "$@" --reserved-connections "$RESERVED_CONNECTIONS"
+  PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops inventory "$@" \
+    > <evidence-dir>/inventory.json 2> <evidence-dir>/inventory.stderr
+  echo "inventory $?" >> <evidence-dir>/exit-status.txt
+)
+```
+
+- An omitted argument leaves the part that depends on it `unknown`. The
+  numeric arguments accept positive integers only
+  (`--reserved-connections` accepts 0 as well).
+  `--control-not-deployed` is mutually exclusive with both Control
+  arguments.
+- The output is one JSON line on stdout. Keys against Gate-0 items:
+  `connection` -> item (1)'s DB side, `declarations` -> (2), `migrations`
+  -> (3), `credentials` -> (4), `ddl_lock` -> (6)'s runtime-settings half,
+  `connection_headroom` -> (8). Each of those carries `judgment`
+  (confirmed / blocked / unknown) and `remediation_required`;
+  `unjudged_items` lists item (5) in full and item (6)'s
+  `lock-and-downtime` half with the reason `runbook-acceptance` -- those
+  two are judged by §10.8's acceptance record. There is no `ready` key:
+  the overall judgment is §10.9's, never this subcommand's.
+- Three items carry counts as well, and those counts are what §10.9's
+  report quotes: `credentials` carries `total_count`, `enabled_count`,
+  `revoked_count` and `must_rotate_count`; `migrations` carries
+  `registered_only_count` (applications registered but never
+  provisioned); `connection_headroom` carries `control_deployed`.
+  `declarations`, `migrations` and `ddl_lock` also carry a `reason` key
+  (`null` unless that item is blocked).
+- Every connection `inventory` opens carries its own fixed, short
+  `lock_timeout` and `statement_timeout`. A read that overruns one of them
+  leaves that item `unknown` -- which is what happens when the read races
+  a migration or an upgrade, so do not run `inventory` while stage 2 is
+  applying anything.
+- Exit status: `0` = every item this subcommand judges is confirmed, `2` =
+  at least one is blocked/unknown, `1` = the tool itself failed (stderr
+  carries a fixed message only) or an input shape was rejected.
+  **Exit status `0` is not Gate-0 ready**: the DB layer does not judge
+  item (5), item (6)'s lock/downtime half, (7), (9), (10), or item (1)'s
+  platform side.
+- Item (6)'s runtime-settings half is confirmed only when every target
+  role (`mitatedbsvc_api`, `mitatedbsvc_controlplane`,
+  `mitatedbsvc_auditreader`, and each application's own runtime/developer
+  role) carries a POSITIVE role-level `statement_timeout`. A value of 0, a
+  negative value, or a value that cannot be parsed is blocked with the
+  fixed reason `statement-timeout-unbounded`; no declaration at all is
+  `unknown`. A target role whose `CONNECTION LIMIT` is `-1` (unlimited) or
+  which `pg_roles` does not carry leaves the item `unknown` before any
+  timeout value is read at all. Migration `0013` is what puts the
+  `statement_timeout` on the auditreader and on the application roles, and
+  `0012` is what replaces a `-1` `CONNECTION LIMIT` with a finite one
+  (§10.10 step 7), so on a deployment where they have not run yet, expect
+  item (6) `unknown` in the first read and resolve it in stage 2.
+- **An application provisioned by a `0003_provision_application.sql` old
+  enough to predate the per-application upgrade ledger, with `0008` not
+  yet applied, makes `migrations` blocked with the reason
+  `ledger-unreadable`.** `upgrade-status` and `upgrade-applications` fail
+  on the same application, so stage 2 cannot resolve it. **Do not start
+  §10.10 at all while any application is in that state**; the design
+  register in
+  `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` section 12.4
+  records how that case is handled.
+
+### 10.6 Per-migration compatibility table (item (5))
+
+**This table is a draft. The compatibility judgments are not settled until
+the independent review in §10.8 accepts them.** Table version: **2**.
+Change the table and the version goes up by one and §10.8's acceptance
+record goes back to "not accepted".
+
+- Every migration is forward-only; there is no down file. "Rollback" here
+  means "move traffic back to the previous Ready revision and keep the
+  schema as the migration left it".
+- "The rollback target does not contain this migration" means the file is
+  absent from `MitateDB-api/migrations/` at that revision's own source ref
+  (decided with `git ls-tree`). If the target does contain it, that
+  revision was built against the post-migration schema and the row's
+  judgment is not needed.
+- A source of "fact" is the file's own text or a read of the source at
+  that ref. "Inference" is a judgment with its reasoning stated, and it is
+  what the review examines.
+- **A row that reasons about "that revision's own `config.py`" and the
+  like holds only for the refs where that reading is true, so every such
+  row states the condition its own judgment depends on in the last
+  column.** The rollback target is one specific revision with one attested
+  source ref (item (9)), so the check is concrete: read the named file at
+  that ref and confirm the condition (§10.10 step 1). **If the condition
+  cannot be confirmed at that ref -- including a ref too old to have the
+  file at all -- the row is not "compatible" for this run, and item (5) is
+  `unknown`.** A rollback target older than the whole range is therefore
+  never judged compatible by default.
+
+| Migration | How this procedure treats it | Down / way back | Does a rollback target that lacks it still run on the post-migration schema? | Source | Condition this judgment depends on -- confirm it at the rollback target's own attested source ref |
+|---|---|---|---|---|---|
+| `0001`, `0002`, `0003` | not applied here (bootstrap / provisioning, §3.1-§3.4) | -- | not applicable | -- | -- |
+| `0004_deprovision_application.sql` | never run by an upgrade (only `deprovision` runs it) | **irreversible** (drops the application's database and both of its roles) | not applicable. Running it makes that application unrecoverable; it is not run inside a Gate-0 read or an upgrade | fact (the file's own `DROP DATABASE`/`DROP ROLE`) | -- |
+| `0005_application_audit.sql` | applied (platform) | none; not reverted | **compatible**. Adds `mitatedb_registry.application_audit` and the `mitatedbsvc_auditreader` role, grants `mitatedbsvc_api` INSERT on the new table plus USAGE on its sequence, and adds a new SELECT grant for `mitatedbsvc_auditreader` on the EXISTING `mitatedb_registry.control_audit` without narrowing the grant already there (`0002` grants the control plane INSERT on that table) -- it names no existing table in any `ALTER`/`DROP` (fact: the file's own statements and header). A revision that lacks it reads and writes none of the new objects | fact | none: the judgment rests on `0005`'s own statements, so it holds at every ref |
+| `0007_platform_declarations.sql` | applied (platform), inside the numbered set. **Re-applying it is idempotent but NOT value-neutral**: it re-sets both roles' `statement_timeout` and `idle_in_transaction_session_timeout` to `5000ms` unconditionally, and it replaces the `audit_writer_roles` declaration row with the pair passed in `--api-role`/`--controlplane-role` (`ON CONFLICT ... DO UPDATE`). Record both before applying and restore them straight afterwards (§10.10 steps 2 and 4) | none; not reverted | **compatible (inference), with one part left unverified**. A pre-`0007` revision does not read `platform_declarations` and reads surfaces from env instead (fact: that revision's own `config.py`). The effect it does feel is the role-level `statement_timeout`/`idle_in_transaction_session_timeout` (5000ms) on `mitatedbsvc_api`/`mitatedbsvc_controlplane`; a role setting applies at login, so sessions that revision opens after the migration carry it while sessions already open keep their own. That revision applied the same two values itself with `SET SESSION`, but only on the audit write connection (fact: that revision's own `application_audit.py`). **Unverified: whether that revision's other queries (registry reads and the like) all finish inside 5 seconds.** Accepting this table at its current version accepts that residual risk -- such a query is cancelled with `canceling statement due to statement timeout` instead of running unbounded | fact + inference, one part unverified | a ref whose `config.py` reads the surfaces from env and performs no `platform_declarations` read, and whose `application_audit.py` applies both timeouts with `SET SESSION` on the audit write connection |
+| `0011_process_ceilings.sql` | applied (platform) | none; not reverted | **compatible**. It only widens the `key` CHECK vocabulary. A pre-`0011` revision's declaration read picks known keys by name and ignores a row with an unknown key (`process_ceilings`) (fact: that revision's own `platform_declarations.read_platform_declarations`); a pre-`0007` revision does not read the table at all | fact | a ref whose declaration read selects known keys by name and ignores an unknown key, or a ref that does not read the table at all |
+| `0012_role_connection_limits.sql` | applied (platform). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it.** No `ops` subcommand prints those current values -- item (8)'s output carries judgment keys only, and `verify-declarations`'s F-16 names a value only inside its own failure message, for the first role that fails -- so read them with a catalog read over the provision DSN and record them before applying (§10.10 step 2) | none; not reverted | **compatible**. Sets each role's `CONNECTION LIMIT` to a fixed value (68 / 20 / 36) and replaces `begin_provision_application` with the same signature and result columns (fact: `0002`'s and `0012`'s own definitions). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 68 / 20 / 36 -- compute it from that ref's own `config.py` |
+| `0013_role_statement_timeouts.sql` | applied (platform) | none; not reverted | **compatible (inference)**. Adds a role-level `statement_timeout` (`5000ms`) to `mitatedbsvc_auditreader` and to every application's runtime/developer role, and replaces `begin_provision_application` so future roles get the same setting -- additive; it drops and revokes nothing (fact: the file's own header and statements). A revision that lacks it passes its own per-request deadline with `SET LOCAL`, which overrides the role setting; the setting therefore bites only on paths that carry no deadline (inference). Note: an audit query slower than the new bound is cancelled rather than running unbounded | fact + inference | a ref whose request paths set their own per-request deadline with `SET LOCAL statement_timeout`. The note holds at every ref: a path that carries no deadline of its own is bounded by the role setting |
+| `0006_declared_field_types_upgrade.sql` (per-application) | applied by `upgrade-applications` to applications that have not recorded it | none | **compatible (inference)**. Adds a table and fills type rows from the existing columns. A pre-`0006` revision does not read that table | inference | a ref that does not read the declared-field-types table |
+| `0008_platform_upgrades_upgrade.sql` (per-application) | as above | none | **compatible**. Adds the ledger table. "Not yet applied" is decided by (numbers this revision ships) minus (numbers recorded), so extra recorded numbers are ignored (fact: `platform_upgrades.pending_upgrade_numbers`). A pre-`0008` revision does not read the ledger | fact | a ref whose own `pending_upgrade_numbers` computes (numbers it ships) minus (numbers recorded), and which does not read the ledger |
+| `0009_field_constraints_upgrade.sql` (per-application) | as above | none | **compatible (with a note)**. Adds columns that have defaults. A pre-`0009` revision's INSERT into `_mdb_field_types` names its columns explicitly (fact: that revision's own `backend_postgres.py`). Note: constraints the new revision declared (`enum_json`/`nullable`) are not enforced by the old revision (inference) | fact + inference | a ref whose `backend_postgres.py` names the columns explicitly in its INSERT into `_mdb_field_types` |
+| `0010_idempotency_records_upgrade.sql` (per-application) | as above | none | **compatible (with a note)**. Adds a table. Note: a pre-`0010` revision does not carry `_mdb_idempotency` among the names it excludes in `schema_count`, so it counts that application's tables one too high (fact: that revision's own `backend_postgres.py` `NOT IN` list of three names). Idempotency records written by the new revision are not used by the old one (inference) | fact + inference | a ref whose `schema_count` excludes exactly the three names its own `backend_postgres.py` `NOT IN` list carries |
+
+**If any migration turns out to be irreversible or to require downtime**,
+ask the requester for a separate decision covering backup/restore and the
+scope of the outage, and do not go to production without that decision and
+its review.
+
+### 10.7 Lock type, stop-time limit, and applied `lock_timeout` table (item (6))
+
+**This table is a draft. The stop-time limits and the `lock_timeout`
+values are not settled until the independent review in §10.8 accepts
+them.** Table version: **2**. Change the table and the version goes up by
+one and §10.8's acceptance record goes back to "not accepted".
+
+- Lock types follow the PostgreSQL 16 documentation (the Explicit Locking
+  table and each command's own Notes). For commands the documentation does
+  not describe a lock for (`ALTER ROLE`, `GRANT`/`REVOKE`, `CREATE OR
+  REPLACE FUNCTION`, `DROP DATABASE`, `DROP ROLE`) the row says
+  "inference".
+- Requests that conflict with a statement already waiting for a lock queue
+  behind it (including an ACCESS SHARE request arriving while an ACCESS
+  EXCLUSIVE request waits). The bound on "how long a following request can
+  wait" is therefore `lock_timeout` PLUS how long that lock is held (to
+  the end of the transaction).
+- `statement_timeout`: the provision role has no role-level value, and
+  neither `ops` nor anything in this section passes one (fact: `0007` sets
+  it for `mitatedbsvc_api`/`mitatedbsvc_controlplane` only, and `0013` for
+  the auditreader and the application roles -- never for
+  `mitatedbsvc_provision`). A per-application `SET LOCAL ROLE` does not
+  pick up a role's settings (PostgreSQL documentation: role settings apply
+  at login).
+- A running Data/Control process reads `platform_declarations` only at
+  startup (fact: `main.build_app` and
+  `control_composition.build_control_service` are the only callers of
+  `read_platform_declarations`).
+
+| Target | Transaction | Statements and lock types | What waits on the locked object | Applied `lock_timeout` (draft) | Bound on how long a following request waits (draft) | Maintenance window |
+|---|---|---|---|---|---|---|
+| `0005` | **no `BEGIN`/`COMMIT` -- each statement auto-commits**, so a failure part-way leaves the earlier statements applied and the file is re-run to finish | `CREATE TABLE IF NOT EXISTS`: no-op if present (inference: no heavy lock on an existing table). `REVOKE`/`GRANT ... ON` the new table and `GRANT USAGE ON SEQUENCE`: inference (ACL update). `DO` block with `CREATE ROLE` when absent: inference (role catalog). `GRANT CONNECT ON DATABASE`, `GRANT USAGE ON SCHEMA`: inference. `GRANT SELECT ON mitatedb_registry.control_audit`: an EXISTING table's ACL -- inference. `SELECT mitatedb_registry.assert_role_has_no_memberships(...)`: catalog read, ACCESS SHARE (fact: documentation) | `control_audit` writes from the control-plane process while its ACL is updated | `3s` | 3 seconds + hold time (ACL/catalog only). Running processes are unaffected | not needed (draft) |
+| `0007` | the whole file is one `BEGIN`/`COMMIT` | `ALTER ROLE ... SET` x4: role catalog row update (inference: no user-table lock). `CREATE TABLE IF NOT EXISTS`: no-op if present (inference). `REVOKE`/`GRANT ... ON` the table: inference (ACL update, no heavy lock on the table). `INSERT ... ON CONFLICT` x2: ROW EXCLUSIVE and row locks (fact: documentation). **Neither of those two writes is value-neutral on a re-application**: the four `ALTER ROLE`s set `5000ms` unconditionally, and the `audit_writer_roles` INSERT is `DO UPDATE`, so it replaces that row with the pair passed on the command line (the `audit_coalescing_window_ms` INSERT is `DO NOTHING` and does not) -- §10.10 steps 2 and 4 record the current values first and restore them straight after the apply, before any restart | a startup declaration read (ACCESS SHARE, which does not conflict with ROW EXCLUSIVE), and a `declare-*` write to the same row | `3s` | 3 seconds + hold time (a few rows in a small table). Running processes are unaffected | not needed (draft) |
+| `0011` | one `BEGIN`/`COMMIT` | `ALTER TABLE ... DROP CONSTRAINT`: ACCESS EXCLUSIVE (fact: the documented default). `ALTER TABLE ... ADD CONSTRAINT ... CHECK`: ACCESS EXCLUSIVE plus a scan validating existing rows (fact: documentation) | any process starting up and reading `platform_declarations`, and `show-declarations` / `verify-declarations` / `inventory` / `declare-*` | `2s` | 2 seconds + hold time (a scan of a few rows). A process starting during that window waits on its declaration read. Running processes are unaffected | not needed (draft); do not run it at the same time as a restart |
+| `0012` sections 1-2 | one `BEGIN`/`COMMIT` | `ALTER ROLE ... CONNECTION LIMIT` x2, plus x2 per application inside the `DO` block: role catalog row updates (inference). The `DO` block's `SELECT ... FROM mitatedb_registry.applications`: ACCESS SHARE (fact: documentation) | only an operation taking ACCESS EXCLUSIVE on `applications`, which no procedure here does | `3s` | 3 seconds + hold time. Existing connections are not dropped; the new limit applies to new connections | not needed (draft) |
+| `0012` section 3 | **outside the transaction** (two statements, each auto-committing) | `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference (function catalog row update; a call already running finishes on the pre-replacement definition) | provisioning running at the same time | the same (`3s`) | the same | not needed (draft); do not run it at the same time as provisioning |
+| `0013` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE mitatedbsvc_auditreader SET statement_timeout`: role catalog row update (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... SET` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing sessions keep their own settings; the new bound applies at the next login | not needed (draft); do not run it at the same time as provisioning |
+| per-application upgrade (`0006`, `0008`, `0009`, `0010`, via `upgrade-applications`) | per application: `GRANT <developer_role> TO CURRENT_USER` (auto-commit) -> one `BEGIN`/`COMMIT` -> `REVOKE` (auto-commit). A failure leaves the temporary membership behind (§3.4b's cleanup) | `CREATE TABLE IF NOT EXISTS` (`0006`, `0008`, `0010`): inference (no heavy lock on an existing table). `INSERT`: ROW EXCLUSIVE (fact: documentation). `0006`'s read of `information_schema.columns`: ACCESS SHARE (fact: documentation). **`0009`'s `ALTER TABLE public._mdb_field_types ADD COLUMN IF NOT EXISTS` x2: ACCESS EXCLUSIVE** (fact: the documented default); the defaults are constants so no table rewrite happens (fact: documentation); the lock is still taken when the column already exists (inference). `GRANT`/`REVOKE` on roles, tables and the schema: inference | that application's own requests that read `_mdb_field_types` (during `0009`), and schema operations on that application | `2s` (`--lock-timeout 2s`) | 2 seconds + hold time per application (catalog-only changes). Other applications are unaffected | not needed (draft) |
+| deprovision (`0004`, via `deprovision`) | outside a transaction (`DROP DATABASE` cannot run inside one -- fact: documentation) | `begin_deprovision_application` / `finish_deprovision_application`: registry row updates (inference: ROW EXCLUSIVE and row locks). `pg_terminate_backend`: no lock. `DROP DATABASE`: fails while another connection exists (fact: documentation), lock type inference. `DROP ROLE`: inference | operations updating the same application's registry rows | `5s` (`--lock-timeout 5s`) | that application stops permanently (irreversible, §10.6). An operation touching the SAME application's registry rows waits at most 5 seconds + hold time; other applications are not affected | never run by an upgrade |
+
+**How the table's values are passed**:
+
+- Platform migrations (`0005`, `0007`, `0011`, `0012`, `0013`):
+  `apply-platform-migration <filename> --lock-timeout <the table's value>`.
+  The argument is required and has no default. Do not assemble
+  `PGOPTIONS` by hand -- the subcommand builds the psql environment from
+  the DSN and adds the lock timeout to `PGOPTIONS` itself.
+- Per-application upgrade: `upgrade-applications --lock-timeout <the
+  table's value>`, required and with no default (`--dry-run` needs it
+  too).
+- Deprovision: `deprovision --lock-timeout <the table's value>`,
+  required and with no default.
+- The accepted value shape is a positive integer with an optional `ms` /
+  `s` / `min` suffix. `0` is refused, because PostgreSQL reads 0 as "no
+  timeout".
+- On overrun psql fails with `canceling statement due to lock timeout`
+  and that transaction is rolled back. Follow §10.10's stop conditions.
+
+### 10.8 Acceptance record for the tables and the procedure
+
+Item (5), and item (6)'s lock/downtime half, are judged by the
+independent review (in design-review mode) of §10.6/§10.7 recorded here.
+**A record whose "version reviewed" does not equal the table's current
+version counts as no record at all.**
+
+| Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
+|---|---|---|---|---|---|---|
+| §10.6 compatibility | 2 | accepted | 2 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.6 | 2026-09-18 | supervisor |
+| §10.7 lock / stop time / `lock_timeout` | 2 | accepted | 2 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.6 | 2026-09-18 | supervisor |
+| §10.10 upgrade procedure (stages 2-4) | 5 | accepted | 5 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.6 | 2026-09-18 | supervisor |
+
+### 10.9 Gate-0 overall judgment and report
+
+This judgment is made the same way in both reads: the first read (stage 1)
+and the second read (stage 3, §10.10.2) use exactly this section.
+
+**Overall judgment** (the DB layer and the platform layer are read in the
+same run and reported together):
+
+| Item | Confirmed when |
+|---|---|
+| (1) | §10.4.1 read exactly one connection name AND `inventory`'s `connection.judgment` is confirmed |
+| (2) | `inventory`'s `declarations.judgment` |
+| (3) | `inventory`'s `migrations.judgment` (`ledger-unreadable` is blocked, §10.5) |
+| (4) | `inventory`'s `credentials.judgment` |
+| (5) | §10.8 records §10.6 accepted at its current version, §10.4.4's rollback target is attested, and every §10.6 row the rollback target does not contain is "compatible" (a note is allowed) AND has its last-column condition confirmed at that target's own attested source ref. A row whose condition cannot be confirmed there leaves (5) `unknown` |
+| (6) | `inventory`'s `ddl_lock.judgment` is confirmed, §10.8 records §10.7 accepted at its current version, and no row being applied needs a maintenance window (or, if one does, a separate decision covers it) |
+| (7) | §10.4.2 |
+| (8) | `inventory`'s `connection_headroom.judgment` (arguments from §10.4.3) |
+| (9) | §10.4.4 |
+| (10) | §10.4.5 |
+
+- **Gate-0 is ready only when all 10 items are confirmed AND §10.8's
+  acceptance records name the tables' current versions.** `inventory`'s
+  exit status `0` on its own never makes Gate-0 ready.
+- A `remediation-required` note is a work item that lets the procedure
+  proceed; it is not a blocker (stage 2 clears it).
+- **With even one blocked or unknown item, Gate-0 is not ready.** What
+  "not ready" forbids is stage 4: no candidate is deployed and no traffic
+  is moved (§10.10.3).
+- **In the FIRST read, "not ready" is the normal starting state of a
+  deployment that has not had the platform remediation yet** -- a
+  deployment where `0013` has not run reports item (6) `unknown`, one
+  where `MITATEDB_MAX_CONCURRENCY` is not declared reports item (8)
+  `unknown`, and so on. Report it (below), then look the finding up in
+  §10.10.1's table of findings that stage 2 resolves. **A finding that is
+  not in that table is not resolved by stage 2: stop there.**
+- **In the SECOND read (stage 3), any item that is still not confirmed
+  stops the procedure.** An `unknown` is never downgraded to a warning and
+  carried into stage 4, and stage 2 is not repeated in the hope of a
+  different answer without a new decision (§10.10.2 names the one
+  exception: a finding whose row in §10.10.1's table names a step).
+
+**Report** (what goes into the repository and into the report to the
+requesting side):
+
+- Each item's judgment. **`unknown` and `blocked` both map to
+  `blocked—platform remediation required`, with the breakdown (how many
+  unknown, how many blocked) stated alongside.** Only `confirmed` is a
+  pass. **Write that phrase exactly as printed here, with an em dash
+  (U+2014) and no spaces around it**: the receiving side matches the
+  string literally, so an ASCII `--` in its place is a different report.
+- The `remediation-required` notes.
+- Counts that carry no identifier (for example: how many applications are
+  registered only; how many credentials are in each state).
+- What never goes in: DSNs, credentials, tokens, HTTP bodies, real data,
+  and the service account, Cloud SQL connection name, real digest,
+  revision name, database name and secret name (those stay in §10.1's
+  evidence).
+
+Shape:
+
+```text
+Gate-0 (<isolated|production>) (<first read|second read>) <date>
+(1) confirmed
+(2) confirmed [remediation-required]
+(3) blocked—platform remediation required (breakdown: blocked)
+(4) confirmed (credentials <n>; by state <enabled n / revoked n / must_rotate n>)
+(5) blocked—platform remediation required (breakdown: unknown)
+...
+(10) confirmed (starting prefix N = <n>)
+overall: <ready | blocked—platform remediation required (unknown <n>, blocked <n>)>
+acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <n> <accepted|not accepted>, §10.10 version <n> <accepted|not accepted>
+```
+
+### 10.10 Platform upgrade procedure (stages 2-4)
+
+Procedure version: **5**. Change the procedure and the version goes up by
+one and §10.8's acceptance record goes back to "not accepted".
+
+**Preconditions**:
+
+- All three rows of §10.8 are accepted, each at the version its subject
+  now carries.
+- **Item (8)'s demand arithmetic has been checked on paper, before a
+  single piece of state is changed.** Item (8) is the one item whose answer
+  depends on inputs that stage 2 and stage 4 themselves decide (the
+  concurrency this deployment declares, and the process counts a cutover
+  puts side by side), so it is computed here rather than discovered in the
+  second read, with production already changed. Take the inputs the second
+  read will pass (§10.4.3: the concurrency value, each service's own
+  worst-case process count total and the candidate's ceiling, the
+  reserved-connection count) and the limit each role will carry AT THE
+  SECOND READ: for a role `0012` names, that file's own value (it sets the
+  limits it names to its own value, raising one below it and lowering one
+  above it -- §10.6's `0012` row), and for every other role (the
+  auditreader's own limit from `0005`, and any other role `0012` does not
+  name) the value the step-2 catalog read returns. Item (8) never compares
+  the provision role at all: it excludes the owner of both audit tables.
+  `max_connections` comes from that same read. Both are the read-only
+  shapes step 2 and step 11 use, which change nothing. Then compute
+  exactly what the tool computes:
+
+  ```text
+  api role demand                    = data total x 2 x concurrency
+  controlplane role demand           = control total x 16
+  auditreader role demand            = control total x 4
+  each application's runtime role
+  and developer role demand          = data total x concurrency
+  total demand                       = api + controlplane + auditreader
+                                       + the application demand (counted
+                                         once when at least one
+                                         application is registered, and
+                                         not at all when none is)
+                                       + 2
+  ```
+
+  The factor `2` in the api demand is the number of connection stores that
+  role carries, the `16` and the `4` are fixed floors, and the trailing
+  `+ 2` is the read's own connections. The auditreader demand is `0` unless
+  a role actually carries `0005`'s own auditreader grant shape. With
+  `--control-not-deployed` the controlplane and auditreader demands are
+  `0` and those roles are left out of both conditions below. The two
+  conditions item (8) then applies are:
+
+  1. every one of those roles' own `CONNECTION LIMIT` is greater than or
+     equal to its own demand above (and none of them is `-1`, which is
+     `unknown` before any demand is compared -- a `-1` on a role `0012`
+     names is the `unknown` row §10.10.1 resolves with step 7, so
+     substitute `0012`'s own value here; a `-1` on any other role stops
+     the procedure);
+  2. total demand plus the reserved-connection count is less than or equal
+     to `max_connections`.
+
+  **If even one of them does not hold, stage 2 does not start**: report
+  `blocked—platform remediation required` with which role or which sum
+  fails, and stop. **This section has no fix for it** -- raising a role's
+  own `CONNECTION LIMIT` value takes a new platform migration (§10.10.1's
+  table of findings), and counting the totals differently is a separate
+  decision. Record the arithmetic and its inputs in the evidence (§10.1)
+  and compute it twice, the way §10.4.3 requires of the totals themselves.
+- **Against production, three things are true before anything in §10.10.1
+  or §10.10.3 runs: this whole procedure has been run against the isolated
+  pair end to end, that evidence has passed an independent audit, and the
+  requester has approved.** Gate-0 ready is not one of the three, and
+  §10.8's acceptance record is not a substitute for any of them
+  (`security/CONTROL_MAPPING.md` records the same limit on
+  `apply-platform-migration` itself).
+- Stage 1 has been read and reported against the pair this run will
+  change, and every finding it produced is one §10.10.1's table covers.
+- No application is in the `ledger-unreadable` state (§10.5).
+- Production gets the SAME digest the isolated run used, and the
+  production read shows no difference from the isolated read.
+
+**Stop conditions** (at every step): a non-zero exit status; a
+`lock_timeout` overrun; a bad Ready condition or health check; a
+`verify-declarations` failure; a finding the table in §10.10.1 does not
+cover; an item the second read leaves not confirmed; a discovery that a
+migration is irreversible, unrecoverable, or needs downtime.
+**If you stop before traffic has moved, leave the candidate at 0%.**
+Remove the cause and restart from the step that stopped (each migration,
+declaration and per-application upgrade is re-appliable on item (10)'s
+evidence).
+
+**Applying a platform migration**: use `apply-platform-migration`, which
+takes the DSN from the environment only, passes `ON_ERROR_STOP=1`, puts
+the required `--lock-timeout` value into the psql environment itself, and
+redacts connection values out of psql's output before any failure text is
+printed. The FILENAME argument is a bare file name: a path separator is
+refused, the name must be one of the accepted platform migrations, and the
+resolved path must stay inside the migrations directory.
+
+```sh
+(
+  set +x
+  MITATEDB_PROVISION_DSN="$(gcloud secrets versions access latest \
+    --secret=<provision-dsn-secret> --project=<project> --quiet 2>/dev/null)" || exit 1
+  export MITATEDB_PROVISION_DSN
+  PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops apply-platform-migration \
+    <filename> --lock-timeout <the §10.7 value> [--api-role ... --controlplane-role ...]
+)
+```
+
+**Apply the platform migrations as one numbered set, never one file out of
+order.** The set is `0005_application_audit.sql`,
+`0007_platform_declarations.sql`, `0011_process_ceilings.sql`,
+`0012_role_connection_limits.sql`, `0013_role_statement_timeouts.sql`, in
+that order, every time. Two reasons:
+
+- `0012` and `0013` both `CREATE OR REPLACE` the same
+  `begin_provision_application` function. Applying `0012` alone after
+  `0013` drops `0013`'s `statement_timeout` lines from the function, so
+  every FUTURE application's roles are provisioned without the bound
+  (roles that already exist keep the setting). The only compensation for
+  such an out-of-order application is the next `inventory` run reporting
+  the new application's item (6) as `unknown` again, until `0013` is
+  applied once more.
+- `0013` names the `mitatedbsvc_auditreader` role that `0005` creates.
+  Applying `0013` on a database where `0005` has not run fails with an
+  undefined-role error.
+
+**Prerequisite for the `ALTER ROLE` statements in `0007`, `0012` and
+`0013`, and what to do when it is not met.** Three files in the set issue
+`ALTER ROLE`, and the prerequisite is the same rule for all of them:
+PostgreSQL 16 lets a role run `ALTER ROLE` against another role only if it
+holds CREATEROLE together with ADMIN OPTION on that target role, and
+CREATEROLE carries that option automatically only for a role it created
+itself. **So the role that applies the set must hold ADMIN OPTION on every
+role the set alters:**
+
+| Statements | Roles altered | Which step creates those roles |
+|---|---|---|
+| `0007`'s four `ALTER ROLE ... SET` and `0012`'s two `ALTER ROLE ... CONNECTION LIMIT` | the api role and the controlplane role (`mitatedbsvc_api`, `mitatedbsvc_controlplane`) | `0002` (§3.2) |
+| `0013`'s `ALTER ROLE ... SET statement_timeout` | `mitatedbsvc_auditreader` | `0005` (§3.2b) |
+| `0012`'s and `0013`'s own `DO` blocks | every application's runtime and developer role | `begin_provision_application` (§3.4) |
+
+**The prerequisite holds when `0002`, `0005` and provisioning were all run
+as the role that now applies the set** (normally `mitatedbsvc_provision`,
+per §3.1/§3.2/§3.2b/§3.4). It does not hold on a cluster where one of them
+was run as the Cloud SQL instance's own administrative role instead.
+
+When it does not hold, the file neither works around it nor skips the
+role: the statement fails with `permission denied to alter role`, naming
+the role in its DETAIL line, and `apply-platform-migration` exits non-zero
+with the psql output redacted. `0007` and `0013` are each a single
+transaction, so nothing at all changes; in `0012` a failure in sections
+1-2 rolls those sections back and section 3 never runs.
+
+To fix it, grant the missing option explicitly for **each role the failure
+named** -- run this as a role that already holds ADMIN OPTION on that
+role, or as the cluster's administrative role, and then apply the numbered
+set again from the file that failed:
+
+```sql
+GRANT <the role> TO <provision role> WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+```
+
+`INHERIT FALSE` and `SET FALSE` keep the grant to the ADMIN option alone:
+the applying role gains neither the target role's privileges by
+inheritance nor the ability to `SET ROLE` to it. This leaves the same
+state a role gets automatically when it created the target role itself.
+
+Measured on a throwaway PostgreSQL 16 cluster whose auditreader was created
+by the administrative role rather than the applying role. **The
+measurement is about `mitatedbsvc_auditreader` and `0013`**; for the api,
+controlplane and application roles the same behaviour is inferred from the
+same PostgreSQL 16 rule and has not been measured:
+
+- before the grant, `apply-platform-migration 0013_role_statement_timeouts.sql`
+  exits 2 on `permission denied to alter role`, and neither an application
+  role's setting nor the `begin_provision_application` body changes;
+- after the grant, the same command exits 0 and the auditreader and the
+  application roles carry the setting;
+- the grant trips no existing check: `assert_role_has_no_memberships`
+  (called by `0005` and by `begin_provision_application`) tests whether the
+  role it is given is itself a member of another role, not whether another
+  role is a member of it, so re-applying `0005`/`0012`/`0013` and
+  provisioning a new application all succeed; `ops inventory` discovers its
+  target roles from table grants and never reads role membership, so the
+  grant alone changes no item's judgment (item (6) turns `confirmed` only
+  once `0013` has actually applied);
+- the applying role's `SET ROLE mitatedbsvc_auditreader` is refused;
+- the resulting `pg_auth_members` row (admin option set, inherit and set
+  options unset) is identical to the one a cluster has when the applying
+  role created the auditreader itself;
+- `REVOKE mitatedbsvc_auditreader FROM <provision role>` removes the row
+  again, after which `0013` fails as before.
+
+#### 10.10.1 Stage 2 -- platform remediation
+
+**What gates this stage is not Gate-0.** The first read of a deployment
+that has not been remediated yet reports items as `unknown`, and that is
+the state this stage exists to clear. What gates it is the three things
+§10.10's preconditions name: the isolated proof, the independent audit and
+the requester's approval. **This stage changes production state** (DDL,
+declarations, role settings, per-application upgrades, one env-only
+revision, on a service whose traffic is pinned the traffic move onto that
+revision in step 10, and, where a tag-only revision keeps a Data revision
+out of §10.4.3's agreement, the removal of that tag), so nothing here runs
+against production until all three hold.
+
+Run the steps in order and stop at the first stop condition. **No
+candidate is deployed anywhere in this stage** -- that is stage 4. The only
+traffic PERCENTAGES this stage moves are step 10's own move onto the
+env-only revision, which runs the same digest the revision it replaces
+runs. Taking a tag off a revision (§10.10.1's table, item (8)) moves no
+percentage, but it is the same traffic projection and carries the same
+three conditions.
+
+**Findings from the first read that this stage resolves.** Look each
+finding up here before starting:
+
+| Item | How the first read reports it | The step that resolves it |
+|---|---|---|
+| (2) `declarations` | confirmed + `remediation-required`: the `platform_declarations` table itself is absent, so no declaration can be read at all (the state of a deployment where `0007` has never run) | step 4 (`0007` creates the table), then step 5, step 6 and step 9 for the rows themselves |
+| (2) `declarations` | confirmed + `remediation-required`: a required declaration row is absent | step 5 (`0011` widens the `key` CHECK so the `process_ceilings` row may exist), step 6 (`declare-process-ceilings`), step 9 (`declare-surfaces`) |
+| (2) `declarations` | blocked, reason `declaration-invalid`: a row exists but its value fails validation | re-declare that row: step 6 for `process_ceilings`, step 9 for `surfaces`, `declare-coalescing-window` for `audit_coalescing_window_ms` (each replaces the whole row) |
+| (3) `migrations` | confirmed + `remediation-required`: an application has per-application upgrades pending | step 8 (`upgrade-applications`) |
+| (6) `ddl_lock` | `unknown`: a target role carries no role-level `statement_timeout` | step 4 (`0007`, for the api and controlplane roles) and step 7 (`0013`, for the auditreader and the application roles) |
+| (6) `ddl_lock` | `unknown`: a target role's `CONNECTION LIMIT` is `-1`, so no timeout value is read at all | step 7 (`0012` sets a finite limit), for a role `0012` itself names -- item (6) reads every target role it finds by grant, so a `-1` on `mitatedbsvc_auditreader` is not resolved by this table |
+| (6) `ddl_lock` | blocked, reason `statement-timeout-unbounded`: a declared value is 0, negative, or unparseable | step 4 and step 7 -- both files set `5000ms` unconditionally. If the unbounded value was one this deployment had chosen on purpose (step 2's record), choose a POSITIVE replacement and pass it to `set-platform-timeouts` in step 4 instead |
+| (7) legacy base-URL env | confirmed + `remediation-required`: a legacy name is on the current revision or the current template | step 10 (the env-only change removes both names from the template) |
+| (7) legacy base-URL env | blocked: the deploy that will create the candidate carries the legacy names forward without removing them | step 10, plus step 13's own deploy, which must carry the removal flag §10.4.2 step 2 names |
+| (8) `connection_headroom` | `unknown`: `--concurrency` was omitted because `MITATEDB_MAX_CONCURRENCY` is not carried by every Data revision that can take traffic (§10.4.3), or because those revisions do not all carry the same value | step 10 in full -- the env-only change declares the value, and on a service whose traffic is pinned to a revision it also moves the traffic onto the revision that carries it; step 13's own deploy carries the same value to the candidate. **A revision reachable only by a tag keeps its own env**, which a template change does not reach, so if one of those is missing the value this row does not resolve the finding: report and stop. The way out is to take the tag off that revision (`gcloud run services update-traffic <service> --remove-tags=<tag> --project=<project> --region=<region> --quiet`), which is itself a traffic-projection change and therefore carries the same three conditions as step 10's own move (the isolated proof, the independent audit and the requester's approval) -- otherwise it is a separate decision |
+| (8) `connection_headroom` | `unknown`: `--reserved-connections` was omitted because the reserve was not established | step 11 |
+| (8) `connection_headroom` | `unknown`: a role's `CONNECTION LIMIT` is `-1` | step 7 (`0012`), for a role `0012` itself names -- a `-1` on any other role is not resolved here |
+| (8) `connection_headroom` | `unknown` + `remediation-required`: the `process_ceilings` declaration is absent | step 5 and step 6 |
+| (8) `connection_headroom` | blocked: the `process_ceilings` row exists but its value is malformed (a shape or value the declaration read rejects, rather than an absent row) | step 6 (`declare-process-ceilings` replaces the whole row with a valid pair) |
+| (8) `connection_headroom` | blocked: the declared `process_ceilings` value does not equal the candidate's own ceiling | step 6 (re-declare the ceilings the candidate will be deployed with) |
+| (8) `connection_headroom` | blocked: a role's `CONNECTION LIMIT` is below its own computed demand | **not a finding this stage resolves.** `0012` sets the limits of the roles it names to its own fixed value (68 for the api role, 20 for the controlplane role, 36 for each application's runtime and developer role), raising one below that value and lowering one above it, and it changes no other role's limit: `mitatedbsvc_auditreader`'s own limit stays as `0005` created it, and the provision role's is untouched as well. So a limit below its own demand is a platform-remediation item of its own: report `blocked—platform remediation required` and stop, because changing a `CONNECTION LIMIT` value takes a new platform migration. This is the condition §10.10's preconditions check on paper before anything is changed; step 7 raises the limits `0012` names, so what stops here is a limit still below its own demand once `0012`'s own value is substituted -- the auditreader's, or one `0012` lowers (this row itself names no step to re-run) |
+
+**A finding is resolved by this stage only when its row names a step.**
+The row for a role's `CONNECTION LIMIT` below its own demand names none,
+and neither does anything absent from the table. In particular this stage
+does not resolve: item (1) `mismatch` or `unknown`; item (3) blocked with
+`ledger-unreadable`, or `unknown` from a per-application read that failed;
+item (4) `unknown`; item (5) not confirmed (that is §10.8's acceptance and
+§10.6's own source-ref condition, not a state change); item (8) blocked
+because a role's `CONNECTION LIMIT` is below its own demand, or because
+total demand plus the reserve exceeds `max_connections`; item (9) not
+confirmed; item (10) `unknown` or blocked. Report and stop.
+
+**Steps** (run the whole sequence against the isolated pair first, then
+against production):
+
+1. **Fix the rollback target**: immediately before touching anything, read
+   §10.4's traffic projection and §10.4.4 again and fix the rollback
+   revisions (and their allocation) and their digests in the evidence. If
+   they differ from the first read, redo the read. Then, for each §10.6
+   row the rollback target does not contain, read the file named in that
+   row's last column at the target's own attested source ref and confirm
+   the condition stated there. **If any condition cannot be confirmed at
+   that ref, item (5) is `unknown` and this stage does not start.**
+2. **Record what the numbered set will overwrite.** Re-applying the set is
+   idempotent but not value-neutral (§10.6/§10.7's `0007` and `0012`
+   rows), so the current values are recorded first:
+
+   ```sh
+   ( ...§10.3's subshell... PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops show-declarations ) \
+     > <evidence-dir>/declarations-before.json
+   ```
+
+   `show-declarations` prints every `platform_declarations` row (key,
+   value, `updated_at`) and, for each role named in the
+   `audit_writer_roles` row, that role's own `pg_db_role_setting` entries
+   -- which is where a value `set-platform-timeouts` wrote shows up. From
+   that output record:
+
+   - the `audit_writer_roles` value: the two role names, in order. Step 4
+     passes exactly these two, so `0007`'s `DO UPDATE` rewrites the row
+     with what is already in it;
+   - both writer roles' current `statement_timeout` and
+     `idle_in_transaction_session_timeout`. If either differs from
+     `5000ms`, step 4 restores it.
+
+   `CONNECTION LIMIT` is not in that output, and no other `ops`
+   subcommand prints it either (§10.6's `0012` row), so read it from the
+   catalog. **No part of this reads the password out of the DSN.** The
+   provision DSN names a `passfile=` (§10.1's own converter puts it there,
+   and §3's own note prefers a passfile to a password in the environment),
+   so the only secret-bearing variable exported here is `PGPASSFILE`.
+   **That passfile is mode `0600`**: libpq silently ignores a more
+   permissive one, and psql then tries to connect with no password at all
+   (in a shell with a terminal it stops at a prompt instead). The DSN
+   itself never enters this subshell and therefore cannot be printed out
+   of it. If no passfile exists yet, run §10.1's converter -- printing the
+   DSN to lift the password out of it is not an option (§10.1, §10.3):
+
+   ```sh
+   (
+     set +x
+     export PGPASSFILE=<the passfile the provision DSN names>
+     export PGHOST=<socket-dir>/<instance-connection-name> PGPORT=5432
+     export PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision
+     psql -At -c "SELECT rolname, rolconnlimit FROM pg_roles \
+       WHERE rolname IN ('<api role>', '<controlplane role>', '<auditreader role>') \
+          OR rolname IN (SELECT runtime_role FROM mitatedb_registry.applications WHERE runtime_role IS NOT NULL) \
+          OR rolname IN (SELECT developer_role FROM mitatedb_registry.applications WHERE developer_role IS NOT NULL) \
+       ORDER BY rolname"
+   ) > <evidence-dir>/role-connection-limits-before.txt
+   ```
+
+   Keep this subshell separate from every subshell that runs an `ops`
+   subcommand: the variables exported here are exactly what an `ops`
+   psycopg connection would silently pick up for a parameter its own DSN
+   omits (§10.1). The psql-starting subcommands rebuild their own
+   environment from the DSN and refuse to start only for a
+   connection-setting variable the DSN does NOT override -- the five
+   exported here are all named by the provision DSN, so no refusal fires;
+   the reason to keep this subshell apart is the psycopg path (§10.1). This
+   is a read-only catalog query, and it is the same read
+   §10.10's own `CONNECTION LIMIT` precondition uses.
+
+   None of these recorded values is a secret, but they go where every
+   other piece of evidence goes (§10.1): a directory outside every git
+   work tree, never into this repository and never into a report.
+3. **`0005`**: `apply-platform-migration 0005_application_audit.sql
+   --lock-timeout <the §10.7 value for 0005>`. It takes no psql variables.
+   It is already applied on a deployment that followed §3.2b; re-applying
+   it is a no-op, and it is in the set so the numbered order is kept.
+4. **`0007`, then restore what it overwrote**:
+   `apply-platform-migration 0007_platform_declarations.sql
+   --lock-timeout <the §10.7 value for 0007> --api-role <api role>
+   --controlplane-role <controlplane role>`, passing exactly the two role
+   names step 2 recorded. **Both role arguments are required for this
+   file** (§3.2b) -- the subcommand refuses the run, before starting psql,
+   if one is missing, and refuses an argument the file does not reference.
+   Straight after the apply, and before any restart:
+
+   - re-run `show-declarations` and compare it with step 2's record;
+   - if the two writer roles' timeouts are now `5000ms` where step 2
+     recorded something else, restore them:
+
+     ```sh
+     ( ...§10.3's subshell... PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops \
+         set-platform-timeouts --statement-ms <recorded milliseconds> --idle-ms <recorded milliseconds> )
+     ```
+
+     **Both arguments take a bare integer number of milliseconds.** The
+     recorded value carries a unit (a role setting reads back as `5000ms`),
+     so pass the number without it -- a value with the unit still attached
+     is rejected as a usage error and nothing is written. That subcommand
+     writes one pair of values for both writer roles together, takes its
+     target roles from the `audit_writer_roles` row itself, and refuses 0
+     or a negative value;
+   - if the `audit_writer_roles` row itself now names a different pair
+     than step 2 recorded, the wrong names were passed: apply `0007` again
+     with the recorded pair (every apply replaces that row).
+
+   A role setting takes effect at each new login, so the restored values
+   reach the running processes at the restart in step 14.
+5. **`0011`**: `apply-platform-migration 0011_process_ceilings.sql
+   --lock-timeout <the §10.7 value for 0011>`, after `0007` (`0011` widens
+   the CHECK constraint `0007` created). **Do not run it at the same time
+   as a restart** (§10.7's `0011` row: it takes ACCESS EXCLUSIVE on
+   `platform_declarations`, and a process starting inside that window
+   waits on its own declaration read).
+6. **`declare-process-ceilings`**: `--data`/`--control` take the same
+   values as the `--max-instances` of the candidate deployed in step 13
+   (§6.2's Invariant 1). Run it after `0011`.
+
+   ```sh
+   ( ...§10.3's subshell... PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops declare-process-ceilings --data <n> --control <n> )
+   ```
+
+   Both arguments are required positive integers. On a deployment that
+   runs no Control process, `--control` still takes a positive integer:
+   declare the ceiling Control would be deployed with, since a declaration
+   is a permitted maximum rather than a statement about what is deployed
+   today, and item (8) does not compare Control's declared ceiling at all
+   when `--control-not-deployed` is passed.
+
+   **This step opens a window, stated here and accepted rather than
+   reordered**: a Data/Control process reads `process_ceilings` at startup
+   and uses the declared value as its own process ceiling (fact:
+   `main.build_app` and `control_composition.build_control_service` are
+   the only callers of `read_platform_declarations`), so between this step
+   and the moment traffic is on the candidate (step 16), a previous
+   revision that cold-starts reads the value declared for the candidate.
+   The order is forced from both sides: `0011` must widen the CHECK before
+   this row can exist at all, and the candidate cannot start before the
+   row exists (a missing `process_ceilings` row fails startup closed).
+
+   **That window is accepted only when the value declared here is at or
+   above the ceiling the revisions now serving were deployed with.** A
+   process reads the declared Data ceiling and publishes `concurrency` and
+   `requests_per_minute` as `enforced` while that ceiling is 1, and as
+   `deployment_required` above it (fact: `capabilities_document.build_
+   capabilities_document`). Declaring a LOWER ceiling therefore lets a
+   previous revision that cold-starts inside the window publish
+   `enforced` while more than one process may serve -- a declaration the
+   deployment does not keep, which is exactly what a client is entitled to
+   rely on. **This step does not cover the downward direction**: it needs a
+   separate decision about the order or the value, so stop and ask for one.
+7. **`0012`, then `0013`**: `apply-platform-migration
+   0012_role_connection_limits.sql --lock-timeout <the §10.7 value
+   for 0012>`, then
+   `apply-platform-migration 0013_role_statement_timeouts.sql --lock-timeout <the §10.7 value for 0013>`. `0013` must come after
+   `0012` and after `0005`; see the numbered-set note and the ADMIN OPTION
+   prerequisite above. **Do not run either at the same time as
+   provisioning** (§10.7's `0012` section 3 and `0013` rows: both replace
+   `begin_provision_application`). Then re-run §10.5's `inventory` and
+   check `ddl_lock` (item (6)) and `connection_headroom` (item (8),
+   headroom against `SHOW max_connections`); the full read is step 12.
+8. **Per-application upgrade** (`--lock-timeout` is §10.7's
+   per-application-upgrade value):
+
+   ```sh
+   ( ...§10.3's subshell... PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops upgrade-status )
+   ( ...§10.3's subshell... PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops upgrade-applications --dry-run --lock-timeout <value> )
+   ( ...§10.3's subshell... PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops upgrade-applications --lock-timeout <value> )
+   ```
+
+   Establish which applications are targeted, what is pending, and which
+   are registered-only with `upgrade-status` and `--dry-run` before
+   applying. On exit status `3`, finish §3.4b's failure procedure (run the
+   printed `REVOKE`) and re-run. `upgrade-status` must finish `0` at the
+   end. An application in the `ledger-unreadable` state (§10.5) has
+   already stopped the procedure before this step.
+9. **Declarations**: `declare-surfaces` REPLACES the shared row, so settle
+   the values (the Data/Control base URLs; either `--control-base-url` or
+   `--no-control`) before running it (§6.1; agreement with each service's
+   own `MITATEDB_CONTROL_PLANE_STATUS` is checked at startup). Run it
+   before step 10, so the surfaces are declared before the legacy env
+   names go away.
+10. **The env-only change**: declare `MITATEDB_MAX_CONCURRENCY` and remove
+    the legacy base-URL env names from the service's template, with no new
+    image:
+
+    ```sh
+    gcloud run services update <service> --project=<project> --region=<region> --quiet \
+      --update-env-vars=MITATEDB_MAX_CONCURRENCY=<n> \
+      --remove-env-vars=MITATEDB_DATA_BASE_URL,MITATEDB_CONTROL_BASE_URL
+    ```
+
+    This creates a new revision on the SAME image digest -- it is not the
+    candidate, which carries a new digest and is deployed in step 13.
+    **What the new revision has to end up with is the digest the
+    traffic-carrying revision runs and that revision's own env, plus
+    `MITATEDB_MAX_CONCURRENCY` and minus the two legacy names -- nothing
+    else added and nothing else dropped.** The two flags above edit the
+    template in place, which is exactly that. A deploy form instead of
+    `services update` does not: `--set-env-vars` (the flag §6.1/§6.2's own
+    deploy commands use) replaces the env wholesale, so anything the
+    current revision carries and that command does not list is gone from
+    the new revision. If a deploy form is used here, list the complete set.
+
+    **Run this once per service that carries either legacy name** -- item
+    (7)'s own targets are the Data and the Control service -- but declare
+    `MITATEDB_MAX_CONCURRENCY` on Data, whose revisions are the ones
+    §10.4.3 reads that value from. If Control's traffic is pinned to a
+    revision as well, the traffic move below is made on that service too.
+
+    Then handle four consequences:
+
+    - `<n>` is the value item (8)'s `--concurrency` is read from in step 12,
+      so use one value across every Data revision §10.4.3's own
+      `--concurrency` rule reads, and the same value in step 13's own
+      deploy;
+    - the legacy names must not come back in step 13's own deploy
+      (§10.4.2 step 2 names the flag that keeps them out);
+    - the new revision becomes the service's current revision. If the
+      service's traffic is set to latest it also takes the traffic the
+      previous revision had; if traffic is pinned to a revision, it takes
+      none until traffic is moved. §10.4's traffic projection is what says
+      which of the two this service is. Either way, re-fix step 1's
+      rollback record only after the traffic move below, and keep the
+      record as it stood before this step as this step's own back-out
+      target -- the digest is unchanged, so item (9)'s attestation still
+      covers it;
+    - **on a service whose traffic is pinned to a revision, move the
+      traffic to this new revision here.** Until that happens the revision
+      carrying the traffic is still one without `MITATEDB_MAX_CONCURRENCY`,
+      so §10.4.3's rule leaves `--concurrency` omitted and item (8)
+      `unknown` through the second read, and this step has resolved
+      nothing. **This is a production traffic change, so it is covered by
+      the same three conditions §10.10's preconditions place on this whole
+      stage** (the isolated proof, the independent audit and the
+      requester's approval) -- it is not a step to take on Gate-0 ready.
+      Move it, then check health, and go back if health does not hold:
+
+      ```sh
+      gcloud run services update-traffic <service> --to-revisions=<env-only-revision>=100 \
+        --project=<project> --region=<region> --quiet
+      ```
+
+      Health: the service's traffic projection shows that revision at
+      100%; its Ready condition is `True`; its env no longer carries
+      either legacy name; and an authenticated capabilities read against
+      the stable service URL succeeds (§6.3's shape, no business
+      reads/writes and no operation-depth probe). Back out by moving the
+      traffic to the revision (and the allocation) step 1 recorded, with
+      the same command shape -- the digest is unchanged and no schema or
+      declaration is involved, so that is the whole way back for this step.
+11. **Establish the reserved-connection count.** Item (8) stays `unknown`
+    until `--reserved-connections` is passed, and the argument accepts `0`
+    -- so a deployment that establishes "nothing further is reserved"
+    passes `0` rather than omitting the argument. Read the server settings,
+    and record the number and its source (for the part the server does not
+    report, the Cloud SQL documentation page and the figure it states) in
+    the evidence:
+
+    ```sh
+    (
+      set +x
+      export PGPASSFILE=<the passfile the provision DSN names>
+      export PGHOST=<socket-dir>/<instance-connection-name> PGPORT=5432
+      export PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision
+      psql -At -c "SELECT name, setting FROM pg_settings WHERE name IN ('superuser_reserved_connections', 'reserved_connections', 'max_connections') ORDER BY name"
+    ) > <evidence-dir>/reserved-connections.txt
+    ```
+
+    The same read-only shape as step 2, with the same rules: `PGPASSFILE`
+    rather than the password field, and a subshell of its own, apart from
+    every subshell that runs an `ops` subcommand (§10.1).
+    `max_connections` comes back in the same read because §10.10's
+    `CONNECTION LIMIT` precondition needs it.
+
+#### 10.10.2 Stage 3 -- the second read
+
+12. **Read everything again.** Re-run §10.4 and §10.5 in full and judge
+    all 10 items by §10.9 again -- not only the items stage 2 touched. Use
+    the same evidence directory with fresh file names (`...-after`), and
+    report the result with `(second read)` in the header line.
+
+    - **Gate-0 is ready only when all 10 items come back confirmed AND
+      §10.8's acceptance records name the current versions.** Then, and
+      only then, stage 4 starts.
+    - **An item that is still not confirmed stops the procedure here.** It
+      is reported as `blocked—platform remediation required` with the
+      breakdown, exactly as in the first read. An `unknown` is never
+      downgraded to a warning and never carried into stage 4.
+    - **One exception, and only this one: a finding that appears here and
+      whose row in §10.10.1's table names a step may be cleared by running
+      that step again and reading again.** Item (8) reports one cause at a
+      time -- the first one in its own order of evaluation -- so a
+      deployment with two causes in that table needs more than one read,
+      and the second cause is expected to show up only once the first is
+      gone. That is not "repeating stage 2 in the hope of a different
+      answer": the step that runs again is the one the table names for the
+      finding in hand, and the read that follows judges all 10 items
+      again. A finding whose row names no step, or one the table does not
+      carry at all, stops the procedure here as above.
+    - `remediation-required` notes that stage 2 was supposed to clear
+      should be gone; one that is still there means the step that was
+      meant to clear it did not, so treat it as a finding, not as a note.
+
+#### 10.10.3 Stage 4 -- candidate, health, traffic
+
+Gate-0 ready (step 12) gates exactly this stage.
+
+13. **Deploy the candidate**: use §6.1/§6.2's deploy with `--no-traffic`
+    to create the candidate. It carries the digest the second read
+    attested, and it must not reintroduce the legacy env names
+    (`MITATEDB_DATA_BASE_URL`, `MITATEDB_CONTROL_BASE_URL`): if the deploy
+    carries env forward, pass the removal flag §10.4.2 step 2 names.
+    **The deploy's own env must include
+    `MITATEDB_MAX_CONCURRENCY=<the value step 10 declared>`.** §6.1/§6.2's
+    deploy sets the env with `--set-env-vars`, which replaces it wholesale,
+    so step 10's declaration is not inherited by a revision this command
+    creates: leave the name out and the candidate runs on the code's own
+    default instead of the value item (8) was judged with, which is the
+    role `CONNECTION LIMIT` demand `0012` exists to bound. Do not modify
+    the rollback target revisions. After deploying, do §10.4.2 step 3 and
+    §10.4.3 step 3, and read the candidate's own
+    `MITATEDB_MAX_CONCURRENCY` back as well: if it differs from the value
+    the second read used, item (8) was judged on a value this deployment
+    does not run, so redo the read -- the same rule §10.4.3 step 3 applies
+    to a ceiling that reads back differently.
+14. **Restart Data/Control**: declarations are read at startup, so the
+    candidate's own start IS the restart, and it is where step 4's
+    restored role settings reach the processes. When the change shortens a
+    writer timeout, bring Data up first; when it lengthens one, bring
+    Control up first (§3.2b).
+15. **Health (before moving traffic)**: the candidate's Ready condition is
+    `True`; the candidate's digest equals the digest attested in the
+    second read; the candidate's env names no longer carry the legacy
+    names. Over the provision DSN run `show-declarations`,
+    `verify-declarations` (with `--control` too on a deployment that runs
+    Control) and `upgrade-status`, and all must succeed. Some
+    `verify-declarations` checks judge from the operator's own shell
+    environment and local code, so use them for this post-check only,
+    never as grounds for a Gate-0 confirmed. Call the candidate's own tag
+    URL only when the deploy that created it assigned a tag (§6.1/§6.2's
+    own deploy commands assign none, and a `--no-traffic` revision without
+    a tag has no URL of its own to call) and the requesting side's own
+    design says its preconditions are met.
+16. **Traffic**: `gcloud run services update-traffic <service>
+    --to-revisions=<candidate-revision>=100 --project=<project>
+    --region=<region> --quiet`.
+17. **Health (after moving traffic)**: the service's traffic projection
+    shows the candidate at 100%; the Ready condition holds; an
+    authenticated read of capabilities against the stable service URL
+    succeeds (§6.3's shape). Do not mix in business reads/writes,
+    fixtures, or an operation-depth probe.
+
+**Rollback**:
+
+- Move traffic back to the target fixed in step 1: `gcloud run services
+  update-traffic <service> --to-revisions=<rollback-revision>=100
+  --project=<project> --region=<region> --quiet` (if the allocation was
+  split, restore the allocation that was fixed).
+- Schema and declarations are NOT reverted (§10.6's compatibility rows are
+  what make that safe).
+- **One part of that safety is unverified, and this is where it is felt.**
+  §10.6's `0007` row is compatible by inference with one part left open:
+  whether a pre-`0007` rollback target's other queries (registry reads and
+  the like) all finish inside the 5-second role-level `statement_timeout`
+  that migration sets on `mitatedbsvc_api`/`mitatedbsvc_controlplane` has
+  not been verified. A role setting applies at login, so a target that
+  cold-starts after the migration opens its sessions under that bound, and
+  a query above it is cancelled with `canceling statement due to statement
+  timeout`. Accepting §10.6 at its current version accepts that residual
+  risk; when the rollback target is a pre-`0007` revision, this is the
+  route the risk lands on, and there is no second way back (the schema and
+  the declarations stay as the stage left them).
+- **After traffic has moved, a failure means checking the requesting
+  side's own design first**: whether the requesting application must be
+  returned to its own previous Ready revision before this Data Service is
+  moved back.
+- These are never part of an automatic rollback: deleting a secret
+  version, revoking a credential, deleting a Cloud SQL resource, or
+  rewriting the env of a rollback target revision.
+
+**Closing this section** (after a completed run, and equally after one
+that stopped at any step): remove the passfile §10.1 derived and the
+directory holding it and the converter, and unset
+`MITATEDB_PROVISION_PASSFILE`. Nothing else outside Secret Manager carries
+the provision password, so this is what puts it back to one place. The
+evidence directory stays where §10.1 put it.

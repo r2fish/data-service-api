@@ -34,6 +34,7 @@
 - **v1.3 (2026-09-17)。** WP-E の統合時の訂正註 E-1〜E-5、監督裁定 E-S1〜E-S11、監査照合の逐語記録 5 件を §6A.11 に、依頼者の回答 (R-48・R-47・条件 (d)) を §6A.12 に追記した。§6A の本文と §1〜§7 の既存の本文は書き換えていない。R-48 は本書の WP-F (WP-E の次の 1 本) で解消する (§6A.12。枠決めは別途 §6B)。
 - **v1.4 (2026-09-17)。** 台帳 R-48 を解消する WP-F (依頼者裁定 2026-09-17 の「migration 0013 の形」と監督裁定 F-R1〜F-R33) の manifest を §6B に、WP-D の訂正註 WPD-4 を §6.1 に追記し、§6A.11 の E1-6 の監査照合の記録を統合コミットの実測で埋めた。§7 の番号を保つため WP-F の節は §6B とした。§6A の本文と §1〜§7 の既存の本文は書き換えていない。
 - **v1.5 (2026-09-18)。** WP-F の統合時の訂正註 F-1〜F-5、監督裁定 F-S1〜F-S10・F-S11、コードレビュー (独立 1 回) の指摘と差し戻し 1 の裁定 R1-1〜R1-10、監査照合の逐語記録 6 件、完了ゲートを §6B.11 に、WP-D の訂正註 WPD-5 (0013 の適用の前提と依頼者裁定による直し方) を §6.1 に追記した。§6B の本文と §1〜§7 の既存の本文は書き換えていない。
+- **v1.6 (2026-09-18)。** WP-D の実施記録と監督裁定 (経過、依頼者裁定 (Gate-0 の入口、案 A) の逐語、差し戻し 1〜4 とレビュー 5 の指摘への裁定の一覧、受理の記録 (W1-D1 版 2・W1-D2 版 2・W1-D3 版 5)、完了条件 19 件の監査照合の表、触るファイルの訂正註、統合コミットの欄) を §6.2 に追記した。§6・§6.1 と §1〜§7 の既存の本文は書き換えていない。
 - 設計: `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` v0.5 (以下「設計」。設計レビュー 2 回反映済み、依頼者裁定 Q-1〜Q-7 はすべて推奨を採用、設計 §6 冒頭の表)。本書は設計の決定 D-1〜D-11、裁定 Z-1〜Z-36、依頼者裁定 Q-1〜Q-7 と、本書 §2.8 の監督裁定 W-1〜W-8 を WP に割り付ける。裁定文・却下案・背景は写さず設計の節番号で指す (`RM` §9 の 9)。
 - 台帳: `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-45 (v1.52)。
 - 本書で条項番号だけを書くとき (「§1.5 の 40」等) は `docs/work-orders/OPERATING_CONDITIONS.md` の条項を指す。
@@ -522,6 +523,118 @@ python3 tools/public_value_scan.py MitateDB-api/docs/cloud-run-cloud-sql.md secu
 > 依頼者:「1 で進めてください」
 
 - WP-D は使い捨てクラスタで次の 2 点を実測する: (a) 上の GRANT の後に 0013 を適用できること、(b) provision role が membership を持つ状態を、0005 の `assert_role_has_no_memberships` と `inventory` の role の判定が異常と見ないこと。
+
+### 6.2 WP-D の実施記録と監督裁定 (2026-09-18、統合時に監督が追記。§6・§6.1 の本文は書き換えない)
+
+**(a) 経過**
+
+- 基点は WP-F 統合後の main。訂正註 WPD-2 の古い worktree (`r45-wpd`) に残っていた日本語の未コミットの起草は diff として材料にするだけにし、新しい worktree で英語で書き直した (訂正註 WPD-1)。
+- 独立設計レビューは計 3 起動・6 回 (1 回目が別起動、2 回目が別起動、3〜6 回目は 3 回目の起動の継続)。監督の差し戻しは 4 回。
+- §10.10 の手順の版は 1 → 5。§10.6・§10.7 の表の版は 1 → 2 で、版 2 の本文は以後 1 字も変えていない。§10.8 の受理記録の版の表記 (2 / 2 / 5) と `security/CONTROL_MAPPING.md` の Version 行・Evidence・Status は互いに一致する。
+
+**(b) 依頼者裁定 (2026-09-18、Gate-0 の入口。逐語)**
+
+> 監督の提示 (要旨): 設計 §1.2 は「unknown は先へ進まない。10 項目すべてが confirmed のときだけ ready」と定める。0013 未適用の本番では (6) が unknown になり (WP-F の枠決めの裁定「設定が無いときは従来どおり unknown」)、runbook の初稿は「unknown が 1 つでもあれば upgrade の手順を始めない」と書くので、0013 を適用できず堂々巡りになる。(8) にも同じ形が 3 つある (`MITATEDB_MAX_CONCURRENCY` が未設定、予約接続数が未確定、`process_ceilings` の宣言の更新が手順の中にある)。案 A (推奨): runbook を 2 段にする — 最初の読み取りで unknown / blocked を `blocked—platform remediation required` と報告 → 直しの段 (platform migration の一式適用、env だけの変更、予約接続数の確定、`process_ceilings` の再宣言。ここを縛るのは Gate-0 ではなく、isolated での証明・独立監査・依頼者の承認) → 再読み取りで 10 項目すべてが confirmed になってから candidate の deploy と traffic の切り替えに進む。コードは変えない。設計 §1.2 の「先へ進まない」の「先」は candidate の deploy と traffic を指す、と設計メモに訂正を 1 つ足す。案 B: `inventory` を変えて設定なしを confirmed + remediation-required にする ((6) を緩めることになり、先の裁定を覆す。コード変更の WP が 1 本増える)。
+>
+> 依頼者:「案 A で進めてください」
+
+- 設計メモ側の訂正は `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §1.2 の【訂正 2026-09-18】に置いた (行は消していない)。コードは変えていない。
+- WPD-5 の依頼者裁定 (2026-09-17) は §6.1 に逐語で記録済みで、本 WP はそれに従って直し方を 1 つだけ書き、使い捨てクラスタで実測した (実測の要点は設計メモ §12.6)。
+
+**(c) 監督裁定の一覧 (差し戻し 1〜4 と、レビュー 5 の指摘への裁定。1 件 1 行)**
+
+差し戻し 1 (出所: 設計レビュー 1 回目)
+
+- **D1-1 (高。Gate-0 の堂々巡り)** — 上の依頼者裁定 (案 A) のとおり §10 を 4 段 (最初の読み取り → 直しの段 → 再読み取り → candidate) に組み替える。**現行**: 設計 §1.2 は unknown で先へ進まないと定め、初稿は「unknown が 1 つでもあれば upgrade の手順を始めない」と書いていた。**シナリオ**: 0013 未適用の環境では (6) が unknown になり、0013 を適用する手順に入れないまま止まる ((8) にも同形が 3 つ)。**直し方**: ready が gate するのは candidate の deploy と traffic の切り替えだけとし、直しの段を縛るのは isolated での証明・独立監査・依頼者の承認とする。「直しの段で解消できる原因」を項目・原因・対応する手順の表で列挙し、表に無い原因の unknown / blocked は止まる。再読み取りで残った unknown を warning として続行しないことは保つ。手順の版を 2 に上げる。
+- **D1-2 (中)** 0007 の再適用は値に中立でない: 0007 は api / controlplane role の timeout を無条件に既定値へ戻し、`audit_writer_roles` の宣言を `ON CONFLICT DO UPDATE` で置き換える。一式適用は毎回これを起こすので、適用の前に現在の宣言と `set-platform-timeouts` で変えた値を控え、0007 の直後・restart の前に再宣言・再設定する。控えは証跡と同じ置き場 (git リポジトリの外) に置く。
+- **D1-3 (中)** ADMIN OPTION の前提は 0013 に固有でない: 一式適用が `ALTER ROLE` を掛ける全 role (0007・0012 の api / controlplane role、0012・0013 の application role、0013 の auditreader) について、適用する role が ADMIN OPTION を持つことを前提として一般形で書く。直し方は `GRANT <the role> TO <provision role> WITH ADMIN TRUE, INHERIT FALSE, SET FALSE` の 1 形だけ。**実測は auditreader についてのものであり、api / controlplane / application role については同じ PostgreSQL 16 の規則からの推論で未実測である旨を明記する。**
+- **D1-4 (中)** 段の組み替えで手順番号が変わるので、§10 の中の手順の相互参照を全件付け直す。
+- **D1-5 (中)** 直しの段と candidate の段を本番に対して実行してよいのは、isolated の組で同じ手順を証明し、独立監査を受け、依頼者の承認を得た後だけであると §10 の冒頭と直しの段の冒頭に書く。
+- **D1-6 (中)** 報告語を設計 §1.2 の逐語 (em dash、U+2014) に全件そろえ、受け手が literal で照合する語である旨を 1 文添える。
+- **D1-7 (中)** 表の根拠にした source ref の範囲 (rollback target がその範囲の外なら (5) を confirmed にしない)、(8) の出力は 3 キーだけなので「現行値を読め」を実際に値を読める経路に直す、(8) に渡す process 数の説明を算法 (各 service の `maxScale` の合計 + candidate の上限) に合わせる、`git fetch origin <ref>` の後は `FETCH_HEAD` を読む、§3 の新しい前文に既存の bootstrap に残る `-v …password=` / `-c "ALTER ROLE … PASSWORD"` が初回限りの例外である旨を 1 文で書く。
+- **D1-8 (低・佐)** レビュー全文の案のとおり直す。annotation の射影に operator の email が入りうるので、射影から annotation を外すか必要な annotation だけを名指しで射影する。provision role 自身に `GRANT pg_signal_backend` を実行させる既存の形は触らない (台帳へ起票した。下の (i)〜(iii) の (iii))。
+- **`security/CONTROL_MAPPING.md`** SI-09 の MitateDB-api ブロックの 3 bullet を 2 段の流れと版に合わせ、Version 行の要約も合わせる。SI-08 は 1 字も変えない。
+
+差し戻し 2 (出所: 設計レビュー 2 回目。手順の版 3。§10.6・§10.7 の表は据え置き)
+
+- **D2-1 (高。(8) の検算を状態変更の前に)** — **現行**: (8) の需要は process 数の合計に比例する (controlplane = 合計 × 16、auditreader = 合計 × 4、api = 合計 × 2 × concurrency、application role = 合計 × concurrency)。0012 の `CONNECTION LIMIT` は 68 / 20 / 36、auditreader は 0005 の 5 のままで、どれも 1 plane 1 process・concurrency 32 の前提の値である。**シナリオ**: candidate と traffic を持つ revision が並ぶと合計が 2 以上になり (8) は blocked になるが、最初の読み取りでは (8) が別の原因で unknown になりうるので、本番を変え終えた再読み取りで初めて分かる。**直し方**: §10.10 の Preconditions (直しの段より前) に、状態を 1 つも変える前に需要の算術を、再読み取りで渡す予定の入力と catalog から読んだ各 role の `CONNECTION LIMIT`・`max_connections` とで検算する手順を置く。1 つでも収まらなければ直しの段を始めず `blocked—platform remediation required` として報告して止まる (この runbook に直し方は無い。上限の変更は新しい platform migration を要する)。「直しの段で解消できる原因」の表の (8) の行に、上限が需要に足りないことはこの表で解消できない原因である旨と、0012 が auditreader と provision role の上限を変えない旨を書く。**runbook に「現在の値では 2 process が収まらない」という評価は書かない** (値と入力は環境ごとに読むもの)。この件は台帳に起票した (下の (i))。
+- **D2-2 (高。concurrency の env と traffic)** — **現行**: `--set-env-vars` は env を全置換する。**シナリオ**: env だけを変える revision が別の digest や欠けた env で作られる、traffic が revision に pin された service では新しい revision に traffic が向かない、candidate の deploy に concurrency の env を含め忘れると (8) を判定した値と違う値で走る。**直し方**: env だけの変更は traffic を持つ revision と同じ image digest・同じ env に `MITATEDB_MAX_CONCURRENCY` を足した (および legacy env を除いた) 形で作る。traffic が pin されている service では、新しい revision に traffic を明示的に移す手順 (health の確認と前の revision へ戻す rollback を含む) を同じ手順の中に書き、これは本番の traffic の変更なので直しの段の開始条件の対象に含まれると明記する。candidate の deploy の env に同じ concurrency の値を必ず含める。§10.4.3 の concurrency の規則が読む対象は traffic を受けうる revision (traffic を持つもの、tag で到達できるもの、candidate) とし、不一致・未設定は unknown。
+- **D2-3 (中)** 再読み取りの所見が表にある行なら、その行の手順だけをやり直して再読み取りしてよい ((8) は 1 回に 1 つの原因しか返さない) / `export PGPASSWORD=<DSN の password 欄>` の形をやめる (DSN を表示させることになる) / SI-09 の「and restores them」を事実に合わせる (戻すのは timeout と `audit_writer_roles` で、`CONNECTION LIMIT` は控えるだけ) / libpq 環境変数の拒否の説明を現物に合わせて一般化する (拒否が掛かるのは psql を起動する経路だけである)。
+- **D2-4 (低)** `set-platform-timeouts` に渡すのはミリ秒の整数だけ / 表に「(8) の宣言が壊れている」「(2) の宣言の表自体が無い」の行を対応する手順とともに足す / 宣言を先に変えてから deploy する順序が安全なのは宣言する上限を上げる向きだけである / Rollback の節に §10.6 の未検証の範囲を再掲する。
+
+差し戻し 3 (出所: 設計レビュー 3 回目。手順の版 4)
+
+- **D3-1 (高。検算の上限は再読み取り時点の値)** — **現行**: 0012 は自分が名指す role の上限を自分の値にそろえ (低い値を上げ、高い値を下げる)、0012 が名指さない role (auditreader = 0005 の値、provision) は触らない。**シナリオ**: 検算が catalog の現在値だけを見ると、0012 未適用の deployment では解消できる不足で直しの段が始まれず、逆に段 2 で変わる値を見落とす。**直し方**: 検算が比べる上限は「再読み取りの時点で各 role が持つ上限」とし、0012 が名指す role は 0012 自身の値、それ以外は手順 2 の catalog の値を代入する。`-1` は、0012 が名指す role なら 0012 の値を代入し、名指さない role なら止まる。表の該当セルを 0012 が実際にすることに合わせ、`-1` の行との矛盾を無くす。**0012 の値そのものや数え方の当否は runbook に書かない。**
+- **D3-2 (中)** libpq 環境変数の拒否の説明を現物に合わせる: 拒否されるのは DSN が上書きしない変数だけで、ここで export する変数には掛からない。別のサブシェルで実行する理由は psycopg で直結する経路が環境変数を黙って読むことである。
+- **D3-3 (中)** tag だけで到達できる revision の出口を 1 句足す: tag を外す (`gcloud run services update-traffic … --remove-tags`) のが唯一の出口で、それ自体が traffic の変更なので env だけの変更と同じ開始条件 (isolated での証明・独立監査・依頼者の承認) に従う。candidate の検証が tag URL を使うなら candidate を tag 付きで deploy することと手順の終わりでの tag の扱いを書き、使わないなら health の確認を現物の形に直す。
+- **D3-4 (中)** 手順の参照語を「§10.4.3 の `--concurrency` の規則が読む revision」に直し、traffic を受けられない warm revision (`minScale` ≥ 1 だけ) は値の一致の対象外だが process 数の合計には入ることを足す。
+- **D3-5 (低)** application 0 件の枝、auditreader の需要の枝、`2 stores`、passfile の mode 0600、§10.1 の DSN の形と手順 2 の前提のそろえ、env だけの変更の対象 service の区別、表のセルの「(no step to re-run)」、rollback の戻し先の記録を traffic の移動より前に固定する。
+
+差し戻し 4 (出所: 設計レビュー 4 回目。手順の版 5)
+
+- **M4-1 (中)** tag の除去を直しの段の「状態を変える」ものの列挙に入れ、段の表・「この段が動かす traffic」の文・SI-09 の bullet の 4 箇所を互いに矛盾しない形にそろえる (割合は動かないが同じ traffic の射影であり、同じ 3 つの開始条件が掛かる)。
+- **M4-2 (中。passfile の出所 = 案 (a))** secret は §5 の `password=` の形を保ち、§10.1 が節の頭で一度だけ passfile の形に変換する (`umask` と `mktemp -d` の私有ディレクトリ、psycopg の `conninfo_to_dict` / `make_conninfo` を使う変換スクリプト、mode 0600、`password=` を `passfile=` に置き換えた同じ DSN を command substitution で受け取る、節の終わり (完走でも中断でも) に passfile とディレクトリを消す)。password は 1 ファイルにだけ入り、画面・argv・シェル履歴・`set -x` に出ない。
+- **M4-3 (中)** `security/CONTROL_MAPPING.md` の Version 行・Evidence・Status の版の表記を手順の版 5 にそろえる。
+- **N4-1 (低)** 検算の段落から provision role を落とす ((8) は両監査表の所有者を対象にしない)。
+- **N4-2 (低)** (6) の `-1` の行は、0012 が名指す role の `-1` だけがこの表で解消することを書く。
+
+レビュー 5 の指摘への裁定 (手順の版は 5 のまま。§10.1 は手順の節ではないため版を上げない)
+
+- **M5-1 (中。passfile の第 1 列)** passfile の host と port を wildcard (`*`) にする。**理由**: libpq が unix-socket 接続の照合でホスト名を既定のホスト名に置き換える読みが正しければ、socket のパスを第 1 列に書いた行は当たらず、passfile 形に切り替えた直後に §10 の全 DSN 経路が認証で失敗する。この作業機では libpq の照合を実測できず (PostgreSQL 16 の libpq の文書・ソースが無く、共有ローカル PostgreSQL への接続は禁止)、**どちらの読みでも通る形を採る**。あわせて escape の説明を password の中の `:` と `\` に直し、「両方の接続経路が受け付ける」の断定に、本番の前に isolated の組で確かめる 1 句を添える。**残余 (受理の条件には数えない)**: `*:*` なので、同じ dbname + user で別の instance に繋げば password が渡る。範囲は mode 0600・`mktemp -d` の 0700・`~/.pgpass` ではないこと・節の終わりの削除で閉じている。
+- **N5-1・N5-2 (低)** 2 度目の実行は「同じパラメータで素通しするので安全」と書く (文字列の並び順は変わる) / DSN を書き出す禁止の bullet に、converter が書くのは password だけで DSN ではない旨の 1 句を添える。
+- **N5-3 (低)** 起草の報告の file:line が現物と 6 行ずれていた (内容は正しい)。記録の訂正だけで文書の変更は無い。
+
+**(d) 受理の記録**
+
+- 対象と版: **W1-D1 = §10.6 の版 2**、**W1-D2 = §10.7 の版 2**、**W1-D3 = §10.10 の版 5**。いずれも独立設計レビュー (`reviewer`、設計レビューのモード) が「受理できる」とした。**受理日 2026-09-18**。runbook §10.8 の 3 行に記入済み (現行の版 = レビューした版 = 2 / 2 / 5、結論 = accepted、レビューの所在 = 設計メモ §12.6)。
+- 設計レビュー 6 回目の最終の所見 (逐語):
+
+> - **W1-D1 — §10.6 per-migration compatibility table、版 2: 受理できる** (`:2276`、行数 11・第 6 列付き、本文はレビュー 2 以降 1 字も変わっていない)。
+> - **W1-D2 — §10.7 lock / stop time / `lock_timeout` table、版 2: 受理できる** (`:2325`、8 行、本文不変)。
+> - **W1-D3 — §10.10 platform upgrade procedure (stages 2-4)、版 5: 受理できる** (レビュー 3〜5 の高 1 件・中 6 件・低 11 件はすべて現物と食い違わずに解消。0012 未適用の deployment でも段 2 が始まれる形になり、本番を変えた後に初めて分かる停止・unknown の抜け道・堂々巡りは残っていない。`security/CONTROL_MAPPING.md` の Version 行・Evidence・Status・SI-09 の bullet と §10.8 の 3 行 (2 / 2 / 5) は互いに一致)。
+> - 変更クラスは宣言どおり **Class D** (`tools/change_class.py` = `class=D`)。引き上げは無い。
+
+**(e) 完了条件 19 件 → 監査照合 (版 5 の現物の見出しで照合)**
+
+§6 の完了条件はいずれも変異を持たない監査照合である。照合先は runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` の §10 (4 段構成、手順 1〜17) と `security/CONTROL_MAPPING.md`。
+
+| # | 監査照合の対象 (版 5 の現物) |
+|---|---|
+| 3 | §10.9「Overall judgment」の表と、その直後の「Gate-0 is ready only when all 10 items are confirmed AND §10.8's …」の箇条 (§10.9 の前文は、この節を最初の読み取りと再読み取りの両方で同じに使うと述べる) |
+| 3a | §10.9「Report」の第 1 箇条と書式ブロック (unknown と blocked をともに `blocked—platform remediation required` に写し、内訳を併記する) |
+| 9a | §10.4.1 Item (1) isolated/production pair |
+| 9b | §10.1「Run the Cloud SQL Auth Proxy in unix-socket mode for this section」(TCP では (1) が unknown のままである理由)。§2・§4・§7 の整合の註 |
+| 21 | §10.3 Passing the DSN 全体 (環境変数だけ、`set -x` / HTTP ログ / 履歴 / argv 展開の禁止、サブシェル) と §10.1「Where that passfile comes from.」 |
+| 24 | §10.1「Where the evidence goes」(どの git work tree の外にも置く) と §10.9「Report」(識別子を含まない件数だけ) |
+| 28 | §10.1「gcloud」(プロンプト無効、API 無効・権限不足・対話は unknown、API を有効化しない) |
+| 38 | §10.4 の前文「Write only the projected fields into the evidence.」・「Projection table」・「Env names that must be present」・「What makes an item `unknown` (all items)」と、§10.4.2・§10.4.4 の判定規則 |
+| 38a | §10.4「Env-value allow-table」 |
+| 38b | §10.4.2 Item (7) legacy base-URL env vars (env を引き継ぐ deploy は現行 env に変更を適用した結果で判定し、旧 env の明示の削除が無ければ blocked) |
+| W1-D1 | §10.6 Per-migration compatibility table (item (5))、版 2 と §10.8 の第 1 行 |
+| W1-D2 | §10.7 Lock type, stop-time limit, and applied `lock_timeout` table (item (6))、版 2 と §10.8 の第 2 行 |
+| W1-D3 | §10.10 Platform upgrade procedure (stages 2-4)、版 5 = Preconditions ((8) の需要の検算を含む)・Stop conditions・「Applying a platform migration」・§10.10.1 Stage 2 (手順 1〜11 と「Findings from the first read that this stage resolves.」の表)・§10.10.2 Stage 3 (手順 12)・§10.10.3 Stage 4 (手順 13〜17 と「Rollback」) と §10.8 の第 3 行 |
+| W7-D1 | §10.7「How the table's values are passed」(0005・0007・0011・0012・0013 は `apply-platform-migration` に `--lock-timeout` と表の値を渡す。per-application upgrade と deprovision の行あり) と §10.10「Applying a platform migration」。**手で `PGOPTIONS` を組む手順は書いていない** (訂正註 WPD-3) |
+| W3-2 | §10.4.5 Item (10) starting prefix N |
+| W6-1 | §10.2 Isolated check of `--quiet`'s own default answer (gate before production) |
+| W5-D | `security/CONTROL_MAPPING.md` の SI-09 MitateDB-api ブロック (Control・Evidence・Status の各 bullet) と Version 行 **2.5 → 2.6**。実測: SI-09 の MitateDB ブロック **8,993 → 12,793 字** / 上限 15,200、SI-08 の MitateDB ブロック **15,194 字で不変**、最長行 **1,384 字** / 上限 1,400 (基点と同じ行)。`conformance-tests/test_control_mapping_register.py` **11 passed** |
+| 47 | `python3 tools/public_value_scan.py` の集計行 `# mode=tree files_scanned=2 total_flagged=0` |
+| 50 | 本表は 19 行で、19 行すべてに監査照合の対象がある。対応の無い行は 0 |
+
+**(f) 触るファイルの訂正註 (WPD-1 の既存の手順の書き直し)**
+
+- WP-D は §6 の表の「触るファイル」の範囲で、`MitateDB-api/docs/cloud-run-cloud-sql.md` の **§10 の新設だけでなく、既存の節の古い手順も直した**: §3 の前文に接続設定を libpq の環境変数で渡す規約を置いて §3・§3.1・§3.2・§3.2b・§3.2e・§3.4・§3.4a・§9 の psql の呼出しから argv の conninfo を外し、§3.4b と §7 の `upgrade-applications` / `deprovision` に必須の `--lock-timeout` を入れ、§7 の一覧に `apply-platform-migration` と `inventory` の行を足し、§2・§4・§7 に Cloud SQL Auth Proxy のモードの註を足した。§4 の provision DSN の欄には passfile 形との関係を 1 句足した。
+- 触らないと定めた §0.1・§9.1 の operator-reported の記録と SI-08 のブロックは 1 字も変えていない (実測)。
+- 直さずに残した箇所と理由 (報告のみ): psql 変数 (`-v`) と `-c` の SQL literal に secret が乗る既存の bootstrap の形 (argv 以外に渡す道が無く、手順の機構そのものの変更になる。§3 の前文に初回限りの例外として明示した)、`ALTER ROLE … PASSWORD '$(openssl rand -base64 32)'` が生成値をどこにも捕まえない既存の欠陥、§2・§3 の TCP 前提そのもの。§9 の `psql "$MITATEDBSVC_PROVISION_DSN" …` (実装の env 名は `MITATEDB_PROVISION_DSN`) は、DSN を argv に置く形の訂正 (WPD-1) で libpq の環境変数の形に直り、その env 名の言及は無くなった (§9.1 の記録は無改変)。
+
+**(g) 本番に対して何も実行していない**
+
+- 本 WP では gcloud・psql・`ops` のいずれも本番に対して実行していない。§10 は本番を読む手順と更新する手順を書くが、本 WP の中では実行しない (§6 の規則、§7)。
+- 実測は使い捨てクラスタ (WPD-5 の 5 項目) と、passfile の変換スクリプトの合成値での実行 (作業用の一時ディレクトリ内、実行後に削除) だけである。runbook の検証は文書の照合と独立設計レビューで行った。
+- 実行した道具: `python3 tools/check_doc_refs.py` (dangling 0、tracked markdown 130 / empty 0)、`python3 tools/public_value_scan.py` (`files_scanned=2 total_flagged=0`)、`tools/change_class.py` (`class=D`)。Class D の文書変更のため root gate は回していない。W5-D の照合として `conformance-tests/test_control_mapping_register.py` を実行した実測は **11 passed** である。
+
+**(h) 統合コミット**
+
+- (統合時に監督が記入)
 
 ## 6A. WP-E — `inventory` の (6)・(8) の判定の直しと platform migration の適用サブコマンド (Class D)
 
