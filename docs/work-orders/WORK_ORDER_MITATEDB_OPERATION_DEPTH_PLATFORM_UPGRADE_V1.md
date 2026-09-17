@@ -634,7 +634,7 @@ python3 tools/public_value_scan.py MitateDB-api/docs/cloud-run-cloud-sql.md secu
 
 **(h) 統合コミット**
 
-- (統合時に監督が記入)
+- 作業コミット `40cdbd0`、main へのマージ `b484bd4` (2026-09-18)。統合後の木に対する監督の完了ゲート: `3688 passed, 2 subtests passed`、`judge=PASS`、実行クラスタの `pg_database` / `pg_roles` の差分 0。`tools/tests` は `492 passed`
 
 ## 6A. WP-E — `inventory` の (6)・(8) の判定の直しと platform migration の適用サブコマンド (Class D)
 
