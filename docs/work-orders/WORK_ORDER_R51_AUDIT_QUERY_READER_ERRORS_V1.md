@@ -52,3 +52,12 @@
 - 完了条件 1・2 の「型」は `AuditReaderUnavailable` と読み替える。足す完了条件 5: `InsufficientPrivilege` は `StorageConfigurationError` になる。足す完了条件 6: HTTP の面の 503 が最後の網 (`_generic_service_unavailable`) ではなく分類の経路を通る。
 - 足す変異: M4 = `InsufficientPrivilege` の節を外す → 5 が赤 / M5 = `_CLASSIFY_ORDER` の足した行を外す → 6 が赤。M1〜M3 は同じ。
 - `errors.py`・`_CLASSIFY_ORDER` を件数や集合で固定する静的テスト・同型性 pin があれば、実測して報告する (集合の増減は監督裁定)。
+
+## 4. 記録 (2026-09-18)
+
+- 実装 2 回 (第 1 回は §2.1 の指定どおりの単段。実装担当の疑義を採って裁定 S-1)、差し戻し 2 (コードレビュー 1 回目の 6 件) は同じ起動で反映。`pt.py` (MitateDB-api/tests): `1351 passed, 2 subtests passed`。新規テストは 6 件。
+- コードレビュー 2 回。1 回目の重 2 件: (i) `mutate.py` は expect=red に `-x` を付けるので、M1 の `tests` に 2 件を並べた結果、実 PostgreSQL のテストが一度も走っていなかった → M1 / M1b に分けた。(ii) HTTP の no-leak テストがどの変異でも赤にならなかった → M6 を足した。2 回目: 差し戻し不要。低 1 件 (except 節のコメントに 2 段の理由が無い) は監督が 1 句を足して閉じた。
+- 完了ゲート (worktree、`gate.py -C`): `3698 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。main `c041438` (作業 `a0b3d8c`)。
+- 完了条件 → 変異 (確定): 1・2 → M1 (mock のテスト)・M1b (実 PostgreSQL のテスト) / 1 (close) → M2 / 3 → M6 (HTTP)・M3 (store の単位) / 5 → M4 / 6 → M5 / 4 → 監査照合 (本表)。
+- 変異の定義 (scratchpad を手放す前の写し): M1・M1b = `audit_query.py` の `except psycopg.Error` の節を外す / M2 = `finally: conn.close()` を外す / M3 = `AuditReaderUnavailable` のメッセージに `str(exc)` を混ぜる / M4 = `InsufficientPrivilege` の節を外す / M5 = `control_http.py` の `_CLASSIFY_ORDER` から `AuditReaderUnavailable` の行を外す / M6 = M3 の edit に加えて `control_http._problem_for_exception` の message を `str(exc)` にする (2 edit)。観測はいずれも `MitateDB-api/tests/test_audit_query_reader_errors.py`。
+- 完了条件 6 は HTTP の面では観測できない (`_classify` は一致が無くても `SERVICE_UNAVAILABLE` を返す) ので、`_CLASSIFY_ORDER` の内容の pin で固定した (`http.py` の `AuditSinkUnavailable` と同じ流儀)。
