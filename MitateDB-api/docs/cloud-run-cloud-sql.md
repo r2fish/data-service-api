@@ -2310,7 +2310,7 @@ value only in the case §10.4.3's table describes:
 ### 10.6 Per-migration compatibility table (item (5))
 
 **This table is a draft. The compatibility judgments are not settled until
-the independent review in §10.8 accepts them.** Table version: **2**.
+the independent review in §10.8 accepts them.** Table version: **3**.
 Change the table and the version goes up by one and §10.8's acceptance
 record goes back to "not accepted".
 
@@ -2360,7 +2360,7 @@ its review.
 
 **This table is a draft. The stop-time limits and the `lock_timeout`
 values are not settled until the independent review in §10.8 accepts
-them.** Table version: **2**. Change the table and the version goes up by
+them.** Table version: **3**. Change the table and the version goes up by
 one and §10.8's acceptance record goes back to "not accepted".
 
 - Lock types follow the PostgreSQL 16 documentation (the Explicit Locking
@@ -2424,9 +2424,9 @@ version counts as no record at all.**
 
 | Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
 |---|---|---|---|---|---|---|
-| §10.6 compatibility | 2 | accepted | 2 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.6 | 2026-09-18 | supervisor |
-| §10.7 lock / stop time / `lock_timeout` | 2 | accepted | 2 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.6 | 2026-09-18 | supervisor |
-| §10.10 upgrade procedure (stages 2-4) | 5 | accepted | 5 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.6 | 2026-09-18 | supervisor |
+| §10.6 compatibility | 3 | accepted | 3 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
+| §10.7 lock / stop time / `lock_timeout` | 3 | accepted | 3 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
+| §10.10 upgrade procedure (stages 2-4) | 6 | accepted | 6 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
 
 ### 10.9 Gate-0 overall judgment and report
 
@@ -2504,7 +2504,7 @@ acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <
 
 ### 10.10 Platform upgrade procedure (stages 2-4)
 
-Procedure version: **5**. Change the procedure and the version goes up by
+Procedure version: **6**. Change the procedure and the version goes up by
 one and §10.8's acceptance record goes back to "not accepted".
 
 **Preconditions**:
