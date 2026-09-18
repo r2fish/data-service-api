@@ -2630,6 +2630,7 @@ _PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
     "0011_process_ceilings.sql",
     "0012_role_connection_limits.sql",
     "0013_role_statement_timeouts.sql",
+    "0014_role_connection_limits_rollout.sql",
 )
 
 #: the psql `-v NAME=VALUE` variables each file above references,
@@ -2644,6 +2645,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
     "0011_process_ceilings.sql": (),
     "0012_role_connection_limits.sql": (),
     "0013_role_statement_timeouts.sql": (),
+    "0014_role_connection_limits_rollout.sql": (),
 }
 
 #: matches a psql `:name`/`:'name'`/`:"name"` variable

@@ -128,7 +128,9 @@ def _bootstrap(prefix: str, *, apply_0013: bool = True) -> types.SimpleNamespace
     """`apply_0013=False` stops right after `0012` -- used by the one test
     that observes `apply-platform-migration` itself turning item (6) from
     `unknown` into `confirmed`. Every other caller applies 0013
-    unconditionally, like 0012, since 0013 depends only on 0005/0012."""
+    unconditionally, like 0012, since 0013 depends only on 0005/0012.
+    0014 is only copied into the rewritten temp dir here; it is not
+    applied -- each test that needs 0014 applies it itself."""
     admin_dsn = _admin_dsn()
     provision_role = f"{prefix}svc_provision"
     api_role = f"{prefix}svc_api"
@@ -142,7 +144,7 @@ def _bootstrap(prefix: str, *, apply_0013: bool = True) -> types.SimpleNamespace
     for name in (
         "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
         "0005_application_audit.sql", "0012_role_connection_limits.sql",
-        "0013_role_statement_timeouts.sql",
+        "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
         "0007_platform_declarations.sql", "0011_process_ceilings.sql",
         "0003_provision_application.sql",
     ):
@@ -1650,15 +1652,104 @@ def test_inventory_connection_headroom_minus_one_on_an_unrelated_role_is_not_unk
     assert report["judgment"] == "confirmed"
 
 
-def test_inventory_connection_headroom_data_process_count_overflow_is_blocked(monkeypatch, capsys, platform):
-    """s 33a (all-revision process count, not just
-    one) and 34 (condition 1's own role-vs-limit comparison)."""
-    _declare_golden_path(monkeypatch, platform, data=20, control=1)
+# ===========================================================================
+# W1-7 (design §4, 2026-09-18 supervisor ruling S-1): a stray single-file
+# re-application of `0012` or `0013` AFTER `0014` is not reverted by any
+# migration file -- `apply-platform-migration` re-applies exactly the one
+# file named. Item (8) catches the resulting under-provisioned state in
+# some cases and not others; these fix which, rather than adding a new
+# check.
+# ===========================================================================
+
+
+def test_inventory_connection_headroom_catches_0012_reapplied_alone_after_0014(monkeypatch, platform):
+    """S-1: a stray `0012` re-application rolls every existing
+    platform-plane and application role back to 0012's own values (68/20/
+    36) -- item (8), read at `concurrency=32`/process 合計 2 (the rollout
+    shape design §3.2 uses), catches this via condition 1 on
+    `mitatedbsvc_api` (demand 128 > 68)."""
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
+    _provision_app(platform, "w17a")
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0012_role_connection_limits.sql")
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
-            _headroom_args(data_process_ceiling=20, data_process_count_total=20, control_process_ceiling=1, control_process_count_total=1))
+            _headroom_args(
+                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_catches_0013_reapplied_alone_after_0014_when_a_new_application_exists(
+    monkeypatch, platform,
+):
+    """S-1: a stray `0013` re-application does not touch any EXISTING
+    role's own CONNECTION LIMIT (0013 only replaces the provisioning
+    FUNCTION) -- item (8) catches it once an application is provisioned
+    AFTER the stray re-application, since THAT application's own
+    runtime/developer role is created with 36 (0013's own value) instead
+    of 68."""
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0013_role_statement_timeouts.sql")
+    _provision_app(platform, "w17b")
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_misses_0013_reapplied_alone_after_0014_with_no_new_application(
+    monkeypatch, platform,
+):
+    """S-1 (documented current limitation -- a fix to the underlying
+    detection would make this test go red): a stray `0013` re-application
+    after 0014, with NO application provisioned afterward, touches
+    nothing item (8) reads -- every existing role's own CONNECTION LIMIT
+    is still 0014's own value, so condition 1 stays satisfied and item
+    (8) reads `confirmed`, even though the provisioning FUNCTION itself
+    is silently back at 36 for the NEXT application provisioned."""
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
+    _provision_app(platform, "w17c")
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0013_role_statement_timeouts.sql")
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
+
+
+def test_inventory_connection_headroom_data_process_count_overflow_is_blocked(monkeypatch, capsys, platform):
+    """s 33a (all-revision process count, not just
+    one) and 34 (condition 1's own role-vs-limit comparison). W1-9/S-2
+    (design `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §4,
+    2026-09-18 supervisor ruling): 0014 raises `mitatedbsvc_api`'s
+    CONNECTION LIMIT to 132, so the data=20/concurrency=2 input this test
+    originally used (api demand 80) no longer overflows it -- revised to
+    data=35 (api demand 140 > 132, still blocked)."""
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
+    _declare_golden_path(monkeypatch, platform, data=35, control=1)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(data_process_ceiling=35, data_process_count_total=35, control_process_ceiling=1, control_process_count_total=1))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
@@ -1698,16 +1789,57 @@ def test_inventory_connection_headroom_control_process_count_mismatch_is_blocked
 
 
 def test_inventory_connection_headroom_role_coefficient_is_two_times_concurrency_for_api(monkeypatch, platform):
-    """34a."""
+    """34a. W1-9/S-2 (design `docs/design/
+    MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §4, 2026-09-18 supervisor
+    ruling): 0014 raises `mitatedbsvc_api`'s CONNECTION LIMIT to 132, so
+    the concurrency=35/data=1 input this test originally used (api
+    demand 70) no longer overflows it -- revised to concurrency=67 (api
+    demand 134 > 132, still blocked)."""
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
-            _headroom_args(concurrency=35, data_process_ceiling=1, data_process_count_total=1, control_process_ceiling=1, control_process_count_total=1))
+            _headroom_args(concurrency=67, data_process_ceiling=1, data_process_count_total=1, control_process_ceiling=1, control_process_count_total=1))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
+
+
+def test_inventory_connection_headroom_rollout_two_processes_confirmed_three_processes_blocked(monkeypatch, platform):
+    """W1-10 (rollout の検算、R-52 の解消そのもの、design
+    `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §3.2): 0014
+    適用後の上限 132/36/68/12 のクラスタで、`concurrency=32`・process 合計
+    2 (2 revision が並走) のとき条件 1 を全 role class が満たし
+    confirmed、合計 3 のとき `mitatedbsvc_api` の需要 (3*2*32=192) が上限
+    132 を超え blocked。declared process ceiling はどちらも 1 のまま
+    (合計は並走 process 数であって、ceiling ではない)。"""
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
+    _provision_app(platform, "w110")
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        confirmed_report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
+    finally:
+        conn.close()
+    assert confirmed_report["judgment"] == "confirmed"
+
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        blocked_report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                concurrency=32, data_process_ceiling=1, data_process_count_total=3,
+                control_process_ceiling=1, control_process_count_total=3, reserved_connections=0))
+    finally:
+        conn.close()
+    assert blocked_report["judgment"] == "blocked"
 
 
 def test_inventory_connection_headroom_shared_application_role_budget_counts_once(monkeypatch, platform):
