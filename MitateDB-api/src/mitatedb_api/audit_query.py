@@ -36,7 +36,8 @@ from psycopg import sql
 
 from .application_audit import APPLICATION_AUDIT_FIELDS, DEFAULT_DENIAL_COALESCE_WINDOW_S
 from .control_audit import CONTROL_AUDIT_FIELDS
-from .errors import ValidationError, violation, observed_type_of
+from .errors import (AuditReaderUnavailable, StorageConfigurationError, ValidationError,
+                     violation, observed_type_of)
 from .identifiers import validate_identifier
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -402,13 +403,27 @@ class PostgresAuditQueryStore:
         }
         statement = sql.SQL(_AUDIT_QUERY_UNION_SQL).format(
             control_table=self._control_table, application_table=self._application_table)
-        conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout)
         try:
-            with conn.cursor() as cur:
-                cur.execute(statement, params)
-                raw_rows = cur.fetchall()
-        finally:
-            conn.close()
+            conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(statement, params)
+                    raw_rows = cur.fetchall()
+            finally:
+                conn.close()
+        except psycopg.errors.InsufficientPrivilege as exc:
+            # Same two-stage, DSN/SQL/PostgreSQL-error-text-free
+            # classification every other platform-side store in this peer
+            # applies for a psycopg failure (e.g. `control_plane.py`'s many
+            # `except psycopg.errors.InsufficientPrivilege as exc: raise
+            # StorageConfigurationError(...) from exc` / `except psycopg.
+            # Error as exc: raise AuthorizationStateUnavailable(...) from
+            # exc` pairs): `InsufficientPrivilege` is a PERMANENT grant
+            # defect, every other `psycopg.Error` (a `QueryCanceled` from
+            # the reader role's `statement_timeout` included) is TRANSIENT.
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            raise AuditReaderUnavailable("audit reader backend unavailable") from exc
         rows: list[dict[str, Any]] = []
         for raw in raw_rows:
             row = dict(zip(_AUDIT_QUERY_ROW_COLUMNS, raw))

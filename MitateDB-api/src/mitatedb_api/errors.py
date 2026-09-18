@@ -255,6 +255,37 @@ class AuditSinkUnavailable(FoundationError):
     """
 
 
+class AuditReaderUnavailable(FoundationError):
+    """Raised when the audit-query reader's own PostgreSQL connection
+    (``audit_query.PostgresAuditQueryStore.query``'s dedicated, read-only
+    ``mitatedbsvc_auditreader`` role) fails for a reason other than a
+    privilege/grant misconfiguration -- most commonly a ``QueryCanceled``
+    from that role's own ``statement_timeout`` (migration ``0013_role_
+    statement_timeouts.sql``), but also connection refusal, a connect
+    timeout, or any other TRANSIENT ``psycopg.Error`` the same call can
+    raise.
+
+    Deliberately a distinct class from three existing ones:
+
+    - :class:`StorageConfigurationError` (a PERMANENT PostgreSQL
+      ``InsufficientPrivilege`` misconfiguration) -- the same reader still
+      raises that class for ``InsufficientPrivilege`` specifically; this
+      class covers every OTHER ``psycopg.Error`` the reader can raise.
+    - :class:`AuthorizationStateUnavailable` (the CREDENTIAL store's own
+      "cannot safely establish authorization state" condition, mapped to
+      contract code ``AUTH_STATE_UNAVAILABLE``) -- the audit reader only
+      ever runs after authentication/authorization has already succeeded,
+      so its own unavailability is never an authorization-state question.
+    - :class:`AuditSinkUnavailable` (the durable audit WRITE path's own
+      "a dependency this request needed is not answering right now"
+      bucket) -- this class is the READ side's own counterpart, a
+      separate dependency from the write-side sink.
+
+    Maps to the common contract's ``SERVICE_UNAVAILABLE`` code
+    (``control_http.py::_CLASSIFY_ORDER``).
+    """
+
+
 class CapabilityError(FoundationError):
     """Raised for a name that is part of the common contract's own
     vocabulary -- a mutation operation (``structured_operations.
