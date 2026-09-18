@@ -234,3 +234,21 @@ python3 tools/public_value_scan.py conformance-tests/test_control_mapping_regist
    > Re-measured 2026-09-18 (version 2.7, after the split): the longest block is now `<SI-nn>`'s `<subsection>` `<default block | named block "topic">` at `<n>` characters (`<15200 - n>` left); the 15,122-character figure above describes the file before the split.
 2. **WP-3 は版を 2.8 に上げる。** 訂正 (HISTORY への移送を伴う書き換え) は純粋な移動と別の変更であり、版数行も分ける。版数行の文は WP-3 の着手時に本書へ訂正註で確定文言を足す。
 3. **WP-1 の変異は登録テスト側 8 件 (W1-4 は 3 項目に分ける) + 照合スクリプト側 3 件とする** (本書 §2.3 のとおり。起草の枠の「6 件 + 2 件」は設計 §10 の数え違い)。
+
+## 8. 訂正註 1 (2026-09-18) — WP-1 のコードレビュー 1 回目への監督裁定
+
+- **S-1 (絶対値の pin)**: `conformance-tests/test_control_mapping_register.py` に足された `EXPECTED_TOTAL_DASH_LINES = 519`・`EXPECTED_TOTAL_EM_DASH_LINES = 43`・`EXPECTED_TOTAL_COLLECTED_BULLETS = 476` の**絶対値の pin は 3 つとも置かない**。WP-2 が `- —` を 2 本新設すると 521 / 45 になり、主張を 1 件足す将来の変更 (R-52 の WP-3 を含む) のたびに 476 も動く — 登録簿に主張を足す変更が毎回 `conformance-tests/` を触る形になる。bullet の脱落を捕らえる性質は、節ごとの恒等式 `- ` 行の数 = 拾った bullet + `- —` と、空振りを防ぐ錨 (SI 節の数 = 16、拾った bullet の合計 > 0) で守る。移動の前後の一致は `tools/check_control_mapping_split.py` が担う。
+- **S-2 (`preamble` と終了コード)**: `preamble` は `identical` / `differs` の 2 値のままとし、`differs` のときは preamble の unified diff を標準出力に出す。`--expect "<集計行>"` を足し、集計行が一致しなければ exit 1 にする (`missing` / `added` が終了コードを左右しない現状を直す)。**W2-4 の期待語 `preamble=as_expected` は `preamble=differs` と読み替え**、出力された preamble の diff を §3.2 の確定文言 (A)〜(F) と 1 行ずつ突き合わせることを W2-4 の監査照合とする (設計 §6 の 6 の「それ以外が不変」は、この diff に確定文言以外の hunk が無いことで確かめる)。
+- **S-3 (`moved`)**: 設計 §6 の 3 のとおり、4 つ組が一致する bullet を旧側と新側で対応付け、小ブロック名が変わった件数を数える。現行の実装 (新側で名前付きに載っている件数) は、分割済みの文書の自己照合で `moved=1`、WP-3 型で `moved=2` になり、W3-5 の `moved=0` が原理的に出ない。
+- **変異の件数**: 作業指示書 §7 の 3 の「8 + 3」は数え漏れで、§2.3 の字義どおりの 15 件 (11 + 4) が正しい (レビューが確認)。差し戻しで足す変異を含めた件数を記録に書く。
+- **道具の引数の訂正**: §1.4 / §2.4 の `pt.py … -- conformance-tests/test_control_mapping_register.py tools/tests -q` の結合実行は、WP と無関係に teardown の error を 1 件出す (`tools/testpg/dsa_testpg.py` が同じ process の `PGPASSWORD` を消し、conformance の session 終了時の adapter の close が再接続に失敗する。完了ゲートは worker の process が分かれるので出ない)。**2 回に分けて回す**: `pt.py … -- conformance-tests/test_control_mapping_register.py -q` と `pt.py … -- tools/tests -q`。原因は台帳に別件で起票する。
+
+## 9. 訂正註 2 (2026-09-18) — WP-1 の記録
+
+- **経過**: 実装 → コードレビュー 1 回目 (重 2・中 3・低 2) → §8 訂正註 1 の監督裁定 S-1〜S-3 → 差し戻し 1 (新しい起動) → コードレビュー 2 回目 (差し戻し不要。低 1 件 = 旧道具の docstring の参照先の誤りは監督が 1 行直した。低 1 件 = `--base` に存在しない rev を渡すと traceback になる、は受理)。
+- **`pt.py`** (2 回に分けて実行): `conformance-tests/test_control_mapping_register.py` = `34 passed` (基点 11)、`tools/tests` = `507 passed` (基点 492。照合スクリプトの自己検査 15 件)。**`mutate.py`**: 20 件とも `expect=red got=red`、復元は sha256 2 回で照合済み。
+- **完了ゲート** (worktree を main `96fda8c` へ早送りした木、`gate.py -C`): `3733 passed, 2 subtests passed` (3710 + 23)、`judge=PASS`、実行クラスタ差分 0。`COLLECTION_FLOOR` は触っていない (テストは増えただけ)。
+- **照合スクリプトの実測** (レビュー 2 回目が合成文書で確認): 分割済みの文書の自己照合 = `moved=0` / WP-3 型 = `missing=1 added=1 moved=0` / 名前付き → 既定の戻し = `moved=1` / WP-2 型 (既定 → 名前付きへ n 件) = `moved=n`。現物の自己照合: `missing=0 added=0 moved=0 empty_axis_added=0 empty_axis_removed=0 subsequence=ok preamble=identical ccr14=identical rule=identical`、exit 0。
+- **WP-2・WP-3 への注意**: `--expect` は集計行の逐語一致で判定する (空白・語順の正規化は無い)。期待行は本書からシングルクォートで逐語に渡す。
+- **変異の定義 (scratchpad を手放す前の写し。id は `r50-wp1-mutations.json` のもの)**: W1-2-allowlist-exclusion-filter W1-3-subject-stage2-removed W1-3-subject-stage2-removed-double-separator-alone W1-4i-missing-default-allowed W1-4ii-duplicate-default-allowed W1-4iii-default-not-first-allowed W1-5-duplicate-subject-check-removed W1-6-peer-order-check-removed W1-7-axis-count-check-removed W1-7-prose-continuation-line-check-removed W1-7-em-dash-mixed-with-bullet-check-removed W1-8-per-subblock-cap-check-removed W1-9-max-named-subblocks-check-removed W1-10-iter-bullets-first-match-return W1-12-global-pairing-restored S3-moved-ignores-old-subblock-name W1-13-em-dash-folded-into-main-multiset W1-14-subsequence-check-removed W1-15-rule-invariance-check-removed S2-expect-comparison-disabled 
+- **既知の制約**: 現物に名前付き小ブロックが 0 件の間、名前付き小ブロックに関する現物側の検査は fixture の上でだけ赤を示せる (WP-2 の後は現物側も効く)。

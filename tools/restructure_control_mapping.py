@@ -57,6 +57,8 @@ content named on the command line). `--out` writes the new file there
 (default: print to stdout). `--log PATH` additionally writes a TSV of every
 claim's (SI, peer, claim index, axis) assignment, in emission order.
 `--axes-table PATH` overrides the default `tools/control_mapping_axes.tsv`.
+
+R-50 (docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md v0.4, section 9): 本表は 2026-09-14 の一度限りの生成の入力であり、小ブロックの割当は含まない。
 """
 from __future__ import annotations
 
