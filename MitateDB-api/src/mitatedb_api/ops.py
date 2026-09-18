@@ -3065,10 +3065,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "apply-platform-migration",
         help="apply one platform migration file a second (or later) time against MITATEDB_PROVISION_DSN -- "
-             "restricted to the known re-appliable platform migrations (0005/0007/0011/0012; the bootstrap-"
-             "only 0001/0002 are never accepted here). Never run against production during "
-             "this work package -- the isolated proof, independent audit, and requester approval in the "
-             "work order's own section 7 come first",
+             "restricted to the known re-appliable platform migrations ("
+             + "/".join(name[:4] for name in _PLATFORM_MIGRATION_FILENAMES)
+             + "; the bootstrap-only 0001/0002 are never accepted here). Against production, run it "
+             "only through the runbook's gated procedure (docs/cloud-run-cloud-sql.md section 10)",
     )
     p.add_argument("file", metavar="FILENAME", help="one of the known platform migration file names (no path)")
     p.add_argument(
@@ -3106,8 +3106,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--data-process-count-total", type=_inventory_positive_int, default=None, metavar="N",
-        help="Data-plane process count actually running right now, summed across every concurrently-serving "
-             "revision (a positive integer, used for connection demand) -- omit to leave item (8) unknown",
+        help="WORST-CASE Data-plane process count: the sum of the process ceilings of every revision that "
+             "can serve at the same time, plus the NEW candidate's own ceiling (a positive integer, used "
+             "for connection demand). Never the number of instances running at the moment of the read -- "
+             "omit to leave item (8) unknown",
     )
     p.add_argument(
         "--control-process-ceiling", type=_inventory_positive_int, default=None, metavar="N",
@@ -3116,8 +3118,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--control-process-count-total", type=_inventory_positive_int, default=None, metavar="N",
-        help="Control-plane process count actually running right now, summed across every concurrently-"
-             "serving revision -- omit (with --control-not-deployed absent too) to leave item (8) unknown",
+        help="WORST-CASE Control-plane process count: the sum of the process ceilings of every revision "
+             "that can serve at the same time, plus the NEW candidate's own ceiling. Never the number of "
+             "instances running at the moment of the read -- omit (with --control-not-deployed absent "
+             "too) to leave item (8) unknown",
     )
     p.add_argument(
         "--control-not-deployed", action="store_true",
