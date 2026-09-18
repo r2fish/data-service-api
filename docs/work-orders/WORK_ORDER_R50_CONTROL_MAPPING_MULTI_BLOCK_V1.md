@@ -347,3 +347,64 @@ python3 tools/public_value_scan.py conformance-tests/test_control_mapping_regist
 - **引用元への訂正註**: `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` の F-S11 の裁定 (`:1150-1152`。1 字も変えていない) の後、`docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` の 3 箇所 (v0.14。表題の版を改版履歴に同期)、`docs/design/CODE_COMMENT_PROVENANCE_V1.md` (v0.21)。
 - **`pt.py`**: `34 passed` / `507 passed`。`public_value_scan.py` = `total_flagged=0`、`check_doc_refs.py` = `0 dangling references`。**完了ゲート** (worktree、`gate.py -C`): `3733 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。
 - **R-52 の WP-3 の材料** (レビューの実測。WP-2 の後 → 本 WP の後。差し戻し 1 は行数を変えていない): `security/CONTROL_MAPPING.md` の `:577` → `:578`、`:682` → `:684`、`:688` → `:690`、`:691` → `:693`、`:700` → `:701`。F-S11 の行は `:618` (SI-08 / MitateDB-api / ops inventory / Evidence)。
+
+
+## 13. 訂正註 6 (2026-09-19) — 受け入れ監査と監督の受け入れ
+
+- **受け入れ監査** (`evidence-auditor` 1 回、レビュー担当とは別の起動、main `06b8871`): 全 50 条件 (W1 21 + W2 12 + W3 12 + W4 5) のうち **充足 44、未充足 6 (いずれも記録の欠落で、実体は監査が現物で確認済み)、証拠不足 0**。「完了条件 → 変異」の対応表に対応の無い行は 0 件。監査は WP-2・WP-3 の照合の集計行を版をまたいで再現し (WP-2 = `missing=0 added=0 moved=28 empty_axis_added=2 …`、WP-3 = `missing=7 added=7 moved=0 …`、どちらも exit 0)、字数 7 値・`:5`・`:9`・`:33` の不変・確定文言の逐語一致・HISTORY の 7 行の逐語一致・`spec/` と `security/SECURITY_INVARIANTS_V1.md` と `conformance-tests/` の差分 0 (WP-2・WP-3) を確かめた。変異 20 件は mutate の log を 1 本ずつ読み、赤になった test id の実名が現行の収集 id に実在することを確かめた。
+- **監督裁定 (記録の欠落 6 件)**: **A-1** W1-1・W1-11・W1-16〜W1-21 の逐語記録と「完了条件 → 変異 → 赤になった test id」の対応表が §9 に無かった → 下の 13.1・13.2 に監査の写しを置いて充足とする。**A-2** W4-1〜W4-3・W4-5 の §5.1 の記録が空だった → 実体は `docs/design/CONTROL_MAPPING_RESTRUCTURE_V1.md` v1.1、`docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` v1.0 (§13)、roadmap v1.66 (main `06b8871`、作業 `a7f7bba`) であり、本項をもって記録とする。**A-3** W3-12: §4.3 の表は 12 行で、全行が監査照合である (本項をもって記録とする)。
+- **監督裁定 (設計疑義)**: **A-4** WP-4 のコミット `a7f7bba` に「security-contract の変更ではない」の明記が無い → WP-4 は Class A (`security/`・`spec/` の差分 0) で、宣言の対象は `security/` か `conformance-tests/` に触れるコミット (WP-1〜WP-3。3 本とも明記済み) と読む。コミットは書き換えない。**A-5** 軽微 3 件: §10 の「SI-14 V2 Evidence 657 字」は他の値と同じ数え方なら 658 (分割後の 2,679 は一致) / WP-3 で `audit query` の小ブロックは 2,679 → **2,713** 字になった (パスの挿入 34 字。上限に影響なし) / `tools/check_control_mapping_split.py` ほかの docstring が設計を `v0.4` と引いている (現行 v1.0。設計時点の版の引用として据え置く)。
+- **完了ゲート** (3 本とも監督が単独実行): `3733 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。直前の main の 3710 との差 +23 は登録テストの増分 (34 − 11) と一致。`COLLECTION_FLOOR` は不変。
+- **受け入れ (監督、2026-09-19)**: **R-50 の WP-1〜WP-4 を受け入れる。**
+
+### 13.1 WP-1 の完了条件の判定 (受け入れ監査の写し) (W1-1〜W1-21)
+
+| # | 判定 | 証拠 / 不足しているもの |
+|---|---|---|
+| W1-1 | 充足 (記録は scratchpad のみ) | 純関数 `_analyze_shape` = `conformance-tests/test_control_mapping_register.py:428`。現物系統 `:532`・`:542`・`:549`・`:558`・`:565`・`:572`・`:579`・`:586` (いずれも `_read()` 経由)、fixture 系統 `:758` 以降が同じ関数を呼ぶ。逐語記録は実装報告にあるが指示書 §9 に無い |
+| W1-2〜W1-10 | 充足 | 変異 14 件が `expect=red got=red`。赤の test id は §4 の変異表のとおり現物の収集 id に実在 |
+| W1-11 | 充足 (記録は scratchpad のみ) | (v) の 9 テスト名はいずれも基点 `96fda8c` に `def` が在り、改修後も収集される (監査で 1 件ずつ照合)。逐語記録は実装報告 §4 のみ |
+| W1-12〜W1-15 | 充足 | 変異 4 件 + S3・S2 の計 6 件が赤 (§4) |
+| W1-16 | 充足 (記録は scratchpad のみ) | `tools/tests/test_check_control_mapping_split.py` は `security/CONTROL_MAPPING.md`・`git` を読まず、fixture は文字列組み立てのみ (docstring `:7-11` が同旨を宣言、grep で確認) |
+| W1-17 | 充足 | 基点 `96fda8c` の `:65-87` (cap の由来コメント、先頭「Design section 5, "肥大化の抑止"…」/ 末尾「to this restructure's own WP-2 pass).」) が現物に**逐語で残存** |
+| W1-18 | 充足 (文言は監督裁定で変更) | `git diff` は両ファイルとも docstring への **+2/-0** のみで本体不変。`restructure_control_mapping.py` は指示書の文言どおり、`check_control_mapping_restructure.py` は差し戻し 5 の裁定により「この道具は表を持たない」旨の別文になった (指示書 §9 は「旧道具の docstring の参照先の誤りを監督が 1 行直した」とのみ記す) |
+| W1-19 | 充足 | `--collect-only -q` の実測: 現行 34 (register) / 507 (tools/tests)、基点の register は `def test_` 11 個 (報告の「基点 11」と一致)。減少なし。緑であることは完了ゲート 3733 passed が担保 |
+| W1-20 | 充足 | 監査で再実行: `mode=tree files_scanned=5 total_flagged=0` |
+| W1-21 | 充足 | §2.3 は 21 行。変異を持つ 15 行 (実施は 20 件) と監査照合 6 行で、対応の無い行は **0** (監査で 1 行ずつ確認) |
+
+### 13.2 変異表 (`tools/dev/mutate.py`。20 件、verbatim)
+
+実装報告 `r50-wp1-impl-report-2.md` §3 の写し。集計行:
+
+```
+mutate: 20 mutations, 20 as expected, restores verified 2/2 files (sha256 x2), grep counts unchanged (n/a for 4 edits whose lines all exist in the pristine file) | logs=(作業機の一時ディレクトリ。記録には残さない)
+```
+
+監査は当該 log ディレクトリ (20 本) を読み、各変異が落とした test id を 1 件ずつ確認した。**完了条件 → 変異 id → 赤になった test id (監査が log で確認した実名)**:
+
+| 完了条件 | 変異 id | 赤になった test id | expect/got |
+|---|---|---|---|
+| W1-2 | `W1-2-allowlist-exclusion-filter` | `…register.py::test_fixture_unknown_subblock_heading_is_rejected_not_skipped` | red/red |
+| W1-3 | `W1-3-subject-stage2-removed` | `…::test_fixture_subblock_subject_with_bad_form_is_rejected[full_width_space]` | red/red |
+| W1-3 | `W1-3-subject-stage2-removed-double-separator-alone` | `…::test_fixture_subblock_subject_with_bad_form_is_rejected[double_separator]` | red/red |
+| W1-4(i) | `W1-4i-missing-default-allowed` | `…::test_fixture_default_subblock_missing_is_rejected` | red/red |
+| W1-4(ii) | `W1-4ii-duplicate-default-allowed` | `…::test_fixture_default_subblock_duplicated_is_rejected` | red/red |
+| W1-4(iii) | `W1-4iii-default-not-first-allowed` | `…::test_fixture_default_subblock_not_first_is_rejected` | red/red |
+| W1-5 | `W1-5-duplicate-subject-check-removed` | `…::test_fixture_duplicate_subject_within_peer_is_rejected` | red/red |
+| W1-6 | `W1-6-peer-order-check-removed` | `…::test_fixture_subblocks_interleaved_across_peers_is_rejected` | red/red |
+| W1-7 | `W1-7-axis-count-check-removed` | `…::test_fixture_named_subblock_missing_an_axis_is_rejected` | red/red |
+| W1-7 | `W1-7-prose-continuation-line-check-removed` | `…::test_fixture_named_subblock_axis_with_a_prose_continuation_line_is_rejected` | red/red |
+| W1-7 | `W1-7-em-dash-mixed-with-bullet-check-removed` | `…::test_fixture_named_subblock_axis_mixes_em_dash_placeholder_with_a_real_bullet_is_rejected` | red/red |
+| W1-8 | `W1-8-per-subblock-cap-check-removed` | `…::test_fixture_named_subblock_alone_exceeds_the_length_cap` | red/red |
+| W1-9 | `W1-9-max-named-subblocks-check-removed` | `…::test_fixture_four_named_subblocks_exceeds_max_named_subblocks` | red/red |
+| W1-10 | `W1-10-iter-bullets-first-match-return` | `…::test_fixture_bullet_accounting_catches_dropped_named_subblock_bullets` | red/red |
+| W1-12 | `W1-12-global-pairing-restored` | `tools/tests/test_check_control_mapping_split.py::test_move_to_a_different_si_is_missing_and_added_not_moved` | red/red |
+| S-3 | `S3-moved-ignores-old-subblock-name` | `…split.py::test_moved_is_zero_when_an_already_split_document_is_compared_to_itself` | red/red |
+| W1-13 | `W1-13-em-dash-folded-into-main-multiset` | `…split.py::test_new_empty_axis_placeholder_is_counted_separately_from_the_main_multiset` | red/red |
+| W1-14 | `W1-14-subsequence-check-removed` | `…split.py::test_subsequence_violation_when_a_subblock_reorders_its_bullets` | red/red |
+| W1-15 | `W1-15-rule-invariance-check-removed` | `…split.py::test_rule_difference_fails_the_check` | red/red |
+| S-2 | `S2-expect-comparison-disabled` | `…split.py::test_expect_mismatch_when_a_bullet_is_lost_exits_1` | red/red |
+
+- 監査の独立確認: 20 件の `tests` に挙がる test id は**全件**現行の収集 id (register 34・tools/tests 507) に実在し、20 件の変異の `old` のスニペットは**全件**現行のファイルに実在する (= 変異が現行コードの実在の分岐を消す形になっている)。
+- W1-3 は `-x` のため 1 変異 1 赤の原則に沿って項目を分けてある (`trailing_space` は 1 段目で既に赤のため 2 段目の変異では動かない — 実装報告 §4 の註)。
+- 指示書 §9 は**変異 id 20 件を逐語で写している**が、「赤になった test id」の列と mutate の集計行は写していない (§5 の未解決 1)。
