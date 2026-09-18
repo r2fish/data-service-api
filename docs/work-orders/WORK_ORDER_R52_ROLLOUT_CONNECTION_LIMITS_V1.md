@@ -196,3 +196,24 @@ python3 tools/check_comment_provenance.py --base "e3ace9e" MitateDB-api/src/mita
 2. 第 1 段の実測 (§2.2 の 1〜7) への**一括裁定**。W1-7 が「捕らえない」だった場合の扱いを含む。
 
 (2026-09-18 の監督裁定により、新規テストの置き場・`lock_timeout` の値・WP-3 と WP-4 の worktree 名・`conformance-tests/` の扱い・変更クラスは確定済みで、本節から外した。)
+
+## 7. 訂正註 1 (2026-09-18) — WP-1 第 1 段の実測への監督の一括裁定
+
+第 1 段の実測 (追跡ファイルの変更 0。`pt.py`: `4 passed`、追加 `1 passed, 3 deselected`) の要点と裁定。
+
+- **実測 1〜4 (疑義なし)**: `0012`+`0013` の後は 68 / 20 / 5 / 36。下書きの `0014` の後は 132 / 36 / 12 / 68 (適用後に provision した application を含む)。ADMIN OPTION を欠くと `InsufficientPrivilege` (42501) でトランザクション全体が戻り、先行の `ALTER` も残らない。`0014` の後の `0012` 単独再適用は api・controlplane・既存 application を下げ戻し、auditreader は変えない。`0013` 単独再適用は既存 role を変えず、以後に provision した application だけが 36 になる。
+- **S-1 (実測 5、W1-7)**: `ops inventory` の (8) は、process 合計 2 で読めば `0012` 単独・`0013` 単独 (その後に provision した application が在る場合) の両方を blocked として捕らえる。**`0013` 単独再適用の後に application を 1 件も provision していない間は、どの既存の検査も捕らえない。** 裁定: 設計外の検査は足さない。W1-7 のテストは「合計 2・`0013` 単独再適用の後に provision した application が在る」組と「`0012` 単独再適用」の組で (8) が blocked になることを固定する。捕らえない組は、捕らえないことを 1 件のテストで固定する (現物の限界の記録。直ったら赤になる)。runbook (WP-2) にこの限界と「再適用は必ず `0012` → `0013` → `0014` の列で行う」を書く。構造的な直し (後続の migration が上書きする対象を持つファイルの単独再適用を `apply-platform-migration` が機械的に扱う) は台帳に別件として起票する (`0012` → `0013` の間にも同じ形が在るため、本 WP の範囲にしない)。
+- **S-2 (実測 6、W1-9)**: `0014` の値では固定値 2 件の**両方**が blocked を保てない (起草時の見込み「片方だけ」は外れた)。裁定: 両方の入力を見直す。値は実測の案 (data 35・concurrency 2 で api の需要 140 > 132 / concurrency 67・data 1 で 134 > 132) を採る。W1-9 の「保てない方だけ」は「2 件とも」と読み替える。
+- **実測 7 (疑義なし)**: `_ISOMORPHIC_TARGETS` に本 WP が本体を変える関数・定数は 0 件。
+
+## 8. 訂正註 2 (2026-09-18) — WP-1 の記録 (§2.6 の中身)
+
+- **経過**: 第 1 段 (実測) → 訂正註 1 の一括裁定 → 第 2 段 (実装) → コードレビュー 1 回目 (中 2・低 3) → 差し戻し 1 (新しい起動) → コードレビュー 2 回目 (差し戻し不要)。
+- **差し戻し 1 の監督裁定 (α)**: `0014` の section 2 のループに `0013_role_statement_timeouts.sql`:91-96 と同じ `IF EXISTS` の防御を足す。理由: `0004_deprovision_application.sql` は 1 トランザクションにできず、途中で落ちると registry 行に role 名だけが残る。防御が無いと、その cluster で `0014` が `undefined_object` で失敗して全部巻き戻り、rollout 中に上限を上げられない。**完了条件 W1-17 として足す** (実装担当は新しい条件を W1-14 に挿入して旧 14〜16 を繰り下げて報告したが、既存の番号は動かさない。変異の id `W1-14-remove-if-exists-guard` は W1-17 の変異と読む)。観測は `test_apply_platform_migration_0014_survives_a_registry_role_dropped_before_it_runs`。
+- **`pt.py`** (MitateDB-api/tests): `1357 passed, 2 subtests passed` (基点 1345 + 新規 12)。**`mutate.py`**: 22 件とも `expect=red got=red`、復元は sha256 2 回で照合済み。第 2 段の 1 回目は W1-11 と W1-5(ii) が green で、原因を直して再実行した。
+- **完了ゲート** (worktree、`gate.py -C`、基点 main `300853b`): `3704 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。
+- **対応表の註**: W1-5(ii) は W1-1d/e と同一の編集・同一の観測テストであり、再適用の冪等の観測は W1-5i が担う (赤になるのは `_snapshot()` に足した auditreader の `rolconnlimit` があるため)。W1-8 の「help の列挙に `0014` が現れる」は、`MitateDB-api/tests/test_ops_apply_platform_migration.py` の実定数のタプルの pin × help が定数由来であること (`MitateDB-api/tests/test_ops_help_text.py`) の合成で満たす (後者は実定数に合成名を足して比べるので W1-8i では緑のまま)。
+- **監査照合**: W1-12 = `0014` のヘッダが `0012_role_connection_limits.sql`:78-79 を明示的に参照し、根拠と日付を添えて上書きしている (レビューが現物で確認)。W1-13 = 件数とタプルの pin を実測で更新し、`0014` が `migrations/*.sql` の走査に入ったことは W1-11 の変異が示す。`tools/check_comment_provenance.py --base e3ace9e MitateDB-api/src/mitatedb_api/ops.py` は worktree では `FAIL (§4.1 (1)) … ops.py:2633 code changed` (コードを変える差分では必ず出る) で、(2)〜(5) は何も出ない = コメント・docstring は不変、`docs/code-history/` の更新は不要 (実装担当の報告の「OK: 110 blocks」は main を測った値で、レビューが訂正した)。`tools/public_value_scan.py`: `total_flagged=0`。
+- **共有 fixture**: `0014` は temp dir にコピーするだけで適用しない (適用するテストが自分で適用する)。`0013` までの cluster は `0014` の適用前の実在する運用状態であり、`0014` は運用者が手で適用するため (レビューも妥当と判断)。
+- **検知の限界 (S-1) の置き場**: `0014` のヘッダには書かず、WP-2 の runbook が持つ。構造的な直しは roadmap R-57。
+- **変異の定義 (scratchpad を手放す前の写し。id は `r52-wp1-mutations.json` のもの)**: W1-1a-api / W1-1b-controlplane / W1-1c-auditreader (各 `ALTER ROLE` を外す)、W1-1d-existing-runtime-loop / W1-1e-existing-developer-loop (既存 application のループの片方を外す)、W1-2i-new-creation-branch / W1-2ii-duplicate-object-fallback (関数の 68 を 36 に戻す)、W1-3-drop-statement-timeout、W1-4-remove-transaction-wrapper、W1-5i-remove-0014-from-reapply-filenames、W1-5ii-remove-0014-existing-application-loop、W1-6-exclude-0014-from-starting-points、W1-7a / W1-7b (`ops.py` の (8) の条件 1 を無効にする → `0012` 単独・`0013` 単独を捕らえるテストが赤)、W1-8i / W1-8ii / W1-8iii (定数・変数表から外す、`:app_id` の参照を混ぜる)、W1-9a / W1-9b ((8) の条件 1 を無効にする → 固定値 2 件が赤)、W1-10-api-value-reverted-to-0012、W1-11-remove-on-error-stop、W1-14-remove-if-exists-guard (= W1-17)。

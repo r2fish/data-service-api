@@ -281,6 +281,7 @@ def _run_ops(platform: types.SimpleNamespace, *args: str) -> subprocess.Complete
 # | 0011_process_ceilings.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 |
 # | 0012_role_connection_limits.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (既存 application ロールを更新する内部ループを持つが `:app_id` 引数は取らない) |
 # | 0013_role_statement_timeouts.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (0012 と同型の内部ループを持つ) |
+# | 0014_role_connection_limits_rollout.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (0012/0013 と同型の内部ループを持つ) |
 # ===========================================================================
 
 _REAPPLY_EXCLUDED_FILENAME = "0004_deprovision_application.sql"
@@ -293,7 +294,7 @@ _REAPPLY_STARTING_POINTS = range(len(_REAPPLY_MIGRATION_SEQUENCE) + 1)
 _REAPPLY_PLATFORM_MIGRATION_FILENAMES = (
     "0005_application_audit.sql", "0007_platform_declarations.sql",
     "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
-    "0013_role_statement_timeouts.sql",
+    "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
 )
 #: per-application upgrade (種別実測) -- 2 回目の適用は運用の経路
 #: (`upgrade-applications --lock-timeout`) を通す。生の psql では呼ばない。
@@ -619,10 +620,12 @@ def _drift_platform_objects_before_reapplication(
     `apply-platform-migration` is about to re-apply, the ONE object
     that file's own header says it (re)asserts unconditionally on every
     run -- an ACL (0005), a role setting (0007), a declared CHECK
-    constraint (0011), a function body (0012), and two role settings
+    constraint (0011), a function body (0012), two role settings
     (0013: `mitatedbsvc_auditreader` and one already-provisioned
-    application's own runtime role). Mirrors the SAME drift shapes
-    `test_ops_apply_platform_migration.py`'s own per-file tests use."""
+    application's own runtime role), and 4 `CONNECTION LIMIT` values
+    (0014: the 3 platform-plane roles and that same runtime role).
+    Mirrors the SAME drift shapes `test_ops_apply_platform_migration.py`'s
+    own per-file tests use."""
     # 0005: application_audit's own `REVOKE ALL ... FROM PUBLIC` runs
     # every time -- add a PUBLIC grant by hand.
     conn = psycopg.connect(provision_dsn, autocommit=True)
@@ -681,6 +684,16 @@ def _drift_platform_objects_before_reapplication(
                 sql.Identifier(runtime_role)))
     finally:
         admin.close()
+    # 0014: the 3 platform-plane roles' and that same already-provisioned
+    # application's own runtime role's `ALTER ROLE ... CONNECTION LIMIT`
+    # all run every time -- hand-lower them.
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            for role in (api_role, controlplane_role, auditreader_role, runtime_role):
+                cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 1").format(sql.Identifier(role)))
+    finally:
+        admin.close()
 
 
 @pytest.mark.parametrize("prefix_n", _REAPPLY_PARAMETRIZED_STARTING_POINTS)
@@ -698,7 +711,7 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
     (今日の内容で) 適用したのち、台帳から per-application の番号
     (6/8/9/10) を消して `upgrade-applications` を実際に走らせ (未適用が
     無ければ本文は実行されない)、platform migration (0005/0007/0011/0012/
-    0013、`apply-platform-migration` 経由) はもう一度適用し、per-
+    0013/0014、`apply-platform-migration` 経由) はもう一度適用し、per-
     application upgrade は `upgrade-applications` (`--lock-timeout` 付き、
     `--script` 無し) をもう一度実行し、すべての終了コードが 0 であること
     と、`updated_at` を除いた宣言の値・widened 制約定義・ロールの
@@ -755,7 +768,7 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
             result = _run_ops(ns, "upgrade-applications", "--application", _REAPPLY_TEST_APP_ID,
                               "--script", str(number), "--lock-timeout", _TEST_LOCK_TIMEOUT)
             assert result.returncode == 0, result.stdout + result.stderr
-        else:  # remaining platform migrations (0005/0011/0012), no variables
+        else:  # remaining platform migrations (0005/0011/0012/0014), no variables
             _run_psql_ok(state["provision_dsn"], target)
 
     try:
@@ -808,6 +821,7 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
                 _function_def_and_acl(provision_dsn, registry_schema, "begin_provision_application"),
                 _role_connection_limits(provision_dsn, api_role, controlplane_role),
                 _role_connlimit(provision_dsn, runtime_role),
+                _role_connlimit(provision_dsn, auditreader_role),
                 _role_setting(provision_dsn, auditreader_role),
                 _role_setting(provision_dsn, runtime_role),
                 ledger_numbers(admin_dsn, app_database),
@@ -1036,7 +1050,7 @@ def test_platform_migrations_declare_on_error_stop_in_the_file() -> None:
     the only guarantee. Derived from the pinned constant (never a
     hand-written list) so a future accepted file is covered without an
     edit here."""
-    assert len(ops._PLATFORM_MIGRATION_FILENAMES) == 5
+    assert len(ops._PLATFORM_MIGRATION_FILENAMES) == 6
     for name in ops._PLATFORM_MIGRATION_FILENAMES:
         text = (MIGRATIONS_DIR / name).read_text()
         assert "\\set ON_ERROR_STOP on" in text, name

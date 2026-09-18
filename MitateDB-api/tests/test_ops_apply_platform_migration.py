@@ -120,7 +120,7 @@ _PLATFORM_MIGRATION_NAMES = (
     "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
     "0005_application_audit.sql", "0007_platform_declarations.sql",
     "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
-    "0013_role_statement_timeouts.sql",
+    "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
 )
 
 
@@ -128,7 +128,8 @@ def _bootstrap(prefix: str, *, apply_0013: bool = True) -> types.SimpleNamespace
     """`apply_0013=False` stops right after `0012` -- used by the one test
     that observes 0013's own per-application loop (section 2) declaring
     `statement_timeout` retroactively on roles provisioned before 0013
-    first ran."""
+    first ran. 0014 is only copied into the rewritten temp dir here; it
+    is not applied -- each test that needs 0014 applies it itself."""
     admin_dsn = _admin_dsn()
     provision_role = f"{prefix}svc_provision"
     api_role = f"{prefix}svc_api"
@@ -322,14 +323,14 @@ def test_apply_platform_migration_accepts_a_known_file_through_a_symlinked_migra
 
 
 def test_apply_platform_migration_accepted_filenames_are_pinned_and_exist_without_app_id():
-    """The accepted-file constant is pinned to the 5 named files;
+    """The accepted-file constant is pinned to the 6 named files;
     each is real and references no `:app_id` psql variable; the
     directory's own `:app_id`-free files differ from this set by exactly
     the 2 bootstrap-only migrations."""
     assert ops._PLATFORM_MIGRATION_FILENAMES == (
         "0005_application_audit.sql", "0007_platform_declarations.sql",
         "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
-        "0013_role_statement_timeouts.sql",
+        "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
     )
     no_app_id_files = set()
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
@@ -582,6 +583,17 @@ def _function_def_and_acl(dsn: str, schema: str, function_name: str) -> tuple:
             )
             row = cur.fetchone()
             return (row[0], row[1]) if row else (None, None)
+    finally:
+        conn.close()
+
+
+def _role_connlimit(dsn: str, role: str) -> "int | None":
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname = %s", [role])
+            row = cur.fetchone()
+            return row[0] if row else None
     finally:
         conn.close()
 
@@ -1117,6 +1129,144 @@ def test_apply_platform_migration_0013_section_3_permission_failure_rolls_back_s
     assert rc != 0
     assert _role_setting(platform.provision_dsn, auditreader_role) is None
     assert _role_setting(platform.provision_dsn, runtime_role) is None
+
+
+# ===========================================================================
+# 0014 -- rollout-time role `CONNECTION LIMIT`
+# (design `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §4)
+# ===========================================================================
+
+
+def test_apply_platform_migration_0014_sets_role_connection_limits_for_every_role_class(monkeypatch, platform):
+    """W1-1: after 0014, the 3 platform-plane roles read 132/36/12
+    (api/controlplane/auditreader) and every ALREADY-PROVISIONED
+    application's own runtime/developer role reads 68 -- observed across
+    2 applications provisioned BEFORE 0014 runs."""
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    _d1, rt1, dv1 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f120a")
+    _d2, rt2, dv2 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f120b")
+
+    rc = _run_apply(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc == 0
+
+    assert _role_connlimit(platform.provision_dsn, platform.api_role) == 132
+    assert _role_connlimit(platform.provision_dsn, platform.controlplane_role) == 36
+    assert _role_connlimit(platform.provision_dsn, auditreader_role) == 12
+    for role in (rt1, dv1, rt2, dv2):
+        assert _role_connlimit(platform.provision_dsn, role) == 68
+
+
+def test_apply_platform_migration_0014_new_application_connection_limit_is_68(monkeypatch, platform):
+    """W1-2 (new-creation branch): an application provisioned AFTER 0014
+    is created directly with `CONNECTION LIMIT 68` on both roles."""
+    rc = _run_apply(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc == 0
+    _database_name, runtime_role, developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f121")
+    assert _role_connlimit(platform.provision_dsn, runtime_role) == 68
+    assert _role_connlimit(platform.provision_dsn, developer_role) == 68
+
+
+def test_apply_platform_migration_0014_duplicate_object_fallback_connection_limit_is_68(monkeypatch, platform):
+    """W1-2 (`duplicate_object` fallback branch): calling `begin_
+    provision_application` twice for the SAME `application_id` (its
+    `database_name` stays NULL after the first call, since `finish_
+    provision_application` never runs here) exercises the `ALTER ROLE`
+    retry-safety branch on the second call -- still 68 on both roles."""
+    rc = _run_apply(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc == 0
+    _provision_app_via_function(platform.provision_dsn, platform.schema, "f122")
+    _database_name, runtime_role, developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f122")
+    assert _role_connlimit(platform.provision_dsn, runtime_role) == 68
+    assert _role_connlimit(platform.provision_dsn, developer_role) == 68
+
+
+def test_apply_platform_migration_0014_preserves_0013_statement_timeout_on_provisioned_roles(monkeypatch, platform):
+    """W1-3: an application provisioned AFTER 0014 still carries 0013's
+    own `statement_timeout` setting on both roles -- 0014's own `CREATE
+    OR REPLACE FUNCTION` does not drop the setting 0013 added."""
+    rc = _run_apply(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc == 0
+    _database_name, runtime_role, developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f123")
+    assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
+    assert _role_setting(platform.provision_dsn, developer_role) == ["statement_timeout=5000ms"]
+
+
+def test_apply_platform_migration_0014_is_transactional_and_rolls_back_on_permission_failure(monkeypatch, platform):
+    """W1-4: a registry row naming a role 0014's own applying role
+    (`mitatedbsvc_provision`) lacks ADMIN OPTION on (created directly by
+    the cluster admin, not by `begin_provision_application`, so
+    CREATEROLE's own implicit ADMIN OPTION never attaches) makes the
+    whole per-application loop fail; the platform-plane roles' own
+    `ALTER ROLE` from section 1 (which runs first) rolls back with it,
+    so nothing from this run is left half-applied."""
+    assert _role_connlimit(platform.provision_dsn, platform.api_role) == 68
+    foreign_role = f"{platform.prefix}foreignrole014"
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL(
+                "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT"
+            ).format(sql.Identifier(foreign_role), sql.Literal(secrets.token_urlsafe(24))))
+    finally:
+        admin.close()
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (application_id, runtime_role, developer_role) VALUES (%s, %s, %s)"
+                ).format(table=sql.Identifier(platform.schema, "applications")),
+                ["f124", foreign_role, foreign_role],
+            )
+    finally:
+        conn.close()
+
+    rc = _run_apply(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc != 0
+    assert _role_connlimit(platform.provision_dsn, platform.api_role) == 68
+
+
+def test_apply_platform_migration_0014_survives_a_registry_role_dropped_before_it_runs(monkeypatch, platform):
+    """W1-14 (remand 1, item 1): a registry row whose runtime/developer
+    role was `DROP ROLE`d directly (the shape `0004_deprovision_
+    application.sql` can leave behind if it fails between its own `DROP
+    ROLE` and `finish_deprovision_application`) does not abort 0014 --
+    section 2's loop below carries the same `IF EXISTS (SELECT 1 FROM
+    pg_roles WHERE rolname = ...)` guard 0013's own section 2 carries
+    (0013:91-96). The platform-plane roles and a second, still-real
+    application's own roles still reach 132/36/12/68."""
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    _d1, rt1, dv1 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f125a")
+    _d2, rt2, dv2 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f125b")
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(rt1)))
+            cur.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(dv1)))
+    finally:
+        admin.close()
+    assert _role_connlimit(platform.provision_dsn, rt1) is None
+    assert _role_connlimit(platform.provision_dsn, dv1) is None
+
+    rc = _run_apply(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc == 0
+
+    assert _role_connlimit(platform.provision_dsn, platform.api_role) == 132
+    assert _role_connlimit(platform.provision_dsn, platform.controlplane_role) == 36
+    assert _role_connlimit(platform.provision_dsn, auditreader_role) == 12
+    for role in (rt2, dv2):
+        assert _role_connlimit(platform.provision_dsn, role) == 68
+
+
+def test_apply_platform_migration_accepts_0014_via_the_subcommand(monkeypatch, platform):
+    """0014 is accepted by name through the real subcommand (not merely
+    present in the pinned constant)."""
+    rc = _run_apply(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc == 0
 
 
 # ===========================================================================
