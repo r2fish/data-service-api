@@ -2,11 +2,11 @@
 
 Status: **Implementation mapping template**
 
-Version: **2.6** (2026-09-18; R-45 WP-D -- the MitateDB-api platform-upgrade runbook gains section 10, the four-stage operator procedure for the Gate-0 read and the platform upgrade (first read, platform remediation, second read, candidate; platform layer, per-migration compatibility and lock tables at version 2, the procedure at version 5, acceptance record, numbered-set application of 0005/0007/0011/0012/0013) -- SI-09 MitateDB-api row extended -- docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md)
+Version: **2.7** (2026-09-18; R-50 -- a subsection may hold several blocks, the default block plus up to 3 named ones (`### <subsection> -- <topic>`) -- SI-08's MitateDB-api subsection split into its default block and `ops inventory`, SI-14's r2db-api subsection into its default block and `audit query`; a pure move, no claim text changed -- docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
-Each claim is one bullet under its invariant, subsection (r2db-api / MitateDB-api / Common) and axis (Control / Evidence / Status); `- —` marks an axis with no claim.
+Each claim is one bullet under its invariant, subsection (r2db-api / MitateDB-api / Common), block (the subsection's default block, or a named one written `### <subsection> -- <topic>`) and axis (Control / Evidence / Status); `- —` marks an axis with no claim.
 
 **Update convention** (phase 7 WP-7 (i), requester ruling 4 --
 `docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` §5):
@@ -30,7 +30,36 @@ SI-14's r2db-api block, now 15,122 characters (15,065 on
 own comment records). Its `MAX_BLOCK_LENGTH = 15200` is that 2026-09-06
 measurement plus a 135-char margin, unchanged (78 left today), set independently
 of `conformance-tests/CONDITIONS.md`'s own cap (per C-1: a shared cap left that
-file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A block is one subsection's claims (r2db-api, MitateDB-api or Common) joined by single spaces. Each physical line is also capped at `MAX_LINE_LENGTH = 1400`.
+file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A block is one subsection's default block or one of its named blocks, that block's claims joined by single spaces. Each physical line is also capped at `MAX_LINE_LENGTH = 1400`.
+
+**Blocks per subsection** (R-50, requester ruling 2026-09-18 --
+`docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md`): a subsection may hold more
+than one block. Each `### ` heading inside an invariant section is either that
+subsection's default block (`### MitateDB-api`) or one of its named blocks
+(`### MitateDB-api -- ops inventory`; the topic is English and unique within
+the subsection). The default block is mandatory, appears exactly once and comes
+first; a subsection may add at most 3 named blocks (`MAX_NAMED_SUBBLOCKS = 3`
+in `conformance-tests/test_control_mapping_register.py`, raised only by a
+supervisor ruling). A subsection's blocks stand together, the subsection order
+(r2db-api, MitateDB-api, Common) is unchanged, and every block holds the same 3
+axes in the same order (`- —` for an axis with no claim). Moving claims between
+blocks of the SAME subsection changes no character of any claim, so it is not a
+correction and moves nothing into `CONTROL_MAPPING_HISTORY.md`. Other documents
+point at a named block as `SI-08 / MitateDB-api / ops inventory / Evidence`,
+and at a default block as `SI-08 / MitateDB-api / Evidence`. Re-measured
+2026-09-18 (version 2.7, after the split): the longest block is now `SI-09`'s
+`MitateDB-api` `default block` at `12,793` characters (`2,407` left); the
+15,122-character figure above describes the file before the split.
+
+**【訂正 2026-09-18 (R-50, version 2.7)】** The two sentences rewritten in place
+above each described a block as one whole subsection, which is false once a
+subsection holds several blocks. The superseded text is kept here verbatim --
+not in `CONTROL_MAPPING_HISTORY.md`, whose headings are bare invariant IDs and
+hold no place for this preamble: (1) "Each claim is one bullet under its
+invariant, subsection (r2db-api / MitateDB-api / Common) and axis (Control /
+Evidence / Status); `- —` marks an axis with no claim." (2) "A block is one
+subsection's claims (r2db-api, MitateDB-api or Common) joined by single
+spaces."
 
 ## SI-00 Single-Compromise Containment
 
@@ -552,6 +581,22 @@ file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A blo
 - (e) Handlers delegate the synchronous section to the threadpool, and `ApplicationCell._lock` now covers the WHOLE lookup -> pass-1 -> pass-2 sequence inside that slot (the separate `_idempotency_lock_scope` helper is gone: the outer cell lock is the in-process serializer, `_idempotency_pg_scope` the cross-process one).
 - That lock is per `ApplicationCell`, so requests against the SAME application serialize while different applications hold different locks -- `MitateDB-api/tests/test_threadpool_offload.py::test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_race`, `::test_sync_section_runs_off_the_event_loop`, `::test_post_query_sync_section_runs_off_the_event_loop`, `::test_post_mutate_sync_section_runs_off_the_event_loop`, `::test_post_cross_entity_mutate_sync_section_runs_off_the_event_loop`, `::test_control_post_issue_credential_sync_section_runs_off_the_event_loop`, `::test_body_read_stays_on_the_loop`, `::test_limiter_state_is_thread_safe`, `::test_pool_acquire_is_thread_safe`, `::test_concurrency_slot_check_then_increment_is_inside_the_active_lock`, and the concurrent same-key idempotency forms `MitateDB-api/tests/test_idempotency_concurrency.py::test_memory_same_key_same_digest_concurrent_executes_exactly_once`, `::test_postgres_same_key_same_digest_concurrent_executes_exactly_once`.
 - The per-application-upgrade/deprovision psql invocations (`_run_upgrade_script`/`_run_deprovision_script`) require a `--lock-timeout` value with no default, set on the psql session via `PGOPTIONS`'s own `-c lock_timeout=<value>` (appended to, never overwriting, the DSN's own `options` value if any) so each of these two psql invocations' own catalog-lock wait has an upper bound rather than none -- the CLI rejects both a missing value and one that is not a positive integer optionally followed by `ms`/`s`/`min`, before any psql subprocess starts.
+
+#### Evidence
+
+- common-suite coverage is C-16's own V3 (see SI-11 row).
+- `MitateDB-api/tests/test_platform_migration_reapply.py::test_run_upgrade_script_passes_lock_timeout_via_pgoptions`, `::test_run_deprovision_script_passes_lock_timeout_via_pgoptions`, `::test_run_upgrade_script_keeps_the_dsns_own_pgoptions_alongside_lock_timeout`, `::test_upgrade_applications_without_lock_timeout_is_a_usage_error`, `::test_deprovision_without_lock_timeout_is_a_usage_error`, `::test_upgrade_applications_rejects_a_malformed_lock_timeout_value`, `::test_deprovision_rejects_a_malformed_lock_timeout_value`, `::test_deprovision_accepts_a_well_formed_lock_timeout_value`.
+
+#### Status
+
+- the contract declares no range -- an operator responsibility, published as-declared -- removing the ceiling also removes the deployment-misconfiguration guardrail it incidentally provided (nothing stops an operator from declaring an implausibly large value), a deliberate trade recorded in `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2c / `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15 -- `test_limits_reject_out_of_range_values`.
+- **Deployment caveat**: like `control_requests_per_minute`, this is an in-process counter, inheriting the `--max-instances=1` requirement on the control service.
+- The application plane's own durable-denial writes are NOT governed by this window (SI-14 point 6).
+
+### MitateDB-api -- ops inventory
+
+#### Control
+
 - **`ops inventory` (Gate-0 DB-layer read-only judgments, R-45 WP-B/WP-E)**: item (8) sums connection demand across `mitatedbsvc_api`/`mitatedbsvc_controlplane`/`mitatedbsvc_auditreader` (table-grant discovery, never a literal name) plus every application's own runtime/developer role; application-role demand scales with the Data TOTAL, never `concurrency` alone; `--control-not-deployed` zeroes Control's own demand/role checks;
 - measured: only `control_composition.build_control_service` ever pools a connection against `mitatedbsvc_auditreader` (conditionally on `MITATEDB_AUDIT_DSN`), `main.build_app` never does -- its demand is counted only under the Control process count;
 - each plane's own CEILING (vs. declared `process_ceilings`) and TOTAL (actual count, feeds demand) are SEPARATE positive-integer arguments, plus `concurrency`/`--reserved-connections` (0 = no reserve) -- omitting any leaves (8) unknown; `--control-not-deployed` substitutes Control's pair;
@@ -561,7 +606,6 @@ file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A blo
 
 #### Evidence
 
-- common-suite coverage is C-16's own V3 (see SI-11 row).
 - Evidence for the `ops inventory` claims above is `MitateDB-api/tests/test_ops_inventory.py`; every name below (`::name` form) is in that ONE file.
 - role-set discovery and application-role scaling: `test_inventory_connection_headroom_data_process_count_overflow_is_blocked`, `::test_inventory_connection_headroom_app_role_demand_scales_with_data_process_count`, `::test_inventory_connection_headroom_app_role_overflow_with_named_values`, `::test_inventory_connection_headroom_shared_application_role_budget_counts_once`.
 - auditreader pooled by Control only: `::test_inventory_connection_headroom_auditreader_counted_under_control_only`, `::test_only_control_composition_pools_a_connection_against_mitatedbsvc_auditreader`.
@@ -571,13 +615,10 @@ file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A blo
 - the pinned reserve constant and its own real measurement: `::test_inventory_connection_headroom_max_concurrent_connections_constant_is_pinned`, `::test_inventory_connection_headroom_aggregate_overflow_is_blocked`, `::test_inventory_connection_headroom_spy_measured_concurrency_stays_at_or_below_the_constant`.
 - item (6)'s runtime-settings half and its own role set: `::test_inventory_ddl_lock_is_confirmed_without_lock_timeout_declared`, `::test_inventory_ddl_lock_is_unknown_when_statement_timeout_not_declared`, `::test_inventory_ddl_lock_target_roles_include_auditreader`, `::test_inventory_ddl_lock_target_roles_include_application_roles`, `::test_inventory_ddl_lock_minus_one_connection_limit_is_unknown`, `::test_inventory_ddl_lock_ignores_a_per_database_scoped_setting`.
 - the CLI/key-set/`unjudged_items` static pins: `::test_inventory_numeric_arguments_reject_zero_and_negative`, `::test_inventory_reserved_connections_accepts_zero_but_rejects_negative`, `::test_inventory_top_level_and_item_keys_are_pinned`, `::test_inventory_unjudged_parts_vocabulary_is_pinned`, `::test_inventory_exit_code_is_0_when_every_judged_item_is_confirmed`.
-- `MitateDB-api/tests/test_platform_migration_reapply.py::test_run_upgrade_script_passes_lock_timeout_via_pgoptions`, `::test_run_deprovision_script_passes_lock_timeout_via_pgoptions`, `::test_run_upgrade_script_keeps_the_dsns_own_pgoptions_alongside_lock_timeout`, `::test_upgrade_applications_without_lock_timeout_is_a_usage_error`, `::test_deprovision_without_lock_timeout_is_a_usage_error`, `::test_upgrade_applications_rejects_a_malformed_lock_timeout_value`, `::test_deprovision_rejects_a_malformed_lock_timeout_value`, `::test_deprovision_accepts_a_well_formed_lock_timeout_value`.
 
 #### Status
 
-- the contract declares no range -- an operator responsibility, published as-declared -- removing the ceiling also removes the deployment-misconfiguration guardrail it incidentally provided (nothing stops an operator from declaring an implausibly large value), a deliberate trade recorded in `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2c / `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15 -- `test_limits_reject_out_of_range_values`.
-- **Deployment caveat**: like `control_requests_per_minute`, this is an in-process counter, inheriting the `--max-instances=1` requirement on the control service.
-- The application plane's own durable-denial writes are NOT governed by this window (SI-14 point 6).
+- —
 
 ### Common
 
@@ -963,17 +1004,6 @@ file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A blo
 - The `request_id` the HTTP layer returns is the one written to the durable row (`::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`).
 - A denial row's `application_id` comes from the authenticated `AuthContext`, never a client-declared value;
 - an unauthenticated denial carries `application_id = NULL`, keyed on `actor_id or "unknown"`.
-- `POST /control/v1/audit/query` and the `POST /v1/audit/query` alias resolve to ONE handler on the control app;
-- the reader is `r2dbsvc_auditreader` (SELECT-only) over the UNION of `control_audit` and `application_audit`;
-- `plane` derives from the source table, never writer-settable;
-- total order is `(recorded_at, plane, event_id)`;
-- `after` is an opaque keyset cursor, `VALIDATION_FAILED` when undecodable;
-- rows newer than `visibility_lag_ms` are withheld -- `r2db-api/tests/test_audit_query.py::test_control_host_serves_both_audit_query_paths_with_one_handler`, `::test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writes` (3 more endpoint-behavior pins: companion history).
-- The data-plane host's own `/v1/audit/query` is unchanged and still answers `CAPABILITY_UNSUPPORTED` (`::test_data_plane_host_audit_query_still_refuses_with_capability_unsupported`).
-- `visibility_lag_ms` (`statement_timeout + idle_in_transaction_session_timeout + 1000ms`, `11000ms` at shipped defaults) is derived by both processes from ONE shared ground -- the platform catalog (`pg_db_role_setting`) -- each process checks at startup that its own effective value agrees with it (declared writer, both settings present, neither zero/negative, no per-database override, writer connection matches catalog);
-- any failure stops that process before it declares or serves anything -- `r2db-api/tests/test_audit_query.py::test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts`, `r2db-api/tests/test_ops_declarations.py::test_derive_visibility_lag_ms_default_is_11000` (5 more startup-guard message pins: companion history);
-- `capabilities().audit_query.operations` (27 members) and `.target_kinds` (5 members) are published `sorted()` off declared constants -- the same declare-the-hazard posture `event_class` has, with no enum in the contract;
-- the data-plane host declares `audit_query` `unavailable` and carries neither key (`::test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable`).
 - **Declared `event_class`/`operation`/`target_kind` vocabulary is exactly the emitted one**, machine-guaranteed by a single AST scanner over the whole package, no hand-maintained list: each `<field>=` keyword argument must be a string constant, an `IfExp` of constants, or a genuinely-bound forward parameter -- no smuggling via a dict literal, subscript/attribute assignment, or passthrough of a client-supplied dict;
 - every function taking the field declares it keyword-only.
 - With the literal set thereby completely enumerable, the scanner pins `U == D ∪ N` and `D ∩ N == ∅` per field, where `N` is an explicitly-named, runtime-measured non-durable exclusion set.
@@ -988,11 +1018,9 @@ file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A blo
 - `test_control_lifecycle_and_failures_are_canonical_audit_events`, `test_audit_is_append_only_and_secret_free`.
 - (i)/(ii): `r2db-api/tests/test_control_plane_service.py::test_rate_limit_precedes_authentication_and_is_not_audited`;
 - (iii): `r2db-api/tests/test_preauth_concurrency_bound.py::test_preauth_concurrency_denial_is_never_durably_audited`.
-- The same measurement technique (reading the two `SHOW` timeouts off the sink's own writer connection) also covers the HTTP conformance adapters' `PostgresApplicationAuditSink` writer connection -- `r2db-api/tests/test_conformance_adapter_r2db_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_no_explicit_session_override`, `MitateDB-api/tests/test_conformance_adapter_mitatedb_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle_timeouts_set`;
 - Non-durability is measured, not assumed: `::test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durable_tables` drives each excluded word through its real path and asserts no durable row appears.
 - `::test_declared_event_classes_cover_every_emittable_class`, `::test_every_field_keyword_argument_is_a_string_literal_ifexp_or_forward` (7 more AST-scanner structural pins: companion history).
 - `::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` reads the sibling peer's test file by path (never imports it), asserting the loaded path is the sibling's.
-- the control-credential-against-data-host case is now a common, unconditional vector (this row's Common evidence cell).
 
 #### Status
 
@@ -1013,6 +1041,31 @@ file's own guard nearly inert; design section 13/WP-8 keeps its own copy). A blo
 - deliberately peer-local (the port carries no method for it).
 - **Disclosed limit**: the equality check cannot see a SHRINKING declaration (moving a durable word from `D` into `N` in the same step keeps `U == D ∪ N` true);
 - the only detector is a per-field snapshot test pinning `DECLARED_AUDIT_OPERATIONS`/`DECLARED_AUDIT_TARGET_KINDS`/`DECLARED_AUDIT_EVENT_CLASSES` against a fixture `frozenset` -- `::test_declared_audit_event_classes_change_only_deliberately`, `::test_declared_audit_operations_change_only_deliberately` (1 more snapshot pin: companion history).
+
+### r2db-api -- audit query
+
+#### Control
+
+- `POST /control/v1/audit/query` and the `POST /v1/audit/query` alias resolve to ONE handler on the control app;
+- the reader is `r2dbsvc_auditreader` (SELECT-only) over the UNION of `control_audit` and `application_audit`;
+- `plane` derives from the source table, never writer-settable;
+- total order is `(recorded_at, plane, event_id)`;
+- `after` is an opaque keyset cursor, `VALIDATION_FAILED` when undecodable;
+- rows newer than `visibility_lag_ms` are withheld -- `r2db-api/tests/test_audit_query.py::test_control_host_serves_both_audit_query_paths_with_one_handler`, `::test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writes` (3 more endpoint-behavior pins: companion history).
+- The data-plane host's own `/v1/audit/query` is unchanged and still answers `CAPABILITY_UNSUPPORTED` (`::test_data_plane_host_audit_query_still_refuses_with_capability_unsupported`).
+- `visibility_lag_ms` (`statement_timeout + idle_in_transaction_session_timeout + 1000ms`, `11000ms` at shipped defaults) is derived by both processes from ONE shared ground -- the platform catalog (`pg_db_role_setting`) -- each process checks at startup that its own effective value agrees with it (declared writer, both settings present, neither zero/negative, no per-database override, writer connection matches catalog);
+- any failure stops that process before it declares or serves anything -- `r2db-api/tests/test_audit_query.py::test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts`, `r2db-api/tests/test_ops_declarations.py::test_derive_visibility_lag_ms_default_is_11000` (5 more startup-guard message pins: companion history);
+- `capabilities().audit_query.operations` (27 members) and `.target_kinds` (5 members) are published `sorted()` off declared constants -- the same declare-the-hazard posture `event_class` has, with no enum in the contract;
+- the data-plane host declares `audit_query` `unavailable` and carries neither key (`::test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable`).
+
+#### Evidence
+
+- The same measurement technique (reading the two `SHOW` timeouts off the sink's own writer connection) also covers the HTTP conformance adapters' `PostgresApplicationAuditSink` writer connection -- `r2db-api/tests/test_conformance_adapter_r2db_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_no_explicit_session_override`, `MitateDB-api/tests/test_conformance_adapter_mitatedb_http_audit_writer_timeouts.py::test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle_timeouts_set`;
+- the control-credential-against-data-host case is now a common, unconditional vector (this row's Common evidence cell).
+
+#### Status
+
+- —
 
 ### MitateDB-api
 

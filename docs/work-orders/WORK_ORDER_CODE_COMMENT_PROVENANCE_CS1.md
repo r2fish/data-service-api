@@ -337,7 +337,15 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 
 ## 4. 訂正註
 
-(なし)
+**訂正註 (2026-09-18、R-50 WP-2、本文は書き換えない)**: `:2041`・`:2479` (行番号は
+本訂正註を足した後の現物の値) が引く `security/CONTROL_MAPPING.md:538` は、R-50
+(`docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md`、`security/CONTROL_MAPPING.md`
+version 2.6 → 2.7、SI-08/SI-14 の複数ブロック化) の preamble への段落追加により
+`:567` へ動いた。動いたのは行番号だけで、当該行の文言 (`` `execution_ms` is
+declared `reference_wall_clock`, not `enforced` … ``) は 1 字も変わっていない
+(純粋な移動)。設計 `docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` §9.1 が挙げる
+3 つ目は、実測では `CH-0538` の行であり `security/CONTROL_MAPPING.md:538` を
+引いていない (2026-09-18 実測)。
 
 ## 5. 変更セット 2 — r2db `postgres.py` の再判定と r2db `service.py`
 

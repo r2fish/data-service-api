@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.20 (2026-09-18)**: §3 の「別件 (対象外)」の行 (`security/CONTROL_MAPPING.md:41`) に、R-50 WP-2 の複数ブロック化による行番号のずれ (`:41` → `:70`) を追記する訂正註を足した。既存の行は書き換えていない。
 - **v0.19 (2026-09-16)**: §10.6 に変更セット 0i の実施記録、教訓 2 行、次の候補を追記した。§10.5 は書き換えていない。
 - **v0.18 (2026-09-15)**: 監督の枠組み (変更セット 0i) により、§9.2 に保護参照の拡張 (F-ID、peer 相対パスと basename だけのファイル名、入れ子の括弧の中の条項 ID) と、0e・0f の手元のコピーを検査するテストの置き換えを置き、§6 に 0i の行を足した。設計レビュー 1 を反映した (監督裁定は作業指示書 §15.5)。既存の節は書き換えていない。
 - **v0.17 (2026-09-15)**: §10.5 に、揺れの疑いがあったテストの調査の結論 (原因、テストの修正、測定、他テストの監査、教訓 1 行) を【追記】した。製品側の問題は roadmap (`docs/design/ROADMAP_POST_PHASE7_V1.md`) R-42 に起票した。
@@ -133,6 +134,8 @@
 | CH-0178 | `was this module's first implementation; the review's B-1 finding showed …` |
 
 **別件 (対象外)**: 他文書が引くコード位置 (`security/CONTROL_MAPPING.md:41`、`conformance-tests/CONDITIONS.md:53`、`spec/CCR_DISPOSITION.md:156`) のずれは既に存在しており、直すと Class C / D になる。
+
+**訂正註 (2026-09-18、R-50 WP-2、本文は書き換えない)**: 上の行が引く `security/CONTROL_MAPPING.md:41` はさらに動いた。R-50 (`docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md`、`security/CONTROL_MAPPING.md` version 2.6 → 2.7、SI-08/SI-14 の複数ブロック化) が preamble に段落を追加したため、当該行 (SI-00 r2db-api の `#### Control` 見出し) は現在 `:70` にある。ずれの指摘そのもの (直すと Class C / D になるという判断) は変わらない。
 
 ## 4. 照合と常設検査
 
