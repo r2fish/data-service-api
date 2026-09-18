@@ -41,3 +41,10 @@
 
 - テスト: `tools/dev/pt.py -C .claude/worktrees/r53-ops-help -- MitateDB-api/tests -q`
 - 変異: `tools/dev/mutate.py "$SP/r53-mutations.json" -C .claude/worktrees/r53-ops-help`
+
+## 2. 記録 (2026-09-18)
+
+- 実装 1 回、差し戻し無し。`pt.py` (MitateDB-api/tests): `1345 passed, 2 subtests passed`。`mutate.py`: M1・M2・M3a・M3b の 4 件とも `expect=red got=red`、復元は sha256 2 回で照合済み。
+- コードレビュー 1 回: 差し戻し無し。低 1 件 (同じファイルのコメントと docstring に旧文言が残る) は監督裁定で別件 R-55 として起票した。
+- 完了ゲート (worktree、`gate.py -C`): `3692 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。main `cad71ad` (作業 `7c17a55`)。
+- 変異の定義 (scratchpad を手放す前の写し): M1 = help の導出式を直書き `0005/0007/0011/0012/0013` に戻す / M2 = `this work package` の旧文を戻す / M3a = `--data-process-count-total` を旧文に戻す / M3b = `--control-process-count-total` を旧文に戻す。いずれも対象は `MitateDB-api/src/mitatedb_api/ops.py`、観測は `MitateDB-api/tests/test_ops_help_text.py`。
