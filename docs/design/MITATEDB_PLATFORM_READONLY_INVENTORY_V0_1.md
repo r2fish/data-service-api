@@ -1,4 +1,4 @@
-# MitateDB platform の読み取り専用 inventory 設計メモ（v0.11）
+# MitateDB platform の読み取り専用 inventory 設計メモ（v0.12）
 
 - 状態: **設計レビュー 2 回反映済み、依頼者裁定済み（2026-09-16、§6 冒頭）。作業指示書の起草待ち。** ~~設計レビュー 2 回反映済み、依頼者判断待ち（Q-1〜Q-7）。~~ 本書の手順はまだ実行してよい手順ではない。本番を読むのは、本書の経路が設計レビューで受け入れられた後である（`docs/work-orders/HANDOVER_20260916_FABLE2.md` 付録 C の制約）。
 - 台帳: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-45**（v1.50）。起票物は `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` の手順 1。
@@ -20,6 +20,7 @@
   - v0.9（2026-09-17）§12.4（WP-E の実施記録）を足し、WP-E で覆した D-1 の (6)・(8)、§7 の 33b、§12.3 の該当記述に打ち消し線と註を入れた（§1.8 の 56）。
   - v0.11（2026-09-18）§12.6（WP-D の実施記録）を足し、§1.2 の「unknown は先へ進まない」に【訂正 2026-09-18】（依頼者裁定の案 A。「先」は candidate の deploy と traffic を指す）を入れた（§1.8 の 56。行は消していない）。本文の他の決定は変えていない。
   - v0.10（2026-09-18）§12.5（WP-F の実施記録）を足し、WP-F の F2 で覆した D-1 の (6) の「`statement_timeout` の有無を読む」の記述に【訂正】を入れた（§1.8 の 56。行は消していない）。本文の他の決定は変えていない。
+  - v0.12（2026-09-18）§12.7（R-52 WP-2/WP-4 の実施記録。runbook の `0014` への追随と §10.8 の再受理）を足した。本文の決定は変えていない。
 
 ## 1. 問題
 
@@ -695,3 +696,14 @@ Z-5 は欠番である。第 1 次の起草の疑義 5（r2db-api の扱い）�
 - **(8) の検算で分かったこと**: (8) の需要は process 数の合計に比例する (controlplane = 合計 × 16、auditreader = 合計 × 4、api = 合計 × 2 × concurrency、application role = 合計 × concurrency)。一方 `CONNECTION LIMIT` は 0012 の 68 / 20 / 36 と 0005 の auditreader 5 で、いずれも 1 plane 1 process・concurrency 32 の前提の値である。したがって rollout 中に candidate と traffic を持つ revision が並ぶ (合計が 2 以上) と需要が上限を超え、**Control を配備した本番の Gate-0 では (8) が blocked になる見込みである**。runbook はこれを「本番を変える前に紙の上で検算し、収まらなければ直しの段を始めずに止まる」手順として閉じた (この runbook に直し方は無い。上限の変更は新しい platform migration を要する)。環境ごとの評価そのものは runbook に書かない。台帳に **R-52** として起票した (対処の候補は上限を上げる新しい platform migration / 数え方の見直し / 旧 revision を先に止める手順。着手は依頼者の指示を待ち、Mitate への報告に含める)。
 - **本番の Gate-0 への帰結**: 手順と 2 つの表は受理されたが、**本番に対しては何も実行していない** (gcloud・psql・`ops` のいずれも)。残りは受け入れ監査と Mitate への報告で、その後の順序は作業指示書 §7 の後続の手順 (isolated での証明 → 独立監査 → 依頼者の明示の承認 → 本番の更新) である。R-47 の状態の application があれば (3) は blocked、0013 未適用なら (6) は unknown で、どちらも直しの段で解消する種類である。R-52 の (8) はこの runbook では解消しない。
 - **記録の所在**: 作業指示書 `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` v1.6 の §6 (manifest)・§6.1 (訂正註 WPD-1〜WPD-5)・§6.2 (実施記録・監督裁定・受理の記録・監査照合の表)、runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` §10 (§10.8 が受理記録)、`security/CONTROL_MAPPING.md` Version 2.6 の SI-09 の MitateDB-api ブロック、計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-45 の行と R-52〜R-54 の行。
+
+### 12.7 R-52 WP-2/WP-4 — runbook の `0014` への追随と §10.8 の再受理 (2026-09-18)
+
+- 基点 main `da75ee2` (WP-2 の作業 `3c1194c`)。作業指示書 `docs/work-orders/WORK_ORDER_R52_ROLLOUT_CONNECTION_LIMITS_V1.md` の §3 (WP-2 の manifest)・§5 (WP-4 の manifest)・§9 訂正註 3 (WP-2 の記録、範囲の追加 W2-9〜W2-11、独立レビューの結果、WP-4 の runbook 部分を前倒しする監督裁定)。文書のみの変更で、コード・migration・テストは 1 行も変えていない。
+- **入ったもの** (`MitateDB-api/docs/cloud-run-cloud-sql.md`): migration `0014_role_connection_limits_rollout.sql` への追随。runbook 1 本、217 行追加・30 行削除。Class A。§10.6・§10.7・§10.10・§10.10.1 の該当行に加え、同じ runbook の自己矛盾を残さないために **W2-9** (§10.7 の値の渡し方の列挙、§10.10 の numbered set の列挙と理由・ADMIN OPTION の前提と対象 role の表・single transaction の列挙、§10.10.1 の item (6)・(8) の `-1` の行)、**W2-10** (§3 の適用例と role floor の表の註、§10 冒頭の platform migration の列挙、§10.5 の `-1` の註、§10.10.3、`0014` の ADMIN OPTION の実測記録) を範囲に足した (監督裁定)。覆した行は 1 行も消さず `(2026-09-18: …)` の註を付け、作業名・R 番号・経緯の叙述は 0 件である (§1.8 の 56・57)。
+- **受理の記録**: 対象と版 = §10.6 の表 (版 3)・§10.7 の表 (版 3)・§10.10 の手順 (版 6)。結論 = 3 件とも独立の設計レビューが受理。レビューの所在 = 本節と作業指示書 §9 訂正註 3。日付 = **2026-09-18**。runbook §10.8 の 3 行は現行の版・レビューした版・結論・日付を記入済みで、記録先として本節を指す。
+- **独立レビュー (机上通し)**: 2 回。初回の指摘は中 4・低 4 で、監督裁定により全件採用 → 差し戻し 1 (**W2-11**: step 7 の段落の矛盾、`0014` は値を SET する (高い上限は下がる) 旨、item (8) の初回 blocked を step 7 が直すことの明示、deprovision の残骸 (`0012` に `IF EXISTS` の防御が無い) と出口、`max_connections` の出口、合計 3 の出口、テストの引き方、§3 の表の見出し) → 再確認で全件解消、受理。想定の本番の状態 10 通り — (a) `0014` 未適用の初回の読み / (b) `0013` も未適用 / (c) `0012` 単独再適用 / (d) `0013` 単独再適用 / (e) ADMIN OPTION の欠如 / (f) deprovision の中断の残骸 / (g) Control 未配備 / (h) `max_connections` の不足 / (i) 合計 3 / (j) rollback — を通し、2 回目で行き止まりと堂々巡りは 0 件。主張と現物 (`0014` の SQL、`ops.py`) の照合と検算の再計算 (128 / 32 / 8 / 64、合計 234、合計 3 で 192 > 132) も一致。**このレビューは机上通しと静的照合だけで、テストは実行していない** (再実行したのは `tools/public_value_scan.py` と `tools/check_doc_refs.py` のみ)。
+- **監査照合 W4-1〜W4-4 の逐語記録**: W4-1 = 上の独立レビューの実施記録と裁定 (逐語は作業指示書 §9 訂正註 3)。W4-2 = 版数の行は `MitateDB-api/docs/cloud-run-cloud-sql.md`:2313 (§10.6、版 **2 → 3**)・:2363 (§10.7、版 **2 → 3**)・:2507 (§10.10、版 **5 → 6**)、§10.8 の受理記録の 3 行は同:2427-2429 (現行の版とレビューした版を 3 / 3 / 6 に、記録先を §12.6 から本節 §12.7 に)。W4-3 = 受理の逐語記録は本節 (§12 の §12.6 の次の番号) にあり、版数は §10.8 の 3 行と一致する。W4-4 = 作業指示書 §5 の対応表は 4 行 (変異を持つ行 0・監査照合 4 行) で、変異も監査照合も持たない行は 0 件。
+- **道具**: `tools/public_value_scan.py MitateDB-api/docs/cloud-run-cloud-sql.md docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` = `files_scanned=2 total_flagged=0`、`tools/check_doc_refs.py` = `0 dangling references`・`empty markdown files: 0`。
+- **本番の Gate-0 への帰結**: 3 行の受理が現行の版を指すので、§10.9 の (5) と (6) の「§10.8 が現行の版で受理を記録している」という前提は再び満たされる。`0014` 未適用の本番の初回の読みでは (8) は blocked であり、それを直すのは §10.10.1 の step 7 である (机上通しの (a))。**本番に対しては何も実行していない** (gcloud・psql・`ops` のいずれも)。`security/CONTROL_MAPPING.md` の中の版の記述の追随は WP-3 が行う (作業指示書 §9 訂正註 3)。
+- **記録の所在**: 作業指示書 `docs/work-orders/WORK_ORDER_R52_ROLLOUT_CONNECTION_LIMITS_V1.md` の §3・§5・§9 訂正註 3、runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` の §10.6・§10.7・§10.8・§10.10、計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-52 の行。
