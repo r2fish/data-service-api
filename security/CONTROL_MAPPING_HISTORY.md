@@ -210,6 +210,12 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api Evidence claim, `ops inventory` item (6) test-name bullet, superseded 2026-09-18 (Version 2.8, R-50 WP-3 -- the claim moved to SI-08's `ops inventory` named block, beside the item (6) claim it evidences), verbatim:*
+
+`ops inventory` item (6) reads the value 0013 sets (the claim itself is SI-08's MitateDB-api item (6) bullet; its evidence sits here, next to the migration it depends on): `MitateDB-api/tests/test_ops_inventory.py::test_inventory_ddl_lock_is_confirmed_by_default_bootstrap_alone`, `::test_inventory_ddl_lock_confirmed_after_apply_platform_migration_0013`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_zero`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_negative`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_unparseable`, `::test_inventory_ddl_lock_is_blocked_when_only_the_application_runtime_role_is_unbounded`, `::test_inventory_ddl_lock_is_blocked_when_only_the_application_developer_role_is_unbounded`, `::test_inventory_ddl_lock_blocked_outranks_unknown_when_mixed_with_an_undeclared_role`, `::test_inventory_ddl_lock_minus_one_and_zero_statement_timeout_mixture_is_unknown`, `::test_inventory_exit_code_is_2_when_ddl_lock_is_blocked`, `::test_inventory_ddl_lock_key_set_is_the_same_on_the_psycopg_error_path`.
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -375,6 +381,22 @@ audit evidence tests; CCR-14's control-plane durable-audit and non-permanence pr
 `::test_a_successful_flush_clears_the_failing_flag_even_when_the_buffer_is_not_empty`, `::test_a_failing_flush_that_completes_after_a_successful_one_sets_the_flag_again` (the `failing`-flag pair, formerly named after "completion order --").
 
 `::test_buffer_does_not_grow_past_its_configured_bound`, `::test_buffer_overflow_emits_logging_error_and_exactly_one_security_control_failure_row` (the buffer-bound/overflow pair, formerly named after "rate-limited to one per flush interval --", together with the one further rate-limit pin this companion already held).
+
+---
+
+*Six r2db-api Evidence claims (five in the default block, one in the `audit query` named block), superseded 2026-09-18 (Version 2.8, R-50 WP-3 -- each claim's first bare `::name` gained the qualifying test file it continues from, `r2db-api/tests/test_application_audit.py` or `r2db-api/tests/test_audit_query.py`), verbatim:*
+
+every other reason code is non-durable and does not enter the bounded buffer -- `::test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry`, `::test_capability_unsupported_and_not_found_denials_add_no_durable_row`.
+
+`operation` U 31 = D 27 + N 4 (`delete_audit`/`set_authorization_state_available`/`set_credential_state`, plus `control_capabilities` (its 2 emit sites can never reach a deny branch) -- `::test_control_capabilities_operation_has_no_reachable_deny_branch`);
+
+Non-durability is measured, not assumed: `::test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durable_tables` drives each excluded word through its real path and asserts no durable row appears.
+
+folding M into the capacity thresholds is runbook work (`POSTGRES_PROVISIONING_RUNBOOK.md` §15) -- `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n`, `::test_different_denial_keys_do_not_coalesce_together` (1 more concurrency pin: companion history).
+
+the only detector is a per-field snapshot test pinning `DECLARED_AUDIT_OPERATIONS`/`DECLARED_AUDIT_TARGET_KINDS`/`DECLARED_AUDIT_EVENT_CLASSES` against a fixture `frozenset` -- `::test_declared_audit_event_classes_change_only_deliberately`, `::test_declared_audit_operations_change_only_deliberately` (1 more snapshot pin: companion history).
+
+the data-plane host declares `audit_query` `unavailable` and carries neither key (`::test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable`).
 
 ---
 

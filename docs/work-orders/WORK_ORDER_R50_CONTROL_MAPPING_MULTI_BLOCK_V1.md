@@ -265,3 +265,85 @@ python3 tools/public_value_scan.py conformance-tests/test_control_mapping_regist
 - **完了ゲート** (worktree、`gate.py -C`): `3733 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。
 - **R-52 の WP-3 の材料** (レビューの実測。旧 → 新): `security/CONTROL_MAPPING.md` の `:548` → `:577`、`:641` → `:682`、`:647` → `:688`、`:650` → `:691`、`:659` → `:700`、`:5` は不変。F-S11 の行は `:657` → `:698`。
 - **WP-3 の範囲の追加 (監督裁定)**: SI-14 の r2db-api の**既定**の小ブロックに、ファイル名を伴わない `` `::name` `` の形のテスト名が 24 件残り、同じファイル (`r2db-api/tests/test_audit_query.py`) を名指す 2 箇所はどちらも `audit query` の小ブロックへ移った (設計 §7.2 は移した側の指示語しか見ていなかった)。純粋な移動の枠では直せないので、**WP-3 (版 2.8 の訂正) に入れる**。確定文言は WP-3 の着手時に本書へ訂正註で足す。
+
+## 11. 訂正註 4 (2026-09-18) — WP-3 の確定文言
+
+本節の英文と `file:line`・字数は本書の起草者が起こした**案と起草時の実測**であり、**監督の確認をもって確定文言とする** (§1.5 の 35)。base は main `bd17175` (§10 の WP-2 統合後)。値は着手時に W3-1 として取り直す。
+
+### 11.1 変更 (i) — F-S11 の 1 行を SI-08 へ戻す
+
+- **対象 (実測)**: `security/CONTROL_MAPPING.md:698` = SI-09 / MitateDB-api / 既定の小ブロック / Evidence の 1 bullet、1,074 字 (設計 §8 の `:657` の WP-2 後の位置。§10 の「R-52 の WP-3 の材料」の実測と一致)。削除は §4.1 の確定文言のとおり (括弧書きを直前の半角空白 1 つごと)。削除後は 954 字 (設計 §8 と一致)。
+- **削除後の 1 行 (現物から起こした逐語。確定文言)**:
+
+> - `ops inventory` item (6) reads the value 0013 sets: `MitateDB-api/tests/test_ops_inventory.py::test_inventory_ddl_lock_is_confirmed_by_default_bootstrap_alone`, `::test_inventory_ddl_lock_confirmed_after_apply_platform_migration_0013`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_zero`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_negative`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_unparseable`, `::test_inventory_ddl_lock_is_blocked_when_only_the_application_runtime_role_is_unbounded`, `::test_inventory_ddl_lock_is_blocked_when_only_the_application_developer_role_is_unbounded`, `::test_inventory_ddl_lock_blocked_outranks_unknown_when_mixed_with_an_undeclared_role`, `::test_inventory_ddl_lock_minus_one_and_zero_statement_timeout_mixture_is_unknown`, `::test_inventory_exit_code_is_2_when_ddl_lock_is_blocked`, `::test_inventory_ddl_lock_key_set_is_the_same_on_the_psycopg_error_path`.
+
+- **単独で読めるか (§4.1 の停止条件の判断材料)**: 読める。`sets` の直後にそのまま `:` が続き、以降はテスト名の列挙だけである。削除は直前の半角空白ごとなので `sets` と `:` の間に空白は残らない。**最小の直しの案は要らない**。
+- **移す先 (実測)**: `security/CONTROL_MAPPING.md:616` = SI-08 / MitateDB-api / `ops inventory` / Evidence の item (6) の既存の証拠の bullet。**その直後**、現行 `:617` (「the CLI/key-set/`unjudged_items` static pins: …」) の前に置く。同小ブロック Evidence の先頭 `:609` は「every name below (`::name` form) is in that ONE file」と述べるが、移す 1 行は先頭が `MitateDB-api/tests/test_ops_inventory.py::…` の完全形で、残りも同じ 1 ファイルなので矛盾しない。
+
+### 11.2 変更 (ii) — SI-14 / r2db-api の既定の小ブロックの `::name` の出所
+
+- **実測 1 (実在ファイル)**: 既定の小ブロック (`:969-1044`) の、ファイル名を伴わない `` `::name` `` は 25 出現・24 名。実在ファイルは 4 つで、すべて `r2db-api/tests/` 配下 — `test_application_audit.py` 13 名、`test_audit_query.py` 7 名、`test_control_plane_service.py` 3 名、`test_control_plane_store.py` 1 名。**1 ファイルに閉じない**ので、SI-08 の名前付き小ブロックが使う「every name below (`::name` form) is in that ONE file」の形はそのままでは使えない。
+- **実測 2 (直前の完全形との一致)**: 25 出現のうち 11 は同じ小ブロック内の直前の `<path>::<name>` と実在ファイルが一致する (`:977`・`:978`・`:980`・`:983`・`:985`・`:987` 2 件・`:988`・`:989`・`:992` 2 件)。残り 14 出現 = 10 行 (`:994` 2 件・`:1002`・`:1003`・`:1004`・`:1011`・`:1021`・`:1022` 2 件・`:1023`・`:1033` 2 件・`:1043` 2 件) は食い違う。**実測 3 (base との差)**: その 10 行は分割前 (base `e0d2cb5`) でも同じく食い違っていた (base の `:953` 2 件・`:961`・`:962`・`:963`・`:981`・`:992`・`:993` 2 件・`:994`・`:1005` 2 件・`:1015` 2 件)。**分割で新たに曖昧になった行は 0 件**。ただし 6 行 (`:1011`・`:1021`・`:1022`・`:1023`・`:1033`・`:1043`) は分割で直前の完全形が入れ替わった (base では `r2db-api/tests/test_ops_declarations.py` と `MitateDB-api/tests/test_conformance_adapter_mitatedb_http_audit_writer_timeouts.py`、現行では `src/r2db_api/service.py` と `r2db-api/tests/test_preauth_concurrency_bound.py`)。
+- **案 (ii)-a (追加だけ。既存の bullet を 1 字も変えない)**: SI-14 / r2db-api / 既定 / Evidence の**先頭** (現行 `:1018` の前) に次の 1 bullet を足す。本文 1,285 字 / 行 1,287 字。既存の文を書き換えないので HISTORY への移送は生じない。
+
+> - A test name written `::name` in this default block carries no file of its own: it is in the nearest qualified `<path>::<name>` earlier in this SAME block, except these fourteen, which follow no such path -- `::test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry`, `::test_capability_unsupported_and_not_found_denials_add_no_durable_row`, `::test_each_data_operation_adds_exactly_one_application_audit_row`, `::test_dispatch_point_is_the_destructive_confirmation_choke`, `::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`, `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n` and `::test_different_denial_keys_do_not_coalesce_together` are in `r2db-api/tests/test_application_audit.py`, and `::test_control_capabilities_operation_has_no_reachable_deny_branch`, `::test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durable_tables`, `::test_declared_event_classes_cover_every_emittable_class`, `::test_every_field_keyword_argument_is_a_string_literal_ifexp_or_forward`, `::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer`, `::test_declared_audit_event_classes_change_only_deliberately` and `::test_declared_audit_operations_change_only_deliberately` are in `r2db-api/tests/test_audit_query.py`.
+
+- **案 (ii)-b (点ごとに補う。書き換えなので訂正に当たる)**: 食い違う 10 行のうち**最小の 5 行**で、その行の最初の `` `:: `` を `` `r2db-api/tests/test_application_audit.py:: `` (`:994`・`:1033`) / `` `r2db-api/tests/test_audit_query.py:: `` (`:1011`・`:1021`・`:1043`) に替える。この 5 行だけで残り 9 出現の直前の完全形も正しくなる (実測で確認)。Update convention により、次の**旧文 5 行**が逐語・無編集で `security/CONTROL_MAPPING_HISTORY.md` の **SI-14 節**へ移す対象になる (移すのは先頭の `- ` を外した本文で、下の `(`:994`)` 等は本註での位置の註記であり移送する文に含めない)。案 (ii)-a と (ii)-b のどちらを採るかは監督が決める。どちらも 11.4 の上限の検査を通る。
+
+> - (`:994`) every other reason code is non-durable and does not enter the bounded buffer -- `::test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry`, `::test_capability_unsupported_and_not_found_denials_add_no_durable_row`.
+> - (`:1011`) `operation` U 31 = D 27 + N 4 (`delete_audit`/`set_authorization_state_available`/`set_credential_state`, plus `control_capabilities` (its 2 emit sites can never reach a deny branch) -- `::test_control_capabilities_operation_has_no_reachable_deny_branch`);
+> - (`:1021`) Non-durability is measured, not assumed: `::test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durable_tables` drives each excluded word through its real path and asserts no durable row appears.
+> - (`:1033`) folding M into the capacity thresholds is runbook work (`POSTGRES_PROVISIONING_RUNBOOK.md` §15) -- `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n`, `::test_different_denial_keys_do_not_coalesce_together` (1 more concurrency pin: companion history).
+> - (`:1043`) the only detector is a per-field snapshot test pinning `DECLARED_AUDIT_OPERATIONS`/`DECLARED_AUDIT_TARGET_KINDS`/`DECLARED_AUDIT_EVENT_CLASSES` against a fixture `frozenset` -- `::test_declared_audit_event_classes_change_only_deliberately`, `::test_declared_audit_operations_change_only_deliberately` (1 more snapshot pin: companion history).
+
+### 11.3 版数行 2.7 → 2.8
+
+- **流儀 (現物と `git log` で確認)**: `security/CONTROL_MAPPING.md:5` は 1 行で、版が上がるたびに丸ごと置き換わってきた (2.0 `de0202d` / 2.4 `6dea423` / 2.5 `467b932` / 2.6 `40cdbd0` / 2.7 `0b25907`)。`security/CONTROL_MAPPING_HISTORY.md` に `Version:` 行は 0 件。したがって**2.7 の行は HISTORY へ移す対象ではない** (旧文は git 履歴が持つ)。
+- **確定文言の案 ((i) + 案 (ii)-a。2.7 の行と同じ形で、(i) と (ii) を 1 文ずつ)**:
+
+> Version: **2.8** (2026-09-18; R-50 WP-3 -- the SI-09 MitateDB-api Evidence bullet listing the tests that read the value migration 0013 sets moves to SI-08's `ops inventory` named block, beside the item (6) claim it evidences, with only its parenthetical about where that claim lives deleted, the superseded line verbatim in `CONTROL_MAPPING_HISTORY.md`'s SI-09 section. SI-14's r2db-api default block gains one Evidence bullet naming the test file each bare `::name` in that block belongs to -- docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md)
+
+- **案 (ii)-b を採るときの 2 文目の差し替え**:
+
+> SI-14's r2db-api default block now spells out the test file the `::name` list of five of its claims continues from, the five superseded lines verbatim in `CONTROL_MAPPING_HISTORY.md`'s SI-14 section.
+
+### 11.4 期待集計行・字数・§4.3 への訂正
+
+- **算法 (設計 §6 の 2・3・5)**: (i) は SI をまたぐので 4 つ組が一致せず `missing=1 added=1`、`moved` には入らない。(ii)-a は bullet の新設なので `added` が 1 増える。(ii)-b は 5 行の書き換えなので `missing`/`added` が 5 ずつ増える。`- —` は増減しないので `empty_axis_*` は 0。新設・書き換えの bullet は §6 の 5 の判定から除かれるので `subsequence=ok`。**`preamble` への訂正**: §4.3 の W3-5 は `preamble=identical` を期待するが、§7 の 2 の裁定 (版を 2.8 に上げる) と両立しない。**期待語を `preamble=differs` に訂正する**。出力される preamble の diff の hunk が版数行と 11.3 の確定文言だけであることを目視で照合する (§8 訂正註 1 の S-2 と同じ扱い)。
+- **`--expect` に渡す期待行 ((i) + 案 (ii)-a)**: `missing=1 added=2 moved=0 empty_axis_added=0 empty_axis_removed=0 subsequence=ok preamble=differs ccr14=identical rule=identical`
+- **`--expect` に渡す期待行 ((i) + 案 (ii)-b)**: `missing=6 added=6 moved=0 empty_axis_added=0 empty_axis_removed=0 subsequence=ok preamble=differs ccr14=identical rule=identical`
+- 起草時の確認: 現物から合成した候補 2 本に `tools/check_control_mapping_split.py --base bd17175 --new <候補>` を掛け、上の 2 行と逐語一致した (候補は scratchpad にのみ置き、`security/` は触っていない)。着手時に実物で取り直す。
+- **字数** (`conformance-tests/test_control_mapping_register.py` の `_subblock_block_text` を import して実測): SI-08 `ops inventory` 5,003 → **5,958** (残り 9,242)、SI-09 MitateDB-api 既定 12,793 → **11,718** (残り 3,482) — どちらも設計 §8 の値と一致。SI-14 r2db-api 既定 12,442 → **13,728** (案 a、残り 1,472) / **12,624** (案 b、残り 2,576)。上限 15,200 に触れない。行長は案 a の新設行が 1,287 字、現物の最長 1,384 字は不変で、いずれも 1,400 未満。**W3-7 への訂正**: (ii) を入れるので、W3-7 の実測の対象に **SI-14 / r2db-api の既定の小ブロックの字数**を足す。
+- **事実の指摘 (本註では文言を起こさない)**: (i) と (ii) の後、この文書の最長ブロックは SI-14 の r2db-api の既定 (案 a 13,728 / 案 b 12,624) になり、preamble `:50-52` の (F) の文が述べる「the longest block is now `SI-09`'s `MitateDB-api` `default block` at `12,793` characters (`2,407` left)」は偽になる。
+
+### 11.5 引用元への訂正註 (W3-8・W3-9)
+
+- **R-45 の作業指示書** `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md`: F-S11 の裁定は `:1150-1152` にあり (W3-8 の値と一致)、**1 行も消さない**。`:1152` の引用の直後、`:1154` の「監査照合の逐語記録」の前に、空行 1 行を置いて次を足す:
+
+> **訂正註 (2026-09-18、R-50 WP-3、本文は書き換えない)**: 上の F-S11 は「SI-08 の MitateDB ブロックが 15,194 / 15,200 字で入らない」ことを根拠に、item (6) の証拠のテスト名 1 行を SI-09 の MitateDB ブロックの Evidence に置いた。R-50 で 1 つの subsection が複数の小ブロックを持てるようになり (`security/CONTROL_MAPPING.md` version 2.7)、SI-08 の MitateDB-api は既定 10,190 字と名前付き `ops inventory` 5,003 字に分かれて、字数だけを根拠にした前提が解消した。よって version 2.8 でその 1 行を `SI-08 / MitateDB-api / ops inventory / Evidence` へ戻し、行中の括弧書き 1 つだけを削除した (旧文 1,074 字は `security/CONTROL_MAPPING_HISTORY.md` の SI-09 節へ逐語で移した)。根拠は設計 `docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` §8・§12 Q-3。F-S11 の行は当時の判断の記録として残す。
+
+- **設計メモ** `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md`: W3-9 が挙げる `:693,697` は、WP-2 が訂正註 2 本を足した後の現物では本文が **`:695`・`:700`**、WP-2 の訂正註が `:696`・`:701` である。**W3-9 の `file:line` をこの値に訂正する**。WP-2 の訂正註と重ならないよう、版数の古さは繰り返さず、移動の事実だけを `:696` の直後と `:701` の直後に同じ字下げで足す (2 箇所とも同じ文で足りる):
+
+> - **訂正註 (2026-09-18、R-50 WP-3、本文は書き換えない)**: 直前の WP-2 の訂正註が予告したとおり、SI-09 の MitateDB-api の Evidence から item (6) の証拠の 1 行が `SI-08 / MitateDB-api / ops inventory / Evidence` へ移り、Version 行は 2.8 になった。runbook §10.8 の受理記録に対応する SI-09 の Evidence・Status の 2 行は動いていない。
+
+### 11.6 監督の確定 (2026-09-18)
+
+1. **11.1 の (i) を確定文言とする** (括弧書きの削除だけ。移す先は 11.1 のとおり)。
+2. **(ii) は案 (ii)-b を採る。** 理由: 出所の食い違いは分割の前から在り (11.2 の実測 3。分割が新たに曖昧にした行は 0 件)、直すなら各主張がその場で自分の出所を持つ形が読み手に確実で、字数も小さい (+182 字)。案 (ii)-a は 1,285 字の例外の一覧を登録簿に足す形で、主張が増えるたびに一覧の保守が要る。§10 訂正註 3 の「同じファイル (`r2db-api/tests/test_audit_query.py`) を名指す 2 箇所」は不正確だった (実在ファイルは 4 つ。11.2 の実測 1) — 本項で訂正する。5 行の旧文は `security/CONTROL_MAPPING_HISTORY.md` の SI-14 節へ逐語で移す (W3-4 の射程に SI-14 節を足す)。
+3. **版数行は 11.3 の確定文言の案の 1 文目 + 「案 (ii)-b を採るときの 2 文目」とする。**
+4. **期待行は `missing=6 added=6 moved=0 empty_axis_added=0 empty_axis_removed=0 subsequence=ok preamble=differs ccr14=identical rule=identical`。** preamble の diff の hunk は版数行と下の 5 だけであること。
+5. **preamble の (F) の 1 文 (版 2.7 で足した再実測の文) は、その場で版 2.8 の実測に置き換える**: 「Re-measured 2026-09-18 (version 2.8, after the split and the SI-09 -> SI-08 move): the longest block is now `<SI-nn>`'s `<subsection>` `<default block | named block "topic">` at `<n>` characters (`<15200 - n>` left); the 15,122-character figure above describes the file before the split.」 `<…>` は担当が WP-3 の後の現物を実測して埋める (11.4 の見込みでは SI-14 の r2db-api の既定、12,624)。(F) は今日の版 2.7 で足した実測の文で、旧文は git 履歴 (`0b25907`) が持つので preamble の訂正註は足さない。`:5`・`:9`・`:33` の行番号は動かさない。
+6. **W3-7 の実測の対象に SI-14 / r2db-api の既定の小ブロックの字数を足す** (見込み 12,624)。W3-9 の `file:line` は 11.5 のとおり `:695`・`:700` (訂正註は `:696`・`:701` の直後)。
+7. **WP-2 の取りこぼし 2 件を本 WP で直す**: `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` の表題の版 (`:1` が v0.12 のまま、改版履歴は v0.13) を改版履歴の最新の版に合わせ (本 WP で版を上げるならその版)、同書 `:687` 付近の「SI-09 の Evidence へ 1 行として置いた」の記述の直後にも 11.5 と同じ訂正註を足す。
+
+## 12. 訂正註 5 (2026-09-18) — WP-3 の記録
+
+- **経過**: 確定文言の起草 (§11) → 監督の確定 (§11.6) → 実装 → コードレビュー 1 回目 (本体の (i)(ii) は全点で実測一致。中 1・低 2・佐 2) → 差し戻し 1 (同じ起動) → 監督が現物で確認 (照合スクリプトの再実行と 7 対目の差分)。
+- **差し戻し 1 の監督裁定**: (a) SI-14 / r2db-api / `audit query` の小ブロックにも、直前の完全形と実在ファイルが食い違う裸の `::name` が 1 件あった (分割の前から。`::test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable`、実在は `r2db-api/tests/test_audit_query.py`)。**本 WP に足した** — (ii)-b と同じ形。これにより §11.6 の 4 の期待行は **`missing=7 added=7 moved=0 empty_axis_added=0 empty_axis_removed=0 subsequence=ok preamble=differs ccr14=identical rule=identical`**、版数行の 2 文目は「SI-14's r2db-api default block now spells out the test file the `::name` list of five of its claims continues from, and its `audit query` block does the same for one claim, the six superseded lines verbatim in `CONTROL_MAPPING_HISTORY.md`'s SI-14 section.」に差し替えた。(b) WP-2 が `docs/design/CODE_COMMENT_PROVENANCE_V1.md` に足した訂正註の行番号 (`:70`) が、本 WP の (F) の 1 行増で `:71` に動いた。同書 v0.21 の訂正註で直し、**行番号に頼らない所在** (節 → 小節 → 最初の `#### Control`) を併記した。(c) `security/CONTROL_MAPPING_HISTORY.md` の SI-09 節へ移した 1 行は、同節の流儀に合わせて先頭の `- ` を外した。
+- **照合** (実装担当・レビュー担当・監督がそれぞれ実行): `python3 tools/check_control_mapping_split.py --base bd17175 --expect '…'` → 上の期待行と一致、exit 0。preamble の diff は版数行と (F) の文だけ。**道具に頼らない照合** (レビュー、差し戻しの前の 6 対): `- ` 行の多重集合の差は、括弧書き 120 字 (直前の半角空白を含む) の削除 1 対と、行の最初の `` `:: `` の直前へのパスの挿入 5 対だけ。7 対目は監督が差分で確認 (パスの挿入だけ)。
+- **`::name` の総当り** (レビュー): SI-14 / r2db-api の既定 34 出現で不一致 0、SI-08 の `ops inventory` 43 出現はすべて `MitateDB-api/tests/test_ops_inventory.py` に実在、移した行の 11 名も実在。`audit query` の残り 2 件は実装担当が grep で一致を確認。
+- **字数** (実測): SI-14 / r2db-api の既定 **12,624** (残り 2,576。文書の最長)、SI-08 の `ops inventory` **5,958**、SI-09 の MitateDB-api の既定 **11,718**。最長行 1,384 < 1,400。`:5`・`:9`・`:33` の行番号は不変。版 2.7 → **2.8**。
+- **HISTORY**: SI-09 節へ旧文 1 行、SI-14 節へ旧文 6 行を逐語で移した。節見出しの増減なし。
+- **引用元への訂正註**: `docs/work-orders/WORK_ORDER_MITATEDB_OPERATION_DEPTH_PLATFORM_UPGRADE_V1.md` の F-S11 の裁定 (`:1150-1152`。1 字も変えていない) の後、`docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` の 3 箇所 (v0.14。表題の版を改版履歴に同期)、`docs/design/CODE_COMMENT_PROVENANCE_V1.md` (v0.21)。
+- **`pt.py`**: `34 passed` / `507 passed`。`public_value_scan.py` = `total_flagged=0`、`check_doc_refs.py` = `0 dangling references`。**完了ゲート** (worktree、`gate.py -C`): `3733 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。
+- **R-52 の WP-3 の材料** (レビューの実測。WP-2 の後 → 本 WP の後。差し戻し 1 は行数を変えていない): `security/CONTROL_MAPPING.md` の `:577` → `:578`、`:682` → `:684`、`:688` → `:690`、`:691` → `:693`、`:700` → `:701`。F-S11 の行は `:618` (SI-08 / MitateDB-api / ops inventory / Evidence)。
