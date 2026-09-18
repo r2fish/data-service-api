@@ -226,3 +226,97 @@ python3 tools/check_comment_provenance.py --base "e3ace9e" MitateDB-api/src/mita
 - **独立レビュー (机上通し)**: 2 回。想定の本番の状態 10 通り — (a) `0014` 未適用の初回の読みは (8) blocked、step 7 が直す / (b) `0013` も未適用 / (c) `0012` 単独再適用 → (8) blocked で検知、補償は `0014` の再適用 / (d) `0013` 単独再適用 → provision の後は (8) blocked、provision するまではどの検査も回らない旨を明記 / (e) ADMIN OPTION の欠如 / (f) deprovision の中断の残骸 → 出口まで通る / (g) Control 未配備 / (h) `max_connections` の不足 / (i) 合計 3 / (j) rollback (`0014` は戻さない)。2 回目で行き止まりと堂々巡りは 0 件、受理。主張と現物 (0014 の SQL、`ops.py`) の照合と検算の再計算 (128 / 32 / 8 / 64、合計 234、合計 3 で 192 > 132) も一致。
 - **step 7 の形 (事実)**: `0012`・`0013` が適用済みの deployment でも 3 本とも無条件に再適用させる。numbered set の規律どおりとして変えない (道具の側の直しは roadmap R-57)。
 - **WP-4 の前倒し (監督裁定)**: §1.3 は WP-2 → WP-3 → WP-4 の直列としたが、runbook の本文が変わった時点で §10.8 の受理記録は版の据え置きのまま無効と同じ状態になる。この状態を R-50 の統合 (WP-3 の前提) まで放置しないために、WP-4 のうち runbook (§10.6 版 2→3・§10.7 版 2→3・§10.10 版 5→6 と §10.8 の記入) と設計メモ `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12 の記録を、上の独立レビューの結果をもって先に行う。`security/CONTROL_MAPPING.md` の中の版の記述の追随は WP-3 に入れる。
+
+## 10. 訂正註 4 — WP-3 の manifest と記録の材料
+
+§4 は「完了条件 → 変異の manifest と『記録』の小節は、R-50 の統合後に本書の訂正註として追記する」と定めた。R-50 は main `d2e7333` (版 2.8) で統合されたので、ここに置く。本文 (§4) は書き換えない (§1.8 の 57)。
+
+### 10.1 WP-3 の manifest (Class D。基点 main `d2e7333`、worktree `r52-wp3`)
+
+触るファイルは 6 本 (差し戻し 1 の後の実測。§10.5): `security/CONTROL_MAPPING.md`、`security/CONTROL_MAPPING_HISTORY.md` (書き換えた主張の旧文の移送先。`CONTROL_MAPPING.md` 冒頭の Update convention が定める)、本書、`docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` (§4 の行番号の訂正註と改版)、`docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md` (§4 の訂正註 1 本)、`MitateDB-api/tests/test_ops_apply_platform_migration.py` (module docstring と節見出しコメントの 2 箇所のみ。**テストの本体は 1 行も変えない**)。いずれも §1.2 の触らないファイルには当たらない。実行される振る舞いを 1 つも変えないので **変異は 0 件、全 12 件が 監査照合**である (§1.5 の 40 の 2 文目。WP-2 と同じ扱い、§1.4 の表)。照合対象の逐語記録は §10.2〜§10.5 に置く。
+
+| # | 完了条件 | 変異 / 監査照合 |
+|---|---|---|
+| W3-1 | `0014` の**値と算式** (132 / 36 / 68 / 12 = 2 × 1 process 分の pool + 4、margin は 1 つ) が SI-08 / MitateDB-api の**既定ブロック**に在り、r2db-api との差 (F-16 の床は両 peer とも 1 process 分のまま、上限の算式だけが違う) が正確に書かれている | 監査照合 (§10.2 の :580-582) |
+| W3-2 | `0014` の**性質** (1 トランザクションで失敗時に何も残さない、存在しない role を飛ばす、`0013` の `statement_timeout` を保持、ADMIN OPTION、`0012` → `0013` → `0014` の適用順、ヘッダが `0012`:78-79 を上書きする) が SI-09 / MitateDB-api の既定ブロックに在る | 監査照合 (§10.2 の :697-699) |
+| W3-3 | `apply-platform-migration` の**受け付けファイルの列挙**と runbook の **numbered set** がともに `0005/0007/0011/0012/0013/0014` になっている | 監査照合 (§10.2 の :691・:702) |
+| W3-4 | `ops inventory` の **(8)** について、合計 2 で confirmed・合計 3 で blocked、`0012` 単独再適用は捕らえる、`0013` 単独再適用は後に application を provision すれば捕らえる、provision しない間は**捕らえない** (S-1) の 4 点が SI-08 / MitateDB-api / `ops inventory` に在り、Evidence が実在するテスト名を引く | 監査照合 (§10.2 の :611-612・:626) |
+| W3-5 | **条件 2 の scope limit** (上限を上げても `max_connections` の余力は増えない、Z-27 の合計は物理的 worst case でない、`max_connections` が足りない場合の方針は未決 = 依頼者裁定 Q-4) を 1 行で開示している | 監査照合 (§10.2 の :630) |
+| W3-6 | runbook §10.6 / §10.7 / §10.10 の版が **3 / 3 / 6**、記録先が設計メモ `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 に追随し、Status に **`0014` も本番未適用**である事実が書かれている | 監査照合 (§10.2 の :710・:714、現物は `MitateDB-api/docs/cloud-run-cloud-sql.md`:2313・2363・2507・2427-2429) |
+| W3-7 | 書き換えた 7 行の**旧文が逐語**で `security/CONTROL_MAPPING_HISTORY.md` の該当 SI 節に在る (SI-08 に 1 件、SI-09 に 6 件)。行は消していない | 監査照合 (§10.3) |
+| W3-8 | Evidence のテスト名が**実在**し、完全形 `<path>::<name>` で始まり、裸の `::name` は同じ小ブロックの中の直前の完全形と同じファイルに在る (R-50 WP-3 の規律) | 監査照合 (§10.4 の grep の記録) |
+| W3-9 | **字数**が上限 (1 ブロック 15,200 字・1 行 1,400 字) に収まり、最長ブロックが変わったので preamble の再実測の文を実測値で置き換えた | 監査照合 (§10.4 の実測) |
+| W3-10 | 道具 4 本 (`tools/check_control_mapping_split.py --expect`・登録テスト・`tools/check_doc_refs.py`・`tools/public_value_scan.py`) が緑で、`missing` / `added` の各対が「書き換えた主張」「足した主張」に 1 対 1 で対応する | 監査照合 (§10.4 の集計行と §10.2 の対応表) |
+| W3-11 | `MitateDB-api/tests/test_ops_apply_platform_migration.py` の module docstring と節見出しコメントが現物と一致する (受け付け 6 本、drift-then-restore を持つのは 5 本、当該節が持つのは 4 本) | 監査照合 (§10.5 の 6) |
+| W3-12 | **W3-1〜W3-11 に対応の無い行が、触った 6 本の差分に 1 行も無い** | 監査照合 (§10.2・§10.3・§10.5 が差分の全行を尽くす) |
+
+### 10.2 触った行 — `security/CONTROL_MAPPING.md` (旧 = main `d2e7333`、新 = 作業後)
+
+**書き換えた主張 7 件 (= 集計行の `missing=7` の内訳。旧文は §10.3 へ逐語で移送)**
+
+| # | 主張 (置き場) | 旧 file:line | 新 file:line | 字数 旧 → 新 | 何が偽になったか |
+|---|---|---|---|---|---|
+| R1 | 0012 と F-16 の peer 対称 (SI-08 / MitateDB-api / 既定 / Control) | :578 | :580 | 1,011 → 1,190 | 「same formula」。`0014` で MitateDB 側だけ上限が並走 2 の値になった |
+| R2 | `apply-platform-migration` の受け付け列挙 (SI-09 / MitateDB-api / Control) | :684 | :691 | 500 → 505 | `0005/0007/0011/0012/0013` 止まり |
+| R3 | `0013` の適用順と stray `0012` の補償 (同上) | :690 | :697 | 449 → 777 | 「corrected by the next `apply-platform-migration 0013`」。`0014` の後は `0013` 単独では戻らない |
+| R4 | numbered set と value-neutral でない再適用 (同上) | :693 | :702 | 1,114 → 1,210 | numbered set・関数を置き換えるファイルの列・ADMIN OPTION の列がいずれも `0013` 止まり |
+| R5 | 2 つの migration テストファイルと件数 (SI-09 / MitateDB-api / Evidence) | :700 | :709 | 725 → 815 | 「44 tests」「each of the 5 accepted files」。実測は 51 件・受け付け 6 本 (うち drift-then-restore は 5 本) |
+| R6 | runbook の受理と版 (同上) | :701 | :710 | 564 → 543 | 版 2 / 2 / 5 と「記録は §10.8 を埋める変更セットで書く」(WP-4 で書き終えた) |
+| R7 | section 10 の版と本番未適用 (SI-09 / MitateDB-api / Status) | :705 | :714 | 441 → 599 | 版 2 / 2 / 5。`0014` の本番未適用にも合わせた |
+
+**足した主張 8 件 (= 集計行の `added=15` − `missing=7`)**
+
+| # | 主張 | 新 file:line (字数) | 対応する完了条件 |
+|---|---|---|---|
+| A1 | `0014` の値と算式、および peer 間の差が未検証の非対称である旨 (SI-08 / MitateDB-api / 既定 / Control) | :581 (734) | W3-1 |
+| A2 | margin は 1 つ・F-16 の床は据え置き・下げ戻しは (8) だけが読む (同上) | :582 (757) | W3-1 |
+| A3 | rollout の検算 (合計 2 = confirmed、合計 3 = blocked) (SI-08 / MitateDB-api / `ops inventory` / Control) | :611 (431) | W3-4 |
+| A4 | 単独再適用の 3 状態と検知の限界 S-1 (同上) | :612 (991) | W3-4 |
+| A5 | 上の 4 件のテスト名 (同 / Evidence) | :626 (518) | W3-4・W3-8 |
+| A6 | 条件 2 の scope limit (同 / Status。`- —` を置換 = `empty_axis_removed=1`) | :630 (455) | W3-5 |
+| A7 | `0014` の適用範囲と 1 トランザクション (SI-09 / MitateDB-api / Control) | :698 (540) | W3-2 |
+| A8 | 適用順・ヘッダの上書き・ADMIN OPTION とそのテスト名 (同上) | :699 (833) | W3-2・W3-8 |
+
+**主張以外に触った行 (preamble。登録テストのブロック集合には入らない)**
+
+- :5 版数行を 2.8 → **2.9** に置き換え (963 字)。形は版 2.8 の行に倣い、R-52 と設計メモ `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` を引く。
+- :47-53 の「Blocks per subsection」段落末尾の**再実測の文**を置き換え (§10.4 の実測による。最長ブロックが SI-14 / r2db-api / 既定 から SI-09 / MitateDB-api / 既定 に変わったため)。旧の 12,624 字という値は文中に残し、消していない。
+
+### 10.3 触った行 — `security/CONTROL_MAPPING_HISTORY.md` (追記のみ、42 行)
+
+R1 の旧文を `## SI-08` 節の末尾に 1 件 (:190)、R2〜R7 の旧文を `## SI-09` 節の末尾に 6 件 (:225・:231・:237・:243・:249・:255) 追記した。1 件の形は版 2.8 (R-50 WP-3) の追記に倣い、`*MitateDB-api <軸> claim, <何の主張か>, superseded 2026-09-19 (Version 2.9, R-52 WP-3 -- <なぜ偽になったか>), verbatim:*` の見出し 1 行 + 旧文 1 行。旧文は 1 文字も編集していない (抽出は作業前の同ファイルから行単位で取り、字数 1,011 / 500 / 449 / 1,114 / 725 / 564 / 441 を照合した)。既存の行は 1 行も消していない。
+
+### 10.4 実測と道具の集計行 (すべて worktree `r52-wp3`、基点 main `d2e7333`)
+
+- **字数** (登録テストの `_split_sections` / `_iter_section_subblocks` / `_subblock_block_text` を import して実測):
+  - 最長ブロックは **SI-09 / MitateDB-api / 既定 = 13,745 字** (上限 15,200、残り 1,455)。基点では SI-14 / r2db-api / 既定 = 12,624 字が最長で、この行は今回変えていないので 12,624 のままである。
+  - 次いで SI-14 / r2db-api / 既定 12,624、SI-08 / MitateDB-api / 既定 11,858 (基点 10,190)、SI-10 / MitateDB-api / 既定 10,625、SI-08 / MitateDB-api / `ops inventory` 8,187 (基点 5,958)。どれも上限内。
+  - 最長の物理行は **1,384 字** (:547、SI-08 / r2db-api の既存の行。今回足した行ではない)。上限 1,400。今回足した / 書き換えた行の最長は :702 の 1,210 字 (差し戻し 1 の後も同じ)。
+  - **途中の実測**: R1 を 1 行に収めた最初の形は 1,433 字で 1 行 1,400 字の上限を超えた。「両 peer の算式が同じでない」という節を A1 の行の冒頭へ移して 1,190 字に収めた (主張の内容は移動しただけで、増減していない)。
+- **`python3 tools/check_control_mapping_split.py --base d2e7333 --expect "<下の行>"`** → 集計行 `missing=7 added=15 moved=0 empty_axis_added=0 empty_axis_removed=1 subsequence=ok preamble=differs ccr14=identical rule=identical`、**exit=0**。期待行は §10.2 の 2 つの表 (書き換え 7 件 → `missing=7`、書き換え 7 + 追加 8 = `added=15`、小ブロック間の移動なし → `moved=0`、`ops inventory` の Status の `- —` を主張に置換 → `empty_axis_removed=1`、既存の主張の順序を変えていない → `subsequence=ok`、版数行と再実測の文を書き換えた → `preamble=differs`) から導いた。
+- **`tools/dev/pt.py -C .claude/worktrees/r52-wp3 -- conformance-tests/test_control_mapping_register.py -q`** (リポジトリルートで実行) → `34 passed in 0.24s`、exit=0。
+- **`python3 tools/check_doc_refs.py`** → `tracked markdown files scanned: 137` / `empty markdown files: 0` / `check_doc_refs OK: 0 dangling references`。
+- **`python3 tools/public_value_scan.py security/CONTROL_MAPPING.md security/CONTROL_MAPPING_HISTORY.md`** → `mode=tree files_scanned=2 total_flagged=0`。
+- **テスト名の実在** (W3-8): 新たに引いた 11 件は `MitateDB-api/tests/test_ops_apply_platform_migration.py` の 7 件 (`test_apply_platform_migration_0014_sets_role_connection_limits_for_every_role_class`・`::_new_application_connection_limit_is_68`・`::_duplicate_object_fallback_connection_limit_is_68`・`::_preserves_0013_statement_timeout_on_provisioned_roles`・`::_is_transactional_and_rolls_back_on_permission_failure`・`::_survives_a_registry_role_dropped_before_it_runs`・`test_apply_platform_migration_accepts_0014_via_the_subcommand`) と `MitateDB-api/tests/test_ops_inventory.py` の 4 件 (`test_inventory_connection_headroom_rollout_two_processes_confirmed_three_processes_blocked`・`::_catches_0012_reapplied_alone_after_0014`・`::_catches_0013_reapplied_alone_after_0014_when_a_new_application_exists`・`::_misses_0013_reapplied_alone_after_0014_with_no_new_application`) で、いずれも `def test_` を grep で確認した。裸の `::name` は各行の冒頭の完全形と同じファイルに在る。
+- **件数の実測** (R5): `grep -c 'def test_' MitateDB-api/tests/test_ops_apply_platform_migration.py` = **51** (同ファイルに `parametrize` は 0 件なので収集数と一致する)。`ops._PLATFORM_MIGRATION_FILENAMES` = 6 本、そのうち drift-then-restore のテストを持つのは 0005/0007/0011/0012/0013 の 5 本 (`0014` の drift-then-restore は無い)。`MitateDB-api/tests/test_platform_migration_reapply.py`:1053 の件数 pin も 6。
+
+### 10.5 差し戻し 1 の記録 (2026-09-19。コードレビュー 1 回目 → 監督裁定 → 直し)
+
+レビューは主張 15 件の断言を現物と突合し、全件一致。指摘 6 件はいずれも監督裁定済みで、次のとおり直した。**期待集計行は変わらない** (`missing=7 added=15 …`): 1 の対象行は本 WP が新しく足した bullet (`git show d2e7333:security/CONTROL_MAPPING.md` に当該文言 0 件) なので、その場の書き換えで済み、HISTORY への移送は生じない。
+
+1. **[中] 事実誤り**: A4 (`security/CONTROL_MAPPING.md`:612) の「a stray `0012` … lowers **every** existing platform-plane and application role」は偽。`0012` は `mitatedbsvc_auditreader` を `ALTER` しない (`MitateDB-api/migrations/0012_role_connection_limits.sql`:78-81、`MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`:42-51、runbook `MitateDB-api/docs/cloud-run-cloud-sql.md`:2346 の `0012` 行)。「`0012` が名指す role (api・controlplane・各 application の runtime/developer) を 68/20/36 に戻し、`mitatedbsvc_auditreader` は `0014` の 12 のままである」形に直した。字数 829 → 991。
+2. **[中。監督裁定: 開示する] 未検証の非対称**: A1 (:581) の末尾に、r2db-api の配備が同じ plane の process を 2 つ並走させうるかは未検証であり、この差は受理済みの差ではない旨を 1 文足した (台帳 R-52 を引く。形は SI-00 の `a separate, still-open asymmetry (ledger item L4-13, still open)` に倣う。出所は設計メモ `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §9 の残課題)。字数 510 → 734。
+3. **[中] 設計メモの改版**: `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` を **v0.4** に上げ、改版の行に「v0.4（2026-09-19）§4 の行番号に実測の訂正註を足した。本文の決定は変えていない。」を足した。既存の記述は 1 行も消していない。
+4. **[低〜中。監督裁定] 行番号の引用**: `docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md` の「## 4. 訂正註」に訂正註を 1 本足した。実測: 当該行 (`` `execution_ms` is declared `reference_wall_clock` `` で始まる bullet) は版 2.9 で `:570`。既存の訂正註の `:567` は版 2.7 時点の値で、版 2.8 (R-50 WP-3) の preamble 追記で既に `:568` へずれていた (`git show d2e7333:security/CONTROL_MAPPING.md` で実測)。**所在はレビューの示唆と異なり `### r2db-api` ではなく `### MitateDB-api` (既定の小ブロック)** で、`## SI-08 Bounded Resource Consumption` → `### MitateDB-api` → `#### Control` である。行番号に頼らない所在を併記し、以後ずれのたびに訂正註を足さない旨を書いた。`docs/design/CODE_COMMENT_PROVENANCE_V1.md` は v0.21 で既に同等の所在を持つので触っていない。
+5. **[低] 触るファイルの本数**: §10.1 の「2 本のみ」を実測の 6 本の列挙に直した。
+6. **[低。監督裁定: 直す] テストの記述**: `MitateDB-api/tests/test_ops_apply_platform_migration.py` の module docstring (`:11`-`:13`)「drift-then-restore for each of the **four** accepted files」を「5 of the 6 accepted files (0005/0007/0011/0012/0013; 0014 has none)」に、節見出しコメント (`:526`-`:527`)「drift-then-restore for each accepted file」を「drift-then-restore -- 0005/0007/0011/0012 (0013's own is in its own section below; 0014 has none)」に直した。実測: `ops._PLATFORM_MIGRATION_FILENAMES` は 6 本、drift-then-restore のテストを持つのは 5 本 (`0005`:603・`0007`:621・`0011`:643・`0012`:671 が当該節、`0013`:888 は自分の節)、`0014` は持たない。テストの本体は 1 行も変えていない。
+7. **[別件]** SI-09 / MitateDB-api の既定が 13,745 字 (上限 15,200、残り 1,455) になった件は監督が台帳に起票する。本 WP では触らない。`0014` の主張に作業名は付けない (現状のまま)。
+
+**差し戻し 1 の後の実測と集計行** (基点 main `d2e7333`、worktree `r52-wp3`):
+
+- `python3 tools/check_control_mapping_split.py --base d2e7333 --expect "missing=7 added=15 moved=0 empty_axis_added=0 empty_axis_removed=1 subsequence=ok preamble=differs ccr14=identical rule=identical"` → 同じ集計行、**exit=0**。
+- `tools/dev/pt.py -C .claude/worktrees/r52-wp3 -- conformance-tests/test_control_mapping_register.py -q` → `34 passed in 0.23s`、exit=0。
+- `tools/dev/pt.py -C .claude/worktrees/r52-wp3 -- MitateDB-api/tests/test_ops_apply_platform_migration.py -q` → `51 passed in 6.74s`、exit=0 (§10.4 の件数 51 を実行でも裏付けた)。
+- `python3 tools/check_doc_refs.py` → `tracked markdown files scanned: 137` / `empty markdown files: 0` / `check_doc_refs OK: 0 dangling references`。
+- `python3 tools/public_value_scan.py` (触った 6 本) → `files_scanned=6 total_flagged=0`。
+- **字数**: 最長ブロックは SI-09 / MitateDB-api / 既定 = **13,745 字のまま**変わらないので、preamble の (F) の再実測の文は §10.2 で置き換えた形のままでよい (測り直して確認)。SI-08 / MitateDB-api / 既定は 11,634 → **11,858** 字 (残り 3,342)。最長の物理行は **1,384 字** (:547、既存の行) のままで、今回の 2 件の伸び (:581 = 734、:612 = 991) はいずれも 1 行 1,400 字の上限内。

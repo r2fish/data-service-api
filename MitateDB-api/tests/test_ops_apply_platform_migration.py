@@ -8,8 +8,9 @@ Covers: filename validation (enumeration, path separators, directory
 containment, no value echoed on rejection, a symlinked migrations
 directory), the psql-variable table, DSN-via-environment-only
 (design Z-8/D-10), connection-value redaction, the required `--lock-
-timeout`, `ON_ERROR_STOP`, psql 16+, drift-then-restore for each of the
-four accepted files, and the AST-derived "flows DDL" subcommand set.
+timeout`, `ON_ERROR_STOP`, psql 16+, drift-then-restore for 5 of the 6
+accepted files (0005/0007/0011/0012/0013; 0014 has none), and the
+AST-derived "flows DDL" subcommand set.
 
 Test infrastructure: own fixtures, duplicated bootstrap shape from
 `test_ops_inventory.py`/`test_platform_migration_reapply.py`, not
@@ -522,7 +523,8 @@ def test_apply_platform_migration_fails_by_exit_code_when_its_dependency_is_miss
 
 
 # ===========================================================================
-# drift-then-restore for each accepted file
+# drift-then-restore -- 0005/0007/0011/0012 (0013's own is in its own
+# section below; 0014 has none)
 # ===========================================================================
 
 
