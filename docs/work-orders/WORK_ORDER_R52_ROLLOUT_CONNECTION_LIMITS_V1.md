@@ -320,3 +320,28 @@ R1 の旧文を `## SI-08` 節の末尾に 1 件 (:190)、R2〜R7 の旧文を `
 - `python3 tools/check_doc_refs.py` → `tracked markdown files scanned: 137` / `empty markdown files: 0` / `check_doc_refs OK: 0 dangling references`。
 - `python3 tools/public_value_scan.py` (触った 6 本) → `files_scanned=6 total_flagged=0`。
 - **字数**: 最長ブロックは SI-09 / MitateDB-api / 既定 = **13,745 字のまま**変わらないので、preamble の (F) の再実測の文は §10.2 で置き換えた形のままでよい (測り直して確認)。SI-08 / MitateDB-api / 既定は 11,634 → **11,858** 字 (残り 3,342)。最長の物理行は **1,384 字** (:547、既存の行) のままで、今回の 2 件の伸び (:581 = 734、:612 = 991) はいずれも 1 行 1,400 字の上限内。
+
+## 11. 訂正註 5 (2026-09-19) — WP-3 の統合、受け入れ監査、監督の受け入れ
+
+- **WP-3 の統合**: main `dccceeb`。`security/CONTROL_MAPPING.md` 版 2.9 (追加 8・書き換え 7。旧文 7 件は `security/CONTROL_MAPPING_HISTORY.md` へ逐語)。コードレビュー 1 回 + 差し戻し 1 (事実誤り 1 件 = 「`0012` の単独再適用は全 role を下げる」→ auditreader は下がらない / r2db-api の並走が未確認であることの開示 / テストの docstring の「4 本」→ 受け付け 6 本・drift-then-restore は 5 本)。`tools/check_control_mapping_split.py --base d2e7333` = `missing=7 added=15 moved=0 empty_axis_added=0 empty_axis_removed=1 subsequence=ok preamble=differs ccr14=identical rule=identical`、exit 0 (起草担当・レビュー担当・監督・監査がそれぞれ再現)。完了ゲート (worktree を main へ早送りした木): `3733 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。
+- **受け入れ監査** (`evidence-auditor` 1 回、main `dccceeb`): **未充足 0、証拠不足 2、要訂正 3**。充足 = W1-1〜W1-13 と W1-17 (変異 22 件の log を全件読み、各 log とも収集 1 件・名指しのテストが FAILED)、W2-1〜W2-8 と S-1 の runbook の記載、W3-1〜W3-12、W4-2〜W4-4、依頼者裁定の 6 項 (132 / 36 / 68 / 12、並走 2、F-16 の床は不変 = `platform_declarations.py` の差分 0、`max_connections` は未決として開示、r2db-api の差分 0、裁定文の逐語)、公開規律。3704 + 6 (R-51 の新規テスト) = 3710 の独立照合も一致。
+- **監督裁定**:
+  - **A-1 (証拠不足: W4-1。WP-2 の独立レビューの指摘の原文が残っていない)** → 下の 11.1 に 1 回目の指摘 8 件を写して充足とする。
+  - **A-2 (証拠不足: W2-1〜W2-11 の更新前後の行の逐語)** → 逐語の正本は作業コミット `3c1194c` (WP-2) と WP-4 の runbook 部分のコミットの差分とする。git の履歴は scratchpad と違って失われず、1 字も丸めない。§9 訂正註 3 の宣言のままで充足と裁定する。
+  - **A-3 (要訂正 a)**: §2.4 の W1-1 の括弧の並び「api / controlplane / auditreader / application」に対する値の並びは **132 / 36 / 12 / 68** が正しい (auditreader = 12、application role = 68。設計 §4 と §7 訂正註 1 が正)。依頼者裁定の「132 / 36 / 68 / 12」は api / controlplane / application / auditreader の順である。**(b)** 実装報告の `ADMIN_DSN_ENV` の所在は `MitateDB-api/tests/test_ops_apply_platform_migration.py` の `:43` (報告の `:42` は誤り)。**(c)** §8 の「新規テスト 12 件」は、テスト関数 11 件 + `test_platform_migration_reapply.py` の parametrize の増分 1 件である。
+  - **A-4 (設計疑義: `security/CONTROL_MAPPING.md` の「ledger item R-52, still open」)** → **R-52 は閉じない。** 実装 WP (WP-1〜WP-4) は受け入れるが、台帳の R-52 行は次の 2 つの残りを持つ未決の項目として開けておく: (i) r2db-api の配備が 2 つの process を並走させうるかの確認 (設計 §9)、(ii) 依頼者裁定 Q-4 (`max_connections` が条件 2 に足りない場合の方針。本番の読み取りの後)。
+  - **A-5**: SI-09 / MitateDB-api の既定の小ブロックが 13,745 字 (残り 1,455) の件を roadmap に R-59 として起票する (R-50 の形で名前付き小ブロックへ分ける候補は `apply-platform-migration`・0013・0014・numbered set・runbook の受理の 7 行、計 5,223 字 — WP-3 のレビューの実測)。
+- **受け入れ (監督、2026-09-19)**: **R-52 の WP-1〜WP-4 を受け入れる。** 本番には何も適用していない。`0014` の本番への適用は runbook §10 の手順と依頼者の指示による。
+
+### 11.1 WP-2 の独立レビュー 1 回目の指摘 (A-1 の写し。runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` の当時の行番号)
+
+1. 中 — step 7 の新規の段落で「never one of them on its own」と「The compensation for either case is to apply `0014` once more」が矛盾する。前者を `0012`・`0013` に限定し、`0014` 単独が安全である根拠 (自分の値しか SET しない、関数の置換が `0013` の `statement_timeout` も運ぶ) を足す。
+2. 中 — §10.6 の `0014` の行の「idempotent and lowers nothing」「lowers none」は現物と食い違う。`0014` は無条件に値を SET するので、それより高くしてある上限は下がる。`0012` の行と同じ強さの警告にする。
+3. 中 — §10.10.1 の item (8) の行と直後の「this stage does not resolve … Report and stop」の列挙が食い違う。`0014` 未適用の本番の初回の読みは必ず (8) blocked (api 68 < 128) で、step 7 が直せる。「step 7 の値を代入しても不足するものだけが止まる」と明示する。
+4. 中 — deprovision が途中で落ちて registry に role 名だけ残る cluster では、`0013`・`0014` は `IF EXISTS` で飛ばすが `0012` に防御が無く、step 7 の第 1 命令が `undefined_object` で全部戻る。出口が §10.10 に無い。→ 出口 (§7 の deprovision の再実行。`0004` は `DROP … IF EXISTS` と無条件の `finish_deprovision_application`) を現物で裏付けて書いた。
+5. 低 — 前提条件の括弧は条件 1 の話で、条件 2 (`max_connections` の不足) の出口 (Cloud SQL の `max_connections` の設定) が名指しされていない。
+6. 低 — 検算例の合計 3 は blocked で終わり、出口 (旧 revision の tag の除去・`minScale` の見直しで合計を 2 に戻す。traffic projection の変更としての条件付き) が書かれていない。
+7. 低 — 引いたテストが固定するのは rc≠0 と api = 68 の据え置きだけで、`InsufficientPrivilege` (42501) 自体は固定していない。「holds the rollback; the SQLSTATE is from the same measurement」に緩める。
+8. 低 — §3 の role floor の表は古い値 (68 / 20 / 36) が表、現行の値が直後の註、という並びで、表だけ読むと読み違える。列名に 1 句足す。
+
+2 回目の再確認で 8 件とも現物で解消、机上通し 10 状態の行き止まりと堂々巡りは 0 件、受理 (§9 訂正註 3)。
