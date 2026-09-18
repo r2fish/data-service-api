@@ -1,9 +1,9 @@
-# MitateDB の rollout 中の role `CONNECTION LIMIT` 設計メモ（v0.3）
+# MitateDB の rollout 中の role `CONNECTION LIMIT` 設計メモ（v0.4）
 
 - 状態: **依頼者裁定済み (2026-09-18)**。Q-1〜Q-4 はすべて監督の推奨どおり (§10.1)。Q-4 の中身は本番の読み取りの後に裁定する。
 - 台帳: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-52**（`RM`:439）。
 - 起票: 2026-09-18。R-45 WP-D の設計レビュー 2 回目の高 1 件と監督の現物確認（`RM`:439）。依頼者の回答（2026-09-18、逐語）「本番の読み取りより前に着手」により、本番の Gate-0 読み取りに先立つ比較資料として起こした。
-- 改版: v0.1（2026-09-18）起票。v0.2（2026-09-18）依頼者裁定を §10.1 に逐語で記録し、Q-3 の推奨欄を監督が記入した。v0.3（2026-09-18）設計レビュー 1 回目の 8 件を反映（監督裁定 2026-09-18、すべて採用）: 0013 の再適用と適用順の不変量、`0014` の性質（1 トランザクション・ADMIN OPTION・auditreader のヘッダ上書き）、runbook §10.8 の再受理の WP、条件 2 の合計の言い換えと物理的 worst case、R-50 を WP-3 の前提条件へ、追随先とテストの行番号の実測。本文の行は消していない（`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56）。
+- 改版: v0.1（2026-09-18）起票。v0.2（2026-09-18）依頼者裁定を §10.1 に逐語で記録し、Q-3 の推奨欄を監督が記入した。v0.3（2026-09-18）設計レビュー 1 回目の 8 件を反映（監督裁定 2026-09-18、すべて採用）: 0013 の再適用と適用順の不変量、`0014` の性質（1 トランザクション・ADMIN OPTION・auditreader のヘッダ上書き）、runbook §10.8 の再受理の WP、条件 2 の合計の言い換えと物理的 worst case、R-50 を WP-3 の前提条件へ、追随先とテストの行番号の実測。本文の行は消していない（`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56）。v0.4（2026-09-19）§4 の行番号に実測の訂正註を足した。本文の決定は変えていない。
 - 公開規律: `docs/work-orders/OPERATING_CONDITIONS.md` §2 の 13、§1.9。本メモの数値はすべて本リポジトリの現物から読んだ値と算式であり、本番の読み取り値・DSN・ホスト名は 1 つも含まない。
 
 ## 1. 問題
@@ -76,6 +76,7 @@
   - runbook §10.8 の受理記録（:2380-2392）。**表や手順の版が上がると「版が一致しない記録は記録が無いのと同じ」**（:2384-2385）なので、受理は無効に戻る。現行の受理は §10.6 版 2 / §10.7 版 2 / §10.10 版 5 で、記録先は設計メモ `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.6（同:689）。新しい受理はその次の番号の節に置く。→ §11 の WP-4。
   - `security/CONTROL_MAPPING.md`: :548（「r2db-api と同じ算式」の主張）、:641（受け付けファイルの列挙）、:647（「0012 alone afterward … corrected by the next `apply-platform-migration 0013`」— 0014 を含む順序に直す）、:650（numbered set と再適用が value-neutral でない旨）、:659（§10.8 の受理と版数の対応）、:5（版数の記述「tables at version 2, the procedure at version 5, … 0005/0007/0011/0012/0013」）。
 - 注意（事実）: `0012:68` は「MitateDB の runbook の "role CONNECTION LIMIT" 表」に全算術があると書いているが、MitateDB の runbook にその表は無い（実測。同名の表があるのは `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`:333）。MitateDB 側で値を持つのは runbook:2310 の §10.6 の行と :2701 の §10.10.1 の行である。
+- **訂正註（2026-09-19、WP-3 着手時の実測）**: 上の `security/CONTROL_MAPPING.md` の行番号は起票時（v0.1、2026-09-18、`security/CONTROL_MAPPING.md` 版 2.6）の実測値である。上の行は消さない（`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56）。roadmap R-50（作業指示書 `docs/work-orders/WORK_ORDER_R50_CONTROL_MAPPING_MULTI_BLOCK_V1.md`、版 2.7・2.8）が SI-08 / MitateDB-api を既定ブロックと `ops inventory` ブロックに分け、SI-09 の Evidence 1 行を SI-08 へ移した結果、同じ主張は R-50 統合後（main `d2e7333`）に :578（同じ算式）・:641→:684（受け付けファイルの列挙）・:647→:690（`0012` alone afterward …）・:650→:693（numbered set）・:659→:701（§10.8 の受理と版数）へ動いた。さらに WP-3 自身の書き換えの後は :580・:691・:697・:702・:710 である。:5（版数行）は行番号こそ動いていないが、そこが名指していた文面「tables at version 2, the procedure at version 5, … 0005/0007/0011/0012/0013」は版 2.7・2.8 の版数行に丸ごと置き換わっており、現行の版数行は 10.6/10.7/10.10 の版も migration の列挙も持たない（版数行はその版の変更を述べる行で、累積しない）。同じ内容を持つのは SI-09 / MitateDB-api の Evidence と Status、および SI-09 / MitateDB-api の Control の numbered set の行である。行番号で名指す先を読むときは、着手時に現物で実測し直す。
 
 ## 5. 却下の見立て (b): 数え方の見直し（`--no-traffic` の間は candidate を数えない等）
 

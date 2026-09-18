@@ -347,6 +347,17 @@ declared `reference_wall_clock`, not `enforced` … ``) は 1 字も変わって
 3 つ目は、実測では `CH-0538` の行であり `security/CONTROL_MAPPING.md:538` を
 引いていない (2026-09-18 実測)。
 
+**訂正註 (2026-09-19、R-52 WP-3、本文は書き換えない)**: 同じ行が `security/
+CONTROL_MAPPING.md` version 2.9 (R-52 WP-3。preamble の再実測の文が 2 行伸びた) で
+`:570` へ動いた。上の訂正註の `:567` は version 2.7 時点の値で、version 2.8 (R-50
+WP-3) の preamble 追記で既に `:568` へずれていた (2026-09-19 実測)。文言は
+version 2.7 以降 1 字も変わっていない。**以後は行番号に頼らず、次の所在で辿る**:
+`security/CONTROL_MAPPING.md` の `## SI-08 Bounded Resource Consumption` 節 →
+`### MitateDB-api` (既定の小ブロック。`### MitateDB-api -- ops inventory` では
+ない) → `#### Control` の、`` `execution_ms` is declared `reference_wall_clock`,
+not `enforced` `` で始まる bullet。preamble の伸びで行番号が動いても、この所在で
+同じ行に着く。**行番号のずれのたびに訂正註は足さない。**
+
 ## 5. 変更セット 2 — r2db `postgres.py` の再判定と r2db `service.py`
 
 正本設計は v0.6 (§3、§6、§8、§9)。行番号は `ccp-cs0` `81ff2b7` の値。
