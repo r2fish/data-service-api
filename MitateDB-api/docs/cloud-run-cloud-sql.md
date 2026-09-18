@@ -452,12 +452,31 @@ irrelevant) the `platform_declarations` migration above:
 PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
   psql \
   -f MitateDB-api/migrations/0012_role_connection_limits.sql
+
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
+  -f MitateDB-api/migrations/0013_role_statement_timeouts.sql
+
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
+  -f MitateDB-api/migrations/0014_role_connection_limits_rollout.sql
 ```
+
+(2026-09-18: the block above used to stop at `0012`. Two files after it
+touch the same subject, so all three run here, and always in the order
+`0012` -> `0013` -> `0014`: each of the two earlier files replaces
+`begin_provision_application` with its OWN `CONNECTION LIMIT` literals,
+so running one of them alone after `0014` lowers a limit again.
+`0013` and `0014` both alter `mitatedbsvc_auditreader`, which `0005`
+(§3.2b) creates, so both fail with an undefined-role error on a database
+where `0005` has not run -- unlike `0012`, whose own order relative to
+`0007`/`0011` stays irrelevant. §10.10's numbered-set note and §10.10.1
+step 7 carry the same order for an existing deployment.)
 
 Role floor arithmetic (formula: worst-case pool composition + 4 fixed
 operator-headroom connections):
 
-| Role | Pool composition | Old `CONNECTION LIMIT` | New `CONNECTION LIMIT` |
+| Role | Pool composition | Old `CONNECTION LIMIT` | New `CONNECTION LIMIT` (as `0012` sets it -- the values a deployment carries today are in the note below this table) |
 | --- | --- | --- | --- |
 | `mitatedbsvc_api` | platform pool (`role_pool_size`, declared `max_concurrency`, default 32) + durable audit sink's own per-write transient connections (also bounded by `max_concurrency`) = 2 x 32 = 64 | 20 | 68 |
 | `mitatedbsvc_controlplane` | 4 platform-plane stores, peer-symmetric worst case with r2db-api's own measured 16 | 10 | 20 |
@@ -465,6 +484,18 @@ operator-headroom connections):
 | `<app>_dv` (developer) | 1 store, bounded by `max_concurrency` = 32 | 10 | 36 |
 | `mitatedbsvc_provision` | short-lived, one-shot CLI/provisioning connections only -- no persistent pool | 5 | unchanged (already >= its own real pool composition) |
 | `mitatedbsvc_auditreader` | 1 store, fixed floor 4 | 5 | unchanged (already >= its own real pool composition) |
+
+(2026-09-18: the "New `CONNECTION LIMIT`" column above is `0012`'s own
+value and is no longer the value a deployment carries once the block
+above has been run to its end. `0014` raises the same composition to the
+demand of TWO revisions of the same process serving at once, which is
+what a rollout puts side by side: `mitatedbsvc_api` 132, `mitatedbsvc_
+controlplane` 36, each `<app>_rt` / `<app>_dv` 68, and
+`mitatedbsvc_auditreader` 12 -- the auditreader's "unchanged" row holds
+for ONE process only, and 5 no longer covers 2 x 4. `mitatedbsvc_
+provision` stays unchanged. The formula is the same one this table uses,
+with "pool 合計" read over the processes serving at once: §10.10's own
+precondition arithmetic works the same numbers.)
 
 `max_connections` (Cloud SQL flag `max_connections`, or `SHOW max_
 connections;`) must be >= the sum of every role's own `CONNECTION LIMIT`
@@ -1689,8 +1720,9 @@ absent).
 
 This is the operator procedure for the Gate-0 read (10 items) that runs
 BEFORE any platform upgrade of the Data/Control services, and for the
-upgrade itself (platform migrations `0005`/`0007`/`0011`/`0012`/`0013`,
-per-application upgrades, declarations, removal of the legacy base-URL env
+upgrade itself (platform migrations
+`0005`/`0007`/`0011`/`0012`/`0013`/`0014`, per-application upgrades,
+declarations, removal of the legacy base-URL env
 vars, restart, health, traffic, rollback). The judgment vocabulary
 (confirmed / blocked / unknown, plus the `remediation-required` note) and
 the 10 items themselves are defined in `docs/design/MITATEDB_PLATFORM_
@@ -2261,6 +2293,10 @@ value only in the case §10.4.3's table describes:
   `0012` is what replaces a `-1` `CONNECTION LIMIT` with a finite one
   (§10.10 step 7), so on a deployment where they have not run yet, expect
   item (6) `unknown` in the first read and resolve it in stage 2.
+  (2026-09-18: step 7 now ends with `0014`, which sets a finite
+  `CONNECTION LIMIT` on the same roles AND on `mitatedbsvc_auditreader`,
+  which `0012` never alters -- so a `-1` on the auditreader is resolved
+  there too.)
 - **An application provisioned by a `0003_provision_application.sql` old
   enough to predate the per-application upgrade ledger, with `0008` not
   yet applied, makes `migrations` blocked with the reason
@@ -2307,8 +2343,9 @@ record goes back to "not accepted".
 | `0005_application_audit.sql` | applied (platform) | none; not reverted | **compatible**. Adds `mitatedb_registry.application_audit` and the `mitatedbsvc_auditreader` role, grants `mitatedbsvc_api` INSERT on the new table plus USAGE on its sequence, and adds a new SELECT grant for `mitatedbsvc_auditreader` on the EXISTING `mitatedb_registry.control_audit` without narrowing the grant already there (`0002` grants the control plane INSERT on that table) -- it names no existing table in any `ALTER`/`DROP` (fact: the file's own statements and header). A revision that lacks it reads and writes none of the new objects | fact | none: the judgment rests on `0005`'s own statements, so it holds at every ref |
 | `0007_platform_declarations.sql` | applied (platform), inside the numbered set. **Re-applying it is idempotent but NOT value-neutral**: it re-sets both roles' `statement_timeout` and `idle_in_transaction_session_timeout` to `5000ms` unconditionally, and it replaces the `audit_writer_roles` declaration row with the pair passed in `--api-role`/`--controlplane-role` (`ON CONFLICT ... DO UPDATE`). Record both before applying and restore them straight afterwards (§10.10 steps 2 and 4) | none; not reverted | **compatible (inference), with one part left unverified**. A pre-`0007` revision does not read `platform_declarations` and reads surfaces from env instead (fact: that revision's own `config.py`). The effect it does feel is the role-level `statement_timeout`/`idle_in_transaction_session_timeout` (5000ms) on `mitatedbsvc_api`/`mitatedbsvc_controlplane`; a role setting applies at login, so sessions that revision opens after the migration carry it while sessions already open keep their own. That revision applied the same two values itself with `SET SESSION`, but only on the audit write connection (fact: that revision's own `application_audit.py`). **Unverified: whether that revision's other queries (registry reads and the like) all finish inside 5 seconds.** Accepting this table at its current version accepts that residual risk -- such a query is cancelled with `canceling statement due to statement timeout` instead of running unbounded | fact + inference, one part unverified | a ref whose `config.py` reads the surfaces from env and performs no `platform_declarations` read, and whose `application_audit.py` applies both timeouts with `SET SESSION` on the audit write connection |
 | `0011_process_ceilings.sql` | applied (platform) | none; not reverted | **compatible**. It only widens the `key` CHECK vocabulary. A pre-`0011` revision's declaration read picks known keys by name and ignores a row with an unknown key (`process_ceilings`) (fact: that revision's own `platform_declarations.read_platform_declarations`); a pre-`0007` revision does not read the table at all | fact | a ref whose declaration read selects known keys by name and ignores an unknown key, or a ref that does not read the table at all |
-| `0012_role_connection_limits.sql` | applied (platform). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it.** No `ops` subcommand prints those current values -- item (8)'s output carries judgment keys only, and `verify-declarations`'s F-16 names a value only inside its own failure message, for the first role that fails -- so read them with a catalog read over the provision DSN and record them before applying (§10.10 step 2) | none; not reverted | **compatible**. Sets each role's `CONNECTION LIMIT` to a fixed value (68 / 20 / 36) and replaces `begin_provision_application` with the same signature and result columns (fact: `0002`'s and `0012`'s own definitions). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 68 / 20 / 36 -- compute it from that ref's own `config.py` |
-| `0013_role_statement_timeouts.sql` | applied (platform) | none; not reverted | **compatible (inference)**. Adds a role-level `statement_timeout` (`5000ms`) to `mitatedbsvc_auditreader` and to every application's runtime/developer role, and replaces `begin_provision_application` so future roles get the same setting -- additive; it drops and revokes nothing (fact: the file's own header and statements). A revision that lacks it passes its own per-request deadline with `SET LOCAL`, which overrides the role setting; the setting therefore bites only on paths that carry no deadline (inference). Note: an audit query slower than the new bound is cancelled rather than running unbounded | fact + inference | a ref whose request paths set their own per-request deadline with `SET LOCAL statement_timeout`. The note holds at every ref: a path that carries no deadline of its own is bounded by the role setting |
+| `0012_role_connection_limits.sql` | applied (platform). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it.** No `ops` subcommand prints those current values -- item (8)'s output carries judgment keys only, and `verify-declarations`'s F-16 names a value only inside its own failure message, for the first role that fails -- so read them with a catalog read over the provision DSN and record them before applying (§10.10 step 2). (2026-09-18: `0014_role_connection_limits_rollout.sql` now raises the same roles above these values, so re-applying `0012` ALONE after `0014` lowers `mitatedbsvc_api`, `mitatedbsvc_controlplane` and every EXISTING application's runtime and developer role back to 68 / 20 / 36, and drops `0013`'s `statement_timeout` line from every FUTURE application's roles; `mitatedbsvc_auditreader` is unaffected, because `0012` never alters it. Re-applying `0014` compensates. The set's own order is `0012` -> `0013` -> `0014` -- §10.10's numbered-set note and §10.10.1 step 7) | none; not reverted | **compatible**. Sets each role's `CONNECTION LIMIT` to a fixed value (68 / 20 / 36) and replaces `begin_provision_application` with the same signature and result columns (fact: `0002`'s and `0012`'s own definitions). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 68 / 20 / 36 -- compute it from that ref's own `config.py` |
+| `0013_role_statement_timeouts.sql` | applied (platform) | none; not reverted | **compatible (inference)**. Adds a role-level `statement_timeout` (`5000ms`) to `mitatedbsvc_auditreader` and to every application's runtime/developer role, and replaces `begin_provision_application` so future roles get the same setting -- additive; it drops and revokes nothing (fact: the file's own header and statements). (2026-09-18: that still describes `0013` against `0012`, but it no longer holds for a re-application after `0014_role_connection_limits_rollout.sql`: `0013` alone afterwards lowers every FUTURE application's runtime and developer role to `CONNECTION LIMIT` 36 -- the value `0013` inherited from `0012` -- while every EXISTING role keeps its `0014` value and every future role still carries the `statement_timeout`. Re-applying `0014` compensates) A revision that lacks it passes its own per-request deadline with `SET LOCAL`, which overrides the role setting; the setting therefore bites only on paths that carry no deadline (inference). Note: an audit query slower than the new bound is cancelled rather than running unbounded | fact + inference | a ref whose request paths set their own per-request deadline with `SET LOCAL statement_timeout`. The note holds at every ref: a path that carries no deadline of its own is bounded by the role setting |
+| `0014_role_connection_limits_rollout.sql` | applied (platform), last in the numbered set. It raises `mitatedbsvc_api` to `CONNECTION LIMIT` 132, `mitatedbsvc_controlplane` to 36, `mitatedbsvc_auditreader` to 12 and every application's runtime and developer role to 68 -- the demand of TWO revisions of the same process serving at once, which is what a rollout puts side by side (§10.10's precondition arithmetic). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it**, exactly as `0012`'s own row warns: this file SETs its four values rather than raising toward them. On a deployment carrying `0012`'s and `0013`'s own values it lowers nothing, but a limit raised by hand above 132 / 36 / 12 / 68 comes back down to it -- so read the current values with the catalog read and record them before applying, the same way `0012`'s row says to (§10.10 step 2). **Re-applying `0014` itself is idempotent, but the two files before it are not value-neutral after it**: `0012` alone afterwards lowers the api, controlplane and existing application roles back to 68 / 20 / 36 and drops `0013`'s `statement_timeout` from future application roles, and `0013` alone afterwards lowers future application roles to 36 while leaving every existing role as `0014` set it. Re-applying `0014` compensates for either. **The second case is caught by nothing this procedure runs until an application is provisioned after it** -- item (8) compares the roles that exist, and until the next provisioning call no role carries the lowered value (§10.10.1 step 7). So apply the set in its own order, `0012` -> `0013` -> `0014`, every time | none; not reverted | **compatible**. Sets four `CONNECTION LIMIT`s to fixed values above `0012`'s and `0005`'s own (132 / 36 / 12 / 68), raising each of those and lowering only a limit already above its own new value, and drops and revokes nothing, and replaces `begin_provision_application` with the same signature and result columns, keeping `0013`'s `statement_timeout` lines (fact: the file's own header and statements). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 132 / 36 / 12 / 68 -- compute it from that ref's own `config.py`, the same way `0012`'s row does |
 | `0006_declared_field_types_upgrade.sql` (per-application) | applied by `upgrade-applications` to applications that have not recorded it | none | **compatible (inference)**. Adds a table and fills type rows from the existing columns. A pre-`0006` revision does not read that table | inference | a ref that does not read the declared-field-types table |
 | `0008_platform_upgrades_upgrade.sql` (per-application) | as above | none | **compatible**. Adds the ledger table. "Not yet applied" is decided by (numbers this revision ships) minus (numbers recorded), so extra recorded numbers are ignored (fact: `platform_upgrades.pending_upgrade_numbers`). A pre-`0008` revision does not read the ledger | fact | a ref whose own `pending_upgrade_numbers` computes (numbers it ships) minus (numbers recorded), and which does not read the ledger |
 | `0009_field_constraints_upgrade.sql` (per-application) | as above | none | **compatible (with a note)**. Adds columns that have defaults. A pre-`0009` revision's INSERT into `_mdb_field_types` names its columns explicitly (fact: that revision's own `backend_postgres.py`). Note: constraints the new revision declared (`enum_json`/`nullable`) are not enforced by the old revision (inference) | fact + inference | a ref whose `backend_postgres.py` names the columns explicitly in its INSERT into `_mdb_field_types` |
@@ -2356,12 +2393,13 @@ one and §10.8's acceptance record goes back to "not accepted".
 | `0012` sections 1-2 | one `BEGIN`/`COMMIT` | `ALTER ROLE ... CONNECTION LIMIT` x2, plus x2 per application inside the `DO` block: role catalog row updates (inference). The `DO` block's `SELECT ... FROM mitatedb_registry.applications`: ACCESS SHARE (fact: documentation) | only an operation taking ACCESS EXCLUSIVE on `applications`, which no procedure here does | `3s` | 3 seconds + hold time. Existing connections are not dropped; the new limit applies to new connections | not needed (draft) |
 | `0012` section 3 | **outside the transaction** (two statements, each auto-committing) | `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference (function catalog row update; a call already running finishes on the pre-replacement definition) | provisioning running at the same time | the same (`3s`) | the same | not needed (draft); do not run it at the same time as provisioning |
 | `0013` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE mitatedbsvc_auditreader SET statement_timeout`: role catalog row update (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... SET` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing sessions keep their own settings; the new bound applies at the next login | not needed (draft); do not run it at the same time as provisioning |
+| `0014` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE ... CONNECTION LIMIT` x3 on the platform-plane roles (`mitatedbsvc_api`, `mitatedbsvc_controlplane`, `mitatedbsvc_auditreader`): role catalog row updates (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... CONNECTION LIMIT` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing connections are not dropped; the new limit applies to new connections | not needed (draft); do not run it at the same time as provisioning |
 | per-application upgrade (`0006`, `0008`, `0009`, `0010`, via `upgrade-applications`) | per application: `GRANT <developer_role> TO CURRENT_USER` (auto-commit) -> one `BEGIN`/`COMMIT` -> `REVOKE` (auto-commit). A failure leaves the temporary membership behind (§3.4b's cleanup) | `CREATE TABLE IF NOT EXISTS` (`0006`, `0008`, `0010`): inference (no heavy lock on an existing table). `INSERT`: ROW EXCLUSIVE (fact: documentation). `0006`'s read of `information_schema.columns`: ACCESS SHARE (fact: documentation). **`0009`'s `ALTER TABLE public._mdb_field_types ADD COLUMN IF NOT EXISTS` x2: ACCESS EXCLUSIVE** (fact: the documented default); the defaults are constants so no table rewrite happens (fact: documentation); the lock is still taken when the column already exists (inference). `GRANT`/`REVOKE` on roles, tables and the schema: inference | that application's own requests that read `_mdb_field_types` (during `0009`), and schema operations on that application | `2s` (`--lock-timeout 2s`) | 2 seconds + hold time per application (catalog-only changes). Other applications are unaffected | not needed (draft) |
 | deprovision (`0004`, via `deprovision`) | outside a transaction (`DROP DATABASE` cannot run inside one -- fact: documentation) | `begin_deprovision_application` / `finish_deprovision_application`: registry row updates (inference: ROW EXCLUSIVE and row locks). `pg_terminate_backend`: no lock. `DROP DATABASE`: fails while another connection exists (fact: documentation), lock type inference. `DROP ROLE`: inference | operations updating the same application's registry rows | `5s` (`--lock-timeout 5s`) | that application stops permanently (irreversible, §10.6). An operation touching the SAME application's registry rows waits at most 5 seconds + hold time; other applications are not affected | never run by an upgrade |
 
 **How the table's values are passed**:
 
-- Platform migrations (`0005`, `0007`, `0011`, `0012`, `0013`):
+- Platform migrations (`0005`, `0007`, `0011`, `0012`, `0013`, `0014`):
   `apply-platform-migration <filename> --lock-timeout <the table's value>`.
   The argument is required and has no default. Do not assemble
   `PGOPTIONS` by hand -- the subcommand builds the psql environment from
@@ -2486,8 +2524,14 @@ one and §10.8's acceptance record goes back to "not accepted".
   limits it names to its own value, raising one below it and lowering one
   above it -- §10.6's `0012` row), and for every other role (the
   auditreader's own limit from `0005`, and any other role `0012` does not
-  name) the value the step-2 catalog read returns. Item (8) never compares
-  the provision role at all: it excludes the owner of both audit tables.
+  name) the value the step-2 catalog read returns (2026-09-18: step 7 now
+  ends with `0014_role_connection_limits_rollout.sql`, so the value to
+  substitute for the four role classes IT names is `0014`'s own -- 132 for
+  the api role, 36 for the controlplane role, 12 for the auditreader and
+  68 for each application's runtime and developer role. The auditreader is
+  no longer a role only the catalog read answers for; a role none of the
+  files names still is). Item (8) never compares the provision role at
+  all: it excludes the owner of both audit tables.
   `max_connections` comes from that same read. Both are the read-only
   shapes step 2 and step 11 use, which change nothing. Then compute
   exactly what the tool computes:
@@ -2519,16 +2563,66 @@ one and §10.8's acceptance record goes back to "not accepted".
      `unknown` before any demand is compared -- a `-1` on a role `0012`
      names is the `unknown` row §10.10.1 resolves with step 7, so
      substitute `0012`'s own value here; a `-1` on any other role stops
-     the procedure);
+     the procedure -- 2026-09-18: step 7 also applies `0014`, whose own
+     value is the one to substitute for the four role classes it names,
+     `mitatedbsvc_auditreader` among them);
   2. total demand plus the reserved-connection count is less than or equal
      to `max_connections`.
+
+  **Worked example** -- the limits step 7 leaves once `0014` has been
+  applied, a declared concurrency of 32, at least one application
+  registered, and both worst-case process totals equal to 2, which is the
+  smallest total a rollout produces (the revision now serving and the
+  candidate stand side by side):
+
+  ```text
+  role                    limit   demand at a total of 2   condition 1
+  api                       132   2 x 2 x 32 = 128         128 <= 132 ok
+  controlplane               36   2 x 16     =  32          32 <=  36 ok
+  auditreader                12   2 x 4      =   8           8 <=  12 ok
+  each application's
+  runtime / developer        68   2 x 32     =  64          64 <=  68 ok
+
+  total demand   = 128 + 32 + 8 + 64 + 2 = 234   (condition 2 compares
+                                                  234 + the reserve
+                                                  against max_connections)
+  ```
+
+  **At a worst-case total of 3 those same limits do not hold**: the api
+  demand is 3 x 2 x 32 = 192, above 132, so condition 1 fails and the
+  answer is `blocked—platform remediation required`. The way back to a
+  total of 2 is the total's own inputs (§10.4.3): the tag on a revision
+  that is kept only for reachability, and a `minScale` of 1 or more on a
+  revision that is not serving. Taking a tag off is the way out
+  §10.10.1's own item (8) `unknown` row already names, and it "is itself
+  a traffic-projection change and therefore carries the same three
+  conditions as step 10's own move (the isolated proof, the independent
+  audit and the requester's approval) -- otherwise it is a separate
+  decision". Changing a `minScale` is a deployment change of the same
+  kind, so it is decided the same way.
+
+  **`0014` does not move condition 2.** It raises the per-role limits
+  condition 1 compares, while condition 2 compares a sum built out of the
+  demands, the reserve and `max_connections` -- none of which a
+  `CONNECTION LIMIT` change touches -- so that sum is the same before and
+  after step 7. Read the sum for what it is: the application demand enters
+  it ONCE however many applications are registered, so it is the number
+  this procedure compares rather than the number of connections the
+  cluster could physically be asked for, which grows with the count of
+  registered applications and counts each application's runtime and
+  developer role separately. When it is condition 2 that fails, the lever
+  is the Cloud SQL instance's own `max_connections` flag (§3.2b names it)
+  rather than any migration -- what value it should carry is not settled
+  here.
 
   **If even one of them does not hold, stage 2 does not start**: report
   `blocked—platform remediation required` with which role or which sum
   fails, and stop. **This section has no fix for it** -- raising a role's
   own `CONNECTION LIMIT` value takes a new platform migration (§10.10.1's
   table of findings), and counting the totals differently is a separate
-  decision. Record the arithmetic and its inputs in the evidence (§10.1)
+  decision (2026-09-18: the numbered set now ends with `0014`, so what
+  this means today is a FURTHER platform migration above `0014`'s own
+  values). Record the arithmetic and its inputs in the evidence (§10.1)
   and compute it twice, the way §10.4.3 requires of the totals themselves.
 - **Against production, three things are true before anything in §10.10.1
   or §10.10.3 runs: this whole procedure has been run against the isolated
@@ -2575,7 +2669,8 @@ resolved path must stay inside the migrations directory.
 **Apply the platform migrations as one numbered set, never one file out of
 order.** The set is `0005_application_audit.sql`,
 `0007_platform_declarations.sql`, `0011_process_ceilings.sql`,
-`0012_role_connection_limits.sql`, `0013_role_statement_timeouts.sql`, in
+`0012_role_connection_limits.sql`, `0013_role_statement_timeouts.sql`,
+`0014_role_connection_limits_rollout.sql`, in
 that order, every time. Two reasons:
 
 - `0012` and `0013` both `CREATE OR REPLACE` the same
@@ -2585,14 +2680,19 @@ that order, every time. Two reasons:
   (roles that already exist keep the setting). The only compensation for
   such an out-of-order application is the next `inventory` run reporting
   the new application's item (6) as `unknown` again, until `0013` is
-  applied once more.
+  applied once more. (2026-09-18: `0014` replaces that same function
+  again, so all three files do. Applying `0012` or `0013` alone after
+  `0014` also lowers a `CONNECTION LIMIT`; §10.6's `0014` row and
+  §10.10.1 step 7 carry what each case lowers, what catches it and what
+  does not.)
 - `0013` names the `mitatedbsvc_auditreader` role that `0005` creates.
   Applying `0013` on a database where `0005` has not run fails with an
-  undefined-role error.
+  undefined-role error. `0014` alters that role too, so the same failure
+  applies to it.
 
-**Prerequisite for the `ALTER ROLE` statements in `0007`, `0012` and
-`0013`, and what to do when it is not met.** Three files in the set issue
-`ALTER ROLE`, and the prerequisite is the same rule for all of them:
+**Prerequisite for the `ALTER ROLE` statements in `0007`, `0012`, `0013`
+and `0014`, and what to do when it is not met.** Four files in the set
+issue `ALTER ROLE`, and the prerequisite is the same rule for all of them:
 PostgreSQL 16 lets a role run `ALTER ROLE` against another role only if it
 holds CREATEROLE together with ADMIN OPTION on that target role, and
 CREATEROLE carries that option automatically only for a role it created
@@ -2601,9 +2701,9 @@ role the set alters:**
 
 | Statements | Roles altered | Which step creates those roles |
 |---|---|---|
-| `0007`'s four `ALTER ROLE ... SET` and `0012`'s two `ALTER ROLE ... CONNECTION LIMIT` | the api role and the controlplane role (`mitatedbsvc_api`, `mitatedbsvc_controlplane`) | `0002` (§3.2) |
-| `0013`'s `ALTER ROLE ... SET statement_timeout` | `mitatedbsvc_auditreader` | `0005` (§3.2b) |
-| `0012`'s and `0013`'s own `DO` blocks | every application's runtime and developer role | `begin_provision_application` (§3.4) |
+| `0007`'s four `ALTER ROLE ... SET`, and `0012`'s and `0014`'s two `ALTER ROLE ... CONNECTION LIMIT` each | the api role and the controlplane role (`mitatedbsvc_api`, `mitatedbsvc_controlplane`) | `0002` (§3.2) |
+| `0013`'s `ALTER ROLE ... SET statement_timeout` and `0014`'s own `ALTER ROLE ... CONNECTION LIMIT` | `mitatedbsvc_auditreader` | `0005` (§3.2b) |
+| `0012`'s, `0013`'s and `0014`'s own `DO` blocks | every application's runtime and developer role | `begin_provision_application` (§3.4) |
 
 **The prerequisite holds when `0002`, `0005` and provisioning were all run
 as the role that now applies the set** (normally `mitatedbsvc_provision`,
@@ -2613,7 +2713,7 @@ was run as the Cloud SQL instance's own administrative role instead.
 When it does not hold, the file neither works around it nor skips the
 role: the statement fails with `permission denied to alter role`, naming
 the role in its DETAIL line, and `apply-platform-migration` exits non-zero
-with the psql output redacted. `0007` and `0013` are each a single
+with the psql output redacted. `0007`, `0013` and `0014` are each a single
 transaction, so nothing at all changes; in `0012` a failure in sections
 1-2 rolls those sections back and section 3 never runs.
 
@@ -2657,6 +2757,35 @@ same PostgreSQL 16 rule and has not been measured:
 - `REVOKE mitatedbsvc_auditreader FROM <provision role>` removes the row
   again, after which `0013` fails as before.
 
+(2026-09-18: `0014` was measured the same way and on the same kind of
+throwaway PostgreSQL 16 cluster, with a registry row naming an
+application role the applying role holds no ADMIN OPTION on -- one
+created by the cluster's administrative role rather than by
+`begin_provision_application`, so CREATEROLE's own implicit option never
+attached. **That measurement is about an application role and `0014`**;
+the api, controlplane and auditreader cases of the same file are
+inferred from the same PostgreSQL 16 rule and have not been measured,
+and neither has any of it been measured against production:
+
+- `apply-platform-migration 0014_role_connection_limits_rollout.sql`
+  exits non-zero, PostgreSQL raising `InsufficientPrivilege`
+  (SQLSTATE `42501`) on the `ALTER ROLE` inside the per-application
+  loop;
+- the whole run rolls back with it: the platform-plane `ALTER ROLE`s in
+  the file's own section 1, which run BEFORE that loop, are undone as
+  well, so the api role still carries the limit it had before the run
+  (68 on a cluster where only `0012` had run) and nothing is left
+  half-applied;
+- the way out is the same `GRANT ... WITH ADMIN TRUE, INHERIT FALSE,
+  SET FALSE` above, for each role the failure names, and then the
+  numbered set again from the file that failed.
+
+`MitateDB-api/tests/test_ops_apply_platform_migration.py::test_apply_
+platform_migration_0014_is_transactional_and_rolls_back_on_permission_
+failure` holds the rollback -- a non-zero exit and the api role's limit
+unchanged at 68. The SQLSTATE above is from the same measurement, not
+from anything that test asserts.)
+
 #### 10.10.1 Stage 2 -- platform remediation
 
 **What gates this stage is not Gate-0.** The first read of a deployment
@@ -2688,17 +2817,17 @@ finding up here before starting:
 | (2) `declarations` | blocked, reason `declaration-invalid`: a row exists but its value fails validation | re-declare that row: step 6 for `process_ceilings`, step 9 for `surfaces`, `declare-coalescing-window` for `audit_coalescing_window_ms` (each replaces the whole row) |
 | (3) `migrations` | confirmed + `remediation-required`: an application has per-application upgrades pending | step 8 (`upgrade-applications`) |
 | (6) `ddl_lock` | `unknown`: a target role carries no role-level `statement_timeout` | step 4 (`0007`, for the api and controlplane roles) and step 7 (`0013`, for the auditreader and the application roles) |
-| (6) `ddl_lock` | `unknown`: a target role's `CONNECTION LIMIT` is `-1`, so no timeout value is read at all | step 7 (`0012` sets a finite limit), for a role `0012` itself names -- item (6) reads every target role it finds by grant, so a `-1` on `mitatedbsvc_auditreader` is not resolved by this table |
+| (6) `ddl_lock` | `unknown`: a target role's `CONNECTION LIMIT` is `-1`, so no timeout value is read at all | step 7 (`0012` sets a finite limit), for a role `0012` itself names -- item (6) reads every target role it finds by grant, so a `-1` on `mitatedbsvc_auditreader` is not resolved by this table (2026-09-18: step 7 now ends with `0014`, which sets `mitatedbsvc_auditreader`'s own `CONNECTION LIMIT` as well, so a `-1` there IS resolved by this table; a `-1` on a role none of the files names still is not) |
 | (6) `ddl_lock` | blocked, reason `statement-timeout-unbounded`: a declared value is 0, negative, or unparseable | step 4 and step 7 -- both files set `5000ms` unconditionally. If the unbounded value was one this deployment had chosen on purpose (step 2's record), choose a POSITIVE replacement and pass it to `set-platform-timeouts` in step 4 instead |
 | (7) legacy base-URL env | confirmed + `remediation-required`: a legacy name is on the current revision or the current template | step 10 (the env-only change removes both names from the template) |
 | (7) legacy base-URL env | blocked: the deploy that will create the candidate carries the legacy names forward without removing them | step 10, plus step 13's own deploy, which must carry the removal flag §10.4.2 step 2 names |
 | (8) `connection_headroom` | `unknown`: `--concurrency` was omitted because `MITATEDB_MAX_CONCURRENCY` is not carried by every Data revision that can take traffic (§10.4.3), or because those revisions do not all carry the same value | step 10 in full -- the env-only change declares the value, and on a service whose traffic is pinned to a revision it also moves the traffic onto the revision that carries it; step 13's own deploy carries the same value to the candidate. **A revision reachable only by a tag keeps its own env**, which a template change does not reach, so if one of those is missing the value this row does not resolve the finding: report and stop. The way out is to take the tag off that revision (`gcloud run services update-traffic <service> --remove-tags=<tag> --project=<project> --region=<region> --quiet`), which is itself a traffic-projection change and therefore carries the same three conditions as step 10's own move (the isolated proof, the independent audit and the requester's approval) -- otherwise it is a separate decision |
 | (8) `connection_headroom` | `unknown`: `--reserved-connections` was omitted because the reserve was not established | step 11 |
-| (8) `connection_headroom` | `unknown`: a role's `CONNECTION LIMIT` is `-1` | step 7 (`0012`), for a role `0012` itself names -- a `-1` on any other role is not resolved here |
+| (8) `connection_headroom` | `unknown`: a role's `CONNECTION LIMIT` is `-1` | step 7 (`0012`), for a role `0012` itself names -- a `-1` on any other role is not resolved here (2026-09-18: step 7 now ends with `0014`, which names `mitatedbsvc_auditreader` too, so a `-1` on it is resolved here as well; a `-1` on a role none of the files names still is not) |
 | (8) `connection_headroom` | `unknown` + `remediation-required`: the `process_ceilings` declaration is absent | step 5 and step 6 |
 | (8) `connection_headroom` | blocked: the `process_ceilings` row exists but its value is malformed (a shape or value the declaration read rejects, rather than an absent row) | step 6 (`declare-process-ceilings` replaces the whole row with a valid pair) |
 | (8) `connection_headroom` | blocked: the declared `process_ceilings` value does not equal the candidate's own ceiling | step 6 (re-declare the ceilings the candidate will be deployed with) |
-| (8) `connection_headroom` | blocked: a role's `CONNECTION LIMIT` is below its own computed demand | **not a finding this stage resolves.** `0012` sets the limits of the roles it names to its own fixed value (68 for the api role, 20 for the controlplane role, 36 for each application's runtime and developer role), raising one below that value and lowering one above it, and it changes no other role's limit: `mitatedbsvc_auditreader`'s own limit stays as `0005` created it, and the provision role's is untouched as well. So a limit below its own demand is a platform-remediation item of its own: report `blocked—platform remediation required` and stop, because changing a `CONNECTION LIMIT` value takes a new platform migration. This is the condition §10.10's preconditions check on paper before anything is changed; step 7 raises the limits `0012` names, so what stops here is a limit still below its own demand once `0012`'s own value is substituted -- the auditreader's, or one `0012` lowers (this row itself names no step to re-run) |
+| (8) `connection_headroom` | blocked: a role's `CONNECTION LIMIT` is below its own computed demand | **not a finding this stage resolves.** `0012` sets the limits of the roles it names to its own fixed value (68 for the api role, 20 for the controlplane role, 36 for each application's runtime and developer role), raising one below that value and lowering one above it, and it changes no other role's limit: `mitatedbsvc_auditreader`'s own limit stays as `0005` created it, and the provision role's is untouched as well. So a limit below its own demand is a platform-remediation item of its own: report `blocked—platform remediation required` and stop, because changing a `CONNECTION LIMIT` value takes a new platform migration. This is the condition §10.10's preconditions check on paper before anything is changed; step 7 raises the limits `0012` names, so what stops here is a limit still below its own demand once `0012`'s own value is substituted -- the auditreader's, or one `0012` lowers (this row itself names no step to re-run). (2026-09-18: step 7 now ends with `0014_role_connection_limits_rollout.sql`, which raises the api role to 132, the controlplane role to 36, `mitatedbsvc_auditreader` to 12 and each application's runtime and developer role to 68. Substitute THOSE values here: the auditreader is no longer outside the limits step 7 raises, and what stops here is a limit still below its own demand once `0014`'s own values are substituted. **So this row's "not a finding this stage resolves" is now the narrower one**: a first read of a deployment that has not had step 7 yet reports item (8) blocked on limits `0014` itself raises -- the api role's own 68 against a demand of 128 at a worst-case total of 2 is the ordinary case -- and step 7 resolves exactly those. What this row still does not resolve, and what still stops the procedure, is a limit that is below its own demand once `0014`'s own values have been substituted; raising one above them takes a further platform migration, and for that case this row names no step to re-run) |
 
 **A finding is resolved by this stage only when its row names a step.**
 The row for a role's `CONNECTION LIMIT` below its own demand names none,
@@ -2709,7 +2838,14 @@ item (4) `unknown`; item (5) not confirmed (that is §10.8's acceptance and
 §10.6's own source-ref condition, not a state change); item (8) blocked
 because a role's `CONNECTION LIMIT` is below its own demand, or because
 total demand plus the reserve exceeds `max_connections`; item (9) not
-confirmed; item (10) `unknown` or blocked. Report and stop.
+confirmed; item (10) `unknown` or blocked. Report and stop. (2026-09-18:
+the item (8) entry in that list is now the conditional one its own row
+above carries -- a limit below its own demand **once step 7's own values
+are substituted**. A limit that is below its demand only because step 7
+has not run yet is resolved by step 7, and is the ordinary first-read
+state of a deployment that has not been remediated. The first sentence
+above is unchanged for every other entry: a finding whose row names no
+step is not resolved here.)
 
 **Steps** (run the whole sequence against the isolated pair first, then
 against production):
@@ -2863,16 +2999,65 @@ against production):
    deployment does not keep, which is exactly what a client is entitled to
    rely on. **This step does not cover the downward direction**: it needs a
    separate decision about the order or the value, so stop and ask for one.
-7. **`0012`, then `0013`**: `apply-platform-migration
+7. **`0012`, then `0013`, then `0014`**: `apply-platform-migration
    0012_role_connection_limits.sql --lock-timeout <the §10.7 value
    for 0012>`, then
-   `apply-platform-migration 0013_role_statement_timeouts.sql --lock-timeout <the §10.7 value for 0013>`. `0013` must come after
-   `0012` and after `0005`; see the numbered-set note and the ADMIN OPTION
-   prerequisite above. **Do not run either at the same time as
-   provisioning** (§10.7's `0012` section 3 and `0013` rows: both replace
+   `apply-platform-migration 0013_role_statement_timeouts.sql --lock-timeout <the §10.7 value for 0013>`, then
+   `apply-platform-migration 0014_role_connection_limits_rollout.sql --lock-timeout <the §10.7 value for 0014>`. `0013` must come after
+   `0012` and after `0005`, and `0014` after all three; see the
+   numbered-set note and the ADMIN OPTION prerequisite above. **Do not
+   run any of the three at the same time as provisioning** (§10.7's
+   `0012` section 3, `0013` and `0014` rows: all three replace
    `begin_provision_application`). Then re-run §10.5's `inventory` and
    check `ddl_lock` (item (6)) and `connection_headroom` (item (8),
    headroom against `SHOW max_connections`); the full read is step 12.
+
+   **Re-apply these three as the whole run `0012` -> `0013` -> `0014`,
+   never `0012` or `0013` on its own.** Each of those two replaces
+   `begin_provision_application` with its own `CONNECTION LIMIT`
+   literals, so after `0014` has been applied:
+
+   - `0012` alone lowers `mitatedbsvc_api` to 68,
+     `mitatedbsvc_controlplane` to 20 and every EXISTING application's
+     runtime and developer role to 36, and drops `0013`'s
+     `statement_timeout` from every FUTURE application's roles
+     (`mitatedbsvc_auditreader` is untouched -- `0012` never alters it);
+   - `0013` alone leaves every EXISTING role as `0014` set it and lowers
+     only every FUTURE application's runtime and developer role, to 36.
+
+   **The first case the next `inventory` reports as item (8) blocked at a
+   worst-case total of 2. The second one nothing reports at all until an
+   application is provisioned after it**: item (8) compares the roles
+   that exist, and until the next `begin_provision_application` call no
+   role carries the lowered value, so no item of the read and no other
+   check in this procedure turns. That is a limit of what can be
+   observed, not a reason to accept the state. **The compensation for
+   either case is to apply `0014` once more, and `0014` on its own is
+   the one safe single application here**: it sets only its own values,
+   and its own `begin_provision_application` carries `0013`'s
+   `statement_timeout = 5000ms` for both the runtime and the developer
+   role, in the `CREATE ROLE` branch and in the `duplicate_object`
+   fallback alike, so re-applying it drops nothing `0013` put in place.
+
+   **On a cluster where a `deprovision` was interrupted, `0012` fails
+   and the set does not complete.** An interrupted `deprovision` can
+   leave a registry row whose `runtime_role`/`developer_role` name roles
+   the catalog no longer carries; `0013` and `0014` skip such a name
+   (each tests `pg_roles` before its own `ALTER ROLE`), but `0012`'s own
+   per-application loop alters every name the row carries with no such
+   test, so it fails with `undefined_object` and its sections 1-2 roll
+   back -- the numbered set cannot be completed while the row is in that
+   state, and `0014` is never reached. The way out is to finish the
+   interrupted deprovision first, with §7's own `deprovision
+   <application_id> --lock-timeout <the §10.7 deprovision value>
+   --confirm <the printed phrase>` for that application: every drop step
+   in the file it runs is `IF EXISTS`, and the registry row is removed
+   unconditionally at the end, so running it again on a half-finished
+   deprovision completes it rather than failing on what is already gone
+   (fact: `0004_deprovision_application.sql`'s own statements). It is
+   irreversible for that application (§10.6's `0004` row), so it is a
+   step to take deliberately; if the application is not one to
+   deprovision, stop and report instead of re-running the set.
 8. **Per-application upgrade** (`--lock-timeout` is §10.7's
    per-application-upgrade value):
 
@@ -3031,7 +3216,9 @@ Gate-0 ready (step 12) gates exactly this stage.
     so step 10's declaration is not inherited by a revision this command
     creates: leave the name out and the candidate runs on the code's own
     default instead of the value item (8) was judged with, which is the
-    role `CONNECTION LIMIT` demand `0012` exists to bound. Do not modify
+    role `CONNECTION LIMIT` demand `0012` exists to bound (2026-09-18:
+    and `0014` after it, which is the file that carries the limits a
+    rollout's own two concurrent revisions need). Do not modify
     the rollback target revisions. After deploying, do §10.4.2 step 3 and
     §10.4.3 step 3, and read the candidate's own
     `MITATEDB_MAX_CONCURRENCY` back as well: if it differs from the value
