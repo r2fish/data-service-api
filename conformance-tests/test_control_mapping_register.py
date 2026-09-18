@@ -52,11 +52,20 @@ section (design section 5's own "散文行や継続行が cap と主張集合を
 the block-length cap and the claim-multiset check
 `tools/check_control_mapping_restructure.py` performs, so this file itself
 also fixes the SHAPE those two properties depend on.
+
+R-50 (docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md v0.4, section 5): a
+`### <peer>` subsection may itself hold one or more `### <peer> -- <topic>`
+sub-blocks, each with its own full Control/Evidence/Status triple. Every
+peer carries a mandatory, unnamed default sub-block (`### <peer>`, no ` --
+`) first, followed by up to `MAX_NAMED_SUBBLOCKS` named sub-blocks in file
+order; the length cap (below) applies per sub-block, not per peer.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+import pytest
 
 CONTROL_MAPPING_PATH = Path(__file__).parent.parent / "security" / "CONTROL_MAPPING.md"
 CONTROL_MAPPING_HISTORY_PATH = Path(__file__).parent.parent / "security" / "CONTROL_MAPPING_HISTORY.md"
@@ -100,9 +109,29 @@ MAX_BLOCK_LENGTH = 15200
 # both be updated together, by hand, whenever the file is regenerated).
 MAX_LINE_LENGTH = 1400
 
+# R-50 (design docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md v0.4,
+# section 4, Q-1, 監督裁定 2026-09-18): each (SI, peer) may hold at most
+# this many NAMED sub-blocks in addition to its mandatory default one
+# (ceiling = 4 * MAX_BLOCK_LENGTH per (SI, peer)). Raising this value
+# requires a supervisor ruling recorded here, the same as MAX_BLOCK_LENGTH
+# above -- it is not a value a generator/editor may bump on its own.
+MAX_NAMED_SUBBLOCKS = 3
+
+# Required test (a) (design section 10 / work order
+# docs/work-orders/WORK_ORDER_R50_CONTROL_MAPPING_MULTI_BLOCK_V1.md W1-10),
+# per 訂正註 1 S-1 (2026-09-18 監督裁定): no per-file absolute pin on the
+# dash/bullet/em-dash totals -- a change that adds a claim, or WP-2's own
+# two new `- —` placeholders, would move all three numbers and force this
+# file to be touched by every unrelated registry edit. The dropped-bullet
+# property is instead held by a per-section identity (raw == collected +
+# em, asserted below) plus two anchors that only guard against a silently
+# vacuous check: the SI section count (16, SI-00..SI-15) and a non-zero
+# collected-bullet total.
+EXPECTED_SI_SECTION_COUNT = 16
+
 _SI_SECTION_RE = re.compile(r"^## (SI-\d+)\s+(.+?)\s*$", re.MULTILINE)
 _ANY_H2_RE = re.compile(r"^## (.+?)\s*$", re.MULTILINE)
-_PEER_H3_RE = re.compile(r"^### (.+?)\s*$", re.MULTILINE)
+_PEER_H3_RE = re.compile(r"^### (.*)$", re.MULTILINE)
 _AXIS_H4_RE = re.compile(r"^#### (.+?)\s*$", re.MULTILINE)
 _BULLET_RE = re.compile(r"^- (.*)$")
 _HISTORY_LINK_RE = re.compile(r"\[history\]\(CONTROL_MAPPING_HISTORY\.md#([a-z0-9\-]+)\)")
@@ -111,6 +140,22 @@ _SI_INVARIANT_HEADING_RE = re.compile(r"^### (SI-\d+)\b", re.MULTILINE)
 
 EXPECTED_PEER_ORDER = ("r2db-api", "MitateDB-api", "Common")
 EXPECTED_AXIS_ORDER = ("Control", "Evidence", "Status")
+
+# R-50 design section 5's 2-stage sub-block heading allowlist. Stage 1:
+# the peer name is one of the 3 known peers, and -- if a topic is present
+# -- it is introduced by the literal separator ` -- ` and starts/ends on a
+# non-space character (a trailing-whitespace heading fails stage 1
+# outright: `\S` cannot match the space just before end-of-line). Stage 2
+# (applied separately, below) further restricts what a captured topic may
+# contain; an allowlist, not an exclusion filter -- a `### ` line that
+# fails EITHER stage is a violation, never silently skipped.
+_SUBBLOCK_HEADING_RE = re.compile(r"^### (r2db-api|MitateDB-api|Common)(?: -- (\S(?:.*\S)?))?$")
+# Stage 2: a topic is ASCII visible characters (0x21-0x7E) grouped into
+# words joined by exactly one regular space each -- this alone would still
+# accept a topic containing a second literal ` -- ` (each `-` is itself in
+# 0x21-0x7E, so "a -- b" tokenizes as 3 valid words); the explicit
+# substring check below closes that gap.
+_SUBJECT_TOKEN_RE = re.compile(r"^[\x21-\x7E]+(?: [\x21-\x7E]+)*$")
 
 
 def _github_slug(text: str) -> str:
@@ -221,122 +266,327 @@ def test_control_mapping_md_si_ids_match_security_invariants_1to1():
     )
 
 
-def test_control_mapping_md_every_section_has_the_fixed_peer_and_axis_shape():
-    """Design section 5's own "形" property, checked in full: each SI
-    section has EXACTLY the 3 `### <peer>` subsections in the fixed order,
-    each with EXACTLY the 3 `#### <axis>` sub-subsections in the fixed
-    order, each with at least one `- ` bullet line; `- —` is allowed only
-    as an axis's sole line. Every non-blank line inside an SI section must
-    be one of: the history link line, a fixed `### `/`#### ` heading, or a
-    `- ` bullet -- no prose or continuation line may slip through."""
-    text = _read()
+# ---------------------------------------------------------------------------
+# R-50: sub-block parsing and shape analysis (design section 5), as pure
+# functions of `text` -- called by both the on-the-real-file tests below
+# and the synthetic-fixture parametrized tests further down (work order
+# W1-1: "検査の本体は `text` を引数に取る純関数へ切り出し … 同じ純関数を
+# 呼ぶ").
+# ---------------------------------------------------------------------------
+
+
+class SubBlock:
+    def __init__(self, peer: str, subject: str | None, body: str, heading_line: str):
+        self.peer = peer
+        self.subject = subject  # None marks the mandatory default sub-block
+        self.body = body  # text between this '### ' heading and the next one (or end)
+        self.heading_line = heading_line
+        self.sid: str | None = None  # filled in by callers that know it, for messages only
+
+
+def _parse_subblock_heading(line: str) -> tuple[str, str | None] | None:
+    """Design section 5's 2-stage allowlist, applied to one raw '### '
+    line (no leading/trailing normalization: a caller must pass the exact
+    line text). Returns (peer, subject_or_None) if well-formed, else None."""
+    m = _SUBBLOCK_HEADING_RE.match(line)
+    if not m:
+        return None
+    peer, subject = m.group(1), m.group(2)
+    if subject is not None:
+        if " -- " in subject:
+            return None
+        if not _SUBJECT_TOKEN_RE.match(subject):
+            return None
+    return peer, subject
+
+
+def _parse_body_subblocks(body: str) -> tuple[list[SubBlock], list[str]]:
+    """Splits one SI section's body into its `### ` sub-blocks. Every raw
+    `### ` line is checked against the section-5 allowlist and, if it
+    fails, is recorded in the returned `bad_headings` list -- never
+    silently skipped (an exclusion filter would let an unrecognized
+    `### ` line escape every shape/cap check that follows)."""
+    h3_matches = list(_PEER_H3_RE.finditer(body))
+    subblocks: list[SubBlock] = []
+    bad_headings: list[str] = []
+    for i, m in enumerate(h3_matches):
+        raw_line = m.group(0)
+        start = m.end()
+        end = h3_matches[i + 1].start() if i + 1 < len(h3_matches) else len(body)
+        parsed = _parse_subblock_heading(raw_line)
+        if parsed is None:
+            bad_headings.append(raw_line)
+            continue
+        peer, subject = parsed
+        subblocks.append(SubBlock(peer, subject, body[start:end], raw_line))
+    return subblocks, bad_headings
+
+
+def _iter_section_subblocks(section: ParsedSection) -> tuple[list[SubBlock], list[str]]:
+    subblocks, bad_headings = _parse_body_subblocks(section.body)
+    for sb in subblocks:
+        sb.sid = section.sid
+    return subblocks, bad_headings
+
+
+def _subblock_axis_bullets(sb: SubBlock) -> dict[str, list[str]]:
+    axis_matches = list(_AXIS_H4_RE.finditer(sb.body))
+    result: dict[str, list[str]] = {}
+    for j, am in enumerate(axis_matches):
+        axis = am.group(1).strip()
+        astart = am.end()
+        aend = axis_matches[j + 1].start() if j + 1 < len(axis_matches) else len(sb.body)
+        axis_body = sb.body[astart:aend]
+        bullets = []
+        for line in axis_body.splitlines():
+            line = line.strip()
+            m = _BULLET_RE.match(line)
+            if m:
+                bullets.append(m.group(1))
+        result[axis] = bullets
+    return result
+
+
+def _subblock_block_text(sb: SubBlock) -> str:
+    """Design section 5's "主" cap join, at sub-block granularity: the 3
+    axes' claims, joined by a single space each; `- —` (no claim for that
+    axis) contributes nothing."""
+    axis_bullets = _subblock_axis_bullets(sb)
+    claims: list[str] = []
+    for axis in EXPECTED_AXIS_ORDER:
+        bullets = axis_bullets.get(axis, [])
+        if bullets == ["—"]:
+            continue
+        claims.extend(bullets)
+    return " ".join(claims)
+
+
+def _check_subblock_axes(sid: str, sb: SubBlock) -> list[str]:
+    """Design section 5's condition (iii), at sub-block granularity: each
+    sub-block holds exactly `#### Control` / `#### Evidence` / `#### Status`
+    in that order, nothing but blank lines before the first one, every
+    content line is a `- ` bullet, and `- —` may appear only as an axis's
+    sole line."""
+    violations: list[str] = []
+    label = f"{sid}/{sb.peer}/{sb.subject!r}"
+    axis_matches = list(_AXIS_H4_RE.finditer(sb.body))
+    axis_names = [m.group(1).strip() for m in axis_matches]
+    if axis_names != list(EXPECTED_AXIS_ORDER):
+        violations.append(f"{label}: axes are {axis_names}, expected {list(EXPECTED_AXIS_ORDER)}")
+        return violations
+
+    axis_preface = sb.body[: axis_matches[0].start()]
+    if axis_preface.strip():
+        violations.append(f"{label}: stray content before first '#### ' heading: {axis_preface!r}")
+
+    for j, am in enumerate(axis_matches):
+        axis = axis_names[j]
+        astart = am.end()
+        aend = axis_matches[j + 1].start() if j + 1 < len(axis_matches) else len(sb.body)
+        axis_body = sb.body[astart:aend]
+        nonblank = [l for l in axis_body.splitlines() if l.strip()]
+        if not nonblank:
+            violations.append(f"{label}/{axis}: no content lines at all")
+            continue
+        bad_lines = [l for l in nonblank if not _BULLET_RE.match(l)]
+        if bad_lines:
+            violations.append(f"{label}/{axis}: non-'- ' line(s) found: {bad_lines}")
+        if nonblank == ["- —"]:
+            continue
+        if "- —" in nonblank:
+            violations.append(f"{label}/{axis}: '- —' placeholder mixed with real claim bullets: {nonblank}")
+    return violations
+
+
+def _run_length_peers(peer_sequence: list[str]) -> list[str]:
+    """Collapses consecutive repeats -- design section 5's "同じ peer の
+    小ブロックは連続して並べ" (grouping) check: comparing this against
+    `EXPECTED_PEER_ORDER` catches BOTH a peer appearing out of order and a
+    peer's sub-blocks being split into two non-adjacent runs (the peer
+    would then appear twice in this list, never equal to the 3-tuple)."""
+    groups: list[str] = []
+    for p in peer_sequence:
+        if not groups or groups[-1] != p:
+            groups.append(p)
+    return groups
+
+
+class ShapeAnalysis:
+    def __init__(self):
+        self.section_preface: list[str] = []
+        self.bad_headings: list[str] = []
+        self.missing_default: list[tuple[str, str]] = []
+        self.multiple_default: list[tuple[str, str]] = []
+        self.default_not_first: list[tuple[str, str]] = []
+        self.duplicate_subjects: list[tuple[str, str, str]] = []
+        self.too_many_named: list[tuple[str, str, int]] = []
+        self.peer_order: list[str] = []
+        self.axis_shape: list[str] = []
+        self.block_length: list[tuple[str, str, str | None, int]] = []
+
+
+def _analyze_shape(text: str) -> ShapeAnalysis:
+    """R-50 design sections 4/5, single pure entry point: both the
+    on-the-real-file tests and the synthetic-fixture parametrized tests
+    below call this same function (work order W1-1)."""
     sections, _tail = _split_sections(text)
-    assert sections, f"no '## SI-NN' sections found in {CONTROL_MAPPING_PATH}"
-
+    report = ShapeAnalysis()
     for section in sections:
-        body = section.body
-        peer_matches = list(_PEER_H3_RE.finditer(body))
-        peer_names = [m.group(1).strip() for m in peer_matches]
-        assert peer_names == list(EXPECTED_PEER_ORDER), (
-            f"{section.sid}: '### ' subsections are {peer_names}, expected {list(EXPECTED_PEER_ORDER)}"
-        )
+        h3_matches = list(_PEER_H3_RE.finditer(section.body))
+        if h3_matches:
+            preface = section.body[: h3_matches[0].start()]
+            preface_lines = [l for l in preface.splitlines() if l.strip()]
+            if not (len(preface_lines) == 1 and _HISTORY_LINK_RE.search(preface_lines[0])):
+                report.section_preface.append(section.sid)
+        else:
+            report.section_preface.append(section.sid)
 
-        # everything before the first '### ' heading: blank lines and
-        # exactly one history-link line
-        preface = body[: peer_matches[0].start()] if peer_matches else body
-        preface_lines = [l for l in preface.splitlines() if l.strip()]
-        assert len(preface_lines) == 1 and _HISTORY_LINK_RE.search(preface_lines[0]), (
-            f"{section.sid}: expected exactly one non-blank line before '### r2db-api' "
-            f"(the history link), found: {preface_lines}"
-        )
+        subblocks, bad_headings = _iter_section_subblocks(section)
+        report.bad_headings.extend(bad_headings)
 
-        for i, pm in enumerate(peer_matches):
-            peer = peer_names[i]
-            pstart = pm.end()
-            pend = peer_matches[i + 1].start() if i + 1 < len(peer_matches) else len(body)
-            peer_body = body[pstart:pend]
+        peer_sequence = [sb.peer for sb in subblocks]
+        if _run_length_peers(peer_sequence) != list(EXPECTED_PEER_ORDER):
+            report.peer_order.append(section.sid)
 
-            axis_matches = list(_AXIS_H4_RE.finditer(peer_body))
-            axis_names = [m.group(1).strip() for m in axis_matches]
-            assert axis_names == list(EXPECTED_AXIS_ORDER), (
-                f"{section.sid}/{peer}: '#### ' sub-subsections are {axis_names}, expected {list(EXPECTED_AXIS_ORDER)}"
-            )
+        for peer in EXPECTED_PEER_ORDER:
+            peer_subblocks = [sb for sb in subblocks if sb.peer == peer]
+            defaults = [sb for sb in peer_subblocks if sb.subject is None]
+            named = [sb for sb in peer_subblocks if sb.subject is not None]
+            if not defaults:
+                report.missing_default.append((section.sid, peer))
+            if len(defaults) > 1:
+                report.multiple_default.append((section.sid, peer))
+            if peer_subblocks and peer_subblocks[0].subject is not None:
+                report.default_not_first.append((section.sid, peer))
+            if len(named) > MAX_NAMED_SUBBLOCKS:
+                report.too_many_named.append((section.sid, peer, len(named)))
+            seen: dict[str, int] = {}
+            for sb in named:
+                seen[sb.subject] = seen.get(sb.subject, 0) + 1
+            for subject, count in seen.items():
+                if count > 1:
+                    report.duplicate_subjects.append((section.sid, peer, subject))
 
-            # nothing but blank lines may precede the first '#### ' heading
-            axis_preface = peer_body[: axis_matches[0].start()] if axis_matches else peer_body
-            assert not axis_preface.strip(), (
-                f"{section.sid}/{peer}: stray non-blank content before the first '#### ' heading: {axis_preface!r}"
-            )
-
-            for j, am in enumerate(axis_matches):
-                axis = axis_names[j]
-                astart = am.end()
-                aend = axis_matches[j + 1].start() if j + 1 < len(axis_matches) else len(peer_body)
-                axis_body = peer_body[astart:aend]
-                # NOT `l.strip()` here: a nested bullet ("  - foo", review
-                # item 7) must be rejected, and stripping leading
-                # whitespace before matching would silently accept it as
-                # an ordinary top-level "- " line. Only lines that are
-                # blank once trailing whitespace is removed are dropped;
-                # every remaining line is checked in its RAW (unindented)
-                # form.
-                nonblank = [l for l in axis_body.splitlines() if l.strip()]
-                assert nonblank, f"{section.sid}/{peer}/{axis}: no content lines at all"
-                bad_lines = [l for l in nonblank if not _BULLET_RE.match(l)]
-                assert not bad_lines, (
-                    f"{section.sid}/{peer}/{axis}: non-'- ' line(s) found (prose/continuation/nested-bullet leak): {bad_lines}"
-                )
-                if nonblank == ["- —"]:
-                    continue
-                assert "- —" not in nonblank, (
-                    f"{section.sid}/{peer}/{axis}: '- —' placeholder mixed with real claim bullets: {nonblank}"
-                )
+        for sb in subblocks:
+            report.axis_shape.extend(_check_subblock_axes(section.sid, sb))
+            block_text = _subblock_block_text(sb)
+            if len(block_text) > MAX_BLOCK_LENGTH:
+                report.block_length.append((sb.sid, sb.peer, sb.subject, len(block_text)))
+    return report
 
 
 def _iter_bullets(body: str, peer: str, axis: str) -> list[str]:
-    peer_matches = list(_PEER_H3_RE.finditer(body))
-    for i, pm in enumerate(peer_matches):
-        if pm.group(1).strip() != peer:
+    """(peer, axis) -> claim bullet texts, across EVERY one of that peer's
+    sub-blocks within `body` (the mandatory default one, plus every named
+    one) -- design section 9's pitfall: an implementation that returns at
+    the FIRST matching sub-block silently drops every later, named
+    sub-block's bullets. Used by the required test (a) accounting below;
+    the length-cap check walks sub-blocks directly instead (a cap applies
+    to one sub-block at a time, not to a peer's bullets pooled together)."""
+    bullets: list[str] = []
+    subblocks, _bad = _parse_body_subblocks(body)
+    for sb in subblocks:
+        if sb.peer != peer:
             continue
-        pstart = pm.end()
-        pend = peer_matches[i + 1].start() if i + 1 < len(peer_matches) else len(body)
-        peer_body = body[pstart:pend]
-        axis_matches = list(_AXIS_H4_RE.finditer(peer_body))
-        for j, am in enumerate(axis_matches):
-            if am.group(1).strip() != axis:
-                continue
-            astart = am.end()
-            aend = axis_matches[j + 1].start() if j + 1 < len(axis_matches) else len(peer_body)
-            axis_body = peer_body[astart:aend]
-            bullets = []
-            for line in axis_body.splitlines():
-                line = line.strip()
-                m = _BULLET_RE.match(line)
-                if m:
-                    bullets.append(m.group(1))
-            if bullets == ["—"]:
-                return []
-            return bullets
-    return []
+        axis_bullets = _subblock_axis_bullets(sb).get(axis, [])
+        if axis_bullets == ["—"]:
+            continue
+        bullets.extend(axis_bullets)
+    return bullets
+
+
+def _count_raw_dash_lines(section_body: str) -> int:
+    return len(re.findall(r"^- ", section_body, re.MULTILINE))
+
+
+def _count_em_dash_lines(section_body: str) -> int:
+    return len(re.findall(r"^- —$", section_body, re.MULTILINE))
+
+
+def _bullet_accounting(section: ParsedSection) -> tuple[int, int, int]:
+    """Required test (a) (design section 10): (raw_dash_lines,
+    collected_bullets, em_dash_lines). `raw_dash_lines` counts every '- '
+    line in the section body directly from the text, independent of any
+    sub-block walking; a mismatch against `collected_bullets +
+    em_dash_lines` means `_iter_bullets` silently dropped bullets."""
+    raw = _count_raw_dash_lines(section.body)
+    em = _count_em_dash_lines(section.body)
+    collected = 0
+    for peer in EXPECTED_PEER_ORDER:
+        for axis in EXPECTED_AXIS_ORDER:
+            collected += len(_iter_bullets(section.body, peer, axis))
+    return raw, collected, em
+
+
+# ---------------------------------------------------------------------------
+# on-the-real-file tests (system 2 of W1-1's "両系統": current
+# `security/CONTROL_MAPPING.md` carries zero named sub-blocks at WP-1
+# integration time -- every check below must still be green against it,
+# design section 1.3's "後方互換のためではなく…既定の小ブロックだけの形
+# が§5の規則の部分集合であるため")
+# ---------------------------------------------------------------------------
+
+
+def test_control_mapping_md_every_section_has_the_history_link_preface_only():
+    text = _read()
+    report = _analyze_shape(text)
+    assert report.section_preface == [], (
+        f"section(s) with other than exactly one history-link preface line: {report.section_preface}"
+    )
+
+
+def test_control_mapping_md_subblock_headings_use_the_allowlisted_form():
+    """W1-2 / W1-3: every `### ` line inside an SI section must satisfy
+    both stages of design section 5's allowlist."""
+    text = _read()
+    report = _analyze_shape(text)
+    assert report.bad_headings == [], f"'### ' heading(s) failing the section-5 allowlist: {report.bad_headings}"
+
+
+def test_control_mapping_md_default_subblock_is_required_exactly_once_and_first():
+    """W1-4 (i)(ii)(iii)."""
+    text = _read()
+    report = _analyze_shape(text)
+    assert report.missing_default == [], f"(SI, peer) missing a default sub-block: {report.missing_default}"
+    assert report.multiple_default == [], f"(SI, peer) with more than one default sub-block: {report.multiple_default}"
+    assert report.default_not_first == [], f"(SI, peer) whose first sub-block is not the default one: {report.default_not_first}"
+
+
+def test_control_mapping_md_subject_names_are_unique_per_si_peer():
+    """W1-5."""
+    text = _read()
+    report = _analyze_shape(text)
+    assert report.duplicate_subjects == [], f"duplicate sub-block subject(s): {report.duplicate_subjects}"
+
+
+def test_control_mapping_md_subblocks_are_grouped_and_peer_ordered():
+    """W1-6."""
+    text = _read()
+    report = _analyze_shape(text)
+    assert report.peer_order == [], f"SI section(s) with out-of-order/interleaved sub-blocks: {report.peer_order}"
+
+
+def test_control_mapping_md_every_subblock_has_the_fixed_axis_shape():
+    """W1-7, at sub-block granularity."""
+    text = _read()
+    report = _analyze_shape(text)
+    assert report.axis_shape == [], f"sub-block(s) with malformed axis shape: {report.axis_shape}"
+
+
+def test_control_mapping_md_named_subblocks_do_not_exceed_max_named_subblocks():
+    """W1-9 (R-c)."""
+    text = _read()
+    report = _analyze_shape(text)
+    assert report.too_many_named == [], f"(SI, peer) with more than {MAX_NAMED_SUBBLOCKS} named sub-block(s): {report.too_many_named}"
 
 
 def test_control_mapping_md_blocks_do_not_exceed_the_length_cap():
-    """Design section 5's own "主" cap: per (SI, subsection), all 3 axes'
-    claims joined by a single space each must not exceed MAX_BLOCK_LENGTH."""
+    """W1-8 (R-a): the cap applies per (SI, peer, sub-block)."""
     text = _read()
-    sections, _tail = _split_sections(text)
-    offenders = []
-    for section in sections:
-        for peer in EXPECTED_PEER_ORDER:
-            claims: list[str] = []
-            for axis in EXPECTED_AXIS_ORDER:
-                claims.extend(_iter_bullets(section.body, peer, axis))
-            block = " ".join(claims)
-            if len(block) > MAX_BLOCK_LENGTH:
-                offenders.append((section.sid, peer, len(block)))
-    assert not offenders, (
-        f"block(s) in {CONTROL_MAPPING_PATH} exceed the {MAX_BLOCK_LENGTH}-character cap "
-        f"(id, peer, length): {offenders}"
+    report = _analyze_shape(text)
+    assert report.block_length == [], (
+        f"sub-block(s) in {CONTROL_MAPPING_PATH} exceed the {MAX_BLOCK_LENGTH}-character cap "
+        f"(sid, peer, subject, length): {report.block_length}"
     )
 
 
@@ -438,3 +688,230 @@ def test_control_mapping_history_every_heading_section_is_non_empty():
     assert not empty, (
         f"{CONTROL_MAPPING_HISTORY_PATH} has heading(s) with an empty section body: {empty}"
     )
+
+
+def test_control_mapping_md_every_dash_line_is_a_bullet_or_an_em_dash_placeholder():
+    """Required test (a) (design section 10, work order W1-10), on the
+    real file: no `- ` line is silently dropped by the sub-block walk.
+    Per 訂正註 1 S-1, the per-section identity below carries the property
+    (no absolute total pin); `EXPECTED_SI_SECTION_COUNT` and the non-zero
+    check only guard against a vacuously-empty pass."""
+    text = _read()
+    sections, _tail = _split_sections(text)
+    assert len(sections) == EXPECTED_SI_SECTION_COUNT, (
+        f"expected {EXPECTED_SI_SECTION_COUNT} '## SI-NN' sections, found {len(sections)}"
+    )
+    per_section_mismatches = []
+    total_raw = total_collected = total_em = 0
+    for section in sections:
+        raw, collected, em = _bullet_accounting(section)
+        total_raw += raw
+        total_collected += collected
+        total_em += em
+        if raw != collected + em:
+            per_section_mismatches.append((section.sid, raw, collected, em))
+    assert not per_section_mismatches, (
+        f"section(s) where raw '- ' line count != collected bullets + '- —' lines "
+        f"(sid, raw, collected, em_dash): {per_section_mismatches}"
+    )
+    assert total_collected > 0, "collected bullets total is 0 -- the sub-block walk observed nothing"
+
+
+# ---------------------------------------------------------------------------
+# synthetic-fixture parametrized tests (system 1 of W1-1's "両系統") --
+# self-contained minimal "## SI-NN" text fragments, never touching
+# `security/CONTROL_MAPPING.md`. Each fixture is deliberately minimal: it
+# supplies only the sub-block(s) needed to exercise the ONE condition its
+# test checks and ignores unrelated fields on the returned ShapeAnalysis.
+# ---------------------------------------------------------------------------
+
+
+def _axis_lines(bullets: tuple[str, ...]) -> str:
+    lines = bullets if bullets else ("—",)
+    return "\n".join(f"- {b}" for b in lines)
+
+
+def _subblock(heading: str, control=("control claim",), evidence=("evidence claim",), status=("—",)) -> str:
+    return (
+        f"{heading}\n\n"
+        f"#### Control\n\n{_axis_lines(control)}\n\n"
+        f"#### Evidence\n\n{_axis_lines(evidence)}\n\n"
+        f"#### Status\n\n{_axis_lines(status)}\n\n"
+    )
+
+
+def _section(body: str, sid: str = "SI-01", name: str = "Example Invariant") -> str:
+    return f"## {sid} {name}\n\n[history](CONTROL_MAPPING_HISTORY.md#{sid.lower()})\n\n{body}"
+
+
+VALID_SECTION_TEXT = _section(
+    _subblock("### r2db-api", control=("r2 claim",), evidence=("r2 evidence",))
+    + _subblock("### MitateDB-api", control=("mitate claim",), evidence=("mitate evidence",))
+    + _subblock("### Common", control=("common claim",), evidence=("common evidence",))
+)
+
+
+def test_fixture_baseline_default_only_section_has_no_violations():
+    """Sanity check for the fixtures below, and design section 1.3's own
+    requirement: a document with zero named sub-blocks (today's real
+    file's own shape) must be fully compliant."""
+    report = _analyze_shape(VALID_SECTION_TEXT)
+    assert report.bad_headings == report.missing_default == report.multiple_default == []
+    assert report.default_not_first == report.duplicate_subjects == report.too_many_named == []
+    assert report.peer_order == report.axis_shape == report.block_length == report.section_preface == []
+
+
+def test_fixture_unknown_subblock_heading_is_rejected_not_skipped():
+    """W1-2."""
+    text = _section(_subblock("### r2db-api") + "### Unknown\n\n")
+    report = _analyze_shape(text)
+    assert report.bad_headings == ["### Unknown"], report.bad_headings
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        pytest.param("ops   ", id="trailing_space"),
+        pytest.param("ops　inventory", id="full_width_space"),
+        pytest.param("a -- b", id="double_separator"),
+    ],
+)
+def test_fixture_subblock_subject_with_bad_form_is_rejected(topic):
+    """W1-3 (design section 5's own fixture examples: trailing whitespace,
+    full-width space, a second ` -- `)."""
+    text = _section(
+        _subblock("### r2db-api")
+        + _subblock(f"### r2db-api -- {topic}")
+    )
+    report = _analyze_shape(text)
+    assert report.bad_headings, f"expected the malformed subject heading to be rejected: topic={topic!r}"
+
+
+def test_fixture_default_subblock_missing_is_rejected():
+    """W1-4 (i): a peer with only named sub-blocks, no default."""
+    text = _section(_subblock("### r2db-api -- ops inventory"))
+    report = _analyze_shape(text)
+    assert ("SI-01", "r2db-api") in report.missing_default, report.missing_default
+
+
+def test_fixture_default_subblock_duplicated_is_rejected():
+    """W1-4 (ii): two unnamed sub-blocks for the same peer."""
+    text = _section(_subblock("### r2db-api") + _subblock("### r2db-api"))
+    report = _analyze_shape(text)
+    assert ("SI-01", "r2db-api") in report.multiple_default, report.multiple_default
+
+
+def test_fixture_default_subblock_not_first_is_rejected():
+    """W1-4 (iii): the default sub-block exists but is not first."""
+    text = _section(_subblock("### r2db-api -- ops inventory") + _subblock("### r2db-api"))
+    report = _analyze_shape(text)
+    assert ("SI-01", "r2db-api") in report.default_not_first, report.default_not_first
+
+
+def test_fixture_duplicate_subject_within_peer_is_rejected():
+    """W1-5."""
+    text = _section(
+        _subblock("### r2db-api")
+        + _subblock("### r2db-api -- ops inventory")
+        + _subblock("### r2db-api -- ops inventory")
+    )
+    report = _analyze_shape(text)
+    assert ("SI-01", "r2db-api", "ops inventory") in report.duplicate_subjects, report.duplicate_subjects
+
+
+def test_fixture_subblocks_interleaved_across_peers_is_rejected():
+    """W1-6: a peer's sub-blocks split into two non-adjacent runs."""
+    text = _section(
+        _subblock("### r2db-api")
+        + _subblock("### MitateDB-api")
+        + _subblock("### r2db-api -- ops inventory")
+    )
+    report = _analyze_shape(text)
+    assert "SI-01" in report.peer_order, report.peer_order
+
+
+def test_fixture_named_subblock_missing_an_axis_is_rejected():
+    """W1-7: a named sub-block with only 2 of the 3 required axes."""
+    text = _section(
+        _subblock("### r2db-api")
+        + "### r2db-api -- ops inventory\n\n#### Control\n\n- claim\n\n#### Evidence\n\n- claim\n\n"
+    )
+    report = _analyze_shape(text)
+    assert report.axis_shape, "expected the malformed (2-axis) named sub-block to be flagged"
+
+
+def test_fixture_named_subblock_axis_with_a_prose_continuation_line_is_rejected():
+    """W1-7 (差し戻し 1, item 4): a named sub-block's axis holds a real
+    bullet AND a bare prose continuation line (no `- ` prefix) directly
+    under it -- module docstring's own "散文行や継続行が...抜けないよう
+    に": the continuation line must not silently vanish from the
+    axis-shape check."""
+    text = _section(
+        _subblock("### r2db-api")
+        + "### r2db-api -- ops inventory\n\n"
+        "#### Control\n\n- claim\ncontinuation prose line\n\n"
+        "#### Evidence\n\n- claim\n\n"
+        "#### Status\n\n- —\n\n"
+    )
+    report = _analyze_shape(text)
+    assert report.axis_shape, "expected a bare prose continuation line under a bullet to be flagged"
+
+
+def test_fixture_named_subblock_axis_mixes_em_dash_placeholder_with_a_real_bullet_is_rejected():
+    """W1-7 (差し戻し 1, item 4): a named sub-block's axis mixes `- —`
+    with a real claim bullet -- `- —` may appear ONLY as an axis's sole
+    line."""
+    text = _section(
+        _subblock("### r2db-api")
+        + "### r2db-api -- ops inventory\n\n"
+        "#### Control\n\n- —\n- claim\n\n"
+        "#### Evidence\n\n- claim\n\n"
+        "#### Status\n\n- —\n\n"
+    )
+    report = _analyze_shape(text)
+    assert report.axis_shape, "expected '- —' mixed with a real claim bullet to be flagged"
+
+
+def test_fixture_named_subblock_alone_exceeds_the_length_cap():
+    """Required test (b) (W1-8): a single named sub-block whose own
+    content, alone, exceeds MAX_BLOCK_LENGTH."""
+    long_claim = "x" * (MAX_BLOCK_LENGTH + 100)
+    text = _section(
+        _subblock("### r2db-api")
+        + _subblock("### r2db-api -- ops inventory", control=(long_claim,), evidence=("—",), status=("—",))
+    )
+    report = _analyze_shape(text)
+    offenders = [o for o in report.block_length if o[1] == "r2db-api" and o[2] == "ops inventory"]
+    assert offenders, report.block_length
+
+
+def test_fixture_four_named_subblocks_exceeds_max_named_subblocks():
+    """W1-9 (R-c): MAX_NAMED_SUBBLOCKS = 3, a 4th named sub-block is red."""
+    text = _section(
+        _subblock("### r2db-api")
+        + _subblock("### r2db-api -- topic one")
+        + _subblock("### r2db-api -- topic two")
+        + _subblock("### r2db-api -- topic three")
+        + _subblock("### r2db-api -- topic four")
+    )
+    report = _analyze_shape(text)
+    assert ("SI-01", "r2db-api", 4) in report.too_many_named, report.too_many_named
+
+
+def test_fixture_bullet_accounting_catches_dropped_named_subblock_bullets():
+    """Required test (a), fixture side (W1-10): a peer with a default
+    sub-block AND a named one, each with distinct claim text -- a
+    first-match-only `_iter_bullets` would silently drop the named
+    sub-block's bullets from the accounting total."""
+    text = _section(
+        _subblock("### r2db-api", control=("default claim",), evidence=("default evidence",))
+        + _subblock("### r2db-api -- ops inventory", control=("named claim",), evidence=("named evidence",))
+    )
+    sections, _tail = _split_sections(text)
+    assert len(sections) == 1
+    raw, collected, em = _bullet_accounting(sections[0])
+    assert raw >= 1, "fixture must contain at least one '- ' line to be a meaningful test"
+    assert raw == collected + em, (
+        f"required test (a) mismatch on a fixture WITH a named sub-block: raw={raw} collected={collected} em={em}"
+    )
+    assert collected == 4, f"expected all 4 real bullets (2 default + 2 named) collected, got {collected}"

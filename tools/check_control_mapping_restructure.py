@@ -27,6 +27,8 @@ line in the form design section 4 specifies:
 and exits 0 only when every count is at its expected all-clear value (the
 missing/added/moved/reordered/unbalanced counters at 0, `history` at
 N/N, and the four equality fields all `identical`).
+
+R-50 (design docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md v0.4 section 9): this tool has no table of its own -- it assumes the OLD table form and is a one-time-only correspondence check against it (design section 6); its `blocks_count = len(sections) * len(PEERS)` (below) counts SI sections times peers, not sub-blocks.
 """
 from __future__ import annotations
 
