@@ -2,6 +2,8 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.1 (2026-09-18)。** R-50 (複数ブロック化) の統合を受けて、§2 の目標形と §5 の表に小ブロックを反映した。既存の行は 1 行も消していない (`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56)。根拠は `docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` (v1.0) と `docs/work-orders/WORK_ORDER_R50_CONTROL_MAPPING_MULTI_BLOCK_V1.md`。
+- **【訂正 2026-09-18 (v1.1)】直下の「現行版: v1.0」の行は v1.0 時点の記述である (行として残す)。**
 - **現行版: v1.0 (2026-09-14)。** WP-3 監査の合格 (3 回目) と root suite ゲート (`3340 passed`) を経て確定した。
 - v0.4 (同日): 1 回目の WP-3 監査の不合格を受けた監督裁定により、規則 R0〜R6 を廃止し、軸の割当を割当表 `tools/control_mapping_axes.tsv` へ移した。
 - 旧版: v0.3 (同日) は設計レビュー 2 回目の反映。v0.2 は設計レビュー 1 回目と目標形の裁定の反映。v0.1 は初稿。
@@ -53,6 +55,21 @@
 - 主張 1 つが箇条書きの 1 行になる。軸の中では旧セル内の順序を保つ。主張が無い軸は `- —` と明示する。
 - 見出しは英語 (`Control` / `Evidence` / `Status`)。ファイル本文が英語のためである。
 - 最長の物理行は約 1,400 字になる (最長の主張は SI-08 r2db-api の 1,382 字。レビュー実測)。
+
+**【追記 2026-09-18 (v1.1)、R-50】小ブロック (`### <peer> -- <主題>`)**: 依頼者裁定「複数ブロックを許す」(2026-09-18) により、1 つの (SI, peer 小節) は**小ブロック**に分かれてよくなった。上の図と §5 の表は小ブロックを含まない v1.0 時点の記述であり、行として残す (`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56)。目標形は次のように拡がる。
+
+```
+### MitateDB-api                       <- 既定 (無名) の小ブロック。各 (SI, peer) に必須・ちょうど 1 つ・先頭
+#### Control / #### Evidence / #### Status
+
+### MitateDB-api -- ops inventory      <- 名前付きの小ブロック。(SI, peer) あたり 0〜3 つ
+#### Control / #### Evidence / #### Status
+```
+
+- 同じ peer の小ブロックは連続して並べ、peer の出現順 (`r2db-api` → `MitateDB-api` → `Common`) は保つ。主題は同じ (SI, peer) の中で一意で、本文と同じ英語で書く。各小ブロックは 3 軸をちょうど 1 つずつ持ち、主張の無い軸は `- —` と明示する。
+- 上の 52 行目「SI 節の中で空行でない行は、history リンク、固定見出し、`- ` 行の 3 種類だけ」は成り立ち続ける。固定見出しの h3 が小ブロックの見出しを含む形に拡がるだけである。history リンクの行は SI 節の preface にあり、小ブロックの中には入らない。
+- 他文書から小ブロックを指す形は `SI-08 / MitateDB-api / ops inventory / Evidence` (SI / peer / 主題 / 軸)。既定の小ブロックを指すときは主題を省く。
+- 現物は `security/CONTROL_MAPPING.md` version 2.8 で、名前付きの小ブロックは `SI-08 / MitateDB-api / ops inventory` と `SI-14 / r2db-api / audit query` の 2 つである。見出しの書式と allowlist の逐語は `docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` §5・§12 Q-1・Q-2。
 
 **更新漏れの検出**: 訂正の diff は該当する主張の 1 行に閉じる。漏れは 2 つの読み方で見つける。(1) 全節の `#### Status` を一覧にして読み、開示された限界・未達が今も正しいかを確かめる。(2) 同じ SI の `### r2db-api` と `### MitateDB-api` で同じ `####` 見出しを対比し、片 peer にしか無い主張を点検する。空の軸は `- —` なので、書き忘れと区別できる。
 
@@ -144,15 +161,17 @@
 
 | 守る性質 | 新形での検査 |
 |---|---|
-| 形 | ファイルに `\|` 始まりの行が無い。各 SI 節は、history リンクの行 → `### r2db-api` / `### MitateDB-api` / `### Common` の順、各小節は `#### Control` / `#### Evidence` / `#### Status` の順で並ぶ。各軸には `- ` 行が 1 つ以上ある。`- —` はその軸の唯一の行としてだけ使える。SI 節の中で空行でない行は、history リンク、固定見出し、`- ` 行のどれかに限る (散文行や継続行が cap と主張集合を抜けないように) |
+| 形 | ファイルに `\|` 始まりの行が無い。各 SI 節は、history リンクの行 → `### r2db-api` / `### MitateDB-api` / `### Common` の順、各小節は `#### Control` / `#### Evidence` / `#### Status` の順で並ぶ。各軸には `- ` 行が 1 つ以上ある。`- —` はその軸の唯一の行としてだけ使える。SI 節の中で空行でない行は、history リンク、固定見出し、`- ` 行のどれかに限る (散文行や継続行が cap と主張集合を抜けないように)。**【訂正 2026-09-18 (v1.1)、R-50】** peer 小節は 1 つとは限らない。各 peer は**既定の小ブロック 1 つ (必須・先頭) + 名前付きの小ブロック 0〜3 つ**が連続して並ぶ形になり、`### ` 行は §2 の追記が指す allowlist に完全一致することを要求する (未知の h3 を無視しない)。3 軸の順序と `axis_preface` の検査は peer 単位ではなく小ブロック単位に効く |
 | 節の順序 | `## SI-NN` が昇順に並び、その後に `## CCR-14 …`、`## Rule` が来る。他の `## ` 見出しは無い |
 | 全 SI が 1 つずつある | SI ID が `security/SECURITY_INVARIANTS_V1.md` の `### SI-NN` と 1 対 1 で一致する。名前は照合しない (SI-03、SI-04 は両文書で名前が違う) |
 | SI 重複なし | 節見出しの SI ID に重複が無い |
 | history リンク | 節ごとにちょうど 1 つあり、slug が HISTORY の見出しへ解決する |
 | HISTORY 見出しの集合一致・節が空でない | 現行と同じ |
-| 肥大化の抑止 | 主: (SI, 小節) ごとに、Common も含め、主張を空白 1 つで連結した長さ ≤ `MAX_BLOCK_LENGTH = 15200`。内容不変なので値は旧セル cap を引き継ぐ (SI-14 r2db-api は旧セル・連結後ともに 15,122 字、レビュー実測)。既存の ratchet をそのまま続ける。補助: 物理行の長さ ≤ `MAX_LINE_LENGTH` (P2 の `<N>` と同じ値) |
+| 肥大化の抑止 | 主: (SI, 小節) ごとに、Common も含め、主張を空白 1 つで連結した長さ ≤ `MAX_BLOCK_LENGTH = 15200`。内容不変なので値は旧セル cap を引き継ぐ (SI-14 r2db-api は旧セル・連結後ともに 15,122 字、レビュー実測)。既存の ratchet をそのまま続ける。補助: 物理行の長さ ≤ `MAX_LINE_LENGTH` (P2 の `<N>` と同じ値)。**【訂正 2026-09-18 (v1.1)、R-50】** 上限の対象キーは (SI, 小節) から **(SI, 小節, 小ブロック)** に替わった。値 15,200 は据え置き、由来の記録 (2026-09-06 の 15,065 + 135 字) も残している。分割だけで総量が無制限に開かないよう、`MAX_NAMED_SUBBLOCKS = 3` を足して (SI, peer) あたりの天井を 4 × `MAX_BLOCK_LENGTH` に閉じた (`docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` §4 の R-a + R-b + R-c)。値を上げる変更は監督裁定を要する |
 
 モジュール docstring と cap のコメントも新形に合わせる。2026-09-06 の測定記録の文は残す (§2)。
+
+**【追記 2026-09-18 (v1.1)、R-50】** 本表の検査は R-50 WP-1 で、`text` を引数に取る純関数 + 合成 fixture のパラメタ化テスト + 現物を読むテストの形に組み替えた (`conformance-tests/test_control_mapping_register.py`)。分割前後の照合は、旧表形を前提とする §4 の `tools/check_control_mapping_restructure.py` ではなく、新設の `tools/check_control_mapping_split.py` が担う。§4 の 2 つの道具は 2026-09-14 の一度限りの生成の記録として触っていない (docstring に註を 1 行足しただけ)。経緯と変異の記録は `docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` §6・§13。
 
 ## 6. 変更クラスと証拠
 
