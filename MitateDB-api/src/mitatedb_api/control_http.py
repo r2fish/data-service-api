@@ -39,11 +39,11 @@ from starlette.routing import Route
 from starlette.types import ASGIApp
 
 from .control_plane import ControlPlaneService
-from .errors import (AuthenticationError, AuthenticationRequiredError,
-                     AuthorizationError, AuthorizationStateUnavailable,
-                     CapabilityError, ConflictError,
-                     DestructiveConfirmationRequired, FoundationError,
-                     NotFoundError, ResourceLimitError,
+from .errors import (AuditReaderUnavailable, AuthenticationError,
+                     AuthenticationRequiredError, AuthorizationError,
+                     AuthorizationStateUnavailable, CapabilityError,
+                     ConflictError, DestructiveConfirmationRequired,
+                     FoundationError, NotFoundError, ResourceLimitError,
                      StorageConfigurationError, ValidationError, violation,
                      observed_type_of)
 from .http import (PROBLEM_CONTENT_TYPE, RequestByteBoundMiddleware,
@@ -95,6 +95,14 @@ _STATUS_BY_CODE: dict[str, int] = {
 _CLASSIFY_ORDER: tuple[tuple[type[FoundationError], str], ...] = (
     (AuthorizationStateUnavailable, "AUTH_STATE_UNAVAILABLE"),
     (StorageConfigurationError, "SERVICE_UNAVAILABLE"),
+    # `AuditReaderUnavailable` (audit_query.PostgresAuditQueryStore.query's
+    # own psycopg.Error path other than InsufficientPrivilege): mapped to
+    # the same SERVICE_UNAVAILABLE code, and listed explicitly here (not
+    # left to the exhaustive-by-construction fallback in `_classify`
+    # below) so that fallback's own "pragma: no cover" comment stays true
+    # -- the same discipline `http.py::_CLASSIFY_ORDER` already applies
+    # for `AuditSinkUnavailable`.
+    (AuditReaderUnavailable, "SERVICE_UNAVAILABLE"),
     (AuthenticationRequiredError, "AUTH_REQUIRED"),
     (AuthenticationError, "AUTH_INVALID"),
     (AuthorizationError, "FORBIDDEN"),
