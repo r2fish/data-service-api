@@ -607,3 +607,61 @@ this is an entirely separate, peer-local-only surface (U-1).
 # (design D-4/D-5) -- provision DSN only, same as the declaration
 # family above.
 ```
+
+## CH-0538
+
+- moved from: `src/mitatedb_api/ops.py` (`<module>`)
+- parent commit: `44c2688`
+- kind: comment
+
+```
+# ===========================================================================
+# `apply-platform-migration` -- applies one platform migration file
+# (never a per-application upgrade, never the bootstrap-only 0001/0002)
+# a second (or later) time against a running cluster. Never run
+# against production before an isolated proof, an independent audit,
+# and requester approval.
+# ===========================================================================
+```
+
+### correction: 2026-09-19
+
+- reason: the code now points at the single gated procedure instead of repeating a subset of its preconditions; section 10.10's own preconditions still name the isolated proof, the independent audit and the requester's approval
+
+old:
+```
+Never run against production before an isolated proof, an independent audit, and requester approval.
+```
+
+new:
+```
+Against production, run it only through the runbook's gated procedure (docs/cloud-run-cloud-sql.md section 10).
+```
+
+## CH-0539
+
+- moved from: `src/mitatedb_api/ops.py` (`cmd_apply_platform_migration`)
+- parent commit: `44c2688`
+- kind: docstring
+
+```
+Applies one platform migration file a second (or later) time
+against a running cluster. Never run against production before an
+isolated proof, an independent audit, and requester approval come
+first. DSN comes from `MITATEDB_PROVISION_DSN` only, never an
+argument (design Z-8/D-10).
+```
+
+### correction: 2026-09-19
+
+- reason: the code now points at the single gated procedure instead of repeating a subset of its preconditions; section 10.10's own preconditions still name the isolated proof, the independent audit and the requester's approval
+
+old:
+```
+Never run against production before an isolated proof, an independent audit, and requester approval come first.
+```
+
+new:
+```
+Against production, run it only through the runbook's gated procedure (docs/cloud-run-cloud-sql.md section 10).
+```
