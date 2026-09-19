@@ -412,6 +412,9 @@ re-run is a deliberate signal, not silently absorbed.
 **The platform migrations that come after `0002`** are each described in
 their own section, and are applied in file order: `0005` (§9, credential
 store), `0006` (§11, control-plane storage), `0007` (§15, audit sink),
+`0014` (§19, auditreader `statement_timeout`, R-56 -- additive only, no
+process REFUSES TO START without it; `ops verify-declarations` reports
+`FAIL F-17` until it is applied and the control process restarted),
 **`0008` (§16, platform declarations + writer-role timeouts, Q4 phase --
 both processes now REFUSE TO START until it is applied)**, `0012`
 (process ceilings, Phase 10 WP-6a -- also required before either process
@@ -1928,3 +1931,59 @@ deployer is expected to enforce them another way (a reverse proxy, a shared
 external limiter) if that class's bound still matters to them. Nothing in
 this package refuses to start or serve at a ceiling above 1; the honest
 declaration is the entire point.
+
+## 19. `r2dbsvc_auditreader`'s own `statement_timeout` (`0014_auditreader_statement_timeout.sql`, R-56)
+
+Design `docs/design/R2DB_AUDIT_READER_STATEMENT_TIMEOUT_V0_1.md` D-1/D-4
+(work order `docs/work-orders/WORK_ORDER_R56_R2DB_AUDIT_READER_TIMEOUT_V1.md`).
+Bounds the reader role's own statements (an operator's interactive `psql`
+session included, not only `r2db_api.control_main`'s own pooled
+connections) to `5000ms` -- the same number the two writer roles already
+carry (§16).
+
+**Run once, after `0007`, as the role that created `r2dbsvc_auditreader`**
+(normally `r2dbsvc_control`; idempotent -- safe to re-run, takes no `-v`
+variables):
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f r2db-api/migrations/0014_auditreader_statement_timeout.sql
+```
+
+**Role settings take effect at login, not on an already-open connection.**
+`r2db_api.control_main`'s own reader pool holds connections open for the
+life of the process and never re-reads role settings on one already open.
+**Order of operations, in this exact sequence:**
+
+1. Apply `0014` (above).
+2. Restart the control process (`r2dbsvc-control.service`) -- the only
+   process that opens connections with this role's DSN
+   (`R2DB_AUDIT_DSN`) -- so every open reader connection is replaced by
+   one that actually carries the new value.
+3. Run `python -m r2db_api.ops verify-declarations` (as `r2dbsvc_control`,
+   against `R2DB_CONTROL_DSN`) and read the `F-17` line.
+
+**On an existing deployment, `ops verify-declarations` reports `FAIL F-17`
+(exit code 16) until `0014` has been applied.** This is the intended
+signal, not a regression: the check makes machine-readable a gap that
+already existed (an audit reader with no statement-level bound) rather
+than one this migration introduces. Applying `0014` and restarting the
+control process (steps 1-2 above) clears it.
+
+**What `F-17` checks and does not check.** `ops verify-declarations`
+identifies the auditreader role by its actual grants (`SELECT` on both
+`application_audit` and `control_audit`, same as §4's connection-limit
+check) and reads its role-level `pg_db_role_setting` entry over the
+CONTROL DSN -- it never opens a connection with the reader's own DSN, so
+it confirms the **declaration** is a positive value with no per-database
+override, not that a currently-running process' own connections have
+actually picked it up (that is what step 2's restart is for). A platform
+with no auditreader role at all (`0007` not yet applied) is not flagged.
+
+**ADMIN OPTION precondition.** Like every other `ALTER ROLE ... SET`
+migration in this set, `0014` succeeds only when run as the role that
+created `r2dbsvc_auditreader` (CREATEROLE's own implicit ADMIN OPTION on
+a role it created) -- normally `r2dbsvc_control`, since `0007` is what
+creates that role. If a different role created it on this cluster, grant
+ADMIN OPTION explicitly first (`GRANT r2dbsvc_auditreader TO
+r2dbsvc_control WITH ADMIN OPTION`, run as a role that already holds it),
+or `0014` fails and rolls back entirely (its own `BEGIN`/`COMMIT`).

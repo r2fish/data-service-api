@@ -63,7 +63,12 @@ re-verify them; it assumes they are already true.
    §15 -- **also required even when `R2DB_AUDIT_DSN` is left unset**: the
    application-plane process' `application_audit` writer connection depends
    on the table existing regardless of whether `audit_query` itself is
-   declared `enabled`), and **migration
+   declared `enabled`). **Migration `0014_auditreader_statement_timeout.sql`**
+   (R-56, `docs/design/R2DB_AUDIT_READER_STATEMENT_TIMEOUT_V0_1.md` D-1 --
+   bounds `r2dbsvc_auditreader`'s own `statement_timeout`;
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §19) is additive-only and does not
+   gate startup, but `ops verify-declarations` reports `FAIL F-17` until it
+   is applied and the control process restarted. And **migration
    `0008_platform_declarations_and_writer_timeouts.sql`** (Q4 phase,
    `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-1/D-2 --
    `r2dbsvc_registry.platform_declarations` plus the two writer roles'

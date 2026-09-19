@@ -33,7 +33,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Json
 
 import r2db_api.ops as ops
-from r2db_api.platform_declarations import PlatformDeclarationError, check_role_connection_limits
+from r2db_api.platform_declarations import PlatformDeclarationError, check_auditreader_statement_timeout, check_role_connection_limits
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
@@ -44,12 +44,12 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    # R-56 WP-1: role-level `statement_timeout` on `r2dbsvc_auditreader` --
+    # placed right after 0007 (the migration that creates that role); no
+    # dependency on 0008/0012/0013.
+    "0014_auditreader_statement_timeout.sql",
     # Phase 10 WP-4f (supervisor ruling 2026-09-09): raises `r2dbsvc_api`/
-    # `r2dbsvc_controlplane`'s own `CONNECTION LIMIT` -- inserted here
-    # (before 0008, not appended at the tuple's own end) so `MIGRATION_
-    # NAMES_WITHOUT_DECLARATIONS`'s own `[:-2]` slice below still drops
-    # exactly `{0008, 0012}`, unchanged (this file's own isomorphism-pinned
-    # symbol, `tests/test_audit_query.py::_ISOMORPHIC_TARGETS`).
+    # `r2dbsvc_controlplane`'s own `CONNECTION LIMIT`.
     "0013_role_connection_limits.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
     # Phase 10 WP-6a (design D-5(ii)): widens `platform_declarations_key_
@@ -62,11 +62,22 @@ MIGRATION_NAMES = (
     # set individually.
     "0012_process_ceilings.sql",
 )
-#: F-8's own fixture omits the last two entries above -- this is that same
-#: sequence minus migrations 0008/0012 (0008 creates `platform_
+#: F-8's own fixture omits migrations 0008/0012 -- 0008 creates `platform_
 #: declarations` in the first place; 0012 widens a CHECK on a table that,
-#: on this fixture, does not exist at all).
-MIGRATION_NAMES_WITHOUT_DECLARATIONS = MIGRATION_NAMES[:-2]
+#: on this fixture, does not exist at all. Selected by NAME (R-56 WP-1,
+#: replacing a former `MIGRATION_NAMES[:-2]` position slice that broke the
+#: moment a migration was appended after this tuple's own last entry), not
+#: position -- a migration inserted anywhere else in `MIGRATION_NAMES`
+#: never changes which two entries this drops.
+_MIGRATION_NAMES_DECLARATIONS_ONLY = frozenset({
+    "0008_platform_declarations_and_writer_timeouts.sql",
+    "0012_process_ceilings.sql",
+})
+MIGRATION_NAMES_WITHOUT_DECLARATIONS = tuple(name for name in MIGRATION_NAMES if name not in _MIGRATION_NAMES_DECLARATIONS_ONLY)
+#: non-vacuous check (review 差し戻し 5, 2026-09-20): every dropped name is
+#: actually a real member of `MIGRATION_NAMES` -- catches a typo in
+#: `_MIGRATION_NAMES_DECLARATIONS_ONLY` silently dropping zero entries.
+assert _MIGRATION_NAMES_DECLARATIONS_ONLY <= set(MIGRATION_NAMES)
 
 _DATA_URL = "https://ops-verify-test.example.invalid/v1"
 _CONTROL_URL = "https://ops-verify-test.example.invalid/control/v1"
@@ -164,6 +175,11 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
     _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
     _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
     _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+    # R-56 WP-1: unconditional, like 0013 below -- depends only on 0007,
+    # so it always runs here regardless of which fixture variant
+    # (`MIGRATION_NAMES` vs `MIGRATION_NAMES_WITHOUT_DECLARATIONS`) called
+    # this function.
+    _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
     # Phase 10 WP-4f: unconditional, like 0002/0005/0006/0007 above --
     # depends only on those four (never on 0008/0012), so it always runs
     # here regardless of which fixture variant (`MIGRATION_NAMES` vs
@@ -844,6 +860,159 @@ def test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_ever
             with conn.cursor() as cur:
                 cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 5").format(sql.Identifier(platform.control_role)))
             conn.commit()
+
+
+# ===========================================================================
+# F-17 (R-56 WP-2, design docs/design/R2DB_AUDIT_READER_STATEMENT_TIMEOUT_
+# V0_1.md D-4): the auditreader role's own role-level `statement_timeout`
+# is a positive value, with no per-database override -- `0014_
+# auditreader_statement_timeout.sql` (already applied unconditionally by
+# `_bootstrap` above, R-56 WP-1) is what makes the POSITIVE case real.
+# ===========================================================================
+
+
+def _auditreader_role(platform: types.SimpleNamespace) -> str:
+    return f"{platform.prefix}_auditreader"
+
+
+def test_verify_declarations_f17_passes_after_migration_0014(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Positive control: a freshly bootstrapped platform (migration 0014
+    already applied by `_bootstrap`) passes F-17 -- proving the FAIL tests
+    below are really about the mutated declaration, not some other
+    difference between fixtures. Output carries no value/ms/raw string."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    f17_line = next(line for line in out.splitlines() if "F-17" in line)
+    assert f17_line.startswith("OK   F-17"), out
+    assert "5000" not in f17_line, out
+    assert " ms" not in f17_line, out
+
+
+def test_verify_declarations_f17_fails_when_declared_timeout_is_zero(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    role = _auditreader_role(platform)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = 0").format(sql.Identifier(role)))
+        conn.commit()
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 16
+    f17_line = next(line for line in out.splitlines() if "F-17" in line)
+    assert f17_line.startswith("FAIL F-17"), out
+    assert role in f17_line, out
+    assert "5000" not in f17_line, out
+    assert " ms" not in f17_line, out
+
+
+def test_verify_declarations_f17_fails_when_declared_timeout_is_reset(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """W2-1's third branch: `RESET` (no role-level row at all) fails F-17
+    the same as an explicit `0` -- both mean "no positive bound", not two
+    different outcomes."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    role = _auditreader_role(platform)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} RESET statement_timeout").format(sql.Identifier(role)))
+        conn.commit()
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 16
+    assert "FAIL F-17" in out, out
+
+
+def test_verify_declarations_f17_fails_when_a_per_database_override_exists(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completion condition W2-2: the role-level declaration stays
+    positive (0014's own 5000ms, untouched) but a per-database override
+    takes precedence over it -- F-17 must still fail."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    role = _auditreader_role(platform)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("ALTER ROLE {} IN DATABASE {} SET statement_timeout = 0").format(
+                    sql.Identifier(role), sql.Identifier(platform.platform_db)))
+        conn.commit()
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 16
+    assert "FAIL F-17" in out, out
+    assert role in out, out
+
+
+def test_f17_the_schema_owning_role_is_never_flagged_despite_an_explicit_select_grant(
+    platform: types.SimpleNamespace,
+) -> None:
+    """The auditreader-identifying query (SELECT on BOTH audit tables)
+    does not naturally match `platform.control_role` (the table OWNER --
+    unlike F-16's own INSERT-based classes, no break-glass migration
+    grants it SELECT), so this test grants it explicitly to exercise the
+    SAME owner-exclusion `check_role_connection_limits`'s own auditreader
+    branch already relies on: the owner must never be floor-checked,
+    regardless of its own statement_timeout (never set on this role by
+    any of this file's own fixtures)."""
+    for table in ("application_audit", "control_audit"):
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(
+                    sql.Identifier(platform.schema, table), sql.Identifier(platform.control_role)))
+            conn.commit()
+    try:
+        with psycopg.connect(platform.control_dsn) as conn:
+            check_auditreader_statement_timeout(conn, schema=platform.schema)
+    finally:
+        for table in ("application_audit", "control_audit"):
+            with psycopg.connect(platform.control_dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql.SQL("REVOKE SELECT ON {} FROM {}").format(
+                        sql.Identifier(platform.schema, table), sql.Identifier(platform.control_role)))
+                conn.commit()
+
+
+def test_verify_declarations_f17_passes_when_auditreader_role_is_absent(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completion condition W2-3: a platform with no auditreader role at
+    all (identified by real GRANTs, same discipline as F-16) is not
+    flagged -- `OK F-17`, exit code 0. Connects with the SAME DSN
+    `verify-declarations` uses in production (`platform.control_dsn`) --
+    `information_schema.role_table_grants` only shows rows visible to the
+    CURRENT connection's own role (grantor/grantee/member), so a
+    connection that is not the grantor of the auditreader's own GRANTs
+    would see zero rows regardless of whether the role exists, making
+    this assertion vacuous. The owner-exclusion this check also depends
+    on is pinned separately, by `test_f17_the_schema_owning_role_is_
+    never_flagged_despite_an_explicit_select_grant` below."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    role = _auditreader_role(platform)
+    platform_dsn = _dsn_with(platform.admin_dsn, dbname=platform.platform_db)
+    with psycopg.connect(platform_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+        conn.commit()
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+        conn.commit()
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "OK   F-17" in out, out
 
 
 # ===========================================================================

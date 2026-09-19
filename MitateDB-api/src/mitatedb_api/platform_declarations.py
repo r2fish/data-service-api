@@ -1097,6 +1097,52 @@ def check_role_connection_limits(
             raise PlatformDeclarationError(_f16_message(role, current, required, ops_module=ops_module), code="F-16")
 
 
+def _f17_message(role: str, *, database_name: "str | None" = None) -> str:
+    if database_name is not None:
+        return (
+            f"role '{role}' has an 'ALTER ROLE … IN DATABASE …' statement_timeout override for database "
+            f"'{database_name}', which takes precedence over the role-level declaration this deployment "
+            f"relies on. Remove it with 'ALTER ROLE {role} IN DATABASE {database_name} RESET "
+            f"statement_timeout;' (issued on the provision DSN), then restart the process that holds this "
+            f"role's own connection pool."
+        )
+    return (
+        f"role '{role}' has no positive statement_timeout declared in pg_db_role_setting: an audit reader "
+        f"must never run unbounded. Set one with 'ALTER ROLE {role} SET statement_timeout = ...;' (issued "
+        f"on the provision DSN), then restart the process that holds this role's own connection pool."
+    )
+
+
+def check_auditreader_statement_timeout(conn: "psycopg.Connection", *, schema: str) -> None:
+    application_audit_owner = _table_owner(conn, schema, "application_audit")
+    control_audit_owner = _table_owner(conn, schema, "control_audit")
+    reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
+    reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
+    for role in sorted(reader_of_application_audit & reader_of_control_audit):
+        if role in (application_audit_owner, control_audit_owner):
+            continue
+        rows = _role_setting_rows(conn, role)
+        declared_row: Optional[list[str]] = None
+        per_database_names: list[str] = []
+        for setdatabase, datname, setconfig in rows:
+            if setdatabase == 0:
+                declared_row = setconfig
+            elif setconfig and any(entry.split("=", 1)[0] == _STATEMENT_TIMEOUT_KEY for entry in setconfig):
+                per_database_names.append(datname or str(setdatabase))
+        declared_ms: Optional[int] = None
+        for entry in declared_row or []:
+            key, sep, raw_value = entry.partition("=")
+            if sep and key == _STATEMENT_TIMEOUT_KEY:
+                try:
+                    declared_ms = ms_from_pg_timeout_text(raw_value)
+                except ValueError:
+                    declared_ms = None
+        if declared_ms is None or declared_ms <= 0:
+            raise PlatformDeclarationError(_f17_message(role), code="F-17")
+        if per_database_names:
+            raise PlatformDeclarationError(_f17_message(role, database_name=per_database_names[0]), code="F-17")
+
+
 def ops_module_hint() -> str:
     """`PEER_MODULE`, named through a function (not referenced directly by
     `check_contract_170_declarations`'s own f-strings) so this check's
@@ -1125,6 +1171,7 @@ __all__ = [
     "ProcessCeilings",
     "RoleTimeoutCatalog",
     "Surfaces",
+    "check_auditreader_statement_timeout",
     "check_control_surface_consistency",
     "check_role_connection_limits",
     "check_writer_role_timeouts",

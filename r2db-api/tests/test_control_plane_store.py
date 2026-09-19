@@ -73,6 +73,9 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    # R-56 WP-1: role-level `statement_timeout` on `r2dbsvc_auditreader`
+    # -- placed right after 0007 (the migration that creates that role).
+    "0014_auditreader_statement_timeout.sql",
 )
 
 
@@ -191,6 +194,7 @@ def _provision_platform(tmp_path_factory: pytest.TempPathFactory) -> types.Simpl
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise

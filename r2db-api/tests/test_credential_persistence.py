@@ -182,6 +182,11 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         "0005_credential_store.sql",
         "0006_control_plane_http.sql",
         "0007_application_audit.sql",
+        # R-56 WP-1: role-level `statement_timeout` on
+        # `r2dbsvc_auditreader` -- placed right after 0007 (the
+        # migration that creates that role); no dependency on
+        # 0008/0012/0013.
+        "0014_auditreader_statement_timeout.sql",
         # Phase 10 WP-4g (supervisor ruling 2026-09-09): `r2db_api.main.
         # build_app`/`r2db_api.control_main.build_control_app` now run
         # F-16 (this process' own role CONNECTION LIMIT) unconditionally
@@ -219,6 +224,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         # (and the `auditreader` role) to exist, exactly as it already
         # needed `0006`'s `control_audit`/`r2dbsvc_controlplane`.
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
         _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
         # Q4 phase WP-1 (design D-1/D-2): platform single-shot migration --
         # ALTER ROLE writer-timeout role settings + the platform_
