@@ -2616,10 +2616,11 @@ def _inventory_exit_code(report: dict) -> int:
 # ===========================================================================
 # `apply-platform-migration` -- applies one platform migration file
 # (never a per-application upgrade, never the bootstrap-only 0001/0002)
-# a second (or later) time against a running cluster. Never run
-# against production before an isolated proof, an independent audit,
-# and requester approval.
+# a second (or later) time against a running cluster. Against
+# production, run it only through the runbook's gated procedure
+# (docs/cloud-run-cloud-sql.md section 10).
 # ===========================================================================
+# history: CH-0538
 
 #: the platform migrations `apply-platform-migration` accepts --
 #: every migration that neither takes a `:app_id` psql variable nor is a
@@ -2724,10 +2725,13 @@ def _platform_migration_variables(filename: str, args: argparse.Namespace) -> "d
 
 def cmd_apply_platform_migration(args: argparse.Namespace) -> int:
     """Applies one platform migration file a second (or later) time
-    against a running cluster. Never run against production before an
-    isolated proof, an independent audit, and requester approval come
-    first. DSN comes from `MITATEDB_PROVISION_DSN` only, never an
-    argument (design Z-8/D-10)."""
+    against a running cluster. Against production, run it only through
+    the runbook's gated procedure (docs/cloud-run-cloud-sql.md section
+    10). DSN comes from `MITATEDB_PROVISION_DSN` only, never an
+    argument (design Z-8/D-10).
+
+    History: CH-0539
+    """
     lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
     script = _resolve_platform_migration_file(args.file)
     variables = _platform_migration_variables(args.file, args)
