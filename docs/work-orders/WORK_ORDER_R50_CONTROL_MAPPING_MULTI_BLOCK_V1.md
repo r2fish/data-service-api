@@ -408,3 +408,7 @@ mutate: 20 mutations, 20 as expected, restores verified 2/2 files (sha256 x2), g
 - 監査の独立確認: 20 件の `tests` に挙がる test id は**全件**現行の収集 id (register 34・tools/tests 507) に実在し、20 件の変異の `old` のスニペットは**全件**現行のファイルに実在する (= 変異が現行コードの実在の分岐を消す形になっている)。
 - W1-3 は `-x` のため 1 変異 1 赤の原則に沿って項目を分けてある (`trailing_space` は 1 段目で既に赤のため 2 段目の変異では動かない — 実装報告 §4 の註)。
 - 指示書 §9 は**変異 id 20 件を逐語で写している**が、「赤になった test id」の列と mutate の集計行は写していない (§5 の未解決 1)。
+
+## 14. 訂正註 7 (2026-09-20) — §8 (訂正註 1) の結合実行の原因
+
+§8 (訂正註 1) は、`conformance-tests/` のファイルと `tools/tests` を 1 回の pytest に結合したときの teardown の error の原因を「`tools/testpg/dsa_testpg.py` が同じ process の `PGPASSWORD` を消すため」と書いた。**これは不正確であった** (本文は書き換えない)。roadmap R-58 の実測 (2026-09-20) では、原因は `tools/perf_baseline.py` の `main()` が process の環境変数を直接書き換えて戻さないことで、偽のクラスタで `main()` を呼ぶ `tools/tests/test_perf_baseline.py` のテストの後、`PGHOST`・`PGPASSFILE` が偽の値のまま残っていた。実測と直しは `docs/work-orders/WORK_ORDER_R58_PERF_BASELINE_ENV_RESTORE_V1.md`。R-58 の統合後は「2 回に分けて回す」の受けは要らない。
