@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **2.10** (2026-09-19; R-54 WP-3 -- both peers' `0004_deprovision_application.sql` now close an application's own live connections with a temporary grant of that application's own two roles, instead of any cluster-wide privilege. SI-00's r2db-api default block and SI-00's MitateDB-api default block each gain that stage order's own control -- no predefined role, no superuser and no operator grant beforehand; the pre-check that refuses, before changing anything, a connection held under any other role; and the bounded residue a failure leaves (`ALLOW_CONNECTIONS false` plus a standing self-grant) with why it is lost availability rather than gained privilege -- and each gains a Status pair naming that peer's six new `tests/test_postgres.py` tests and holding production evidence at `absent`. SI-09's MitateDB-api default block has its two runbook-version claims corrected, the section 10.7 table having moved to version 4 in this same change set and been accepted there by an independent review of 2026-09-19 (sections 10.6 and 10.10 stay at 3 and 6); the two superseded lines verbatim in `CONTROL_MAPPING_HISTORY.md`'s SI-09 section. -- docs/design/DEPROVISION_FORCED_DROP_V0_1.md)
+Version: **2.11** (2026-09-19; R-59 -- SI-09's MitateDB-api subsection, whose default block held 14,229 of the 15,200 characters one block may hold, splits into that default block and a named `platform upgrade` block. A pure move of 15 claims (12 Control, 2 Evidence, 1 Status), no claim text changed and nothing moved into `CONTROL_MAPPING_HISTORY.md`: the named block takes `apply-platform-migration`, migrations `0013_role_statement_timeouts.sql` and `0014_role_connection_limits_rollout.sql`, the numbered-set ordering, the section 10 upgrade runbook, the two migration test files and the section 10.6/10.7/10.10 acceptance state; the default block keeps `delete`, the control-plane `revoke_credential` gate, `deprovision` and `ops inventory`, and its Status axis, whose one claim was that acceptance state, now reads `- —` -- docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -47,15 +47,15 @@ blocks of the SAME subsection changes no character of any claim, so it is not a
 correction and moves nothing into `CONTROL_MAPPING_HISTORY.md`. Other documents
 point at a named block as `SI-08 / MitateDB-api / ops inventory / Evidence`,
 and at a default block as `SI-08 / MitateDB-api / Evidence`. Re-measured
-2026-09-19 (version 2.10, after R-54's own additions to SI-00 and its two
-corrections in SI-09): the longest block is still `SI-09`'s `MitateDB-api`
-`default block`, now at `14,229` characters (`971` left, the first block
-to fall below a 1,000-character margin), ahead of `SI-14`'s `r2db-api`
-`default block`, which is unchanged at the `12,624` characters version 2.8
-measured after the split and the SI-09 -> SI-08 move (`2,576` left then);
-version 2.9 measured that SI-09 block at `13,745` characters (`1,455`
-left), and the 15,122-character figure above describes the file before the
-split.
+2026-09-19 (version 2.11, after R-59 split SI-09's `MitateDB-api`
+subsection): the longest block is `SI-14`'s `r2db-api` `default block`
+again, unchanged at the `12,624` characters version 2.8 measured after
+the first split and the SI-09 -> SI-08 move (`2,576` left), ahead of
+`SI-08`'s `MitateDB-api` `default block` at `11,858` (`3,342` left);
+SI-09's `MitateDB-api` `platform upgrade` block is `9,616` characters
+and its `default block` is `4,612` (`10,588` left, against the `14,229`
+and `971` version 2.10 measured), and the 15,122-character figure above
+describes the file before the first split.
 
 **【訂正 2026-09-18 (R-50, version 2.7)】** The two sentences rewritten in place
 above each described a block as one whole subsection, which is false once a
@@ -703,6 +703,21 @@ spaces."
 - each connection also carries a fixed `lock_timeout`/`statement_timeout` (3000ms/5000ms) so a read cannot queue behind, or itself prolong, a concurrent migration/upgrade -- exceeding either leaves that item unknown, never confirmed;
 - `cmd_inventory`'s own read-only readback (not merely `_inventory_connect`'s own internal `SET`) genuinely gates the whole run (a false readback fails the subcommand closed, never proceeds to build a report); item (3)'s own per-application connections are read-only the same way the platform connection is, confirmed by the SAME readback on each one;
 - if any of `_inventory_connect`'s own three `SET` statements fails, the connection is closed before the exception propagates -- never leaked half-configured.
+
+#### Evidence
+
+- `test_c06_destructive_confirmation.py` exercises the full strict-branch vector set (V1-V5/V8; V6/V7 use the shared absence mechanism -- no `drop_entity`/control-plane surface here).
+- `MitateDB-api/tests/test_ops_inventory.py::test_inventory_connections_reject_writes_outside_an_explicit_transaction`, `::test_inventory_application_connections_also_reject_writes`, `::test_inventory_application_connections_confirm_read_only`, `::test_inventory_confirms_read_only_by_reading_it_back`, `::test_inventory_ledger_absent_read_only_survives_the_internal_rollback`, `::test_inventory_all_opened_connections_go_through_the_factory`, `::test_inventory_never_calls_psycopg_connect_outside_its_own_factory`, `::test_inventory_connect_closes_the_connection_when_a_set_statement_fails`, `::test_inventory_tool_failure_when_read_only_cannot_be_confirmed`.
+- `MitateDB-api/tests/test_ops_inventory.py::test_inventory_session_timeouts_are_actually_set`, `::test_inventory_session_timeout_constants_are_pinned`, `::test_inventory_credentials_lock_timeout_exceeded_is_unknown`.
+
+#### Status
+
+- —
+
+### MitateDB-api -- platform upgrade
+
+#### Control
+
 - **`apply-platform-migration` (R-45 WP-E)**: applies one platform migration file (a pinned constant: 0005/0007/0011/0012/0013/0014 only, never the bootstrap-only 0001/0002) against `MITATEDB_PROVISION_DSN`; FILENAME is a bare name (no path separator), matched against that pinned enumeration, and resolved (both the migrations directory and the candidate file, symlinks followed) to confirm it stays inside the migrations directory before any psql subprocess starts -- the rejected value is never echoed;
 - DSN is environment-only (no CLI argument, design Z-8/D-10), `ON_ERROR_STOP=1`, a required no-default `--lock-timeout` reaching psql via `PGOPTIONS` (`_with_lock_timeout_option`, the SAME helper `upgrade-applications`/`deprovision` use), and psql's own captured output is redacted before any failure message reaches stderr;
 - per-file psql variables (0007's own `:api_role`/`:controlplane_role`) are a static table matched against each file's own real `:name` references (excluding `--` comments and `::` casts); a table entry the operator omits, or an argument the table does not list, is refused before any subprocess starts;
@@ -718,9 +733,6 @@ spaces."
 
 #### Evidence
 
-- `test_c06_destructive_confirmation.py` exercises the full strict-branch vector set (V1-V5/V8; V6/V7 use the shared absence mechanism -- no `drop_entity`/control-plane surface here).
-- `MitateDB-api/tests/test_ops_inventory.py::test_inventory_connections_reject_writes_outside_an_explicit_transaction`, `::test_inventory_application_connections_also_reject_writes`, `::test_inventory_application_connections_confirm_read_only`, `::test_inventory_confirms_read_only_by_reading_it_back`, `::test_inventory_ledger_absent_read_only_survives_the_internal_rollback`, `::test_inventory_all_opened_connections_go_through_the_factory`, `::test_inventory_never_calls_psycopg_connect_outside_its_own_factory`, `::test_inventory_connect_closes_the_connection_when_a_set_statement_fails`, `::test_inventory_tool_failure_when_read_only_cannot_be_confirmed`.
-- `MitateDB-api/tests/test_ops_inventory.py::test_inventory_session_timeouts_are_actually_set`, `::test_inventory_session_timeout_constants_are_pinned`, `::test_inventory_credentials_lock_timeout_exceeded_is_unknown`.
 - `MitateDB-api/tests/test_ops_apply_platform_migration.py` (51 tests: filename validation, the psql-variable table (quoted-form-only reference, no bare `:name`), DSN-via-environment, redaction, drift-then-restore for 5 of the 6 accepted files (0005/0007/0011/0012/0013), 0013's and 0014's own retroactive/forward-provisioning/transactional/skip-missing-role/permission-failure coverage, 0014's own preservation of the setting 0013 adds, and the AST-derived DDL-flowing-subcommand and psql-file-launching-function sets) and `MitateDB-api/tests/test_platform_migration_reapply.py::test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` (also covers 0005/0013/0014; re-application routed through `apply-platform-migration` with drift-then-restore, replacing the earlier bare-psql re-application).
 - Runbook acceptance for the section 10.6 table (version 3), the section 10.7 table (version 4) and the section 10.10 procedure (version 6): the acceptance record in `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.8 (conclusion, version reviewed, where the review is recorded, date accepted). Section 10.7 moved to version 4 in this change set -- its deprovision row now carries the temporary self-grant and `ALLOW_CONNECTIONS false` stages R-54 adds to `0004` -- and was accepted at that version by an independent review of 2026-09-19. This claim carries no mutation of its own -- it is an audit correspondence, and its verbatim collation record is the design register `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` section 12.7 for sections 10.6 and 10.10 and `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` section 5 for section 10.7's own version 4, each named by the matching row of section 10.8.
 
