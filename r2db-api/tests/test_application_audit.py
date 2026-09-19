@@ -64,6 +64,10 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    # R-56 WP-1: role-level `statement_timeout` on `r2dbsvc_auditreader`
+    # -- placed right after 0007 (the migration that creates that role);
+    # no dependency on 0008/0012/0013.
+    "0014_auditreader_statement_timeout.sql",
     # Phase 10 WP-4g (supervisor ruling 2026-09-09): `r2db_api.main.build_
     # app` now runs F-16 (this process' own role CONNECTION LIMIT)
     # unconditionally at startup, on every real launch this file's own
@@ -212,6 +216,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
         _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])

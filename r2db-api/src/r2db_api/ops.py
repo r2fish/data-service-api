@@ -1010,6 +1010,7 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     # at least its own real pool-composition floor -- the next unused exit
     # code.
     "F-16": 15,
+    "F-17": 16,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1132,6 +1133,12 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
     _verify_declarations_ok("F-16", "each role's CONNECTION LIMIT is -1 or at least its own real pool-composition floor")
+
+    try:
+        platform_declarations.check_auditreader_statement_timeout(conn, schema=schema)
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok("F-17", "auditreader role's statement_timeout is a positive, role-level-only value")
     return 0
 
 

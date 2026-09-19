@@ -276,20 +276,25 @@ sudo -u "${R2DBSVC_OS_USER}" "${R2DBSVC_INSTALL_ROOT}/.venv/bin/pip" install -c 
 # Step 3 -- PostgreSQL migrations (POSTGRES_PROVISIONING_RUNBOOK.md §5/§9/
 # §11/§16/§17/§18). Order: 0001 (cluster-admin bootstrap) -> 0002
 # (provisioning functions) -> 0005 (credential store + api_password) -> 0006
-# (control-plane storage) -> 0007 (audit sink) -> 0008 (Q4 platform
-# declarations + writer-role timeouts) -> 0012 (Phase 10 process_ceilings
-# key widening) -> 0003 (this deployment's first application).
-# 0005/0006/0007/0008/0012 are platform-wide bootstrap and are independent
-# of any one application (§5/§9/§16/§18's own note); 0003 is placed last
-# here so an operator who only wants the platform-wide objects can stop
-# before it. `0004` (deprovision) is intentionally never invoked by this
-# script -- it is an operator-run teardown path, not part of onboarding.
-# `0009` (the per-application platform-upgrade ledger retrofit, §17) is
-# likewise never run directly here: the revised `0003` above already seeds
-# this deployment's first application with the ledger pre-populated, and the
-# general retrofit path for any OTHER already-registered application is
-# `ops upgrade-applications` below, not a hand-picked `psql -f 0009_....sql`
-# invocation (design D-3(b), D-4).
+# (control-plane storage) -> 0007 (audit sink) -> 0014 (R-56 auditreader
+# statement_timeout) -> 0008 (Q4 platform declarations + writer-role
+# timeouts) -> 0012 (Phase 10 process_ceilings key widening) -> 0003 (this
+# deployment's first application).
+# 0005/0006/0007/0014/0008/0012 are platform-wide bootstrap and are
+# independent of any one application (§5/§9/§16/§18's own note); 0003 is
+# placed last here so an operator who only wants the platform-wide objects
+# can stop before it. `0004` (deprovision) is intentionally never invoked by
+# this script -- it is an operator-run teardown path, not part of
+# onboarding. `0009` (the per-application platform-upgrade ledger retrofit,
+# §17) is likewise never run directly here: the revised `0003` above already
+# seeds this deployment's first application with the ledger pre-populated,
+# and the general retrofit path for any OTHER already-registered
+# application is `ops upgrade-applications` below, not a hand-picked
+# `psql -f 0009_....sql` invocation (design D-3(b), D-4). `0013` (role
+# `CONNECTION LIMIT` raise) is likewise never run directly here: unlike
+# `0014`, it has its own precondition (`max_connections` must be re-checked
+# against the runbook's own updated worked example first, R-56 design §5)
+# that this script does not verify -- see the runbook for the manual step.
 # ---------------------------------------------------------------------------
 
 log "0001_bootstrap_control_plane.sql (cluster admin)"
@@ -344,6 +349,15 @@ printf '%s\n' \
     "\\getenv auditreader_password R2DBSVC_AUDITREADER_PASSWORD" \
     "\\i ${R2DBSVC_MIGRATIONS_DIR}/0007_application_audit.sql" \
   | psql "${R2DBSVC_CONTROL_DSN}"
+
+# R-56 WP-1 (design D-1): role-level `statement_timeout` on
+# `r2dbsvc_auditreader` -- no `-v`/`\getenv` variables (role name is a
+# literal in the migration file, design D-1's own "様式の理由"), takes no
+# precondition beyond 0007 above having already created that role.
+log "0014_auditreader_statement_timeout.sql (r2dbsvc_control)"
+psql "${R2DBSVC_CONTROL_DSN}" \
+    -v ON_ERROR_STOP=1 \
+    -f "${R2DBSVC_MIGRATIONS_DIR}/0014_auditreader_statement_timeout.sql"
 
 # ---------------------------------------------------------------------------
 # Role-name / pg_roles consistency check (supervisor ruling 2026-09-06

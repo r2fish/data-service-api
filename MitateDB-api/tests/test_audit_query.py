@@ -2199,7 +2199,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_138_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_140_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2472,6 +2472,11 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # `*.example.invalid` synthetic fixture URLs both sides).
     # 追記 2026-09-16 (R-44 WP-3、D-4): `ADMIN_DSN_DEFAULT` はこの変更セットで
     # 削除された。上の経緯コメントは書き換えない。登録行のみここで消す。
+    # 追記 2026-09-20 (R-56 WP-1): `MIGRATION_NAMES_WITHOUT_DECLARATIONS` の
+    # 本体は `MIGRATION_NAMES[:-1]` 位置 slice から
+    # `tuple(name for name in MIGRATION_NAMES if name not in
+    # _MIGRATION_NAMES_DECLARATIONS_ONLY)` (名前選択) に両 peer 同時に直っ
+    # た。上の経緯コメントは書き換えない。行 (シンボル名) はそのまま。
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATIONS_DIR"),
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
@@ -2672,12 +2677,21 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_CONTROLPLANE_ROLE_POOL_FLOOR"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_AUDITREADER_ROLE_POOL_FLOOR"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f16_message"),
+    # R-56 WP-2 review (差し戻し 2, 2026-09-20): F-17's own peer-duplicated
+    # pieces -- `_f17_message` and `check_auditreader_statement_timeout`
+    # itself. Unlike `check_role_connection_limits` (excluded above: real
+    # per-peer parameter/column differences thread through its whole
+    # body), `check_auditreader_statement_timeout` carries no docstring
+    # and no peer-specific literal on either peer -- verified
+    # normalize-and-diff equal before adding both rows.
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f17_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_auditreader_statement_timeout"),
     ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_parse_handler"),
     ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_authenticate_call_nodes"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_138_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_140_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2761,7 +2775,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_138_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_138_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_140_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2994,10 +3008,12 @@ def test_isomorphic_target_table_is_pinned_to_its_current_138_rows() -> None:
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_CONTROLPLANE_ROLE_POOL_FLOOR"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_AUDITREADER_ROLE_POOL_FLOOR"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f16_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f17_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_auditreader_statement_timeout"),
         ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_parse_handler"),
         ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_authenticate_call_nodes"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 138
+    assert len(_ISOMORPHIC_TARGETS) == 140
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:

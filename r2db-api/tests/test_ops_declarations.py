@@ -63,6 +63,10 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    # R-56 WP-1: role-level `statement_timeout` on `r2dbsvc_auditreader`
+    # -- placed right after 0007 (the migration that creates that role);
+    # no dependency on 0008.
+    "0014_auditreader_statement_timeout.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
 )
 
@@ -165,6 +169,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
         # D-2(h) point 1: migration `0008` now takes `-v api_role=... -v
         # controlplane_role=...` -- the SAME two throwaway-prefixed role
         # names this fixture already bootstrapped above (never the
@@ -255,6 +260,7 @@ def bare_platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.Si
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
         _run_psql(
             control_dsn,
             rewritten["0008_platform_declarations_and_writer_timeouts.sql"],

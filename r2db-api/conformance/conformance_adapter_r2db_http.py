@@ -347,6 +347,11 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0005_credential_store.sql",
         "0006_control_plane_http.sql",
         "0007_application_audit.sql",
+        # R-56 WP-1: role-level `statement_timeout` on `<prefix>_
+        # auditreader` -- depends only on 0007 above, so it is safe to
+        # apply here even though this adapter's own control stack never
+        # reads the DB-side `platform_declarations` table at all.
+        "0014_auditreader_statement_timeout.sql",
         # Phase 10 WP-4f (supervisor ruling 2026-09-09): raises `<prefix>_
         # api`/`<prefix>_controlplane`'s own `CONNECTION LIMIT` to match
         # their real pool composition -- WP-4e's own investigation found
@@ -373,6 +378,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
     _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
     _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+    _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
     controlplane_dsn = _dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db)
