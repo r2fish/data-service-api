@@ -20,6 +20,7 @@ Run directly:
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import subprocess
@@ -4127,3 +4128,281 @@ def test_0i_label_m3_without_protected_reference_stays_removable_is_green(tmp_pa
     repo, rev = _label_scenario(tmp_path, "Per phase 3: reason.", "reason.")
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 0, output
+
+
+# ===========================================================================
+# R-63 WP-1 (docs/work-orders/WORK_ORDER_R63_PROVENANCE_NEW_SYMBOL_BLOCKS_V1.md
+# §2.2): §4.1 (2)'s CH-ID-less column opens for blocks attached to a symbol
+# absent from the base rev (D-1, J-1, J-2), while an addition to an EXISTING
+# target stays red (D-2) and (5)'s history-token scan still reaches a new
+# symbol's own block (condition (b)). Each scenario asserts, per §2.2's own
+# observation rule, the presence/absence of the literal "§4.1 (2)" line --
+# not the overall exit code, since (1) (a real code change) legitimately
+# still fires whenever a brand-new statement is added.
+# ===========================================================================
+
+def test_r63_new_function_with_docstring_is_green(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "def alpha():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = old + '\n\ndef beta():\n    """Computes beta."""\n    return 2\n'
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_new_module_constant_with_comment_is_green(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "LIMIT = 3\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "LIMIT = 3\n\n# New ceiling for the cache.\nMAX = 5\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_new_function_docstring_history_token_is_red(tmp_path):
+    # condition (b): a new symbol's own block is still subject to (5)'s
+    # history-token scan even though it is exempt from (2).
+    repo = _init_repo(tmp_path)
+    old = "def alpha():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = old + '\n\ndef beta():\n    """Computes beta (WP-1).\n    """\n    return 2\n'
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (5)" in output, output
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_moved_block_into_new_function_is_red_at_old_key(tmp_path):
+    # D-1(c): a "new symbol" disguise must not hide an existing block's
+    # move -- the OLD side of its key still reports the loss (old 1, new
+    # 0), even though the destination (a brand-new function) is itself
+    # exempt from (2).
+    repo = _init_repo(tmp_path)
+    old = "def alpha(x):\n    # Guard against negative input.\n    return x + 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        "def beta(y):\n    # Guard against negative input.\n    return y\n"
+        "\n\ndef alpha(x):\n    return x + 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+    assert "(old 1, new 0)" in output, output
+
+
+def test_r63_new_block_before_existing_statement_is_red(tmp_path):
+    # D-2: the target statement ("import os") already exists in the base
+    # rev, so a CH-ID-less block placed in front of it is never exempt.
+    repo = _init_repo(tmp_path)
+    old = "import os\n\nLIMIT = 3\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "import os\n\n# Read the ceiling from the environment when set.\nLIMIT = 3\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+
+
+def test_r63_insert_statement_before_existing_block_is_green(tmp_path):
+    # §1.2 (i): a new, unrelated statement inserted ahead of an unchanged
+    # existing block must not move that block's own key.
+    repo = _init_repo(tmp_path)
+    old = "# Ceiling for the queue.\nLIMIT = 3\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "T = 5\n\n# Ceiling for the queue.\nLIMIT = 3\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_value_only_change_of_commented_constant_is_green(tmp_path):
+    # J-1: an `Assign` token is the TARGET only, never the value, so a
+    # value-only edit still aligns to the same statement and keeps its
+    # block attached ((1) still separately reports the value change).
+    repo = _init_repo(tmp_path)
+    old = "# Ceiling for the queue.\nLIMIT = 3\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# Ceiling for the queue.\nLIMIT = 4\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_new_function_after_scope_final_block_is_green(tmp_path):
+    # §1.2 (iv): an unchanged scope-final block, still last in its own key
+    # group, is unaffected by a brand-new function appended after it.
+    repo = _init_repo(tmp_path)
+    old = "LIMIT = 3\n\n# Trailing note about the module.\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = old + "\n\ndef beta(y):\n    return y - 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_block_moved_between_identical_siblings_is_red(tmp_path):
+    # J-1 (ii): two structurally identical statements (`pass`, `pass`) are
+    # still distinguished by their OWN position in the old body, so moving
+    # a block from before the first to before the second is still red.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    # Note.\n    pass\n    pass\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    pass\n    # Note.\n    pass\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+
+
+# ===========================================================================
+# R-63 WP-1, code review round 1 (差し戻し、監督裁定 2026-09-20): 4 items.
+# ===========================================================================
+
+_PROPSRC = (
+    "class C:\n"
+    "    @property\n"
+    "    def value(self):\n"
+    '        """Returns the cached value."""\n'
+    "        return self._v\n"
+    "\n"
+    "    @value.setter\n"
+    "    def value(self, v):\n"
+    '        """Stores a new value."""\n'
+    "        self._v = v\n"
+)
+
+_GETTER_ONLY = (
+    "class C:\n"
+    "    @property\n"
+    "    def value(self):\n"
+    '        """Returns the cached value."""\n'
+    "        return self._v\n"
+)
+
+
+def test_r63_review1_property_setter_unchanged_is_green(tmp_path):
+    # 重大 1: same-named sibling scopes (`@property`/`@x.setter`) must not
+    # collide in the J-1 alignment cache -- an untouched pair is fully
+    # green, not a false (2) red from one sibling's blocks being aligned
+    # against the OTHER sibling's body.
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/mod.py", _PROPSRC)
+    rev = _commit_all(repo, "old")
+    _write(repo, "r2db-api/src/r2db_api/mod.py", _PROPSRC)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_review1_new_setter_sibling_getter_unaffected_is_green(tmp_path):
+    # 重大 1: adding a same-named sibling (a `@x.setter` where only the
+    # `@property` existed before) is D-1's "new symbol" -- its own
+    # docstring is green, AND the pre-existing getter's docstring is not
+    # dragged along into a spurious mismatch by the collision.
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/mod.py", _GETTER_ONLY)
+    rev = _commit_all(repo, "old")
+    _write(repo, "r2db-api/src/r2db_api/mod.py", _PROPSRC)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_review1_docstring_edit_inside_if_body_is_red_once(tmp_path):
+    # 重大 2: a `def` nested inside a NON-scope compound statement
+    # (`if True:`) is not itself a J-1 "scope", so its docstring text
+    # lives inside the `if` statement's own `ast.dump` token. Without
+    # recursively stripping docstrings from that token (the same
+    # `_strip_docstrings_for_ast` (1) uses), the edit wrongly perturbs the
+    # `if` statement's alignment and doubles an unrelated trailing
+    # module-level comment's own error count (1 -> 2).
+    repo = _init_repo(tmp_path)
+    old = (
+        "# Module note about the fallback.\n"
+        "if True:\n"
+        "    def helper():\n"
+        '        """Does the work."""\n'
+        "        return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = old.replace("Does the work.", "Does the work well.")
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert output.count("§4.1 (2)") == 1, output
+
+
+def test_r63_review1_ast_equal_diffs_align_by_identity(tmp_path):
+    # 中 (完了条件 10 の強化): for several AST-equal (per (1)) diffs -- a
+    # pure line-shift, a comment reworded with code unchanged, and a
+    # docstring reworded with code unchanged -- the module scope's J-1
+    # alignment must be the IDENTITY map (every old index corresponds to
+    # itself), which is exactly what a plain structural INDEX key would
+    # already give: nothing about (2)'s verdict changes for a pure
+    # code-invariant diff.
+    pairs = [
+        ("X = 1\nY = 2\n", "\n\nX = 1\n\nY = 2\n"),
+        ("# Note A.\nX = 1\n\nY = 2\n", "# Note A changed.\nX = 1\n\nY = 2\n"),
+        (
+            'def f():\n    """Doc f."""\n    return 1\n\n\ndef g():\n    return 2\n',
+            'def f():\n    """Doc f v2."""\n    return 1\n\n\ndef g():\n    return 2\n',
+        ),
+    ]
+    assert len(pairs) >= 2
+    for old_src, new_src in pairs:
+        assert cp.ast_signature(old_src) == cp.ast_signature(new_src)
+        old_body = ast.parse(old_src).body
+        new_body = ast.parse(new_src).body
+        mapping = cp._align_scope_bodies(old_body, new_body)
+        assert len(old_body) == len(new_body)
+        assert mapping == {i: i for i in range(len(old_body))}, mapping
+
+
+def test_r63_review1_duplicated_block_before_new_function_is_green(tmp_path):
+    # 低 (逐語コピー): duplicating an EXISTING block so a copy also sits in
+    # front of a brand-new function is allowed -- 原本が残る限り許す -- as
+    # long as the original's own key still holds it (checked here: it
+    # does, the original stays attached to the pre-existing statement).
+    repo = _init_repo(tmp_path)
+    old = "# Guard the queue.\nX = 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# Guard the queue.\ndef newf():\n    pass\n\n\n# Guard the queue.\nX = 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r63_review1_non_leading_bare_string_is_content_sensitive():
+    # 低 (docstring の範囲): `_token_for_stmt`'s `is_first` restriction must
+    # match design §4.1 (1)'s own docstring shape exactly (`body[0]`
+    # only) -- a bare string Expr statement NOT at that position is an
+    # ordinary, content-sensitive statement: editing its text must NOT
+    # align to its old self (index 1), unlike its unaffected neighbours
+    # (index 0 and index 2, which do align).
+    old_body = ast.parse('def f():\n    x = 1\n    "note"\n    y = 2\n').body[0].body
+    new_body = ast.parse('def f():\n    x = 1\n    "note changed"\n    y = 2\n').body[0].body
+    mapping = cp._align_scope_bodies(old_body, new_body)
+    assert mapping.get(0) == 0
+    assert 1 not in mapping, mapping
+    assert mapping.get(2) == 2

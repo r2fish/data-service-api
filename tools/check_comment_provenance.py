@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import difflib
 import inspect
 import re
@@ -1849,19 +1850,26 @@ def _is_allowed_reduction(
 # design §4.1 (1): code unchanged (docstrings excluded, line numbers
 # excluded via include_attributes=False -- a pure line-shift is green).
 # ---------------------------------------------------------------------------
+def _is_docstring_stmt(stmt: ast.stmt) -> bool:
+    """design §4.1 (1)'s own docstring shape: a bare string-constant `Expr`
+    statement. The ONE definition `_strip_docstrings_for_ast` (below, a
+    leading `node.body[0]`) and `_token_for_stmt` (R-63 WP-1 code review
+    round 1, 低 "docstring の範囲": only at `is_first`, never mid-body)
+    both use -- so "what counts as a docstring" is never defined twice."""
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and isinstance(stmt.value.value, str)
+    )
+
+
 def _strip_docstrings_for_ast(tree: ast.Module) -> ast.Module:
     doc_node_types = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
     for node in ast.walk(tree):
         if not isinstance(node, doc_node_types):
             continue
-        if node.body:
-            first = node.body[0]
-            if (
-                isinstance(first, ast.Expr)
-                and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)
-            ):
-                node.body = node.body[1:] or [ast.Pass()]
+        if node.body and _is_docstring_stmt(node.body[0]):
+            node.body = node.body[1:] or [ast.Pass()]
     return tree
 
 
@@ -2324,6 +2332,203 @@ def _block_positions(source: str, blocks: list[Block]) -> list[tuple[str, str]]:
     return [_scope_and_anchor_for_block(tree, b) for b in blocks]
 
 
+def _sibling_occurrence(body: list[ast.stmt], idx: int) -> int:
+    """R-63 WP-1 code review round 1 (重大 1): how many EARLIER elements of
+    `body` (before `idx`) are a scope sharing `body[idx]`'s own name --
+    0-based occurrence order among same-named siblings. Python allows
+    same-named sibling scopes (`@property`/`@x.setter`, `@overload`), and
+    the plain dotted name alone does not tell them apart."""
+    child = body[idx]
+    return sum(
+        1 for other in body[:idx]
+        if isinstance(other, _SCOPE_TYPES) and other.name == child.name
+    )
+
+
+def _scope_bodies_by_identity(tree: ast.Module) -> dict[str, list[ast.stmt]]:
+    """R-63 WP-1 code review round 1 (重大 1, option (a)): maps every
+    scope's INTERNAL identity -- dotted name with `#k` (`_sibling_
+    occurrence`) appended at EVERY level, e.g. `C#0.value#1` for a
+    `@x.setter` that is the 2nd child of `C` named `value` -- to that
+    scope's OWN `body` list. Collision-free even when same-named sibling
+    scopes exist, unlike a plain-dotted-name map (which the display key
+    from `_scope_and_anchor_for_block`, used for error text and the final
+    §4.1 (2) key, still deliberately stays -- only this internal J-1
+    alignment cache needed disambiguating)."""
+    bodies: dict[str, list[ast.stmt]] = {}
+
+    def walk(node: ast.AST, path: list[str]) -> None:
+        key = ".".join(path) if path else "<module>"
+        body: list[ast.stmt] = node.body  # type: ignore[attr-defined]
+        bodies[key] = body
+        for idx, child in enumerate(body):
+            if isinstance(child, _SCOPE_TYPES):
+                walk(child, path + [f"{child.name}#{_sibling_occurrence(body, idx)}"])
+
+    walk(tree, [])
+    return bodies
+
+
+def _internal_scope_key_and_body_for_block(tree: ast.Module, block: Block) -> tuple[str, list[ast.stmt]]:
+    """R-63 WP-1 code review round 1 (重大 1, option (b)): the SAME line-
+    containment descent as `_scope_and_anchor_for_block`, but returning the
+    `#k`-suffixed internal identity (matching `_scope_bodies_by_identity`)
+    together with the scope's own body -- fetched directly by this descent,
+    never by a name lookup back into a dict, so a block belonging to one
+    same-named sibling (the setter) can never be resolved against another
+    (the getter)'s body."""
+    path: list[str] = []
+    body: list[ast.stmt] = tree.body
+    while True:
+        descended = False
+        for idx, child in enumerate(body):
+            if isinstance(child, _SCOPE_TYPES):
+                start = child.lineno
+                end = getattr(child, "end_lineno", start)
+                if start <= block.start_line <= end:
+                    path.append(f"{child.name}#{_sibling_occurrence(body, idx)}")
+                    body = child.body
+                    descended = True
+                    break
+        if not descended:
+            break
+    return (".".join(path) if path else "<module>"), body
+
+
+def _token_for_stmt(stmt: ast.stmt, is_first: bool) -> tuple:
+    """R-63 WP-1 (J-1; code review round 1, 重大 2 and 低 "docstring の
+    範囲"): the per-statement token used to align a scope's OLD body to
+    its NEW body. `def`/`class` compare by (kind, name) so renaming the
+    statement itself, not merely editing its body, is a different
+    statement. `Assign`/`AnnAssign`/`AugAssign` compare by (kind, target's
+    `ast.dump`) -- never the value -- so a value-only edit (WP-1
+    completion condition 7) still aligns to the same statement and keeps
+    the block attached to it. `is_first` (true only for `body[0]` of the
+    scope `stmt` itself belongs to, i.e. exactly design §4.1 (1)'s own
+    docstring shape via `_is_docstring_stmt`) is tokenized by shape only,
+    never its text, so editing docstring wording alone never perturbs the
+    alignment of the statements around it -- a bare string Expr NOT at
+    that position is an ordinary statement, content-sensitive like any
+    other (低: the SAME `_is_docstring_stmt` definition (1) uses, not a
+    separate one). Every other statement is tokenized from a DEEP COPY
+    recursively stripped of every docstring it contains, anywhere in its
+    own subtree, via `_strip_docstrings_for_ast` (重大 2: without this, a
+    docstring buried inside a non-scope compound statement -- `if`/`try`,
+    which this alignment's shallow per-scope walk never descends into as
+    its own scope -- still leaks into the ENCLOSING statement's `ast.dump`,
+    so editing it would wrongly perturb an unrelated sibling block's own
+    key). The real tree is never touched -- only the copy is stripped."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ("func", stmt.name)
+    if isinstance(stmt, ast.ClassDef):
+        return ("class", stmt.name)
+    if isinstance(stmt, ast.Assign):
+        return ("assign", tuple(ast.dump(t) for t in stmt.targets))
+    if isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        return ("assign", ast.dump(stmt.target))
+    if is_first and _is_docstring_stmt(stmt):
+        return ("docstring",)
+    return ("stmt", ast.dump(_strip_docstrings_for_ast(copy.deepcopy(stmt))))
+
+
+def _align_scope_bodies(old_body: list[ast.stmt], new_body: list[ast.stmt]) -> dict[int, int]:
+    """R-63 WP-1 (J-1): aligns one scope's OLD body to its NEW body via a
+    token-per-statement `difflib.SequenceMatcher` (`autojunk=False`),
+    returning NEW-body-index -> OLD-body-index for every position inside a
+    matching block. A new-body index absent from the mapping has no OLD
+    counterpart at that position: either it is a statement added by this
+    diff, or one moved here from elsewhere in the same body -- either way
+    J-2 treats it as "new" for anchoring purposes."""
+    old_tokens = [_token_for_stmt(s, i == 0) for i, s in enumerate(old_body)]
+    new_tokens = [_token_for_stmt(s, i == 0) for i, s in enumerate(new_body)]
+    mapping: dict[int, int] = {}
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
+    for match in matcher.get_matching_blocks():
+        for k in range(match.size):
+            mapping[match.b + k] = match.a + k
+    return mapping
+
+
+def _plain_block_keys(old_source: str, new_source: str,
+                       new_blocks: list[Block]) -> list[tuple[tuple[str, str], bool]]:
+    """R-63 WP-1 (D-1, J-1, J-2): the (scope, anchor) key and "deletable"
+    flag used for the CH-ID-less half of §4.1 (2), for every block in
+    `new_blocks` (a block WITH a CH-ID never reads this list -- its
+    correspondence is decided earlier, by scope name only).
+
+    A block whose own scope does not exist in the OLD tree at all (D-1: the
+    scope itself is new) is always deletable -- describing a brand-new
+    symbol can never collide with an existing key, because no OLD block is
+    ever keyed under a scope OLD does not have. Verbatim-copying an
+    existing block to sit beside a new symbol is allowed by this same rule
+    too, as long as the original stays put: 原本が残る限り許す (the
+    original's OWN key is unaffected, since the copy's key routes to
+    wherever it sits, D-1's "new symbol" scope).
+
+    Otherwise the block's key is the OLD index of the first statement,
+    after the block, that has an OLD counterpart under the scope's J-1
+    alignment (`"<end>"` if none) -- J-2's "transparent" new-statement
+    skip. It is deletable exactly when the statement it immediately
+    precedes, in the NEW body, has NO OLD counterpart (D-2: a block placed
+    immediately before an EXISTING statement is never deletable, even if a
+    later, unrelated new statement follows somewhere in the same body).
+
+    The scope used to key and align (code review round 1, 重大 1) is the
+    `#k`-disambiguated INTERNAL identity (`_scope_bodies_by_identity` /
+    `_internal_scope_key_and_body_for_block`), never the plain dotted name
+    -- only the DISPLAY half of the returned key (first element) stays the
+    plain dotted name, unchanged, for error text and to keep merging
+    same-named siblings' surviving blocks into one comparison exactly like
+    `_scope_and_anchor_for_block` always has."""
+    old_tree = ast.parse(old_source)
+    new_tree = ast.parse(new_source)
+    old_scope_bodies = _scope_bodies_by_identity(old_tree)
+    alignment_cache: dict[str, dict[int, int]] = {}
+    keys: list[tuple[tuple[str, str], bool]] = []
+    for nb in new_blocks:
+        scope_key = _scope_and_anchor_for_block(new_tree, nb)[0]
+        internal_key, body = _internal_scope_key_and_body_for_block(new_tree, nb)
+        if internal_key not in old_scope_bodies:
+            keys.append(((scope_key, "<newscope>"), True))
+            continue
+        alignment = alignment_cache.get(internal_key)
+        if alignment is None:
+            alignment = _align_scope_bodies(old_scope_bodies[internal_key], body)
+            alignment_cache[internal_key] = alignment
+        j = next((i for i, stmt in enumerate(body) if stmt.lineno > nb.end_line), None)
+        deletable = j is not None and j not in alignment
+        anchor = "<end>"
+        while j is not None and j < len(body):
+            if j in alignment:
+                anchor = f"stmt#{alignment[j]}"
+                break
+            j += 1
+        keys.append(((scope_key, anchor), deletable))
+    return keys
+
+
+def _old_sequence_reachable(old_seq: list[str], new_entries: list[tuple[int, str, bool]]) -> bool:
+    """R-63 WP-1 (D-1/D-2, J-2): whether `old_seq` (the surviving CH-ID-less
+    OLD blocks at one (scope, anchor) key, in file order) can be produced
+    from `new_entries` by deleting only entries marked deletable -- an
+    order-preserving subsequence test. Each NEW entry either matches the
+    next unconsumed OLD text (advancing past it) or, if deletable, is
+    skipped; a non-deletable entry that matches nothing keeps this key red
+    (D-2: an existing target still rejects an unaccounted-for addition)."""
+    reach = {0}
+    for _line, text, deletable in new_entries:
+        nxt: set[int] = set()
+        for i in reach:
+            if i < len(old_seq) and old_seq[i] == text:
+                nxt.add(i + 1)
+            if deletable:
+                nxt.add(i)
+        reach = nxt
+        if not reach:
+            break
+    return len(old_seq) in reach
+
+
 def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                                 old_blocks: list[Block], new_blocks: list[Block],
                                 companion_lookup: dict[str, str],
@@ -2510,17 +2715,24 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             continue
         remaining_old_by_key.setdefault(old_positions[i], []).append((ob.start_line, ob.dedented))
 
-    new_plain_by_key: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    # R-63 WP-1 (D-1/D-2, J-1, J-2): a CH-ID-less new block's key is no
+    # longer its own NEW-tree structural position (`new_positions`, which
+    # only the CH-ID-matching code above still uses, for `nb_scope`) but
+    # the OLD-aligned key from `_plain_block_keys`, together with whether
+    # this particular block is allowed to be an unmatched addition.
+    plain_keys = _plain_block_keys(old_source, new_source, new_blocks)
+    new_plain_by_key: dict[tuple[str, str], list[tuple[int, str, bool]]] = {}
     for i, nb in enumerate(new_blocks):
         if nb.history_id is not None:
             continue
-        new_plain_by_key.setdefault(new_positions[i], []).append((nb.start_line, nb.dedented))
+        key, deletable = plain_keys[i]
+        new_plain_by_key.setdefault(key, []).append((nb.start_line, nb.dedented, deletable))
 
     for key in sorted(set(remaining_old_by_key) | set(new_plain_by_key)):
         old_seq = [text for _line, text in remaining_old_by_key.get(key, [])]
         new_entries = new_plain_by_key.get(key, [])
-        new_seq = [text for _line, text in new_entries]
-        if old_seq == new_seq:
+        new_seq = [text for _line, text, _deletable in new_entries]
+        if _old_sequence_reachable(old_seq, new_entries):
             continue
         line = new_entries[0][0] if new_entries else remaining_old_by_key[key][0][0]
         errors.append(
