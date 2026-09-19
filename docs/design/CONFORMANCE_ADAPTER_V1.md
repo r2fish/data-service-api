@@ -2792,6 +2792,14 @@ acceptance boundary rather than a test defect to force red (監督裁定 2
 回目: MitateDB's own deprovision path independently guarantees the
 outcome close would have guaranteed).
 
+**Correction note (2026-09-19, design `docs/design/
+DEPROVISION_FORCED_DROP_V0_1.md` v1.0 D-2R; this paragraph is not
+rewritten, only annotated)**: the `pg_terminate_backend` call above is
+unchanged and is now preceded by a live-connection pre-check, a
+temporary self-grant, and `ALLOW_CONNECTIONS false` -- none of which
+this acceptance boundary's own guarantee depends on, so the property
+this paragraph states holds unchanged.
+
 ### 21.2 `idempotency_key` optional field (D-6.7 C-07 (ii))
 
 Added as an optional field (default `None`) to `BatchOperation` and

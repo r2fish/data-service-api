@@ -258,6 +258,18 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+---
+
+*MitateDB-api Evidence claim, the runbook acceptance record and the versions it names, superseded 2026-09-19 (Version 2.10, R-54 WP-3 -- the section 10.7 table moved to version 4 when its deprovision row gained the temporary self-grant and `ALLOW_CONNECTIONS false` stages, and was accepted there by an independent review of the same date; sections 10.6 and 10.10 are unchanged at 3 and 6), verbatim:*
+
+- Runbook acceptance for the section 10.6 table (version 3), the section 10.7 table (version 3) and the section 10.10 procedure (version 6): the acceptance record in `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.8 (conclusion, version reviewed, where the review is recorded, date accepted). This claim carries no mutation of its own -- it is an audit correspondence, and its verbatim collation record is the design register `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` section 12.7, which every row of section 10.8 names.
+
+---
+
+*MitateDB-api Status claim, the versions section 10's three reviewed subjects stand at, superseded 2026-09-19 (Version 2.10, R-54 WP-3 -- the same move of the 10.7 table to version 4, and R-54's own `0004` stages are likewise unapplied in production), verbatim:*
+
+- Section 10's three reviewed subjects stand at these versions -- the 10.6 table at 3, the 10.7 table at 3, the 10.10 procedure at 6 -- and each stays a draft until section 10.8's own row names that same version for it; section 10.8 is the single place that state is read from, and a row naming an earlier version counts as no record at all. As of this version of this file, nothing in section 10 has been run against production, and `0014_role_connection_limits_rollout.sql` has not been applied to production either -- every value and every judgment above was measured on a throwaway test cluster.
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**

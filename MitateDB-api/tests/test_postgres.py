@@ -1932,6 +1932,207 @@ def test_begin_provision_application_aborts_when_a_preexisting_role_was_contamin
             conn.close()
 
 
+# --- R-54: 0004's live-connection handling (design docs/design/ ----------
+# --- DEPROVISION_FORCED_DROP_V0_1.md v1.0, D-1/D-2R) -----------------------
+
+
+def test_deprovision_succeeds_in_a_single_pass_with_a_live_runtime_role_connection(platform) -> None:
+    """Completion condition 1 (design D-1/D-2R, H-1): a runtime-role
+    connection stays open across the whole deprovision attempt -- 0004's
+    stage (3) temporary self-grant plus its existing stage (5) narrowed
+    terminate close it out, so `_run_psql` (deliberately not
+    `deprovision_app`, whose own retry loop would hide whether a single
+    attempt already succeeds) can run 0004 against the provision DSN
+    exactly once, with no retry, and it succeeds. Uses its own throwaway
+    application (not `app_a`/`app_b`) so this test's own single attempt is
+    the only deprovision call made for it."""
+    app = provision_app(platform, "live_conn_app")
+    live_conn = psycopg.connect(app.runtime_dsn)
+    try:
+        _run_psql(platform.provision_dsn, platform.deprovision_script, {"app_id": "live_conn_app"})
+    finally:
+        try:
+            live_conn.close()
+        except Exception:
+            pass
+
+
+def test_0004_allow_connections_false_is_between_the_temporary_grant_and_terminate() -> None:
+    """Completion condition 2 (design D-2R stage (4)): a structural check
+    on `0004_deprovision_application.sql`'s own source text -- the
+    `ALLOW_CONNECTIONS false` statement must appear after the temporary
+    self-grant stage and before the existing narrowed `pg_terminate_
+    backend` statement. Behavioural backing is design H-1's own quoted
+    single-session run, in that same order, not re-exercised here. Code
+    review round 1 addendum (c): searches a comment-stripped copy of the
+    text (every line that starts with `--`, leading whitespace ignored,
+    is dropped first) so a future prose comment mentioning these same
+    words in a different order can never satisfy this pin -- only the
+    real SQL can."""
+    raw_text = (MIGRATIONS_DIR / "0004_deprovision_application.sql").read_text()
+    text = "\n".join(line for line in raw_text.splitlines() if not line.strip().startswith("--"))
+    grant_index = text.find("SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'runtime_role')")
+    allow_connections_index = text.find("WITH ALLOW_CONNECTIONS false")
+    terminate_index = text.find(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity\n"
+        "    WHERE datname = :'database_name' "
+        "AND pid <> pg_backend_pid() AND backend_type = 'client backend';"
+    )
+    assert grant_index != -1
+    assert allow_connections_index != -1
+    assert terminate_index != -1
+    assert grant_index < allow_connections_index < terminate_index
+
+
+def test_deprovision_leaves_no_role_or_executor_membership_behind(platform) -> None:
+    """Completion condition 3 (design D-1/D-3, M-7/M-13's own "membership
+    残り0行"): after a normal deprovision (no stalled live connection),
+    both this application's roles are gone from `pg_roles`, and
+    `mitatedbsvc_provision` holds no `inherit_option = true` row in
+    `pg_auth_members` as the *member* side -- the same accounting
+    `test_new_auditreader_role_has_no_memberships` in
+    `test_application_audit.py` uses, narrowed to `inherit_option = true`
+    because that is the one property D-1's own grant sets that the
+    baseline `CREATE ROLE`-implicit ADMIN OPTION row (inherit_option =
+    false, M-7) never does, so this stays 0 regardless of any other
+    application this module-scoped fixture has provisioned. The temporary
+    self-grant D-1 adds does not outlive the `DROP ROLE` that follows it
+    on the normal path. The membership assert runs before the `pg_roles`
+    residual assert below so that removing only the `DROP ROLE` step for
+    `runtime_role` (M3) fails at the membership assert itself, not merely
+    at the role-residual assert (code review round 1, item 1)."""
+    app = provision_app(platform, "membership_check_app")
+    conn = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolname FROM pg_roles WHERE rolname IN (%s, %s)", [app.runtime_role, app.developer_role])
+            assert {row[0] for row in cur.fetchall()} == {app.runtime_role, app.developer_role}
+    finally:
+        conn.close()
+
+    deprovision_app(platform, "membership_check_app")
+
+    conn = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON m.member = r.oid "
+                "WHERE r.rolname = %s AND m.inherit_option = true",
+                [platform.provision_role],
+            )
+            assert cur.fetchone()[0] == 0
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolname FROM pg_roles WHERE rolname IN (%s, %s)", [app.runtime_role, app.developer_role])
+            assert cur.fetchall() == []
+    finally:
+        conn.close()
+
+
+def test_deprovision_pre_check_stops_and_changes_nothing_for_an_unrelated_connected_role(platform) -> None:
+    """Completion condition 4 (design D-2R stage (2), H-2): a normal
+    LOGIN role that is neither this application's runtime/developer role
+    nor the executing (provision) role, holding a connection to this
+    application's database, makes 0004 raise before any of its later
+    stages run -- the database, its `datallowconn`, the executing role's
+    own `inherit_option = true` membership count (D-1's own grant marker,
+    see `test_deprovision_leaves_no_role_or_executor_membership_behind`'s
+    own docstring for why that -- not a raw row count -- is what stays 0
+    here), and the registry row are all exactly as before. Design §6.1
+    pins only "it stopped" and "nothing changed" -- not PostgreSQL's own
+    `DETAIL:` text."""
+    app = provision_app(platform, "third_party_conn_app")
+    other_role = f"{platform.prefix}_third_party_reader"
+    other_password = secrets.token_urlsafe(24)
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    other_conn = None
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(sql.Identifier(other_role), sql.Literal(other_password)))
+            cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(app.database), sql.Identifier(other_role)))
+        other_dsn = _dsn_with(platform.admin_dsn, user=other_role, password=other_password, dbname=app.database)
+        other_conn = psycopg.connect(other_dsn)
+
+        with pytest.raises(RuntimeError):
+            _run_psql(platform.provision_dsn, platform.deprovision_script, {"app_id": "third_party_conn_app"})
+
+        with admin.cursor() as cur:
+            cur.execute("SELECT datallowconn FROM pg_database WHERE datname = %s", [app.database])
+            assert cur.fetchone() == (True,)
+            cur.execute(
+                "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON m.member = r.oid "
+                "WHERE r.rolname = %s AND m.inherit_option = true",
+                [platform.provision_role],
+            )
+            assert cur.fetchone()[0] == 0
+
+        prov_conn = psycopg.connect(platform.provision_dsn)
+        try:
+            with prov_conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT count(*) FROM {} WHERE application_id = %s").format(
+                        sql.Identifier(platform.registry_schema, "applications")
+                    ),
+                    ["third_party_conn_app"],
+                )
+                assert cur.fetchone()[0] == 1
+        finally:
+            prov_conn.close()
+    finally:
+        if other_conn is not None:
+            other_conn.close()
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("REVOKE CONNECT ON DATABASE {} FROM {}").format(sql.Identifier(app.database), sql.Identifier(other_role)))
+            cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(other_role)))
+        admin.close()
+
+    deprovision_app(platform, "third_party_conn_app")
+
+
+def test_0004_temporary_grant_uses_inherit_true_set_false() -> None:
+    """Completion condition 5 (design D-2R stage (3)): a structural check
+    on `0004_deprovision_application.sql`'s own source text -- the
+    temporary self-grant must be written `WITH INHERIT TRUE, SET FALSE`,
+    for both roles it can grant. Behavioural backing is design M-9's own
+    quoted measurement of this exact form, not re-exercised here. Code
+    review round 1 addendum (c): searches a comment-stripped copy of the
+    text (every line that starts with `--`, leading whitespace ignored,
+    is dropped first), the same hardening
+    `test_0004_allow_connections_false_is_between_the_temporary_grant_and_
+    terminate` applies, above."""
+    raw_text = (MIGRATIONS_DIR / "0004_deprovision_application.sql").read_text()
+    text = "\n".join(line for line in raw_text.splitlines() if not line.strip().startswith("--"))
+    assert text.count("GRANT %I TO CURRENT_USER WITH INHERIT TRUE, SET FALSE") == 2
+
+
+def test_deprovision_completes_on_rerun_after_the_database_was_already_dropped(platform) -> None:
+    """Completion condition 6 (design §4.1 row 3, F-1): simulates 0004
+    having already gotten through `DROP DATABASE` on some earlier attempt
+    that then failed before `DROP ROLE`/`finish_deprovision_application`
+    ran (a stalled lock/statement timeout, a killed psql, etc.) --
+    database gone, both roles and the registry row still there -- by
+    dropping the database directly and then running 0004 once more:
+    stage (4)'s own `pg_database` existence check (F-1) must skip the
+    `ALTER DATABASE` rather than fail on a database that no longer
+    exists, and the rest of the script must still complete."""
+    app = provision_app(platform, "predropped_db_app")
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(app.database)))
+    finally:
+        admin.close()
+
+    _run_psql(platform.provision_dsn, platform.deprovision_script, {"app_id": "predropped_db_app"})
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute("SELECT rolname FROM pg_roles WHERE rolname IN (%s, %s)", [app.runtime_role, app.developer_role])
+            assert cur.fetchall() == []
+    finally:
+        admin.close()
+
+
 # --- m-11 (independent review round 2): ghost role reclaim -----------------
 
 

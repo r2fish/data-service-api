@@ -43,6 +43,7 @@ application ごとに専用 DB role を **runtime / developer の2つ**発行し
 - `CREATE/DROP DATABASE`、`CREATE/DROP ROLE`、`GRANT`/`REVOKE` (`GRANT <role> TO CURRENT_USER WITH SET TRUE` を含む — PG16+ 構文のため版固定の根拠)、`CONNECTION LIMIT`
 - `REVOKE ALL ON SCHEMA public FROM PUBLIC`、`ALTER SCHEMA public OWNER TO <role>`、`SET LOCAL ROLE <role>`、`ALTER DEFAULT PRIVILEGES FOR ROLE <role> IN SCHEMA public`
 - `pg_terminate_backend` (Cloud SQL では実行 role が `pg_signal_backend` member であることが前提 — runbook の実機検証手順に含める。`DROP DATABASE` 前の接続残存対策。terminate と DROP の間の再接続 race に備え retry を設けるか、PG13+ の `DROP DATABASE ... WITH (FORCE)` を代替として実測選択する — 第2ラウンド M-10)
+  - **訂正註 (2026-09-19、設計 `docs/design/DEPROVISION_FORCED_DROP_V0_1.md` v1.0 §5.2。本文は書き換えない — `docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56)**: 実測は同メモ §3.2 (M-8〜M-12) で行い、**FORCE は採らず** terminate を残して `ALLOW_CONNECTIONS false` で窓を閉じる形 (D-2R) にした。
 
 superuser 専用機能 (untrusted PL、ALTER SYSTEM 等) を一切使わない。
 
@@ -245,6 +246,7 @@ WP-0 独立レビュー (Opus、2026-08-30) の結果: **blocker 2 / major 11 / 
 経緯: 本設計 v1.0 は並行セッション mitate-30 が執筆し、本セッションが自ドラフトと誤認したまま独立レビュー・v1.1 化・コミットした (二重発注)。両セッションの WP-0 レビューは独立に走り、相補的だった。実装所有は本セッションに固定、mitate-30 はクライアント側 (mitate-application) を所有。
 
 - **重複 (v1.1 で解決済み)**: B-1 (= 当方 B-1/P3-D1)、B-3 (= M-2)、M-6 (= M-4/WP-2.5)、M-10 の大半 (= M-11/pg_terminate_backend)、m-4/m-5/m-11 (= m-4/M-6/M-9)
+  - **訂正註 (2026-09-19、設計 `docs/design/DEPROVISION_FORCED_DROP_V0_1.md` v1.0 §5.2。本文は書き換えない)**: M-10/`pg_terminate_backend` 側の採用形は同メモの D-2R (`pg_signal_backend` 不要、`ALLOW_CONNECTIONS false` で窓を閉じる) に確定した。
 - **B-1 追加分**: delete 確認句の fingerprint 前提崩れ → §0 例外節へ追記、WP-1 で add_field と同一コミット。create_entity の fields 省略受理も確定
 - **B-2 (裁定 = P3-D2/D-J)**: transact の update/delete atomic 拡張で実挙動を既存宣言へ収束させる (WP-1.5 新設)。レビュア推奨案を採用。§8.1(b) は MitateDB では実害消滅、契約 CCR は台帳残置
 - **M-1**: 数値制約は v1.1 反映済み。追加分 (capability_document の per-call provisioning 是正、155 application 実測、HTTP での実 DB/role 総数) を R-8 へ

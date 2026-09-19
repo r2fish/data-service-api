@@ -473,8 +473,12 @@ Deprovisioning a slug that was never provisioned now raises loudly
 
 **If `0005_credential_store.sql` has been applied on this platform database,
 clear this application's credentials first.** `0004` refuses to proceed
-(before touching anything -- no `pg_terminate_backend`, no `DROP DATABASE`,
-no `DROP ROLE`) while any `credentials` row still references this slug
+(before touching anything -- no live-connection pre-check, no temporary
+self-grant, no `ALLOW_CONNECTIONS` change, no `pg_terminate_backend`, no
+`DROP DATABASE`, no `DROP ROLE` -- design `docs/design/
+DEPROVISION_FORCED_DROP_V0_1.md` v1.0 D-2R adds the first three stages,
+all of which still run strictly after this guard, never before it) while
+any `credentials` row still references this slug
 (`application_slug` is `ON DELETE RESTRICT`, by design -- §9). The error
 names the count and the remedy:
 
@@ -525,6 +529,27 @@ DATABASE` -- `0004` deliberately does not attempt to terminate background
 workers (doing so requires true superuser, which `r2dbsvc_control` is
 not); simply re-run `0004` a few seconds later, once autovacuum has
 finished on its own.
+
+**Correction note (2026-09-19, design `docs/design/
+DEPROVISION_FORCED_DROP_V0_1.md` v1.0; the paragraph above is not
+rewritten, only annotated)**: this error can have two different causes
+here. (i) the autovacuum worker did not finish within PostgreSQL's own
+grace period -- M-12 is a single measurement of a plain `DROP DATABASE`
+succeeding with one worker present, not evidence this never happens under
+load. (ii) a connection under a role other than this application's own,
+that raced in after the pre-check passed and before `DROP DATABASE` ran.
+Either way the database is left with `ALLOW_CONNECTIONS false` -- the
+application stays down -- so "wait a few seconds and retry" is not free.
+For (ii), read `pg_stat_activity` by `usename` as an admin to find the
+connection's owner, have them close it, then re-run `0004`.
+
+At this point the database itself is left with
+`ALLOW_CONNECTIONS false` and the temporary self-grant of this
+application's roles still standing (design `docs/design/
+DEPROVISION_FORCED_DROP_V0_1.md` v1.0 §4.1); re-running `0004` clears both
+and completes the deprovision. To abandon instead of retrying, see the
+equivalent state in §14's branch (B) recovery below for the two commands
+that undo it.
 
 ### A note on `psql`'s password variables
 
@@ -1084,13 +1109,46 @@ plain `DROP ROLE` outright. Dropping the database first removes every
 object inside it, ownership included, so neither role owns anything left
 anywhere in the cluster once it is gone:
 
-1. Terminate any sessions against the residual database (mirrors `0004`'s
-   own deprovisioning step -- a crash mid-`0003` is not expected to leave
-   live sessions, but confirm rather than assume):
+1. Clear any sessions against the residual database, in the same order
+   `0004`'s own live-connection handling now uses (design
+   `docs/design/DEPROVISION_FORCED_DROP_V0_1.md` v1.0, D-2R) -- a crash
+   mid-`0003` is not expected to leave live sessions, but confirm rather
+   than assume:
    ```sql
-   SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+   -- pre-check: read who (if anyone) is connected before changing anything.
+   -- `backend_type` reads NULL here for a backend whose role you do not
+   -- hold privileges of (design M-5/H-2); judge by `usename`/`usesysid`
+   -- instead -- `usesysid IS NULL` is a background worker (autovacuum),
+   -- which the pre-check deliberately does not count (design D-2R
+   -- stage (2), M-12).
+   SELECT usename, usesysid IS NOT NULL AS is_a_login_role FROM pg_stat_activity
      WHERE datname = 'r2dbsvc_app_<slug>' AND pid <> pg_backend_pid();
+
+   -- temporary self-grant (branch (B) was entered because CREATE DATABASE
+   -- had already run, and both roles are created before it -- see this
+   -- section's intro; if either GRANT still reports role "..." does not
+   -- exist, skip that one, exactly as 0004's own EXISTS guard does):
+   -- needed only if a connection under one of them is present
+   -- (`pg_terminate_backend` requires privileges of the role being
+   -- terminated); a no-op otherwise.
+   GRANT r2dbsvc_app_<slug>_runtime TO CURRENT_USER WITH INHERIT TRUE, SET FALSE;
+   GRANT r2dbsvc_app_<slug>_developer TO CURRENT_USER WITH INHERIT TRUE, SET FALSE;
+
+   -- close the reconnect window before terminating
+   ALTER DATABASE r2dbsvc_app_<slug> WITH ALLOW_CONNECTIONS false;
+
+   -- narrowed terminate, the same filter `0004` itself uses
+   SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+     WHERE datname = 'r2dbsvc_app_<slug>' AND pid <> pg_backend_pid()
+       AND backend_type = 'client backend';
    ```
+   If this stops partway through, the state left behind and what to do
+   next mirrors `0004`'s own (design §4.1):
+
+   | Stopped at | State left behind | Next step |
+   |---|---|---|
+   | the pre-check read (nothing changed yet) | database, `ALLOW_CONNECTIONS`, role membership and the registry row all unchanged | investigate the connection the read reported, then continue |
+   | `ALLOW_CONNECTIONS false` through the terminate | database left unreachable (`ALLOW_CONNECTIONS false`); the temporary self-grant left standing | continue to step 2 below, or abandon with `ALTER DATABASE r2dbsvc_app_<slug> WITH ALLOW_CONNECTIONS true` and `REVOKE r2dbsvc_app_<slug>_runtime FROM CURRENT_USER` (likewise `_developer`), run by `r2dbsvc_control` itself |
 2. Drop the database, then the two roles:
    ```sql
    DROP DATABASE IF EXISTS r2dbsvc_app_<slug>;
@@ -1099,10 +1157,16 @@ anywhere in the cluster once it is gone:
    ```
    The `DROP DATABASE` above must succeed before the `DROP ROLE` statements
    are attempted -- if it fails (e.g. `database "..." is being accessed by
-   other users`, the same transient autovacuum-worker condition §5 above
-   already documents for `0004`), resolve that first; do not attempt to
-   drop the roles while the database that owns objects through them still
-   exists.
+   other users`, most likely a just-terminated backend not yet fully gone
+   from `pg_stat_activity` -- the residual-visibility gap `0004`'s own
+   comment above its terminate step documents; the autovacuum-worker
+   condition this note previously named is not the usual cause here --
+   the narrowed terminate above never touches a worker, and a plain
+   `DROP DATABASE` cleared one in the design's own measurement (M-12, a
+   single measurement -- see §5's correction note for the two causes and
+   why waiting is not free)), resolve that first (a short wait is usually
+   enough); do not attempt to drop the roles while the database that owns
+   objects through them still exists.
 3. Re-run `0003_provision_application.sql` for the slug (§5 above) as
    normal, with freshly generated passwords -- identical to branch (A)'s
    own step 3, now that both the roles and the database are gone.
