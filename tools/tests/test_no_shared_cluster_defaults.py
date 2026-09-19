@@ -16,7 +16,7 @@ independent parts:
 `os.environ.get(ADMIN_DSN_ENV, "")` -- `psycopg.connect("")` still falls
 back to the shared cluster via libpq's own defaults, silently, past every
 other check in this repository. `test_admin_dsn_env_definitions_are_
-pinned_to_26_files` and `test_every_admin_dsn_reader_raises_when_the_
+pinned_to_27_files` and `test_every_admin_dsn_reader_raises_when_the_
 environment_variable_is_unset` read the AST of every module-level
 `ADMIN_DSN_ENV` definition's own reader function(s) directly, not a
 string search (§1.7 の 52 -- a check must read the property a function
@@ -262,11 +262,11 @@ def test_scan_covers_at_least_one_file() -> None:
     assert len(files) >= 1, "git ls-files -- '*.py' returned no files"
 
 
-def test_admin_dsn_env_definitions_are_pinned_to_26_files() -> None:
-    """Completion condition 5 (R-2): exactly 26 tracked .py files define
+def test_admin_dsn_env_definitions_are_pinned_to_27_files() -> None:
+    """Completion condition 5 (R-2): exactly 27 tracked .py files define
     `ADMIN_DSN_ENV` at module level (work order §4.2 (a))."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
-    assert len(files) == 26, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
+    assert len(files) == 27, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
 
 
 def test_every_admin_dsn_reader_raises_when_the_environment_variable_is_unset() -> None:
