@@ -232,7 +232,7 @@ def _set_auditreader_statement_timeout(control_dsn: str, role: str, value: str) 
 def test_slow_audit_query_is_canceled_returns_503_without_backend_detail_and_frees_the_connection(
     platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Completion condition W1-2 (design §6 条件 2, verbatim): the
+    """Completion condition W1-2 (design §6 条件 2, rendered in English): the
     reader ROLE's own `statement_timeout` (`ALTER ROLE ... SET`, on
     `platform.control_dsn`) is shortened to `200ms` for the scenario and
     restored to whatever it was before (read via `pg_roles.rolconfig`,
