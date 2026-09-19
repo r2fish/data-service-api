@@ -187,8 +187,12 @@ test-cluster evidence, not full production evidence: `docs/cloud-run-cloud-sql.m
 §9.1 records the runbook's first real execution, against a live Cloud SQL
 16.14 instance (2026-09-01, operator-reported, supervisor-verified) --
 role/database DDL, the `GRANT ... WITH SET TRUE` construct, and
-`log_statement` suppression PASS, while deprovision (`pg_terminate_backend`)
-and the `assert_role_has_no_memberships`/cloudsqlsuperuser fail-closed probe
+`log_statement` suppression PASS, while deprovision (§9 item 3 -- the
+live-connection pre-check, temporary self-grant, `ALLOW_CONNECTIONS false`,
+and narrowed `pg_terminate_backend` design `docs/design/
+DEPROVISION_FORCED_DROP_V0_1.md` v1.0 D-2R adds; no longer a bare
+`pg_terminate_backend`/`pg_signal_backend` grant) and the
+`assert_role_has_no_memberships`/cloudsqlsuperuser fail-closed probe
 remain unexercised against that instance (`security/CONTROL_MAPPING.md`
 records this per invariant; `docs/cloud-run-cloud-sql.md` §9 is the ongoing
 real-instance verification procedure).

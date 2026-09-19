@@ -771,7 +771,11 @@ def test_0004_refuses_to_deprovision_while_a_credential_remains_and_touches_noth
     failed -- an inconsistent half-torn-down state (database/roles gone,
     registry still claiming the application provisioned, credential still
     valid). This confirms the fixed behaviour: the whole script aborts
-    *before* `pg_terminate_backend`/`DROP DATABASE`/`DROP ROLE` ever run --
+    *before* the live-connection pre-check, the temporary self-grant,
+    `ALLOW_CONNECTIONS`, `pg_terminate_backend`/`DROP DATABASE`/`DROP
+    ROLE` -- anything at all -- ever run (design `docs/design/
+    DEPROVISION_FORCED_DROP_V0_1.md` v1.0 D-2R adds the first three
+    stages ahead of the ones this docstring already named) --
     the database, both roles, and the registry row are all still
     completely intact afterwards -- and that deleting the blocking
     credential (`python -m r2db_api.ops delete-credential`, the escape

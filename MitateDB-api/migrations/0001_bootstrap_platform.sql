@@ -27,9 +27,15 @@
 --   against), CONNECTION LIMIT, REVOKE ALL ON SCHEMA public FROM PUBLIC,
 --   ALTER SCHEMA public OWNER TO <role>, SET LOCAL ROLE <role>, ALTER
 --   DEFAULT PRIVILEGES FOR ROLE <role> IN SCHEMA public,
---   pg_terminate_backend (Cloud SQL requires the executing role be a
---   `pg_signal_backend` member for this one -- a runbook/operator
---   precondition, not something this SQL can grant itself).
+--   pg_terminate_backend (requires privileges of the role whose backend
+--   is being terminated, M-2's own `DETAIL:` -- `0004` obtains that via
+--   the temporary self-grant listed next, not via `pg_signal_backend`
+--   membership or an operator's own advance `GRANT`), ALTER
+--   DATABASE ... WITH ALLOW_CONNECTIONS false, and GRANT <role> TO
+--   CURRENT_USER WITH INHERIT TRUE, SET FALSE (0004's own temporary
+--   self-grant onto its own already-created application roles -- does
+--   NOT assume `pg_signal_backend` membership; design docs/design/
+--   DEPROVISION_FORCED_DROP_V0_1.md D-1/D-2R).
 -- No superuser-only feature (untrusted procedural languages, ALTER
 -- SYSTEM, event triggers, etc.) is used anywhere in this migration set.
 -- Evidence status (honest, per R-1): every statement above has been

@@ -1648,20 +1648,57 @@ to escalate, not a runbook typo to silently work around.
    completes without a syntax error specifically on this construct (a
    pre-16 Cloud SQL instance would reject it at parse time, distinct from
    a privilege error).
-3. **`pg_terminate_backend` / `pg_signal_backend` membership**: Cloud SQL
-   requires the executing role to be a `pg_signal_backend` member for
-   `pg_terminate_backend` to succeed (superuser is not available at all).
-   Grant it once, then verify:
+3. **Live-connection deprovision** (design `docs/design/
+   DEPROVISION_FORCED_DROP_V0_1.md` v1.0, D-2R -- supersedes the
+   `pg_signal_backend` grant this item previously called for; see the
+   correction note on the 2026-09-01 record below, §9.1): `0004` no
+   longer needs cluster-wide `pg_signal_backend` membership at all. It
+   instead runs a pre-check, a temporary self-grant of this application's
+   own roles, and `ALLOW_CONNECTIONS false`, ahead of the narrowed
+   `pg_terminate_backend`/`DROP DATABASE`/`DROP ROLE` steps that were
+   already here. Verify it end to end:
    ```sh
-   # libpq environment variables from the provision DSN's own fields, never
-   # the DSN on argv (§3's convention).
-   psql -c "GRANT pg_signal_backend TO mitatedbsvc_provision"
+   # libpq environment variables from the admin DSN's own fields, never
+   # the DSN on argv (§3's convention). Read-only, before running anything
+   # below. `backend_type` reads NULL here for a backend whose role you do
+   # not hold privileges of (design M-5/H-2), so judge by `usename`/
+   # `usesysid` instead -- a row with `usesysid IS NULL` is a background
+   # worker (autovacuum), which the pre-check deliberately does not count
+   # (design D-2R stage (2), M-12).
+   psql -c "SELECT usename, usesysid IS NOT NULL AS is_a_login_role
+             FROM pg_stat_activity
+             WHERE datname = '<application database>' AND pid <> pg_backend_pid()"
    ```
-   then run a deprovision (§3.4's own reverse, `0004_deprovision_
-   application.sql`, or the break-glass `deprovision` subcommand, §7)
-   against an application with an open connection and confirm the
-   `pg_terminate_backend` step inside that script succeeds rather than
-   raising `permission denied to terminate process`.
+   Record whether that database has a connection open under a role other
+   than this application's own runtime/developer role or the executing
+   role -- `0004`'s own pre-check (D-2R stage (2)) refuses outright, before
+   changing anything, if it does. **Provision a throwaway application for
+   this check only (§3.4).** Then open one connection under *its* runtime
+   role deliberately (to exercise the live-connection path this design
+   memo exists for -- with the runtime credentials recorded at
+   provisioning time, or simply by letting the Data service serve one
+   request against it) and deprovision *that* application (§3.4's own
+   reverse, `0004_deprovision_application.sql`, or the break-glass
+   `deprovision` subcommand, §7). Confirm the script completes in a single
+   pass, with no retry. **Never run this item against an application in
+   service** -- deprovision is irreversible (§10.6).
+
+   If it stops instead, what is left behind and what to do next follows
+   design §4.1:
+
+   | Stopped at | State left behind | Next step |
+   |---|---|---|
+   | the pre-check (stage (2)) | nothing changed -- `ALLOW_CONNECTIONS` stays true, no membership, database and registry row both intact | close the connection identified by the read above, then re-run `0004` (the exception itself is a fixed message and names no role, by design) |
+   | `--lock-timeout` cancels stage (3) or stage (4) itself | the temporary self-grant of whichever role was already granted (possibly neither, if the cancel hit the first `GRANT` -- then nothing changed, same as the row above) left standing, but `ALLOW_CONNECTIONS` is still **true** (unlike the row below, where it already reads `false`) -- `--lock-timeout` applies to the whole psql session, so it can cancel these auto-committing statements individually (design §10.7's deprovision row) | same as below: re-run `0004` to complete it, or abandon with the same two `REVOKE`s (a no-op for a role that was never granted) (no `ALTER DATABASE` to revert, since it never ran) |
+   | stage (4) onward, up to and including `DROP DATABASE` | database left unreachable (`ALLOW_CONNECTIONS false`); the temporary self-grant membership left standing; registry row intact | re-run `0004` to complete it, or to abandon: `ALTER DATABASE <database> WITH ALLOW_CONNECTIONS true` and `REVOKE <runtime role> FROM CURRENT_USER` and `REVOKE <developer role> FROM CURRENT_USER` (both, if both grants ran), run by `mitatedbsvc_provision` itself |
+   | after `DROP DATABASE`, before `DROP ROLE`/`finish_deprovision_application` | database gone; the two roles, their temporary self-grant membership, and the registry row left behind | re-run `0004` -- it completes |
+
+   **Whether Cloud SQL's own management connections (e.g. a
+   `cloudsqladmin`-owned session) count toward the pre-check's "connection
+   under a role other than runtime/developer/executing" test is unexercised
+   against a real instance (`absent`)** -- no runbook step, migration,
+   configuration, or code in this repository depends on `cloudsqladmin`;
+   every occurrence of the name is prose recording this same gap.
 4. **`assert_role_has_no_memberships`/cloudsqlsuperuser fail-closed check**
    (§3.3's own invariant 2): deliberately create a throwaway role via
    `gcloud sql users create` (NOT the migration SQL), then attempt to
@@ -1704,6 +1741,21 @@ is still unexercised:
   pg_signal_backend TO mitatedbsvc_provision` catalog grant was applied;
   deprovision (the step that actually exercises `pg_terminate_backend`) has
   **not yet been exercised** against this instance -- open.
+  - **Correction note (2026-09-19, design `docs/design/
+    DEPROVISION_FORCED_DROP_V0_1.md` v1.0 M-3; this record is not
+    rewritten, only annotated -- `docs/work-orders/OPERATING_CONDITIONS.md`
+    §1.8 item 56/57)**: this `GRANT` had no effect on its own --
+    `mitatedbsvc_provision` is `NOINHERIT` (`migrations/
+    0001_bootstrap_platform.sql`), so holding `pg_signal_backend`
+    membership without `WITH INHERIT TRUE` (never granted here) does
+    nothing for it. The membership may be `REVOKE`d; the role able to do
+    so is bootstrap `postgres`, the role that ran the `GRANT` above --
+    `mitatedbsvc_provision` itself never held admin option on
+    `pg_signal_backend` and cannot revoke its own membership in it (unlike
+    `0004`'s own temporary self-grant, which the executing role can
+    self-revoke because it holds admin option on the role it grants,
+    M-13). D-2R (adopted above, item 3) does not use `pg_signal_backend`
+    at all.
 - **Item 4 (`assert_role_has_no_memberships`/cloudsqlsuperuser fail-closed
   probe)**: **not yet exercised** against this instance -- open.
 - **Item 5 (`log_statement` suppression)**: PASS -- `SHOW log_statement`
@@ -2360,14 +2412,14 @@ its review.
 
 **This table is a draft. The stop-time limits and the `lock_timeout`
 values are not settled until the independent review in §10.8 accepts
-them.** Table version: **3**. Change the table and the version goes up by
+them.** Table version: **4**. Change the table and the version goes up by
 one and §10.8's acceptance record goes back to "not accepted".
 
 - Lock types follow the PostgreSQL 16 documentation (the Explicit Locking
   table and each command's own Notes). For commands the documentation does
-  not describe a lock for (`ALTER ROLE`, `GRANT`/`REVOKE`, `CREATE OR
-  REPLACE FUNCTION`, `DROP DATABASE`, `DROP ROLE`) the row says
-  "inference".
+  not describe a lock for (`ALTER ROLE`, `ALTER DATABASE`, `GRANT`/
+  `REVOKE`, `CREATE OR REPLACE FUNCTION`, `DROP DATABASE`, `DROP ROLE`)
+  the row says "inference".
 - Requests that conflict with a statement already waiting for a lock queue
   behind it (including an ACCESS SHARE request arriving while an ACCESS
   EXCLUSIVE request waits). The bound on "how long a following request can
@@ -2395,7 +2447,7 @@ one and §10.8's acceptance record goes back to "not accepted".
 | `0013` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE mitatedbsvc_auditreader SET statement_timeout`: role catalog row update (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... SET` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing sessions keep their own settings; the new bound applies at the next login | not needed (draft); do not run it at the same time as provisioning |
 | `0014` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE ... CONNECTION LIMIT` x3 on the platform-plane roles (`mitatedbsvc_api`, `mitatedbsvc_controlplane`, `mitatedbsvc_auditreader`): role catalog row updates (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... CONNECTION LIMIT` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing connections are not dropped; the new limit applies to new connections | not needed (draft); do not run it at the same time as provisioning |
 | per-application upgrade (`0006`, `0008`, `0009`, `0010`, via `upgrade-applications`) | per application: `GRANT <developer_role> TO CURRENT_USER` (auto-commit) -> one `BEGIN`/`COMMIT` -> `REVOKE` (auto-commit). A failure leaves the temporary membership behind (§3.4b's cleanup) | `CREATE TABLE IF NOT EXISTS` (`0006`, `0008`, `0010`): inference (no heavy lock on an existing table). `INSERT`: ROW EXCLUSIVE (fact: documentation). `0006`'s read of `information_schema.columns`: ACCESS SHARE (fact: documentation). **`0009`'s `ALTER TABLE public._mdb_field_types ADD COLUMN IF NOT EXISTS` x2: ACCESS EXCLUSIVE** (fact: the documented default); the defaults are constants so no table rewrite happens (fact: documentation); the lock is still taken when the column already exists (inference). `GRANT`/`REVOKE` on roles, tables and the schema: inference | that application's own requests that read `_mdb_field_types` (during `0009`), and schema operations on that application | `2s` (`--lock-timeout 2s`) | 2 seconds + hold time per application (catalog-only changes). Other applications are unaffected | not needed (draft) |
-| deprovision (`0004`, via `deprovision`) | outside a transaction (`DROP DATABASE` cannot run inside one -- fact: documentation) | `begin_deprovision_application` / `finish_deprovision_application`: registry row updates (inference: ROW EXCLUSIVE and row locks). `pg_terminate_backend`: no lock. `DROP DATABASE`: fails while another connection exists (fact: documentation), lock type inference. `DROP ROLE`: inference | operations updating the same application's registry rows | `5s` (`--lock-timeout 5s`) | that application stops permanently (irreversible, §10.6). An operation touching the SAME application's registry rows waits at most 5 seconds + hold time; other applications are not affected | never run by an upgrade |
+| deprovision (`0004`, via `deprovision`) | outside a transaction (`DROP DATABASE` cannot run inside one -- fact: documentation). **A failure after stage (3) (and after either `GRANT` that already succeeded -- a cancel on the first `GRANT` itself leaves nothing changed) leaves the temporary self-grant membership behind** (design §5.1 (i)), the same property the per-application upgrade row above records for its own temporary grant | `begin_deprovision_application` / `finish_deprovision_application`: registry row updates (inference: ROW EXCLUSIVE and row locks). `GRANT <role> TO CURRENT_USER WITH INHERIT TRUE, SET FALSE` (stage (3), when either role still exists): inference (`pg_auth_members` row). `ALTER DATABASE ... WITH ALLOW_CONNECTIONS false` (stage (4)): inference (`pg_database` row update). `pg_terminate_backend`: no lock. `DROP DATABASE`: fails while another connection exists (fact: documentation), lock type inference. `DROP ROLE`: inference | operations updating the same application's registry rows, plus, after stage (4), every new connection attempt to that application's database (refused, not queued); existing sessions are ended by stage (5)'s terminate, not by the `ALTER` | `5s` (`--lock-timeout 5s`) -- applied to the whole psql session, so it also bounds stage (3)'s `GRANT` and stage (4)'s `ALTER DATABASE`; a timeout at either leaves only the temporary self-grant standing while `ALLOW_CONNECTIONS` is still true (see §9 item 3's failure-state table for that state) | that application stops permanently (irreversible, §10.6). An operation touching the SAME application's registry rows waits at most 5 seconds + hold time; other applications are not affected. If the run stops at stage (4) or later, that application's database is left refusing new connections (`datallowconn=false`) until an operator re-runs `0004` or reverts it -- an unbounded stop, not a lock wait, plus fleet-command degradation (design §4.1 / F-3) | never run by an upgrade |
 
 **How the table's values are passed**:
 
@@ -2425,7 +2477,7 @@ version counts as no record at all.**
 | Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
 |---|---|---|---|---|---|---|
 | §10.6 compatibility | 3 | accepted | 3 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
-| §10.7 lock / stop time / `lock_timeout` | 3 | accepted | 3 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
+| §10.7 lock / stop time / `lock_timeout` | 4 | accepted | 4 | `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` §5 | 2026-09-19 | supervisor |
 | §10.10 upgrade procedure (stages 2-4) | 6 | accepted | 6 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
 
 ### 10.9 Gate-0 overall judgment and report

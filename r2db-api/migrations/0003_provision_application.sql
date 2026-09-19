@@ -145,7 +145,12 @@ GRANT USAGE ON SCHEMA public TO :"runtime_role";
 -- membership is granted immediately before it is needed and revoked
 -- immediately after (`REVOKE ... FROM CURRENT_USER` below), so
 -- `r2dbsvc_control` never holds standing membership in any application's
--- developer role between provisioning runs.
+-- developer role between provisioning runs -- outside of a `0004`
+-- deprovision attempt that fails at or after its own temporary
+-- self-grant stage (D-2R stage (3), design docs/design/
+-- DEPROVISION_FORCED_DROP_V0_1.md §4.1), whose own temporary self-grant
+-- on the runtime/developer role can then still be standing until that
+-- script is retried to completion or the membership is revoked by hand.
 GRANT :"developer_role" TO CURRENT_USER WITH SET TRUE;
 
 -- `public` schema ownership -- and therefore all future DDL authority in

@@ -52,6 +52,19 @@
 --
 -- WHY A SCRIPT, NOT A FUNCTION: `DROP DATABASE` has the identical
 -- transaction-block restriction `CREATE DATABASE` does (0003's header).
+--
+-- LIVE-CONNECTION HANDLING (design docs/design/DEPROVISION_FORCED_DROP_
+-- V0_1.md v1.0, D-2R): inside the `\if :{?database_name}` branch below,
+-- three stages precede the terminate/drop steps that were already here --
+-- pre-check, temporary self-grant, `ALLOW_CONNECTIONS false` -- so that a
+-- runtime-role connection this application's own Data service pool is
+-- still holding does not make this script fail (§3.3 of that design memo:
+-- retrying alone cannot fix this, since production deprovisioning has no
+-- retry loop). `WITH (FORCE)` was considered and rejected (X-5 there): it
+-- is refused outright by a lingering autovacuum worker (M-11), where a
+-- plain `DROP DATABASE` is not (M-12). None of the three new stages apply
+-- to the `\else` branch below (no database exists there to hold a live
+-- connection, protect, or reconnect to).
 
 \set ON_ERROR_STOP on
 
@@ -63,21 +76,109 @@ SELECT * FROM mitatedb_registry.begin_deprovision_application(:'app_id') \gset
 -- case this branch exists to handle.
 \if :{?database_name}
 
+-- LIVE-CONNECTION PRE-CHECK (D-2R stage (2), design H-2): before any of
+-- the stages below changes anything, refuse if this database has a
+-- connection open under any role other than this application's own
+-- runtime/developer role or the executing role itself.
+-- `usesysid IS NOT NULL` excludes background workers (autovacuum reports
+-- `usesysid IS NULL`); `usename`/`usesysid` are already readable here,
+-- without anything the temporary grant stage below adds (H-2). Written
+-- as
+-- `format()` + `\gexec`, not a literal `DO $$ ... $$` block, because psql
+-- does not expand its own `:'variable'` syntax inside a dollar-quoted
+-- string (design F-2) -- `format()`'s `%L` bakes the fixed,
+-- role-name-free exception text into the generated `DO` block's source
+-- before `\gexec` runs it, so no psql variable ever needs to appear
+-- inside the dollar quotes. Diagnosis is the operator's own
+-- `pg_stat_activity` read (this migration set's runbook), not this
+-- exception's own message -- only "it stopped" and "nothing changed" are
+-- meant to be relied on, not PostgreSQL's own `DETAIL:` text.
+SELECT CASE WHEN EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE datname = :'database_name'
+                   AND pid <> pg_backend_pid()
+                   AND usesysid IS NOT NULL
+                   AND usename NOT IN (:'runtime_role', :'developer_role', CURRENT_USER)
+             )
+            THEN format('DO $check$ BEGIN RAISE EXCEPTION %L; END $check$',
+                         'deprovision refused: a connection to this database is held by a role other than this application''s own runtime/developer role or the executing role -- close it, then retry')
+            ELSE 'SELECT 1'
+       END
+\gexec
+
+-- TEMPORARY SELF-GRANT (D-2R stage (3), design M-7/H-1): grants each of
+-- this application's still-existing roles to `CURRENT_USER` (the
+-- executing role) `WITH INHERIT TRUE, SET FALSE`. `mitatedbsvc_provision`
+-- already holds ADMIN OPTION on both (it `CREATE ROLE`d them itself, in
+-- 0003), so this needs no privilege it does not already have, and no
+-- cluster-wide predefined role (`pg_signal_backend` et al.) is used
+-- anywhere in this file. `SET FALSE` deliberately withholds `SET ROLE`
+-- (never needed here). Grant, use, explicit revoke is this repository's
+-- own established shape for a role's own temporary self-elevation (0003's
+-- `GRANT :"developer_role" TO CURRENT_USER WITH SET TRUE` immediately
+-- before, and `REVOKE ... FROM CURRENT_USER` immediately after, its own
+-- one use) -- `DROP ROLE` below is this grant's own revoke, on the normal
+-- path; a run that stops before reaching it leaves the grant standing
+-- (design §4.1), removable by hand with plain `REVOKE ... FROM
+-- CURRENT_USER` (M-13). This grant is what lets the narrowed terminate
+-- below succeed against this application's own live backends -- H-1
+-- exercises it against three open connections plus a client reconnecting
+-- every 0.1 s (four terminated in that run), with an autovacuum worker
+-- left alone. Each `EXISTS` guard skips a role
+-- that is already gone (a retried run after a prior attempt got partway
+-- through `DROP ROLE` below) rather than failing on `GRANT`'s own
+-- missing-role error -- the same non-existence idiom this file's own
+-- `0013_role_statement_timeouts.sql`/`0014_role_connection_limits_rollout.
+-- sql` per-role loops already use (`0012_role_connection_limits.sql`'s own
+-- per-role loop has no such existence check).
+SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'runtime_role')
+            THEN format('GRANT %I TO CURRENT_USER WITH INHERIT TRUE, SET FALSE', :'runtime_role')
+            ELSE 'SELECT 1'
+       END
+\gexec
+
+SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'developer_role')
+            THEN format('GRANT %I TO CURRENT_USER WITH INHERIT TRUE, SET FALSE', :'developer_role')
+            ELSE 'SELECT 1'
+       END
+\gexec
+
+-- CLOSE THE RECONNECT WINDOW (D-2R stage (4), design H-1/F-1): flips this
+-- database to refuse new connections before the narrowed terminate below
+-- runs, so a client racing to reconnect in the gap between that terminate
+-- and `DROP DATABASE` cannot re-open one -- the same gap `WITH (FORCE)`
+-- was considered for and rejected over (design §4 D-2, X-5). No extra
+-- privilege is needed: `mitatedbsvc_provision` is this database's OWNER
+-- (0003 creates it with no explicit `OWNER` clause, so ownership defaults
+-- to the executing role). The `pg_database` existence check (F-1) is what
+-- keeps a retry safe after an earlier attempt already got past `DROP
+-- DATABASE` below (design §4.1) -- an unconditional `ALTER DATABASE`
+-- would otherwise fail every later attempt with `database "..." does not
+-- exist` and this script could never complete.
+SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname = :'database_name')
+            THEN format('ALTER DATABASE %I WITH ALLOW_CONNECTIONS false', :'database_name')
+            ELSE 'SELECT 1'
+       END
+\gexec
+
 -- Terminate any lingering ordinary client backends against this
 -- application's database before dropping it -- a pooled `PostgresBackend`
 -- connection this process itself just closed can take a brief moment to
 -- fully disappear from `pg_stat_activity` from the server's point of
 -- view, which would otherwise race `DROP DATABASE` into `database "..."
 -- is being accessed by other users`. Harmless (and a no-op) if nothing is
--- connected. `AND backend_type = 'client backend'` deliberately excludes
--- background workers (autovacuum in particular): terminating one
--- requires true superuser, which `mitatedbsvc_provision` deliberately is
--- not, so attempting it would itself fail with `permission denied to
--- terminate process`. Autovacuum on a table or two in a freshly created,
--- still-tiny database finishes in well under a second on its own;
--- `tests/test_postgres.py`'s own deprovisioning helper retries this whole
--- script with a short backoff on exactly the `is being accessed by other
--- users` outcome that outliving it can still produce.
+-- connected. By this point `ALLOW_CONNECTIONS false` above has already
+-- closed off any new connection, so this only has to clear whatever was
+-- already open when this script started (H-1). `AND backend_type =
+-- 'client backend'` deliberately excludes background workers (autovacuum
+-- in particular): terminating one requires true superuser, which
+-- `mitatedbsvc_provision` deliberately is not, so attempting it would
+-- itself fail with `permission denied to terminate process`. Autovacuum
+-- on a table or two in a freshly created, still-tiny database finishes in
+-- well under a second on its own; `tests/test_postgres.py`'s own
+-- deprovisioning helper retries this whole script with a short backoff on
+-- exactly the `is being accessed by other users` outcome that outliving
+-- it can still produce.
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity
     WHERE datname = :'database_name' AND pid <> pg_backend_pid() AND backend_type = 'client backend';
 
