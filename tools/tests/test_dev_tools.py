@@ -17,9 +17,11 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,7 @@ mutate = _load("mutate")
 section = _load("section")
 gate = _load("gate")
 finalize = _load("finalize")
+fold = _load("fold")
 
 
 # ---------------------------------------------------------------------------
@@ -969,6 +972,439 @@ def test_finalize_merge_conflict_is_aborted(isolated_git, tmp_path):
     assert code == dl.PARTIAL and "merge failed and was aborted" in text and "merged=no" in text
     assert _git(main_root, "rev-parse", "HEAD") == main_head
     assert _git(main_root, "status", "--porcelain") == ""
+
+
+# ---------------------------------------------------------------------------
+# fold
+# ---------------------------------------------------------------------------
+
+def _fold_main_repo(tmp_path: Path) -> Path:
+    main_root = _init_repo(tmp_path / "main", {"a.txt": "a\n"})
+    _git(main_root, "config", "core.logAllRefUpdates", "true")  # deterministic reflog files
+    return main_root
+
+
+def _add_worktree(main_root: Path, tmp_path: Path, branch: str, base: str = "main") -> Path:
+    wt = tmp_path / f"wt-{branch.replace('/', '-')}"
+    _git(main_root, "worktree", "add", "-q", "-b", branch, str(wt), base)
+    return wt
+
+
+def _age_branch_log(main_root: Path, branch: str, hours: float) -> None:
+    past = time.time() - hours * 3600
+    common = Path(_git(main_root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    p = common / "logs" / "refs" / "heads" / branch
+    if p.exists():
+        os.utime(p, (past, past))
+
+
+def _age_worktree(main_root: Path, wt: Path, branch: str, hours: float) -> None:
+    """Backdates the 2 files fold.py's own activity check reads (R1: index
+    dropped -- a `git status` read can stamp it with "now"), plus the
+    branch's own reflog file: a worktree whose last activity was `hours` ago."""
+    past = time.time() - hours * 3600
+    git_dir = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    for rel in fold.ACTIVITY_FILES:
+        p = git_dir / rel
+        if p.exists():
+            os.utime(p, (past, past))
+    _age_branch_log(main_root, branch, hours)
+
+
+def _worktrees(main_root: Path) -> str:
+    return _git(main_root, "worktree", "list", "--porcelain")
+
+
+def _branch_exists(main_root: Path, branch: str) -> bool:
+    return _git(main_root, "branch", "--list", branch).strip() != ""
+
+
+def _isolate_fold_lock(monkeypatch, tmp_path) -> Path:
+    """Redirects `dsa_testpg`'s own per-uid lock base dir to a private tmp
+    one (same idiom as gate.py's tests: `monkeypatch.setattr(gate.dsa_testpg,
+    "_base_dir", ...)`) -- `fold.dsa_testpg` IS the same module object gate.py
+    imports, so leaving this unpatched would make every --apply fold test
+    take the REAL machine-wide suite lock, possibly contending with a
+    concurrent gate.py/pytest run in another chat."""
+    base = tmp_path / "lock-base"
+    base.mkdir(exist_ok=True)
+    monkeypatch.setattr(fold.dsa_testpg, "_base_dir", lambda *a, **k: base)
+    return base
+
+
+def _fold(root: Path, apply=False, includes=(), min_age_hours=24.0, main_branch="main", verbose=False, wait=0.0):
+    buf = io.StringIO()
+    code = fold.fold(root, apply, list(includes), min_age_hours, main_branch, out=buf, verbose=verbose, wait=wait)
+    return code, buf.getvalue()
+
+
+def test_fold_dry_run_changes_nothing(isolated_git, tmp_path):
+    """mutation (`tools/dev/fold.py`): change the worktree loop's own `elif
+    apply:` to `elif True:` -- this test goes red because a dry-run call
+    would then actually remove a FOLD-eligible worktree/branch."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "merged-clean")
+    _age_worktree(main_root, wt, "merged-clean", 48)
+    code, text = _fold(main_root, apply=False)
+    assert code == 0, text
+    assert f"fold: FOLD worktree {wt}" in text
+    assert "fold: dry-run worktrees=1 branches=0 prunable=0" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "merged-clean")
+
+
+def test_fold_dry_run_does_not_touch_worktree_index_mtime(isolated_git, tmp_path):
+    """R1: `is_clean`/`worktree_status` reads with `--no-optional-locks` so a
+    plain dry-run read never stamps the worktree's own index file with
+    "now" (a real `git status` without it can do exactly that)."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "index-probe")
+    git_dir = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    index = git_dir / "index"
+    assert index.exists()
+    before = index.stat().st_mtime
+    _fold(main_root, apply=False)
+    assert index.stat().st_mtime == before
+
+
+def test_fold_apply_removes_merged_clean_worktree_and_branch(isolated_git, tmp_path, monkeypatch):
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "merged-clean")
+    _age_worktree(main_root, wt, "merged-clean", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert f"fold: FOLD worktree {wt}" in text
+    assert "fold: applied worktrees=1 branches=0 prunable=0" in text
+    assert str(wt) not in _worktrees(main_root)
+    assert not wt.exists()
+    assert not _branch_exists(main_root, "merged-clean")
+
+
+def test_fold_unmerged_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): drop the ancestor-of-main check in
+    `decide_worktree` -- this test goes red because an unmerged worktree
+    would then be removed under --apply."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "unmerged")
+    (wt / "b.txt").write_text("b\n")
+    _git(wt, "add", "b.txt")
+    _git(wt, "commit", "-q", "-m", "diverge")
+    _age_worktree(main_root, wt, "unmerged", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "unmerged" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "unmerged")
+
+
+def test_fold_dirty_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): drop the `dirty` branch of
+    `worktree_status`'s result in `decide_worktree` -- this test goes red
+    because a worktree with an untracked file would then be removed."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "dirty-one")
+    (wt / "untracked.txt").write_text("x\n")
+    _age_worktree(main_root, wt, "dirty-one", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "dirty" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "dirty-one")
+
+
+def test_fold_ignored_files_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    """R2: an ignored file whose own basename is not a known build artifact
+    (here `.env`) must never be silently thrown away with the worktree."""
+    main_root = _fold_main_repo(tmp_path)
+    # .gitignore committed on main FIRST, so the new branch's tip stays
+    # exactly main's tip (still trivially an ancestor) -- only the later,
+    # untracked+ignored `.env` file is worktree-specific.
+    (main_root / ".gitignore").write_text(".env\n")
+    _git(main_root, "add", ".gitignore")
+    _git(main_root, "commit", "-q", "-m", "ignore env")
+    wt = _add_worktree(main_root, tmp_path, "ignored-bad")
+    (wt / ".env").write_text("SECRET=x\n")
+    _age_worktree(main_root, wt, "ignored-bad", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "ignored-files" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "ignored-bad")
+
+
+def test_fold_allowed_ignored_pycache_folds(isolated_git, tmp_path, monkeypatch):
+    """R2: `__pycache__/*.pyc` is a known, tolerated build artifact -- its
+    presence alone must not block an otherwise-eligible fold.
+
+    mutation (`tools/dev/fold.py`): drop the `_is_allowed_ignored` allowance
+    (treat every ignored path as disallowed) -- this test goes red because
+    the worktree would then stay SKIP `ignored-files` instead of folding."""
+    main_root = _fold_main_repo(tmp_path)
+    (main_root / ".gitignore").write_text("__pycache__/\n")
+    _git(main_root, "add", ".gitignore")
+    _git(main_root, "commit", "-q", "-m", "ignore pycache")
+    wt = _add_worktree(main_root, tmp_path, "ignored-ok")
+    (wt / "__pycache__").mkdir()
+    (wt / "__pycache__" / "x.pyc").write_text("x")
+    _age_worktree(main_root, wt, "ignored-ok", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert f"fold: FOLD worktree {wt}" in text
+    assert str(wt) not in _worktrees(main_root)
+
+
+def test_fold_local_settings_copy_tolerated_only_under_dot_claude(isolated_git, tmp_path, monkeypatch):
+    """The per-worktree `.claude/settings.local.json` copy, `.ruff_cache/` and
+    `*.egg-info/` do not block a fold; a `settings.local.json` anywhere else
+    is an unknown ignored file and does."""
+    main_root = _fold_main_repo(tmp_path)
+    (main_root / ".gitignore").write_text("settings.local.json\n.ruff_cache/\n*.egg-info/\n")
+    _git(main_root, "add", ".gitignore")
+    _git(main_root, "commit", "-q", "-m", "ignore local settings and caches")
+    ok = _add_worktree(main_root, tmp_path, "settings-ok")
+    (ok / ".claude").mkdir()
+    (ok / ".claude" / "settings.local.json").write_text("{}")
+    (ok / ".ruff_cache").mkdir()
+    (ok / ".ruff_cache" / "x").write_text("x")
+    (ok / "pkg.egg-info").mkdir()
+    (ok / "pkg.egg-info" / "PKG-INFO").write_text("x")
+    bad = _add_worktree(main_root, tmp_path, "settings-bad")
+    (bad / "conf").mkdir()
+    (bad / "conf" / "settings.local.json").write_text("{}")
+    _age_worktree(main_root, ok, "settings-ok", 48)
+    _age_worktree(main_root, bad, "settings-bad", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert str(ok) not in _worktrees(main_root)
+    assert str(bad) in _worktrees(main_root)
+    assert "ignored-files=1" in text
+
+
+def test_fold_recent_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): drop the `is_recent` check in
+    `decide_worktree` -- this test goes red because a just-created worktree
+    (default --min-age-hours=24, not backdated) would then be removed."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "fresh-one")
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)  # default min_age_hours=24, never backdated
+    assert code == 0, text
+    assert "recent" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "fresh-one")
+
+
+def test_fold_claude_worktree_excluded_by_default_then_included(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): empty `DEFAULT_EXCLUDES` -- this test
+    goes red because the first, --include-less call would then also fold
+    `claude/x`."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "claude/x")
+    _age_worktree(main_root, wt, "claude/x", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "excluded" in text
+    assert str(wt) in _worktrees(main_root)
+    code, text = _fold(main_root, apply=True, includes=["claude/*"])
+    assert code == 0, text
+    assert str(wt) not in _worktrees(main_root)
+    assert not _branch_exists(main_root, "claude/x")
+
+
+def test_fold_current_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): drop the `current_path` check in
+    `decide_worktree` -- this test goes red because the worktree `-C`
+    itself points into would then be removed under --apply."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "current-one")
+    _age_worktree(main_root, wt, "current-one", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(wt, apply=True)  # -C points at the worktree itself
+    assert code == 0, text
+    assert "current" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "current-one")
+
+
+def test_fold_main_checkout_never_folds(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): drop the `main_path` check in
+    `decide_worktree` -- this test goes red because the main checkout's own
+    worktree entry would then no longer be SKIPped `main-checkout`."""
+    main_root = _fold_main_repo(tmp_path)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "main-checkout=1" in text
+    assert str(main_root) in _worktrees(main_root)
+
+
+def test_fold_detached_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): drop the `detached` check in
+    `decide_worktree` -- this test goes red because a detached worktree
+    would then be removed (`entry["branch"]` is None for it, so the removal
+    step itself would also need a branch it does not have)."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = tmp_path / "wt-detached"
+    head = _git(main_root, "rev-parse", "main").strip()
+    _git(main_root, "worktree", "add", "-q", "--detach", str(wt), head)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "detached" in text
+    assert str(wt) in _worktrees(main_root)
+
+
+def test_fold_worktreeless_merged_branch_removed_unmerged_stays(isolated_git, tmp_path, monkeypatch):
+    main_root = _fold_main_repo(tmp_path)
+    _git(main_root, "branch", "old-merged", "main")
+    _age_branch_log(main_root, "old-merged", 48)
+    wt = _add_worktree(main_root, tmp_path, "diverge-src")
+    (wt / "c.txt").write_text("c\n")
+    _git(wt, "add", "c.txt")
+    _git(wt, "commit", "-q", "-m", "diverge")
+    _git(main_root, "branch", "old-unmerged", "diverge-src")
+    _age_branch_log(main_root, "old-unmerged", 48)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "fold: FOLD branch old-merged" in text
+    assert not _branch_exists(main_root, "old-merged")
+    assert _branch_exists(main_root, "old-unmerged")
+    assert "fold: applied worktrees=0 branches=1" in text
+
+
+def test_fold_branchless_dry_run_reports_without_deleting(isolated_git, tmp_path):
+    """mutation (`tools/dev/fold.py`): change the branch loop's own `elif
+    apply:` to `elif True:` -- this test goes red because a dry-run call
+    would then actually delete a FOLD-eligible worktree-less branch."""
+    main_root = _fold_main_repo(tmp_path)
+    _git(main_root, "branch", "old-merged-dry", "main")
+    _age_branch_log(main_root, "old-merged-dry", 48)
+    code, text = _fold(main_root, apply=False)
+    assert code == 0, text
+    assert "fold: FOLD branch old-merged-dry" in text
+    assert "fold: dry-run worktrees=0 branches=1" in text
+    assert _branch_exists(main_root, "old-merged-dry")
+
+
+def test_fold_branchless_no_reflog_falls_back_to_committer_date_and_stays_recent(isolated_git, tmp_path):
+    """R5: a branch with no reflog file at all must fall back to its own
+    tip commit's committer date, not be treated as infinitely old.
+
+    mutation (`tools/dev/fold.py`): change `decide_branchless`'s `if mtime
+    is None: mtime = committer_date(...)` fallback back to leaving `mtime`
+    as `None` (the pre-R5 "missing counts as old" rule) -- this test goes
+    red because the branch (committed moments ago) would then be folded
+    instead of staying SKIP `recent`."""
+    main_root = _fold_main_repo(tmp_path)
+    _git(main_root, "config", "core.logAllRefUpdates", "false")
+    _git(main_root, "branch", "no-reflog", "main")
+    common = Path(_git(main_root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    reflog = common / "logs" / "refs" / "heads" / "no-reflog"
+    assert not reflog.exists()
+    code, text = _fold(main_root, apply=False)  # main's tip is fresh -> committer date is "now"
+    assert code == 0, text
+    assert "recent" in text
+    assert _branch_exists(main_root, "no-reflog")
+
+
+def test_fold_branch_delete_reconfirms_ancestry_just_before_delete(isolated_git, tmp_path, monkeypatch):
+    """R6/apply_branch_delete's own re-check: a branch `decide_branchless`
+    already judged FOLD (patched out below, standing in for a race where it
+    was merged at enumeration time) but that has since moved to a commit no
+    longer an ancestor of main must FAIL, not be deleted.
+
+    mutation (`tools/dev/fold.py`): drop `apply_branch_delete`'s own
+    `is_ancestor` re-check (delete unconditionally) -- this test goes red
+    because the branch would then actually be deleted instead of FAILing."""
+    main_root = _fold_main_repo(tmp_path)
+    _git(main_root, "branch", "moved", "main")
+    _age_branch_log(main_root, "moved", 48)
+    src = _add_worktree(main_root, tmp_path, "moved-src", base="moved")
+    (src / "d.txt").write_text("d\n")
+    _git(src, "add", "d.txt")
+    _git(src, "commit", "-q", "-m", "advance past main")
+    _git(main_root, "branch", "-f", "moved", "moved-src")
+    monkeypatch.setattr(fold, "decide_branchless", lambda *a, **k: ("FOLD", ""))
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 1
+    assert "fold: FAIL branch moved" in text
+    assert _branch_exists(main_root, "moved")
+
+
+def test_fold_mutation_journal_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    """mutation (`tools/dev/fold.py`): drop the `journal_blocker` check in
+    `decide_worktree` -- this test goes red because a worktree with an
+    unfinished mutate.py run would then be removed under --apply."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "journal-one")
+    _age_worktree(main_root, wt, "journal-one", 48)
+    dl.journal_path(wt).write_text("{}")
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "mutation-journal" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "journal-one")
+
+
+def test_fold_locked_worktree_stays(isolated_git, tmp_path, monkeypatch):
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "locked-one")
+    _age_worktree(main_root, wt, "locked-one", 48)
+    _git(main_root, "worktree", "lock", str(wt))
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert "locked" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "locked-one")
+
+
+def test_fold_prunable_worktree_is_reported_and_not_pruned(isolated_git, tmp_path, monkeypatch):
+    """R4: a `prunable` worktree (its directory is gone) is only reported --
+    never actually pruned (a synced drive can make a directory vanish and
+    reappear, so this tool never runs `git worktree prune` itself)."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "gone-one")
+    shutil.rmtree(wt)
+    _isolate_fold_lock(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True)
+    assert code == 0, text
+    assert f"fold: PRUNABLE worktree {wt}" in text
+    assert "prunable=1" in text
+    assert str(wt) in _worktrees(main_root)
+
+
+def test_fold_refuses_when_the_exclusive_lock_times_out(isolated_git, tmp_path, monkeypatch):
+    """R3: --apply runs inside the exclusive suite lock; when it cannot be
+    taken within --wait, fold REFUSES (75) and changes nothing.
+
+    mutation (`tools/dev/fold.py`): drop the `dsa_testpg.suite_lock(...)`
+    wrapper around `_run` under --apply (call `_run` unconditionally) --
+    this test goes red because the fold would then proceed and remove the
+    worktree/branch instead of REFUSING."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "locked-out")
+    _age_worktree(main_root, wt, "locked-out", 48)
+    base = _isolate_fold_lock(monkeypatch, tmp_path)
+    held = dsa_testpg._acquire_suite_lock(exclusive=False, wait=1.0, base=base)  # a live "other pytest run"
+    try:
+        code, text = _fold(main_root, apply=True, wait=0.3)
+    finally:
+        held.release()
+    assert code == dl.REFUSED
+    assert "fold: REFUSED --" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "locked-out")
 
 
 # ---------------------------------------------------------------------------

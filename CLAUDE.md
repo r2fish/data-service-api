@@ -53,5 +53,5 @@ Common capability/requirement → applicable Security Invariants → common API 
 ## Working procedure
 
 - Read `docs/work-orders/OPERATING_CONDITIONS.md` at session start; it is the source for how work is run here (worktrees, gates, commits, roles).
-- Use `tools/dev/` (`pt.py`, `mutate.py`, `gate.py`, `finalize.py`, `section.py`; see `tools/dev/README.md`) instead of repeating those procedures by hand. Commit through `finalize.py`, which runs the identity, empty-`.md`, doc-reference and public-value checks.
+- Use `tools/dev/` (`pt.py`, `mutate.py`, `gate.py`, `finalize.py`, `section.py`, `fold.py`; see `tools/dev/README.md`) instead of repeating those procedures by hand. Commit through `finalize.py`, which runs the identity, empty-`.md`, doc-reference and public-value checks.
 - On a fresh clone run `.venv/bin/pre-commit install` once, so a hand-made commit also runs the public-value and doc-reference scans. `.git/hooks` is shared by every worktree.
