@@ -288,3 +288,117 @@ def test_perf_baseline_takes_the_exclusive_lock_and_uses_its_own_cluster(tmp_pat
     # The exclusive lock is released on the way out: a fresh shared acquisition now succeeds.
     handle = pb.dsa_testpg._acquire_suite_lock(exclusive=False, wait=1.0, base=base)
     handle.release()
+
+
+def _fake_cluster_cm():
+    class _FakeCluster:
+        def env(self):
+            return dict(_FAKE_CLUSTER_ENV)
+
+    @contextlib.contextmanager
+    def fake_cluster():
+        yield _FakeCluster()
+
+    return fake_cluster
+
+
+def test_perf_baseline_restores_the_environment_it_borrowed(tmp_path, monkeypatch):
+    """R-58 WP-1 completion condition 1 (docs/work-orders/
+    WORK_ORDER_R58_PERF_BASELINE_ENV_RESTORE_V1.md §2.2): `main()` writes
+    the owned cluster's own connection env directly into `os.environ` (the
+    two DSN names, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSFILE`, and drops
+    `PGPASSWORD`) so `_run()`'s adapters can reach it, but must put the
+    caller's own process state back once the cluster is no longer live:
+    names that existed before the call (`PGPASSWORD`/`PGPASSFILE`,
+    sentineled here) keep their exact sentinel value afterward, and names
+    the cluster added that were absent before (`PGHOST`, `PGPORT`,
+    `PGUSER`, the two DSN names) are absent again.
+
+    M1 (`tools/perf_baseline.py`, docs/work-orders/
+    WORK_ORDER_R58_PERF_BASELINE_ENV_RESTORE_V1.md §2.3): drop the
+    `finally` restore loop entirely -- red because the sentinel
+    `PGPASSWORD`/`PGPASSFILE` values are gone and the fake cluster's own
+    DSN names are still present after `main()` returns.
+    M1b (`tools/perf_baseline.py`, same work order §2.3): restore every
+    borrowed name except `PGPASSWORD` -- red because `PGPASSWORD` stays
+    absent (`main()` popped it) instead of coming back as the sentinel.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+
+    for name in _FAKE_CLUSTER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PGPASSWORD", "sentinel-password")
+    monkeypatch.setenv("PGPASSFILE", "sentinel-pgpassfile")
+
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"adapters": []}), encoding="utf-8")
+
+    monkeypatch.setattr(pb.dsa_testpg, "cluster", _fake_cluster_cm())
+
+    code = pb.main(["--registry", str(registry)])
+    assert code == 0
+
+    observed = 0
+    assert os.environ.get("PGPASSWORD") == "sentinel-password"
+    observed += 1
+    assert os.environ.get("PGPASSFILE") == "sentinel-pgpassfile"
+    observed += 1
+    for name in _FAKE_CLUSTER_ENV:
+        if name == "PGPASSFILE":
+            continue  # sentineled and checked above; the fake cluster's own value must not survive it either
+        assert name not in os.environ, f"{name} leaked the fake cluster's own value after main() returned"
+        observed += 1
+    assert observed == len(_FAKE_CLUSTER_ENV) + 1
+
+
+@pytest.mark.parametrize(
+    "raiser,expected_code",
+    [
+        (lambda args: (_ for _ in ()).throw(RuntimeError("synthetic failure from _run")), None),
+        (lambda args: (_ for _ in ()).throw(pb.dsa_testpg.TestPgError("synthetic")), 1),
+    ],
+)
+def test_perf_baseline_restores_the_environment_when_run_raises(tmp_path, monkeypatch, raiser, expected_code):
+    """R-58 WP-1 completion condition 2 (docs/work-orders/
+    WORK_ORDER_R58_PERF_BASELINE_ENV_RESTORE_V1.md §2.2): the same restore
+    as the previous test's completion condition 1 also happens when
+    `_run()` raises -- both a plain exception (propagates out of `main()`)
+    and a `dsa_testpg.TestPgError` (caught by `main()`'s own outer
+    `except`, returning 1 since the failure is past the `lock` stage).
+
+    M2 (`tools/perf_baseline.py`, docs/work-orders/
+    WORK_ORDER_R58_PERF_BASELINE_ENV_RESTORE_V1.md §2.3): move the restore
+    loop from `finally` to after `return _run(args)` on the success path
+    only -- red because both parametrizations here leak the fake
+    cluster's own `PGHOST`/DSN names (the restore never runs on either
+    exception path).
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+
+    for name in _FAKE_CLUSTER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PGPASSWORD", "sentinel-password-2")
+
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"adapters": []}), encoding="utf-8")
+
+    monkeypatch.setattr(pb.dsa_testpg, "cluster", _fake_cluster_cm())
+    monkeypatch.setattr(pb, "_run", raiser)
+
+    if expected_code is None:
+        with pytest.raises(RuntimeError, match="synthetic failure from _run"):
+            pb.main(["--registry", str(registry)])
+    else:
+        assert pb.main(["--registry", str(registry)]) == expected_code
+
+    observed = 0
+    assert os.environ.get("PGPASSWORD") == "sentinel-password-2"
+    observed += 1
+    for name in _FAKE_CLUSTER_ENV:
+        assert name not in os.environ, f"{name} leaked the fake cluster's own value after main() raised"
+        observed += 1
+    assert observed == len(_FAKE_CLUSTER_ENV) + 1

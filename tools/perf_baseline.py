@@ -993,9 +993,19 @@ def main(argv: list[str] | None = None) -> int:
             stage = "cluster"
             with dsa_testpg.cluster() as c:
                 stage = "run"
-                os.environ.update(c.env())
-                os.environ.pop("PGPASSWORD", None)
-                return _run(args)
+                cluster_env = c.env()
+                restore_names = set(cluster_env) | {"PGPASSWORD"}
+                saved_env = {name: os.environ.get(name) for name in restore_names}  # None means the name was absent before
+                try:
+                    os.environ.update(cluster_env)
+                    os.environ.pop("PGPASSWORD", None)
+                    return _run(args)
+                finally:
+                    for name, value in saved_env.items():  # put the caller's own environment back, always
+                        if value is None:
+                            os.environ.pop(name, None)
+                        else:
+                            os.environ[name] = value
     except dsa_testpg.TestPgError as exc:
         print(f"perf_baseline: {exc}", file=sys.stderr)
         return REFUSED if stage == "lock" else 1

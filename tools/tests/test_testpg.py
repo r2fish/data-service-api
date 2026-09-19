@@ -77,32 +77,39 @@ _ENV_NAMES = (dsa.ENV_MODE, dsa.R2DB_DSN, dsa.MITATEDB_DSN, dsa.ENV_BINDIR, dsa.
               dsa.ENV_LOCK_HELD, "PYTEST_XDIST_WORKER", "PGHOST", "PGPORT", "PGUSER", "PGPASSFILE", "PGPASSWORD")
 
 
-@pytest.fixture(autouse=True)
-def _isolated_state(monkeypatch):
-    """Every decision-table test starts from a clean slate: none of the
-    module's own env vars set, and no `_owned_cluster` / `_owned_lock` left
-    over from a previous test (the real module keeps that as global state,
-    exactly as a single pytest process would across its three conftest.py
-    imports).
-
-    `_acquire_suite_lock` is stubbed to a harmless no-op EVERY test (never
-    the machine's real, per-uid base dir -- shared with any concurrently
-    running gate.py / pytest on this machine): the lock-specific tests below
-    call `_real_acquire_suite_lock` directly instead, always against an
-    explicit tmp_path `base`.
-
-    The teardown also stops a REAL cluster if one is somehow left behind in
-    `dsa._owned_cluster` -- normally impossible (every test that reaches the
-    "start a cluster" branch replaces `dsa.start` with a fake first), but a
-    future change to `ensure_for_pytest()`'s own ordering could let a
-    real `start()` run before a test gets the chance to install its fake;
-    this keeps such a bug from leaking a real postgres process."""
+def _isolated_state_setup(monkeypatch) -> dict[str, str | None]:
+    """The `_isolated_state` fixture's own setup half, factored out so a
+    test can drive it directly with its own `MonkeyPatch` instance (see
+    `test_isolated_state_teardown_restores_the_pre_fixture_environment_
+    after_an_owned_mode_run` below) instead of only through the autouse
+    fixture. Returns each of `_ENV_NAMES`' pre-call state (`None` if the
+    name was absent), for `_isolated_state_teardown` to put back."""
+    pre_state = {name: os.environ.get(name) for name in _ENV_NAMES}
     for name in _ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(dsa, "_acquire_suite_lock", lambda *a, **k: _FakeLockHandle())
     dsa._owned_cluster = None
     dsa._owned_lock = None
-    yield
+    return pre_state
+
+
+def _isolated_state_teardown(pre_state: dict[str, str | None]) -> None:
+    """The `_isolated_state` fixture's own teardown half. Stops a REAL
+    cluster if one is somehow left behind in `dsa._owned_cluster` --
+    normally impossible (every test that reaches the "start a cluster"
+    branch replaces `dsa.start` with a fake first), but a future change to
+    `ensure_for_pytest()`'s own ordering could let a real `start()` run
+    before a test gets the chance to install its fake; this keeps such a
+    bug from leaking a real postgres process.
+
+    The final restore loop is independent of `monkeypatch`: a test that
+    drives `ensure_for_pytest()` into its owned-mode branch (with a faked
+    `start()`) exercises `dsa_testpg.py`'s own direct
+    `os.environ.update(...)`/`os.environ[...] = ...` writes, which
+    `monkeypatch.delenv`/`setenv` never records an undo for when the name
+    was already absent going in -- so this puts each name's own captured
+    pre-fixture state back explicitly, rather than relying on
+    `monkeypatch`'s own bookkeeping to have seen every write."""
     if dsa._owned_cluster is not None:
         try:
             dsa._owned_cluster.stop()
@@ -115,6 +122,30 @@ def _isolated_state(monkeypatch):
             pass
     dsa._owned_cluster = None
     dsa._owned_lock = None
+    for name, value in pre_state.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state(monkeypatch):
+    """Every decision-table test starts from a clean slate: none of the
+    module's own env vars set, and no `_owned_cluster` / `_owned_lock` left
+    over from a previous test (the real module keeps that as global state,
+    exactly as a single pytest process would across its three conftest.py
+    imports).
+
+    `_acquire_suite_lock` is stubbed to a harmless no-op EVERY test (never
+    the machine's real, per-uid base dir -- shared with any concurrently
+    running gate.py / pytest on this machine): the lock-specific tests below
+    call `_real_acquire_suite_lock` directly instead, always against an
+    explicit tmp_path `base`. See `_isolated_state_setup`/
+    `_isolated_state_teardown` for what each half actually does."""
+    pre_state = _isolated_state_setup(monkeypatch)
+    yield
+    _isolated_state_teardown(pre_state)
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +308,50 @@ def test_unset_mode_with_no_dsn_starts_a_cluster_and_exports_its_env(monkeypatch
     assert dsa._owned_cluster is None
     assert dsa._owned_lock is None
     dsa.stop_owned()  # idempotent
+
+
+def test_isolated_state_teardown_restores_the_pre_fixture_environment_after_an_owned_mode_run(tmp_path):
+    """R-58 WP-1b completion condition 7 (docs/work-orders/
+    WORK_ORDER_R58_PERF_BASELINE_ENV_RESTORE_V1.md, coordinator ruling
+    (d)): starting from none of `_ENV_NAMES` set (the outer autouse
+    `_isolated_state` fixture already guarantees this for every test),
+    running `ensure_for_pytest()`'s owned-mode branch through a fake
+    `start()` and then this fixture's own teardown must leave none of
+    `_ENV_NAMES` in `os.environ` -- not merely "no worse than before",
+    since before was already clean.
+
+    Drives `_isolated_state_setup`/`_isolated_state_teardown` directly
+    with an own `MonkeyPatch` instance (rather than a second nested pytest
+    run) so this one test can observe `os.environ` on both sides of the
+    teardown call.
+
+    mutation M4 (`tools/tests/test_testpg.py`): drop the final restore
+    loop from `_isolated_state_teardown` -- red because `PGHOST` (etc.)
+    stays set in `os.environ` after teardown returns.
+    """
+    for name in _ENV_NAMES:
+        assert name not in os.environ, f"{name} was already set before this test started"
+
+    inner_monkeypatch = pytest.MonkeyPatch()
+    try:
+        pre_state = _isolated_state_setup(inner_monkeypatch)
+        assert all(value is None for value in pre_state.values())
+
+        fake = _FakeCluster(tmp_path / "run-fakeid-cc7")
+        inner_monkeypatch.setattr(dsa, "start", lambda: fake)
+        inner_monkeypatch.setattr(dsa.atexit, "register", lambda fn: None)
+
+        dsa.ensure_for_pytest()
+        # Not vacuous: confirms the owned-mode branch actually wrote to
+        # os.environ before checking that teardown undoes it.
+        assert os.environ.get("PGHOST") == "/fake/s"
+
+        _isolated_state_teardown(pre_state)
+
+        for name in _ENV_NAMES:
+            assert name not in os.environ, f"{name} leaked into os.environ after teardown"
+    finally:
+        inner_monkeypatch.undo()
 
 
 def test_unset_mode_honors_the_lock_wait_env_var(monkeypatch, tmp_path):
