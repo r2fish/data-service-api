@@ -8,6 +8,7 @@
 ### 0.1 変更クラス
 
 - 全体の見込みは **Class C** — `security/CONTROL_MAPPING.md` に主張を**足す** (設計 §9 の監督裁定)。各 WP の確定は着手時に `tools/change_class.py` と `RM` §9 の 8 の表で行う。
+- **【訂正註 2026-09-20 (監督)】** 変更クラスの宣言 **Class C は誤り**で、`security/` 配下を触る本件は **Class D** である (`docs/design/ROADMAP_POST_PHASE7_V1.md` §9 の 8 の表、`tools/change_class.py`。R-56 の設計レビューの指摘)。本文は書き換えない (§1.8 の 57)。D が求める依頼者裁定の逐語記録に当たるのは依頼者指示 2026-09-19 の委任 (引き継ぎ書 `docs/work-orders/HANDOVER_20260919_FABLE2.md` §2 に逐語) で、版付きの security-contract 決定に当たるのは `security/CONTROL_MAPPING.md` の版 (R-54 は 2.10、R-59 は 2.11) である。事後の依頼者確認は引き継ぎ書 `docs/work-orders/HANDOVER_20260920_FABLE.md` §4 で伺っている。
 - **D に上げない条件** (設計 §9): 両 peer に**同名のテストヘルパを置かない**。`_ISOMORPHIC_TARGETS` (`r2db-api/tests/test_audit_query.py`:2388 / `MitateDB-api/tests/test_audit_query.py`:2179) を増減しない。増減が要ると判断したら**実装せず報告に書く**。
 - 公開契約 `spec/`・`security/SECURITY_INVARIANTS_V1.md`・`conformance-tests/` の本文は触らない。
 

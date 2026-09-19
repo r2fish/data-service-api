@@ -3,6 +3,7 @@
 ## 0. 版数・位置づけ
 
 - **v1.0 (2026-09-19)。** 基点 main `2d47383`。台帳は `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-59。変更クラスは **Class C** (`security/` を触る。契約は触らない)。
+- **【訂正註 2026-09-20 (監督)】** 変更クラスの宣言 **Class C は誤り**で、`security/` 配下を触る本件は **Class D** である (`docs/design/ROADMAP_POST_PHASE7_V1.md` §9 の 8 の表、`tools/change_class.py`。R-56 の設計レビューの指摘)。本文は書き換えない (§1.8 の 57)。D が求める依頼者裁定の逐語記録に当たるのは依頼者指示 2026-09-19 の委任 (引き継ぎ書 `docs/work-orders/HANDOVER_20260919_FABLE2.md` §2 に逐語) で、版付きの security-contract 決定に当たるのは `security/CONTROL_MAPPING.md` の版 (R-54 は 2.10、R-59 は 2.11) である。事後の依頼者確認は引き継ぎ書 `docs/work-orders/HANDOVER_20260920_FABLE.md` §4 で伺っている。加えて、**R-59 は受け入れ監査を入れていない** (§2)。純粋な移動で照合は道具が行い、コードレビューが独立に再現したためだが、**D の手順は受け入れ監査を求める** — D の手順からの逸脱として記録する。
 - 設計は新しく起こさない。方法は `docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` v1.0 (依頼者裁定 2026-09-18「複数ブロックを許す」、§5 の見出しの書式、§6 の照合、§7 の訂正註 = 残った側の指示語も見る) がそのまま定めており、本件はその 3 回目の適用である。適用の計画 (どの bullet を移すか) のレビューは §1.6 のレビューが兼ねる。
 - 規律は `docs/work-orders/OPERATING_CONDITIONS.md` に従う (commit は監督のみ、道具は `tools/dev/`)。
 
