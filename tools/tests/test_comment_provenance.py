@@ -2743,13 +2743,19 @@ def test_0e_run_base_green_when_join_fixed(tmp_path):
     assert code == 0, output
 
 
-def _check_rev_pair(repo_root, rel_path, old_source, new_source, real_paths, identifier_set, out):
+def _check_rev_pair(repo_root, rel_path, old_source, new_source, real_paths, identifier_set, out, rev):
     """change set 0f (supervisor ruling 2026-09-15, fixing this test's
     own working-tree dependency): the SAME per-file checks `run_base`
     runs, but taking `old_source`/`new_source` directly instead of
     reading the working tree -- lets a test compare two REVISIONS (or a
     revision against itself) without ever touching the local worktree's
-    own uncommitted state."""
+    own uncommitted state.
+
+    `rev` (design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3 rule 6):
+    the companion AND its correction records are read from THIS rev too
+    (never the working tree), so a "rev vs itself" comparison is built
+    from one shared snapshot throughout -- an uncommitted, working-tree-
+    only correction record must never perturb it."""
     had_failure = False
     try:
         old_sig = cp.ast_signature(old_source)
@@ -2764,8 +2770,8 @@ def _check_rev_pair(repo_root, rel_path, old_source, new_source, real_paths, ide
         print(f"FAIL (§4.1 (5)) {rel_path}:{lineno} added line carries a history token ({pat}): {line_text.strip()!r}", file=out)
         had_failure = True
     peer = Path(rel_path).parts[0]
-    companion_lookup = cp._load_companion_lookup(repo_root, peer)
-    corrections_lookup, corrections_errors = cp._load_corrections_lookup(repo_root, peer)
+    companion_lookup = cp._load_companion_lookup(repo_root, peer, rev=rev)
+    corrections_lookup, corrections_errors = cp._load_corrections_lookup(repo_root, peer, rev=rev)
     for corr_err in corrections_errors:
         print(f"FAIL (§9f) {corr_err}", file=out)
         had_failure = True
@@ -2842,7 +2848,7 @@ def test_0f_both_peers_all_src_rev_vs_itself_is_green():
         )
         assert blob.returncode == 0, blob.stderr.decode()
         source = blob.stdout.decode("utf-8")
-        code = _check_rev_pair(REAL_REPO_ROOT, rel_path, source, source, real_paths, identifier_set, out)
+        code = _check_rev_pair(REAL_REPO_ROOT, rel_path, source, source, real_paths, identifier_set, out, rev="HEAD")
         if code != 0:
             had_failure = True
     output = out.getvalue()
@@ -2873,7 +2879,7 @@ def test_0f_rev_pair_check_is_red_when_working_tree_has_uncommitted_comment_edit
     )
     source = blob.stdout.decode("utf-8")
     out2 = io.StringIO()
-    code2 = _check_rev_pair(repo, "r2db-api/src/r2db_api/mod.py", source, source, real_paths, identifier_set, out2)
+    code2 = _check_rev_pair(repo, "r2db-api/src/r2db_api/mod.py", source, source, real_paths, identifier_set, out2, rev=rev)
     assert code2 == 0, out2.getvalue()
 
 
@@ -3289,10 +3295,17 @@ def _correction_scenario(tmp_path, companion_lines, correction_blocks, current_b
         _write(repo, rel_path, content)
     src = "\n".join(current_block_lines + ["# history: CH-0001"]) + "\ndef f():\n    return 1\n"
     _write(repo, "r2db-api/src/r2db_api/mod.py", src)
-    rev = _commit_all(repo, "old")
     section = _companion_section("CH-0001", "\n".join(companion_lines))
     section += "".join(correction_blocks)
+    # design §9.3 rule 1 (work order R-68 WP-1): the companion AND its
+    # correction records are committed in THIS SAME revision, matching
+    # this helper's own documented shape ("the committed revision AND
+    # the working tree carry the SAME... block") -- a re-edit's stage-A
+    # basis now reads its correction records from the BASIS revision,
+    # never the working tree, so leaving them uncommitted would starve
+    # every scenario built by this helper of its own correction record.
     _write(repo, "docs/code-history/r2db-api/mod.md", section)
+    rev = _commit_all(repo, "old")
     return repo, rev
 
 
@@ -4406,3 +4419,518 @@ def test_r63_review1_non_leading_bare_string_is_content_sensitive():
     assert mapping.get(0) == 0
     assert 1 not in mapping, mapping
     assert mapping.get(2) == 2
+
+
+# ===========================================================================
+# Change set 0j: a re-edited block's companion correction record may now be
+# recorded in the SAME changeset as the reword (design
+# docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3, work order
+# docs/work-orders/WORK_ORDER_R68_PROVENANCE_SAME_CHANGESET_REWORD_V1.md
+# WP-1). `_same_changeset_scenario` commits a revision whose SOURCE and
+# companion still reflect the state BEFORE the reword (plus any correction
+# entries already committed in an earlier changeset -- `base_correction_
+# blocks`), then leaves the WORKING TREE with the reworded source and the
+# companion carrying the full correction list (`all_correction_blocks`,
+# base entries first, any new ones appended after).
+# ===========================================================================
+
+def _same_changeset_scenario(
+    tmp_path, old_src, new_src, companion_lines, base_correction_blocks, all_correction_blocks,
+    *, kind="comment", rel_path="r2db-api/src/r2db_api/mod.py",
+    companion_rel_path="docs/code-history/r2db-api/mod.md",
+    base_has_companion_file=True, base_section_present=True, working_companion_lines=None,
+):
+    repo = _init_repo(tmp_path)
+    _write(repo, rel_path, old_src)
+    if base_has_companion_file:
+        if base_section_present:
+            base_section = _companion_section("CH-0001", "\n".join(companion_lines), kind=kind)
+            base_section += "".join(base_correction_blocks)
+        else:
+            # completion condition 5's second shape: the basis rev's
+            # companion FILE exists, but carries only a DIFFERENT CH-ID's
+            # section -- CH-0001's own section is absent from the file,
+            # distinct from the file itself being absent
+            # (`base_has_companion_file=False`).
+            base_section = _companion_section("CH-9999", "# Unrelated section.")
+        _write(repo, companion_rel_path, base_section)
+    rev = _commit_all(repo, "old")
+    _write(repo, rel_path, new_src)
+    working_lines = companion_lines if working_companion_lines is None else working_companion_lines
+    full_section = _companion_section("CH-0001", "\n".join(working_lines), kind=kind)
+    full_section += "".join(all_correction_blocks)
+    _write(repo, companion_rel_path, full_section)
+    return repo, rev
+
+
+_0J_WRAPPED_OLD = [
+    "# The widget behaves the old way across multiple",
+    "# lines for backward compatibility.",
+]
+_0J_WRAPPED_NEW = [
+    "# The widget behaves the new way across multiple",
+    "# lines for backward compatibility.",
+]
+_0J_WRAPPED_CORRECTION = _correction_block(
+    "2026-09-20", "behavior changed",
+    "The widget behaves the old way across multiple lines for backward compatibility.",
+    "The widget behaves the new way across multiple lines for backward compatibility.",
+)
+
+
+def test_0j_comment_reword_with_same_changeset_correction_is_green(tmp_path):
+    # Completion condition 1 (wrapped basis block, R1-2): the basis
+    # revision carries no correction for CH-0001 at all (base = 0
+    # entries); the working tree reword and its correction record are
+    # recorded together.
+    old_src = "\n".join(_0J_WRAPPED_OLD) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "\n".join(_0J_WRAPPED_NEW) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, _0J_WRAPPED_OLD, [], [_0J_WRAPPED_CORRECTION],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0j_docstring_reword_with_same_changeset_correction_is_green(tmp_path):
+    # Completion condition 2 (wrapped basis block, R1-2): same shape, a
+    # docstring block instead of a comment.
+    companion_lines = [
+        "The widget stores state using the old on-disk format",
+        "across process restarts.",
+    ]
+    old_src = (
+        'def f():\n    """The widget stores state using the old on-disk format\n'
+        '    across process restarts.\n\n    History: CH-0001\n    """\n    return 1\n'
+    )
+    new_src = (
+        'def f():\n    """The widget stores state using the new on-disk format\n'
+        '    across process restarts.\n\n    History: CH-0001\n    """\n    return 1\n'
+    )
+    correction = _correction_block(
+        "2026-09-20", "format changed",
+        "The widget stores state using the old on-disk format across process restarts.",
+        "The widget stores state using the new on-disk format across process restarts.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction], kind="docstring",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0j_two_pending_corrections_chain_is_green(tmp_path):
+    # Completion condition 3: two pending corrections, the second
+    # chaining on the first's own `new` text.
+    companion_lines = ["# Step one runs first then step two runs second."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# Phase one runs first then phase two runs second.\n# history: CH-0001\ndef f():\n    return 1\n"
+    corr1 = _correction_block(
+        "2026-09-20", "step one renamed",
+        "Step one runs first then step two runs second.",
+        "Phase one runs first then step two runs second.",
+    )
+    corr2 = _correction_block(
+        "2026-09-20", "step two renamed",
+        "Phase one runs first then step two runs second.",
+        "Phase one runs first then phase two runs second.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [corr1, corr2],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0j_pending_old_absent_from_basis_block_is_noop_green(tmp_path):
+    # Completion condition 4: an earlier (uncorrelated) reduction already
+    # deleted the sentence a pending correction still names -- 0
+    # occurrences applies no change rather than erroring.
+    companion_lines = [
+        "# Kept sentence stays here.",
+        "# Removed sentence was deleted earlier.",
+    ]
+    old_src = "# Kept sentence stays here.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = old_src  # the block itself is untouched in this changeset
+    correction = _correction_block(
+        "2026-09-20", "stale, sentence already gone",
+        "Removed sentence was deleted earlier.", "Replacement text should not appear.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0j_no_basis_companion_section_treats_all_as_pending_is_green(tmp_path):
+    # Completion condition 5 (F-1): the basis revision has no companion
+    # file for CH-0001 at all -- base corrections are 0, every working-
+    # tree correction is pending.
+    companion_lines = ["# Plain content stays as is."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# Plain content now stays updated.\n# history: CH-0001\ndef f():\n    return 1\n"
+    correction = _correction_block(
+        "2026-09-20", "content updated",
+        "Plain content stays as is.", "Plain content now stays updated.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction], base_has_companion_file=False,
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0j_no_basis_section_in_present_companion_file_treats_all_as_pending_is_green(tmp_path):
+    # Completion condition 5's second shape (F-1): the basis revision's
+    # companion FILE exists (unlike the fixture above) but carries only
+    # a DIFFERENT CH-ID's section -- CH-0001's own section is absent
+    # from the file, not the file itself.
+    companion_lines = ["# Plain content stays as is."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# Plain content now stays updated.\n# history: CH-0001\ndef f():\n    return 1\n"
+    correction = _correction_block(
+        "2026-09-20", "content updated",
+        "Plain content stays as is.", "Plain content now stays updated.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction], base_section_present=False,
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0j_reword_without_any_correction_record_is_red(tmp_path):
+    # Completion condition 6, condition (a): a plain reword with no
+    # correction record at all must stay red exactly as before.
+    companion_lines = ["# Value uses the legacy format."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# Value uses the updated format.\n# history: CH-0001\ndef f():\n    return 1\n"
+    repo, rev = _same_changeset_scenario(tmp_path, old_src, new_src, companion_lines, [], [])
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0j_basis_correction_new_rewritten_in_working_tree_is_red(tmp_path):
+    # Completion condition 7, condition (b): a correction already
+    # committed at the basis rev is edited (its `new` text changed) in
+    # the working tree -- the prefix check must catch this positionally.
+    companion_lines = ["# The widget used old behavior."]
+    old_src = "# The widget used behavior X.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = old_src
+    base_corr = _correction_block(
+        "2026-09-10", "reworded", "The widget used old behavior.", "The widget used behavior X.",
+    )
+    working_corr = _correction_block(
+        "2026-09-10", "reworded", "The widget used old behavior.", "The widget used behavior Y.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [base_corr], [working_corr],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9.3 (2)" in output
+
+
+def test_0j_basis_correction_deleted_in_working_tree_is_red(tmp_path):
+    # Completion condition 8, condition (b): the basis rev has TWO
+    # committed corrections; the working tree drops the second one --
+    # the list got shorter, which is never a valid prefix relationship.
+    companion_lines = ["# Sentence one original."]
+    old_src = "# Sentence one fixed twice.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = old_src
+    corr1 = _correction_block(
+        "2026-09-10", "first fix", "Sentence one original.", "Sentence one fixed.",
+    )
+    corr2 = _correction_block(
+        "2026-09-11", "second fix", "Sentence one fixed.", "Sentence one fixed twice.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [corr1, corr2], [corr1],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9.3 (2)" in output
+
+
+def test_0j_pending_correction_drops_protected_reference_is_red(tmp_path):
+    # Completion condition 9, condition (c): a pending correction's `new`
+    # silently drops the `old` sentence's protected reference (SI-08).
+    companion_lines = ["# The body is plain here (SI-08)."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# The body is plain here now.\n# history: CH-0001\ndef f():\n    return 1\n"
+    correction = _correction_block(
+        "2026-09-20", "drops SI-08",
+        "The body is plain here (SI-08).", "The body is plain here now.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "SI-08" in output
+    assert "dropped" in output
+
+
+def test_0j_pending_old_occurs_twice_is_red(tmp_path):
+    # Completion condition 10 (R1-10): the pending `old` sentence occurs
+    # TWICE in the basis block's own text. The new block below replaces
+    # only the FIRST occurrence -- if the ambiguity check were bypassed,
+    # this exact reduction would otherwise pass -- so a red here must be
+    # attributable ONLY to the 2-occurrence ambiguity, never to the
+    # unchanged full-chain check (F-4): a committed base correction
+    # turns an unrelated placeholder sentence into the target wording
+    # (so the full chain sees it exactly once against the companion's
+    # own pristine text), while a SEPARATE, already-allowed bare-id
+    # parenthetical removal turns the companion's second, still-
+    # DIFFERENT sentence into the SAME wording only in the basis
+    # block's own (committed) text -- the two occurrences the pending
+    # correction ambiguously matches exist ONLY there.
+    companion_lines = ["# Some placeholder text. Repeat sentence (R-9) stays."]
+    old_src = "# Repeat sentence stays. Repeat sentence stays.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# Fixed sentence now. Repeat sentence stays.\n# history: CH-0001\ndef f():\n    return 1\n"
+    base_correction = _correction_block(
+        "2026-09-10", "placeholder replaced",
+        "Some placeholder text.", "Repeat sentence stays.",
+    )
+    pending_correction = _correction_block(
+        "2026-09-20", "one occurrence fixed",
+        "Repeat sentence stays.", "Fixed sentence now.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [base_correction],
+        [base_correction, pending_correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "occurs 2 time" in output
+
+
+def test_0j_unrecorded_sentence_added_alongside_reword_is_red(tmp_path):
+    # Completion condition 11, condition (a): an unrecorded sentence is
+    # smuggled in alongside an otherwise-valid, correction-backed reword.
+    companion_lines = ["# The cache refreshes every five minutes."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = (
+        "# The cache refreshes every ten minutes. This extra sentence was never recorded.\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    correction = _correction_block(
+        "2026-09-20", "interval changed",
+        "The cache refreshes every five minutes.", "The cache refreshes every ten minutes.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0j_pending_old_absent_from_companion_original_is_red(tmp_path):
+    # Completion condition 12 (F-4, unchanged existing check): an earlier
+    # ALLOWED reduction (a bare-id parenthetical removal, unrelated to
+    # any correction) already changed the basis block's own wording, so
+    # the pending correction's `old` -- written against the basis
+    # block's CURRENT form -- occurs once there but never in the
+    # companion's own pristine original.
+    companion_lines = ["# The cache uses LRU eviction (R-5)."]
+    old_src = "# The cache uses LRU eviction.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# The cache uses LRU eviction now.\n# history: CH-0001\ndef f():\n    return 1\n"
+    correction = _correction_block(
+        "2026-09-20", "reworded",
+        "The cache uses LRU eviction.", "The cache uses LRU eviction now.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "occurs 0 time" in output
+
+
+def test_0j_whole_block_move_with_pending_added_protected_ref_is_red(tmp_path):
+    # Completion condition 13 (F-4's last sentence): the block is moved
+    # away entirely (nothing retained); the pending correction ADDS a
+    # protected reference (SI-08) that was not present before -- the
+    # whole-move protected-reference check runs against the text AFTER
+    # the pending correction is applied.
+    companion_lines = ["# The helper runs synchronously."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# history: CH-0001\ndef f():\n    return 1\n"
+    correction = _correction_block(
+        "2026-09-20", "clarified with SI-08",
+        "The helper runs synchronously.", "The helper runs synchronously per SI-08.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+    assert "SI-08" in output
+
+
+def test_0j_rev_pair_check_ignores_uncommitted_pending_correction_is_green(tmp_path):
+    # Completion condition 14 (J-1): the rev-vs-itself guard must read
+    # the companion AND its correction records from the SAME rev the
+    # source comes from -- an uncommitted correction record added to the
+    # working tree's companion file (a same-changeset reword still in
+    # progress) must never perturb a "rev vs itself" comparison, which
+    # never even looks at the working tree.
+    repo = _init_repo(tmp_path)
+    src = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", src)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# The body is JSON."),
+    )
+    rev = _commit_all(repo, "old")
+    # Uncommitted, working-tree-only pending correction -- never
+    # committed at `rev`.
+    pending_correction = _correction_block(
+        "2026-09-20", "reworded", "The body is JSON.", "The body uses JSON.",
+    )
+    section = _companion_section("CH-0001", "# The body is JSON.") + pending_correction
+    _write(repo, "docs/code-history/r2db-api/mod.md", section)
+
+    real_paths = cp._tree_paths(repo, rev)
+    identifier_set = cp._tracked_identifier_set(repo, rev)
+    out = io.StringIO()
+    code = _check_rev_pair(repo, "r2db-api/src/r2db_api/mod.py", src, src, real_paths, identifier_set, out, rev=rev)
+    assert code == 0, out.getvalue()
+
+
+def test_0j_working_tree_rewrite_of_companion_original_is_red(tmp_path):
+    # Completion condition 15 (R1-1): the companion's ORIGINAL fenced
+    # block (never the append-only correction mechanism) is rewritten
+    # directly in the working tree, bypassing the record -- since it is
+    # always read from the working tree, this must still be caught.
+    companion_lines = ["# The helper validates input strictly."]
+    old_src = "\n".join(companion_lines) + "\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = old_src  # the code itself never changed
+    working_companion_lines = ["# The helper validates input loosely."]
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [],
+        working_companion_lines=working_companion_lines,
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (2)" in output
+
+
+def test_0j_pending_revives_previously_deleted_sentence_is_red(tmp_path):
+    # Completion condition 16 (F-3): a sentence an earlier changeset
+    # deleted is reintroduced into the code, "backed" by a pending
+    # correction whose `old` text does not occur in the basis block's
+    # own (already-reduced) text -- the stage-B basis is the basis
+    # block's OWN body, never the receptacle's fully-corrected text, so
+    # the revived sentence has no counterpart and is rejected as an
+    # unaccounted-for addition.
+    companion_lines = ["# Kept sentence stays. Removed sentence was cut earlier."]
+    old_src = "# Kept sentence stays.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = "# Kept sentence stays. Removed sentence is back again.\n# history: CH-0001\ndef f():\n    return 1\n"
+    correction = _correction_block(
+        "2026-09-20", "revival attempt",
+        "Removed sentence was cut earlier.", "Removed sentence is back again.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0j_pair_md_basis_correction_rewritten_is_red(tmp_path):
+    # Completion condition 17 (R1-4): the same basis-side prefix check
+    # (F-2) applies to a CH-ID whose companion section lives in
+    # `pair.md`, not a peer-specific file -- the basis-side enumeration
+    # must find it there too.
+    companion_lines = ["# Shared behavior stays old."]
+    old_src = "# Shared behavior stays new.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = old_src
+    base_corr = _correction_block(
+        "2026-09-10", "reworded", "Shared behavior stays old.", "Shared behavior stays new.",
+    )
+    working_corr = _correction_block(
+        "2026-09-10", "reworded", "Shared behavior stays old.", "Shared behavior stays different.",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion_lines, [base_corr], [working_corr],
+        companion_rel_path="docs/code-history/pair.md",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9.3 (2)" in output
+
+
+def test_0j_unreadable_basis_companion_path_is_fail(tmp_path, monkeypatch):
+    # Completion condition 25: a companion path the basis revision's OWN
+    # tree lists (so `_companion_rel_paths` enumerates it) but whose
+    # content `git show` then fails to read must be reported, never
+    # silently folded into "0 corrections" -- that would push every
+    # correction the unreadable file carries into `pending`, disabling
+    # the append-only prefix check (design §9.3 rule 2) for every CH-ID
+    # it covers. `git show` is monkeypatched to fail for exactly this
+    # one path; the source file's own read is untouched.
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/mod.py", "# body.\n# history: CH-0001\ndef f():\n    return 1\n")
+    _write(repo, "docs/code-history/r2db-api/mod.md", _companion_section("CH-0001", "# body."))
+    rev = _commit_all(repo, "old")
+
+    real_git_show = cp._git_show
+    unreadable_rel_path = "docs/code-history/r2db-api/mod.md"
+
+    def flaky_git_show(repo_root, git_rev, rel_path):
+        if rel_path == unreadable_rel_path:
+            return None
+        return real_git_show(repo_root, git_rev, rel_path)
+
+    monkeypatch.setattr(cp, "_git_show", flaky_git_show)
+    corrections_lookup, errors = cp._load_corrections_lookup(repo, "r2db-api", rev=rev)
+    assert corrections_lookup == {}
+    # This function's own errors carry no `FAIL (§9f) ` label --
+    # `run_base`, the only caller that ever prints them, adds it once
+    # itself.
+    assert any(unreadable_rel_path in e and "could not be read" in e for e in errors), errors
+
+
+def test_0j_unreadable_basis_rev_is_fail(tmp_path):
+    # Completion condition 25's second shape: `rev` itself does not
+    # resolve at all, so `_companion_rel_paths` would otherwise
+    # enumerate zero paths (nothing to iterate, nothing to report) --
+    # `_rev_tree_readable` is checked first so this is still a FAIL, not
+    # a silent "0 corrections" indistinguishable from a legitimate rev
+    # whose tree simply has no companion files yet.
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/mod.py", "# body.\ndef f():\n    return 1\n")
+    _commit_all(repo, "old")
+    corrections_lookup, errors = cp._load_corrections_lookup(repo, "r2db-api", rev="not-a-real-rev")
+    assert corrections_lookup == {}
+    assert any("not-a-real-rev" in e and "could not be read" in e for e in errors), errors
+
+
+def test_0j_ls_tree_failure_on_resolvable_rev_is_fail(tmp_path, monkeypatch):
+    # A rev that resolves fine (`_rev_tree_readable` succeeds) but whose
+    # own companion-tree enumeration (`git ls-tree`, via
+    # `_tree_paths_or_none`) then fails outright must also be a hard
+    # FAIL, never silently read as an empty (0-corrections) tree --
+    # `_tree_paths` itself keeps its documented fail-toward-empty
+    # contract for every OTHER caller; only the basis-record enumeration
+    # in `_load_corrections_lookup` is hardened this way.
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/mod.py", "# body.\ndef f():\n    return 1\n")
+    rev = _commit_all(repo, "old")
+
+    def failing_tree_paths_or_none(repo_root, git_rev):
+        return None
+
+    monkeypatch.setattr(cp, "_tree_paths_or_none", failing_tree_paths_or_none)
+    corrections_lookup, errors = cp._load_corrections_lookup(repo, "r2db-api", rev=rev)
+    assert corrections_lookup == {}
+    assert any("could not be enumerated" in e for e in errors), errors

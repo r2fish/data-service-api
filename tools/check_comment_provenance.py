@@ -12,6 +12,10 @@ Two independent modes, matching design D-3/D-4:
         tree's current `<src path>` and its content at git revision `<rev>`
         (read via `git show <rev>:<path>`, never `git checkout`). Never run
         in CI (D-4); a reviewer re-runs it by hand against the same `<rev>`.
+        A changeset that adds or edits a companion correction record
+        (design §9.3 rule 6) must run this against every `<src path>`
+        carrying that CH-ID, since the standing rev-vs-itself guard only
+        ever reads HEAD's own committed records.
 
     --register
         Standing repository-wide check (design §4.2, items 1-6) over the
@@ -1946,10 +1950,42 @@ def _companion_files(repo_root: Path, peer: str) -> list[Path]:
     return files
 
 
-def _iter_companion_sections(path: Path) -> list[tuple[str, str]]:
+def _companion_rel_paths_from_tree(peer: str, tree_paths: frozenset[str]) -> list[str]:
+    """Core of the rev-based enumeration below, factored out so a caller
+    that must tell a genuinely EMPTY tree apart from a FAILED tree read
+    (`_tree_paths_or_none`) can supply its own `tree_paths` instead of
+    going through `_tree_paths`'s own fail-toward-empty contract."""
+    peer_prefix = f"docs/code-history/{peer}/"
+    rel_paths = sorted(
+        p for p in tree_paths
+        if p.startswith(peer_prefix) and p.endswith(".md") and "/" not in p[len(peer_prefix):]
+    )
+    pair_rel = "docs/code-history/pair.md"
+    if pair_rel in tree_paths:
+        rel_paths.append(pair_rel)
+    return rel_paths
+
+
+def _companion_rel_paths(repo_root: Path, peer: str, rev: str | None = None) -> list[str]:
+    """The same companion-file SET `_companion_files` lists from the
+    working tree -- that peer's own `docs/code-history/<peer>/*.md`
+    (non-recursive) plus the shared `docs/code-history/pair.md` -- as
+    repo-relative POSIX path strings. With `rev` given, the set is read
+    from `rev`'s own git tree (`_tree_paths`) instead of the working
+    tree, so a caller can enumerate exactly what the working tree would
+    show, at an earlier snapshot (design docs/design/CODE_COMMENT_PROVENANCE_V1.md
+    §9.3 rule 1: a companion whose only section lives in `pair.md` must
+    still be found this way)."""
+    if rev is None:
+        return [str(p.relative_to(repo_root)) for p in _companion_files(repo_root, peer)]
+    return _companion_rel_paths_from_tree(peer, _tree_paths(repo_root, rev))
+
+
+def _iter_companion_sections_from_text(text: str) -> list[tuple[str, str]]:
     """[(CH-ID, section_body)] in file order, WITHOUT de-duplication --
-    duplicate detection needs the raw list."""
-    text = path.read_text(encoding="utf-8")
+    duplicate detection needs the raw list. Split out of
+    `_iter_companion_sections` so a rev-based read (`_git_show`, never
+    `Path.read_text`) can share the exact same section-splitting logic."""
     headings = list(_HEADING_RE.finditer(text))
     out: list[tuple[str, str]] = []
     for i, m in enumerate(headings):
@@ -1957,6 +1993,12 @@ def _iter_companion_sections(path: Path) -> list[tuple[str, str]]:
         end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
         out.append((m.group(1), text[start:end]))
     return out
+
+
+def _iter_companion_sections(path: Path) -> list[tuple[str, str]]:
+    """[(CH-ID, section_body)] in file order, WITHOUT de-duplication --
+    duplicate detection needs the raw list."""
+    return _iter_companion_sections_from_text(path.read_text(encoding="utf-8"))
 
 
 def _fenced_content(body: str) -> str | None:
@@ -1976,13 +2018,28 @@ def _fenced_content(body: str) -> str | None:
     return body[start : close_m.start()].rstrip("\n")
 
 
-def _load_companion_lookup(repo_root: Path, peer: str) -> dict[str, str]:
+def _load_companion_lookup(repo_root: Path, peer: str, rev: str | None = None) -> dict[str, str]:
     """{CH-ID: fenced block content} for one peer, merged across its
     companion dir and pair.md. Last-one-wins on a duplicate heading is
-    fine here -- duplication itself is a separate --register failure."""
+    fine here -- duplication itself is a separate --register failure.
+
+    `rev` (design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3 rule 6):
+    when given, every companion file is read from `rev`'s own git tree
+    instead of the working tree. `run_base`'s own re-edit basis always
+    keeps reading the WORKING TREE's companion (`rev=None`, §9.3 rule 1)
+    -- the fenced block itself must reflect a working-tree rewrite, or
+    that rewrite would go undetected. This parameter exists for a caller
+    that must read source, companion, and corrections from one shared
+    snapshot (e.g. a rev-vs-itself comparison)."""
     merged: dict[str, str] = {}
-    for path in _companion_files(repo_root, peer):
-        for ch_id, body in _iter_companion_sections(path):
+    for rel_path in _companion_rel_paths(repo_root, peer, rev):
+        text = (
+            (repo_root / rel_path).read_text(encoding="utf-8")
+            if rev is None else _git_show(repo_root, rev, rel_path)
+        )
+        if text is None:
+            continue
+        for ch_id, body in _iter_companion_sections_from_text(text):
             content = _fenced_content(body)
             if content is not None:
                 merged[ch_id] = content
@@ -2040,7 +2097,7 @@ _CORRECTION_OLD_MARKER_RE = re.compile(r"^old:\s*$", re.MULTILINE)
 _CORRECTION_NEW_MARKER_RE = re.compile(r"^new:\s*$", re.MULTILINE)
 
 
-def _parse_corrections(ch_id: str, path: Path, body: str) -> tuple[list[Correction], list[str]]:
+def _parse_corrections(ch_id: str, path: Path | str, body: str) -> tuple[list[Correction], list[str]]:
     """[Correction, ...] plus [format-error, ...] for one CH-ID section's
     body (everything after its `## CH-XXXX` heading). A malformed entry
     (missing date/reason/old/new, markers out of order, or an old/new
@@ -2086,15 +2143,62 @@ def _parse_corrections(ch_id: str, path: Path, body: str) -> tuple[list[Correcti
     return corrections, errors
 
 
-def _load_corrections_lookup(repo_root: Path, peer: str) -> tuple[dict[str, list[Correction]], list[str]]:
+def _load_corrections_lookup(
+    repo_root: Path, peer: str, rev: str | None = None,
+) -> tuple[dict[str, list[Correction]], list[str]]:
     """{CH-ID: [Correction, ...]} for one peer, merged across its companion
-    dir and pair.md (see `_companion_files`) -- plus every format error
-    encountered (§9f) while parsing them."""
+    dir and pair.md (see `_companion_rel_paths`) -- plus every format error
+    encountered (§9f) while parsing them.
+
+    `rev` (design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3 rules 1
+    and 6): the same rev-capable read `_load_companion_lookup` offers.
+    `run_base` uses it to load the BASIS revision's own correction
+    records (never the working tree) for its re-edit-path prefix check
+    and stage-A basis; a rev-vs-itself comparison uses it for BOTH
+    sides.
+
+    A basis-side read that cannot actually be completed is reported
+    (§9f), never silently folded into "0 corrections": that would push
+    every correction on the unreadable path into `pending`, which
+    disables the append-only prefix check (design §9.3 rule 2) for
+    every CH-ID it covers. Three distinct failures are checked, in
+    order, each returning immediately: `rev` itself failing to resolve
+    at all (`_rev_tree_readable`); `rev`'s own companion-tree read
+    (`git ls-tree`, via `_tree_paths_or_none`) failing outright, told
+    apart from a tree that genuinely has no matching paths yet (design
+    §9.3 rule 1's own, legitimate, 0-corrections case); and a path the
+    tree enumeration DOES list, but whose own `git show` then fails --
+    `rev`'s tree said the path exists, so a read failure at that point
+    is a genuine problem, not "the basis rev has no such file"."""
     merged: dict[str, list[Correction]] = {}
     errors: list[str] = []
-    for path in _companion_files(repo_root, peer):
-        for ch_id, body in _iter_companion_sections(path):
-            corrections, errs = _parse_corrections(ch_id, path, body)
+    if rev is None:
+        rel_paths = _companion_rel_paths(repo_root, peer, None)
+    else:
+        if not _rev_tree_readable(repo_root, rev):
+            errors.append(f"{peer}: basis revision {rev!r} could not be read (git rev-parse failed)")
+            return merged, errors
+        tree_paths = _tree_paths_or_none(repo_root, rev)
+        if tree_paths is None:
+            errors.append(
+                f"{peer}: basis revision {rev!r}'s companion tree could not be enumerated "
+                "(git ls-tree failed)"
+            )
+            return merged, errors
+        rel_paths = _companion_rel_paths_from_tree(peer, tree_paths)
+    for rel_path in rel_paths:
+        if rev is None:
+            text = (repo_root / rel_path).read_text(encoding="utf-8")
+        else:
+            text = _git_show(repo_root, rev, rel_path)
+            if text is None:
+                errors.append(
+                    f"{peer}: {rel_path} is listed in {rev!r}'s tree but could not be "
+                    "read (git show failed)"
+                )
+                continue
+        for ch_id, body in _iter_companion_sections_from_text(text):
+            corrections, errs = _parse_corrections(ch_id, rel_path, body)
             if corrections:
                 merged.setdefault(ch_id, []).extend(corrections)
             errors.extend(errs)
@@ -2189,6 +2293,71 @@ def _apply_corrections(
     return working, None
 
 
+def _correction_prefix_mismatch(
+    base_corrections: list[Correction], working_corrections: list[Correction],
+) -> str | None:
+    """design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3 rule 2: the
+    basis revision's own correction list for a CH-ID must be a verbatim
+    (date, reason, old, and new all compared) PREFIX of the working
+    tree's list for the same CH-ID -- an edited, deleted, or reordered
+    basis-side entry breaks the prefix at the first position where the
+    two no longer match position-for-position, so a swap is caught the
+    same way an edit is. Returns an error string, or None if the prefix
+    holds."""
+    if len(base_corrections) > len(working_corrections):
+        return (
+            f"basis correction list has {len(base_corrections)} entries, the working-tree "
+            f"list has only {len(working_corrections)} (an entry was deleted)"
+        )
+    for i, base_corr in enumerate(base_corrections):
+        work_corr = working_corrections[i]
+        if (
+            (base_corr.date, base_corr.reason, base_corr.old, base_corr.new)
+            != (work_corr.date, work_corr.reason, work_corr.old, work_corr.new)
+        ):
+            return (
+                f"basis correction #{i + 1} ({base_corr.date}) does not match the working-tree "
+                "entry at the same position verbatim (edited, deleted, or reordered)"
+            )
+    return None
+
+
+def _apply_pending_corrections(
+    kind: str, basis_text: str, pending: list[Correction],
+    real_paths: frozenset[str], identifier_set: frozenset[str],
+) -> tuple[str, str | None]:
+    """design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3 rule 3:
+    applies a CH-ID's PENDING correction entries (present in the working
+    tree but not yet in the basis revision's own companion record, per
+    `_correction_prefix_mismatch`) to the FLATTENED text of the re-edited
+    block's own current, committed wording (`ob.retained_text`) -- the
+    stage-B basis for a same-changeset reword. Unlike `_apply_corrections`
+    (which always requires exactly one occurrence, since it is folding
+    corrections that are already final against the companion's frozen
+    original), a pending correction's `old` sentence may legitimately be
+    ABSENT: 0 occurrences applies no change (an earlier sentence deletion
+    already removed it, never an error), exactly 1 occurrence replaces
+    it, and 2+ occurrences is still a hard error (ambiguous). Each
+    pending correction is checked (`_correction_relaxes_protection`) the
+    same way `_apply_corrections` does. Returns (corrected_text, error);
+    error is None on success."""
+    working = _flatten(kind, basis_text, identifier_set)
+    for corr in pending:
+        protection_err = _correction_relaxes_protection(corr.old, corr.new, real_paths)
+        if protection_err:
+            return working, f"correction {corr.date}: {protection_err}"
+        count = working.count(corr.old)
+        if count == 0:
+            continue
+        if count != 1:
+            return working, (
+                f"correction {corr.date} old sentence occurs {count} time(s) in the basis "
+                f"(expected exactly 1): {corr.old!r}"
+            )
+        working = working.replace(corr.old, corr.new, 1)
+    return working, None
+
+
 # ---------------------------------------------------------------------------
 # --base: design §4.1 (1)-(5), per source path.
 # ---------------------------------------------------------------------------
@@ -2236,6 +2405,52 @@ def _tree_paths(repo_root: Path, rev: str) -> frozenset[str]:
     except UnicodeDecodeError:
         return frozenset()
     return frozenset(n for n in names if n)
+
+
+def _tree_paths_or_none(repo_root: Path, rev: str) -> frozenset[str] | None:
+    """The same `git ls-tree` read as `_tree_paths`, except a genuine
+    read failure (a non-zero exit, an `OSError`/timeout, or undecodable
+    output) returns `None` instead of being folded into the same empty
+    set a legitimately-empty tree also produces. `_tree_paths` itself,
+    and every one of its other callers relying on its documented
+    fail-toward-empty contract, is unchanged; this exists only for a
+    caller (the basis-record enumeration in `_load_corrections_lookup`)
+    that must tell the two apart and FAIL on a genuine read failure."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", "-z", rev],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        names = proc.stdout.decode("utf-8").split("\0")
+    except UnicodeDecodeError:
+        return None
+    return frozenset(n for n in names if n)
+
+
+def _rev_tree_readable(repo_root: Path, rev: str) -> bool:
+    """Whether `rev` resolves to a real commit at all (`git rev-parse
+    --verify`) -- catches a bad SHA or an otherwise unresolvable/
+    unreachable rev before any tree read is even attempted. A rev that
+    resolves fine but whose OWN tree read then fails (a `git ls-tree`
+    subprocess error) is a separate condition `_tree_paths_or_none`
+    checks; this function does not attempt to distinguish that case."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 _IDENTIFIER_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -2534,7 +2749,8 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                                 companion_lookup: dict[str, str],
                                 real_paths: frozenset[str],
                                 identifier_set: frozenset[str] = frozenset(),
-                                corrections_lookup: dict[str, list[Correction]] | None = None) -> list[str]:
+                                corrections_lookup: dict[str, list[Correction]] | None = None,
+                                base_corrections_lookup: dict[str, list[Correction]] | None = None) -> list[str]:
     """design §4.1 (2)+(3)+(4), correspondence taken via CH-ID (v0.3).
 
     v0.4 P3 (review rounds 2-3): a new block WITHOUT a CH-ID is compared
@@ -2580,12 +2796,26 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
     correction whose own `old` sentence cannot be found (exactly once) in
     the basis is reported here (§9f) and that block's checks are skipped
     for this CH-ID, rather than silently falling back to the uncorrected
-    (and, by construction, now-wrong) basis."""
+    (and, by construction, now-wrong) basis.
+
+    design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3 (work order
+    docs/work-orders/WORK_ORDER_R68_PROVENANCE_SAME_CHANGESET_REWORD_V1.md):
+    `base_corrections_lookup` carries the BASIS revision's own correction
+    records for the re-edit path only -- `None` (the default) is treated
+    as identical to `corrections_lookup` itself, reproducing the
+    pre-existing judgment (every correction is already committed, nothing
+    pending). When it differs from `corrections_lookup`, a CH-ID's
+    working-tree correction list must extend the basis list by a
+    verbatim prefix (`_correction_prefix_mismatch`); the remainder
+    (pending) is applied to the re-edited block's OWN current wording,
+    never to the companion's original text, so a same-changeset reword
+    can be recorded and applied together."""
     errors: list[str] = []
     consumed = [False] * len(old_blocks)
     old_positions = _block_positions(old_source, old_blocks)
     new_positions = _block_positions(new_source, new_blocks)
     corrections_lookup = corrections_lookup or {}
+    base_corrections_lookup = corrections_lookup if base_corrections_lookup is None else base_corrections_lookup
 
     def _corrected_basis(text: str, ch_id: str, kind: str) -> tuple[str | None, str | None]:
         basis, err = _apply_corrections(
@@ -2616,6 +2846,30 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             match_idx = reedit_candidates[0]
             ob = old_blocks[match_idx]
             consumed[match_idx] = True
+
+            # design §9.3 rule 2: the basis revision's own correction
+            # list must be a verbatim prefix of the working tree's list;
+            # the remainder (pending) is what a same-changeset reword may
+            # apply below (rule 3).
+            working_corrections = corrections_lookup.get(ch_id, [])
+            base_corrections = base_corrections_lookup.get(ch_id, [])
+            prefix_err = _correction_prefix_mismatch(base_corrections, working_corrections)
+            if prefix_err:
+                errors.append(f"FAIL (§9.3 (2)) {rel_path}:{nb.start_line} {ch_id}: {prefix_err}")
+                continue
+            pending = working_corrections[len(base_corrections):]
+
+            # design §9.3 rule 4: EVERY working-tree correction (base and
+            # pending together), applied in file order to the companion's
+            # own pristine text, must succeed here -- unconditionally, for
+            # every re-edited block, whether or not it still retains any
+            # text. It is independent of the base/pending basis built
+            # below, and when pending is empty the two coincide.
+            _, full_corr_err = _corrected_basis(companion_text, ch_id, ob.kind)
+            if full_corr_err:
+                errors.append(f"FAIL (§9f) {rel_path}:{nb.start_line} {ch_id}: {full_corr_err}")
+                continue
+
             # Containment (fixed per reviewer report on q4repo/rev-cs2,
             # postgres.py CH-0001 false-red): the basis block need not
             # sentence-match the companion VERBATIM -- change set 1 (and
@@ -2624,8 +2878,12 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             # companion's original, unreduced text. Require that it be
             # DERIVABLE from the companion via the same allowed-reduction
             # machinery, not that every sentence appear byte-for-byte.
+            # design §9.3 rule 1: this basis uses only the BASIS
+            # revision's own corrections (never the pending ones).
             if ob.retained_text:
-                basis_text, corr_err = _corrected_basis(companion_text, ch_id, ob.kind)
+                basis_text, corr_err = _apply_corrections(
+                    ob.kind, companion_text, base_corrections, real_paths, identifier_set
+                )
                 if corr_err:
                     errors.append(f"FAIL (§9f) {rel_path}:{nb.start_line} {ch_id}: {corr_err}")
                     continue
@@ -2636,16 +2894,30 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                         f"not derivable from the existing companion section: {reason}"
                     )
                     continue
+
+            # design §9.3 rule 3: the stage-B basis is the basis block's
+            # OWN current wording, with only the PENDING corrections
+            # applied -- never the companion's full, uncorrected-by-base
+            # text, so a sentence a prior change set already deleted can
+            # never be revived through a pending correction that happens
+            # to still name it.
+            pending_basis, pending_err = _apply_pending_corrections(
+                ob.kind, ob.retained_text, pending, real_paths, identifier_set
+            )
+            if pending_err:
+                errors.append(f"FAIL (§9f) {rel_path}:{nb.start_line} {ch_id}: {pending_err}")
+                continue
             if nb.retained_text:
-                ok, reason = _is_allowed_reduction(nb.kind, ob.retained_text, nb.retained_text, real_paths, identifier_set)
+                ok, reason = _is_allowed_reduction(nb.kind, pending_basis, nb.retained_text, real_paths, identifier_set)
                 if not ok:
                     errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
-            elif ob.retained_text:
+            elif pending_basis.strip():
                 # change set 0d review round (item 1): nothing kept in
                 # code at all -- the basis's own retained text (already
-                # itself a reduction) is being moved away in full; every
-                # one of ITS sentences must be checked too.
-                protected = _first_protected_sentence(ob.retained_text, ob.kind, real_paths, identifier_set)
+                # itself a reduction, and now carrying any pending
+                # correction, design §9.3 rule 4) is being moved away in
+                # full; every one of ITS sentences must be checked too.
+                protected = _first_protected_sentence(pending_basis, ob.kind, real_paths, identifier_set)
                 if protected is not None:
                     errors.append(
                         f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} cannot move the whole block away "
@@ -2748,6 +3020,10 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
     total_new_blocks = 0
     companion_cache: dict[str, dict[str, str]] = {}
     corrections_cache: dict[str, dict[str, list[Correction]]] = {}
+    # design §9.3 rule 1: the BASIS revision's own correction records,
+    # read once per peer via `rev` (never the working tree) -- the
+    # re-edit path's stage-A basis and prefix check (§9.3 rules 1-2).
+    base_corrections_cache: dict[str, dict[str, list[Correction]]] = {}
     # design §9 rule 2: real-path membership is read from the BASIS
     # revision's own tree, once per invocation (never the working tree).
     real_paths = _tree_paths(repo_root, rev)
@@ -2799,6 +3075,13 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
                 had_failure = True
             corrections_cache[peer] = corrections_lookup
         corrections_lookup = corrections_cache[peer]
+        if peer not in base_corrections_cache:
+            base_corrections_lookup, base_corrections_errors = _load_corrections_lookup(repo_root, peer, rev=rev)
+            for corr_err in base_corrections_errors:
+                print(f"FAIL (§9f) {corr_err}", file=out)
+                had_failure = True
+            base_corrections_cache[peer] = base_corrections_lookup
+        base_corrections_lookup = base_corrections_cache[peer]
 
         new_blocks = extract_all_blocks(new_source)
         old_blocks = extract_all_blocks(old_source)
@@ -2806,7 +3089,7 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
 
         for msg in check_provenance_semantics(
             rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths,
-            identifier_set, corrections_lookup,
+            identifier_set, corrections_lookup, base_corrections_lookup,
         ):
             print(msg, file=out)
             had_failure = True
