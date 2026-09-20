@@ -164,7 +164,7 @@ r2db-api の `ops.py` に `apply-platform-migration` に相当する subcommand 
 | `MitateDB-api/tests/test_ops_apply_platform_migration.py` | 単独の `0012` (:689) と `0013` (:729、:754、:854、:882、:897、:930、:938、:950-954、:999、:1022、:1081、:1130) の ops 経由の呼び出し 15 箇所 (D-6)、列の受け付け・拒否の新規テスト |
 | `MitateDB-api/tests/test_ops_inventory.py`:1383 | 単独の `0013` の ops 経由の呼び出し 1 箇所 (D-6) |
 | `MitateDB-api/tests/test_platform_migration_reapply.py`:294-298、:843-849 | 再適用のループを列に直す (D-6) |
-| `MitateDB-api/tests/test_ops_help_text.py`:52-57、:121、:143-158 | help が定数由来であることの pin と、節見出しコメントの逐語 (`applies one platform migration file`) |
+| `MitateDB-api/tests/test_ops_help_text.py`:52-57、:121、:143-158 | help が定数由来であることの pin と、節見出しコメントの逐語 (`applies one platform migration file`) **【追記 2026-09-20】R-68 (main `b83d9aa`) で節見出しコメントを列の言い方に直し、:121 の pin もその逐語に動かした。** |
 | `MitateDB-api/docs/cloud-run-cloud-sql.md`:1567、:2455、:3054-3058、:3067-3068 | D-5 が名指しする 4 箇所 |
 | 同 :2702-2726 (`Applying a platform migration` と numbered set の段落) | 現行の使い方の説明。列の形に直す (G-2) |
 | 同 :2398・:2399・:2400 (§10.6 の `0012`/`0013`/`0014` の 3 行) | 単独再適用の帰結の記述。:2400 は「道具が列を強制する」に合わせる (R-9) |
@@ -250,7 +250,7 @@ r2db-api の `ops.py` に `apply-platform-migration` に相当する subcommand 
 - **§7 の訂正**: 「不正確になるのは 2 行」は見落としが在った。runbook の §10.6 の表と §10.10 の手順を変えると版が上がり (版 4・版 7)、`security/CONTROL_MAPPING.md` の版数を引く Evidence・Status の 2 行と、改名したテストを引く 1 行も動く。版 2.13 で計 5 行を直し、旧文は `security/CONTROL_MAPPING_HISTORY.md` へ逐語で移した。
 - **D-7 #11 の監査照合**: 対応表に対応の無い完了条件は 0 (受け入れ監査の実測。WP-1 17 行 / WP-2 1 行 / WP-3 4 行)。
 - **migration を足すときの注意**: `MitateDB-api/tests/test_platform_migration_reapply.py` の導出は、上書きの鎖に属するファイルを全部 1 つの列にまとめる。今は鎖が 1 本 (`0012 0013 0014`、§10.7 の値はどれも `3s`) なので D-4 と合う。**§10.7 の `--lock-timeout` の値が違う独立した鎖が増えたら、列を値ごとに分ける形へ導出を直す。**
-- **残件**: 節見出しコメントと `cmd_apply_platform_migration` の docstring の「applies one platform migration file」は、コメント検査の道具が登録済みの塊の言い換えを通せないため元の文のままである。台帳 R-68。
+- **残件**: 節見出しコメントと `cmd_apply_platform_migration` の docstring の「applies one platform migration file」は、コメント検査の道具が登録済みの塊の言い換えを通せないため元の文のままである。台帳 R-68。 **【追記 2026-09-20】R-68 で解消した** (main `b83d9aa`)。道具が同じ変更セットでの言い換えを、受け皿 `docs/code-history/MitateDB-api/ops.md` の訂正記録つきで通す形になり (設計 `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §9.3 = 変更セット 0j)、CH-0538 (節見出しコメント) と CH-0539 (docstring) の第 1 文は列の言い方になった。**本残件は閉じた。**
 
 ## 9. 依頼者判断待ち
 
