@@ -2656,6 +2656,30 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
     "0014_role_connection_limits_rollout.sql": (),
 }
 
+#: design D-2: `file -> the LATER accepted files that redefine at least
+#: one of file's own targets (the same role/function's own CONNECTION
+#: LIMIT, a role-level SET parameter, or a CREATE OR REPLACE FUNCTION
+#: body)` -- a file with a NON-EMPTY entry here, given without every one
+#: of its own listed successors later in the SAME `apply-platform-
+#: migration` call, is refused (`_validate_platform_migration_run`). A
+#: file absent from this table (or with an empty tuple) has no known
+#: successor and may always be applied alone. This table is proved
+#: equal to the "target -> defining files" map derived directly from
+#: the 6 accepted migration files themselves, folded to file
+#: granularity, by a static test (design
+#: `docs/design/MITATEDB_PLATFORM_MIGRATION_RUN_V0_1.md` D-3,
+#: `test_ops_apply_platform_migration.py`) -- this table is the side
+#: that must keep matching that derivation, never the other way round.
+_PLATFORM_MIGRATION_SUPERSEDED_BY: dict[str, tuple[str, ...]] = {
+    "0012_role_connection_limits.sql": (
+        "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    ),
+    "0013_role_statement_timeouts.sql": (
+        "0014_role_connection_limits_rollout.sql",
+    ),
+}
+
 #: matches a psql `:name`/`:'name'`/`:"name"` variable
 #: reference, but never a `::` type cast -- the negative lookbehind/
 #: lookahead on both sides of the leading colon reject a colon that is
@@ -2709,24 +2733,84 @@ def _resolve_platform_migration_file(filename: str) -> Path:
     return candidate
 
 
-def _platform_migration_variables(filename: str, args: argparse.Namespace) -> "dict[str, str]":
+def _validate_platform_migration_run(files: "tuple[str, ...]") -> None:
+    """Design D-2's 2 acceptance conditions for a RUN of FILENAMEs,
+    checked once every element of `files` has already been resolved by
+    `_resolve_platform_migration_file` (so each is already a known
+    member of `_PLATFORM_MIGRATION_FILENAMES`) -- refuses (fixed
+    message, `_die`, exit code 2) before `_platform_migration_
+    variables` or any psql subprocess runs:
+
+    1. `files` is strictly ascending in `_PLATFORM_MIGRATION_FILENAMES`
+       order with no repeat.
+    2. every file's own successors in `_PLATFORM_MIGRATION_SUPERSEDED_
+       BY` (if any -- a file absent from that table, or mapped to an
+       empty tuple, has none and always passes this condition on its
+       own) are present in `files`, later than that file. The rejection
+       names the FULL required run (that file plus its own successors,
+       built from `_PLATFORM_MIGRATION_SUPERSEDED_BY` and
+       `_PLATFORM_MIGRATION_FILENAMES`), never `files` itself -- the
+       operator's own rejected values are not echoed (`ops.py`:2696's
+       existing rule)."""
+    positions = {name: i for i, name in enumerate(_PLATFORM_MIGRATION_FILENAMES)}
+    indices = [positions[name] for name in files]
+    if indices != sorted(indices) or len(set(indices)) != len(indices):
+        _die("apply-platform-migration: FILENAMEs must be given in migration order, each at most once")
+    given = set(files)
+    for name in files:
+        successors = _PLATFORM_MIGRATION_SUPERSEDED_BY.get(name, ())
+        missing = [succ for succ in successors if succ not in given]
+        if missing:
+            required_run = (name,) + successors
+            _die(
+                f"apply-platform-migration: {name} is superseded by a later platform migration; "
+                "apply the whole run in one call, in this order: " + " ".join(required_run)
+            )
+
+
+def _platform_migration_variables(files: "tuple[str, ...]", args: argparse.Namespace) -> "dict[str, str]":
     """Reconciles the operator-supplied `--api-role`/
-    `--controlplane-role` values against `filename`'s own required set --
-    a missing required variable, or a supplied variable the file does
-    not reference, is refused (fixed message, no psql subprocess
-    started)."""
-    required = _PLATFORM_MIGRATION_VARIABLE_TABLE[filename]
+    `--controlplane-role` values against the UNION of every file in
+    `files`'s own required set (`_PLATFORM_MIGRATION_VARIABLE_TABLE`) --
+    a required variable no file in `files` references, or a supplied
+    variable no file in `files` references, is refused (fixed message,
+    no psql subprocess started). Each file in the run is later invoked
+    with only its OWN required subset (`cmd_apply_platform_migration`),
+    never this whole union -- this function only checks that the union
+    is exactly what the operator supplied. The union is walked in
+    `files` order (already `_PLATFORM_MIGRATION_FILENAMES` order, D-2)
+    and, within each file, that file's own `_PLATFORM_MIGRATION_
+    VARIABLE_TABLE` tuple order -- a missing-variable message therefore
+    always names the SAME variable for the SAME input, never one that
+    varies run-to-run with Python's own (hash-randomized) `set`
+    iteration order. An unexpected (extra) variable's own rejection
+    names the ONE file it does not belong to only when `files` itself
+    is one file; a run of 2+ files names no file (no single file in a
+    multi-file run is the "right" one to blame for an extra variable).
+
+    History: CH-0540
+    """
+    required_ordered: "list[str]" = []
+    for name in files:
+        for var in _PLATFORM_MIGRATION_VARIABLE_TABLE[name]:
+            if var not in required_ordered:
+                required_ordered.append(var)
     supplied: "dict[str, str]" = {}
     if args.api_role is not None:
         supplied["api_role"] = args.api_role
     if args.controlplane_role is not None:
         supplied["controlplane_role"] = args.controlplane_role
-    missing = [name for name in required if name not in supplied]
+    missing = [name for name in required_ordered if name not in supplied]
     if missing:
-        _die(f"apply-platform-migration: {filename} requires --{missing[0].replace('_', '-')}")
-    extra = [name for name in supplied if name not in required]
+        var = missing[0]
+        naming_file = next(name for name in files if var in _PLATFORM_MIGRATION_VARIABLE_TABLE[name])
+        _die(f"apply-platform-migration: {naming_file} requires --{var.replace('_', '-')}")
+    extra = [name for name in supplied if name not in required_ordered]
     if extra:
-        _die(f"apply-platform-migration: {filename} does not accept --{extra[0].replace('_', '-')}")
+        var = extra[0]
+        if len(files) == 1:
+            _die(f"apply-platform-migration: {files[0]} does not accept --{var.replace('_', '-')}")
+        _die(f"apply-platform-migration: no file in this run accepts --{var.replace('_', '-')}")
     return supplied
 
 
@@ -2740,20 +2824,34 @@ def cmd_apply_platform_migration(args: argparse.Namespace) -> int:
     History: CH-0539
     """
     lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
-    script = _resolve_platform_migration_file(args.file)
-    variables = _platform_migration_variables(args.file, args)
+    files = tuple(args.file)
+    scripts = [_resolve_platform_migration_file(name) for name in files]
+    _validate_platform_migration_run(files)
+    variables = _platform_migration_variables(files, args)
     dsn = _provision_dsn()
     _require_psql_16_or_newer()
     env = _psql_connection_env(dsn)
     env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)
-    argv = ["psql", "-v", "ON_ERROR_STOP=1"]
-    for name, value in variables.items():
-        argv += ["-v", f"{name}={value}"]
-    argv += ["-f", str(script)]
-    result = subprocess.run(argv, capture_output=True, text=True, env=env)
-    if result.returncode != 0:
-        _die(_redact_connection_values(f"apply-platform-migration failed:\n{result.stdout}\n{result.stderr}", dsn))
-    print(f"applied {args.file}")
+    applied: "list[str]" = []
+    for name, script in zip(files, scripts):
+        argv = ["psql", "-v", "ON_ERROR_STOP=1"]
+        for var_name in _PLATFORM_MIGRATION_VARIABLE_TABLE[name]:
+            argv += ["-v", f"{var_name}={variables[var_name]}"]
+        argv += ["-f", str(script)]
+        result = subprocess.run(argv, capture_output=True, text=True, env=env)
+        if result.returncode != 0:
+            not_run = files[len(applied) + 1:]
+            message = (
+                f"apply-platform-migration failed at {name}\n"
+                f"applied: {' '.join(applied) if applied else '(none)'}\n"
+                f"not run: {' '.join(not_run) if not_run else '(none)'}\n"
+                "An applied file may still carry a value a later file in this run replaces. "
+                "Re-run the whole run from its first file; every file in it is idempotent.\n"
+                f"{result.stdout}\n{result.stderr}"
+            )
+            _die(_redact_connection_values(message, dsn))
+        print(f"applied {name}")
+        applied.append(name)
     return 0
 
 
@@ -3077,13 +3175,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "apply-platform-migration",
-        help="apply one platform migration file a second (or later) time against MITATEDB_PROVISION_DSN -- "
-             "restricted to the known re-appliable platform migrations ("
+        help="apply a RUN of one or more platform migration files, in migration order, a second (or later) "
+             "time against MITATEDB_PROVISION_DSN -- restricted to the known re-appliable platform migrations ("
              + "/".join(name[:4] for name in _PLATFORM_MIGRATION_FILENAMES)
-             + "; the bootstrap-only 0001/0002 are never accepted here). Against production, run it "
+             + "; the bootstrap-only 0001/0002 are never accepted here). A file with a later file that "
+             "redefines one of its own targets is refused unless every one of those later files is given "
+             "too, in the same call. Against production, run it "
              "only through the runbook's gated procedure (docs/cloud-run-cloud-sql.md section 10)",
     )
-    p.add_argument("file", metavar="FILENAME", help="one of the known platform migration file names (no path)")
+    p.add_argument(
+        "file", metavar="FILENAME", nargs="+",
+        help="one or more of the known platform migration file names (no path), in migration order",
+    )
     p.add_argument(
         "--lock-timeout", required=True, metavar="VALUE",
         help="lock_timeout to set on the psql session before applying the file (a positive integer optionally "

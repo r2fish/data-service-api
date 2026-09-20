@@ -1,6 +1,6 @@
 # `apply-platform-migration` に再適用の「列」を受け付けさせる 設計メモ (v0.2)
 
-- 状態: **監督確定 (2026-09-20)**。設計レビュー 1 回と監督裁定 (§8.2・§8.3) を反映した v0.2 を確定版として扱う。WP の割り付けの訂正は作業指示書 `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5.1 の K-1。~~起草 (2026-09-20)。~~§1〜§8 の枠は監督が確定済み。作業指示書は未着手。依頼者判断待ちの項目は無い (§9)。
+- 状態: **実施・受け入れ済み (2026-09-20、§8.4)**。監督確定 (2026-09-20)。設計レビュー 1 回と監督裁定 (§8.2・§8.3) を反映した v0.2 を確定版として扱う。WP の割り付けの訂正は作業指示書 `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5.1 の K-1。~~起草 (2026-09-20)。~~§1〜§8 の枠は監督が確定済み。作業指示書は未着手。依頼者判断待ちの項目は無い (§9)。
 - 改版: v0.1 (2026-09-20) 起草。**v0.2 (2026-09-20) 設計レビュー 1 回目 (高 3・中 5・低 4。クラス引き上げ無し) と監督裁定 R-1〜R-12 を反映**: G-1 の凍結範囲を実測記録そのもの (:2786-2839) に狭め復旧手順を追随先へ移し (R-1)、D-3 の照合を対象水準の写像の pin にし (R-2)、`docs/code-history/` と `tools/check_comment_provenance.py` を範囲に足し R-63 との順序を定め (R-3)、条件 (i) を「道具が 0 で終わったとき」に限定して失敗窓を D-4 に明記し (R-4)、`--lock-timeout` の値を道具に持たせない裁定を D-4 に書き (R-5)、条件 (iii) の完了条件と変異を足し (R-6)、D-7 の #3 を 3 つに割り (R-7)、WP-3 にテスト名の実在確認を足し (R-8)、§10.6 の 3 行を追随先に足し (R-9)、対象の同一性を定義し (R-10)、#5 の変異を現物の分岐に対応させ (R-11)、`0012`・`0013` の単体 drift-then-restore を psql 直打ちに残した (R-12)。**v0.1 の行は消していない** (`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56)。
 - 台帳: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-57** (`RM`:455)。起票 2026-09-18 (R-52 WP-1 第 1 段の監督裁定 S-1、`docs/work-orders/WORK_ORDER_R52_ROLLOUT_CONNECTION_LIMITS_V1.md`:205)。
 - 公開規律: `docs/work-orders/OPERATING_CONDITIONS.md` §2 の 13、§1.9。本メモは実 DSN・実ホスト名・実ドメイン・作業機のパス・traceback を 1 つも含まない。
@@ -243,6 +243,14 @@ r2db-api の `ops.py` に `apply-platform-migration` に相当する subcommand 
 - **R-10 (低 10 採用)**: **対象の同一性 = (役または関数の識別子, 設定の種別/パラメタ名)** と定義する。`0007` の名指し除外はやめる。psql 変数の役名は**変数名**を識別子として扱う。→ §4 D-3。
 - **R-11 (低 11 採用)**: D-7 の #5 の変異を現物の分岐 (閉包検査の「表に後続を持たないファイル」の枝) に対応させる。→ D-7 の 5。
 - **R-12 (低 12 採用)**: `0012`・`0013` の単体 drift-then-restore は psql 直打ちの helper に残し、粒度を落とさない。→ §4 D-6、D-7 の 9。
+
+## 8.4 実施記録 (2026-09-20)
+
+- 実施・差し戻しへの裁定・道具の出力・変異の対応表・受け入れは作業指示書 `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5.2〜§5.4 に在る。完了ゲート `3789 passed, 2 subtests passed`、`judge=PASS`。
+- **§7 の訂正**: 「不正確になるのは 2 行」は見落としが在った。runbook の §10.6 の表と §10.10 の手順を変えると版が上がり (版 4・版 7)、`security/CONTROL_MAPPING.md` の版数を引く Evidence・Status の 2 行と、改名したテストを引く 1 行も動く。版 2.13 で計 5 行を直し、旧文は `security/CONTROL_MAPPING_HISTORY.md` へ逐語で移した。
+- **D-7 #11 の監査照合**: 対応表に対応の無い完了条件は 0 (受け入れ監査の実測。WP-1 17 行 / WP-2 1 行 / WP-3 4 行)。
+- **migration を足すときの注意**: `MitateDB-api/tests/test_platform_migration_reapply.py` の導出は、上書きの鎖に属するファイルを全部 1 つの列にまとめる。今は鎖が 1 本 (`0012 0013 0014`、§10.7 の値はどれも `3s`) なので D-4 と合う。**§10.7 の `--lock-timeout` の値が違う独立した鎖が増えたら、列を値ごとに分ける形へ導出を直す。**
+- **残件**: 節見出しコメントと `cmd_apply_platform_migration` の docstring の「applies one platform migration file」は、コメント検査の道具が登録済みの塊の言い換えを通せないため元の文のままである。台帳 R-68。
 
 ## 9. 依頼者判断待ち
 

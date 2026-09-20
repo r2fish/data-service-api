@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import secrets
 import subprocess
 import tempfile
@@ -247,6 +248,30 @@ def _run_apply(
         return exc.code
 
 
+def _run_apply_run(
+    monkeypatch: pytest.MonkeyPatch, platform: types.SimpleNamespace, *filenames: str,
+    clear_ambient: bool = True, **cli_kwargs,
+) -> "int | None":
+    """Same as `_run_apply`, but for a RUN of one or more FILENAMEs
+    (D-1) -- `filenames` are passed as one or more positional
+    arguments, in the given order, never sorted here."""
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
+    monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(platform.migrations_dir))
+    if clear_ambient:
+        _clear_ambient_pg_connection_env_vars(monkeypatch)
+    argv = ["apply-platform-migration", *filenames]
+    if "lock_timeout" not in cli_kwargs:
+        cli_kwargs["lock_timeout"] = _TEST_LOCK_TIMEOUT
+    for flag, value in cli_kwargs.items():
+        if value is None:
+            continue
+        argv += [f"--{flag.replace('_', '-')}", str(value)]
+    try:
+        return ops.main(argv)
+    except SystemExit as exc:
+        return exc.code
+
+
 # ===========================================================================
 # filename validation
 # ===========================================================================
@@ -302,6 +327,37 @@ def test_apply_platform_migration_rejection_never_echoes_the_input_value(monkeyp
     assert rc == 2
     captured = capsys.readouterr()
     assert "not-a-real-migration-name.sql" not in captured.err
+
+
+def test_apply_platform_migration_resolves_every_file_before_any_psql_starts(monkeypatch, capsys, platform):
+    """R-57 WP-1 code review fix 5 (resolve half): an unknown FILENAME
+    LATER in the run is refused before ANY psql subprocess starts --
+    including for a known, valid file earlier in the SAME run (every
+    file is resolved up front, never one at a time inside the apply
+    loop)."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply_run(monkeypatch, platform, "0011_process_ceilings.sql", "not-a-real-migration-name.sql")
+    assert rc == 2
+    assert calls == []
+
+
+def test_apply_platform_migration_run_variable_mismatch_is_rejected_before_any_psql_starts(
+    monkeypatch, capsys, platform,
+):
+    """R-57 WP-1 code review fix 5 (variables half): a variable
+    mismatch anywhere in the run is refused before ANY psql subprocess
+    starts, including for `0011` -- earlier in the run and individually
+    fine on its own -- when `0007` later in the SAME run is missing
+    `--controlplane-role`."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply_run(
+        monkeypatch, platform, "0007_platform_declarations.sql", "0011_process_ceilings.sql",
+        api_role=platform.api_role,
+    )
+    assert rc == 2
+    assert calls == []
 
 
 def test_apply_platform_migration_accepts_a_known_file_through_a_symlinked_migrations_directory(monkeypatch, platform):
@@ -686,8 +742,20 @@ def test_apply_platform_migration_0012_restores_a_manually_drifted_function_body
         conn.close()
     drifted_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
     assert marker not in drifted_def
-    rc = _run_apply(monkeypatch, platform, "0012_role_connection_limits.sql")
-    assert rc == 0
+    # R-12 (design D-6): `0012` alone is now refused by `apply-platform-
+    # migration` (its own successors `0013`/`0014` are absent from this
+    # single-file call) -- proven inline here too (scoped `MonkeyPatch.
+    # context()`, undone before the psql-direct call below, so it never
+    # leaks into it) -- this test's own subject is 0012's OWN restore-
+    # on-reapply granularity, so the RESTORE itself is applied directly
+    # via psql, never through the now-refusing subcommand.
+    with pytest.MonkeyPatch.context() as ops_mp:
+        calls = []
+        ops_mp.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+        rc = _run_apply(ops_mp, platform, "0012_role_connection_limits.sql")
+        assert rc == 2
+        assert calls == []
+    _run_psql(platform.provision_dsn, platform.migration_paths["0012_role_connection_limits.sql"])
     restored_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
     assert marker in restored_def
     assert "drifted stub" not in restored_def
@@ -707,12 +775,16 @@ def test_apply_platform_migration_0013_sets_statement_timeout_on_auditreader_dat
     assert _role_setting(platform.provision_dsn, auditreader_role) == ["statement_timeout=5000ms"]
 
 
-def test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_application_roles(monkeypatch):
+def test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_application_roles():
     """0013's own per-application loop (section 2) retroactively
     declares `statement_timeout` on BOTH the runtime and developer role
     of every application already provisioned BEFORE 0013 first ran,
     observed across 2 applications (a single application could not tell
-    this apart from a coincidence)."""
+    this apart from a coincidence). Applies 0013 directly via psql
+    (design D-6): a solo `0013` is now refused by `apply-platform-
+    migration` (its own successor `0014` is absent from a single-file
+    call) -- this test's own subject is 0013's SQL-level retroactive
+    declare, unrelated to that refusal."""
     _require_admin_connection()
     admin_dsn = _admin_dsn()
     prefix = f"r45wpef102{secrets.token_hex(4)}"
@@ -726,21 +798,22 @@ def test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_ap
         _d2, rt2, dv2 = _provision_app_via_function(platform.provision_dsn, platform.schema, "f102b")
         for role in (rt1, dv1, rt2, dv2):
             assert _role_setting(platform.provision_dsn, role) is None
-        rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-        assert rc == 0
+        _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
         for role in (rt1, dv1, rt2, dv2):
             assert _role_setting(platform.provision_dsn, role) == ["statement_timeout=5000ms"]
     finally:
         _sweep_prefix(admin_dsn, prefix)
 
 
-def test_apply_platform_migration_0013_succeeds_with_an_unprovisioned_registry_row(monkeypatch, platform):
+def test_apply_platform_migration_0013_succeeds_with_an_unprovisioned_registry_row(platform):
     """A registry row that is registered but never provisioned
     (`runtime_role` NULL) is filtered out by the loop's own `WHERE`
     clause before either column's own value is ever read -- 0013 still
     succeeds, and the loop never touches a role an unfiltered row's own
     `developer_role` column happens to name (here, the unrelated
-    provision role itself, which is a real row in `pg_roles`)."""
+    provision role itself, which is a real row in `pg_roles`). Applies
+    0013 directly via psql (design D-6, same reason as the sibling test
+    above)."""
     conn = psycopg.connect(platform.provision_dsn, autocommit=True)
     try:
         with conn.cursor() as cur:
@@ -751,8 +824,7 @@ def test_apply_platform_migration_0013_succeeds_with_an_unprovisioned_registry_r
             )
     finally:
         conn.close()
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     assert _role_setting(platform.provision_dsn, platform.provision_role) is None
 
 
@@ -848,11 +920,22 @@ def test_apply_platform_migration_0013_statement_timeout_values_are_a_single_pos
     assert ops.pg_timeouts.ms_from_pg_timeout_text(values[0]) > 0
 
 
-def test_apply_platform_migration_accepts_0013_via_the_subcommand(monkeypatch, platform):
-    """0013 is accepted by name through the real subcommand
-    (not merely present in the pinned constant)."""
+def test_apply_platform_migration_solo_0013_is_rejected_by_the_subcommand(monkeypatch, capsys, platform):
+    """0013 is a known name (present in the pinned constant), but the
+    real subcommand now refuses it ALONE -- its own successor `0014`
+    (`_PLATFORM_MIGRATION_SUPERSEDED_BY`) is absent from a single-file
+    call (design D-2, R-57). No psql subprocess starts."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
     rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.err.strip() == (
+        "error: apply-platform-migration: 0013_role_statement_timeouts.sql is superseded by a later "
+        "platform migration; apply the whole run in one call, in this order: "
+        "0013_role_statement_timeouts.sql 0014_role_connection_limits_rollout.sql"
+    )
 
 
 def test_apply_platform_migration_variable_table_keys_match_the_filenames_constant():
@@ -863,13 +946,15 @@ def test_apply_platform_migration_variable_table_keys_match_the_filenames_consta
     assert set(ops._PLATFORM_MIGRATION_VARIABLE_TABLE.keys()) == set(ops._PLATFORM_MIGRATION_FILENAMES)
 
 
-def test_apply_platform_migration_0013_revokes_public_execute_on_the_replaced_function(monkeypatch, platform):
+def test_apply_platform_migration_0013_revokes_public_execute_on_the_replaced_function(platform):
     """0013's own `REVOKE ALL ON FUNCTION ... FROM PUBLIC`
     runs every time it (re)applies the function -- a hand-added PUBLIC
     EXECUTE grant does not survive a reapplication of 0013 (0012's own
     prior REVOKE would already leave the ACL clean on a fresh bootstrap,
     so this test grants PUBLIC EXECUTE back by hand first to prove 0013's
-    OWN REVOKE, not merely 0012's, is what keeps it closed)."""
+    OWN REVOKE, not merely 0012's, is what keeps it closed). Applies
+    0013 directly via psql (design D-6): a solo `0013` is now refused
+    by `apply-platform-migration`."""
     function_signature = f"{platform.schema}.begin_provision_application(text, text, text)"
     conn = psycopg.connect(platform.provision_dsn, autocommit=True)
     try:
@@ -879,23 +964,23 @@ def test_apply_platform_migration_0013_revokes_public_execute_on_the_replaced_fu
         conn.close()
     _, acl = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
     assert _acl_has_public_grantee(acl)
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     _, acl = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
     assert not _acl_has_public_grantee(acl)
 
 
-def test_apply_platform_migration_0013_restores_manually_drifted_settings_and_function_body(monkeypatch, platform):
+def test_apply_platform_migration_0013_restores_manually_drifted_settings_and_function_body(platform):
     """Hand-drifted `mitatedbsvc_auditreader` setting, a
     pre-existing application's own runtime-role setting, and the
     replaced `begin_provision_application` body all get restored by
-    re-applying 0013 through `apply-platform-migration`; a second
-    re-application changes nothing further."""
+    re-applying 0013 -- this file ALONE restores its own targets, a
+    granularity design R-12/D-6 keeps by applying 0013 directly via
+    psql (a solo `0013` is now refused by `apply-platform-migration`);
+    a second re-application changes nothing further."""
     auditreader_role = f"{platform.prefix}svc_auditreader"
     _database_name, runtime_role, _developer_role = _provision_app_via_function(
         platform.provision_dsn, platform.schema, "f111")
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
 
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
@@ -927,45 +1012,48 @@ def test_apply_platform_migration_0013_restores_manually_drifted_settings_and_fu
     drifted_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
     assert marker not in drifted_def
 
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     assert _role_setting(platform.provision_dsn, auditreader_role) == ["statement_timeout=5000ms"]
     assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
     restored_def, _ = _function_def_and_acl(platform.provision_dsn, platform.schema, "begin_provision_application")
     assert marker in restored_def
     assert "drifted stub" not in restored_def
 
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     assert _role_setting(platform.provision_dsn, auditreader_role) == ["statement_timeout=5000ms"]
     assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
 
 
-def test_apply_platform_migration_0013_then_0012_then_0013_restores_new_application_setting(monkeypatch, platform):
+def test_apply_platform_migration_0013_then_0012_then_0013_restores_new_application_setting(platform):
     """0012 and 0013 `CREATE OR REPLACE` the
     identical function -- applying 0012 alone after 0013 drops the
     `statement_timeout` lines for FUTURE applications; applying 0013 once
     more restores them, observed on an application provisioned after the
-    stray 0012 re-application."""
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
-    rc = _run_apply(monkeypatch, platform, "0012_role_connection_limits.sql")
-    assert rc == 0
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    stray 0012 re-application. Each of the 3 files is applied directly
+    via psql (design D-6): this exact stray-single-file sequence is
+    precisely what `apply-platform-migration` now refuses through the
+    subcommand (design D-2) -- the SQL-level restore behavior this test
+    is about is independent of that refusal."""
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
+    _run_psql(platform.provision_dsn, platform.migration_paths["0012_role_connection_limits.sql"])
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     _database_name, runtime_role, developer_role = _provision_app_via_function(
         platform.provision_dsn, platform.schema, "f113")
     assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
     assert _role_setting(platform.provision_dsn, developer_role) == ["statement_timeout=5000ms"]
 
 
-def test_apply_platform_migration_0013_is_transactional_and_rolls_back_on_permission_failure(monkeypatch, platform):
+def test_apply_platform_migration_0013_is_transactional_and_rolls_back_on_permission_failure(platform):
     """A per-application role 0013's own applying role
     (`mitatedbsvc_provision`) lacks ADMIN OPTION on (created directly by
     the cluster admin, not by `begin_provision_application`, so
     CREATEROLE's own implicit ADMIN OPTION never attaches) makes the
     whole loop fail; the auditreader `ALTER ROLE` from section 1 rolls
-    back with it, so nothing is left half-applied."""
+    back with it, so nothing is left half-applied. Applies 0013 directly
+    via psql (design D-6): a solo `0013` is now refused by
+    `apply-platform-migration` before ANY psql subprocess starts, which
+    would make this SQL-level failure unreachable through the
+    subcommand."""
     auditreader_role = f"{platform.prefix}svc_auditreader"
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
@@ -996,16 +1084,18 @@ def test_apply_platform_migration_0013_is_transactional_and_rolls_back_on_permis
     finally:
         conn.close()
 
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc != 0
+    with pytest.raises(RuntimeError):
+        _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     assert _role_setting(platform.provision_dsn, auditreader_role) is None
 
 
-def test_apply_platform_migration_0013_skips_a_registry_row_with_no_matching_role(monkeypatch, platform):
+def test_apply_platform_migration_0013_skips_a_registry_row_with_no_matching_role(platform):
     """A registry row naming a role `pg_roles` no longer
     carries (a deprovisioned application whose own row survived) is
     skipped rather than aborting the whole migration; that row's own
-    role never picks up the setting, since 0013 never touched it."""
+    role never picks up the setting, since 0013 never touched it.
+    Applies 0013 directly via psql (design D-6): a solo `0013` is now
+    refused by `apply-platform-migration`."""
     ghost_runtime = f"{platform.prefix}_app_f115_rt"
     ghost_developer = f"{platform.prefix}_app_f115_dv"
     conn = psycopg.connect(platform.provision_dsn, autocommit=True)
@@ -1019,18 +1109,20 @@ def test_apply_platform_migration_0013_skips_a_registry_row_with_no_matching_rol
             )
     finally:
         conn.close()
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc == 0
+    _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     assert _role_setting(platform.provision_dsn, ghost_runtime) is None
 
 
-def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_different_role(monkeypatch):
+def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_different_role():
     """A cluster where `mitatedbsvc_auditreader` was
     created by the cluster admin role directly (never by the applying
     provision role, so CREATEROLE's own implicit ADMIN OPTION never
-    attaches to it) makes 0013 fail with a non-zero exit code through
-    `apply-platform-migration`; neither an application role setting nor
-    the replaced function body ever appear."""
+    attaches to it) makes 0013 fail; neither an application role
+    setting nor the replaced function body ever appear. Applies 0013
+    directly via psql (design D-6): a solo `0013` is now refused by
+    `apply-platform-migration` before ANY psql subprocess starts, which
+    would make this SQL-level failure unreachable through the
+    subcommand."""
     _require_admin_connection()
     admin_dsn = _admin_dsn()
     prefix = f"r45wpef118{secrets.token_hex(4)}"
@@ -1074,14 +1166,8 @@ def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_d
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
 
-        monkeypatch.setenv("MITATEDB_PROVISION_DSN", provision_dsn)
-        monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(rewritten_dir))
-        _clear_ambient_pg_connection_env_vars(monkeypatch)
-        try:
-            rc = ops.main(["apply-platform-migration", "0013_role_statement_timeouts.sql", "--lock-timeout", _TEST_LOCK_TIMEOUT])
-        except SystemExit as exc:
-            rc = exc.code
-        assert rc != 0
+        with pytest.raises(RuntimeError):
+            _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
         assert _role_setting(provision_dsn, auditreader_role) is None
         function_def, _ = _function_def_and_acl(provision_dsn, schema, "begin_provision_application")
         assert "statement_timeout" not in (function_def or "")
@@ -1089,14 +1175,17 @@ def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_d
         _sweep_prefix(admin_dsn, prefix)
 
 
-def test_apply_platform_migration_0013_section_3_permission_failure_rolls_back_sections_1_and_2(monkeypatch, platform):
+def test_apply_platform_migration_0013_section_3_permission_failure_rolls_back_sections_1_and_2(platform):
     """Section 1 (the auditreader `ALTER ROLE`), section 2 (the
     per-application loop), and section 3 (`CREATE OR REPLACE FUNCTION`)
     all run inside the SAME transaction -- a permission failure confined
     to section 3 (the applying role no longer owns `begin_provision_
     application`, so `CREATE OR REPLACE FUNCTION` is refused) rolls back
     section 1 and section 2's own changes from THIS run too, not merely
-    section 3's own attempted change."""
+    section 3's own attempted change. Applies 0013 directly via psql
+    (design D-6): a solo `0013` is now refused by `apply-platform-
+    migration` before ANY psql subprocess starts, which would make this
+    SQL-level failure unreachable through the subcommand."""
     auditreader_role = f"{platform.prefix}svc_auditreader"
     _database_name, runtime_role, _developer_role = _provision_app_via_function(
         platform.provision_dsn, platform.schema, "f119")
@@ -1127,8 +1216,8 @@ def test_apply_platform_migration_0013_section_3_permission_failure_rolls_back_s
     finally:
         admin_on_platform_db.close()
 
-    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
-    assert rc != 0
+    with pytest.raises(RuntimeError):
+        _run_psql(platform.provision_dsn, platform.migration_paths["0013_role_statement_timeouts.sql"])
     assert _role_setting(platform.provision_dsn, auditreader_role) is None
     assert _role_setting(platform.provision_dsn, runtime_role) is None
 
@@ -1367,6 +1456,570 @@ def test_apply_platform_migration_unexpected_variable_is_rejected(monkeypatch, c
     assert calls == []
     captured = capsys.readouterr()
     assert "--api-role" in captured.err
+
+
+def test_apply_platform_migration_missing_variable_message_is_deterministic_by_table_order(
+    monkeypatch, capsys, platform,
+):
+    """R-57 WP-1 code review fix 2: with BOTH `--api-role`/
+    `--controlplane-role` omitted, the missing-variable message always
+    names `--api-role` FIRST -- `_PLATFORM_MIGRATION_VARIABLE_TABLE
+    ["0007_platform_declarations.sql"]`'s own tuple order -- never a
+    name that depends on Python's own (hash-randomized) `set`
+    iteration order."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply(monkeypatch, platform, "0007_platform_declarations.sql")
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert "--api-role" in captured.err
+    assert "--controlplane-role" not in captured.err
+
+
+def test_apply_platform_migration_run_unexpected_variable_message_names_no_file(monkeypatch, capsys, platform):
+    """R-57 WP-1 code review fix 7 (裁定): a run of 2+ files rejects an
+    unexpected variable naming NO file (which file, if any, would have
+    accepted it depends on every other file in the run, not a fixed
+    position) -- distinct from the single-file message above, which
+    keeps the basis form."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply_run(
+        monkeypatch, platform,
+        "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
+        "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
+        api_role="somerole",
+    )
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "error: apply-platform-migration: no file in this run accepts --api-role"
+
+
+# ===========================================================================
+# D-3 -- the target-level map ("target -> the files, in
+# `_PLATFORM_MIGRATION_FILENAMES` order, that define it") that
+# `ops._PLATFORM_MIGRATION_SUPERSEDED_BY` is proved to derive from, at
+# file granularity. "Target" = (role or function identifier, setting
+# kind) per design R-10: a literal role name, a psql `:"name"`
+# variable's own NAME, or a plpgsql expression's own source text (e.g.
+# `app.runtime_role`) as identifier; `CONNECTION LIMIT`, `SET <param>`,
+# or `function body` as kind. This machinery reads the 6 accepted
+# migration files directly -- it is test-only static analysis, never
+# part of `ops.py`'s own runtime surface.
+# ===========================================================================
+
+#: code review round 1 (高 1): `OR REPLACE` is OPTIONAL -- a bare
+#: `CREATE FUNCTION` defines a function body target exactly the same
+#: way a `CREATE OR REPLACE FUNCTION` does; requiring `OR REPLACE`
+#: would silently miss a plain `CREATE FUNCTION`'s own body (never
+#: exclude it from scanning, never register it as a target either).
+_FUNCTION_HEADER_RE = re.compile(
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([A-Za-z0-9_.]+)\s*\(.*?\)\s*RETURNS[^;]*?AS\s+(\$\w*\$)",
+    re.DOTALL,
+)
+_IF_NOT_EXISTS_GUARDED_BLOCK_RE = re.compile(r"IF NOT EXISTS\s*\(.*?\)\s*THEN.*?END IF;", re.DOTALL)
+_CREATE_ROLE_CONNECTION_LIMIT_RE = re.compile(r"CREATE ROLE\s+(\S+)\s+LOGIN PASSWORD[^;]*?CONNECTION LIMIT")
+_ALTER_ROLE_CONNECTION_LIMIT_RE = re.compile(r"ALTER ROLE\s+(\S+)\s+CONNECTION LIMIT")
+_ALTER_ROLE_SET_RE = re.compile(r"ALTER ROLE\s+(\S+)\s+SET\s+(\w+)")
+_FORMAT_ALTER_ROLE_CONNECTION_LIMIT_RE = re.compile(
+    r"format\(\s*'ALTER ROLE %I CONNECTION LIMIT\s+\d+'\s*,\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\)"
+)
+_FORMAT_ALTER_ROLE_SET_RE = re.compile(
+    r"format\(\s*'ALTER ROLE %I SET (\w+)\s*=\s*%L'\s*,\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,"
+)
+
+
+def _normalize_role_identifier(raw: str) -> str:
+    """R-10: a literal role name is used AS-IS; a psql `:"name"`/
+    `:'name'` variable reference is reduced to its own NAME (never the
+    `:"..."` wrapper) -- it is the VARIABLE, not this particular
+    quoting, that identifies the target across files."""
+    match = re.fullmatch(r':"([A-Za-z_][A-Za-z0-9_]*)"', raw) or re.fullmatch(r":'([A-Za-z_][A-Za-z0-9_]*)'", raw)
+    return match.group(1) if match else raw
+
+
+def _blank_span(text: str, start: int, end: int) -> str:
+    """Replaces `text[start:end]` with an equal-length run of spaces
+    (never removes characters), so every later match's own OFFSET into
+    the ORIGINAL text stays meaningful."""
+    return text[:start] + (" " * (end - start)) + text[end:]
+
+
+def _strip_function_bodies(text: str) -> "tuple[str, list[tuple[str, str]]]":
+    """Removes every `CREATE OR REPLACE FUNCTION ... AS $tag$ ... $tag$`
+    span (header AND body) from `text`, registering ONE `(identifier,
+    "function body")` target per span -- the body's own content (e.g.
+    an `EXECUTE format('ALTER ROLE %I ...')` call) is never
+    independently scanned; it is part of this ONE target, not a target
+    of its own (design D-3)."""
+    targets: "list[tuple[str, str]]" = []
+    result = text
+    while True:
+        header_match = _FUNCTION_HEADER_RE.search(result)
+        if header_match is None:
+            break
+        tag = header_match.group(2)
+        close = result.find(tag, header_match.end())
+        if close == -1:
+            break
+        span_end = close + len(tag)
+        targets.append((header_match.group(1), "function body"))
+        result = _blank_span(result, header_match.start(), span_end)
+    return result, targets
+
+
+def _strip_if_not_exists_guarded_blocks(text: str) -> str:
+    """Removes every `IF NOT EXISTS (...) THEN ... END IF;` span --
+    e.g. `0005_application_audit.sql`'s own conditional `CREATE ROLE
+    mitatedbsvc_auditreader ... CONNECTION LIMIT 5` -- so a value only
+    ever set when the target does not YET exist is never registered as
+    a target competing with a later file's own unconditional `ALTER
+    ROLE`. Deliberately anchored on the literal `IF NOT EXISTS` (never
+    bare `IF EXISTS`), so the skip guards `0013_role_statement_
+    timeouts.sql`/`0014_role_connection_limits_rollout.sql`'s own
+    section 2 use (`IF EXISTS (SELECT 1 FROM pg_roles ...)`) are left
+    untouched (design D-3's "走査の規則"). LIMITATION (R-57 WP-1 code
+    review, 低 6, 裁定): a guard with a NESTED `IF`/`END IF;` closes on
+    the INNER `END IF;` (`.*?` is non-greedy) rather than its own outer
+    one -- none of the 6 accepted migration files has this shape today,
+    and the failure mode is over-detection (an extra target, a red
+    test), never a silently missed one, so this is accepted rather than
+    fixed."""
+    return _IF_NOT_EXISTS_GUARDED_BLOCK_RE.sub("", text)
+
+
+def _extract_role_setting_targets(text: str) -> "list[tuple[str, str]]":
+    """Every `CONNECTION LIMIT`/`SET <param>` target `text` carries --
+    direct SQL (`ALTER ROLE <role> CONNECTION LIMIT`/`SET <param>`,
+    `CREATE ROLE <role> ... CONNECTION LIMIT`) and DO-block dynamic SQL
+    (`format('ALTER ROLE %I CONNECTION LIMIT ...', <expr>)`/
+    `format('ALTER ROLE %I SET <param> = %L', <expr>, ...)`) alike. The
+    dynamic forms are matched and blanked FIRST, so a direct-SQL regex
+    never mistakes the literal `%I` placeholder inside a `format(...)`
+    string argument for a role name."""
+    targets: "list[tuple[str, str]]" = []
+    working = text
+    for match in _FORMAT_ALTER_ROLE_CONNECTION_LIMIT_RE.finditer(working):
+        targets.append((match.group(1), "CONNECTION LIMIT"))
+    working = _FORMAT_ALTER_ROLE_CONNECTION_LIMIT_RE.sub("", working)
+    for match in _FORMAT_ALTER_ROLE_SET_RE.finditer(working):
+        targets.append((match.group(2), f"SET {match.group(1)}"))
+    working = _FORMAT_ALTER_ROLE_SET_RE.sub("", working)
+    for match in _CREATE_ROLE_CONNECTION_LIMIT_RE.finditer(working):
+        targets.append((_normalize_role_identifier(match.group(1)), "CONNECTION LIMIT"))
+    for match in _ALTER_ROLE_CONNECTION_LIMIT_RE.finditer(working):
+        targets.append((_normalize_role_identifier(match.group(1)), "CONNECTION LIMIT"))
+    for match in _ALTER_ROLE_SET_RE.finditer(working):
+        targets.append((_normalize_role_identifier(match.group(1)), f"SET {match.group(2)}"))
+    return targets
+
+
+def _platform_migration_targets_in_file(path: Path) -> "list[tuple[str, str]]":
+    text = ops._strip_sql_line_comments(path.read_text())
+    text, function_targets = _strip_function_bodies(text)
+    text = _strip_if_not_exists_guarded_blocks(text)
+    return function_targets + _extract_role_setting_targets(text)
+
+
+def _derive_platform_migration_target_map() -> "dict[tuple[str, str], tuple[str, ...]]":
+    """D-3: `target -> the files (in `_PLATFORM_MIGRATION_FILENAMES`
+    order) that define it`, derived from the 6 accepted migration files
+    themselves -- this is the thing D-3 FIXES; `ops._PLATFORM_
+    MIGRATION_SUPERSEDED_BY` is proved (below) to be exactly what this
+    map derives at file granularity, never the other way around."""
+    target_map: "dict[tuple[str, str], list[str]]" = {}
+    for name in ops._PLATFORM_MIGRATION_FILENAMES:
+        for target in _platform_migration_targets_in_file(MIGRATIONS_DIR / name):
+            target_map.setdefault(target, []).append(name)
+    return {target: tuple(files) for target, files in target_map.items()}
+
+
+def _file_level_superseded_by(
+    target_map: "dict[tuple[str, str], tuple[str, ...]]",
+) -> "dict[str, tuple[str, ...]]":
+    """Folds the target-level map down to `file -> the files, in order,
+    that redefine at least one of its own targets` -- the SAME shape as
+    `ops._PLATFORM_MIGRATION_SUPERSEDED_BY`. A target defined by only
+    ONE file contributes no entry (nothing to be superseded BY)."""
+    successors: "dict[str, set]" = {}
+    for files in target_map.values():
+        for i, name in enumerate(files[:-1]):
+            successors.setdefault(name, set()).update(files[i + 1:])
+    order = {name: i for i, name in enumerate(ops._PLATFORM_MIGRATION_FILENAMES)}
+    return {
+        name: tuple(sorted(later, key=order.__getitem__))
+        for name, later in successors.items()
+    }
+
+
+def test_platform_migration_target_map_contains_the_4_known_targets():
+    """Completion condition 1 (non-vacuousness, design D-7 #1): the
+    derived target-level map contains the function-body target and 3
+    of the `CONNECTION LIMIT` targets `_PLATFORM_MIGRATION_SUPERSEDED_
+    BY`'s own file-level chain depends on."""
+    target_map = _derive_platform_migration_target_map()
+    known = {
+        ("mitatedb_registry.begin_provision_application", "function body"): (
+            "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+            "0014_role_connection_limits_rollout.sql",
+        ),
+        ("mitatedbsvc_api", "CONNECTION LIMIT"): (
+            "0012_role_connection_limits.sql", "0014_role_connection_limits_rollout.sql",
+        ),
+        ("mitatedbsvc_controlplane", "CONNECTION LIMIT"): (
+            "0012_role_connection_limits.sql", "0014_role_connection_limits_rollout.sql",
+        ),
+        ("app.runtime_role", "CONNECTION LIMIT"): (
+            "0012_role_connection_limits.sql", "0014_role_connection_limits_rollout.sql",
+        ),
+    }
+    assert len(known) >= 1
+    for target, files in known.items():
+        assert target_map.get(target) == files, target
+
+
+def test_platform_migration_target_map_excludes_the_if_not_exists_guarded_auditreader_creation():
+    """Completion condition 2: `0005`'s own conditional `CREATE ROLE
+    mitatedbsvc_auditreader ... CONNECTION LIMIT 5` never appears as a
+    `CONNECTION LIMIT`-kind target competing with 0014's own
+    unconditional `ALTER ROLE mitatedbsvc_auditreader CONNECTION LIMIT
+    12` -- the target's own file list is `(0014,)`, never `(0005,
+    0014)`."""
+    target_map = _derive_platform_migration_target_map()
+    assert target_map[("mitatedbsvc_auditreader", "CONNECTION LIMIT")] == (
+        "0014_role_connection_limits_rollout.sql",
+    )
+
+
+def test_platform_migration_target_map_includes_the_if_exists_skip_guarded_alters():
+    """Completion condition 2b: the `IF EXISTS (SELECT 1 FROM pg_roles
+    ...)` skip guard inside 0013's/0014's own per-application loop does
+    NOT exclude the `ALTER ROLE` it guards -- both `app.runtime_role`
+    and `app.developer_role`'s own `CONNECTION LIMIT` targets are
+    present, spanning 0012 -> 0014."""
+    target_map = _derive_platform_migration_target_map()
+    for identifier in ("app.runtime_role", "app.developer_role"):
+        assert target_map[(identifier, "CONNECTION LIMIT")] == (
+            "0012_role_connection_limits.sql", "0014_role_connection_limits_rollout.sql",
+        )
+
+
+def test_platform_migration_target_map_never_scans_inside_a_function_body():
+    """Completion condition 2c: the `EXECUTE format('ALTER ROLE %I SET
+    statement_timeout ...')` lines inside 0013's/0014's own replacement
+    `begin_provision_application` body never surface as independent
+    `v_runtime_role`/`v_developer_role` targets -- they are part of
+    the ONE `function body` target, never scanned on their own
+    (code review round 1: docstring corrected to name only what this
+    assert covers -- `--` comment stripping is `ops._strip_sql_line_
+    comments`'s own subject, not this test's)."""
+    target_map = _derive_platform_migration_target_map()
+    for identifier in ("v_runtime_role", "v_developer_role"):
+        assert (identifier, "SET statement_timeout") not in target_map
+
+
+def test_platform_migration_function_header_regex_matches_a_bare_create_function_too():
+    """Code review round 1, 高 1: a bare `CREATE FUNCTION` (never `OR
+    REPLACE`) is scanned as a function-body target too -- two synthetic
+    SQL strings, one plain `CREATE FUNCTION` and one `CREATE OR REPLACE
+    FUNCTION`, fold to the exact SAME `(identifier, "function body")`
+    target."""
+    plain = "CREATE FUNCTION pkg.f(a int) RETURNS int LANGUAGE plpgsql AS $fn$ BEGIN RETURN a; END; $fn$;"
+    replaced = "CREATE OR REPLACE FUNCTION pkg.f(a int) RETURNS int LANGUAGE plpgsql AS $fn$ BEGIN RETURN a; END; $fn$;"
+    _, plain_targets = _strip_function_bodies(plain)
+    _, replaced_targets = _strip_function_bodies(replaced)
+    assert plain_targets == replaced_targets == [("pkg.f", "function body")]
+
+
+def test_platform_migration_superseded_by_equals_the_target_map_folded_to_file_level():
+    """Completion condition 1b: `ops._PLATFORM_MIGRATION_SUPERSEDED_BY`
+    is exactly what the target-level map derives at file granularity."""
+    target_map = _derive_platform_migration_target_map()
+    assert _file_level_superseded_by(target_map) == ops._PLATFORM_MIGRATION_SUPERSEDED_BY
+
+
+# ===========================================================================
+# D-1/D-2/D-4 -- a RUN of one or more FILENAMEs
+# ===========================================================================
+
+
+def test_apply_platform_migration_run_of_0012_0013_0014_succeeds_in_one_call(monkeypatch, platform):
+    """Completion condition 6: the whole numbered run, given as 3
+    FILENAMEs in one call, applies all 3 in order with a single call to
+    `apply-platform-migration`."""
+    rc = _run_apply_run(
+        monkeypatch, platform,
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    )
+    assert rc == 0
+
+
+def test_apply_platform_migration_run_reports_applied_per_file(monkeypatch, platform, capsys):
+    """Completion condition 6: `applied <file>` is printed once per
+    FILENAME in the run, in order."""
+    rc = _run_apply_run(
+        monkeypatch, platform,
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        "applied 0012_role_connection_limits.sql",
+        "applied 0013_role_statement_timeouts.sql",
+        "applied 0014_role_connection_limits_rollout.sql",
+    ]
+
+
+def test_apply_platform_migration_solo_0012_is_rejected_with_the_confirmed_closure_message(
+    monkeypatch, capsys, platform,
+):
+    """Completion condition 3a/3b: `0012` alone (its own successors
+    `0013`/`0014` both absent from the call) is refused before any psql
+    subprocess starts, with the confirmed T-1 message naming the FULL
+    required run."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply_run(monkeypatch, platform, "0012_role_connection_limits.sql")
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.err.strip() == (
+        "error: apply-platform-migration: 0012_role_connection_limits.sql is superseded by a later "
+        "platform migration; apply the whole run in one call, in this order: "
+        "0012_role_connection_limits.sql 0013_role_statement_timeouts.sql 0014_role_connection_limits_rollout.sql"
+    )
+
+
+def test_apply_platform_migration_0012_0014_without_0013_is_rejected(monkeypatch, capsys, platform):
+    """Completion condition 3a: `0012 0014` (skipping `0013`, one of
+    `0012`'s own successors) is refused before any psql subprocess
+    starts."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply_run(
+        monkeypatch, platform, "0012_role_connection_limits.sql", "0014_role_connection_limits_rollout.sql",
+    )
+    assert rc == 2
+    assert calls == []
+
+
+def test_apply_platform_migration_out_of_order_run_is_rejected(monkeypatch, capsys, platform):
+    """Completion condition 4: `0013 0012 0014` (not ascending in
+    `_PLATFORM_MIGRATION_FILENAMES` order) is refused with the
+    confirmed T-2 message."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply_run(
+        monkeypatch, platform,
+        "0013_role_statement_timeouts.sql", "0012_role_connection_limits.sql",
+        "0014_role_connection_limits_rollout.sql",
+    )
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.err.strip() == (
+        "error: apply-platform-migration: FILENAMEs must be given in migration order, each at most once"
+    )
+
+
+def test_apply_platform_migration_duplicate_filename_in_run_is_rejected(monkeypatch, capsys, platform):
+    """Completion condition 4: a repeated FILENAME in the same run
+    (`0011 0011`) is refused with the confirmed T-2 message."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)) or pytest.fail("psql started"))
+    rc = _run_apply_run(monkeypatch, platform, "0011_process_ceilings.sql", "0011_process_ceilings.sql")
+    assert rc == 2
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.err.strip() == (
+        "error: apply-platform-migration: FILENAMEs must be given in migration order, each at most once"
+    )
+
+
+def test_apply_platform_migration_solo_0011_still_passes_the_closure_check(monkeypatch, platform):
+    """Completion condition 5: `0011` alone (no successors) still
+    passes the closure check -- unaffected by D-1/D-2."""
+    rc = _run_apply_run(monkeypatch, platform, "0011_process_ceilings.sql")
+    assert rc == 0
+
+
+def test_apply_platform_migration_solo_0014_still_passes_the_closure_check(monkeypatch, platform):
+    """Completion condition 5: `0014` alone (no successors, the LAST
+    file in `_PLATFORM_MIGRATION_FILENAMES`) still passes the closure
+    check."""
+    rc = _run_apply_run(monkeypatch, platform, "0014_role_connection_limits_rollout.sql")
+    assert rc == 0
+
+
+def test_apply_platform_migration_run_psql_argv_carries_only_each_files_own_variables(monkeypatch, platform):
+    """Completion condition 6: psql variables are narrowed to EACH
+    file's own required subset -- `0007`'s own run-wide `--api-role`/
+    `--controlplane-role` never reach `0011`'s own psql invocation."""
+    captured_argvs = []
+    real_run = subprocess.run
+
+    def _spy_run(argv, **kwargs):
+        if argv[:1] == ["psql"] and "--version" not in argv:
+            captured_argvs.append(argv)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _spy_run)
+    rc = _run_apply_run(
+        monkeypatch, platform, "0007_platform_declarations.sql", "0011_process_ceilings.sql",
+        api_role=platform.api_role, controlplane_role=platform.controlplane_role,
+    )
+    assert rc == 0
+    assert len(captured_argvs) == 2
+    assert "-v" in captured_argvs[0] and f"api_role={platform.api_role}" in captured_argvs[0]
+    assert f"api_role={platform.api_role}" not in captured_argvs[1]
+    # `0011` requires no variables at all -- ONLY the constant
+    # `ON_ERROR_STOP=1` `-v` pair reaches its own psql argv, never a
+    # `-v NAME=VALUE` variable pair.
+    assert captured_argvs[1].count("-v") == 1
+
+
+def test_apply_platform_migration_run_never_starts_a_file_the_operator_did_not_list(monkeypatch, platform):
+    """Completion condition 6b (condition (iii)): the set of psql `-f`
+    targets started equals EXACTLY the operator's own given run -- the
+    tool never adds `0013`'s own successor `0014` on its own."""
+    started_files = []
+    real_run = subprocess.run
+
+    def _spy_run(argv, **kwargs):
+        if argv[:1] == ["psql"] and "--version" not in argv:
+            f_index = argv.index("-f")
+            started_files.append(Path(argv[f_index + 1]).name)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _spy_run)
+    rc = _run_apply_run(
+        monkeypatch, platform,
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    )
+    assert rc == 0
+    assert started_files == [
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    ]
+
+
+def test_apply_platform_migration_never_starts_a_files_own_successor_the_operator_omitted(monkeypatch, platform):
+    """Completion condition 6b (condition (iii)), R-57 WP-1 code review
+    fix 4: the test above gives the FULL run already, so it cannot tell
+    "the tool never adds a file on its own" apart from "the tool simply
+    ran everything it was given". Here `_validate_platform_migration_
+    run` is bypassed (its own closure refusal is `test_apply_platform_
+    migration_solo_0013_is_rejected_by_the_subcommand`'s own subject,
+    not this test's) -- giving `0013` ALONE starts psql against
+    `0013_role_statement_timeouts.sql` ONLY, never its own successor
+    `0014`."""
+    monkeypatch.setattr(ops, "_validate_platform_migration_run", lambda files: None)
+    started_files = []
+    real_run = subprocess.run
+
+    def _spy_run(argv, **kwargs):
+        if argv[:1] == ["psql"] and "--version" not in argv:
+            f_index = argv.index("-f")
+            started_files.append(Path(argv[f_index + 1]).name)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _spy_run)
+    rc = _run_apply(monkeypatch, platform, "0013_role_statement_timeouts.sql")
+    assert rc == 0
+    assert started_files == ["0013_role_statement_timeouts.sql"]
+
+
+def test_apply_platform_migration_run_stops_at_the_failing_file_with_the_confirmed_t3_message(
+    monkeypatch, capsys, platform,
+):
+    """Completion condition 7: a mid-run psql failure stops the run --
+    no file after the failing one is ever started -- and the confirmed
+    T-3 message names the applied/not-run files and tells the operator
+    to re-run the whole run."""
+    real_run = subprocess.run
+    started = []
+
+    def _fake_run(argv, **kwargs):
+        if argv[:2] == ["psql", "--version"]:
+            return real_run(argv, **kwargs)
+        f_index = argv.index("-f")
+        name = Path(argv[f_index + 1]).name
+        started.append(name)
+        if name == "0013_role_statement_timeouts.sql":
+            return subprocess.CompletedProcess(argv, 1, stdout="synthetic failure\n", stderr="")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    rc = _run_apply_run(
+        monkeypatch, platform,
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    )
+    assert rc == 2
+    assert started == ["0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql"]
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "error: apply-platform-migration failed at 0013_role_statement_timeouts.sql\n"
+        "applied: 0012_role_connection_limits.sql\n"
+        "not run: 0014_role_connection_limits_rollout.sql\n"
+        "An applied file may still carry a value a later file in this run replaces. "
+        "Re-run the whole run from its first file; every file in it is idempotent.\n"
+    )
+
+
+def test_apply_platform_migration_run_of_0012_0013_0014_leaves_the_newest_values(monkeypatch, platform):
+    """Completion condition 8 (real PostgreSQL): re-applying the
+    numbered run `0012 0013 0014` in ONE call leaves the state at the
+    NEWEST values -- `begin_provision_application`'s own `CONNECTION
+    LIMIT` 68 and `statement_timeout`, and the platform-plane roles'
+    own 132/36/12."""
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    rc = _run_apply_run(
+        monkeypatch, platform,
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    )
+    assert rc == 0
+    assert _role_connlimit(platform.provision_dsn, platform.api_role) == 132
+    assert _role_connlimit(platform.provision_dsn, platform.controlplane_role) == 36
+    assert _role_connlimit(platform.provision_dsn, auditreader_role) == 12
+    _database_name, runtime_role, developer_role = _provision_app_via_function(
+        platform.provision_dsn, platform.schema, "f130")
+    assert _role_connlimit(platform.provision_dsn, runtime_role) == 68
+    assert _role_connlimit(platform.provision_dsn, developer_role) == 68
+    assert _role_setting(platform.provision_dsn, runtime_role) == ["statement_timeout=5000ms"]
+    assert _role_setting(platform.provision_dsn, developer_role) == ["statement_timeout=5000ms"]
+
+
+def test_apply_platform_migration_run_reversed_order_leaves_the_oldest_values(monkeypatch, platform):
+    """Completion condition 8 (real PostgreSQL, R-11 mutation target):
+    reversing the run's own file order (`0014 0013 0012`, itself
+    already rejected by the ascending-order check) is exercised here
+    directly against `cmd_apply_platform_migration`'s own internal
+    per-file loop, bypassing `_validate_platform_migration_run`, to
+    prove the loop itself preserves argument order rather than
+    re-sorting -- iterating in the GIVEN (reversed) order leaves
+    `mitatedbsvc_api` at 0012's own value (68), never 0014's own value
+    (132)."""
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
+    monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(platform.migrations_dir))
+    _clear_ambient_pg_connection_env_vars(monkeypatch)
+    reversed_files = (
+        "0014_role_connection_limits_rollout.sql", "0013_role_statement_timeouts.sql",
+        "0012_role_connection_limits.sql",
+    )
+    monkeypatch.setattr(ops, "_validate_platform_migration_run", lambda files: None)
+    args = types.SimpleNamespace(
+        file=list(reversed_files), lock_timeout=_TEST_LOCK_TIMEOUT, api_role=None, controlplane_role=None,
+    )
+    rc = ops.cmd_apply_platform_migration(args)
+    assert rc == 0
+    assert _role_connlimit(platform.provision_dsn, platform.api_role) == 68
 
 
 # ===========================================================================

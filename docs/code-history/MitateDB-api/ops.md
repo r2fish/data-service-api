@@ -665,3 +665,31 @@ new:
 ```
 Against production, run it only through the runbook's gated procedure (docs/cloud-run-cloud-sql.md section 10).
 ```
+
+## CH-0540
+
+- moved from: `src/mitatedb_api/ops.py` (`_platform_migration_variables`)
+- parent commit: `9127598`
+- kind: docstring
+
+```
+Reconciles the operator-supplied `--api-role`/
+`--controlplane-role` values against `filename`'s own required set --
+a missing required variable, or a supplied variable the file does
+not reference, is refused (fixed message, no psql subprocess
+started).
+```
+
+### correction: 2026-09-20
+
+- reason: R-57 -- `apply-platform-migration` now accepts a RUN of files, so this helper reconciles the operator-supplied roles against the UNION of every file in the run's own required set, instead of one file's
+
+old:
+```
+Reconciles the operator-supplied `--api-role`/`--controlplane-role` values against `filename`'s own required set -- a missing required variable, or a supplied variable the file does not reference, is refused (fixed message, no psql subprocess started).
+```
+
+new:
+```
+Reconciles the operator-supplied `--api-role`/`--controlplane-role` values against the UNION of every file in `files`'s own required set (`_PLATFORM_MIGRATION_VARIABLE_TABLE`) -- a required variable no file in `files` references, or a supplied variable no file in `files` references, is refused (fixed message, no psql subprocess started). Each file in the run is later invoked with only its OWN required subset (`cmd_apply_platform_migration`), never this whole union -- this function only checks that the union is exactly what the operator supplied. The union is walked in `files` order (already `_PLATFORM_MIGRATION_FILENAMES` order, D-2) and, within each file, that file's own `_PLATFORM_MIGRATION_VARIABLE_TABLE` tuple order -- a missing-variable message therefore always names the SAME variable for the SAME input, never one that varies run-to-run with Python's own (hash-randomized) `set` iteration order. An unexpected (extra) variable's own rejection names the ONE file it does not belong to only when `files` itself is one file; a run of 2+ files names no file (no single file in a multi-file run is the "right" one to blame for an extra variable).
+```
