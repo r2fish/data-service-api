@@ -194,13 +194,14 @@ python3 tools/change_class.py security/CONTROL_MAPPING.md security/CONTROL_MAPPI
 
 ### 1.10 記録 (統合時に監督が埋める)
 
-- 実施日・作業コミット・main SHA:
-- 道具の出力 (逐語):
-- ブロック長の実測:
-- 完了条件 → 変異 → 結果:
-- 監督裁定:
-- 文のレビュー / 受け入れ監査:
-- 完了ゲート (監督が単独実行):
+- **実施日・作業コミット・main SHA**: 実施 **2026-09-20**。基点 main `3965fe4`。本書自体は先行して main `f6e9983` (作業 `df21795`) に入り、変更セットは main `b0f6e50` (作業 `182a398`)。**push は無し**。差分は `security/CONTROL_MAPPING.md`・`security/CONTROL_MAPPING_HISTORY.md` の 2 ファイルだけ (§1.5 のとおり)。`security/CONTROL_MAPPING.md` **版 2.14**。**変更クラス D**、契約 **1.8.0 のまま**、コード・`spec/`・`conformance-tests/`・migration・runbook の差分 **0**。
+- **道具の出力 (逐語)**: `./.venv/bin/python tools/check_control_mapping_split.py --base 3965fe4 --expect "missing=2 added=2 moved=0 empty_axis_added=0 empty_axis_removed=0 subsequence=ok preamble=differs ccr14=identical rule=identical"` = 同じ行・**exit 0** (実装担当の実行。文のレビュー担当と受け入れ監査担当がそれぞれ独立に再実行して同じ行)。`conformance-tests/test_control_mapping_register.py` = **`34 passed`**。`tools/dev/mutate.py` の要約行 = `3 mutations, 3 as expected, restores verified 2/2 files (sha256 x2)`。
+- **ブロック長の実測** (実装担当・文のレビュー担当・受け入れ監査担当の 3 者が独立に一致): 対象ブロック SI-09 / MitateDB-api / `platform upgrade` **12,200 → 12,516** (残り **2,684**)。文書の最長ブロックは SI-08 / MitateDB-api の既定 **13,023** で**不変**。新しい Control 行は **533** 字、Version 行は **1,142** 字の **1 物理行**、文書の最長物理行は **1,384** (本件が足した行ではない)。§1.2 (5) の起草時の値 (12,528 / 2,672、545 字) とのずれは §1.12 の訂正註 1 の逸脱で説明がつく。履歴へ移した旧 2 行は基点 `3965fe4` と**逐語一致**、触っていない行は不変 (受け入れ監査の機械比較)。
+- **完了条件 → 変異 → 結果**: §1.7 の表のとおり。変異を持つのは完了条件 4 だけで、**M1 / M2 / M3 の 3 件とも `expect=red got=red`**、復元は sha256 2 回で照合済み (上の要約行)。他の完了条件 (1・2・3・5・6・7・8・9・10) は**監査照合**で、照合対象 (コマンドと出力、`file:line`) を受け入れ監査が独立に再実行・再測して確認した。**対応の無い行は 0 件**。
+- **監督裁定**: §1.12 (訂正註 1〜5)。本文は書き換えていない。
+- **文のレビュー / 受け入れ監査**: 設計レビュー **1 回** (6 件、全件採用。反映は §1.11)。文のレビュー **1 回** (中 1・低 1、差し戻し **1 回**)。受け入れ監査 **1 回** (完了条件 **10 件**、未充足 **0**)。受け入れ監査の証拠不足の指摘は 2 件 — `--expect` を渡した実行と `mutate.py` の要約行が成果物ファイルに残っていない — なので、**上の 2 行に逐語で残した**。
+- **完了ゲート (監督が単独実行)**: 最終の木で `3789 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0、共有クラスタ差分 0 (info)。差し戻し前の木で取った 1 回目も同じ集計行で PASS だったが、**正本は最終の木の測定**である。
+- **起票**: 同じ小ブロックの Platform-upgrade runbook の主張が runbook (`MitateDB-api/docs/cloud-run-cloud-sql.md`:1799-1802・:2692-2697) より弱く読める件を、`RM` (= `docs/design/ROADMAP_POST_PHASE7_V1.md`) の **R-70** に起票した (文のレビューと受け入れ監査の指摘)。本変更セットでは当該行を 1 字も触っていない。
 
 ### 1.11 設計レビュー 1 の反映 (2026-09-20、監督裁定として全件採用)
 
@@ -215,9 +216,19 @@ python3 tools/change_class.py security/CONTROL_MAPPING.md security/CONTROL_MAPPI
 | (v) | 洗い出しが `block` の語だけでは足りない (`row` / `cell` / `column` / `SI-NN above` の指し方も見るべき) | §1.3 に実測 1 行を足した (主張行 111 行を全件見て、複数ブロックを持つ (SI, peer) を peer 名つきで指すのは `:754` のみ) |
 | (vi) | preamble `:28` の扱いを本書の中で確定させる | **監督裁定 (a) で確定: 触らない。** R-65 の変更セットで preamble を再実測するときに in place で直す (§1.3.3、§3) |
 
+### 1.12 訂正註 (2026-09-20 追記。§1.1〜§1.9 の本文は書き換えない)
+
+- **訂正註 1 (§1.2 (2) の確定文からの逸脱。文のレビューの中 1 件、監督裁定)**: `whose stage 2 and stage 4 preconditions` を **`whose stage 2 preconditions`** にした。理由: `apply-platform-migration` が走るのは runbook の段の表で **stage 2 だけ**であり、指し先の主張は stage 4 については Gate-0 の ready しか述べない。これに伴い §1.2 (2) の確定文は 545 → **533** 字、対象ブロックは 12,528 → **12,516** (残り 2,672 → **2,684**)、§1.2 (5) の再実測文の**数値 2 箇所**が動いた。
+- **訂正註 2 (§1.7 の変異の anchor)**: **M1** の `old` の anchor は **`section 10), whose stage 2`** にした (§1.7 が書いた元の anchor は、§1.11 の (i) の反映で確定文から消えていた)。**M2** の詰め物は新しい残り字数に合わせて再計算した。期待する赤のテストは §1.7 のまま。
+- **訂正註 3 (文のレビューの低 1 件)**: §1.2 (5) の再実測文を、段の折り幅 (**63〜81 桁**) で折り直した (**文字は不変**)。
+- **訂正註 4 (性能差分、監督裁定)**: 性能差分 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.3 の 27) は**計測しない**。実行されるコードが 1 行も変わらない `.md` 2 ファイルの変更だからである。
+- **訂正註 5 (決定の出所)**: §1.1 の決定 (D-1〜D-6) と、設計レビュー・文のレビューに対する裁定は、**依頼者指示 2026-09-19 の委任**の下で監督が**推奨として**下した (§0)。引き継ぎ書で**事後報告**する。
+
 ## 2. 受け入れ
 
 監督が完了ゲート (`tools/dev/gate.py -C .claude/worktrees/jovial-almeida-97c9fb`) の集計行と §1.6 を照合して判定する。**Class D なので受け入れ監査を入れる** (§1.9)。受理したら、台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-60 行・R-61 行に追記して閉じ (行は消さない)、引き継ぎ書で依頼者へ**事後報告**する (§0)。
+
+**監督の判定 (2026-09-20): 受け入れ。** 根拠は 3 つ。(a) §1.6 の**完了条件 10 件すべて充足**、未充足 0 (受け入れ監査 1 回が独立に照合。§1.10)。(b) 最終の木の完了ゲートが `3789 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0、共有クラスタ差分 0 (info) で、`docs/work-orders/OPERATING_CONDITIONS.md` §1.3 の 22・26 の合格条件 (failed = 0 / skipped = 0 / xfailed = 0) を満たす。(c) §1.2 の確定文からの逸脱は §1.12 の訂正註 1〜3 の 3 件だけで、いずれも監督裁定として記録済み。統合は main `b0f6e50` (作業 `182a398`)、push は無し。台帳の追記と R-70 の起票は `RM` (= `docs/design/ROADMAP_POST_PHASE7_V1.md`) **v1.77**。
 
 ## 3. 本書の範囲外 (申し送り。列挙のみで、本書の WP では行わない)
 
