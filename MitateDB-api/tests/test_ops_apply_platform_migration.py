@@ -1,8 +1,8 @@
 """`ops apply-platform-migration` -- the public subcommand
-that applies one platform migration file (never a per-application
-upgrade, never the bootstrap-only 0001/0002) a second (or later) time
-against a running cluster, and the static coverage proving which
-subcommands' own `--lock-timeout` is required.
+that applies a run of one or more platform migration files (never a
+per-application upgrade, never the bootstrap-only 0001/0002) a second
+(or later) time against a running cluster, and the static coverage
+proving which subcommands' own `--lock-timeout` is required.
 
 Covers: filename validation (enumeration, path separators, directory
 containment, no value echoed on rejection, a symlinked migrations

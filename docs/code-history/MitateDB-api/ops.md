@@ -638,6 +638,20 @@ new:
 Against production, run it only through the runbook's gated procedure (docs/cloud-run-cloud-sql.md section 10).
 ```
 
+### correction: 2026-09-20
+
+- reason: the subcommand now accepts a run of one or more files in one invocation, not exactly one
+
+old:
+```
+`apply-platform-migration` -- applies one platform migration file (never a per-application upgrade, never the bootstrap-only 0001/0002) a second (or later) time against a running cluster.
+```
+
+new:
+```
+`apply-platform-migration` -- applies a run of one or more platform migration files (never a per-application upgrade, never the bootstrap-only 0001/0002) a second (or later) time against a running cluster.
+```
+
 ## CH-0539
 
 - moved from: `src/mitatedb_api/ops.py` (`cmd_apply_platform_migration`)
@@ -664,6 +678,20 @@ Never run against production before an isolated proof, an independent audit, and
 new:
 ```
 Against production, run it only through the runbook's gated procedure (docs/cloud-run-cloud-sql.md section 10).
+```
+
+### correction: 2026-09-20
+
+- reason: the subcommand now accepts a run of one or more files in one invocation, not exactly one
+
+old:
+```
+Applies one platform migration file a second (or later) time against a running cluster.
+```
+
+new:
+```
+Applies a run of one or more platform migration files a second (or later) time against a running cluster.
 ```
 
 ## CH-0540

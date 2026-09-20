@@ -118,7 +118,7 @@ RESTATED_PRECONDITION_PHRASES = ("isolated proof", "requester approval")
 _RUNBOOK_SECTION_RE = re.compile(r"docs/cloud-run-cloud-sql\.md section (\d+)")
 
 _SECTION_HEADING_FIRST_LINE = (
-    "# `apply-platform-migration` -- applies one platform migration file"
+    "# `apply-platform-migration` -- applies a run of one or more"
 )
 
 
