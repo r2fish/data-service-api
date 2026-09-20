@@ -193,6 +193,12 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*MitateDB-api Evidence claim, `ops inventory` item (6)'s own test-name list, superseded 2026-09-20 (Version 2.13, R-57 WP-3 -- R-57 WP-1 renamed `test_inventory_ddl_lock_confirmed_after_apply_platform_migration_0013` to `test_inventory_ddl_lock_confirmed_after_0013_is_applied`, since that test now applies 0013 by a direct psql call rather than through `apply-platform-migration`'s own now-refusing solo-file path), verbatim:*
+
+- `ops inventory` item (6) reads the value 0013 sets: `MitateDB-api/tests/test_ops_inventory.py::test_inventory_ddl_lock_is_confirmed_by_default_bootstrap_alone`, `::test_inventory_ddl_lock_confirmed_after_apply_platform_migration_0013`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_zero`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_negative`, `::test_inventory_ddl_lock_is_blocked_when_statement_timeout_is_unparseable`, `::test_inventory_ddl_lock_is_blocked_when_only_the_application_runtime_role_is_unbounded`, `::test_inventory_ddl_lock_is_blocked_when_only_the_application_developer_role_is_unbounded`, `::test_inventory_ddl_lock_blocked_outranks_unknown_when_mixed_with_an_undeclared_role`, `::test_inventory_ddl_lock_minus_one_and_zero_statement_timeout_mixture_is_unknown`, `::test_inventory_exit_code_is_2_when_ddl_lock_is_blocked`, `::test_inventory_ddl_lock_key_set_is_the_same_on_the_psycopg_error_path`.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -269,6 +275,32 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 *MitateDB-api Status claim, the versions section 10's three reviewed subjects stand at, superseded 2026-09-19 (Version 2.10, R-54 WP-3 -- the same move of the 10.7 table to version 4, and R-54's own `0004` stages are likewise unapplied in production), verbatim:*
 
 - Section 10's three reviewed subjects stand at these versions -- the 10.6 table at 3, the 10.7 table at 3, the 10.10 procedure at 6 -- and each stays a draft until section 10.8's own row names that same version for it; section 10.8 is the single place that state is read from, and a row naming an earlier version counts as no record at all. As of this version of this file, nothing in section 10 has been run against production, and `0014_role_connection_limits_rollout.sql` has not been applied to production either -- every value and every judgment above was measured on a throwaway test cluster.
+
+---
+
+*MitateDB-api Control claim, `apply-platform-migration`'s own file-count and closure behavior, superseded 2026-09-20 (Version 2.13, R-57 WP-3 -- R-57 WP-1 gives `apply-platform-migration` a run of one or more FILENAMEs, with ordering/closure acceptance derived from a target-level map, explicit-files-only and mid-run-stop behavior), verbatim:*
+
+- **`apply-platform-migration` (R-45 WP-E)**: applies one platform migration file (a pinned constant: 0005/0007/0011/0012/0013/0014 only, never the bootstrap-only 0001/0002) against `MITATEDB_PROVISION_DSN`; FILENAME is a bare name (no path separator), matched against that pinned enumeration, and resolved (both the migrations directory and the candidate file, symlinks followed) to confirm it stays inside the migrations directory before any psql subprocess starts -- the rejected value is never echoed;
+
+---
+
+*MitateDB-api Evidence claim, `test_ops_apply_platform_migration.py`'s own test count and content summary, superseded 2026-09-20 (Version 2.13, R-57 WP-3 -- R-57 WP-1 raises the file's test count from 51 to 75 and adds run-acceptance/closure/explicit-files-only/mid-run-stop/real-PostgreSQL-ordering coverage), verbatim:*
+
+- `MitateDB-api/tests/test_ops_apply_platform_migration.py` (51 tests: filename validation, the psql-variable table (quoted-form-only reference, no bare `:name`), DSN-via-environment, redaction, drift-then-restore for 5 of the 6 accepted files (0005/0007/0011/0012/0013), 0013's and 0014's own retroactive/forward-provisioning/transactional/skip-missing-role/permission-failure coverage, 0014's own preservation of the setting 0013 adds, and the AST-derived DDL-flowing-subcommand and psql-file-launching-function sets) and `MitateDB-api/tests/test_platform_migration_reapply.py::test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix` (also covers 0005/0013/0014; re-application routed through `apply-platform-migration` with drift-then-restore, replacing the earlier bare-psql re-application).
+
+---
+
+*MitateDB-api Evidence claim, the runbook acceptance record and the versions it names, superseded 2026-09-20 (Version 2.13, R-57 WP-3 rework, supervisor ruling item 1 -- the section 10.6 table moved to version 4 and the section 10.10 procedure to version 7, both following `apply-platform-migration` accepting a run of FILENAMEs and refusing a solo `0012`/`0013` application with a later file that redefines its own targets, and were accepted at those versions by an independent review of 2026-09-20; section 10.7 is unchanged at version 4, since this change set touches only prose outside its own table), verbatim:*
+
+- Runbook acceptance for the section 10.6 table (version 3), the section 10.7 table (version 4) and the section 10.10 procedure (version 6): the acceptance record in `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.8 (conclusion, version reviewed, where the review is recorded, date accepted). Section 10.7 moved to version 4 in this change set -- its deprovision row now carries the temporary self-grant and `ALLOW_CONNECTIONS false` stages R-54 adds to `0004` -- and was accepted at that version by an independent review of 2026-09-19. This claim carries no mutation of its own -- it is an audit correspondence, and its verbatim collation record is the design register `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` section 12.7 for sections 10.6 and 10.10 and `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` section 5 for section 10.7's own version 4, each named by the matching row of section 10.8.
+
+---
+
+*MitateDB-api Status claim, the versions section 10's three reviewed subjects stand at, superseded 2026-09-20 (Version 2.13, R-57 WP-3 rework, supervisor ruling item 1 -- the same move of the 10.6 table to version 4 and the 10.10 procedure to version 7, and R-57's own run/closure behavior is likewise unapplied in production), verbatim:*
+
+- Section 10's three reviewed subjects stand at these versions -- the 10.6 table at 3, the 10.7 table at 4, the 10.10 procedure at 6 -- and each stays a draft until section 10.8's own row names that same version for it; section 10.8 is the single place that state is read from, and a row naming an earlier version counts as no record at all. As of this version of this file, nothing in section 10 has been run against production, and neither `0014_role_connection_limits_rollout.sql` nor the `0004` stages R-54 adds (which are what moved the 10.7 table to version 4) has been applied to production either -- every value and every judgment above was measured on a throwaway test cluster.
+
+---
 
 ## SI-10
 

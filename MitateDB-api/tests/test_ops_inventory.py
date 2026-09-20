@@ -1345,11 +1345,15 @@ def test_inventory_ddl_lock_minus_one_and_zero_statement_timeout_mixture_is_unkn
     assert report == {"judgment": "unknown", "remediation_required": False, "reason": None}
 
 
-def test_inventory_ddl_lock_confirmed_after_apply_platform_migration_0013(monkeypatch, capsys):
+def test_inventory_ddl_lock_confirmed_after_0013_is_applied(monkeypatch, capsys):
     """A platform bootstrapped only through 0012
-    (0013 not yet applied) reads item (6) as unknown; applying 0013 alone
-    through `apply-platform-migration` -- no further declaration step --
-    makes it confirmed."""
+    (0013 not yet applied) reads item (6) as unknown; applying 0013
+    alone -- no further declaration step -- makes it confirmed. Applies
+    0013 directly via psql (design D-6, R-57): a solo `0013` is now
+    refused by `apply-platform-migration` (its own successor `0014` is
+    absent from a single-file call); this test's own subject is item
+    (6)'s own read of 0013's SQL-level effect, unrelated to that
+    refusal."""
     _require_admin_connection()
     admin_dsn = _admin_dsn()
     prefix = f"r45wpbinvf29{secrets.token_hex(4)}"
@@ -1367,25 +1371,7 @@ def test_inventory_ddl_lock_confirmed_after_apply_platform_migration_0013(monkey
             conn.close()
         assert before["judgment"] == "unknown"
 
-        # `apply-platform-migration` refuses a leftover ambient libpq
-        # connection variable the DSN itself does not cover (e.g. the
-        # test infrastructure's own `PGPASSFILE`) -- cleared here, for
-        # this ONE call only, and restored immediately after so `admin_
-        # dsn` (which has no embedded password of its own, unlike
-        # `info.provision_dsn`) keeps working for this test's own later
-        # `_sweep_prefix` cleanup.
-        ambient_names = (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY)
-        saved_ambient = {name: os.environ.get(name) for name in ambient_names}
-        for name in ambient_names:
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(info.migrations_dir))
-        rc = ops.main([
-            "apply-platform-migration", "0013_role_statement_timeouts.sql", "--lock-timeout", "5000ms",
-        ])
-        for name, value in saved_ambient.items():
-            if value is not None:
-                monkeypatch.setenv(name, value)
-        assert rc == 0
+        _run_psql(info.provision_dsn, info.migrations_dir / "0013_role_statement_timeouts.sql")
 
         conn = ops._inventory_connect(info.provision_dsn)
         try:

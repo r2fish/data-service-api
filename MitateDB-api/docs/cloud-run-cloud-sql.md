@@ -1564,11 +1564,14 @@ module docstring).
   with `--confirm '<the printed phrase>'`. **`--lock-timeout` is required
   and has no default** (same value shape as `upgrade-applications`;
   §10.7's deprovision row is where the value comes from).
-- `apply-platform-migration <FILENAME> --lock-timeout <value>
-  [--api-role ROLE --controlplane-role ROLE]` -- requires
-  `MITATEDB_PROVISION_DSN`; re-applies one of the accepted platform
-  migrations (§10.10). **`--lock-timeout` is required and has no default**
-  (§10.7 is where the value comes from).
+- `apply-platform-migration <FILENAME> [<FILENAME> ...] --lock-timeout
+  <value> [--api-role ROLE --controlplane-role ROLE]` -- requires
+  `MITATEDB_PROVISION_DSN`; re-applies one or more of the accepted
+  platform migrations, in migration order, as one run (§10.10).
+  **`--lock-timeout` is required and has no default** (§10.7 is where
+  the value comes from; the tool does not check that a run's files
+  share one §10.7 value, so composing a run only from files whose
+  §10.7 value agrees is the operator's own responsibility).
 - `inventory` -- requires `MITATEDB_PROVISION_DSN`; the read-only Gate-0
   DB-layer read (§10.5). It opens its own read-only connections and
   changes nothing.
@@ -2362,7 +2365,10 @@ value only in the case §10.4.3's table describes:
 ### 10.6 Per-migration compatibility table (item (5))
 
 **This table is a draft. The compatibility judgments are not settled until
-the independent review in §10.8 accepts them.** Table version: **3**.
+the independent review in §10.8 accepts them.** Table version: **4**
+(2026-09-20, R-57 WP-3: follows `apply-platform-migration` accepting a
+run of FILENAMEs and refusing a solo `0012`/`0013` application that has
+a later file redefining its own targets).
 Change the table and the version goes up by one and §10.8's acceptance
 record goes back to "not accepted".
 
@@ -2395,9 +2401,9 @@ record goes back to "not accepted".
 | `0005_application_audit.sql` | applied (platform) | none; not reverted | **compatible**. Adds `mitatedb_registry.application_audit` and the `mitatedbsvc_auditreader` role, grants `mitatedbsvc_api` INSERT on the new table plus USAGE on its sequence, and adds a new SELECT grant for `mitatedbsvc_auditreader` on the EXISTING `mitatedb_registry.control_audit` without narrowing the grant already there (`0002` grants the control plane INSERT on that table) -- it names no existing table in any `ALTER`/`DROP` (fact: the file's own statements and header). A revision that lacks it reads and writes none of the new objects | fact | none: the judgment rests on `0005`'s own statements, so it holds at every ref |
 | `0007_platform_declarations.sql` | applied (platform), inside the numbered set. **Re-applying it is idempotent but NOT value-neutral**: it re-sets both roles' `statement_timeout` and `idle_in_transaction_session_timeout` to `5000ms` unconditionally, and it replaces the `audit_writer_roles` declaration row with the pair passed in `--api-role`/`--controlplane-role` (`ON CONFLICT ... DO UPDATE`). Record both before applying and restore them straight afterwards (§10.10 steps 2 and 4) | none; not reverted | **compatible (inference), with one part left unverified**. A pre-`0007` revision does not read `platform_declarations` and reads surfaces from env instead (fact: that revision's own `config.py`). The effect it does feel is the role-level `statement_timeout`/`idle_in_transaction_session_timeout` (5000ms) on `mitatedbsvc_api`/`mitatedbsvc_controlplane`; a role setting applies at login, so sessions that revision opens after the migration carry it while sessions already open keep their own. That revision applied the same two values itself with `SET SESSION`, but only on the audit write connection (fact: that revision's own `application_audit.py`). **Unverified: whether that revision's other queries (registry reads and the like) all finish inside 5 seconds.** Accepting this table at its current version accepts that residual risk -- such a query is cancelled with `canceling statement due to statement timeout` instead of running unbounded | fact + inference, one part unverified | a ref whose `config.py` reads the surfaces from env and performs no `platform_declarations` read, and whose `application_audit.py` applies both timeouts with `SET SESSION` on the audit write connection |
 | `0011_process_ceilings.sql` | applied (platform) | none; not reverted | **compatible**. It only widens the `key` CHECK vocabulary. A pre-`0011` revision's declaration read picks known keys by name and ignores a row with an unknown key (`process_ceilings`) (fact: that revision's own `platform_declarations.read_platform_declarations`); a pre-`0007` revision does not read the table at all | fact | a ref whose declaration read selects known keys by name and ignores an unknown key, or a ref that does not read the table at all |
-| `0012_role_connection_limits.sql` | applied (platform). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it.** No `ops` subcommand prints those current values -- item (8)'s output carries judgment keys only, and `verify-declarations`'s F-16 names a value only inside its own failure message, for the first role that fails -- so read them with a catalog read over the provision DSN and record them before applying (§10.10 step 2). (2026-09-18: `0014_role_connection_limits_rollout.sql` now raises the same roles above these values, so re-applying `0012` ALONE after `0014` lowers `mitatedbsvc_api`, `mitatedbsvc_controlplane` and every EXISTING application's runtime and developer role back to 68 / 20 / 36, and drops `0013`'s `statement_timeout` line from every FUTURE application's roles; `mitatedbsvc_auditreader` is unaffected, because `0012` never alters it. Re-applying `0014` compensates. The set's own order is `0012` -> `0013` -> `0014` -- §10.10's numbered-set note and §10.10.1 step 7) | none; not reverted | **compatible**. Sets each role's `CONNECTION LIMIT` to a fixed value (68 / 20 / 36) and replaces `begin_provision_application` with the same signature and result columns (fact: `0002`'s and `0012`'s own definitions). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 68 / 20 / 36 -- compute it from that ref's own `config.py` |
-| `0013_role_statement_timeouts.sql` | applied (platform) | none; not reverted | **compatible (inference)**. Adds a role-level `statement_timeout` (`5000ms`) to `mitatedbsvc_auditreader` and to every application's runtime/developer role, and replaces `begin_provision_application` so future roles get the same setting -- additive; it drops and revokes nothing (fact: the file's own header and statements). (2026-09-18: that still describes `0013` against `0012`, but it no longer holds for a re-application after `0014_role_connection_limits_rollout.sql`: `0013` alone afterwards lowers every FUTURE application's runtime and developer role to `CONNECTION LIMIT` 36 -- the value `0013` inherited from `0012` -- while every EXISTING role keeps its `0014` value and every future role still carries the `statement_timeout`. Re-applying `0014` compensates) A revision that lacks it passes its own per-request deadline with `SET LOCAL`, which overrides the role setting; the setting therefore bites only on paths that carry no deadline (inference). Note: an audit query slower than the new bound is cancelled rather than running unbounded | fact + inference | a ref whose request paths set their own per-request deadline with `SET LOCAL statement_timeout`. The note holds at every ref: a path that carries no deadline of its own is bounded by the role setting |
-| `0014_role_connection_limits_rollout.sql` | applied (platform), last in the numbered set. It raises `mitatedbsvc_api` to `CONNECTION LIMIT` 132, `mitatedbsvc_controlplane` to 36, `mitatedbsvc_auditreader` to 12 and every application's runtime and developer role to 68 -- the demand of TWO revisions of the same process serving at once, which is what a rollout puts side by side (§10.10's precondition arithmetic). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it**, exactly as `0012`'s own row warns: this file SETs its four values rather than raising toward them. On a deployment carrying `0012`'s and `0013`'s own values it lowers nothing, but a limit raised by hand above 132 / 36 / 12 / 68 comes back down to it -- so read the current values with the catalog read and record them before applying, the same way `0012`'s row says to (§10.10 step 2). **Re-applying `0014` itself is idempotent, but the two files before it are not value-neutral after it**: `0012` alone afterwards lowers the api, controlplane and existing application roles back to 68 / 20 / 36 and drops `0013`'s `statement_timeout` from future application roles, and `0013` alone afterwards lowers future application roles to 36 while leaving every existing role as `0014` set it. Re-applying `0014` compensates for either. **The second case is caught by nothing this procedure runs until an application is provisioned after it** -- item (8) compares the roles that exist, and until the next provisioning call no role carries the lowered value (§10.10.1 step 7). So apply the set in its own order, `0012` -> `0013` -> `0014`, every time | none; not reverted | **compatible**. Sets four `CONNECTION LIMIT`s to fixed values above `0012`'s and `0005`'s own (132 / 36 / 12 / 68), raising each of those and lowering only a limit already above its own new value, and drops and revokes nothing, and replaces `begin_provision_application` with the same signature and result columns, keeping `0013`'s `statement_timeout` lines (fact: the file's own header and statements). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 132 / 36 / 12 / 68 -- compute it from that ref's own `config.py`, the same way `0012`'s row does |
+| `0012_role_connection_limits.sql` | applied (platform). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it.** No `ops` subcommand prints those current values -- item (8)'s output carries judgment keys only, and `verify-declarations`'s F-16 names a value only inside its own failure message, for the first role that fails -- so read them with a catalog read over the provision DSN and record them before applying (§10.10 step 2). (2026-09-18: `0014_role_connection_limits_rollout.sql` now raises the same roles above these values, so re-applying `0012` ALONE after `0014` lowers `mitatedbsvc_api`, `mitatedbsvc_controlplane` and every EXISTING application's runtime and developer role back to 68 / 20 / 36, and drops `0013`'s `statement_timeout` line from every FUTURE application's roles; `mitatedbsvc_auditreader` is unaffected, because `0012` never alters it. Re-applying `0014` compensates. The set's own order is `0012` -> `0013` -> `0014` -- §10.10's numbered-set note and §10.10.1 step 7) `apply-platform-migration` refuses a lone `0012`; that call must also carry `0013` and `0014` in the same run, and a solo `0012` application is possible only outside the tool, applied directly with `psql`. | none; not reverted | **compatible**. Sets each role's `CONNECTION LIMIT` to a fixed value (68 / 20 / 36) and replaces `begin_provision_application` with the same signature and result columns (fact: `0002`'s and `0012`'s own definitions). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 68 / 20 / 36 -- compute it from that ref's own `config.py` |
+| `0013_role_statement_timeouts.sql` | applied (platform). `apply-platform-migration` refuses a lone `0013`; that call must also carry `0014` in the same run, and a solo `0013` application is possible only outside the tool, applied directly with `psql`. | none; not reverted | **compatible (inference)**. Adds a role-level `statement_timeout` (`5000ms`) to `mitatedbsvc_auditreader` and to every application's runtime/developer role, and replaces `begin_provision_application` so future roles get the same setting -- additive; it drops and revokes nothing (fact: the file's own header and statements). (2026-09-18: that still describes `0013` against `0012`, but it no longer holds for a re-application after `0014_role_connection_limits_rollout.sql`: `0013` alone afterwards lowers every FUTURE application's runtime and developer role to `CONNECTION LIMIT` 36 -- the value `0013` inherited from `0012` -- while every EXISTING role keeps its `0014` value and every future role still carries the `statement_timeout`. Re-applying `0014` compensates) A revision that lacks it passes its own per-request deadline with `SET LOCAL`, which overrides the role setting; the setting therefore bites only on paths that carry no deadline (inference). Note: an audit query slower than the new bound is cancelled rather than running unbounded | fact + inference | a ref whose request paths set their own per-request deadline with `SET LOCAL statement_timeout`. The note holds at every ref: a path that carries no deadline of its own is bounded by the role setting |
+| `0014_role_connection_limits_rollout.sql` | applied (platform), last in the numbered set. It raises `mitatedbsvc_api` to `CONNECTION LIMIT` 132, `mitatedbsvc_controlplane` to 36, `mitatedbsvc_auditreader` to 12 and every application's runtime and developer role to 68 -- the demand of TWO revisions of the same process serving at once, which is what a rollout puts side by side (§10.10's precondition arithmetic). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it**, exactly as `0012`'s own row warns: this file SETs its four values rather than raising toward them. On a deployment carrying `0012`'s and `0013`'s own values it lowers nothing, but a limit raised by hand above 132 / 36 / 12 / 68 comes back down to it -- so read the current values with the catalog read and record them before applying, the same way `0012`'s row says to (§10.10 step 2). **Re-applying `0014` itself is idempotent, but the two files before it are not value-neutral after it**: `0012` alone afterwards lowers the api, controlplane and existing application roles back to 68 / 20 / 36 and drops `0013`'s `statement_timeout` from future application roles, and `0013` alone afterwards lowers future application roles to 36 while leaving every existing role as `0014` set it. Re-applying `0014` compensates for either. **The second case is caught by nothing this procedure runs until an application is provisioned after it** -- item (8) compares the roles that exist, and until the next provisioning call no role carries the lowered value (§10.10.1 step 7). `apply-platform-migration` enforces the order: it refuses `0012` or `0013` given without every one of its own later files in the same run, so a run that includes `0012` is always `0012` `0013` `0014`, a run that includes `0013` always carries `0014`, and `0014` can still be applied on its own | none; not reverted | **compatible**. Sets four `CONNECTION LIMIT`s to fixed values above `0012`'s and `0005`'s own (132 / 36 / 12 / 68), raising each of those and lowering only a limit already above its own new value, and drops and revokes nothing, and replaces `begin_provision_application` with the same signature and result columns, keeping `0013`'s `statement_timeout` lines (fact: the file's own header and statements). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 132 / 36 / 12 / 68 -- compute it from that ref's own `config.py`, the same way `0012`'s row does |
 | `0006_declared_field_types_upgrade.sql` (per-application) | applied by `upgrade-applications` to applications that have not recorded it | none | **compatible (inference)**. Adds a table and fills type rows from the existing columns. A pre-`0006` revision does not read that table | inference | a ref that does not read the declared-field-types table |
 | `0008_platform_upgrades_upgrade.sql` (per-application) | as above | none | **compatible**. Adds the ledger table. "Not yet applied" is decided by (numbers this revision ships) minus (numbers recorded), so extra recorded numbers are ignored (fact: `platform_upgrades.pending_upgrade_numbers`). A pre-`0008` revision does not read the ledger | fact | a ref whose own `pending_upgrade_numbers` computes (numbers it ships) minus (numbers recorded), and which does not read the ledger |
 | `0009_field_constraints_upgrade.sql` (per-application) | as above | none | **compatible (with a note)**. Adds columns that have defaults. A pre-`0009` revision's INSERT into `_mdb_field_types` names its columns explicitly (fact: that revision's own `backend_postgres.py`). Note: constraints the new revision declared (`enum_json`/`nullable`) are not enforced by the old revision (inference) | fact + inference | a ref whose `backend_postgres.py` names the columns explicitly in its INSERT into `_mdb_field_types` |
@@ -2452,10 +2458,14 @@ one and §10.8's acceptance record goes back to "not accepted".
 **How the table's values are passed**:
 
 - Platform migrations (`0005`, `0007`, `0011`, `0012`, `0013`, `0014`):
-  `apply-platform-migration <filename> --lock-timeout <the table's value>`.
-  The argument is required and has no default. Do not assemble
-  `PGOPTIONS` by hand -- the subcommand builds the psql environment from
-  the DSN and adds the lock timeout to `PGOPTIONS` itself.
+  `apply-platform-migration <filename> [<filename> ...] --lock-timeout
+  <the table's value>`. The argument is required and has no default, and
+  the tool does not carry its own copy of this table (design D-4, R-5) --
+  a run composes files that share the same §10.7 value, and mixing files
+  whose §10.7 values differ is the operator's own responsibility, not
+  something the tool checks. Do not assemble `PGOPTIONS` by hand -- the
+  subcommand builds the psql environment from the DSN and adds the lock
+  timeout to `PGOPTIONS` itself.
 - Per-application upgrade: `upgrade-applications --lock-timeout <the
   table's value>`, required and with no default (`--dry-run` needs it
   too).
@@ -2476,9 +2486,9 @@ version counts as no record at all.**
 
 | Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
 |---|---|---|---|---|---|---|
-| §10.6 compatibility | 3 | accepted | 3 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
+| §10.6 compatibility | 4 | accepted | 4 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | 2026-09-20 | supervisor |
 | §10.7 lock / stop time / `lock_timeout` | 4 | accepted | 4 | `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` §5 | 2026-09-19 | supervisor |
-| §10.10 upgrade procedure (stages 2-4) | 6 | accepted | 6 | `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12.7 | 2026-09-18 | supervisor |
+| §10.10 upgrade procedure (stages 2-4) | 7 | accepted | 7 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | 2026-09-20 | supervisor |
 
 ### 10.9 Gate-0 overall judgment and report
 
@@ -2556,8 +2566,11 @@ acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <
 
 ### 10.10 Platform upgrade procedure (stages 2-4)
 
-Procedure version: **6**. Change the procedure and the version goes up by
-one and §10.8's acceptance record goes back to "not accepted".
+Procedure version: **7** (2026-09-20, R-57 WP-3: follows
+`apply-platform-migration` accepting a run and refusing a solo file with
+a later file that redefines its own targets). Change the procedure and
+the version goes up by one and §10.8's acceptance record goes back to
+"not accepted".
 
 **Preconditions**:
 
@@ -2700,12 +2713,17 @@ declaration and per-application upgrade is re-appliable on item (10)'s
 evidence).
 
 **Applying a platform migration**: use `apply-platform-migration`, which
-takes the DSN from the environment only, passes `ON_ERROR_STOP=1`, puts
-the required `--lock-timeout` value into the psql environment itself, and
-redacts connection values out of psql's output before any failure text is
-printed. The FILENAME argument is a bare file name: a path separator is
-refused, the name must be one of the accepted platform migrations, and the
-resolved path must stay inside the migrations directory.
+takes the DSN from the environment only, accepts one or more FILENAMEs as
+a single run, passes `ON_ERROR_STOP=1`, puts the required `--lock-timeout`
+value into the psql environment itself, and redacts connection values out
+of psql's output before any failure text is printed. Each FILENAME
+argument is a bare file name: a path separator is refused, the name must
+be one of the accepted platform migrations, and the resolved path must
+stay inside the migrations directory. A run's FILENAMEs must be given in
+migration order with no repeat, and a file with a later file that
+redefines one of its own targets is refused unless every one of those
+later files is given too, in the same run -- both checks run, and refuse
+with a fixed message, before any psql subprocess starts.
 
 ```sh
 (
@@ -2714,7 +2732,7 @@ resolved path must stay inside the migrations directory.
     --secret=<provision-dsn-secret> --project=<project> --quiet 2>/dev/null)" || exit 1
   export MITATEDB_PROVISION_DSN
   PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops apply-platform-migration \
-    <filename> --lock-timeout <the §10.7 value> [--api-role ... --controlplane-role ...]
+    <filename> [<filename> ...] --lock-timeout <the §10.7 value, the same for every file in the run> [--api-role ... --controlplane-role ...]
 )
 ```
 
@@ -2723,7 +2741,10 @@ order.** The set is `0005_application_audit.sql`,
 `0007_platform_declarations.sql`, `0011_process_ceilings.sql`,
 `0012_role_connection_limits.sql`, `0013_role_statement_timeouts.sql`,
 `0014_role_connection_limits_rollout.sql`, in
-that order, every time. Two reasons:
+that order, every time. `apply-platform-migration` enforces the order and
+the `0012`/`0013`/`0014` closure within one run; it does not force
+`0005`, `0007` and `0011` into that same run, so this operator rule still
+covers the rest of the set. Two reasons for the rule:
 
 - `0012` and `0013` both `CREATE OR REPLACE` the same
   `begin_provision_application` function. Applying `0012` alone after
@@ -2771,8 +2792,9 @@ transaction, so nothing at all changes; in `0012` a failure in sections
 
 To fix it, grant the missing option explicitly for **each role the failure
 named** -- run this as a role that already holds ADMIN OPTION on that
-role, or as the cluster's administrative role, and then apply the numbered
-set again from the file that failed:
+role, or as the cluster's administrative role, and then run the same call
+again, in full, from its first file (every file in a run is idempotent,
+and the same §10.7 `--lock-timeout` value applies to the whole call):
 
 ```sql
 GRANT <the role> TO <provision role> WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
@@ -2829,14 +2851,25 @@ and neither has any of it been measured against production:
   (68 on a cluster where only `0012` had run) and nothing is left
   half-applied;
 - the way out is the same `GRANT ... WITH ADMIN TRUE, INHERIT FALSE,
-  SET FALSE` above, for each role the failure names, and then the
-  numbered set again from the file that failed.
+  SET FALSE` above, for each role the failure names, and then running
+  the same call again, in full, from its first file (every file in a
+  run is idempotent).
 
 `MitateDB-api/tests/test_ops_apply_platform_migration.py::test_apply_
 platform_migration_0014_is_transactional_and_rolls_back_on_permission_
 failure` holds the rollback -- a non-zero exit and the api role's limit
 unchanged at 68. The SQLSTATE above is from the same measurement, not
 from anything that test asserts.)
+
+**Correction note (2026-09-20, design `docs/design/
+MITATEDB_PLATFORM_MIGRATION_RUN_V0_1.md` G-1; this record is not
+rewritten, only annotated -- `docs/work-orders/OPERATING_CONDITIONS.md`
+§1.8 item 57)**: since R-57, `apply-platform-migration` refuses a lone
+`0012` or a lone `0013`, because the later file(s) that redefine their
+targets (`_PLATFORM_MIGRATION_SUPERSEDED_BY`) are not given in the same
+call; a lone `0014` is still accepted. The single-file `0013` invocation
+measured above is a record of the tool's pre-R-57 shape, when it
+accepted only one FILENAME per call.
 
 #### 10.10.1 Stage 2 -- platform remediation
 
@@ -3051,23 +3084,40 @@ against production):
    deployment does not keep, which is exactly what a client is entitled to
    rely on. **This step does not cover the downward direction**: it needs a
    separate decision about the order or the value, so stop and ask for one.
-7. **`0012`, then `0013`, then `0014`**: `apply-platform-migration
-   0012_role_connection_limits.sql --lock-timeout <the §10.7 value
-   for 0012>`, then
-   `apply-platform-migration 0013_role_statement_timeouts.sql --lock-timeout <the §10.7 value for 0013>`, then
-   `apply-platform-migration 0014_role_connection_limits_rollout.sql --lock-timeout <the §10.7 value for 0014>`. `0013` must come after
-   `0012` and after `0005`, and `0014` after all three; see the
-   numbered-set note and the ADMIN OPTION prerequisite above. **Do not
-   run any of the three at the same time as provisioning** (§10.7's
-   `0012` section 3, `0013` and `0014` rows: all three replace
-   `begin_provision_application`). Then re-run §10.5's `inventory` and
-   check `ddl_lock` (item (6)) and `connection_headroom` (item (8),
-   headroom against `SHOW max_connections`); the full read is step 12.
+7. **`0012`, `0013`, `0014`, as one run**: `apply-platform-migration
+   0012_role_connection_limits.sql 0013_role_statement_timeouts.sql
+   0014_role_connection_limits_rollout.sql --lock-timeout <the §10.7
+   value, the same for `0012`, `0013` and `0014`>`. `0012` must come
+   after `0005`; see the numbered-set note and the ADMIN OPTION
+   prerequisite above. **Do not run this at the same time as
+   provisioning** (§10.7's `0012` section 3, `0013` and `0014` rows: all
+   three replace `begin_provision_application`). Then re-run §10.5's
+   `inventory` and check `ddl_lock` (item (6)) and `connection_headroom`
+   (item (8), headroom against `SHOW max_connections`); the full read is
+   step 12.
 
-   **Re-apply these three as the whole run `0012` -> `0013` -> `0014`,
-   never `0012` or `0013` on its own.** Each of those two replaces
-   `begin_provision_application` with its own `CONNECTION LIMIT`
-   literals, so after `0014` has been applied:
+   **The failure window this run can stop in** (design
+   `MITATEDB_PLATFORM_MIGRATION_RUN_V0_1.md` D-4): a failure partway
+   through does not undo the files that already applied. If the run
+   fails at `0013`, `0012` has already applied, including its section 3
+   (`CREATE OR REPLACE FUNCTION begin_provision_application` and the
+   following `REVOKE`) -- two statements outside the transaction, each
+   auto-committing (§10.7's `0012` section 3 row) -- so
+   `begin_provision_application` is left carrying `0012`'s own values
+   (`CONNECTION LIMIT` 36, no `statement_timeout`) even though the run
+   as a whole did not succeed, a state nothing in this procedure catches
+   on its own. `apply-platform-migration` prints which files applied and
+   which did not run, and says to re-run the whole run from its first
+   file because every file in it is idempotent; do exactly that.
+
+   **`apply-platform-migration` refuses `0012` or `0013` given without
+   every one of its own later files in the same call, so a run that
+   includes `0012` is always `0012` `0013` `0014`, a run that includes
+   `0013` always carries `0014`, and `0014` can still be applied on its
+   own.** The path below stays open outside the
+   tool (a file applied directly with `psql`). Each of those two
+   replaces `begin_provision_application` with its own `CONNECTION
+   LIMIT` literals, so after `0014` has been applied:
 
    - `0012` alone lowers `mitatedbsvc_api` to 68,
      `mitatedbsvc_controlplane` to 20 and every EXISTING application's

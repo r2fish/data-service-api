@@ -290,12 +290,80 @@ _REAPPLY_MIGRATION_SEQUENCE.sort()
 _REAPPLY_STARTING_POINTS = range(len(_REAPPLY_MIGRATION_SEQUENCE) + 1)
 
 #: platform migrations (種別実測により 0005 も含む) -- 2 回目の適用は
-#: それぞれの psql 呼出しを直接もう一度行う。
+#: `apply-platform-migration` を通す。design D-2 (R-57) により `0012`・
+#: `0013`・`0014` は互いに後続関係を持つので 1 回の呼び出しの列として
+#: まとめて渡し (`ops._PLATFORM_MIGRATION_SUPERSEDED_BY` を参照)、後続を
+#: 持たず、誰の後続でもないもの (`0005`・`0007`・`0011`) は単独のまま
+#: 呼ぶ -- どちらに属するかは `_reapply_solo_and_run_groups` がこの
+#: 定数と `ops._PLATFORM_MIGRATION_SUPERSEDED_BY` から実測で導く
+#: (R-57 WP-1 code review fix 3: この定数自身は名前の列挙のみで、
+#: solo/列の分岐先を直接持たない)。
 _REAPPLY_PLATFORM_MIGRATION_FILENAMES = (
     "0005_application_audit.sql", "0007_platform_declarations.sql",
     "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
     "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
 )
+
+
+def _reapply_solo_and_run_groups(
+    filenames: "tuple[str, ...]", superseded_by: "dict[str, tuple[str, ...]]",
+) -> "tuple[tuple[str, ...], tuple[str, ...]]":
+    """`filenames` split into (solo, run): a name with NO successors of
+    its own (`superseded_by.get(name)` empty/absent) AND that is not
+    itself a successor of any OTHER name in `superseded_by` is solo;
+    every other name (participating in some closure chain, as either
+    end) is in the run group, together -- both groups preserve
+    `filenames`'s own relative order, and together they partition it
+    exactly (every name in exactly one group)."""
+    all_successors = {succ for succs in superseded_by.values() for succ in succs}
+    solo = tuple(
+        name for name in filenames
+        if not superseded_by.get(name) and name not in all_successors
+    )
+    run = tuple(name for name in filenames if name not in solo)
+    return solo, run
+
+
+_REAPPLY_PLATFORM_MIGRATION_SOLO_FILENAMES, _REAPPLY_PLATFORM_MIGRATION_RUN_FILENAMES = (
+    _reapply_solo_and_run_groups(_REAPPLY_PLATFORM_MIGRATION_FILENAMES, ops._PLATFORM_MIGRATION_SUPERSEDED_BY)
+)
+
+
+def test_reapply_solo_and_run_groups_partition_a_synthetic_7_file_set() -> None:
+    """R-57 WP-1 code review fix 3: a synthetic 7-file set (extending
+    the real 2-link `0012`->`0013`->`0014` chain shape with a 3rd,
+    independent 2-link chain and 2 solo files) is split into solo/run
+    correctly, and the two groups partition the whole set exactly (no
+    name lost, none in both)."""
+    filenames = ("a.sql", "b.sql", "c.sql", "d.sql", "e.sql", "f.sql", "g.sql")
+    superseded_by = {"b.sql": ("d.sql",), "c.sql": ("f.sql", "g.sql"), "f.sql": ("g.sql",)}
+    solo, run = _reapply_solo_and_run_groups(filenames, superseded_by)
+    assert solo == ("a.sql", "e.sql")
+    assert run == ("b.sql", "c.sql", "d.sql", "f.sql", "g.sql")
+    assert set(solo) | set(run) == set(filenames)
+    assert set(solo) & set(run) == set()
+
+
+def test_reapply_platform_migration_solo_and_run_groups_partition_the_real_constant() -> None:
+    """R-57 WP-1 code review fix 3: the real `_REAPPLY_PLATFORM_
+    MIGRATION_FILENAMES` (`0005`/`0007`/`0011`/`0012`/`0013`/`0014`) is
+    fully accounted for by the solo/run split -- `0011`, whose own
+    §10.7 `--lock-timeout` value (`2s`) differs from `0012`/`0013`/
+    `0014`'s own (`3s`), stays solo as a RESULT of this derivation,
+    never a name listed by hand."""
+    assert _REAPPLY_PLATFORM_MIGRATION_SOLO_FILENAMES == (
+        "0005_application_audit.sql", "0007_platform_declarations.sql", "0011_process_ceilings.sql",
+    )
+    assert _REAPPLY_PLATFORM_MIGRATION_RUN_FILENAMES == (
+        "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
+        "0014_role_connection_limits_rollout.sql",
+    )
+    assert (
+        set(_REAPPLY_PLATFORM_MIGRATION_SOLO_FILENAMES) | set(_REAPPLY_PLATFORM_MIGRATION_RUN_FILENAMES)
+        == set(_REAPPLY_PLATFORM_MIGRATION_FILENAMES)
+    )
+
+
 #: per-application upgrade (種別実測) -- 2 回目の適用は運用の経路
 #: (`upgrade-applications --lock-timeout`) を通す。生の psql では呼ばない。
 _REAPPLY_PER_APPLICATION_UPGRADE_NUMBER_BY_FILENAME = {
@@ -840,13 +908,25 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
         # nothing newly applied.
         _drift_platform_objects_before_reapplication(
             admin_dsn, provision_dsn, registry_schema, api_role, controlplane_role, auditreader_role, runtime_role)
-        for name in _REAPPLY_PLATFORM_MIGRATION_FILENAMES:
+        # design D-2/D-4 (R-57): a name in `_REAPPLY_PLATFORM_MIGRATION_
+        # RUN_FILENAMES` has a LATER file that redefines one of its own
+        # targets (`ops._PLATFORM_MIGRATION_SUPERSEDED_BY`), so
+        # `apply-platform-migration` now refuses any of them alone --
+        # the numbered run applies the whole group in ONE call, in
+        # order. `_REAPPLY_PLATFORM_MIGRATION_SOLO_FILENAMES` has no
+        # such successor and stays solo.
+        for name in _REAPPLY_PLATFORM_MIGRATION_SOLO_FILENAMES:
             if name == "0007_platform_declarations.sql":
                 r = _run_ops(ns, "apply-platform-migration", name, "--lock-timeout", _TEST_LOCK_TIMEOUT,
                             "--api-role", api_role, "--controlplane-role", controlplane_role)
             else:
                 r = _run_ops(ns, "apply-platform-migration", name, "--lock-timeout", _TEST_LOCK_TIMEOUT)
             assert r.returncode == 0, f"{name}: {r.stdout + r.stderr}"
+        r = _run_ops(
+            ns, "apply-platform-migration",
+            *_REAPPLY_PLATFORM_MIGRATION_RUN_FILENAMES, "--lock-timeout", _TEST_LOCK_TIMEOUT,
+        )
+        assert r.returncode == 0, f"{_REAPPLY_PLATFORM_MIGRATION_RUN_FILENAMES} run: {r.stdout + r.stderr}"
         r_upgrade = _run_ops(ns, "upgrade-applications", "--application", _REAPPLY_TEST_APP_ID,
                              "--lock-timeout", _TEST_LOCK_TIMEOUT)
         assert r_upgrade.returncode == 0, r_upgrade.stdout + r_upgrade.stderr
