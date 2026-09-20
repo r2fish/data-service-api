@@ -302,6 +302,18 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api Control claim, the restriction on running `apply-platform-migration` against production, superseded 2026-09-20 (Version 2.14, R-61 -- the WP-E/WP-D work period it names ended when R-45 was accepted on 2026-09-18; the restriction in force is the runbook's own gated procedure (section 10), which the help text and the source text have named since R-53 and R-55), verbatim:*
+
+- never run against production during WP-E/WP-D (isolated proof, independent audit, and requester approval come first, work order section 7) -- every test targets a throwaway PostgreSQL cluster only (`MITATEDB_TEST_ADMIN_DSN`).
+
+---
+
+*MitateDB-api Control claim, the block `0014_role_connection_limits_rollout.sql` takes the raised ceilings from, superseded 2026-09-20 (Version 2.14, R-60 -- `SI-08's own MitateDB-api block` stopped being unique once SI-08's MitateDB-api subsection gained its `ops inventory` named block; the claim now names the `default block`, the term R-50 itself defined for the mandatory first block of a subsection and this file's own re-measurement sentences use), verbatim:*
+
+- **`0014_role_connection_limits_rollout.sql`**: applies the raised ceilings SI-08's own MitateDB-api block states, retroactively (already-provisioned runtime/developer roles, a registry row whose role `pg_roles` no longer carries skipped rather than aborting the file) and going forward (`begin_provision_application`'s own `CREATE OR REPLACE`, both the `CREATE ROLE` branch and its `duplicate_object` fallback), the WHOLE file inside one transaction so a permission failure partway leaves nothing changed rather than a half-applied state;
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
