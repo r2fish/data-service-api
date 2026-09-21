@@ -119,6 +119,12 @@ following a Phase B review finding (`docs/design/CONFORMANCE_ADAPTER_V1.md` §10
 
 ---
 
+*r2db-api Control claim, the audit role's fail-closed write refusals, superseded 2026-09-21 (Version 2.18, R-64 -- the cited test was renamed from `..._all_11_endpoints` to `..._all_13_endpoints` when `audit_query`'s two paths joined the route table, and the claim kept the old name, which resolves to no test), verbatim:*
+
+- fail-closed on the other 8 write operations, durably audited -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, `test_audit_role_http_authorization_matrix_all_11_endpoints` (derives its own enumeration from the real wire route table).
+
+---
+
 ## SI-07
 **MitateDB-api:**
 

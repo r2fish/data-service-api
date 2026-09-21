@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **2.17** (2026-09-21; R-70 -- SI-09's MitateDB-api `platform upgrade` named block, one Control claim corrected in place, no claim moved between blocks: the Platform-upgrade runbook claim said the remediation stage is gated `instead` by the isolated proof, the independent audit and the requester's approval, which could be read as those three conditions applying to the remediation stage only -- weaker than the runbook (`MitateDB-api/docs/cloud-run-cloud-sql.md` section 10), which requires all three before anything in stage 2 or stage 4 runs against production; the claim now says the three conditions come before both state-changing stages and that Gate-0 ready, which gates the candidate stage, does not gate the remediation stage. No new invariant or control. The superseded line verbatim in `CONTROL_MAPPING_HISTORY.md`'s SI-09 section. -- docs/design/ROADMAP_POST_PHASE7_V1.md R-70)
+Version: **2.18** (2026-09-21; R-64 -- SI-06's r2db-api default block, one Control claim's cited test name corrected in place, no claim moved between blocks: the claim cited `..._all_11_endpoints`, which was renamed to `..._all_13_endpoints` when `audit_query`'s two paths joined the route table (SI-02's own r2db-api Control claim already cited the new name); the old name resolved to no test. `conformance-tests/test_control_mapping_register.py` now machine-checks that every Evidence/Control claim's test-name reference in this file resolves to a real `def` -- a full `<path>.py::<name>` form (repository-relative, subsection-independent) or a bare `::<name>`/`` `<name>` `` form (resolved only within the claiming subsection's own peer-scoped test directories; a same-named `def` existing in both peers is not distinguished, that form's own stated limit). No new invariant or control. The superseded line verbatim in `CONTROL_MAPPING_HISTORY.md`'s SI-06 section. -- docs/design/ROADMAP_POST_PHASE7_V1.md R-64)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -97,6 +97,12 @@ claim in `SI-09`'s `MitateDB-api` `platform upgrade` block in place and
 moved nothing): that block is now `12,681` characters (`2,519` left; version
 2.16 left that block at `12,533` characters) and is the longest block, ahead of
 `SI-14`'s `r2db-api` `default block` at `12,624`, unchanged this change set.
+Re-measured 2026-09-21 (version 2.18, after R-64 corrected one Control
+claim's cited test name in `SI-06`'s `r2db-api` `default block` in place and
+moved nothing): that block is now `2,367` characters (`12,833` left),
+unchanged (the corrected name is the same length as the one it replaced);
+the longest block stays `SI-09`'s `MitateDB-api` `platform upgrade` block at `12,681`,
+unchanged this change set.
 
 **【訂正 2026-09-18 (R-50, version 2.7)】** The two sentences rewritten in place
 above each described a block as one whole subsection, which is false once a
@@ -474,7 +480,7 @@ spaces."
 - **`must_rotate` exposure**: `list_credentials` rows for a control-table credential carry their real `must_rotate` value (application rows never carry the key -- the concept does not exist for them) -- `test_issued_secret_appears_only_in_the_response`.
 - **`audit` role**: a second, weaker, distributable control-credential scope (`control_credentials.role` CHECK constraint) narrowed to the 3 read-only endpoints;
 - issuance is ceremony-only (out-of-band CLI, single tx = issue+rotate, distributed already `must_rotate=false`), never in-band;
-- fail-closed on the other 8 write operations, durably audited -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, `test_audit_role_http_authorization_matrix_all_11_endpoints` (derives its own enumeration from the real wire route table).
+- fail-closed on the other 8 write operations, durably audited -- `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`, `test_audit_role_http_authorization_matrix_all_13_endpoints` (derives its own enumeration from the real wire route table).
 - **Revoke-gate role filter**: the "sole remaining control credential" gate (SI-09) filters to `role=="control"` rows only, so an `audit` row can neither mask nor be mistaken for the last administrative credential;
 - revoking an `audit` credential itself is never gated -- `test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_credential`.
 - **Per-application issuance freeze**: `applications.issuance_frozen`, CLI-only, non-destructive;
