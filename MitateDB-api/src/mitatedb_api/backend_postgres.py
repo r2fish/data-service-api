@@ -357,6 +357,9 @@ class PostgresBackend:
                     "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s, %s, %s)"
                 ), list(_BOOKKEEPING_TABLES))
                 count = cur.fetchone()[0]
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.Error as exc:
             self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
@@ -396,6 +399,9 @@ class PostgresBackend:
                 ), [collection])
                 rows = cur.fetchall()
                 declared = self._field_types_locked(cur, collection) if rows else {}
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
             self._developer.rollback()
             # WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
@@ -455,6 +461,9 @@ class PostgresBackend:
                 ), [collection])
                 (exists,) = cur.fetchone()
                 declared = self._field_types_locked(cur, collection) if exists else {}
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
             self._developer.rollback()
             # See `field_domains`'s own identical rework above -- same
@@ -482,6 +491,9 @@ class PostgresBackend:
                 _execute(cur, sql.SQL("SELECT entity, field, declared_type FROM {}")
                           .format(sql.Identifier(_FIELD_TYPES_TABLE)))
                 rows = cur.fetchall()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
             self._developer.rollback()
             # See `field_domains`'s own identical rework above -- same
@@ -541,6 +553,9 @@ class PostgresBackend:
                 ), [collection])
                 (exists,) = cur.fetchone()
                 declared = self._field_constraints_locked(cur, collection) if exists else {}
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
             self._developer.rollback()
             raise StorageConfigurationError(
@@ -599,6 +614,9 @@ class PostgresBackend:
                 ), [collection])
                 (exists,) = cur.fetchone()
                 types, constraints = self._field_types_and_constraints_locked(cur, collection) if exists else ({}, {})
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
             self._developer.rollback()
             raise StorageConfigurationError(
@@ -624,6 +642,9 @@ class PostgresBackend:
                 _execute(cur, sql.SQL("SELECT entity, field, enum_json, nullable FROM {}")
                           .format(sql.Identifier(_FIELD_TYPES_TABLE)))
                 rows = cur.fetchall()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
             self._developer.rollback()
             raise StorageConfigurationError(
@@ -828,6 +849,9 @@ class PostgresBackend:
                 _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
                           .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
                 row = cur.fetchone()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.Error as exc:
             self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
