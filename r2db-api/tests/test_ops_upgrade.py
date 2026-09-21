@@ -60,6 +60,14 @@ def _clear_ambient_pg_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
 
+#: コードレビュー1低9: this file's own default for `upgrade-applications`'
+#: required `--lock-timeout` (design D-7) -- every caller here is a
+#: per-test PostgreSQL exercise, never a real deployment, so any accepted
+#: value does; a caller exercising `--lock-timeout` itself passes its own
+#: value instead. Mirrors MitateDB-api's own same-named constant
+#: (`MitateDB-api/tests/test_ops_upgrade.py::_TEST_LOCK_TIMEOUT`).
+_TEST_LOCK_TIMEOUT = "5000ms"
+
 
 def _admin_dsn() -> str:
     import os
@@ -276,7 +284,7 @@ def test_upgrade_applications_dry_run_pending_is_a_set_difference(
     try:
         assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10, 11})
         monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
-        rc = ops.main(["upgrade-applications", "--application", "upga", "--dry-run"])
+        rc = ops.main(["upgrade-applications", "--application", "upga", "--dry-run", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         out = capsys.readouterr().out
         assert rc == 4
         assert "pending=[9999]" in out
@@ -304,7 +312,7 @@ def test_upgrade_applications_pending_detects_a_hole_not_just_the_max(
             conn.commit()
         assert _ledger_numbers(app.developer_dsn) == frozenset({9999})
         monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
-        rc = ops.main(["upgrade-applications", "--application", "upgb", "--dry-run"])
+        rc = ops.main(["upgrade-applications", "--application", "upgb", "--dry-run", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         out = capsys.readouterr().out
         assert rc == 4
         assert "pending=[9]" in out
@@ -360,7 +368,7 @@ def test_upgrade_applications_one_failure_does_not_stop_the_others(
     good = provision_app(ops_env, "goodapp")
     bad = provision_app(ops_env, "failapp")
     try:
-        rc = ops.main(["upgrade-applications"])
+        rc = ops.main(["upgrade-applications", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         out = capsys.readouterr().out
         assert rc == 3
         assert "goodapp" in out and "failapp" in out
@@ -379,9 +387,9 @@ def test_upgrade_applications_is_idempotent(ops_env: types.SimpleNamespace) -> N
     既に台帳付きで provision されているので、追加手順なしに冪等)。"""
     app = provision_app(ops_env, "idemapp")
     try:
-        assert ops.main(["upgrade-applications", "--application", "idemapp"]) == 0
+        assert ops.main(["upgrade-applications", "--application", "idemapp", "--lock-timeout", _TEST_LOCK_TIMEOUT]) == 0
         before = _ledger_numbers(app.developer_dsn)
-        assert ops.main(["upgrade-applications", "--application", "idemapp"]) == 0
+        assert ops.main(["upgrade-applications", "--application", "idemapp", "--lock-timeout", _TEST_LOCK_TIMEOUT]) == 0
         after = _ledger_numbers(app.developer_dsn)
         assert before == after == frozenset({9, 10, 11})
     finally:
@@ -397,20 +405,20 @@ def test_upgrade_applications_exit_codes(ops_env: types.SimpleNamespace, monkeyp
     app = provision_app(ops_env, "exitapp")
     try:
         # 0 -- nothing pending.
-        assert ops.main(["upgrade-applications", "--application", "exitapp"]) == 0
+        assert ops.main(["upgrade-applications", "--application", "exitapp", "--lock-timeout", _TEST_LOCK_TIMEOUT]) == 0
         # 1 -- enumeration failure (bad provision DSN).
         monkeypatch.setenv("R2DB_CONTROL_DSN", "host=127.0.0.1 port=1 dbname=nonexistent connect_timeout=1")
-        assert ops.main(["upgrade-applications"]) == 1
+        assert ops.main(["upgrade-applications", "--lock-timeout", _TEST_LOCK_TIMEOUT]) == 1
         monkeypatch.setenv("R2DB_CONTROL_DSN", ops_env.control_dsn)
         # 2 -- usage error (provision DSN entirely unset).
         monkeypatch.delenv("R2DB_CONTROL_DSN")
         with pytest.raises(SystemExit) as exc:
-            ops.main(["upgrade-applications"])
+            ops.main(["upgrade-applications", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         assert exc.value.code == 2
         monkeypatch.setenv("R2DB_CONTROL_DSN", ops_env.control_dsn)
         # 4 -- dry-run, something pending.
         monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
-        assert ops.main(["upgrade-applications", "--application", "exitapp", "--dry-run"]) == 4
+        assert ops.main(["upgrade-applications", "--application", "exitapp", "--dry-run", "--lock-timeout", _TEST_LOCK_TIMEOUT]) == 4
     finally:
         deprovision_app(ops_env, "exitapp")
 
@@ -421,7 +429,7 @@ def test_upgrade_applications_exit_code_3_on_failure(
     synthetic_script_9999.write_text(synthetic_script_9999.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
     bad = provision_app(ops_env, "failapp")
     try:
-        assert ops.main(["upgrade-applications", "--application", "failapp"]) == 3
+        assert ops.main(["upgrade-applications", "--application", "failapp", "--lock-timeout", _TEST_LOCK_TIMEOUT]) == 3
     finally:
         deprovision_app(ops_env, "failapp")
 
@@ -436,7 +444,7 @@ def test_upgrade_applications_script_on_an_already_recorded_database_is_skipped_
 ) -> None:
     app = provision_app(ops_env, "scriptapp")
     try:
-        rc = ops.main(["upgrade-applications", "--application", "scriptapp", "--script", "9"])
+        rc = ops.main(["upgrade-applications", "--application", "scriptapp", "--script", "9", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         out = capsys.readouterr().out
         assert rc == 0
         assert "recorded, skipped" in out
@@ -501,7 +509,7 @@ def test_upgrade_applications_unknown_application_is_a_usage_error(ops_env: type
     """M-2(a): レジストリに存在しない `--application` は使い方の誤り
     (exit 2) であり、無音の exit 0 やエラー無視であってはならない。"""
     with pytest.raises(SystemExit) as exc:
-        ops.main(["upgrade-applications", "--application", "totally_unregistered_slug"])
+        ops.main(["upgrade-applications", "--application", "totally_unregistered_slug", "--lock-timeout", _TEST_LOCK_TIMEOUT])
     assert exc.value.code == 2
 
 
@@ -519,7 +527,7 @@ def test_upgrade_applications_missing_script_file_is_a_usage_error(ops_env: type
     app = provision_app(ops_env, "scriptmiss")
     try:
         with pytest.raises(SystemExit) as exc:
-            ops.main(["upgrade-applications", "--application", "scriptmiss", "--script", "1234"])
+            ops.main(["upgrade-applications", "--application", "scriptmiss", "--script", "1234", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         assert exc.value.code == 2
     finally:
         deprovision_app(ops_env, "scriptmiss")
@@ -541,7 +549,7 @@ def test_upgrade_applications_script_number_unknown_to_the_package_is_a_usage_er
     app = provision_app(ops_env, "scriptunk")
     try:
         with pytest.raises(SystemExit) as exc:
-            ops.main(["upgrade-applications", "--application", "scriptunk", "--script", "42"])
+            ops.main(["upgrade-applications", "--application", "scriptunk", "--script", "42", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         assert exc.value.code == 2
         assert "recorded, skipped=" not in capsys.readouterr().out
     finally:
@@ -628,7 +636,7 @@ def test_upgrade_applications_a_never_provisioned_application_named_explicitly_i
     finally:
         conn.close()
 
-    rc = ops.main(["upgrade-applications", "--application", "ghostapply"])
+    rc = ops.main(["upgrade-applications", "--application", "ghostapply", "--lock-timeout", _TEST_LOCK_TIMEOUT])
     assert rc == 3
 
 
@@ -652,14 +660,14 @@ def test_upgrade_applications_enabled_does_not_affect_target_selection(
         disable_application(ops_env, "enabledapp")
         # A disabled application's own database must still be targeted by
         # the DEFAULT (no `--application`) enumeration.
-        rc = ops.main(["upgrade-applications", "--application", "enabledapp", "--dry-run"])
+        rc = ops.main(["upgrade-applications", "--application", "enabledapp", "--dry-run", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         assert rc == 0, "a fully-seeded, disabled application must still report nothing pending"
 
         with psycopg.connect(app.developer_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 9")
             conn.commit()
-        rc = ops.main(["upgrade-applications"])
+        rc = ops.main(["upgrade-applications", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         assert rc == 0, "the disabled application must still be upgraded by the default (no --application) run"
         assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10, 11})
     finally:
@@ -680,7 +688,7 @@ def test_upgrade_applications_failure_output_includes_the_psql_stderr_tail(
     synthetic_script_9999.write_text(synthetic_script_9999.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
     provision_app(ops_env, "failapp")
     try:
-        rc = ops.main(["upgrade-applications", "--application", "failapp"])
+        rc = ops.main(["upgrade-applications", "--application", "failapp", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         out = capsys.readouterr().out
         assert rc == 3
         assert "psql stderr (tail)" in out
@@ -717,10 +725,10 @@ def test_upgrade_applications_tally_line_counts_one_of_each_outcome(
     provision_app(ops_env, "failapp")
     skip = provision_app(ops_env, "skipagg")
     try:
-        assert ops.main(["upgrade-applications", "--application", "skipagg"]) == 0
+        assert ops.main(["upgrade-applications", "--application", "skipagg", "--lock-timeout", _TEST_LOCK_TIMEOUT]) == 0
         assert _ledger_numbers(skip.developer_dsn) == frozenset({9, 10, 11, 9999})
 
-        rc = ops.main(["upgrade-applications"])
+        rc = ops.main(["upgrade-applications", "--lock-timeout", _TEST_LOCK_TIMEOUT])
         out = capsys.readouterr().out
         assert rc == 3
         assert "1 succeeded, 1 failed, 1 skipped (applied)" in out
@@ -762,7 +770,7 @@ def test_run_upgrade_script_passes_connection_params_via_env_never_argv(monkeypa
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
-    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1")
+    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1", _TEST_LOCK_TIMEOUT)
 
     assert len(calls) == 1
     cmd, kwargs = calls[0]
@@ -816,7 +824,7 @@ def test_cmd_upgrade_applications_redacts_connection_values_from_a_failed_psql_o
         lambda migrations_dir: {9: Path("/nonexistent/0009_does_not_matter.sql")},
     )
 
-    def _fake_run_upgrade_script(app_dsn, script, app_slug):  # noqa: ANN001
+    def _fake_run_upgrade_script(app_dsn, script, app_slug, lock_timeout):  # noqa: ANN001
         raw = (
             f"psql: error: connection to server at \"sentinel-host-b91d.invalid\", port 6543 failed\n"
             f"FATAL:  password authentication failed for user \"sentinel_user_c3f1\"\n"
@@ -827,7 +835,7 @@ def test_cmd_upgrade_applications_redacts_connection_values_from_a_failed_psql_o
 
     monkeypatch.setattr(ops, "_run_upgrade_script", _fake_run_upgrade_script)
 
-    args = types.SimpleNamespace(application=None, script=9, dry_run=False)
+    args = types.SimpleNamespace(application=None, script=9, dry_run=False, lock_timeout=_TEST_LOCK_TIMEOUT)
     rc = ops.cmd_upgrade_applications(args)
     captured = capsys.readouterr()
 
@@ -1061,6 +1069,143 @@ def test_run_upgrade_script_calls_the_psql_version_gate_first(monkeypatch: pytes
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ops.subprocess, "run", _fake_run)
-    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1")
+    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1", _TEST_LOCK_TIMEOUT)
     assert version_calls == 1
     assert main_calls == 1
+
+
+# ===========================================================================
+# design D-7 (work order R-66 WP-2): `upgrade-applications`'s own required
+# `--lock-timeout` -- argument presence, value validation, and the
+# `PGOPTIONS` it reaches `_run_upgrade_script` through.
+# ===========================================================================
+
+
+def test_upgrade_applications_without_lock_timeout_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    """完了条件1: `--lock-timeout` を省略すると argparse が使用法エラー
+    (exit 2) で拒否する -- 既定値が無いことを実行で確かめる。"""
+    with pytest.raises(SystemExit) as exc:
+        ops.main(["upgrade-applications"])
+    assert exc.value.code == 2
+    assert "--lock-timeout" in capsys.readouterr().err
+
+
+def test_upgrade_applications_without_lock_timeout_is_a_usage_error_with_dry_run(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """完了条件1: `--dry-run` を付けても同じく exit 2 になる。"""
+    with pytest.raises(SystemExit) as exc:
+        ops.main(["upgrade-applications", "--dry-run"])
+    assert exc.value.code == 2
+    assert "--lock-timeout" in capsys.readouterr().err
+
+
+def test_validate_lock_timeout_value_accepts_well_formed_values() -> None:
+    """完了条件3: `5000`・`5000ms`・`5s`・`1min` は受理され、値そのものが
+    そのまま返る。空振り禁止: ループ 4 回すべてで assert が走る。"""
+    for value in ("5000", _TEST_LOCK_TIMEOUT, "5s", "1min"):
+        assert ops._validate_lock_timeout_value(value) == value
+
+
+def test_validate_lock_timeout_value_rejects_ill_formed_values(capsys: pytest.CaptureFixture[str]) -> None:
+    """完了条件3: `0`・`0ms`・負・`1h`・`1d`・非数字は拒否され (exit 2)、
+    拒否した値そのものは echo されない。空振り禁止: ループ 6 回すべてで
+    assert が走る。"""
+    for value in ("0", "0ms", "-5", "1h", "1d", "not-a-value"):
+        with pytest.raises(SystemExit) as exc:
+            ops._validate_lock_timeout_value(value)
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "--lock-timeout" in err
+        assert value not in err
+
+
+def test_run_upgrade_script_passes_lock_timeout_via_pgoptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """完了条件4: `_run_upgrade_script` は `lock_timeout` を
+    `_with_lock_timeout_option` 経由で `PGOPTIONS` に足す (DSN 自身が
+    `options` を持たない場合)。"""
+    calls: list[dict] = []
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        if cmd[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=_FAKE_PSQL_VERSION_STDOUT, stderr="")
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    ops._run_upgrade_script(_SENTINEL_DSN, Path("/nonexistent/0099_does_not_matter.sql"), "app1", "42s")
+    assert len(calls) == 1
+    assert calls[0]["env"]["PGOPTIONS"] == "-c lock_timeout=42s"
+
+
+def test_run_upgrade_script_keeps_the_dsns_own_pgoptions_alongside_lock_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """完了条件4: DSN 自身の `options` (`PGOPTIONS` に既に載る値) と
+    `lock_timeout` の両方が effect を持つよう連結され、上書きされない。"""
+    calls: list[dict] = []
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        if cmd[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=_FAKE_PSQL_VERSION_STDOUT, stderr="")
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    dsn_with_options = make_conninfo(_SENTINEL_DSN, options="-c search_path=foo")
+    ops._run_upgrade_script(dsn_with_options, Path("/nonexistent/0099_does_not_matter.sql"), "app1", "42s")
+    assert len(calls) == 1
+    assert calls[0]["env"]["PGOPTIONS"] == "-c search_path=foo -c lock_timeout=42s"
+
+
+# ===========================================================================
+# コードレビュー1 高1: `cmd_upgrade_applications` 自身の CLI 経路で
+# `--lock-timeout` の値検証と配線が効いていることの固定 (`_validate_lock_
+# timeout_value`/`_run_upgrade_script` を直接呼ぶだけの上のテスト群は
+# `cmd_upgrade_applications` のこの 2 行 (検証呼び出し・`_run_upgrade_
+# script` への引き渡し) 自体が抜けても緑のままだった)。
+# ===========================================================================
+
+
+def test_upgrade_applications_rejects_an_ill_formed_lock_timeout_through_the_cli(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """コードレビュー1 高1: `--lock-timeout` の値検証が `cmd_upgrade_
+    applications` の CLI 経路自身でも、`psycopg.connect` より前に効いて
+    いることを、到達不能な provision DSN で固定する -- 検証を通れば `_die`
+    が先に exit 2 で止まるので、この DSN へ実際に接続を試みることは無い
+    (実 PostgreSQL 不要)。"""
+    monkeypatch.setenv("R2DB_CONTROL_DSN", "host=127.0.0.1 port=1 dbname=nonexistent connect_timeout=1")
+    with pytest.raises(SystemExit) as exc:
+        ops.main(["upgrade-applications", "--lock-timeout", "0", "--dry-run"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--lock-timeout value must be a positive integer" in err  # 接続前に止まった証拠
+    assert "0" not in err
+
+
+def test_upgrade_applications_cli_lock_timeout_value_reaches_pgoptions(
+    ops_env: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, synthetic_script_9999: Path,
+) -> None:
+    """コードレビュー1 高1 (RM2 の穴): `ops.main` の argv で渡した
+    `--lock-timeout` の値が、その値のまま `_run_upgrade_script` を経由して
+    実際の psql invocation の `PGOPTIONS` に届くことを、`cmd_upgrade_
+    applications` 経由 (CLI 全体) で固定する -- `_run_upgrade_script` を
+    直接呼ぶ既存テストと異なり、argv からの配線そのものを見る。"""
+    app = provision_app(ops_env, "cliwireapp")
+    calls: list[dict] = []
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        if cmd[:2] == ["psql", "--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=_FAKE_PSQL_VERSION_STDOUT, stderr="")
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ops.subprocess, "run", _fake_run)
+    try:
+        rc = ops.main(["upgrade-applications", "--application", "cliwireapp", "--lock-timeout", "7500ms"])
+        assert rc == 0
+        assert len(calls) == 1
+        assert calls[0]["env"]["PGOPTIONS"] == "-c lock_timeout=7500ms"
+    finally:
+        deprovision_app(ops_env, "cliwireapp")

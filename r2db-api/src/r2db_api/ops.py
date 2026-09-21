@@ -1358,6 +1358,27 @@ def _require_psql_16_or_newer() -> None:
         _die("psql binary is missing, unreadable, or older than PostgreSQL 16; refusing to run a psql subprocess")
 
 
+#: A PostgreSQL GUC duration -- a positive integer optionally followed by
+#: one of PostgreSQL's own `ms`/`s`/`min` unit suffixes -- never `0`
+#: (which PostgreSQL itself reads as "no timeout") and never any other
+#: unit PostgreSQL also accepts (`h`/`d`), so the CLI's own accepted
+#: vocabulary stays a strict subset of PostgreSQL's.
+_LOCK_TIMEOUT_VALUE_RE = re.compile(r"^[1-9][0-9]*(ms|s|min)?$")
+
+
+def _validate_lock_timeout_value(value: str) -> str:
+    """Rejects a `--lock-timeout` value that does not match `_LOCK_
+    TIMEOUT_VALUE_RE` before it ever reaches a psql subprocess, via the
+    same fixed-message `_die` every other usage error in this module
+    already uses. The rejected value itself is never echoed back."""
+    if not _LOCK_TIMEOUT_VALUE_RE.fullmatch(value):
+        _die(
+            "--lock-timeout value must be a positive integer optionally "
+            "followed by ms, s, or min"
+        )
+    return value
+
+
 def _psql_connection_env(dsn: str) -> dict[str, str]:
     """design D-2: builds the environment for a psql subprocess invocation
     from `dsn`'s own connection parameters -- never on argv, which is
@@ -1448,15 +1469,30 @@ def _redact_connection_values(text: str, dsn: str) -> str:
     pattern = "|".join(re.escape(v) for v in sorted(values, key=len, reverse=True))
     return re.sub(pattern, "<redacted>", text)
 
-def _run_upgrade_script(app_dsn: str, script: Path, app_slug: str) -> "subprocess.CompletedProcess[str]":
-    """Call shape ONLY copied from MitateDB-api's own `_run_deprovision_script` (design D-4(b)) -- the psql `-v` variable name is r2db's own (`platform_upgrades.UPGRADE_SCRIPT_VARIABLE`, `app_slug`; MitateDB's own realization uses `app_id` instead, design §3.10's own peer-pair table). Never `_die`s on a non-zero exit -- the caller decides how one application's own failure affects the rest of the run.
+
+def _with_lock_timeout_option(existing_pgoptions: "str | None", lock_timeout: str) -> str:
+    """Appends a `-c lock_timeout=<value>` startup option to `existing_
+    pgoptions` (the value `_psql_connection_env`'s own `options`-key
+    mapping already placed there, if the DSN itself carried one) rather
+    than replacing it -- a DSN-supplied `options` value keeps taking
+    effect alongside the lock timeout, never silently dropped."""
+    option = f"-c lock_timeout={lock_timeout}"
+    if existing_pgoptions:
+        return f"{existing_pgoptions} {option}"
+    return option
+
+
+def _run_upgrade_script(app_dsn: str, script: Path, app_slug: str, lock_timeout: str) -> "subprocess.CompletedProcess[str]":
+    """Call shape ONLY copied from MitateDB-api's own `_run_deprovision_script` (design D-4(b)) -- the psql `-v` variable name is r2db's own (`platform_upgrades.UPGRADE_SCRIPT_VARIABLE`, `app_slug`; MitateDB's own realization uses `app_id` instead, design §3.10's own peer-pair table). Never `_die`s on a non-zero exit -- the caller decides how one application's own failure affects the rest of the run. `lock_timeout` (design D-7) is appended to the psql session's own `PGOPTIONS` via `_with_lock_timeout_option`, on top of whatever `_psql_connection_env` already placed there from the DSN itself.
 
     History: CH-0326
     """
     _require_psql_16_or_newer()
+    env = _psql_connection_env(app_dsn)
+    env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)
     return subprocess.run(
         ["psql", "-v", "ON_ERROR_STOP=1", "-v", f"{platform_upgrades.UPGRADE_SCRIPT_VARIABLE}={app_slug}", "-f", str(script)],
-        capture_output=True, text=True, env=_psql_connection_env(app_dsn),
+        capture_output=True, text=True, env=env,
     )
 
 
@@ -1503,6 +1539,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
     scripts = platform_upgrades.discover_upgrade_scripts(_migrations_dir())
     if args.script is not None and not args.dry_run and args.script not in scripts:
         _die(f"no per-application upgrade script found for upgrade number {args.script} under {_migrations_dir()}")
+    lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
 
     with psycopg.connect(provision_dsn) as conn:
         provision_role = conn.info.user
@@ -1566,7 +1603,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
             # the Python-side ledger SELECT -- a separate connection path,
             # design D-4(b): "台帳の読み出しはPython側で行う。script側の
             # `\c :database_name`とは別経路である").
-            result = _run_upgrade_script(provision_dsn, script_path, application_id)
+            result = _run_upgrade_script(provision_dsn, script_path, application_id, lock_timeout)
             if result.returncode != 0:
                 failed_numbers.append(number)
                 cleanup_sql = f"REVOKE {app['developer_role']} FROM {provision_role};"
@@ -1842,6 +1879,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--application", default=None, metavar="ID", help="limit to one application (default: every provisioned application)")
     p.add_argument("--script", type=int, default=None, metavar="NNNN", help="limit to one upgrade number; already-recorded databases are skipped")
     p.add_argument("--dry-run", action="store_true", help="report applied/pending only -- applies nothing")
+    p.add_argument(
+        "--lock-timeout", required=True, metavar="VALUE",
+        help="lock_timeout to set on the psql session before running each per-application upgrade script "
+             "(a positive integer optionally followed by ms, s, or min; no default)",
+    )
     p.set_defaults(func=cmd_upgrade_applications)
 
     p = sub.add_parser(

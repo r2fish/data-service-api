@@ -938,6 +938,20 @@ table). Never `_die`s on a non-zero exit -- the caller decides how one
 application's own failure affects the rest of the run (D-4(c)).
 ```
 
+### correction: 2026-09-22
+
+- reason: work order `docs/work-orders/WORK_ORDER_R66_DEPLOY_0013_AND_PROVISION_ROLE_TIMEOUT_V1.md` WP-2 (design D-7) -- `_run_upgrade_script` gained a required `lock_timeout` parameter (peer-isomorphic with `MitateDB-api/src/mitatedb_api/ops.py::_run_upgrade_script`), so the docstring now names how it is applied
+
+old:
+```
+Call shape ONLY copied from MitateDB-api's own `_run_deprovision_script` (design D-4(b)) -- the psql `-v` variable name is r2db's own (`platform_upgrades.UPGRADE_SCRIPT_VARIABLE`, `app_slug`; MitateDB's own realization uses `app_id` instead, design §3.10's own peer-pair table). Never `_die`s on a non-zero exit -- the caller decides how one application's own failure affects the rest of the run
+```
+
+new:
+```
+Call shape ONLY copied from MitateDB-api's own `_run_deprovision_script` (design D-4(b)) -- the psql `-v` variable name is r2db's own (`platform_upgrades.UPGRADE_SCRIPT_VARIABLE`, `app_slug`; MitateDB's own realization uses `app_id` instead, design §3.10's own peer-pair table). Never `_die`s on a non-zero exit -- the caller decides how one application's own failure affects the rest of the run. `lock_timeout` (design D-7) is appended to the psql session's own `PGOPTIONS` via `_with_lock_timeout_option`, on top of whatever `_psql_connection_env` already placed there from the DSN itself
+```
+
 ## CH-0327
 
 - moved from: `src/r2db_api/ops.py` (`_print_upgrade_result`)

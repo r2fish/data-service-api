@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # r2dbsvc stage-1 install, part 1 -- OS account, install directory, venv, the
 # PostgreSQL migrations through the credential store / control-plane storage
-# / audit sink / Q4 platform declarations / Phase 10 process-ceilings key
-# widening (0001, 0002, 0005, 0006, 0007, 0008, 0012) plus one application's
-# onboarding (0003), then the THREE declaration `ops` steps every fresh host
-# needs before either process will start: declaring `surfaces` (0008
+# / audit sink / R-66 role CONNECTION LIMIT raise / R-56 auditreader
+# statement_timeout / Q4 platform declarations / Phase 10 process-ceilings
+# key widening (0001, 0002, 0005, 0006, 0007, 0013, 0014, 0008, 0012 -- this
+# order, not ascending file-number order, see Step 3 below) plus one
+# application's onboarding (0003), then the THREE declaration `ops` steps
+# every fresh host needs before either process will start: declaring
+# `surfaces` (0008
 # deliberately seeds no `surfaces` row, design D-2(c)), declaring
 # `process_ceilings` (0012 likewise deliberately seeds no row, design
 # D-5(ii)/(iii)), and bringing every registered application's
@@ -216,6 +219,12 @@ if [ -n "${R2DBSVC_CONTROL_BASE_URL:-}" ]; then
     require_var R2DBSVC_CONTROL_BASE_URL
 fi
 
+# R-66 WP-1: defined here (before Step 1) rather than immediately before
+# its first use, because BOTH `part1a_check_max_connections.sh` (Step 3,
+# right after `0002`) and `part1c_declare_surfaces.sh` (Step 4) are called
+# by `${SCRIPT_DIR}` below -- one definition, used both times.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ---------------------------------------------------------------------------
 # Step 1 -- dedicated, non-login OS service account
 # (DEPLOYMENT_RUNBOOK.md §2 step 1)
@@ -276,11 +285,12 @@ sudo -u "${R2DBSVC_OS_USER}" "${R2DBSVC_INSTALL_ROOT}/.venv/bin/pip" install -c 
 # Step 3 -- PostgreSQL migrations (POSTGRES_PROVISIONING_RUNBOOK.md §5/§9/
 # §11/§16/§17/§18). Order: 0001 (cluster-admin bootstrap) -> 0002
 # (provisioning functions) -> 0005 (credential store + api_password) -> 0006
-# (control-plane storage) -> 0007 (audit sink) -> 0014 (R-56 auditreader
-# statement_timeout) -> 0008 (Q4 platform declarations + writer-role
-# timeouts) -> 0012 (Phase 10 process_ceilings key widening) -> 0003 (this
-# deployment's first application).
-# 0005/0006/0007/0014/0008/0012 are platform-wide bootstrap and are
+# (control-plane storage) -> 0007 (audit sink) -> 0013 (role `CONNECTION
+# LIMIT` raise, R-66 WP-1) -> 0014 (R-56 auditreader statement_timeout) ->
+# 0008 (Q4 platform declarations + writer-role timeouts) -> 0012 (Phase 10
+# process_ceilings key widening) -> 0003 (this deployment's first
+# application).
+# 0005/0006/0007/0013/0014/0008/0012 are platform-wide bootstrap and are
 # independent of any one application (§5/§9/§16/§18's own note); 0003 is
 # placed last here so an operator who only wants the platform-wide objects
 # can stop before it. `0004` (deprovision) is intentionally never invoked by
@@ -290,11 +300,20 @@ sudo -u "${R2DBSVC_OS_USER}" "${R2DBSVC_INSTALL_ROOT}/.venv/bin/pip" install -c 
 # seeds this deployment's first application with the ledger pre-populated,
 # and the general retrofit path for any OTHER already-registered
 # application is `ops upgrade-applications` below, not a hand-picked
-# `psql -f 0009_....sql` invocation (design D-3(b), D-4). `0013` (role
-# `CONNECTION LIMIT` raise) is likewise never run directly here: unlike
-# `0014`, it has its own precondition (`max_connections` must be re-checked
-# against the runbook's own updated worked example first, R-56 design §5)
-# that this script does not verify -- see the runbook for the manual step.
+# `psql -f 0009_....sql` invocation (design D-3(b), D-4).
+#
+# R-66 WP-1 (work order docs/work-orders/
+# WORK_ORDER_R66_DEPLOY_0013_AND_PROVISION_ROLE_TIMEOUT_V1.md §1.4 D-1):
+# `0013` now DOES run here, right after `0007` -- this paragraph previously
+# said it was left to a manual runbook step because this script did not
+# verify its own precondition (`max_connections` re-checked against the
+# runbook's own updated worked example). Left unrun, a host this script
+# alone provisioned could not start EITHER process at the default declared
+# `concurrency` (32) at all (F-16, both processes' own startup fail-fast,
+# not merely `ops verify-declarations` reporting FAIL -- the finding that
+# reopened this as R-66). `part1a_check_max_connections.sh`, called right
+# after `0002` below (design D-2), is this script's own verification of
+# that precondition; `0013` runs only once it has already passed.
 # ---------------------------------------------------------------------------
 
 log "0001_bootstrap_control_plane.sql (cluster admin)"
@@ -329,6 +348,16 @@ psql "${R2DBSVC_CONTROL_DSN}" \
     -v ON_ERROR_STOP=1 \
     -f "${R2DBSVC_MIGRATIONS_DIR}/0002_provisioning_functions.sql"
 
+# R-66 WP-1 (design D-2): verifies `max_connections` (minus `superuser_
+# reserved_connections`) already leaves this deployment enough headroom
+# for `0013_role_connection_limits.sql`'s own floor, BEFORE `0005` (or any
+# later migration) runs -- `0001`/`0002` above are both idempotent, so a
+# host this check rejects is safe to re-run once corrected. Reads
+# `R2DBSVC_CONTROL_DSN`/`R2DBSVC_EXPECTED_PEAK_CONNECTIONS` directly out of
+# THIS script's own environment (the same pattern `part1c_declare_
+# surfaces.sh`'s own header documents) -- no explicit `env` prefix needed.
+"${SCRIPT_DIR}/part1a_check_max_connections.sh"
+
 log "0005_credential_store.sql (r2dbsvc_control, api_password)"
 printf '%s\n' \
     "\\set ON_ERROR_STOP on" \
@@ -349,6 +378,22 @@ printf '%s\n' \
     "\\getenv auditreader_password R2DBSVC_AUDITREADER_PASSWORD" \
     "\\i ${R2DBSVC_MIGRATIONS_DIR}/0007_application_audit.sql" \
   | psql "${R2DBSVC_CONTROL_DSN}"
+
+# R-66 WP-1 (design D-1): raises `r2dbsvc_api`/`r2dbsvc_controlplane`/every
+# registered application's own runtime/developer roles to their own real
+# pool-composition floor -- this migration's own header and runbook §5's
+# own "Order of operations" both place it right after `0007`; order
+# relative to `0008`/`0012` does not matter (this migration's own header:
+# "order relative to 0008/0009/0010/0011/0012 does not matter at all").
+# No `-v`/`\getenv` variables (role names are literals in the migration
+# file, same as `0014` below). `part1a_check_max_connections.sh`, run
+# right after `0002` above, is this script's own verification of this
+# migration's own precondition (`max_connections` re-checked against the
+# runbook's own updated worked example) before this point is ever reached.
+log "0013_role_connection_limits.sql (r2dbsvc_control)"
+psql "${R2DBSVC_CONTROL_DSN}" \
+    -v ON_ERROR_STOP=1 \
+    -f "${R2DBSVC_MIGRATIONS_DIR}/0013_role_connection_limits.sql"
 
 # R-56 WP-1 (design D-1): role-level `statement_timeout` on
 # `r2dbsvc_auditreader` -- no `-v`/`\getenv` variables (role name is a
@@ -463,7 +508,9 @@ printf '%s\n' \
 # preflight read the marker it writes (never `ops show-declarations`'s
 # free-text output, M-1) before either systemd unit is enabled.
 # ---------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# `SCRIPT_DIR` is defined once, near the top of this script (before Step
+# 1) -- shared with `part1a_check_max_connections.sh`'s own call in Step 3
+# above.
 "${SCRIPT_DIR}/part1c_declare_surfaces.sh"
 
 control_surface_marker="${R2DBSVC_INSTALL_ROOT}/.r2dbsvc-control-surface-declared"
@@ -512,7 +559,7 @@ OPS=("${R2DBSVC_INSTALL_ROOT}/.venv/bin/python" -m r2db_api.ops)
 
 log "bringing every registered application's per-application platform-upgrade ledger current (ops upgrade-applications)"
 env R2DB_CONTROL_DSN="${R2DBSVC_CONTROL_DSN}" R2DB_MIGRATIONS_DIR="${R2DBSVC_MIGRATIONS_DIR}" \
-    "${OPS[@]}" upgrade-applications
+    "${OPS[@]}" upgrade-applications --lock-timeout 2s
 
 log "part 1 complete. Record every generated password above in your secret manager now -- none of it is stored in recoverable form anywhere (POSTGRES_PROVISIONING_RUNBOOK.md §5)."
 if [ "$control_surface_declared" = "yes" ]; then

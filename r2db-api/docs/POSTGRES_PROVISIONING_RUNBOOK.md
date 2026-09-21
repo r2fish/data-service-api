@@ -365,7 +365,14 @@ easy-to-compute stand-in for that real figure (never smaller than it, by
 construction of the table's own +4 headroom margin) for an operator who
 has not derived it -- not a PostgreSQL requirement in its own right.
 Re-check the real figure against `SHOW max_connections;` before applying
-`0013` to a cluster already close to its own configured ceiling.
+`0013` to a cluster already close to its own configured ceiling. Applying
+it by hand (an already-running cluster this script has not touched, or a
+retrofit after the fact):
+
+```
+PGOPTIONS='-c lock_timeout=<value>' psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 \
+  -f r2db-api/migrations/0013_role_connection_limits.sql
+```
 
 `python -m r2db_api.ops verify-declarations` now also checks the
 CONNECTION LIMIT table above, independently of `max_connections` (new
@@ -380,6 +387,25 @@ every other check that command already runs, so a FUTURE deployment that
 raises `ResourceLimits.concurrency` without a follow-up migration like
 `0013` is caught at verify time instead of silently reopening this exact
 failure mode.
+
+**`part1a_check_max_connections.sh` (R-66 WP-1, design D-2):**
+`part1_provision_host_and_db.sh` now runs this check itself, right after
+`0002` and before `0005` -- it connects over `R2DBSVC_CONTROL_DSN`, reads
+`SHOW max_connections;` and `SHOW superuser_reserved_connections;`, and
+refuses (before `0005` or any later migration runs) unless `max_
+connections` minus `superuser_reserved_connections` is at least
+`98 + 72 × (N + 1)`, N being the number of already-provisioned
+applications in `r2dbsvc_registry.applications` (0 if that table does not
+exist yet). `98`/`72` are this section's own CONNECTION LIMIT table
+literals (98 = 68 + 20 + 5 + 5, the platform-plane roles; 72 = 36 + 36,
+one application's own runtime + developer roles) -- the SAME
+"conservative, easy-to-compute stand-in" the "One formula, not three"
+paragraph above describes, never the real PostgreSQL requirement itself.
+An operator who has derived the real figure from that paragraph's own
+formula sets `R2DBSVC_EXPECTED_PEAK_CONNECTIONS` (a positive integer) to
+use it instead of this script's own conservative default; any other
+value (unset is not "any other value" -- it is the documented default)
+is refused with the same message shape.
 
 ## 5. Order of operations
 
@@ -410,20 +436,29 @@ idempotent by design -- it raises if the slug is already provisioned, so a
 re-run is a deliberate signal, not silently absorbed.
 
 **The platform migrations that come after `0002`** are each described in
-their own section, and are applied in file order: `0005` (§9, credential
-store), `0006` (§11, control-plane storage), `0007` (§15, audit sink),
+their own section, and are applied in the order `part1_provision_host_
+and_db.sh` actually runs them, not ascending file-number order (`0013`
+and `0014` both run before `0008`/`0012` despite their own HIGHER file
+numbers -- design D-1, R-66 WP-1): `0005` (§9, credential store), `0006`
+(§11, control-plane storage), `0007` (§15, audit sink), **`0013` (§4, role `CONNECTION
+LIMIT`s, Phase 10 WP-4f -- additive only, safe to apply by hand at any
+point after `0002`/`0005`/`0006`/`0007` exist on an already-running
+cluster; run by this script since R-66 WP-1 -- at the
+default declared `concurrency` (32), both processes now REFUSE TO START
+until it is applied, F-16 `check_role_connection_limits`;
+`part1a_check_max_connections.sh`, run right after `0002`, verifies this
+migration's own precondition -- `max_connections` re-checked against this
+section's own worked example -- before this script ever applies it)**,
 `0014` (§19, auditreader `statement_timeout`, R-56 -- additive only, no
 process REFUSES TO START without it; `ops verify-declarations` reports
 `FAIL F-17` until it is applied and the control process restarted),
 **`0008` (§16, platform declarations + writer-role timeouts, Q4 phase --
-both processes now REFUSE TO START until it is applied)**, `0012`
+both processes now REFUSE TO START until it is applied)**, and `0012`
 (process ceilings, Phase 10 WP-6a -- also required before either process
-starts, F-15), and `0013` (§4, role `CONNECTION LIMIT`s, Phase 10 WP-4f --
-additive only, safe to apply at any point after `0002`/`0005`/`0006`/`0007`
-exist). **§17 covers the
+starts, F-15). **§17 covers the
 third class of migration** -- per-application upgrade scripts, of which
 `0009` is this peer's first: those are applied per application database, by
-`python -m r2db_api.ops upgrade-applications`, never by hand in this order.
+`python -m r2db_api.ops upgrade-applications --lock-timeout <value>`, never by hand in this order.
 An application provisioned by the current `0003` (step 3 above) already
 carries the ledger `0009` retrofits, so §17 is a catch-up step for databases
 provisioned before that revision, exactly like the CCR-13 DOMAIN note below.
@@ -458,7 +493,7 @@ default `CONNECT`, reconnects into the new database via `\c`, and sets up
 To remove an application (e.g. tearing down a test/staging application):
 
 ```
-psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' \
+PGOPTIONS='-c lock_timeout=<value>' psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' \
   -f r2db-api/migrations/0004_deprovision_application.sql
 ```
 
@@ -1724,12 +1759,16 @@ ships exactly one such script, `0009`, so the complete set is `{9}`.
 
 ```
 # Preview: applies nothing, reports applied/pending per application.
-R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications --dry-run
+R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications --lock-timeout <value> --dry-run
 
 # Apply. Visits every registered application; one failure does not stop the
 # rest -- failed applications are listed at the end with a cleanup line.
-R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications
+R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications --lock-timeout <value>
 ```
+
+`--lock-timeout <value>` is required (design D-7; no default) -- a positive
+integer optionally followed by `ms`/`s`/`min`, applied as the psql session's
+own `lock_timeout` for each per-application upgrade script it runs.
 
 `R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR>` (pointing at this package's `migrations/`
 directory) is required whenever `r2db-api` was installed non-editable into a
@@ -1810,9 +1849,9 @@ report it.
 1. `python -m r2db_api.ops upgrade-status --application <slug>` -- confirm
    which numbers are pending (exit 4 means at least one is).
 2. `R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications
-   --application <slug> --dry-run`, then the same command without
-   `--dry-run` (see the `R2DB_MIGRATIONS_DIR` note above -- required for a
-   non-editable install).
+   --application <slug> --lock-timeout <value> --dry-run`, then the same
+   command without `--dry-run` (see the `R2DB_MIGRATIONS_DIR` note above --
+   required for a non-editable install).
 3. If it exits 3, read the failure block: fix the cause, issue the printed
    `REVOKE`, re-run step 2.
 4. `sudo systemctl restart r2dbsvc-api.service` -- the check is a cell-open
@@ -1946,7 +1985,7 @@ carry (§16).
 variables):
 
 ```
-psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f r2db-api/migrations/0014_auditreader_statement_timeout.sql
+PGOPTIONS='-c lock_timeout=<value>' psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f r2db-api/migrations/0014_auditreader_statement_timeout.sql
 ```
 
 **Role settings take effect at login, not on an already-open connection.**
