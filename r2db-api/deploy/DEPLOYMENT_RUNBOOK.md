@@ -68,7 +68,20 @@ re-verify them; it assumes they are already true.
    bounds `r2dbsvc_auditreader`'s own `statement_timeout`;
    `POSTGRES_PROVISIONING_RUNBOOK.md` §19) is additive-only and does not
    gate startup, but `ops verify-declarations` reports `FAIL F-17` until it
-   is applied and the control process restarted. And **migration
+   is applied and the control process restarted. **Migration
+   `0013_role_connection_limits.sql`** (Phase 10 WP-4f, R-66 WP-1 -- raises
+   `r2dbsvc_api`/`r2dbsvc_controlplane`/every served application's own
+   runtime/developer roles to their own real pool-composition floor;
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §4), unlike `0014`, **is required by
+   BOTH processes at the default declared `concurrency` (32)**: without
+   it, either process REFUSES TO START (F-16, `check_role_connection_
+   limits` -- the same startup fail-fast `0008`/`0012` below trigger).
+   `part1_provision_host_and_db.sh` now applies `0013` itself, right after
+   `0007`, but only once `part1a_check_max_connections.sh` (run right
+   after `0002`) has verified this migration's own precondition --
+   `max_connections` leaves enough headroom, `POSTGRES_PROVISIONING_
+   RUNBOOK.md` §4; the optional `R2DBSVC_EXPECTED_PEAK_CONNECTIONS`
+   overrides that check's own conservative default. And **migration
    `0008_platform_declarations_and_writer_timeouts.sql`** (Q4 phase,
    `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-1/D-2 --
    `r2dbsvc_registry.platform_declarations` plus the two writer roles'
@@ -97,8 +110,9 @@ re-verify them; it assumes they are already true.
    present in `r2dbsvc_registry.applications` with `enabled = true`, **and
    its per-application platform-upgrade ledger must be current** -- run
    `python -m r2db_api.ops upgrade-status` (exit `0` = nothing pending) and,
-   if anything is pending, `python -m r2db_api.ops upgrade-applications`
-   (`POSTGRES_PROVISIONING_RUNBOOK.md` §17). An application provisioned by
+   if anything is pending, `python -m r2db_api.ops upgrade-applications
+   --lock-timeout <value>` (`--lock-timeout` is required, no default;
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §17). An application provisioned by
    the current `0003` is already current; one provisioned earlier is not, and
    its own cell will refuse every request with `SERVICE_UNAVAILABLE` (F-12)
    until the retrofit is applied and this process restarted. **The
@@ -690,6 +704,20 @@ up entirely through `part1_provision_host_and_db.sh` +
 `declare-surfaces`/the ledger than any other migration this runbook already
 assumes scripted -- see those two scripts' own header comments for the exact
 variable contract.
+
+**Gap closed (R-66 WP-1 addendum, 2026-09-22).**
+`part1_provision_host_and_db.sh` previously never applied
+`0013_role_connection_limits.sql` at all -- left unapplied, a host it alone
+provisioned could not start EITHER process at the default declared
+`concurrency` (32): F-16 (`check_role_connection_limits`) is one of both
+processes' own startup fail-fast checks, not merely a check `ops
+verify-declarations` reports on demand. The script now also runs
+`part1a_check_max_connections.sh` right after `0002` (reads `R2DBSVC_
+CONTROL_DSN`, refuses before `0005` runs unless `max_connections` minus
+`superuser_reserved_connections` leaves enough headroom -- see
+`POSTGRES_PROVISIONING_RUNBOOK.md` §4 for the exact figure and the
+optional `R2DBSVC_EXPECTED_PEAK_CONNECTIONS` override), then applies
+`0013` right after `0007`, before `0014`.
 
 1. Create a dedicated `EnvironmentFile` (e.g. `/etc/r2dbsvc/control.env`),
    root-owned, mode `0600`, containing the table above (copy

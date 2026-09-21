@@ -211,6 +211,12 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*MitateDB-api Control claim, F-17 on this peer, superseded 2026-09-22 (Version 2.20, R-66 -- the cited count-pin test of the isomorphism table carries the row count in its name and was renamed from `..._140_rows` to `..._143_rows` when R-66 added three helpers to the table; the claim's text is otherwise unchanged):*
+
+- **F-17 runs on this peer too (R-56)**: the same `ops verify-declarations` check r2db-api's own SI-08 row describes (role-level `statement_timeout` positive for the roles identified by their real SELECT grants on both audit tables, no per-database row overriding that key, exit code 16) is judged here against the reader bound `0013_role_statement_timeouts.sql` already declares, so R-56 adds no migration to this peer; `_f17_message` and `check_auditreader_statement_timeout` are rows of `_ISOMORPHIC_TARGETS`, which holds the two peers' wording and judgment together -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_passes_from_migration_0013`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_zero`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_reset`, `::test_verify_declarations_f17_fails_when_a_per_database_override_exists`, `::test_verify_declarations_f17_passes_when_auditreader_role_is_absent`, `::test_f17_the_schema_owning_role_is_never_flagged_despite_an_explicit_select_grant`, `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_140_rows`.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**

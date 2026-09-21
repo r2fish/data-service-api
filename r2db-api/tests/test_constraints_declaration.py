@@ -669,7 +669,7 @@ def test_pg_ops_upgrade_applications_retrofits_the_side_table_and_unblocks_alter
     # PROCESS, so `os.environ` itself must be cleared).
     for name in (*ops._LIBPQ_ENV_VAR_FOR_CONNINFO_KEY.values(), *ops._LIBPQ_CONNECTION_ENV_VARS_WITHOUT_A_CONNINFO_KEY):
         monkeypatch.delenv(name, raising=False)
-    rc = ops.main(["upgrade-applications", "--application", app_a.slug])
+    rc = ops.main(["upgrade-applications", "--application", app_a.slug, "--lock-timeout", "5000ms"])
     assert rc == 0
 
     conn = psycopg.connect(app_a.developer_dsn)

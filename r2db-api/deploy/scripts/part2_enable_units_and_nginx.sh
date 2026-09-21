@@ -476,7 +476,7 @@ log "checking per-application platform-upgrade ledger (ops upgrade-status)"
 upgrade_status_rc=0
 env R2DB_CONTROL_DSN="${R2DB_CONTROL_DSN}" "${OPS[@]}" upgrade-status || upgrade_status_rc=$?
 if [ "$upgrade_status_rc" -ne 0 ]; then
-    log "FAILED: ops upgrade-status exited ${upgrade_status_rc} (0 = nothing pending expected here). Do not treat this deployment as verified -- run 'python -m r2db_api.ops upgrade-applications' (POSTGRES_PROVISIONING_RUNBOOK.md §17), then re-run this check."
+    log "FAILED: ops upgrade-status exited ${upgrade_status_rc} (0 = nothing pending expected here). Do not treat this deployment as verified -- run 'python -m r2db_api.ops upgrade-applications --lock-timeout <value>' (POSTGRES_PROVISIONING_RUNBOOK.md §17), then re-run this check."
     exit 1
 fi
 log "ops upgrade-status: nothing pending."
