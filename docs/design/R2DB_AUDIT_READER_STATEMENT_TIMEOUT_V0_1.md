@@ -82,7 +82,7 @@ r2db-api の `r2dbsvc_auditreader` には `statement_timeout` が無く、コー
 | `PostgresCell.query` | 通る | `postgres.py`:1153 → :1175 |
 | `PostgresCell.transact` | 通る | 同 :1232 → :1284 |
 | `PostgresCell.apply_schema` (DDL) | 通る | 同 :1715 → :1753 |
-| `PostgresCell.catalog` | **通らない** | 同 :803-807。`self._runtime.connection()` + `conn.transaction()` で `_load_catalog` を呼ぶだけで `_set_timeouts` を呼ばない |
+| `PostgresCell.catalog` | **通らない** | 同 :803-807。`self._runtime.connection()` + `conn.transaction()` で `_load_catalog` を呼ぶだけで `_set_timeouts` を呼ばない **【追記 2026-09-21】** R-62 (main `3a52296`) で `catalog` も**取引ごとの `SET LOCAL` を通るようになった** — `postgres.py` の `catalog(self, limits=None)` が取引の先頭で `_set_timeouts` を発行し、打ち切りは他の 3 操作と同じ `LIMIT_EXCEEDED` (413) に写る。左の「通らない」は 2026-09-19 時点の実測で、行は消さない。 |
 | provisioning / deprovision (`0003`/`0004`) と `ops upgrade-applications` | 通らない | `ops.py`:1484 以下 (:1495 で provision DSN、:1523 で application ごとの DSN)。application database へ **provision 役** (`r2dbsvc_control`) で繋ぐ。その役には role 水準の timeout が無い (§3.1) |
 
 - `catalog` は client が到達できるデータ面の操作である (`r2db-api/src/r2db_api/service.py`:933-948 の `DataService.catalog` が `self._cells[...].catalog()` を呼ぶ)。すなわち runtime role で、上限の無い文が 1 つ、認証済みの client の要求から起きうる。
@@ -239,7 +239,7 @@ r2db には MitateDB の `ops inventory` に相当するコマンドが無い (g
 
 本件の範囲に入れず、監督が `RM` §8 へ起票するかどうかを判定する材料。
 
-1. **`PostgresCell.catalog` に文の上限が無い** (`postgres.py`:803-807)。client が到達できるデータ面の操作で、runtime role の文が 1 つ、`SET LOCAL` を通らずに走る。MitateDB は role 水準の 5000ms でこの経路を覆っている (§3.1)。**監督裁定 2 (2026-09-19): R-56 の範囲外。監督が次の台帳項目として起票し、migration ではなくコードで直す。**
+1. **`PostgresCell.catalog` に文の上限が無い** (`postgres.py`:803-807)。client が到達できるデータ面の操作で、runtime role の文が 1 つ、`SET LOCAL` を通らずに走る。MitateDB は role 水準の 5000ms でこの経路を覆っている (§3.1)。**監督裁定 2 (2026-09-19): R-56 の範囲外。監督が次の台帳項目として起票し、migration ではなくコードで直す。** **【追記 2026-09-21】`RM` §8 の R-62 として起票し、閉じた。** main `3a52296` で `PostgresCell.catalog` は取引ごとの `SET LOCAL statement_timeout` / `lock_timeout` を通るようになり (上限は `ResourceLimits.execution_ms` から導く)、打ち切りと lock timeout は `LIMIT_EXCEEDED` (413) に写る。`security/CONTROL_MAPPING.md` **版 2.15** が peer 間の差の開示を更新した。記録は `docs/work-orders/WORK_ORDER_R62_R2DB_CATALOG_TIMEOUT_V1.md` §6。
 2. **`r2dbsvc_control` (および MitateDB の provision 役) に role 水準の timeout が無い** (§3.1)。`0003`/`0004`/`ops upgrade-applications` が application database へ流す文は上限なしに走る。運用者が 1 回ずつ流すもので client からは到達できない。**監督裁定 2: R-56 の範囲外。DDL を流す役であり、`ops` が `--lock-timeout` を要求する経路 (MitateDB `ops.py`:636-643、:740-746。r2db に同等の引数は無い) との関係を含めて別に判断する。**
 3. ~~`part1_provision_host_and_db.sh` が `0013` を流していない件を台帳の材料にする~~ — **監督裁定 5 (2026-09-19) が一度覆した。行は消さない。** → **v1.0 で台帳材料に戻した** (設計レビュー 中 8・監督裁定 2026-09-19)。**`0013` は前提を持つ**: 自身のヘッダが適用前の `max_connections` の再確認を要求するが (`0013_role_connection_limits.sql`:95-98)、script に確認は無い (grep 0 件)。したがって `0013` を script に足すには「`max_connections` の確認の段」を併せて置く必要があり、それは R-56 の範囲ではない。**script に足すのは `0014` だけである** (§5)。意図的な除外の形跡が現物に無いことは確かめてあるので (§5)、台帳には「取りこぼしであって意図ではない」という実測つきで起票する材料とする。
 4. **r2db の監査 reader に R-51 相当の 2 段分類が無い** — `credential_store.py`:1778 の `except psycopg.Error` 一括は、MitateDB が R-51 で入れた `InsufficientPrivilege` → `StorageConfigurationError` / それ以外 → `AuditReaderUnavailable` の分類を持たない。**R-56 の範囲には入れない**: 応答は同じ 503 `SERVICE_UNAVAILABLE` で、SI-08 と SI-10 の安全上の結果は同じであり、`RM`:448 も「r2db-api の同じ `query` は `except psycopg.Error` → `SERVICE_UNAVAILABLE` を既に持つ (直す所なし)」と実測で閉じている。差は分類の粒度だけである。
