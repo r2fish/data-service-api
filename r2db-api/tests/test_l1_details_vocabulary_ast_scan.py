@@ -146,7 +146,12 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # literal` (still read by `test_postgres.py`'s own facade test) net +7
     # lines above; `_fail_client_value`'s own single `fail()` call is
     # otherwise unchanged.
-    ("postgres.py", 1439),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # R-62 WP-1 (2026-09-21): line shift only (1439 -> 1451) -- `catalog` now
+    # threads `limits` through `_set_timeouts`/the mapped-exception handlers
+    # inside its own transaction (parity with `query`/`transact`/`apply_
+    # schema`), lengthening the file by 12 lines above this call site;
+    # `_fail_client_value`'s own single `fail()` call is otherwise unchanged.
+    ("postgres.py", 1451),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

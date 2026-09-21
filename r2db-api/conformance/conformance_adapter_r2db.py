@@ -211,12 +211,12 @@ def _hold_in_flight_via_stalled_cell_method(cell_obj: object, method_name: str, 
     threads each issue one genuine, full port-level request
     (`make_request()`, e.g. `DataService.catalog(session)`) that reaches
     this stall point ONLY after passing through `DataService._slot`'s own
-    concurrency-counter increment (`self._active += 1`, `service.py:1139`)
+    concurrency-counter increment (`self._active += 1`, `service.py:1004`)
     -- both of this helper's current callers pass `method_name="catalog"`,
-    whose real dispatch to `self._cells[app_id].catalog()` sits INSIDE
-    that same `with self._slot(context)` block at `service.py:1095`
+    whose real dispatch to `self._cells[app_id].catalog(self.limits)` sits
+    INSIDE that same `with self._slot(context)` block at `service.py:942`
     (Phase 8 WP-1 rework 3, 裁定 3, 監督裁定 2026-09-07: corrected from
-    this docstring's own former, unrelated `:1000`/`:1048`/`:1079`
+    this docstring's own former, unrelated `:758`/`:845`/`:907`
     citations -- those are the SAME `_slot`-guarded dispatch pattern's
     other three call sites, for `query`/`mutate`/`schema` respectively,
     none of which this helper ever actually stalls),
@@ -370,7 +370,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # instance a SMALL conformance profile -- `None` (every
         # pre-WP-4 caller, this repository's own session-scoped
         # construction included) keeps `DataService`'s own default
-        # (`ResourceLimits()`, `service.py:828`), unchanged.
+        # (`ResourceLimits()`, `service.py:667`), unchanged.
         #
         # Synthetic pepper for this conformance run only; never a real
         # deployment secret and never read from the environment.
@@ -857,12 +857,13 @@ class R2DBConformanceAdapter(ConformanceAdapter):
 
     # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps the
     # SAME per-application cell object `DataService._slot`'s own dispatch
-    # (`service.py:1000`/`:1048`/`:1079`/`:1095`) calls INTO -- so the
+    # (`service.py:758`/`:845`/`:907`/`:942`) calls INTO -- so the
     # stall point sits after the concurrency counter's own increment
     # (`_slot`), before any backend call. `catalog()` is the stalled
-    # method: parameter-less, needs no pre-existing entity/row, and is a
-    # real, already-present dispatch (`self._cells[app_id].catalog()`,
-    # `service.py:1095`) -- not a method invented for this primitive.
+    # method: takes an optional `limits` argument, needs no pre-existing
+    # entity/row, and is a real, already-present dispatch
+    # (`self._cells[app_id].catalog(self.limits)`, `service.py:942`) --
+    # not a method invented for this primitive.
     def hold_in_flight(self, session, n: int):
         """See `ConformanceAdapter.hold_in_flight`'s own docstring
         (`adapter.py`) for this primitive's port-level meaning; this
@@ -1090,7 +1091,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
     ) -> list[dict]:
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
         # port v1.12 (L7-21): `limit` maps directly onto `DataService.
-        # query`'s own pre-existing `page_size` keyword (`service.py:957`,
+        # query`'s own pre-existing `page_size` keyword (`service.py:719`,
         # unchanged by this WP) -- `None` omits it, letting that method's
         # own default (100) apply exactly as every pre-v1.12 caller here
         # already observed.
@@ -1117,7 +1118,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         where = [{"field": field, "operator": operator, "value": value}]
         # port v1.12 (L7-21): additional predicates are appended to the
         # SAME real `where` list `DataService.query` already accepts
-        # (`service.py:995`, `len(where)` already folds into this peer's
+        # (`service.py:719`, `len(where)` already folds into this peer's
         # own `query_complexity` metric, `structured.py:1183`) -- never a
         # second query stitched together by this adapter.
         if extra_predicates:

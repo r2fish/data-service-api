@@ -975,7 +975,7 @@ class ApplicationCell:
             "unique_keys": unique_keys,
         }
 
-    def catalog(self) -> list[dict[str, Any]]:
+    def catalog(self, limits: ResourceLimits | None = None) -> list[dict[str, Any]]:
         return [self._describe_entity(name) for name in sorted(self.entities)]
 
     def transact(
