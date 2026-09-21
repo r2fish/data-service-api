@@ -2404,11 +2404,12 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
 
     # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps the
     # SAME per-application `PostgresCell.catalog()` `DataService._slot`'s
-    # own dispatch calls into (`service.py:1095`), after the concurrency
+    # own dispatch calls into (`service.py:942`), after the concurrency
     # counter's own increment and BEFORE any backend/DB call (`catalog()`
-    # needs no live connection at all on this backend either -- it reads
-    # the cell's own in-memory schema view). Each held request is a REAL
-    # `GET /v1/catalog` HTTP round trip, issued from its OWN OS thread
+    # opens its own live connection, bounded by the same per-transaction
+    # `statement_timeout`/`lock_timeout` the other 3 operations carry).
+    # Each held request is a REAL `GET /v1/catalog` HTTP round trip,
+    # issued from its OWN OS thread
     # with its OWN event loop + `httpx.AsyncClient(ASGITransport(...))`
     # against the SAME running ASGI app (`self._loop.run_until_complete`
     # on the shared, single loop `_send()` uses cannot itself hold more

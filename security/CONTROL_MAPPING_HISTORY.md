@@ -199,6 +199,12 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*r2db-api Control claim, the per-transaction `SET LOCAL` and `PostgresCell.catalog`'s statement bound, superseded 2026-09-21 (Version 2.15, R-62 -- `PostgresCell.catalog` now issues the same `SET LOCAL` inside its own transaction, which closes the open ledger item this claim disclosed), verbatim:*
+
+- **disclosed difference between the peers**: MitateDB-api's `0013_role_statement_timeouts.sql` puts a role-level `statement_timeout` on its application runtime/developer roles as well, while r2db-api leaves those two roles without a role-level timeout and relies on the per-transaction `SET LOCAL` `_set_timeouts` issues (`r2db-api/src/r2db_api/postgres.py:2282-2297`); `PostgresCell.catalog` (`:803-807`) opens its transaction without that call, so that one path carries no statement bound of its own -- an open ledger item (R-56, design section 10), not a closed gap.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**

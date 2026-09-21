@@ -299,6 +299,60 @@ def test_catalog_denied_for_revoked_credential_exactly_as_query(service):
     assert exc.value.code == "AUTH_REVOKED"
 
 
+def test_data_service_catalog_passes_only_its_own_limits_to_the_cell(service):
+    """`DataService.catalog` threads exactly `self.limits` through to the
+    cell's own `catalog(limits=...)` -- never `deadline`/`clock` (`catalog`
+    takes neither: `hold_in_flight` can stall a cell's `catalog` call
+    across an arbitrary wall-clock gap, so a deadline computed before that
+    stall would silently starve it once resumed). The recording stub's own
+    signature (`limits=None`, nothing else) makes any extra argument a
+    `TypeError` this test itself would surface, not merely a value it
+    forgot to assert on."""
+    calls: list = []
+
+    def recording_catalog(self, limits=None):
+        calls.append(limits)
+        return []
+
+    original = ApplicationCell.catalog
+    ApplicationCell.catalog = recording_catalog
+    try:
+        runtime = service.authenticate("cred-a.secret-a")
+        result = service.catalog(runtime)
+    finally:
+        ApplicationCell.catalog = original
+    assert result["entities"] == []
+    assert len(calls) == 1
+    assert calls[0] is service.limits
+
+
+def test_data_service_catalog_denial_is_audited_with_the_limit_exceeded_reason(service):
+    """When the cell's own `catalog` raises `LIMIT_EXCEEDED` (the mapped
+    outcome of a real transaction timeout, `PostgresCell.catalog`'s own
+    behaviour), `DataService.catalog`'s existing `except FoundationError`
+    clause still records a `deny` audit event for it -- `operation=
+    "catalog"`, `reason_code="LIMIT_EXCEEDED"` -- exactly like every other
+    denial this method already audits."""
+    def failing_catalog(self, limits=None):
+        raise FoundationError(
+            code="LIMIT_EXCEEDED", message="Operation exceeds the execution budget.",
+            details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms if limits is not None else 0},
+            status=413,
+        )
+
+    original = ApplicationCell.catalog
+    ApplicationCell.catalog = failing_catalog
+    try:
+        runtime = service.authenticate("cred-a.secret-a")
+        with pytest.raises(FoundationError) as exc:
+            service.catalog(runtime)
+    finally:
+        ApplicationCell.catalog = original
+    assert exc.value.code == "LIMIT_EXCEEDED"
+    denied = [event for event in ControlAuthority(service).audit_events() if event.get("outcome") == "deny"]
+    assert denied and denied[-1]["operation"] == "catalog" and denied[-1]["reason_code"] == "LIMIT_EXCEEDED"
+
+
 def test_finite_limits_are_enforced_and_discoverable(service):
     runtime = service.authenticate("cred-a.secret-a")
     response = service.capabilities(runtime)

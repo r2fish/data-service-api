@@ -1251,6 +1251,168 @@ def test_statement_timeout_is_wired_to_resource_limits(app_a: types.SimpleNamesp
         cell.close()
 
 
+# --- catalog carries a per-transaction statement bound, like the other 3 ---
+# --- client-reachable operations (`query`/`transact`/`apply_schema`) -------
+
+
+def test_catalog_wires_statement_and_lock_timeout_to_the_passed_resource_limits(app_a: types.SimpleNamespace) -> None:
+    """`catalog(limits=...)` enters `_load_catalog`'s own transaction only
+    after `_set_timeouts` has run -- the effective `statement_timeout`/
+    `lock_timeout` PostgreSQL reports for that same connection, inside that
+    same transaction, is the exact `f"{timeout_ms}ms"` `_set_timeouts`
+    composes from `limits.execution_ms`. `_load_catalog` is swapped out for
+    a probe that reads `pg_settings.setting` directly (never `SHOW`, never
+    the SQL text `_set_timeouts` issues) so this observes the live session
+    state a timeout would actually be enforced against.
+    """
+    cell = make_cell(app_a)
+    captured: dict[str, str] = {}
+
+    def probing_load_catalog(self: PostgresCell, conn: "psycopg.Connection", *, with_constraints: bool = True) -> dict:
+        with conn.cursor() as cur:
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+            captured["statement_timeout"] = cur.fetchone()[0]
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
+            captured["lock_timeout"] = cur.fetchone()[0]
+        return {}
+
+    try:
+        limits = ResourceLimits(execution_ms=1234)
+        original = PostgresCell._load_catalog
+        PostgresCell._load_catalog = probing_load_catalog
+        try:
+            assert cell.catalog(limits=limits) == []
+        finally:
+            PostgresCell._load_catalog = original
+        assert captured["statement_timeout"] == "1234"
+        assert captured["lock_timeout"] == "1234"
+    finally:
+        cell.close()
+
+
+def test_catalog_without_an_explicit_limits_argument_uses_default_resource_limits(app_a: types.SimpleNamespace) -> None:
+    """A bare `cell.catalog()` -- the shape every existing direct call site
+    in this file already uses -- still carries a bound: the observed
+    `statement_timeout` is the default `ResourceLimits().execution_ms`,
+    read the same way (live `pg_settings.setting`) as the explicit-`limits`
+    case above, never a proxy such as "non-zero"."""
+    cell = make_cell(app_a)
+    captured: dict[str, str] = {}
+
+    def probing_load_catalog(self: PostgresCell, conn: "psycopg.Connection", *, with_constraints: bool = True) -> dict:
+        with conn.cursor() as cur:
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+            captured["statement_timeout"] = cur.fetchone()[0]
+        return {}
+
+    try:
+        original = PostgresCell._load_catalog
+        PostgresCell._load_catalog = probing_load_catalog
+        try:
+            assert cell.catalog() == []
+        finally:
+            PostgresCell._load_catalog = original
+        assert captured["statement_timeout"] == str(ResourceLimits().execution_ms)
+    finally:
+        cell.close()
+
+
+def test_catalog_set_local_timeouts_do_not_leak_to_the_next_transaction(app_a: types.SimpleNamespace) -> None:
+    """`_set_timeouts` uses `SET LOCAL`, so a bound set for one `catalog`
+    transaction must not survive into the next transaction run over the
+    SAME pooled connection. `pool_size=1` pins this cell to exactly one
+    physical connection; the probe also records `id(conn)` so both the
+    baseline read below and the second, directly-opened transaction after
+    `catalog()` are proven to be the very same connection object `catalog`
+    itself used, not merely "a" connection from a same-sized pool. The
+    baseline is read from that SAME connection, before `catalog()` ever
+    runs `SET LOCAL` on it, so the comparison never assumes the cluster's
+    own default is `0` -- it only checks that whatever the connection
+    carried before `catalog()` is what it carries again afterward."""
+    cell = make_cell(app_a, pool_size=1)
+    captured: dict[str, object] = {}
+
+    def probing_load_catalog(self: PostgresCell, conn: "psycopg.Connection", *, with_constraints: bool = True) -> dict:
+        captured["conn_id"] = id(conn)
+        return {}
+
+    try:
+        with cell._runtime.connection() as conn:
+            baseline_conn_id = id(conn)
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+                    baseline_statement_timeout = cur.fetchone()[0]
+                    cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
+                    baseline_lock_timeout = cur.fetchone()[0]
+
+        original = PostgresCell._load_catalog
+        PostgresCell._load_catalog = probing_load_catalog
+        try:
+            cell.catalog(limits=ResourceLimits(execution_ms=1234))
+        finally:
+            PostgresCell._load_catalog = original
+        assert captured["conn_id"] == baseline_conn_id
+
+        with cell._runtime.connection() as conn:
+            assert id(conn) == baseline_conn_id
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+                    statement_timeout = cur.fetchone()[0]
+                    cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
+                    lock_timeout = cur.fetchone()[0]
+        assert statement_timeout == baseline_statement_timeout
+        assert lock_timeout == baseline_lock_timeout
+    finally:
+        cell.close()
+
+
+def test_catalog_maps_timeout_and_lock_conflicts_to_limit_exceeded(app_a: types.SimpleNamespace) -> None:
+    """`catalog`'s transaction maps `psycopg.errors.QueryCanceled`/
+    `LockNotAvailable` to the same `LIMIT_EXCEEDED` (413, `resource`/
+    `limit_class` = `execution_ms`, `limit` = `limits.execution_ms`)
+    `query`/`transact`/`apply_schema` already return, rather than falling
+    through to a generic `SERVICE_UNAVAILABLE`. Two routes are exercised,
+    each with `_load_catalog` swapped out: (i) an actual `pg_sleep` inside
+    the same transaction, genuinely cancelled by the short timeout; (ii) a
+    directly raised `LockNotAvailable`, observing only the mapping."""
+    cell = make_cell(app_a)
+    limits = ResourceLimits(execution_ms=200)
+
+    def slow_load_catalog(self: PostgresCell, conn: "psycopg.Connection", *, with_constraints: bool = True) -> dict:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_sleep(2)")
+        return {}
+
+    def lock_conflict_load_catalog(self: PostgresCell, conn: "psycopg.Connection", *, with_constraints: bool = True) -> dict:
+        raise psycopg.errors.LockNotAvailable("simulated lock conflict")
+
+    try:
+        original = PostgresCell._load_catalog
+        PostgresCell._load_catalog = slow_load_catalog
+        try:
+            with pytest.raises(FoundationError) as exc:
+                cell.catalog(limits=limits)
+        finally:
+            PostgresCell._load_catalog = original
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert exc.value.status == 413
+        assert exc.value.details == {"resource": "execution_ms", "limit_class": "execution_ms", "limit": 200}
+
+        PostgresCell._load_catalog = lock_conflict_load_catalog
+        try:
+            with pytest.raises(FoundationError) as lock_exc:
+                cell.catalog(limits=limits)
+        finally:
+            PostgresCell._load_catalog = original
+        assert lock_exc.value.code == "LIMIT_EXCEEDED"
+        assert lock_exc.value.status == 413
+        assert lock_exc.value.details == {"resource": "execution_ms", "limit_class": "execution_ms", "limit": 200}
+    finally:
+        cell.close()
+
+
 # --- ordinary correctness: catalog, schema ops, mutation semantics --------
 
 

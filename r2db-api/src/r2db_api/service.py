@@ -939,7 +939,7 @@ class DataService:
                 # addressability` is now declared `enabled`, so this
                 # publishes exactly what the cell itself already computes,
                 # with no narrowing.
-                entities = self._cells[canonical.application_id].catalog()
+                entities = self._cells[canonical.application_id].catalog(self.limits)
                 # `catalog` never passes through the confirmation choke -- always buffer-class.
                 # history: CH-0114
                 self._event(canonical, operation="catalog", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid)

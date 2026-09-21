@@ -173,7 +173,7 @@ class StorageBackend(Protocol):
         """
         ...
 
-    def catalog(self) -> list[dict[str, Any]]:
+    def catalog(self, limits: ResourceLimits | None = None) -> list[dict[str, Any]]:
         """List this application's entities and their known fields."""
         ...
 

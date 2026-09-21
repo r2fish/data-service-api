@@ -800,10 +800,22 @@ class PostgresCell:
             "unique_keys": unique_keys,
         }
 
-    def catalog(self) -> list[dict[str, Any]]:
+    def catalog(self, limits: ResourceLimits | None = None) -> list[dict[str, Any]]:
+        """List this application's entities and their known fields, inside a transaction bounded by `statement_timeout`/`lock_timeout` derived from `limits` (`ResourceLimits()` when omitted), exactly like `query`/`transact`/`apply_schema`. A timeout maps to the same `LIMIT_EXCEEDED` those three operations already return."""
+        if limits is None:
+            limits = ResourceLimits()
         with self._runtime.connection() as conn:
-            with conn.transaction():
-                info = self._load_catalog(conn)
+            timeout_ms = self._timeout_ms(limits, None, None)
+            try:
+                with conn.transaction():
+                    self._set_timeouts(conn, timeout_ms)
+                    info = self._load_catalog(conn)
+            except psycopg.errors.QueryCanceled:
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
+            except psycopg.errors.LockNotAvailable:
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
+            except psycopg.Error:
+                fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         return [self._describe_table(name, info[name]) for name in sorted(info)]
 
     def _load_catalog(self, conn: "psycopg.Connection[Any]", *, with_constraints: bool = True) -> dict[str, "_TableInfo"]:

@@ -710,7 +710,7 @@ class _PoolBackedFakeCell:
     def apply_schema(self, *args, **kwargs):  # pragma: no cover -- not exercised by this test
         raise NotImplementedError
 
-    def catalog(self) -> list[dict]:  # pragma: no cover -- not exercised by this test
+    def catalog(self, limits=None) -> list[dict]:  # pragma: no cover -- not exercised by this test
         return []
 
 

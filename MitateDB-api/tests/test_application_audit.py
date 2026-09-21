@@ -408,6 +408,38 @@ def clean_application_audit(platform: types.SimpleNamespace) -> None:
 
 
 # ===========================================================================
+# Role-level statement_timeout (0013) reaches the catalog path's own
+# developer connection
+# ===========================================================================
+
+
+def test_developer_connection_used_by_the_catalog_path_carries_the_role_level_statement_timeout(
+    timeout_probe_app: types.SimpleNamespace,
+) -> None:
+    """`PostgresBackend.all_field_types`/`.all_field_constraints` -- the
+    storage this application's `GET /v1/catalog` reads -- run entirely on
+    `self._developer` (`backend_postgres.py`). `0013_role_statement_
+    timeouts.sql` bounds that role with a role-level `ALTER ROLE ... SET
+    statement_timeout = '5000ms'` rather than a per-transaction `SET
+    LOCAL` (r2db's own mechanism, disclosed as a platform difference in
+    `security/CONTROL_MAPPING.md`'s SI-08 block). This reads the EFFECTIVE
+    value straight off the SAME connection object `PostgresBackend` opens
+    for that path (`pg_settings.setting`, never `pg_roles.rolconfig`/
+    `pg_db_role_setting`'s own declaration) -- proof the session the
+    catalog path actually runs in carries the bound, not merely that the
+    role declares one."""
+    backend = make_backend(timeout_probe_app)
+    try:
+        with backend._developer.cursor() as cur:
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+            statement_timeout = cur.fetchone()[0]
+        backend._developer.rollback()
+    finally:
+        backend.close()
+    assert statement_timeout == "5000"
+
+
+# ===========================================================================
 # Migration / GRANT tests (real PostgreSQL, module `platform` fixture)
 # ===========================================================================
 
