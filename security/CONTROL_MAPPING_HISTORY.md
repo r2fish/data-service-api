@@ -326,6 +326,12 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api Control claim, the Platform-upgrade runbook, superseded 2026-09-21 (Version 2.17, R-70 -- `gated instead by` could be read as the isolated proof, the independent audit and the requester's approval applying to the remediation stage only, weaker than the runbook's own section 10, which requires all three before anything in stage 2 or stage 4 runs against production; the claim now states the three conditions for both state-changing stages), verbatim:*
+
+- **Platform-upgrade runbook (R-45 WP-D)**: `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10 is the operator procedure for the Gate-0 read and the platform upgrade, in four stages -- first read, platform remediation, second read, candidate -- of which only the remediation and the candidate stage change production state (a read performs no DDL, no DML, no declaration replacement, no restart, no traffic change, no API enablement); Gate-0 is ready only when all 10 items are confirmed AND section 10.8's acceptance records name the current versions (`ops inventory`'s own exit status 0 never makes it ready), and what ready gates is exactly the candidate deploy and the traffic switch onto it, while the remediation stage is gated instead by the isolated proof, the independent audit and the requester's approval -- including that stage's own single move of traffic percentages, onto the env-only revision that runs the same image digest as the revision it replaces, and the removal of a tag that keeps a Data revision out of the concurrency agreement (no percentage moves, but it is the same traffic projection and carries the same three conditions);
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
