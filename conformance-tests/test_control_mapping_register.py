@@ -915,3 +915,375 @@ def test_fixture_bullet_accounting_catches_dropped_named_subblock_bullets():
         f"required test (a) mismatch on a fixture WITH a named sub-block: raw={raw} collected={collected} em={em}"
     )
     assert collected == 4, f"expected all 4 real bullets (2 default + 2 named) collected, got {collected}"
+
+
+# ---------------------------------------------------------------------------
+# R-64 (docs/work-orders/WORK_ORDER_R64_CONTROL_MAPPING_TEST_NAME_RESOLUTION_V1.md
+# section 1, D-1..D-4): every test-name reference a Control/Evidence claim
+# cites must resolve to a real `def`, so a rename or removal on the test
+# side cannot leave a claim pointing at nothing while this suite stays
+# green (the gap R-56's mutation M11 and R-57's mutation found). Two
+# reference forms:
+#   (i) full form `<path>.py::<name>` (or, if `<path>` omits its
+#       directory, a basename that is unique within the claiming
+#       subsection's peer-scoped test directories); the file must be
+#       repository-relative and real, and it must hold `def <name>`
+#       (module-level, or one level under a class -- a method).
+#   (ii) bare form `::<name>` / `` `<name>` `` (the whole backtick span is
+#       the `test_`-prefixed identifier): `<name>` must be a `def`
+#       SOMEWHERE in the claim's peer-scoped test directories. This does
+#       NOT distinguish which file, and does not catch the same name
+#       existing in both peers (D-1's own stated limit).
+# Resolution is peer-scoped only -- the rejected alternative (tracking the
+# nearest preceding path across bullets) is not implemented: 31% of bare
+# `::name` references share no bullet with a preceding path, and that
+# heuristic misattributes an SI-14 reference (work order section 1's own
+# measurement).
+# ---------------------------------------------------------------------------
+
+import ast
+
+REPO_ROOT = CONTROL_MAPPING_PATH.parent.parent
+
+# D-3: the ONE file this check reads -- never a `security/*.md` glob, and
+# never `CONTROL_MAPPING_HISTORY_PATH` (the verbatim archive of superseded
+# claims, where a since-renamed test name is CORRECT to find, e.g. the
+# `..._all_11_endpoints` bullet R-64 WP-2 moves there).
+TEST_NAME_RESOLUTION_TARGET_PATH = CONTROL_MAPPING_PATH
+
+# D-2: the 4 test directories a `def`/`async def` index is built over
+# (`ast`, not pytest collection -- collection needs PostgreSQL/a DSN,
+# OPERATING_CONDITIONS.md section 2 item 12). Keys match the peer-scoping
+# table below.
+_TEST_DIR_KEYS = ("r2db-api", "MitateDB-api", "conformance-tests", "tools/tests")
+_TEST_DIRS = {
+    "r2db-api": REPO_ROOT / "r2db-api" / "tests",
+    "MitateDB-api": REPO_ROOT / "MitateDB-api" / "tests",
+    "conformance-tests": REPO_ROOT / "conformance-tests",
+    "tools/tests": REPO_ROOT / "tools" / "tests",
+}
+
+# D-1 (ii): which of the 4 directories a bare reference may resolve in,
+# keyed by the CLAIMING subsection's own peer name. A `Common` subsection,
+# or any claim outside every SI section, gets all 4 (`tools/tests` is
+# never reachable from a named-peer subsection -- current file: 0 such
+# bare references, D-1 (ii)'s own note; a claim wanting `tools/tests`
+# writes the full form instead).
+_PEER_SCOPED_DIR_KEYS = {
+    "r2db-api": ("r2db-api", "conformance-tests"),
+    "MitateDB-api": ("MitateDB-api", "conformance-tests"),
+    "Common": ("r2db-api", "MitateDB-api", "conformance-tests", "tools/tests"),
+}
+_OUTSIDE_SI_DIR_KEYS = ("r2db-api", "MitateDB-api", "conformance-tests", "tools/tests")
+
+_FULL_FORM_REF_RE = re.compile(r"^(\S+\.py)::([A-Za-z_]\w*)$")
+_BARE_COLON_REF_RE = re.compile(r"^::(test_\w+)$")
+_BARE_NAME_REF_RE = re.compile(r"^(test_\w+)$")
+
+# D-4: floor per reference form -- measured 2026-09-21 (基点 3711a34) at
+# 112 / 320 / 109; each floor below is that count minus a margin, so a
+# regression in the extraction regex (or a future edit that trims claims
+# well past the margin) is caught rather than a floor that only guards
+# against zero (OPERATING_CONDITIONS.md section 1.5 item 32, D-4).
+FULL_FORM_FLOOR = 90
+BARE_COLON_FORM_FLOOR = 280
+BARE_NAME_FORM_FLOOR = 90
+
+
+def _iter_defs_in_file(path: Path) -> set[str]:
+    """D-2: `def`/`async def` names directly under the module, or
+    directly under a class body (one level of nesting, a method) -- never
+    a nested function inside another function, which is not itself a
+    collectible pytest item."""
+    try:
+        tree = ast.parse(path.read_text())
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names.add(child.name)
+    return names
+
+
+def _build_def_index() -> dict[str, dict[str, set[str]]]:
+    """D-2: dir_key -> {repository-relative posix path: def names}, one
+    entry per `*.py` file anywhere under each of the 4 test directories
+    (`rglob`, 差し戻し 1 item 3, 監督裁定: a nested test file must still be
+    indexed). A full-form reference to a path OUTSIDE all 4 of these
+    directories stays unresolved regardless -- D-1 (i)'s own evidence is
+    scoped to these 4 directories, by design, not to the whole
+    repository."""
+    index: dict[str, dict[str, set[str]]] = {}
+    for dir_key in _TEST_DIR_KEYS:
+        entries: dict[str, set[str]] = {}
+        dir_path = _TEST_DIRS[dir_key]
+        if dir_path.is_dir():
+            for f in sorted(dir_path.rglob("*.py")):
+                if "__pycache__" in f.parts:
+                    continue
+                rel = f.relative_to(REPO_ROOT).as_posix()
+                entries[rel] = _iter_defs_in_file(f)
+        index[dir_key] = entries
+    return index
+
+
+def _resolve_full_form(index, allowed_dir_keys, path_str: str, name: str) -> bool:
+    """D-1 (i). A directory-carrying `path_str` resolves against any
+    indexed directory (full form resolves "subsection を問わず"); a
+    directory-OMITTED `path_str` (a bare basename) resolves only within
+    `allowed_dir_keys`, and only if the basename is unique there."""
+    if "/" in path_str:
+        for entries in index.values():
+            if path_str in entries:
+                return name in entries[path_str]
+        return False
+    matches = [
+        (rel, names)
+        for dir_key in allowed_dir_keys
+        for rel, names in index.get(dir_key, {}).items()
+        if rel.rsplit("/", 1)[-1] == path_str
+    ]
+    if len(matches) != 1:
+        return False
+    _rel, names = matches[0]
+    return name in names
+
+
+def _resolve_bare_form(index, allowed_dir_keys, name: str) -> bool:
+    """D-1 (ii): `name` is a `def` somewhere in the claim's peer-scoped
+    directories -- which file, or a same-name collision with the OTHER
+    peer, is outside what (ii) checks (D-1's own stated limit)."""
+    return any(name in names for dir_key in allowed_dir_keys for names in index.get(dir_key, {}).values())
+
+
+class _Claim:
+    def __init__(self, sid, peer, subject, axis, line, bullet):
+        self.sid = sid
+        self.peer = peer
+        self.subject = subject
+        self.axis = axis
+        self.line = line
+        self.bullet = bullet
+
+
+def _iter_document_claims(text: str):
+    """Walks the SI/peer(/subject)/axis/bullet structure directly on
+    absolute text offsets (parallel to `_analyze_shape`'s relative-offset
+    walk over `ParsedSection`/`SubBlock`, which callers outside this
+    section rely on staying relative-only) so each yielded `_Claim`
+    carries a real line number for failure messages. Text outside every
+    SI section (preamble, `## CCR-14`, `## Rule`) is walked too (D-3:
+    "対象は全文"), and NOT restricted to `- ` bullet lines there -- every
+    non-blank line outside an SI section is a candidate (差し戻し 1 item 1,
+    監督裁定: a plain paragraph line such as `security/CONTROL_MAPPING.md`'s
+    own `Version:` line can carry a test-name reference; measured
+    2026-09-21, the current file has none outside its SI sections, so this
+    path is pinned by a fixture). Each such reference resolves
+    with `peer=None` (the D-1 (ii) "SI 節の外" case, resolved against
+    `_OUTSIDE_SI_DIR_KEYS`, all 4 directories)."""
+    h2_starts = [m.start() for m in _ANY_H2_RE.finditer(text)]
+    si_matches = list(_SI_SECTION_RE.finditer(text))
+    si_spans = []
+    for m in si_matches:
+        later = [s for s in h2_starts if s > m.start()]
+        end = min(later) if later else len(text)
+        si_spans.append((m.group(1), m.start(), end))
+
+    def in_any_si(pos: int) -> bool:
+        return any(start <= pos < end for _sid, start, end in si_spans)
+
+    for sid, sec_start, sec_end in si_spans:
+        h3_matches = [m for m in _PEER_H3_RE.finditer(text) if sec_start <= m.start() < sec_end]
+        for i, h3 in enumerate(h3_matches):
+            parsed = _parse_subblock_heading(h3.group(0))
+            if parsed is None:
+                continue
+            peer, subject = parsed
+            sub_start = h3.end()
+            sub_end = h3_matches[i + 1].start() if i + 1 < len(h3_matches) else sec_end
+            axis_matches = [m for m in _AXIS_H4_RE.finditer(text) if sub_start <= m.start() < sub_end]
+            for j, am in enumerate(axis_matches):
+                axis = am.group(1).strip()
+                a_start = am.end()
+                a_end = axis_matches[j + 1].start() if j + 1 < len(axis_matches) else sub_end
+                for bm in re.finditer(r"^- (.*)$", text[a_start:a_end], re.MULTILINE):
+                    bullet = bm.group(1)
+                    if bullet == "—":
+                        continue
+                    line = text.count("\n", 0, a_start + bm.start()) + 1
+                    yield _Claim(sid, peer, subject, axis, line, bullet)
+    # D-3 (差し戻し 1 item 1): preamble + tail (CCR-14, Rule) -- every
+    # non-blank line outside any SI section, not only `- ` bullet lines.
+    pos = 0
+    for raw_line in text.splitlines(keepends=True):
+        start = pos
+        pos += len(raw_line)
+        line_content = raw_line.rstrip("\n")
+        if not line_content.strip():
+            continue
+        if in_any_si(start):
+            continue
+        line = text.count("\n", 0, start) + 1
+        yield _Claim(None, None, None, None, line, line_content)
+
+
+def _extract_bullet_references(bullet: str):
+    """The 3 reference forms inside one claim bullet's backtick spans:
+    `("full", path, name)`, `("bare_colon", name)`, `("bare_name", name)`.
+    A backtick span matching none of the 3 (e.g. `` `CredentialStore.
+    authenticate` ``, a code reference with no `test_` prefix) is not a
+    test-name reference at all and is silently not yielded -- only the 3
+    shapes D-1 defines are references this check resolves."""
+    refs = []
+    for span in re.findall(r"`([^`]+)`", bullet):
+        m = _FULL_FORM_REF_RE.match(span)
+        if m:
+            refs.append(("full", m.group(1), m.group(2)))
+            continue
+        m = _BARE_COLON_REF_RE.match(span)
+        if m:
+            refs.append(("bare_colon", m.group(1)))
+            continue
+        m = _BARE_NAME_REF_RE.match(span)
+        if m:
+            refs.append(("bare_name", m.group(1)))
+            continue
+    return refs
+
+
+def _find_unresolved_test_name_references(text: str, index) -> list[str]:
+    """D-1: one message per unresolved reference, `file:line`, the name,
+    (SI, peer, subblock, axis) and which rule ((i)/(ii)) applied -- never
+    folded/summarized, so every offender is visible from one failed
+    assertion (work order section 2.1)."""
+    violations: list[str] = []
+    for claim in _iter_document_claims(text):
+        allowed = _PEER_SCOPED_DIR_KEYS.get(claim.peer, _OUTSIDE_SI_DIR_KEYS)
+        for ref in _extract_bullet_references(claim.bullet):
+            if ref[0] == "full":
+                _kind, path_str, name = ref
+                ok = _resolve_full_form(index, allowed, path_str, name)
+                rule = "(i)"
+            else:
+                _kind, name = ref
+                ok = _resolve_bare_form(index, allowed, name)
+                rule = "(ii)"
+            if not ok:
+                violations.append(
+                    f"{TEST_NAME_RESOLUTION_TARGET_PATH}:{claim.line}: {name!r} "
+                    f"(SI={claim.sid}, peer={claim.peer}, subblock={claim.subject!r}, axis={claim.axis}) "
+                    f"rule {rule} does not resolve to a real def"
+                )
+    return violations
+
+
+def test_control_mapping_md_test_name_reference_extraction_meets_the_floor():
+    """D-4: the reference extraction must not go silently empty on the
+    real file -- three floors, one per form (work order section 2.4, M4)."""
+    text = TEST_NAME_RESOLUTION_TARGET_PATH.read_text()
+    full = bare_colon = bare_name = 0
+    for claim in _iter_document_claims(text):
+        for ref in _extract_bullet_references(claim.bullet):
+            if ref[0] == "full":
+                full += 1
+            elif ref[0] == "bare_colon":
+                bare_colon += 1
+            else:
+                bare_name += 1
+    assert full >= FULL_FORM_FLOOR, f"full-form reference count {full} below floor {FULL_FORM_FLOOR}"
+    assert bare_colon >= BARE_COLON_FORM_FLOOR, f"bare '::' reference count {bare_colon} below floor {BARE_COLON_FORM_FLOOR}"
+    assert bare_name >= BARE_NAME_FORM_FLOOR, f"bare-name reference count {bare_name} below floor {BARE_NAME_FORM_FLOOR}"
+
+
+def test_control_mapping_test_name_def_index_has_at_least_one_entry_per_directory():
+    """D-4: the `ast` index itself must not be silently empty in any of
+    the 4 directories."""
+    index = _build_def_index()
+    empty_dirs = [dir_key for dir_key in _TEST_DIR_KEYS if not any(index.get(dir_key, {}).values())]
+    assert not empty_dirs, f"directory key(s) with zero indexed test defs: {empty_dirs}"
+
+
+def test_test_name_resolution_target_path_is_pinned_to_control_mapping_only():
+    """D-3: the object of this check is ONE constant, never a
+    `security/*.md` glob and never `CONTROL_MAPPING_HISTORY_PATH` (M8:
+    broadening this constant to also cover the history file would pull in
+    that file's own verbatim, intentionally-unresolvable superseded test
+    names)."""
+    assert TEST_NAME_RESOLUTION_TARGET_PATH == CONTROL_MAPPING_PATH
+    assert TEST_NAME_RESOLUTION_TARGET_PATH != CONTROL_MAPPING_HISTORY_PATH
+
+
+def test_control_mapping_md_every_test_name_reference_resolves():
+    """D-1: the real file's every Control/Evidence test-name reference
+    resolves. WP-1 measurement (work order section 2.1): exactly one
+    unresolved reference, `security/CONTROL_MAPPING.md:477`'s
+    `test_audit_role_http_authorization_matrix_all_11_endpoints` (renamed
+    to `..._all_13_endpoints`, D-5 (a)) -- WP-2 corrects it in the same
+    commit (D-6), so this test is green only from that commit onward."""
+    text = TEST_NAME_RESOLUTION_TARGET_PATH.read_text()
+    index = _build_def_index()
+    violations = _find_unresolved_test_name_references(text, index)
+    assert violations == [], "\n".join(violations)
+
+
+def test_control_mapping_md_async_def_test_is_indexed_and_resolves():
+    """D-2 (M7): an `async def` test must be indexed -- this uses a real
+    one (`r2db-api/tests/test_preauth_concurrency_bound.py::
+    test_unauthenticated_flood_is_bounded_by_concurrency`, an `async def`)
+    rather than a synthetic fixture, since the fixture path never touches
+    the real `ast` index this property is about."""
+    index = _build_def_index()
+    rel = "r2db-api/tests/test_preauth_concurrency_bound.py"
+    assert rel in index["r2db-api"], f"{rel} missing from the r2db-api index"
+    assert "test_unauthenticated_flood_is_bounded_by_concurrency" in index["r2db-api"][rel]
+
+
+def _fake_index(**dir_entries):
+    """{dir_key: {rel_path: {names}}}, the same shape `_build_def_index`
+    returns, built by hand so the fixture tests below never touch the
+    real filesystem."""
+    return dir_entries
+
+
+def test_fixture_full_form_unknown_name_in_a_real_path_does_not_resolve():
+    """D-1 (i) (M1): mutating `_resolve_full_form` to check only that
+    `path_str` is indexed (never that `name` is one of its own defs)
+    would let this resolve."""
+    index = _fake_index(**{"r2db-api": {"r2db-api/tests/test_x.py": {"test_real"}}})
+    assert not _resolve_full_form(index, ("r2db-api", "conformance-tests"), "r2db-api/tests/test_x.py", "test_fake")
+
+
+def test_fixture_bare_form_name_only_in_the_other_peer_does_not_resolve():
+    """D-1 (ii) peer scope (M2): mutating `_resolve_bare_form` to search
+    all 4 directories (never just `allowed_dir_keys`) would let this
+    resolve."""
+    index = _fake_index(**{"MitateDB-api": {"MitateDB-api/tests/test_y.py": {"test_only_in_mitatedb"}}})
+    assert not _resolve_bare_form(index, ("r2db-api", "conformance-tests"), "test_only_in_mitatedb")
+
+
+def test_fixture_directory_omitted_basename_ambiguous_does_not_resolve():
+    """D-1 (i) directory omission (M3): mutating `_resolve_full_form` to
+    take the first basename match (instead of requiring exactly one)
+    would let this resolve even though `test_dup.py` exists twice within
+    the allowed directories."""
+    index = _fake_index(**{
+        "r2db-api": {"r2db-api/tests/test_dup.py": {"test_shared"}},
+        "conformance-tests": {"conformance-tests/test_dup.py": {"test_other"}},
+    })
+    assert not _resolve_full_form(index, ("r2db-api", "conformance-tests"), "test_dup.py", "test_shared")
+
+
+def test_fixture_outside_si_section_line_with_unresolved_reference_is_detected():
+    """D-3 (差し戻し 1 item 1, 監督裁定, M9): a plain paragraph line OUTSIDE
+    every SI section (preamble, `## CCR-14`, `## Rule`) must be scanned
+    for test-name references too, not only `- ` bullet lines -- the
+    property that let the real file's own version line (a paragraph line
+    citing a since-renamed test name) escape detection before this fix."""
+    text = "A preamble paragraph line citing `test_totally_fake_outside_si_reference` as evidence.\n"
+    violations = _find_unresolved_test_name_references(text, _fake_index())
+    assert violations, "expected the outside-SI paragraph line's fake reference to be flagged"
