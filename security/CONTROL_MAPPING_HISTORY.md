@@ -320,6 +320,12 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api Control claim, the block `0014_role_connection_limits_rollout.sql` takes the raised ceilings from, superseded 2026-09-21 (Version 2.16, R-65 -- the claims stating the raised ceilings moved out of SI-08's MitateDB-api `default block` into its new `capacity and concurrency` named block, so the `default block` this claim named no longer states them; the claim now names the `capacity and concurrency` block), verbatim:*
+
+- **`0014_role_connection_limits_rollout.sql`**: applies the raised ceilings `SI-08`'s `MitateDB-api` `default block` states, retroactively (already-provisioned runtime/developer roles, a registry row whose role `pg_roles` no longer carries skipped rather than aborting the file) and going forward (`begin_provision_application`'s own `CREATE OR REPLACE`, both the `CREATE ROLE` branch and its `duplicate_object` fallback), the WHOLE file inside one transaction so a permission failure partway leaves nothing changed rather than a half-applied state;
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
