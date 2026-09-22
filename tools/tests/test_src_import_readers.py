@@ -206,8 +206,8 @@ PINNED_MODULES: dict[str, frozenset[str]] = {
 # a real reader (dead) fails the same as a real reader-zero import that
 # isn't listed here. A reason either cites `MODULE_REFACT_ARCHITECTURE_V1.md`
 # §10.19's (4) record of an intentional facade re-export, cites a facade
-# identity test's own `file:line`, or -- for the handful with neither, all
-# noted as such at this file's own creation -- reads "no record".
+# identity test's own `file:line`, or -- only for a row whose key is
+# pinned in _NO_RECORD_KEYS below (currently empty) -- reads "no record".
 ALLOWED_READER_ZERO_IMPORTS: frozenset[tuple[str, str, str, str]] = frozenset(
     {
         (
@@ -432,12 +432,6 @@ ALLOWED_READER_ZERO_IMPORTS: frozenset[tuple[str, str, str, str]] = frozenset(
             "test_value_types_leaf_preserves_structured_facade",
         ),
         (
-            "r2db",
-            "r2db_api.structured",
-            "Decimal",
-            "no record (present at this file's own creation)",
-        ),
-        (
             "mitatedb",
             "mitatedb_api.backend_postgres",
             "_INT_DOMAIN_RANGES",
@@ -489,12 +483,6 @@ ALLOWED_READER_ZERO_IMPORTS: frozenset[tuple[str, str, str, str]] = frozenset(
             "_as_traversable",
             "facade identity test MitateDB-api/tests/test_application_plane_limits.py:404 "
             "test_as_traversable_leaf_preserves_cell_facade_and_dataclass_normalization",
-        ),
-        (
-            "mitatedb",
-            "mitatedb_api.control_http",
-            "_CredentialMissing",
-            "no record (present at this file's own creation)",
         ),
         (
             "mitatedb",
@@ -765,15 +753,11 @@ def test_string_annotation_only_readers_match_pin() -> None:
 
 _REASON_FILE_LINE_RE = re.compile(r"\.py:\d+")
 
-# The only two (peer, module, name) keys allowed a bare "no record" reason
-# (no `MODULE_REFACT_ARCHITECTURE_V1.md` citation, no `file.py:line`) --
-# pinned as a row set so a THIRD row cannot quietly claim the same excuse.
-_NO_RECORD_KEYS: frozenset[tuple[str, str, str]] = frozenset(
-    {
-        ("r2db", "r2db_api.structured", "Decimal"),
-        ("mitatedb", "mitatedb_api.control_http", "_CredentialMissing"),
-    }
-)
+# (peer, module, name) keys allowed a bare "no record" reason (no
+# `MODULE_REFACT_ARCHITECTURE_V1.md` citation, no `file.py:line`) --
+# pinned as a row set (currently empty) so a new row cannot quietly claim
+# the same excuse without being added here first.
+_NO_RECORD_KEYS: frozenset[tuple[str, str, str]] = frozenset()
 
 
 def _reason_is_well_formed(key: tuple[str, str, str], reason: str) -> bool:

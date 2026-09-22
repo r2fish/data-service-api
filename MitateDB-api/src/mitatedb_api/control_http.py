@@ -47,8 +47,8 @@ from .errors import (AuditReaderUnavailable, AuthenticationError,
                      StorageConfigurationError, ValidationError, violation,
                      observed_type_of)
 from .http import (PROBLEM_CONTENT_TYPE, RequestByteBoundMiddleware,
-                   _CredentialMissing, _extract_bearer,
-                   _read_json_object, _request_id, _schema_property_type_name)
+                   _extract_bearer, _read_json_object, _request_id,
+                   _schema_property_type_name)
 # Phase 6 WP-0 (design D-4(b)): `_SCHEMAS` is imported from `.http` rather
 # than this module loading its own second, independent copy of the
 # contract -- `.http` already owns the packaged-copy / `importlib.

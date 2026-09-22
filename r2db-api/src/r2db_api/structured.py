@@ -7,7 +7,6 @@ import threading
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import Any, Callable
 
 from .audit_hook import ApplicationAuditHook
