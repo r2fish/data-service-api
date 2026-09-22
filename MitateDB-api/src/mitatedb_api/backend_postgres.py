@@ -88,6 +88,7 @@ import psycopg
 from psycopg import sql
 
 from .backend import UNCHANGED
+from .config import FoundationConfig
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
                      PlatformUpgradePending, ResourceLimitError,
                      StorageConfigurationError, ValidationError, violation)
@@ -267,9 +268,23 @@ class PostgresBackend:
     `runtime_conn`, because this backend never even attempts DDL there.
     """
 
-    def __init__(self, runtime_dsn, developer_dsn, *, application_id=None):
+    def __init__(self, runtime_dsn, developer_dsn, *, application_id=None, max_execution_ms: int | None = None):
         self._runtime = psycopg.connect(runtime_dsn, autocommit=False)
         self._developer = psycopg.connect(developer_dsn, autocommit=False)
+        # R-87: the constructed upper bound the developer-connection
+        # catalog reads below (`schema_count`/`field_domains`/`field_
+        # types`/`all_field_types`/`field_constraints`/`field_types_and_
+        # constraints`/`all_field_constraints`/`schema_revision`) pass to
+        # `self._set_timeouts` at the start of their own transaction,
+        # unconditionally -- independent of any caller-supplied value
+        # (a bare construction, e.g. this module's own test suite, gets
+        # `FoundationConfig`'s class-attribute default, never an unbound
+        # read). `None` keeps this the deployment's declared
+        # `execution_ms` (`MITATEDB_MAX_EXECUTION_MS` via `FoundationConfig.
+        # from_env`); an explicit value overrides it for tests/tooling.
+        self._catalog_timeout_ms = (
+            max_execution_ms if max_execution_ms is not None else FoundationConfig.max_execution_ms
+        )
         # Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(f),
         # §3.7 data-plane steps 9-10, F-12; requester ruling 2026-09-05
         # U-2, reworked by supervisor ruling 2026-09-05 H-1(a)): "cell
@@ -352,6 +367,7 @@ class PostgresBackend:
     def schema_count(self):
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s, %s, %s)"
@@ -392,6 +408,7 @@ class PostgresBackend:
         validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL(
                     "SELECT column_name, data_type FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s "
@@ -455,6 +472,7 @@ class PostgresBackend:
         validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s"
@@ -488,6 +506,7 @@ class PostgresBackend:
         sole data source."""
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL("SELECT entity, field, declared_type FROM {}")
                           .format(sql.Identifier(_FIELD_TYPES_TABLE)))
                 rows = cur.fetchall()
@@ -547,6 +566,7 @@ class PostgresBackend:
         validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s"
@@ -608,6 +628,7 @@ class PostgresBackend:
         validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s"
@@ -639,6 +660,7 @@ class PostgresBackend:
         `GET /v1/catalog`'s sole data source for `field_constraints`."""
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL("SELECT entity, field, enum_json, nullable FROM {}")
                           .format(sql.Identifier(_FIELD_TYPES_TABLE)))
                 rows = cur.fetchall()
@@ -846,6 +868,7 @@ class PostgresBackend:
     def schema_revision(self):
         try:
             with self._developer.cursor() as cur:
+                self._set_timeouts(cur, self._catalog_timeout_ms)
                 _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
                           .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
                 row = cur.fetchone()

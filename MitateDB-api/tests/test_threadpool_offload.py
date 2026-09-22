@@ -590,18 +590,36 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
     at B's request start) would clamp to `max(1, ...)` ms once B finally
     runs if that window ever reached B's own budget -- turning the
     `a_status`/`b_status` assertion below into a load-timing assertion,
-    not a lock-correctness one. Mutation (M2, the window widened back to
-    exactly the pre-fix 10 s, `/ 1000 * 2` instead of `/ 1000 / 5`): the
-    precondition assertion on `after_release_timeouts` goes red
-    deterministically BEFORE the status assertion is ever reached: a
-    hold of at least 10 s is longer than B's own 5 s budget, so B's own
-    `PostgresBackend._timeout_ms` (`backend_postgres.py`) always clamps
-    to 1ms once B finally runs (measured: `timeout_ms` recorded as `1`
-    for the one `_set_timeouts` call observed after A's own `release`
-    was set, while `visible_before_a_commit`/`b_started_before_a_
-    released` both stayed at their correct, post-fix values) -- i.e.
-    this is genuinely a budget artifact, not a lock regression (the lock
-    assertions stayed at their post-fix values).
+    not a lock-correctness one.
+
+    R-87 (`backend_postgres.PostgresBackend`'s own developer-connection
+    catalog reads now call `_set_timeouts` unconditionally, at the
+    CONSTRUCTED `max_execution_ms`, never `deadline`) mixes two kinds of
+    `_set_timeouts` call into `after_release_timeouts` below: B's own
+    pass-1 catalog reads (`field_domains` via `_select_fields`, `field_
+    types` via `_decode_rows`) always record the constructed constant
+    (`5000` at `app_a_stack`'s default, D-3's own declared limitation --
+    the residual budget the lock hold ate into never reaches them), while
+    B's own data read (`backend.read(...)`, still `deadline`-derived, the
+    ORIGINAL single call this paragraph used to describe) records
+    whatever remains of B's budget after the hold. Measured on the
+    UNMUTATED baseline: `after_release_timeouts == [5000, 3964, 5000]` --
+    three calls, not one, and only the middle one moves with the hold.
+
+    Mutation (M2, the window widened back to exactly the pre-fix 10 s,
+    `/ 1000 * 2` instead of `/ 1000 / 5`): the precondition assertion on
+    `after_release_timeouts` still goes red deterministically BEFORE the
+    status assertion is ever reached, but no longer because "the one
+    call" clamps -- a hold of at least 10 s is longer than B's own 5 s
+    budget, so only B's own deadline-derived data read clamps to `1`ms;
+    the two constructed-constant catalog-read calls stay at `5000`, unmoved
+    by the hold (measured: `after_release_timeouts == [5000, 1, 5000]`,
+    `visible_before_a_commit`/`b_started_before_a_released` both stayed at
+    their correct, post-fix values) -- `all(t > 1 ...)` still fails on the
+    single clamped entry, so this is still genuinely a budget artifact on
+    B's data read, not a lock regression (the lock assertions stayed at
+    their post-fix values) and not evidence that the catalog-read calls
+    also clamp (D-3: they never see the residual budget at all).
     """
     _create_entity(app_a_stack, "wp8b_u10_probe_target", ["item_key"])
 

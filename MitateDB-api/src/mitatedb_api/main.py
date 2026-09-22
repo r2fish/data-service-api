@@ -455,7 +455,9 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # reaches it (`backend_postgres._guard_pending_platform_
         # upgrades`), while this process itself starts and every other
         # application is served without interruption.
-        backend = PostgresBackend(runtime_dsn, developer_dsn, application_id=application_id)
+        backend = PostgresBackend(
+            runtime_dsn, developer_dsn, application_id=application_id, max_execution_ms=config.max_execution_ms,
+        )
         if backend._pending_platform_upgrade_message is not None:
             # H-1: logged once, here, at cell-open time -- the SAME text
             # this application's own requests will see in every

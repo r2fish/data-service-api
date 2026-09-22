@@ -4,7 +4,11 @@
 -- roles, `mitatedbsvc_api`/`mitatedbsvc_controlplane`, already carry a
 -- role-level `statement_timeout` from `0007_platform_declarations.sql`;
 -- this file closes the same gap for the three role classes 0007 does
--- not touch).
+-- not touch). R-87 (2026-09-23): 8 of the developer role's own
+-- statements -- backend_postgres.py's developer-connection catalog
+-- reads -- carry no explicit deadline either, but since R-87 each
+-- issues its own per-transaction SET LOCAL statement_timeout/
+-- lock_timeout, so this role-level bound no longer applies to them.
 --
 -- WHO RUNS THIS: the operator, connected to the `mitatedb_platform`
 -- database AS the `mitatedbsvc_provision` role -- the same role/connection

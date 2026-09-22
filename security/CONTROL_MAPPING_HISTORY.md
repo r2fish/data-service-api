@@ -235,6 +235,24 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*r2db-api Control claim, disclosed difference between the peers on role-level `statement_timeout` vs. per-transaction `SET LOCAL`, superseded 2026-09-23 (Version 2.23, R-87 -- MitateDB-api's 8 developer-connection catalog reads now issue their own per-transaction `SET LOCAL` too, so the claim that only r2db-api's `SET LOCAL` sets `lock_timeout` and that MitateDB-api's developer connection carries only the role-level value no longer holds), verbatim:*
+
+- **disclosed difference between the peers**: MitateDB-api's `0013_role_statement_timeouts.sql` puts a role-level `statement_timeout` on its application runtime/developer roles as well, while r2db-api leaves those two roles without a role-level timeout and relies on the per-transaction `SET LOCAL` `_set_timeouts` issues (`r2db-api/src/r2db_api/postgres.py:2294-2308`), which sets `statement_timeout` and `lock_timeout` alike (MitateDB-api's role-level setting is `statement_timeout` only); on MitateDB-api the developer connection its catalog path reads through carries that role-level value -- `MitateDB-api/tests/test_application_audit.py::test_developer_connection_used_by_the_catalog_path_carries_the_role_level_statement_timeout`.
+
+---
+
+*MitateDB-api Control claim, `execution_ms` declared `reference_wall_clock` position reference, superseded 2026-09-23 (Version 2.23, R-87 -- the cited `backend_postgres.py` range no longer contains the `SET LOCAL statement_timeout` conversion, which moved to `:1511-1522`), verbatim:*
+
+- `execution_ms` is declared `reference_wall_clock`, not `enforced` (`capabilities_document.py:270`) -- a wall-clock deadline (`time.monotonic() + max_execution_ms`) handed to the backend, `backend_postgres.py` converts it into a real `SET LOCAL statement_timeout`/`lock_timeout` (`backend_postgres.py:1496-1499`), matching r2db-api's own identical declaration.
+
+---
+
+*MitateDB-api Control claim, developer-connection catalog reads bound only by the role-level `statement_timeout` (R-71), superseded 2026-09-23 (Version 2.23, R-87 -- each of the 8 reads now issues its own per-transaction `SET LOCAL statement_timeout`/`lock_timeout` at the constructed `max_execution_ms`, so the claim that the bound is the ROLE-level value and differs from the declared `execution_ms` no longer holds), verbatim:*
+
+- **Developer-connection catalog reads (R-71)**: the 8 reads `backend_postgres.py` runs on the developer connection with no per-transaction `SET LOCAL` of their own (`schema_count`, `field_domains`, `field_types`, `all_field_types`, `field_constraints`, `field_types_and_constraints`, `all_field_constraints`, `schema_revision`; `field_constraints` has no caller in `src/` today) map a statement the role-level `statement_timeout` cancels to the same `LIMIT_EXCEEDED` (`limit_class` `execution_ms`) that file's other operations return, not to the `VALIDATION_FAILED` its catch-all backstop gives an unclassified `psycopg.Error`, so a client is not told to reshape a request that was cut off for time; the bound on these reads is the ROLE-level value (`0013_role_statement_timeouts.sql`, 5000ms), a per-request budget does not narrow it, and on a deployment whose `MITATEDB_MAX_EXECUTION_MS` is not 5000 it differs from the declared `execution_ms` (ledger R-87); this peer does not durably audit a `LIMIT_EXCEEDED` denial -- `MitateDB-api/tests/test_r71_catalog_read_cancel_mapping.py::test_catalog_read_cancel_synthetic_injection_maps_to_resource_limit_error`, `::test_all_field_types_real_postgresql_query_canceled_becomes_resource_limit_error`, `::test_get_catalog_returns_limit_exceeded_not_validation_failed_when_the_read_is_canceled`.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
