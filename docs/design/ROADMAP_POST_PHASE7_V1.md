@@ -1,5 +1,6 @@
 # フェーズ7 以降の計画 (Roadmap) v1
 
+- 版数: **v1.91 (2026-09-22)**。v1.90 からの変更: **R-77 行に採用形・実施・受け入れを【追記】して閉じ、R-94 を起票した** (§8。R-94 は起票のみ)。直後の v1.90 行は当時のまま残す。
 - 版数: **v1.90 (2026-09-22)**。v1.89 からの変更: **R-75 行に採用形・実施・受け入れを【追記】して閉じた** (§8)。直後の v1.89 行は当時のまま残す。
 - 版数: **v1.89 (2026-09-22)**。v1.88 からの変更: **R-76 行に採用形・実施・受け入れを【追記】して閉じた** (§8)。直後の v1.88 行は当時のまま残す。
 - 版数: **v1.88 (2026-09-22)**。v1.87 からの変更: **R-69 行に採用形・実施・受け入れを【追記】して閉じた** (§8)。直後の v1.87 行は当時のまま残す。
@@ -509,6 +510,7 @@
 | **R-91** | **`max_connections` を起動時にも `ops verify-declarations` にも検査する箇所が無い (両 peer)。** F-16 は role の `CONNECTION LIMIT` だけを見る (runbook が「`max_connections` とは独立」と明記する設計判断)。「role 上限は足りるが `max_connections` が足りない」配備は起動時 fail-fast を通り、負荷が上がってから PostgreSQL の接続拒否に当たる。R-66 は r2db-api の配備 script の入口にだけ確認を置いた。MitateDB-api の配備経路 (`MitateDB-api/docs/cloud-run-cloud-sql.md`) には `0012`/`0014` の前提の自動確認が無い。 | **起票 2026-09-22、起票のみ** (R-66 の作業指示書 §5a、監督裁定)。着手・直し方は未定で、本件では何も直さない。 |
 | **R-92** | **F-12 の案内文が `--lock-timeout` を含まない (両 peer、既存)。** `r2db-api/src/r2db_api/platform_upgrades.py` と MitateDB-api の同名 module が返す `Run 'python -m <pkg>.ops upgrade-applications'` は、この検査で唯一 HTTP 応答に出る文である。MitateDB-api では必須化の時点から、r2db-api では R-66 から、このとおり叩くと終了コード 2 になる。文は両 peer で同一なので直すなら同時に直す。応答文を pin するテストと `security/CONTROL_MAPPING.md` の引用の有無は着手時に実測する。 | **起票 2026-09-22、起票のみ** (R-66 の作業指示書 §5a、監督裁定)。着手・直し方は未定で、本件では何も直さない。 |
 | **R-93** | **`r2db-api/migrations/0005_credential_store.sql` のヘッダの「`R2DB_PLATFORM_POOL_SIZE`, default 4」が陳腐化している。** Phase 10 WP-4e 以後、既定は `concurrency` である (`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §4)。R-21 系の文書陳腐化。migration ファイルのコメントなので、直すときは来歴検査の対象かを先に確かめる。 | **起票 2026-09-22、起票のみ** (R-66 の作業指示書 §5a、監督裁定)。着手・直し方は未定で、本件では何も直さない。 |
+| **R-94** | **両 peer の `src/` に、読み手 0 で設計の記録 (`docs/design/MODULE_REFACT_ARCHITECTURE_V1.md` §10.19 (4)) にも facade identity test にも当たらない import が 2 件ある** (R-77 の許可表で「記録なし」のまま採用したもの): `r2db-api/src/r2db_api/structured.py:10` の `Decimal` (repo 内に読み手 0) と `MitateDB-api/src/mitatedb_api/control_http.py:50` の `_CredentialMissing` (同 module `:71` のコメントが inline で扱うと述べ、読み手 0)。削るか (src の import 削除は `OPERATING_CONDITIONS.md` §1.5 の 40a の準用 (R-37 WP-5 の Z5-14) で両 peer の suite の集計行を要する)、意図的な facade 互換として §10.19 に記録するかを決め、`tools/tests/test_src_import_readers.py` の許可表 (`_NO_RECORD_KEYS` で 2 件に pin) の理由欄を直す。**Class B** (src の import 行 2 件と tools/tests)。 | **起票 2026-09-22、起票のみ** (R-77 の許可表の裁定、監督裁定)。着手・直し方は未定で、本件では何も直さない。 |
 
 ### R-23 着手前調査資料（非正本）
 
