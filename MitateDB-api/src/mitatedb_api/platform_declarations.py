@@ -1114,6 +1114,32 @@ def _f17_message(role: str, *, database_name: "str | None" = None) -> str:
 
 
 def check_auditreader_statement_timeout(conn: "psycopg.Connection", *, schema: str) -> None:
+    """F-17: raises `PlatformDeclarationError(code="F-17")` for the FIRST
+    audit-reader role, in sorted name order, that fails either condition
+    below. An audit reader is identified by what it can do, not by its
+    name: a role holding `SELECT` on BOTH `application_audit` and
+    `control_audit` in `schema`, other than the role that owns either
+    table. Finding no such role is not a failure -- a deployment without
+    an audit reader passes.
+
+    Two conditions fail a reader role. Its role-level row in
+    `pg_db_role_setting` (`setdatabase = 0`) carries no
+    `statement_timeout`, or one that is zero, negative, or not parseable
+    as a PostgreSQL duration. Or a per-database row for the database this
+    connection is in sets the same key, whatever its value: that row
+    takes precedence over the role-level one, so the declaration would
+    not be what a session gets. For one role the first condition is
+    reported before the second, and the second names the overriding
+    database. Per-database rows for OTHER databases are not read
+    (`_role_setting_rows`).
+
+    This judges the DECLARATION, not the value in effect inside a running
+    process: a role setting is copied into a session at login, so a
+    connection opened before the setting was made keeps its old value
+    until it is closed, and a pooled connection can outlive the change
+    for as long as the process that holds it runs. `ops
+    verify-declarations` is the only caller; no process runs this at
+    startup."""
     application_audit_owner = _table_owner(conn, schema, "application_audit")
     control_audit_owner = _table_owner(conn, schema, "control_audit")
     reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
