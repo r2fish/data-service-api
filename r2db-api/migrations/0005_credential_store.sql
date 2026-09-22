@@ -102,13 +102,26 @@ CREATE TABLE IF NOT EXISTS r2dbsvc_registry.credentials (
 -- `r2dbsvc_control`) already wrote, which is the actual substance of
 -- least-privilege here, not merely a naming convention.
 --
--- CONNECTION LIMIT 10: this role is used by exactly one small, dedicated
--- pool per API process (`R2DB_PLATFORM_POOL_SIZE`, default 4 --
--- `r2db_api.credential_store.PostgresCredentialStore`), not per-application
--- like `r2dbsvc_app_*_runtime`/`_developer` (0002's `CONNECTION LIMIT 20`/
--- `10`) -- one process needs at most one such pool regardless of how many
--- applications it serves, so a modest fixed ceiling is enough headroom
--- without being unbounded.
+-- CONNECTION LIMIT 10: this migration's own initial value -- a later
+-- migration (`0013_role_connection_limits.sql`) raises it once this
+-- role's own running pool composition is known.
+--
+-- This role is used only by the API process's own platform-side pools,
+-- never per-application like `r2dbsvc_app_*_runtime`/`_developer`
+-- (0002's `CONNECTION LIMIT 20`/`10`). The data-plane process
+-- (`r2db_api.main`) holds two separate pools against this role -- its
+-- own `r2db_api.credential_store.PostgresCredentialStore` pool and the
+-- durable application-plane audit sink's own pool -- not one. The
+-- control-plane process's own credential-store pool is a separate
+-- pool, under a different role entirely, and does not draw against
+-- this role's own limit at all.
+--
+-- Each pool's own size is a decision the composition root that opens
+-- it makes, never a value this migration fixes: `r2db_api.main`
+-- derives its own platform pool size from the declared
+-- `ResourceLimits.concurrency` ceiling, while `r2db_api.control_main`
+-- defaults its own (different-role) pool to 4; an explicit
+-- `R2DB_PLATFORM_POOL_SIZE` overrides either default.
 SELECT format(
     'CREATE ROLE r2dbsvc_api LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10',
     :'api_password'

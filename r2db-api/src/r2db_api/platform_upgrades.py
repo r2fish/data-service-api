@@ -177,8 +177,9 @@ def _f12_message(*, application_id: str, pending: Sequence[int], ops_module: str
     numbers = ", ".join(str(n) for n in pending)
     return (
         f"This application's storage is missing platform upgrade(s) {numbers}: the deployment must apply them "
-        f"before this application can serve requests. Run 'python -m {ops_module}.ops upgrade-applications' "
-        f"(its '--dry-run' shows applied and pending per application), then retry."
+        f"before this application can serve requests. Run 'python -m {ops_module}.ops upgrade-applications "
+        f"--lock-timeout <value>' (its '--dry-run' shows applied and pending per application and requires "
+        f"the same '--lock-timeout'), then retry."
     )
 
 

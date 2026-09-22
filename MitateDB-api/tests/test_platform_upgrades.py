@@ -341,8 +341,9 @@ def test_f12_message_matches_design_section_3_8_verbatim() -> None:
         raise AssertionError("expected PlatformUpgradeError")
     assert message == (
         "This application's storage is missing platform upgrade(s) 6, 8, 9, 10: the deployment must apply them "
-        "before this application can serve requests. Run 'python -m mitatedb_api.ops upgrade-applications' "
-        "(its '--dry-run' shows applied and pending per application), then retry."
+        "before this application can serve requests. Run 'python -m mitatedb_api.ops upgrade-applications "
+        "--lock-timeout <value>' (its '--dry-run' shows applied and pending per application and requires "
+        "the same '--lock-timeout'), then retry."
     )
     for forbidden in ("dsn", "DSN=", "password", "://", "host="):
         assert forbidden not in message

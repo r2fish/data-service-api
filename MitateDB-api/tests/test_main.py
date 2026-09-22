@@ -302,7 +302,8 @@ def _h1_issue_runtime_credential(platform, app) -> str:
 _F12_MESSAGE_UPGRADE_8 = (
     "This application's storage is missing platform upgrade(s) 8: the deployment must apply "
     "them before this application can serve requests. Run 'python -m mitatedb_api.ops "
-    "upgrade-applications' (its '--dry-run' shows applied and pending per application), then retry."
+    "upgrade-applications --lock-timeout <value>' (its '--dry-run' shows applied and pending "
+    "per application and requires the same '--lock-timeout'), then retry."
 )
 
 

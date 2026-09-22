@@ -85,15 +85,15 @@ SECURITY_INVARIANTS_PATH = Path(__file__).parent.parent / "security" / "SECURITY
 # r2db-api control/evidence cell at 15,065 characters. MAX_CELL_LENGTH =
 # 15,200 is that measurement plus a 135-character margin.
 #
-# Re-measured 2026-09-14 (WP-2, after the restructure): SI-14's r2db-api
-# block is now 15,122 characters (`tools/check_control_mapping_restructure.py`
-# against the restructured file, and CONTROL_MAPPING.md's own preamble
-# "Length cap measurement" paragraph). MAX_BLOCK_LENGTH is carried forward
-# unchanged at 15200 -- 78 left against 15,122, not the same 135-char
-# margin the 2026-09-06 measurement had (content is unchanged by the
-# restructure; the margin shrank because the block itself grew from
-# 15,065 to 15,122 characters between those two measurements, both prior
-# to this restructure's own WP-2 pass).
+# The longest block moves as content changes, so its current length is
+# not recorded here -- measure it by running this file's own
+# `_split_sections` against the current `security/CONTROL_MAPPING.md`,
+# then `_iter_section_subblocks` on each returned section, then
+# `_subblock_block_text` on each of those sub-blocks, and taking the
+# longest result (the same measurement CONTROL_MAPPING.md's own
+# preamble "Length cap measurement" paragraph records for that file).
+# MAX_BLOCK_LENGTH is the 2026-09-06 measurement above plus its
+# margin; it does not track the longest block's current length.
 MAX_BLOCK_LENGTH = 15200
 
 # Secondary cap (design section 5's own "補助"): no single physical line

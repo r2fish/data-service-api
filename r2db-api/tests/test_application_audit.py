@@ -3191,7 +3191,8 @@ def _issue_runtime_credential(platform: types.SimpleNamespace, app: types.Simple
 _F12_MESSAGE_UPGRADE_9 = (
     "This application's storage is missing platform upgrade(s) 9: the deployment must apply "
     "them before this application can serve requests. Run 'python -m r2db_api.ops "
-    "upgrade-applications' (its '--dry-run' shows applied and pending per application), then retry."
+    "upgrade-applications --lock-timeout <value>' (its '--dry-run' shows applied and pending "
+    "per application and requires the same '--lock-timeout'), then retry."
 )
 
 
