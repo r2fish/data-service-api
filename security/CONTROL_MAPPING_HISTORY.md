@@ -362,6 +362,12 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api Control claim, the production restriction on `apply-platform-migration`, superseded 2026-09-23 (Version 2.22, R-72 -- `states` could be read as a complete list of the runbook's stage 2 preconditions, while the block's Platform-upgrade runbook claim names only some of them; the runbook's own section 10.10 is the complete list), verbatim:*
+
+- against production, `apply-platform-migration` is run only through the runbook's gated procedure (`MitateDB-api/docs/cloud-run-cloud-sql.md` section 10), whose stage 2 preconditions this block's own Platform-upgrade runbook claim below states rather than this claim restating a subset of them -- the subcommand's own help text, section-heading comment and docstring name that same section too, pinned by `MitateDB-api/tests/test_ops_help_text.py`; every test targets a throwaway PostgreSQL cluster only (`MITATEDB_TEST_ADMIN_DSN`).
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**

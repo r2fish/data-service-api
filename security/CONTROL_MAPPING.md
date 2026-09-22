@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **2.21** (2026-09-23; R-88 -- `conformance-tests/test_control_mapping_register.py` gains a machine check that resolves this file's `file:line` position references against the repository (the path exists, the line is within the file); it does not judge whether an in-range line is the right one, does not pin the directory of a reference resolved by bare basename, and does not resolve a `:line` with no path on its own line. 3 SI-08 claims are corrected in place -- r2db-api's `PostgresCell` client-reachable-operations claim, MitateDB-api's application-plane `requests_per_minute`/`concurrency` claim and its `execution_ms` claim -- whose position references pointed past the end of the current file, at lines the source no longer holds, or carried no path; they now cite the current locations, and one function name is updated to its current spelling. Two SI-08 bare-filename cross-peer comparisons sit in the check's 2-row allow-list by design; the superseded text is in `CONTROL_MAPPING_HISTORY.md` -- docs/design/ROADMAP_POST_PHASE7_V1.md R-88)
+Version: **2.22** (2026-09-23; R-72 -- one SI-09 MitateDB-api `platform upgrade` Control claim corrected in place: its production-restriction sentence said the block's own Platform-upgrade runbook claim `states` the runbook's stage 2 preconditions, which reads as a complete list; it now says `states in part` and names the runbook's section 10.10 as the complete list. No other claim, evidence or block changed; the superseded text is in `CONTROL_MAPPING_HISTORY.md` -- docs/design/ROADMAP_POST_PHASE7_V1.md R-72)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -24,8 +24,8 @@ assumption); do not add one, and keep every claim as one bullet on one
 line (no embedded newline inside a claim).
 
 **Length cap measurement** (差し戻し rework round 3, 監督裁定 2026-09-06 item
-C-1/B-2; re-measured 2026-09-21, R-70): this file's longest block is
-SI-09's MitateDB-api `platform upgrade` block, 12,681 characters (2,519 left under the cap).
+C-1/B-2; re-measured 2026-09-23, R-72): this file's longest block is
+SI-09's MitateDB-api `platform upgrade` block, 12,747 characters (2,453 left under the cap).
 `conformance-tests/test_control_mapping_register.py`'s `MAX_BLOCK_LENGTH = 15200`
 is the 2026-09-06 measurement of SI-14's r2db-api subsection (15,065 characters, the figure
 that file's own comment records) plus a 135-char margin, unchanged, set independently
@@ -115,6 +115,14 @@ now `10,268` characters (`4,932` left), its `capacity and concurrency` block
 `9,226` (`5,974` left), and `SI-08`'s `MitateDB-api` `default block` `8,010`
 (`7,190` left); the longest block stays `SI-09`'s `MitateDB-api`
 `platform upgrade` block at `12,681`, unchanged this change set.
+
+Re-measured 2026-09-23 (version 2.22, after R-72 corrected one Control
+claim in `SI-09`'s `MitateDB-api` `platform upgrade` block in place and
+moved nothing): that block is now `12,747` characters (`2,453` left; version
+2.21 left that block at `12,681` characters) and stays the longest block. Version 2.21 (R-88)
+corrected three `SI-08` claims' position references in place without re-measuring: `SI-08`'s
+`r2db-api` `default block` is `10,304` characters (`4,896` left) and its `MitateDB-api`
+`default block` `8,053` (`7,147` left), both unchanged this change set.
 
 **【訂正 2026-09-18 (R-50, version 2.7)】** The two sentences rewritten in place
 above each described a block as one whole subsection, which is false once a
@@ -823,7 +831,7 @@ spaces."
 - DSN is environment-only (no CLI argument, design Z-8/D-10), `ON_ERROR_STOP=1`, a required no-default `--lock-timeout` reaching psql via `PGOPTIONS` (`_with_lock_timeout_option`, the SAME helper `upgrade-applications`/`deprovision` use), and psql's own captured output is redacted before any failure message reaches stderr;
 - per-file psql variables (0007's own `:api_role`/`:controlplane_role`) are a static table matched against each file's own real `:name` references (excluding `--` comments and `::` casts); a table entry the operator omits, or an argument the table does not list, is refused before any subprocess starts;
 - the AST-derived set of subcommands that flow a migration file through psql (`apply-platform-migration`/`upgrade-applications`/`deprovision`) is exactly the set whose own `--lock-timeout` is a required, no-default argument -- `set-platform-timeouts`/`declare-*` (psycopg-only configuration writes) are never in it;
-- against production, `apply-platform-migration` is run only through the runbook's gated procedure (`MitateDB-api/docs/cloud-run-cloud-sql.md` section 10), whose stage 2 preconditions this block's own Platform-upgrade runbook claim below states rather than this claim restating a subset of them -- the subcommand's own help text, section-heading comment and docstring name that same section too, pinned by `MitateDB-api/tests/test_ops_help_text.py`; every test targets a throwaway PostgreSQL cluster only (`MITATEDB_TEST_ADMIN_DSN`).
+- against production, `apply-platform-migration` is run only through the runbook's gated procedure (`MitateDB-api/docs/cloud-run-cloud-sql.md` section 10), whose stage 2 preconditions this block's own Platform-upgrade runbook claim below states in part (the runbook's section 10.10 holds the complete list) rather than this claim carrying a second partial copy -- the subcommand's own help text, section-heading comment and docstring name that same section too, pinned by `MitateDB-api/tests/test_ops_help_text.py`; every test targets a throwaway PostgreSQL cluster only (`MITATEDB_TEST_ADMIN_DSN`).
 - **`0013_role_statement_timeouts.sql` (R-45 WP-F)**: sets a role-level `statement_timeout` on `mitatedbsvc_auditreader` and on every application's own runtime/developer role, both retroactively (already-provisioned roles, inside one transaction -- a permission failure partway rolls back the whole file, no half-applied state) and going forward (`begin_provision_application`'s own `CREATE OR REPLACE`, both the `CREATE ROLE` branch and its `duplicate_object` fallback);
 - a registry row naming a role `pg_roles` no longer carries is skipped rather than aborting the migration; must run after 0012 (both `CREATE OR REPLACE` the identical function -- 0012 alone afterward drops the setting for FUTURE applications only, and, now that `0014_role_connection_limits_rollout.sql` replaces that same function last, a stray 0012 additionally lowers every EXISTING role's own `CONNECTION LIMIT` back to 0012's own values; either stray is corrected by re-applying the set in its own order and ending at `apply-platform-migration 0014`, never by 0013 alone, which would leave the next application's roles at 36); applying 0013 requires ADMIN OPTION on `mitatedbsvc_auditreader` (PostgreSQL 16's own CREATEROLE rule), refused rather than bypassed when absent.
 - **`0014_role_connection_limits_rollout.sql`**: applies the raised ceilings `SI-08`'s `MitateDB-api` `capacity and concurrency` block states, retroactively (already-provisioned runtime/developer roles, a registry row whose role `pg_roles` no longer carries skipped rather than aborting the file) and going forward (`begin_provision_application`'s own `CREATE OR REPLACE`, both the `CREATE ROLE` branch and its `duplicate_object` fallback), the WHOLE file inside one transaction so a permission failure partway leaves nothing changed rather than a half-applied state;
