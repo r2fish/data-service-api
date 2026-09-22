@@ -136,4 +136,11 @@ spec の形の例 (完了条件 3。`old` は着手時に対象ファイルで 1
 
 ### 6.2 実施と受け入れ
 
-- (差分・実測・道具の出力行・コードレビュー・受け入れ監査・完了ゲート・最終判定を監督が記す。)
+- **差分**: 新規 `tools/tests/test_src_import_readers.py` 1 本 (node id 3: `test_src_modules_match_pinned_set`、`test_string_annotation_only_readers_match_pin`、`test_reader_zero_imports_match_allow_table`)。src は不変。台帳 v1.91 (R-94 起票)。`tools/change_class.py` (パス指定) → `class=B`。コード commit `239c944` (main `f4d4fd8`)。本節と台帳 R-77 行の追記は同日の記録 commit。
+- **実測 (2026-09-22、ローカル main f2517ed の上)**: module 87 (pin 一覧は `test_src_import_cycles.py` と byte 同一)、import 名 1164、読み手 0 の import 41 (r2db 32 = `postgres.py` 4 + `structured.py` 27 + `Decimal`; MitateDB 9) = 許可表 41 行 (§6.1 裁定 1 の理由、`_NO_RECORD_KEYS` で「記録なし」2 件を pin し許可表側と等価)。文字列注釈だけが読む名前 3 件 (集合 pin)。入れ子の文字列注釈 (現物 16 箇所) を parse、`Literal[...]` の slice と `Annotated[...]` の第 2 要素以降は parse しない。
+- **道具の出力行**: `pt: 3 passed`、`pt: 585 passed` (`tools/tests`、基準 582 + 3)。`mutate: 14 mutations, 14 as expected, restores verified 4/4 files (sha256 x2), grep counts unchanged` — M1〜M7 (§3.6 の 1〜7) + M8a/M8b/M8c/M8d (理由欄の検査と `no record` の pin) + M9 (green) / M9b (red) (複合注釈の入れ子)。
+- **§3.6 の表への追記**: 完了条件 9「許可表の理由欄は検査可能な引用を持ち、『記録なし』は `_NO_RECORD_KEYS` の 2 キーだけで、pin と許可表は等価」→ M8a・M8b・M8c・M8d。完了条件 10「複合注釈 (`dict[str, "Foo"]`) の中の文字列も読み手」→ M9 (green) / M9b (red)。
+- **コードレビュー 3 巡** (1 巡目 中 3・低 5 → 差し戻し 1: 理由欄の裁定反映、`:1665`→`:1661`、入れ子注釈の parse、`__all__` の AugAssign/AnnAssign、理由欄の検査、失敗行の `file:line`、Limits; 2 巡目 中 1・低 2 → 差し戻し 2: M5b の理由を well-formed に、`Literal`/`Annotated` の除外、`_NO_RECORD_KEYS`; 3 巡目 低 2 → 差し戻し 3: pin と許可表の等式、別名 import の限界)。F7 (pin 不一致メッセージの形) は姉妹テストとの複製を保つため据え置き。
+- **受け入れ監査**: 完了条件 1〜8 全て充足、未充足 0 (独立再走査で pin と完全一致)。証拠不足だった完了ゲートと ff 後の `tools/tests` は下記と `585 passed` で充足。所見: 表への追記 (上記 9・10)、`rulings` の語 (:5、文書参照なので残す)、`cast("Foo", x)` は読み手にしない (偽陽性方向、現物 0 件、据え置き)。
+- **完了ゲート** (監督単独、`tools/dev/gate.py -C .claude/worktrees/r77 --label r77`): `gate: 3844 passed, 2 subtests passed in 348.84s`、`judge=PASS`、実行クラスタの `pg_database`/`pg_roles` 差分 0。root collection の増分 0。
+- **最終判定**: 受け入れ。台帳 R-77 は閉じる (v1.91)。R-94 を起票 (「記録なし」2 件の処置)。
