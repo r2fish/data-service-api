@@ -133,30 +133,30 @@ def _peer_declares_drop_entity_supported(iso: ConformanceAdapter) -> bool:
 
     This reads the ACTUALLY DECLARED capability instead: whether
     `drop_entity` -- one of the six schema operations `SchemaOperation
-    Request.operation` names (`spec/data-service-api.v1.json:283`) -- is
+    Request.operation` names (`spec/data-service-api.v1.json:1042`) -- is
     an operation this peer really executes, per its own capability
     document's `capabilities.schema_operations` entry (a peer-published
     key inside `CapabilityDocument.capabilities`'s deliberately open
-    shape, `spec/data-service-api.v1.json:40`'s own note on `operations`
+    shape, `spec/data-service-api.v1.json:218`'s own note on `operations`
     applies identically to its sibling `unsupported`).
 
     That entry publishes the vocabulary two ways, and only one is usable
     through `capability_document()`: `operations` (the executable subset)
-    is gated on the CALLING session's own role -- `r2db_api/service.py:
-    914`'s `schema_ops = [...] if canonical.role == "developer" else []`,
-    `mitatedb_api/cell.py:1751`'s identical `is_developer` gate -- and
+    is gated on the CALLING session's own role -- `r2db_api/capabilities_document.py:
+    31`'s `schema_ops = [...] if role == "developer" else []`,
+    `mitatedb_api/capabilities_document.py:99`'s identical `is_developer` gate -- and
     every one of the four adapters' own `capability_document()` always
     probes with a `"runtime"`-role credential (measured by reading each:
-    `conformance_adapter_r2db.py:328`, `conformance_adapter_r2db_http.py:
-    1605`, `conformance_adapter_mitatedb.py:487`, `conformance_adapter_
+    `conformance_adapter_r2db.py:590`, `conformance_adapter_r2db_http.py:
+    2024`, `conformance_adapter_mitatedb.py:753`, `conformance_adapter_
     mitatedb_http.py` around its own `_capability_probe_session` cache),
     so `operations` reads back empty through this call on every plug and
     cannot distinguish anything. `unsupported` is NOT role-gated on
     either peer (same two source lines): it is a fixed list published
     regardless of who is asking, so it is the one reliable read available
-    here. r2db-api's own `unsupported` (`service.py:914`) is `["alter_
-    field", "jobs"]` -- `drop_entity` absent, i.e. declared supported;
-    MitateDB-api's own (`cell.py:1751`) is `["alter_field", "create_
+    here. r2db-api's own `unsupported` (`r2db_api/capabilities_document.py:62`) is
+    `["jobs"]` -- `drop_entity` absent, i.e. declared supported;
+    MitateDB-api's own (`mitatedb_api/capabilities_document.py:99`) is `["create_
     index", "drop_index", "drop_entity", "jobs"]` -- `drop_entity`
     present, i.e. declared genuinely unsupported, matching the structural
     `SurfaceAbsent` fact this module's own header docstring already

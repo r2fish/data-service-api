@@ -616,7 +616,7 @@ def _extract_references(line: str) -> tuple[list[tuple], list[str]]:
 def _iter_nonblank_lines(text: str):
     """D-2: every non-blank line, not only `|`-started table rows -- the
     real file's own preamble carries 3 test-name references outside the
-    table (`:16`, `:22`, `:61`)."""
+    table (`conformance-tests/CONDITIONS.md` `:16`, `:22`, `:61`)."""
     for i, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
@@ -763,7 +763,7 @@ def test_conditions_md_allowlist_matches_known_non_test_name_spans():
 
 def test_conditions_md_has_out_of_table_test_name_references():
     """D-2: the real file carries at least one test-name reference OUTSIDE
-    the `|`-started table -- measured directly: 3 (`:16`, `:22`, `:61`)."""
+    the `|`-started table -- measured directly: 3 (`conformance-tests/CONDITIONS.md` `:16`, `:22`, `:61`)."""
     text = TEST_NAME_RESOLUTION_TARGET_PATH.read_text()
     out_of_table = [
         (line_num, ref)

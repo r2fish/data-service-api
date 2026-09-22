@@ -427,7 +427,7 @@ def _drive_requests_per_minute(adapter: ConformanceAdapter) -> bool:
         # is no longer true after 裁定 3 -- `capabilities()`/`catalog()`/
         # `schema_revision()` are now wrapped by `_limit_gate` (rate/
         # concurrency only) on BOTH MitateDB surfaces, matching r2db's own
-        # `capabilities()` (`service.py:877`, inside `_slot`) -- so
+        # `capabilities()` (`r2db_api/service.py:709`, inside `_slot`) -- so
         # `HttpService.authenticate`'s own `GET /v1/capabilities` round
         # trip now consumes exactly 1 unit of the SAME `requests_per_
         # minute` window this drive measures, under the SAME runtime
@@ -552,8 +552,8 @@ def _drive_result_items(adapter: ConformanceAdapter) -> bool:
     `limit` keyword removes that port-shape gap entirely, and the two
     peers' own real checks (measured, design D-2/§6.2) agree at the
     SAME N/N+1 position for this recipe: r2db checks `min(len(rows),
-    page_size)` against the bound (`postgres.py:1069`/`structured.py:
-    1198`) -- with `bound+1` ACTUAL rows present, `min(bound+1,
+    page_size)` against the bound (`postgres.py:1224`/`structured.py:
+    923`) -- with `bound+1` ACTUAL rows present, `min(bound+1,
     page_size)` equals `page_size` for both `page_size=bound` (succeeds)
     and `page_size=bound+1` (denied); MitateDB checks the REQUESTED
     `limit` value directly, independent of how many rows actually match
