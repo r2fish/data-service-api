@@ -1308,7 +1308,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # (set in `__init__`) is byte-for-byte the same
             # `FoundationConfig(...)` this line used to construct inline.
             application_id, self._application_config,
-            backend=PostgresBackend(info.runtime_dsn, info.developer_dsn, application_id=application_id),
+            backend=PostgresBackend(
+                info.runtime_dsn, info.developer_dsn, application_id=application_id,
+                max_execution_ms=self._application_config.max_execution_ms,
+            ),
             audit_router=self._audit_router, limit_holder=self._limit_holder,
         )
         self._evict_cells_over_cap()

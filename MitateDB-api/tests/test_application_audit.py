@@ -420,14 +420,29 @@ def test_developer_connection_used_by_the_catalog_path_carries_the_role_level_st
     storage this application's `GET /v1/catalog` reads -- run entirely on
     `self._developer` (`backend_postgres.py`). `0013_role_statement_
     timeouts.sql` bounds that role with a role-level `ALTER ROLE ... SET
-    statement_timeout = '5000ms'` rather than a per-transaction `SET
-    LOCAL` (r2db's own mechanism, disclosed as a platform difference in
-    `security/CONTROL_MAPPING.md`'s SI-08 block). This reads the EFFECTIVE
-    value straight off the SAME connection object `PostgresBackend` opens
-    for that path (`pg_settings.setting`, never `pg_roles.rolconfig`/
-    `pg_db_role_setting`'s own declaration) -- proof the session the
-    catalog path actually runs in carries the bound, not merely that the
-    role declares one."""
+    statement_timeout = '5000ms'`. This reads the EFFECTIVE value straight
+    off the SAME connection object `PostgresBackend` opens for that path
+    (`pg_settings.setting`, never `pg_roles.rolconfig`/`pg_db_role_
+    setting`'s own declaration) -- proof the session the catalog path
+    actually runs in carries the bound, not merely that the role declares
+    one.
+
+    R-87 limits this to OUTSIDE the 8 catalog reads' own transactions:
+    since that work order, each of the 8 (`schema_count`/`field_domains`/
+    `field_types`/`all_field_types`/`field_constraints`/`field_types_and_
+    constraints`/`all_field_constraints`/`schema_revision`) issues its own
+    `SET LOCAL statement_timeout`/`lock_timeout` at the start of its own
+    transaction -- inside one of those 8 transactions the CONSTRUCTED
+    value (`PostgresBackend(..., max_execution_ms=...)`) is what actually
+    binds, not this role-level value (`test_r87_catalog_read_execution_
+    ms.py::test_catalog_reads_use_the_constructed_statement_and_lock_
+    timeout_inside_their_own_transaction`). The value this test reads,
+    straight after construction with no catalog call yet made, is
+    unaffected either way. The second half below (completion condition 5,
+    R-87) reads the SAME role-level value a SECOND time, this time AFTER
+    a real catalog call on a DIFFERENT backend -- proof the per-
+    transaction `SET LOCAL` does not leak past its own transaction back
+    onto this role-level value."""
     backend = make_backend(timeout_probe_app)
     try:
         with backend._developer.cursor() as cur:
@@ -437,6 +452,46 @@ def test_developer_connection_used_by_the_catalog_path_carries_the_role_level_st
     finally:
         backend.close()
     assert statement_timeout == "5000"
+
+    # R-87 completion condition 5: a `SET LOCAL` issued by one of the 8
+    # catalog reads must not leak past its own transaction. Constructed
+    # with a value (1234) distinct from the role-level `statement_timeout`
+    # default (5000) -- if it leaked, `statement_timeout` would read back
+    # as `1234` after the call. The comparison is against a BASELINE read
+    # on the SAME `_developer` connection, taken BEFORE any catalog call,
+    # never a hardcoded cluster-default literal (`lock_timeout`'s own
+    # role-level absence is whatever this cluster's own global default
+    # is, not necessarily `0` on every cluster) -- so this test does not
+    # depend on this cluster's particular defaults, only on "before" and
+    # "after" agreeing.
+    probe_backend = PostgresBackend(
+        timeout_probe_app.runtime_dsn, timeout_probe_app.developer_dsn, max_execution_ms=1234,
+    )
+    try:
+        with probe_backend._developer.cursor() as cur:
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+            baseline_statement_timeout = cur.fetchone()[0]
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
+            baseline_lock_timeout = cur.fetchone()[0]
+        probe_backend._developer.rollback()
+
+        probe_backend.schema_count()
+        with probe_backend._developer.cursor() as cur:
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+            after_statement_timeout = cur.fetchone()[0]
+            cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
+            after_lock_timeout = cur.fetchone()[0]
+        probe_backend._developer.rollback()
+    finally:
+        probe_backend.close()
+    assert after_statement_timeout == baseline_statement_timeout, (
+        after_statement_timeout, baseline_statement_timeout)
+    assert after_lock_timeout == baseline_lock_timeout, (after_lock_timeout, baseline_lock_timeout)
+    # Independent sanity check that this comparison is not vacuous against
+    # a cluster where `max_execution_ms` itself happens to equal the
+    # role-level default: the constructed value (1234) never appears.
+    assert baseline_statement_timeout != "1234"
+    assert after_statement_timeout != "1234"
 
 
 # ===========================================================================
