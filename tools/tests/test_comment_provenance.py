@@ -5101,3 +5101,284 @@ def test_0k_pending_old_reaches_basis_only_via_label_strip_is_green(tmp_path):
     )
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 0, output
+
+
+
+# ===========================================================================
+# R-89 (docs/work-orders/WORK_ORDER_R89_PROVENANCE_PLAIN_BLOCK_KEY_V1.md;
+# design docs/design/CODE_COMMENT_PROVENANCE_V1.md §4.1 (2) v0.26):
+# a CH-ID-less block's own text is unchanged, but the statement it
+# immediately precedes was rewritten (not merely line-shifted) -- the
+# `replace`-pair byte-identity gate (`_replace_pairs`, `_plain_block_keys`)
+# keeps the block's old key when it is the SAME statement, rewritten, and
+# the block's own dedented text already sat at that exact old key.
+# ===========================================================================
+
+def test_r89_try_except_added_after_unchanged_docstring_is_green(tmp_path):
+    # D-4 (i): the docstring block itself is byte-identical; only the
+    # `try` statement immediately after it gains an `except` clause. The
+    # block's own text never moved and never changed -- this must stay
+    # green even though the `try` statement's own `ast.dump` differs.
+    repo = _init_repo(tmp_path)
+    old = (
+        'def f():\n    """Returns the rows."""\n'
+        "    try:\n        return g()\n    finally:\n        h()\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        'def f():\n    """Returns the rows."""\n'
+        "    try:\n        return g()\n    except KeyError:\n        raise\n"
+        "    finally:\n        h()\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r89_edited_block_before_rewritten_statement_stays_red(tmp_path):
+    # D-4 (ii), D-1's own byte-identity gate: same shape as the green case
+    # above, but the docstring's OWN text is also edited by one word.
+    # Rewriting the following statement must NOT excuse the block's own,
+    # separate, unaccounted-for edit -- the exact `(old 1, new 0)` count
+    # is asserted verbatim (守る条件 (c): no smuggling a different block's
+    # text past the old block's key just because the next statement was
+    # also rewritten).
+    repo = _init_repo(tmp_path)
+    old = (
+        'def f():\n    """Returns the rows."""\n'
+        "    try:\n        return g()\n    finally:\n        h()\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        'def f():\n    """Returns the row."""\n'
+        "    try:\n        return g()\n    except KeyError:\n        raise\n"
+        "    finally:\n        h()\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+    assert "(old 1, new 0)" in output, output
+
+
+def test_r89_replace_1to2_block_before_first_is_green(tmp_path):
+    # D-4 (iv), `replace` region old-len 1 -> new-len 2: the block stays
+    # attached to the FIRST new statement (old i-th <-> new i-th pairing,
+    # k=0 only) -- unchanged text, same relative position, green.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    # Note.\n    print(1)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    # Note.\n    print(11)\n    print(2)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r89_replace_1to2_block_before_second_is_red(tmp_path):
+    # D-4 (iv): the SAME region, but the block now precedes the SECOND
+    # new statement -- outside the `min(1, 2)` = 1 paired position, so it
+    # is an unaccounted-for move.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    # Note.\n    print(1)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    print(11)\n    # Note.\n    print(2)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+
+
+def test_r89_replace_2to1_block_on_surviving_stmt_is_green(tmp_path):
+    # D-4 (v), `replace` region old-len 2 -> new-len 1: the block precedes
+    # the position that survives (paired old i=0 <-> new i=0) -- green.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    # Note.\n    print(1)\n    print(2)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    # Note.\n    print(11)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r89_replace_2to1_block_on_vanishing_stmt_is_red(tmp_path):
+    # D-4 (v): the block was attached to the SECOND old statement (the
+    # one with no counterpart once the pair collapses to one). It stays
+    # in the file, immediately before the sole remaining statement (the
+    # only place left to put it) -- but the byte-identity gate requires
+    # an OLD block to have sat AT THE PAIRED old index (`stmt#0`, the
+    # FIRST/surviving one), not merely somewhere in the same replace
+    # region, so this still loses its key and stays red.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    print(1)\n    # Note.\n    print(2)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    # Note.\n    print(11)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+
+
+def test_r89_new_docstring_on_existing_function_stays_red(tmp_path):
+    # D-2 (ii), D-4 (ix): R-67's own case (RM:511) -- a function that
+    # already existed in the base rev gains its FIRST docstring. This is
+    # the intentionally-kept-red "old 0, new 1" case (out of scope for
+    # this work order); it must not be swept up by the `replace`-pair
+    # gate above.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = 'def f():\n    """Returns one."""\n    return 1\n'
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+    assert "(old 0, new 1)" in output, output
+
+
+def test_r89_new_block_before_rewritten_statement_is_green(tmp_path):
+    # D-4 (vi), S10: a block that did NOT exist in the base rev at all is
+    # placed immediately before a statement that was itself rewritten (a
+    # `replace` pair, not merely line-shifted) -- still green, exactly
+    # like any other brand-new block whose anchor has no OLD counterpart.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    print(1)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    # Brand new note.\n    print(2)\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r89_renamed_function_preceding_block_stays_red(tmp_path):
+    # D-4 (vii), D-1's node-type/name condition, S12: a `def` renamed
+    # (same kind, DIFFERENT name) must NOT pair with its old self --
+    # renaming is not "the same statement, rewritten" for this rule, so
+    # the untouched preceding comment still loses its key.
+    repo = _init_repo(tmp_path)
+    old = "# Guard the queue.\ndef alpha():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# Guard the queue.\ndef beta():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+
+
+def test_r89_different_call_same_kind_preceding_block_is_green(tmp_path):
+    # D-4 (viii), D-2 (vi) known limitation, S19: substituting a DIFFERENT
+    # statement of the SAME AST kind (a call to a different function) at
+    # the block's anchor position is indistinguishable, by this rule
+    # alone, from an in-place rewrite -- the block stays paired to its
+    # old key even though what it precedes now says something else.
+    repo = _init_repo(tmp_path)
+    old = "def f():\n    # Note.\n    b()\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "def f():\n    # Note.\n    d()\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" not in output, output
+
+
+def test_r89_moved_across_same_named_sibling_scopes_stays_red(tmp_path):
+    # R-89: the byte-identity gate must
+    # match by INTERNAL scope identity (`_internal_scope_and_anchor_for_
+    # block`), not the plain DISPLAY name -- a block moved from a
+    # `@property` getter's body to its `@x.setter` sibling's body, with
+    # BOTH bodies' own following statements independently rewritten (so
+    # both land in a `replace` pair), must still lose its key: the getter
+    # and setter share the same plain name ("value") but are DIFFERENT
+    # internal (`#k`-disambiguated) scopes.
+    repo = _init_repo(tmp_path)
+    old = (
+        "class C:\n"
+        "    @property\n"
+        "    def value(self):\n"
+        "        # Note.\n"
+        "        print(1)\n"
+        "\n"
+        "    @value.setter\n"
+        "    def value(self, v):\n"
+        "        print(2)\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = (
+        "class C:\n"
+        "    @property\n"
+        "    def value(self):\n"
+        "        print(11)\n"
+        "\n"
+        "    @value.setter\n"
+        "    def value(self, v):\n"
+        "        # Note.\n"
+        "        print(22)\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert "§4.1 (2)" in output, output
+
+
+def test_r89_real_commit_0d0f8c9_reproduction(tmp_path):
+    # D-5: the actual R-71 regression (commit `0d0f8c9`,
+    # `MitateDB-api/src/mitatedb_api/backend_postgres.py`) reproduced in a
+    # throwaway repo. Fails outright (never skips) if the real repository
+    # does not have this commit. Before this fix the "sequence of
+    # CH-ID-less blocks changed" line appeared twice, for
+    # `PostgresBackend.all_field_constraints` and
+    # `PostgresBackend.all_field_types`; after it, zero.
+    sha = "0d0f8c9"
+    rel = "MitateDB-api/src/mitatedb_api/backend_postgres.py"
+    check = subprocess.run(
+        ["git", "cat-file", "-e", sha], cwd=REAL_REPO_ROOT, capture_output=True
+    )
+    assert check.returncode == 0, f"real commit {sha} not found in {REAL_REPO_ROOT}"
+
+    def _blob(rev: str) -> str:
+        r = subprocess.run(
+            ["git", "show", f"{rev}:{rel}"], cwd=REAL_REPO_ROOT, capture_output=True
+        )
+        assert r.returncode == 0, r.stderr
+        return r.stdout.decode()
+
+    old = _blob(f"{sha}~1")
+    new = _blob(sha)
+
+    repo = _init_repo(tmp_path)
+    _write(repo, rel, old)
+    rev = _commit_all(repo, "old")
+    _write(repo, rel, new)
+
+    code, output = _run_base(repo, rev, rel)
+    seq_lines = [
+        line for line in output.splitlines()
+        if "§4.1 (2)" in line and "the sequence of CH-ID-less blocks changed" in line
+    ]
+    assert seq_lines == [], seq_lines
+    # R-89: a positive observation, so a run that
+    # silently produced NO output at all (e.g. a crash swallowed upstream)
+    # could not pass this assertion by vacuously satisfying it. This
+    # throwaway single-file repo lacks the OTHER files this commit's
+    # CH-ID companions live in, so `run_base` still fails overall (exit
+    # 1) on 12 unrelated `§4.1 (2)` lines (companion-section-not-found /
+    # unmatched-own-reference, for CH-0525/0526/0528/0529/0530/0537) --
+    # this fix narrows the "sequence changed" count, it does not silence
+    # the check.
+    assert code == 1, (code, output)
+    all_two_lines = [line for line in output.splitlines() if "§4.1 (2)" in line]
+    assert len(all_two_lines) == 12, all_two_lines
