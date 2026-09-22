@@ -2325,7 +2325,7 @@ def _correction_prefix_mismatch(
 def _apply_pending_corrections(
     kind: str, basis_text: str, pending: list[Correction],
     real_paths: frozenset[str], identifier_set: frozenset[str],
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     """design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.3 rule 3:
     applies a CH-ID's PENDING correction entries (present in the working
     tree but not yet in the basis revision's own companion record, per
@@ -2339,23 +2339,74 @@ def _apply_pending_corrections(
     already removed it, never an error), exactly 1 occurrence replaces
     it, and 2+ occurrences is still a hard error (ambiguous). Each
     pending correction is checked (`_correction_relaxes_protection`) the
-    same way `_apply_corrections` does. Returns (corrected_text, error);
-    error is None on success."""
+    same way `_apply_corrections` does. Returns (corrected_text, error,
+    section); error and section are both None on success, section is the
+    diagnostic tag the caller prefixes its own `FAIL (...)` line with
+    (`§9f` for every error below, `§9.4` for the two §9.4 rule 1 errors).
+
+    design docs/design/CODE_COMMENT_PROVENANCE_V1.md §9.4 rule 1: when
+    `old` occurs 0 times verbatim in the basis (it is written in the
+    receiving end's own wording, while THIS block's own earlier (4)/(6)
+    reduction already dropped part of what `old` names), the 0-occurrence
+    branch no longer assumes the sentence is simply gone -- it first
+    looks, among the basis's own sentences, for exactly one that `old`
+    itself reduces to (`_sentence_reachable`, tried against `old` and,
+    failing that, against `old` with its own leading label stripped).
+    None is still a no-op; two or more distinct reductions is a hard
+    error (ambiguous which one the correction meant). Finding exactly
+    one reduction is not yet enough to replace it, though: unlike an
+    exact (whole-text) match of `old` itself, whose uniqueness the
+    literal `working.count(corr.old) != 1` check above already
+    guarantees, a reduction found this way is only a SENTENCE-level
+    match -- its own literal text can still occur more than once in
+    `working` as a plain substring (e.g. inside a different, longer
+    sentence that happens to end the same way), so replacing it with
+    `str.replace(..., 1)` could silently rewrite the wrong occurrence.
+    The literal occurrence count of the reduction itself is therefore
+    checked the same way an exact match's would be before it is ever
+    replaced; anything other than exactly 1 is its own §9.4 error,
+    distinct from the ambiguous-candidates error above."""
     working = _flatten(kind, basis_text, identifier_set)
     for corr in pending:
         protection_err = _correction_relaxes_protection(corr.old, corr.new, real_paths)
         if protection_err:
-            return working, f"correction {corr.date}: {protection_err}"
+            return working, f"correction {corr.date}: {protection_err}", "§9f"
         count = working.count(corr.old)
         if count == 0:
+            label_stripped_old = _strip_leading_label(corr.old, real_paths)
+            candidates = [
+                s for s in split_sentences(working)
+                if _sentence_reachable(corr.old, s, real_paths)
+                or (
+                    label_stripped_old != corr.old
+                    and _sentence_reachable(label_stripped_old, s, real_paths)
+                )
+            ]
+            if not candidates:
+                continue
+            if len(candidates) > 1:
+                return working, (
+                    f"pending correction {corr.date}: old sentence occurs 0 time(s) verbatim "
+                    f"in the basis block, and {len(candidates)} of its sentences are reductions "
+                    "of it (ambiguous): " + ", ".join(repr(c) for c in candidates)
+                ), "§9.4"
+            reduction = candidates[0]
+            occurrences = working.count(reduction)
+            if occurrences != 1:
+                return working, (
+                    f"pending correction {corr.date}: old sentence occurs 0 time(s) verbatim "
+                    f"in the basis block, its reduction {reduction!r} occurs {occurrences} "
+                    "time(s) (ambiguous)"
+                ), "§9.4"
+            working = working.replace(reduction, corr.new, 1)
             continue
         if count != 1:
             return working, (
                 f"correction {corr.date} old sentence occurs {count} time(s) in the basis "
                 f"(expected exactly 1): {corr.old!r}"
-            )
+            ), "§9f"
         working = working.replace(corr.old, corr.new, 1)
-    return working, None
+    return working, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -2901,11 +2952,16 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             # text, so a sentence a prior change set already deleted can
             # never be revived through a pending correction that happens
             # to still name it.
-            pending_basis, pending_err = _apply_pending_corrections(
+            pending_basis, pending_err, pending_section = _apply_pending_corrections(
                 ob.kind, ob.retained_text, pending, real_paths, identifier_set
             )
             if pending_err:
-                errors.append(f"FAIL (§9f) {rel_path}:{nb.start_line} {ch_id}: {pending_err}")
+                # `pending_section` is `_apply_pending_corrections`'s own
+                # call: `§9.4` for its rule 1 (0-for-0, but resolvable or
+                # ambiguous among the basis's own reductions of `old`)
+                # errors, `§9f` for every other one -- never guessed here
+                # from the message text.
+                errors.append(f"FAIL ({pending_section}) {rel_path}:{nb.start_line} {ch_id}: {pending_err}")
                 continue
             if nb.retained_text:
                 ok, reason = _is_allowed_reduction(nb.kind, pending_basis, nb.retained_text, real_paths, identifier_set)

@@ -4934,3 +4934,170 @@ def test_0j_ls_tree_failure_on_resolvable_rev_is_fail(tmp_path, monkeypatch):
     corrections_lookup, errors = cp._load_corrections_lookup(repo, "r2db-api", rev=rev)
     assert corrections_lookup == {}
     assert any("could not be enumerated" in e for e in errors), errors
+
+
+_0K_R5_COMPANION = ["# The cache uses LRU eviction (R-5)."]
+_0K_R5_OLD_SRC = "# The cache uses LRU eviction.\n# history: CH-0001\ndef f():\n    return 1\n"
+_0K_R5_CORRECTION = _correction_block(
+    "2026-09-21", "eviction policy changed",
+    "The cache uses LRU eviction (R-5).", "The cache now uses LFU eviction (R-5).",
+)
+
+
+def test_0k_pending_old_matches_reduced_basis_sentence_is_replaced_green(tmp_path):
+    # Fixture 17 (design §9.4): the receiving end's original sentence
+    # carries a bare-id parenthetical (R-5) that an earlier, uncorrelated
+    # §4.1 (4) reduction already dropped from the basis block before this
+    # changeset's pending correction ever ran. The correction's `old` is
+    # written against the receiving end's own (unreduced) wording, so it
+    # occurs 0 times verbatim in the basis block; exactly one basis
+    # sentence is a reduction of it, and that sentence is the one that
+    # gets replaced.
+    new_src = "# The cache now uses LFU eviction (R-5).\n# history: CH-0001\ndef f():\n    return 1\n"
+    repo, rev = _same_changeset_scenario(
+        tmp_path, _0K_R5_OLD_SRC, new_src, _0K_R5_COMPANION, [], [_0K_R5_CORRECTION],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0k_pending_replacement_then_reduced_again_is_green(tmp_path):
+    # Fixture 18: same basis and correction as above, but the working
+    # tree's new block goes on to drop the same bare-id parenthetical
+    # from the correction's own `new` text -- stage B must accept a
+    # reduction of `new` the same way it accepts a reduction of any
+    # other sentence.
+    new_src = "# The cache now uses LFU eviction.\n# history: CH-0001\ndef f():\n    return 1\n"
+    repo, rev = _same_changeset_scenario(
+        tmp_path, _0K_R5_OLD_SRC, new_src, _0K_R5_COMPANION, [], [_0K_R5_CORRECTION],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0k_pending_old_reduced_sentence_ambiguous_is_red(tmp_path):
+    # Fixture 19: the basis block's own text carries the same reduced
+    # wording twice -- each one independently a reduction of a DIFFERENT
+    # bare-id sentence on the receiving end (R-5 / R-7), so the pending
+    # correction's `old` (written against just the R-5 sentence) still
+    # occurs exactly once against the receiving end for the full-chain
+    # check. The reduced-sentence search cannot tell which of the two
+    # identical basis sentences the correction meant.
+    companion = [
+        "# The cache uses LRU eviction (R-5).",
+        "# The cache uses LRU eviction (R-7).",
+    ]
+    old_src = (
+        "# The cache uses LRU eviction. The cache uses LRU eviction.\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    new_src = old_src
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion, [], [_0K_R5_CORRECTION],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9.4" in output
+    assert "ambiguous" in output
+    assert output.count("The cache uses LRU eviction.") >= 2
+
+
+def test_0k_pending_reduced_sentence_left_stale_is_red(tmp_path):
+    # Fixture 20: same basis and correction as fixture 17, but the new
+    # block keeps the basis's own (stale) wording instead of picking up
+    # the correction's `new` text -- stage B's basis now carries the
+    # corrected sentence, and the stale wording is no longer reachable
+    # from it.
+    repo, rev = _same_changeset_scenario(
+        tmp_path, _0K_R5_OLD_SRC, _0K_R5_OLD_SRC, _0K_R5_COMPANION, [], [_0K_R5_CORRECTION],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+    assert "no order-preserving match" in output
+
+
+def test_0k_pending_old_written_in_reduced_form_is_red(tmp_path):
+    # Fixture 21: writing the correction's `old` against the basis
+    # block's own reduced wording, instead of the receiving end's
+    # original, still fails the full-chain check exactly as before --
+    # the reduced-sentence search only widens what stage B accepts,
+    # never what the full-correction chain against the companion's
+    # pristine text accepts.
+    correction = _correction_block(
+        "2026-09-21", "eviction policy changed",
+        "The cache uses LRU eviction.", "The cache now uses LFU eviction.",
+    )
+    new_src = "# The cache now uses LFU eviction.\n# history: CH-0001\ndef f():\n    return 1\n"
+    repo, rev = _same_changeset_scenario(
+        tmp_path, _0K_R5_OLD_SRC, new_src, _0K_R5_COMPANION, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9f" in output
+    assert "occurs 0 time" in output
+
+
+def test_0k_pending_reduction_occurs_twice_in_basis_is_red(tmp_path):
+    # Fixture 22 (design §9.4 rule 1's uniqueness clause): the basis
+    # block's own text is "Rule 4: The connection is closed. The
+    # connection is closed." -- two sentences, the SECOND of which is
+    # the only one reachable from the pending correction's `old` (the
+    # first carries an unrelated leading label the correction's `old`
+    # never mentions). Naming exactly one reachable sentence is not
+    # enough: that sentence's own literal text also occurs a second
+    # time, as the tail end of the FIRST (longer) sentence, so a
+    # position-blind `str.replace(..., 1)` would silently rewrite the
+    # wrong occurrence -- the first sentence's own tail, not the second
+    # sentence the correction actually names.
+    companion = [
+        "# Rule 4: The connection is closed.",
+        "# The connection is closed (R-5).",
+    ]
+    old_src = (
+        "# Rule 4: The connection is closed. The connection is closed.\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    new_src = (
+        "# Rule 4: The connection is closed. The socket is now closed (R-5).\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    correction = _correction_block(
+        "2026-09-21", "connection wording updated",
+        "The connection is closed (R-5).", "The socket is now closed (R-5).",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§9.4" in output
+    assert "ambiguous" in output
+    assert "occurs 2 time" in output
+
+
+def test_0k_pending_old_reaches_basis_only_via_label_strip_is_green(tmp_path):
+    # Fixture 22': the receiving end's original sentence carries BOTH a
+    # §4.1 (6) leading label ("Ruling U-7: ", an unprotected bare id) and
+    # a bare-id parenthetical (R-5); the basis block has already dropped
+    # both, keeping only the bare sentence. The pending correction's
+    # `old` is written in the receiving end's full (labelled, bracketed)
+    # form, so it is unreachable from the basis sentence directly -- only
+    # stripping the label first (design §9.4 rule 1's `or` clause) makes
+    # the remaining bracketed sentence reduce to the basis sentence.
+    companion = ["# Ruling U-7: The cache uses LRU eviction (R-5)."]
+    old_src = "# The cache uses LRU eviction.\n# history: CH-0001\ndef f():\n    return 1\n"
+    new_src = (
+        "# Ruling U-7: The cache now uses LFU eviction (R-5).\n"
+        "# history: CH-0001\ndef f():\n    return 1\n"
+    )
+    correction = _correction_block(
+        "2026-09-21", "eviction policy changed",
+        "Ruling U-7: The cache uses LRU eviction (R-5).",
+        "Ruling U-7: The cache now uses LFU eviction (R-5).",
+    )
+    repo, rev = _same_changeset_scenario(
+        tmp_path, old_src, new_src, companion, [], [correction],
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
