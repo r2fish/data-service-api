@@ -2681,8 +2681,9 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # pieces -- `_f17_message` and `check_auditreader_statement_timeout`
     # itself. Unlike `check_role_connection_limits` (excluded above: real
     # per-peer parameter/column differences thread through its whole
-    # body), `check_auditreader_statement_timeout` carries no docstring
-    # and no peer-specific literal on either peer -- verified
+    # body), `check_auditreader_statement_timeout` carries no
+    # peer-specific literal on either peer (its leading docstring is
+    # dropped before comparison, `_strip_leading_docstring`) -- verified
     # normalize-and-diff equal before adding both rows.
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f17_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_auditreader_statement_timeout"),
