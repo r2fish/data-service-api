@@ -217,6 +217,24 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*r2db-api Control claim, the four client-reachable operations of `PostgresCell` and their `SET LOCAL` timeout bound, superseded 2026-09-22 (Version 2.21, R-88 -- the claim's position reference carried no path on its own line, so the lines it cited resolved to no file), verbatim:*
+
+- all four client-reachable operations of `PostgresCell` -- `query`, `transact`, `apply_schema` and `catalog` (`:803-819`) -- issue that call inside their own transaction; `catalog` takes its bound from the `ResourceLimits` it is passed (`DataService.catalog` passes its own), falls back to the default `ResourceLimits()` when called without one, so the bound never depends on the caller, and maps a cancelled statement or a lock timeout to the same `LIMIT_EXCEEDED` the other three return -- `r2db-api/tests/test_postgres.py::test_catalog_wires_statement_and_lock_timeout_to_the_passed_resource_limits`, `::test_catalog_without_an_explicit_limits_argument_uses_default_resource_limits`, `::test_catalog_set_local_timeouts_do_not_leak_to_the_next_transaction`, `::test_catalog_maps_timeout_and_lock_conflicts_to_limit_exceeded`, `r2db-api/tests/test_foundation.py::test_data_service_catalog_passes_only_its_own_limits_to_the_cell`, `::test_data_service_catalog_denial_is_audited_with_the_limit_exceeded_reason`.
+
+---
+
+*MitateDB-api Control claim, the application-plane `requests_per_minute`/`concurrency` bounds and their `limit_enforcement` declaration, superseded 2026-09-22 (Version 2.21, R-88 -- every position reference in this claim was stale after the R-37 module split: three cited lines past the end of the current `cell.py`, three more pointed at lines the split had moved), verbatim:*
+
+- **Application-plane resource bounds** (Phase 8 WP-1a, rework 1, 2026-09-06): `requests_per_minute` and `concurrency` are `enforced` -- `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py:744`, `:775-782`, `:785-794`), declared in `__build_capabilities_document`'s `limit_enforcement` dict (`cell.py:3811`, `:4051`, `:4055`);
+
+---
+
+*MitateDB-api Control claim, `execution_ms` declared `reference_wall_clock` rather than `enforced`, superseded 2026-09-22 (Version 2.21, R-88 -- the cited `cell.py` line is past the end of the current file and the cited `backend_postgres.py` range is no longer the `SET LOCAL statement_timeout` conversion it names), verbatim:*
+
+- `execution_ms` is declared `reference_wall_clock`, not `enforced` (`cell.py:4044`) -- a wall-clock deadline (`time.monotonic() + max_execution_ms`) handed to the backend, `backend_postgres.py` converts it into a real `SET LOCAL statement_timeout`/`lock_timeout` (`backend_postgres.py:1658-1661`), matching r2db-api's own identical declaration.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**

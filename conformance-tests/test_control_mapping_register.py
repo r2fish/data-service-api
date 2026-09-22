@@ -1287,3 +1287,542 @@ def test_fixture_outside_si_section_line_with_unresolved_reference_is_detected()
     text = "A preamble paragraph line citing `test_totally_fake_outside_si_reference` as evidence.\n"
     violations = _find_unresolved_test_name_references(text, _fake_index())
     assert violations, "expected the outside-SI paragraph line's fake reference to be flagged"
+
+
+# ---------------------------------------------------------------------------
+# R-88 (docs/work-orders/WORK_ORDER_R88_CONTROL_MAPPING_POSITION_REFS_V1.md
+# D-1..D-9): every `file:line` POSITION reference a claim cites -- as
+# opposed to R-64's TEST-NAME references above, which this section does
+# not import or modify -- must resolve to a real file, with any line
+# number inside that file's own range. D-1: new extraction/resolution
+# functions, a new constant (`POSITION_REF_TARGET_PATH`), never R-64's
+# `_extract_bullet_references`/`_build_def_index`/`_resolve_*` or its
+# `TEST_NAME_RESOLUTION_TARGET_PATH`.
+#
+# D-3's 6 reference shapes, inside one candidate line's backtick spans and
+# the bare text around them:
+#   (a)  `` `path:line` ``               -- colon+digits INSIDE the backticks
+#   (b)  `` `path:line-line` ``          -- same, a range
+#   (a') `` `path`:line `` / `` `path`:line-line `` -- colon+digits OUTSIDE
+#        the backticks, touching the closing backtick with no gap
+#   (c)  a bare `:line` / `:line-line`, inside or outside backticks, that
+#        is NOT touching a preceding path-shaped backtick -- it inherits
+#        the last path-shaped backtick seen EARLIER ON THE SAME LINE (never
+#        across lines, never across bullets)
+#   (d)  `` `path` `` alone, no line number -- existence only
+#   (e)  `` `NNNN`:line `` / `` `NNNN`:line-line `` -- a 3-5 digit label,
+#        resolved against the enclosing peer's own `migrations/NNNN_*.sql`
+# `path.py::test_name` (a test node id, R-64's own object) is never a
+# position reference and is not extracted here (D-3's own carve-out).
+# ---------------------------------------------------------------------------
+
+import os
+
+# D-1: this check's own object, never `CONTROL_MAPPING_HISTORY_PATH` (the
+# verbatim archive of superseded claims, where a since-rotted position
+# reference is CORRECT to find, not a defect this check should flag).
+POSITION_REF_TARGET_PATH = CONTROL_MAPPING_PATH
+
+# D-3: only a backtick span whose content has one of these extensions is a
+# path candidate at all -- comparison is case-sensitive (`Path.suffix` is
+# compared against this literal lowercase set), so `psycopg.sql.SQL`
+# (suffix `.SQL`) and dotted code identifiers like `AuthContext.
+# application_id`/`psycopg.sql.Composed`/`audit.fields` (suffixes not in
+# this set at all) are never mistaken for a path.
+_POSITION_REF_EXTENSIONS = {
+    ".py", ".sql", ".md", ".sh", ".yml", ".yaml", ".toml", ".txt", ".json", ".ini",
+}
+
+# D-4 (iii): the basename-search scope for a claim scoped to one peer is
+# that peer's own subdirectories plus the shared directories below --
+# never the OTHER peer's own tree (the R-37 module split's own `cell.py`
+# lives only under MitateDB-api, and a stray reference to an r2db-api-only
+# basename from inside a MitateDB-api claim must still fail).
+_POSITION_REF_PEERS = ("r2db-api", "MitateDB-api")
+_POSITION_REF_PEER_SUBDIRS = ("src", "migrations", "docs", "tests", "deploy", "config", "docker")
+_POSITION_REF_SHARED_DIRS = ("conformance-tests", "tools", "security", "spec", "docs")
+
+_POSITION_REF_SI_LINE_RE = re.compile(r"^## (SI-\d+)\b")
+_POSITION_REF_H3_LINE_RE = re.compile(r"^### (r2db-api|MitateDB-api|Common)\b")
+_POSITION_REF_TOKEN_RE = re.compile(r"`([^`\n]+)`|:(\d+)(?:-(\d+))?")
+_POSITION_REF_INNER_RE = re.compile(r"^([A-Za-z0-9_./\-]+):(\d+)(?:-(\d+))?$")
+_POSITION_REF_BARE_COLON_WHOLE_RE = re.compile(r"^:(\d+)(?:-(\d+))?$")
+_POSITION_REF_PATH_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./\-]+$")
+_POSITION_REF_LABEL_RE = re.compile(r"^\d{3,5}$")
+
+
+def _position_ref_has_whitelisted_extension(path_str: str) -> bool:
+    return Path(path_str).suffix in _POSITION_REF_EXTENSIONS
+
+
+def _iter_position_ref_records(text: str) -> list[tuple[int, str, str | None, str | None]]:
+    """D-2 walk, a new function of R-88's own (does not call or share state
+    with R-64's `_iter_document_claims`): inside an SI section, only `- `
+    bullet lines are candidates (peer = the enclosing `### <peer>`
+    subsection); outside every SI section (preamble, `## CCR-14`, `##
+    Rule`), every non-blank line is a candidate, peer=None. Returns
+    (lineno, raw_line, si_id_or_None, peer_or_None)."""
+    lines = text.splitlines()
+    records: list[tuple[int, str, str | None, str | None]] = []
+    si: str | None = None
+    peer: str | None = None
+    in_si = False
+    for lineno, raw in enumerate(lines, 1):
+        if raw.startswith("## "):
+            m = _POSITION_REF_SI_LINE_RE.match(raw)
+            si = m.group(1) if m else None
+            in_si = bool(m)
+            peer = None
+            continue
+        if raw.startswith("### "):
+            m = _POSITION_REF_H3_LINE_RE.match(raw)
+            peer = m.group(1) if m else None
+            continue
+        if in_si:
+            if raw.startswith("- "):
+                records.append((lineno, raw, si, peer))
+        else:
+            if raw.strip():
+                records.append((lineno, raw, si, peer))
+    return records
+
+
+def _extract_position_refs(line: str) -> list[dict]:
+    """D-3: every position reference on one line, left to right, tracking
+    the last path-shaped backtick seen SO FAR ON THIS LINE (`carry_path`)
+    for shape (c) -- `carry_path` is local to this call, so it never
+    crosses a line (callers pass one line at a time; D-3's own "同一行の
+    直前")."""
+    tokens = []
+    for m in _POSITION_REF_TOKEN_RE.finditer(line):
+        if m.group(1) is not None:
+            tokens.append(("bt", m.group(1), m.start(), m.end()))
+        else:
+            tokens.append(("colon", int(m.group(2)), int(m.group(3) or m.group(2)), m.start(), m.end()))
+
+    refs: list[dict] = []
+    carry_path: str | None = None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok[0] == "bt":
+            _kind, content, start, end = tok
+            if "::" in content:
+                # a test node id (`path.py::test_name`/`::test_name`) --
+                # R-64's own object, not a position reference (D-3).
+                i += 1
+                continue
+            inner = _POSITION_REF_INNER_RE.match(content)
+            if inner and _position_ref_has_whitelisted_extension(inner.group(1)):
+                l1 = int(inner.group(2))
+                l2 = int(inner.group(3) or inner.group(2))
+                shape = "b" if inner.group(3) else "a"
+                refs.append(dict(shape=shape, raw=content, path=inner.group(1), label=None, l1=l1, l2=l2))
+                carry_path = inner.group(1)
+                i += 1
+                continue
+            bare_whole = _POSITION_REF_BARE_COLON_WHOLE_RE.match(content)
+            if bare_whole:
+                l1 = int(bare_whole.group(1))
+                l2 = int(bare_whole.group(2) or bare_whole.group(1))
+                refs.append(dict(shape="c", raw=content, path=carry_path, label=None, l1=l1, l2=l2))
+                i += 1
+                continue
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            is_adjacent = nxt is not None and nxt[0] == "colon" and nxt[3] == end
+            if is_adjacent and _POSITION_REF_PATH_TOKEN_RE.match(content) and _position_ref_has_whitelisted_extension(content):
+                l1, l2 = nxt[1], nxt[2]
+                tail = f":{l1}" + (f"-{l2}" if l2 != l1 else "")
+                refs.append(dict(shape="a'", raw=content + tail, path=content, label=None, l1=l1, l2=l2))
+                carry_path = content
+                i += 2
+                continue
+            if is_adjacent and _POSITION_REF_LABEL_RE.match(content):
+                l1, l2 = nxt[1], nxt[2]
+                tail = f":{l1}" + (f"-{l2}" if l2 != l1 else "")
+                refs.append(dict(shape="e", raw=content + tail, path=None, label=content, l1=l1, l2=l2))
+                i += 2
+                continue
+            # Neither (a') nor (e): the trailing colon (if any) is NOT part
+            # of this backtick -- do not swallow it. `content` gets its
+            # ordinary (d)/nothing classification below, and a still-pending
+            # `nxt` colon token is left for the NEXT loop iteration, where it
+            # is classified as its own (c) token, carrying whatever path is
+            # already in effect (never `content`, which was never a path).
+            if _POSITION_REF_PATH_TOKEN_RE.match(content) and _position_ref_has_whitelisted_extension(content):
+                refs.append(dict(shape="d", raw=content, path=content, label=None, l1=None, l2=None))
+                carry_path = content
+            i += 1
+            continue
+        else:
+            _kind, l1, l2, start, end = tok
+            raw = f":{l1}" + (f"-{l2}" if l2 != l1 else "")
+            refs.append(dict(shape="c", raw=raw, path=carry_path, label=None, l1=l1, l2=l2))
+            i += 1
+            continue
+    return refs
+
+
+def _position_ref_search_dirs(peer: str | None, repo_root: Path) -> list[Path]:
+    """D-4 (iii): enclosing peer's own dir + shared dirs; a peer that is
+    not one of the 2 real peers (`None` for preamble, or the literal
+    string `"Common"`) gets BOTH real peers' dirs + shared dirs -- `peer
+    in _POSITION_REF_PEERS` is the guard, not `peer` truthiness (`"Common"`
+    is truthy but names no directory of its own)."""
+    dirs: list[Path] = []
+    peers = (peer,) if peer in _POSITION_REF_PEERS else _POSITION_REF_PEERS
+    for p in peers:
+        for sub in _POSITION_REF_PEER_SUBDIRS:
+            d = repo_root / p / sub
+            if d.is_dir():
+                dirs.append(d)
+    for sub in _POSITION_REF_SHARED_DIRS:
+        d = repo_root / sub
+        if d.is_dir():
+            dirs.append(d)
+    return dirs
+
+
+def _position_ref_line_count(path: Path) -> int:
+    return len(path.read_bytes().decode("utf-8", "replace").splitlines())
+
+
+def _resolve_position_ref(ref: dict, peer: str | None, repo_root: Path) -> tuple[Path | None, str | None, str | None]:
+    """D-4 (i)-(iii)/(e): returns (resolved_path_or_None, route_or_None,
+    failure_note_or_None). Does not check the line number -- that is
+    `_position_ref_range_note`'s job (D-4 (iv)), kept separate so a
+    resolved-but-out-of-range reference can be told apart from an
+    unresolvable one."""
+    if ref["shape"] == "e":
+        if not peer:
+            return None, None, "ambiguous"
+        cands = sorted((repo_root / peer / "migrations").glob(ref["label"] + "_*.sql"))
+        if len(cands) == 1:
+            return cands[0], "e-migration", None
+        return None, None, "ambiguous" if cands else "file not found"
+    path_str = ref["path"]
+    if path_str is None:
+        return None, None, "no preceding path on this line"
+    p = repo_root / path_str
+    if p.is_file():
+        return p, "i", None
+    p = repo_root / "security" / path_str
+    if p.is_file():
+        return p, "i'", None
+    if peer:
+        p = repo_root / peer / path_str
+        if p.is_file():
+            return p, "ii", None
+    base = os.path.basename(path_str)
+    hits: set[Path] = set()
+    for d in _position_ref_search_dirs(peer, repo_root):
+        for f in d.rglob(base):
+            if f.is_file():
+                hits.add(f)
+    hits_sorted = sorted(hits)
+    if len(hits_sorted) == 1:
+        return hits_sorted[0], "iii", None
+    if len(hits_sorted) > 1:
+        return None, None, "ambiguous"
+    return None, None, "file not found"
+
+
+def _position_ref_range_note(ref: dict, resolved_path: Path) -> str | None:
+    """D-4 (iv): `None` when there is no line number to check (shape d) or
+    the range is well-formed and inside the resolved file's own line
+    count."""
+    if ref["l1"] is None:
+        return None
+    if ref["l2"] < ref["l1"]:
+        return "bad range"
+    n = _position_ref_line_count(resolved_path)
+    if ref["l2"] > n:
+        return f"line {ref['l2']} beyond EOF {n}"
+    return None
+
+
+def _find_unresolved_position_refs(text: str, repo_root: Path):
+    """D-8: one entry per unresolved reference, never folded. Returns
+    (unresolved, shape_counts, route_counts) -- `route_counts` only counts
+    a FILE-level resolution (i/i'/ii/iii/e-migration); a reference whose
+    file resolved but whose line number did not is counted in both
+    `route_counts` (the file resolved) and `unresolved` (the reference, as
+    a whole, did not).
+
+    D-9's 3 limits: a rotted reference that stays IN range (pointing at a
+    different line than the one the claim describes) is not detected here;
+    a reference resolved by route (iii) (bare basename search) does not
+    pin that file's directory -- it stays resolved if the basename
+    survives anywhere in scope even after the module holding it moves; and
+    a bare `:line`/`:line-line` with no path on its own line does not
+    resolve (D-6 corrects that by adding a path, not by this check
+    inferring one)."""
+    unresolved: list[tuple[int, dict, str | None, str | None, str]] = []
+    shape_counts: dict[str, int] = {}
+    route_counts: dict[str, int] = {}
+    for lineno, line, si, peer in _iter_position_ref_records(text):
+        for ref in _extract_position_refs(line):
+            shape_counts[ref["shape"]] = shape_counts.get(ref["shape"], 0) + 1
+            resolved, route, note = _resolve_position_ref(ref, peer, repo_root)
+            if resolved is None:
+                unresolved.append((lineno, ref, si, peer, note))
+                continue
+            route_counts[route] = route_counts.get(route, 0) + 1
+            range_note = _position_ref_range_note(ref, resolved)
+            if range_note is not None:
+                unresolved.append((lineno, ref, si, peer, range_note))
+    return unresolved, shape_counts, route_counts
+
+
+# D-5: explicit permit-list, keyed by (exact extracted reference string,
+# enclosing SI id, enclosing peer) -- never by `CONTROL_MAPPING.md`'s own
+# line number, which an unrelated edit can move. Pinned as a SET: a row
+# missing is red (a real rot escaped the table), and a row that now
+# resolves on the filesystem (a "dead" allow row) is ALSO red (D-5's own
+# "今は解決するようになった参照が表に残っていても赤"). Measured 2026-09-23
+# (基点 adea2b5, on the corrected `security/CONTROL_MAPPING.md` -- the 3
+# rotted claim lines already fixed in place): these are the only 2 position references in the
+# corrected file this check cannot resolve on the filesystem, both SI-08
+# comparing one peer's own claim against the OTHER peer's migration file
+# by bare filename (a legitimate cross-peer comparison, not rot -- the
+# named file is real, just outside the citing claim's own D-4 (iii) scope
+# by design).
+POSITION_REF_ALLOWLIST: dict[tuple[str, str | None, str | None], str] = {
+    ("0013_role_statement_timeouts.sql", "SI-08", "r2db-api"): (
+        "r2db-api's own claim names MitateDB-api's migration file, by bare "
+        "filename, to state a disclosed difference between the two peers; "
+        "MitateDB-api's own tree is outside r2db-api's own D-4 (iii) scope."
+    ),
+    ("0013_role_connection_limits.sql", "SI-08", "MitateDB-api"): (
+        "MitateDB-api's own claim names r2db-api's migration file, by bare "
+        "filename, for the same cross-peer comparison; r2db-api's own tree "
+        "is outside MitateDB-api's own D-4 (iii) scope."
+    ),
+}
+
+# D-7: floors, one per shape and one per named route (i)/(i')/(ii)/(iii) --
+# `e-migration` is not floored (D-7 names only the 4 routes above). Measured
+# 2026-09-23 (基点 adea2b5, on the corrected `security/CONTROL_MAPPING.md`
+# -- the 3 rotted claim lines already fixed in place -- via this file's own
+# `_find_unresolved_position_refs`):
+# 197 total refs, shapes a=3 a'=2 b=2 c=18 d=168 e=4; routes i=112 i'=4 ii=6
+# iii=69 (the corrected `:619`/`:667`/`:668` references now join the
+# successful routes instead of the unresolved list). Each floor below is
+# that measurement minus a margin, so a regression in the
+# extraction/resolution logic is caught rather than a floor that only guards
+# against zero (OPERATING_CONDITIONS.md section 1.5 item 32, D-4).
+POSITION_REF_SHAPE_A_FLOOR = 2
+POSITION_REF_SHAPE_A_PRIME_FLOOR = 1
+POSITION_REF_SHAPE_B_FLOOR = 1
+POSITION_REF_SHAPE_C_FLOOR = 13
+POSITION_REF_SHAPE_D_FLOOR = 150
+POSITION_REF_SHAPE_E_FLOOR = 3
+POSITION_REF_ROUTE_I_FLOOR = 100
+POSITION_REF_ROUTE_I_PRIME_FLOOR = 3
+POSITION_REF_ROUTE_II_FLOOR = 5
+POSITION_REF_ROUTE_III_FLOOR = 60
+
+
+def test_position_ref_target_path_is_pinned_to_control_mapping_only():
+    """D-2: the object of this check is ONE constant, never a
+    `security/*.md` glob and never `CONTROL_MAPPING_HISTORY_PATH` (broadening
+    this constant to also scan the history file would pull in that file's
+    own verbatim, intentionally-unresolved rotted references)."""
+    assert POSITION_REF_TARGET_PATH == CONTROL_MAPPING_PATH
+    assert POSITION_REF_TARGET_PATH != CONTROL_MAPPING_HISTORY_PATH
+
+
+def test_control_mapping_md_every_position_reference_resolves_or_is_allowlisted():
+    """D-1/D-5/D-8: the real file's every position reference resolves,
+    except the 2 rows in `POSITION_REF_ALLOWLIST` -- and every allow-list
+    row must itself still be needed (a row that now resolves on the
+    filesystem is flagged too, D-5's "死んだ許可行")."""
+    text = POSITION_REF_TARGET_PATH.read_text()
+    unresolved, _shape_counts, _route_counts = _find_unresolved_position_refs(text, REPO_ROOT)
+    messages = []
+    seen_allowlist_keys = set()
+    for lineno, ref, si, peer, note in unresolved:
+        key = (ref["raw"], si, peer)
+        if key in POSITION_REF_ALLOWLIST:
+            seen_allowlist_keys.add(key)
+            continue
+        messages.append(f"{POSITION_REF_TARGET_PATH.name}:{lineno}: {ref['raw']} ({note})")
+    assert not messages, "\n".join(messages)
+    dead = sorted(set(POSITION_REF_ALLOWLIST) - seen_allowlist_keys)
+    assert not dead, f"allow-list row(s) that now resolve on the filesystem (dead pin): {dead}"
+
+
+def test_control_mapping_md_position_reference_shape_and_route_counts_meet_the_floor():
+    """D-7."""
+    text = POSITION_REF_TARGET_PATH.read_text()
+    _unresolved, shape_counts, route_counts = _find_unresolved_position_refs(text, REPO_ROOT)
+    assert shape_counts.get("a", 0) >= POSITION_REF_SHAPE_A_FLOOR, shape_counts
+    assert shape_counts.get("a'", 0) >= POSITION_REF_SHAPE_A_PRIME_FLOOR, shape_counts
+    assert shape_counts.get("b", 0) >= POSITION_REF_SHAPE_B_FLOOR, shape_counts
+    assert shape_counts.get("c", 0) >= POSITION_REF_SHAPE_C_FLOOR, shape_counts
+    assert shape_counts.get("d", 0) >= POSITION_REF_SHAPE_D_FLOOR, shape_counts
+    assert shape_counts.get("e", 0) >= POSITION_REF_SHAPE_E_FLOOR, shape_counts
+    assert route_counts.get("i", 0) >= POSITION_REF_ROUTE_I_FLOOR, route_counts
+    assert route_counts.get("i'", 0) >= POSITION_REF_ROUTE_I_PRIME_FLOOR, route_counts
+    assert route_counts.get("ii", 0) >= POSITION_REF_ROUTE_II_FLOOR, route_counts
+    assert route_counts.get("iii", 0) >= POSITION_REF_ROUTE_III_FLOOR, route_counts
+
+
+def test_fixture_position_ref_carry_forward_does_not_cross_lines():
+    """D-3 (c): a bare `:line` on a line with NO backtick path of its
+    own must not inherit an earlier LINE's path -- only the same line's."""
+    text = (
+        "## SI-01 Example\n\n[history](CONTROL_MAPPING_HISTORY.md#si-01)\n\n"
+        "### r2db-api\n\n#### Control\n\n"
+        "- see `security/CONTROL_MAPPING.md` for the shape.\n"
+        "- and also `:5-9` here.\n\n"
+        "#### Evidence\n\n- —\n\n#### Status\n\n- —\n"
+    )
+    unresolved, _shape_counts, _route_counts = _find_unresolved_position_refs(text, REPO_ROOT)
+    notes = [note for _ln, ref, _si, _peer, note in unresolved if ref["raw"] == ":5-9"]
+    assert notes == ["no preceding path on this line"], notes
+
+
+def test_fixture_position_ref_ambiguous_basename_multiple_candidates_does_not_resolve(tmp_path):
+    """D-4 (iii): a mutation that takes the FIRST basename match
+    instead of requiring exactly one would let this resolve."""
+    for sub in ("src", "tests"):
+        d = tmp_path / "r2db-api" / sub
+        d.mkdir(parents=True)
+        (d / "dup_name.py").write_text("x = 1\n")
+    ref = dict(shape="d", raw="dup_name.py", path="dup_name.py", label=None, l1=None, l2=None)
+    resolved, route, note = _resolve_position_ref(ref, "r2db-api", tmp_path)
+    assert resolved is None and note == "ambiguous", (resolved, route, note)
+
+
+def test_fixture_position_ref_route_iii_scope_excludes_the_other_peer(tmp_path):
+    """D-4 (iii): a basename that exists only under the OTHER peer's own
+    tree must not resolve for a claim scoped to this peer."""
+    other_peer_file = tmp_path / "MitateDB-api" / "src" / "only_here.py"
+    other_peer_file.parent.mkdir(parents=True)
+    other_peer_file.write_text("x = 1\n")
+    ref = dict(shape="d", raw="only_here.py", path="only_here.py", label=None, l1=None, l2=None)
+    resolved, route, note = _resolve_position_ref(ref, "r2db-api", tmp_path)
+    assert resolved is None and note == "file not found", (resolved, route, note)
+    resolved2, route2, note2 = _resolve_position_ref(ref, "MitateDB-api", tmp_path)
+    assert resolved2 is not None and route2 == "iii", (resolved2, route2, note2)
+
+
+def test_fixture_position_ref_route_ii_resolves_a_path_outside_the_iii_search_subdirs(tmp_path):
+    """D-4 (ii): a relative path directly under the peer directory, in a
+    top-level subdirectory that is NOT one of D-4 (iii)'s own search
+    subdirectories, resolves via (ii)'s own exact-relative-path prefix --
+    (iii)'s basename search alone could never reach it (the mutation this
+    disabling route (ii) must make the file become unresolvable
+    rather than silently falling through to (iii))."""
+    d = tmp_path / "r2db-api" / "not_an_iii_search_dir"
+    d.mkdir(parents=True)
+    (d / "only_via_ii.yaml") .write_text("x: 1\n")
+    ref = dict(shape="d", raw="not_an_iii_search_dir/only_via_ii.yaml",
+               path="not_an_iii_search_dir/only_via_ii.yaml", label=None, l1=None, l2=None)
+    resolved, route, note = _resolve_position_ref(ref, "r2db-api", tmp_path)
+    assert resolved is not None and route == "ii", (resolved, route, note)
+
+
+def test_fixture_position_ref_route_i_prime_resolves_before_route_iii_is_attempted(tmp_path):
+    """D-4 (i'): the sibling-of-`CONTROL_MAPPING.md` prefix is tried
+    BEFORE (iii)'s basename search -- a same-basename file placed
+    elsewhere in (iii)'s own scope, which would make (iii)'s search
+    `ambiguous` on its own, does not stop (i') from resolving uniquely
+    first (disabling route (i') must make the reference become
+    `ambiguous` once (iii) is reached instead)."""
+    sec = tmp_path / "security"
+    sec.mkdir()
+    (sec / "COMPANION.md").write_text("x\n")
+    other = tmp_path / "conformance-tests"
+    other.mkdir()
+    (other / "COMPANION.md").write_text("y\n")
+    ref = dict(shape="d", raw="COMPANION.md", path="COMPANION.md", label=None, l1=None, l2=None)
+    resolved, route, note = _resolve_position_ref(ref, None, tmp_path)
+    assert resolved is not None and route == "i'", (resolved, route, note)
+
+
+def test_fixture_position_ref_nonexistent_path_is_file_not_found(tmp_path):
+    ref = dict(shape="d", raw="totally_fake_xyz.py", path="totally_fake_xyz.py", label=None, l1=None, l2=None)
+    resolved, route, note = _resolve_position_ref(ref, "r2db-api", tmp_path)
+    assert resolved is None and note == "file not found", (resolved, route, note)
+
+
+def test_fixture_position_ref_reversed_range_is_bad_range(tmp_path):
+    f = tmp_path / "five_lines.sql"
+    f.write_text("1\n2\n3\n4\n5\n")
+    ref = dict(shape="b", raw="five_lines.sql:4-2", path="five_lines.sql", label=None, l1=4, l2=2)
+    note = _position_ref_range_note(ref, f)
+    assert note == "bad range", note
+
+
+def test_fixture_position_ref_line_past_eof_is_reported_with_both_numbers(tmp_path):
+    f = tmp_path / "five_lines.sql"
+    f.write_text("1\n2\n3\n4\n5\n")
+    ref = dict(shape="a", raw="five_lines.sql:9", path="five_lines.sql", label=None, l1=9, l2=9)
+    note = _position_ref_range_note(ref, f)
+    assert note == "line 9 beyond EOF 5", note
+
+
+def test_fixture_position_ref_dotted_identifiers_are_not_extracted():
+    """D-3: extension whitelist is case-sensitive (`psycopg.sql.SQL`'s
+    suffix `.SQL` is not in the lowercase set) and dotted code identifiers
+    with no whitelisted extension at all are never mistaken for a path."""
+    text = (
+        "## SI-01 Example\n\n[history](CONTROL_MAPPING_HISTORY.md#si-01)\n\n"
+        "### r2db-api\n\n#### Control\n\n"
+        "- uses `psycopg.sql.Composed` and `AuthContext.application_id` and "
+        "`audit.fields`, never `psycopg.sql.SQL`.\n\n"
+        "#### Evidence\n\n- —\n\n#### Status\n\n- —\n"
+    )
+    unresolved, shape_counts, _route_counts = _find_unresolved_position_refs(text, REPO_ROOT)
+    assert not unresolved, unresolved
+    assert shape_counts == {}, shape_counts
+
+
+def test_fixture_position_ref_label_resolves_uniquely_within_the_enclosing_peers_migrations():
+    """D-3 (e)/D-4 (e): a real short numeric label (`0004`) resolves
+    against its enclosing peer's own `migrations/0004_*.sql`, uniquely."""
+    text = (
+        "## SI-01 Example\n\n[history](CONTROL_MAPPING_HISTORY.md#si-01)\n\n"
+        "### r2db-api\n\n#### Control\n\n"
+        "- the pre-check (`0004`:102-113) refuses the run.\n\n"
+        "#### Evidence\n\n- —\n\n#### Status\n\n- —\n"
+    )
+    unresolved, shape_counts, route_counts = _find_unresolved_position_refs(text, REPO_ROOT)
+    assert unresolved == [], unresolved
+    assert shape_counts.get("e", 0) == 1, shape_counts
+    assert route_counts.get("e-migration", 0) == 1, route_counts
+
+
+
+def test_fixture_position_ref_common_subsection_basename_resolves_via_a_real_peer_dir(tmp_path):
+    """D-4 (iii): a claim under a `### Common` subsection passes peer=
+    `"Common"` -- not one of the 2 real peers -- and must still search BOTH
+    real peers' own directories (never treat `"Common"` as a literal,
+    nonexistent peer directory of its own)."""
+    d = tmp_path / "r2db-api" / "src"
+    d.mkdir(parents=True)
+    (d / "only_under_r2db.py").write_text("x = 1\n")
+    ref = dict(shape="d", raw="only_under_r2db.py", path="only_under_r2db.py", label=None, l1=None, l2=None)
+    resolved, route, note = _resolve_position_ref(ref, "Common", tmp_path)
+    assert resolved is not None and route == "iii", (resolved, route, note)
+
+
+def test_fixture_position_ref_non_a_prime_non_e_backtick_does_not_swallow_its_trailing_colon(tmp_path):
+    """D-3 (c): a backtick span touching a trailing `:line` that is neither
+    a whitelisted-extension path (a') nor a 3-5 digit label (e) must not
+    make that `:line` vanish -- it is read on the NEXT token as an
+    ordinary (c) carry-forward, against whatever path already precedes it
+    on the same line."""
+    f = tmp_path / "five_lines.sql"
+    f.write_text("1\n2\n3\n4\n5\n")
+    text = (
+        "## SI-01 Example\n\n[history](CONTROL_MAPPING_HISTORY.md#si-01)\n\n"
+        "### r2db-api\n\n#### Control\n\n"
+        "- see `five_lines.sql` and `SomeIdentifier`:9999 here.\n\n"
+        "#### Evidence\n\n- —\n\n#### Status\n\n- —\n"
+    )
+    unresolved, shape_counts, _route_counts = _find_unresolved_position_refs(text, tmp_path)
+    notes = [note for _ln, ref, _si, _peer, note in unresolved if ref["raw"] == ":9999"]
+    assert notes and notes[0].startswith("line 9999 beyond EOF"), (notes, shape_counts)
