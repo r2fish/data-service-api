@@ -455,8 +455,8 @@ def test_control_endpoint_audit_role_acceptance_matches_1_3_0_declaration():
 def test_contract_1_3_0_prose_pins():
     # Independent-review M-2 (ii): substring pins for §1 A/D/E/F, following
     # this file's existing style (see test_contract_has_separate_control_and_
-    # application_authority's exact-match pin at :29 and test_contract_states_
-    # audit_sink_failure_policy's substring pins at :57-59) -- each of these
+    # application_authority's exact-match pin at `conformance-tests/test_contract.py` :28 and test_contract_states_
+    # audit_sink_failure_policy's substring pins at `conformance-tests/test_contract.py` :57-59) -- each of these
     # sentences currently has no dedicated regression test of its own.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
 
