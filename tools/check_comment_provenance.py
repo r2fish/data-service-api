@@ -2661,6 +2661,27 @@ def _internal_scope_key_and_body_for_block(tree: ast.Module, block: Block) -> tu
     return (".".join(path) if path else "<module>"), body
 
 
+def _internal_scope_and_anchor_for_block(tree: ast.Module, block: Block) -> tuple[str, str]:
+    """R-89: the SAME `#k`-disambiguated
+    INTERNAL scope identity `_internal_scope_key_and_body_for_block` uses,
+    together with the block's own anchor index within that scope's body --
+    never the plain dotted name (`_scope_and_anchor_for_block`'s own
+    display key), so the `_plain_block_keys` byte-identity gate below
+    cannot mistake one same-named sibling scope (a `@property`/`@x.setter`
+    pair, an `@overload` group, two same-named module-level `def`s) for
+    another: a block moved from the getter's body to the setter's, even
+    when both bodies' own following statements were independently
+    rewritten, must not slip through as "the same old key" merely because
+    their DISPLAY names collide."""
+    internal_key, body = _internal_scope_key_and_body_for_block(tree, block)
+    anchor = "<end>"
+    for idx, stmt in enumerate(body):
+        if stmt.lineno > block.end_line:
+            anchor = f"stmt#{idx}"
+            break
+    return internal_key, anchor
+
+
 def _token_for_stmt(stmt: ast.stmt, is_first: bool) -> tuple:
     """R-63 WP-1 (J-1; code review round 1, 重大 2 and 低 "docstring の
     範囲"): the per-statement token used to align a scope's OLD body to
@@ -2715,9 +2736,53 @@ def _align_scope_bodies(old_body: list[ast.stmt], new_body: list[ast.stmt]) -> d
     return mapping
 
 
+def _replace_pairs(old_body: list[ast.stmt], new_body: list[ast.stmt]) -> dict[int, int]:
+    """R-89 (docs/design/CODE_COMMENT_PROVENANCE_V1.md §4.1 (2), D-1): maps
+    NEW-body-index -> OLD-body-index for statement pairs that the SAME
+    token alignment `_align_scope_bodies` uses (`_token_for_stmt`,
+    `difflib.SequenceMatcher`) puts in a `replace` opcode -- a rewrite of
+    one statement into another at the same relative position, never an
+    `insert`/`delete`/`equal` one (those are `_align_scope_bodies`'s own
+    job; this function reads the SAME matcher output but keeps a disjoint
+    half of it, and never changes what `_align_scope_bodies` itself
+    returns -- J-1's own OLD/NEW correspondence is untouched).
+
+    A `replace` region of old length `i2-i1` and new length `j2-j1` pairs
+    only the first `min(i2-i1, j2-j1)` positions, old i-th with new i-th
+    (a length mismatch leaves the remainder unpaired, falling through to
+    the ordinary insert/delete handling in `_plain_block_keys`). A pair is
+    kept only when the two statements are the SAME AST node type, and --
+    for `def`/`class` specifically -- also share the SAME name: renaming a
+    function or substituting a different kind of statement is not treated
+    as "the same statement, rewritten" (design D-1's own limitation, D-2
+    (vi): substituting a DIFFERENT statement of the SAME kind at that
+    position, e.g. calling a different function, is indistinguishable
+    from an in-place rewrite by this rule alone -- a block anchored there
+    stays paired to its old key even though the statement it now precedes
+    says something else)."""
+    old_tokens = [_token_for_stmt(s, i == 0) for i, s in enumerate(old_body)]
+    new_tokens = [_token_for_stmt(s, i == 0) for i, s in enumerate(new_body)]
+    pairs: dict[int, int] = {}
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace":
+            continue
+        for k in range(min(i2 - i1, j2 - j1)):
+            oi, ni = i1 + k, j1 + k
+            old_stmt, new_stmt = old_body[oi], new_body[ni]
+            if type(old_stmt) is not type(new_stmt):
+                continue
+            if isinstance(old_stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and old_stmt.name != new_stmt.name:
+                continue
+            pairs[ni] = oi
+    return pairs
+
+
 def _plain_block_keys(old_source: str, new_source: str,
                        new_blocks: list[Block]) -> list[tuple[tuple[str, str], bool]]:
-    """R-63 WP-1 (D-1, J-1, J-2): the (scope, anchor) key and "deletable"
+    """R-63 WP-1 (D-1, J-1, J-2); extended by R-89 (D-1) for the `replace`-
+    pair byte-identity gate below. The (scope, anchor) key and "deletable"
     flag used for the CH-ID-less half of §4.1 (2), for every block in
     `new_blocks` (a block WITH a CH-ID never reads this list -- its
     correspondence is decided earlier, by scope name only).
@@ -2739,17 +2804,44 @@ def _plain_block_keys(old_source: str, new_source: str,
     immediately before an EXISTING statement is never deletable, even if a
     later, unrelated new statement follows somewhere in the same body).
 
+    R-89 (design §4.1 (2), D-1): when that immediately-following statement
+    has no J-1 counterpart but IS one half of a `_replace_pairs` pair
+    (same AST node type; same name too, for `def`/`class`), the block is
+    treated as pointing at the SAME old key as before -- but only when
+    there is an OLD block, in that SAME internal scope (`#k`-disambiguated,
+    `_internal_scope_and_anchor_for_block` -- R-89),
+    sitting at that exact old index, whose own text (dedented, byte-for-
+    byte) matches the new block's. This byte-identity gate is load-
+    bearing: rewriting the following statement alone can never smuggle a
+    DIFFERENT block's text past an unrelated old block's key, because the
+    gate only ever recognizes the block's own, unmodified original AT THE
+    SAME internal scope -- a block moved between two same-named sibling
+    scopes (a `@property`/`@x.setter` pair, an `@overload` group, two
+    same-named module-level `def`s) is never excused by this gate even
+    when both scopes' own following statements were independently
+    rewritten, because their internal identities differ even though their
+    DISPLAY names collide. Editing the block's own text is still an
+    unaccounted-for change (falls through, unpaired, to the ordinary
+    forward search below) even when the following statement is a
+    `replace` partner.
+
     The scope used to key and align (code review round 1, 重大 1) is the
     `#k`-disambiguated INTERNAL identity (`_scope_bodies_by_identity` /
     `_internal_scope_key_and_body_for_block`), never the plain dotted name
     -- only the DISPLAY half of the returned key (first element) stays the
     plain dotted name, unchanged, for error text and to keep merging
     same-named siblings' surviving blocks into one comparison exactly like
-    `_scope_and_anchor_for_block` always has."""
+    `_scope_and_anchor_for_block` always has. The byte-identity gate above
+    reads the OLD tree's CH-ID-less blocks keyed by that SAME internal
+    scope identity, for the reason given above -- never the plain
+    scope_key."""
     old_tree = ast.parse(old_source)
     new_tree = ast.parse(new_source)
     old_scope_bodies = _scope_bodies_by_identity(old_tree)
+    old_plain_blocks = [b for b in extract_all_blocks(old_source) if b.history_id is None]
+    old_plain_positions = [_internal_scope_and_anchor_for_block(old_tree, b) for b in old_plain_blocks]
     alignment_cache: dict[str, dict[int, int]] = {}
+    replace_pairs_cache: dict[str, dict[int, int]] = {}
     keys: list[tuple[tuple[str, str], bool]] = []
     for nb in new_blocks:
         scope_key = _scope_and_anchor_for_block(new_tree, nb)[0]
@@ -2757,18 +2849,37 @@ def _plain_block_keys(old_source: str, new_source: str,
         if internal_key not in old_scope_bodies:
             keys.append(((scope_key, "<newscope>"), True))
             continue
+        old_body = old_scope_bodies[internal_key]
         alignment = alignment_cache.get(internal_key)
         if alignment is None:
-            alignment = _align_scope_bodies(old_scope_bodies[internal_key], body)
+            alignment = _align_scope_bodies(old_body, body)
             alignment_cache[internal_key] = alignment
         j = next((i for i, stmt in enumerate(body) if stmt.lineno > nb.end_line), None)
         deletable = j is not None and j not in alignment
         anchor = "<end>"
-        while j is not None and j < len(body):
-            if j in alignment:
-                anchor = f"stmt#{alignment[j]}"
-                break
-            j += 1
+        paired_anchor = None
+        if deletable and j is not None:
+            replace_pairs = replace_pairs_cache.get(internal_key)
+            if replace_pairs is None:
+                replace_pairs = _replace_pairs(old_body, body)
+                replace_pairs_cache[internal_key] = replace_pairs
+            oi = replace_pairs.get(j)
+            if oi is not None:
+                candidate = (internal_key, f"stmt#{oi}")
+                if any(
+                    pos == candidate and ob.dedented == nb.dedented
+                    for ob, pos in zip(old_plain_blocks, old_plain_positions)
+                ):
+                    paired_anchor = f"stmt#{oi}"
+        if paired_anchor is not None:
+            anchor = paired_anchor
+            deletable = False
+        else:
+            while j is not None and j < len(body):
+                if j in alignment:
+                    anchor = f"stmt#{alignment[j]}"
+                    break
+                j += 1
         keys.append(((scope_key, anchor), deletable))
     return keys
 
