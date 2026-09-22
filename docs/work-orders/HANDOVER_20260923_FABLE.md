@@ -64,3 +64,10 @@
 - **依頼者への事後報告 (§4 (o) の具体)**: 決定 = 検査の追加 (D-1〜D-9)、3 主張行の訂正、版数行 2.21 の確定文 (指示書 §6.1 監督裁定 1)。いずれも 2026-09-19 の委任の下で監督が下した。
 - 教訓: **`mutate.py` の 1 entry に fixture と現物のテストを並べると `-x` で現物側が走らない** — 現物依存を示す変異は entry を分ける (M5b/M12b)。**Version 行の因果 (「R-37 の分割で腐った」) は `git log -S` で確かめてから書く** — 1 件は R-62 で path 無しのまま追加されたものだった。
 - 進行中は R-89 だけ (worktree `r89`、Class B、来歴検査 §4.1 (2) の鍵 — `replace` 区間の対付けと本文 byte 一致ゲート)。閉じたら §8 に追記する。
+
+## 8. 追記 — 同じチャットで R-72 を閉じた (2026-09-23)
+
+- **R-72 を閉じた (Class D、事後報告)。** ローカル main `48f3ec8` (コミット `e7ced60`)。SI-09 / MitateDB-api / platform upgrade の production-restriction の主張の 1 区間を `states in part (the runbook's section 10.10 holds the complete list) rather than this claim carrying a second partial copy` に改めた (Update convention、旧行は HISTORY へ逐語、**CONTROL_MAPPING は版 2.22**、ブロック 12,747 字で最長のまま、preamble に SI-08 の再測 (2.21 で未再測の `10,304` / `8,053`) を併記)。監督が直接行い (R-70 の先例)、文のレビュー 1 (低 5、全件反映)、完了ゲート `3874 passed, 2 subtests passed in 397.34s (0:06:37)`、`judge=PASS`。台帳 **v1.96**。作業指示書 `docs/work-orders/WORK_ORDER_R72_SI09_STATES_WORDING_V1.md` §3。
+- **依頼者への事後報告 (§4 (o) に加える)**: R-72 の確定文 (上の 1 区間) は 2026-09-19 の委任の下で監督が下した。
+- 教訓: **`tools/check_control_mapping_split.py` は自分のパスから repo root を決める** — worktree を測るときは worktree 側の道具を呼ぶ (main の道具は main を測って `identical` を返す)。**`cmd | tail; echo $?` は exit code を隠す** (前書 §5 の再掲 — 同じ罠を 2 度踏んだ)。
+- 進行中は R-89 だけ (レビュー 1 の反映中: 内部 scope 鍵によるゲート照合と M8)。閉じたら §9 に追記する。R-95 は起票のまま (材料: conformance-tests の docstring の行番号付き参照 54 件、行超過 2、疑い 16 — R-88 と同型の検査が要る)。
