@@ -57,3 +57,10 @@
 - **`COLLECTION_FLOOR` (3326) は未更新** — 下限であり、更新はフェーズ完了時の監督の仕事 (`conformance-tests/README.md`)。
 - 進行中は R-88 だけ (worktree `r88`)。閉じたら §7 に追記する。
 - 教訓: **register ファイルを単独で pytest に掛けると `_collect_marked_condition_ids` の marker 3 本が仕様どおり赤になる** — 新検査は node id を列挙して回し、報告前に `conformance-tests/` 全体を 1 回。**「索引が空でない」の検査は dict の truthy では固定できない** (空集合を値に持つ dict は真) — 名前の総数で判定する。**変異が赤にならないと実測で分かったら、変異を広げて性質を固定する** (M12)。
+
+## 7. 追記 — 同じチャットで R-88 を閉じた (2026-09-23)
+
+- **R-88 を閉じた (Class D、事後報告)。** ローカル main `279b41a` (コミット `cdcdc05`)。`conformance-tests/test_control_mapping_register.py` に位置参照の検査 (node id 15): `security/CONTROL_MAPPING.md` の 6 形の `file:line` 参照を 4 経路で解決し行番号の範囲を検査、許可表 2 行 (他 peer の裸ファイル名、集合 pin)、床 10 本、3 限界 (範囲内の別箇所指し / basename 解決は directory を固定しない / 同一行に path の無い `:line`) を docstring に開示。**CONTROL_MAPPING は版 2.21**: SI-08 の主張行 3 本 (`:619`・`:667`・`:668`) を Update convention で訂正 (腐り 5 件 + 範囲内の別箇所 4 件。旧文は HISTORY へ逐語、`check_control_mapping_split.py --base adea2b5` は `missing=3 added=3 moved=0`)。`:667` の関数名は現行の `build_capabilities_document` に改めた。設計レビュー 1 (高 3・中 6・低 4)、コードレビュー 2 巡、受け入れ監査 1、変異 28 件、完了ゲート `3874 passed, 2 subtests passed`、`judge=PASS`。台帳 **v1.95**。作業指示書 `docs/work-orders/WORK_ORDER_R88_CONTROL_MAPPING_POSITION_REFS_V1.md` §6。
+- **依頼者への事後報告 (§4 (o) の具体)**: 決定 = 検査の追加 (D-1〜D-9)、3 主張行の訂正、版数行 2.21 の確定文 (指示書 §6.1 監督裁定 1)。いずれも 2026-09-19 の委任の下で監督が下した。
+- 教訓: **`mutate.py` の 1 entry に fixture と現物のテストを並べると `-x` で現物側が走らない** — 現物依存を示す変異は entry を分ける (M5b/M12b)。**Version 行の因果 (「R-37 の分割で腐った」) は `git log -S` で確かめてから書く** — 1 件は R-62 で path 無しのまま追加されたものだった。
+- 進行中は R-89 だけ (worktree `r89`、Class B、来歴検査 §4.1 (2) の鍵 — `replace` 区間の対付けと本文 byte 一致ゲート)。閉じたら §8 に追記する。
