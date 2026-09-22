@@ -71,3 +71,12 @@
 - **依頼者への事後報告 (§4 (o) に加える)**: R-72 の確定文 (上の 1 区間) は 2026-09-19 の委任の下で監督が下した。
 - 教訓: **`tools/check_control_mapping_split.py` は自分のパスから repo root を決める** — worktree を測るときは worktree 側の道具を呼ぶ (main の道具は main を測って `identical` を返す)。**`cmd | tail; echo $?` は exit code を隠す** (前書 §5 の再掲 — 同じ罠を 2 度踏んだ)。
 - 進行中は R-89 だけ (レビュー 1 の反映中: 内部 scope 鍵によるゲート照合と M8)。閉じたら §9 に追記する。R-95 は起票のまま (材料: conformance-tests の docstring の行番号付き参照 54 件、行超過 2、疑い 16 — R-88 と同型の検査が要る)。
+
+## 9. 追記 — 同じチャットで R-89 を閉じ、本チャットを終える (2026-09-23)
+
+- **R-89 を閉じた。** ローカル main `d971696` (コミット `2eb9f23`)。`tools/check_comment_provenance.py` の §4.1 (2): J-1 の整列は変えず、`replace` 区間の対 (旧 i ↔ 新 i、AST 種別が同じ、def/class は名前も同じ) を別写像で作り、塊の本文が byte 一致し直後の文がその対なら同じ鍵 (直後の文の書き換えだけでは赤にしない)。照合は内部識別 (`#k`) で、scope 内の移動と同名兄弟 scope 間の移動は赤のまま。R-67 型 (`old 0, new 1`) は正当な赤のまま。R-71 の実 commit `0d0f8c9` の再現テストで現行の 2 行が 0 行に。新テスト 12 (`tools/tests` 597)、変異 10 件、設計レビュー 1 (高 3・中 3・低 2)、コードレビュー 2 巡、受け入れ監査 1。完了ゲート `3874 passed, 2 subtests passed`、`judge=PASS`。設計 `docs/design/CODE_COMMENT_PROVENANCE_V1.md` v0.26。台帳 **v1.97**。Class B。作業指示書 `docs/work-orders/WORK_ORDER_R89_PROVENANCE_PLAIN_BLOCK_KEY_V1.md` §6。
+- **既知の限界 (設計 v0.26 に開示)**: 同種別の別の文への差し替え (呼ぶ関数を変える等) は (2) が黙る。
+- **本チャットの最終状態**: ローカル main = 本節のコミット。push 停止中 (origin/main `8bf21a2` のまま)。閉じたもの: R-76・R-75・R-77・R-92+R-93+R-73・R-94・R-74・R-88・R-72・R-89 (9 件 + 起票 R-94・R-95)。`security/CONTROL_MAPPING.md` 版 **2.22**、`tools/tests` 597、root 集計 **3874**。統合済みの worktree は全て fold 済み (残る `r22-status` は別チャット、`r45-wpd` は dirty で他チャットの残骸、`claude/*` は他チャットの session worktree)。進行中のサブエージェントは無い。
+- **次の一手**: R-87 (Class D、設計要)、R-90、R-91、R-95 (材料は §8)、R-78〜R-86 (順序と保留は台帳の各行)。監督チャットはモデル呼び出し 300 回を超えているので、次は新しいチャットで本書から始める (`OPERATING_CONDITIONS.md` §1.10 の 67)。
+- **依頼者判断待ち (§4 に足す)**: (q) 本チャットの Class D の決定 3 件 (R-88 の検査 + 訂正、R-72 の確定文 — いずれも 2026-09-19 の委任の下) と、R-77 の「恒久テストにする」裁定 (Z5-13 の「恒久にしない」を覆した) の事後確認。
+- 教訓: **同名兄弟 scope (`@property`/`@x.setter`、`@overload`) は表示用の dotted name では区別できない** — 塊の照合は内部識別で行う。**設計の版数行は差し戻しの反映後に必ず読み直す** (round 1 のまま byte 一致で残っていた)。
