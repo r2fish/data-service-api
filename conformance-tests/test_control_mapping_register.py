@@ -49,16 +49,19 @@ lines, EXCEPT that `- —` may appear only as an axis's sole line (marking
 "no claim for this axis"). No other non-blank line may appear inside an SI
 section (design section 5's own "散文行や継続行が cap と主張集合を抜け
 ないように") -- a stray prose/continuation line would silently escape both
-the block-length cap and the claim-multiset check
-`tools/check_control_mapping_restructure.py` performs, so this file itself
-also fixes the SHAPE those two properties depend on.
+the block-length cap and the claim-multiset check the retired one-time
+restructure checker used to perform (retired by the 3.0 migration,
+docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md), so this file itself also
+fixes the SHAPE those two properties depend on.
 
 R-50 (docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md v0.4, section 5): a
 `### <peer>` subsection may itself hold one or more `### <peer> -- <topic>`
 sub-blocks, each with its own full Control/Evidence/Status triple. Every
 peer carries a mandatory, unnamed default sub-block (`### <peer>`, no ` --
-`) first, followed by up to `MAX_NAMED_SUBBLOCKS` named sub-blocks in file
-order; the length cap (below) applies per sub-block, not per peer.
+`) first, followed by the existing named sub-blocks in file order (design
+section 2.1: no new named sub-block may be added); the per-claim length
+cap (`MAX_CLAIM_LENGTH`, below) applies per claim, not per sub-block or
+peer.
 
 Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
 a gap that cannot let a contract violation or a Security Invariant breach
@@ -70,22 +73,14 @@ through the completion gate is recorded here and not filed in the ledger):
        about the content at that line.
        caught by: the acceptance audit against the verbatim record kept
        in the change set's own design document, and code review.
-    2. not detected: the current longest sub-block's own length --
-       deliberately not recorded in the comment above
-       `MAX_BLOCK_LENGTH`.
-       why: the cap is a ceiling plus a margin, not a record of today's
-       measurement; a recorded number would go stale (ledger R-73).
-       caught by: re-running the measurement recipe that same comment
-       gives, and `CONTROL_MAPPING.md`'s own "Length cap measurement"
-       paragraph (accepted).
-    3. not detected: whether a claim has a matching condition row in
+    2. not detected: whether a claim has a matching condition row in
        `conformance-tests/CONDITIONS.md` -- this file never reads
        CONDITIONS.md.
        why: its inputs are `security/CONTROL_MAPPING.md` and
        `security/CONTROL_MAPPING_HISTORY.md`.
        caught by: `conformance-tests/test_conditions_register.py`, which
        checks both directions of the CONDITIONS.md/marker mapping.
-    4. not detected (the other way round -- a false red): a legitimate
+    3. not detected (the other way round -- a false red): a legitimate
        restructure of `security/CONTROL_MAPPING.md` that keeps every
        heading and every reference resolving but changes HOW MANY
        references take each shape/route -- splitting one claim into
@@ -100,10 +95,27 @@ through the completion gate is recorded here and not filed in the ledger):
        (the comment above them), so they pin the document's current
        reference MIX, not only the extraction logic they were added
        to guard.
-       caught by: the restructure's own work order re-measures and
-       re-pins every floor after the rewrite (design section 4 WP-1,
-       section 5 condition 8); until then a red floor on a change that
-       only reshapes references is read as this gap, not as a defect.
+       caught by: re-measuring and re-pinning every floor after such a
+       restructure (the recipe is this file's own floor comment above
+       `POSITION_REF_SHAPE_A_FLOOR`); a red floor on a change that only
+       reshapes references is read as this gap, not as a defect, until
+       the floors are re-fixed.
+    4. not detected: a Control claim whose only resolving position
+       reference is a `.md` (design document / runbook) path passes
+       check (2), because `_position_ref_has_whitelisted_extension`
+       admits `.md`/`.txt`/`.json`.
+       why: R-88's resolution is file-level and the extension set is
+       shared with the Evidence/Status axes.
+       caught by: the acceptance audit of each Control claim's subject
+       and enforcement site (design section 5 condition 13).
+    5. not detected: no length bound applies to lines outside the
+       three axes' claim lines (the preamble, `## CCR-14`, `## Rule`)
+       since `MAX_LINE_LENGTH` was retired with form 3.0.
+       why: design section 2.1 puts those sections outside the claim
+       grammar.
+       caught by: review of the preamble in each change set (measured
+       2026-09-24: the longest such line is 519 characters, the
+       Version line).
 """
 from __future__ import annotations
 
@@ -116,51 +128,12 @@ CONTROL_MAPPING_PATH = Path(__file__).parent.parent / "security" / "CONTROL_MAPP
 CONTROL_MAPPING_HISTORY_PATH = Path(__file__).parent.parent / "security" / "CONTROL_MAPPING_HISTORY.md"
 SECURITY_INVARIANTS_PATH = Path(__file__).parent.parent / "security" / "SECURITY_INVARIANTS_V1.md"
 
-# Design section 5, "肥大化の抑止": a block is one (SI, subsection)'s
-# claims (across all 3 axes) joined by a single space each; content is
-# unchanged by the restructure, so this ratchet carries the OLD table
-# form's own MAX_CELL_LENGTH value forward unchanged, verbatim record of
-# this file's own predecessor comment (差し戻し rework round 3, 監督裁定
-# 2026-09-06, item C-1/B-2) kept below rather than paraphrased:
-#
-# Measured 2026-09-06 (after restoring the dropped SI-14 r2db-api items
-# A-3/A-4 -- the exclusion-list rationale/asymmetry note and the
-# process-local deployment-ceiling note -- that this same rework round put
-# back onto the current row): this file's own longest cell is SI-14's
-# r2db-api control/evidence cell at 15,065 characters. MAX_CELL_LENGTH =
-# 15,200 is that measurement plus a 135-character margin.
-#
-# The longest block moves as content changes, so its current length is
-# not recorded here -- measure it by running this file's own
-# `_split_sections` against the current `security/CONTROL_MAPPING.md`,
-# then `_iter_section_subblocks` on each returned section, then
-# `_subblock_block_text` on each of those sub-blocks, and taking the
-# longest result (the same measurement CONTROL_MAPPING.md's own
-# preamble "Length cap measurement" paragraph records for that file).
-# MAX_BLOCK_LENGTH is the 2026-09-06 measurement above plus its
-# margin; it does not track the longest block's current length.
-MAX_BLOCK_LENGTH = 15200
-
-# Secondary cap (design section 5's own "補助"): no single physical line
-# may exceed this length. Computed by
-# tools/restructure_control_mapping.py as the restructured file's own
-# longest physical line rounded up to the next 100 -- 1,400 (the longest
-# line is `- ` plus SI-08's r2db-api longest claim, 1,382 characters,
-# measured 2026-09-14) -- and recorded verbatim in CONTROL_MAPPING.md's own
-# preamble as `` `MAX_LINE_LENGTH = 1400` ``. Kept in sync with that value,
-# not derived from it at test time, so a generator regression that changes
-# the preamble's own declared number without regenerating a consistent
-# file is still caught (this constant and the preamble's own text must
-# both be updated together, by hand, whenever the file is regenerated).
-MAX_LINE_LENGTH = 1400
-
-# R-50 (design docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md v0.4,
-# section 4, Q-1, 監督裁定 2026-09-18): each (SI, peer) may hold at most
-# this many NAMED sub-blocks in addition to its mandatory default one
-# (ceiling = 4 * MAX_BLOCK_LENGTH per (SI, peer)). Raising this value
-# requires a supervisor ruling recorded here, the same as MAX_BLOCK_LENGTH
-# above -- it is not a value a generator/editor may bump on its own.
-MAX_NAMED_SUBBLOCKS = 3
+# Design section 2.1 (依頼者裁定 2026-09-23、監督裁定 2026-09-23: Control
+# 200 -> 250): per-claim cap, keyed by axis, replacing the retired trio of
+# block-level caps (design section 4 "WP-1 の内訳"). Counting unit: the
+# claim's own physical line, INCLUDING the leading "- " (design section
+# 2.1's own "計数単位").
+MAX_CLAIM_LENGTH = {"Control": 250, "Evidence": 300, "Status": 300}
 
 # Required test (a) (design section 10 / work order
 # docs/work-orders/WORK_ORDER_R50_CONTROL_MAPPING_MULTI_BLOCK_V1.md W1-10),
@@ -392,20 +365,6 @@ def _subblock_axis_bullets(sb: SubBlock) -> dict[str, list[str]]:
     return result
 
 
-def _subblock_block_text(sb: SubBlock) -> str:
-    """Design section 5's "主" cap join, at sub-block granularity: the 3
-    axes' claims, joined by a single space each; `- —` (no claim for that
-    axis) contributes nothing."""
-    axis_bullets = _subblock_axis_bullets(sb)
-    claims: list[str] = []
-    for axis in EXPECTED_AXIS_ORDER:
-        bullets = axis_bullets.get(axis, [])
-        if bullets == ["—"]:
-            continue
-        claims.extend(bullets)
-    return " ".join(claims)
-
-
 def _check_subblock_axes(sid: str, sb: SubBlock) -> list[str]:
     """Design section 5's condition (iii), at sub-block granularity: each
     sub-block holds exactly `#### Control` / `#### Evidence` / `#### Status`
@@ -464,10 +423,8 @@ class ShapeAnalysis:
         self.multiple_default: list[tuple[str, str]] = []
         self.default_not_first: list[tuple[str, str]] = []
         self.duplicate_subjects: list[tuple[str, str, str]] = []
-        self.too_many_named: list[tuple[str, str, int]] = []
         self.peer_order: list[str] = []
         self.axis_shape: list[str] = []
-        self.block_length: list[tuple[str, str, str | None, int]] = []
 
 
 def _analyze_shape(text: str) -> ShapeAnalysis:
@@ -503,8 +460,6 @@ def _analyze_shape(text: str) -> ShapeAnalysis:
                 report.multiple_default.append((section.sid, peer))
             if peer_subblocks and peer_subblocks[0].subject is not None:
                 report.default_not_first.append((section.sid, peer))
-            if len(named) > MAX_NAMED_SUBBLOCKS:
-                report.too_many_named.append((section.sid, peer, len(named)))
             seen: dict[str, int] = {}
             for sb in named:
                 seen[sb.subject] = seen.get(sb.subject, 0) + 1
@@ -514,9 +469,6 @@ def _analyze_shape(text: str) -> ShapeAnalysis:
 
         for sb in subblocks:
             report.axis_shape.extend(_check_subblock_axes(section.sid, sb))
-            block_text = _subblock_block_text(sb)
-            if len(block_text) > MAX_BLOCK_LENGTH:
-                report.block_length.append((sb.sid, sb.peer, sb.subject, len(block_text)))
     return report
 
 
@@ -616,56 +568,6 @@ def test_control_mapping_md_every_subblock_has_the_fixed_axis_shape():
     text = _read()
     report = _analyze_shape(text)
     assert report.axis_shape == [], f"sub-block(s) with malformed axis shape: {report.axis_shape}"
-
-
-def test_control_mapping_md_named_subblocks_do_not_exceed_max_named_subblocks():
-    """W1-9 (R-c)."""
-    text = _read()
-    report = _analyze_shape(text)
-    assert report.too_many_named == [], f"(SI, peer) with more than {MAX_NAMED_SUBBLOCKS} named sub-block(s): {report.too_many_named}"
-
-
-def test_control_mapping_md_blocks_do_not_exceed_the_length_cap():
-    """W1-8 (R-a): the cap applies per (SI, peer, sub-block)."""
-    text = _read()
-    report = _analyze_shape(text)
-    assert report.block_length == [], (
-        f"sub-block(s) in {CONTROL_MAPPING_PATH} exceed the {MAX_BLOCK_LENGTH}-character cap "
-        f"(sid, peer, subject, length): {report.block_length}"
-    )
-
-
-def test_control_mapping_md_lines_do_not_exceed_the_line_length_cap():
-    """Design section 5's own "補助" cap: no physical line may exceed
-    MAX_LINE_LENGTH."""
-    text = _read()
-    offenders = [(i + 1, len(line)) for i, line in enumerate(text.splitlines()) if len(line) > MAX_LINE_LENGTH]
-    assert not offenders, (
-        f"line(s) in {CONTROL_MAPPING_PATH} exceed the {MAX_LINE_LENGTH}-character cap "
-        f"(line number, length): {offenders[:10]}"
-    )
-
-
-_DECLARED_MAX_LINE_LENGTH_RE = re.compile(r"MAX_LINE_LENGTH = (\d+)")
-
-
-def test_control_mapping_md_declares_the_same_max_line_length_as_this_file():
-    """Code review item (e): the preamble's own P2 sentence
-    ('` `` `MAX_LINE_LENGTH = <N>` `` `') is generated content, not derived
-    from this test's own MAX_LINE_LENGTH constant at test time (module
-    docstring: "Kept in sync with that value, not derived from it"). A
-    regenerate that changes the file's own longest line without this
-    constant being updated to match must be caught here, not silently
-    accepted because both numbers happen to independently satisfy the cap
-    check above."""
-    text = _read()
-    m = _DECLARED_MAX_LINE_LENGTH_RE.search(text)
-    assert m, f"{CONTROL_MAPPING_PATH}'s preamble does not declare a MAX_LINE_LENGTH value"
-    declared = int(m.group(1))
-    assert declared == MAX_LINE_LENGTH, (
-        f"{CONTROL_MAPPING_PATH} declares MAX_LINE_LENGTH = {declared} but this test's own "
-        f"constant is {MAX_LINE_LENGTH} -- update MAX_LINE_LENGTH above to match a regeneration"
-    )
 
 
 def test_every_control_mapping_section_has_a_resolving_history_link():
@@ -802,8 +704,8 @@ def test_fixture_baseline_default_only_section_has_no_violations():
     file's own shape) must be fully compliant."""
     report = _analyze_shape(VALID_SECTION_TEXT)
     assert report.bad_headings == report.missing_default == report.multiple_default == []
-    assert report.default_not_first == report.duplicate_subjects == report.too_many_named == []
-    assert report.peer_order == report.axis_shape == report.block_length == report.section_preface == []
+    assert report.default_not_first == report.duplicate_subjects == []
+    assert report.peer_order == report.axis_shape == report.section_preface == []
 
 
 def test_fixture_unknown_subblock_heading_is_rejected_not_skipped():
@@ -915,32 +817,6 @@ def test_fixture_named_subblock_axis_mixes_em_dash_placeholder_with_a_real_bulle
     )
     report = _analyze_shape(text)
     assert report.axis_shape, "expected '- —' mixed with a real claim bullet to be flagged"
-
-
-def test_fixture_named_subblock_alone_exceeds_the_length_cap():
-    """Required test (b) (W1-8): a single named sub-block whose own
-    content, alone, exceeds MAX_BLOCK_LENGTH."""
-    long_claim = "x" * (MAX_BLOCK_LENGTH + 100)
-    text = _section(
-        _subblock("### r2db-api")
-        + _subblock("### r2db-api -- ops inventory", control=(long_claim,), evidence=("—",), status=("—",))
-    )
-    report = _analyze_shape(text)
-    offenders = [o for o in report.block_length if o[1] == "r2db-api" and o[2] == "ops inventory"]
-    assert offenders, report.block_length
-
-
-def test_fixture_four_named_subblocks_exceeds_max_named_subblocks():
-    """W1-9 (R-c): MAX_NAMED_SUBBLOCKS = 3, a 4th named sub-block is red."""
-    text = _section(
-        _subblock("### r2db-api")
-        + _subblock("### r2db-api -- topic one")
-        + _subblock("### r2db-api -- topic two")
-        + _subblock("### r2db-api -- topic three")
-        + _subblock("### r2db-api -- topic four")
-    )
-    report = _analyze_shape(text)
-    assert ("SI-01", "r2db-api", 4) in report.too_many_named, report.too_many_named
 
 
 def test_fixture_bullet_accounting_catches_dropped_named_subblock_bullets():
@@ -1266,7 +1142,8 @@ def test_test_name_resolution_target_path_is_pinned_to_control_mapping_only():
 def test_control_mapping_md_every_test_name_reference_resolves():
     """D-1: the real file's every Control/Evidence test-name reference
     resolves. WP-1 measurement (work order section 2.1): exactly one
-    unresolved reference, `security/CONTROL_MAPPING.md:477`'s
+    unresolved reference, `security/CONTROL_MAPPING.md:477` (version 2.25's
+    `:477`; the form 3.0 rewrite moved every line)'s
     `test_audit_role_http_authorization_matrix_all_11_endpoints` (renamed
     to `..._all_13_endpoints`, D-5 (a)) -- WP-2 corrects it in the same
     commit (D-6), so this test is green only from that commit onward."""
@@ -1647,25 +1524,26 @@ POSITION_REF_ALLOWLIST: dict[tuple[str, str | None, str | None], str] = {
 
 # D-7: floors, one per shape and one per named route (i)/(i')/(ii)/(iii) --
 # `e-migration` is not floored (D-7 names only the 4 routes above). Measured
-# 2026-09-23 (基点 adea2b5, on the corrected `security/CONTROL_MAPPING.md`
-# -- the 3 rotted claim lines already fixed in place -- via this file's own
-# `_find_unresolved_position_refs`):
-# 197 total refs, shapes a=3 a'=2 b=2 c=18 d=168 e=4; routes i=112 i'=4 ii=6
-# iii=69 (the corrected `:619`/`:667`/`:668` references now join the
-# successful routes instead of the unresolved list). Each floor below is
-# that measurement minus a margin, so a regression in the
-# extraction/resolution logic is caught rather than a floor that only guards
-# against zero (OPERATING_CONDITIONS.md section 1.5 item 32, D-4).
-POSITION_REF_SHAPE_A_FLOOR = 2
-POSITION_REF_SHAPE_A_PRIME_FLOOR = 1
-POSITION_REF_SHAPE_B_FLOOR = 1
-POSITION_REF_SHAPE_C_FLOOR = 13
-POSITION_REF_SHAPE_D_FLOOR = 150
-POSITION_REF_SHAPE_E_FLOOR = 3
-POSITION_REF_ROUTE_I_FLOOR = 100
+# 2026-09-24 on `security/CONTROL_MAPPING.md` version 3.0 (the R-103 change
+# set, after the acceptance-audit corrections; that version line identifies
+# the file) via this file's own `_find_unresolved_position_refs`):
+# 768 total refs, shapes a=400 a'=19 b=21 c=32 d=288 e=8; routes i=662 i'=4
+# ii=7 iii=85 (e-migration=8, not floored; the audit corrections moved the
+# shape a/d and route i/iii counts from the pre-correction 2026-09-24
+# measurement). Each floor below is that measurement minus the same margin
+# used at the prior fixing, so a regression in the extraction/resolution
+# logic is caught rather than a floor that only guards against zero
+# (OPERATING_CONDITIONS.md section 1.5 item 32, D-4).
+POSITION_REF_SHAPE_A_FLOOR = 399
+POSITION_REF_SHAPE_A_PRIME_FLOOR = 18
+POSITION_REF_SHAPE_B_FLOOR = 20
+POSITION_REF_SHAPE_C_FLOOR = 27
+POSITION_REF_SHAPE_D_FLOOR = 270
+POSITION_REF_SHAPE_E_FLOOR = 7
+POSITION_REF_ROUTE_I_FLOOR = 650
 POSITION_REF_ROUTE_I_PRIME_FLOOR = 3
-POSITION_REF_ROUTE_II_FLOOR = 5
-POSITION_REF_ROUTE_III_FLOOR = 60
+POSITION_REF_ROUTE_II_FLOOR = 6
+POSITION_REF_ROUTE_III_FLOOR = 76
 
 
 def test_position_ref_target_path_is_pinned_to_control_mapping_only():
@@ -1871,3 +1749,175 @@ def test_fixture_position_ref_non_a_prime_non_e_backtick_does_not_swallow_its_tr
     unresolved, shape_counts, _route_counts = _find_unresolved_position_refs(text, tmp_path)
     notes = [note for _ln, ref, _si, _peer, note in unresolved if ref["raw"] == ":9999"]
     assert notes and notes[0].startswith("line 9999 beyond EOF"), (notes, shape_counts)
+
+
+# ---------------------------------------------------------------------------
+# Form 3.0 (design docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md section 2.1,
+# section 5's own (E) extraction formula, work order
+# docs/work-orders/WORK_ORDER_CONTROL_MAPPING_FORM_V3.md section 3): three
+# per-claim checks that replace the retired block-level trio above. All
+# three reuse `_iter_document_claims` (R-64) so "主張" is counted the same
+# way section 5's own (E) defines it -- only `- ` bullets under an SI
+# section's `#### Control|Evidence|Status` heading, never `## CCR-14`/`##
+# Rule`, never `- —`.
+# ---------------------------------------------------------------------------
+
+
+def _claim_length_offenders(text: str) -> list[tuple[str, str | None, str | None, str, int, int]]:
+    """(1): a claim's own physical line, the leading "- " included, must
+    not exceed `MAX_CLAIM_LENGTH[axis]`."""
+    offenders = []
+    for claim in _iter_document_claims(text):
+        cap = MAX_CLAIM_LENGTH.get(claim.axis)
+        if cap is None:
+            continue
+        length = len(f"- {claim.bullet}")
+        if length > cap:
+            offenders.append((claim.sid, claim.peer, claim.subject, claim.axis, claim.line, length))
+    return offenders
+
+
+def test_control_mapping_md_claims_do_not_exceed_the_per_axis_length_cap():
+    """Design section 2.1: replaces the retired block-level length cap."""
+    text = _read()
+    offenders = _claim_length_offenders(text)
+    assert not offenders, (
+        f"claim(s) in {CONTROL_MAPPING_PATH} exceed their axis's MAX_CLAIM_LENGTH "
+        f"(sid, peer, subject, axis, line, length): {offenders}"
+    )
+
+
+def test_fixture_control_claim_line_length_of_250_is_accepted_and_251_is_rejected():
+    """Work order section 3.6: a 250-character Control claim line (the
+    leading "- " included) is accepted; 251 is rejected. The claim body
+    lengths (248, 249) are literal, not derived from `MAX_CLAIM_LENGTH` at
+    test time, so a mutation that raises the cap is still caught here."""
+    at_cap = _section(_subblock("### r2db-api", control=("x" * 248,)))
+    over_cap = _section(_subblock("### r2db-api", control=("x" * 249,)))
+    assert _claim_length_offenders(at_cap) == []
+    offenders = _claim_length_offenders(over_cap)
+    assert offenders, "expected a 251-character Control claim line to be rejected"
+
+
+def _control_claims_missing_position_refs(text: str, repo_root: Path = REPO_ROOT) -> list[tuple[str, str | None, str | None, int]]:
+    """(2) design section 2.1/2.2: a Control claim must carry at least one
+    R-88 position reference that resolves (`_resolve_position_ref` and
+    `_position_ref_range_note` both succeed). A reference whose (raw, sid,
+    peer) key is in `POSITION_REF_ALLOWLIST` does not count (design section
+    2.2's own "数えない参照" -- it is a permitted cross-peer comparison,
+    never that claim's own enforcement site)."""
+    offenders = []
+    for claim in _iter_document_claims(text):
+        if claim.axis != "Control":
+            continue
+        line = f"- {claim.bullet}"
+        resolved_any = False
+        for ref in _extract_position_refs(line):
+            key = (ref["raw"], claim.sid, claim.peer)
+            if key in POSITION_REF_ALLOWLIST:
+                continue
+            resolved_path, _route, _note = _resolve_position_ref(ref, claim.peer, repo_root)
+            if resolved_path is None:
+                continue
+            if _position_ref_range_note(ref, resolved_path) is None:
+                resolved_any = True
+                break
+        if not resolved_any:
+            offenders.append((claim.sid, claim.peer, claim.subject, claim.line))
+    return offenders
+
+
+def test_control_mapping_md_control_claims_carry_a_resolving_position_reference():
+    """Design section 2.1: every Control claim names its own enforcement
+    site."""
+    text = _read()
+    offenders = _control_claims_missing_position_refs(text)
+    assert not offenders, (
+        f"Control claim(s) in {CONTROL_MAPPING_PATH} carry no resolving position "
+        f"reference (sid, peer, subject, line): {offenders}"
+    )
+
+
+def test_fixture_control_claim_position_reference_requirement(tmp_path):
+    """(2): a Control claim with no position reference is rejected; one
+    whose only reference is a `POSITION_REF_ALLOWLIST` row is rejected too
+    (even though that reference resolves on disk); one with a real,
+    resolving reference of its own is accepted."""
+    target = tmp_path / "r2db-api" / "src" / "fixture_target.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("x = 1\n" * 5)
+    allowlisted_target = tmp_path / "r2db-api" / "migrations" / "0013_role_statement_timeouts.sql"
+    allowlisted_target.parent.mkdir(parents=True)
+    allowlisted_target.write_text("-- sql\n")
+
+    no_ref = _section(_subblock("### r2db-api", control=("bounds nothing, no reference at all",)))
+    offenders = _control_claims_missing_position_refs(no_ref, tmp_path)
+    assert offenders, "expected a Control claim with no position reference to be rejected"
+
+    allowlisted_only = _section(
+        _subblock("### r2db-api", control=("names `0013_role_statement_timeouts.sql` for a peer comparison",)),
+        sid="SI-08",
+    )
+    offenders2 = _control_claims_missing_position_refs(allowlisted_only, tmp_path)
+    assert offenders2, "expected an allow-listed-only reference to still be rejected"
+
+    real_ref = _section(_subblock("### r2db-api", control=("bounds X -- `fixture_target.py:3`",)))
+    offenders3 = _control_claims_missing_position_refs(real_ref, tmp_path)
+    assert offenders3 == [], offenders3
+
+
+_EVIDENCE_TEST_NAME_RE = re.compile(r"test_[a-z0-9_]+")
+_EVIDENCE_FILE_REF_RE = re.compile(r"[\w./\-]+\.(?:py|sql|md|yml|sh)(?::\d+(?:-\d+)?)?")
+
+
+def _evidence_claim_has_reference(bullet: str) -> bool:
+    """(3) design section 5 (E): a test name or a file reference, each
+    found anywhere inside a backtick span (looser than R-64's own strict
+    full/bare-colon/bare-name shapes above, which must match a whole
+    span). The (E) "path inside a backtick span" is implemented as a
+    partial match inside the span, not a full-span match; measured
+    2026-09-24 on version 3.0 the two readings differ on 0 claims."""
+    for span in re.findall(r"`([^`]+)`", bullet):
+        if _EVIDENCE_TEST_NAME_RE.search(span) or _EVIDENCE_FILE_REF_RE.search(span):
+            return True
+    return False
+
+
+def _evidence_claims_missing_references(text: str) -> list[tuple[str, str | None, str | None, int]]:
+    offenders = []
+    for claim in _iter_document_claims(text):
+        if claim.axis != "Evidence":
+            continue
+        if not _evidence_claim_has_reference(claim.bullet):
+            offenders.append((claim.sid, claim.peer, claim.subject, claim.line))
+    return offenders
+
+
+def test_control_mapping_md_evidence_claims_carry_a_test_name_or_file_reference():
+    """Design section 5 (E): an Evidence claim must not be a reference-less
+    generic sentence."""
+    text = _read()
+    offenders = _evidence_claims_missing_references(text)
+    assert not offenders, (
+        f"Evidence claim(s) in {CONTROL_MAPPING_PATH} carry no test name or file "
+        f"reference (sid, peer, subject, line): {offenders}"
+    )
+
+
+def test_fixture_evidence_claim_reference_requirement():
+    """(3): a reference-less generic sentence is rejected; a claim with a
+    test name (or `file:line`) reference of its own is accepted."""
+    generic = _section(
+        _subblock("### r2db-api", evidence=("negative topology and isolation tests confirm this",))
+    )
+    offenders = _evidence_claims_missing_references(generic)
+    assert offenders, "expected a reference-less generic Evidence claim to be rejected"
+
+    with_test_name = _section(
+        _subblock(
+            "### r2db-api",
+            evidence=("observed in `tests/test_fixture_example.py::test_something_observed`",),
+        )
+    )
+    offenders2 = _evidence_claims_missing_references(with_test_name)
+    assert offenders2 == [], offenders2

@@ -490,6 +490,8 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 ### D-7 (i) 現行結論と履歴の分離 (裁定 4)
 
+**【上書き註 2026-09-24 (R-103、形式 3.0)】** 裁定 4 の更新規約「訂正は現行行を書き換え、旧文は履歴へ移す」は `security/CONTROL_MAPPING.md` については 3.0 以後 `docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` §3 が上書きする (依頼者裁定 2026-09-23): 文言訂正と参照の更新は git の履歴に任せ、制御の撤回・限界の変更・証拠を引けず Status へ落ちる Evidence 主張だけを履歴へ逐語で移す。`conformance-tests/CONDITIONS.md` の裁定 4 は据え置き。本節の行は消さない。
+
 **元ファイルの各行の形**: 「**現行の担保 (短文) + 証拠 (テスト名・`file:line`) + `[history](CONTROL_MAPPING_HISTORY.md#si-10)` 形のリンク**」。
 
 **列構造は維持する** — `CONDITIONS.md` は `ID` / `Condition` / `Invariants` / `Evidence` / `Status` の 5 列 (`test_conditions_register.py` が `ID` と `Status` を読む)、`CONTROL_MAPPING.md` は 4 列 (解析コードは 0 件だが**列は維持する**)。§1.6 の 1 のとおり、**セル内に生の `|` を置かず、1 行 1 レコードを保つ**。

@@ -125,6 +125,8 @@
 
 ## 4. 生成と照合
 
+**【退役註 2026-09-24 (R-103、形式 3.0)】** 本節が定めた生成器 `tools/restructure_control_mapping.py`・照合器 `tools/check_control_mapping_restructure.py`・割当表 `tools/control_mapping_axes.tsv` とそのテストは、形式 3.0 の移行 (`docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` §4 WP-1) で削除した。一度きりの道具であり、旧表形を前提としていたため。本節の記述は当時の記録として残す。
+
 どちらも `tools/` に置き、base rev を引数に取る。照合は生成を import せず、割当表も読まない。§3.1 の分解を独自に実装し、内容不変だけを検査する。新ファイル側は箇条書きの行をそのまま主張として読むので、2 つの実装の分解が食い違えば赤になる。
 
 | script | 役割 |
@@ -156,6 +158,8 @@
 割当が妥当かは機械では判定しない。割当表を監査が §3.2 の判定基準で突合する (§7)。却下案: script を scratchpad の一時物にする — 前例 (Phase 7 WP-7) と同じく証拠を再現できない。
 
 ## 5. 登録テストの改修
+
+**【退役註 2026-09-24 (R-103、形式 3.0)】** 本節の `MAX_BLOCK_LENGTH` / `MAX_LINE_LENGTH` と block 単位の上限検査は形式 3.0 で退役し、上限は主張単位 (`MAX_CLAIM_LENGTH`: Control 250 / Evidence 300 / Status 300) に移った (`docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` §2.1・§4)。本節の記述は当時の記録として残す。
 
 新しい登録テストは**新形だけ**を検査する。
 

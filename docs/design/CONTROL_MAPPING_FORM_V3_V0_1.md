@@ -1,4 +1,4 @@
-# CONTROL_MAPPING 形式 3.0 設計 v0.3
+# CONTROL_MAPPING 形式 3.0 設計 v0.4
 
 ## 0. 位置づけと台帳の扱い
 
@@ -328,12 +328,109 @@ script と出力は本書 §9 に逐語で残す (変異を持たない完了条
 
 ## 9. 実施記録
 
-(未実施。WP-4 の集計行・監査の逐語、WP ごとの完了ゲートの集計行をここに追記する。)
+### 9.1 実施の枠 (2026-09-24、台帳 R-103、worktree `determined-nightingale-9c442a`、基点 main `94febb3`)
+
+- 作業指示書 `docs/work-orders/WORK_ORDER_CONTROL_MAPPING_FORM_V3.md` v1.0 (訂正註 1〜4)。`<SHA>` = `94febb3`。
+- 役割: 実装担当 (Sonnet、WP-1a / WP-1b)、起草担当 (Opus、WP-2 / WP-3 を 2 並列。同一ファイルへの並行書き込みを避けるため各自の SI 範囲を scratchpad の別ファイルに書き、監督が差し込んだ)、監査担当 (Opus、WP-4)、レビュー担当 (Opus、コードレビュー 1 回)。
+- 監督裁定 (起草・実施中): (1) 制御を述べていない文 (相互参照・案内・手順の所在) に施行箇所参照を付けて Control に残さない — §3 の「削除する散文」として削除 (WP-2 で 7 行、HISTORY へ移さない)。(2) 旧 :293 (SI-02 r2db-api Evidence、分離ストアの構造説明) は撤回ではなく C-14 の Control へ移す。(3) 証拠を引けず Status へ落ちた Evidence は「**No cited evidence for …**: …; version 2.25's uncited wording is in the history file.」の限界開示の形に揃える。(4) Control が抱えていたテスト名は同 block の Evidence 軸へ移す (§2.1 の軸定義どおり)。
+
+### 9.2 旧 (版 2.25) と新 (3.0) の実測 (`$SP/cm_multiset.py stats`、抽出式は §5 の (E))
+
+```
+old (git show 94febb3:security/CONTROL_MAPPING.md): 1430 lines / 192,630 chars
+claims=525 blocks=53
+Control: n=333 chars=120088 longest=1384 over_cap(250)=181 no_test_or_file=150
+Evidence: n=119 chars=35368 longest=1244 over_cap(300)=45 no_test_or_file=21
+Status: n=73 chars=15920 longest=672 over_cap(300)=19 no_test_or_file=47
+no_test_or_file total = 218
+```
+
+```
+new (worktree, form 3.0, before the completion gate): 2190 lines / 246,174 chars
+claims=1361 blocks=53
+Control: n=584 chars=107063 longest=250 over_cap(250)=0 no_test_or_file=8
+Evidence: n=642 chars=98118 longest=300 over_cap(300)=0 no_test_or_file=0
+Status: n=135 chars=24417 longest=299 over_cap(300)=0 no_test_or_file=104
+no_test_or_file total = 112
+```
+
+前文: 136 行 / 10,910 文字 → 75 行 / 5,421 文字 (`grep -c 'Re-measured'` = 0、`CONTROL_MAPPING_HISTORY.md` への backtick 参照 4 件)。本体の総文字数は 192,630 → 246,174 (+28%): Control 軸は 120,088 → 107,063 に減り、Evidence 軸が 35,368 → 98,118 に増えた (1 観測 = 1 主張の分割で 119 → 642 件。§2.3 例 2 のとおり)。HISTORY は 13 件 (Status へ落ちた Evidence 主張。撤回した Control 主張は 0 件) を逐語で受けた。
+
+### 9.3 WP-4 多重集合検査 (`$SP/cm_multiset.py compare <old> <new>`、(SI, peer, block) ごとの Counter 比較)
+
+```
+ids: old_tokens=83 new_tokens=135 distinct_old=26 distinct_new=26 missing=0 extra=52
+tests: old_tokens=755 new_tokens=790 distinct_old=532 distinct_new=545 missing=0 extra=35
+files: old_tokens=190 new_tokens=744 distinct_old=114 distinct_new=385 missing=0 extra=554
+TOTAL missing=0
+```
+
+抽出式 (script 逐語): 既存 ID = `\b(?:F|C|CCR)-\d{2}\b|\bL\d+-\d+\b`、テスト名 = `test_[A-Za-z0-9_]+`、`file:line` = backtick 内の `^([A-Za-z0-9_./\-]+\.(?:py|sql|md|yml|yaml|sh|toml|json|txt|ini|cfg|tsv))(:\d+(?:-\d+)?)?$` と backtick 外の裸の `:\d+(?:-\d+)?`。主張の抽出は §5 の (E) (`#### Control|Evidence|Status` 配下の `- ` 行、`- —` を除き、SI 節外は数えない)。script は scratchpad にのみ置き、`tools/` に増やしていない。
+
+### 9.4 WP-1a / WP-1b の道具の出力 (逐語)
+
+- WP-1a (検査器側の変異、fixture): `pt: 33 passed, 25 deselected in 0.29s` / `mutate: 3 mutations, 3 as expected, restores verified 1/1 files (sha256 x2), grep counts unchanged` — M1 `MAX_CLAIM_LENGTH["Control"]` 250→251 → `test_fixture_control_claim_line_length_of_250_is_accepted_and_251_is_rejected` red、M2 解決を常に True → `test_fixture_control_claim_position_reference_requirement` red、M3 Evidence 参照抽出を常に空 → `test_fixture_evidence_claim_reference_requirement` red。
+- WP-1b (現物側の変異、`security/CONTROL_MAPPING.md`): `pt: 58 passed in 3.03s` / `mutate: 3 mutations, 3 as expected, restores verified 1/1 files (sha256 x2), grep counts unchanged` — 251 文字の Control 主張 / 位置参照を落とした Control 主張 / 参照なしの総称文 Evidence 主張、いずれも expect=red got=red。変異文字列の全文 grep 0 件。
+
+### 9.5 床の再固定 (WP-1b。各床 = 移行後実測 − 現行 margin、規約は `conformance-tests/test_control_mapping_register.py` の床コメント)
+
+| 形/route | 旧実測 | 旧床 | margin | 新実測 | 新床 |
+|---|---|---|---|---|---|
+| shape a | 3 | 2 | 1 | 399 | 398 |
+| shape a' | 2 | 1 | 1 | 19 | 18 |
+| shape b | 2 | 1 | 1 | 21 | 20 |
+| shape c | 18 | 13 | 5 | 32 | 27 |
+| shape d | 168 | 150 | 18 | 280 | 262 |
+| shape e | 4 | 3 | 1 | 8 | 7 |
+| route i | 112 | 100 | 12 | 656 | 644 |
+| route i' | 4 | 3 | 1 | 4 | 3 |
+| route ii | 6 | 5 | 1 | 7 | 6 |
+| route iii | 69 | 60 | 9 | 82 | 73 |
+
+`POSITION_REF_ALLOWLIST` の 2 行は据え置き (死んだ許可行 0)。
+
+### 9.6 WP-4 監査照合 (evidence-auditor、パケット = scratchpad `wp4-audit.md`。判定の逐語)
+
+- 受入条件 6 (限界主張の 1 対 1 照合): **充足**。母数 105 件 (旧 Status 73 + Status へ移した旧 Control / Evidence 32)、**後継なし 0 件**。弱化 2 件 (W-1 旧 :640 の「(an audit reader whose statements carry no bound of their own)」、W-2 旧 :1188 の minimal event class 5 語の列挙) は監督裁定で復元した (9.7)。
+- 受入条件 9 (HISTORY の逐語): **充足**。Form 3.0 追記 13 件、13 件とも旧行と 1 字の差なし (ok 13 / diff 0)。SI 内訳: SI-07・SI-12 各 2、SI-00・02・03・04・08・09・10・11・14 各 1。撤回した Control 主張 0 件。
+- 受入条件 7(iii) (軸を移した主張を指す正本参照): **充足**。式 B = 48 行 / 17 ファイル。正本 8 件 (INVENTORY 設計 6 + `CONTROL_MAPPING.md` 自己参照 2) はいずれも腐っていない (指す軸に後継が現存) ので更新しない (作業指示書 訂正註 5)。記録側で実際に軸が動いた 4 行 (R-87:49、R-71:22/:88、R-52:265/:271) は不変。
+- 受入条件 13 (Control 主張の主語): 初回 **未充足** — 7 語以上 20 件、bound する主体でない主語 7 件、動詞のない断片 5 件、境界例 12 件 (残り 557 件は充足)。監督裁定で是正し (9.7)、再監査の逐語は 9.8。
+- 参考の自測: 見出し集合 diff 空、`- —` と実主張の混在 0、上限違反 0、参照なし Evidence 0、実 credential / 絶対パスの混入 0。
+
+### 9.6b `CONTROL_MAPPING.md:NNN` 行参照の判定 (受入条件 11、設計 §6.2b の「判定が要る」6 文書 15 件)
+
+| ファイル:行 | 判定 | 理由 |
+|---|---|---|
+| `docs/design/CODE_COMMENT_PROVENANCE_V1.md`:12・:143・:145 | 記録 | 版数ログと訂正註 (2026-09-18 時点の行番号のずれの記録) |
+| `docs/design/MITATEDB_PLATFORM_MIGRATION_RUN_V0_1.md`:129・:174・:241 | 記録 | 閉止済み R-57 の設計時分析と受け入れ (:736/:744/:751 は版 2.12〜2.13 の行) |
+| `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md`:65・:103 | 記録 | 閉止済み R-52 の設計時分析 (:650/:548 は当時の行) |
+| `docs/design/DEPROVISION_FORCED_DROP_V0_1.md`:233・:242 | 記録 | 閉止済み R-54 の監督裁定の記録 (版 2.9 → 2.10) |
+| `docs/design/ROADMAP_POST_PHASE7_V1.md`:57 (§0.1.3) | **正本** | 現行の充足判定。本変更セットで再実測して更新 |
+| `docs/design/ROADMAP_POST_PHASE7_V1.md`:510 (R-90 行) | 記録 | 閉止行 |
+| `docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md`:802 | 記録 | L7-22 の閉止記録 |
+| `conformance-tests/test_control_mapping_register.py` (docstring の `:477`) | 記録 | R-88 WP-1 当時の測定記録。註記 1 行「(version 2.25's `:477`; the form 3.0 rewrite moved every line)」を足した |
+
+正本で更新した行参照は台帳 §0.1.3 の 1 件のみ。他の 18 ファイル (作業指示書 12・引き継ぎ書 3・旧設計文書・完了フェーズの監査記録・本設計) は記録として不変。
+
+### 9.7 監査・レビュー後の是正 (監督裁定 2026-09-24)
+
+- 是正担当 (drafter、現物を直接編集): 主語 7 語以上 20/20 件、主体でない主語 7 件 + レビュー 3a の :690/:691 (限界を Status へ)、断片 5/5 件、境界例 12 件中 8 件、W-1 (逐語復元)・W-2 (2 主張に分割し 5 区分を逐語復元。主張化のため `That minimal event class is` と最後の項の前の `and` が加わる)、O-1 参照単位 43 件中 33 件を施行する行へ付け替え (10 件は class 全体が施行主体)、`.md` だけを引く Control 26 件のうち 5 件を code/migration へ (21 件 = SI-09 platform upgrade の運用手順 17 + 配備・再起動・再適用順 4 は手順そのものが制御として残置)。
+- 再監査 (`$SP/wp4-audit-2.md`): 条件 13 **充足** (53 block、未充足 0)、条件 6 **充足** (母数 107、後継なし 0、削除された Status 主張 0)、条件 9 **充足** (13 件不変、ok 13 / diff 0)、W-1 逐語、W-2 実質充足。観察 N-1〜N-4 と :1301 は監督が直した: N-1 MitateDB の `mitatedbsvc_provision` の `statement_timeout` 限界を r2db と対称に Status へ、N-2 配備の既定に依存する 3 主張 (Cloud Run の IAM 分離・環境変数の不在・`0014` 後の再起動) を「配備の前提」として Status へ、N-3 class 宣言行より範囲の広い 3 主張の参照を module path (行なし) に、N-4 動詞のない 2 主張を 1 文に、:1301 の主語を 6 語以内に。
+- 最終実測 (`cm_multiset.py stats`): `claims=1363 blocks=53` / `Control: n=577 chars=106271 longest=250 over_cap(250)=0 no_test_or_file=8` / `Evidence: n=642 chars=98118 longest=300 over_cap(300)=0 no_test_or_file=0` / `Status: n=144 chars=26534 longest=299 over_cap(300)=0 no_test_or_file=105`。本体 2,192 行 / 247,501 字。多重集合 `TOTAL missing=0` (ids 83 → 135、tests 755 → 790、files 190 → 753 tokens)。見出し集合 diff 空。登録テスト + R-95 検査 `pt: 83 passed`。
+- 床の最終再固定 (是正後の実測 − 現行 margin。9.5 の表を上書きする): a 400 → 399、a' 19 → 18、b 21 → 20、c 32 → 27、d 288 → 270、e 8 → 7、i 662 → 650、i' 4 → 3、ii 7 → 6、iii 85 → 76。
+- コードレビュー (Opus、1 回、`$SP/review-wp1.log`) 7 件: 1 §9 未記入 → 本節、2 床コメントの基点 → 「version 3.0 (the R-103 change set)」、3 `.md` だけの施行箇所参照 → (a) 現物 (b) Known gaps 項目、4 (E) と部分一致の差 (実測 0 件) → docstring、5 主張行以外の行長 → Known gaps 項目、6 空振り assertion 2 つ → 削除、7 Known gaps 項目 3 の caught by → 床コメントを指す形。裁定表は引き継ぎ書。
+
+### 9.8 完了ゲートと commit
+
+- 完了ゲート (`tools/dev/gate.py -C .claude/worktrees/determined-nightingale-9c442a --label cm-form-v3`): `gate: 4018 passed, 2 subtests passed in 504.40s (0:08:24)` / `gate: judge=PASS` / `gate: pg_database/pg_roles diff 0` (2026-09-24, label cm-form-v3)
+- `tools/tests -q` (`tools/dev/pt.py`): `pt: 588 passed in 73.71s (0:01:13)`
+- commit: `tools/dev/finalize.py --tools-tests` (監督)。版 2.25 の全文は commit `94febb3`。
 
 ## 改版履歴
 
 | 版 | 日付 | 変更 | 出所 |
 |---|---|---|---|
+| **v0.4** | 2026-09-24 | §9 実施記録 (R-103 の実施: 実測、多重集合検査、監査・レビューの逐語、床の再固定表、行参照の判定表、完了ゲート)。§0〜§8 は不変 (§6.1 の「正本 8 件を WP-5 で更新する」は実測で腐りなしと判明、作業指示書 訂正註 5) | 実施 2026-09-24、作業指示書 `docs/work-orders/WORK_ORDER_CONTROL_MAPPING_FORM_V3.md` |
 | **v0.3** | 2026-09-23 | 再確認で残った矛盾 7 件を是正: §2.1 の計数単位 (先頭 `- ` 込みの物理行) と route i' の一本化、§2.2 に allowlist 参照を数えない行、§3 の route i' 記述、§4 WP-1 の検査 (1) を 250/251 に訂正・床の再固定を「実測 − 現行 margin」に、§5 の (E)・条件 8・11・13、§6.2b で `test_control_mapping_register.py`:1250 を記録区分へ | 設計レビュー再確認 2026-09-23 + 監督裁定 |
 | **v0.2** | 2026-09-23 | 設計レビュー指摘 15 件 + 枠への疑義 3 件への監督裁定を反映: §0 の 1 commit 規律、§1.1 の 525 / 219 / Status 73、§2.1 の Control 上限 250・施行箇所の定義・分割時の参照複製・既存参照の形の据え置き・route i' 維持・CCR-14 対象外・Status は peer block 据え置き・Evidence 21 件の帰結、§2.2、§2.3 例 3 を英語化、§3 に HISTORY 逐語の行と 4 つの前提、§4 の WP 表・床の再固定・検査 (2)・WP-2/3 規律・WP-4 の 1 対 1 照合、§5 を 16 条件に再構成 + (E)、§6.1 の結論・§6.2b の 24 ファイル、§7 に (f)(g)、§8 を空に | 設計レビュー 2026-09-23 + 監督裁定 |
 | v0.1 | 2026-09-23 | 初版。形式 3.0 の主張文法、更新規約 3.0、WP-1〜WP-5、受け入れ条件 14 件、影響ファイルの実測 | 依頼者裁定 2026-09-23 (決定 1〜6)、`RM`:160、`docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` §5 裁定 4 |
