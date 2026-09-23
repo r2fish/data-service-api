@@ -192,7 +192,10 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: docstring gained the harness-only calling condition (8 lines), so the
 #: `postgres.py` site below shifted DOWN by 8. Re-verified via
 #: `_fail_call_sites`.
-    ("postgres.py", 1592),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+#: R-79 WP-3 (2026-09-23): line shift only (1592 -> 1604) -- `_liveness_
+#: check` grew a non-IDLE pre-check and a replacement explanatory comment
+#: for its own `autocommit`-based ping, net +12 lines above this call site.
+    ("postgres.py", 1604),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
