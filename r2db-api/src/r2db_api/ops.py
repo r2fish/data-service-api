@@ -17,6 +17,7 @@ History: CH-0288
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -35,7 +36,12 @@ from psycopg.types.json import Json
 
 from . import platform_declarations
 from . import platform_upgrades
-from .control_plane import bootstrap_control_credential, issue_audit_credential_ceremony, reset_control_credentials
+from .control_plane import (
+    _APPLICATION_ID_PATTERN,
+    bootstrap_control_credential,
+    issue_audit_credential_ceremony,
+    reset_control_credentials,
+)
 from .credential_store import (
     DEFAULT_SCHEMA,
     PostgresApplicationRegistry,
@@ -328,7 +334,7 @@ def _require_cli_confirmation(
 ) -> None:
     """Contract 1.2.0 `destructive_confirmation`'s exact-match rule (`structured.require_destructive_confirmation`'s own HTTP-facing counterpart), applied to this CLI's own `--confirm <phrase>` flag: a valid confirmation is `confirm == phrase` as an exact string (no presence/truthy/prefix check) -- there is no separate `destructive` boolean here, since invoking `reset`/`delete-credential` at all already *is* the destructive intent signal a wire request's own `destructive: true` field stands in for.
 
-    Checked FIRST, before any store/audit-sink construction, in both callers below: both phrases (`RESET_CONTROL_CREDENTIALS`, a constant; `DELETE_CREDENTIAL <credential_id>`, a pure function of the CLI's own argument) are fully computable with no database read at all, so a rejected confirmation leaves the platform database completely untouched -- not even a connection is opened -- satisfying the same "denial reads/writes nothing" guarantee the wire surfaces get from their own evaluation order (contract `destructive_confirmation.evaluation_order`), even though the CLI has no separate shape/auth/target-existence steps of its own to interleave this after.
+    Checked FIRST, before any store/audit-sink construction, in the first two callers below (`reset`/`delete-credential`): both phrases (`RESET_CONTROL_CREDENTIALS`, a constant; `DELETE_CREDENTIAL <credential_id>`, a pure function of the CLI's own argument) are fully computable with no database read at all, so a rejected confirmation there leaves the platform database completely untouched -- not even a connection is opened. The third caller, `deprovision` (R-90 design D-2), is different: its own phrase (`_deprovision_confirmation_phrase`) is a pure function too, but its own INPUT (`provisioned_at`) is read from the registry first, so a rejected `deprovision` confirmation still reads the registry, though it writes nothing there and starts no psql subprocess (contract `destructive_confirmation.evaluation_order`'s own target-existence-then-precondition position). All three callers still satisfy the same "denial writes nothing" guarantee the wire surfaces get from their own evaluation order, even though the CLI has no separate shape/auth/target-existence steps of its own to interleave this after.
 
     On denial: prints one line of problem+json-shaped JSON (`FoundationError.problem()`'s own shape: type/code/message/request_id/details) to stderr and exits 2 -- deliberately NOT routed through `main()`'s ordinary `FoundationError` handling (`f"error: {code}: {message}"` text, exit 1): this predates any store/audit construction, so there is nothing transactional to unwind, and R-4's own contract for this CLI is exit code 2 + JSON-on-stderr specifically, distinguishable at a glance from every other CLI failure mode (argparse usage errors; a `FoundationError` the ceremony/store itself raises after this gate passes; a raw `psycopg.Error`).
 
@@ -1668,6 +1674,333 @@ def cmd_upgrade_status(args: argparse.Namespace) -> int:
     return 4 if any_pending else 0
 
 
+# =========================================================================== `apply-platform-migration` re-applies one or more of the 4 known re-appliable platform migrations (0008/0012/0013/0014 -- never the bootstrap-only 0001/0002, never a per-application migration, never one of the password-carrying 0005/0006/0007) against a running cluster's own R2DB_CONTROL_DSN, the same DSN `upgrade-applications` above already uses (design docs/work-orders/WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md D-1/D-3). Call shape only, independent of MitateDB-api's own same-named subcommand (P-6: no code sharing between peers) -- 3 of the 4 helpers below are isomorphic to MitateDB-api's own same-named functions (`_ISOMORPHIC_TARGETS`, `tests/test_audit_query.py`) because their bodies are already peer-generic, not because either peer imports the other. ===========================================================================
+
+
+#: the platform migrations `apply-platform-migration` accepts -- every
+#: migration that neither takes an `:app_slug` psql variable nor is a
+#: bootstrap-only, once-ever migration (0001/0002), nor a per-application
+#: migration (0003/0004/0009-0011), nor requires a password psql
+#: variable (0005/0006/0007 -- excluded so no CLI argument ever carries
+#: a password, design condition (d)). Order is migration-number order.
+_PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
+    "0008_platform_declarations_and_writer_timeouts.sql",
+    "0012_process_ceilings.sql",
+    "0013_role_connection_limits.sql",
+    "0014_auditreader_statement_timeout.sql",
+)
+
+#: the psql `-v NAME=VALUE` variables each file above references, by
+#: filename -- an argument this table does not list for a file is
+#: refused, and a variable the table lists but the operator omitted is
+#: refused too (`_platform_migration_variables`). Equality against each
+#: file's own real `:name` references is a static test
+#: (`test_ops_apply_platform_migration.py`).
+_PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
+    "0008_platform_declarations_and_writer_timeouts.sql": ("api_role", "controlplane_role"),
+    "0012_process_ceilings.sql": (),
+    "0013_role_connection_limits.sql": (),
+    "0014_auditreader_statement_timeout.sql": (),
+}
+
+#: design D-1: `file -> the LATER accepted files that redefine at least
+#: one of file's own targets (the same role's own SET/CONNECTION LIMIT,
+#: a CREATE OR REPLACE FUNCTION body, or an ALTER TABLE .../CREATE TABLE
+#: constraint of the same name)` -- a file with a NON-EMPTY entry here,
+#: given without every one of its own listed successors later in the
+#: SAME `apply-platform-migration` call, is refused
+#: (`_validate_platform_migration_run`). A file absent from this table
+#: (or mapped to an empty tuple) has no known successor and may always
+#: be applied alone. This table is proved equal to the "target ->
+#: defining files" map derived directly from the 4 accepted migration
+#: files themselves, folded to file granularity, by a static test (work
+#: order WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md
+#: D-1, `test_ops_apply_platform_migration.py`) -- this table is the
+#: side that must keep matching that derivation, never the other way
+#: round. `0008` defines the `platform_declarations_key_check`
+#: constraint (`CREATE TABLE ... CONSTRAINT
+#: platform_declarations_key_check`); `0012` redefines the same-named
+#: constraint (`ALTER TABLE ... DROP CONSTRAINT IF EXISTS
+#: platform_declarations_key_check` / `ADD CONSTRAINT
+#: platform_declarations_key_check`) -- applying `0008` alone against a
+#: cluster that has never seen `platform_declarations` before would
+#: otherwise leave that constraint 3-key wide forever.
+_PLATFORM_MIGRATION_SUPERSEDED_BY: dict[str, tuple[str, ...]] = {
+    "0008_platform_declarations_and_writer_timeouts.sql": ("0012_process_ceilings.sql",),
+}
+
+#: matches a psql `:name`/`:'name'`/`:"name"` variable reference, but
+#: never a `::` type cast -- the negative lookbehind/lookahead on both
+#: sides of the leading colon reject a colon that is itself adjacent to
+#: another colon.
+_PSQL_VARIABLE_RE = re.compile(
+    r"(?<!:):(?!:)(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\"|([A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def _strip_sql_line_comments(text: str) -> str:
+    """Drops everything from the first `--` onward on each
+    line -- a `:name` reference inside a `--` comment is never a real
+    psql variable reference."""
+    return "\n".join(line[: line.find("--")] if "--" in line else line for line in text.splitlines())
+
+
+def _extract_psql_variables(text: str) -> "set[str]":
+    """Every psql variable `text` references, excluding
+    `--` line comments and `::` type casts."""
+    stripped = _strip_sql_line_comments(text)
+    found: "set[str]" = set()
+    for match in _PSQL_VARIABLE_RE.finditer(stripped):
+        name = match.group(1) or match.group(2) or match.group(3)
+        if name:
+            found.add(name)
+    return found
+
+
+def _resolve_platform_migration_file(filename: str) -> Path:
+    """`filename` must be a bare name (no path separator), a member of
+    `_PLATFORM_MIGRATION_FILENAMES`, and resolve to a real file INSIDE
+    `_migrations_dir()` -- both sides are resolved (symlinks followed)
+    before the containment check, so a migrations directory that is
+    itself a symlink still accepts a known file, while a file that
+    resolves outside the directory (e.g. a symlink planted in its
+    place) is refused. `_migrations_dir()` (`R2DB_MIGRATIONS_DIR`) is
+    the operator-set trust boundary this check keeps `filename` inside
+    of. The rejected value itself is never echoed back."""
+    if "/" in filename or (os.sep != "/" and os.sep in filename):
+        _die("apply-platform-migration: FILENAME must not contain a path separator")
+    if filename not in _PLATFORM_MIGRATION_FILENAMES:
+        _die("apply-platform-migration: FILENAME must be one of the known platform migration files")
+    directory = _migrations_dir().resolve()
+    candidate = (directory / filename).resolve()
+    try:
+        candidate.relative_to(directory)
+    except ValueError:
+        _die("apply-platform-migration: resolved migration file path is outside the migrations directory")
+    if not candidate.is_file():
+        _die("apply-platform-migration: migration file not found")
+    return candidate
+
+
+def _validate_platform_migration_run(files: "tuple[str, ...]") -> None:
+    """The acceptance conditions for a RUN of FILENAMEs, checked once
+    every element of `files` has already been resolved by
+    `_resolve_platform_migration_file` (so each is already a known
+    member of `_PLATFORM_MIGRATION_FILENAMES`) -- refuses (fixed
+    message, `_die`, exit code 2) before `_platform_migration_
+    variables` or any psql subprocess runs:
+
+    1. `files` is strictly ascending in `_PLATFORM_MIGRATION_FILENAMES`
+       order with no repeat.
+    2. every file's own successors in `_PLATFORM_MIGRATION_SUPERSEDED_
+       BY` (if any -- a file absent from that table, or mapped to an
+       empty tuple, has none and always passes this condition on its
+       own) are present in `files`, later than that file. The
+       rejection names the FULL required run (that file plus its own
+       successors, built from `_PLATFORM_MIGRATION_SUPERSEDED_BY` and
+       `_PLATFORM_MIGRATION_FILENAMES`), never `files` itself -- the
+       operator's own rejected values are not echoed back."""
+    positions = {name: i for i, name in enumerate(_PLATFORM_MIGRATION_FILENAMES)}
+    indices = [positions[name] for name in files]
+    if indices != sorted(indices) or len(set(indices)) != len(indices):
+        _die("apply-platform-migration: FILENAMEs must be given in migration order, each at most once")
+    given = set(files)
+    for name in files:
+        successors = _PLATFORM_MIGRATION_SUPERSEDED_BY.get(name, ())
+        missing = [succ for succ in successors if succ not in given]
+        if missing:
+            required_run = (name,) + successors
+            _die(
+                f"apply-platform-migration: {name} is superseded by a later platform migration; "
+                "apply the whole run in one call, in this order: " + " ".join(required_run)
+            )
+
+
+def _platform_migration_variables(files: "tuple[str, ...]", args: argparse.Namespace) -> "dict[str, str]":
+    """Reconciles the operator-supplied `--api-role`/`--controlplane-
+    role` values against the UNION of every file in `files`'s own
+    required set (`_PLATFORM_MIGRATION_VARIABLE_TABLE`) -- a required
+    variable no file in `files` references, or a supplied variable no
+    file in `files` references, is refused (fixed message, no psql
+    subprocess started). Each file in the run is later invoked with
+    only its OWN required subset (`cmd_apply_platform_migration`),
+    never this whole union -- this function only checks that the union
+    is exactly what the operator supplied. The union is walked in
+    `files` order (already `_PLATFORM_MIGRATION_FILENAMES` order) and,
+    within each file, that file's own `_PLATFORM_MIGRATION_VARIABLE_
+    TABLE` tuple order -- a missing-variable message therefore always
+    names the SAME variable for the SAME input, never one that varies
+    run-to-run with Python's own (hash-randomized) `set` iteration
+    order. An unexpected (extra) variable's own rejection names the
+    ONE file it does not belong to only when `files` itself is one
+    file; a run of 2+ files names no file (no single file in a
+    multi-file run is the "right" one to blame for an extra
+    variable)."""
+    required_ordered: "list[str]" = []
+    for name in files:
+        for var in _PLATFORM_MIGRATION_VARIABLE_TABLE[name]:
+            if var not in required_ordered:
+                required_ordered.append(var)
+    supplied: "dict[str, str]" = {}
+    if args.api_role is not None:
+        supplied["api_role"] = args.api_role
+    if args.controlplane_role is not None:
+        supplied["controlplane_role"] = args.controlplane_role
+    missing = [name for name in required_ordered if name not in supplied]
+    if missing:
+        var = missing[0]
+        naming_file = next(name for name in files if var in _PLATFORM_MIGRATION_VARIABLE_TABLE[name])
+        _die(f"apply-platform-migration: {naming_file} requires --{var.replace('_', '-')}")
+    extra = [name for name in supplied if name not in required_ordered]
+    if extra:
+        var = extra[0]
+        if len(files) == 1:
+            _die(f"apply-platform-migration: {files[0]} does not accept --{var.replace('_', '-')}")
+        _die(f"apply-platform-migration: no file in this run accepts --{var.replace('_', '-')}")
+    return supplied
+
+
+def cmd_apply_platform_migration(args: argparse.Namespace) -> int:
+    """Applies a run of one or more platform migration files a second
+    (or later) time against a running cluster, via R2DB_CONTROL_DSN
+    only (never an argument, condition (b)). See
+    POSTGRES_PROVISIONING_RUNBOOK.md for the manual per-migration
+    sections this subcommand replaces."""
+    lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
+    files = tuple(args.file)
+    scripts = [_resolve_platform_migration_file(name) for name in files]
+    _validate_platform_migration_run(files)
+    variables = _platform_migration_variables(files, args)
+    dsn = _control_dsn()
+    _require_psql_16_or_newer()
+    env = _psql_connection_env(dsn)
+    env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)
+    applied: "list[str]" = []
+    for name, script in zip(files, scripts):
+        argv = ["psql", "-v", "ON_ERROR_STOP=1"]
+        for var_name in _PLATFORM_MIGRATION_VARIABLE_TABLE[name]:
+            argv += ["-v", f"{var_name}={variables[var_name]}"]
+        argv += ["-f", str(script)]
+        result = subprocess.run(argv, capture_output=True, text=True, env=env)
+        if result.returncode != 0:
+            not_run = files[len(applied) + 1:]
+            message = (
+                f"apply-platform-migration failed at {name}\n"
+                f"applied: {' '.join(applied) if applied else '(none)'}\n"
+                f"not run: {' '.join(not_run) if not_run else '(none)'}\n"
+                "An applied file may still carry a value a later file in this run replaces. "
+                "Re-run the whole run from its first file; every file in it is idempotent.\n"
+                f"{result.stdout}\n{result.stderr}"
+            )
+            _die(_redact_connection_values(message, dsn))
+        print(f"applied {name}")
+        applied.append(name)
+    return 0
+
+
+# =========================================================================== `deprovision` runs `0004_deprovision_application.sql` -- the terminal, whole-namespace removal of one application -- against R2DB_CONTROL_DSN, gated by the same `--confirm <phrase>` declare-and-echo protocol `reset`/`delete-credential` already use (`_require_cli_confirmation`; design docs/work-orders/WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md D-2/D-3). `_deprovision_confirmation_phrase` is isomorphic to MitateDB-api's own same-named function (`_ISOMORPHIC_TARGETS`) -- its body is peer-generic; the registry column it is fed from (`provisioned_at` here, `registered_at` on MitateDB-api) is read by a peer-local lookup function that is NOT pinned. ===========================================================================
+
+
+_DEPROVISION_CONSEQUENCE = (
+    "The application's entire database (every table in it) and both its runtime/developer login roles are "
+    "dropped, and its r2dbsvc_registry.applications row is removed permanently -- the terminal, "
+    "whole-namespace removal for this application. Nothing about it is recoverable afterward."
+)
+_DEPROVISION_REVERSIBLE_ALTERNATIVE = (
+    "disable-app <slug> refuses every credential belonging to this application without destroying anything, "
+    "and is reversed by enable-app. Deprovision is for permanent removal only."
+)
+
+
+def _deprovision_confirmation_phrase(application_id: str, registered_at) -> str:
+    """State-fingerprinted (contract `destructive_confirmation`'s own
+    phrase-construction rule (b): `application_id` is destroyable-and-
+    recreatable by name -- registering it again after a deprovision has
+    no defence against reusing the SAME `application_id` -- so the
+    phrase must go stale across a deprovision-then-re-register cycle).
+    `registered_at` changes on every fresh registration of the same
+    `application_id`, which is exactly the state this needs to bind
+    to."""
+    canonical = registered_at.isoformat() if hasattr(registered_at, "isoformat") else str(registered_at)
+    digest = hashlib.sha256(f"{application_id}:{canonical}".encode("utf-8")).hexdigest()[:16]
+    return f"DEPROVISION application {application_id} @registered={digest}"
+
+
+def _lookup_application_provisioned_at(dsn: str, schema: str, application_slug: str):
+    """Reads `provisioned_at` for `application_slug` from `<schema>.
+    applications` (`_schema()`, R1-9) -- the column `finish_provision_
+    application` (0006) sets to `now()` on every successful provision,
+    and that a deprovision-then-re-provision of the SAME slug always
+    changes (§1.3 (3)). `None` (no row, or a row whose own `provisioned_
+    at` is NULL -- the two-state registry's own "registered but never
+    provisioned" shape) is refused the same way as a missing row: this
+    lookup never distinguishes the two to the operator, since neither
+    has anything for `deprovision` to remove."""
+    statement = sql.SQL("SELECT provisioned_at FROM {table} WHERE application_slug = %s").format(
+        table=sql.Identifier(schema, "applications")
+    )
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(statement, [application_slug])
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None or row[0] is None:
+        _die(f"deprovision: application {application_slug!r} is not registered, or is registered but not provisioned")
+    return row[0]
+
+
+def _run_deprovision_script(dsn: str, application_slug: str, lock_timeout: str) -> "subprocess.CompletedProcess[str]":
+    """Call shape only, independent of MitateDB-api's own same-named
+    function (P-6) -- the psql `-v` variable name is r2db's own
+    (`app_slug`, matching `0004_deprovision_application.sql`'s own
+    `:'app_slug'`/`:"app_slug"` references; MitateDB's own realization
+    uses `app_id` instead). `_require_psql_16_or_newer`/`_psql_
+    connection_env`/`_with_lock_timeout_option` are the SAME helpers
+    `cmd_apply_platform_migration` above already uses."""
+    script = _migrations_dir() / "0004_deprovision_application.sql"
+    _require_psql_16_or_newer()
+    env = _psql_connection_env(dsn)
+    env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)
+    return subprocess.run(
+        ["psql", "-v", "ON_ERROR_STOP=1", "-v", f"app_slug={application_slug}", "-f", str(script)],
+        capture_output=True, text=True, env=env,
+    )
+
+
+def cmd_deprovision(args: argparse.Namespace) -> int:
+    """Permanently removes an application's entire database, both its
+    runtime/developer login roles, and its registry row -- the
+    terminal, whole-namespace removal. `application_id` is format-
+    validated BEFORE any database access or phrase computation (mirrors
+    `cmd_delete_credential`'s own existing rule: an unvalidated
+    identifier must never reach a confirmation phrase or a shell-
+    adjacent subprocess argument). See POSTGRES_PROVISIONING_RUNBOOK.md
+    section 5 for the manual `psql -f 0004_...` procedure this
+    subcommand replaces."""
+    application_slug = args.application_id
+    if not _APPLICATION_ID_PATTERN.fullmatch(application_slug):
+        _die(f"deprovision: application_id must match {_APPLICATION_ID_PATTERN.pattern!r}")
+    lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
+    dsn = _control_dsn()
+    provisioned_at = _lookup_application_provisioned_at(dsn, _schema(), application_slug)
+    phrase = _deprovision_confirmation_phrase(application_slug, provisioned_at)
+    _require_cli_confirmation(
+        args.confirm,
+        phrase=phrase,
+        message="Deprovisioning this application requires the current confirmation phrase.",
+        consequence=_DEPROVISION_CONSEQUENCE,
+        reversible_alternative=_DEPROVISION_REVERSIBLE_ALTERNATIVE,
+        recovery=None,
+    )
+    result = _run_deprovision_script(dsn, application_slug, lock_timeout)
+    if result.returncode != 0:
+        _die(_redact_connection_values(f"deprovision script failed:\n{result.stdout}\n{result.stderr}", dsn))
+    print(f"application {application_slug} deprovisioned")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m r2db_api.ops",
@@ -1868,6 +2201,61 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--control", action="store_true", help="also check F-3c (surfaces.control must be declared for a control-plane process)")
     p.set_defaults(func=cmd_verify_declarations)
+
+    _apply_platform_migration_help = (
+        "Apply a RUN of one or more platform migration files, in migration order, a second "
+        "(or later) time against R2DB_CONTROL_DSN -- restricted to the known re-appliable platform "
+        "migrations (" + "/".join(name[:4] for name in _PLATFORM_MIGRATION_FILENAMES) + "; the "
+        "bootstrap-only 0001/0002 and the password-carrying 0005/0006/0007 are never accepted here). A "
+        "file with a later file that redefines one of its own targets is refused unless every one of "
+        "those later files is given too, in the same call. See POSTGRES_PROVISIONING_RUNBOOK.md section "
+        "16 (0008), section 18 (0012), section 4 (0013), and section 19 (0014). 0008/0013 re-applying is "
+        "an ASSIGNMENT, not an increment -- it resets a hand-changed value back to the shipped default "
+        "(0008's own role timeouts/audit_writer_roles row, 0013's own CONNECTION LIMITs); use "
+        "`ops set-platform-timeouts` for a real, lasting timeout change instead of a re-apply"
+    )
+    p = sub.add_parser(
+        "apply-platform-migration",
+        help=_apply_platform_migration_help,
+        description=_apply_platform_migration_help,
+    )
+    p.add_argument(
+        "file", metavar="FILENAME", nargs="+",
+        help="one or more of the known platform migration file names (no path), in migration order",
+    )
+    p.add_argument(
+        "--lock-timeout", required=True, metavar="VALUE",
+        help="lock_timeout to set on the psql session before applying the file (a positive integer optionally "
+             "followed by ms, s, or min; no default)",
+    )
+    p.add_argument("--api-role", default=None, metavar="ROLE", help="0008's own :api_role psql variable")
+    p.add_argument(
+        "--controlplane-role", default=None, metavar="ROLE",
+        help="0008's own :controlplane_role psql variable",
+    )
+    p.set_defaults(func=cmd_apply_platform_migration)
+
+    _deprovision_help = (
+        "Permanently remove an application's entire database, both its runtime/developer "
+        "login roles, and its registry row -- the terminal, whole-namespace removal. Requires --confirm "
+        "<phrase> (echoing a prior refusal's own required_confirmation, POSTGRES_PROVISIONING_RUNBOOK.md "
+        "section 5) -- omit or get it wrong and the declaration prints to stderr as JSON and this exits 2 "
+        "without dropping anything. The phrase's own @registered= digest is the application's own "
+        "r2dbsvc_registry.applications.provisioned_at -- deprovisioning then re-provisioning the same "
+        "slug changes it, so a stale echoed phrase is refused too"
+    )
+    p = sub.add_parser("deprovision", help=_deprovision_help, description=_deprovision_help)
+    p.add_argument("application_id", metavar="SLUG")
+    p.add_argument(
+        "--confirm", default=None, metavar="PHRASE",
+        help="echo the required_confirmation phrase from a prior refusal's stderr declaration to proceed",
+    )
+    p.add_argument(
+        "--lock-timeout", required=True, metavar="VALUE",
+        help="lock_timeout to set on the psql session before running the deprovision script "
+             "(a positive integer optionally followed by ms, s, or min; no default)",
+    )
+    p.set_defaults(func=cmd_deprovision)
 
     p = sub.add_parser(
         "upgrade-applications",

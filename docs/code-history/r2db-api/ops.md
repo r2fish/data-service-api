@@ -362,6 +362,20 @@ control_audit`'s MI-3 note -- only successful state changes are
 durably recorded by this CLI).
 ```
 
+### correction: 2026-09-23
+
+- reason: `deprovision` (R-90 WP-2) is now a third caller of `_require_cli_confirmation`, and unlike `reset`/`delete-credential` its own confirmation phrase requires a registry read (`provisioned_at`) before the gate -- "in both callers below" and "not even a connection is opened" no longer hold for all callers
+
+old:
+```
+Checked FIRST, before any store/audit-sink construction, in both callers below: both phrases (`RESET_CONTROL_CREDENTIALS`, a constant; `DELETE_CREDENTIAL <credential_id>`, a pure function of the CLI's own argument) are fully computable with no database read at all, so a rejected confirmation leaves the platform database completely untouched -- not even a connection is opened -- satisfying the same "denial reads/writes nothing" guarantee the wire surfaces get from their own evaluation order (contract `destructive_confirmation.evaluation_order`), even though the CLI has no separate shape/auth/target-existence steps of its own to interleave this after.
+```
+
+new:
+```
+Checked FIRST, before any store/audit-sink construction, in the first two callers below (`reset`/`delete-credential`): both phrases (`RESET_CONTROL_CREDENTIALS`, a constant; `DELETE_CREDENTIAL <credential_id>`, a pure function of the CLI's own argument) are fully computable with no database read at all, so a rejected confirmation there leaves the platform database completely untouched -- not even a connection is opened. The third caller, `deprovision` (R-90 design D-2), is different: its own phrase (`_deprovision_confirmation_phrase`) is a pure function too, but its own INPUT (`provisioned_at`) is read from the registry first, so a rejected `deprovision` confirmation still reads the registry, though it writes nothing there and starts no psql subprocess (contract `destructive_confirmation.evaluation_order`'s own target-existence-then-precondition position). All three callers still satisfy the same "denial writes nothing" guarantee the wire surfaces get from their own evaluation order, even though the CLI has no separate shape/auth/target-existence steps of its own to interleave this after.
+```
+
 ## CH-0301
 
 - moved from: `src/r2db_api/ops.py` (`<module>`)

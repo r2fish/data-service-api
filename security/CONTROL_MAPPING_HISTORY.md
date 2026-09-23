@@ -253,6 +253,18 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*r2db-api Control claim, the disclosed `--lock-timeout` difference between the peers (R-66), superseded 2026-09-23 (Version 2.24, R-90 -- r2db-api now requires `--lock-timeout` on all three subcommands that apply a migration file (`apply-platform-migration`, `upgrade-applications`, `deprovision`), closing the disclosed difference), verbatim:*
+
+- **disclosed difference between the peers (R-66)**: MitateDB-api requires the same argument on all three subcommands that apply a migration file (`apply-platform-migration`, `upgrade-applications`, `deprovision`); r2db-api has only `upgrade-applications`; its platform migrations are run by the deployment script on a first deployment, with no `lock_timeout` (a host being provisioned has no other session to wait behind), and they and `0004` are otherwise applied by hand with `psql -f`, where the runbook tells the operator to set `PGOPTIONS='-c lock_timeout=<value>'` on a running cluster and nothing enforces it
+
+---
+
+*MitateDB-api Control claim, F-17's own evidence name for the isomorphic-target pin, superseded 2026-09-23 (Version 2.24, R-90 -- the isomorphic-target pin grew to 150 rows with the seven helpers R-90 added), verbatim:*
+
+- **F-17 runs on this peer too (R-56)**: the same `ops verify-declarations` check r2db-api's own SI-08 row describes (role-level `statement_timeout` positive for the roles identified by their real SELECT grants on both audit tables, no per-database row overriding that key, exit code 16) is judged here against the reader bound `0013_role_statement_timeouts.sql` already declares, so R-56 adds no migration to this peer; `_f17_message` and `check_auditreader_statement_timeout` are rows of `_ISOMORPHIC_TARGETS`, which holds the two peers' wording and judgment together -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_passes_from_migration_0013`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_zero`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_reset`, `::test_verify_declarations_f17_fails_when_a_per_database_override_exists`, `::test_verify_declarations_f17_passes_when_auditreader_role_is_absent`, `::test_f17_the_schema_owning_role_is_never_flagged_despite_an_explicit_select_grant`, `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_143_rows`.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -383,6 +395,18 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 *MitateDB-api Control claim, the production restriction on `apply-platform-migration`, superseded 2026-09-23 (Version 2.22, R-72 -- `states` could be read as a complete list of the runbook's stage 2 preconditions, while the block's Platform-upgrade runbook claim names only some of them; the runbook's own section 10.10 is the complete list), verbatim:*
 
 - against production, `apply-platform-migration` is run only through the runbook's gated procedure (`MitateDB-api/docs/cloud-run-cloud-sql.md` section 10), whose stage 2 preconditions this block's own Platform-upgrade runbook claim below states rather than this claim restating a subset of them -- the subcommand's own help text, section-heading comment and docstring name that same section too, pinned by `MitateDB-api/tests/test_ops_help_text.py`; every test targets a throwaway PostgreSQL cluster only (`MITATEDB_TEST_ADMIN_DSN`).
+
+---
+
+*r2db-api Control claim, phrase construction for all 4 gated surfaces defined once in `structured.py`, superseded 2026-09-23 (Version 2.24, R-90 -- `deprovision` is now a 5th gated surface, whose own confirmation phrase lives in `ops.py` beside its caller, not in `structured.py`, so "all 4" no longer covers every gated surface), verbatim:*
+
+- Phrase construction for all 4 gated surfaces (`delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential`) is defined exactly once in the shared module `structured.py`, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- fixed by an object-identity assertion, `test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases`.
+
+---
+
+*r2db-api Control claim, the out-of-band ritual CLI gates before any store/DSN is constructed, superseded 2026-09-23 (Version 2.24, R-90 -- `deprovision`'s own confirmation phrase requires a registry read before the gate can be evaluated, so this claim no longer holds for all of the ritual CLI's gated subcommands), verbatim:*
+
+- The out-of-band ritual CLI gates on the identical declare-and-echo protocol before any store/DSN is constructed, so a wrong `--confirm` never touches the database -- `test_cli_reset_without_confirm_declares_and_touches_nothing`, `test_cli_delete_credential_without_confirm_declares_and_touches_nothing`.
 
 ---
 

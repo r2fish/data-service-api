@@ -6,10 +6,14 @@
 --
 -- WHO RUNS THIS: the operator, connected to the `r2dbsvc_platform` database
 -- (created by 0001) AS the `r2dbsvc_control` role -- the same role/connection
--- 0002/0005/0006/0007 already run as. Run once, after 0007:
+-- 0002/0005/0006/0007 already run as. Run once, after 0007, ALWAYS together
+-- with its own required successor 0012 in the same call (R-90 WP-1: via
+-- `ops apply-platform-migration`, whose closure check refuses this file
+-- alone -- see POSTGRES_PROVISIONING_RUNBOOK.md section 16):
 --
---   psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f 0008_platform_declarations_and_writer_timeouts.sql \
---        -v api_role=r2dbsvc_api -v controlplane_role=r2dbsvc_controlplane
+--   python -m r2db_api.ops apply-platform-migration \
+--     0008_platform_declarations_and_writer_timeouts.sql 0012_process_ceilings.sql \
+--     --lock-timeout <value> --api-role r2dbsvc_api --controlplane-role r2dbsvc_controlplane
 --
 -- `-v ON_ERROR_STOP=1` (WP-4 rework round 2, supervisor ruling 2026-09-06,
 -- wp4-rework-2.md #2) must be passed on every `-f` invocation -- without

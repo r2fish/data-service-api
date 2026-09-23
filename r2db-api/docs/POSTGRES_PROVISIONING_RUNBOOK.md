@@ -367,11 +367,11 @@ has not derived it -- not a PostgreSQL requirement in its own right.
 Re-check the real figure against `SHOW max_connections;` before applying
 `0013` to a cluster already close to its own configured ceiling. Applying
 it by hand (an already-running cluster this script has not touched, or a
-retrofit after the fact):
+retrofit after the fact), via `ops apply-platform-migration` (R-90 WP-1,
+`--lock-timeout` required):
 
 ```
-PGOPTIONS='-c lock_timeout=<value>' psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 \
-  -f r2db-api/migrations/0013_role_connection_limits.sql
+python -m r2db_api.ops apply-platform-migration 0013_role_connection_limits.sql --lock-timeout <value>
 ```
 
 `python -m r2db_api.ops verify-declarations` now also checks the
@@ -490,11 +490,22 @@ comment for the full mechanics (it creates the database, closes `PUBLIC`'s
 default `CONNECT`, reconnects into the new database via `\c`, and sets up
 `public`'s ownership/RLS-verification view there).
 
-To remove an application (e.g. tearing down a test/staging application):
+To remove an application (e.g. tearing down a test/staging application), use
+`ops deprovision` (R-90 WP-2) rather than `psql -f` directly -- it enforces
+`--lock-timeout` the same way `ops apply-platform-migration` (§16/§18/§19)
+does, and it is gated by a `--confirm <phrase>` declare-and-echo step (this
+runbook's own destructive-confirmation convention, §12/§13): invoke it once
+without `--confirm` and it prints the required phrase as JSON on stderr and
+exits 2, touching nothing; invoke it again with that exact phrase to
+actually run `0004_deprovision_application.sql`. The phrase's own
+`@registered=` digest is this application's own
+`r2dbsvc_registry.applications.provisioned_at` -- deprovisioning this slug
+and then re-provisioning it changes `provisioned_at`, which changes the
+required phrase too, so a stale echoed phrase from an earlier provisioning
+is refused:
 
 ```
-PGOPTIONS='-c lock_timeout=<value>' psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' \
-  -f r2db-api/migrations/0004_deprovision_application.sql
+python -m r2db_api.ops deprovision myapp --confirm <phrase> --lock-timeout <value>
 ```
 
 This drops that application's entire database (every table in it, along
@@ -507,7 +518,10 @@ test_cross_database_connect_is_refused_at_the_database_level` and
 Deprovisioning a slug that was never provisioned now raises loudly
 (a deliberate behavioural change from the previous single-function
 `deprovision_application`, which silently no-op'd in that case -- see
-`0002_provisioning_functions.sql`'s header for why).
+`0002_provisioning_functions.sql`'s header for why); `ops deprovision`
+itself also refuses an unregistered or never-provisioned slug before
+computing a confirmation phrase at all (no `provisioned_at` to fingerprint
+against).
 
 **If `0005_credential_store.sql` has been applied on this platform database,
 clear this application's credentials first.** `0004` refuses to proceed
@@ -517,11 +531,15 @@ self-grant, no `ALLOW_CONNECTIONS` change, no `pg_terminate_backend`, no
 DEPROVISION_FORCED_DROP_V0_1.md` v1.0 D-2R adds the first three stages,
 all of which still run strictly after this guard, never before it) while
 any `credentials` row still references this slug
-(`application_slug` is `ON DELETE RESTRICT`, by design -- §9). The error
-names the count and the remedy:
+(`application_slug` is `ON DELETE RESTRICT`, by design -- §9). `ops
+deprovision` relays the script's own failure text (with any connection
+value redacted) and exits non-zero; the error names the count and the
+remedy:
 
 ```
-psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' -f r2db-api/migrations/0004_deprovision_application.sql
+python -m r2db_api.ops deprovision myapp --confirm <phrase> --lock-timeout <value>
+error: deprovision script failed:
+
 ERROR:  application myapp still has 2 credential row(s) referencing it -- revoke it first
 (python -m r2db_api.ops revoke-credential <credential_id>), then delete the row
 (python -m r2db_api.ops delete-credential <credential_id> --confirm ...; run it
@@ -1606,15 +1624,24 @@ migration moves four things that used to be per-process environment
 variables into the platform database itself, as the single state **both**
 `r2db_api.main` and `r2db_api.control_main` read at startup.
 
-**Run once, after `0007`, as `r2dbsvc_control` against `r2dbsvc_platform`**
-(idempotent -- safe to re-run; a re-run resets a hand-changed timeout back
-to the shipped default, so use `ops set-platform-timeouts` for real
-changes):
+**Run once, after `0007`, as `r2dbsvc_control` against `r2dbsvc_platform`,
+via `ops apply-platform-migration` (R-90 WP-1)** -- required (`--lock-timeout`
+is a mandatory argument, never a default) so a re-apply against a running
+cluster always bounds how long it may wait behind another session's lock;
+idempotent -- safe to re-run, and a re-run resets a hand-changed timeout
+back to the shipped default (an assignment, never an increment -- see the
+migration's own header), so use `ops set-platform-timeouts` for a real,
+lasting change instead. **`0008` is always given together with its own
+required successor, `0012` (§18), in the SAME call** -- `0012` widens the
+`platform_declarations_key_check` constraint `0008` itself defines, so the
+subcommand's own closure check refuses a solo `0008`; giving both here is
+always safe, since `0012` is idempotent and does not touch anything `0008`
+manages:
 
 ```
-psql "$R2DBSVC_CONTROL_DSN" \
-  -v api_role=r2dbsvc_api -v controlplane_role=r2dbsvc_controlplane \
-  -f r2db-api/migrations/0008_platform_declarations_and_writer_timeouts.sql
+python -m r2db_api.ops apply-platform-migration \
+  0008_platform_declarations_and_writer_timeouts.sql 0012_process_ceilings.sql \
+  --lock-timeout <value> --api-role r2dbsvc_api --controlplane-role r2dbsvc_controlplane
 ```
 
 The two `-v` variables name the service writer roles this file both issues
@@ -1888,11 +1915,18 @@ path. `0012` is a SEPARATE platform single-shot migration from `0008` (§16)
 the `surfaces`/`audit_coalescing_window_ms`/`audit_writer_roles` rows `0008`
 already manages.
 
-**Run once, after `0008`, as `r2dbsvc_control` against `r2dbsvc_platform`**
-(idempotent -- safe to re-run, takes no `-v` variables):
+**Normally applied together with `0008` in the SAME §16 run** (`0008`'s own
+required successor). The solo invocation below, as `r2dbsvc_control`
+against `r2dbsvc_platform` via `ops apply-platform-migration` (R-90 WP-1),
+is for drift recovery (re-converging a hand-dropped
+`platform_declarations_key_check`) and the existing-host rollout procedure
+below ONLY -- both run against a platform where `0008` is already applied,
+so the closure check (which only fires when `0008` itself is part of the
+SAME call) never rejects a solo `0012` (idempotent -- safe to re-run, takes
+no `-v` variables):
 
 ```
-psql "$R2DBSVC_CONTROL_DSN" -f r2db-api/migrations/0012_process_ceilings.sql
+python -m r2db_api.ops apply-platform-migration 0012_process_ceilings.sql --lock-timeout <value>
 ```
 
 Like `surfaces`, `0012` deliberately seeds NO `process_ceilings` row
@@ -1918,7 +1952,7 @@ release that requires `process_ceilings` (this one) must run these three
 steps, in this exact order, before restarting either process, or both will
 refuse to start (F-15) with no `process_ceilings` row to read yet):
 
-1. `psql "$R2DBSVC_CONTROL_DSN" -f r2db-api/migrations/0012_process_ceilings.sql`
+1. `python -m r2db_api.ops apply-platform-migration 0012_process_ceilings.sql --lock-timeout <value>`
 2. `python -m r2db_api.ops declare-process-ceilings --data 1 --control 1`
    (or the deployment's real ceilings, if not the single-uvicorn default)
 3. Restart both `r2dbsvc-api.service` and `r2dbsvc-control.service` --
@@ -1981,11 +2015,12 @@ connections) to `5000ms` -- the same number the two writer roles already
 carry (§16).
 
 **Run once, after `0007`, as the role that created `r2dbsvc_auditreader`**
-(normally `r2dbsvc_control`; idempotent -- safe to re-run, takes no `-v`
-variables):
+(normally `r2dbsvc_control`), via `ops apply-platform-migration` (R-90 WP-1,
+`--lock-timeout` required); idempotent -- safe to re-run, takes no `-v`
+variables:
 
 ```
-PGOPTIONS='-c lock_timeout=<value>' psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f r2db-api/migrations/0014_auditreader_statement_timeout.sql
+python -m r2db_api.ops apply-platform-migration 0014_auditreader_statement_timeout.sql --lock-timeout <value>
 ```
 
 **Role settings take effect at login, not on an already-open connection.**

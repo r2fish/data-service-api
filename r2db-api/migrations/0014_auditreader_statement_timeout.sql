@@ -8,7 +8,8 @@
 -- `r2dbsvc_control`, `0007_application_audit.sql`'s own applier). Run
 -- once, after 0007:
 --
---   psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f 0014_auditreader_statement_timeout.sql
+--   python -m r2db_api.ops apply-platform-migration 0014_auditreader_statement_timeout.sql --lock-timeout <value>
+--   (R-90 WP-1 -- see POSTGRES_PROVISIONING_RUNBOOK.md section 19)
 --
 -- `-v ON_ERROR_STOP=1` must be passed on every `-f` invocation -- without
 -- it, psql exits 0 even when a statement in this file errors out.
