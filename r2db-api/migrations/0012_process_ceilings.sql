@@ -11,7 +11,8 @@
 -- migration, those are per-application upgrade scripts, design SS8.1 rule
 -- 2):
 --
---   psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f 0012_process_ceilings.sql
+--   python -m r2db_api.ops apply-platform-migration 0012_process_ceilings.sql --lock-timeout <value>
+--   (R-90 WP-1 -- see POSTGRES_PROVISIONING_RUNBOOK.md section 18)
 --
 -- `-v ON_ERROR_STOP=1` must be passed on every `-f` invocation -- without
 -- it, psql exits 0 even when a statement in this file errors out.

@@ -2,10 +2,12 @@
 -- (database-per-application, architecture §8 "D-3 改訂")
 --
 -- WHO RUNS THIS: the operator/deploy tooling, connected to the
--- `r2dbsvc_platform` database as `r2dbsvc_control`:
+-- `r2dbsvc_platform` database as `r2dbsvc_control` (R-90 WP-2: via
+-- `ops deprovision`, gated by a confirmation phrase -- see
+-- POSTGRES_PROVISIONING_RUNBOOK.md section 5):
 --
---   psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' \
---     -f 0004_deprovision_application.sql
+--   python -m r2db_api.ops deprovision myapp --confirm <phrase> \
+--     --lock-timeout <value>
 --
 -- Drops that application's entire database (every table in it, `CASCADE`
 -- is implicit -- dropping the database drops everything inside it) and

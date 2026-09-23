@@ -26,6 +26,7 @@ import os
 import re
 import secrets
 import subprocess
+import shutil
 import tempfile
 import types
 from pathlib import Path
@@ -225,6 +226,7 @@ def platform() -> Iterator[types.SimpleNamespace]:
         yield info
     finally:
         _sweep_prefix(admin_dsn, prefix)
+        shutil.rmtree(info.migrations_dir, ignore_errors=True)
 
 
 def _run_apply(

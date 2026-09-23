@@ -19,7 +19,8 @@
 -- rule 2. This header previously said "after 0012", which was never
 -- true:
 --
---   psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f 0013_role_connection_limits.sql
+--   python -m r2db_api.ops apply-platform-migration 0013_role_connection_limits.sql --lock-timeout <value>
+--   (R-90 WP-1 -- see POSTGRES_PROVISIONING_RUNBOOK.md section 4)
 --
 -- `-v ON_ERROR_STOP=1` must be passed on every `-f` invocation -- without
 -- it, psql exits 0 even when a statement in this file errors out.
