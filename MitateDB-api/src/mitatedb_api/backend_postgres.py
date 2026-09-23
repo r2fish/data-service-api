@@ -86,6 +86,7 @@ import time
 
 import psycopg
 from psycopg import sql
+from psycopg.pq import TransactionStatus
 
 from .backend import UNCHANGED
 from .config import FoundationConfig
@@ -95,6 +96,13 @@ from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
 from .identifiers import validate_identifier
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
+# R-79 (WO §2.1 D-1/D-2): the counting cursor/connection subclasses
+# `__init__` (below) uses instead of plain `psycopg.connect`, and the
+# `pg_prepared_statements` probe `prepared_stats` (below) calls -- all
+# byte-identical to `r2db_api.psycopg_counting` (a same-named test in
+# `tests/` pins the sha256 match; rework 指摘 3 moved the
+# probe itself there so it is not duplicated per peer).
+from .psycopg_counting import CountingConnection, prepared_stats_skeleton, probe_prepared_statements
 # `_INT_DOMAIN_RANGES`/`_check_domain` are re-exported for facade
 # compatibility (design D-2); not referenced elsewhere in this module.
 from .postgres_value_domain import _INT_DOMAIN_RANGES, _validate_value_domain, _check_domain
@@ -269,8 +277,8 @@ class PostgresBackend:
     """
 
     def __init__(self, runtime_dsn, developer_dsn, *, application_id=None, max_execution_ms: int | None = None):
-        self._runtime = psycopg.connect(runtime_dsn, autocommit=False)
-        self._developer = psycopg.connect(developer_dsn, autocommit=False)
+        self._runtime = CountingConnection.connect(runtime_dsn, autocommit=False)
+        self._developer = CountingConnection.connect(developer_dsn, autocommit=False)
         # R-87: the constructed upper bound the developer-connection
         # catalog reads below (`schema_count`/`field_domains`/`field_
         # types`/`all_field_types`/`field_constraints`/`field_types_and_
@@ -346,6 +354,37 @@ class PostgresBackend:
     def close(self):
         self._runtime.close()
         self._developer.close()
+
+    def prepared_stats(self):
+        """R-79 (WO §1.2 D-2, completion condition 9): probe both
+        persistent connections this backend holds, labelled `runtime@
+        <pid>`/`developer@<pid>` (`conn.info.backend_pid`, the same public
+        attribute r2db-api's own pool-based `label` uses -- a re-connect
+        shows up as the pid changing). Unlike r2db-api's pool, there is no
+        queue to drain/refill here -- these two connections are held
+        directly for this cell's whole lifetime, so there is nothing to
+        return anywhere afterwards. `cell.py::ApplicationCell.prepared_
+        stats()` is the caller, under `self._lock`.
+
+        A probe that raises may leave its connection mid-transaction
+        (aborted) -- if the failure happened after the probe's own SELECT
+        but before its `commit()` (rework 指摘 5): rolled
+        back here so this backend's own persistent connection is never
+        left aborted for the NEXT real request on it (mutation M25 drops
+        this rollback). This does lose whatever was prepared on that
+        connection (F2), but a connection already stuck aborted from a
+        probe failure is not a state worth preserving prepared statements
+        over."""
+        rows = []
+        for role_name, conn in (("runtime", self._runtime), ("developer", self._developer)):
+            label = f"{role_name}@{conn.info.backend_pid}"
+            try:
+                rows.append(probe_prepared_statements(conn, label))
+            except Exception as exc:  # noqa: BLE001 -- reported as probed=False/error=<class name> (D-2, WO §6.1 H-4)
+                if conn.info.transaction_status != TransactionStatus.IDLE:
+                    conn.rollback()
+                rows.append(prepared_stats_skeleton(conn, label, error=type(exc).__name__))
+        return rows
 
     def check_reserved(self, value, label):
         # WP-3e rework T1 (追補2 M-1): the reserved-name half of the

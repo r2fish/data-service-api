@@ -105,6 +105,13 @@ from .backend import StorageBackend as _StorageBackend
 from .errors import fail, violation
 from .limits import ResourceLimits
 from . import platform_upgrades
+# R-79 (WO §2.1 D-1/D-2): the counting cursor/connection subclasses
+# `_connect` (below) uses instead of plain `psycopg.connect`, and the
+# `pg_prepared_statements` probe `prepared_stats` (below) calls -- all
+# byte-identical to `mitatedb_api.psycopg_counting` (a same-named test in
+# `tests/` pins the sha256 match; rework 指摘 3 moved the
+# probe itself there so it is not duplicated per peer).
+from .psycopg_counting import CountingConnection, prepared_stats_skeleton, probe_prepared_statements
 # `_escape_like_literal` is not used directly in this module (its one
 # call site, inside `_predicate_sql`, moved to `postgres_sql.py`); the
 # import exists only as a facade-compat re-export for `r2db-api/tests/
@@ -309,7 +316,7 @@ class _RolePool:
         # which is exactly the kind of unbounded wait `_acquire` below must
         # not be exposed to while holding `self._lock` (see that method's
         # own comment on why `_connect()` is never called under the lock).
-        conn = psycopg.connect(self._dsn, autocommit=False, connect_timeout=self._connect_timeout)
+        conn = CountingConnection.connect(self._dsn, autocommit=False, connect_timeout=self._connect_timeout)
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SET search_path TO {}").format(sql.Identifier(self._schema)))
         conn.commit()
@@ -404,6 +411,61 @@ class _RolePool:
                 "wait_max_ms": self._wait_max_ms,
                 "in_use_peak": self._in_use_peak,
             }
+
+    def prepared_stats(self, label_prefix: str) -> list[dict[str, Any]]:
+        """R-79 (WO §1.2 D-2, completion condition 8): probe every
+        connection currently sitting IDLE in this pool's own queue --
+        drained via `get_nowait` (never `_acquire()`: `_acquire()` would
+        touch `_record_acquire`/`_record_wait` above, and this call must
+        leave R-78's own `acquire_count`/`wait_count`/`in_use_peak`
+        completely unchanged), probed with `psycopg_counting.probe_
+        prepared_statements`, then returned to the SAME queue with `put_
+        nowait` -- always, even when the probe raised (mutation M15
+        removes that `finally`; WO §6.1 H-4). A connection some other
+        caller currently has checked out is simply not in the queue right
+        now and is not probed -- in-use connections are out of scope for
+        this probe by construction (WO §1.2 D-2's own "idle 接続"
+        wording), not by any extra check here.
+
+        A probe that raises may leave its connection mid-transaction
+        (aborted) -- if the failure happened after the probe's own SELECT
+        but before its `commit()` (rework 指摘 5): rolled
+        back here, before the connection rejoins the queue, so a caller
+        that later checks it out never inherits an aborted transaction
+        (mutation M25 drops this rollback). This does lose whatever was
+        prepared on that connection (F2), but a connection already stuck
+        aborted from a probe failure is not a state worth preserving
+        prepared statements over.
+
+        No lock: only this call drains this pool's own queue for the
+        duration of this method (mirrors `close_all()`, above, which does
+        the identical `get_nowait` drain with no lock either).
+
+        This drains the queue in one shot, so it must never be called
+        while a request may be mid-`_acquire()` on this same pool (another
+        thread could see the queue empty and open a brand-new connection
+        past `maxconn`, or simply stall waiting for one this call is
+        temporarily holding) -- the only caller is the measurement
+        harness, between ops, never inside a real request's own code
+        path."""
+        conns: list["psycopg.Connection[Any]"] = []
+        while True:
+            try:
+                conns.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        rows: list[dict[str, Any]] = []
+        for conn in conns:
+            label = f"{label_prefix}@{conn.info.backend_pid}"
+            try:
+                rows.append(probe_prepared_statements(conn, label))
+            except Exception as exc:  # noqa: BLE001 -- reported as probed=False/error=<class name>, connection still returned below (completion condition 15)
+                if conn.info.transaction_status != TransactionStatus.IDLE:
+                    conn.rollback()
+                rows.append(prepared_stats_skeleton(conn, label, error=type(exc).__name__))
+            finally:
+                self._queue.put_nowait(conn)
+        return rows
 
     def _liveness_check(self, conn: "psycopg.Connection[Any]") -> bool:
         """`pool_pre_ping` equivalent: a connection dequeued from `self._
@@ -658,6 +720,21 @@ class SharedPoolManager:
         with self._lock:
             items = [(key, entry.pool) for key, entry in self._entries.items()]
         return {f"{application_id}/{role}": pool.stats() for (application_id, role), pool in items}
+
+    def prepared_stats(self) -> list[dict[str, Any]]:
+        """R-79 (WO §1.2 D-2, completion condition 8): a flat list across
+        every live pool's own `prepared_stats(...)`, one dict per idle
+        connection probed. Snapshots `(key, pool)` pairs under `self._lock`
+        exactly like `stats()` above, then calls each pool's own `prepared_
+        stats` OUTSIDE that lock -- probing drains/refills each pool's own
+        queue, which is thread-safe on its own and does not need this
+        manager's lock held for the duration."""
+        with self._lock:
+            items = [(key, entry.pool) for key, entry in self._entries.items()]
+        rows: list[dict[str, Any]] = []
+        for (application_id, role), pool in items:
+            rows.extend(pool.prepared_stats(f"{application_id}/{role}"))
+        return rows
 
 
 class _PoolHandle:

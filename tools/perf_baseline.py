@@ -797,13 +797,92 @@ def _emit_pool_rows(peer: str, plug: str, op: str, adapter_obj: Any) -> None:
         print(_format_pool_row(peer, plug, op, key, stats))
 
 
+def _format_prepared_row(peer: str, plug: str, op: str, conn_stats: dict) -> str:
+    """R-79 (WO §1.2 D-3): one `PREPARED` line for one connection-shaped
+    dict `<adapter>.prepared_stats()` returns (11 keys, WO §1.2 D-2).
+    Column names are `executes=`/`executemany=` -- never `statements=`,
+    which would collide with two different meanings ("statements
+    executed" vs. "statements currently prepared", design review 1 M-7).
+    `share` is `prepared_execs / executes`, printed `0.000`-formatted,
+    `0.000` when `executes == 0` (never a `ZeroDivisionError`) -- a LOWER
+    BOUND on how much of this connection's traffic actually landed on a
+    prepared statement (WO §1.2 D-3: statements psycopg's own rollback-
+    triggered `DEALLOCATE ALL` already cleared are not counted here, and
+    the denominator also includes statements that can never themselves
+    become prepared -- `SET LOCAL`, DDL, `prepare=False` reads -- so
+    `share` structurally never reaches `1.000`; design review 1 M-8).
+    `transaction_status`/`probed`/`error` are dict keys, never columns on
+    this line (WO §1.2 D-3's own explicit carve-out)."""
+    executes = conn_stats["execute_count"]
+    share = (conn_stats["prepared_execs"] / executes) if executes else 0.0
+    return (
+        f"PREPARED peer={peer} plug={plug} op={op} conn={conn_stats['label']} "
+        f"executes={executes} executemany={conn_stats['executemany_count']} "
+        f"prepared={conn_stats['prepared']} prepared_execs={conn_stats['prepared_execs']} "
+        f"share={share:.3f}"
+    )
+
+
+def _format_prepstmt_row(peer: str, plug: str, op: str, conn_label: str, stmt: dict) -> str:
+    """R-79 (WO §1.2 D-3): one `PREPSTMT` line per prepared statement a
+    connection's own `prepared_statements` list carries (only printed
+    when `--prepared-detail` is given). `stmt=` collapses every run of
+    whitespace in the statement's own first-80-characters text to a
+    single space (WO §1.2 D-3's own "空白を 1 つに畳む") -- the dict's own
+    `statement` value (from `psycopg_counting.probe_prepared_statements`)
+    is already truncated to 80 characters; this only normalizes
+    whitespace, it does not re-truncate."""
+    collapsed = " ".join(stmt["statement"].split())
+    return (
+        f"PREPSTMT peer={peer} plug={plug} op={op} conn={conn_label} "
+        f"name={stmt['name']} generic={stmt['generic_plans']} custom={stmt['custom_plans']} "
+        f"stmt={collapsed}"
+    )
+
+
+def _emit_prepared_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, detail: bool) -> None:
+    """R-79 (WO §1.2 D-3): print one `PREPARED` line per connection `adapter_
+    obj.prepared_stats()` returns (skipped entirely, no exception, for a
+    plug with no such method -- every plug this WP does not touch, mirrors
+    `_emit_pool_rows` immediately above), called once per (plug, op) from
+    inside `_measure_plug`, AFTER that (plug, op)'s own `_emit_pool_rows`
+    call -- WO §1.2 D-3's own "same op の POOL 行の後に置く". Like `_emit_
+    pool_rows`, this runs unconditionally for every transport: a socket-
+    transport plug shares the same in-process cell/pool object as its
+    `-http` counterpart, so there is no transport this should ever skip
+    (completion condition 20). `PREPSTMT` lines (one per prepared
+    statement on a connection) print only when `detail` is true
+    (`--prepared-detail`, completion condition 19) -- never otherwise."""
+    prepared_stats = getattr(adapter_obj, "prepared_stats", None)
+    if prepared_stats is None:
+        return
+    for conn_stats in prepared_stats():
+        print(_format_prepared_row(peer, plug, op, conn_stats))
+        if detail:
+            for stmt in conn_stats["prepared_statements"]:
+                print(_format_prepstmt_row(peer, plug, op, conn_stats["label"], stmt))
+
+
+def _emit_measurement_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, prepared_detail: bool) -> None:
+    """R-79 (WO §1.2 D-3, rework item (C)): the ONE call site
+    `_measure_plug` uses per (plug, op) -- always `_emit_pool_rows` FIRST,
+    then `_emit_prepared_rows` (WO §1.2 D-3's own "同じ op の POOL 行の後
+    に置く"). Pinning the order here, in a single small function both
+    `_measure_plug` and `tools/tests/test_perf_baseline.py` call directly,
+    means a test can observe the real order the measurement loop itself
+    produces -- not a copy of the same two calls re-typed in the test,
+    which could drift from `_measure_plug`'s own call order unnoticed."""
+    _emit_pool_rows(peer, plug, op, adapter_obj)
+    _emit_prepared_rows(peer, plug, op, adapter_obj, detail=prepared_detail)
+
+
 # ---------------------------------------------------------------------
 # one plug's own full measurement
 # ---------------------------------------------------------------------
 
 
 def _measure_plug(
-    name: str, adapter_obj: ConformanceAdapter, *, warmup: int, n: int, concurrency: int,
+    name: str, adapter_obj: ConformanceAdapter, *, warmup: int, n: int, concurrency: int, prepared_detail: bool = False,
 ) -> list[dict]:
     peer, transport = _classify_plug(name, adapter_obj)
     app_id = fresh_identifier("perfbase")
@@ -831,7 +910,7 @@ def _measure_plug(
             query_row = _row(peer, name, transport, "query", durations, calls, concurrency)
             rows.append(query_row)
             _run_self_check(name, calls)
-            _emit_pool_rows(peer, name, "query", adapter_obj)
+            _emit_measurement_rows(peer, name, "query", adapter_obj, prepared_detail=prepared_detail)
 
             # --- mutate ---
             # WP-5 rework ruling item 2: every value `fresh_identifier`
@@ -860,7 +939,7 @@ def _measure_plug(
                 _do_mutate, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
             )
             rows.append(_row(peer, name, transport, "mutate", durations, calls, concurrency))
-            _emit_pool_rows(peer, name, "mutate", adapter_obj)
+            _emit_measurement_rows(peer, name, "mutate", adapter_obj, prepared_detail=prepared_detail)
 
             # --- batch (5 operations, design D-6 decision 1) ---
             batch_runtime = adapter_obj.authenticate(adapter_obj.issue_credential(app_id, "runtime"))
@@ -885,7 +964,7 @@ def _measure_plug(
                 _do_batch, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
             )
             rows.append(_row(peer, name, transport, "batch", durations, calls, concurrency))
-            _emit_pool_rows(peer, name, "batch", adapter_obj)
+            _emit_measurement_rows(peer, name, "batch", adapter_obj, prepared_detail=prepared_detail)
 
             # --- cross_entity (MitateDB 2 plug only; design D-6 decision 1) ---
             capabilities = adapter_obj.capability_document().get("capabilities", {})
@@ -910,7 +989,7 @@ def _measure_plug(
                     _do_cross_entity, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
                 )
                 rows.append(_row(peer, name, transport, "cross_entity", durations, calls, concurrency))
-                _emit_pool_rows(peer, name, "cross_entity", adapter_obj)
+                _emit_measurement_rows(peer, name, "cross_entity", adapter_obj, prepared_detail=prepared_detail)
         return rows
     finally:
         with contextlib.suppress(Exception):
@@ -1013,6 +1092,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--registry", type=Path, default=REGISTRY_PATH,
         help="override registry.json path (scratchpad testing only -- conformance-tests/registry.json itself is never written by this tool)",
     )
+    # R-79 (WO §1.2 D-3, completion condition 19): off by default -- one
+    # `PREPSTMT` line per prepared statement per connection is far more
+    # output than the summary `PREPARED` line above it, and is only useful
+    # when inspecting exactly WHICH statements are prepared (WO §1.2 D-3's
+    # own "判定は share の大小ではなく PREPSTMT の一覧で行う").
+    parser.add_argument(
+        "--prepared-detail", action="store_true",
+        help="also print one PREPSTMT line per prepared statement per connection (default: off)",
+    )
     return parser
 
 
@@ -1022,7 +1110,10 @@ def _run(args: argparse.Namespace) -> int:
     try:
         for name, adapter_obj in built:
             try:
-                for row in _measure_plug(name, adapter_obj, warmup=args.warmup, n=args.n, concurrency=args.concurrency):
+                for row in _measure_plug(
+                    name, adapter_obj, warmup=args.warmup, n=args.n, concurrency=args.concurrency,
+                    prepared_detail=args.prepared_detail,
+                ):
                     print(_format_row(row))
             except (SelfCheckFailure, UnknownAdapterShape) as exc:
                 print(f"perf_baseline: {exc}", file=sys.stderr)

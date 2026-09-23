@@ -206,6 +206,90 @@ Absent, empty, or not a positive integer, the plug's pool size is the
 unchanged default `2` -- conformance's own default behaviour never
 depends on this variable being set.
 
+## `PREPARED` / `PREPSTMT` lines (R-79)
+
+For each (plug, op), immediately AFTER that op's own `POOL` line(s)
+(never before, never interleaved), this tool calls `prepared_stats()` on
+the plug if it has one, and prints one `PREPARED` line per connection the
+call returns:
+
+```
+PREPARED peer=<peer> plug=<plug> op=<op> conn=<label> executes=<n> executemany=<n> prepared=<n> prepared_execs=<n> share=<x.xxx>
+```
+
+`conn=<label>` ends in `@<backend_pid>` (`r2db-api` `<application_id>/
+<role>@<pid>`, `MitateDB-api` `runtime@<pid>`/`developer@<pid>`) -- a
+re-connect shows up as the pid changing. `executes=`/`executemany=` are
+that connection's own lifetime `execute()`/`executemany()` call counts
+(`r2db_api.psycopg_counting`/`mitatedb_api.psycopg_counting`'s own
+`CountingCursor`); `prepared=` is how many rows `pg_prepared_statements`
+currently holds for that connection; `prepared_execs=` is the sum of
+those rows' own `generic_plans + custom_plans`.
+
+**`--prepared-detail` adds one `PREPSTMT` line per prepared statement per
+connection** (off by default -- far more output than the summary line
+above it):
+
+```
+PREPSTMT peer=<peer> plug=<plug> op=<op> conn=<label> name=<name> generic=<n> custom=<n> stmt=<first 80 chars, whitespace collapsed to one space>
+```
+
+**`share` is a LOWER BOUND, and structurally can never reach `1.000`.**
+`share = prepared_execs / executes` (`0.000` when `executes == 0`, never
+a `ZeroDivisionError`) is "how much of this connection's own traffic is
+CURRENTLY landing on a statement `pg_prepared_statements` still holds" --
+not "how much of it ever did". A `rollback()` on a non-IDLE connection
+clears every prepared statement psycopg is tracking (`Connection.
+rollback`/`Transaction.rollback`, PostgreSQL's own `DEALLOCATE ALL`); the
+executions that already happened against a since-cleared statement are
+gone from the numerator but still counted in the denominator. The
+denominator also includes statements that can never themselves become
+prepared at all -- `SET LOCAL`, DDL, a `prepare=False` read -- so `share`
+carries a structural ceiling below `1.000` even with zero deallocation.
+**Judge whether a given statement is prepared by the `PREPSTMT` list
+(`--prepared-detail`), never by `share`'s own magnitude.**
+
+**The `executes`/`executemany`/`prepared`/`prepared_execs` numbers are
+the connection's own LIFETIME counters, never reset per op** -- exactly
+like the `POOL` line counters above: a `batch` op's `PREPARED` line
+reflects every `execute()` call on that connection since it was opened,
+not just `batch`'s own.
+
+**The probe runs strictly AFTER the op it is measuring, and never
+mutates prepared-statement state.** It reads `pg_prepared_statements`
+with a bare `psycopg.Cursor` (never the connection's own `CountingCursor`
+-- so the probe's own read is never itself counted as `execute_count`)
+and `prepare=False` (so the probe's own SELECT can never itself become a
+server-side prepared statement -- it never appears in `PREPSTMT`, and
+never inflates `prepared`/`prepared_execs`), followed immediately by
+`conn.commit()`, never `rollback()` (a rollback on a non-IDLE connection
+would clear whatever the probe is trying to observe). A connection that
+is not IDLE at the moment the probe reaches it is left completely
+alone -- not probed at all that round -- rather than risk disturbing an
+in-flight caller's own transaction.
+
+**"Never mutates prepared-statement state" is about the SERVER side
+only.** The probe's own SELECT still lands a key in psycopg's own
+client-side bookkeeping (WO §1.1 F3) -- one extra entry per probe,
+occupying a slot in that connection's own `prepared_max`-capped table
+until a later, unrelated statement's own key eventually evicts it (the
+same LRU behaviour `_counts` always has, `_preparing.py`'s own `_rotate`)
+-- it never becomes a server-side prepared statement itself and never
+appears in `pg_prepared_statements`/`PREPSTMT`, but it is not entirely
+free on the client side either (design memo §1's own F3 note).
+
+**MitateDB's `POOL lock=` `acquire`, from R-79 onward, includes one
+acquisition per PRECEDING probe.** `ApplicationCell.prepared_stats()`
+takes the SAME cell lock every other operation on that cell takes
+(`cell.py::ApplicationCell._lock`), so calling it once (to print the
+`PREPARED` line(s) for the op that just ran) raises that cell's own
+`lock_acquire_count` by 1 -- the NEXT op's own `POOL lock=` line reflects
+that extra acquisition alongside the op's own real ones. r2db-api's
+`POOL role=` line is unaffected: its probe drains idle connections
+directly off the pool's own queue (`get_nowait`/`put_nowait`), never
+`_acquire()`, so it never touches `acquire_count`/`wait_count`/`in_use_
+peak`.
+
 ## The limits of what these numbers mean
 
 - **In-process / ASGI-in-process / real socket.** `_classify_plug` (Phase

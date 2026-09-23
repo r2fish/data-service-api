@@ -269,6 +269,148 @@ def test_emit_pool_rows_prints_a_line_per_entry_even_for_a_socket_transport_plug
     assert "role=app1/runtime" in out
 
 
+def test_prepared_detail_flag_defaults_to_false():
+    """R-79 (WO §1.2 D-3, completion condition 19): `--prepared-detail` is
+    off by default -- `PREPSTMT` lines are opt-in."""
+    parser = pb._build_parser()
+    assert parser.get_default("prepared_detail") is False
+    args = parser.parse_args(["--prepared-detail"])
+    assert args.prepared_detail is True
+
+
+def test_prepared_row_format_is_stable():
+    """R-79 completion condition 18: `_format_prepared_row`'s own column
+    names/order/formatting -- `executes=`/`executemany=` (never
+    `statements=`, design review 1 M-7), `share` = `prepared_execs /
+    executes` printed `0.000`-formatted.
+
+    mutation M18 (`tools/perf_baseline.py`): rename one column (e.g.
+    `prepared_execs=` -> `execs=`) -- this test's own exact-string
+    comparison goes red."""
+    conn_stats = {
+        "label": "app1/runtime@4242", "execute_count": 8, "executemany_count": 0,
+        "prepared": 1, "prepared_execs": 3,
+    }
+    line = pb._format_prepared_row("r2db-api", "r2db-api-http", "query", conn_stats)
+    assert line == (
+        "PREPARED peer=r2db-api plug=r2db-api-http op=query conn=app1/runtime@4242 "
+        "executes=8 executemany=0 prepared=1 prepared_execs=3 share=0.375"
+    )
+
+
+def test_prepared_row_share_is_zero_when_executes_is_zero():
+    """R-79 completion condition 18: `share` is `0.000` (never a
+    `ZeroDivisionError`) when a connection's own `execute_count` is 0 --
+    a freshly-opened connection this op never used."""
+    conn_stats = {
+        "label": "app1/runtime@1", "execute_count": 0, "executemany_count": 0,
+        "prepared": 0, "prepared_execs": 0,
+    }
+    line = pb._format_prepared_row("r2db-api", "r2db-api-http", "query", conn_stats)
+    assert line.endswith("share=0.000")
+
+
+def test_prepstmt_row_format_collapses_whitespace():
+    """R-79 completion condition 19: `_format_prepstmt_row`'s own `stmt=`
+    collapses every run of whitespace in the statement's own text to a
+    single space."""
+    stmt = {"name": "_pg3_0", "generic_plans": 2, "custom_plans": 1, "statement": "SELECT   1\n   WHERE $1 = $2"}
+    line = pb._format_prepstmt_row("r2db-api", "r2db-api-http", "query", "app1/runtime@4242", stmt)
+    assert line == (
+        "PREPSTMT peer=r2db-api plug=r2db-api-http op=query conn=app1/runtime@4242 "
+        "name=_pg3_0 generic=2 custom=1 stmt=SELECT 1 WHERE $1 = $2"
+    )
+
+
+def test_emit_prepared_rows_prints_nothing_when_the_plug_has_no_prepared_stats():
+    """R-79 (mirrors R-78's `test_emit_pool_rows_prints_nothing_when_the_
+    plug_has_no_pool_stats` immediately above): a plug without `prepared_
+    stats` is silently skipped -- no `PREPARED` line, no exception."""
+    stub = SimpleNamespace(transport_kind="in_process")
+    pb._emit_prepared_rows("r2db-api", "r2db-api", "query", stub, detail=True)
+
+
+def test_emit_prepared_rows_prints_prepstmt_lines_only_with_detail_flag(capsys):
+    """R-79 completion condition 19: `PREPSTMT` lines print only when
+    `detail=True` -- never otherwise, even when the connection dict
+    carries `prepared_statements`.
+
+    mutation M19 (`tools/perf_baseline.py`): make `_emit_prepared_rows`
+    print `PREPSTMT` lines unconditionally, regardless of `detail` --
+    this test's own `detail=False` branch (`PREPSTMT count == 0`) goes
+    red."""
+    stub = SimpleNamespace(
+        transport_kind="in_process",
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 6, "executemany_count": 0,
+            "prepared": 1, "prepared_execs": 1,
+            "prepared_statements": [
+                {"name": "_pg3_0", "generic_plans": 0, "custom_plans": 1, "statement": "SELECT 1"},
+            ],
+        }],
+    )
+    pb._emit_prepared_rows("r2db-api", "r2db-api", "query", stub, detail=False)
+    out = capsys.readouterr().out
+    assert out.count("PREPARED ") == 1
+    assert out.count("PREPSTMT ") == 0
+
+    pb._emit_prepared_rows("r2db-api", "r2db-api", "query", stub, detail=True)
+    out = capsys.readouterr().out
+    assert out.count("PREPARED ") == 1
+    assert out.count("PREPSTMT ") == 1
+
+
+def test_emit_prepared_rows_prints_for_socket_transport_plug(capsys):
+    """R-79 completion condition 20: a stub declaring `transport_kind ==
+    "socket"` still gets its `PREPARED` line(s) -- there is no transport
+    this tool skips (mirrors R-78's own identical POOL-line test above).
+
+    mutation M20 (`tools/perf_baseline.py`): make `_emit_prepared_rows`
+    return early for any plug name ending in `-socket` -- this test's
+    own stub plug is named `r2db-api-socket`, so the assertion below (a
+    `PREPARED` line is printed) goes red."""
+    stub = SimpleNamespace(
+        transport_kind="socket",
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 1, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [],
+        }],
+    )
+    pb._emit_prepared_rows("r2db-api", "r2db-api-socket", "query", stub, detail=False)
+    out = capsys.readouterr().out
+    assert out.count("PREPARED ") == 1
+
+
+def test_emit_measurement_rows_prints_pool_lines_before_prepared_lines(capsys):
+    """R-79 (WO §1.2 D-3, rework item (C)): `_emit_measurement_
+    rows` -- the ONE call site `_measure_plug` itself uses per (plug, op)
+    -- prints a (plug, op)'s own `POOL` line(s) BEFORE its `PREPARED`
+    line(s), never the other way around. Calls the real function under
+    test directly (not a re-typed copy of its own two calls), so this
+    observes `_measure_plug`'s own actual emit order, not merely this
+    test's own assumption about it.
+
+    mutation M24 (`tools/perf_baseline.py`): swap the two calls inside
+    `_emit_measurement_rows` (`_emit_prepared_rows` before `_emit_pool_
+    rows`) -- this test's own `pool_idx < prepared_idx` assertion goes
+    red (`PREPARED ` now prints first)."""
+    stub = SimpleNamespace(
+        transport_kind="in_process",
+        pool_stats=lambda: {"app1/runtime": {
+            "size": 2, "acquire_count": 1, "wait_count": 0, "wait_total_ms": 0.0, "wait_max_ms": 0.0, "in_use_peak": 1,
+        }},
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 1, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [],
+        }],
+    )
+    pb._emit_measurement_rows("r2db-api", "r2db-api", "query", stub, prepared_detail=False)
+    out = capsys.readouterr().out
+    pool_idx = out.index("POOL ")
+    prepared_idx = out.index("PREPARED ")
+    assert pool_idx < prepared_idx
+
+
 _FAKE_CLUSTER_ENV = {
     "R2DB_TEST_ADMIN_DSN": "host=/fake/s port=5432 dbname=postgres user=postgres",
     "MITATEDB_TEST_ADMIN_DSN": "host=/fake/s port=5432 dbname=postgres user=postgres",
