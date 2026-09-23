@@ -141,6 +141,71 @@ their own -- comparing the two is what the judgement rule above is for
 declare `cross_entity_mutation: unavailable`, so none of them ever carries
 a `cross_entity` line).
 
+## `POOL` lines (R-78)
+
+For each (plug, op) this tool measures, it calls `pool_stats()` on the
+plug if it has one, and prints one `POOL` line per entry the call returns
+-- never a proxy for whether a wait happened, the plug's own connection-
+pool/lock bookkeeping. **Position**: every `POOL` line for a plug is
+printed while `_measure_plug` is still running (a side effect, once per
+op measured), and only once `_measure_plug` returns does the caller print
+that plug's own `PERF` lines -- so a plug's `POOL` lines print as ONE
+BLOCK, all of them, BEFORE that plug's `PERF` lines, never interleaved
+with them op by op:
+
+```
+POOL peer=<peer> plug=<plug> op=<op> role=<role> size=<n> acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>
+POOL peer=<peer> plug=<plug> op=<op> lock=<application_id> acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx>
+```
+
+The first shape is a `r2db-api` role pool (`r2db_api.postgres._RolePool.
+stats()`'s own six keys: `size`/`acquire_count`/`wait_count`/`wait_total_
+ms`/`wait_max_ms`/`in_use_peak`); the second is a `MitateDB-api`
+application cell lock (`mitatedb_api.cell._CountingRLock.stats()`'s own
+four keys -- `lock_acquire_count`/`wait_count`/`wait_total_ms`/`wait_max_
+ms` -- there is no pool `size`/`in_use_peak` concept for a mutex, so
+neither column is printed on this shape). Only plugs with a `pool_stats()`
+method print `POOL` lines at all -- a plug without one (any plug this WP
+did not touch) is silently skipped, the same way a plug without `cross_
+entity_mutation` support is silently skipped for that op.
+
+**The numbers are cumulative across the whole plug run, never reset per
+op.** `size`/`acquire`/`waits`/`wait_total_ms`/`wait_max_ms`/`in_use_peak`
+(or the lock equivalents) keep accumulating from the plug's first
+measured op through its last -- a `batch` op's `POOL` line reflects every
+acquisition since `query`'s own first one too, not just `batch`'s own.
+Reading a single op's `POOL` line in isolation as "this op's own cost"
+undercounts nothing but attributes everything to the wrong op. The
+counters live on the pool/lock object itself, not on this tool, so they
+also survive across plugs that share one process (the `-http`/`-socket`
+pair) -- and are lost outright if the underlying pool/lock object is ever
+evicted and recreated (r2db's `SharedPoolManager` idle/LRU eviction,
+MitateDB's `_MAX_OPEN_CELLS` cap): a `POOL` line after an eviction reflects
+only the NEW object's own counters from zero, not the evicted one's
+history.
+
+**`-socket` plugs print `POOL` lines too.** A socket-transport plug is the
+SAME in-process object as its `-http` counterpart (`R2DBSocketConformance
+Adapter`/`MitateDBSocketConformanceAdapter` only override `transport_kind`/
+`_build_client`/`_surfaces_value`/`_reset_surface_state` -- composition,
+including the cell/pool, is inherited unchanged) running behind a real
+`uvicorn` thread of the SAME process; the only genuinely separate process
+in that path is the `nginx` front end. There is nothing across a process
+boundary this tool cannot read for a socket plug that it could read for
+its `-http` sibling.
+
+**`DSA_PERF_POOL_SIZE` (r2db-api `-http`/`-socket` only).** This
+environment variable is read only by the `r2db-api-http` conformance
+plug's `_make_cell` (`-socket` inherits it, unchanged); it is a harness-
+only escape hatch, never read by production code. Set to a positive
+integer, it overrides this plug's own per-application data-plane pool
+size (otherwise a fixed `2`) so a K-sweep can measure the plug at the
+production dimension (`role_pool_size(ResourceLimits())`, i.e. `Resource
+Limits.concurrency`) as well as at the existing conformance default.
+Absent, empty, or not a positive integer, the plug's pool size is the
+unchanged default `2` -- conformance's own default behaviour never
+depends on this variable being set.
+
 ## The limits of what these numbers mean
 
 - **In-process / ASGI-in-process / real socket.** `_classify_plug` (Phase

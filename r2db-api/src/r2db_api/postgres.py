@@ -283,6 +283,20 @@ class _RolePool:
         # return; the pool drains to zero connections and stops being handed
         # out for new acquisitions once every outstanding checkout returns.
         self._retired = False
+        # R-78 acquisition statistics: counted under `self._stats_lock`, a
+        # lock dedicated to this bookkeeping and never shared with `self.
+        # _lock` above -- the fast path in `_acquire` (`self._queue.get_
+        # nowait()` succeeding) takes no lock at all today, and this
+        # statistics addition does not change that; every counter update
+        # below is a plain integer/float addition under `self._stats_lock`,
+        # never a second acquisition of `self._lock`.
+        self._stats_lock = threading.Lock()
+        self._acquire_count = 0
+        self._wait_count = 0
+        self._wait_total_ms = 0.0
+        self._wait_max_ms = 0.0
+        self._in_use = 0
+        self._in_use_peak = 0
 
     def _connect(self) -> "psycopg.Connection[Any]":
         # `connect_timeout` (a real libpq connection parameter, merged into
@@ -303,9 +317,12 @@ class _RolePool:
 
     def _acquire(self) -> "psycopg.Connection[Any]":
         try:
-            return self._queue.get_nowait()
+            conn = self._queue.get_nowait()
         except queue.Empty:
             pass
+        else:
+            self._record_acquire()
+            return conn
         # Reserve a slot (increment `_created`) and release the lock
         # *before* calling `_connect()` -- a real, previously-shipped bug
         # this class had: `_connect()` used to run while `self._lock` was
@@ -326,11 +343,13 @@ class _RolePool:
                 reserved = True
         if reserved:
             try:
-                return self._connect()
+                conn = self._connect()
             except Exception:
                 with self._lock:
                     self._created = max(0, self._created - 1)
                 raise
+            self._record_acquire()
+            return conn
         # Every slot is claimed by a connection some other caller currently
         # holds (or that is itself mid-`_connect()` on another thread) --
         # wait for one to be returned, but never unboundedly: a
@@ -342,11 +361,49 @@ class _RolePool:
         # closed to `SERVICE_UNAVAILABLE`/`AUTH_STATE_UNAVAILABLE`, never a
         # silent hang).
         try:
-            return self._queue.get(timeout=self._acquire_timeout)
+            wait_start = time.monotonic()
+            conn = self._queue.get(timeout=self._acquire_timeout)
         except queue.Empty:
+            self._record_wait((time.monotonic() - wait_start) * 1000.0)
             raise psycopg.OperationalError(
                 f"timed out after {self._acquire_timeout}s waiting for an available pooled connection (pool exhausted at maxconn={self._maxconn})"
             )
+        self._record_wait((time.monotonic() - wait_start) * 1000.0)
+        self._record_acquire()
+        return conn
+
+    def _record_acquire(self) -> None:
+        """Count one successful acquisition under `self._stats_lock`: `acquire_count` rises by one, `in_use` rises by one, and `in_use_peak` keeps the highest value `in_use` ever reaches. Called from every branch of `_acquire` that returns a connection, never from the branch that raises."""
+        with self._stats_lock:
+            self._acquire_count += 1
+            self._in_use += 1
+            if self._in_use > self._in_use_peak:
+                self._in_use_peak = self._in_use
+
+    def _record_wait(self, waited_ms: float) -> None:
+        """Count one entry into the blocking `self._queue.get(timeout=...)` branch of `_acquire`, whether it ends in a connection or in the timeout `psycopg.OperationalError` -- both are a wait that happened. `wait_max_ms` keeps the highest single wait observed."""
+        with self._stats_lock:
+            self._wait_count += 1
+            self._wait_total_ms += waited_ms
+            if waited_ms > self._wait_max_ms:
+                self._wait_max_ms = waited_ms
+
+    def _record_release(self) -> None:
+        """Count one connection returning from checked-out (`in_use`) back to available, under `self._stats_lock`. Called once per `connection()` context, regardless of which path (recycled or closed) the returned connection takes."""
+        with self._stats_lock:
+            self._in_use = max(0, self._in_use - 1)
+
+    def stats(self) -> dict[str, int | float]:
+        """Return this pool's acquisition statistics as a plain dict with exactly six keys: `size` (this pool's `maxconn`), `acquire_count`, `wait_count`, `wait_total_ms`, `wait_max_ms`, `in_use_peak`. Read under `self._stats_lock`; never touches `self._lock` or the connection queue itself."""
+        with self._stats_lock:
+            return {
+                "size": self._maxconn,
+                "acquire_count": self._acquire_count,
+                "wait_count": self._wait_count,
+                "wait_total_ms": self._wait_total_ms,
+                "wait_max_ms": self._wait_max_ms,
+                "in_use_peak": self._in_use_peak,
+            }
 
     def _liveness_check(self, conn: "psycopg.Connection[Any]") -> bool:
         """`pool_pre_ping` equivalent: a connection dequeued from `self._
@@ -422,6 +479,7 @@ class _RolePool:
                     pass
                 with self._lock:
                     self._created = max(0, self._created - 1)
+            self._record_release()
 
     def close_all(self) -> None:
         while True:
@@ -594,6 +652,12 @@ class SharedPoolManager:
             self._entries.clear()
         for entry in entries:
             entry.pool.retire()
+
+    def stats(self) -> dict[str, dict[str, int | float]]:
+        """Return every live pool's own `stats()` dict, keyed by `"<application_id>/<role>"` (a plain string, not the `(application_id, role)` tuple `self._entries` is keyed by: role alone would collide across different applications sharing this manager). Empty when no pool is cached. Reads `self._entries` under `self._lock`, the same lock every other method on this class already takes to touch it; each pool's own `stats()` call happens outside that lock, under the pool's own `_stats_lock`."""
+        with self._lock:
+            items = [(key, entry.pool) for key, entry in self._entries.items()]
+        return {f"{application_id}/{role}": pool.stats() for (application_id, role), pool in items}
 
 
 class _PoolHandle:

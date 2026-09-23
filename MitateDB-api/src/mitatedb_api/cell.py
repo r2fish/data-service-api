@@ -406,6 +406,104 @@ class _LimitStateHolder:
                 self._active -= 1
 
 
+class _CountingRLock:
+    """R-78 (D-1): wraps `threading.RLock` to count acquisition/wait
+    statistics. For every call site in `ApplicationCell` below (all of
+    them go through the context-manager protocol, never `.acquire()`/
+    `.release()` directly) this behaves exactly like the bare `RLock()`
+    it replaces: block, reenter, release, same eventual outcome, no added
+    timeout, no change to who is allowed to acquire when.
+
+    Two real differences from bare `RLock`, both about the `blocking`/
+    `timeout` KEYWORD ARGUMENTS a caller could pass to `.acquire()`
+    directly (unreached by anything in this file today, but part of this
+    class's own public surface):
+
+    - `acquire(blocking=False, timeout=<anything but -1>)` -- bare `RLock`
+      always raises `ValueError` for this combination, before even
+      checking whether the lock is available. This class's own non-
+      blocking probe (below) can succeed first (lock free, or the calling
+      thread already owns it) and return `True` WITHOUT ever raising --
+      only a probe that fails (someone else holds the lock) reaches the
+      `if not blocking: return False` branch, which does not validate
+      `timeout` at all.
+    - The non-blocking probe itself: this class always makes ONE extra
+      raw-lock attempt (`self._raw.acquire(False)`) before a genuinely
+      contended acquisition's real, timed, blocking attempt -- two C-level
+      calls where bare `RLock.acquire(blocking=True, timeout=...)` makes
+      one. Functionally equivalent (same eventual block/succeed/timeout
+      outcome, same total wait bound), but not bit-identical timing to
+      `RLock`'s own single call.
+
+    Every acquisition first tries `self._raw.acquire(False)` (RLock's own
+    reentrant fast path: a thread that already owns this lock always
+    succeeds here immediately, with no wait -- the same is true of the
+    very first acquisition of an uncontended lock). Only when that fails
+    (someone else currently holds it) does the wait get timed and a
+    blocking `self._raw.acquire(True, timeout)` follow. `lock_acquire_
+    count` counts every successful acquisition, INCLUDING the same
+    thread's own reentrant ones -- a thread that acquires this lock twice
+    in a row (its own second, nested context-manager scope) adds two to
+    this counter, not one.
+    """
+
+    def __init__(self) -> None:
+        self._raw = RLock()
+        self._stats_lock = Lock()
+        self._lock_acquire_count = 0
+        self._wait_count = 0
+        self._wait_total_ms = 0.0
+        self._wait_max_ms = 0.0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        # Matches bare `RLock.acquire`'s own upfront validation (D-1): a
+        # negative, non-`-1` `timeout` is rejected before any acquisition
+        # is attempted at all, the same message text `threading.RLock`
+        # itself raises -- not only once this class's own non-blocking
+        # probe (below) has already failed.
+        if timeout != -1 and timeout < 0:
+            raise ValueError("timeout value must be a non-negative number")
+        got = self._raw.acquire(False)
+        if not got:
+            if not blocking:
+                return False
+            wait_start = time.monotonic()
+            got = self._raw.acquire(True, timeout)
+            waited_ms = (time.monotonic() - wait_start) * 1000.0
+            with self._stats_lock:
+                self._wait_count += 1
+                self._wait_total_ms += waited_ms
+                if waited_ms > self._wait_max_ms:
+                    self._wait_max_ms = waited_ms
+            if not got:
+                return False
+        with self._stats_lock:
+            self._lock_acquire_count += 1
+        return True
+
+    def release(self) -> None:
+        self._raw.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+    def stats(self) -> dict[str, int | float]:
+        """Return this lock's acquisition statistics as a plain dict with
+        exactly four keys: `lock_acquire_count`, `wait_count`, `wait_
+        total_ms`, `wait_max_ms`. Read under `self._stats_lock`; never
+        touches `self._raw`."""
+        with self._stats_lock:
+            return {
+                "lock_acquire_count": self._lock_acquire_count,
+                "wait_count": self._wait_count,
+                "wait_total_ms": self._wait_total_ms,
+                "wait_max_ms": self._wait_max_ms,
+            }
+
+
 class ApplicationCell:
     """A private application storage boundary.
 
@@ -445,7 +543,7 @@ class ApplicationCell:
         # leave this `None` -- nothing in this WP relies on it for that
         # backend.
         self._db = getattr(self._backend, "raw_connection", None)
-        self._lock = RLock()
+        self._lock = _CountingRLock()
         # WP-8b 差し戻し (0)/監督裁定 2026-09-08 (design D-8 (3), U-10 --
         # RECORD OF FACT, after measurement, not an aspiration): every
         # public method below now takes `self._lock` immediately inside

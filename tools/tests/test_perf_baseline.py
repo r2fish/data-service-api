@@ -205,6 +205,70 @@ def test_perf_row_format_is_stable():
     )
 
 
+def test_pool_row_format_is_stable_for_a_role_pool_entry():
+    """R-78 completion condition 8: `_format_pool_row`'s ROLE-shaped
+    column names/order/formatting for a `r2db_api.postgres._RolePool.
+    stats()`-shaped dict (six keys, `size`/`in_use_peak` present, no
+    `lock_acquire_count`).
+
+    mutation M8 (`tools/perf_baseline.py`): rename one column (e.g.
+    `wait_max_ms=` -> `max_wait_ms=`) -- this test goes red on the
+    exact-string comparison below."""
+    stats = {
+        "size": 4, "acquire_count": 7, "wait_count": 2,
+        "wait_total_ms": 12.5, "wait_max_ms": 9.25, "in_use_peak": 3,
+    }
+    line = pb._format_pool_row("r2db-api", "r2db-api-http", "query", "app1/runtime", stats)
+    assert line == (
+        "POOL peer=r2db-api plug=r2db-api-http op=query role=app1/runtime "
+        "size=4 acquire=7 waits=2 wait_total_ms=12.500 wait_max_ms=9.250 in_use_peak=3"
+    )
+
+
+def test_pool_row_format_is_stable_for_a_lock_entry():
+    """R-78 completion condition 8: `_format_pool_row`'s LOCK-shaped
+    column names/order/formatting for a `mitatedb_api.cell.
+    _CountingRLock.stats()`-shaped dict (four keys, `lock_acquire_count`
+    present, no `size`/`in_use_peak`) -- `lock=` replaces `role=` and
+    there is no `size=`/`in_use_peak=` column, since neither concept
+    applies to a mutex."""
+    stats = {"lock_acquire_count": 5, "wait_count": 1, "wait_total_ms": 3.0, "wait_max_ms": 3.0}
+    line = pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "mutate", "app1", stats)
+    assert line == (
+        "POOL peer=MitateDB-api plug=MitateDB-api-http op=mutate lock=app1 "
+        "acquire=5 waits=1 wait_total_ms=3.000 wait_max_ms=3.000"
+    )
+
+
+def test_emit_pool_rows_prints_nothing_when_the_plug_has_no_pool_stats():
+    """R-78 completion condition 8: a plug without `pool_stats` (every
+    plug this WP does not touch) is silently skipped -- no `POOL` line at
+    all, and no exception."""
+    stub = SimpleNamespace(transport_kind="in_process")
+    pb._emit_pool_rows("r2db-api", "r2db-api", "query", stub)
+
+
+def test_emit_pool_rows_prints_a_line_per_entry_even_for_a_socket_transport_plug(capsys):
+    """R-78 completion condition 10: a stub declaring `transport_kind ==
+    "socket"` (a socket-transport plug) still gets its `POOL` line(s) --
+    there is no transport this tool skips (monitor 裁定 2026-09-23).
+
+    mutation M9 (`tools/perf_baseline.py`): make `_emit_pool_rows` return
+    early for any plug name ending in `-socket` -- this test's stub plug
+    is named `r2db-api-socket`, so the assertion below (a POOL line is
+    printed) goes red."""
+    stub = SimpleNamespace(
+        transport_kind="socket",
+        pool_stats=lambda: {"app1/runtime": {
+            "size": 2, "acquire_count": 1, "wait_count": 0, "wait_total_ms": 0.0, "wait_max_ms": 0.0, "in_use_peak": 1,
+        }},
+    )
+    pb._emit_pool_rows("r2db-api", "r2db-api-socket", "query", stub)
+    out = capsys.readouterr().out
+    assert out.count("POOL ") == 1
+    assert "role=app1/runtime" in out
+
+
 _FAKE_CLUSTER_ENV = {
     "R2DB_TEST_ADMIN_DSN": "host=/fake/s port=5432 dbname=postgres user=postgres",
     "MITATEDB_TEST_ADMIN_DSN": "host=/fake/s port=5432 dbname=postgres user=postgres",

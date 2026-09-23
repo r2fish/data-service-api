@@ -151,7 +151,7 @@ from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
 from r2db_api.limits import ControlPlaneLimits, ResourceLimits, role_pool_size  # noqa: E402
 from r2db_api.platform_declarations import VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS  # noqa: E402
-from r2db_api.postgres import PostgresCell  # noqa: E402
+from r2db_api.postgres import PostgresCell, default_pool_manager  # noqa: E402
 
 BASE_URL = "http://r2db-http-pg.conformance.invalid"
 
@@ -996,6 +996,27 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
 # detail and why it stays at its original value.
 _DEFAULT_PLATFORM_POOL_SIZE = role_pool_size(ResourceLimits())
 
+# R-78 (D-2 追補): this adapter's own pre-existing per-application data-plane
+# pool size, unconditionally `2` until now (`_make_cell` below). `DSA_PERF_
+# POOL_SIZE` is a harness-only escape hatch `tools/perf_baseline.py` sets so
+# a K-sweep can measure this same plug at the production dimension (`role_
+# pool_size(ResourceLimits())`, i.e. `ResourceLimits.concurrency`) as well as
+# the existing default -- production code never reads this variable, and
+# this function returns the unchanged default `2` whenever it is absent,
+# empty, or not a positive integer.
+_PERF_POOL_SIZE_ENV = "DSA_PERF_POOL_SIZE"
+
+
+def _perf_pool_size() -> int:
+    raw = os.environ.get(_PERF_POOL_SIZE_ENV)
+    if raw is None or raw == "":
+        return 2
+    try:
+        value = int(raw)
+    except ValueError:
+        return 2
+    return value if value > 0 else 2
+
 
 class R2DBHttpConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to r2db-api's real HTTP +
@@ -1473,6 +1494,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # endpoints, exactly as a real client would.
             raise AssertionError("PostgresCell-backed provisioning does not pre-populate entities")
         info = self._app_pg[application_id]
+        # R-78 (D-2 追補): harness-only override. `_perf_pool_size()` returns
+        # `2` (this adapter's own established `pool_size=2`, unchanged)
+        # unless the harness-only `DSA_PERF_POOL_SIZE` environment variable
+        # names a positive integer -- production dimensions (`role_pool_
+        # size`/`ResourceLimits.concurrency`/role `CONNECTION LIMIT`) are
+        # untouched by this env var; conformance's own default plug
+        # behaviour is unchanged when it is absent.
         cell = PostgresCell(
             application_id,
             info.schema,
@@ -1480,7 +1508,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             developer_dsn=info.developer_dsn,
             runtime_role=info.runtime_role,
             developer_role=info.developer_role,
-            pool_size=2,
+            pool_size=_perf_pool_size(),
         )
         self._provisioned_cells.append(cell)
         return cell
@@ -3956,6 +3984,15 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                     (datname_like,),
                 )
                 return cur.fetchone()[0]
+
+    def pool_stats(self) -> dict[str, dict[str, int | float]]:
+        """R-78 (D-2): `default_pool_manager.stats()` -- every cell this
+        adapter's own `_make_cell` builds shares that same process-wide
+        `SharedPoolManager` (it never passes its own `pool_manager`), so
+        this reflects every one of this adapter's own role pools, keyed by
+        `"<application_id>/<role>"` (`SharedPoolManager.stats()`'s own
+        docstring)."""
+        return default_pool_manager.stats()
 
     def close(self) -> None:
         try:
