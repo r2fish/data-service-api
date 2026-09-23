@@ -592,3 +592,36 @@ def test_l10_two_digit_phase_prefix_is_a_family_reference(tmp_path):
     _append(root, cdr.PHASE_CANONICAL["L10"][0], "- **L10-42 socket plug CI time**\n")
     code, out, err = _run(root)
     assert code == 0, f"a bold L10-42 span inside L10's own canonical file must define it; got exit {code}:\n{out}{err}"
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-23 -- the R family's third digit. The ledger reached R-100 on
+# 2026-09-23 while the R pattern was still `\d{1,2}`, so `R-100` was neither
+# a reference nor a definition: a dangling three-digit R reference could
+# never be reported (recorded as the checker's Known gaps item 1, then
+# fixed by widening R -- and only R -- to `\d{1,3}`).
+def test_r_three_digit_reference_is_a_family_reference(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _write(root, "docs/design/OTHER_R999_USER.md", "see R-999 for the ledger row\n")
+
+    code, out, err = _run(root)
+    assert code != 0, (
+        f"an R-999 reference with no definition in the roadmap must be dangling; "
+        f"got exit {code}, output:\n{out}{err}"
+    )
+    assert any("R-999" in line for line in _dangling_lines(out)), out
+
+    _append(root, cdr.SIMPLE_FAMILIES["R"]["canonical"], "| **R-999** | placeholder |\n")
+    code, out, err = _run(root)
+    assert code == 0, f"a bold R-999 first cell in the roadmap must define it; got exit {code}:\n{out}{err}"
+
+
+def test_g_and_p_stay_two_digit_wide(tmp_path):
+    # Only R was widened: a three-digit G/P token still belongs to no family
+    # (design D-2, 族ごとの桁), so it is neither dangling nor counted.
+    root = _build_minimal_tree(tmp_path)
+    _write(root, "docs/design/OTHER_GP_LOCAL.md", "local constants G-100 and P-100 are not roadmap IDs\n")
+
+    code, out, err = _run(root)
+    assert code == 0, f"G-100 / P-100 must not be family references; got exit {code}:\n{out}{err}"
+    assert _dangling_lines(out) == []

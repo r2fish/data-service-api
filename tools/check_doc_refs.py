@@ -33,14 +33,17 @@ document-local, non-conformance number such as
 docs/design/R2DB_SERVICE_LAYER_ARCHITECTURE.md §5.3's `C-1`..`C-5` design
 constants, and `C-0x` placeholders, be mistaken for C-family references):
 zero-padded 2-digit families SI/C/CCR (`SI-NN`, `C-NN`, `CCR-NN`, optional
-`[a-z]` suffix); non-zero-padded 1-2-digit families G/P/R (`G-N`, `P-N`,
-`R-N`, one or two digits, optional `[a-z]` suffix); non-zero-padded 1-2-digit
-L-family (`L{phase}-N`, same digit shape, known phase prefixes unchanged).
-A number of 3 or more digits (e.g. `C-100`) matches no family under the
-current numbering convention; if that convention ever needs one, update
-this file's per-family constants in their own explicit commit, exactly
-like COLLECTION_FLOOR's own bump discipline -- do not silently widen the
-pattern back to `\\d+`.
+`[a-z]` suffix); non-zero-padded 1-2-digit families G/P (`G-N`, `P-N`,
+one or two digits, optional `[a-z]` suffix); non-zero-padded 1-3-digit R
+family (`R-N`, one to three digits, optional `[a-z]` suffix -- widened
+from 1-2 digits on 2026-09-23, in its own commit, once the ledger really
+held R-100..R-102 and every reference to them had become invisible here);
+non-zero-padded 1-2-digit L-family (`L{phase}-N`, known phase prefixes
+unchanged). A number beyond a family's own width (e.g. `C-100`, `G-100`,
+`R-1000`) matches no family under the current numbering convention; if
+that convention ever needs one, update this file's per-family constants
+in their own explicit commit, exactly like COLLECTION_FLOOR's own bump
+discipline -- do not silently widen the pattern back to `\\d+`.
 
 A "definition" only exists inside a family's own canonical file(s) --
 scanning every other file's tables/bold text for something that merely
@@ -110,15 +113,18 @@ script runs outside any repository this guard is meant to protect.
 Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
 a gap that cannot let a contract violation or a Security Invariant breach
 through the completion gate is recorded here and not filed in the ledger):
-    1. not detected: a reference to an ID with 3 or more digits. The
-       ledger now really holds R-100..R-102 (2026-09-23), so every
-       reference to one of them is invisible here while this script
-       still reports OK -- see the token-grammar paragraph above ("A
-       number of 3 or more digits ... matches no family").
-       why: the G/P/R and L family patterns are 1-2 digits.
-       caught by: the supervisor's own reading when the ledger is
-       revised (accepted; widening the digits is its own explicit
-       commit, exactly as that paragraph requires).
+    1. not detected: a reference to an ID beyond its family's own digit
+       width -- G/P and L at 3+ digits, SI/C/CCR at anything but exactly
+       2, R at 4+ digits (R was widened to 1-3 digits on 2026-09-23; the
+       ledger's R-100..R-102 references had been invisible here until
+       then) -- see the token-grammar paragraph above.
+       why: each family's pattern is fixed to its own current numbering
+       width on purpose (a shared `\\d+` let document-local numbers
+       masquerade as references).
+       caught by: the supervisor's own reading when a family's numbering
+       first crosses its width (accepted; the widening is its own
+       explicit commit, exactly as that paragraph requires, and
+       tools/tests/test_check_doc_refs.py pins the R width).
     2. not detected: a reference living outside the scanned set -- both
        peers' own `.md` trees, anything under `tools/` below the top
        level (`tools/dev/README.md` included), and every code comment or
@@ -264,7 +270,8 @@ def find_empty_markdown_files(files: list[Path]) -> list[Path]:
 # `\d+` -- see the module docstring's "Token grammar" paragraph for why.
 # ---------------------------------------------------------------------------
 _DIGITS_ZERO_PADDED_2 = r"\d{2}"  # SI-NN / C-NN / CCR-NN
-_DIGITS_UNPADDED_1_2 = r"\d{1,2}"  # G-N / P-N / R-N / L{phase}-N
+_DIGITS_UNPADDED_1_2 = r"\d{1,2}"  # G-N / P-N / L{phase}-N
+_DIGITS_UNPADDED_1_3 = r"\d{1,3}"  # R-N (the ledger reached R-100 on 2026-09-23)
 
 _BOLD_ROW_TMPL = r"^\|\s*\*\*({prefix}-{digits}[a-z]?)\*\*\s*\|"
 # Leading table cell whose content STARTS with the ID -- not necessarily
@@ -301,9 +308,9 @@ SIMPLE_FAMILIES: dict[str, dict] = {
         "def_re": re.compile(_BOLD_ROW_TMPL.format(prefix="P", digits=_DIGITS_UNPADDED_1_2)),
     },
     "R": {
-        "ref_re": re.compile(r"\bR-\d{1,2}[a-z]?\b"),
+        "ref_re": re.compile(r"\bR-\d{1,3}[a-z]?\b"),
         "canonical": "docs/design/ROADMAP_POST_PHASE7_V1.md",
-        "def_re": re.compile(_BOLD_ROW_TMPL.format(prefix="R", digits=_DIGITS_UNPADDED_1_2)),
+        "def_re": re.compile(_BOLD_ROW_TMPL.format(prefix="R", digits=_DIGITS_UNPADDED_1_3)),
     },
 }
 
