@@ -2,6 +2,8 @@
 
 Verbatim historical text moved out of `security/CONTROL_MAPPING.md` during phase 7 WP-7 (i). Headings are the bare Security Invariant ID only (no title), so each ID's own GitHub anchor (`#si-00`, `#si-14`, ...) is what `security/CONTROL_MAPPING.md`'s own `[history](...)` links resolve against. Do not add a title to a heading here -- it changes the anchor and breaks the link (`conformance-tests/test_control_mapping_register.py`).
 
+Form 3.0 (2026-09-24, ledger R-103): the full text of `security/CONTROL_MAPPING.md` version 2.25, the last 2.x version, is at commit `94febb3`. Prose that the 3.0 migration deleted without moving it here is readable there; what this file gained in that migration is only the Evidence claims that cited no test and no file and therefore fell to Status, and any withdrawn Control claim, each verbatim under its own `## SI-NN` heading (`docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` §3).
+
 ## SI-00
 
 **Common conformance evidence pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -26,6 +28,10 @@ lateral/control-plane tests; CCR-14's control-plane authority boundary is additi
 **Common conformance evidence:**
 
 (WP-5 flip: `r2db-api`/`r2db-api-http` since CCR-14, `MitateDB-api`/`MitateDB-api-http` since design v1.2 WP-5 -- a real control-plane surface, declared `enabled`, checked for real fail-closed behavior in both directions on every one)
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:211, Common / Evidence (verbatim):**
+
+- lateral/control-plane tests;
 
 ---
 
@@ -67,15 +73,27 @@ control-plane denial tests; CCR-14's cross-plane fail-closed boundary is additio
 
 (all four adapters: provided, since design v1.2 WP-5 for the MitateDB pair)
 
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:330, Common / Evidence (verbatim):**
+
+- control-plane denial tests;
+
 ---
 
 ## SI-03
 Nothing to move for this row -- the r2db-api, MitateDB-api, and Common-conformance-evidence cells contain only present-tense current controls/tests and disclosed scope limits (e.g. "local-cluster/test evidence only until the VPS is provisioned", "distinct production Runtime/Developer DB authority TBD"), with no progress narration, closed-WP announcements, deployment logs, or corrections to move.
 
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:381, Common / Evidence (verbatim):**
+
+- privilege tests;
+
 ---
 
 ## SI-04
 Nothing to move for this row -- all three cells (r2db-api, MitateDB-api, Common conformance evidence) contain only present-tense current controls, mechanisms, and test citations, with no progress narration, closed-WP announcements, deployment logs, or corrections.
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:402, r2db-api / Evidence (verbatim):**
+
+- contract surface review;
 
 ---
 
@@ -131,6 +149,14 @@ following a Phase B review finding (`docs/design/CONFORMANCE_ADAPTER_V1.md` §10
 **Closed WP-4/WP-5/WP-6, control-credential-scoped (application-credential compromise containment is the SI-13/SI-06 rows above)**: a compromised control credential is bounded to (i) application credentials it issued/rotated during the compromise window, (ii) an availability harm from any application credential it revoked (ungated -- `ControlPlaneService.revoke_credential` applies no confirmation to an application-credential target, `MitateDB-api/tests/test_control_plane_service.py::test_revoke_application_credential_is_never_gated`), and never reaches Application data or the `mitatedbsvc_provision` provisioning/deprovisioning surface (a wholly separate DSN no control credential or control-plane process holds). `role=control` issuance has exactly one path, the out-of-band `bootstrap`/`reset` ceremony -- no in-band operation reaches it (`_deny_role_control`, evaluated before target resolution, `MitateDB-api/tests/test_control_plane_service.py::test_issue_credential_role_shape_is_validated_before_capability_check`); `reset` revokes every existing control credential unconditionally and mints exactly one new one atomically, verified against real PostgreSQL by `MitateDB-api/tests/test_ops.py::test_reset_with_the_echoed_phrase_revokes_everything_and_mints_one_new_credential`. Full recovery procedure: `MitateDB-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`.
 
 **`audit`-credential compromise, a strictly narrower containment class, closed phase 3.5 WP-1/WP-5**: bounded to read-only disclosure of `list_applications`/`list_credentials`/`control_capabilities` (see the SI-06/SI-10 rows for the exact exposure and the SI-02 row for the authority-class distinction) -- an `audit` credential cannot issue, rotate, revoke, register, enable, or disable anything (fail-closed on all 8 write endpoints, `test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint`), so its compromise carries none of the (i)/(ii) harms above; `reset`'s unconditional revoke-all also covers every live `audit` row, same ceremony, same test.
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:565, r2db-api / Evidence (verbatim):**
+
+- negative topology and isolation tests;
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:598, Common / Evidence (verbatim):**
+
+- stolen-credential scenario tests
 
 ---
 
@@ -274,6 +300,11 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 *MitateDB-api Control claim, the `0014` claim's own `read only by ops inventory item (8)` subject, superseded 2026-09-23 (Version 2.25, R-91 -- clarified in place to name the doubled `CONNECTION LIMIT`, not F-16's own per-process floor, now that F-18 also reads the same per-process floors below it), verbatim:*
 
 - the operator margin stays ONE 4, not a doubled one, and F-16's floor is deliberately not doubled with the ceiling -- F-16 judges only the pool held by the process it runs in, which is why a ceiling lowered back to a single process's demand still passes it (that is exactly what `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f16_passes_after_migration_0012` fixes) and is read only by `ops inventory` item (8) -- `MitateDB-api/tests/test_ops_apply_platform_migration.py::test_apply_platform_migration_0014_sets_role_connection_limits_for_every_role_class`, `::test_apply_platform_migration_0014_new_application_connection_limit_is_68`, `::test_apply_platform_migration_0014_duplicate_object_fallback_connection_limit_is_68`.
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:767, Common / Evidence (verbatim):**
+
+- resource boundary tests;
+
 
 ---
 
@@ -420,6 +451,11 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 - The out-of-band ritual CLI gates on the identical declare-and-echo protocol before any store/DSN is constructed, so a wrong `--confirm` never touches the database -- `test_cli_reset_without_confirm_declares_and_touches_nothing`, `test_cli_delete_credential_without_confirm_declares_and_touches_nothing`.
 
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:871, Common / Evidence (verbatim):**
+
+- destructive misuse tests;
+
+
 ---
 
 ## SI-10
@@ -436,6 +472,11 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 **Application-plane HTTP, closed WP-3**
 
 (WP-0 review m-4, `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §4)
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:950, Common / Evidence (verbatim):**
+
+- error probing tests
+
 
 ---
 
@@ -454,6 +495,11 @@ rollback/fault tests; CCR-13's revision-precondition atomicity/semantics are add
 
 Rollback on a pass-2 failure is now unconditional regardless of exception type (WP-2 review B-2, the largest safety fix of that review) -- a lone UTF-16 surrogate code point in a later operation's value used to raise an uncaught `UnicodeEncodeError` past the original narrow `except FoundationError` tuple, leaving an earlier operation's row permanently committed (a real partial-effect defect, pre-existing but made load-bearing by this WP's own `cross_entity_mutation` declaration); fixed by widening the rollback to `except Exception` plus a deterministic pre-execution rejection of lone surrogates in `encode_value` (both backends, the same treatment as the pre-existing NUL-byte rejection).
 
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:1004, Common / Evidence (verbatim):**
+
+- rollback/fault tests;
+
+
 ---
 
 ## SI-12
@@ -466,6 +512,15 @@ Rollback on a pass-2 failure is now unconditional regardless of exception type (
 
 Structured package has no credential/connection/native-command response; topology denies privileged egress; contract smoke test. **Q4 phase (2026-09-05, design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-2/D-3, §3.9, requester ruling U-2) -- two new bookkeeping tables, neither reachable from an application-facing API.** (a) `r2dbsvc_registry.platform_declarations` (migration `0008`) lives in the platform database, which no application `runtime`/`developer` role ever connects to; both platform process roles (`r2dbsvc_api`, `r2dbsvc_controlplane`) hold `SELECT` only and every write goes through the provision DSN (`ops`/migration). (b) `public._r2db_platform_upgrades` (revised `0003` template, retrofit script `0009`) lives inside each application's own database, is OWNED by that application's developer role -- the same scope `_r2db_schema_revision` already has, closed inside that one database -- and grants the `runtime` role **`SELECT` only** (requester ruling U-2), which is what the cell-open completeness check reads; the provision role holds `SELECT` plus schema `USAGE` so `upgrade-status` can report without assuming the developer role. Reading one bookkeeping row is not the exercise of a privilege SI-12 forbids (no DB credential, no unbounded connection, no privileged private endpoint, no key that bypasses authorization), and the table name is unreachable through the API at all: `structured.py`'s `_reject_reserved_prefix` refuses any `_`-prefixed identifier. **Stated limit (design §3.9): the ledger is an operational record, not tamper-proof evidence** -- inside the threat model's own "one application-facing defect" case its rows are as reachable as any other bookkeeping row in that same database. Evidence: `r2db-api/tests/test_postgres.py::test_runtime_role_can_select_but_not_write_the_ledger`, `::test_provision_role_can_read_the_ledger_after_the_script_ends`, `::test_ledger_table_has_no_row_level_security`, `::test_template_seeds_the_ledger_with_the_current_platform_upgrade_numbers`, `::test_0009_upgrades_a_legacy_application_to_match_a_freshly_provisioned_ledger`, `::test_backend_excludes_the_ledger_from_catalog_and_schema_objects_accounting`, `::test_missing_rls_view_stays_empty_on_both_a_new_and_an_upgraded_application`, `r2db-api/tests/test_ops_declarations.py::test_migration_0008_grants_select_to_both_writer_roles_and_nothing_to_public`, `::test_migration_0008_seeds_window_default_but_not_surfaces`, `::test_migration_0008_key_check_constraint_is_named`.
 Nothing needed to move to history for SI-12: both the r2db-api and MitateDB-api columns are current-state control descriptions with disclosed scope limits (design/ruling citations that authorize a still-active current architecture, not "closed WP-N"/phase completion narration), and the Common conformance evidence column has no content beyond the short current phrase.
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:1030, r2db-api / Evidence (verbatim):**
+
+- contract smoke test.
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:1063, Common / Evidence (verbatim):**
+
+- exposure/config review
+
 
 ---
 
@@ -603,6 +658,11 @@ folding M into the capacity thresholds is runbook work (`POSTGRES_PROVISIONING_R
 the only detector is a per-field snapshot test pinning `DECLARED_AUDIT_OPERATIONS`/`DECLARED_AUDIT_TARGET_KINDS`/`DECLARED_AUDIT_EVENT_CLASSES` against a fixture `frozenset` -- `::test_declared_audit_event_classes_change_only_deliberately`, `::test_declared_audit_operations_change_only_deliberately` (1 more snapshot pin: companion history).
 
 the data-plane host declares `audit_query` `unavailable` and carries neither key (`::test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable`).
+
+**Form 3.0 (2026-09-24, R-103) -- Evidence claim that cited no test and no file, withdrawn to Status; version 2.25 `security/CONTROL_MAPPING.md`:1289, Common / Evidence (verbatim):**
+
+- audit evidence tests;
+
 
 ---
 

@@ -241,6 +241,7 @@ v0.2 の本文 (撤回済み、記録として残す): 「`0004` の terminate �
 
 - **裁定の理由**: SI-00 の Protected assets (`security/SECURITY_INVARIANTS_V1.md`:71) が「administrative credentials, database administration capability」を挙げて資産が一致し、Required property (:75-81) が単一侵害の波及範囲そのものであり、証拠 `absent` の受理境界 (`security/CONTROL_MAPPING.md`:118) も既にここに在る。
 - 置く前の実測 (2026-09-19、版 2.9、`conformance-tests/test_control_mapping_register.py` の `_subblock_block_text` と同じ数え方): **SI-00 / r2db-api 既定 2,939 字 (残り 12,261)、SI-00 / MitateDB-api 既定 2,502 字 (残り 12,698)**。上限は 1 小ブロック **15,200 字** (同ファイル :97 の `MAX_BLOCK_LENGTH`)、名前付き小ブロックは (SI, peer) ごと 3 本まで (同 :118)、既定 (無名) の小ブロックは各 (SI, peer) に必須でちょうど 1 つ・先頭 (設計 `docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md` §5)。分割の照合は `tools/check_control_mapping_split.py`。
+  - **【退役註 2026-09-24 (R-103、形式 3.0)】** 上の行が引く `_subblock_block_text`・`MAX_BLOCK_LENGTH`・小ブロック数の上限・`tools/check_control_mapping_split.py` は形式 3.0 で退役した (上限は主張単位 `MAX_CLAIM_LENGTH` へ。`docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` §2.1・§4)。上の実測は版 2.9 当時の記録として残す。
 - 検討した候補 (記録として残す。判定は上の裁定):
 
 | 候補 | SI | 小ブロック | 字数 (r2db / Mitate) | 残り | 材料 |

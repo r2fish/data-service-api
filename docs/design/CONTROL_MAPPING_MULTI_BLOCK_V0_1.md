@@ -49,6 +49,8 @@
 
 ## 5. 小ブロックの見出しの書式
 
+**【退役註 2026-09-24 (R-103、形式 3.0)】** 見出しの書式は据え置きだが、`MAX_NAMED_SUBBLOCKS` (小ブロック数の上限) は形式 3.0 で退役した: 既存の 5 つの named block を据え置き、新規追加は不可とする (`docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` §2.1)。
+
 - 事実: peer 小節は h3 (`### r2db-api`)、軸は h4 (`#### Control`)。両者の間に空いている見出しレベルは無い。軸を h5 へ下げると全 16 節 × 3 peer × 3 軸 = 144 見出しを書き換えることになる。
 - 事実: `_ANY_H2_RE` / `_HEADING_RE` は `## ` の後に空白を要求するので、h3 を増やしても節の切り出しと history リンクの slug には影響しない。
 - **形**: 小ブロックは h3 を重ねて `### <peer> -- <主題>` と書く。例: `### MitateDB-api -- ops inventory`。
@@ -64,6 +66,8 @@
 - **他文書から小ブロックを指す形**: `SI-08 / MitateDB-api / ops inventory / Evidence` (SI / peer / 主題 / 軸)。既定の小ブロックを指すときは主題を省いて `SI-08 / MitateDB-api / Evidence` と書く。
 
 ## 6. 分割の照合 (条件 (ii))
+
+**【退役註 2026-09-24 (R-103、形式 3.0)】** 本節の照合器 `tools/check_control_mapping_split.py` とそのテストは形式 3.0 の移行で削除した (`docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` §4 WP-1)。一度きりの道具であり、block 単位の上限とともに退役した。本節の記述は当時の記録として残す。
 
 - 事実: `tools/check_control_mapping_restructure.py` は旧表形を前提とする。`--base <rev>` を `git show` で読み (`:156-164`)、`OldFile` は `|` 始まりの行が無ければ `CheckError("old file has no '|'-started table")` で止まる (`:171-173`)。生成器 `tools/restructure_control_mapping.py:385-387` も同じである。**現行形 → 現行形の照合には、いずれもそのままでは使えない。**
 - したがって (ii) の照合は新しく定める。**既存の算法 (`tools/check_control_mapping_restructure.py:410-422`) は踏襲しない** — あれは本文が一致する `missing` と `added` を文書全体で突き合わせて `moved` に畳む global pairing であり、別 SI へ主張が逃げた場合に `missing=0 added=0 moved=1` として緑に見えてしまう。本件で守るのは「どこにも逃げていない」ことなので、次のとおり厳密に突合する。
