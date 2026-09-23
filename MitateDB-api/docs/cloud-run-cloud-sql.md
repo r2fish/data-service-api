@@ -497,17 +497,21 @@ provision` stays unchanged. The formula is the same one this table uses,
 with "pool 合計" read over the processes serving at once: §10.10's own
 precondition arithmetic works the same numbers.)
 
-`max_connections` (Cloud SQL flag `max_connections`, or `SHOW max_
-connections;`) must be >= the sum of every role's own `CONNECTION LIMIT`
-above, PLUS however many interactive/diagnostic `psql` sessions an
-operator expects to hold open at once, PLUS `superuser_reserved_
-connections` (default 3) -- re-check this before applying the migration
-to an instance already close to its own configured ceiling.
+The CONNECTION LIMIT figures the table above sets are PER-ROLE ceilings PostgreSQL enforces independently -- summing them is not itself the PostgreSQL requirement `max_connections` has to satisfy. The one fact that actually governs `max_connections` is:
+
+```
+max_connections >= real simultaneous connections this deployment can produce at once
+                    + superuser_reserved_connections (default 3)
+```
+
+"real simultaneous connections this deployment can produce at once" is declared `concurrency` x role count (runtime + developer) x applications served by this process, plus `2 x platform_pool_size` for the two platform-plane pools, plus however many interactive/diagnostic `psql` sessions an operator expects to hold open at once. Summing the CONNECTION LIMIT table instead is a conservative, easy-to-compute stand-in for that real figure for an operator who has not derived it -- not a PostgreSQL requirement in its own right. Re-check the real figure against `SHOW max_connections;` before applying a migration to an instance already close to its own configured ceiling.
 
 `python -m mitatedb_api.ops verify-declarations` now also checks this
 (new check `F-16`): each role's own `pg_roles.rolconnlimit` is `-1` or at
 least its own real pool-composition floor above, run unconditionally
 alongside every other check that command already runs.
+
+`python -m mitatedb_api.ops verify-declarations` also checks a cluster-wide necessary condition (new check `F-18`): the connection count the declared `process_ceilings` guarantees this deployment opens -- one platform pool per data process, one runtime/developer pair per data process once at least one application is registered, one control-plane pool per control process -- plus `superuser_reserved_connections` plus `reserved_connections`, must stay at or under `max_connections`; both `mitatedb-app` and `mitatedb-ctrl` fail the same unscoped check at their own startup, `verify-declarations` itself exiting 17. Unlike Gate-0 item (8) (§10.10), F-18 never takes an operator-supplied process count or reserved-connection value -- it reads `process_ceilings` directly -- and it counts only ONE registered application's own runtime/developer pair toward the judged lower bound, never the full registered-application count (that full count feeds only a reported, unjudged upper bound). It is a necessary condition only, never counting an interactive/diagnostic `psql` session nor its own connection; the `mitatedb-ctrl` startup judgment reads the declared `concurrency` from its own environment (`MITATEDB_MAX_CONCURRENCY`, exactly as its F-16 call does), so keep that value equal to the data service's; if the open rollout-overlap question (R-52) is resolved by declaring the overlap's own process count in `process_ceilings`, that declared count is exactly what F-18's lower bound already counts. Evidence: `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f18_fails_when_the_declared_lower_bound_exceeds_max_connections`, `::test_verify_declarations_f18_passes_when_the_declared_lower_bound_fits`, `MitateDB-api/tests/test_application_audit.py::test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections`, `MitateDB-api/tests/test_control_main.py::test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections`.
 
 All four subcommands connect with `MITATEDB_PROVISION_DSN` (the same
 `mitatedbsvc_provision` credential the migrations above already use).

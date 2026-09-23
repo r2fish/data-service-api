@@ -132,6 +132,7 @@ from .http import HttpService, create_app
 from .identifiers import validate_identifier
 from . import platform_declarations
 from .platform_declarations import (check_control_surface_consistency,
+                                    check_max_connections_headroom,
                                     check_role_connection_limits,
                                     check_writer_role_timeouts, read_platform_declarations,
                                     reject_removed_surface_env, reject_removed_timeout_env)
@@ -379,6 +380,10 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
             concurrency=_declared_concurrency,
             role_classes=frozenset({"api"}), application_ids=ids,
+        )
+        check_max_connections_headroom(
+            declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            process_ceilings=declarations.process_ceilings, concurrency=_declared_concurrency,
         )
     finally:
         declarations_conn.close()

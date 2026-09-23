@@ -24,6 +24,7 @@ whichever env happened to be active on the very first import.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 import httpx
@@ -163,6 +164,51 @@ def test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_
         # above AND this call succeed, but a mutation that left the check
         # permanently broken (e.g. caching the FIRST observed limit) would
         # fail here instead.
+        control_main_module.build_control_app(env)
+
+
+def test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections(
+    control_main_module, control_platform,
+) -> None:
+    """R-91 (work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_
+    HEADROOM_CHECK_V1.md §1.2 D-3, completion condition 10, peer-symmetric
+    with r2db-api's own same-numbered test): unlike F-16 (this file's own
+    test just above), this new startup check is run UNSCOPED --
+    `control_platform.controlplane_role`'s own `CONNECTION LIMIT` is left
+    healthy (F-16 alone would pass), but the declared `process_ceilings`
+    (`{"data": 1, "control": 20}`, lower bound 1*64+20*16=384, decoupled
+    from whether this fixture happens to have a registered application)
+    exceeds this throwaway cluster's own real headroom (297, §1.3 (8)).
+    Mutation M9d (dropping this startup call from `mitatedb_api.control_
+    composition.build_control_service`) turns this red."""
+    env = _env(control_platform)
+    with psycopg.connect(control_platform.provision_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(control_platform.registry_schema, "platform_declarations")),
+                [json.dumps({"data": 1, "control": 20})],
+            )
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            control_main_module.build_control_app(env)
+        assert excinfo.value.code == "F-18"
+    finally:
+        with psycopg.connect(control_platform.provision_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(control_platform.registry_schema, "platform_declarations")),
+                    [json.dumps({"data": 1, "control": 1})],
+                )
+            conn.commit()
+        # Non-空振り: the restore above is really what makes
+        # `build_control_app` healthy again.
         control_main_module.build_control_app(env)
 
 

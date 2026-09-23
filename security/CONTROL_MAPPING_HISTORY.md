@@ -265,6 +265,18 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*MitateDB-api Control claim, F-17's own evidence name for the isomorphic-target pin, superseded 2026-09-23 (Version 2.25, R-91 -- the isomorphic-target pin grew to 156 rows with the six F-18 symbols R-91 added), verbatim:*
+
+- **F-17 runs on this peer too (R-56)**: the same `ops verify-declarations` check r2db-api's own SI-08 row describes (role-level `statement_timeout` positive for the roles identified by their real SELECT grants on both audit tables, no per-database row overriding that key, exit code 16) is judged here against the reader bound `0013_role_statement_timeouts.sql` already declares, so R-56 adds no migration to this peer; `_f17_message` and `check_auditreader_statement_timeout` are rows of `_ISOMORPHIC_TARGETS`, which holds the two peers' wording and judgment together -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_passes_from_migration_0013`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_zero`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_reset`, `::test_verify_declarations_f17_fails_when_a_per_database_override_exists`, `::test_verify_declarations_f17_passes_when_auditreader_role_is_absent`, `::test_f17_the_schema_owning_role_is_never_flagged_despite_an_explicit_select_grant`, `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_150_rows`.
+
+---
+
+*MitateDB-api Control claim, the `0014` claim's own `read only by ops inventory item (8)` subject, superseded 2026-09-23 (Version 2.25, R-91 -- clarified in place to name the doubled `CONNECTION LIMIT`, not F-16's own per-process floor, now that F-18 also reads the same per-process floors below it), verbatim:*
+
+- the operator margin stays ONE 4, not a doubled one, and F-16's floor is deliberately not doubled with the ceiling -- F-16 judges only the pool held by the process it runs in, which is why a ceiling lowered back to a single process's demand still passes it (that is exactly what `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f16_passes_after_migration_0012` fixes) and is read only by `ops inventory` item (8) -- `MitateDB-api/tests/test_ops_apply_platform_migration.py::test_apply_platform_migration_0014_sets_role_connection_limits_for_every_role_class`, `::test_apply_platform_migration_0014_new_application_connection_limit_is_68`, `::test_apply_platform_migration_0014_duplicate_object_fallback_connection_limit_is_68`.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**

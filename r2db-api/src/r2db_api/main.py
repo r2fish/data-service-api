@@ -149,6 +149,7 @@ from .http import create_app
 from . import platform_declarations
 from .platform_declarations import (
     check_control_surface_consistency,
+    check_max_connections_headroom,
     check_role_connection_limits,
     check_writer_role_timeouts,
     read_platform_declarations,
@@ -472,6 +473,10 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
             concurrency=resource_limits.concurrency,
             role_classes=frozenset({"api"}), application_slugs=slugs,
+        )
+        check_max_connections_headroom(
+            _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            process_ceilings=declarations.process_ceilings, concurrency=resource_limits.concurrency,
         )
 
     audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)

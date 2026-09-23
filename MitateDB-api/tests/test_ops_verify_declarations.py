@@ -37,7 +37,15 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Json
 
 import mitatedb_api.ops as ops
-from mitatedb_api.platform_declarations import PlatformDeclarationError, check_auditreader_statement_timeout, check_role_connection_limits
+import mitatedb_api.platform_declarations as platform_declarations
+from mitatedb_api.platform_declarations import (
+    PlatformDeclarationError,
+    ProcessCeilings,
+    check_auditreader_statement_timeout,
+    check_max_connections_headroom,
+    check_role_connection_limits,
+    headroom_lower_bound,
+)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
@@ -885,6 +893,243 @@ def test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_ever
             with conn.cursor() as cur:
                 cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 5").format(sql.Identifier(platform.provision_role)))
             conn.commit()
+
+
+# ===========================================================================
+# F-18 (R-91, work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_
+# HEADROOM_CHECK_V1.md §1.2 D-1/D-2/D-5, peer-symmetric with r2db-api's
+# own same-numbered addition): the declared process_ceilings' own
+# connection-headroom LOWER bound, plus both reserved-connection GUCs,
+# fits under max_connections -- a necessary condition, never a sufficient
+# one (§1.1 (c)).
+# ===========================================================================
+
+
+class _FakeHeadroomCursor:
+    """A fake cursor -- never a real connection -- standing in for BOTH of
+    `check_max_connections_headroom`'s own reads (the registered-
+    application count, then the three `pg_settings` GUCs): completion
+    condition 8 (R1-6) needs to prove the reserved-connections read
+    helper returns whatever THIS cursor hands back, not a hardcoded
+    value, without touching a real cluster's own static parameters."""
+
+    def __init__(self, *, application_count: int, settings: dict) -> None:
+        self._application_count = application_count
+        self._settings = settings
+
+    def __enter__(self) -> "_FakeHeadroomCursor":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def execute(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def fetchone(self) -> tuple:
+        return (self._application_count,)
+
+    def fetchall(self) -> list:
+        return list(self._settings.items())
+
+
+class _FakeHeadroomConn:
+    def __init__(self, *, application_count: int, max_connections: int, superuser_reserved: int, reserved: int) -> None:
+        self._application_count = application_count
+        self._settings = {
+            "max_connections": str(max_connections),
+            "superuser_reserved_connections": str(superuser_reserved),
+            "reserved_connections": str(reserved),
+        }
+
+    def cursor(self) -> _FakeHeadroomCursor:
+        return _FakeHeadroomCursor(application_count=self._application_count, settings=self._settings)
+
+
+def test_f18_headroom_lower_bound_is_linear_in_data_and_control_processes() -> None:
+    """Completion condition 2(a): doubling `data_processes`/`control_
+    processes` doubles each plane's own contribution to the lower bound.
+    Mutation M2 (dropping the `data_processes` multiplication) leaves
+    `two_data` equal to `one` instead of `one + 128`."""
+    floors = dict(platform_pool_floor=64, application_pair_floor=64, control_plane_floor=16, registered_applications=1)
+    one = headroom_lower_bound(data_processes=1, control_processes=1, **floors)
+    two_data = headroom_lower_bound(data_processes=2, control_processes=1, **floors)
+    two_control = headroom_lower_bound(data_processes=1, control_processes=2, **floors)
+    assert one == 64 + 64 + 16
+    assert two_data == one + 128
+    assert two_control == one + 16
+
+
+def test_f18_headroom_lower_bound_adds_the_application_pair_floor_only_once_when_registered() -> None:
+    """Completion condition 2(b): the application-pair floor is added
+    EXACTLY once whenever at least one application is registered --
+    never scaled by HOW MANY are (1 and 5 registered applications yield
+    the identical lower bound); zero registered applications omits it
+    entirely."""
+    floors = dict(data_processes=1, control_processes=0, platform_pool_floor=64, application_pair_floor=64, control_plane_floor=16)
+    zero = headroom_lower_bound(registered_applications=0, **floors)
+    one = headroom_lower_bound(registered_applications=1, **floors)
+    five = headroom_lower_bound(registered_applications=5, **floors)
+    assert zero == 64
+    assert one == 128
+    assert five == 128
+
+
+def test_f18_check_max_connections_headroom_boundary_allows_equal_and_rejects_one_more() -> None:
+    """Completion condition 3: lower bound (data=1, control=0, concurrency
+    32, 1 registered application) = 128. `superuser_reserved_connections`
+    3 makes the exact boundary `max_connections=131`. Mutation M3
+    (dropping the reserved-connections addition from the judgment) makes
+    the `max_connections=130` case pass instead of raising."""
+    ceilings = ProcessCeilings(data=1, control=0)
+    exact = check_max_connections_headroom(
+        _FakeHeadroomConn(application_count=1, max_connections=131, superuser_reserved=3, reserved=0),
+        schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+    )
+    assert exact.lower_bound == 128
+    one_more = check_max_connections_headroom(
+        _FakeHeadroomConn(application_count=1, max_connections=132, superuser_reserved=3, reserved=0),
+        schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+    )
+    assert one_more.lower_bound == 128
+    with pytest.raises(PlatformDeclarationError) as excinfo:
+        check_max_connections_headroom(
+            _FakeHeadroomConn(application_count=1, max_connections=130, superuser_reserved=3, reserved=0),
+            schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+        )
+    assert excinfo.value.code == "F-18"
+
+
+def test_f18_judgment_uses_the_lower_bound_never_the_upper_bound() -> None:
+    """Completion condition 4: with 3 registered applications and
+    control=1 (`auditreader`'s own floor counted only in the upper
+    bound), the upper bound (276) exceeds `max_connections` (200) while
+    the lower bound (144) does not -- passes ONLY if the judgment reads
+    the lower bound. Mutation M4 (judging on the upper bound instead)
+    turns this into an unexpected `PlatformDeclarationError`."""
+    ceilings = ProcessCeilings(data=1, control=1)
+    report = check_max_connections_headroom(
+        _FakeHeadroomConn(application_count=3, max_connections=200, superuser_reserved=0, reserved=0),
+        schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+    )
+    assert report.lower_bound == 144
+    assert report.upper_bound == 276
+    assert report.upper_bound > report.max_connections
+    assert report.lower_bound <= report.max_connections
+
+
+def test_f18_read_connection_headroom_settings_returns_the_fake_cursors_reserved_connections() -> None:
+    """Completion condition 8 (R1-6): a fake cursor returning
+    `reserved_connections = 5` -- the read helper returns exactly that
+    value, never a hardcoded default. Mutation M7 (replacing the
+    `reserved_connections` read with the literal `0`) turns this red."""
+    conn = _FakeHeadroomConn(application_count=0, max_connections=300, superuser_reserved=3, reserved=5)
+    max_connections, superuser_reserved_connections, reserved_connections = platform_declarations._read_connection_headroom_settings(conn)  # noqa: SLF001
+    assert max_connections == 300
+    assert superuser_reserved_connections == 3
+    assert reserved_connections == 5
+
+
+def test_f18_read_connection_headroom_settings_names_a_missing_key_instead_of_a_bare_keyerror() -> None:
+    """Differential review 1 item 8: a fake cursor answering only 2 of the
+    3 rows (`reserved_connections` absent, as PG15 -- this GUC is new in
+    PG16, §1.3 (7)) raises `PlatformDeclarationError(code="F-18")` naming
+    the missing key, never a bare `KeyError` a caller would have to
+    translate itself. Mutation (revert to plain `settings[...]` indexing,
+    no missing-key check) turns this red -- `KeyError` is not
+    `PlatformDeclarationError`, so `pytest.raises` below would fail to see
+    the expected type."""
+    conn = _FakeHeadroomConn(application_count=0, max_connections=300, superuser_reserved=3, reserved=5)
+    conn._settings.pop("reserved_connections")  # noqa: SLF001
+    with pytest.raises(PlatformDeclarationError) as excinfo:
+        platform_declarations._read_connection_headroom_settings(conn)  # noqa: SLF001
+    assert excinfo.value.code == "F-18"
+    assert "reserved_connections" in str(excinfo.value)
+
+
+def test_f18_process_ceilings_row_absent_returns_f15_and_never_prints_f18(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completion condition 6 (§1.3 (15)): `read_platform_declarations`'s
+    own early return means a missing `process_ceilings` row is F-15 (exit
+    14), never reaching F-18 at all -- neither `OK F-18` nor `FAIL F-18`
+    ever appears. Mutation M5b (assuming `{"data": 1, "control": 1}` in
+    the `except` branch instead of returning immediately) turns this
+    red."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _delete_row(platform, "process_ceilings")
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 14
+    assert "F-15" in out, out
+    assert "F-18" not in out, out
+
+
+def test_verify_declarations_f18_fails_when_the_declared_lower_bound_exceeds_max_connections(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completion conditions 5 and 9 (R1-1): a throwaway cluster's own
+    real `max_connections` is 300, `superuser_reserved_connections`
+    defaults to 3, `reserved_connections` defaults to 0 -- 297 real
+    headroom (§1.3 (8)). One registered application (so the
+    application-pair floor is added once) plus a declared
+    `process_ceilings = {"data": 3, "control": 1}` -> lower bound
+    3*(64+64) + 1*16 = 400, over 297 -- `FAIL F-18`, exit code 17, and the
+    message names the lower bound, the upper bound, both reserved-
+    connection settings, `max_connections`, and the shortfall (400+3+0-
+    300=103). Only the DECLARATION changes here, never the number of
+    provisioned applications (§1.1 (a)). Mutation M5a (dropping the
+    shortfall number from `_f18_message`) and mutation M8 (the `ops`
+    layer passing a fixed `{1, 1}` instead of the declared
+    `process_ceilings`, which would compute a lower bound of 144 and
+    pass) both turn this red."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_provision_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf18bad")
+    _set_row(platform, "process_ceilings", {"data": 3, "control": 1})
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 17
+    assert "FAIL F-18" in out, out
+    f18_line = next(line for line in out.splitlines() if "FAIL F-18" in line)
+    assert "lower bound 400" in f18_line, f18_line
+    assert "upper bound 404" in f18_line, f18_line
+    assert "superuser_reserved_connections 3" in f18_line, f18_line
+    assert "reserved_connections 0" in f18_line, f18_line
+    assert "max_connections 300" in f18_line, f18_line
+    assert "by 103" in f18_line, f18_line
+
+
+def test_verify_declarations_f18_passes_when_the_declared_lower_bound_fits(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Non-空振り positive control for the FAIL test immediately
+    above: the SAME registered application, `process_ceilings` lowered to
+    `{"data": 2, "control": 2}` (lower bound 288, under 297) -- `OK
+    F-18`, and the OK line carries all four numbers (completion condition
+    4's own disclosure requirement): the lower bound, the upper bound,
+    both reserved-connection settings, and `max_connections`."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_provision_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf18ok")
+    _set_row(platform, "process_ceilings", {"data": 2, "control": 2})
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    f18_line = next(line for line in out.splitlines() if "F-18" in line)
+    assert f18_line.startswith("OK   F-18"), out
+    assert "lower_bound=288" in f18_line, out
+    assert "upper_bound=296" in f18_line, out
+    assert "superuser_reserved_connections=3" in f18_line, out
+    assert "reserved_connections=0" in f18_line, out
+    assert "max_connections=300" in f18_line, out
+
+
+def test_verify_declarations_exit_code_table_maps_f18_to_17() -> None:
+    """Completion condition 7: the exit-code pin (same type as F-15's own,
+    `test_process_ceilings_declaration.py`). Mutation M6 (changing the
+    table entry to 18) turns this red."""
+    assert ops._VERIFY_DECLARATIONS_EXIT_CODES["F-18"] == 17  # noqa: SLF001
 
 
 # ===========================================================================

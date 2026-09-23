@@ -264,14 +264,13 @@ def test_scan_covers_at_least_one_file() -> None:
 
 def test_admin_dsn_env_definitions_are_pinned_to_29_files() -> None:
     """Completion condition 5 (R-2): exactly 29 tracked .py files define
-    `ADMIN_DSN_ENV` at module level (work order §4.2 (a)). Two absorbed
-    since the last update to this pin (27): R-90 (2026-09-22) added
-    `r2db-api/tests/test_ops_apply_platform_migration.py` without updating
-    this pin (27 -> 28, silently missed at the time -- supervisor
-    correction noted against the R-90 roadmap row); R-78 WP-1 (2026-09-23)
-    then added `r2db-api/tests/test_r78_pool_wait_stats.py`, a new test
-    file that defines it at module level the same way every sibling test
-    file already does (28 -> 29)."""
+    `ADMIN_DSN_ENV` at module level (work order §4.2 (a)). The 28th is
+    `r2db-api/tests/test_ops_apply_platform_migration.py` (R-90; pinned in
+    a follow-up correction), the 29th `r2db-api/tests/test_r78_pool_wait_
+    stats.py` (R-78 WP-1); both follow the same convention. This pin
+    counts tracked files only, so a change set that adds such a file must
+    re-measure it with the new file tracked (`git add -N`) before its own
+    `tools/tests` run."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
     assert len(files) == 29, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
 
