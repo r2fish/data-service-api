@@ -562,7 +562,7 @@ def test_fallback_zero_scan_does_not_force_failure(tmp_path, monkeypatch):
     # not itself fatal" half of the ruling (an empty fallback set can
     # legitimately happen outside any repository this guard protects).
     root = _build_minimal_tree(tmp_path)
-    monkeypatch.setattr(cdr, "iter_scan_files", lambda repo_root: [])
+    monkeypatch.setattr(cdr, "iter_scan_files", lambda repo_root, *, include_archive=False: [])
 
     code, out, err = _run(root)
     assert code == 0, (
@@ -625,3 +625,96 @@ def test_g_and_p_stay_two_digit_wide(tmp_path):
     code, out, err = _run(root)
     assert code == 0, f"G-100 / P-100 must not be family references; got exit {code}:\n{out}{err}"
     assert _dangling_lines(out) == []
+
+
+# ---------------------------------------------------------------------------
+# WORK_ORDER_DOC_ARCHIVE_SPLIT_V1.md WP-1, completion condition (1): a
+# dangling reference inside a `.md` under docs/archive/ (a moved record) is
+# never reported -- `iter_scan_files` excludes docs/archive/ from the
+# *reference* scan (design docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (i)).
+# Positive control in the SAME test: the identical dangling reference,
+# placed directly under docs/ (outside archive), still goes red exactly as
+# every other dangling-reference test above expects.
+# ---------------------------------------------------------------------------
+def test_archive_dangling_reference_is_not_reported(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _write(
+        root,
+        "docs/archive/docs/work-orders/OLD_HANDOVER_ARCHIVED.md",
+        "See SI-99 for details.\n",
+    )
+
+    code, out, err = _run(root)
+    assert code == 0, (
+        f"a dangling reference under docs/archive/ must not be reported; "
+        f"got exit {code}, output:\n{out}{err}"
+    )
+    assert _dangling_lines(out) == []
+
+    # Positive control: the SAME dangling reference outside docs/archive/
+    # must still fail the run (proves the archive exclusion is location-
+    # scoped, not a disabled check).
+    _write(root, "docs/design/OTHER_ARCHIVE_CONTROL.md", "See SI-99 for details.\n")
+    code, out, err = _run(root)
+    assert code != 0, (
+        f"the same SI-99 reference outside docs/archive/ must still be "
+        f"dangling; got exit {code}, output:\n{out}{err}"
+    )
+    lines = _dangling_lines(out)
+    assert len(lines) == 1, out
+    assert "SI-99" in lines[0]
+    assert "OTHER_ARCHIVE_CONTROL.md" in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# WORK_ORDER_DOC_ARCHIVE_SPLIT_V1.md WP-1, completion condition (2a): a
+# tracked, zero-byte `.md` under docs/archive/ is still detected by the
+# EMPTY guard via the GIT path -- `iter_tracked_markdown_files` (the
+# empty-file scan set) is repo-wide via `git ls-files`, unaffected by the
+# reference scan's own docs/archive/ exclusion (design D-3 (i), "R-17 の空
+# .md ガードは全 repo のまま").
+# Mutation (WP-1 manifest entry 2a): exclude docs/archive/ from the names
+# `iter_tracked_markdown_files` returns on the git-success path.
+# ---------------------------------------------------------------------------
+def test_2a_archive_empty_tracked_markdown_detected_via_git(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _write(root, "docs/archive/docs/work-orders/EMPTY_ARCHIVED.md", "")
+    _git_init_and_add(root)
+
+    code, out, err = _run(root)
+    assert code != 0, (
+        f"a tracked empty .md under docs/archive/ must still fail the run; "
+        f"output:\n{out}{err}"
+    )
+    lines = out.splitlines()
+    assert "EMPTY: docs/archive/docs/work-orders/EMPTY_ARCHIVED.md" in lines, out
+    assert "empty markdown files: 1" in lines, out
+    assert not any(l.startswith("tracked markdown files scanned:") and l.endswith("(fallback)") for l in lines), out
+
+
+# ---------------------------------------------------------------------------
+# WORK_ORDER_DOC_ARCHIVE_SPLIT_V1.md WP-1, completion condition (2b): the
+# SAME empty-file detection under docs/archive/, but via the FALLBACK path
+# (no git working tree at all -- same shape as the existing
+# test_fallback_outside_git). The fallback calls
+# `iter_scan_files(repo_root, include_archive=True)`; if it silently
+# reused the reference scan's own default (archive-excluding) call, an
+# empty `.md` under docs/archive/ would go undetected specifically in the
+# no-git case, even though 2a (the git path) still catches it.
+# Mutation (WP-1 manifest entry 2b): drop `include_archive=True` from the
+# fallback call inside `iter_tracked_markdown_files`.
+# ---------------------------------------------------------------------------
+def test_2b_archive_empty_tracked_markdown_detected_via_fallback(tmp_path):
+    root = _build_minimal_tree(tmp_path)  # deliberately no git init here
+    _write(root, "docs/archive/docs/work-orders/EMPTY_ARCHIVED_FALLBACK.md", "")
+
+    code, out, err = _run(root)
+    assert code != 0, (
+        f"a zero-byte .md under docs/archive/ must fail even via the "
+        f"fallback; output:\n{out}{err}"
+    )
+    combined = out + err
+    assert "falling back" in combined.lower(), combined
+    lines = out.splitlines()
+    assert "EMPTY: docs/archive/docs/work-orders/EMPTY_ARCHIVED_FALLBACK.md" in lines, out
+    assert "empty markdown files: 1" in lines, out

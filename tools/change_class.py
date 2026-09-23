@@ -23,16 +23,21 @@ possibly lighter-weight, location). Local invocations should use
 `--no-renames` for the same reason.
 
 Path rules (heaviest evaluated first; the FIRST rule a path matches decides
-that path's class -- design D-4 item 1):
+that path's class -- design D-4 item 1; evaluation order D -> C -> archive
+-> `.md` -> B, design docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (iii)):
 
     D  `security/` (any depth under it), `CLAUDE.md`,
        `docs/security/public-repository-policy.md`, `tools/public_value_scan.py`
     C  `spec/` (any depth), `conformance-tests/` (any depth), and the
        contract JSON's two PACKAGED COPIES (see below) -- the spec/ original
        is already covered by the `spec/` rule above.
-    A  none of the above, AND the path ends in `.md` (exact, case-sensitive:
-       this repository's own `.md` files are all lowercase-suffixed; a path
-       ending in anything else, including `.MD`, is never A on this rule).
+    A  `docs/archive/` (any depth under it, any extension -- design
+       DOC_ARCHIVE_SPLIT_V1.md D-3 (iii): a record's own path is Class A
+       regardless of its suffix), evaluated after D and C and before the
+       `.md`-extension rule below; OR, failing that, none of the above AND
+       the path ends in `.md` (exact, case-sensitive: this repository's own
+       `.md` files are all lowercase-suffixed; a path ending in anything
+       else, including `.MD`, is never A on this rule).
     B  everything else.
 
 The push's overall class is the heaviest class among all of its changed
@@ -113,6 +118,19 @@ through the completion gate is recorded here and not filed in the ledger):
        diff.
        caught by: the human classification recorded in the work order's
        own Change Set Manifest; CI consumes only `conformance_required`.
+    3. not detected: a newly CREATED (not moved) file placed directly
+       under `docs/archive/` is graded A the same as a genuine moved
+       record.
+       why: the `docs/archive/` rule looks at PLACEMENT only, not at
+       whether the path arrived there via `git mv` (a rename, evaluated
+       at its own original path under `--no-renames`) or was authored
+       fresh at that path -- a freshly created path has no "original
+       location" for the rule to fall back to.
+       caught by: the supervisor's own `git status --short` and
+       `tools/dev/finalize.py`'s `--allow` allowlist (a new file directly
+       under `docs/archive/` is outside design docs/design/
+       DOC_ARCHIVE_SPLIT_V1.md D-2's only two sanctioned ways to populate
+       it, `git mv` or a verbatim excerpt).
 """
 from __future__ import annotations
 
@@ -139,6 +157,15 @@ _C_EXACT_FILES: tuple[str, ...] = (
     "MitateDB-api/src/mitatedb_api/contract/data-service-api.v1.json",
 )
 
+# design docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (iii): a record's own path
+# (anywhere under `docs/archive/`, any depth, any extension) is Class A,
+# evaluated after D and C and before the `.md`-extension rule -- a moved
+# file's SOURCE path (reported alongside its destination when CI diffs
+# with `--no-renames`) is unaffected and keeps whatever class it always
+# had, since this rule only ever matches the `docs/archive/...`
+# destination path itself.
+_ARCHIVE_DIR_PREFIX = "docs/archive/"
+
 # Class weight for "heaviest wins" (design D-4 item 1). "unknown" never
 # appears in a per-path classification (only as the whole-push result for
 # an empty input set), so it carries no weight here.
@@ -147,13 +174,17 @@ _CLASS_WEIGHT: dict[str, int] = {"A": 0, "B": 1, "C": 2, "D": 3}
 
 def classify_path(path: str) -> str:
     """Classifies a single repo-root-relative path into "A"/"B"/"C"/"D",
-    per the module docstring's path rules. D is checked before C, and C
-    before the A extension rule -- a path matching more than one rule
-    always takes the heaviest one that matches (design D-4 item 1)."""
+    per the module docstring's path rules. D is checked before C, before
+    the `docs/archive/` rule, before the A extension rule -- a path
+    matching more than one rule always takes the heaviest one that
+    matches (design D-4 item 1; archive ordering: design
+    DOC_ARCHIVE_SPLIT_V1.md D-3 (iii))."""
     if path in _D_EXACT_FILES or any(path.startswith(prefix) for prefix in _D_DIR_PREFIXES):
         return "D"
     if path in _C_EXACT_FILES or any(path.startswith(prefix) for prefix in _C_DIR_PREFIXES):
         return "C"
+    if path.startswith(_ARCHIVE_DIR_PREFIX):
+        return "A"
     if path.endswith(".md"):
         return "A"
     return "B"
