@@ -1285,6 +1285,7 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     # code.
     "F-16": 15,
     "F-17": 16,
+    "F-18": 17,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1412,6 +1413,27 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
     _verify_declarations_ok("F-17", "auditreader role's statement_timeout is a positive, role-level-only value")
+
+    # R-91 (work order §1.2 D-1/D-2): the declared process_ceilings' own
+    # lower-bound connection count (never the upper bound, §1.1 (c′)) fits
+    # under max_connections once both reserved-connection GUCs are added.
+    # `_declared_concurrency()` is peer-local -- this function's own call
+    # site stays textually isomorphic across peers; see that helper's own
+    # docstring for the peer-specific body it hides. Run unconditionally
+    # like the F-16/F-17 checks above.
+    try:
+        headroom = platform_declarations.check_max_connections_headroom(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            process_ceilings=declarations.process_ceilings, concurrency=_declared_concurrency(),
+        )
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok(
+        "F-18",
+        f"max_connections headroom: lower_bound={headroom.lower_bound} upper_bound={headroom.upper_bound} "
+        f"superuser_reserved_connections={headroom.superuser_reserved_connections} "
+        f"reserved_connections={headroom.reserved_connections} max_connections={headroom.max_connections}",
+    )
     return 0
 
 

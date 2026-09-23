@@ -1682,6 +1682,53 @@ def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_
             pass
 
 
+def test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
+) -> None:
+    """R-91 (work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_
+    HEADROOM_CHECK_V1.md §1.2 D-3, completion condition 10): unlike F-16
+    (this file's own test just above), this new startup check is run
+    UNSCOPED -- `platform.api_role`'s own `CONNECTION LIMIT` is left
+    healthy (F-16 alone would pass), but the declared `process_ceilings`
+    (`{"data": 3, "control": 1}`, lower bound 3*(64+64)+1*16=400) exceeds
+    this throwaway cluster's own real headroom (297, §1.3 (8)) -- proving
+    a per-process role floor check alone (F-16) cannot catch a
+    cluster-wide overcommit a NARROWED check would miss. Mutation M9a
+    (dropping this startup call from `r2db_api.main.build_app`) turns this
+    red."""
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps({"data": 3, "control": 1})],
+            )
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            main_module.build_app(env=_main_env(platform, provisioned_app))
+        assert excinfo.value.code == "F-18"
+    finally:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps({"data": 1, "control": 1})],
+                )
+            conn.commit()
+        # Non-空振り: the restore above is really what makes
+        # `build_app` healthy again, mirroring the F-16 test's own
+        # non-空振り check just above.
+        asgi_app = main_module.build_app(env=_main_env(platform, provisioned_app))
+        with TestClient(asgi_app):
+            pass
+
+
 def test_build_app_missing_required_env_var_raises(main_module: types.ModuleType) -> None:
     with pytest.raises(RuntimeError, match="R2DB_CREDENTIAL_PEPPER"):
         main_module.build_app(env={})

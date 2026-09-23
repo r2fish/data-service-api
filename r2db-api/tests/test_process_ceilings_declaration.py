@@ -794,7 +794,7 @@ def test_declaration_table_is_the_only_source_no_env_fallback(
         source = inspect.getsource(getattr(pd, name))
         assert "os.environ" not in source and "getenv" not in source, f"{name} must never read the process environment"
 
-    _set_row(platform, "process_ceilings", {"data": 5, "control": 5})
+    _set_row(platform, "process_ceilings", {"data": 2, "control": 2})
     try:
         env = _main_env(platform, app_a)
         env["R2DB_PROCESS_CEILINGS"] = json.dumps({"data": 1, "control": 1})
@@ -810,9 +810,16 @@ def test_declaration_table_is_the_only_source_no_env_fallback(
             service = app.app.state.service
             context = service.authenticate(compose_bearer_locator("crd_pceilenv_0000000", "secret-pceilenv"))
             enforcement = service.capabilities(context)["limit_enforcement"]
-            # data=5 (the TABLE value) means deployment_required, never
-            # enforced -- an env fallback reading the bogus env var above
-            # (data=1) would report enforced instead.
+            # R-91 (work order docs/work-orders/WORK_ORDER_R91_MAX_
+            # CONNECTIONS_HEADROOM_CHECK_V1.md §1.6 R1-1/R1-2): data=2 (the
+            # TABLE value, lowered from the original data=5 so this
+            # platform's own declared process_ceilings fits the throwaway
+            # cluster's real max_connections headroom -- this assertion's
+            # own intent never depended on the value, only on it
+            # disagreeing with the env fallback's data=1) means
+            # deployment_required, never enforced -- an env fallback
+            # reading the bogus env var above (data=1) would report
+            # enforced instead.
             assert enforcement["requests_per_minute"] == "deployment_required"
         finally:
             app.app.state.service._durable_audit.close()  # noqa: SLF001

@@ -1195,6 +1195,206 @@ def check_auditreader_statement_timeout(conn: "psycopg.Connection", *, schema: s
             raise PlatformDeclarationError(_f17_message(role, database_name=per_database_names[0]), code="F-17")
 
 
+# ---------------------------------------------------------------------------
+# F-18 (R-91, work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_
+# HEADROOM_CHECK_V1.md §1.2 D-1): F-18
+# judges whether the platform this deployment DECLARES (`process_
+# ceilings`) can open that many real connections against `max_connections`
+# -- a cluster-wide question F-16 above never asks (F-16 judges only a
+# single ROLE's own `CONNECTION LIMIT` against ITS OWN pool-composition
+# floor). This is a NECESSARY condition, not a sufficient one (§1.1 (c)):
+# it never counts an interactive/diagnostic `psql` session, and it
+# deliberately judges the LOWER bound every `process_ceilings`-honoring
+# deployment is guaranteed to open (one platform pool per data process,
+# plus one runtime/developer pair per data process IF this platform has at
+# least one registered application, plus one control-plane pool per
+# control process), never the UPPER bound (every REGISTERED application
+# times every data process, `auditreader` counted too) -- the declaration
+# says nothing about which process serves which application or whether
+# `auditreader`/control-plane are even deployed, so judging the upper
+# bound would refuse deployments that would actually run fine (§1.1
+# (c′)). All four startup call sites (`r2db_api.main.build_app`,
+# `r2db_api.control_main.build_control_app`, and their MitateDB-api
+# equivalents) judge the SAME deployment-wide declaration, unscoped by
+# role or plane -- UNLIKE F-16's own narrowed startup calls: narrowing
+# F-18 to one process' own roles would report a false green while a
+# SIBLING process' own declared ceiling already exceeds headroom, since
+# `max_connections` is a resource every process on the cluster shares.
+# `headroom_lower_bound`/`check_max_connections_headroom`/`_f18_message`
+# are pinned isomorphic to MitateDB-api's own same-named realizations
+# (`_ISOMORPHIC_TARGETS`), together with the `_count_registered_
+# applications`/`_read_connection_headroom_settings`/`HeadroomReport`
+# helpers they call -- none of these six takes a peer-specific argument;
+# `check_max_connections_headroom`'s own caller passes this peer's own
+# already-declared `concurrency` the same way `check_role_connection_
+# limits`'s callers already do.
+# ---------------------------------------------------------------------------
+
+
+def headroom_lower_bound(
+    *,
+    data_processes: int,
+    control_processes: int,
+    platform_pool_floor: int,
+    application_pair_floor: int,
+    control_plane_floor: int,
+    registered_applications: int,
+) -> int:
+    """The connection count every deployment honoring `process_ceilings`
+    (`data_processes`/`control_processes`) is GUARANTEED to open, given
+    this platform's own registered-application count: each data process
+    always opens its own platform pool (`platform_pool_floor`); it also
+    opens exactly ONE runtime/developer pair's worth (`application_pair_
+    floor`) if this platform has at least one registered application --
+    never scaled by HOW MANY applications are registered (a single
+    process serves whichever applications it is actually given, not
+    every one on the platform; the count that WOULD scale with
+    registration is the upper bound, computed by this module's own
+    caller, never here). Each control process always opens its own
+    control-plane pool (`control_plane_floor`) -- `auditreader` is never
+    added here: whether this deployment even runs a control process
+    with an `auditreader` pool configured is not something `process_
+    ceilings` declares (§1.1 (c′) (iii))."""
+    application_floor = platform_pool_floor + (application_pair_floor if registered_applications >= 1 else 0)
+    return data_processes * application_floor + control_processes * control_plane_floor
+
+
+def _count_registered_applications(conn: "psycopg.Connection", schema: str) -> int:
+    """The number of rows in `<schema>.applications` -- read unconditionally
+    (never filtered by `runtime_role`/`developer_role` being set, unlike
+    `check_role_connection_limits`'s own read of this table): a
+    REGISTERED-only row (no roles provisioned yet) still means "this
+    platform has at least one application", which is all `headroom_lower_
+    bound` above needs to know."""
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT count(*) FROM {table}").format(table=sql.Identifier(schema, "applications")))
+        (count,) = cur.fetchone()
+    return count
+
+
+_HEADROOM_SETTING_NAMES = ("max_connections", "superuser_reserved_connections", "reserved_connections")
+
+
+def _read_connection_headroom_settings(conn: "psycopg.Connection") -> "tuple[int, int, int]":
+    """`max_connections`/`superuser_reserved_connections`/`reserved_
+    connections` (PG16), read directly off `pg_settings` -- a
+    world-readable view (§1.3 (7): measured readable by a non-superuser
+    `SET ROLE` session), so this never needs a superuser connection.
+    Returns `(max_connections, superuser_reserved_connections, reserved_
+    connections)`. Raises `PlatformDeclarationError(code="F-18")`, naming
+    every missing name, if `pg_settings` answers fewer than all three rows
+    -- never a bare `KeyError` a caller would have to translate itself."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT name, setting FROM pg_settings WHERE name = ANY(%s)",
+            [list(_HEADROOM_SETTING_NAMES)],
+        )
+        settings = dict(cur.fetchall())
+    missing = [name for name in _HEADROOM_SETTING_NAMES if name not in settings]
+    if missing:
+        raise PlatformDeclarationError(
+            f"pg_settings did not answer {', '.join(missing)} -- F-18 cannot judge connection headroom without "
+            f"all three of {', '.join(_HEADROOM_SETTING_NAMES)}.",
+            code="F-18",
+        )
+    return (
+        int(settings["max_connections"]),
+        int(settings["superuser_reserved_connections"]),
+        int(settings["reserved_connections"]),
+    )
+
+
+@dataclass(frozen=True)
+class HeadroomReport:
+    """`check_max_connections_headroom`'s own return shape (success only --
+    a FAILING judgment raises instead, `_f18_message` below): the numbers
+    `ops verify-declarations`'s own OK line reports (completion condition
+    4)."""
+    lower_bound: int
+    upper_bound: int
+    superuser_reserved_connections: int
+    reserved_connections: int
+    max_connections: int
+
+
+def _f18_message(
+    *,
+    lower_bound: int,
+    upper_bound: int,
+    superuser_reserved_connections: int,
+    reserved_connections: int,
+    max_connections: int,
+    ops_module: str,
+) -> str:
+    """The FAIL text `check_max_connections_headroom` raises with, naming
+    every number its own judgment reads: the algorithm this judges is
+    `lower_bound + superuser_reserved_connections + reserved_connections
+    <= max_connections` (§1.2 D-1) -- `upper_bound` is named too, but only
+    disclosed, never part of that judgment (§1.1 (c′))."""
+    shortfall = lower_bound + superuser_reserved_connections + reserved_connections - max_connections
+    return (
+        f"declared process_ceilings' own connection lower bound {lower_bound} (upper bound {upper_bound}) plus "
+        f"superuser_reserved_connections {superuser_reserved_connections} and reserved_connections "
+        f"{reserved_connections} exceeds max_connections {max_connections} by {shortfall} -- raise max_connections, "
+        f"or lower the declared process_ceilings -- see {ops_module}'s own provisioning runbook."
+    )
+
+
+def check_max_connections_headroom(
+    conn: "psycopg.Connection", *, schema: str, ops_module: str,
+    process_ceilings: ProcessCeilings, concurrency: int,
+) -> HeadroomReport:
+    """F-18: raises `PlatformDeclarationError(code="F-18")` when the LOWER
+    bound of the connections `process_ceilings` guarantees this deployment
+    opens (`headroom_lower_bound`, above) plus `superuser_reserved_
+    connections` plus `reserved_connections` exceeds `max_connections`
+    (all three read live off `pg_settings`, never a caller-supplied
+    value). Equal is allowed (`<=`, not `<`). On success, returns a
+    `HeadroomReport` carrying the lower bound, the UPPER bound (every
+    REGISTERED application times every data process, `auditreader`'s own
+    floor added to the control side too -- reported only, never judged,
+    §1.1 (c′)), both reserved-connection settings, and `max_connections`
+    itself, so the caller can print all four numbers without a second
+    round of reads."""
+    registered_applications = _count_registered_applications(conn, schema)
+    platform_pool_floor = _API_ROLE_STORE_COUNT * concurrency
+    application_pair_floor = 2 * concurrency
+    control_plane_floor = _CONTROLPLANE_ROLE_POOL_FLOOR
+    auditreader_floor = _AUDITREADER_ROLE_POOL_FLOOR
+    lower_bound = headroom_lower_bound(
+        data_processes=process_ceilings.data,
+        control_processes=process_ceilings.control,
+        platform_pool_floor=platform_pool_floor,
+        application_pair_floor=application_pair_floor,
+        control_plane_floor=control_plane_floor,
+        registered_applications=registered_applications,
+    )
+    upper_bound = (
+        process_ceilings.data * (platform_pool_floor + application_pair_floor * registered_applications)
+        + process_ceilings.control * (control_plane_floor + auditreader_floor)
+    )
+    max_connections, superuser_reserved_connections, reserved_connections = _read_connection_headroom_settings(conn)
+    if lower_bound + superuser_reserved_connections + reserved_connections > max_connections:
+        raise PlatformDeclarationError(
+            _f18_message(
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
+                superuser_reserved_connections=superuser_reserved_connections,
+                reserved_connections=reserved_connections,
+                max_connections=max_connections,
+                ops_module=ops_module,
+            ),
+            code="F-18",
+        )
+    return HeadroomReport(
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+        superuser_reserved_connections=superuser_reserved_connections,
+        reserved_connections=reserved_connections,
+        max_connections=max_connections,
+    )
+
+
 def ops_module_hint() -> str:
     """`PEER_MODULE`, named through a function (not referenced directly by
     `check_contract_170_declarations`'s own f-strings) so this check's
@@ -1218,6 +1418,7 @@ __all__ = [
     "REMOVED_TIMEOUT_ENV",
     "TABLE_NAME",
     "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
+    "HeadroomReport",
     "PlatformDeclarationError",
     "PlatformDeclarations",
     "ProcessCeilings",
@@ -1226,9 +1427,11 @@ __all__ = [
     "check_auditreader_statement_timeout",
     "check_contract_170_declarations",
     "check_control_surface_consistency",
+    "check_max_connections_headroom",
     "check_role_connection_limits",
     "check_writer_role_timeouts",
     "derive_visibility_lag_ms",
+    "headroom_lower_bound",
     "ops_module_hint",
     "read_declared_role_timeouts",
     "read_effective_timeouts_ms",
