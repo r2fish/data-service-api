@@ -85,6 +85,25 @@ through the completion gate is recorded here and not filed in the ledger):
        `security/CONTROL_MAPPING_HISTORY.md`.
        caught by: `conformance-tests/test_conditions_register.py`, which
        checks both directions of the CONDITIONS.md/marker mapping.
+    4. not detected (the other way round -- a false red): a legitimate
+       restructure of `security/CONTROL_MAPPING.md` that keeps every
+       heading and every reference resolving but changes HOW MANY
+       references take each shape/route -- splitting one claim into
+       several (shape c's same-line inheritance does not cross the new
+       line), shortening the preamble (route i'), or normalising a
+       label/peer-relative reference into a full path (shape e, route
+       ii) -- goes red on the `POSITION_REF_*_FLOOR` pins although
+       nothing is broken. Found by the 2026-09-23 design review of
+       `docs/design/CONTROL_MAPPING_FORM_V3_V0_1.md` (5 of its 15
+       findings were this).
+       why: the floors are a point-in-time measurement minus a margin
+       (the comment above them), so they pin the document's current
+       reference MIX, not only the extraction logic they were added
+       to guard.
+       caught by: the restructure's own work order re-measures and
+       re-pins every floor after the rewrite (design section 4 WP-1,
+       section 5 condition 8); until then a red floor on a change that
+       only reshapes references is read as this gap, not as a defect.
 """
 from __future__ import annotations
 
