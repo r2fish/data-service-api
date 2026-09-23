@@ -127,6 +127,17 @@ _CROSS_ENTITY_OPS = 2  # not fixed by design; this tool's own choice -- see
 # the completion report's "design との食い違い" section (2 entities, 1
 # insert each, the smallest request that is genuinely cross-entity).
 
+# R-80 (WO §1.2 D-1, designレビュー1のH-1): the `ROUNDTRIP` poll's own
+# fixed timing -- `pg_stat_clear_snapshot()` then a minimum 12s wait
+# before ANY confirmation is even considered (a flat window was measured
+# unstable for less, WO §1.3 (5)/(5b)), 1s between reads thereafter, and
+# a 30s ceiling past which the last-seen value is printed with `stale=1`
+# rather than blocked on forever. Never exposed as a CLI flag (WO §2.1
+# only asks for `--roundtrip`; these three stay fixed).
+_ROUNDTRIP_MIN_WAIT_S = 12.0
+_ROUNDTRIP_POLL_INTERVAL_S = 1.0
+_ROUNDTRIP_MAX_WAIT_S = 30.0
+
 
 class SelfCheckFailure(RuntimeError):
     """Raised when the backend-call counting proxy observed zero calls for
@@ -351,6 +362,73 @@ def _resolve_backend_object(cell: Any) -> Any:
     `_backend`: `SQLiteBackend` or `PostgresBackend`)."""
     inner = getattr(cell, "_backend", None)
     return inner if inner is not None else cell
+
+
+def _resolve_app_db_and_matcher(cell: Any, app_id: str) -> "tuple[str | None, Callable[[dict], bool]]":
+    """R-80 (WO §1.2 D-2, §1.3 (8)): resolves the application database
+    NAME for `ROUNDTRIP`'s `db=app` row, and a matching function that
+    decides -- given one connection dict `<adapter>.prepared_stats()`
+    returned -- whether that connection's own probe `commit()` belongs to
+    THIS application (WO §1.2 D-1's own "probe が実際に走った接続の本数"
+    correction, 設計レビュー1のM-4's own derivation rule). Two forms,
+    tried in order, never a peer-name literal (mirrors `_resolve_cell`'s
+    own precedent immediately above in this file):
+
+    - **r2db form**: `cell._runtime_dsn` (`r2db_api.postgres.PostgresCell`)
+      is a real DSN string, parsed with `psycopg.conninfo.conninfo_to_dict`
+      for `dbname` (WO §1.3 (8)'s own literal instruction). r2db's own
+      `label` carries `<application_id>/<role>@<pid>`
+      (`SharedPoolManager.prepared_stats`) -- the matcher is a `<app_id>/`
+      prefix check, since a pool's own idle-connection count varies and
+      cannot be predicted ahead of a probe.
+    - **MitateDB form**: the resolved backend object's own `_runtime`
+      (`mitatedb_api.backend_postgres.PostgresBackend`) has a public
+      `.info.dbname` (psycopg's own public `ConnectionInfo`, never a
+      private psycopg attribute -- WO §1.1 (e)). Unlike r2db, MitateDB
+      always holds exactly 2 persistent connections per cell (`_runtime`/
+      `_developer`, `backend_postgres.py`:358) -- their own `.info.
+      backend_pid` (also public, cached client-side, no extra round trip)
+      is read directly to build the exact 2 labels (`runtime@<pid>`/
+      `developer@<pid>`) THIS cell's own backend would produce, so a
+      capability-probe application's own cell (a second, unrelated
+      application `capability_document()` may have provisioned, WO §1.3
+      (8)'s own "cross_entity が作る 2 つ目の application") never gets
+      counted here even though the adapter's own `prepared_stats()`
+      aggregates every open cell.
+
+    Returns `(None, <a matcher that always returns False>)` when neither
+    form resolves -- never raises (completion condition 12b)."""
+    runtime_dsn = getattr(cell, "_runtime_dsn", None)
+    if runtime_dsn is not None:
+        from psycopg.conninfo import conninfo_to_dict
+
+        app_db = conninfo_to_dict(runtime_dsn).get("dbname")
+        prefix = f"{app_id}/"
+        return app_db, (lambda stats, _prefix=prefix: stats.get("label", "").startswith(_prefix))
+    backend = _resolve_backend_object(cell)
+    runtime_conn = getattr(backend, "_runtime", None)
+    info = getattr(runtime_conn, "info", None) if runtime_conn is not None else None
+    if info is not None:
+        app_db = info.dbname
+        own_labels: set[str] = set()
+        for role_name in ("runtime", "developer"):
+            conn = getattr(backend, f"_{role_name}", None)
+            if conn is not None:
+                own_labels.add(f"{role_name}@{conn.info.backend_pid}")
+        frozen = frozenset(own_labels)
+        return app_db, (lambda stats, _labels=frozen: stats.get("label") in _labels)
+    return None, (lambda stats: False)
+
+
+def _resolve_platform_db(adapter_obj: Any) -> "str | None":
+    """R-80 (WO §1.2 D-2, §1.3 (8)): the platform database NAME for
+    `ROUNDTRIP`'s `db=platform` row -- both http plugs' own `_Platform.
+    platform_db` (`conformance_adapter_r2db_http.py`/`conformance_adapter_
+    mitatedb_http.py`), the socket plugs inheriting it unchanged. `None`
+    when the adapter carries no `_platform` at all (completion condition
+    12b's own "どちらの形でも解決できない")."""
+    platform = getattr(adapter_obj, "_platform", None)
+    return getattr(platform, "platform_db", None) if platform is not None else None
 
 
 def _is_postgres_backed(backend_obj: Any) -> bool:
@@ -840,7 +918,7 @@ def _format_prepstmt_row(peer: str, plug: str, op: str, conn_label: str, stmt: d
     )
 
 
-def _emit_prepared_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, detail: bool) -> None:
+def _emit_prepared_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, detail: bool) -> "list[dict] | None":
     """R-79 (WO §1.2 D-3): print one `PREPARED` line per connection `adapter_
     obj.prepared_stats()` returns (skipped entirely, no exception, for a
     plug with no such method -- every plug this WP does not touch, mirrors
@@ -852,18 +930,260 @@ def _emit_prepared_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, deta
     `-http` counterpart, so there is no transport this should ever skip
     (completion condition 20). `PREPSTMT` lines (one per prepared
     statement on a connection) print only when `detail` is true
-    (`--prepared-detail`, completion condition 19) -- never otherwise."""
+    (`--prepared-detail`, completion condition 19) -- never otherwise.
+
+    R-80 (WO §1.2 D-1, §2.1's own "prepared_stats() の戻り値を `_emit_
+    prepared_rows` と新しい emit で共有する"): returns the exact list
+    `prepared_stats()` produced (or `None` when the plug has none) instead
+    of discarding it -- the ONE probe call this makes is reused by `_emit_
+    measurement_rows`' own `ROUNDTRIP` `conn=` rows below, so a `--roundtrip`
+    run still calls `prepared_stats()` only once per op on this, the POST
+    side (completion condition 3)."""
     prepared_stats = getattr(adapter_obj, "prepared_stats", None)
     if prepared_stats is None:
-        return
-    for conn_stats in prepared_stats():
+        return None
+    conn_stats_list = prepared_stats()
+    for conn_stats in conn_stats_list:
         print(_format_prepared_row(peer, plug, op, conn_stats))
         if detail:
             for stmt in conn_stats["prepared_statements"]:
                 print(_format_prepstmt_row(peer, plug, op, conn_stats["label"], stmt))
+    return conn_stats_list
 
 
-def _emit_measurement_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, prepared_detail: bool) -> None:
+# ---------------------------------------------------------------------
+# ROUNDTRIP (R-80, WO §1.2 D-1): per-connection statement deltas and
+# per-database transaction/session deltas, printed only under
+# `--roundtrip`. Two row shapes -- `conn=` (one per connection `prepared_
+# stats()` returned, D-1 (i)) and `db=` (one per resolved database name,
+# D-1 (ii)) -- both taken as a PRE (immediately before `_measure_op`
+# starts timing) minus POST (immediately after) difference, never a
+# running total (completion condition 4).
+# ---------------------------------------------------------------------
+
+
+def _per_request(value: float, requests: int) -> float:
+    """The `_per_req=` denominator every `ROUNDTRIP` column shares:
+    `value / requests`, `0.0` when `requests == 0` (completion condition
+    6) -- never a bare division that would raise `ZeroDivisionError` for
+    a `--warmup 0 --n 0` run."""
+    return (value / requests) if requests else 0.0
+
+
+def _format_roundtrip_conn_row(peer: str, plug: str, op: str, requests: int, label: str, stmts: int) -> str:
+    """WO §1.2 D-1 (i): one `ROUNDTRIP conn=` line -- `peer`/`plug`/`op`/
+    `requests`/`conn`/`stmts`/`stmts_per_req`, in that exact order
+    (completion condition 1)."""
+    return (
+        f"ROUNDTRIP peer={peer} plug={plug} op={op} requests={requests} "
+        f"conn={label} stmts={stmts} stmts_per_req={_per_request(stmts, requests):.2f}"
+    )
+
+
+def _format_roundtrip_db_row(
+    peer: str, plug: str, op: str, requests: int, db: str, xacts: int, sessions: int, stale: bool,
+) -> str:
+    """WO §1.2 D-1 (ii): one `ROUNDTRIP db=` line -- `peer`/`plug`/`op`/
+    `requests`/`db`/`xacts`/`xacts_per_req`/`sessions`/`sessions_per_req`/
+    `stale`, in that exact order (completion condition 2). `stale` prints
+    as the literal `0`/`1`, never `True`/`False` (WO §1.2 D-1's own
+    `stale=<0|1>`)."""
+    return (
+        f"ROUNDTRIP peer={peer} plug={plug} op={op} requests={requests} "
+        f"db={db} xacts={xacts} xacts_per_req={_per_request(xacts, requests):.2f} "
+        f"sessions={sessions} sessions_per_req={_per_request(sessions, requests):.2f} stale={int(stale)}"
+    )
+
+
+def _emit_roundtrip_conn_rows(
+    peer: str, plug: str, op: str, requests: int,
+    pre_conn_stats: "list[dict] | None", post_conn_stats: "list[dict] | None",
+) -> None:
+    """WO §1.2 D-1 (i): one `conn=` line per entry of `post_conn_stats` (the
+    SAME return value `_emit_prepared_rows` already printed `PREPARED`
+    lines from, above -- never a second `prepared_stats()` call). `stmts`
+    is `post.execute_count` minus the SAME connection's own `pre.
+    execute_count` (matched by `label`) -- `0` when that label is absent
+    from `pre_conn_stats` (a fresh connection since the pre-probe: WO
+    §6.1 起草時の裁定 7, completion condition 5b), never the value carried
+    over from a DIFFERENT label. Prints nothing, raises nothing, when
+    `post_conn_stats` is `None` (no `prepared_stats()` on this plug at
+    all -- completion condition 14, mirrors `_emit_prepared_rows`'s own
+    identical skip)."""
+    if post_conn_stats is None:
+        return
+    baseline_by_label = {stats["label"]: stats["execute_count"] for stats in (pre_conn_stats or [])}
+    for stats in post_conn_stats:
+        label = stats["label"]
+        stmts = stats["execute_count"] - baseline_by_label.get(label, 0)
+        print(_format_roundtrip_conn_row(peer, plug, op, requests, label, stmts))
+
+
+def _clear_pg_stat_snapshot(admin_conn: Any) -> None:
+    """WO §1.2 D-1 (ii)(a): `pg_stat_clear_snapshot()` on the harness's own
+    admin connection (never a plug's own connection -- WO §1.1 (b))."""
+    with admin_conn.cursor() as cur:
+        cur.execute("SELECT pg_stat_clear_snapshot()")
+
+
+def _read_db_stats(admin_conn: Any, db_names: "list[str]") -> "dict[str, tuple[int, int, int]]":
+    """One read of `(xact_commit, xact_rollback, sessions)` per name in
+    `db_names`, via the harness's own admin connection -- a database with
+    no matching row (should not happen for a resolved name, but never
+    raises) reads as `(0, 0, 0)`."""
+    with admin_conn.cursor() as cur:
+        cur.execute(
+            "SELECT datname, xact_commit, xact_rollback, sessions FROM pg_stat_database WHERE datname = ANY(%s)",
+            (list(db_names),),
+        )
+        rows = cur.fetchall()
+    seen = {name: (commit, rollback, sessions) for name, commit, rollback, sessions in rows}
+    return {name: seen.get(name, (0, 0, 0)) for name in db_names}
+
+
+def _poll_pg_stat_database(
+    db_names: "list[str]", *, read_stats: "Callable[[list[str]], dict[str, tuple[int, int, int]]]",
+    clear_snapshot: "Callable[[], None]", min_wait: float, poll_interval: float, max_wait: float,
+    sleep: "Callable[[float], None]" = time.sleep, now: "Callable[[], float]" = time.monotonic,
+) -> "dict[str, dict]":
+    """WO §1.2 D-1 (ii)(a)(b)(c), 設計レビュー1のH-1: `clear_snapshot()`
+    once, then reads `db_names` every `poll_interval` seconds, per-name,
+    until EITHER (confirmed) that name's own value has stayed identical
+    for 3 consecutive reads AND at least `min_wait` seconds have elapsed
+    since the clear (`stale=False`), OR `max_wait` seconds have elapsed,
+    in which case every still-unconfirmed name is returned at its last-
+    seen value with `stale=True` (completion conditions 11, 22a, 22b).
+    "Stable from the very first read" does NOT confirm before `min_wait`
+    (completion condition 11 -- WO §1.3 (5b)'s own run 1: a flat +5 for 20
+    seconds was NOT the true +101). `sleep`/`now` are injectable (real-
+    time-free tests, completion condition 11's own "時計と待ちを注入する
+    か").
+
+    `db_names` is de-duplicated (order preserved) before anything else
+    (コードレビュー 2026-09-24 差し戻し 5): `confirmed`/`streak` are
+    already keyed by NAME, so a caller passing the SAME real database
+    name twice (`db_names={"app": "x", "platform": "x"}`, a degenerate
+    but not impossible resolution) would otherwise never reach `len(
+    confirmed) >= len(db_names)` -- the duplicate collapses to ONE
+    `confirmed` entry while `len(db_names)` still counts it twice,
+    forcing every such poll to run out the clock to `max_wait` and
+    report `stale=1` even after genuinely confirming."""
+    db_names = list(dict.fromkeys(db_names))
+    clear_snapshot()
+    start = now()
+    last = read_stats(db_names)
+    streak = {name: 1 for name in db_names}
+    confirmed: "dict[str, dict]" = {}
+    while True:
+        elapsed = now() - start
+        for name in db_names:
+            if name in confirmed:
+                continue
+            if streak[name] >= 3 and elapsed >= min_wait:
+                confirmed[name] = {"values": last[name], "stale": False}
+        if len(confirmed) >= len(db_names):
+            break
+        if elapsed >= max_wait:
+            for name in db_names:
+                if name not in confirmed:
+                    confirmed[name] = {"values": last[name], "stale": True}
+            break
+        sleep(poll_interval)
+        current = read_stats(db_names)
+        for name in db_names:
+            if name in confirmed:
+                continue
+            if current[name] == last[name]:
+                streak[name] += 1
+            else:
+                streak[name] = 1
+        last = current
+    return confirmed
+
+
+def _probe_correction_count(conn_stats: "list[dict]", matcher: "Callable[[dict], bool]") -> int:
+    """WO §1.2 D-1's own "probe が実際に走った接続の本数" -- how many
+    entries of `conn_stats` were both actually probed (`probed` true,
+    `psycopg_counting.probe_prepared_statements`'s own early-return for a
+    non-IDLE connection never calls `commit()`) AND, per `matcher`, belong
+    to the database this correction is being subtracted from (設計レビュー
+    1のM-4's own derivation rule, `_resolve_app_db_and_matcher`
+    above)."""
+    return sum(1 for stats in conn_stats if stats.get("probed") and matcher(stats))
+
+
+def _emit_roundtrip_db_rows(
+    peer: str, plug: str, op: str, requests: int, db_names: "dict[str, str]",
+    pre_db_values: "dict[str, dict] | None", post_db_values: "dict[str, dict] | None",
+    post_conn_stats: "list[dict] | None", correction_matcher: "Callable[[dict], bool] | None",
+) -> None:
+    """WO §1.2 D-1 (ii): one `db=` line per resolved kind in `db_names`
+    (`"app"`/`"platform"`) present in both `pre_db_values`/`post_db_
+    values`. `xacts` is `Δxact_commit + Δxact_rollback` (completion
+    condition 8) MINUS the POST probe's own correction (completion
+    condition 9) -- `db=platform`'s own correction is always 0 (WO §1.2
+    D-1: neither peer's platform/credential connections are ever probed),
+    `db=app`'s is `_probe_correction_count(post_conn_stats,
+    correction_matcher)`. `sessions` is `Δsessions`, unconnected. Prints
+    nothing for a kind whose read is missing from either side (never
+    raises `KeyError`).
+
+    `stale` is the LOGICAL OR of the PRE and POST reads' own `stale`
+    (コードレビュー 2026-09-24 差し戻し 1): a `Δ` built from one settled
+    read and one that hit the 30s ceiling is exactly as unsettled as one
+    built from two unsettled reads -- either side alone being `stale=1`
+    means this row's own delta cannot be trusted as a final value."""
+    if post_db_values is None:
+        return
+    for kind, _db_name in db_names.items():
+        pre_entry = (pre_db_values or {}).get(kind)
+        post_entry = post_db_values.get(kind)
+        if pre_entry is None or post_entry is None:
+            continue
+        pre_commit, pre_rollback, pre_sessions = pre_entry["values"]
+        post_commit, post_rollback, post_sessions = post_entry["values"]
+        xacts = (post_commit - pre_commit) + (post_rollback - pre_rollback)
+        if kind == "app" and post_conn_stats is not None and correction_matcher is not None:
+            xacts -= _probe_correction_count(post_conn_stats, correction_matcher)
+        sessions = post_sessions - pre_sessions
+        stale = bool(pre_entry["stale"]) or bool(post_entry["stale"])
+        print(_format_roundtrip_db_row(peer, plug, op, requests, kind, xacts, sessions, stale))
+
+
+def _roundtrip_pre_probe(
+    adapter_obj: Any, *, admin_conn: Any, db_names: "dict[str, str]", min_wait: float, poll_interval: float, max_wait: float,
+) -> "tuple[list[dict] | None, dict[str, dict] | None]":
+    """WO §1.2 D-1, 設計レビュー1のM-3 (全 op に一般化): the PRE half of a
+    single op's pre/post pair -- one `prepared_stats()` call (mirrors
+    `_emit_prepared_rows`'s own POST call; together exactly 2 per op,
+    completion condition 3), and, when `db_names` resolved at least one
+    kind, one full `_poll_pg_stat_database` cycle so the PRE baseline is
+    itself a settled (not mid-flush) value -- never a bare single read
+    (WO §1.3 (5b): an unsettled read would double-count the PREVIOUS op's
+    still-pending commits as this op's own)."""
+    prepared_stats = getattr(adapter_obj, "prepared_stats", None)
+    conn_stats = prepared_stats() if prepared_stats is not None else None
+    db_values = None
+    if db_names:
+        # `_poll_pg_stat_database` is keyed by the REAL database name (it
+        # knows nothing of "app"/"platform" -- that vocabulary is this
+        # file's own, not `pg_stat_database`'s) -- re-key its result back
+        # to `db_names`' own kind ("app"/"platform") here, once, so every
+        # OTHER caller (`_emit_roundtrip_db_rows`) can go on using the
+        # kind alone, exactly like `db_names` itself.
+        by_dbname = _poll_pg_stat_database(
+            list(db_names.values()),
+            read_stats=lambda dbs: _read_db_stats(admin_conn, dbs),
+            clear_snapshot=lambda: _clear_pg_stat_snapshot(admin_conn),
+            min_wait=min_wait, poll_interval=poll_interval, max_wait=max_wait,
+        )
+        db_values = {kind: by_dbname[db_name] for kind, db_name in db_names.items()}
+    return conn_stats, db_values
+
+
+def _emit_measurement_rows(
+    peer: str, plug: str, op: str, adapter_obj: Any, *, prepared_detail: bool, roundtrip: "dict | None" = None,
+) -> "list[dict] | None":
     """R-79 (WO §1.2 D-3, rework item (C)): the ONE call site
     `_measure_plug` uses per (plug, op) -- always `_emit_pool_rows` FIRST,
     then `_emit_prepared_rows` (WO §1.2 D-3's own "同じ op の POOL 行の後
@@ -871,9 +1191,100 @@ def _emit_measurement_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, p
     `_measure_plug` and `tools/tests/test_perf_baseline.py` call directly,
     means a test can observe the real order the measurement loop itself
     produces -- not a copy of the same two calls re-typed in the test,
-    which could drift from `_measure_plug`'s own call order unnoticed."""
+    which could drift from `_measure_plug`'s own call order unnoticed.
+
+    R-80 (WO §1.2 D-1, §2.1's own "`_emit_measurement_rows` に3つ目の emit
+    を足す"): when `roundtrip` is given (a plain dict built by `_measure_
+    plug`/tests -- `requests`/`pre_conn_stats`/`pre_db_values`/
+    `admin_conn`/`db_names`/`correction_matcher`/`min_wait`/
+    `poll_interval`/`max_wait`), prints `ROUNDTRIP` rows AFTER the
+    `PREPARED` rows above (completion condition 13) -- the POST probe
+    reused from `_emit_prepared_rows`'s own return value, and a fresh
+    POST `_poll_pg_stat_database` cycle. `roundtrip=None` (the default --
+    every call site `--roundtrip` did not ask for) emits nothing new at
+    all, byte-identical to the pre-R-80 function (completion condition
+    21a/21b)."""
     _emit_pool_rows(peer, plug, op, adapter_obj)
-    _emit_prepared_rows(peer, plug, op, adapter_obj, detail=prepared_detail)
+    post_conn_stats = _emit_prepared_rows(peer, plug, op, adapter_obj, detail=prepared_detail)
+    if roundtrip is not None:
+        requests = roundtrip["requests"]
+        _emit_roundtrip_conn_rows(peer, plug, op, requests, roundtrip["pre_conn_stats"], post_conn_stats)
+        db_names = roundtrip["db_names"]
+        if db_names:
+            admin_conn = roundtrip["admin_conn"]
+            # Same re-keying as `_roundtrip_pre_probe` above (real database
+            # name -> "app"/"platform" kind) -- kept in sync deliberately,
+            # since `_emit_roundtrip_db_rows` below looks its two inputs up
+            # by kind, not by database name.
+            by_dbname = _poll_pg_stat_database(
+                list(db_names.values()),
+                read_stats=lambda dbs: _read_db_stats(admin_conn, dbs),
+                clear_snapshot=lambda: _clear_pg_stat_snapshot(admin_conn),
+                min_wait=roundtrip["min_wait"], poll_interval=roundtrip["poll_interval"], max_wait=roundtrip["max_wait"],
+            )
+            post_db_values = {kind: by_dbname[db_name] for kind, db_name in db_names.items()}
+            _emit_roundtrip_db_rows(
+                peer, plug, op, requests, db_names, roundtrip["pre_db_values"], post_db_values,
+                post_conn_stats, roundtrip["correction_matcher"],
+            )
+    return post_conn_stats
+
+
+def _measure_op_and_emit(
+    fn: Callable[[], None], *, peer: str, plug: str, op: str,
+    warmup: int, n: int, concurrency: int, counter: _CallCounter, adapter_obj: Any, prepared_detail: bool,
+    roundtrip_enabled: bool, admin_conn: Any, db_names: "dict[str, str]",
+    correction_matcher: "Callable[[dict], bool] | None", min_wait: float, poll_interval: float, max_wait: float,
+    after_measure: "Callable[[list[float]], None] | None" = None,
+) -> "tuple[list[float], list[float]]":
+    """R-80 (WO §1.2 D-1, §2.1): runs one (plug, op)'s `_measure_op` call
+    and its trailing `_emit_measurement_rows` call as one unit, with the
+    `ROUNDTRIP` PRE half (`_roundtrip_pre_probe`) taken immediately BEFORE
+    `_measure_op` starts timing and the POST half taken from inside `_emit_
+    measurement_rows` immediately after -- factored out once so every one
+    of `_measure_plug`'s own 4 op blocks (query/mutate/batch/cross_entity)
+    wires PRE/POST the same way, rather than 4 near-identical copies.
+
+    `roundtrip_enabled=False` (every call site when `--roundtrip` was not
+    given) skips the PRE probe/poll entirely -- `prepared_stats()` stays
+    at exactly its pre-R-80 call count of 1 per op (POST only, completion
+    condition 21b) and no `db=` poll ever touches `admin_conn` (completion
+    condition 21a).
+
+    `after_measure`, when given, runs on the measured `calls` list right
+    after `_measure_op` returns but BEFORE any emission -- `_measure_plug`'s
+    own `query` block uses this for `_run_self_check`. **順序は保存されて
+    いる**: pre-R-80, `_run_self_check` ran after `_measure_op` and before
+    `_emit_measurement_rows`'s own prints; here it runs after `_measure_op`
+    and before this function's own call to `_emit_measurement_rows` --
+    the SAME position relative to every printed line. Only its position
+    relative to `_measure_plug`'s own `_row(...)`/`rows.append(...)` (no
+    side effect of their own) moved, from after to before."""
+    pre_conn_stats: "list[dict] | None" = None
+    pre_db_values: "dict[str, dict] | None" = None
+    if roundtrip_enabled:
+        pre_conn_stats, pre_db_values = _roundtrip_pre_probe(
+            adapter_obj, admin_conn=admin_conn, db_names=db_names,
+            min_wait=min_wait, poll_interval=poll_interval, max_wait=max_wait,
+        )
+    durations, calls = _measure_op(fn, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj)
+    if after_measure is not None:
+        after_measure(calls)
+    roundtrip: "dict | None" = None
+    if roundtrip_enabled:
+        roundtrip = {
+            "requests": (warmup + n) * concurrency,
+            "pre_conn_stats": pre_conn_stats,
+            "pre_db_values": pre_db_values,
+            "admin_conn": admin_conn,
+            "db_names": db_names,
+            "correction_matcher": correction_matcher,
+            "min_wait": min_wait,
+            "poll_interval": poll_interval,
+            "max_wait": max_wait,
+        }
+    _emit_measurement_rows(peer, plug, op, adapter_obj, prepared_detail=prepared_detail, roundtrip=roundtrip)
+    return durations, calls
 
 
 # ---------------------------------------------------------------------
@@ -883,6 +1294,9 @@ def _emit_measurement_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, p
 
 def _measure_plug(
     name: str, adapter_obj: ConformanceAdapter, *, warmup: int, n: int, concurrency: int, prepared_detail: bool = False,
+    roundtrip: bool = False, admin_conn: Any = None,
+    min_wait: float = _ROUNDTRIP_MIN_WAIT_S, poll_interval: float = _ROUNDTRIP_POLL_INTERVAL_S,
+    max_wait: float = _ROUNDTRIP_MAX_WAIT_S,
 ) -> list[dict]:
     peer, transport = _classify_plug(name, adapter_obj)
     app_id = fresh_identifier("perfbase")
@@ -896,6 +1310,22 @@ def _measure_plug(
         adapter_obj.insert(seed_runtime, entity, {"label": "perf-seed"})
 
         cell = _resolve_cell(adapter_obj, app_id)
+
+        # R-80 (WO §1.2 D-2): resolved ONCE per plug (never per op) --
+        # `db_names`/`correction_matcher` stay fixed for this cell's whole
+        # lifetime. Empty `db_names` (neither form resolved) means every
+        # op's `db=` emission below is a silent no-op (completion
+        # condition 12b), computed only when `roundtrip` is actually on.
+        db_names: "dict[str, str]" = {}
+        correction_matcher: "Callable[[dict], bool] | None" = None
+        if roundtrip:
+            app_db, correction_matcher = _resolve_app_db_and_matcher(cell, app_id)
+            if app_db is not None:
+                db_names["app"] = app_db
+            platform_db = _resolve_platform_db(adapter_obj)
+            if platform_db is not None:
+                db_names["platform"] = platform_db
+
         rows: list[dict] = []
         with _backend_call_counter(cell) as counter:
             # --- query ---
@@ -904,13 +1334,16 @@ def _measure_plug(
             def _do_query() -> None:
                 adapter_obj.select_eq(query_runtime, entity, ["label"], "label", "perf-seed")
 
-            durations, calls = _measure_op(
-                _do_query, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+            durations, calls = _measure_op_and_emit(
+                _do_query, peer=peer, plug=name, op="query",
+                warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+                prepared_detail=prepared_detail, roundtrip_enabled=roundtrip, admin_conn=admin_conn,
+                db_names=db_names, correction_matcher=correction_matcher,
+                min_wait=min_wait, poll_interval=poll_interval, max_wait=max_wait,
+                after_measure=lambda c: _run_self_check(name, c),
             )
             query_row = _row(peer, name, transport, "query", durations, calls, concurrency)
             rows.append(query_row)
-            _run_self_check(name, calls)
-            _emit_measurement_rows(peer, name, "query", adapter_obj, prepared_detail=prepared_detail)
 
             # --- mutate ---
             # WP-5 rework ruling item 2: every value `fresh_identifier`
@@ -935,11 +1368,14 @@ def _measure_plug(
             def _do_mutate() -> None:
                 adapter_obj.insert(mutate_runtime, entity, {"label": next(mutate_values_iter)})
 
-            durations, calls = _measure_op(
-                _do_mutate, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+            durations, calls = _measure_op_and_emit(
+                _do_mutate, peer=peer, plug=name, op="mutate",
+                warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+                prepared_detail=prepared_detail, roundtrip_enabled=roundtrip, admin_conn=admin_conn,
+                db_names=db_names, correction_matcher=correction_matcher,
+                min_wait=min_wait, poll_interval=poll_interval, max_wait=max_wait,
             )
             rows.append(_row(peer, name, transport, "mutate", durations, calls, concurrency))
-            _emit_measurement_rows(peer, name, "mutate", adapter_obj, prepared_detail=prepared_detail)
 
             # --- batch (5 operations, design D-6 decision 1) ---
             batch_runtime = adapter_obj.authenticate(adapter_obj.issue_credential(app_id, "runtime"))
@@ -960,11 +1396,14 @@ def _measure_plug(
             def _do_batch() -> None:
                 adapter_obj.attempt_batch_with_addresses(batch_runtime, entity, next(batch_ops_iter))
 
-            durations, calls = _measure_op(
-                _do_batch, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+            durations, calls = _measure_op_and_emit(
+                _do_batch, peer=peer, plug=name, op="batch",
+                warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+                prepared_detail=prepared_detail, roundtrip_enabled=roundtrip, admin_conn=admin_conn,
+                db_names=db_names, correction_matcher=correction_matcher,
+                min_wait=min_wait, poll_interval=poll_interval, max_wait=max_wait,
             )
             rows.append(_row(peer, name, transport, "batch", durations, calls, concurrency))
-            _emit_measurement_rows(peer, name, "batch", adapter_obj, prepared_detail=prepared_detail)
 
             # --- cross_entity (MitateDB 2 plug only; design D-6 decision 1) ---
             capabilities = adapter_obj.capability_document().get("capabilities", {})
@@ -985,11 +1424,14 @@ def _measure_plug(
                 def _do_cross_entity() -> None:
                     adapter_obj.attempt_cross_entity_batch(cross_runtime, next(cross_ops_iter))
 
-                durations, calls = _measure_op(
-                    _do_cross_entity, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+                durations, calls = _measure_op_and_emit(
+                    _do_cross_entity, peer=peer, plug=name, op="cross_entity",
+                    warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+                    prepared_detail=prepared_detail, roundtrip_enabled=roundtrip, admin_conn=admin_conn,
+                    db_names=db_names, correction_matcher=correction_matcher,
+                    min_wait=min_wait, poll_interval=poll_interval, max_wait=max_wait,
                 )
                 rows.append(_row(peer, name, transport, "cross_entity", durations, calls, concurrency))
-                _emit_measurement_rows(peer, name, "cross_entity", adapter_obj, prepared_detail=prepared_detail)
         return rows
     finally:
         with contextlib.suppress(Exception):
@@ -1101,24 +1543,62 @@ def _build_parser() -> argparse.ArgumentParser:
         "--prepared-detail", action="store_true",
         help="also print one PREPSTMT line per prepared statement per connection (default: off)",
     )
+    # R-80 (WO §1.2 D-1, completion condition 21a): off by default -- the
+    # `pg_stat_database` confirm-wait this adds (12-30s per pre/post read,
+    # WO §6.1 設計レビュー1のH-1) would otherwise slow down every ordinary
+    # run, not just one taken specifically to look at round-trip counts.
+    parser.add_argument(
+        "--roundtrip", action="store_true",
+        help=(
+            "also print ROUNDTRIP lines (per-connection statement deltas and per-database "
+            "transaction/session deltas, WO §1.2 D-1) -- default off, since the pg_stat_database "
+            "confirm-wait this adds costs several seconds per (plug, op)"
+        ),
+    )
     return parser
+
+
+def _roundtrip_enabled(args: argparse.Namespace) -> bool:
+    """R-80 (WO §1.2 D-1, completion condition 21a): `--roundtrip` alone
+    gates every `ROUNDTRIP`-related code path in this file (the PRE probe/
+    poll, the admin connection, every `ROUNDTRIP` print) -- split out as
+    its own function so a test can pin the exact gating decision without
+    running `_run`/`main` end-to-end against a real registry."""
+    return bool(args.roundtrip)
 
 
 def _run(args: argparse.Namespace) -> int:
     built = _discover_and_build(args.registry)
     exit_code = 0
+    roundtrip = _roundtrip_enabled(args)
+    admin_conn: Any = None
     try:
+        if roundtrip:
+            # R-80 (WO §1.2 D-1 (ii)): the harness's OWN admin connection
+            # to the throwaway cluster's `postgres` db (never a plug's own
+            # connection) -- opened only under `--roundtrip`, so a default
+            # run never even dials it (completion condition 21a). `main()`
+            # has already written the owned cluster's own env (including
+            # `dsa_testpg.R2DB_DSN`, the SAME dsn value `MITATEDB_DSN`
+            # carries) into `os.environ` by the time `_run` is reached.
+            import psycopg
+
+            admin_conn = psycopg.connect(os.environ[dsa_testpg.R2DB_DSN], autocommit=True)
         for name, adapter_obj in built:
             try:
                 for row in _measure_plug(
                     name, adapter_obj, warmup=args.warmup, n=args.n, concurrency=args.concurrency,
                     prepared_detail=args.prepared_detail,
+                    roundtrip=roundtrip, admin_conn=admin_conn,
                 ):
                     print(_format_row(row))
             except (SelfCheckFailure, UnknownAdapterShape) as exc:
                 print(f"perf_baseline: {exc}", file=sys.stderr)
                 exit_code = 1
     finally:
+        if admin_conn is not None:
+            with contextlib.suppress(Exception):
+                admin_conn.close()
         for _name, adapter_obj in built:
             with contextlib.suppress(Exception):
                 adapter_obj.close()
