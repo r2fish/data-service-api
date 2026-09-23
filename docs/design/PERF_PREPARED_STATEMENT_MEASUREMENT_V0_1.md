@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.3 (2026-09-23)。** WP-3 の後の r2db の再計測を §2.3 と §3 (ix) に、結果を §4 に足した。
 - **v0.2 (2026-09-23)。** WP-2 で §2〜§4 を埋めた (v0.1 は骨だけ)。 基点は `docs/work-orders/WORK_ORDER_R79_PREPARED_STATEMENT_MEASUREMENT_V1.md` (以下「WO」)。台帳は `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-79 行。
 - §2 (実測) と §3 (事実) と §4 (判断) は **WO §3 = WP-2 で監督が埋める。** WP-1 (実装担当) はこの骨を動かさず、**判断を先に書かない。**
 
@@ -491,6 +492,227 @@ PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=batch n=100 
 PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity n=100 p50_ms=41.640 p95_ms=47.306 backend_calls=22.00 concurrency=4
 ```
 
+### 2.3 WP-3 の後の K=1 (`--warmup 10 --n 100 --concurrency 1 --prepared-detail`、r2db の liveness ping を transaction の外に出した木)
+
+WO §3.4 (WP-3) の統合直前に、完了ゲート (`4018 passed`) の後で取った。r2db の pool の寸法は既定 2。負荷は §2.1 と同程度 (load average 4 前後)。MitateDB-api は WP-3 で触っていないので、その行は §2.1 との再現性の参照値である。
+
+```
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=fc891cb-dirty date=2026-09-23
+PERF peer=r2db-api plug=r2db-api transport=in-process op=query n=100 p50_ms=0.129 p95_ms=0.146 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=mutate n=100 p50_ms=0.197 p95_ms=0.243 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=batch n=100 p50_ms=0.691 p95_ms=1.021 backend_calls=1.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=query n=100 p50_ms=0.141 p95_ms=0.166 backend_calls=11.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=mutate n=100 p50_ms=0.111 p95_ms=0.137 backend_calls=7.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=batch n=100 p50_ms=0.197 p95_ms=0.219 backend_calls=37.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=cross_entity n=100 p50_ms=0.140 p95_ms=0.152 backend_calls=16.00 concurrency=1
+POOL peer=r2db-api plug=r2db-api-http op=query role=perfbase_15aa2bc6f308/developer size=2 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=query role=perfbase_15aa2bc6f308/runtime size=2 acquire=111 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/developer@73238 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/runtime@73240 executes=668 executemany=0 prepared=6 prepared_execs=633 share=0.948
+PREPSTMT peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_0 generic=106 custom=0 stmt=SELECT 1
+PREPSTMT peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_1 generic=101 custom=5 stmt=SELECT c.table_name, c.column_name, c.data_type, c.is_identity, c.domain_name FR
+PREPSTMT peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_2 generic=101 custom=5 stmt=SELECT c.relname AS table_name, i.relname AS index_name, idx.indisunique, array_
+PREPSTMT peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_3 generic=105 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_4 generic=105 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-http op=query conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_5 generic=100 custom=5 stmt=SELECT "label", "_r2db_revision"::text FROM "perfq_f2c5b62f4eaa" WHERE "label" =
+POOL peer=r2db-api plug=r2db-api-http op=mutate role=perfbase_15aa2bc6f308/developer size=2 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=mutate role=perfbase_15aa2bc6f308/runtime size=2 acquire=221 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/developer@73238 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 executes=1438 executemany=0 prepared=8 prepared_execs=1395 share=0.970
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_0 generic=216 custom=0 stmt=SELECT 1
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_1 generic=211 custom=5 stmt=SELECT c.table_name, c.column_name, c.data_type, c.is_identity, c.domain_name FR
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_2 generic=211 custom=5 stmt=SELECT c.relname AS table_name, i.relname AS index_name, idx.indisunique, array_
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_3 generic=215 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_4 generic=215 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_5 generic=100 custom=5 stmt=SELECT "label", "_r2db_revision"::text FROM "perfq_f2c5b62f4eaa" WHERE "label" =
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_6 generic=106 custom=0 stmt=SELECT entity_name, field_name, nullable, enum_values FROM public."_r2db_field_c
+PREPSTMT peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_7 generic=101 custom=5 stmt=INSERT INTO "perfq_f2c5b62f4eaa" ("label") VALUES ($1) RETURNING "id"
+POOL peer=r2db-api plug=r2db-api-http op=batch role=perfbase_15aa2bc6f308/developer size=2 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=batch role=perfbase_15aa2bc6f308/runtime size=2 acquire=331 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/developer@73238 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 executes=2648 executemany=0 prepared=8 prepared_execs=2605 share=0.984
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_0 generic=326 custom=0 stmt=SELECT 1
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_1 generic=321 custom=5 stmt=SELECT c.table_name, c.column_name, c.data_type, c.is_identity, c.domain_name FR
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_2 generic=321 custom=5 stmt=SELECT c.relname AS table_name, i.relname AS index_name, idx.indisunique, array_
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_3 generic=325 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_4 generic=325 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_5 generic=100 custom=5 stmt=SELECT "label", "_r2db_revision"::text FROM "perfq_f2c5b62f4eaa" WHERE "label" =
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_6 generic=216 custom=0 stmt=SELECT entity_name, field_name, nullable, enum_values FROM public."_r2db_field_c
+PREPSTMT peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_15aa2bc6f308/runtime@73240 name=_pg3_7 generic=651 custom=5 stmt=INSERT INTO "perfq_f2c5b62f4eaa" ("label") VALUES ($1) RETURNING "id"
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=query n=100 p50_ms=1.861 p95_ms=2.179 backend_calls=14.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=mutate n=100 p50_ms=1.942 p95_ms=2.221 backend_calls=15.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=batch n=100 p50_ms=2.002 p95_ms=2.311 backend_calls=19.00 concurrency=1
+POOL peer=MitateDB-api plug=MitateDB-api-http op=query lock=perfbase_381e70be7c60 acquire=226 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=query conn=runtime@73262 executes=334 executemany=0 prepared=3 prepared_execs=303 share=0.907
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=runtime@73262 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_dd087037f910" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=runtime@73262 name=_pg3_1 generic=99 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=runtime@73262 name=_pg3_2 generic=99 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@73263 executes=1788 executemany=0 prepared=5 prepared_execs=1748 share=0.978
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@73263 name=_pg3_0 generic=439 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@73263 name=_pg3_1 generic=439 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@73263 name=_pg3_2 generic=432 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@73263 name=_pg3_3 generic=212 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@73263 name=_pg3_4 generic=211 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+POOL peer=MitateDB-api plug=MitateDB-api-http op=mutate lock=perfbase_381e70be7c60 acquire=447 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=runtime@73262 executes=664 executemany=0 prepared=4 prepared_execs=629 share=0.947
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=runtime@73262 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_dd087037f910" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=runtime@73262 name=_pg3_1 generic=209 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=runtime@73262 name=_pg3_2 generic=209 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=runtime@73262 name=_pg3_3 generic=101 custom=5 stmt=INSERT INTO "perfq_dd087037f910" ("label") VALUES ($1) RETURNING ctid
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@73263 executes=2668 executemany=0 prepared=6 prepared_execs=2625 share=0.984
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@73263 name=_pg3_0 generic=659 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@73263 name=_pg3_1 generic=659 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@73263 name=_pg3_2 generic=542 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@73263 name=_pg3_3 generic=322 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@73263 name=_pg3_4 generic=321 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@73263 name=_pg3_5 generic=102 custom=5 stmt=SELECT field, declared_type, enum_json, nullable FROM "_mdb_field_types" WHERE e
+POOL peer=MitateDB-api plug=MitateDB-api-http op=batch lock=perfbase_381e70be7c60 acquire=668 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 executes=1434 executemany=0 prepared=8 prepared_execs=1393 share=0.971
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_dd087037f910" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_1 generic=209 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_2 generic=209 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_3 generic=651 custom=5 stmt=INSERT INTO "perfq_dd087037f910" ("label") VALUES ($1) RETURNING ctid
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_4 generic=103 custom=0 stmt=SET LOCAL statement_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_5 generic=103 custom=0 stmt=SET LOCAL lock_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_6 generic=4 custom=0 stmt=SET LOCAL statement_timeout = '4997ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@73262 name=_pg3_7 generic=4 custom=0 stmt=SET LOCAL lock_timeout = '4997ms'
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@73263 executes=7068 executemany=0 prepared=6 prepared_execs=7025 share=0.994
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@73263 name=_pg3_0 generic=1759 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@73263 name=_pg3_1 generic=1759 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@73263 name=_pg3_2 generic=1092 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@73263 name=_pg3_3 generic=872 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@73263 name=_pg3_4 generic=871 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@73263 name=_pg3_5 generic=652 custom=5 stmt=SELECT field, declared_type, enum_json, nullable FROM "_mdb_field_types" WHERE e
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity lock=cap_probe_1_f3550c2e acquire=0 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity lock=perfbase_381e70be7c60 acquire=893 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73968 executes=1 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73969 executes=0 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 executes=1874 executemany=0 prepared=9 prepared_execs=1822 share=0.972
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_dd087037f910" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_1 generic=312 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_2 generic=312 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_3 generic=761 custom=5 stmt=INSERT INTO "perfq_dd087037f910" ("label") VALUES ($1) RETURNING ctid
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_4 generic=105 custom=0 stmt=SET LOCAL statement_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_5 generic=105 custom=0 stmt=SET LOCAL lock_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_6 generic=6 custom=0 stmt=SET LOCAL statement_timeout = '4997ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_7 generic=6 custom=0 stmt=SET LOCAL lock_timeout = '4997ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@73262 name=_pg3_8 generic=100 custom=5 stmt=INSERT INTO "perfx_cbafebd66155" ("label") VALUES ($1) RETURNING ctid
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73263 executes=8848 executemany=0 prepared=6 prepared_execs=1730 share=0.196
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73263 name=_pg3_6 generic=435 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73263 name=_pg3_7 generic=435 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73263 name=_pg3_8 generic=210 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73263 name=_pg3_9 generic=210 custom=5 stmt=SELECT field, declared_type, enum_json, nullable FROM "_mdb_field_types" WHERE e
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73263 name=_pg3_10 generic=210 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@73263 name=_pg3_11 generic=210 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=query n=100 p50_ms=8.106 p95_ms=8.546 backend_calls=21.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=mutate n=100 p50_ms=7.775 p95_ms=8.121 backend_calls=13.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=batch n=100 p50_ms=9.394 p95_ms=9.779 backend_calls=49.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=cross_entity n=100 p50_ms=8.239 p95_ms=8.713 backend_calls=22.00 concurrency=1
+POOL peer=r2db-api plug=r2db-api-socket op=query role=perfbase_0d349f14f247/developer size=2 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=query role=perfbase_0d349f14f247/runtime size=2 acquire=111 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/developer@74235 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/runtime@74237 executes=668 executemany=0 prepared=6 prepared_execs=633 share=0.948
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_0 generic=106 custom=0 stmt=SELECT 1
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_1 generic=101 custom=5 stmt=SELECT c.table_name, c.column_name, c.data_type, c.is_identity, c.domain_name FR
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_2 generic=101 custom=5 stmt=SELECT c.relname AS table_name, i.relname AS index_name, idx.indisunique, array_
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_3 generic=105 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_4 generic=105 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_5 generic=100 custom=5 stmt=SELECT "label", "_r2db_revision"::text FROM "perfq_49a5fd56c1dc" WHERE "label" =
+POOL peer=r2db-api plug=r2db-api-socket op=mutate role=perfbase_0d349f14f247/developer size=2 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=mutate role=perfbase_0d349f14f247/runtime size=2 acquire=221 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/developer@74235 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 executes=1438 executemany=0 prepared=8 prepared_execs=1395 share=0.970
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_0 generic=216 custom=0 stmt=SELECT 1
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_1 generic=211 custom=5 stmt=SELECT c.table_name, c.column_name, c.data_type, c.is_identity, c.domain_name FR
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_2 generic=211 custom=5 stmt=SELECT c.relname AS table_name, i.relname AS index_name, idx.indisunique, array_
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_3 generic=215 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_4 generic=215 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_5 generic=100 custom=5 stmt=SELECT "label", "_r2db_revision"::text FROM "perfq_49a5fd56c1dc" WHERE "label" =
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_6 generic=106 custom=0 stmt=SELECT entity_name, field_name, nullable, enum_values FROM public."_r2db_field_c
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_7 generic=101 custom=5 stmt=INSERT INTO "perfq_49a5fd56c1dc" ("label") VALUES ($1) RETURNING "id"
+POOL peer=r2db-api plug=r2db-api-socket op=batch role=perfbase_0d349f14f247/developer size=2 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=batch role=perfbase_0d349f14f247/runtime size=2 acquire=331 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/developer@74235 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 executes=2648 executemany=0 prepared=8 prepared_execs=2605 share=0.984
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_0 generic=326 custom=0 stmt=SELECT 1
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_1 generic=321 custom=5 stmt=SELECT c.table_name, c.column_name, c.data_type, c.is_identity, c.domain_name FR
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_2 generic=321 custom=5 stmt=SELECT c.relname AS table_name, i.relname AS index_name, idx.indisunique, array_
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_3 generic=325 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_4 generic=325 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_5 generic=100 custom=5 stmt=SELECT "label", "_r2db_revision"::text FROM "perfq_49a5fd56c1dc" WHERE "label" =
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_6 generic=216 custom=0 stmt=SELECT entity_name, field_name, nullable, enum_values FROM public."_r2db_field_c
+PREPSTMT peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_0d349f14f247/runtime@74237 name=_pg3_7 generic=651 custom=5 stmt=INSERT INTO "perfq_49a5fd56c1dc" ("label") VALUES ($1) RETURNING "id"
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=query n=100 p50_ms=6.036 p95_ms=6.410 backend_calls=14.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=mutate n=100 p50_ms=6.297 p95_ms=6.652 backend_calls=15.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=batch n=100 p50_ms=6.387 p95_ms=6.710 backend_calls=19.00 concurrency=1
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=query lock=perfbase_458f5f154eee acquire=226 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=query conn=runtime@74253 executes=334 executemany=0 prepared=3 prepared_execs=303 share=0.907
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=runtime@74253 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_68798a6bf244" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=runtime@74253 name=_pg3_1 generic=99 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=runtime@74253 name=_pg3_2 generic=99 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@74254 executes=1788 executemany=0 prepared=5 prepared_execs=1748 share=0.978
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@74254 name=_pg3_0 generic=439 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@74254 name=_pg3_1 generic=439 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@74254 name=_pg3_2 generic=432 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@74254 name=_pg3_3 generic=212 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@74254 name=_pg3_4 generic=211 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=mutate lock=perfbase_458f5f154eee acquire=447 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=runtime@74253 executes=664 executemany=0 prepared=4 prepared_execs=627 share=0.944
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=runtime@74253 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_68798a6bf244" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=runtime@74253 name=_pg3_1 generic=208 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=runtime@74253 name=_pg3_2 generic=208 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=runtime@74253 name=_pg3_3 generic=101 custom=5 stmt=INSERT INTO "perfq_68798a6bf244" ("label") VALUES ($1) RETURNING ctid
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@74254 executes=2668 executemany=0 prepared=6 prepared_execs=2625 share=0.984
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@74254 name=_pg3_0 generic=659 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@74254 name=_pg3_1 generic=659 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@74254 name=_pg3_2 generic=542 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@74254 name=_pg3_3 generic=322 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@74254 name=_pg3_4 generic=321 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@74254 name=_pg3_5 generic=102 custom=5 stmt=SELECT field, declared_type, enum_json, nullable FROM "_mdb_field_types" WHERE e
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=batch lock=perfbase_458f5f154eee acquire=668 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 executes=1434 executemany=0 prepared=8 prepared_execs=1393 share=0.971
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_68798a6bf244" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_1 generic=208 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_2 generic=208 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_3 generic=651 custom=5 stmt=INSERT INTO "perfq_68798a6bf244" ("label") VALUES ($1) RETURNING ctid
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_4 generic=100 custom=0 stmt=SET LOCAL statement_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_5 generic=100 custom=0 stmt=SET LOCAL lock_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_6 generic=8 custom=0 stmt=SET LOCAL statement_timeout = '4997ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@74253 name=_pg3_7 generic=8 custom=0 stmt=SET LOCAL lock_timeout = '4997ms'
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@74254 executes=7068 executemany=0 prepared=6 prepared_execs=7025 share=0.994
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@74254 name=_pg3_0 generic=1759 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@74254 name=_pg3_1 generic=1759 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@74254 name=_pg3_2 generic=1092 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@74254 name=_pg3_3 generic=872 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@74254 name=_pg3_4 generic=871 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@74254 name=_pg3_5 generic=652 custom=5 stmt=SELECT field, declared_type, enum_json, nullable FROM "_mdb_field_types" WHERE e
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity lock=cap_probe_1_5d5edc48 acquire=0 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity lock=perfbase_458f5f154eee acquire=893 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@75005 executes=1 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@75006 executes=0 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 executes=1874 executemany=0 prepared=9 prepared_execs=1820 share=0.971
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_0 generic=100 custom=5 stmt=SELECT "label" FROM "perfq_68798a6bf244" WHERE "label" = $1 LIMIT $2
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_1 generic=308 custom=0 stmt=SET LOCAL statement_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_2 generic=308 custom=0 stmt=SET LOCAL lock_timeout = '4999ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_3 generic=761 custom=5 stmt=INSERT INTO "perfq_68798a6bf244" ("label") VALUES ($1) RETURNING ctid
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_4 generic=105 custom=0 stmt=SET LOCAL statement_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_5 generic=105 custom=0 stmt=SET LOCAL lock_timeout = '4998ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_6 generic=9 custom=0 stmt=SET LOCAL statement_timeout = '4997ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_7 generic=9 custom=0 stmt=SET LOCAL lock_timeout = '4997ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@74253 name=_pg3_8 generic=100 custom=5 stmt=INSERT INTO "perfx_569addcbb890" ("label") VALUES ($1) RETURNING ctid
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@74254 executes=8848 executemany=0 prepared=6 prepared_execs=1730 share=0.196
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@74254 name=_pg3_6 generic=435 custom=0 stmt=SET LOCAL statement_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@74254 name=_pg3_7 generic=435 custom=0 stmt=SET LOCAL lock_timeout = '5000ms'
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@74254 name=_pg3_8 generic=210 custom=5 stmt=SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AN
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@74254 name=_pg3_9 generic=210 custom=5 stmt=SELECT field, declared_type, enum_json, nullable FROM "_mdb_field_types" WHERE e
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@74254 name=_pg3_10 generic=210 custom=5 stmt=SELECT column_name, data_type FROM information_schema.columns WHERE table_schema
+PREPSTMT peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@74254 name=_pg3_11 generic=210 custom=5 stmt=SELECT field, declared_type FROM "_mdb_field_types" WHERE entity = $1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=query n=100 p50_ms=12.954 p95_ms=15.415 backend_calls=21.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=mutate n=100 p50_ms=13.466 p95_ms=16.695 backend_calls=13.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=batch n=100 p50_ms=14.050 p95_ms=15.910 backend_calls=49.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity n=100 p50_ms=13.069 p95_ms=14.950 backend_calls=22.00 concurrency=1
+```
+
 ## 3. 事実 (§2 の数字だけから。判断語を含まない。WP-2 = 監督が埋める)
 
 - (i) 接続・op ごとの `share` (**構造的上限が在るので判定は `PREPSTMT` の一覧で行う**): **r2db は全接続・全 op で `prepared=0`、`share=0.000`** (K=1: runtime 接続 1 本、`executes` は query 668 → mutate 1438 → batch 2648 と累積; K=4: runtime 接続 2 本 (pool 2)、`executes` 各 5,275 / 5,294 まで。developer 接続は `executes=21` で不変)。http と socket の plug で数字は同一である。**MitateDB は `runtime@<pid>` が 0.913〜0.983、`developer@<pid>` が 0.978〜0.998**、例外は cross_entity の developer 接続の **0.196** (K=1) / **0.199** (K=4) で、これは (iii) の消去の後の値である。cross_entity で現れる第 2 の cell (`runtime@…` `executes=1`、`developer@…` `executes=0`) は同 op が作る 2 つ目の application で、実行回数が閾値に届かないので `prepared=0` である。
@@ -502,7 +724,10 @@ PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity
 - (vii) r2db の消去が **checkout ごとの liveness rollback** (`postgres.py`:462-489) によるものか (WO §6.1 の設計レビュー 1 の H-2): r2db の成功経路で `rollback()` を打つ箇所は `_liveness_check` の 1 つだけであり (WO §1.3 の (2))、貸し出しのたびに `SELECT 1` → `rollback()` が走る。観測は「probe のたびに `prepared=0`、かつ同じ文字列の `executes` が数千回」であり、checkout ごとの全消去と整合する。他の消去経路 (dry_run の `psycopg.Rollback`、error 分岐、`_load_field_constraints` の savepoint) は本 harness の op では踏まない。
 - (viii) 本計測は **plug 1 回につき application 1 個**なので、台帳 `RM`:510 の R-79 行の「application ごとに識別子が変わる」条件は**観測されない** (WO §6.1 の設計レビュー 1 の L-11): `PREPARED` の label は plug ごとに 1 つの `perfbase_*` application だけを示す (cross_entity が作る 2 つ目の cell を除く)。application ごとに識別子が変わる場合の鍵の増え方は本計測の範囲外である。
 
+- (ix) **WP-3 の後の r2db** (§2.3): runtime 接続で `prepared` が 6 (query) → 8 (mutate / batch)、`share` 0.948 → 0.970 → 0.984 (K=1、http と socket で同一の数字)。prepared に在る文は、ping の `SELECT 1` (`generic_plans` 106 → 326 = checkout ごとに 1 回)、catalog 読み 2 形 (`information_schema` 相当の列読みと index 読み。`custom_plans=5` の後 generic、op ごとに 100 回 = **要求ごとに 1 回ずつ読んでいる**)、`SET LOCAL statement_timeout` / `lock_timeout` = `'4999ms'` (値は 1 種)、data 面の `SELECT … "_r2db_revision"::text FROM …`、制約 registry の読み (`SELECT entity_name, field_name, nullable, enum_values FROM public.…`、mutate 以降)、`INSERT … RETURNING` である。developer 接続は `executes=21` のまま `prepared=0` (閾値に届く文が無い)。**同じ木で基点 `fc891cb` の道具と交互に取った非退行 (K=1 / K=3、WO §6.2)**: r2db-http の p50 は K=1 で 3.440 → 1.664 ms (query)、3.499 → 1.789 (mutate)、3.805 → 1.922 (batch) = **−49〜−52%**、r2db-socket は −26〜−44%、K=3 では r2db-http −41〜−46%、r2db-socket −12〜−15%。MitateDB の行は −9.3〜+5.8% (socket batch のみ −11.4%) で、WP-3 が触っていない peer の run 間の散らばりと同程度である。**`connection()` の `finally` の防御 rollback** (受け入れ監査の実測): caller が非 IDLE で解放した接続には毎回 `ROLLBACK` が打たれ、F2 で prepared が全消去される。実運用経路は `with conn.transaction():` の commit / rollback で閉じるので IDLE で戻り、この rollback は発火しない。ただし**例外で終わる要求は `conn.transaction()` 自身の rollback で消去される** (F2 のとおり、WP-3 の範囲外)。
+
 ## 4. 判断 (WP-2 = 監督が書く。WP-1 では空欄)
 
 - 効かない経路の特定: **r2db の data 面の全経路。** 原因は `_RolePool._liveness_check` が貸し出しのたびに `SELECT 1` を開いた transaction を `rollback()` で閉じることで、psycopg はこの `rollback()` で client 側の prepared 表を消し `DEALLOCATE ALL` を送る (F2)。自動 prepare は同じ接続で同じ文を 5 回数えることが前提なので、checkout ごとに 0 に戻る r2db では一度も成立しない (§3 の (i)(iii)(vii))。**MitateDB は効いている**: 持続接続 2 本で `share` ≥ 0.91、deadline 由来の `SET LOCAL` の値も 3〜12 種に収まって自身が prepared になるので、F1 の可変鍵は本 harness では問題にならない (§3 の (ii))。cross_entity の developer 接続の 1 回の消去は error 分岐の `rollback()` (F2) と整合し、経路の欠陥ではない。
 - WP-3 の内容 (WO §3.4 の候補 (A) / (B) / (C) のどれを採るか): **(D) を r2db に適用し、MitateDB は (C) とする** (監督判断 2026-09-23)。(D) の形: `_liveness_check` の `SELECT 1` を transaction の外で打つ (ping の間だけ `conn.autocommit = True` にし、直後に `False` へ戻す。psycopg の `autocommit` の切り替えは IDLE のときサーバへ何も送らない) — `ROLLBACK` が出ないので prepared 表は残り、ping の往復は `BEGIN` / `SELECT 1` / `ROLLBACK` の 3 から `SELECT 1` の 1 に減る。貸し出す接続が IDLE で始まる保証は変わらない。**(A) は採らない**: r2db では ping の消去がある限り (A) だけでは 1 本も prepared にならず、MitateDB では既に prepared になっている。(A) の往復削減 (2 文 → 1 文) は R-80 の範囲として台帳に申し送る。**(B) は不要** (値の種類は 3〜12 で `prepared_max` 100 に遠い)。R-84 の再検討条件には触れない。WP-3 の後に r2db の K=1 を再計測して §2.3 に置き、`prepared` > 0 と `share` を §3 に追記する。
+- **WP-3 の結果 (2026-09-23)**: (D) を r2db に適用した木で、r2db の data 面は prepared で走るようになった (§3 の (ix): `share` 0.95〜0.98、p50 は http で約半分)。**R-79 は閉じる。** 申し送り: (1) 候補 (A) (`SET LOCAL` 2 文 → `set_config` 1 文) は往復削減として **R-80** の材料 (両 peer とも `SET LOCAL` は既に prepared に在るので prepare の観点では不要)。(2) r2db が**要求ごとに catalog を 2 形読んでいる**事実 (§3 の (ix)) は **R-82** (スキーマ情報の要求ごとの読み直し) の起点の実測である。(3) 例外で終わる要求の接続は `conn.transaction()` の rollback で prepared を失う (F2) — エラー率が高い運用では再 prepare のコストが残るが、psycopg の機構であり本件では扱わない。

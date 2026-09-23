@@ -2051,3 +2051,30 @@ new:
 # test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_
 # recovers_once_reachable` are the executable checks for this fix.
 ```
+
+## CH-0541
+
+- moved from: `src/r2db_api/postgres.py` (`_RolePool._liveness_check`)
+- parent commit: `fc891cb`
+- kind: comment
+
+```
+# A `SELECT` inside `autocommit=False` opens a transaction; roll
+# it back immediately so the connection is handed to the caller
+# IDLE, exactly as `_connect()` leaves a freshly opened one --
+# the ping itself must be invisible to whatever runs next.
+```
+
+### correction: 2026-09-23
+
+- reason: R-79 WP-3 (docs/work-orders/WORK_ORDER_R79_PREPARED_STATEMENT_MEASUREMENT_V1.md §3.4) -- the liveness ping now runs under `autocommit=True` instead of opening a transaction that `rollback()` then closes, since that `rollback()` cleared every prepared statement on the connection on every checkout (F2); a pre-check that rolls back a non-IDLE connection first was added at the same time so the `autocommit=True` flip (which requires an IDLE connection) never raises
+
+old:
+```
+A `SELECT` inside `autocommit=False` opens a transaction; roll it back immediately so the connection is handed to the caller IDLE, exactly as `_connect()` leaves a freshly opened one -- the ping itself must be invisible to whatever runs next.
+```
+
+new:
+```
+The ping runs under `autocommit=True` so `SELECT 1` never opens a transaction, leaving nothing for a `rollback()` to close afterwards -- `rollback()` on a non-IDLE connection clears every prepared statement on it, which a checkout-time ping must not do. The check above rolls a non-IDLE connection back first so this flip (which requires IDLE) never raises. `autocommit` returns to `False` in `finally` so the connection is handed to the caller IDLE, exactly as `_connect()` leaves a freshly opened one -- the ping itself must be invisible to whatever runs next.
+```
