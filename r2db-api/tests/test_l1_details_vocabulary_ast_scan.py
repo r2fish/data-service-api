@@ -165,7 +165,34 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # `_fail_client_value`'s own single `fail()` call is otherwise unchanged.
     # R-78 WP-1 (2026-09-23): line shift only (1451 -> 1515) -- see this
     # frozenset's own `#:` header above for the detailed accounting.
-    ("postgres.py", 1515),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # R-79 WP-1 (2026-09-23): line shift only (1515 -> 1659, then 1659 ->
+    # 1658 after a rework pass removed the probe's own internal `try`/
+    # `except` -- WO §2.2 completion condition 15's own
+    # `finally`-based connection return only exercises meaningfully when
+    # the probe itself is allowed to raise, so the catch moved to the
+    # caller) -- `postgres.py` gained a `CountingConnection` import, the
+    # module-level `pg_prepared_statements` probe helpers, and `_RolePool.
+    # prepared_stats`/`SharedPoolManager.prepared_stats` (WO §2.1 D-1/D-2),
+    # all above this call site; `_fail_client_value`'s own single `fail()`
+    # call is otherwise unchanged.
+#: R-79 WP-1 supervisor rework (2026-09-23): the CH-ID-less comment block
+#: in front of `_RolePool._connect`'s `CountingConnection.connect` call
+#: was removed (comment provenance §4.1 (2)), shortening the file by 6
+#: lines -- the `postgres.py` site below shifted UP by 6. Re-verified via
+#: `_fail_call_sites`.
+#: R-79 WP-1 rework (2026-09-23, 指摘 3): 1652 -> 1584 -- the `pg_
+#: prepared_statements` probe helpers (then locally named with a leading
+#: underscore, now the shared, public `prepared_stats_skeleton`/`probe_
+#: prepared_statements`) moved out of this file entirely, into
+#: `psycopg_counting.py` (shared with MitateDB-api, no longer duplicated
+#: per peer); only a `CountingConnection`/`prepared_stats_skeleton`/
+#: `probe_prepared_statements` import line remains here. Re-verified via
+#: `_fail_call_sites`.
+#: R-79 WP-1 final rework (2026-09-23): the `_RolePool.prepared_stats`
+#: docstring gained the harness-only calling condition (8 lines), so the
+#: `postgres.py` site below shifted DOWN by 8. Re-verified via
+#: `_fail_call_sites`.
+    ("postgres.py", 1592),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

@@ -37,6 +37,11 @@ from typing import Optional
 import psycopg
 
 from .errors import AuthorizationStateUnavailable
+# R-79 (WO §2.1 D-1): the counting cursor/connection subclasses `_new_
+# connection` (below) uses instead of plain `psycopg.connect` --
+# byte-identical to `r2db_api.psycopg_counting` (a same-named test in
+# `tests/` pins the sha256 match).
+from .psycopg_counting import CountingConnection
 
 # mitatedbsvc_api's own CONNECTION LIMIT (migration
 # 0002_registry_and_functions.sql) -- the composition root's own default
@@ -128,7 +133,13 @@ class BoundedConnectionPool:
             }
 
     def _new_connection(self) -> "psycopg.Connection":
-        return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        # R-79 (WO §2.1 D-1): `CountingConnection.connect` in place of
+        # plain `psycopg.connect` -- same classmethod, same signature
+        # (`psycopg.connect` is itself `Connection.connect`, `psycopg/
+        # __init__.py`), the only difference is every connection this pool
+        # ever hands out now carries its own `execute_count`/`executemany_
+        # count` and a `CountingCursor` factory. No other line changes.
+        return CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
 
     def _forget_one(self) -> None:
         with self._lock:

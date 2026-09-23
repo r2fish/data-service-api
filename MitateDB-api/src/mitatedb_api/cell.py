@@ -611,6 +611,29 @@ class ApplicationCell:
         # config`.
         self.process_ceiling = process_ceiling
 
+    def prepared_stats(self):
+        """R-79 (WO §1.2 D-2, D-3; §2.1 起草時の裁定 4): read-only accessor
+        -- delegates to `self._backend.prepared_stats()` under `self.
+        _lock` (this class's own `RLock`, WO §1.2 D-2's own "lock is taken
+        by `ApplicationCell`, r2db does not take one -- it drains a queue
+        instead" split) and returns `[]` when the backend has no such
+        method (`SQLiteBackend`, and any other non-PostgreSQL backend).
+        Called exactly once per (plug, op) by `tools/perf_baseline.py`'s
+        `_emit_prepared_rows` (via the conformance adapter's own `prepared_
+        stats()`), so one call here is one `self._lock` acquisition --
+        this is also why the harness's own `POOL lock=` `acquire` count
+        includes one entry per preceding probe from R-79 onward (`tools/
+        PERF_BASELINE_README.md`).
+
+        Does not widen or narrow the scope `with self._lock:` already
+        covers elsewhere in this class -- this is a new, independent
+        acquisition of the SAME lock, not a change to any existing one."""
+        with self._lock:
+            backend_probe = getattr(self._backend, "prepared_stats", None)
+            if backend_probe is None:
+                return []
+            return backend_probe()
+
     @contextmanager
     def _limit_gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
         """Phase 8 WP-1a rework 1 (裁定 5, 監督裁定 2026-09-06; design D-1

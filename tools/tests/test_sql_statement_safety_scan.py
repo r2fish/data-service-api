@@ -230,6 +230,7 @@ _EXPECTED_DISCOVERED_MODULES: dict[str, frozenset[str]] = {
         "postgres_like.py",
         "postgres_sql.py",
         "postgres_types.py",
+        "psycopg_counting.py",
         "request_shape.py",
         "schema_binding.py",
         "service.py",
@@ -280,6 +281,7 @@ _EXPECTED_DISCOVERED_MODULES: dict[str, frozenset[str]] = {
         "postgres_types.py",
         "postgres_value_domain.py",
         "provisional_gate.py",
+        "psycopg_counting.py",
         "request_binding.py",
         "request_limits.py",
         "request_traversal.py",
@@ -306,8 +308,14 @@ _EXECUTION_QUALIFIED_NAMES: tuple[str, ...] = (
     "r2db_api.credential_store._execute",
 )
 
-# The pinned `.executemany(` count per peer (0 for both, measured by hand).
-_EXPECTED_EXECUTEMANY_COUNTS: dict[str, int] = {"r2db": 0, "mitatedb": 0}
+# The pinned `.executemany(` count per peer. R-79 (WO §2.1 D-1, completion
+# condition 24): each peer's own `psycopg_counting.CountingCursor.
+# executemany` forwards to `super().executemany(...)` -- one real call
+# site per peer, the unit test's own only observation point (WO §1.3 (8):
+# still 0 real APPLICATION-code call sites, r2db-api/src and MitateDB-api/
+# src's own ops.py/etc. never call `.executemany`; this is the counting
+# wrapper's own forwarding call, not a production one).
+_EXPECTED_EXECUTEMANY_COUNTS: dict[str, int] = {"r2db": 1, "mitatedb": 1}
 
 _PACKAGE_TO_PEER: dict[str, str] = {"r2db_api": "r2db", "mitatedb_api": "mitatedb"}
 

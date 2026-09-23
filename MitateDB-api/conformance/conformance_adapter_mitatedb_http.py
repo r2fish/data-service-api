@@ -3057,6 +3057,21 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         cell is currently open."""
         return {application_id: cell._lock.stats() for application_id, cell in self._cells.items()}  # noqa: SLF001 -- adapter-internal reach-in, same convention as this file's other `cell._...` accesses above
 
+    def prepared_stats(self) -> list[dict]:
+        """R-79 (WO §1.2 D-2/D-3): the data-plane counterpart of
+        `conformance_adapter_r2db_http.py`'s identical addition. Calls each
+        open cell's own PUBLIC `prepared_stats()` (`cell.py::ApplicationCell.
+        prepared_stats`, under that cell's own lock) -- unlike `pool_stats`
+        immediately above, this needs no `noqa: SLF001` reach-in, since
+        `ApplicationCell.prepared_stats` is itself a public method. Flat
+        list across every open cell (each connection's own `label` already
+        carries its role and backend pid, so cells never need a separate
+        key the way `pool_stats`'s dict does)."""
+        rows: list[dict] = []
+        for cell in self._cells.values():
+            rows.extend(cell.prepared_stats())
+        return rows
+
     def close(self) -> None:
         self._cleanup()
         atexit.unregister(self._cleanup)

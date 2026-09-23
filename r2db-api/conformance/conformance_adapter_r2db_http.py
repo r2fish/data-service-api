@@ -3994,6 +3994,15 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         docstring)."""
         return default_pool_manager.stats()
 
+    def prepared_stats(self) -> list[dict]:
+        """R-79 (WO §1.2 D-2/D-3): the data-plane counterpart of `pool_
+        stats()` immediately above -- same process-wide `SharedPoolManager`
+        this adapter's own cells all share, so this is every idle
+        connection currently sitting in any of this adapter's own role
+        pools, probed for `pg_prepared_statements` content
+        (`SharedPoolManager.prepared_stats()`'s own docstring)."""
+        return default_pool_manager.prepared_stats()
+
     def close(self) -> None:
         try:
             self._run(self._client.aclose())

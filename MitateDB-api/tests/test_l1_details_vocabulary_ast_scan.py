@@ -274,6 +274,29 @@ _VOCAB_CLASSES = {"ValidationError", "CapabilityError"}
 #: times and adds no `_VOCAB_CLASSES` call of its own, so `_VOCAB_
 #: CLASSES` call sites are unaffected; only the line numbers of the
 #: pre-existing generic `except psycopg.Error` backstops below move.
+#: R-79 WP-1 (2026-09-23, docs/work-orders/
+#: WORK_ORDER_R79_PREPARED_STATEMENT_MEASUREMENT_V1.md §2.1 D-1/D-2): a
+#: new `TransactionStatus`/`CountingConnection` import, the module-level
+#: `pg_prepared_statements` probe helpers (then locally named with a
+#: leading underscore, now the shared, public `prepared_stats_skeleton`/
+#: `probe_prepared_statements`), a comment on the two `CountingConnection.
+#: connect` calls inside `__init__`, and the new `PostgresBackend.prepared_
+#: stats` method after `close()` push every one of the 20 allowlisted
+#: sites below down by a UNIFORM 114 lines -- all 20 sit after every one
+#: of these insertions in the file, so the shift is constant this time.
+#: Re-verified against the current file via `_fail_call_sites`, not
+#: hand-shifted. Entry count and site identity unchanged (20) -- R-79
+#: calls `ValidationError`/`CapabilityError` zero times and adds no
+#: `_VOCAB_CLASSES` call of its own.
+#: R-79 WP-1 rework (2026-09-23): removing the probe's own internal
+#: `try`/`except` (WO §2.2 completion condition 15's own
+#: `finally`-based return only exercises meaningfully when the probe
+#: itself is allowed to raise, so the catch moved to the caller,
+#: `PostgresBackend.prepared_stats`) shortened the file by 1 line --
+#: every one of the 20 sites below shifted UP by 1 more (a further
+#: UNIFORM shift, all 20 still sit after this edit). Re-verified via
+#: `_fail_call_sites`, not hand-shifted. Entry count and site identity
+#: unchanged (20).
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # Code-review fix F1/F2/F6 (Opus review 2, WP-6d rework): every line
     # number below shifted when `idempotency_begin`/`idempotency_reserve`
@@ -284,26 +307,42 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # file, not merely offset by a constant (the two idempotency sites
     # near the bottom moved by MORE than every site above them, since the
     # added code sits between them and the earlier sites).
-    ("backend_postgres.py", 381),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 442),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 495),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 526),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 587),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 649),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 678),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 859),   # generic driver-exception translation
-    ("backend_postgres.py", 880),   # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1011),  # generic driver-exception translation
-    ("backend_postgres.py", 1169),  # generic driver-exception translation
-    ("backend_postgres.py", 1242),  # generic driver-exception translation
-    ("backend_postgres.py", 1295),  # generic driver-exception translation
-    ("backend_postgres.py", 1328),  # generic driver-exception translation
-    ("backend_postgres.py", 1354),  # generic driver-exception translation
-    ("backend_postgres.py", 1421),  # generic driver-exception translation
-    ("backend_postgres.py", 1449),  # generic driver-exception translation
-    ("backend_postgres.py", 1490),  # generic driver-exception translation
-    ("backend_postgres.py", 1759),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1828),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+#: R-79 WP-1 supervisor rework (2026-09-23): the CH-ID-less comment block
+#: in front of the two `CountingConnection.connect` calls in `__init__`
+#: was removed (comment provenance §4.1 (2)), shortening the file by 7
+#: lines -- every one of the 20 sites below shifted UP by 7 more (UNIFORM,
+#: all 20 sit after `__init__`). Re-verified via `_fail_call_sites`.
+#: R-79 WP-1 rework (2026-09-23, 指摘 3): every site shifted UP by a
+#: further 67 lines (UNIFORM) -- the `pg_prepared_statements` probe
+#: helpers (then locally named with a leading underscore, now the
+#: shared, public `prepared_stats_skeleton`/`probe_prepared_statements`)
+#: moved out of this file entirely, into `psycopg_counting.py` (shared
+#: with r2db-api, no longer duplicated per peer); only a
+#: `CountingConnection`/`prepared_stats_skeleton`/`probe_prepared_
+#: statements` import line remains here, and `prepared_stats()` itself
+#: shrank (it now calls the shared functions instead of defining them).
+#: Re-verified via `_fail_call_sites`, not hand-shifted. Entry count and
+#: site identity unchanged (20).
+    ("backend_postgres.py", 420),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 481),   # field_domains: generic driver-exception translation
+    ("backend_postgres.py", 534),   # field_types: generic driver-exception translation
+    ("backend_postgres.py", 565),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 626),   # field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 688),   # field_types_and_constraints: generic driver-exception translation
+    ("backend_postgres.py", 717),   # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 898),   # generic driver-exception translation
+    ("backend_postgres.py", 919),   # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1050),  # generic driver-exception translation
+    ("backend_postgres.py", 1208),  # generic driver-exception translation
+    ("backend_postgres.py", 1281),  # generic driver-exception translation
+    ("backend_postgres.py", 1334),  # generic driver-exception translation
+    ("backend_postgres.py", 1367),  # generic driver-exception translation
+    ("backend_postgres.py", 1393),  # generic driver-exception translation
+    ("backend_postgres.py", 1460),  # generic driver-exception translation
+    ("backend_postgres.py", 1488),  # generic driver-exception translation
+    ("backend_postgres.py", 1529),  # generic driver-exception translation
+    ("backend_postgres.py", 1798),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1867),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
