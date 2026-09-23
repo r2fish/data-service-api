@@ -5382,3 +5382,66 @@ def test_r89_real_commit_0d0f8c9_reproduction(tmp_path):
     assert code == 1, (code, output)
     all_two_lines = [line for line in output.splitlines() if "§4.1 (2)" in line]
     assert len(all_two_lines) == 12, all_two_lines
+
+
+# ---------------------------------------------------------------------------
+# WORK_ORDER_DOC_ARCHIVE_SPLIT_V1.md WP-1, completion condition (4):
+# `_companion_files`'s enumeration of a peer's companions never includes a
+# duplicate placed under docs/archive/docs/code-history/<peer>/ -- the
+# `peer_dir` it globs is `docs/code-history/<peer>/` itself (non-recursive),
+# not `docs/` at large, so a path outside that one directory is invisible
+# regardless of the recursion depth `docs/archive/...` happens to sit at
+# (design docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (ii)). This is 4a of the
+# 2-way split (監督裁定, 設計レビュー指摘) -- the GLOB-based enumeration
+# (`_companion_files`, used by the working-tree path); 4b below covers the
+# TREE-based enumeration (`_companion_rel_paths_from_tree`, used by the
+# rev-based `--base` path).
+# Mutation (WP-1 manifest entry 4a, same entry/2 edits): widen `peer_dir`
+# to `repo_root / "docs"` and change `.glob("*.md")` to `.rglob("*.md")`
+# -- both edits together make the archive duplicate below reappear in the
+# enumeration.
+# ---------------------------------------------------------------------------
+def test_4a_archive_companion_duplicate_not_enumerated_via_glob(tmp_path):
+    repo = tmp_path / "repo"
+    _write(repo, "docs/code-history/r2db-api/mod.md", "## CH-0001\n")
+    _write(
+        repo,
+        "docs/archive/docs/code-history/r2db-api/x.md",
+        "## CH-0002\n",
+    )
+
+    files = cp._companion_files(repo, "r2db-api")
+    rels = sorted(str(p.relative_to(repo)) for p in files)
+
+    assert rels != [], "companion enumeration must not be empty (空振り禁止)"
+    assert "docs/code-history/r2db-api/mod.md" in rels, rels
+    assert "docs/archive/docs/code-history/r2db-api/x.md" not in rels, rels
+
+
+# ---------------------------------------------------------------------------
+# WORK_ORDER_DOC_ARCHIVE_SPLIT_V1.md WP-1, completion condition 4b (2-way
+# split, 監督裁定, 設計レビュー指摘): the TREE-based companion enumeration
+# (`_companion_rel_paths_from_tree`, used by the rev-based `--base` path --
+# tools/check_comment_provenance.py:2005-2018) also never returns a
+# docs/archive/ duplicate: its prefix check (`p.startswith(peer_prefix)`)
+# already excludes any path not starting exactly with
+# `docs/code-history/<peer>/`, so `docs/archive/docs/code-history/
+# r2db-api/x.md` never qualifies regardless of the `"/" not in
+# p[len(peer_prefix):]` non-recursion guard.
+# Mutation (WP-1 manifest entry 4b): loosen the exact-prefix check to a
+# bare containment test (`peer_prefix in p`) and drop the non-recursion
+# guard in the same edit -- the archive duplicate then reappears in the
+# enumeration alongside the real companion.
+# ---------------------------------------------------------------------------
+def test_4b_archive_companion_duplicate_excluded_from_tree_enumeration():
+    tree_paths = frozenset(
+        {
+            "docs/archive/docs/code-history/r2db-api/x.md",
+            "docs/code-history/r2db-api/y.md",
+        }
+    )
+
+    rel_paths = cp._companion_rel_paths_from_tree("r2db-api", tree_paths)
+
+    assert rel_paths != [], "companion enumeration must not be empty (空振り禁止)"
+    assert rel_paths == ["docs/code-history/r2db-api/y.md"], rel_paths

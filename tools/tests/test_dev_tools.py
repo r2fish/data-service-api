@@ -872,6 +872,20 @@ def test_finalize_commits_allowed_paths_and_merges(isolated_git, tmp_path):
     assert _git(wt, "rev-parse", "HEAD") == _git(main_root, "rev-parse", "HEAD")
 
 
+def test_finalize_commits_a_staged_rename(isolated_git, tmp_path):
+    # The source side of a `git mv` is a deletion that is already staged: it
+    # exists neither in the working tree nor in the index, so a plain
+    # `git add -- <path>` refuses it. finalize must still commit the rename
+    # (docs/archive moves, docs/design/DOC_ARCHIVE_SPLIT_V1.md D-2).
+    main_root, wt = _repo_with_worktree(tmp_path)
+    (wt / "docs/archive").mkdir()
+    _git(wt, "mv", "docs/old.md", "docs/archive/old.md")
+    code, text = _finalize(wt, tmp_path, ["docs/*"])
+    assert code == 0, text
+    assert _git(main_root, "show", "HEAD:docs/archive/old.md") == "old\n"
+    assert "docs/old.md" not in _git(main_root, "ls-files")
+
+
 def test_finalize_splits_commits_with_leave(isolated_git, tmp_path):
     main_root, wt = _repo_with_worktree(tmp_path)
     main_head = _git(main_root, "rev-parse", "HEAD")

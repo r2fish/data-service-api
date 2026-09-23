@@ -55,12 +55,22 @@ the scanned-file set.
 
 Scan scope for *references* (all of `.md`, no code-comment scanning):
 docs/ spec/ security/ conformance-tests/ (recursive) plus README.md,
-CLAUDE.md, and tools/*.md (non-recursive). This deliberately includes the
-canonical files themselves and docs/work-orders/HANDOVER_*.md (history,
-never rewritten) -- no exemption list, on purpose (design D-2's "赤が出た
-ときの一般規則"): a rare, genuine token/ID collision inside a HANDOVER_*.md
-file (never rewritten) is the one case allowed into KNOWN_NON_IDS below,
-by an explicit commit that records the reason.
+CLAUDE.md, and tools/*.md (non-recursive), EXCEPT `docs/archive/` (any
+depth), which the reference scan's own `iter_scan_files(...)` call
+(`include_archive=False`, the default) never returns. This deliberately includes
+the canonical files themselves and docs/work-orders/HANDOVER_*.md
+(history, never rewritten) -- no exemption list, on purpose (design D-2's
+"赤が出たときの一般規則"): a rare, genuine token/ID collision inside a
+HANDOVER_*.md file (never rewritten) is the one case allowed into
+KNOWN_NON_IDS below, by an explicit commit that records the reason. The
+"no exemption list" principle above is, for `docs/archive/` specifically
+and only there, superseded by design docs/design/DOC_ARCHIVE_SPLIT_V1.md
+D-3 (i): records moved under `docs/archive/` are place-based, not name-
+based, and are excluded from the reference scan by their location, not by
+a per-file/per-family list entry. The empty-tracked-markdown guard below
+(`iter_tracked_markdown_files`) is unaffected -- it stays repo-wide,
+`docs/archive/` included, since it protects against truncation
+regardless of a file's role.
 
 A different repository's own ID family (currently just Mitate's `DM-NNNN`)
 is a legitimate cross-repository reference, not a defect: it is reported
@@ -93,11 +103,16 @@ docs/spec/security/conformance-tests + root-files set iter_scan_files
 walks for the reference check above) is checked for `st_size == 0`. A
 zero-byte tracked `.md` is fatal (exit 1) regardless of the reference
 check's own result. Outside a git working tree (or when `git` itself is
-unavailable), this falls back to iter_scan_files's own rglob-based file
-set and says so in one printed line -- an untracked file is invisible to
-`git ls-files` by design (it is not yet part of the repository this guard
-protects), so the fallback set is scoped the same way the primary
-reference scan already is, not to every `.md` under the repository root.
+unavailable), this falls back to `iter_scan_files(repo_root,
+include_archive=True)` -- its own rglob-based file set, WITH `docs/archive/`
+included -- and says so in one printed line. The fallback therefore is NOT
+scoped the same way as the primary reference scan: the reference scan
+excludes `docs/archive/`, the empty-file guard never does (design
+docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (i); pinned by
+tools/tests/test_check_doc_refs.py's 2b test). What the fallback shares
+with `git ls-files` is only that an untracked file is invisible to both
+(it is not yet part of the repository this guard protects); the fallback
+is never every `.md` under the repository root.
 
 A `tracked markdown files scanned: N` line is printed immediately before
 the `empty markdown files: N` tally (supervisor ruling on WP-1 code
@@ -138,6 +153,39 @@ through the completion gate is recorded here and not filed in the ledger):
        that ID exists in the family's canonical file.
        why: resolution is ID-to-definition, never text-to-text.
        caught by: review and the acceptance audit.
+    4. not detected: a dangling reference inside a `.md` file under
+       `docs/archive/` (any depth); an unreadable (non-UTF-8) `.md` under
+       `docs/archive/` is likewise never reported by
+       `check_scan_readability`, for the same reason.
+       why: records are never rewritten (design docs/design/
+       DOC_ARCHIVE_SPLIT_V1.md D-1), so a reference left dangling there
+       has no hand left to fix it; `iter_scan_files` excludes
+       `docs/archive/` on purpose (D-3 (i)), and `check_scan_readability`
+       reads its own scan-target list from that SAME `iter_scan_files`
+       call, so an unreadable file under `docs/archive/` is invisible to
+       it too. A definition is still read directly from each family's
+       canonical file, so this never affects a family's definition
+       count. One file under `docs/archive/` is NOT a record:
+       `docs/archive/README.md` is the archive's own canonical text
+       (design D-2, v1.1) and may be rewritten, yet the place-based
+       exclusion covers it too, so an ID reference inside it is never
+       resolved either (supervisor's ruling 2026-09-23: recorded here,
+       not carved out -- that file is edited only together with a
+       version bump of the design, which is when its references are
+       read).
+       caught by: the empty-tracked-markdown guard and the public-value
+       scan, both of which still cover `docs/archive/` (design D-3
+       (iv)); the reference scan still covers every canonical (non-
+       archive) file unchanged.
+    5. not detected: a hand-over document left in `docs/work-orders/
+       HANDOVER_*.md` beyond the newest 2 (design docs/design/
+       DOC_ARCHIVE_SPLIT_V1.md D-6's rotation rule going unperformed).
+       why: rotation is a PROCEDURAL discipline (`docs/work-orders/
+       OPERATING_CONDITIONS.md` 1.16-78), not a place-based rule this
+       script checks -- it has no notion of "newest 2" at all.
+       caught by: the supervisor's own `ls docs/work-orders/
+       HANDOVER_*.md` and a check of the newest hand-over's own opening
+       (accepted).
 """
 from __future__ import annotations
 
@@ -156,15 +204,36 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCAN_DIRS = ("docs", "spec", "security", "conformance-tests")
 _SCAN_ROOT_FILES = ("README.md", "CLAUDE.md")
 
+# docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (i): `docs/archive/` (any depth)
+# holds records, never the canonical text, so it is never a *reference*
+# scan target -- a dangling ID inside a record has no hand left to fix it
+# (records are never rewritten). Definitions are still read directly from
+# each family's canonical path, unaffected by this exclusion. The empty-
+# tracked-markdown guard below (`iter_tracked_markdown_files`) is a
+# SEPARATE scan set and stays repo-wide, archive included.
+_ARCHIVE_ROOT = ("docs", "archive")
 
-def iter_scan_files(repo_root: Path) -> list[Path]:
+
+def iter_scan_files(repo_root: Path, *, include_archive: bool = False) -> list[Path]:
+    """`include_archive=False` (the default, used for the *reference* scan
+    everywhere in this file except the one call noted below) excludes
+    `docs/archive/` per D-3 (i). `include_archive=True` is used ONLY by
+    `iter_tracked_markdown_files`'s git-unavailable fallback path below:
+    that fallback stands in for the EMPTY-markdown guard's own scan set
+    (repo-wide, archive included) when `git ls-files` cannot be run, so it
+    must not silently narrow to the reference-scan's own, deliberately
+    smaller, archive-excluding set."""
     files: set[Path] = set()
+    archive_dir = repo_root.joinpath(*_ARCHIVE_ROOT)
     for d in _SCAN_DIRS:
         base = repo_root / d
         if base.is_dir():
             for p in base.rglob("*.md"):
-                if p.is_file():
-                    files.add(p)
+                if not p.is_file():
+                    continue
+                if not include_archive and archive_dir in p.parents:
+                    continue
+                files.add(p)
     for name in _SCAN_ROOT_FILES:
         p = repo_root / name
         if p.is_file():
@@ -221,9 +290,13 @@ def iter_tracked_markdown_files(repo_root: Path) -> tuple[list[Path], str | None
     `fallback_notice` is None when `git ls-files` succeeded. When `git` is
     not installed, `repo_root` is not inside a git working tree, or the
     listing could not be decoded as UTF-8, this falls back to
-    iter_scan_files's own rglob-based file set and `fallback_notice` is a
-    single fixed line describing the fallback -- callers must print it
-    exactly once, never silently substitute the fallback set."""
+    `iter_scan_files(repo_root, include_archive=True)` -- ITS OWN rglob-
+    based file set WITH `docs/archive/` included, since this guard stays
+    repo-wide even in the fallback (design docs/design/
+    DOC_ARCHIVE_SPLIT_V1.md D-3 (i): only the *reference* scan excludes
+    `docs/archive/`, never the empty-file guard) -- and `fallback_notice`
+    is a single fixed line describing the fallback -- callers must print
+    it exactly once, never silently substitute the fallback set."""
     try:
         proc = subprocess.run(
             ["git", "ls-files", "-z", "--", "*.md"],
@@ -242,7 +315,7 @@ def iter_tracked_markdown_files(repo_root: Path) -> tuple[list[Path], str | None
         if names is not None:
             return sorted(repo_root / name for name in names if name), None
 
-    return iter_scan_files(repo_root), _FALLBACK_NOTICE
+    return iter_scan_files(repo_root, include_archive=True), _FALLBACK_NOTICE
 
 
 def find_empty_markdown_files(files: list[Path]) -> list[Path]:

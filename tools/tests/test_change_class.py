@@ -261,3 +261,30 @@ def test_packaged_contract_copies_are_class_c():
     klass, conformance_required = _header(out)
     assert klass == "C", out
     assert conformance_required == "true", out
+
+
+# ---------------------------------------------------------------------------
+# WORK_ORDER_DOC_ARCHIVE_SPLIT_V1.md WP-1, completion condition (3): a
+# non-`.md` path under docs/archive/ (any depth) is Class A regardless of
+# its extension -- design docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (iii).
+# Mutation (WP-1 manifest entry 3): drop the classify_path archive rule --
+# docs/archive/x.txt then falls through to B (it does not end in `.md`).
+# ---------------------------------------------------------------------------
+def test_3_archive_non_markdown_path_is_class_a():
+    code, out = _run(["docs/archive/x.txt"])
+    assert code == 0
+    klass, conformance_required = _header(out)
+    assert klass == "A", out
+    assert conformance_required == "false", out
+
+    # Same-test companion assert (supervisor ruling on WP-1 完了条件 (3)):
+    # a moved-record pair -- the record's SOURCE path (still `security/`,
+    # graded D on its own merits, --no-renames reports both source and
+    # destination) alongside its `docs/archive/` DESTINATION path (graded A
+    # by the rule above) -- takes the overall HEAVIEST class, D. This is a
+    # companion assert only, not itself a mutation target.
+    code, out = _run(["security/MOVED_RECORD.md", "docs/archive/security/MOVED_RECORD.md"])
+    assert code == 0
+    klass, conformance_required = _header(out)
+    assert klass == "D", out
+    assert conformance_required == "true", out

@@ -147,7 +147,15 @@ def finalize(wt: Path, branch: str, allow: list[str], msgfile: Path, checks: lis
     if changed_paths(wt) != all_paths:
         print("finalize: STOP -- the changed-path set moved during the checks; nothing committed", file=out)
         return 1
-    dl.git(wt, "add", "--", *paths)
+    # A path whose deletion is ALREADY staged (the source side of a `git mv`,
+    # or a `git rm`) exists neither in the working tree nor in the index, and
+    # `git add -- <path>` refuses it ("pathspec did not match any files").
+    # Its removal is already in the index, so only the paths that still exist
+    # somewhere are handed to `git add`; the unstaged check below still
+    # proves that nothing outside the staged set is left behind.
+    indexed = set(dl.git(wt, "ls-files", "-z").split("\0"))
+    addable = [p for p in paths if (wt / p).exists() or p in indexed]
+    dl.git(wt, "add", "--", *addable)
     unstaged = dl.git(wt, "diff", "--name-only").splitlines() + dl.git(wt, "ls-files", "--others", "--exclude-standard").splitlines()
     if [p for p in unstaged if p not in left]:
         print("finalize: STOP -- changes outside the staged set; paths are staged, nothing committed", file=out)
