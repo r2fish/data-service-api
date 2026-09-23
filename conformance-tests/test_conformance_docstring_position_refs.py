@@ -99,6 +99,41 @@ is itself inside `conformance-tests/`, the real-corpus test in this same
 file (`test_every_real_conformance_tests_position_reference_resolves_or_is_allowlisted`)
 scans this file too, and an embedded real reference would go stale exactly
 the way the ones this file exists to catch do.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a reference that still resolves and stays in range
+       while pointing at an unrelated statement -- see Limits (D-9) item
+       1 above.
+       why: same item (resolution proves the path and the line count,
+       never the content at that line).
+       caught by: a human reading the surrounding prose against the real
+       file, and the acceptance audit of any change set that touches the
+       unit (accepted; R-88's own resolution over
+       `security/CONTROL_MAPPING.md` carries the same bound).
+    2. not detected: a file moved to a different directory inside route
+       (iii)'s own search scope -- see Limits (D-9) item 2 above.
+       why: same item (a unique suffix match never pins a directory).
+       caught by: code review of the move itself (accepted).
+    3. not detected: a bare path carrying no line number, and R-88's own
+       short-label shape -- see Limits (D-9) item 3 above.
+       why: same item (D-3's own carve-out).
+       caught by: for the label shape over `security/CONTROL_MAPPING.md`,
+       R-88's own checks in `conformance-tests/
+       test_control_mapping_register.py`; for conformance prose, review
+       (accepted).
+    4. not detected: the same defect inside either peer's own `src` or
+       `tests` docstrings and comments -- see Limits (D-9) item 4 above.
+       why: same item (scope is `conformance-tests/*.py` only).
+       caught by: `tools/check_comment_provenance.py`'s own Known gaps
+       section names it as that checker's first gap (ledger R-96 was
+       closed into it 2026-09-23); code review meanwhile.
+    5. not detected: a non-backtick-quoted reference written in running
+       prose, and an ID-prefixed form -- see Limits (D-9) item 5 above.
+       why: same item (extraction looks inside backtick spans, and the
+       character right before the colon must not be alphanumeric).
+       caught by: review (accepted by D-3, deliberately).
 """
 
 from __future__ import annotations

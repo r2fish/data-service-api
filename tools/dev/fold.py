@@ -95,6 +95,23 @@ Safety notes:
     (c) `--min-age-hours 0` removes the only guard against (a)/(b): use it
         only when the supervisor already knows, by name, everything the
         run would otherwise be old enough to touch.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: another chat's own clean, old-enough worktree that
+       is merely sitting open, and the `-C`-only "current" guard -- see
+       Safety notes (a)-(c) above.
+       why: same notes; merged + clean + old enough + (for --apply) the
+       suite lock are the whole guard set.
+       caught by: the supervisor reading the dry-run list by name before
+       `--apply` (accepted: that reading is the actual guard).
+    2. not detected: whether a folded branch's work also reached the
+       remote -- ancestry is checked against the LOCAL --main only.
+       why: no remote ref is ever read (and no remote branch is ever
+       touched).
+       caught by: accepted -- a local branch is folded only after its
+       merge into the local main, and remote branches are kept.
 """
 from __future__ import annotations
 

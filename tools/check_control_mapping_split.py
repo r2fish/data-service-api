@@ -47,6 +47,26 @@ AND (if `--expect` was given) a matching aggregate line -- the first three
 are never expected to differ for any legitimate split (design section 6,
 condition (ii) and section 3(ii)). Exit 2 if the input cannot be parsed
 (`CheckError`).
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether a moved bullet is still TRUE after the move
+       (or whether its evidence still supports it) -- only the
+       (SI, peer, axis, body) multiset is compared.
+       why: bodies are compared as text.
+       caught by: the acceptance audit, and R-88's own position-
+       reference checks in `conformance-tests/test_control_mapping_
+       register.py`.
+    2. not detected: an unintended missing/added/moved count when
+       `--expect` is not passed -- those counters alone never gate the
+       exit code.
+       why: they are legitimately non-zero for an intentional split
+       (design section 6), so exit 0 rests on `subsequence` / `ccr14` /
+       `rule` only.
+       caught by: the work order passing `--expect "<line>"` (which
+       turns the by-hand comparison into a machine gate) and the
+       supervisor reading the aggregate line.
 """
 from __future__ import annotations
 

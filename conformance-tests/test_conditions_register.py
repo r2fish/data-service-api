@@ -26,6 +26,38 @@ the companion has exactly the main table's IDs (no more, no fewer), no
 table cell exceeds the agreed length cap, and no ID row is duplicated
 (the dict-based parser above would otherwise silently keep only the last
 one).
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a test-name reference written in any shape other
+       than the 5 backtick forms.
+       why: `_extract_references` reads backtick spans only, and inside
+       them only D-3's 5 forms.
+       caught by: `test_conditions_md_has_no_test_name_token_outside_
+       backticks` (a naked `test_` token anywhere is red) and
+       `test_conditions_md_allowlist_matches_known_non_test_name_spans`
+       (a backtick span holding `test_` that matches none of the 5 forms
+       is red unless allowlisted); a sentence that names a test without
+       any `test_` token at all is left to review.
+    2. not detected: which file a path-omitted bare name means when two
+       directories hold the same basename.
+       why: the path-omitted forms resolve by basename across the 4 test
+       directories.
+       caught by: the resolver itself -- a non-unique basename fails
+       with "ambiguous basename" instead of resolving to one of them, so
+       this is never silent.
+    3. not detected: whether a cited test actually DRIVES the condition
+       it is cited for.
+       why: resolution only proves that the def exists at that path.
+       caught by: the `@pytest.mark.condition(...)` matching in both
+       directions (the two checks at the top of this file) and the
+       acceptance audit.
+    4. not detected: the one allowlisted span D-3 (f) records
+       (`pytest_collection_modifyitems`) -- it is never resolved.
+       why: it holds `test_` but matches none of the 5 forms.
+       caught by: that allowlist being pinned as an exact set, so a
+       second such span is red and needs its own explicit commit.
 """
 from __future__ import annotations
 

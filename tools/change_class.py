@@ -88,6 +88,31 @@ stdin/argv is a valid, classifiable path).
 
 Standard library only (tools/public_value_scan.py convention) -- no
 external dependency.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a changed path the caller never hands in -- an
+       untracked, an unstaged or an otherwise filtered-out path is never
+       classified at all.
+       why: the only input is stdin/argv, so the class is computed over
+       exactly the path set given (CI gives it `git diff --name-only
+       --no-renames origin/main...HEAD`). Reproduced 2026-09-23 for the
+       ledger's own R-100: `echo 'MitateDB-api/docs/cloud-run-cloud-
+       sql.md' | tools/change_class.py` does print `class=A` and `A
+       MitateDB-api/docs/cloud-run-cloud-sql.md`, so the path rules
+       above have no blind spot there -- that path had simply never
+       reached the tool.
+       caught by: tools/dev/finalize.py's own --allow allowlist, which
+       matches EVERY changed path, tracked and untracked alike (`git
+       status --porcelain --untracked-files=all`), and the supervisor's
+       own `git status --short` before a class is declared.
+    2. not detected: a C/D trigger that lives in a diff's CONTENT rather
+       than in a path -- see "Disclosed limitation" above.
+       why: same paragraph: a path-only classifier cannot look inside a
+       diff.
+       caught by: the human classification recorded in the work order's
+       own Change Set Manifest; CI consumes only `conformance_required`.
 """
 from __future__ import annotations
 

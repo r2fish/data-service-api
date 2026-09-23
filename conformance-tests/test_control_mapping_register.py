@@ -59,6 +59,32 @@ sub-blocks, each with its own full Control/Evidence/Status triple. Every
 peer carries a mandatory, unnamed default sub-block (`### <peer>`, no ` --
 `) first, followed by up to `MAX_NAMED_SUBBLOCKS` named sub-blocks in file
 order; the length cap (below) applies per sub-block, not per peer.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether a control/evidence claim is TRUE, or
+       whether a resolving `file:line` still shows the claimed control.
+       why: R-88's own resolution below proves that the file exists and
+       that the line number lies inside that file's range -- nothing
+       about the content at that line.
+       caught by: the acceptance audit against the verbatim record kept
+       in the change set's own design document, and code review.
+    2. not detected: the current longest sub-block's own length --
+       deliberately not recorded in the comment above
+       `MAX_BLOCK_LENGTH`.
+       why: the cap is a ceiling plus a margin, not a record of today's
+       measurement; a recorded number would go stale (ledger R-73).
+       caught by: re-running the measurement recipe that same comment
+       gives, and `CONTROL_MAPPING.md`'s own "Length cap measurement"
+       paragraph (accepted).
+    3. not detected: whether a claim has a matching condition row in
+       `conformance-tests/CONDITIONS.md` -- this file never reads
+       CONDITIONS.md.
+       why: its inputs are `security/CONTROL_MAPPING.md` and
+       `security/CONTROL_MAPPING_HISTORY.md`.
+       caught by: `conformance-tests/test_conditions_register.py`, which
+       checks both directions of the CONDITIONS.md/marker mapping.
 """
 from __future__ import annotations
 

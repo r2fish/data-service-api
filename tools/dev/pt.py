@@ -33,6 +33,19 @@ Output: the tally line, up to --show FAILED/ERROR lines, then
 Exit: pytest's own code (0-5); 75 = refused to start (including a lock-wait
 timeout); 78 = precondition error.
 Run it in the foreground with the Bash timeout set to 600000 (1.6-42).
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether the args select what a WP claims to have
+       run -- pt.py runs exactly what it is handed and judges nothing.
+       why: its exit code is pytest's own; the PASS/FAIL rule lives in
+       gate.py (OPERATING_CONDITIONS 1.3-19..22).
+       caught by: gate.py's own root-suite run, and the reviewer
+       checking the args against the WP's own verification method.
+    2. not detected: FAILED/ERROR lines beyond `--show N` on stdout.
+       why: only the first N such lines are printed.
+       caught by: the complete output at the printed `log=` path.
 """
 from __future__ import annotations
 

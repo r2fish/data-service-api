@@ -39,6 +39,48 @@ convention) -- no external dependency, no dependence on `sys.executable`.
 Exit code: 0 if the requested mode found nothing to flag, 1 otherwise (or if
 a required file could not be read/parsed -- an unreadable input is never
 treated as "nothing to check").
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether a `file:line` position reference written
+       inside a src docstring/comment resolves to anything (one measured
+       staleness; ledger R-96).
+       why: both modes reason about BLOCK provenance (registration,
+       CH-ID, block keys); the content a reference points at is never
+       read.
+       caught by: for `security/CONTROL_MAPPING.md`, R-88's own checks
+       in `conformance-tests/test_control_mapping_register.py` (the
+       section starting at its `# R-88` comment); for the conformance
+       `.py` files, `conformance-tests/test_conformance_docstring_
+       position_refs.py` (R-95); for both peers' `src/` and `tests/`,
+       code review -- accepted for now, since an allow table and a floor
+       would have to be designed first (ledger R-96, closed into this
+       entry 2026-09-23).
+    2. not detected: a replacement of the statement FOLLOWING a
+       CH-ID-less block by a different statement of the same AST kind.
+       why: the section 4.1 (2) block key re-pairs an old/new `replace`
+       span when the AST kind matches (and the name too, for def/class),
+       so a same-kind substitute keeps the key stable (design
+       docs/design/CODE_COMMENT_PROVENANCE_V1.md v0.26 records this
+       limit).
+       caught by: code review (accepted: the alternative is the false
+       red this key was built to remove).
+    3. not detected: the difference between a moved block and a
+       docstring written for the FIRST time on a function that already
+       exists at the base rev -- that shows up as a section 4.1 (2) red
+       reading `old 0, new 1`.
+       why: (2) counts CH-ID-less blocks per scope, and a new block that
+       carries no history has no receptacle of its own.
+       caught by: a human reading that red and judging it a justified
+       one (accepted; this is what R-67's own change set did).
+    4. not detected: a history token or a registered block that appears
+       OUTSIDE both peers' `src/` (tests/, conformance-tests/, tools/,
+       docs/ other than the register itself).
+       why: design section 3's scope -- see "Design boundary (section
+       3)" above.
+       caught by: `--register`'s own checks over `docs/code-history/`
+       and both peers' `src/`, plus code review (accepted).
 """
 from __future__ import annotations
 

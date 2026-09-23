@@ -26,6 +26,22 @@ on main and clean; no unfinished mutation journal in any worktree; each
 Output: one line per check, then READY or NOT READY; with --handover and READY,
 the continuation prompt between BEGIN/END lines.
 Exit: 0 READY; 1 NOT READY; 78 precondition error.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether a subagent or a background task of this
+       chat is still running -- `--no-running-agents` is a self-
+       declaration.
+       why: there is no machine check for it (see the flag's own
+       description above).
+       caught by: accepted; the chat has to state it explicitly, which
+       is the whole point of the flag.
+    2. not detected: a worktree the chat used but did not pass with
+       `--worktree`.
+       why: only the listed worktrees are checked clean-and-merged (the
+       mutation-journal scan does cover every worktree).
+       caught by: the supervisor naming its own worktrees (accepted).
 """
 from __future__ import annotations
 

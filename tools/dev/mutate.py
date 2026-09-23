@@ -64,6 +64,21 @@ and the backups are under $SP/dev-logs/mutate-<stamp>/. Large specs can
 outlast the Bash timeout: run them with run_in_background.
 Exit: 0 all as expected and restored; 1 an expectation not met; 70 restore
 or final check failed; 75 refused to start; 78 precondition error.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: the second and later tests of one mutation entry --
+       each mutation's pytest runs with `-x` and stops at the first
+       failure.
+       why: `expect: "red"` is exit code exactly 1 under `-x`, so a
+       later test in the same entry never runs at all.
+       caught by: the standing practice of one test per mutation entry,
+       and the reviewer reading the mutation table.
+    2. not detected: whether a red came from the intended assertion.
+       why: the verdict is the subprocess's exit code, nothing more.
+       caught by: the reviewer reading that mutation's own log under
+       $SP/dev-logs/ (accepted).
 """
 from __future__ import annotations
 

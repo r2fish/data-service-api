@@ -43,6 +43,27 @@ The pytest child runs with `DSA_TEST_PG_LOCK_HELD=1` (review B-1) so an
 owned-mode pytest the suite spawns as a genuine nested subprocess (e.g.
 conformance-tests/test_testpg_cluster.py's own nested-controller tests)
 does not try to acquire the suite lock again and deadlock against this gate.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: anything under `tools/tests` -- the root suite does
+       not collect it (it has its own pytest.ini root).
+       why: the command run is the root `-m pytest -q -n 5 --dist
+       loadgroup`.
+       caught by: tools/dev/finalize.py --tools-tests.
+    2. not detected: that it was pointed at the wrong tree -- `-C`
+       defaults to the CURRENT directory, so a call made from the main
+       checkout measures main and still prints `judge=PASS`.
+       why: that default (see `-C` above).
+       caught by: reading the directory gate.py prints with its own
+       output lines (accepted).
+    3. not detected: catalog drift on the shared local PostgreSQL -- its
+       diff is printed as `info=` and never judged.
+       why: the judged cluster is the gate's own throwaway one (D-5,
+       Q-3; see the paragraph above).
+       caught by: accepted by that decision -- the shared cluster
+       carries the standing local service and other sessions' runs.
 """
 from __future__ import annotations
 

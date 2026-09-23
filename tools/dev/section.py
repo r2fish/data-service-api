@@ -13,6 +13,24 @@ leading #). Each matching section is printed from its heading up to the next
 heading of the same or a higher level. Headings inside ``` fences are
 ignored. -n prefixes line numbers.
 Exit: 0; 1 when a PATTERN matches no heading.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a setext heading (a title underlined with `===` or
+       `---`) -- it is neither listed nor printed as a section.
+       why: `_HEADING_RE` matches ATX headings (`#` to `######`) only.
+       caught by: accepted -- the documents here use ATX headings, and a
+       heading missing from `--list` is the visible symptom.
+    2. not detected: a fence opened with MORE than three markers -- it
+       is treated as a 3-marker fence, so a nested ``` inside it toggles
+       the state again.
+       why: the fence marker compared is `stripped[:3]`.
+       caught by: reading the printed section (accepted).
+    3. not detected: a `#` line inside an indented (4-space) code block
+       -- it is reported as a heading.
+       why: only fenced blocks are skipped.
+       caught by: reading the printed outline (accepted).
 """
 from __future__ import annotations
 

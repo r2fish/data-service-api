@@ -88,6 +88,38 @@ also runs under a bare `python3` with no project venv active -- the CI job
 after `docker run --entrypoint pip <image> freeze` has already run outside
 this script (this script has no docker dependency of its own and is not
 itself run inside the image).
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a `constraints.txt` pin the image never installs at
+       all.
+       why: `compare()` walks the IMAGE's own pins only; the
+       constraints-only direction is never enumerated (an absent package
+       is not a "mismatch", it is simply not in `image_pins`).
+       caught by: `--require` (CI passes starlette / psycopg / uvicorn);
+       any other constraints-only entry is accepted.
+    2. not detected: whether the `pip freeze` transcript really came
+       from the production image.
+       why: the transcript arrives on stdin/--freeze; this script has no
+       docker dependency and never runs inside the image (see the last
+       paragraph above).
+       caught by: the CI job's own `docker run --entrypoint pip <image>
+       freeze` step in `.github/workflows/ci.yml` -- that job, not this
+       script, is the provenance (accepted).
+    3. not detected: two package names that differ only by `.` versus
+       `-` -- see the name-normalization paragraph above.
+       why: same paragraph (`.` is deliberately not folded).
+       caught by: accepted; widen the normalization in its own explicit
+       commit if a package in this project's set ever needs it.
+    4. not detected: any image but MitateDB-api's own -- `git ls-files`
+       shows `MitateDB-api/docker/Dockerfile` as this repository's only
+       production image, so r2db-api has nothing compared here.
+       why: the whole check is driven by a freeze taken inside that one
+       image.
+       caught by: accepted -- r2db-api has no container image today; if
+       one is added, giving it its own invocation is a decision for that
+       work order, not a silent gap.
 """
 from __future__ import annotations
 
