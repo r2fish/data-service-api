@@ -7,7 +7,7 @@
 - ローカルの main は **`25bacda`**。
 - 最後の root gate は本チャットの木 (`--label docrefs-r3`) で `3987 passed, 2 subtests passed`、`judge=PASS`、実行クラスタ差分 0。`tools/tests` は **603 本**。
 - `security/CONTROL_MAPPING.md` は版 **2.25** (不変)、台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` は **v1.104**。
-- **進行中: 無し。** 本チャットの worktree は `claude/peaceful-mclean-c8e870` (session worktree。`fold.py` の既定除外 `claude/*` に当たるので、畳むなら `--include 'claude/peaceful-mclean-*'`)。
+- **進行中: R-79 が別チャットで実施中** (branch `r79`、worktree は `git worktree list` で branch `r79` を持つ session worktree (dir 名は `public_value_scan` の R3 に当たるので書かない、前書 §5 の 7)、起点 `ce27b52`。2026-09-23 時点で未コミットの実装: 両 peer に `psycopg_counting.py`、MitateDB `tests/test_r79_prepared_stats.py` 等)。**その branch は本チャットの 3 merge (`2fe980d`・`25bacda`・`5d2c606`) を含まない**ので、統合前に main を取り込む (触るファイルは重ならない: 本チャットは `tools/`・`conformance-tests/` の docstring と `docs/` のみ)。【訂正註 2026-09-23: 初稿は「進行中: 無し」と書いた。依頼者の指摘で訂正】 本チャットの worktree は `claude/peaceful-mclean-c8e870` (session worktree。`fold.py` の既定除外 `claude/*` に当たるので、畳むなら `--include 'claude/peaceful-mclean-*'`)。
 
 ## 2. 本チャットで閉じたもの
 
@@ -21,7 +21,7 @@
 
 ## 3. 次の一手
 
-1. **R-79** (prepared statement が効いているかの実測)。**前書 §3 の 1 が「台帳の R-79 行に書き足せ」とした探索ノート (`explore-r78-r79.md`) は、前チャットの scratchpad にしか無く、R-79 行に【追記】は無い (本チャットで確認)。事実は失われたので R-79 は探索からやり直す。**
+1. ~~**R-79** (prepared statement が効いているかの実測)。前書 §3 の 1 が「台帳の R-79 行に書き足せ」とした探索ノート (`explore-r78-r79.md`) は、前チャットの scratchpad にしか無く、R-79 行に【追記】は無い (本チャットで確認)。事実は失われたので R-79 は探索からやり直す。~~ **【訂正註 2026-09-23】R-79 は別チャットが実施中である (§1)。新しいチャットは R-79 に手を出さず、その閉止を待つか、R-79 と触るファイルが重ならない次の項目 (2 の R-80 以降のうち R-79 の結果に依らないもの) から始める。**
 2. 続いて **R-80**、**R-81**、**R-82**、**R-85**、**R-86**、その後 **R-97**、**R-99**。**R-83**・**R-84** は R-78〜R-82 の結果次第、**R-101**・**R-102** は R-79〜R-82 の後に着手可否を決める (台帳の各行の保留条件を読む)。R-96・R-98・R-100 は閉じたので候補から外れた。
 3. 新しい検査器の不完全さが見つかったら、起票の前に `OPERATING_CONDITIONS.md` §1.12 の 71 の 1 問を立てる。「いいえ」なら当該 docstring の `Known gaps` に 3 行を足し、`tools/dev/README.md` の表の件数と要約を直す。
 4. fold は `tools/dev/fold.py --min-age-hours 0 --apply` (他チャットの worktree は先に `git worktree lock`)。
