@@ -290,6 +290,127 @@ directly off the pool's own queue (`get_nowait`/`put_nowait`), never
 `_acquire()`, so it never touches `acquire_count`/`wait_count`/`in_use_
 peak`.
 
+## `ROUNDTRIP` lines (R-80)
+
+**Off by default -- pass `--roundtrip` to turn them on.** Unlike every
+other line this tool prints, a `--roundtrip` run's `pg_stat_database`
+confirm-wait (below) costs several real seconds per (plug, op), taken
+TWICE (once before the op, once after) -- so the ordinary run's own
+duration stays unaffected unless `--roundtrip` is actually given
+(docs/work-orders/WORK_ORDER_R80_ROUNDTRIP_MEASUREMENT_V1.md, "WO" below,
+§1.2 D-1).
+
+For each (plug, op), `--roundtrip` prints two kinds of line, AFTER that
+op's own `PREPARED`/`PREPSTMT` lines (`POOL` -> `PREPARED` (+`PREPSTMT`)
+-> `ROUNDTRIP`, never any other order):
+
+```
+ROUNDTRIP peer=<peer> plug=<plug> op=<op> requests=<n> conn=<label> stmts=<n> stmts_per_req=<x.xx>
+ROUNDTRIP peer=<peer> plug=<plug> op=<op> requests=<n> db=<app|platform> xacts=<n> xacts_per_req=<x.xx> sessions=<n> sessions_per_req=<x.xx> stale=<0|1>
+```
+
+**Why these are separate lines, not one number.** A single "round trips
+per request" figure would silently add together things that do not add:
+an autocommit statement (the liveness ping) has no `BEGIN`/`COMMIT` of
+its own, and a new session's own connection-establishment round trip is
+neither a statement nor a transaction. `conn=` (one line per connection)
+carries the STATEMENT count; `db=` (one line per resolved database)
+carries the TRANSACTION and SESSION counts -- three separate components,
+never merged into one.
+
+**`requests=` is the number of real requests this run actually sent for
+that op**, `(warmup + n) * concurrency` -- a DIFFERENT number from the
+`PERF` line's own `n=` (the measured-sample count alone, never counting
+`--warmup`).
+
+**Both kinds of line are a PRE/POST difference, never a running total.**
+Immediately before `_measure_op` starts timing an op, and again
+immediately after, this tool takes a PROBE (`prepared_stats()`, same as
+the `PREPARED` line above -- the POST probe's own return value is reused
+for both, so a `--roundtrip` run still calls `prepared_stats()` only
+twice per op, not three times) and a `pg_stat_database` read. `stmts=`
+is that op's own `Δexecute_count` for one connection (matched by
+`label`; a label absent from the PRE probe -- a reconnect -- reads as
+baseline 0, never a raised exception and never the value carried over
+from a different label). Taking the baseline from the immediately
+preceding PRE probe, rather than the previous op's own POST value, keeps
+activity BETWEEN two ops (credential issuance, `authenticate`, a
+`cross_entity` op's own `create_entity`) out of the next op's own count.
+
+**`db=app`/`db=platform` name resolution.** The application database name
+comes from whichever of two forms a plug's resolved cell/backend has: a
+DSN string (`r2db_api.postgres.PostgresCell._runtime_dsn`, parsed with
+`psycopg.conninfo.conninfo_to_dict`) or a public `psycopg` property
+(`mitatedb_api.backend_postgres.PostgresBackend._runtime.info.dbname`).
+The platform database name is both http plugs' own `_platform.
+platform_db`. A plug matching NEITHER form (every non-PostgreSQL plug)
+gets zero `db=` lines for that op -- never an exception.
+
+**Probe `commit()`s are excluded from `xacts`.** The probe's own SELECT
+is followed by `conn.commit()` on every IDLE connection it reaches (same
+as the `PREPARED` section above) -- each such commit raises that
+connection's own database `xact_commit` by 1, a round trip this tool
+itself caused, not the measured op. `db=app`'s own `xacts` subtracts the
+count of POST-probed connections belonging to THIS run's own application
+(r2db-api: `label` starts with `<application_id>/`; MitateDB-api: the
+resolved cell's own exactly-2 persistent connections, identified by
+their own `.info.backend_pid` -- never a DIFFERENT application's own
+cell, such as the one `capability_document()` provisions once to probe
+`cross_entity_mutation` availability). **`db=platform`'s own correction
+is always 0** -- neither peer's platform/credential connections are ever
+probed (r2db-api's platform/credential/audit-sink pools are never
+registered with `SharedPoolManager`; MitateDB-api's credential store
+opens and closes a fresh connection per call, never leaving one IDLE for
+a probe to reach).
+
+**`pg_stat_database`'s own counters lag real time -- the poll waits for
+them to settle.** This tool's own admin connection to the throwaway
+cluster (never a plug's own connection) runs `pg_stat_clear_snapshot()`,
+then reads `xact_commit`/`xact_rollback`/`sessions` for the resolved
+database name(s) every 1 second, confirming a value only once BOTH at
+least 12 seconds have elapsed since the clear AND the last 3 reads agreed
+-- a value that has been flat since the very first read does NOT confirm
+before that 12-second minimum (WO §1.3 (5b): a real burst was observed
+flat at a wrong value for 20 real seconds before the backend's own
+pending statistics actually flushed). Past a 30-second ceiling, the
+last-seen value is printed anyway, with **`stale=1`** (a confirmed value
+prints `stale=0`) -- a `stale=1` row is not this op's settled value and
+should not be treated as one.
+
+**`BEGIN`/`COMMIT`/`ROLLBACK` count toward `xacts`; `SAVEPOINT`/`RELEASE`
+count toward NOTHING this tool measures at all.** `Cursor.execute` is
+never called for any of the five (psycopg's own `Connection._exec_
+command` path) -- `BEGIN`/`COMMIT`/`ROLLBACK` still show up indirectly,
+as a `pg_stat_database` transaction; `SAVEPOINT`/`RELEASE` show up
+NOWHERE -- not in `stmts` (no `execute()` call), not in `xacts` (no
+separate top-level transaction, no distinct `pg_stat_database` counter
+for a savepoint). A round trip spent taking or releasing a savepoint is
+invisible to every `ROUNDTRIP` component.
+
+**A second application's own connections never appear in `db=app`.**
+Deciding whether `cross_entity` is even available at all calls
+`capability_document()`, which provisions its own separate capability-
+probe application (a real database + 2 roles) the FIRST time it is
+reached -- from the `cross_entity` op onward, that second application's
+own connections sit alongside this run's own in whatever `prepared_
+stats()` returns, but `db=app`'s own probe-commit correction (above)
+only ever counts THIS run's own resolved cell, never that second
+application's.
+
+**Under `--roundtrip`, MitateDB's `POOL lock=` `acquire` carries ONE
+MORE extra acquisition per op than the `--roundtrip`-less baseline
+above.** The `## PREPARED / PREPSTMT lines (R-79)` section above already
+notes that the (single, POST-only) probe every op takes raises `acquire_
+count` by 1, reflected on the NEXT op's own `POOL lock=` line.
+`--roundtrip` takes that SAME probe twice per op (PRE and POST,
+`ROUNDTRIP` section above), so each op's own `POOL lock=` line runs 1
+higher than the R-79 baseline, from the very first op onward -- not just
+the last one. Measured against the real, registered `MitateDB-api-http`
+plug (a throwaway-cluster confirmation run, `--warmup 2 --n 5`, `perfbase_
+*` lock, `query`/`mutate`/`batch`/`cross_entity` in order, not a `tools/
+tests` assertion): `acquire=20/35/50/69` without `--roundtrip`, `acquire=
+21/37/53/73` with it.
+
 ## The limits of what these numbers mean
 
 - **In-process / ASGI-in-process / real socket.** `_classify_plug` (Phase

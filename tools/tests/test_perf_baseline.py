@@ -4,6 +4,12 @@ docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-12) and, from Phase 10
 WP-7 onward, its `--concurrency K` dispatch (design D-8, work order
 docs/work-orders/WORK_ORDER_PHASE10_DEPLOYMENT_EVIDENCE_V1.md WP-7).
 
+From R-80 onward, also covers the `ROUNDTRIP` lines (docs/work-orders/
+WORK_ORDER_R80_ROUNDTRIP_MEASUREMENT_V1.md §1.2 D-1, §2.2) -- format,
+pre/post diffing, the `pg_stat_database` confirm-wait poll, and the
+`--roundtrip` flag gate. All of it via stubs/fakes, exactly like the
+R-78/R-79 tests above: no real registered adapter or PostgreSQL.
+
 Deliberately NOT under `conformance-tests/` and NOT discoverable by the
 root suite: `tools/` is not in pyproject.toml's `[tool.pytest.ini_options]
 testpaths` (same convention as `tools/tests/test_check_doc_refs.py`).
@@ -608,3 +614,649 @@ def test_perf_baseline_restores_the_environment_when_run_raises(tmp_path, monkey
         assert name not in os.environ, f"{name} leaked the fake cluster's own value after main() raised"
         observed += 1
     assert observed == len(_FAKE_CLUSTER_ENV) + 1
+
+
+# ---------------------------------------------------------------------
+# R-80 -- ROUNDTRIP lines (WO §1.2 D-1, §2.2).
+# ---------------------------------------------------------------------
+
+
+def test_roundtrip_conn_row_format_is_stable():
+    """WO §2.2 completion condition 1: `_format_roundtrip_conn_row`'s own
+    column names/order/formatting -- `peer`/`plug`/`op`/`requests`/`conn`/
+    `stmts`/`stmts_per_req`.
+
+    mutation M1 (`tools/perf_baseline.py`): rename a column in `_format_
+    roundtrip_conn_row` (e.g. `stmts_per_req=` -> `per_req=`) -- this
+    test's own exact-string comparison goes red."""
+    line = pb._format_roundtrip_conn_row("r2db-api", "r2db-api-http", "query", 10, "app1/runtime@42", 6)
+    assert line == (
+        "ROUNDTRIP peer=r2db-api plug=r2db-api-http op=query requests=10 "
+        "conn=app1/runtime@42 stmts=6 stmts_per_req=0.60"
+    )
+
+
+def test_roundtrip_db_row_format_is_stable():
+    """WO §2.2 completion condition 2: `_format_roundtrip_db_row`'s own
+    column names/order/formatting -- `peer`/`plug`/`op`/`requests`/`db`/
+    `xacts`/`xacts_per_req`/`sessions`/`sessions_per_req`/`stale`, `db`
+    being one of the two literal words `app`/`platform`.
+
+    mutation M2 (`tools/perf_baseline.py`): rename a column (e.g.
+    `sessions_per_req=` -> `sess_per_req=`) -- this test's own exact-
+    string comparison goes red."""
+    line = pb._format_roundtrip_db_row("r2db-api", "r2db-api-http", "query", 10, "app", 12, 3, False)
+    assert line == (
+        "ROUNDTRIP peer=r2db-api plug=r2db-api-http op=query requests=10 "
+        "db=app xacts=12 xacts_per_req=1.20 sessions=3 sessions_per_req=0.30 stale=0"
+    )
+    line = pb._format_roundtrip_db_row("MitateDB-api", "MitateDB-api-http", "query", 10, "platform", 1, 1, True)
+    assert line.endswith("stale=1")
+
+
+def test_roundtrip_probes_prepared_stats_exactly_twice_per_op(capsys):
+    """WO §2.2 completion condition 3 (design review 1 M-3): a `--roundtrip`
+    op calls `prepared_stats()` exactly twice -- once as the PRE baseline
+    (`_roundtrip_pre_probe`), once as the POST value `_emit_prepared_rows`
+    already uses for its own `PREPARED` lines -- and the `ROUNDTRIP conn=`
+    lines are built from that SAME POST return value, never a third call.
+
+    mutation M3 (`tools/perf_baseline.py`): call `prepared_stats()` once
+    more for the `ROUNDTRIP` lines instead of reusing `_emit_prepared_
+    rows`' own return value -- this test's own `len(call_log) == 2`
+    assertion goes red (3 calls instead of 2)."""
+    call_log: list[int] = []
+
+    def prepared_stats():
+        call_log.append(1)
+        return [{
+            "label": "app1/runtime@1", "execute_count": len(call_log), "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }]
+
+    stub = SimpleNamespace(transport_kind="in_process", prepared_stats=prepared_stats)
+    pb._measure_op_and_emit(
+        lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+        warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub,
+        prepared_detail=False, roundtrip_enabled=True, admin_conn=None, db_names={},
+        correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    assert len(call_log) == 2
+    out = capsys.readouterr().out
+    assert out.count("PREPARED ") == 1
+    assert out.count("ROUNDTRIP ") == 1
+
+
+def test_roundtrip_conn_stmts_is_a_difference_not_a_cumulative_value(capsys):
+    """WO §2.2 completion condition 4: `stmts` is `post.execute_count`
+    minus the SAME label's own `pre.execute_count` -- never the raw
+    cumulative `execute_count` carried straight through.
+
+    mutation M4 (`tools/perf_baseline.py`): use `stats["execute_count"]`
+    directly for `stmts`, ignoring `pre_conn_stats` -- this test's own
+    `stmts=6` assertion goes red (would read `stmts=56`)."""
+    pre = [{"label": "app1/runtime@1", "execute_count": 50, "probed": True}]
+    post = [{"label": "app1/runtime@1", "execute_count": 56, "probed": True}]
+    pb._emit_roundtrip_conn_rows("r2db-api", "r2db-api", "query", 10, pre, post)
+    out = capsys.readouterr().out
+    assert "stmts=6 " in out
+
+
+def test_roundtrip_conn_baseline_is_this_ops_own_pre_probe_not_the_previous_ops_post(capsys):
+    """WO §2.2 completion condition 5a (design review 1 M-3): the baseline
+    for op N's own `stmts` is op N's own PRE probe, taken immediately
+    before `_measure_op` starts -- activity BETWEEN two ops (credential
+    issuance, `authenticate`, `create_entity`) that bumps `execute_count`
+    must not leak into the NEXT op's own `stmts`.
+
+    mutation M5 (`tools/perf_baseline.py`): drop the PRE probe and use the
+    PREVIOUS op's own POST value as the baseline instead -- this test's
+    own `stmts=0` assertion for op 2 goes red (would read `stmts=15`,
+    since the previous op's own POST was 5 and the between-ops activity
+    bumped the stub to 20)."""
+    counts = {"n": 5}
+
+    def prepared_stats():
+        return [{
+            "label": "app1/runtime@1", "execute_count": counts["n"], "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }]
+
+    stub = SimpleNamespace(transport_kind="in_process", prepared_stats=prepared_stats)
+    common = dict(
+        warmup=0, n=1, concurrency=1, adapter_obj=stub, prepared_detail=False,
+        roundtrip_enabled=True, admin_conn=None, db_names={}, correction_matcher=None,
+        min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    pb._measure_op_and_emit(lambda: None, peer="r2db-api", plug="r2db-api", op="query", counter=pb._CallCounter(), **common)
+    counts["n"] = 20  # between-ops activity this run's own credential/entity calls would cause
+    capsys.readouterr()
+    pb._measure_op_and_emit(lambda: None, peer="r2db-api", plug="r2db-api", op="mutate", counter=pb._CallCounter(), **common)
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.startswith("ROUNDTRIP") and "op=mutate" in l and "conn=" in l)
+    assert "stmts=0 " in line
+
+
+def test_roundtrip_conn_baseline_is_zero_for_a_reconnected_label(capsys):
+    """WO §2.2 completion condition 5b (起草時の裁定7): when the PRE probe
+    has no entry for a POST label at all (a reconnect changed the label's
+    own pid), the baseline is 0 -- never an exception, never a different
+    label's own value.
+
+    mutation M19 (`tools/perf_baseline.py`): drop the row for a label
+    absent from `pre_conn_stats` instead of using baseline 0 -- this
+    test's own `conn=app1/runtime@2` assertion goes red (the line is
+    missing entirely)."""
+    pre = [{"label": "app1/runtime@1", "execute_count": 99, "probed": True}]
+    post = [{"label": "app1/runtime@2", "execute_count": 3, "probed": True}]
+    pb._emit_roundtrip_conn_rows("r2db-api", "r2db-api", "query", 10, pre, post)
+    out = capsys.readouterr().out
+    assert "conn=app1/runtime@2 stmts=3 " in out
+
+
+def test_roundtrip_per_req_is_zero_point_zero_when_requests_is_zero(capsys):
+    """WO §2.2 completion condition 6: `stmts_per_req`/`xacts_per_req`/
+    `sessions_per_req` are `value / requests`, printed `0.00` (never a
+    `ZeroDivisionError`) when `requests == 0`.
+
+    mutation M6 (`tools/perf_baseline.py`): make `_per_request` divide
+    unconditionally -- this test raises `ZeroDivisionError` instead of
+    printing `0.00` (red either way)."""
+    pb._emit_roundtrip_conn_rows("r2db-api", "r2db-api", "query", 0, [], [{"label": "a@1", "execute_count": 5, "probed": True}])
+    db_names = {"app": "appdb"}
+    pre_db = {"app": {"values": (0, 0, 0), "stale": False}}
+    post_db = {"app": {"values": (5, 1, 2), "stale": False}}
+    pb._emit_roundtrip_db_rows("r2db-api", "r2db-api", "query", 0, db_names, pre_db, post_db, None, None)
+    out = capsys.readouterr().out
+    assert "stmts_per_req=0.00" in out
+    assert "xacts_per_req=0.00" in out
+    assert "sessions_per_req=0.00" in out
+
+
+def test_roundtrip_requests_is_warmup_plus_n_times_concurrency(capsys):
+    """WO §2.2 completion condition 7: `requests` is `(warmup + n) *
+    concurrency` -- a DIFFERENT value from the `PERF` line's own `n=`
+    (the measured-sample count alone).
+
+    mutation M7 (`tools/perf_baseline.py`): use `n * concurrency` for
+    `requests`, dropping `warmup` -- this test's own `requests=14`
+    assertion goes red (would read `requests=8`)."""
+    stub = SimpleNamespace(
+        transport_kind="in_process",
+        prepared_stats=lambda: [{
+            "label": "a@1", "execute_count": 1, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }],
+    )
+    pb._measure_op_and_emit(
+        lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+        warmup=3, n=4, concurrency=2, counter=pb._CallCounter(), adapter_obj=stub,
+        prepared_detail=False, roundtrip_enabled=True, admin_conn=None, db_names={},
+        correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.startswith("ROUNDTRIP") and "conn=" in l)
+    assert "requests=14 " in line
+
+
+def test_roundtrip_db_xacts_is_commit_plus_rollback_delta(capsys):
+    """WO §2.2 completion condition 8: `xacts` is `Δxact_commit +
+    Δxact_rollback`, `sessions` is `Δsessions`, both measured against the
+    SAME op's own PRE read.
+
+    mutation M8 (`tools/perf_baseline.py`): drop `Δxact_rollback` from
+    `xacts` -- this test's own `xacts=18` assertion goes red (would read
+    `xacts=15`)."""
+    pre_db = {"app": {"values": (10, 2, 1), "stale": False}}
+    post_db = {"app": {"values": (25, 5, 1), "stale": False}}
+    pb._emit_roundtrip_db_rows("r2db-api", "r2db-api", "query", 10, {"app": "appdb"}, pre_db, post_db, None, None)
+    out = capsys.readouterr().out
+    assert "xacts=18 " in out
+    assert "sessions=0 " in out
+
+
+def test_roundtrip_db_app_xacts_subtracts_only_this_apps_own_probes(capsys):
+    """WO §2.2 completion condition 9 (design review 1 M-4): `db=app`'s
+    own `xacts` is reduced by the count of POST-probed connections the
+    correction matcher says belong to THIS application (never a different
+    application's own label) -- `db=platform`'s own correction is always
+    0.
+
+    mutation M9 (`tools/perf_baseline.py`): drop the subtraction entirely
+    -- this test's own `xacts=3` assertion for `db=app` goes red (would
+    read `xacts=5`, the un-corrected commit delta)."""
+    pre_db = {"app": {"values": (0, 0, 0), "stale": False}, "platform": {"values": (0, 0, 0), "stale": False}}
+    post_db = {"app": {"values": (5, 0, 0), "stale": False}, "platform": {"values": (5, 0, 0), "stale": False}}
+    post_conn_stats = [
+        {"label": "app1/runtime@1", "probed": True},
+        {"label": "app1/runtime@2", "probed": True},
+        {"label": "app2/runtime@9", "probed": True},  # a DIFFERENT application -- must not be counted
+    ]
+    matcher = lambda stats: stats["label"].startswith("app1/")  # noqa: E731 - test-local, mirrors production shape
+    pb._emit_roundtrip_db_rows(
+        "r2db-api", "r2db-api", "query", 10, {"app": "appdb", "platform": "platformdb"},
+        pre_db, post_db, post_conn_stats, matcher,
+    )
+    out = capsys.readouterr().out
+    lines = {l.split("db=", 1)[1].split()[0]: l for l in out.splitlines()}
+    assert "xacts=3 " in lines["app"]
+    assert "xacts=5 " in lines["platform"]
+
+
+def test_poll_clears_snapshot_before_reading_stats():
+    """WO §2.2 completion condition 10: `_poll_pg_stat_database` calls
+    `clear_snapshot()` before its first `read_stats()` call -- observed
+    via the exact call order a fake admin connection's own stand-ins
+    receive.
+
+    mutation M10 (`tools/perf_baseline.py`): drop the `clear_snapshot()`
+    call from `_poll_pg_stat_database` -- this test's own `order[0] ==
+    "clear"` assertion goes red (the log would start with `"read"`, or be
+    empty of `"clear"` entirely)."""
+    order: list[str] = []
+
+    def clear_snapshot() -> None:
+        order.append("clear")
+
+    def read_stats(dbs):
+        order.append("read")
+        return {d: (1, 0, 1) for d in dbs}
+
+    pb._poll_pg_stat_database(
+        ["app"], read_stats=read_stats, clear_snapshot=clear_snapshot,
+        min_wait=0.0, poll_interval=0.0, max_wait=0.0, sleep=lambda s: None, now=lambda: 0.0,
+    )
+    assert order[0] == "clear"
+    assert "read" in order
+
+
+def test_poll_does_not_confirm_before_the_minimum_wait_even_when_stable(capsys):
+    """WO §2.2 completion condition 11 (design review 1 H-1): a value that
+    is stable from the very FIRST read must not confirm before `min_wait`
+    seconds have elapsed since the clear -- WO §1.3 (5b)'s own run 1 (a
+    flat `+5` sat unchanged for 20 real seconds while the true value was
+    `+101`).
+
+    mutation M11 (`tools/perf_baseline.py`): drop the `elapsed >= min_
+    wait` half of the confirm condition (confirm on 3-in-a-row alone) --
+    this test's own `fake_clock["t"] >= 5.0` assertion goes red (the fake
+    clock would stop advancing after only 3 reads, well under 5.0)."""
+    fake_clock = {"t": 0.0}
+
+    def now() -> float:
+        return fake_clock["t"]
+
+    def sleep(seconds: float) -> None:
+        fake_clock["t"] += seconds
+
+    def read_stats(dbs):
+        return {"app": (2, 0, 1)}
+
+    result = pb._poll_pg_stat_database(
+        ["app"], read_stats=read_stats, clear_snapshot=lambda: None,
+        min_wait=5.0, poll_interval=1.0, max_wait=30.0, sleep=sleep, now=now,
+    )
+    assert result["app"]["stale"] is False
+    assert fake_clock["t"] >= 5.0
+
+
+def test_poll_marks_a_confirmed_result_as_not_stale():
+    """WO §2.2 completion condition 22a: a value that DOES confirm (3-in-
+    a-row after `min_wait`) is returned with `stale=False`.
+
+    mutation M21 (`tools/perf_baseline.py`): mark every result `stale=True`
+    unconditionally, even a confirmed one -- this test's own `stale is
+    False` assertion goes red."""
+    fake_clock = {"t": 0.0}
+    result = pb._poll_pg_stat_database(
+        ["app"], read_stats=lambda dbs: {"app": (2, 0, 1)}, clear_snapshot=lambda: None,
+        min_wait=1.0, poll_interval=1.0, max_wait=30.0,
+        sleep=lambda s: fake_clock.__setitem__("t", fake_clock["t"] + s), now=lambda: fake_clock["t"],
+    )
+    assert result["app"]["stale"] is False
+
+
+def test_poll_marks_a_timed_out_result_as_stale():
+    """WO §2.2 completion condition 22b: a value that never stops changing
+    is returned, at its LAST-seen value, with `stale=True` once `max_wait`
+    is reached -- never blocked on forever.
+
+    mutation M17 (`tools/perf_baseline.py`): drop the `max_wait` branch so
+    a never-stabilizing poll returns `stale=False` (or loops forever) --
+    this test's own `stale is True` assertion goes red."""
+    counter = {"i": 0}
+
+    def read_stats(dbs):
+        counter["i"] += 1
+        return {"app": (counter["i"], 0, 1)}  # always different -- never stabilizes
+
+    fake_clock = {"t": 0.0}
+    result = pb._poll_pg_stat_database(
+        ["app"], read_stats=read_stats, clear_snapshot=lambda: None,
+        min_wait=1.0, poll_interval=1.0, max_wait=3.0,
+        sleep=lambda s: fake_clock.__setitem__("t", fake_clock["t"] + s), now=lambda: fake_clock["t"],
+    )
+    assert result["app"]["stale"] is True
+
+
+def test_resolve_app_db_and_platform_db_use_the_two_known_forms():
+    """WO §2.2 completion condition 12a (WO §1.3 (8)): `db=` resolution
+    tries the r2db form (`cell._runtime_dsn`, a DSN string) and the
+    MitateDB form (backend's own `_runtime.info.dbname`) -- both yield an
+    application DB name, and `_platform.platform_db` yields the platform
+    DB name.
+
+    mutation M12 (`tools/perf_baseline.py`): drop the MitateDB form
+    (`_runtime.info.dbname`) from `_resolve_app_db_and_matcher` -- this
+    test's own `app_db_mitate == "mdb_app1"` assertion goes red (would
+    read `None`)."""
+    r2db_cell = SimpleNamespace(_runtime_dsn="host=/x port=5432 dbname=perf_app1 user=runtime")
+    app_db_r2db, matcher_r2db = pb._resolve_app_db_and_matcher(r2db_cell, "app1")
+    assert app_db_r2db == "perf_app1"
+    assert matcher_r2db({"label": "app1/runtime@1"}) is True
+    assert matcher_r2db({"label": "app2/runtime@1"}) is False
+
+    backend = SimpleNamespace(
+        _runtime=SimpleNamespace(info=SimpleNamespace(dbname="mdb_app1", backend_pid=111)),
+        _developer=SimpleNamespace(info=SimpleNamespace(dbname="mdb_app1", backend_pid=222)),
+    )
+    mitate_cell = SimpleNamespace(_backend=backend)
+    app_db_mitate, matcher_mitate = pb._resolve_app_db_and_matcher(mitate_cell, "app1")
+    assert app_db_mitate == "mdb_app1"
+    assert matcher_mitate({"label": "runtime@111"}) is True
+    assert matcher_mitate({"label": "developer@222"}) is True
+    assert matcher_mitate({"label": "runtime@999"}) is False
+
+    adapter_stub = SimpleNamespace(_platform=SimpleNamespace(platform_db="perf_platform"))
+    assert pb._resolve_platform_db(adapter_stub) == "perf_platform"
+
+
+def test_resolve_app_db_returns_none_without_exception_for_an_unknown_shape():
+    """WO §2.2 completion condition 12b: a cell/backend matching NEITHER
+    known form resolves to `(None, <a matcher that always says False>)` --
+    never an exception.
+
+    mutation M20 (`tools/perf_baseline.py`): raise when neither form
+    resolves -- this test's own call goes red with an unhandled
+    exception instead of returning `(None, ...)`."""
+    weird_cell = SimpleNamespace()
+    app_db, matcher = pb._resolve_app_db_and_matcher(weird_cell, "app1")
+    assert app_db is None
+    assert matcher({"label": "anything"}) is False
+
+
+def test_emit_measurement_rows_prints_roundtrip_conn_lines_after_prepared_lines(capsys):
+    """WO §2.2 completion condition 13: `ROUNDTRIP` lines print AFTER the
+    same op's own `PREPARED` lines -- `POOL` -> `PREPARED` -> `ROUNDTRIP`.
+
+    mutation M13 (`tools/perf_baseline.py`): print the `ROUNDTRIP conn=`
+    lines from inside `_emit_measurement_rows` BEFORE calling `_emit_
+    prepared_rows` -- this test's own `prepared_idx < roundtrip_idx`
+    assertion goes red."""
+    stub = SimpleNamespace(
+        transport_kind="in_process",
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 5, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }],
+    )
+    roundtrip = {
+        "requests": 10, "pre_conn_stats": None, "pre_db_values": None, "admin_conn": None,
+        "db_names": {}, "correction_matcher": None, "min_wait": 0.0, "poll_interval": 0.0, "max_wait": 0.0,
+    }
+    pb._emit_measurement_rows("r2db-api", "r2db-api", "query", stub, prepared_detail=False, roundtrip=roundtrip)
+    out = capsys.readouterr().out
+    prepared_idx = out.index("PREPARED ")
+    roundtrip_idx = out.index("ROUNDTRIP ")
+    assert prepared_idx < roundtrip_idx
+
+
+def test_roundtrip_conn_rows_are_absent_when_the_plug_has_no_prepared_stats(capsys):
+    """WO §2.2 completion condition 14: a plug without `prepared_stats`
+    (every plug this WP does not touch) gets zero `ROUNDTRIP conn=` lines
+    -- no exception, mirrors `PREPARED`'s own identical skip.
+
+    mutation M14 (`tools/perf_baseline.py`, shared with R-79's own
+    `_emit_prepared_rows`): drop the `getattr(..., None)` default so a
+    plug without `prepared_stats` raises `AttributeError` instead -- this
+    test's own call goes red with an unhandled exception."""
+    stub = SimpleNamespace(transport_kind="in_process")  # no prepared_stats attribute at all
+    roundtrip = {
+        "requests": 5, "pre_conn_stats": None, "pre_db_values": None, "admin_conn": None,
+        "db_names": {}, "correction_matcher": None, "min_wait": 0.0, "poll_interval": 0.0, "max_wait": 0.0,
+    }
+    pb._emit_measurement_rows("r2db-api", "r2db-api", "query", stub, prepared_detail=False, roundtrip=roundtrip)
+    out = capsys.readouterr().out
+    assert "ROUNDTRIP" not in out
+
+
+def test_roundtrip_rows_print_for_a_socket_transport_plug(capsys):
+    """WO §2.2 completion condition 15: a stub declaring `transport_kind
+    == "socket"` still gets its `ROUNDTRIP` line(s) -- there is no
+    transport this tool skips (mirrors R-78/R-79's own identical tests).
+
+    mutation M15 (`tools/perf_baseline.py`): suppress `ROUNDTRIP` output
+    for any plug name ending in `-socket` -- this test's own stub plug
+    is named `r2db-api-socket`, so the assertion below goes red."""
+    stub = SimpleNamespace(
+        transport_kind="socket",
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 3, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }],
+    )
+    roundtrip = {
+        "requests": 3, "pre_conn_stats": None, "pre_db_values": None, "admin_conn": None,
+        "db_names": {}, "correction_matcher": None, "min_wait": 0.0, "poll_interval": 0.0, "max_wait": 0.0,
+    }
+    pb._emit_measurement_rows("r2db-api", "r2db-api-socket", "query", stub, prepared_detail=False, roundtrip=roundtrip)
+    out = capsys.readouterr().out
+    assert out.count("ROUNDTRIP ") == 1
+
+
+def test_roundtrip_enabled_follows_the_flag_only():
+    """WO §2.2 completion condition 21a: `--roundtrip` (default off)
+    alone decides `_roundtrip_enabled`.
+
+    mutation M16 (`tools/perf_baseline.py`): make `_roundtrip_enabled`
+    always return `True` -- this test's own `is False` assertion for the
+    no-flag case goes red."""
+    parser = pb._build_parser()
+    assert parser.get_default("roundtrip") is False
+    args_default = parser.parse_args([])
+    assert pb._roundtrip_enabled(args_default) is False
+    args_on = parser.parse_args(["--roundtrip"])
+    assert pb._roundtrip_enabled(args_on) is True
+
+
+def test_roundtrip_disabled_never_touches_the_admin_connection_and_prints_nothing(capsys):
+    """WO §2.2 completion condition 21a (second half): with `roundtrip_
+    enabled=False`, `_measure_op_and_emit` never calls anything on
+    `admin_conn` (a poison stand-in here that raises if touched at all)
+    and prints no `ROUNDTRIP` line."""
+    class _Poison:
+        def cursor(self):  # pragma: no cover - must never be reached
+            raise AssertionError("admin connection must not be used when roundtrip is disabled")
+
+    stub = SimpleNamespace(
+        transport_kind="in_process",
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 1, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }],
+    )
+    pb._measure_op_and_emit(
+        lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+        warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub,
+        prepared_detail=False, roundtrip_enabled=False, admin_conn=_Poison(), db_names={"app": "x"},
+        correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    out = capsys.readouterr().out
+    assert "ROUNDTRIP" not in out
+
+
+def test_default_run_probes_prepared_stats_exactly_once_per_op(capsys):
+    """WO §2.2 completion condition 21b (design review 1 M-5): with
+    `--roundtrip` absent, `prepared_stats()` is called exactly once per
+    op (POST only) -- the PRE probe never runs outside the flag, so
+    R-79's own established `POOL lock=` `acquire`/`PREPARED` baseline
+    stays undisturbed.
+
+    mutation M18 (`tools/perf_baseline.py`): run the PRE probe regardless
+    of `roundtrip_enabled` -- this test's own `len(call_log) == 1`
+    assertion goes red (2 calls instead of 1)."""
+    call_log: list[int] = []
+
+    def prepared_stats():
+        call_log.append(1)
+        return [{
+            "label": "a@1", "execute_count": 1, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }]
+
+    stub = SimpleNamespace(transport_kind="in_process", prepared_stats=prepared_stats)
+    pb._measure_op_and_emit(
+        lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+        warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub,
+        prepared_detail=False, roundtrip_enabled=False, admin_conn=None, db_names={},
+        correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    assert len(call_log) == 1
+
+
+def test_emit_measurement_rows_reads_roundtrip_db_poll_by_real_name_and_prints_by_kind(monkeypatch, capsys):
+    """R-80 regression (実機確認 2026-09-24 で発見): `_poll_pg_stat_database`
+    returns its result keyed by the REAL database name it queried, never
+    by the logical kind (`"app"`/`"platform"`) -- `_emit_measurement_rows`
+    must re-key that result back to kind before handing it to `_emit_
+    roundtrip_db_rows`, which looks its two inputs up by kind alone. The
+    stub poll below returns two DIFFERENT real names (`realapp_db`/
+    `realplatform_db`) rather than echoing "app"/"platform" straight
+    back, so a missing re-key is actually exercised, not masked.
+
+    mutation M22 (`tools/perf_baseline.py`): drop the re-keying dict
+    comprehension in `_emit_measurement_rows`'s own `ROUNDTRIP` block
+    (`post_db_values = by_dbname` instead of `{kind: by_dbname[db_name]
+    for kind, db_name in db_names.items()}`) -- this test's own `db=app`/
+    `db=platform` line-count assertions go red (both real names are
+    absent from `db_names`' own kind vocabulary, so `_emit_roundtrip_db_
+    rows`'s own per-kind lookups miss and print nothing)."""
+    def fake_poll(names, **kwargs):
+        return {name: {"values": (1, 0, 1), "stale": False} for name in names}
+
+    monkeypatch.setattr(pb, "_poll_pg_stat_database", fake_poll)
+
+    stub = SimpleNamespace(
+        transport_kind="in_process",
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 1, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+        }],
+    )
+    roundtrip = {
+        "requests": 1, "pre_conn_stats": None,
+        "pre_db_values": {
+            "app": {"values": (0, 0, 0), "stale": False},
+            "platform": {"values": (0, 0, 0), "stale": False},
+        },
+        "admin_conn": None,
+        "db_names": {"app": "realapp_db", "platform": "realplatform_db"},
+        "correction_matcher": None, "min_wait": 0.0, "poll_interval": 0.0, "max_wait": 0.0,
+    }
+    pb._emit_measurement_rows("r2db-api", "r2db-api", "query", stub, prepared_detail=False, roundtrip=roundtrip)
+    out = capsys.readouterr().out
+    assert out.count("db=app ") == 1
+    assert out.count("db=platform ") == 1
+
+
+# ---------------------------------------------------------------------
+# R-80 rework -- コードレビュー差し戻し (2026-09-24)。
+# ---------------------------------------------------------------------
+
+
+def test_roundtrip_db_stale_is_the_or_of_pre_and_post(capsys):
+    """コードレビュー差し戻し 1 (2026-09-24): a `db=` row's own `stale` is
+    the LOGICAL OR of the PRE read's own `stale` and the POST read's own
+    `stale` -- either half being unsettled makes the whole `Δ` unsettled.
+    Two cases: POST alone `stale=True`, and PRE alone `stale=True`.
+
+    mutation M23 (`tools/perf_baseline.py`): hardcode `stale = False` --
+    both cases' own `"stale=1"` assertions go red.
+    mutation M24 (`tools/perf_baseline.py`): use `bool(post_entry["stale"])`
+    alone (ignore PRE) -- the PRE-only case's own `"stale=1"` assertion
+    goes red (POST alone still shows `stale=1`, masking a POST-only bug,
+    which is exactly why both cases are asserted here)."""
+    pre_post_stale = {"app": {"values": (0, 0, 0), "stale": False}}
+    post_stale = {"app": {"values": (1, 0, 0), "stale": True}}
+    pb._emit_roundtrip_db_rows("r2db-api", "r2db-api", "query", 1, {"app": "x"}, pre_post_stale, post_stale, None, None)
+    out = capsys.readouterr().out
+    assert "stale=1" in out
+
+    pre_stale = {"app": {"values": (0, 0, 0), "stale": True}}
+    post_not_stale = {"app": {"values": (1, 0, 0), "stale": False}}
+    pb._emit_roundtrip_db_rows("r2db-api", "r2db-api", "query", 1, {"app": "x"}, pre_stale, post_not_stale, None, None)
+    out = capsys.readouterr().out
+    assert "stale=1" in out
+
+
+def test_roundtrip_db_app_correction_ignores_unprobed_connections(capsys):
+    """コードレビュー差し戻し 2 (2026-09-24): `_probe_correction_count`
+    only counts a connection whose own `probed` is true -- adding an
+    otherwise-matching connection with `probed=False` (left alone by the
+    probe because it was not IDLE, `psycopg_counting.probe_prepared_
+    statements`'s own early return) must not change the correction.
+
+    mutation M25 (`tools/perf_baseline.py`): drop the `stats.get(
+    "probed") and` half of `_probe_correction_count`'s own generator
+    condition -- this test's own `xacts=4` assertion goes red (would
+    read `xacts=3`, since the unprobed connection gets counted too)."""
+    pre_db = {"app": {"values": (0, 0, 0), "stale": False}}
+    post_db = {"app": {"values": (5, 0, 0), "stale": False}}
+    post_conn_stats = [
+        {"label": "app1/runtime@1", "probed": True},
+        {"label": "app1/runtime@2", "probed": False},  # left alone by the probe -- must not count
+    ]
+    matcher = lambda stats: stats["label"].startswith("app1/")  # noqa: E731 - test-local
+    pb._emit_roundtrip_db_rows(
+        "r2db-api", "r2db-api", "query", 10, {"app": "appdb"}, pre_db, post_db, post_conn_stats, matcher,
+    )
+    out = capsys.readouterr().out
+    assert "xacts=4 " in out
+
+
+def test_roundtrip_wait_defaults_are_12_and_30_seconds():
+    """コードレビュー差し戻し 3 (2026-09-24): the minimum wait (12.0s) and
+    the ceiling (30.0s) this file's own `ROUNDTRIP` poll uses are pinned
+    directly (WO §1.2 D-1, WO §6.1 設計レビュー1のH-1).
+
+    mutation M26 (`tools/perf_baseline.py`): change `_ROUNDTRIP_MIN_WAIT_S`
+    from `12.0` to `0.0` -- this test's own `== 12.0` assertion goes red."""
+    assert pb._ROUNDTRIP_MIN_WAIT_S == 12.0
+    assert pb._ROUNDTRIP_MAX_WAIT_S == 30.0
+
+
+def test_poll_confirms_when_two_kinds_resolve_to_the_same_database_name():
+    """コードレビュー差し戻し 5 (2026-09-24): `db=app`/`db=platform`
+    resolving to the SAME real database name (a degenerate but not
+    impossible case) must not prevent the poll from ever confirming --
+    `db_names` is de-duplicated before `confirmed`/`streak` are built.
+
+    mutation M27 (`tools/perf_baseline.py`): drop the de-duplication line
+    -- this test's own `stale is False` (and `fake_clock["t"] < 3.0`,
+    never reaching `max_wait`) assertions go red: the duplicate name
+    makes `len(confirmed)` (1, unique) permanently short of `len(
+    db_names)` (2, with the duplicate), so the poll runs out the clock to
+    `max_wait` and reports `stale=True` even though the value settled
+    immediately."""
+    fake_clock = {"t": 0.0}
+
+    def read_stats(dbs):
+        return {d: (1, 0, 1) for d in dbs}
+
+    result = pb._poll_pg_stat_database(
+        ["same_db", "same_db"], read_stats=read_stats, clear_snapshot=lambda: None,
+        min_wait=1.0, poll_interval=1.0, max_wait=3.0,
+        sleep=lambda s: fake_clock.__setitem__("t", fake_clock["t"] + s), now=lambda: fake_clock["t"],
+    )
+    assert result["same_db"]["stale"] is False
+    assert fake_clock["t"] < 3.0
