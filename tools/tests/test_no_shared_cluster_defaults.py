@@ -262,11 +262,15 @@ def test_scan_covers_at_least_one_file() -> None:
     assert len(files) >= 1, "git ls-files -- '*.py' returned no files"
 
 
-def test_admin_dsn_env_definitions_are_pinned_to_27_files() -> None:
-    """Completion condition 5 (R-2): exactly 27 tracked .py files define
-    `ADMIN_DSN_ENV` at module level (work order §4.2 (a))."""
+def test_admin_dsn_env_definitions_are_pinned_to_28_files() -> None:
+    """Completion condition 5 (R-2): exactly 28 tracked .py files define
+    `ADMIN_DSN_ENV` at module level (work order §4.2 (a)). The 28th is
+    `r2db-api/tests/test_ops_apply_platform_migration.py` (R-90), which
+    follows the same convention; this pin counts tracked files only, so a
+    change set that adds such a file must re-measure it with the new file
+    tracked (`git add -N`) before its own `tools/tests` run."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
-    assert len(files) == 27, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
+    assert len(files) == 28, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
 
 
 def test_every_admin_dsn_reader_raises_when_the_environment_variable_is_unset() -> None:
