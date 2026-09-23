@@ -746,6 +746,57 @@ def _format_row(row: dict) -> str:
     )
 
 
+def _format_pool_row(peer: str, plug: str, op: str, key: str, stats: dict) -> str:
+    """R-78 (D-2): one `POOL` line for one entry of a plug's own `pool_
+    stats()`. Two shapes, chosen by which keys `stats` carries -- never by
+    `peer`/`plug` name, so a future third pool/lock shape is refused
+    loudly (`KeyError`) rather than silently misprinted:
+
+    - A ROLE row (`stats` has `lock_acquire_count` absent, `acquire_count`/
+      `size`/`in_use_peak` present -- `r2db_api.postgres._RolePool.stats()`'s
+      own six keys): `role=<key> size=<n> acquire=<n> waits=<n> wait_
+      total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>`.
+    - A LOCK row (`stats` has `lock_acquire_count` -- `mitatedb_api.cell.
+      _CountingRLock.stats()`'s own four keys, no pool `size`/`in_use_peak`
+      concept for a mutex): `lock=<key> acquire=<n> waits=<n> wait_total_
+      ms=<x.xxx> wait_max_ms=<x.xxx>`."""
+    if "lock_acquire_count" in stats:
+        return (
+            f"POOL peer={peer} plug={plug} op={op} lock={key} "
+            f"acquire={stats['lock_acquire_count']} waits={stats['wait_count']} "
+            f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f}"
+        )
+    return (
+        f"POOL peer={peer} plug={plug} op={op} role={key} size={stats['size']} "
+        f"acquire={stats['acquire_count']} waits={stats['wait_count']} "
+        f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f} "
+        f"in_use_peak={stats['in_use_peak']}"
+    )
+
+
+def _emit_pool_rows(peer: str, plug: str, op: str, adapter_obj: Any) -> None:
+    """R-78 (D-2): print one `POOL` line per entry `adapter_obj.pool_
+    stats()` returns, called once per (plug, op) from inside `_measure_
+    plug` itself, as a side effect -- NOT interleaved with `PERF` lines:
+    `_measure_plug` returns its `PERF` row dicts to `_run`'s own loop,
+    which prints them only after `_measure_plug` (and every `_emit_pool_
+    rows` call inside it) has already returned, so every `POOL` line for a
+    given plug prints as one block BEFORE that plug's own `PERF` lines,
+    never interleaved with them one (plug, op) at a time. Called
+    unconditionally, for every transport (monitor 裁定 2026-09-23: a
+    socket-transport plug shares the same in-process cell/pool object as
+    its `-http` counterpart -- see `tools/PERF_BASELINE_README.md` -- so
+    there is no transport this should ever skip). Adapters with no `pool_
+    stats` method (every plug this WP does not touch) are silently
+    skipped, exactly like this tool already skips the MitateDB `cross_
+    entity` op for plugs without that capability."""
+    pool_stats = getattr(adapter_obj, "pool_stats", None)
+    if pool_stats is None:
+        return
+    for key, stats in pool_stats().items():
+        print(_format_pool_row(peer, plug, op, key, stats))
+
+
 # ---------------------------------------------------------------------
 # one plug's own full measurement
 # ---------------------------------------------------------------------
@@ -780,6 +831,7 @@ def _measure_plug(
             query_row = _row(peer, name, transport, "query", durations, calls, concurrency)
             rows.append(query_row)
             _run_self_check(name, calls)
+            _emit_pool_rows(peer, name, "query", adapter_obj)
 
             # --- mutate ---
             # WP-5 rework ruling item 2: every value `fresh_identifier`
@@ -808,6 +860,7 @@ def _measure_plug(
                 _do_mutate, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
             )
             rows.append(_row(peer, name, transport, "mutate", durations, calls, concurrency))
+            _emit_pool_rows(peer, name, "mutate", adapter_obj)
 
             # --- batch (5 operations, design D-6 decision 1) ---
             batch_runtime = adapter_obj.authenticate(adapter_obj.issue_credential(app_id, "runtime"))
@@ -832,6 +885,7 @@ def _measure_plug(
                 _do_batch, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
             )
             rows.append(_row(peer, name, transport, "batch", durations, calls, concurrency))
+            _emit_pool_rows(peer, name, "batch", adapter_obj)
 
             # --- cross_entity (MitateDB 2 plug only; design D-6 decision 1) ---
             capabilities = adapter_obj.capability_document().get("capabilities", {})
@@ -856,6 +910,7 @@ def _measure_plug(
                     _do_cross_entity, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
                 )
                 rows.append(_row(peer, name, transport, "cross_entity", durations, calls, concurrency))
+                _emit_pool_rows(peer, name, "cross_entity", adapter_obj)
         return rows
     finally:
         with contextlib.suppress(Exception):

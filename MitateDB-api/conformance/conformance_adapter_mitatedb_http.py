@@ -3044,6 +3044,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 )
                 return cur.fetchone()[0]
 
+    def pool_stats(self) -> dict[str, dict[str, int | float]]:
+        """R-78 (D-2): the data-plane counterpart of `conformance_adapter_
+        r2db_http.py`'s identical addition. This peer has no connection
+        pool on its data plane (module docstring, `backend_postgres.py`
+        :71-74) -- each `ApplicationCell` in `self._cells` serializes its
+        two persistent connections through its own `RLock` instead
+        (`cell.py::ApplicationCell._lock`). Returns that lock's own
+        `stats()` dict (keys `lock_acquire_count`/`wait_count`/`wait_
+        total_ms`/`wait_max_ms`), keyed by `application_id` alone (there is
+        exactly one lock per application, not one per role). Empty when no
+        cell is currently open."""
+        return {application_id: cell._lock.stats() for application_id, cell in self._cells.items()}  # noqa: SLF001 -- adapter-internal reach-in, same convention as this file's other `cell._...` accesses above
+
     def close(self) -> None:
         self._cleanup()
         atexit.unregister(self._cleanup)

@@ -16,7 +16,7 @@ independent parts:
 `os.environ.get(ADMIN_DSN_ENV, "")` -- `psycopg.connect("")` still falls
 back to the shared cluster via libpq's own defaults, silently, past every
 other check in this repository. `test_admin_dsn_env_definitions_are_
-pinned_to_27_files` and `test_every_admin_dsn_reader_raises_when_the_
+pinned_to_29_files` and `test_every_admin_dsn_reader_raises_when_the_
 environment_variable_is_unset` read the AST of every module-level
 `ADMIN_DSN_ENV` definition's own reader function(s) directly, not a
 string search (§1.7 の 52 -- a check must read the property a function
@@ -262,15 +262,17 @@ def test_scan_covers_at_least_one_file() -> None:
     assert len(files) >= 1, "git ls-files -- '*.py' returned no files"
 
 
-def test_admin_dsn_env_definitions_are_pinned_to_28_files() -> None:
-    """Completion condition 5 (R-2): exactly 28 tracked .py files define
+def test_admin_dsn_env_definitions_are_pinned_to_29_files() -> None:
+    """Completion condition 5 (R-2): exactly 29 tracked .py files define
     `ADMIN_DSN_ENV` at module level (work order §4.2 (a)). The 28th is
-    `r2db-api/tests/test_ops_apply_platform_migration.py` (R-90), which
-    follows the same convention; this pin counts tracked files only, so a
-    change set that adds such a file must re-measure it with the new file
-    tracked (`git add -N`) before its own `tools/tests` run."""
+    `r2db-api/tests/test_ops_apply_platform_migration.py` (R-90; pinned in
+    a follow-up correction), the 29th `r2db-api/tests/test_r78_pool_wait_
+    stats.py` (R-78 WP-1); both follow the same convention. This pin
+    counts tracked files only, so a change set that adds such a file must
+    re-measure it with the new file tracked (`git add -N`) before its own
+    `tools/tests` run."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
-    assert len(files) == 28, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
+    assert len(files) == 29, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
 
 
 def test_every_admin_dsn_reader_raises_when_the_environment_variable_is_unset() -> None:

@@ -81,6 +81,51 @@ class BoundedConnectionPool:
         # locality heuristic, not a correctness requirement.
         self._idle: "queue.LifoQueue[psycopg.Connection]" = queue.LifoQueue()
         self._created = 0
+        # R-78 acquisition statistics: counted under `self._stats_lock`, a
+        # lock dedicated to this bookkeeping and never shared with `self.
+        # _lock` above -- stage (1) of `acquire()` (reusing an idle,
+        # still-open connection) takes no lock at all today, and this
+        # statistics addition does not change that.
+        self._stats_lock = threading.Lock()
+        self._acquire_count = 0
+        self._wait_count = 0
+        self._wait_total_ms = 0.0
+        self._wait_max_ms = 0.0
+        self._in_use = 0
+        self._in_use_peak = 0
+
+    def _record_acquire(self) -> None:
+        """Count one successful acquisition under `self._stats_lock`: `acquire_count` rises by one, `in_use` rises by one, and `in_use_peak` keeps the highest value `in_use` ever reaches."""
+        with self._stats_lock:
+            self._acquire_count += 1
+            self._in_use += 1
+            if self._in_use > self._in_use_peak:
+                self._in_use_peak = self._in_use
+
+    def _record_wait(self, waited_ms: float) -> None:
+        """Count one entry into stage (3) of `acquire()` (the deadline loop reached only when the pool is at `max_size`), whether it ends in a reused connection or in `AuthorizationStateUnavailable`. `wait_max_ms` keeps the highest single wait observed."""
+        with self._stats_lock:
+            self._wait_count += 1
+            self._wait_total_ms += waited_ms
+            if waited_ms > self._wait_max_ms:
+                self._wait_max_ms = waited_ms
+
+    def _record_release(self) -> None:
+        """Count one connection returning from checked-out (`in_use`) back to available, under `self._stats_lock`. Called once per `release()`/`discard()` call -- the two ways a connection this pool handed out comes back."""
+        with self._stats_lock:
+            self._in_use = max(0, self._in_use - 1)
+
+    def stats(self) -> dict[str, int | float]:
+        """Return this pool's acquisition statistics as a plain dict with exactly six keys: `size` (this pool's `max_size`), `acquire_count`, `wait_count`, `wait_total_ms`, `wait_max_ms`, `in_use_peak`. Read under `self._stats_lock`; never touches `self._lock` or the idle queue itself."""
+        with self._stats_lock:
+            return {
+                "size": self._max_size,
+                "acquire_count": self._acquire_count,
+                "wait_count": self._wait_count,
+                "wait_total_ms": self._wait_total_ms,
+                "wait_max_ms": self._wait_max_ms,
+                "in_use_peak": self._in_use_peak,
+            }
 
     def _new_connection(self) -> "psycopg.Connection":
         return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
@@ -109,6 +154,7 @@ class BoundedConnectionPool:
             if conn.closed:
                 self._forget_one()
                 continue
+            self._record_acquire()
             return conn
 
         # 2) Create a new one, if under budget.
@@ -120,17 +166,21 @@ class BoundedConnectionPool:
                 under_budget = False
         if under_budget:
             try:
-                return self._new_connection()
+                conn = self._new_connection()
             except psycopg.Error as exc:
                 self._forget_one()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+            self._record_acquire()
+            return conn
 
         # 3) At budget: wait briefly for a released connection rather than
         # manufacturing one past the cap or blocking forever.
-        deadline = time.monotonic() + self._acquire_timeout
+        wait_start = time.monotonic()
+        deadline = wait_start + self._acquire_timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                self._record_wait((time.monotonic() - wait_start) * 1000.0)
                 raise AuthorizationStateUnavailable(
                     "platform registry connection pool exhausted (max_size reached)"
                 )
@@ -141,10 +191,13 @@ class BoundedConnectionPool:
             if conn.closed:
                 self._forget_one()
                 continue
+            self._record_wait((time.monotonic() - wait_start) * 1000.0)
+            self._record_acquire()
             return conn
 
     def release(self, conn: "psycopg.Connection") -> None:
         """Return a healthy connection to the idle pool."""
+        self._record_release()
         if conn.closed:
             self._forget_one()
             return
@@ -152,6 +205,7 @@ class BoundedConnectionPool:
 
     def discard(self, conn: "psycopg.Connection") -> None:
         """Close and forget a connection that must never be reused."""
+        self._record_release()
         try:
             conn.close()
         except psycopg.Error:

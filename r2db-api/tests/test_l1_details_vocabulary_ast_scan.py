@@ -112,6 +112,18 @@ _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORT
 #: (`_fail_client_value`'s generic `psycopg.errors.DataError` catch), has
 #: no in-memory sibling at all -- `test_backend_layer_allowlist_entries_
 #: have_no_in_memory_sibling_denial` below pins that.
+#: R-78 (2026-09-23, work order docs/work-orders/
+#: WORK_ORDER_R78_POOL_WAIT_MEASUREMENT_V1.md D-1): `_RolePool.__init__`
+#: gained six acquisition-statistics fields, `_acquire` gained calls into
+#: three new `_record_acquire`/`_record_wait`/`_record_release` methods
+#: (inserted directly above `_liveness_check`), and `SharedPoolManager`
+#: gained a `stats()` method -- all inserted ABOVE `_fail_client_value`'s
+#: own single `fail()` call, pushing it (and nothing else vocabulary-
+#: relevant) down by 64 lines. Re-verified against the current file via
+#: `_fail_call_sites`, not hand-shifted. Entry count and site identity
+#: unchanged (1) -- R-78 calls no `fail()`/`violation()`/`_VOCAB_CLASSES`
+#: site of its own; only the line number of this one pre-existing generic
+#: `except psycopg.errors.DataError` backstop moves.
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # WP-6d (ruling U-7, `{scratchpad}/review2/frame.md` F-①): line shift
     # only (1621 -> 1732) -- the new `_idempotency_key_lock`/`_idempotency_
@@ -151,7 +163,9 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # inside its own transaction (parity with `query`/`transact`/`apply_
     # schema`), lengthening the file by 12 lines above this call site;
     # `_fail_client_value`'s own single `fail()` call is otherwise unchanged.
-    ("postgres.py", 1451),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # R-78 WP-1 (2026-09-23): line shift only (1451 -> 1515) -- see this
+    # frozenset's own `#:` header above for the detailed accounting.
+    ("postgres.py", 1515),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
