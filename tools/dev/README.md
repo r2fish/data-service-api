@@ -45,3 +45,36 @@ tools/dev/finalize.py -C .claude/worktrees/wp1 --branch wp1 --allow 'r2db-api/*'
 tools/dev/fold.py
 tools/dev/fold.py --apply
 ```
+
+## Known gaps (all checkers)
+
+The rule is `docs/work-orders/OPERATING_CONDITIONS.md` 1.12-71 -- one question per gap found in a checker: could a product defect (a contract violation or a Security Invariant breach) pass the completion gate through it? Yes: file it in `docs/design/ROADMAP_POST_PHASE7_V1.md` section 8. No: record it in that checker's own module docstring and do not file it. 1.12-72 treats the tool layer as complete once every checker carries the section. Each checker's `Known gaps` section is the authoritative text (what is not detected / why / what catches it instead); this table is only an index.
+
+| Checker | Gaps (count) | One-line summary |
+| --- | --- | --- |
+| `tools/change_class.py` | 2 | Classifies only the paths it is handed (the caller's enumeration is the gap, not the path rules -- ledger R-100); content-level C/D triggers are invisible to a path-only classifier. |
+| `tools/check_collection_floor.py` | 2 | A same-size swap or any drop still above the floor passes; `tools/tests` is not part of the root collection. |
+| `tools/check_comment_provenance.py` | 4 | `file:line` references inside src comments are never resolved (ledger R-96); a same-AST-kind substitute after a CH-ID-less block stays silent; a first docstring on an existing function reads as a justified red; nothing outside both peers' `src/` is scanned. |
+| `tools/check_control_mapping_restructure.py` | 2 | Compares claim text, never claim truth; a one-time check that assumes the old table form. |
+| `tools/check_control_mapping_split.py` | 2 | Compares bullet text per (SI, peer, axis), never truth; the move counters gate the exit code only with `--expect`. |
+| `tools/check_doc_refs.py` | 3 | IDs of 3+ digits match no family (R-100..R-102 exist now); the scan set excludes both peers' `.md`, `tools/` below the top level and all code comments; a resolving reference is not checked against what the sentence claims. |
+| `tools/check_image_pins.py` | 4 | Only the image-to-constraints direction is walked; the freeze transcript's provenance is the CI job's, not this script's; `.` is not folded in name normalization; MitateDB-api's is the only production image. |
+| `tools/public_value_scan.py` | 3 | A deny-suffix host nested inside another URL's query string is not seen (**ledger R-46, OPEN -- fix before the public flip**); R7 personal names are out of scope; bare FQDNs outside the narrow TLD set, and shapes no rule describes, are never examined. |
+| `tools/rewrite_hash_refs.py` | 3 | Sha references under 7 hex characters (or all-digit/all-letter) are not candidates; only tracked `*.md` is targeted by default; `unmatched` tokens do not block `--apply`. |
+| `tools/dev/_devlib.py` | 2 | An unknown pytest summary wording parses as None (fail-closed, never a wrong number); a mutate run killed before its journal was written leaves no blocker. |
+| `tools/dev/finalize.py` | 3 | Never runs the root suite; `--tools-tests` takes no suite lock and waits for nothing; the `--allow` globs prove a match, not narrowness. |
+| `tools/dev/fold.py` | 2 | Safety notes (a)-(c): another chat's clean, old-enough worktree can be folded, and `-C` protects only one worktree; ancestry is checked against the local `--main` only. |
+| `tools/dev/gate.py` | 3 | The root suite excludes `tools/tests`; `-C` defaults to the current directory (a call from the main checkout measures main and still says PASS); the shared cluster's catalog diff is `info=` only. |
+| `tools/dev/handover_ready.py` | 2 | `--no-running-agents` is a self-declaration; only the worktrees passed with `--worktree` are checked clean-and-merged. |
+| `tools/dev/mutate.py` | 2 | `-x` hides every test after the first failure in one mutation entry; a red is an exit code, not evidence of the intended assertion. |
+| `tools/dev/pt.py` | 2 | Runs what it is handed and judges nothing; FAILED/ERROR lines beyond `--show N` are only in the log. |
+| `tools/dev/section.py` | 3 | Setext headings are not recognized; a fence of more than three markers is read as a 3-marker fence; a `#` line inside an indented code block is reported as a heading. |
+| `tools/dev/turn_budget_hook.py` | 2 | Every exception exits 0 silently, so a broken counter is invisible; calls made inside a subagent are never counted. |
+| `conformance-tests/test_control_mapping_register.py` | 3 | Shape, cap and reference resolution only -- never a claim's truth, nor the content at a resolving line; the current longest sub-block is deliberately unrecorded (ledger R-73); CONDITIONS.md is never read here. |
+| `conformance-tests/test_conditions_register.py` | 4 | Only the 5 backtick forms inside backtick spans are extracted; a path-omitted name relies on basename uniqueness (non-unique is red, never silent); resolution does not show that the test drives the condition; D-3 (f)'s one allowlisted span is never resolved. |
+| `conformance-tests/test_conformance_docstring_position_refs.py` | 5 | Limits (D-9): an in-range reference pointing at an unrelated statement is not seen; route (iii) does not pin a directory; a bare path with no line number and R-88's label shape are out of scope; both peers' `src`/`tests` are out of scope (ledger R-96); a non-backtick-quoted reference and an ID-prefixed form are not extracted. |
+| `tools/tests/test_src_import_readers.py` | 3 | Pins the allow table's row set, cannot judge whether a reader-zero import should exist (ledger R-94's ruling did that); D-5's limits (dataflow, dynamic imports, shadowing, aliased `Literal`/`Annotated`); scope is both peers' `src/` only. |
+
+### Checks that live outside tools/
+
+- `r2db-api/src/r2db_api/ops.py:1728-1752` (`_PLATFORM_MIGRATION_SUPERSEDED_BY`) with its derivation in `r2db-api/tests/test_ops_apply_platform_migration.py:402-436` -- **not detected**: a later platform migration that redefines an already-covered role's target while spelling that role differently from the earlier file (a psql variable such as `:"api_role"` in one file, a literal such as `r2dbsvc_api` in another) loses its supersede edge, and `apply-platform-migration`'s own closure check stays green. **why**: the derivation keeps each role reference as its own matched text and never resolves a psql variable to the role name an operator supplies at invocation time, so the two spellings are two different targets. **caught by**: that derivation's own disclosure -- a new migration must spell an already-referenced role exactly as an earlier accepted file already spells it -- plus code review of every new platform migration; ledger R-98 records the gap. Whether MitateDB-api's own same-shaped derivation (R-57 D-3) has the same property is unverified. The peers' `src/` docstrings are inside the comment-provenance scan, so this entry is recorded here rather than in `ops.py` itself.

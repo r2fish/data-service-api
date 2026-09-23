@@ -35,6 +35,24 @@ The floor itself is not bumped by this script. It only compares; raising
 COLLECTION_FLOOR after a legitimate increase is a separate, explicit commit
 (see conformance-tests/README.md's COLLECTION_FLOOR section) made at a
 phase's completion gate, not something this tool does on its own.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a swap that keeps the total constant (N tests
+       deleted and N added), or any drop that still lands above the
+       floor.
+       why: one measured total is compared against one integer; there is
+       no per-directory, per-file or per-test-id breakdown.
+       caught by: accepted -- the floor is a floor, not an inventory.
+       Which tests exist is shown by the work order's own completion-
+       condition/mutation table and the reviewer's reading of the diff.
+    2. not detected: any test outside the root pytest session --
+       `tools/tests` has its own root (`tools/tests/pytest.ini`) and is
+       never collected here.
+       why: the measurement is one `-m pytest --collect-only -q` run
+       from the repository root.
+       caught by: tools/dev/finalize.py --tools-tests.
 """
 from __future__ import annotations
 

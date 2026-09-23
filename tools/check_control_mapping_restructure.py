@@ -29,6 +29,25 @@ missing/added/moved/reordered/unbalanced counters at 0, `history` at
 N/N, and the four equality fields all `identical`).
 
 R-50 (design docs/design/CONTROL_MAPPING_MULTI_BLOCK_V0_1.md v0.4 section 9): this tool has no table of its own -- it assumes the OLD table form and is a one-time-only correspondence check against it (design section 6); its `blocks_count = len(sections) * len(PEERS)` (below) counts SI sections times peers, not sub-blocks.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether a claim is TRUE, or whether the evidence it
+       cites still shows what it claims -- only that the old and the new
+       file hold the same claim multiset.
+       why: every check (V1-V8) compares cell/bullet TEXT.
+       caught by: the acceptance audit against the cited `file:line`
+       evidence, and R-88's own position-reference checks in
+       `conformance-tests/test_control_mapping_register.py`.
+    2. not detected: anything about today's file form -- this is a
+       one-time correspondence check that assumes the OLD table form
+       (see the R-50 paragraph above).
+       why: same paragraph (`blocks_count = len(sections) * len(PEERS)`;
+       there is no sub-block model here at all).
+       caught by: `conformance-tests/test_control_mapping_register.py`
+       (the standing shape/cap fixation) and, for a sub-block split,
+       `tools/check_control_mapping_split.py`.
 """
 from __future__ import annotations
 

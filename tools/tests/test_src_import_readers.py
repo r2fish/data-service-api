@@ -77,6 +77,30 @@ module set for each peer must equal ``PINNED_MODULES[peer]`` exactly, a
 set-equality check rather than a bare count. The pinned list below is
 copied verbatim from `test_src_import_cycles.py`'s own list rather than
 imported from it (`tools/tests` files do not import each other).
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether a reader-zero import SHOULD exist at all --
+       this file pins the allow table's row set, it cannot judge a row's
+       legitimacy.
+       why: a row's reason is free text; only its (peer, module, name)
+       key participates in the set equality. The `"no record"` reason
+       shape exists for rows pinned in `_NO_RECORD_KEYS`, which is empty
+       today.
+       caught by: a human ruling recorded in the ledger -- R-94 was
+       exactly that ruling (both unrecorded imports deleted 2026-09-22,
+       leaving the 39 rows and the empty `_NO_RECORD_KEYS` here) -- plus
+       code review of any new row's reason.
+    2. not detected: dataflow, a dynamic import, scope and shadowing, or
+       an aliased `Literal`/`Annotated` -- see "Limits (D-5)" above.
+       why: same paragraph; all of them are false-negative directions by
+       construction.
+       caught by: code review (accepted by D-5).
+    3. not detected: any import outside the two peers' `src/` packages
+       (tools/, tests/, conformance-tests/).
+       why: the module set is pinned to `PINNED_MODULES` (D-1).
+       caught by: accepted -- that is the designed scope.
 """
 from __future__ import annotations
 

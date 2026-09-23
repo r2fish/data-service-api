@@ -29,6 +29,33 @@ Refuses while an unfinished mutation run's journal exists.
 Exit: 0 committed (and merged); 1 a check failed, nothing committed;
 76 committed but not merged (or merged but the worktree not fast-forwarded;
 the output says which); 78 precondition error, nothing committed.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: whether the root suite is green at the commit --
+       finalize never runs it.
+       why: what runs here is the identity / allowlist / empty-`.md`
+       checks, check_doc_refs, public_value_scan over the staged paths,
+       any `--check` command, and optionally `tools/tests`.
+       caught by: tools/dev/gate.py, run by the supervisor before
+       finalize (OPERATING_CONDITIONS 1.3-19).
+    2. not detected: a gate or another pytest run in flight while
+       `--tools-tests` runs -- it takes no suite lock and waits for
+       nothing.
+       why: `tools/tests` has its own root and needs no PostgreSQL, so
+       there is no shared cluster to collide over; only the mutation-
+       journal check remains.
+       caught by: accepted for the cluster; a red or an interrupted run
+       exits 76 (committed, not merged) and the exit-76 recovery in
+       tools/dev/README.md applies.
+    3. not detected: an `--allow` glob broader than the work order's own
+       "paths you may touch" list.
+       why: the allowlist proves every changed path matched SOME glob
+       (fnmatch, where `*` also matches `/`), never that the glob was as
+       narrow as the manifest.
+       caught by: the supervisor comparing the printed `staged N paths`
+       / `git diff --cached --stat` line against that list.
 """
 from __future__ import annotations
 

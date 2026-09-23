@@ -18,6 +18,23 @@ Usage (settings.json command):
     python3 -B <root>/tools/dev/turn_budget_hook.py --project-root <root> --threshold 300 --every 50
 State: $TURN_BUDGET_STATE_DIR, else ~/.claude/turn-budget/<session_id>.json
 Standard library only; Python 3.9+.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: its own failure -- every exception exits 0
+       silently, so a broken counter looks exactly like a chat still
+       under the threshold.
+       why: deliberate (see "Any error exits 0 silently" above).
+       caught by: accepted; the boundary itself is decided by
+       tools/dev/handover_ready.py, not by this counter.
+    2. not detected: model calls made inside a subagent -- input
+       carrying an agent_id is never answered, so a chat that delegates
+       heavily is undercounted.
+       why: same paragraph above.
+       caught by: accepted -- the threshold is about the main
+       conversation's own context growth, which is what the handover
+       rule addresses.
 """
 from __future__ import annotations
 

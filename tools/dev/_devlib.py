@@ -12,6 +12,25 @@ served are removed. PostgreSQL exclusivity is now a real flock
 perf_baseline.py directly and by every owned-mode pytest run via its own
 conftest.py -- never re-derived here by scanning `ps`. Only the mutation-
 journal check survives, renamed `journal_blocker()`.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a pytest summary whose wording these regexes do not
+       know (a new count kind, another pytest version's phrasing).
+       why: `_TALLY_HINT_RE` / `_COUNT_RE` enumerate the known count
+       words, so `tally_line` / `parse_counts` return None rather than a
+       wrong number.
+       caught by: fail-closed callers -- gate.py's PASS requires a fully
+       parsed summary line (OPERATING_CONDITIONS 1.3-22), so an unparsed
+       tally can never read as PASS.
+    2. not detected: a mutate.py run killed BEFORE its journal file was
+       written.
+       why: `journal_blocker` is a file-existence check on the
+       worktree's git dir, nothing more.
+       caught by: mutate.py writing that journal before its FIRST edit,
+       its own end-of-run sha256 and `git grep` comparison, and `git
+       status` in the worktree (accepted).
 """
 from __future__ import annotations
 

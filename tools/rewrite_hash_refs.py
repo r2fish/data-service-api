@@ -76,6 +76,29 @@ Modes:
 
 Output line format:  <path>:<line> | <token> | <verdict>[ -> <replacement>]
 Summary line:        # replaced=N ambiguous=N unmatched=N allowed=N
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a commit reference shorter than 7 hex characters,
+       or one that happens to be all digits or all letters.
+       why: a candidate must be a word-bounded run of 7-40 lowercase
+       hex characters holding at least one digit and at least one letter
+       (see "Candidate token shape" above).
+       caught by: accepted -- `--verify` uses the same shape, so this
+       bound is a convention about how this repository writes shas (7
+       characters or more), not a checked property.
+    2. not detected: a reference outside the default target set (tracked
+       `*.md`) -- a `.py` docstring, a workflow YAML, a JSON fixture.
+       why: `resolve_target_files` defaults to `git ls-files -- '*.md'`.
+       caught by: the operator passing explicit pathspecs for those
+       files and re-running `--verify` over the same set (accepted).
+    3. not detected: whether an `unmatched` token was a genuine rewrite
+       gap -- `--apply` writes anyway (see the `--apply` paragraph
+       above; only `ambiguous` blocks a write).
+       why: same paragraph.
+       caught by: the operator reading the `unmatched` list, and
+       `--verify` afterwards.
 """
 from __future__ import annotations
 

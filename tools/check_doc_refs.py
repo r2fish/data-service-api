@@ -106,6 +106,32 @@ zero is itself a fatal (exit 1) scan-vacuity signal, the same "空振り禁止"
 principle as the per-family counts below. A fallback-path zero is NOT
 fatal by itself -- an empty fallback set can legitimately happen when this
 script runs outside any repository this guard is meant to protect.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a reference to an ID with 3 or more digits. The
+       ledger now really holds R-100..R-102 (2026-09-23), so every
+       reference to one of them is invisible here while this script
+       still reports OK -- see the token-grammar paragraph above ("A
+       number of 3 or more digits ... matches no family").
+       why: the G/P/R and L family patterns are 1-2 digits.
+       caught by: the supervisor's own reading when the ledger is
+       revised (accepted; widening the digits is its own explicit
+       commit, exactly as that paragraph requires).
+    2. not detected: a reference living outside the scanned set -- both
+       peers' own `.md` trees, anything under `tools/` below the top
+       level (`tools/dev/README.md` included), and every code comment or
+       docstring.
+       why: `iter_scan_files` walks docs/ spec/ security/
+       conformance-tests/ recursively, plus README.md, CLAUDE.md and
+       `tools/*.md` non-recursively.
+       caught by: review (accepted).
+    3. not detected: whether a reference that DOES resolve still says
+       what the citing sentence claims -- only that a definition with
+       that ID exists in the family's canonical file.
+       why: resolution is ID-to-definition, never text-to-text.
+       caught by: review and the acceptance audit.
 """
 from __future__ import annotations
 

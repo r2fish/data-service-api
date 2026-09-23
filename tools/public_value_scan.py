@@ -37,6 +37,30 @@ Output line format (never the raw matched value):
     <path>:<line> | <RULE> | <first3>...<length>
 
 Exit code: 0 if no rule flags anything, 1 otherwise.
+
+Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
+a gap that cannot let a contract violation or a Security Invariant breach
+through the completion gate is recorded here and not filed in the ledger):
+    1. not detected: a deny-suffix host that sits INSIDE another URL's
+       query string.
+       why: `R2_URL_RE` matches a URL greedily up to whitespace or a
+       delimiter, so a nested `https://...` inside a query string is
+       part of ONE match and only the outer host is ever classified
+       against the allow/deny sets.
+       caught by: ledger R-46 (OPEN, not accepted): fix before the
+       public flip; until then human review of URLs in query strings.
+    2. not detected: personal names (R7) -- see the R7 paragraph above.
+       why: same paragraph (not expressible as a reliable regex).
+       caught by: human review, as that paragraph states.
+    3. not detected: a bare FQDN whose TLD is outside `R2_FQDN_TLDS`
+       (com/net/org/jp/io/cloud/info/biz), and any value shape no rule
+       describes at all.
+       why: the TLD set is deliberately narrow (design Appendix A.1: a
+       broad set reproduced attribute-chain false positives such as
+       `self.dev`), and the scanner is a fixed rule list (see "Rules
+       implemented" above).
+       caught by: human review before publication, against
+       `docs/security/public-repository-policy.md` (accepted).
 """
 from __future__ import annotations
 
