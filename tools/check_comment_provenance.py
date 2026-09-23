@@ -81,6 +81,16 @@ through the completion gate is recorded here and not filed in the ledger):
        3)" above.
        caught by: `--register`'s own checks over `docs/code-history/`
        and both peers' `src/`, plus code review (accepted).
+    5. not detected: a companion duplicate placed under
+       `docs/archive/docs/code-history/<peer>/*.md`.
+       why: `_companion_files`'s enumeration of a peer's companions is a
+       NON-RECURSIVE glob scoped to `docs/code-history/<peer>/` itself
+       (design docs/design/DOC_ARCHIVE_SPLIT_V1.md D-3 (ii)); anything
+       under `docs/archive/` sits outside that one directory, so it is
+       never enumerated, moved or not.
+       caught by: the registry's own canonical `docs/code-history/` tree
+       is never moved to `docs/archive/` (design DOC_ARCHIVE_SPLIT_V1.md
+       section 6), so this gap has no live instance to catch.
 """
 from __future__ import annotations
 
