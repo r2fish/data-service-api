@@ -481,13 +481,25 @@ class _RolePool:
         responsible for replacing it, not for reusing it in this state).
         """
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-            # A `SELECT` inside `autocommit=False` opens a transaction; roll
-            # it back immediately so the connection is handed to the caller
-            # IDLE, exactly as `_connect()` leaves a freshly opened one --
-            # the ping itself must be invisible to whatever runs next.
-            conn.rollback()
+            if conn.info.transaction_status != TransactionStatus.IDLE:
+                conn.rollback()
+            # The ping runs under `autocommit=True` so `SELECT 1` never
+            # opens a transaction, leaving nothing for a `rollback()` to
+            # close afterwards -- `rollback()` on a non-IDLE connection
+            # clears every prepared statement on it, which a checkout-time
+            # ping must not do. The check above rolls a non-IDLE connection
+            # back first so this flip (which requires IDLE) never raises.
+            # `autocommit` returns to `False` in `finally` so the
+            # connection is handed to the caller IDLE, exactly as
+            # `_connect()` leaves a freshly opened one -- the ping itself
+            # must be invisible to whatever runs next.
+            # history: CH-0541
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            finally:
+                conn.autocommit = False
             return True
         except Exception:
             try:

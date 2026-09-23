@@ -29,6 +29,7 @@ import hashlib
 import os
 from pathlib import Path
 
+import psycopg
 import pytest
 from psycopg.pq import TransactionStatus
 
@@ -472,3 +473,206 @@ def test_probe_truncates_statement_text_to_80_characters():
         assert stmt == _LONG_QUERY[:80]
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------
+# WP-3 (work order §3.4): the liveness ping no longer clears prepared
+# statements on every checkout -- completion conditions 33-37, 40
+# ---------------------------------------------------------------------
+
+
+def test_six_checkouts_through_the_pool_leave_prepared_statements_in_place():
+    """Completion condition 33 (空振り禁止, §1.5 の 32): checking the SAME
+    connection out of the pool 6+ times, running the SAME statement once
+    per checkout and closing each checkout the way a real request does
+    (`with conn.transaction():`, ending in a commit), crosses psycopg's
+    own default `prepare_threshold` (5) -- the probe observes `prepared
+    >= 1` and `prepared_execs >= 1` on that connection afterwards.
+    `maxconn=1` forces the same connection to be reused across all 6
+    checkouts (pool sizing is an implementation detail here, not the
+    point under test).
+
+    mutation M27 (`r2db_api/postgres.py`, `edits`): revert `_liveness_
+    check` to its pre-WP-3 form -- `conn.autocommit = True` and the
+    `finally: conn.autocommit = False` dropped, `conn.rollback()` placed
+    right after the ping's own `SELECT 1` instead. Every checkout's ping
+    then opens a transaction (`SELECT 1` under `autocommit=False`) that
+    `rollback()` immediately closes, clearing every prepared statement on
+    the connection each time (`rollback()` on a non-IDLE connection is
+    not the early-return case); this test's own `prepared >= 1` assertion
+    goes red (observes 0)."""
+    pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
+    try:
+        pid = None
+        for _ in range(6):
+            with pool.connection() as conn:
+                pid = conn.info.backend_pid
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1 WHERE 1 = 1")
+        rows = pool.prepared_stats("r79app/runtime")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["label"] == f"r79app/runtime@{pid}"
+        assert row["prepared"] >= 1
+        assert row["prepared_execs"] >= 1
+        assert any("WHERE 1 = 1" in st["statement"] for st in row["prepared_statements"]), row["prepared_statements"]
+    finally:
+        pool.close_all()
+
+
+def test_connection_handed_out_by_the_pool_is_idle_with_autocommit_false():
+    """Completion condition 34: the connection `pool.connection()` hands
+    to its caller -- observed directly on that same object, not a copy or
+    a proxy -- is IDLE (`conn.info.transaction_status`) and has
+    `autocommit is False` after the ping has run. `_liveness_check` runs
+    on every checkout (including the first, freshly-`_connect()`-ed one),
+    so a single checkout is enough to exercise the ping's own `autocommit`
+    flip and its `finally` reset.
+
+    mutation M28 (`r2db_api/postgres.py`): drop `_liveness_check`'s own
+    `finally: conn.autocommit = False` -- the connection is handed out
+    still in `autocommit=True` mode, and this test's own `conn.autocommit
+    is False` assertion goes red."""
+    pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
+    try:
+        with pool.connection() as conn:
+            assert conn.info.transaction_status == TransactionStatus.IDLE
+            assert conn.autocommit is False
+    finally:
+        pool.close_all()
+
+
+def test_ping_select_1_never_opens_a_transaction():
+    """Completion condition 35: the ping's own `SELECT 1`, observed FROM
+    INSIDE `_liveness_check` itself (immediately after `super().execute()`
+    returns, before whatever runs after it), never leaves the connection
+    non-IDLE -- a `cursor_factory` subclass records `conn.info.
+    transaction_status` at that exact point, and `_liveness_check` is
+    called directly (not through `connection()`) so the observation point
+    is the ping itself, not the connection after hand-off.
+
+    mutation M29 (`r2db_api/postgres.py`): change the ping's own leading
+    `conn.autocommit = True` to `conn.autocommit = False` -- `SELECT 1`
+    then runs under `autocommit=False` and opens a transaction. Measured
+    (2026-09-23): the test goes red at `assert ok is True` -- the ping's
+    `finally` sets `autocommit = False` on an INTRANS connection, psycopg
+    raises `ProgrammingError`, and `_liveness_check` reports the connection
+    dead -- before the recorded-status assertion is reached. A mutation
+    that instead wraps the ping in raw `BEGIN`/`ROLLBACK` reds the
+    recorded-status assertion itself (INTRANS observed, not IDLE)."""
+    recorded: list[TransactionStatus] = []
+
+    class _RecordingCursor(psycopg.Cursor):
+        def execute(self, *args, **kwargs):
+            result = super().execute(*args, **kwargs)
+            owning_conn = self.connection
+            recorded.append(TransactionStatus(owning_conn.info.transaction_status))
+            return result
+
+    pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
+    try:
+        conn = pool._connect()
+        try:
+            conn.cursor_factory = _RecordingCursor
+            ok = pool._liveness_check(conn)
+            assert ok is True
+            assert len(recorded) == 1
+            assert recorded[0] == TransactionStatus.IDLE
+        finally:
+            conn.close()
+    finally:
+        pool.close_all()
+
+
+def test_dead_connection_is_discarded_for_one_with_a_different_backend_pid():
+    """Completion condition 36 (空振り禁止, §1.5 の 32): the existing tests
+    that touch `_liveness_check` (`test_threadpool_offload.py`'s 2
+    monkeypatches) both replace it outright and never exercise a real
+    ping failure, so this is the first test of the actual failure
+    behaviour -- a connection whose server-side backend is killed
+    (`pg_terminate_backend`) while idle in the pool's own queue is not
+    handed back to a caller: `_liveness_check` reports it dead, `pool.
+    connection()` opens a fresh one instead, usable, with a DIFFERENT
+    `backend_pid`.
+
+    mutation M30 (`r2db_api/postgres.py`): drop the `except` branch's own
+    `conn.close()` call and return `True` instead of `False` -- the dead
+    connection is reported alive and handed straight back to a caller
+    instead of being replaced. Measured (2026-09-23): the test goes red
+    with `OperationalError: the connection is closed` on the reused dead
+    connection, before the `new_pid != dead_pid` assertion is reached --
+    either way the dead connection was handed out instead of a fresh
+    one."""
+    admin = psycopg.connect(_admin_dsn(), autocommit=True)
+    try:
+        pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
+        try:
+            with pool.connection() as conn:
+                dead_pid = conn.info.backend_pid
+            with admin.cursor() as cur:
+                cur.execute("SELECT pg_terminate_backend(%s)", [dead_pid])
+            with pool.connection() as conn:
+                new_pid = conn.info.backend_pid
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    assert cur.fetchone() == (1,)
+            assert new_pid != dead_pid
+        finally:
+            pool.close_all()
+    finally:
+        admin.close()
+
+
+def test_liveness_ping_raises_execute_count_by_exactly_one_per_checkout():
+    """Completion condition 37 (D-1 の計数の解釈用): the ping's own
+    contribution to `CountingConnection.execute_count` is EXACTLY 1 per
+    checkout through `pool.connection()` -- observed as the difference
+    between two successive checkouts of the SAME connection (`maxconn=1`)
+    with nothing executed inside either `with` block; the second
+    checkout's own ping is the only thing that can have raised the count
+    between the two observations.
+
+    mutation M31 (`r2db_api/postgres.py`): make the ping run `cur.execute
+    ("SELECT 1")` twice -- this test's own `after - before == 1`
+    assertion goes red (observes 2)."""
+    pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
+    try:
+        with pool.connection() as conn:
+            before = conn.execute_count  # already reflects this checkout's own ping
+        with pool.connection() as conn:
+            after = conn.execute_count  # reflects the SECOND checkout's own ping, and nothing else
+        assert after - before == 1
+    finally:
+        pool.close_all()
+
+
+def test_non_idle_dequeued_connection_is_rolled_back_and_reused():
+    """Completion condition 40 (監督裁定 2026-09-23): a connection dequeued
+    non-IDLE -- pushed back into `_queue` directly, bypassing `connection(
+    )`'s own defence-in-depth rollback in its `finally` block, to isolate
+    `_liveness_check`'s OWN pre-check -- is rolled back and REUSED: same
+    `backend_pid`, IDLE, not discarded for a fresh connection. The
+    pre-check exists precisely so `conn.autocommit = True` (which
+    requires an IDLE connection) never raises on it.
+
+    mutation M32 (`r2db_api/postgres.py`): drop the `if conn.info.
+    transaction_status != TransactionStatus.IDLE: conn.rollback()`
+    pre-check -- `conn.autocommit = True` on the still-INTRANS connection
+    raises `ProgrammingError`, `_liveness_check` discards it (closes it,
+    returns `False`), and `connection()` opens a brand-new one instead;
+    this test's own `backend_pid` equality assertion goes red (observes a
+    DIFFERENT pid)."""
+    pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
+    try:
+        conn = pool._connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")  # left open on purpose -- non-IDLE
+        assert conn.info.transaction_status != TransactionStatus.IDLE
+        before_pid = conn.info.backend_pid
+        pool._queue.put_nowait(conn)  # bypass connection()'s own finally-time rollback
+        with pool.connection() as reused:
+            assert reused.info.backend_pid == before_pid
+            assert reused.info.transaction_status == TransactionStatus.IDLE
+    finally:
+        pool.close_all()
