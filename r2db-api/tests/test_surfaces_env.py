@@ -47,6 +47,7 @@ py`'s own `main_module` fixture.
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 from typing import Iterator
@@ -389,6 +390,61 @@ def test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_
         # above AND this call succeed, but a mutation that left the check
         # permanently broken (e.g. caching the FIRST observed limit) would
         # fail here instead.
+        _set_surfaces_row(platform, {"data": {"base_url": _GOOD_DATA_BASE_URL}, "control": {"base_url": _GOOD_CONTROL_BASE_URL}})
+        try:
+            asgi_app = module.build_control_app(env=_real_control_env(platform))
+            with TestClient(asgi_app):
+                pass
+        finally:
+            _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+
+
+def test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections(
+    platform: types.SimpleNamespace,
+) -> None:
+    """R-91 (work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_
+    HEADROOM_CHECK_V1.md §1.2 D-3, completion condition 10): unlike F-16
+    (this file's own test just above), this new startup check is run
+    UNSCOPED -- `<prefix>_controlplane`'s own `CONNECTION LIMIT` is left
+    healthy (F-16 alone would pass), but the declared `process_ceilings`
+    (`{"data": 1, "control": 20}`, lower bound 1*64+20*16=384, decoupled
+    from whether this fixture happens to have a registered application)
+    exceeds this throwaway cluster's own real headroom (297, §1.3 (8)).
+    Mutation M9b (dropping this startup call from `r2db_api.control_main.
+    build_control_app`) turns this red."""
+    import psycopg
+    from psycopg import sql
+
+    module = _control_main_module()
+    _set_surfaces_row(platform, {"data": {"base_url": _GOOD_DATA_BASE_URL}, "control": {"base_url": _GOOD_CONTROL_BASE_URL}})
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps({"data": 1, "control": 20})],
+            )
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            module.build_control_app(env=_real_control_env(platform))
+        assert excinfo.value.code == "F-18"
+    finally:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps({"data": 1, "control": 1})],
+                )
+            conn.commit()
+        _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+        # Non-空振り: the restore above is really what makes
+        # `build_control_app` healthy again.
         _set_surfaces_row(platform, {"data": {"base_url": _GOOD_DATA_BASE_URL}, "control": {"base_url": _GOOD_CONTROL_BASE_URL}})
         try:
             asgi_app = module.build_control_app(env=_real_control_env(platform))

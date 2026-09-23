@@ -218,6 +218,7 @@ from .credential_store import (
 from .limits import ControlPlaneLimits, ResourceLimits
 from . import platform_declarations
 from .platform_declarations import (
+    check_max_connections_headroom,
     check_role_connection_limits,
     check_writer_role_timeouts,
     derive_visibility_lag_ms,
@@ -582,6 +583,10 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
             concurrency=ResourceLimits().concurrency,
             role_classes=frozenset(_own_role_classes), application_slugs=(),
+        )
+        check_max_connections_headroom(
+            _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            process_ceilings=declarations.process_ceilings, concurrency=ResourceLimits().concurrency,
         )
 
     # Step 6: assemble the rest of the stack -- `surfaces`/`audit_

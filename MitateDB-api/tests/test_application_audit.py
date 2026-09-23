@@ -27,6 +27,7 @@ import asyncio
 import logging
 import os
 import secrets
+import json
 import subprocess
 import threading
 import time
@@ -1026,6 +1027,61 @@ def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_
         # this call succeed, but a mutation that left the check
         # permanently broken (e.g. caching the FIRST observed limit) would
         # fail here instead.
+        with _closing_build_app(main_module, env, monkeypatch):
+            pass
+
+
+def test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections(
+    platform: types.SimpleNamespace, timeout_probe_app: types.SimpleNamespace,
+    main_module: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-91 (work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_
+    HEADROOM_CHECK_V1.md §1.2 D-3, completion condition 10, peer-symmetric
+    with r2db-api's own same-numbered test): unlike F-16 (this file's own
+    test just above), this new startup check is run UNSCOPED --
+    `platform.api_role`'s own `CONNECTION LIMIT` is left healthy (F-16
+    alone would pass), but the declared `process_ceilings` (`{"data": 3,
+    "control": 1}`, lower bound 3*(64+64)+1*16=400, `timeout_probe_app`
+    guarantees at least one registered application) exceeds this
+    throwaway cluster's own real headroom (297, §1.3 (8)). Mutation M9c
+    (dropping this startup call from `mitatedb_api.main.build_app`) turns
+    this red."""
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+        "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+        "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+    }
+    with psycopg.connect(platform.provision_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps({"data": 3, "control": 1})],
+            )
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            main_module.build_app(env)
+        assert excinfo.value.code == "F-18"
+    finally:
+        with psycopg.connect(platform.provision_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps({"data": 1, "control": 1})],
+                )
+            conn.commit()
+        # Non-空振り: the restore above is really what makes
+        # `build_app` healthy again.
         with _closing_build_app(main_module, env, monkeypatch):
             pass
 
