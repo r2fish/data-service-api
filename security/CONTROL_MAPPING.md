@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **3.1** (2026-09-24; R-104 -- Evidence folded per design v0.5 section 2.4: one claim per point with its test names listed, path written once per block; every SI section's Evidence blocks; 642 -> 326 Evidence claims, test-name and file:line multisets unchanged per block; `CONTROL_MAPPING_HISTORY.md` untouched)
+Version: **3.2** (2026-09-25; R-29 / R-23 / R-16 -- phase 11 (contract 1.9.0): C-28 Evidence added to the Common blocks of SI-05, SI-09, SI-10, SI-11 and SI-14, C-29 Evidence to SI-10's; no Control claim and no new invariant (requester ruling U-5, design `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` section 5); `CONTROL_MAPPING_HISTORY.md` untouched)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -486,6 +486,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - CCR-13 declaration/behavior agreement, conditions C-12 and C-17, on all four adapters -- `test_c12_capability_agreement.py`, `test_c17_declaration_agreement.py`.
 - the socket-plug branch is narrow by construction: `transport_kind == "socket"` only, wire-carried positions only, and only for `httpx.LocalProtocolError` or an `UNCLASSIFIED` non-problem+json failure, never an unreachable peer -- `conformance-tests/test_c03_structured_injection.py`.
 - body-carried positions still demand a genuine contract-coded denial on every plug -- `conformance-tests/test_c03_structured_injection.py::test_c03_wire_rejection_never_applies_to_a_body_carried_position`, `::test_c03_wire_rejection_never_applies_to_a_reachability_failure`.
+- C-28, on all six adapters: in a baseline-only turn, an out-of-enum value and a null in a `nullable: false` field are each refused as `VALIDATION_FAILED` naming that declaration -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
 
 #### Status
 
@@ -1179,6 +1180,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - Q-1's declare-and-echo protocol (contract 1.2.0) has its own condition C-06, executable on `r2db-api`, `r2db-api-http`, `MitateDB-api` and `MitateDB-api-http` -- `conformance-tests/test_c06_destructive_confirmation.py`.
 - the C-06 vectors -- `conformance-tests/test_c06_destructive_confirmation.py::test_c06_v1_unconfirmed_destructive_delete_denied`, `::test_c06_v3_confirmation_exact_match_required`, `::test_c06_v4_phrase_is_deterministic_and_requester_independent`, `::test_c06_v5_echo_executes`.
 - the C-06 vectors -- `conformance-tests/test_c06_destructive_confirmation.py::test_c06_v6_drop_entity_fingerprint_invalidation`, `::test_c06_v7_control_credential_gate`, `::test_c06_v8_no_payload_echo_in_declarations`.
+- C-28, on all six adapters: the turn's predicate `delete` is refused unconfirmed, executes once the client presents the declared phrase, and removes exactly the matched row (exact-match enforcement itself is C-06's) -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
 
 #### Status
 
@@ -1311,7 +1313,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Evidence
 
-- —
+- C-28, on all six adapters: an enum refusal names the request-body position, never the rejected value or a declared member, with details keys inside the contract vocabulary -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
+- C-29: each plug serves a catalog byte-identical to the packaged one; socket plugs serve it at the declared URL -- `conformance-tests/test_c29_operation_catalog_url.py::test_c29_served_body_matches_the_packaged_catalog`, `::test_c29_operation_catalog_url_is_really_dialable_on_socket_plugs`.
 
 #### Status
 
@@ -1377,6 +1380,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - CCR-13's revision-precondition atomicity and semantics are additionally covered by C-18, on all four adapters -- `conformance-tests/test_c18_revision_precondition_semantics.py`.
 - cross-entity atomic-unit agreement, declared against observed, with both entities voided together on a mixed-validity unit, is additionally covered by C-16 -- `conformance-tests/test_c16_cross_entity_atomicity.py`.
 - V1 and V2 drive the two PROVIDED MitateDB adapters and V5's evidence-form check the two ABSENT r2db adapters -- `conformance-tests/test_c16_cross_entity_atomicity.py::test_c16_v5_unavailable_peers_take_their_declared_evidence_form`.
+- C-28, on all six adapters: a dry run under the real send's idempotency key leaves no row, the real send presenting that plan commits one row, and a same-key resend adds none -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
 
 #### Status
 
@@ -1751,6 +1755,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the deploy smoke on that real startup; a root with no declaration row fails fast instead of starting on a default -- `conformance-tests/test_c26_composition_root.py::test_c26_deploy_smoke_is_green`, `::test_c26_missing_declaration_fails_fast`.
 - shutdown and a start failure leave no process, no bound port, no temporary directory and no throwaway database or role behind -- `conformance-tests/test_c26_composition_root.py::test_c26_no_residue_after_shutdown`, `::test_c26_start_failure_leaves_no_residue`.
 - the composition-roots registry -- `conformance-tests/test_c26_composition_root.py::test_c26_composition_roots_registry_has_at_least_two`, `::test_c26_items_are_grouped_per_launcher`.
+- C-28, on all six adapters: the turn's real send carries a `request_id`, and a same-key, same-body resend returns that same `request_id` -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
 
 #### Status
 

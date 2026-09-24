@@ -1211,6 +1211,14 @@ python -m mitatedb_api.ops declare-surfaces \
 `--data-base-url` must end at `/v1` (no trailing slash); `--control-base-
 url` must end at `/control/v1` (no trailing slash) -- both checked on
 write AND on every read (form only, never reachability; design D-2(d)).
+
+`MITATEDB_OPERATION_CATALOG_URL` (optional, both services): unset,
+`GET /v1/operation-catalog`'s declared URL derives from `surfaces.data.
+base_url` with its trailing contract `versioning.base_path` replaced by
+the contract's own `endpoints.operation_catalog.path` -- reachable
+behind the same reverse-proxy prefix, if any, `surfaces.data.base_url`
+itself already carries. Set it (the SAME value on both `gcloud run
+deploy` commands) only for a CDN-fronted copy of the operation catalog.
 Both services reading the SAME row is now **structural, once they are
 both actually pointed at the same platform database** -- not a deployer
 discipline to remember for the row's OWN content any more (design's own

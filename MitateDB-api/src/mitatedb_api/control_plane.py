@@ -1239,7 +1239,8 @@ class ControlPlaneService:
                  audit_default_limit: int = _DEFAULT_AUDIT_QUERY_LIMIT,
                  audit_max_limit: int = _MAX_AUDIT_QUERY_LIMIT,
                  audit_coalescing_window_ms: int = DEFAULT_COALESCING_WINDOW_MS,
-                 surfaces: Optional[dict] = None, process_ceiling: int = 1) -> None:
+                 surfaces: Optional[dict] = None, process_ceiling: int = 1,
+                 operation_catalog_url: Optional[str] = None) -> None:
         self._backend = backend
         # Phase 6 WP-3 (design D-2): single source of truth for this
         # control-plane process' own `CapabilityDocument.surfaces` --
@@ -1249,6 +1250,13 @@ class ControlPlaneService:
         # pre-1.6.0-style direct construction -- most of this
         # repository's own tests) omits the key entirely.
         self._surfaces = surfaces
+        # The control surface's own `CapabilityDocument` carries the SAME
+        # `operation_catalog_url` value the data surface's own document
+        # carries -- constructor-injected, same echo-only discipline as
+        # `surfaces` immediately above. `control_composition.
+        # build_control_service` reads `MITATEDB_OPERATION_CATALOG_URL`
+        # (the same env var `main.py` reads).
+        self._operation_catalog_url = operation_catalog_url
         self._limits = limits or ControlPlaneLimits()
         self._clock = clock or time.monotonic
         self._rate_lock = threading.Lock()
@@ -1592,12 +1600,16 @@ class ControlPlaneService:
             # to 1.8.0 -- the SAME commit as the data-plane document's own
             # identical flip and this host's own `process_ceilings`
             # mapping (D-5 (ii)).
-            "contract_version": "1.8.0",
+            #
+            # This control-plane document also flips to 1.9.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
+            # history: CH-0543
+            "contract_version": "1.9.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
             },
             **({"surfaces": self._surfaces} if self._surfaces is not None else {}),
+            **({"operation_catalog_url": self._operation_catalog_url} if self._operation_catalog_url is not None else {}),
             "limits": limits,
             "limit_enforcement": limit_enforcement,
             "authorization_propagation_bound_ms": 0,

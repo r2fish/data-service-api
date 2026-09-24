@@ -20,6 +20,16 @@ def _surfaces_document_fragment(config):
     return {"surfaces": surfaces} if surfaces is not None else {}
 
 
+def _operation_catalog_url_fragment(config):
+    """Same splat-friendly, key-omitted-when-unset shape as `_surfaces_
+    document_fragment` immediately above -- `config.operation_catalog_url`
+    is constructor-injected (`FoundationConfig.from_env`'s own
+    `MITATEDB_OPERATION_CATALOG_URL`, or a direct value for a conformance
+    adapter), never derived or hardcoded here."""
+    url = config.operation_catalog_url
+    return {"operation_catalog_url": url} if url is not None else {}
+
+
 def build_capabilities_document(*, is_developer, role, application_id, cell_config, process_ceiling):
     config = cell_config
     # Phase 10 WP-6b (design D-5 (ii)): region (ii) of the 3-region
@@ -75,7 +85,17 @@ def build_capabilities_document(*, is_developer, role, application_id, cell_conf
         # D-5 (v)): the SAME commit as this host's own `process_
         # ceilings` mapping (D-5 (ii)) -- never ahead of the behavior
         # it declares.
-        "contract_version": "1.8.0",
+        #
+        # This host also declares contract 1.9.0 in the same commit as
+        # `common_baseline`'s operations all being genuinely executable
+        # (no status below moves) and `operation_catalog_url` (below)
+        # actually serving the byte-identical derived catalog
+        # (`http.py::get_operation_catalog`) -- the version's two
+        # unconditional obligations, never ahead of the behavior they
+        # declare. `control_plane.py`'s own control-plane document flips
+        # in the same commit too (C-19's cross-plane version match).
+        # history: CH-0542
+        "contract_version": "1.9.0",
         "capabilities": {
             "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},
@@ -190,6 +210,7 @@ def build_capabilities_document(*, is_developer, role, application_id, cell_conf
             "request_budget": {"status": "enabled"},
         },
         **_surfaces_document_fragment(config),
+        **_operation_catalog_url_fragment(config),
         "limits": {
             "batch_items": config.max_batch_items,
             # P35 WP-2 (R-2): distinct-entity bound for `transact()`

@@ -519,7 +519,7 @@ def test_contract_version_is_1_7_0_on_data_plane(service):
     mapping -- function name kept, same precedent as the sibling peer's
     own re-flipped pins."""
     _, _, _dev, runtime = service
-    assert runtime.capabilities()["contract_version"] == "1.8.0"
+    assert runtime.capabilities()["contract_version"] == "1.9.0"
 
 
 def test_contract_version_is_1_7_0_on_control_plane():
@@ -533,7 +533,45 @@ def test_contract_version_is_1_7_0_on_control_plane():
     with backend.unit_of_work() as work:
         _cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     document = service.control_capabilities(secret)
-    assert document["contract_version"] == "1.8.0"
+    assert document["contract_version"] == "1.9.0"
+
+
+def test_operation_catalog_url_agrees_on_data_and_control_planes():
+    """Design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5, §7.1
+    訂正註「control plane の宣言版」: `MitateDataService.capabilities()`
+    and `ControlPlaneService.control_capabilities()` both echo whatever
+    `operation_catalog_url` their own constructor was given, verbatim.
+
+    Constructor-level check ONLY: the SAME
+    literal is passed directly to both constructors below, so this pins
+    only the echo-through, not the composition roots that decide what
+    value to construct each process with (`config.py::FoundationConfig.
+    from_env` / `control_composition.py::_operation_catalog_url`) --
+    `test_main.py::test_data_and_control_documents_derive_the_same_
+    operation_catalog_url_when_unset` and its override sibling exercise
+    those real composition roots over a real, running app."""
+    from mitatedb_api.config import FoundationConfig
+    from mitatedb_api.control_plane import ControlPlaneService, InMemoryControlBackend, bootstrap_control_credential
+
+    url = "http://mitatedb-op-catalog-agree-test.example.invalid/v1/operation-catalog"
+
+    control = ControlPlane(
+        "wp3-opcat-agree-test-pepper-0000000",
+        config=FoundationConfig(control_plane_status="enabled", operation_catalog_url=url),
+    )
+    control.provision_application("opcat_app")
+    _cid, runtime_secret = control.issue_credential("opcat_app", Role.RUNTIME)
+    svc = MitateDataService(control)
+    runtime = svc.open_session(runtime_secret)
+    data_document = runtime.capabilities()
+
+    backend = InMemoryControlBackend(app_pepper="p" * 20, control_pepper="c" * 20)
+    control_service = ControlPlaneService(backend, operation_catalog_url=url)
+    with backend.unit_of_work() as work:
+        _control_cid, control_secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    control_document = control_service.control_capabilities(control_secret)
+
+    assert data_document["operation_catalog_url"] == control_document["operation_catalog_url"] == url
 
 
 def test_flip_target_capabilities_are_all_enabled(service):

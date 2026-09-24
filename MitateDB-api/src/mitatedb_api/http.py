@@ -35,6 +35,7 @@ from .errors import (AuditSinkUnavailable, AuthenticationError,
                      PreconditionFailedError, ResourceLimitError,
                      StorageConfigurationError, ValidationError,
                      observed_type_of, violation)
+from .operation_catalog import load_operation_catalog_bytes
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
@@ -47,6 +48,20 @@ _CONTRACT_PATH = resources.files("mitatedb_api.contract").joinpath("data-service
 _CONTRACT = json.loads(_CONTRACT_PATH.read_text())
 _SCHEMAS = _CONTRACT["schemas"]
 _DEFINITIONS = _CONTRACT["definitions"]
+
+# The packaged, byte-identical derived operation catalog this deployment
+# serves at contract `endpoints.operation_catalog` (`GET /v1/operation-
+# catalog`, below) -- loaded once, as raw bytes, via `operation_catalog.
+# load_operation_catalog_bytes()` (shared with the in-process conformance
+# adapter's port v1.17 `operation_catalog_document()`, so both paths read
+# the identical source and can never silently re-encode it differently).
+_OPERATION_CATALOG_BYTES = load_operation_catalog_bytes()
+
+# The route path below is bound to the SAME `endpoints.operation_
+# catalog.path` the packaged contract (`_CONTRACT`, already loaded above
+# for `_SCHEMAS`/`_DEFINITIONS`) declares, never a hand-typed literal
+# that could silently drift from it.
+_OPERATION_CATALOG_ENDPOINT_PATH = _CONTRACT["endpoints"]["operation_catalog"]["path"]
 
 # -------------------------------------------------------------------------- HTTP status <-> contract error code (m-12: cross-peer status agreement is tracked conformance evidence, contract errors.http_status_note). Every code this peer can actually emit is listed here, mapped to the SAME status r2db-api's own call sites use for that code (grep'd from r2db-api/src/r2db_api/*.py's own `fail(...)`/`FoundationError(...)` call sites -- r2db-api itself is not imported or modified, only read for this cross-check per the task brief). No divergence was needed: every code below agrees with r2db-api's own mapping. This peer simply never emits several contract codes at all (AUTH_REVOKED, APPLICATION_DISABLED, SCOPE_MISMATCH, ATOMICITY_FAILED, IDENTIFIER_INVALID -- `auth.py`/`credential_store_postgres.py` fold "revoked"/"disabled" into a single `AuthenticationError` -> AUTH_INVALID, and `identifiers.py` raises the same `ValidationError` -> VALIDATION_FAILED for a malformed identifier as for any other malformed shape); that is a pre-existing fact about this peer's own error vocabulary, not something WP-3 narrows, and is reported to the requester as a known divergence (not a status mismatch -- there is nothing to compare a peer never emits).
 #
@@ -601,6 +616,27 @@ async def get_capabilities(request: Request) -> Response:
     # `operation_depth` is now the SAME -- `cell.py`'s own single-source declaration is `enforced` on BOTH surfaces too (see `cell.py:: ApplicationRuntime.capabilities()`'s own `limit_enforcement.operation_depth` comment (now in `capabilities_document.py`) for why the WP-1a report's original "in-process has no request dict" premise was factually wrong: `_check_operation_depth` genuinely runs, in-process included, on every request shape `_limit_gate`'s own callers build -- `insert`'s own `{"collection": ..., "values": ...}` is a real request dict, not an absent one). This wire layer therefore no longer overrides `operation_depth` either, for the identical reason it stopped overriding `request_bytes` above.
     # history: CH-0208
     return JSONResponse(document, status_code=200)
+
+
+@_endpoint
+async def get_operation_catalog(request: Request) -> Response:
+    """Contract `endpoints.operation_catalog`: same auth as
+    `get_capabilities` immediately above (any authenticated
+    application credential -- `roles: [runtime, developer]`, no anonymous
+    face is added, design §8.2) and the SAME `ApplicationRuntime.
+    operation_catalog` rate/concurrency gate (SI-08's existing bound,
+    unchanged). The response body is the packaged `contract/
+    OPERATION_CATALOG.json` bytes, returned verbatim -- never re-
+    serialized through `json.dumps`, so this handler can never silently
+    drift from the byte-for-byte value C-29 checks."""
+    service: HttpService = request.app.state.service
+    with service.acquire_concurrency_slot():
+        def _sync() -> None:
+            session = _authenticate(request)
+            session.operation_catalog(request_id=_request_id(request))
+
+        await run_in_threadpool(_sync)
+    return Response(content=_OPERATION_CATALOG_BYTES, status_code=200, media_type="application/json")
 
 
 @_endpoint
@@ -1217,6 +1253,7 @@ async def post_audit_query(request: Request) -> Response:
 
 _ROUTES = [
     Route("/v1/capabilities", get_capabilities, methods=["GET"]),
+    Route(_OPERATION_CATALOG_ENDPOINT_PATH, get_operation_catalog, methods=["GET"]),
     Route("/v1/data/{entity}/query", post_query, methods=["POST"]),
     Route("/v1/data/{entity}/mutations", post_mutate, methods=["POST"]),
     # Fixed 3-segment path, distinct from the 4-segment `/v1/data/{entity}/

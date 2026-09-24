@@ -934,6 +934,22 @@ reflects this instance's own constructor-injected deployer declaration -- never 
 # behavior it declares.
 ```
 
+### correction: 2026-09-25
+
+- reason: Phase 11 WP-3 (docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-4/D-5) -- this host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable and `operation_catalog_url` actually serving the byte-identical derived catalog
+
+old:
+```
+Phase 10 WP-6a/pair-closing (design D-5 (v)): flipped again to 1.8.0 in the SAME commit as this host's own `process_ceilings` mapping (D-5 (ii)) -- the version's one unconditional obligation, `limit_enforcement_scoped_to_deployment_behind_base_url` -- never ahead of the behavior it declares.
+```
+
+new:
+```
+Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as this host's own `process_ceilings` mapping -- the version's one unconditional obligation, `limit_enforcement_scoped_to_deployment_behind_base_url` -- never ahead of the behavior it declares.
+
+This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
+```
+
 ## CH-0143
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)
