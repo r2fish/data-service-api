@@ -75,24 +75,24 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_8_0():
-    # Phase 10 WP-5a (docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
-    # §3 D-5 (i)/(v), CCR_DISPOSITION.md subordinate ruling 13):
+def test_contract_declares_1_9_0():
+    # Phase 11 WP-1 (docs/design/PHASE11_KEYSET_PAGING_V1.md §9 WP-1 row,
+    # CCR_DISPOSITION.md subordinate ruling 14):
     # the version bump itself, pinned so a future revert of just this one
     # line is caught here rather than only by whichever other test happens
-    # to touch contract_version. Supersedes the 1.7.0 pin (phase 9 WP-1,
-    # subordinate ruling 12) this test itself carried before -- 1.7.0 is
+    # to touch contract_version. Supersedes the 1.8.0 pin (phase 10 WP-5a,
+    # subordinate ruling 13) this test itself carried before -- 1.8.0 is
     # already published, so this file never re-adds a standalone
-    # "declares 1.7.0" test: any implementation still declaring 1.7.0 or
+    # "declares 1.8.0" test: any implementation still declaring 1.8.0 or
     # earlier is exercised by version_binding's own retroactivity rule,
     # not by a dedicated pin here for a version this document no longer
-    # declares. NOTE (WP-5a scope): this is the contract JSON's OWN
+    # declares. NOTE (WP-1 scope): this is the contract JSON's OWN
     # contract_version field -- neither peer's own runtime declaration
-    # (`service.py`/`control_plane.py`/`cell.py`) moves in this WP; both
-    # peers still declare 1.7.0 until WP-6's pair-closing version-flip
-    # commit (design D-5 (v), work order WP-5 "触らないファイル").
+    # (`capabilities_document.py`/`control_plane.py`) moves in this WP;
+    # both peers still declare 1.8.0 until WP-6's pair-closing version-flip
+    # commit (design §9 WP-6 row, work order WP-1 "触らないファイル").
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.8.0"
+    assert contract["contract_version"] == "1.9.0"
 
 
 # ---------------------------------------------------------------------------
@@ -179,12 +179,17 @@ def test_contract_pins_the_1_8_0_ruling_sentences_verbatim():
         f"never as a new sibling key: {sorted(key_diff)}"
     )
 
-    # (3) versioning.obligations -- condition 3.
+    # (3) versioning.obligations -- condition 3. Phase 11 WP-1 (contract
+    # 1.9.0) appends a further entry after 1.8.0's own, so this no longer
+    # reads obligations[-1] -- it looks the 1.8.0 entry up by version, the
+    # same mechanical follow-up 1.8.0's own introduction made to the
+    # phase-9 pins below.
     obligations = contract["versioning"]["obligations"]
-    assert obligations[-1] == FIXED_1_8_0_OBLIGATIONS_ENTRY, (
-        f"versioning.obligations' 1.8.0 entry does not byte-match the monitor-finalized entry: {obligations[-1]!r}"
+    obligations_by_version = {entry["version"]: entry for entry in obligations}
+    assert obligations_by_version.get("1.8.0") == FIXED_1_8_0_OBLIGATIONS_ENTRY, (
+        f"versioning.obligations' 1.8.0 entry does not byte-match the monitor-finalized entry: {obligations_by_version.get('1.8.0')!r}"
     )
-    assert set(obligations[-1].keys()) == {"version", "subordinate_ruling", "unconditional", "conditional"}
+    assert set(obligations_by_version["1.8.0"].keys()) == {"version", "subordinate_ruling", "unconditional", "conditional"}
 
 
 def _subordinate_ruling_numbers_in_ccr_disposition() -> set[int]:
@@ -298,7 +303,12 @@ PIN_1_8_0_IDEMPOTENCY_RECORD_CONCURRENT_SENDS = (
 # New (contract 1.8.0): the single-item retroactive-denial row for
 # 1.7.0-declaring peers, following the same pattern PIN_1_7_0_RETROACTIVE_
 # DENIAL_ROW_1_6_0 above documents for the 1.6.0/1.7.0 transition.
-PIN_1_8_0_RETROACTIVE_DENIAL_ROW_1_7_0 = "is not held to any 1.8.0-only obligation retroactively"
+# Phase 11 WP-1 (contract 1.9.0) mechanically extended this row's own
+# substring the same way 1.8.0's own introduction did to the 1.7.0/1.6.0
+# rows below (git log -S"1.7.0-only" -- spec/data-service-api.v1.json) --
+# updated here in the same commit as the contract change, matching Revision
+# note 1's own account of this same mechanical follow-up.
+PIN_1_8_0_RETROACTIVE_DENIAL_ROW_1_7_0 = "is not held to any 1.8.0-only or 1.9.0-only obligation retroactively"
 
 
 def test_contract_pins_the_1_8_0_version_binding_paragraph_verbatim():
@@ -355,6 +365,220 @@ def test_contract_pins_the_1_8_0_concurrent_same_key_addendum_verbatim():
     assert set(conditional[0].keys()) == {"obligation", "capability"}, (
         "1.8.0's conditional item does not carry the same 2 keys 1.7.0's conditional items carry: "
         f"{sorted(conditional[0])}"
+    )
+
+
+# Phase 11 WP-1 (contract 1.9.0, design docs/design/PHASE11_KEYSET_PAGING_V1.md
+# D-1, CCR_DISPOSITION.md subordinate ruling 14): the monitor-finalized fixed
+# text for 1.9.0 (keyset paging), copied verbatim from the requester-confirmed
+# scratchpad file (OPERATING_CONDITIONS.md §1.5 items 35/36) -- never
+# paraphrased. All 7 obligations are conditional on `structured_query`; there
+# is no unconditional 1.9.0 obligation.
+FIXED_1_9_0_OBLIGATIONS_ENTRY = {
+    "version": "1.9.0",
+    "subordinate_ruling": 14,
+    "unconditional": [],
+    "conditional": [
+        {"obligation": "query_results_are_totally_ordered", "capability": ["structured_query"]},
+        {"obligation": "next_page_is_non_null_exactly_when_more_rows_follow", "capability": ["structured_query"]},
+        {"obligation": "next_page_is_a_stateless_keyset_cursor", "capability": ["structured_query"]},
+        {"obligation": "query_cursor_is_bound_to_application_entity_where_and_order_by", "capability": ["structured_query"]},
+        {"obligation": "unusable_query_cursor_refused_as_a_request_schema_violation", "capability": ["structured_query"]},
+        {"obligation": "unchanged_row_returned_exactly_once_across_a_traversal", "capability": ["structured_query"]},
+        {"obligation": "omitted_page_size_defaults_to_the_least_of_1000_and_the_result_items_bounds", "capability": ["structured_query"]},
+    ],
+}
+
+PIN_1_9_0_VERSION_BINDING_PARAGRAPH = (
+    "Only an implementation declaring 1.9.0 or higher additionally claims conformance to the obligations "
+    "1.9.0 introduces (subordinate ruling 14). Every 1.9.0 obligation is conditional, in the same sense "
+    "1.4.0's, 1.6.0's, 1.7.0's and 1.8.0's own conditional lists are: each binds only insofar as the "
+    "implementation's own capabilities() declares structured_query as something other than unavailable: (1) "
+    "the items a query returns are totally ordered, in the order structured_operations.paging.ordering "
+    "defines -- the request's own order_by, completed by a tie-break of the implementation's own choosing, "
+    "which this contract does not name -- so that two identical requests decided against unchanged stored "
+    "content return the identical sequence; (2) QueryResult.next_page is non-null exactly when at least one "
+    "further row follows this page's last item in that order, and null exactly when none does; (3) where it "
+    "is non-null, it is a keyset cursor as structured_operations.paging.cursor defines it -- an opaque token "
+    "encoding that last item's own position in that order, never an offset or a count, holding no "
+    "server-side state, and a request carrying it returns the rows that follow that position; (4) a cursor "
+    "is bound to the Application, the entity, the request's where and the request's order_by, and stays "
+    "valid across a change of select or page.size (structured_operations.paging.binding); (5) a cursor that "
+    "fails to decode, whose ordering values do not match, in number or in type, the terms of that order, or "
+    "whose recorded binding names a different Application, entity, where or order_by than the request "
+    "presenting it, is refused with VALIDATION_FAILED, details.violated_declaration: request_schema and "
+    "details.field: page/cursor; (6) across the pages of one traversal, a row that exists throughout it and "
+    "whose ordering-term values do not change during it is returned exactly once; and (7) a request that "
+    "carries no page.size is answered as though it carried the page.size equal to the least of 1000 "
+    "(Page.size's own maximum), the implementation's declared limits.result_items, and the request's own "
+    "budget.result_items where it carries one, and its page holds at most that many items "
+    "(structured_operations.paging.next_page). 1.9.0 introduces no obligation on what a client must send: "
+    "page.cursor remains optional wherever it appears, and a request valid under 1.8.0 stays valid in "
+    "shape. A cursor an implementation issued before its own version-flip need not remain usable across it; "
+    "such a request is refused as structured_operations.paging.refusal describes, and the client restarts "
+    "the traversal. An implementation still declaring 1.8.0 is not held to any 1.9.0-only obligation "
+    "retroactively."
+)
+
+PIN_1_9_0_RETROACTIVE_DENIAL_ROW_1_8_0 = "is not held to any 1.9.0-only obligation retroactively"
+
+
+def test_contract_pins_the_1_9_0_obligations_entry_verbatim():
+    """Completion condition 1: `versioning.obligations`' 1.9.0 entry
+    byte-matches the monitor-finalized entry -- 7 conditional obligations
+    bound to `structured_query`, 0 unconditional."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    obligations = contract["versioning"]["obligations"]
+    assert obligations[-1] == FIXED_1_9_0_OBLIGATIONS_ENTRY, (
+        f"versioning.obligations' 1.9.0 entry does not byte-match the monitor-finalized entry: {obligations[-1]!r}"
+    )
+    assert set(obligations[-1].keys()) == {"version", "subordinate_ruling", "unconditional", "conditional"}
+
+
+def test_contract_pins_the_1_9_0_version_binding_paragraph_verbatim():
+    """Completion condition 2: the monitor-finalized 1.9.0 paragraph --
+    including its own trailing 1.8.0-declaring retroactive-denial sentence
+    -- is present verbatim in versioning.version_binding, and occupies
+    EXACTLY the text between the (mechanically extended) 1.7.0-declaring
+    retroactive-denial sentence and the version-flip sentence (an equality
+    check, not a mere containment check, so a further, unaccounted-for
+    sentence slipped in between the two anchors is caught here too)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = contract["versioning"]["version_binding"]
+
+    assert PIN_1_9_0_VERSION_BINDING_PARAGRAPH in version_binding, (
+        "versioning.version_binding no longer contains the monitor-finalized 1.9.0 paragraph verbatim"
+    )
+    assert PIN_1_9_0_RETROACTIVE_DENIAL_ROW_1_8_0 in version_binding, (
+        "versioning.version_binding is missing the new 1.8.0-declaring retroactive-denial row"
+    )
+
+    anchor_1_7_0_retroactive = "An implementation still declaring 1.7.0 is not held to any 1.8.0-only or 1.9.0-only obligation retroactively."
+    idx_1_7_0_retroactive_end = version_binding.index(anchor_1_7_0_retroactive) + len(anchor_1_7_0_retroactive)
+    idx_version_flip = version_binding.index("A peer's version-flip")
+    between = version_binding[idx_1_7_0_retroactive_end:idx_version_flip]
+    assert between == " " + PIN_1_9_0_VERSION_BINDING_PARAGRAPH + " ", (
+        "the text between the 1.7.0-declaring retroactive row and the version-flip sentence is not exactly "
+        f"the monitor-finalized 1.9.0 paragraph (surrounded by one space on each side): {between!r}"
+    )
+
+
+# The 6 `structured_operations.paging` clauses, copied verbatim from the
+# requester-confirmed scratchpad file (Q-3, design §5.1, C-1 through C-6).
+PIN_1_9_0_PAGING_ORDERING = (
+    "The items QueryResult returns are totally ordered. The request's own order_by names the leading "
+    "terms of that order, and where order_by is absent the implementation's own default leads; in "
+    'either case the implementation completes the order with a tie-break of its own, so that no two '
+    "rows of an entity ever compare equal. That tie-break is the implementation's own and this "
+    'contract does not name it: a client does not rely on which it is, and where it is not one of the '
+    "entity's declared fields, it is never returned as a field of an item and cannot be selected, "
+    'filtered or ordered on. Two identical requests decided against unchanged stored content return '
+    "the identical sequence of items. How strings compare (collation), where an ordering term's "
+    'values include null, and how values that are not a string, number or boolean -- including an '
+    "untyped field's values of differing JSON type -- compare, are the implementation's own; this "
+    'version does not require two implementations to place them alike, and a client that needs a '
+    'placement it can rely on orders by a field whose values it controls.'
+)
+PIN_1_9_0_PAGING_NEXT_PAGE = (
+    "QueryResult.next_page is non-null exactly when at least one further row follows this page's last "
+    'item in the order paging.ordering defines, and null exactly when none does. A null next_page is '
+    "therefore the service's statement that this page ends the result -- what lets a client know it "
+    'has read the whole of it, rather than inferring completeness from a page that came back shorter '
+    'than page.size. An implementation may decide this by reading one row beyond the requested '
+    'page.size and returning only page.size items. A client never constructs a next_page value '
+    'itself; it only echoes the value it received back as Page.cursor on a later request. Where a '
+    'request carries no page.size, it is answered as though it carried the page.size equal to the '
+    "least of 1000 (Page.size's own maximum), the implementation's declared limits.result_items, and "
+    "the request's own budget.result_items where it carries one; its page holds at most that many "
+    'items, and next_page reports, in the same terms, whether any row follows the page it returned.'
+)
+PIN_1_9_0_PAGING_CURSOR = (
+    'The value next_page carries is a keyset cursor: an opaque token encoding the position of this '
+    "page's last item in the order paging.ordering defines -- that row's own ordering values together "
+    "with the implementation's tie-break -- and never an offset, a row count, or an index a client "
+    'could compute for itself. A request that carries a cursor returns, in the order paging.ordering '
+    "defines, the rows that follow the position it encodes, under that request's own where and "
+    'order_by as they stand when the request is decided. It holds no server-side state: nothing on '
+    'the service expires, is evicted, or must be cleaned up, there is no bound on how many cursors '
+    'may exist, and a cursor is not attached to a session, a connection or a credential. Its internal '
+    'structure is opaque; an implementation may change that structure without a contract change, and '
+    'no client may depend on it. This contract states no performance figure and none is claimed here. '
+    'A cursor is neither signed nor encrypted: it is a recoverable encoding of the ordering values of '
+    "a row the client has already received -- its own data, never another Application's -- and a "
+    'client that stores or forwards a cursor forwards those values with it. An implementation is not '
+    'required to detect a well-formed token it did not itself issue; the binding paging.binding '
+    'defines is what keeps such a token inside the Application, entity, where and order_by it names, '
+    'and a client that alters one receives an arbitrary position within its own result or a refusal, '
+    "never another Application's rows."
+)
+PIN_1_9_0_PAGING_BINDING = (
+    'A cursor is bound to the Application it was issued under, the entity it was issued against, and '
+    "that request's own where and order_by; it is valid on a later request that repeats all four -- "
+    'the same where predicates, in any order, and the same order_by -- and is refused under any '
+    'other, as paging.refusal describes. select and page.size are deliberately outside that binding: '
+    'neither changes where a row sits in the order, so a client may narrow or widen its projection '
+    'between pages, and may continue from the cursor it already holds with a smaller page.size after '
+    'a LIMIT_EXCEEDED refusal, without restarting the traversal.'
+)
+PIN_1_9_0_PAGING_REFUSAL = (
+    'A cursor that fails to decode, whose ordering values do not match, in number or in type, the '
+    "terms of this request's own order as paging.ordering defines it, or whose recorded binding names "
+    'a different Application, entity, where or order_by than the request presenting it, is refused '
+    'with VALIDATION_FAILED, details.violated_declaration: request_schema and details.field: '
+    'page/cursor. The refusal names that position in the request and nothing else: not what the token '
+    'decoded to, not what it was bound to, and not whether the Application or entity it names exists. '
+    'A client that receives it restarts the traversal rather than adjusting the token.'
+)
+PIN_1_9_0_PAGING_TRAVERSAL = (
+    'A traversal is a first request together with the successive requests that each echo back the '
+    'next_page they received. Across the pages of one traversal, a row that exists throughout it and '
+    'whose values for the ordering terms do not change during it is returned exactly once. A row '
+    'inserted or deleted while the traversal is in progress is returned once or not at all; a row '
+    'whose values for the ordering terms change during it may be returned twice, once, or not at all, '
+    'since each page is decided against the order as it then stands. No further statement is made '
+    'about concurrent change: this version defines paging, not a snapshot, and a client needing a '
+    'stable point in time obtains it some other way.'
+)
+
+PIN_1_9_0_PAGING_CLAUSES = {
+    'ordering': PIN_1_9_0_PAGING_ORDERING,
+    'next_page': PIN_1_9_0_PAGING_NEXT_PAGE,
+    'cursor': PIN_1_9_0_PAGING_CURSOR,
+    'binding': PIN_1_9_0_PAGING_BINDING,
+    'refusal': PIN_1_9_0_PAGING_REFUSAL,
+    'traversal': PIN_1_9_0_PAGING_TRAVERSAL,
+}
+
+
+def test_contract_pins_the_1_9_0_paging_section_verbatim_and_placement():
+    """Completion condition 3: the 6 `structured_operations.paging` clauses
+    byte-match the monitor-finalized text (design §5.1 C-1 through C-6)
+    verbatim, and `paging` sits between `upsert` and `revision_preconditions`
+    -- the position design D-1 names (「query 系の語が並ぶ位置」)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    so = contract["structured_operations"]
+    assert "paging" in so, "structured_operations.paging is missing"
+    paging = so["paging"]
+    assert set(paging.keys()) == set(PIN_1_9_0_PAGING_CLAUSES.keys())
+    for key, pin in PIN_1_9_0_PAGING_CLAUSES.items():
+        assert paging[key] == pin, (
+            f"structured_operations.paging.{key} does not byte-match the monitor-finalized text verbatim: {paging[key]!r}"
+        )
+
+    keys = list(so.keys())
+    assert keys.index("upsert") < keys.index("paging") < keys.index("revision_preconditions"), (
+        f"structured_operations.paging is not placed between upsert and revision_preconditions: {keys!r}"
+    )
+
+
+def test_contract_pins_the_1_9_0_page_cursor_schema():
+    """Completion condition 4: Page.cursor carries no maxLength (requester
+    ruling Q-5 = (a), design D-1 (D)) -- {"type": "string"} exactly, no
+    sibling key."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    cursor_schema = contract["definitions"]["Page"]["properties"]["cursor"]
+    assert cursor_schema == {"type": "string"}, (
+        f"Page.cursor no longer matches the monitor-finalized 1.9.0 schema (no maxLength): {cursor_schema!r}"
     )
 
 
@@ -894,7 +1118,11 @@ PIN_1_6_0_ITEM_3_FIELD_TYPES = """The field-type vocabulary gains a seventh memb
 # ruling 13): widened AGAIN, mechanically, from "1.6.0-only or 1.7.0-only"
 # to "1.6.0-only, 1.7.0-only, or 1.8.0-only" -- the same extension applied
 # to this sentence for 1.7.0 above, applied once more for 1.8.0.
-PIN_1_6_0_VERSION_BINDING_PARAGRAPH = """Only an implementation declaring 1.6.0 or higher additionally claims conformance to the obligations 1.6.0 introduces (subordinate ruling 11). **Two of those obligations are unconditional in the same sense as every obligation enumerated above** — they bind simply by declaring 1.6.0, independent of any capability's own status: (a) its `GET /v1/capabilities` document carries `surfaces.data.base_url`, the absolute base URL of its own data surface, and — where a control surface is provided at all (`control_plane` other than `unavailable`, the same precondition subordinate rulings 8 and 9 already carry) — both surfaces' capability documents additionally carry `surfaces.control.base_url`, each document carrying the same `surfaces`; and (b) the `secret` returned by any issue or rotate path it offers, in band or out of band, is accepted verbatim as a bearer token on the surface that credential is for, with no composition, splitting, or derivation required of the client (`security.schemes`). **The remaining 1.6.0 obligations are conditional**, in the same sense 1.4.0's own conditional list is: they bind only insofar as the implementation's own `capabilities()` declares the named capability as something other than `unavailable`. Where it declares `application_catalog` as something other than `unavailable`: (1) every `EntityDescriptor` it returns carries `field_types`, total over that entity's own `fields`, reporting `json` for any field created without a declared type. Where it declares `schema_operations` as something other than `unavailable`: (2) a `create_entity` it executes accepts `field_types` and creates each field named there with the type declared there, and an `add_field` it executes accepts every member of the seven-member vocabulary, `json` included; a `field_types` naming a field outside the request's own `fields`, carrying a value outside that vocabulary, or sent without `fields`, is refused with `VALIDATION_FAILED`. **1.6.0 introduces no obligation on what a client must send**: `SchemaOperationRequest.field_types` is optional wherever it appears, and a request valid under 1.5.0 stays valid. An implementation still declaring 1.5.0 is not held to any 1.6.0-only, 1.7.0-only, or 1.8.0-only obligation retroactively."""
+# Phase 11 WP-1 (contract 1.9.0, subordinate ruling 14): widened AGAIN,
+# mechanically, from "1.6.0-only, 1.7.0-only, or 1.8.0-only" to "1.6.0-only,
+# 1.7.0-only, 1.8.0-only, or 1.9.0-only" -- the same extension applied once
+# more for 1.9.0.
+PIN_1_6_0_VERSION_BINDING_PARAGRAPH = """Only an implementation declaring 1.6.0 or higher additionally claims conformance to the obligations 1.6.0 introduces (subordinate ruling 11). **Two of those obligations are unconditional in the same sense as every obligation enumerated above** — they bind simply by declaring 1.6.0, independent of any capability's own status: (a) its `GET /v1/capabilities` document carries `surfaces.data.base_url`, the absolute base URL of its own data surface, and — where a control surface is provided at all (`control_plane` other than `unavailable`, the same precondition subordinate rulings 8 and 9 already carry) — both surfaces' capability documents additionally carry `surfaces.control.base_url`, each document carrying the same `surfaces`; and (b) the `secret` returned by any issue or rotate path it offers, in band or out of band, is accepted verbatim as a bearer token on the surface that credential is for, with no composition, splitting, or derivation required of the client (`security.schemes`). **The remaining 1.6.0 obligations are conditional**, in the same sense 1.4.0's own conditional list is: they bind only insofar as the implementation's own `capabilities()` declares the named capability as something other than `unavailable`. Where it declares `application_catalog` as something other than `unavailable`: (1) every `EntityDescriptor` it returns carries `field_types`, total over that entity's own `fields`, reporting `json` for any field created without a declared type. Where it declares `schema_operations` as something other than `unavailable`: (2) a `create_entity` it executes accepts `field_types` and creates each field named there with the type declared there, and an `add_field` it executes accepts every member of the seven-member vocabulary, `json` included; a `field_types` naming a field outside the request's own `fields`, carrying a value outside that vocabulary, or sent without `fields`, is refused with `VALIDATION_FAILED`. **1.6.0 introduces no obligation on what a client must send**: `SchemaOperationRequest.field_types` is optional wherever it appears, and a request valid under 1.5.0 stays valid. An implementation still declaring 1.5.0 is not held to any 1.6.0-only, 1.7.0-only, 1.8.0-only, or 1.9.0-only obligation retroactively."""
 
 # (5-current) structured_operations.upsert sentence BEFORE the D-3(vii) edit
 # -- pinned so the manual "obligation count unchanged (2)" audit trail (WP-1
@@ -925,25 +1153,31 @@ PIN_1_6_0_UPSERT_SENTENCE_AFTER = """upsert on an entity without a declared uniq
 # receive. Names are kept as PIN_1_7_0_* (they were never renamed to
 # PIN_1_8_0_* -- only their content changes, following the same
 # no-intermediate-rename convention the comment above already states).
+#
+# Phase 11 WP-1 (contract 1.9.0, subordinate ruling 14): each of these 5
+# rows (the 4 below plus PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_6_0) is widened
+# AGAIN, mechanically, adding ", or 1.9.0-only" on top of the "..., or
+# 1.8.0-only" member phase 10 already added -- the same no-intermediate-
+# rename convention (names stay PIN_1_7_0_*).
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_1_0 = (
-    "is not held to any 1.2.0-only, 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only "
-    "obligation retroactively"
+    "is not held to any 1.2.0-only, 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, 1.8.0-only, "
+    "or 1.9.0-only obligation retroactively"
 )
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_2_0 = (
-    "is not held to any 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only "
-    "obligation retroactively"
+    "is not held to any 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, 1.8.0-only, "
+    "or 1.9.0-only obligation retroactively"
 )
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_3_0 = (
-    "is not held to any 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only obligation retroactively"
+    "is not held to any 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, 1.8.0-only, or 1.9.0-only obligation retroactively"
 )
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_4_0 = (
-    "is not held to any 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only obligation retroactively"
+    "is not held to any 1.5.0-only, 1.6.0-only, 1.7.0-only, 1.8.0-only, or 1.9.0-only obligation retroactively"
 )
 # New (contract 1.8.0): the single-item row for 1.6.0-declaring peers,
 # widened from "1.7.0-only" alone (phase 9 WP-1's own new sentence,
 # introduced -- not extended -- alongside the 1.7.0 paragraph) to
-# "1.7.0-only or 1.8.0-only".
-PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_6_0 = "is not held to any 1.7.0-only or 1.8.0-only obligation retroactively"
+# "1.7.0-only or 1.8.0-only". Phase 11 WP-1 widens it again to 3 items.
+PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_6_0 = "is not held to any 1.7.0-only, 1.8.0-only, or 1.9.0-only obligation retroactively"
 
 
 def test_contract_pins_the_requester_finalized_1_6_0_prose():

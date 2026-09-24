@@ -238,6 +238,34 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     **版数の扱い**: 1.7.0 は既に main へ公開済みであるため、従属判断 4/5 のような個別版数据え置きの余地はなく、この裁定を単独の 1.8.0 として出荷する (依頼者裁定の委任に基づく監督確定)。1.8.0 が足す義務は (a) と (c) の 2 件である。**実施記録 (契約公開、WP-5)**: 契約 1.8.0 は第10次作業指示書 WP-5 節で公開する。**この WP は両 peer の `contract_version` を動かさない** — 両 peer は 1.7.0 を宣言したまま (`process_ceilings` 宣言と `limit_enforcement` 写像を実装する WP-6 の pair-closing コミットで flip する)。
 
+14. **フェーズ11 契約 1.9.0 (keyset ページング — `structured_operations.paging` の新設、`versioning.obligations`/`version_binding` の 1.9.0 entry、`Page.cursor` の `maxLength` 撤去) への裁定 (2026-09-24、依頼者裁定 Q-1/Q-2/Q-3/Q-5、監督起票)。** 新規 CCR ではなく、既存の意味論 (CCR-01 structured API/非 SQL 公開、CCR-13 行の指し示し可能性) を明確化・実効化する additive 変更として採用する。実施設計は `docs/design/PHASE11_KEYSET_PAGING_V1.md` (v0.6) §3 D-1〜D-9、§5.1 (依頼者裁定)、§6.1 (C-28)。契約への反映は作業指示書 `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` WP-1 で完了する。前例は従属判断 9 (1.4.0 の束 8 件一括)・従属判断 10 (1.5.0 の束 2 件一括)・従属判断 11 (1.6.0 の束 4 件一括)・従属判断 12 (1.7.0 の束 7 件一括)・従属判断 13 (1.8.0 の束 2 件一括)。
+
+    **本文 — 1.9.0 が足す義務 (すべて条件付き、`structured_query` が `unavailable` 以外の実装にのみ束縛。無条件義務は 0 件)**: (1) query が返す行の全順序化 (`order_by` + 実装任意の tie-break)、(2) `QueryResult.next_page` は「続きの行が存在するとき、かつそのときに限り非 null」、(3) `next_page` が非 null のときそれは無状態の keyset cursor (offset でも件数でもない)、(4) cursor は Application・entity・`where`・`order_by` に束縛され (`where` は述語の順序に依らない)、`select`/`page.size` の変更を跨いで有効、(5) 復号不能・順序値不一致・束縛不一致の cursor は `VALIDATION_FAILED`/`request_schema`/`page/cursor` で拒否、(6) 走査を通じて順序項が変わらない行はちょうど 1 回返る、(7) `page.size` を省いた要求は 1000・宣言 `limits.result_items`・要求 `budget.result_items` の最小値を運んだものとして答えられる (既定ページ)。契約文言は `structured_operations.paging` の 6 節 (`ordering`/`next_page`/`cursor`/`binding`/`refusal`/`traversal`) に置く。`Page.cursor` は `maxLength` を持たない (`{"type": "string"}`) — keyset cursor は順序キーの値そのものを運ぶため 512 バイトを超えうり、要求文字列の長さは `request_bytes` が bound する (依頼者裁定 Q-5 = (a))。
+
+    **依頼者裁定 Q-1 (MitateDB の保存形を変えるか。逐語、`docs/design/PHASE11_KEYSET_PAGING_V1.md` §5.1)**:
+
+    > D-2 (保存形の変更、保証は完全)で。
+
+    **依頼者裁定 Q-2 (cursor の束縛範囲。逐語、同 §5.1)**:
+
+    > select/size の変更は取り違えではなく正当な意図でありうるなら束縛してはいけないように思う
+
+    裁定は A (Application, entity, `where`, `order_by` のみ。`select` と `page.size` は自由)。
+
+    **依頼者裁定 Q-3 (契約文と C-28 の Condition 文の逐語確定。逐語、同 §5.1)**:
+
+    > Q-3 は見直し 1 点を含めて確定、Q-5 は (a)、Q-4 はその形で。
+
+    見直し 1 点: 案文 C-4 の `where` の束縛を、述語の順序に依らない形 (field・演算子・値で整列した正規 JSON) に改める。
+
+    **依頼者裁定 Q-5 (`Page.cursor` の `maxLength`。逐語、同 §5.1、Q-3 と同じ返信)**:
+
+    > Q-3 は見直し 1 点を含めて確定、Q-5 は (a)、Q-4 はその形で。
+
+    裁定は (a) — `maxLength` を外す。
+
+    **版数の扱い**: 契約 1.8.0 は既に main へ公開済みであるため、この裁定を単独の 1.9.0 として出荷する。**実施記録 (契約公開、WP-1)**: 契約 1.9.0 は作業指示書 `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` WP-1 で公開する。**この WP は両 peer の `contract_version` を動かさない** — 両 peer は 1.8.0 を宣言したまま (両 peer の keyset 実装と C-28 の緑化が揃う WP-6 の pair-closing コミットで flip する)。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**
