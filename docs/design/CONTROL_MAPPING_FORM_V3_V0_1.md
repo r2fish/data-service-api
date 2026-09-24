@@ -1,4 +1,4 @@
-# CONTROL_MAPPING 形式 3.0 設計 v0.4
+# CONTROL_MAPPING 形式 3.0 設計 v0.5
 
 ## 0. 位置づけと台帳の扱い
 
@@ -55,7 +55,7 @@
 | 軸 | 形 | 上限 | 必須 | 禁止 |
 |---|---|---|---|---|
 | **Control** | **主語 (6 語以内の名詞句)** + 何を bound するか 1 文 + **施行箇所の参照** | **250 文字** (参照込み。字数から参照トークンを除く案は却下 — §7 (f)) | **施行箇所の位置参照**を 1 つ以上 = R-88 の 6 形のいずれかで解決する `path` 又は `path:line`。関数名・クラス名だけの参照は施行箇所と認めない (主語には使ってよい)。既存の `F-NN` / `C-NN` / `CCR-NN` があれば**主語の前**に置く | 限界・未実施の記述 (Status へ)、実装手順の再説明 |
-| **Evidence** | 何が観測されたか + その出所 | **300 文字** | **テスト名か `file:line` を 1 つ以上**引く | 引用の無い総称文 (「negative topology and isolation tests」の類) |
+| **Evidence** | **1 つの論点 + それを示すテスト名の列挙** (v0.5、依頼者裁定 2026-09-24。§2.4) | **300 文字** | **テスト名か `file:line` を 1 つ以上**引く | 引用の無い総称文 (「negative topology and isolation tests」の類)。**テスト名が観測を語るときに同じ内容を文で繰り返すこと** (§2.4) |
 | **Status** | 開示された限界・peer 間差 | **300 文字** | — | 制御の再説明、進捗・WP の記録 |
 
 - 上限は **主張単位** (`MAX_CLAIM_LENGTH`、軸ごとの値) とする。**計数単位は先頭の `- ` を含む物理行全体の文字数**である。block 単位の `MAX_BLOCK_LENGTH` と `MAX_NAMED_SUBBLOCKS` の検査は**退役**する。
@@ -125,6 +125,24 @@
 >
 > #### Status
 > - **Production evidence is `absent`**: section 10 has never been run against production, and neither `0014_role_connection_limits_rollout.sql`, the `0004` stages R-54 adds, nor the run/closure behavior R-57 adds is applied there; every value above was measured on a throwaway cluster.
+
+### 2.4 Evidence の畳み方 (v0.5、依頼者裁定 2026-09-24)
+
+3.0 の初回実施 (R-103、§9) は「1 観測 = 1 主張」で書いたため、Evidence が 119 件 35,368 文字から 642 件 98,118 文字に増えた (本体 192,386 → 247,325 文字、+29%)。増分の正体は path の繰り返しではなく (7,875 文字)、**テスト名が既に語っている観測を文で言い直したこと**である (例: 「a statement over the ROLE-level bound answers 503 without backend detail and frees the connection -- `::test_slow_audit_query_is_canceled_returns_503_without_backend_detail_and_frees_the_connection`」)。本節はこれを畳む規則で、§2.1 の Evidence 行を上書きする。
+
+| 規則 | 内容 |
+|---|---|
+| 単位 | **1 主張 = 1 つの論点** (同じ制御・同じ限界・同じ migration を示すテストの束) + その論点を示す**テスト名の列挙**。300 文字以内。同じ論点でも 300 文字を超えるなら主張を分ける |
+| 文 | **テスト名が観測を語るなら文を書かない**。論点の名詞句 (例: `0014` reader `statement_timeout`) と列挙だけにする。文を書くのは、テスト名だけでは観測が読めないとき (数値・条件・peer 間差など名前にない情報) に限り、その情報だけを書く |
+| 参照 | テスト名は 3.0 と同じ形 (backtick、`path::test_x` または `test_x`)。同じファイルのテストを列挙するときは path を 1 回だけ書き、以後は `::test_y`。**`::test_y` が継承する path は同じ主張の中で直前の `path::` に限る** (ファイルが変わるたびにフルパス。主張・block をまたぐ継承は不可)。`file:line` の観測 (テスト以外の証拠) は従来どおり |
+| 不変条件 | 畳む前後で、block ごとの**テスト名の多重集合と `file:line` 参照の多重集合は同一** (§5 の 17)。Evidence の主張を Control / Status へ動かさない。見出しは触らない |
+| 目標 | Evidence 全体 **55,000 文字以下**、本体 (`security/CONTROL_MAPPING.md` 全体) **200,000 文字以下** (§5 の 18)。**訂正 (実施中の実測、2026-09-24)**: 起草時の目標 45,000 / 192,386 は算術的に不能だった。3.0 の Evidence 98,118 文字のうち参照トークン (テスト名・path) が 49,705 文字を占め、その中身は 2.25 が Control の散文に散らして引いていたのと同じ集合 (固有テスト名: 2.25 全軸 481、3.0 Evidence 491) である。減らせるのは文 (48,413 文字) と path の繰り返し (約 8,000 文字) だけなので、目標を上の値に改めた |
+
+例 (SI-08 / r2db-api / Evidence。3.0 の 4 主張 → v0.5 の 1 主張):
+
+> - `0014` reader `statement_timeout`: effective value after `0014`, 503 without backend detail on a statement over the ROLE-level bound, idempotent re-application -- `r2db-api/tests/test_auditreader_statement_timeout.py::test_reader_connection_effective_statement_timeout_is_5000ms_after_0014`, `::test_slow_audit_query_is_canceled_returns_503_without_backend_detail_and_frees_the_connection`, `::test_0014_reapplication_is_idempotent`.
+
+(この例は 3 名の列挙で 300 文字を超えるので、実施では 2 主張に分ける。数値 `5000ms` は名前が語るので文に書かない。)
 
 ## 3. 更新規約 3.0
 
@@ -238,6 +256,8 @@ script と出力は本書 §9 に逐語で残す (変異を持たない完了条
 | 14 | 台帳 **R-73 が閉止**されている (最長 block 長の記録が文書からも検査器からも消えたことを台帳行に【追記】) | `RM` の R-73 行 |
 | 15 | 完了ゲート (`tools/dev/gate.py`) を**最後に 1 回**走らせて green、`tools/tests -q` も green、commit は `tools/dev/finalize.py --tools-tests` (監督のみ) | 集計行 |
 | 16 | 1〜15 のうち変異と対応しない条件は 5・6・7(ii)(iii)・8・9・10・11・12・13・14 だけであり、いずれも「監査照合」と明記されている | 作業指示書の対応表 |
+| 17 | (v0.5) Evidence を畳む前後で、block ごとのテスト名の多重集合と `file:line` 参照の多重集合が同一、**拡張子を問わない bare file 参照の多重集合も同一**、かつ **`::test_x` は同じ主張の中で直前に書いた `path::` のファイルに定義されている** (ファイルが変わるたびに最初のテストにフルパス。主張・block をまたぐ継承は不可。初回実施の監査が 38 件の誤継承を見つけて足した条件) (scratchpad の一度きり script 2 本。集計行を §9.9 に逐語) | 監査照合 |
+| 18 | (v0.5) Evidence 全体 55,000 文字以下、本体 200,000 文字以下 (`wc -c`。起草時の 45,000 / 192,386 は §2.4 の訂正のとおり不能で、実施中に改めた) | grep / wc |
 
 **(E) 抽出式 (逐語で固定する。§1.1 の件数と条件 2・3・4 はこの式で数える)**
 
@@ -426,6 +446,45 @@ TOTAL missing=0
 - `tools/tests -q` (`tools/dev/pt.py`): `pt: 588 passed in 73.71s (0:01:13)`
 - commit: `tools/dev/finalize.py --tools-tests` (監督)。版 2.25 の全文は commit `94febb3`。
 
+### 9.9 v0.5 Evidence の畳み込み (2026-09-24、台帳 R-104、worktree `cm-evidence-fold`、基点 main 60dd773)
+
+実施: 起草担当 (Opus) 2 名が SI-00〜07 / SI-08〜15 を並列に畳み、scratchpad の splice script で本体へ差し替えた。監査 (evidence-auditor) が初回の畳み込みに 38 件の `::` 誤継承と 15 件の情報欠落、6 件の論点の束ね違いを見つけ、是正して再監査した。
+
+| 実測 | 3.0 (R-103 直後) | 3.1 (是正後) |
+|---|---|---|
+| 本体 (`wc -c`) | 247,325 | 223,172 |
+| Evidence 主張 / 文字 | 642 / 98,118 | 346 / 74,285 |
+| うち参照トークン (テスト名・path、backtick 込み) | 49,705 | 約 60,000 (継承規則の確定でフルパス再掲が増えた) |
+| Control / Status | 577 / 106,271、144 / 26,534 | 不変 |
+| 前文 | 5,524 | 版上げ記録 1 行を 3.1 に差し替え、3.0 の行は削除 (git) |
+
+検査 (scratchpad の一度きり script。`tools/` には置かない):
+
+- `cm_evidence_check.py compare` (block ごとのテスト名・`file:line` 多重集合): `blocks=49 missing=0 added=0`
+- `cm_evidence_check.py stats`: `file chars 222956 | Evidence n 346 chars 74285 | Control n 577 chars 106271 | Status n 144 chars 26534 | Evidence >300: 0`
+- `cm_inherit_check.py` (`::test_x` が同じ主張内の直前 `path::` に定義されていること、拡張子を問わない bare file 参照の多重集合): `inheritance offenders 4` (すべて 3.0 由来の短縮形 `test_ops.py::` 等、3.0 は 37) / `bare-file-refs missing=0 added=0`
+- 見出し集合: 3.0 と同一。二重空行 0。1,400 文字超の行 0。
+
+床の再固定 (`cm_floors.py`、登録テストの `_find_unresolved_position_refs` と 3 形の正規表現を import して実測。各床 = 実測 − 従来の margin):
+
+| 定数 | 3.0 実測 / 床 | 3.1 実測 / 床 |
+|---|---|---|
+| `FULL_FORM_FLOOR` | 136 / 90 | 260 / 214 |
+| `BARE_COLON_FORM_FLOOR` | 371 / 280 | 247 / 156 |
+| `BARE_NAME_FORM_FLOOR` | 108 / 90 | 108 / 90 |
+| `POSITION_REF_SHAPE_D_FLOOR` | 288 / 270 | 288 (畳み途中 287) / 269 |
+| その他の shape/route | 不変 (a 400、a' 19、b 21、c 32、e 8、i 662、i' 4、ii 7、iii 85) | 不変 |
+
+登録テスト: 58 passed。
+
+受け入れ条件 18 (Evidence 55,000 / 本体 200,000): **未充足** (74,285 / 223,172)。監査の実測では参照トークンだけで 49,635 文字 (継承規則の確定前) あり、Control/Status を凍結する限り本体の下限は約 203,000。目標値は起草時 (45,000 / 192,386) と実施中 (55,000 / 200,000) の 2 度誤っており、3 度目の置き換えはせず、未充足のまま依頼者の受け入れ裁定に委ねる。
+
+監査 (evidence-auditor、パケット = scratchpad `r104-audit.md` §1〜§13): 初回「条件 17 充足 (検査の射程内) / §2.4 の情報保持 未充足 (c) 15 件 / 1 主張 = 1 論点 未充足 6 件 / 条件 18 未充足」、観察 1「`::` の path 継承が 39 箇所で別ファイルを指す (畳み込みが新たに作った誤りは 38)」、観察 2「条件 17 の検査が path 接頭辞と bare path を見ていない」。再監査 (是正後)「観察 1 解消 (`resolved-WRONG-FILE=0`、3.0 由来の短縮形 4 件のみ残る) / (c) 14/14 充足 (c-11 は欠番) / 論点 7/7 充足 / 新規欠陥 2 件 (低: `:119` の `membership` の 1 語 → 是正済み、同一ラベル 6 主張 → 観察として残置) / 条件 18 未充足 (参照トークン 57,523 で床 58,215、Evidence 55,000 自体が不能)」。
+
+完了ゲート (`tools/dev/gate.py --label r104-final`、是正と 1 語復帰の後の最終ツリー): `gate: 4018 passed, 2 subtests passed in 492.99s (0:08:12)`、`judge=PASS`、`pg_database/pg_roles diff 0`。
+
+受け入れ (依頼者裁定 2026-09-24、選択肢 1): **このまま受け入れる**。条件 18 は「未充足、目標値の設定が 2 度誤っていた (起草時 45,000/192,386、実施中 55,000/200,000)」と記録して閉じ、3 度目の置き換えはしない。参照トークンを字数から除く算定 (§7 (f)) と論点粒度の再圧縮は採らない。
+
 ## 改版履歴
 
 | 版 | 日付 | 変更 | 出所 |
@@ -435,3 +494,4 @@ TOTAL missing=0
 | **v0.2** | 2026-09-23 | 設計レビュー指摘 15 件 + 枠への疑義 3 件への監督裁定を反映: §0 の 1 commit 規律、§1.1 の 525 / 219 / Status 73、§2.1 の Control 上限 250・施行箇所の定義・分割時の参照複製・既存参照の形の据え置き・route i' 維持・CCR-14 対象外・Status は peer block 据え置き・Evidence 21 件の帰結、§2.2、§2.3 例 3 を英語化、§3 に HISTORY 逐語の行と 4 つの前提、§4 の WP 表・床の再固定・検査 (2)・WP-2/3 規律・WP-4 の 1 対 1 照合、§5 を 16 条件に再構成 + (E)、§6.1 の結論・§6.2b の 24 ファイル、§7 に (f)(g)、§8 を空に | 設計レビュー 2026-09-23 + 監督裁定 |
 | v0.1 | 2026-09-23 | 初版。形式 3.0 の主張文法、更新規約 3.0、WP-1〜WP-5、受け入れ条件 14 件、影響ファイルの実測 | 依頼者裁定 2026-09-23 (決定 1〜6)、`RM`:160、`docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` §5 裁定 4 |
 | v0.1 | 2026-09-23 | 起草時の監督裁定 (疑義 9 件) を反映: §0 に R-73 閉止、§1.1 の block 53・抽出式による 221 件・位置参照行の削除、§2.1/§2.2 の Control 文法 (主語 + 施行箇所の参照、新 ID 族なし)、§2.3 例 1、§4 の `MAX_LINE_LENGTH` 退役、§5 の (E) 抽出式・条件 6/11/13/14、§7 に (e)、§8 を 1 件に縮小 | 監督裁定 2026-09-23 |
+| v0.5 | 2026-09-24 | §2.4 (Evidence の畳み方: 1 主張 = 1 論点 + テスト名の列挙、名前が語る観測は文にしない、総量目標)、§2.1 の Evidence 行を §2.4 で上書き、§5 に条件 17・18、§9.9 を新設 | 依頼者裁定 2026-09-24 (修正案で進める)。初回実施の実測 (本体 +29%) |
