@@ -721,6 +721,22 @@ facade), but the pagination continuation itself only reaches a
 caller through `query_page` below, which `http.post_query` uses.
 ```
 
+### correction: 2026-09-25
+
+- reason: keyset paging work order WORK_ORDER_PHASE11_KEYSET_PAGING_V1 §4 WP-5 (design PHASE11_KEYSET_PAGING_V1 D-1 (2a), D-3 (9)) -- a second paragraph documents the new `page_size=None` default resolution (least of the contract maximum, declared `limits.result_items`, and the request's own `budget.result_items`). The `WP-4` pointer on the first paragraph's `(CCR-13 WP-4)` was already dropped at this change set's own base (§4.1 (6) label stripping, untracked before this correction)
+
+old:
+```
+which `http.post_query` uses.
+```
+
+new:
+```
+which `http.post_query` uses.
+
+Keyset paging (design D-1 (2a), D-3 (9)): `page_size` of `None` (the default, and what a request that omits `page.size` resolves to) is answered as though it carried the least of the contract maximum, this deployment's own declared `limits.result_items`, and the request's own `budget.result_items` where it carries one -- resolved once, in `_query_outcome` below, after `budget` has already narrowed the effective limits.
+```
+
 ## CH-0136
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)

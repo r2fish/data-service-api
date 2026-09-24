@@ -593,6 +593,20 @@ key always waits for the first, full stop.
 # validated) here, before any SQL referencing it runs.
 ```
 
+### correction: 2026-09-25
+
+- reason: keyset paging work order WORK_ORDER_PHASE11_KEYSET_PAGING_V1 §4 WP-5 (design PHASE11_KEYSET_PAGING_V1 D-3 (3), D-6) -- the offset cursor's shape hash (bound to select/where/order_by/size) is replaced by a keyset binding hash that excludes select/size (neither decides a row's position) and normalizes where; the comment now describes the binding hash, not the retired shape hash
+
+old:
+```
+R-6: the cursor's opaque shape hash binds the Application scope, entity, and the full query shape (select/where/order_by/size) -- decoded (and validated) here, before any SQL referencing it runs.
+```
+
+new:
+```
+keyset paging (design D-3 (3), D-6): the cursor's binding hash covers the Application scope, entity, and the normalized where/order_by only (never select/size, which do not decide a row's position) -- decoded (and count/type-checked) here, before any SQL referencing it runs.
+```
+
 ## CH-0025
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell.query`)
@@ -629,6 +643,20 @@ key always waits for the first, full stop.
 # non-negative integers (never client-supplied text) by this point
 # -- `sql.Literal` here is composing a trusted value, the same
 # pattern `_set_timeouts` already uses for its own computed values.
+```
+
+### correction: 2026-09-25
+
+- reason: keyset paging work order WORK_ORDER_PHASE11_KEYSET_PAGING_V1 §4 WP-5 (design PHASE11_KEYSET_PAGING_V1 D-3 (1)/(4)) -- `OFFSET` is removed (keyset paging replaces it); the second paragraph now describes the `LIMIT size+1` look-ahead alone. The leading `R-6:` label on the first paragraph was already dropped at this change set's own base (§4.1 (6) label stripping, untracked before this correction)
+
+old:
+```
+`offset`/`page_size` are always server-computed, already-validated non-negative integers (never client-supplied text) by this point -- `sql.Literal` here is composing a trusted value, the same pattern `_set_timeouts` already uses for its own computed values.
+```
+
+new:
+```
+keyset paging (design D-3 (4)): the caller's own keyset predicate (if any) is already folded into `where_sql` above, so this statement's own `LIMIT` is a look-ahead `size+1`, with no `OFFSET` clause. `page_size` is always a server-computed, already-validated positive integer (never client-supplied text) by this point -- `sql.Literal` here is composing a trusted value, the same pattern `_set_timeouts` already uses for its own computed values.
 ```
 
 ## CH-0027

@@ -66,6 +66,19 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 #: and `validate_page_size`'s own `fail("LIMIT_EXCEEDED", ...)` site are
 #: not vocabulary codes and are not counted here) and must stay in
 #: `SCANNED_MODULES` for the same reason as `identifier_rules.py` above.
+#: Phase 11 keyset paging WP-5 (design docs/design/
+#: PHASE11_KEYSET_PAGING_V1.md D-3): `_shape_hash`/`_encode_cursor`/
+#: `_decode_cursor` are replaced by `canonical_page_binding`/`encode_page_
+#: cursor`/`decode_page_cursor` (the D-6 codec/binding trio) plus the new
+#: r2db-only wrapper `decode_and_check_page_cursor`; `validate_page_size`'s
+#: own `LIMIT_EXCEEDED`/`VALIDATION_FAILED` split collapses to one
+#: `VALIDATION_FAILED` site (D-3 (8)). `paging.py`'s own vocabulary count is
+#: now 6: `validate_page_size` (1), `_resolve_order_by` (4, unchanged), and
+#: `decode_and_check_page_cursor` (1, a single site covering decode/
+#: binding/count/type failure alike -- D-1 (5) collapses all four into one
+#: refusal). `encode_page_cursor`/`decode_page_cursor`/`canonical_page_
+#: binding` raise no `fail(...)` of their own (`decode_page_cursor` raises
+#: `ValueError`, per D-6 (b)) and add 0.
 #: R-37 WP-1i (2026-09-14): `value_types.py` holds `_check_type`/
 #: `_declared_type_label`/`_validate_wildcard_pattern`/`_validate_
 #: predicate_types` (plus the `_TEXT_ONLY_OPERATORS` set only the last of
@@ -195,7 +208,17 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: R-79 WP-3 (2026-09-23): line shift only (1592 -> 1604) -- `_liveness_
 #: check` grew a non-IDLE pre-check and a replacement explanatory comment
 #: for its own `autocommit`-based ping, net +12 lines above this call site.
-    ("postgres.py", 1604),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+#: Phase 11 keyset paging WP-5 (2026-09-25): line shift only (1604 -> 1626)
+#: -- `PostgresCell.query` gained the keyset binding/decode/predicate lines
+#: (design D-3), net +22 lines above this call site; `_fail_client_value`'s
+#: own single `fail()` call is otherwise unchanged. Re-verified via
+#: `_fail_call_sites`.
+#: Review corrections 2026-09-25 (task A, comment provenance CH-0024
+#: correction): line shift only (1626 -> 1627) -- a `# history: CH-0024`
+#: reference line was added above this call site's own scope; `_fail_
+#: client_value`'s own single `fail()` call is otherwise unchanged.
+#: Re-verified via `_fail_call_sites`.
+    ("postgres.py", 1627),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
@@ -487,12 +510,31 @@ def test_ast_full_count_matches_the_audit_site_count():
         # wording or `details=` shape (the module's own `LIMIT_EXCEEDED`
         # and `NOT_FOUND` sites are not vocabulary codes and are not
         # counted here).
-        "paging.py": 10,
+        # Phase 11 keyset paging WP-5 (design D-3): -4 -- `validate_page_
+        # size`'s own `LIMIT_EXCEEDED`/`VALIDATION_FAILED` split collapses
+        # to 1 `VALIDATION_FAILED` site (-0 net from that function, since
+        # only the `VALIDATION_FAILED` leg was ever counted); `_shape_
+        # hash`/`_encode_cursor`/`_decode_cursor`'s 5 sites (all inside the
+        # old `_decode_cursor`) are replaced by the new codec (`encode_
+        # page_cursor`/`decode_page_cursor`/`canonical_page_binding`, 0
+        # `fail(...)` sites of their own -- `decode_page_cursor` raises
+        # `ValueError`, D-6 (b)) plus 1 new site in the r2db-only wrapper
+        # `decode_and_check_page_cursor` (a single site covering decode/
+        # binding/count/type failure alike, D-1 (5)); `_resolve_order_by`
+        # is unchanged (4 sites). Net: 1 (`validate_page_size`) + 4
+        # (`_resolve_order_by`) + 1 (`decode_and_check_page_cursor`) = 6
+        # (10 -> 6).
+        "paging.py": 6,
         # R-37 WP-1i (2026-09-14): the 11 `fail("VALIDATION_FAILED", ...)`
         # sites `_check_type`/`_validate_wildcard_pattern`/`_validate_
         # predicate_types` carried in `structured.py` before the move,
         # unchanged in wording or `details=` shape.
-        "value_types.py": 11,
+        # Review corrections 2026-09-25 (task C, design PHASE11_
+        # KEYSET_PAGING_V1 D-3 (4a)): +2 -- `_check_type`'s own "number"
+        # (finite float64) and "string" (no lone UTF-16 surrogate) domain
+        # checks, the shared choke point `where` and `page/cursor` both
+        # pass through (11 -> 13).
+        "value_types.py": 13,
         # R-37 WP-3c (2026-09-15): the 6 sites `_check_query_request_
         # shape`/`_check_mutation_request_shape` carried in `service.py`
         # before the move, unchanged in wording or `details=` shape.

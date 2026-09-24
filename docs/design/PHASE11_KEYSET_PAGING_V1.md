@@ -690,3 +690,43 @@ v0.3 (2026-09-24) で上の文を設計レビュー 1 への裁定 (指摘 1・3
    cell.py は指示どおり §4.1 (1) の 1 件のみ（実コード変更）に収まった。http.py は §4.1 (1) に加え **§4.1 (2) が 1 件残る** — 「WP-3 design decision」の comment 塊 (旧 `page.cursor` 拒否の理由) を `http.py` から丸ごと削って `cell.py` へ移したことで、`post_query` scope の CH-ID なし block 列が old 3 → new 2 になったため。
 
    **監督裁定 (2026-09-25、2 回目) への対応と実測**: `docs/code-history/MitateDB-api/http.md` に `CH-0542`（両 peer 通しの連番で既存最大 `CH-0541` の次。`moved from: src/mitatedb_api/http.py (post_query)`、`parent commit: 3af11b3`、`kind: comment`、fenced block は移動元の塊全体を dedent 後 byte 一致で登録）を追加し、`ApplicationCell.read_page` の docstring 末尾に `History: CH-0542` を足して実測したところ、**別の FAIL が新たに出た**: `FAIL (§4.1 (2)) MitateDB-api/src/mitatedb_api/cell.py:2151 companion CH-0542 does not byte-match any (remaining) original block in the same scope ('ApplicationCell.read_page')`。読解: `check_provenance_semantics` は `rel_path` 単位（`run_base` の `for rel_path in rel_paths` ループ）で呼ばれ、`old_blocks`/`old_positions` はその**同じファイルの** `--base` 版から作った木に限られる — CH-ID の companion 照合 (:3147-3153) も「同一 scope の unconsumed old block」だけを対象とし、コード上の注記どおり **cross-scope フォールバックが無い** (:3154-3159 "NO cross-scope fallback")。`read_page` は `cell.py` の新規メソッドで、`cell.py` の `--base` 版には対応する old block が存在しないため、companion 登録があっても `cell.py` 側では「一致する old block が無い」で必ず FAIL する。一方 `http.py` 側は「old block が新しい block で消費されない」ままなので、登録前と同じ `old 3, new 2` が residual する。**つまり `--base` モードはファイルを跨ぐ CH-ID の「moved from」を検証できない構造であり（`--register` モードが登録側の書式のみを見る別チェック）、登録によって `http.py`/`cell.py` いずれの FAIL も消えないことを実測で確認した。** 登録 (`docs/code-history/MitateDB-api/http.md` への追記、`cell.py` の `History: CH-0542` 行) は追加の FAIL しか生まなかったため、**両方とも元に戻した**（`docs/code-history/` は無変更、`cell.py` は `History:` 行なしの状態に復元）。`--base` の最終実測は登録前と同一 (下記)。**この 1 件 (http.py の §4.1 (2)) は実コード変更 2 件と同種の、正当な理由のある残留 FAIL として報告する** — 4.1(1) の 2 件だけには収まらなかった。
+
+### WP-5 監査照合の記録 (2026-09-25)
+
+作業指示書 §4 WP-5 の完了条件番号→変異表の「監査照合」6 件 (完了条件 1・9b・21・22・23・24) の逐語記録。
+
+- **完了条件 1 (`pt.py -rxX` の実測が期待結果表と一致し、r2db の F が I だけ 3 件)**: `./.venv/bin/python tools/dev/pt.py -C <WT> --wait 300 -- conformance-tests/test_c28_keyset_paging.py -q -rxX -n 2` → `pt: 3 failed, 42 xfailed, 39 xpassed in 22.20s`。FAILED の 3 件は `test_c28_concurrent_insert_discriminates_keyset_from_offset[r2db-api]` / `[r2db-api-http]` / `[r2db-api-socket]`（I node、r2db 3 plug）のみ、他は全て `[XPASS(strict)]` の同一理由。確定した表 (コードレビュー差し戻し対応 B で T に変種 `tied_order_key` を追加し、9 node → 9 node のまま、T の variant 数だけ 5 → 6 になった。node 数の勘定は「T の 6 変種 + 他 8 node」= 14 id):
+
+  | node | r | rh | rs | m | mh | ms |
+  |---|---|---|---|---|---|---|
+  | T (6 変種) | X | X | X | x | x | x |
+  | I | **F** | **F** | **F** | x | x | x |
+  | B | X | X | X | x | x | x |
+  | A | X | X | X | x | x | x |
+  | R | X | X | X | x | x | x |
+  | S | X | X | X | x | x | x |
+  | D | X | X | X | x | x | x |
+  | DP | X | X | X | x | x | x |
+  | PS | X | X | X | x | x | x |
+
+  設計 §9 の見込み表 (WP-5 完了時点: r2db 3 plug の (ii) が XPASS(strict→FAILED)、他 8 node が XPASS(non-strict)) と完全一致。**既知の穴 (標準実行時の観察)**: この file を **並列度指定なしで単独実行**すると (`-n` を付けない場合)、r2db-api-http 側で `httpx.AsyncClient` が「Cannot send a request, as the client has been closed」を投げ、無関係な後続 node (例: PS) が FAILED になることを実測した (`tied_order_key` 追加後の 84 node で発現、5 変種времени の 78 node では未発現)。実測で切り分けた原因は **content ではなく総 node 数**（`-k` で任意の 3 node を追加で除外しても解消し、`tied_order_key` を並べ替えても位置に依らず再現する）——単独直列実行の httpx クライアント寿命に関わる資源上限で、`-n 2` 以上の並列度、または完了ゲートと同じ `-n 5 --dist loadgroup` では 3 回中 3 回とも発現しない (下記完了条件 24 の実測)。`conftest.py`/adapter 層はこの WP の触ってよいパス外であり、原因の切り分けのみ記録し実装しない。
+- **完了条件 9b (`1`/`1.0` の束縛の実測、r2db)**: `PYTHONPATH=r2db-api/src python3 -c "from r2db_api.paging import canonical_page_binding; ..."` → `canonical_page_binding('app-x', 'items', [('n', 'eq', 1)], [('id', 'asc')])` = `ea9471961335d955`、`canonical_page_binding('app-x', 'items', [('n', 'eq', 1.0)], [('id', 'asc')])` = `03f384074928d02a`。**`1` と `1.0` は異なる束縛になる**（設計 §10 の 14 の起草時見込みどおり — `json.dumps` は型変換せず、Python の `1`/`1.0` はそれぞれ `"1"`/`"1.0"` という別のテキストになる）。MitateDB 側の実測は WP-4 で行う。
+- **完了条件 21 (codec と `canonical_page_binding` の本体に comment が無く、`paging.py` に module 水準の可変状態が無い)**: `r2db-api/src/r2db_api/paging.py` の `canonical_page_binding`、`encode_page_cursor`、`decode_page_cursor` の本体を目視 — いずれも docstring のみで in-body `#` comment は 0 件。module 水準の代入は `MAX_PAGE_SIZE = 1000` と `MAX_ORDER_BY_FIELDS = 10` の 2 定数のみ（いずれも不変の int リテラルで、可変コンテナ・カウンタは無い）。
+- **完了条件 22 (`MAX_CURSOR_OFFSET` と offset の符号化が消えている)**: `grep -rn "MAX_CURSOR_OFFSET" r2db-api/src/r2db_api/*.py` → 0 件。`grep -rn "_shape_hash\|_encode_cursor\b\|_decode_cursor\b" r2db-api/src/r2db_api/*.py` → 実装側 0 件（コードレビュー差し戻し対応 E で `http.py:466` の comment も新名 `decode_and_check_page_cursor` に直し、旧名の残存は 0 件になった）。
+- **完了条件 23 (`r2db-api/tests` 全体が緑)**: `-- r2db-api/tests -q` → `pt: 1467 passed in 107.47s`（コードレビュー差し戻し対応 B/C/F の新設テスト 5 本、リネーム 1 本を含む。failed 0）。
+- **完了条件 24 (部分集合 2 本、failed は r2db の I の 3 件だけ)**: `-- conformance-tests -k "not MitateDB" -q -rxX -n 5 --dist loadgroup` → `pt: 3 failed, 701 passed, 39 xpassed in 124.73s`（failed 3 件は全て I node、xpassed 39 = 13 id (T の 6 変種 + 他 7 node) × 3 plug の non-strict XPASS、xfailed 0）。`-- conformance-tests -k "not r2db" -q -rxX -n 5 --dist loadgroup` → 4 回実測: 2 回は `1 failed, 699/699 passed, 39/42 xfailed`（`test_c27_same_digest_executes_once[MitateDB-api-http]`、`AUTH_INVALID` — WP-1/WP-2 の記録にある既知の flake と同種）、2 回は `700 passed, 42 xfailed`（failed 0、うち直近 1 回は連続 2 回赤の直後の再実測）。本 WP が触れていない `test_c27_concurrent_same_key.py`/MitateDB 側ファイルに起因し、WP-5 の変更によるものではないと判断する。
+
+### WP-5 コードレビュー差し戻し対応の記録 (2026-09-25)
+
+監督裁定済みの差し戻し指摘 A〜F への対応。
+
+- **A (comment provenance、指摘 1)**: `docs/code-history/r2db-api/{postgres,service}.md` の CH-0024・CH-0026・CH-0135 に `### correction: 2026-09-25` を追記 (`docs/design/CODE_COMMENT_PROVENANCE_V1.md` §9.3、先例 CH-0541)。CH-0024 は新しい塊の末尾に `# history: CH-0024` を復元。実測: `python3 tools/check_comment_provenance.py --register` → `comment provenance register OK: 89 files scanned, 431 CH-IDs`。`--base HEAD <src 9 本 (旧 7 本 + http.py + value_types.py)>` → §4.1 (1) 8 件 (実コード変更) + (2) 15 件、(3) は 0 件 (旧 postgres_sql.py:55/service.py:721 の 2 件は解消)。`pt.py -- tools/tests/test_comment_provenance.py -q` → `pt: 303 passed in 31.77s`。
+- **B (tie-break の固定、指摘 3)**: `test_foundation.py`/`test_postgres.py` に `test_cursor_pagination_uses_the_id_tie_break_when_the_order_by_field_ties` を追加 (3 行同値群が page_size=1 の境界を必ずまたぐ seed、asc/desc 両方)。C-28 の T に変種 `tied_order_key` を追加 (5 行、bucket が "x"×3/"y"×2 の 2 値のみ、order_by 1 項)。変異 4 本 (`postgres_sql.py`/`inmemory_sort.py` の tie-break 方向反転 × 新設単体テスト/C-28 新変種) を `mutate.py` で expect=red、全 4 件的中。
+- **C (改変 cursor の 503、指摘 2)**: `value_types._check_type` に number (有限 float64) と string (lone surrogate 拒否) の定義域検査を追加 (`where`/`page/cursor` 共通)。`test_foundation.py`/`test_postgres.py` に `test_domain_out_of_range_values_are_validation_failed_*` を追加 (401 桁整数・`"\ud800"` が `where` と改変 `page/cursor` の両方で同一の 2 キー拒否)。既存の `test_postgres_data_error_from_an_out_of_range_number_value_is_validation_failed` は新しい早期拒否を反映して `test_postgres_write_of_an_out_of_range_number_value_is_validation_failed` に改名・assert 更新 (バックエンド層 `_fail_client_value` の no-details 経路はこの入力ではもう届かないことをdocstringに明記。**指示書外の判断**: この trigger の完了条件6 pin 自体の代替トリガは本 WP の範囲外として棚上げ)。変異 M5-11b (定義域検査を外す→ PostgreSQL の新設テストが 503 で赤) 的中。
+- **D (`sort_keys=True`、指摘 4)**: `paging.py::encode_page_cursor` に追加。
+- **E (指摘 5・6・7)**: `test_foundation.py` の SI-08 誤帰属 2 件を SI-01 に修正。`paging.py`/`postgres_sql.py` の経緯文 (WP-4/review 由来の語) を現在の規則だけの文に整理。`http.py:466` の旧名 `_decode_cursor` を `decode_and_check_page_cursor` に修正。本節末尾を「5 件」→「6 件」に修正 (本節冒頭)。
+- **F (in-memory `result_items`、指摘 8)**: `structured.py` の `limits.check("result_items", ...)` を keyset 絞り込み (旧 :932) の後に移動。`test_foundation.py` に `test_cursor_continuation_result_items_check_counts_the_returned_rows_not_the_full_match_set` (10 行、`result_items=3` へ狭めた continuation、`page.size=5`、残り 2 行) を追加。変異 M5-F1 (検査位置を戻す→赤) 的中。
+
+再実測 (全対応後): `-- r2db-api/tests -q` → `pt: 1467 passed in 107.47s`。`-- conformance-tests/test_c28_keyset_paging.py -q -rxX -n 2` → `pt: 3 failed, 42 xfailed, 39 xpassed in 22.20s` (期待結果表と一致)。`-- conformance-tests -k "not MitateDB" -q -rxX -n 5 --dist loadgroup` → `pt: 3 failed, 701 passed, 39 xpassed in 124.73s`。`-- conformance-tests -k "not r2db" -q -rxX -n 5 --dist loadgroup` → `pt: 700 passed, 42 xfailed in 127.38s` (直近の clean run)。`tools/public_value_scan.py` (差分 17 ファイル) → `total_flagged=0`。両 peer `capabilities_document.py` の `"1.9.0"` 残留 0。
+
+

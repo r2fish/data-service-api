@@ -1,32 +1,33 @@
-"""r2db page size, order_by, and cursor pagination: the contract `Page.
-size` ceiling, order_by field/direction validation and its `id` tie-
-breaker, and cursor shape hashing/encoding/decoding (ST7).
+"""r2db page size, order_by, and keyset cursor pagination: the contract
+`Page.size` ceiling, order_by field/direction validation and its `id`
+tie-breaker, the D-6 cursor codec (`encode_page_cursor`/
+`decode_page_cursor`) and binding hash (`canonical_page_binding`), and the
+r2db-side decode-and-check wrapper `decode_and_check_page_cursor` that
+turns a bad cursor into the single D-1 (5) refusal (ST7).
 
 This is a pure leaf: `validate_page_size` is a closed-form comparison of
-its own `page_size` argument against a fixed contract ceiling and the
-caller's own explicitly-passed `ResourceLimits` (work order §2's E
-classification -- a deployment's resource limits are an explicit
-argument here, never read from global/service state); `_resolve_order_by`
-validates and normalizes an already-parsed order_by list against an
-already-known field set, delegating identifier syntax to
-`validate_identifier` (in `identifier_rules.py`); and `_shape_hash`/
-`_encode_cursor`/`_decode_cursor` are total, deterministic functions over
-their own arguments alone. None of the five opens a connection, reads a
-catalog, or consults any request/limits/principal state beyond the
-`ResourceLimits` object a caller passes in. The choke point that decides
-*when* a page is fetched (`ApplicationCell.query`, in `structured.py`)
-remains in its own module.
+its own `page_size` argument against a fixed contract ceiling; `_resolve_
+order_by` validates and normalizes an already-parsed order_by list against
+an already-known field set, delegating identifier syntax to `validate_
+identifier` (in `identifier_rules.py`); and `encode_page_cursor`/`decode_
+page_cursor`/`canonical_page_binding`/`decode_and_check_page_cursor` are
+total, deterministic functions over their own arguments alone. None of
+these open a connection, read a catalog, or consult any request/limits/
+principal state beyond the `ResourceLimits` object `validate_page_size`
+takes. The choke point that decides *when* a page is fetched
+(`ApplicationCell.query`/`PostgresCell.query`) remains in its own module.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
-from typing import Any
+from typing import Any, Sequence
 
-from .errors import fail, violation
+from .errors import FoundationError, fail, violation
 from .identifier_rules import validate_identifier
 from .limits import ResourceLimits
+from .value_types import _check_type
 
 
 # --- page size (contract `Page.size`) ---------------------------------------
@@ -35,23 +36,21 @@ from .limits import ResourceLimits
 # "maximum": 1000}` -- a fixed contract ceiling, independent of
 # `ResourceLimits.result_items` (a deployment-tunable resource class that
 # could in principle be configured to any positive value). A client
-# request for a page larger than the contract itself allows is a request
-# outside the contract's own vocabulary (`VALIDATION_FAILED`), not a
-# resource a deployment could simply raise (WP-4 review minor-1).
+# request for a page outside the contract's own declared range is a
+# request outside the contract's own vocabulary (`VALIDATION_FAILED` /
+# `request_schema` / `page/size`), not a resource a deployment could
+# simply raise or lower (design D-3 (8)).
 MAX_PAGE_SIZE = 1000
 
 
 def validate_page_size(page_size: int, limits: ResourceLimits) -> None:
-    if page_size <= 0:
-        fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit_class": "result_items", "limit": limits.result_items})
-    if page_size > MAX_PAGE_SIZE:
-        fail("VALIDATION_FAILED", "Page size exceeds the contract maximum.", details=violation("budget", field="page_size"))
+    if page_size <= 0 or page_size > MAX_PAGE_SIZE:
+        fail("VALIDATION_FAILED", "Page size is outside the contract's declared range.", details=violation("request_schema", field="page/size"))
 
 
-# --- order_by / cursor pagination (R-6) ------------------------------------
+# --- order_by / cursor pagination (R-6, keyset paging D-3) -----------------------
 
 MAX_ORDER_BY_FIELDS = 10
-MAX_CURSOR_OFFSET = 10**9
 
 
 def _resolve_order_by(order_by: Any, known_fields: set[str]) -> list[tuple[str, str]]:
@@ -88,47 +87,81 @@ def _resolve_order_by(order_by: Any, known_fields: set[str]) -> list[tuple[str, 
     return spec
 
 
-def _shape_hash(application_id: str, entity: str, select: list[str], where: list[Predicate], order_spec: list[tuple[str, str]], size: int) -> str:
-    payload = {
-        # WP-2 review minor (a): binding the hash to the Application scope
-        # and entity too (not just select/where/order_by/size) means a
-        # cursor minted under one application/entity can never even
-        # coincidentally validate against another's query of the same
-        # select/where/order_by/size shape.
-        "application": application_id,
-        "entity": entity,
-        "select": list(select),
-        "where": [[p.field, p.operator, p.value] for p in where],
-        "order_by": [list(item) for item in order_spec],
-        "size": size,
-    }
+def canonical_page_binding(application_id: str, entity: str, where: Sequence[tuple[str, str, Any]], order_by: Sequence[tuple[str, str]]) -> str:
+    """The hash a page cursor is bound to (design D-3 (3), D-6): the
+    Application scope, the entity, `where`'s own (field, operator, value)
+    triples normalized to a value-order-independent form, and `order_by`'s
+    own (field, direction) pairs (which are not normalized, since their
+    order decides the result order itself).
+    """
+    normalized_where = sorted([field, operator, json.dumps(value, sort_keys=True, default=str)] for field, operator, value in where)
+    payload = {"application": application_id, "entity": entity, "where": normalized_where, "order_by": [list(item) for item in order_by]}
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def _encode_cursor(offset: int, shape: str) -> str:
-    payload = json.dumps({"o": offset, "q": shape}, separators=(",", ":")).encode("utf-8")
+def encode_page_cursor(values: list[Any], binding: str) -> str:
+    """The opaque `page.cursor` token (design D-6): the ordering values of
+    the last item of a page, together with the binding hash they were
+    minted under. Holds no server-side state; `values`/`binding` are
+    caller-supplied, so this function alone never knows what either one
+    means.
+    """
+    payload = json.dumps({"v": values, "b": binding}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: Any, expected_shape: str) -> int:
+def decode_page_cursor(cursor: Any, expected_binding: str) -> list[Any]:
+    """The inverse of `encode_page_cursor`: recovers the ordering values a
+    cursor carries, once its own binding hash matches `expected_binding`.
+    Raises `ValueError` on any failure -- not a string, not decodable, the
+    wrong shape, or a binding that does not match -- and never distinguishes
+    which one to its caller; the caller maps `ValueError` to its own
+    contract-level refusal (design D-6 (b)).
+    """
     if not isinstance(cursor, str) or not cursor:
-        fail("VALIDATION_FAILED", "Cursor is not valid.", details=violation("request_schema", field="cursor"))
+        raise ValueError("cursor is not a non-empty string")
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
         raw = base64.urlsafe_b64decode(padded.encode("ascii"))
         payload = json.loads(raw)
-    except Exception:
-        fail("VALIDATION_FAILED", "Cursor could not be decoded.", details=violation("request_schema", field="cursor"))
-    if not isinstance(payload, dict) or set(payload) != {"o", "q"}:
-        fail("VALIDATION_FAILED", "Cursor shape is not supported.", details=violation("request_schema", field="cursor"))
-    offset = payload["o"]
-    shape = payload["q"]
-    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset > MAX_CURSOR_OFFSET:
-        fail("VALIDATION_FAILED", "Cursor offset is out of range.", details=violation("request_schema", field="cursor"))
-    if not isinstance(shape, str) or shape != expected_shape:
-        # R-6, corrigendum m-3: a cursor minted for a different query shape
-        # (different select/where/order_by/size) never silently pages
-        # through the wrong result set -- it fails loudly instead.
-        fail("VALIDATION_FAILED", "Cursor does not match the current query shape.", details=violation("request_schema", field="cursor"))
-    return offset
+    except Exception as exc:
+        raise ValueError("cursor could not be decoded") from exc
+    if not isinstance(payload, dict) or set(payload) != {"v", "b"}:
+        raise ValueError("cursor shape is not supported")
+    values = payload["v"]
+    binding = payload["b"]
+    if not isinstance(values, list):
+        raise ValueError("cursor values are not a list")
+    if not isinstance(binding, str) or binding != expected_binding:
+        raise ValueError("cursor binding does not match the current query")
+    return values
+
+
+def decode_and_check_page_cursor(cursor: Any, binding: str, order_spec: list[tuple[str, str]], field_types: dict[str, str | None]) -> list[Any]:
+    """r2db's own wrapper around `decode_page_cursor` (not one of the
+    isomorphic-pinned D-6 functions): decodes `cursor` against `binding`,
+    then checks the decoded ordering values against `order_spec` (design
+    D-3 (4a)) -- the count must match `order_spec` (tie-break included) and
+    each value must satisfy `_check_type` for its own column's declared
+    type. Any failure along the way -- decode, binding mismatch, count, or
+    type -- collapses to the single D-1 (5) refusal (`VALIDATION_FAILED` /
+    `request_schema` / `page/cursor`); the caller never learns which one.
+    """
+    ok = True
+    values: list[Any] = []
+    try:
+        values = decode_page_cursor(cursor, binding)
+    except ValueError:
+        ok = False
+    if ok and len(values) != len(order_spec):
+        ok = False
+    if ok:
+        try:
+            for value, (field_name, _direction) in zip(values, order_spec):
+                _check_type(value, field_types.get(field_name), "page/cursor")
+        except FoundationError:
+            ok = False
+    if not ok:
+        fail("VALIDATION_FAILED", "Cursor does not match this query's own order.", details=violation("request_schema", field="page/cursor"))
+    return values

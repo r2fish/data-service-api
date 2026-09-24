@@ -362,7 +362,11 @@ def test_finite_limits_are_enforced_and_discoverable(service):
     assert set(response["limit_enforcement"].values()) <= {"enforced", "reference_wall_clock", "deployment_required", "unavailable"}
     with pytest.raises(FoundationError) as exc:
         service.query(runtime, "notes", select=["id"], page_size=0)
-    assert exc.value.code == "LIMIT_EXCEEDED"
+    # Phase 11 (design D-3 (8)): `page.size <= 0` is a contract-schema
+    # violation (`request_schema`/`page/size`), not a resource-class
+    # `LIMIT_EXCEEDED` -- unified with the `> 1000` leg below.
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/size"}
 
 
 def test_audit_is_append_only_and_secret_free(service):
@@ -2272,10 +2276,15 @@ def test_inmemory_sort_leaf_preserves_structured_facade_and_null_rank():
 
 
 def test_paging_leaf_preserves_structured_facade():
-    """R-37 WP-1h (ST7): `structured.py` re-exports all 8 page-size/
-    order_by/cursor names from the new leaf `paging.py` as the exact same
-    objects -- this checks facade identity only, not behaviour (the
-    dedicated tests around this one exercise behaviour)."""
+    """R-37 WP-1h (ST7): `structured.py` re-exports the page-size/
+    order_by/cursor names it uses from the leaf `paging.py` as the exact
+    same objects -- this checks facade identity only, not behaviour (the
+    dedicated tests around this one exercise behaviour). Phase 11 keyset
+    paging WP-5 (design D-3/D-6): `MAX_CURSOR_OFFSET`/`_shape_hash`/
+    `_encode_cursor`/`_decode_cursor` (the offset codec) are gone;
+    `canonical_page_binding`/`encode_page_cursor`/`decode_and_check_page_
+    cursor` (the keyset binding hash, the D-6 codec's encode half, and the
+    r2db-only decode-and-check wrapper) take their place."""
     from r2db_api import structured
     from r2db_api import paging
 
@@ -2283,11 +2292,10 @@ def test_paging_leaf_preserves_structured_facade():
         "MAX_PAGE_SIZE",
         "validate_page_size",
         "MAX_ORDER_BY_FIELDS",
-        "MAX_CURSOR_OFFSET",
         "_resolve_order_by",
-        "_shape_hash",
-        "_encode_cursor",
-        "_decode_cursor",
+        "canonical_page_binding",
+        "encode_page_cursor",
+        "decode_and_check_page_cursor",
     ]
     for name in names:
         assert getattr(structured, name) is getattr(paging, name), name
@@ -2636,7 +2644,9 @@ def test_request_shape_denials_carry_code_details_and_order(service):
     with pytest.raises(FoundationError) as error:
         service.query(runtime, "notes", select=["id"], cursor=123)
     assert error.value.code == "VALIDATION_FAILED"
-    assert error.value.details == {"violated_declaration": "request_schema", "field": "cursor", "declared_type": "string", "observed_type": "integer"}
+    # Phase 11 (design D-3 (7)): `field` follows the contract's own path
+    # rule, `page/cursor` (the old `cursor` did not).
+    assert error.value.details == {"violated_declaration": "request_schema", "field": "page/cursor", "declared_type": "string", "observed_type": "integer"}
 
     # capability check before the operations-shape check: an unsupported
     # `transaction` together with malformed `operations` still reports
@@ -2810,19 +2820,30 @@ def test_cursor_pagination_pages_through_results_and_signals_has_more():
     assert third.next_cursor is None
 
 
-def test_cursor_shape_mismatch_and_malformed_cursor_are_rejected():
+def test_cursor_stays_valid_across_a_select_or_page_size_change_and_malformed_cursor_is_rejected():
+    """Phase 11 keyset paging (design D-1 (4), D-3 (3)): the binding hash
+    covers only (Application, entity, `where`, `order_by`) -- `select` and
+    `page.size` are deliberately outside it, since neither decides where a
+    row sits in the order, so a cursor minted under one `select`/`page_
+    size` stays valid when the caller narrows/widens the projection or
+    changes the page size on the next request (this replaces the pre-1.9.0
+    `_shape_hash` behaviour, which bound `select`/`size` too and rejected
+    both changes -- design D-3 (3)/(8), SI-01's own binding scope moved
+    with it). A cursor that fails to decode is still rejected."""
     cell = _numbered_cell(5)
     first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
-    with pytest.raises(FoundationError) as exc:
-        cell.query("items", select=["id", "n"], where=[], page_size=2, limits=LIMITS, cursor=first.next_cursor)
-    assert exc.value.code == "VALIDATION_FAILED"
+    wider = cell.query("items", select=["id", "n"], where=[], page_size=2, limits=LIMITS, cursor=first.next_cursor)
+    assert wider.items == [{"id": 3, "n": 2}, {"id": 4, "n": 3}]
+    resized = cell.query("items", select=["n"], where=[], page_size=3, limits=LIMITS, cursor=first.next_cursor)
+    assert resized.items == [{"n": 2}, {"n": 3}, {"n": 4}]
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor="not-a-valid-cursor")
     assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/cursor"}
 
 
 def test_cursor_rejects_reuse_with_a_different_where_value_at_the_same_shape():
-    """SI-08: the shape hash binds `where`'s own VALUES, not merely its
+    """SI-01: the binding hash binds `where`'s own VALUES, not merely its
     field/operator shape -- a cursor minted for `n >= 1` must not validate
     a same-shaped `n >= 2` query (tampering with a filter value while
     keeping everything else identical must fail loudly, never silently
@@ -2834,45 +2855,37 @@ def test_cursor_rejects_reuse_with_a_different_where_value_at_the_same_shape():
     assert exc.value.code == "VALIDATION_FAILED"
 
 
-def test_cursor_rejects_reuse_with_a_different_page_size():
-    """SI-08: the shape hash binds the page `size` a cursor was minted for
-    -- reusing a cursor with a different `page_size` must fail loudly,
-    never silently apply the stored offset against a differently-sized
-    page."""
-    cell = _numbered_cell(5)
-    first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
-    with pytest.raises(FoundationError) as exc:
-        cell.query("items", select=["n"], where=[], page_size=3, limits=LIMITS, cursor=first.next_cursor)
-    assert exc.value.code == "VALIDATION_FAILED"
-
-
 def _forge_cursor(payload) -> str:
     blob = json.dumps(payload).encode("utf-8")
     return base64.urlsafe_b64encode(blob).decode("ascii").rstrip("=")
 
 
-def _decode_cursor_shape(cursor: str) -> str:
+def _decode_cursor_binding(cursor: str) -> str:
     padded = cursor + "=" * (-len(cursor) % 4)
-    return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))["q"]
+    return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))["b"]
 
 
-def test_cursor_rejects_negative_offset_overflow_and_non_dict_payload():
-    """WP-2 review M-13: R-6's offset bound (0 <= offset <= 10^9) and
-    payload shape are checked explicitly, not only via a garbage string."""
+def test_cursor_rejects_malformed_payload_shapes():
+    """Phase 11 keyset paging (design D-6): a well-formed base64url/JSON
+    envelope that is not a dict, is missing `v`/`b`, or carries `v` as a
+    non-list, is rejected the same as an undecodable string -- `paging.
+    decode_page_cursor`'s own shape checks, exercised here with the real
+    binding hash a live cursor carries so only the payload SHAPE (not the
+    binding) is under test."""
     cell = _numbered_cell(3)
     first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
-    shape = _decode_cursor_shape(first.next_cursor)
-
-    with pytest.raises(FoundationError) as exc:
-        cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"o": -1, "q": shape}))
-    assert exc.value.code == "VALIDATION_FAILED"
-
-    with pytest.raises(FoundationError) as exc:
-        cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"o": 10**9 + 1, "q": shape}))
-    assert exc.value.code == "VALIDATION_FAILED"
+    binding = _decode_cursor_binding(first.next_cursor)
 
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor(["not", "a", "dict"]))
+    assert exc.value.code == "VALIDATION_FAILED"
+
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"v": [0], "b": binding, "extra": 1}))
+    assert exc.value.code == "VALIDATION_FAILED"
+
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"v": "not-a-list", "b": binding}))
     assert exc.value.code == "VALIDATION_FAILED"
 
 
@@ -2882,26 +2895,32 @@ def test_page_size_over_the_contract_maximum_is_validation_failed():
     independent of whatever `ResourceLimits.result_items` a deployment
     happens to configure (this fixture's default is also 1000, so a
     request for 1001 is unambiguously over the *contract's* own ceiling,
-    not merely this deployment's)."""
+    not merely this deployment's). Phase 11 (design D-3 (8)): the refusal
+    is the contract-schema form (`request_schema`/`page/size`)."""
     cell = _numbered_cell(1)
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["n"], where=[], page_size=1001, limits=LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/size"}
     # The boundary value itself is accepted (rejected only for exceeding
     # it, not merely being large).
     cell.query("items", select=["n"], where=[], page_size=1000, limits=LIMITS)
 
 
-def test_validate_page_size_refuses_zero_as_limit_exceeded():
-    """`validate_page_size` rejects `page_size <= 0` as `LIMIT_EXCEEDED`
-    (a resource-class refusal, distinct from the `VALIDATION_FAILED`
-    contract-ceiling check above) -- the smallest positive value (1)
-    passes silently."""
+def test_validate_page_size_refuses_zero_as_validation_failed():
+    """Phase 11 (design D-3 (8)): `validate_page_size` rejects `page_size
+    <= 0` with the SAME `VALIDATION_FAILED`/`request_schema`/`page/size`
+    refusal as the `> 1000` leg above -- both are a value outside `Page.
+    size`'s own declared `{minimum: 1, maximum: 1000}` schema range, not a
+    deployment resource class (the pre-1.9.0 split into `LIMIT_EXCEEDED`
+    for `<= 0` and `VALIDATION_FAILED`/`budget` for `> 1000` is gone) --
+    the smallest positive value (1) passes silently."""
     from r2db_api.structured import validate_page_size
 
     with pytest.raises(FoundationError) as exc:
         validate_page_size(0, LIMITS)
-    assert exc.value.code == "LIMIT_EXCEEDED"
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/size"}
     validate_page_size(1, LIMITS)
 
 
@@ -2927,6 +2946,134 @@ def test_cursor_shape_hash_is_bound_to_application_and_entity():
     with pytest.raises(FoundationError) as exc:
         cell_a2.query("other_entity", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=cursor)
     assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_cursor_binding_is_independent_of_where_predicate_order():
+    """Phase 11 keyset paging (design D-3 (3), v0.6 -- requester ruling
+    Q-3's review-1 point, §5.1): the binding hash normalizes `where`'s own
+    predicates before hashing, so re-sending the identical predicate SET
+    in a different order keeps a cursor valid -- only the predicate
+    VALUES (already covered by the where-value test above) unbind it,
+    never their order."""
+    cell = _numbered_cell(5)
+    first = cell.query("items", select=["n"], where=[Predicate("n", "gte", 1), Predicate("n", "lt", 4)], page_size=1, limits=LIMITS)
+    assert first.items == [{"n": 1}]
+    reordered = cell.query("items", select=["n"], where=[Predicate("n", "lt", 4), Predicate("n", "gte", 1)], page_size=1, limits=LIMITS, cursor=first.next_cursor)
+    assert reordered.items == [{"n": 2}]
+
+
+def test_cursor_rejects_a_tampered_token_with_the_wrong_value_count_or_type():
+    """Phase 11 keyset paging corrigendum (2026-09-25, work order §4
+    訂正註): C-28's black-box R node cannot forge an opaque cursor with a
+    tampered element count/type, so `paging.decode_and_check_page_
+    cursor`'s own count/type check (design D-3 (4a)) is pinned here
+    instead, at the one layer that CAN see the token's own structure. A
+    genuine cursor's own binding is reused (via `encode_page_cursor`, the
+    same D-6 codec production code uses) so only the VALUES under test are
+    forged -- not the binding hash itself. Both a wrong element count and
+    a wrong element type collapse to the identical D-1 (5) refusal every
+    other cursor failure produces."""
+    from r2db_api.paging import encode_page_cursor
+
+    cell = _numbered_cell(5)
+    first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
+    binding = _decode_cursor_binding(first.next_cursor)
+
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=encode_page_cursor([2, 99], binding))
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/cursor"}
+
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=encode_page_cursor(["not-an-id"], binding))
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/cursor"}
+
+
+def test_cursor_pagination_uses_the_id_tie_break_when_the_order_by_field_ties():
+    """Design D-3 (2): the deterministic `id asc` tie-break is what keeps a
+    keyset traversal total when the caller's own `order_by` field does not
+    already distinguish every row. Seeded so a group of tied rows (3 rows
+    of `bucket="x"`) is guaranteed to straddle a `page_size=1` page
+    boundary, in both directions -- C-28's own fixtures never do this
+    (design D-1 (1): a client does not rely on which field is the
+    tie-break, so the conformance port cannot observe it), so it is pinned
+    here instead."""
+    cell = _cell()
+    _create_entity(cell, "ties")
+    _add_field(cell, "ties", "bucket")
+    cell.transact("ties", [{"operation": "insert", "values": {"bucket": b}} for b in ["x", "x", "x", "y", "y"]], LIMITS)
+    for direction in ("asc", "desc"):
+        order_by = [{"field": "bucket", "direction": direction}]
+        unpaged = cell.query("ties", select=["id", "bucket"], where=[], page_size=10, limits=LIMITS, order_by=order_by)
+        paged_items: list[dict] = []
+        cursor = None
+        for _ in range(10):
+            page = cell.query("ties", select=["id", "bucket"], where=[], page_size=1, limits=LIMITS, order_by=order_by, cursor=cursor)
+            paged_items.extend(page.items)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        assert paged_items == unpaged.items, (
+            f"direction={direction}: paged={paged_items!r} != unpaged={unpaged.items!r}"
+        )
+
+
+def test_domain_out_of_range_values_are_validation_failed_in_memory_too():
+    """`value_types._check_type` (the shared choke point `where` and
+    `page/cursor` both pass through) refuses a 401-digit integer bound to
+    a `number` field and a lone UTF-16 surrogate bound to a `string`
+    field, the same way the PostgreSQL cell does (`test_postgres.py`'s
+    identically-scoped test) -- so the two cells never split on the SAME
+    tampered value (one refusing, the other returning 200)."""
+    from r2db_api.paging import encode_page_cursor
+
+    cell = _cell()
+    _create_entity(cell, "domain_check")
+    _add_field(cell, "domain_check", "score", "number")
+    _add_field(cell, "domain_check", "label", "string")
+    cell.transact("domain_check", [{"operation": "insert", "values": {"score": 1.0, "label": "a"}}, {"operation": "insert", "values": {"score": 2.0, "label": "b"}}], LIMITS)
+
+    huge_integer = 10**401
+    with pytest.raises(FoundationError) as exc:
+        cell.query("domain_check", select=["score"], where=[Predicate("score", "gt", huge_integer)], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+    lone_surrogate = "\ud800"
+    with pytest.raises(FoundationError) as exc:
+        cell.query("domain_check", select=["label"], where=[Predicate("label", "eq", lone_surrogate)], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+    first = cell.query("domain_check", select=["score"], where=[], page_size=1, limits=LIMITS, order_by=[{"field": "score", "direction": "asc"}])
+    binding = _decode_cursor_binding(first.next_cursor)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("domain_check", select=["score"], where=[], page_size=1, limits=LIMITS, order_by=[{"field": "score", "direction": "asc"}], cursor=encode_page_cursor([huge_integer, 1], binding))
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/cursor"}
+
+
+def test_cursor_continuation_result_items_check_counts_the_returned_rows_not_the_full_match_set():
+    """Review corrections 2026-09-25 (task F): `limits.check("result_
+    items", ...)` runs AFTER the cursor position has narrowed `rows`, so
+    this cell agrees with `PostgresCell.query` (whose own `rows` is
+    already the post-keyset, post-LIMIT fetch) on what a page "returns" --
+    never the count of matches from the start of the unpaged order. 10
+    rows, a cursor left after 8, and a continuation narrowed to `result_
+    items=3` with `page.size=5`: only 2 rows remain past the cursor, so
+    the continuation succeeds and returns 2 items. The OLD (pre-fix)
+    position -- checking `min(len(all 10 rows), 5) == 5 > 3` before the
+    cursor narrowed `rows` -- would have raised `LIMIT_EXCEEDED` even
+    though this page returns only 2."""
+    cell = _numbered_cell(10)
+    first = cell.query("items", select=["n"], where=[], page_size=8, limits=LIMITS)
+    assert len(first.items) == 8
+    assert first.next_cursor is not None
+    narrow_limits = replace(LIMITS, result_items=3)
+    second = cell.query("items", select=["n"], where=[], page_size=5, limits=narrow_limits, cursor=first.next_cursor)
+    assert len(second.items) == 2
+    assert second.has_more is False
 
 
 def test_query_revisions_are_index_aligned_with_items():
@@ -3189,6 +3336,30 @@ def test_service_query_matches_filter_combines_with_order_by(service):
     service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "another"}}])
     items = service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}], order_by=[{"field": "id", "direction": "asc"}])
     assert items == [{"body": "a"}, {"body": "another"}]
+
+
+def test_service_query_page_omits_size_and_uses_the_least_of_the_declared_bounds(service):
+    """Phase 11 (design D-1 (2a), D-3 (9)): a request that omits `page.
+    size` is answered as though it carried the least of the contract
+    maximum (1000), the deployment's own declared `limits.result_items`,
+    and the request's own `budget.result_items` where it carries one --
+    never the pre-1.9.0 fixed default of 100 (`service.py`'s old
+    `page_size: int = 100`). Exercised against a small `limits.
+    result_items` (well under 100) so the old default would have silently
+    returned every row on one page with a null `next_page`, hiding the
+    very thing this test pins."""
+    runtime = service.authenticate("cred-a.secret-a")
+    service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": f"n{i}"}} for i in range(4)])
+    service.limits = replace(service.limits, result_items=3)
+    try:
+        first = service.query_page(runtime, "notes", select=["id"], order_by=[{"field": "id", "direction": "asc"}])
+        assert len(first.items) == 3
+        assert first.next_page is not None
+        second = service.query_page(runtime, "notes", select=["id"], order_by=[{"field": "id", "direction": "asc"}], cursor=first.next_page)
+        assert len(second.items) == 2
+        assert second.next_page is None
+    finally:
+        service.limits = replace(service.limits, result_items=1000)
 
 
 def test_mutation_binding_leaf_preserves_structured_facade():
@@ -3502,14 +3673,15 @@ def test_postgres_sql_leaf_preserves_predicate_delegates():
 
 def test_select_statement_is_composed_literally():
     """R-37 WP-4c (PG3): `_select_statement` composes `SELECT <cols>,
-    <revision col>::text FROM <table> [WHERE ...] ORDER BY <order> OFFSET
-    <offset> LIMIT <page_size + 1>` as a literal `psycopg.sql.Composed`
-    fragment sequence -- built and compared without ever calling
-    `.as_string()` (which would need a live connection to quote against).
-    Pins both the OFFSET-before-LIMIT ordering and the `page_size + 1`
-    look-ahead row in one assertion: swapping the OFFSET/LIMIT clause
-    order, or dropping the `+ 1`, each changes the composed fragment
-    sequence directly."""
+    <revision col>::text FROM <table> [WHERE ...] ORDER BY <order> LIMIT
+    <page_size + 1>` as a literal `psycopg.sql.Composed` fragment sequence
+    -- built and compared without ever calling `.as_string()` (which would
+    need a live connection to quote against). Pins the `page_size + 1`
+    look-ahead row: dropping the `+ 1` changes the composed fragment
+    sequence directly. Phase 11 keyset paging (design D-3 (1)/(4)): there
+    is no `OFFSET` clause any more -- the caller's own keyset predicate (a
+    `_keyset_predicate_sql` result) is folded into `where_sql` before this
+    function ever sees it (`postgres.py::PostgresCell.query`)."""
     from psycopg import sql
 
     from r2db_api.postgres_sql import _select_statement
@@ -3519,7 +3691,6 @@ def test_select_statement_is_composed_literally():
         ["name", "age"],
         None,
         [("name", "asc"), ("age", "desc")],
-        5,
         10,
         revision_column="_r2db_revision",
     )
@@ -3532,7 +3703,7 @@ def test_select_statement_is_composed_literally():
         sql.SQL("{col} {direction}").format(col=sql.Identifier("age"), direction=sql.SQL("DESC")),
     ])
     base = sql.SQL("{base} ORDER BY {order}").format(base=base, order=order)
-    expected = sql.SQL("{base} OFFSET {offset} LIMIT {limit}").format(base=base, offset=sql.Literal(5), limit=sql.Literal(11))
+    expected = sql.SQL("{base} LIMIT {limit}").format(base=base, limit=sql.Literal(11))
 
     assert result == expected
 
@@ -3555,6 +3726,28 @@ def test_order_by_sql_uses_only_fixed_direction_literals():
         sql.SQL("{col} {direction}").format(col=sql.Identifier("id"), direction=sql.SQL("ASC")),
     ])
     assert result == expected
+
+
+def test_keyset_predicate_sql_covers_every_order_spec_term_including_the_tie_break():
+    """Phase 11 keyset paging (design D-3 (4)): the dictionary/lexicographic
+    expansion `_keyset_predicate_sql` builds covers EVERY `order_spec` term,
+    including the trailing tie-break (`id`, appended by `_resolve_order_by`
+    whenever the caller's own `order_by` does not already name it) -- C-28's
+    own fixtures never seed two rows that tie on every visible ordering
+    term (the tie-break's own contract-level role, D-1 (1): a client does
+    not rely on which field it is), so dropping the tie-break from the
+    predicate is invisible to the conformance port and is pinned here
+    instead, directly against the composed SQL text."""
+    from psycopg import sql
+
+    from r2db_api.postgres_sql import _keyset_predicate_sql
+
+    order_spec = [("bucket", "asc"), ("rank", "asc"), ("id", "asc")]
+    result, params = _keyset_predicate_sql(order_spec, ["a", 1, 5], {"bucket": None, "rank": "integer", "id": "integer"})
+    rendered = result.as_string(None)
+    assert '"id"' in rendered, f"the tie-break term id is missing from the keyset predicate: {rendered}"
+    assert len(params) == 6, f"expected 6 bound values (1 + 2 + 3 across the 3-term expansion), got {params!r}"
+    assert isinstance(result, sql.Composed)
 
 
 def test_append_revision_predicate_binds_the_expected_revision():

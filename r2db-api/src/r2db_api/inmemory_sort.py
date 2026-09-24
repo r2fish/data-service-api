@@ -1,9 +1,13 @@
-"""r2db in-memory `order_by` sort key and row-sorting (ST2).
+"""r2db in-memory `order_by` sort key, row-sorting, and keyset cursor
+position comparison (ST2; keyset paging, design D-3 (5)).
 
 This is a pure leaf: `_sort_key` is a total, deterministic ordering key
-over an already-typed Python value, and `_sort_rows` is a total,
+over an already-typed Python value, `_sort_rows` is a total,
 deterministic multi-field stable sort over already-fetched rows using
-that key. Neither opens a connection, reads a catalog, nor consults any
+that key, and `_after_page_cursor` is a total, deterministic dictionary
+comparison (using that same key) between an already-sorted row's own
+ordering values and a decoded cursor's own ordering values. None of the
+three opens a connection, reads a catalog, nor consults any
 request/limits/principal state; the choke point that decides which rows
 and which `order_by` spec reach this leaf (`ApplicationCell.query`,
 in `structured.py`) remains in its own module.
@@ -52,3 +56,25 @@ def _sort_rows(rows: list[dict[str, Any]], spec: list[tuple[str, str]]) -> list[
     for field_name, direction in reversed(spec):
         result.sort(key=lambda row, f=field_name: _sort_key(row.get(f)), reverse=(direction == "desc"))
     return result
+
+
+def _after_page_cursor(row_values: list[Any], cursor_values: list[Any], spec: list[tuple[str, str]]) -> bool:
+    """Whether an already-sorted row sits strictly after a decoded page
+    cursor's own position, in the order `spec` defines (design D-3 (5)):
+    a dictionary comparison of `_sort_key(row_values[i])` against
+    `_sort_key(cursor_values[i])`, term by term -- the first term that
+    differs decides the row's position (`>` for `asc`, `<` for `desc`,
+    matching `_sort_key`'s own NULL-as-largest total order); a row whose
+    values tie the cursor on every term is the cursor's own row and is
+    not "after" it. `row_values`/`cursor_values` are index-aligned with
+    `spec` (tie-break included).
+    """
+    for (_field_name, direction), row_value, cursor_value in zip(spec, row_values, cursor_values):
+        row_key = _sort_key(row_value)
+        cursor_key = _sort_key(cursor_value)
+        if row_key == cursor_key:
+            continue
+        if direction == "asc":
+            return row_key > cursor_key
+        return row_key < cursor_key
+    return False

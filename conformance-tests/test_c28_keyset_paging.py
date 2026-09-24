@@ -99,6 +99,7 @@ _ORDER_BY_VARIANTS = (
     "mixed_direction",
     "field_outside_select",
     "select_every_declared_field",
+    "tied_order_key",
 )
 
 
@@ -117,18 +118,32 @@ def test_c28_paged_traversal_is_the_unpaged_sequence(
     declared_fields = ["bucket", "rank", "tag"]
     iso.create_entity(developer, entity, {"bucket": "text", "rank": "integer", "tag": "text"})
 
-    # bucket/rank pairs are all distinct, so (bucket, rank) alone already
-    # totally orders these 5 rows -- every variant below stays within the
-    # isolated surface's own small query_complexity bound (len(where) +
-    # len(select) + order_by_count <= 5, conformance_adapter_r2db.py's own
-    # ISOLATED_APPLICATION_LIMITS) without needing a 3rd ordering term.
-    rows: list[dict[str, Any]] = [
-        {"bucket": "a", "rank": 3, "tag": "x"},
-        {"bucket": "a", "rank": 1},  # tag omitted -- NULL
-        {"bucket": "b", "rank": 2, "tag": "y"},
-        {"bucket": "b", "rank": 4},  # tag omitted -- NULL
-        {"bucket": "c", "rank": 5, "tag": "x"},
-    ]
+    if variant == "tied_order_key":
+        # 他の変種の (bucket, rank) は全行 distinct なので tie-break `id`
+        # に一度も届かない。この変種だけ、order_by 1 項 (bucket) の値を 2
+        # 値だけに絞り (3 行が "x"、2 行が "y")、tie 群がページ境界
+        # (page_size=2 の走査) を必ずまたぐ seed にする -- tie-break の
+        # 方向を誤ると重複・欠落が現れる。
+        rows: list[dict[str, Any]] = [
+            {"bucket": "x", "rank": 1, "tag": "x"},
+            {"bucket": "x", "rank": 2, "tag": "x"},
+            {"bucket": "x", "rank": 3, "tag": "x"},
+            {"bucket": "y", "rank": 4, "tag": "y"},
+            {"bucket": "y", "rank": 5, "tag": "y"},
+        ]
+    else:
+        # bucket/rank pairs are all distinct, so (bucket, rank) alone already
+        # totally orders these 5 rows -- every variant below stays within the
+        # isolated surface's own small query_complexity bound (len(where) +
+        # len(select) + order_by_count <= 5, conformance_adapter_r2db.py's own
+        # ISOLATED_APPLICATION_LIMITS) without needing a 3rd ordering term.
+        rows = [
+            {"bucket": "a", "rank": 3, "tag": "x"},
+            {"bucket": "a", "rank": 1},  # tag omitted -- NULL
+            {"bucket": "b", "rank": 2, "tag": "y"},
+            {"bucket": "b", "rank": 4},  # tag omitted -- NULL
+            {"bucket": "c", "rank": 5, "tag": "x"},
+        ]
     for row in rows:
         iso.insert(runtime, entity, row)
 
@@ -144,6 +159,9 @@ def test_c28_paged_traversal_is_the_unpaged_sequence(
     elif variant == "field_outside_select":
         select = ["bucket"]
         order_by = [("rank", "asc")]
+    elif variant == "tied_order_key":
+        select = ["bucket", "rank"]
+        order_by = [("bucket", "asc")]
     else:
         assert variant == "select_every_declared_field"
         select = list(declared_fields)

@@ -368,12 +368,16 @@ async def test_query_page_size_is_forwarded(client):
 async def test_query_page_size_over_the_contract_maximum_is_validation_failed(client):
     """WP-4 review minor-1: `Page.size` is bounded at 1000 by the contract
     itself (`spec/data-service-api.v1.json`), independent of whatever
-    `ResourceLimits.result_items` a deployment happens to configure."""
+    `ResourceLimits.result_items` a deployment happens to configure.
+    Phase 11 (design D-3 (8)): out-of-range `page.size` (both above 1000
+    and, D-3 (8)'s other half, `<= 0`) is refused as a contract-schema
+    violation naming `page/size`, not `budget`/`page_size`."""
     response = await client.post(
         "/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"], "page": {"size": 1001}}
     )
     assert response.status_code == 400
     assert response.json()["code"] == "VALIDATION_FAILED"
+    assert response.json()["details"] == {"violated_declaration": "request_schema", "field": "page/size"}
 
 
 async def test_query_order_by_sorts_ascending_and_descending(client):
@@ -494,10 +498,10 @@ async def test_query_cursor_tampering_is_validation_failed(client):
 
 
 async def test_query_cursor_minted_for_a_different_entity_is_rejected(client):
-    """A cursor's opaque shape hash binds the entity it was minted against
-    (`r2db_api.structured._shape_hash`) -- reusing one against a different
-    entity must fail loudly, never silently page through the wrong
-    entity's rows."""
+    """A cursor's opaque binding hash binds the entity it was minted
+    against (`r2db_api.structured.canonical_page_binding`) -- reusing one
+    against a different entity must fail loudly, never silently page
+    through the wrong entity's rows."""
     developer = await client.post(
         "/v1/schema/operations",
         headers=_auth("dev-a.dev-secret-a"),

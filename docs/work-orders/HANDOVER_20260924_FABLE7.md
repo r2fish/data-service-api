@@ -4,7 +4,7 @@
 
 ## 1. 現在地
 
-- ローカル main は `0fee6e5` (台帳 v1.119)。**本 worktree の branch には WP-1 を `3af11b3` として積んだ (main には merge しない。統合 branch、main への merge は WP-7 後の 1 回)。** push 停止中 (課金上限)。
+- ローカル main は `0fee6e5` (台帳 v1.119)。**本 worktree の branch には WP-1 を `3af11b3`、WP-2 を `a2ba943`、WP-5 を (次の commit) として積んだ (main には merge しない。統合 branch、main への merge は WP-7 後の 1 回)。** push 停止中 (課金上限)。
 - 本チャットの worktree: `.claude/worktrees/cranky-visvesvaraya-616e67` (branch `claude/cranky-visvesvaraya-616e67`、main と同一 + 未追跡 2 点)。**次のチャットはこの worktree に入って続ける** (新しい worktree を切らない)。
   - 未追跡: `docs/design/PHASE11_KEYSET_PAGING_V1.md` (**設計 v0.5** — 設計レビュー 1 (18 件) と 2 (16 件)、起草担当の疑義への監督裁定を反映済み) と **作業指示書 `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` v1.1** (WP 7 本、直列、統合 branch)。Q-3 / Q-5 / Q-4 は依頼者に提示済み・裁定待ち と本書。設計は単独で commit しない (`check_doc_refs` が C-28 / R-106 / R-107 の dangling で赤。台帳行と `CONDITIONS.md` の C-28 行と同じ変更セットで commit する)。
   - 未追跡・**commit しない**: `.handover-materials/` (前チャットの scratchpad の写し。作業機の絶対パスを含むので公開値スキャンに掛かる。読み終えたら削除してよい): `frame-keyset.md` (枠と裁定 Q-1/Q-2 の逐語)、`rulings-draft-v01.md` (起草者の疑義 9 件への裁定)、`design-review-1.md` (設計レビュー 1 回目、18 件の全文と修正案)、**`rulings-review1.md` (設計レビュー 1 の 18 件への監督裁定。末尾の追記に #9 / #12 の確定形)**、**`rulings-drafter-v03.md` (v0.3 起草担当の疑義 7 件への監督裁定。v0.4 で反映する)**、`verbatim-190-draft.md` (契約 1.9.0 の案文 v0.3 追随済み。依頼者未確定)、探索ノート 4 本 (**`explore-page-defaults.md` は #9 / #12 の実測**)、`mitate-paging-requirements.md` (Mitate 要件の逐語)。
@@ -103,5 +103,17 @@
 | コードレビュー WP-2-3 S / B の select 脚が page.size も変えていた、§11 の原因記述の取り違え | 直した | A の x は現行 r2db の `field: cursor` による |
 | コードレビュー WP-2-4 comment provenance 赤 15 件 (経緯語 WP-n、CH-0210 の言い換え、理由の塊の消失) | 直した | `docs/code-history/` は触らない |
 | コードレビュー WP-2-5 報告と周辺記述のずれ | 直した | — |
+| WP-2 残: `check_comment_provenance --base` の §4.1 (2) 1 件 (post_query から cell.read_page docstring へ跨ぎ移動した理由の塊。CH-0542 の登録を試すと移動先で別の赤) | **観察** (検査器の穴の候補: `--base` はファイル跨ぎの moved-from を検証できない。§1.12 の 71 の 1 問 = 製品欠陥は通らない → 検査器 docstring の Known gaps 行を後日) | CI も pre-commit も provenance を回さない。塊は逐語で移してある |
+| WP-1/2/5 の部分集合実行で C-27 `test_c27_same_digest_executes_once[MitateDB-api-http]` が断続的に赤 (直列で 413 LIMIT_EXCEEDED、`-n 5` でも 3 回中 2 回 AUTH_INVALID。単独では緑。別チャットの直列全体実行でも再現) | **起票候補 (WP-6 の台帳更新で、R-107 の次の番号で起票)**: 利用者は気づかないが完了ゲート (`RM` §0.1 の終了条件) を赤にしうる。原因は MitateDB http adapter の credential repair (reset → rotate) が制御面の rate limit / 認証窓に掛かる仮説。本変更セットでは直さない | 起票の 2 問: (a) 検査器の穴ではない、(b) 終了条件を破りうる → 起票 |
+| コードレビュー WP-5-1 `--register` 赤 (CH-0024 orphan、CH-0026 / CH-0135 の無記録の書き換え) | 直した (correction 節。§4.1 (2) の 12 件は code change set として観察) | `gate.py` は tools/tests を回さないので finalize `--tools-tests` で拾う |
+| コードレビュー WP-5-2 改変 cursor (巨大整数・lone surrogate) が PostgreSQL cell で 503 | 直した (共有層 `_check_type` の定義域検査。where 側も同時に 2 キー拒否へ) | HEAD から where にもあった欠陥。MitateDB は `encode_value` で既に拒否 → peer 揃え |
+| コードレビュー WP-5-3 tie-break の方向を固定するテストが無い (同値群がページ境界をまたがない seed) | 直した (単体テスト 2 本 + C-28 T の同値群変種) | WP-4 の M4-3 の空振りも防ぐ |
+| コードレビュー WP-5-4 `encode_page_cursor` に `sort_keys=True` が無い | 直した | 設計 D-6 のとおり。WP-4 が写す前に確定 |
+| コードレビュー WP-5-5 SI-08 の誤帰属 docstring | 直した | 束縛は SI-01 |
+| コードレビュー WP-5-6 §11 の数え間違い | 直した | — |
+| コードレビュー WP-5-7 経緯 comment と旧名コメント (`http.py:466`) | 直した | — |
+| コードレビュー WP-5-8 in-memory cell の `result_items` が cursor 前の行も数える (PostgreSQL と割れ) | 直した (検査を絞り込みの後へ) | offset 時代からの割れ。1.9.0 で到達しやすくなる |
+| WP-5 実装担当の棚上げ 1: `test_postgres_data_error_from_an_out_of_range_number_value_is_validation_failed` の旧 trigger (backend 層の data error → no-details 拒否) が定義域検査の前置で未到達に | **観察**: backend 層の写像は多層防御として残す。旧完了条件のピンは新しい拒否経路 (request_schema) の assert に改めた | 到達する別 vector があれば後日追加 |
+| WP-5 実装担当の棚上げ 2: C-28 を直列・並列指定なしで回すと node 数 84 で httpx client の資源枯渇により無関係な node が赤化 (`-n 2` 以上では非発現) | **観察** (上の C-27 の起票候補と同じ行に「conformance http adapter の密な実行での資源枯渇」として併記) | 完了ゲートは `-n 5`。実装担当は C-28 単独を `-n 2` で回す |
 | 作業指示書 v1.0 起草担当の疑義 1〜7 | 裁定済み (直す 5、採用 2)、設計 v0.5 / 作業指示書 v1.1 で反映 | `rulings-wo-v1.md`: control_plane と 1.8.0 pin テストを WP-6 に、R-107 行を WP-1 に、Revision note 3 本は既存 `## versioning.version_binding` 節に、MitateDB cell の cursor 入口を WP-2 で (WP-4 まで CAPABILITY_UNSUPPORTED)、conformance 全体は前景 1 回に収まらない (606 s) |
 | 設計 v0.5 / 作業指示書 v1.1 起草担当の疑義 1〜4 | 裁定済み (直す 3、採用 1) | OC §1.5 の 39 は変えない (実装担当は peer ごとの部分集合を前景で、全体は監督のゲートのみ)、1.8.0 pin 3 箇所を WP-6 に、cursor 入口は `ApplicationRuntime` (実体は `ApplicationCell`)、L1 件数ピンの条件付き追加は可 |
