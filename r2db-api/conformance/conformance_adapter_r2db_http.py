@@ -141,8 +141,6 @@ from r2db_api import ControlAuthority, DataService  # noqa: E402
 from r2db_api.control_http import create_control_app  # noqa: E402
 from r2db_api.control_main import assemble_control_stack  # noqa: E402
 from r2db_api.credential_store import (  # noqa: E402
-    DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
-    DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
     PostgresApplicationAuditSink,
     PostgresControlAuditSink,
     PostgresCredentialStore,
@@ -154,6 +152,18 @@ from r2db_api.platform_declarations import VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS  
 from r2db_api.postgres import PostgresCell, default_pool_manager  # noqa: E402
 
 BASE_URL = "http://r2db-http-pg.conformance.invalid"
+
+# R-105 (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-1): this
+# adapter's own declared writer-connection timeouts for the conformance
+# deployment -- NOT the product defaults in `r2db_api.credential_store`
+# (`DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`DEFAULT_AUDIT_IDLE_TIMEOUT_MS`,
+# 5000/5000, unchanged), which this adapter no longer reads. The platform
+# DB unit_of_work here is a handful of ms-scale statements with no
+# subprocess/external wait between them, so a much smaller pair is
+# sufficient for this deployment; see design D-1 for the measurement that
+# backs these two values.
+CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS = 1000
+CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS = 2000
 
 # WP-5 round-2 review MINOR-1: the exact set of denial codes that mean "the
 # cached control credential is genuinely no longer live" (an authority
@@ -1473,14 +1483,17 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # Q4 phase WP-1 (design D-1(c)): this adapter's control stack
             # never reads the DB-side writer-role catalog (design §3.11
             # point 4, see this file's own note at `_application_durable_
-            # audit`'s construction site above) -- it passes the SAME
-            # fixed value (5000 + 5000 + margin) the pre-Q4 internal
-            # derivation always produced from these same two module
-            # constants, so `capabilities().audit_query.visibility_lag_ms`
-            # is unchanged for this adapter. The margin itself is imported
+            # audit`'s construction site above) -- it passes a fixed value
+            # instead. R-105 (design SLOW_CALL_PHASE_TESTS_V0_1 D-1): that
+            # fixed value is this adapter's own conformance-deployment
+            # value (`CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS` +
+            # `CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS` + margin), not the
+            # product defaults `r2db_api.credential_store` ships (role-
+            # level timeout is still not placed on the writer role -- Q4
+            # §3.11 point 4 is unchanged). The margin itself is imported
             # from `platform_declarations` (rulings-q4-wp12-rework.md §2),
             # never a repeated literal `1000`.
-            audit_visibility_lag_ms=DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS + DEFAULT_AUDIT_IDLE_TIMEOUT_MS + VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS,
+            audit_visibility_lag_ms=CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS + CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS + VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS,
         )
         app = create_control_app(service)
         return app, stores

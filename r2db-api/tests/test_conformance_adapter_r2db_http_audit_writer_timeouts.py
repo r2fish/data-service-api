@@ -60,6 +60,7 @@ import psycopg  # noqa: E402
 
 import conformance_adapter_r2db_http as _http_module  # noqa: E402
 from r2db_api.credential_store import PostgresApplicationAuditSink  # noqa: E402
+from r2db_api.platform_declarations import VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS  # noqa: E402
 
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
 
@@ -128,3 +129,27 @@ def test_http_conformance_adapter_never_mentions_the_removed_surface_env_vars() 
     text = adapter_path.read_text()
     hits = re.findall(r"R2DB_DATA_BASE_URL|R2DB_CONTROL_BASE_URL", text)
     assert hits == []
+
+
+def test_http_conformance_adapter_declares_the_conformance_deployment_visibility_lag() -> None:
+    """R-105 (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-1): this
+    adapter declares `audit_visibility_lag_ms` as the sum of its OWN
+    conformance-deployment module constants (`CONFORMANCE_AUDIT_STATEMENT_
+    TIMEOUT_MS` + `CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS` + `VISIBILITY_LAG_
+    CLOCK_SKEW_MARGIN_MS`) -- checked BOTH against that same-source sum
+    (guards the construction call site at `:1496`) AND against the literal
+    `4000` (guards the two module constants themselves drifting away from
+    the value both this plug and MitateDB-api's own HTTP plug must agree
+    on, design D-1: "両辺同源の穴を塞ぐ")."""
+    adapter = _http_module.build_adapter()
+    try:
+        lag_ms = adapter.audit_visibility_lag_ms()
+    finally:
+        adapter.close()
+
+    assert lag_ms == (
+        _http_module.CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS
+        + _http_module.CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS
+        + VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS
+    )
+    assert lag_ms == 4000
