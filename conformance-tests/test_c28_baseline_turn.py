@@ -1,4 +1,4 @@
-"""C-28 (仮) -- a client composing only the operations `common_baseline`
+"""C-28 -- a client composing only the operations `common_baseline`
 names completes one whole agent turn against every conformant peer,
 reading no capability status at all, with no step branching on a
 declaration: a `CAPABILITY_UNSUPPORTED` anywhere in the turn is a failure
