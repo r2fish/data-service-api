@@ -3453,6 +3453,43 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             "request_id": result.get("request_id"),
         }
 
+    def attempt_filter_with_result(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        §7 段 (9)): `attempt_filter`'s own `where` construction, presented
+        to `_query_request` (`:1672`) together with that SAME helper's
+        pre-existing `page_size` keyword and its `extra_body` merge -- the
+        latter carries `order_by` (`_query_request` has no dedicated
+        keyword for it) and `budget` onto the real wire body's top level,
+        exactly as `query_with_budget` above already carries `budget`
+        alone the same way."""
+        assert isinstance(session, _Session)
+        where: list[dict[str, Any]] = [{"field": field, "operator": operator, "value": value}]
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
+        extra: dict[str, Any] = {}
+        if order_by:
+            extra["order_by"] = list(order_by)
+        if budget:
+            extra["budget"] = dict(budget)
+        result = self._query_request(
+            session, entity, select=list(select), where=where, page_size=page_size,
+            extra_body=extra or None,
+        )
+        return {"items": result["items"], "request_id": result.get("request_id")}
+
     # ------------------------------------------------------------------
     # WP-1 (contract 1.2.0, docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-1,
     # subordinate ruling 7(A) reverse-validation) -- thin, NON-normative raw

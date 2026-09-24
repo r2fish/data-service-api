@@ -2564,6 +2564,47 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return {"items": list(result.get("items", [])), "revisions": result.get("revisions"), "request_id": result.get("request_id")}
         return {"items": result, "revisions": None, "request_id": None}
 
+    def attempt_filter_with_result(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        §7 段 (9)): `attempt_filter`'s own `filters` construction, presented
+        to `session.read_with_result` (`cell.py:3664`) together with that
+        SAME method's pre-existing `order_by`/`limit`/`budget` keywords --
+        all three already live there (unchanged by this WP), exactly as
+        `query_with_budget` above already presents `budget` alone to the
+        same real entry point (including its own `hasattr` fallback to the
+        pre-`read_with_result` `session.read` for a checkout where WP-3e
+        has not landed)."""
+        filters = [Filter(field, operator, value)]
+        if extra_predicates:
+            filters.extend(Filter(f, o, v) for f, o, v in extra_predicates)
+        kwargs: dict[str, Any] = {}
+        if order_by:
+            kwargs["order_by"] = list(order_by)
+        if page_size is not None:
+            kwargs["limit"] = page_size
+        if budget:
+            kwargs["budget"] = dict(budget)
+        if hasattr(session, "read_with_result"):
+            result = self._call(lambda: session.read_with_result(entity, fields=list(select), filters=filters, **kwargs))
+            return {"items": list(result.get("items", [])), "request_id": result.get("request_id")}
+        result = self._call(lambda: session.read(entity, fields=list(select), filters=filters, **kwargs))
+        if isinstance(result, Mapping):
+            return {"items": list(result.get("items", [])), "request_id": result.get("request_id")}
+        return {"items": result, "request_id": None}
+
     # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------

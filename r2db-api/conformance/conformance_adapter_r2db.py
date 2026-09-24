@@ -1733,6 +1733,40 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             "request_id": getattr(page, "request_id", None),
         }
 
+    def attempt_filter_with_result(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        §7 段 (9)): `attempt_filter`'s own `where` construction, presented
+        to `DataService.query_page` (`service.py:726`) together with that
+        SAME method's pre-existing `order_by`/`page_size`/`budget`
+        keywords -- all four already live there (unchanged by this WP),
+        exactly as `query_with_budget` above already presents `budget`
+        alone to the same real entry point."""
+        where: list[dict[str, Any]] = [{"field": field, "operator": operator, "value": value}]
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
+        kwargs: dict[str, Any] = {}
+        if order_by:
+            kwargs["order_by"] = list(order_by)
+        if page_size is not None:
+            kwargs["page_size"] = page_size
+        if budget:
+            kwargs["budget"] = dict(budget)
+        page = self._call(lambda: self._service.query_page(session, entity, select=list(select), where=where, **kwargs))
+        return {"items": page.items, "request_id": getattr(page, "request_id", None)}
+
     # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------

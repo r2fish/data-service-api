@@ -2773,6 +2773,37 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             "request_id": result.get("request_id"),
         }
 
+    def attempt_filter_with_result(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        §7 段 (9)): `attempt_filter`'s own `where` construction, presented
+        to `_query` (`:1273`) together with that SAME helper's pre-existing
+        `order_by`/`page_size` keywords and its `extra_body` merge (which
+        carries `budget`, exactly as `query_with_budget` above already
+        carries it alone)."""
+        assert isinstance(session, _Session)
+        where: list[dict[str, Any]] = [{"field": field, "operator": operator, "value": value}]
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
+        extra_body = {"budget": dict(budget)} if budget else None
+        result = self._query(
+            session, entity, select=select, where=where,
+            order_by=list(order_by) if order_by else None, page_size=page_size, extra_body=extra_body,
+        )
+        return {"items": result["items"], "request_id": result.get("request_id")}
+
     # ------------------------------------------------------------------
     # optional raw-accessor methods (WP-2.5 widening, `test_c11_response_
     # schema_conformance.py`'s own `_find_all_adapters_with`): non-

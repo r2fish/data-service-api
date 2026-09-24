@@ -2915,6 +2915,91 @@ class ConformanceAdapter(ABC):
         declared `unavailable`), exactly like every other primitive here.
         """
 
+    @abstractmethod
+    def attempt_filter_with_result(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """`attempt_filter`'s exact request shape, extended with the
+        contract's own request-level `order_by`/`page.size`/`budget` in ONE
+        query request (port v1.16, design docs/design/
+        PHASE11_MIN_COMMON_PROFILE_V1.md §7 段 (9) and §7.1 items 1/4, work
+        order docs/work-orders/WORK_ORDER_PHASE11_MIN_COMMON_PROFILE_V1.md
+        WP-2), returning the full observed result as a `Mapping` instead of
+        a bare `list[dict]` -- mirrors the `attempt_mutation` -> `attempt_
+        mutation_with_result` / `query_with_revisions` -> `query_with_
+        budget` precedent this ABC already establishes (an additive `_with_
+        result` sibling, not a change to the original method's fixed-arity
+        return). `attempt_filter` itself stays byte-for-byte untouched (no
+        new keyword, still a bare `list[dict]`), so every pre-v1.16 caller
+        keeps its exact pre-v1.16 behavior. `select_eq`/`query_with_budget`
+        are likewise untouched -- this is an ADDITION, not a replacement of
+        any of the three pre-existing query methods.
+
+        `extra_predicates` behaves exactly as it already does on `attempt_
+        filter` (zero or more additional `(field, operator, value)`
+        predicates, ANDed with the primary one, presented on the SAME real
+        `where`/filter-list entry point).
+
+        `order_by` (request-UNIT keyword, contract `QueryRequest.order_by`
+        -- `spec/data-service-api.v1.json` `definitions.Order`, an array of
+        `{field, direction}` objects where `direction` is `"asc"`/`"desc"`,
+        `maxItems: 10`): carried through unedited, in that exact shape, to
+        whichever real multi-term order entry point the peer already has --
+        `r2db-api`'s `DataService.query_page` (`src/r2db_api/service.py`)
+        already takes an `order_by` keyword of this same shape; `MitateDB-
+        api`'s `session.read_with_result` (`src/mitatedb_api/cell.py`)
+        already takes one too -- neither peer's backend gains a new
+        keyword, only this port gains a new caller of an existing one.
+        `None` (the default) omits `order_by` from the presented request
+        entirely, byte-identical to every existing `attempt_filter` caller,
+        none of which order.
+
+        `page_size` (request-UNIT keyword, contract `QueryRequest.page.
+        size`): the SAME real page-size parameter `select_eq`'s own
+        `limit` keyword (port v1.12) already presents verbatim -- named
+        `page_size` here (not `limit`) to read as the contract's own
+        `page.size` at this call site. `None` omits it, exactly like
+        `select_eq(..., limit=None)`.
+
+        `budget` (request-UNIT keyword, contract `QueryRequest.budget`,
+        `spec/data-service-api.v1.json`: an object with optional integer
+        `result_items`/`execution_ms`/`batch_items`, each `minimum: 1`):
+        the SAME keyword `query_with_budget` (port v1.13) already carries,
+        in that exact shape, never interpreted, validated, or narrowed by
+        this adapter itself. `None` (the default) omits it entirely.
+
+        Returns a `Mapping` with:
+          - `items`: `list[dict]`, the same value `attempt_filter` returns
+            bare.
+          - `request_id`: `str | None`, observed the same way `query_with_
+            budget`'s own `request_id` already is -- `None` when the real
+            response carries no such key/attribute at all, never
+            fabricated.
+
+        On the peer's own real refusal this raises `ConformanceDenial`
+        (carrying the peer's real error body -- `code`/`details`, exactly
+        like `attempt_filter`/`query_with_budget`/every other `attempt_*`
+        primitive on this ABC), so a caller distinguishes a successful
+        result `Mapping` from a denial by catching `ConformanceDenial`
+        rather than by inspecting a field of the return value -- the SAME
+        success/denial split every other `attempt_*`/`*_with_result` method
+        here already uses. For example `CAPABILITY_UNSUPPORTED` for an
+        `operator` outside the peer's declared `structured_query.
+        operators`, or `VALIDATION_FAILED`/`LIMIT_EXCEEDED` for a `budget`
+        the deployment rejects or exceeds.
+        """
+
     # --- attack surface declarations ---
     @abstractmethod
     def native_command_surface(self) -> None: ...  # must always return None
