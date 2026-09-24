@@ -323,26 +323,36 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: shrank (it now calls the shared functions instead of defining them).
 #: Re-verified via `_fail_call_sites`, not hand-shifted. Entry count and
 #: site identity unchanged (20).
-    ("backend_postgres.py", 420),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 481),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 534),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 565),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 626),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 688),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 717),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 898),   # generic driver-exception translation
-    ("backend_postgres.py", 919),   # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1050),  # generic driver-exception translation
-    ("backend_postgres.py", 1208),  # generic driver-exception translation
-    ("backend_postgres.py", 1281),  # generic driver-exception translation
-    ("backend_postgres.py", 1334),  # generic driver-exception translation
-    ("backend_postgres.py", 1367),  # generic driver-exception translation
-    ("backend_postgres.py", 1393),  # generic driver-exception translation
-    ("backend_postgres.py", 1460),  # generic driver-exception translation
-    ("backend_postgres.py", 1488),  # generic driver-exception translation
-    ("backend_postgres.py", 1529),  # generic driver-exception translation
-    ("backend_postgres.py", 1798),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1867),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+#: Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2: the module-level
+#: `_ROW_ORDER_COLUMN` constant + its docstring comment inserted before
+#: `_execute` shifted every site below it DOWN by 13 (the 9 sites that sit
+#: between `schema_count` and `schema_revision`, inclusive); `create_
+#: collection`'s own new column-append statement, plus its own comment
+#: (also citing the same design doc), then shifted every site below IT
+#: DOWN by a further 11 (net +24 from the two edits combined, the 11
+#: sites from `create_collection` onward). Neither edit changed a single
+#: site's own identity or the entry count (still 20). Re-verified via
+#: `_fail_call_sites`, not hand-shifted.
+    ("backend_postgres.py", 433),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 494),   # field_domains: generic driver-exception translation
+    ("backend_postgres.py", 547),   # field_types: generic driver-exception translation
+    ("backend_postgres.py", 578),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 639),   # field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 701),   # field_types_and_constraints: generic driver-exception translation
+    ("backend_postgres.py", 730),   # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 911),   # generic driver-exception translation
+    ("backend_postgres.py", 932),   # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1074),  # generic driver-exception translation
+    ("backend_postgres.py", 1232),  # generic driver-exception translation
+    ("backend_postgres.py", 1305),  # generic driver-exception translation
+    ("backend_postgres.py", 1358),  # generic driver-exception translation
+    ("backend_postgres.py", 1391),  # generic driver-exception translation
+    ("backend_postgres.py", 1417),  # generic driver-exception translation
+    ("backend_postgres.py", 1484),  # generic driver-exception translation
+    ("backend_postgres.py", 1512),  # generic driver-exception translation
+    ("backend_postgres.py", 1553),  # generic driver-exception translation
+    ("backend_postgres.py", 1822),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1891),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --

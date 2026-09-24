@@ -69,6 +69,25 @@ when PostgreSQL is unreachable, they fail loudly).
   from a fixed, Cloud-SQL-compatible allowlist (no superuser-only feature
   anywhere) -- see `docs/cloud-run-cloud-sql.md` for the runbook and the
   real-instance verification procedure.
+- **Per-application platform upgrades** (`python -m mitatedb_api.ops
+  upgrade-applications --lock-timeout <v>`, `migrations/NNNN_*_upgrade.sql`):
+  a per-application ledger (`public._mdb_platform_upgrades`) tracks which
+  upgrade scripts an existing application database has already applied, so
+  a schema change shipped after that application was first provisioned
+  (e.g. `0015_row_order_column_upgrade.sql`, the internal row-order column
+  every collection table carries) can be retrofitted onto it. Two
+  disclosures: an upgrade script that rewrites every collection table in
+  one transaction (`0015`) holds each table's own `ACCESS EXCLUSIVE` lock
+  from the moment it is taken until that one transaction's own `COMMIT` --
+  so the total hold time is proportional to the *application's* own data
+  volume (every collection's own rewrite, not any single table's), and for
+  that whole duration every read and write against every collection this
+  application owns waits. `--lock-timeout` bounds only each lock's own
+  *acquisition*, never how long it is then held once acquired. And, for
+  that same script, the row numbers PostgreSQL assigns to a collection's
+  own pre-existing rows follow PostgreSQL's own physical rewrite order,
+  which is stable but not necessarily the order those rows were
+  originally inserted in.
 - **Application-plane HTTP** (`src/mitatedb_api/http.py`, Starlette): the
   contract's 7 endpoints. The request-byte bound (SI-08) is enforced in
   the ASGI `receive` loop, measured from actual bytes received, sized from

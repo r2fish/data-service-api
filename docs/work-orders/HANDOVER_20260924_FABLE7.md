@@ -4,7 +4,7 @@
 
 ## 1. 現在地
 
-- ローカル main は `0fee6e5` (台帳 v1.119)。**本 worktree の branch には WP-1 を `3af11b3`、WP-2 を `a2ba943`、WP-5 を (次の commit) として積んだ (main には merge しない。統合 branch、main への merge は WP-7 後の 1 回)。** push 停止中 (課金上限)。
+- ローカル main は `0fee6e5` (台帳 v1.119)。**本 worktree の branch には WP-1 を `3af11b3`、WP-2 を `a2ba943`、WP-5 を `f3b10ca` として積んだ (main には merge しない。統合 branch、main への merge は WP-7 後の 1 回)。** push 停止中 (課金上限)。
 - 本チャットの worktree: `.claude/worktrees/cranky-visvesvaraya-616e67` (branch `claude/cranky-visvesvaraya-616e67`、main と同一 + 未追跡 2 点)。**次のチャットはこの worktree に入って続ける** (新しい worktree を切らない)。
   - 未追跡: `docs/design/PHASE11_KEYSET_PAGING_V1.md` (**設計 v0.5** — 設計レビュー 1 (18 件) と 2 (16 件)、起草担当の疑義への監督裁定を反映済み) と **作業指示書 `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` v1.1** (WP 7 本、直列、統合 branch)。Q-3 / Q-5 / Q-4 は依頼者に提示済み・裁定待ち と本書。設計は単独で commit しない (`check_doc_refs` が C-28 / R-106 / R-107 の dangling で赤。台帳行と `CONDITIONS.md` の C-28 行と同じ変更セットで commit する)。
   - 未追跡・**commit しない**: `.handover-materials/` (前チャットの scratchpad の写し。作業機の絶対パスを含むので公開値スキャンに掛かる。読み終えたら削除してよい): `frame-keyset.md` (枠と裁定 Q-1/Q-2 の逐語)、`rulings-draft-v01.md` (起草者の疑義 9 件への裁定)、`design-review-1.md` (設計レビュー 1 回目、18 件の全文と修正案)、**`rulings-review1.md` (設計レビュー 1 の 18 件への監督裁定。末尾の追記に #9 / #12 の確定形)**、**`rulings-drafter-v03.md` (v0.3 起草担当の疑義 7 件への監督裁定。v0.4 で反映する)**、`verbatim-190-draft.md` (契約 1.9.0 の案文 v0.3 追随済み。依頼者未確定)、探索ノート 4 本 (**`explore-page-defaults.md` は #9 / #12 の実測**)、`mitate-paging-requirements.md` (Mitate 要件の逐語)。
@@ -115,5 +115,15 @@
 | コードレビュー WP-5-8 in-memory cell の `result_items` が cursor 前の行も数える (PostgreSQL と割れ) | 直した (検査を絞り込みの後へ) | offset 時代からの割れ。1.9.0 で到達しやすくなる |
 | WP-5 実装担当の棚上げ 1: `test_postgres_data_error_from_an_out_of_range_number_value_is_validation_failed` の旧 trigger (backend 層の data error → no-details 拒否) が定義域検査の前置で未到達に | **観察**: backend 層の写像は多層防御として残す。旧完了条件のピンは新しい拒否経路 (request_schema) の assert に改めた | 到達する別 vector があれば後日追加 |
 | WP-5 実装担当の棚上げ 2: C-28 を直列・並列指定なしで回すと node 数 84 で httpx client の資源枯渇により無関係な node が赤化 (`-n 2` 以上では非発現) | **観察** (上の C-27 の起票候補と同じ行に「conformance http adapter の密な実行での資源枯渇」として併記) | 完了ゲートは `-n 5`。実装担当は C-28 単独を `-n 2` で回す |
+| WP-3 実装担当: migration 0015 の追加で集合 / 行番号ピン 31 件 (4 ファイル) が赤 | 直した (現在の集合のピンの追随。R-45 と同じ扱い) | 設計 §9 の「触るファイル」列は既存のピン付きテストへの波及を書いていない — 次回の manifest は `tests/` のピンを列挙する (教訓) |
+| WP-3 実装担当: `tools/public_value_scan.py` は相対パスだと main checkout 基準で worktree の変更を見落とす | **既知の穴 (§1.12 の 71: 製品欠陥は通らないが、公開値の見落としは通りうる → 起票候補と同列に扱い、WP-6 で検査器 docstring の Known gaps に 3 行)** | finalize.py は staged path を絶対で渡すので commit 経路は影響なし |
+| WP-3 実装担当: `public_value_scan.py` の `R3_project_id` が `mutate-20260925-NNNNNN` 形式のログ名に偽陽性 (設計 §11 に書いたログパス) | 観察 (メモリの既知事項と同種: pt / mutate のログ名を文書に書かない。ログパスは削除して解消) | 検査器の Known gaps 候補 (WP-6 で同じ docstring に併記) |
+| コードレビュー WP-3-1 完了条件 3 の PostgreSQL 側が helper の除外に反応しない (select-all を見ていない) | 直した (select-all の assert、M3-3a/3b) | — |
+| コードレビュー WP-3-2 README の lock 開示が 1 transaction の事実に反する | 直した | COMMIT まで保持、Application 全体のデータ量に比例 |
+| コードレビュー WP-3-3 経緯語と出所の無い ID | 直した | — |
+| コードレビュー WP-3-4 CONTROL_MAPPING の行番号参照 2 箇所がずれた | 直す (WP-6 の 3.2 で) | Class D の経路 |
+| コードレビュー WP-3-5 runbook の rollback 互換表に 0015 が無い (設計の抜け) | 直した (WP-3 で行を追加。0015 後の旧 revision は非互換 — 旧コードは `_mdb_row` を宣言 field として扱う) | 設計 §9 の触るファイルに runbook を書いていなかった (教訓) |
+| コードレビュー WP-3-6 実装担当が変異を手編集で行った (残留なし) | 観察 (§11 から手動の数値を消す。以後 mutate.py のみ) | OC §1.4 の 29〜31 |
+| コードレビュー WP-3-7 主張の文言が実測と合わない 3 箇所 | 直した | — |
 | 作業指示書 v1.0 起草担当の疑義 1〜7 | 裁定済み (直す 5、採用 2)、設計 v0.5 / 作業指示書 v1.1 で反映 | `rulings-wo-v1.md`: control_plane と 1.8.0 pin テストを WP-6 に、R-107 行を WP-1 に、Revision note 3 本は既存 `## versioning.version_binding` 節に、MitateDB cell の cursor 入口を WP-2 で (WP-4 まで CAPABILITY_UNSUPPORTED)、conformance 全体は前景 1 回に収まらない (606 s) |
 | 設計 v0.5 / 作業指示書 v1.1 起草担当の疑義 1〜4 | 裁定済み (直す 3、採用 1) | OC §1.5 の 39 は変えない (実装担当は peer ごとの部分集合を前景で、全体は監督のゲートのみ)、1.8.0 pin 3 箇所を WP-6 に、cursor 入口は `ApplicationRuntime` (実体は `ApplicationCell`)、L1 件数ピンの条件付き追加は可 |

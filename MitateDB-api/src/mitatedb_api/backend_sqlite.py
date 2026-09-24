@@ -125,6 +125,17 @@ class SQLiteBackend:
         definitions = []
         for field, field_type in fields.items():
             definitions.append(quote_identifier(field) + " " + _TYPES[field_type])
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2's own table,
+        # SQLite side: `INTEGER PRIMARY KEY` is this engine's own rowid
+        # alias (monotonically increasing, never `AUTOINCREMENT` -- same
+        # design's own §10 の 6: this backend is a test double, not a
+        # deployment target, and `AUTOINCREMENT` would add the new
+        # `sqlite_sequence` table this package has never needed). `quote_
+        # identifier` is not used here (unlike every client-declared
+        # `field` above) -- it calls `validate_identifier`, which rejects
+        # a leading `_` by design; this literal name never goes through
+        # the client-identifier gate at all.
+        definitions.append('"_mdb_row" INTEGER PRIMARY KEY')
         statement = "CREATE TABLE " + quote_identifier(name) + " (" + \
             ", ".join(definitions) + ")"
         self._begin_pseudo_tx()

@@ -213,7 +213,7 @@ def _app_namespace(platform: types.SimpleNamespace, app_id: str, runtime_passwor
 
 def provision_app(platform: types.SimpleNamespace, app_id: str) -> types.SimpleNamespace:
     """A NEW application, via the CURRENT (Q4-WP4-revised, Phase 9 WP-3a-
-    revised) `0003` -- ledger seeded `{6, 8, 9, 10}` (design D-3(b)(i))."""
+    revised) `0003` -- ledger seeded `{6, 8, 9, 10, 15}` (design D-3(b)(i))."""
     runtime_password = secrets.token_urlsafe(24)
     developer_password = secrets.token_urlsafe(24)
     _run_psql_ok(
@@ -340,7 +340,7 @@ def test_f12_message_matches_design_section_3_8_verbatim() -> None:
     else:
         raise AssertionError("expected PlatformUpgradeError")
     assert message == (
-        "This application's storage is missing platform upgrade(s) 6, 8, 9, 10: the deployment must apply them "
+        "This application's storage is missing platform upgrade(s) 6, 8, 9, 10, 15: the deployment must apply them "
         "before this application can serve requests. Run 'python -m mitatedb_api.ops upgrade-applications "
         "--lock-timeout <value>' (its '--dry-run' shows applied and pending per application and requires "
         "the same '--lock-timeout'), then retry."
@@ -387,7 +387,7 @@ def test_require_application_upgrades_applied_passes_when_nothing_pending() -> N
                     pass
 
                 def fetchall(self_inner):
-                    return [(6,), (8,), (9,), (10,)]
+                    return [(6,), (8,), (9,), (10,), (15,)]
             return _Cur()
 
     require_application_upgrades_applied(
@@ -406,11 +406,13 @@ def test_require_application_upgrades_applied_passes_when_nothing_pending() -> N
 
 def test_template_seeds_the_full_number_set_for_a_new_application(new_app: types.SimpleNamespace, platform: types.SimpleNamespace) -> None:
     """完了条件 5: a NEWLY provisioned application's own ledger already
-    carries `{6, 8, 9, 10}` -- `0003`'s own revision seeds it directly, no
-    per-application upgrade script ever needs to run against it. (Phase 9
-    WP-3a: 9 = `0009_field_constraints_upgrade.sql`, design docs/design/
-    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)/(4).)"""
-    assert _ledger_numbers(platform.admin_dsn, new_app.database) == frozenset({6, 8, 9, 10})
+    carries `{6, 8, 9, 10, 15}` -- `0003`'s own revision seeds it directly,
+    no per-application upgrade script ever needs to run against it.
+    (9 = `0009_field_constraints_upgrade.sql`, design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)/(4);
+    15 = `0015_row_order_column_upgrade.sql`, design docs/design/
+    PHASE11_KEYSET_PAGING_V1.md D-2.)"""
+    assert _ledger_numbers(platform.admin_dsn, new_app.database) == frozenset({6, 8, 9, 10, 15})
 
 
 def test_runtime_role_has_select_only_on_the_ledger(new_app: types.SimpleNamespace) -> None:
@@ -419,7 +421,7 @@ def test_runtime_role_has_select_only_on_the_ledger(new_app: types.SimpleNamespa
     try:
         with conn.cursor() as cur:
             cur.execute(sql.SQL("SELECT upgrade_number FROM public.{}").format(sql.Identifier(LEDGER_TABLE_NAME)))
-            assert set(row[0] for row in cur.fetchall()) == {6, 8, 9, 10}
+            assert set(row[0] for row in cur.fetchall()) == {6, 8, 9, 10, 15}
         conn.rollback()
         for statement in (
             sql.SQL("INSERT INTO public.{} (upgrade_number, script_name) VALUES (99, 'x')").format(sql.Identifier(LEDGER_TABLE_NAME)),
@@ -441,7 +443,7 @@ def test_provision_role_can_read_the_ledger_via_dbname_swap(new_app: types.Simpl
     app_dsn = _dsn_with(platform.provision_dsn, dbname=new_app.database)
     conn = psycopg.connect(app_dsn)
     try:
-        assert read_applied_upgrade_numbers(conn, ledger_table_name=LEDGER_TABLE_NAME) == frozenset({6, 8, 9, 10})
+        assert read_applied_upgrade_numbers(conn, ledger_table_name=LEDGER_TABLE_NAME) == frozenset({6, 8, 9, 10, 15})
     finally:
         conn.close()
 
@@ -600,11 +602,11 @@ def test_backfill_leaves_6_pending_when_field_types_table_is_absent(platform: ty
         _run_psql_ok(platform.provision_dsn, platform.upgrade_script, {"app_id": app.app_id})
         applied = _ledger_numbers(platform.admin_dsn, app.database)
         assert applied == frozenset({8})
-        # Phase 9 WP-3c: `PLATFORM_UPGRADE_NUMBERS` is now `{6, 8, 9, 10}` --
-        # this legacy app has run only `0008`, so 6 (never backfilled,
-        # `_mdb_field_types` absent), 9 (never applied at all), and 10
-        # (never applied at all) are all pending, not merely 6.
-        assert pending_upgrade_numbers(applied, PLATFORM_UPGRADE_NUMBERS) == (6, 9, 10)
+        # `PLATFORM_UPGRADE_NUMBERS` is now `{6, 8, 9, 10, 15}` -- this
+        # legacy app has run only `0008`, so 6 (never backfilled, `_mdb_
+        # field_types` absent), 9, 10, and 15 (never applied at all) are
+        # all pending, not merely 6.
+        assert pending_upgrade_numbers(applied, PLATFORM_UPGRADE_NUMBERS) == (6, 9, 10, 15)
 
         # 完了条件 26 の後半: 後から 0006 を実際に当てれば 6 も記録される
         # (0006 自身の CREATE TABLE IF NOT EXISTS が今度こそ実行される)。

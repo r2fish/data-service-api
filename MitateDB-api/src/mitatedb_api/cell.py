@@ -942,6 +942,27 @@ class ApplicationCell:
         self._backend.check_reserved(value, label)
         return value
 
+    #: Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2's own "select"
+    #: decision: the internal row-order column every collection table now
+    #: carries (`backend_postgres.py`/`backend_sqlite.py`'s own `create_
+    #: collection`), never declarable by a client request (`identifiers.
+    #: py`'s own leading-`_` syntax rejection already makes it un-
+    #: nameable). Excluded here, never on either backend.
+    _ROW_ORDER_COLUMN = "_mdb_row"
+
+    def _visible_field_domains(self, collection):
+        """The single choke point every one of this class's own six
+        `field_domains` call sites goes through (create/alter field-count
+        and existence checks, select-all, order_by binding, values/filters
+        binding): wraps `self._backend.field_domains(collection)` and
+        drops `_ROW_ORDER_COLUMN` from the result. Neither backend's own
+        `field_domains` is told about this exclusion -- both keep
+        returning every physical column, `_ROW_ORDER_COLUMN` included;
+        this is the only place that hides it from request-shape/catalog
+        logic built on top."""
+        domains = self._backend.field_domains(collection)
+        return {name: domain for name, domain in domains.items() if name != self._ROW_ORDER_COLUMN}
+
     # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと合意;
     # `{scratchpad}/phase10/wp8b-review-2.md` §5 (A) / §7-1): この直前に
     # あった `_idempotency_lock_scope` ヘルパーは削除した。全 4 入口
@@ -1580,7 +1601,7 @@ class ApplicationCell:
                     # consumption class, so `ValidationError`, not `ResourceLimitError`
                     # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
                     # `ResourceLimitError` call-site count unaffected by this WP).
-                    current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+                    current = self._visible_field_domains(collection)  # NotFoundError if `collection` does not exist
                     if len(current) >= self.config.max_fields:
                         # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
                         # names the request key this bound is about -- `add_field`
@@ -1835,7 +1856,7 @@ class ApplicationCell:
                             # is never `request_id`-less (see `_idempotency_
                             # check`'s own docstring).
                             return replay
-                    available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+                    available = self._visible_field_domains(collection)  # NotFoundError if `collection` does not exist
                     if field not in available:
                         # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
                         # request NAMES a field the entity does not have -- a
@@ -3107,7 +3128,7 @@ class ApplicationCell:
                         return results
 
     def _select_fields(self, collection, requested):
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         if requested is None:
             return list(available)
         if not isinstance(requested, list) or not requested:
@@ -3212,7 +3233,7 @@ class ApplicationCell:
                 "order_by term limit exceeded",
                 details=violation("request_schema", field="order_by"),
             )
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         bound = []
         for i, item in enumerate(order_by):
             if not isinstance(item, dict):
@@ -3302,7 +3323,7 @@ class ApplicationCell:
         # `"operations/<i>/entity"`, its own path_prefix sibling.
         entity_path = (path_prefix.rsplit("/", 1)[0] + "/entity") if "/" in path_prefix else "entity"
         collection = self._identifier(collection, entity_path)
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         # Phase 6 WP-3 (design D-3, G3): the PRIMARY, backend-independent
         # declared-type choke point -- `field_types.check_declared_value`
         # runs BEFORE `encode_value` on every backend (sqlite included,
@@ -3464,7 +3485,7 @@ class ApplicationCell:
             # into, and `capabilities()` below publishes this exact bound
             # (`config.max_filter_terms`) under the `query_complexity` key.
             raise ResourceLimitError("filter limit exceeded", limit_class="query_complexity")
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         # Phase 6 WP-3 (design D-3, G3): same choke point `_prepare_values`
         # above uses.
         declared_types = self._backend.field_types(collection)

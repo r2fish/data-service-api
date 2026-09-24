@@ -247,6 +247,19 @@ _IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 761761762
 # fixed, readable order matching this declaration.
 _BOOKKEEPING_TABLES = (_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE, _PLATFORM_UPGRADES_TABLE, _IDEMPOTENCY_TABLE)
 
+# The internal row-order column every collection table carries (design
+# docs/design/PHASE11_KEYSET_PAGING_V1.md D-2's own table). Not a
+# bookkeeping TABLE (`_BOOKKEEPING_TABLES` above
+# lists tables `schema_count()` excludes) -- this is a COLUMN every real
+# collection table has, added here by `create_collection` below and by
+# `migrations/0015_row_order_column_upgrade.sql` for a collection that
+# predates this column. `GENERATED ALWAYS AS IDENTITY` so no INSERT path
+# can ever supply its own value. `cell.ApplicationCell._visible_field_
+# domains` is the only place that hides it from request-shape/catalog
+# logic -- this backend's own `field_domains` reports it like any other
+# physical column, unchanged.
+_ROW_ORDER_COLUMN = "_mdb_row"
+
 
 def _execute(cursor, statement, params=()):
     """R-2 choke point. The ONLY call to `cursor.execute` in this module."""
@@ -936,6 +949,17 @@ class PostgresBackend:
         for field, field_type in fields.items():
             validate_identifier(field, "field")
             definitions.append(sql.SQL("{} {}").format(sql.Identifier(field), _TYPE_SQL[field_type]))
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2's own table:
+        # every NEW collection carries the
+        # internal row-order column from the start -- an existing
+        # collection (provisioned before this column existed) gets it
+        # retrofitted by `migrations/0015_row_order_column_upgrade.sql`
+        # instead. Not reachable through `fields`/`field_types` (the
+        # client-declared columns validated above): `identifiers.py`'s
+        # own leading-`_` syntax rejection already makes this exact name
+        # un-declarable, so no client request can ever collide with it.
+        definitions.append(sql.SQL("{} BIGINT GENERATED ALWAYS AS IDENTITY").format(
+            sql.Identifier(_ROW_ORDER_COLUMN)))
         statement = sql.SQL("CREATE TABLE {} ({})").format(
             sql.Identifier(name), sql.SQL(", ").join(definitions)
         )

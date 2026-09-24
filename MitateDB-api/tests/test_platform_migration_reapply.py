@@ -282,6 +282,7 @@ def _run_ops(platform: types.SimpleNamespace, *args: str) -> subprocess.Complete
 # | 0012_role_connection_limits.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (既存 application ロールを更新する内部ループを持つが `:app_id` 引数は取らない) |
 # | 0013_role_statement_timeouts.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (0012 と同型の内部ループを持つ) |
 # | 0014_role_connection_limits_rollout.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (0012/0013 と同型の内部ループを持つ) |
+# | 0015_row_order_column_upgrade.sql | per-application upgrade | `:app_id` を取り、冪等 (`ADD COLUMN IF NOT EXISTS`)、`PLATFORM_UPGRADE_NUMBERS` の一員 |
 # ===========================================================================
 
 _REAPPLY_EXCLUDED_FILENAME = "0004_deprovision_application.sql"
@@ -371,6 +372,7 @@ _REAPPLY_PER_APPLICATION_UPGRADE_NUMBER_BY_FILENAME = {
     "0008_platform_upgrades_upgrade.sql": 8,
     "0009_field_constraints_upgrade.sql": 9,
     "0010_idempotency_records_upgrade.sql": 10,
+    "0015_row_order_column_upgrade.sql": 15,
 }
 _REAPPLY_TEST_APP_ID = "reapp"
 
@@ -860,12 +862,12 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
 
         # Force the per-application upgrade scripts to actually run their
         # own bodies (a freshly provisioned application already carries
-        # 6/8/9/10 in its own ledger, seeded by 0003 itself, so every
+        # 6/8/9/10/15 in its own ledger, seeded by 0003 itself, so every
         # `--script N` call above was a no-op "already recorded" skip):
         # clear the ledger, then run the bulk operational path with
         # today's own file content already in place, and check its own
         # output shows real work, not a silent no-op.
-        for number in (6, 8, 9, 10):
+        for number in (6, 8, 9, 10, 15):
             delete_ledger_row(admin_dsn, app_database, number)
         ns = types.SimpleNamespace(
             provision_dsn=provision_dsn, registry_schema=registry_schema, migrations_dir=rewritten_dir)
@@ -873,7 +875,7 @@ def test_0007_0011_0012_reapplication_is_idempotent_from_every_starting_prefix(
                           "--lock-timeout", _TEST_LOCK_TIMEOUT)
         assert r_real.returncode == 0, r_real.stdout + r_real.stderr
         assert "1 succeeded" in r_real.stdout, r_real.stdout
-        assert ledger_numbers(admin_dsn, app_database) == frozenset({6, 8, 9, 10})
+        assert ledger_numbers(admin_dsn, app_database) == frozenset({6, 8, 9, 10, 15})
 
         runtime_role = f"{app_database}_rt"
         auditreader_role = f"{prefix}svc_auditreader"
@@ -1105,7 +1107,7 @@ def test_per_application_upgrade_reapplication_is_idempotent(platform: types.Sim
         assert first_run.returncode == 0, first_run.stdout + first_run.stderr
         assert "1 succeeded" in first_run.stdout
         ledger_after_first = ledger_numbers(platform.admin_dsn, app.database)
-        assert ledger_after_first == frozenset({6, 8, 9, 10})
+        assert ledger_after_first == frozenset({6, 8, 9, 10, 15})
 
         second_run = _run_ops(
             platform, "upgrade-applications", "--application", "reapp1", "--lock-timeout", _TEST_LOCK_TIMEOUT)
