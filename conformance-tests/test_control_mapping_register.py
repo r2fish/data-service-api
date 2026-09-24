@@ -906,8 +906,13 @@ _BARE_NAME_REF_RE = re.compile(r"^(test_\w+)$")
 # regression in the extraction regex (or a future edit that trims claims
 # well past the margin) is caught rather than a floor that only guards
 # against zero (OPERATING_CONDITIONS.md section 1.5 item 32, D-4).
-FULL_FORM_FLOOR = 90
-BARE_COLON_FORM_FLOOR = 280
+# R-104 (2026-09-24, Evidence folded per design v0.5 section 2.4: one
+# claim per point, path written once per block): re-measured on the folded
+# file (each claim's first test of a file carries the full path, later ones
+# `::name`) at full 260 / bare_colon 247 / bare_name 108; each floor = that
+# count minus the margin the previous pin carried (46 / 91 / 18), per known gap 4.
+FULL_FORM_FLOOR = 214
+BARE_COLON_FORM_FLOOR = 156
 BARE_NAME_FORM_FLOOR = 90
 
 
@@ -1534,11 +1539,15 @@ POSITION_REF_ALLOWLIST: dict[tuple[str, str | None, str | None], str] = {
 # used at the prior fixing, so a regression in the extraction/resolution
 # logic is caught rather than a floor that only guards against zero
 # (OPERATING_CONDITIONS.md section 1.5 item 32, D-4).
+# R-104 (2026-09-24): re-measured on the folded file -- shapes a=400 a'=19
+# b=21 c=32 d=288 e=8; routes i=662 i'=4 ii=7 iii=85. Shape d dipped to 287 mid-fold
+# and returned to 288; its floor is re-pinned at 287 minus the margin the previous
+# pin carried (18); the others are unchanged.
 POSITION_REF_SHAPE_A_FLOOR = 399
 POSITION_REF_SHAPE_A_PRIME_FLOOR = 18
 POSITION_REF_SHAPE_B_FLOOR = 20
 POSITION_REF_SHAPE_C_FLOOR = 27
-POSITION_REF_SHAPE_D_FLOOR = 270
+POSITION_REF_SHAPE_D_FLOOR = 269
 POSITION_REF_SHAPE_E_FLOOR = 7
 POSITION_REF_ROUTE_I_FLOOR = 650
 POSITION_REF_ROUTE_I_PRIME_FLOOR = 3
