@@ -1676,6 +1676,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         *,
         select: list[Any],
         where: list[dict[str, Any]] | None = None,
+        order_by: list[dict[str, Any]] | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
         extra_body: Mapping[str, Any] | None = None,
@@ -1685,6 +1686,12 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         body: dict[str, Any] = {"select": select}
         if where is not None:
             body["where"] = where
+        # port v1.16 (design D-4, C-28): `order_by` is the SAME wire-shaped
+        # `QueryRequest.order_by` array `post_query` already accepts
+        # (`r2db-api/src/r2db_api/http.py:468`) -- no prior caller of this
+        # method carried it.
+        if order_by is not None:
+            body["order_by"] = order_by
         # `cursor` (WP-1 correction, sup8): added alongside the
         # pre-existing `page_size`-only shape so `count()`'s own
         # `next_page`-following fallback (see that method) can request a
@@ -3452,6 +3459,35 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             "revisions": result.get("revisions"),
             "request_id": result.get("request_id"),
         }
+
+    def query_page(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        *,
+        where: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[tuple[str, str]] | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """port v1.16 (design D-4, C-28): presents the wire body's own
+        `where`/`order_by`/`page.size`/`page.cursor`/`budget` fields
+        through `_query_request`'s own real `POST .../query` entry point,
+        verbatim -- `cursor` maps onto that method's own pre-existing
+        keyword (`:1680`, added for `count()`'s own `next_page`-following
+        fallback), `order_by` onto the keyword this WP added immediately
+        above."""
+        assert isinstance(session, _Session)
+        where_body = [{"field": f, "operator": op, "value": v} for f, op, v in where] if where else None
+        order_body = [{"field": f, "direction": d} for f, d in order_by] if order_by else None
+        extra_body = {"budget": dict(budget)} if budget else None
+        result = self._query_request(
+            session, entity, select=list(select), where=where_body, order_by=order_body,
+            page_size=page_size, cursor=cursor, extra_body=extra_body,
+        )
+        return result["items"], result.get("next_page")
 
     # ------------------------------------------------------------------
     # WP-1 (contract 1.2.0, docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-1,

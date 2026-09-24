@@ -2564,6 +2564,39 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return {"items": list(result.get("items", [])), "revisions": result.get("revisions"), "request_id": result.get("request_id")}
         return {"items": result, "revisions": None, "request_id": None}
 
+    def query_page(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        *,
+        where: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[tuple[str, str]] | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md
+        D-2b.4): calls the runtime's own new cursor-carrying entry point,
+        `session.read_page(...)`, directly -- WP-2's own addition
+        (`cell.py::ApplicationRuntime.read_page`), passing `cursor`
+        verbatim. Through WP-4, that entry point's own body still refuses
+        any non-`None` cursor with `CAPABILITY_UNSUPPORTED` (design
+        D-2b.4); this adapter fabricates nothing on its own. `order_by`
+        is the SAME wire-shaped `[{"field":..., "direction":...}]` list
+        `_bind_order_by` already accepts (`cell.py:3147`)."""
+        filters = [Filter(f, op, v) for f, op, v in where] if where else None
+        order = [{"field": f, "direction": d} for f, d in order_by] if order_by else None
+        kwargs: dict[str, Any] = {}
+        if page_size is not None:
+            kwargs["limit"] = page_size
+        if budget:
+            kwargs["budget"] = dict(budget)
+        rows, next_page = self._call(lambda: session.read_page(
+            entity, fields=list(select), filters=filters, order_by=order, cursor=cursor, **kwargs
+        ))
+        return list(rows), next_page
+
     # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------
@@ -2595,6 +2628,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             _MitateDataServiceClass.open_session,
             ApplicationRuntime.insert,
             ApplicationRuntime.read,
+            # WP-2 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.4):
+            # the cursor-carrying counterpart of `read` above -- `http.py`'s
+            # own `post_query` and this file's own `query_page` (port
+            # v1.16) both call it now. Same list-maintenance discipline as
+            # `read_with_result` immediately below (this file's own module-
+            # level comment: pinned to match `ApplicationRuntime`/
+            # `ApplicationDeveloper`'s real public methods mechanically).
+            ApplicationRuntime.read_page,
             # Phase 9 WP-3e (design D-7 / 裁定 C-25 (A)): the contract-
             # shaped, request_id-carrying counterpart of `read` above --
             # same isolated surface, same argument-passing convention

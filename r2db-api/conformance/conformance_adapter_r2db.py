@@ -1733,6 +1733,39 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             "request_id": getattr(page, "request_id", None),
         }
 
+    def query_page(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        *,
+        where: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[tuple[str, str]] | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        the SAME real `DataService.query_page` entry point `query_with_
+        budget`/`query_with_revisions` above already call, generalized here
+        to carry a caller-chosen `where`/`order_by` (a port-neutral tuple
+        sequence) instead of a single `field`/`value` equality. `cursor`/
+        `order_by`/`page_size` map onto that method's own pre-existing
+        keywords (`service.py:726`, CCR-13) unchanged by this WP; `budget`
+        follows the exact `None`-omits-the-field convention `query_with_
+        budget`'s own docstring states."""
+        where_body = [{"field": f, "operator": op, "value": v} for f, op, v in where] if where else None
+        order_body = [{"field": f, "direction": d} for f, d in order_by] if order_by else None
+        kwargs: dict[str, Any] = {}
+        if page_size is not None:
+            kwargs["page_size"] = page_size
+        if budget:
+            kwargs["budget"] = dict(budget)
+        page = self._call(lambda: self._service.query_page(
+            session, entity, select=list(select), where=where_body, order_by=order_body, cursor=cursor, **kwargs
+        ))
+        return list(page.items), page.next_page
+
     # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------

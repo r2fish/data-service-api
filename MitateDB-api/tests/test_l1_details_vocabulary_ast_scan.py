@@ -587,11 +587,20 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # below. `_check_predicate_value`/`_normalize_value_for_storage`
         # raise no `ValidationError`/`CapabilityError` of their own (0
         # sites moved).
-        "cell.py": 42,
+        # WP-2 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.4,
+        # work order WP-2 task 6): +1 -- `ApplicationCell.read_page`'s own
+        # `CapabilityError` site (`page/cursor`), moved verbatim from
+        # `http.py::post_query`'s own former inline rejection (42 -> 43);
+        # see `http.py`'s own count immediately below.
+        "cell.py": 43,
         # WP-3e rework T2 (追補 L-4): +1 -- `_check_object_shape`'s own
         # new "present but wrong type" leg (a genuine new choke-point
         # call site, not a relabeling of an existing one).
-        "http.py": 27,
+        # WP-2 (design D-2b.4): -1 -- `post_query`'s own inline
+        # `page.cursor` rejection moved to `cell.py::ApplicationCell.
+        # read_page` above (the ONE call site design D-4 requires); the
+        # site's own wording/details are unchanged (27 -> 26).
+        "http.py": 26,
         "field_types.py": 4,
         "identifiers.py": 1,
         # WP-6d (ruling U-7): -1 -- `idempotency_begin`/`idempotency_

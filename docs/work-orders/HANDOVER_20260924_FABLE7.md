@@ -4,7 +4,7 @@
 
 ## 1. 現在地
 
-- ローカル main は `0fee6e5` (台帳 v1.119)。本チャットは **何もコミットしていない**。push 停止中 (課金上限)。
+- ローカル main は `0fee6e5` (台帳 v1.119)。**本 worktree の branch には WP-1 を `3af11b3` として積んだ (main には merge しない。統合 branch、main への merge は WP-7 後の 1 回)。** push 停止中 (課金上限)。
 - 本チャットの worktree: `.claude/worktrees/cranky-visvesvaraya-616e67` (branch `claude/cranky-visvesvaraya-616e67`、main と同一 + 未追跡 2 点)。**次のチャットはこの worktree に入って続ける** (新しい worktree を切らない)。
   - 未追跡: `docs/design/PHASE11_KEYSET_PAGING_V1.md` (**設計 v0.5** — 設計レビュー 1 (18 件) と 2 (16 件)、起草担当の疑義への監督裁定を反映済み) と **作業指示書 `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` v1.1** (WP 7 本、直列、統合 branch)。Q-3 / Q-5 / Q-4 は依頼者に提示済み・裁定待ち と本書。設計は単独で commit しない (`check_doc_refs` が C-28 / R-106 / R-107 の dangling で赤。台帳行と `CONDITIONS.md` の C-28 行と同じ変更セットで commit する)。
   - 未追跡・**commit しない**: `.handover-materials/` (前チャットの scratchpad の写し。作業機の絶対パスを含むので公開値スキャンに掛かる。読み終えたら削除してよい): `frame-keyset.md` (枠と裁定 Q-1/Q-2 の逐語)、`rulings-draft-v01.md` (起草者の疑義 9 件への裁定)、`design-review-1.md` (設計レビュー 1 回目、18 件の全文と修正案)、**`rulings-review1.md` (設計レビュー 1 の 18 件への監督裁定。末尾の追記に #9 / #12 の確定形)**、**`rulings-drafter-v03.md` (v0.3 起草担当の疑義 7 件への監督裁定。v0.4 で反映する)**、`verbatim-190-draft.md` (契約 1.9.0 の案文 v0.3 追随済み。依頼者未確定)、探索ノート 4 本 (**`explore-page-defaults.md` は #9 / #12 の実測**)、`mitate-paging-requirements.md` (Mitate 要件の逐語)。
@@ -98,5 +98,10 @@
 | コードレビュー WP-1-6 Revision note の ID に文書名が無い | 直した | OC §1.8 の 59 |
 | コードレビュー WP-1-7 test_contract.py の履歴コメント未更新 | 直した | — |
 | コードレビュー WP-1 註 register 3 件は部分実行の性質 / C-28 は別チャットの `test_c28_baseline_turn.py` と衝突見込み | 観察 / 予定どおり merge 直前に振り直す | 作業指示書 WP-1 の道具の引数の行は次の改版で `test_conditions_register.py` を部分集合側へ |
+| コードレビュー WP-2-1 I node が続きを page_size=100 で読み、フリップ下の現行 r2db で shape 拒否に止まる | 直した (page_size=2) | 判別 assert に到達させる |
+| コードレビュー WP-2-2 R node の個数・型の脚が束縛違いと区別不能 (空振り) | 直した (裁定 (a)) | conformance は改変 token を作れない (opaque)。個数・型検査の証拠は peer 単体テスト (WP-4 / WP-5)、C-28 Status に開示。(b) の drop_entity 経路は r2db 限定なので採らない |
+| コードレビュー WP-2-3 S / B の select 脚が page.size も変えていた、§11 の原因記述の取り違え | 直した | A の x は現行 r2db の `field: cursor` による |
+| コードレビュー WP-2-4 comment provenance 赤 15 件 (経緯語 WP-n、CH-0210 の言い換え、理由の塊の消失) | 直した | `docs/code-history/` は触らない |
+| コードレビュー WP-2-5 報告と周辺記述のずれ | 直した | — |
 | 作業指示書 v1.0 起草担当の疑義 1〜7 | 裁定済み (直す 5、採用 2)、設計 v0.5 / 作業指示書 v1.1 で反映 | `rulings-wo-v1.md`: control_plane と 1.8.0 pin テストを WP-6 に、R-107 行を WP-1 に、Revision note 3 本は既存 `## versioning.version_binding` 節に、MitateDB cell の cursor 入口を WP-2 で (WP-4 まで CAPABILITY_UNSUPPORTED)、conformance 全体は前景 1 回に収まらない (606 s) |
 | 設計 v0.5 / 作業指示書 v1.1 起草担当の疑義 1〜4 | 裁定済み (直す 3、採用 1) | OC §1.5 の 39 は変えない (実装担当は peer ごとの部分集合を前景で、全体は監督のゲートのみ)、1.8.0 pin 3 箇所を WP-6 に、cursor 入口は `ApplicationRuntime` (実体は `ApplicationCell`)、L1 件数ピンの条件付き追加は可 |

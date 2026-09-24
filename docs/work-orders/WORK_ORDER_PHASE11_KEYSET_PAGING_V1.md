@@ -285,6 +285,8 @@ M2-3 はフリップそのものが変異である。対照 (§1.3) は、確定
 
 ## 4. WP-5 — r2db の keyset (順序 3 番目)
 
+**【訂正註 2026-09-25 (WP-2 コードレビュー 2 への監督裁定)】** C-28 の R node は「復号できるが順序値の個数か型が合わない cursor」を観測しない — cursor は契約上 opaque であり、conformance は改変 token を作れず、`order_by` を変える黒箱の脚は束縛違いの拒否と区別がつかない。個数・型検査の証拠は peer の単体テスト (改変 token を知ってよい層) に置く: WP-5 の完了条件 11 と変異 M5-11、WP-4 の完了条件 11 と変異 M4-11 の「赤になる test」は **R ではなく、その WP で置く peer の単体テスト** (r2db は `r2db-api/tests/test_foundation.py`、MitateDB は `MitateDB-api/tests/test_http.py` または cell の単体テスト) と読み替える。C-28 の Status に開示を置く。
+
 ### 目的
 
 r2db の cursor を offset から keyset へ置き換え、束縛を `where` (述語の並びに依らない) + `order_by` に狭め、拒否の details と既定ページを 1.9.0 の形にする。宣言は 1.8.0 のまま。

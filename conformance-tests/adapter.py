@@ -2915,6 +2915,46 @@ class ConformanceAdapter(ABC):
         declared `unavailable`), exactly like every other primitive here.
         """
 
+    @abstractmethod
+    def query_page(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        *,
+        where: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[tuple[str, str]] | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        an independent, additive query primitive for C-28 (keyset paging) --
+        `select_eq`/`attempt_filter` carry neither `order_by` nor `cursor`,
+        so this is a new abstract method rather than growing either of
+        their signatures (design principle: existing ~20 callers of every
+        other query method stay untouched).
+
+        `where` is the same `(field, operator, value)` triple sequence
+        `attempt_filter`'s own `extra_predicates` already carries, ANDed
+        together. `order_by` is a `(field, direction)` pair sequence. Both,
+        along with `select`/`page_size`/`cursor`, are presented to the
+        peer's own real query entry point VERBATIM -- never interpreted,
+        validated, or synthesized by this adapter itself, the same
+        principle `select_eq`'s own docstring states.
+
+        `budget` (keyword-only, port v0.4 addition to this same method,
+        design D-4): carried through exactly as `query_with_budget`'s own
+        `budget` is -- `None` (the default) omits it from the presented
+        request entirely.
+
+        Returns `(items, next_page)`: `next_page` is the peer's own real
+        response value, returned unmodified -- this adapter neither
+        interprets nor constructs a cursor. Raises `ConformanceDenial` on
+        the peer's own real refusal, exactly like every other primitive
+        here; this adapter never fabricates one.
+        """
+
     # --- attack surface declarations ---
     @abstractmethod
     def native_command_surface(self) -> None: ...  # must always return None

@@ -2146,6 +2146,49 @@ class ApplicationCell:
         self._push_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
         return rows
 
+    def read_page(self, principal, collection, fields=None, filters=None, order_by=None, limit=None, *,
+                  cursor=None, request_id=None, budget=None):
+        """Cursor-carrying counterpart of `read` above, returning `(rows,
+        next_page)` -- `read` itself has no return-shape room of its own
+        for a pagination continuation (a bare `list[dict]`, unlike
+        `read_with_result`'s own dict envelope, which has no `next_page`
+        slot a keyset cursor could actually advance either). `read` stays
+        completely unchanged; its 195 existing in-process callers are
+        untouched.
+
+        A non-`None` `cursor` is refused, unconditionally, with
+        `CAPABILITY_UNSUPPORTED` / `violated_declaration: capability` /
+        `field: page/cursor` -- the ONE real call site both `http.py::
+        post_query` and the in-process conformance adapter's own
+        `query_page` reach (design docs/design/PHASE11_KEYSET_PAGING_V1.md
+        D-2b.4's own "拒否の置き場は入口 1 箇所"). A `None` cursor runs the
+        existing `read` unchanged and reports `next_page` as always absent
+        (`None`), the identical observable shape `read_with_result` above
+        already gives every caller.
+
+        Design decision (reported to the requester): `page.cursor`
+        has no implementation on this peer -- there is no opaque-cursor
+        pagination state anywhere in `cell.py`/either backend. Presenting
+        one is refused deterministically and classified
+        `CAPABILITY_UNSUPPORTED`: cursor-based pagination is a real,
+        optional target shape this contract defines (`QueryResult.
+        next_page`) that this peer simply does not execute, matching
+        `capability_status.rules`' own "optional target operations ...
+        must fail with CAPABILITY_UNSUPPORTED" -- not a malformed request
+        (`VALIDATION_FAILED`), and not a structural absence (the field IS
+        a real, accepted part of this endpoint's own request shape; it is
+        refused only once actually presented, after shape/auth, before
+        execution). Left to a future capability-envelope decision whether
+        to implement cursor pagination at all (design v1.2 §7 ledger)."""
+        if cursor is not None:
+            raise CapabilityError(
+                "page.cursor is not supported by this peer",
+                details=violation("capability", field="page/cursor"),
+            )
+        rows = self.read(principal, collection, fields=fields, filters=filters, order_by=order_by, limit=limit,
+                         request_id=request_id, budget=budget)
+        return rows, None
+
     def _validate_update(self, collection, values, filters, *, path_prefix="values", limits=None):
         """m-1 (independent review, P3-D2 follow-up): the single choke
         BOTH `ApplicationCell.update` below AND `transact()`'s own
@@ -3687,6 +3730,18 @@ class ApplicationRuntime:
         rows = self.read(collection, fields=fields, filters=filters, order_by=order_by, limit=limit,
                          request_id=request_id, budget=budget)
         return {"items": rows, "next_page": None, "request_id": request_id}
+
+    def read_page(self, collection, fields=None, filters=None, order_by=None, limit=None, *,
+                  cursor=None, request_id=None, budget=None):
+        """The cursor-carrying entry point `http.py` and the in-process
+        conformance adapter's `query_page` call (design docs/design/
+        PHASE11_KEYSET_PAGING_V1.md D-2b.4) -- `read` above stays the
+        plain, cursor-less in-process entry point (unchanged). Delegates
+        to `ApplicationCell.read_page`, whose own docstring states this
+        method's full contract."""
+        self.__authorize(request_id=request_id)
+        return self.__cell.read_page(self.__principal, collection, fields, filters, order_by, limit,
+                                     cursor=cursor, request_id=request_id, budget=budget)
 
     def catalog(self, *, request_id=None):
         self.__authorize(request_id=request_id)
