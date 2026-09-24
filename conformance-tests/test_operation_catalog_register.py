@@ -110,11 +110,15 @@ def _all_endpoint_entries(contract):
 
 def test_scanner_finds_at_least_one_endpoint():
     """Non-vacuity guard: there must be at least one endpoint entry, or every
-    check below would vacuously pass over an empty set."""
+    check below would vacuously pass over an empty set.
+
+    Phase 11 WP-1 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md §6.6)
+    adds endpoints.operation_catalog, moving the count from 19 (7 + 12) to
+    20 (8 + 12)."""
     contract = _contract()
     entries = list(_all_endpoint_entries(contract))
     assert len(entries) >= 1
-    assert len(entries) == 19, f"expected 19 endpoint entries (7 + 12), got {len(entries)}"
+    assert len(entries) == 20, f"expected 20 endpoint entries (8 + 12), got {len(entries)}"
 
 
 def test_operation_catalog_regenerates_byte_identical():
