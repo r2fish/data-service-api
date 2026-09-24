@@ -637,7 +637,7 @@ class _DenialCoalescer:
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1) -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1, operation_catalog_url: str | None = None) -> None:
         # R-9 (CCR-14, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §1: "capability 申告は環境変数由来で composition root 注入"): whether this application-plane process' own `capabilities()` declares `control_plane: enabled` is a *deployer* fact this class cannot know on its own (a separated deployment, the default, means the application-plane process has no idea whether a control-plane process is running anywhere at all) -- it is constructor-injected, defaulting to the safe, honest `unavailable` so nothing short of an explicit composition-root decision (`main.py`, reading `R2DB_CONTROL_PLANE_STATUS`) ever declares `enabled`. Validated here too (not only at `main.py`'s env-parsing boundary) so any other caller constructing a `DataService` directly (this repository's own tests, the in-process conformance adapter) gets the same fail-loud guard against a typo'd status string, rather than silently publishing an invalid capability value.
         # history: CH-0148
         if control_plane_status not in {"enabled", "unavailable"}:
@@ -646,6 +646,14 @@ class DataService:
         # `surfaces` is constructor-injected, same "deployer-declared, not derived" discipline as `control_plane_status` immediately above -- `main.py` (the real composition root) is the one caller that validates the two `R2DB_*_BASE_URL` environment variables' SHAPE at startup and assembles this dict from them; this class only ever echoes whatever it was given, verbatim, in `capabilities()` below. `None` (the default -- every caller, including this repository's own unit tests that construct `DataService` directly without opting in) omits the `surfaces` key from the response entirely, never a `"surfaces": None` value (contract `CapabilityDocument.surfaces` is an optional key, not a nullable one).
         # history: CH-0147
         self._surfaces = surfaces
+        # Same constructor-injected, echo-only discipline as `surfaces`
+        # immediately above (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        # D-5) -- `main.py` reads
+        # `R2DB_OPERATION_CATALOG_URL`; this class only ever echoes
+        # whatever it was given, verbatim, in `capabilities()` below.
+        # `None` (the default) omits the `operation_catalog_url` key
+        # entirely.
+        self._operation_catalog_url = operation_catalog_url
         # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): the deployer's own declared ceiling on how many processes may serve THIS plane's `surfaces` base URL at the same time -- constructor-injected, same "deployer-declared, not derived" discipline as `control_plane_status`/`surfaces` above. `main.py` (the real
         # composition root) is the one caller that resolves this from the
         # DB-side `process_ceilings` declaration (`platform_declarations.
@@ -714,7 +722,24 @@ class DataService:
                 control_plane_status=self._control_plane_status,
                 process_ceiling=self._process_ceiling,
                 surfaces=self._surfaces,
+                operation_catalog_url=self._operation_catalog_url,
             )
+
+    def operation_catalog(self, context: AuthContext, *, concurrency_precharged: bool = False) -> None:
+        """Design D-5, contract 1.9.0 `endpoints.operation_catalog`:
+        authorization/rate gate only -- the SAME
+        `_slot()` gate `capabilities()` immediately above goes through
+        (design §8.2, SI-08's existing request-rate bound applies
+        unchanged), so `requests_per_minute`/`concurrency` are charged
+        for this endpoint exactly like every other data-plane operation.
+        The served bytes are the packaged `contract/OPERATION_CATALOG.
+        json`, read verbatim by `http.py`'s own handler and by the
+        in-process conformance adapter's port v1.17 `operation_catalog_
+        document()` -- there is nothing `DataService`-scoped to compute
+        or return here.
+        """
+        with self._slot(context, concurrency_precharged=concurrency_precharged):
+            return None
 
     def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> list[dict[str, Any]]:
         """Plain-item-list form, unchanged in shape since before CCR-13 (every existing caller -- `tests/test_foundation.py`, the in-process conformance adapter -- keeps working against exactly this return type). `order_by`/`cursor` (CCR-13) are accepted here too (so this method alone is enough to exercise/test them against the facade), but the pagination continuation itself only reaches a caller through `query_page` below, which `http.post_query` uses.

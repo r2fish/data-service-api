@@ -199,12 +199,14 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 import psycopg
 from starlette.types import ASGIApp
 
 from .audit_query import DECLARED_COALESCING_WINDOW_MS
 from .control_http import create_control_app
+from . import operation_catalog
 from .control_plane import ControlPlaneService, PostgresControlBackend
 from .credential_store import (
     DEFAULT_SCHEMA,
@@ -270,6 +272,7 @@ def assemble_control_stack(
     audit_coalescing_window_ms: int = DECLARED_COALESCING_WINDOW_MS,
     audit: "PostgresControlAuditSink | None" = None,
     process_ceiling: int = 1,
+    operation_catalog_url: str | None = None,
 ) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink, PostgresAuditQueryStore | None]]:
     """WP-5 round-2 review (MINOR-3): the 4-Postgres-store + `ControlPlaneService`
     assembly core, shared by `build_control_app` below AND the WP-5
@@ -357,6 +360,7 @@ def assemble_control_stack(
         audit_coalescing_window_ms=audit_coalescing_window_ms,
         surfaces=surfaces,
         process_ceiling=process_ceiling,
+        operation_catalog_url=operation_catalog_url,
     )
     return service, (applications, credentials, control_credentials, audit, audit_reader)
 
@@ -533,6 +537,21 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         "data": {"base_url": declarations.surfaces.data_base_url},
         "control": {"base_url": declarations.surfaces.control_base_url},
     }
+    # The SAME env var `main.py` reads -- both processes are given the
+    # same deployer-set value, echoed verbatim into each process' own
+    # `CapabilityDocument.operation_catalog_url`. Unset falls back to the
+    # SAME derived default `main.py` computes: `operation_catalog.
+    # derive_operation_catalog_url(declarations.surfaces.data_base_url)`.
+    _raw_operation_catalog_url = env.get("R2DB_OPERATION_CATALOG_URL") or None
+    if _raw_operation_catalog_url is not None:
+        _parsed_operation_catalog_url = urlsplit(_raw_operation_catalog_url)
+        if not _parsed_operation_catalog_url.scheme or not _parsed_operation_catalog_url.netloc:
+            raise RuntimeError(
+                f"R2DB_OPERATION_CATALOG_URL must be an absolute URL (scheme and host), got {_raw_operation_catalog_url!r}"
+            )
+    operation_catalog_url = _raw_operation_catalog_url or (
+        operation_catalog.derive_operation_catalog_url(declarations.surfaces.data_base_url)
+    )
 
     # Step 4 (F-13/F-7/F-9/F-10/F-11): construct the writer sink FIRST (so
     # its own pool exists to borrow a login-role-correct connection from),
@@ -607,6 +626,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # own `limit_enforcement` mapping for `control_requests_per_
         # minute`/`audit_requests_per_minute`.
         process_ceiling=declarations.process_ceilings.control,
+        operation_catalog_url=operation_catalog_url,
     )
 
     @asynccontextmanager

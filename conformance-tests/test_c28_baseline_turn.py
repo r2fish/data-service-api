@@ -30,9 +30,12 @@ document, never a literal -- design §7 段 (9), v0.3), (10) update by
 predicate, (11) delete by predicate under declare-and-echo, (12) read the
 resulting state back.
 
-**段 (1) の版 assert はまだ置かない** (design §7 段 (1), work order §3.4
-item 5): both peers still declare 1.8.0 as of WP-2; the version >= 1.9.0
-gate lands in WP-3. **`page.cursor`/`next_page` は baseline の外** (design
+**段 (1) の版 assert は WP-3 で追加された** (design §7 段 (1), work order
+WP-3 完了条件 6): both peers now declare 1.9.0 or higher (WP-3 flips both
+`contract_version` declarations in the same commit as the served
+`operation_catalog` behavior); step (1) asserts `parse_semver(
+contract_version) >= (1, 9, 0)`, never `operations` non-emptiness (design
+§7 段 (1)). **`page.cursor`/`next_page` は baseline の外** (design
 D-6) -- this row never inspects `next_page`.
 
 **port v1.16**: `attempt_filter_with_result` (`conformance-tests/
@@ -52,6 +55,7 @@ from adapter import (
     fresh_identifier,
     load_contract,
     native_cause_of,
+    parse_semver,
 )
 from conftest import provision_pair
 
@@ -86,6 +90,20 @@ def test_c28_baseline_turn(adapter: ConformanceAdapter, isolated) -> None:
     # ------------------------------------------------------------------
     capdoc = iso.capability_document()
     assert capdoc.get("contract_version"), f"{adapter.name}: C-28 段(1): capability_document carries no contract_version"
+    # Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md §7
+    # 段 (1), work order docs/work-orders/
+    # WORK_ORDER_PHASE11_MIN_COMMON_PROFILE_V1.md WP-3 完了条件 6): the
+    # version assert WP-2's own module docstring deferred -- 1.9.0's own
+    # `common_baseline` obligation (a) is what makes every later step in
+    # this scenario version-gated rather than capability-gated at all.
+    # `operations` non-emptiness is deliberately NOT asserted here (design
+    # §7 段 (1)) -- that is read once, later, from `common_baseline.
+    # operations` itself (module-level constants above), not from this
+    # capability document.
+    assert parse_semver(capdoc["contract_version"]) >= (1, 9, 0), (
+        f"{adapter.name}: C-28 段(1): contract_version {capdoc['contract_version']!r} "
+        "is below the 1.9.0 common_baseline obligation this row exercises"
+    )
     capabilities = capdoc.get("capabilities", {})
     for name in _BASELINE_CAPABILITIES:
         status = capabilities.get(name, {}).get("status", "unavailable")

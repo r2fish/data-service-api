@@ -54,7 +54,10 @@ order's original six-item enumeration):
         non-empty string.
 
 Plus the byte-identical regeneration check: `spec/OPERATION_CATALOG.json`
-must match a fresh run of `tools/contract_catalog.py` exactly.
+must match a fresh run of `tools/contract_catalog.py` exactly. Phase 11
+WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5) extends
+this to a 3-copy comparison: both peers' packaged `contract/
+OPERATION_CATALOG.json` must be byte-identical to the spec copy.
 
 No `@pytest.mark.condition(...)` marker is used anywhere in this file
 (design §6.5: this is repository hygiene, an implementation-independent
@@ -76,6 +79,13 @@ import contract_catalog  # noqa: E402  (path insert above must run first)
 
 CONTRACT_PATH = ROOT / "spec" / "data-service-api.v1.json"
 CATALOG_PATH = ROOT / "spec" / "OPERATION_CATALOG.json"
+# Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5):
+# the two peer-packaged copies `contract/OPERATION_CATALOG.json` ships as
+# package data -- same "3 複製、同一コミットで同一バイト" regime the
+# contract JSON's own 3 copies already follow (`test_contract.py::
+# test_contract_packaged_copies_are_byte_identical`).
+R2DB_CATALOG_PATH = ROOT / "r2db-api" / "src" / "r2db_api" / "contract" / "OPERATION_CATALOG.json"
+MITATEDB_CATALOG_PATH = ROOT / "MitateDB-api" / "src" / "mitatedb_api" / "contract" / "OPERATION_CATALOG.json"
 
 _ROLE_GROUPS = {"application": {"runtime", "developer"}, "control": {"control"}, "audit": {"audit"}}
 _ATOMICITY_VOCAB = {"atomic", "none", "atomic_unless_best_effort"}
@@ -129,6 +139,28 @@ def test_operation_catalog_regenerates_byte_identical():
     assert rendered == on_disk, (
         f"{CATALOG_PATH} does not match a fresh run of tools/contract_catalog.py -- "
         "re-run `./.venv/bin/python tools/contract_catalog.py` and commit the result"
+    )
+
+
+def test_operation_catalog_packaged_copies_are_byte_identical():
+    """Phase 11 WP-3 (design D-5, work order WP-3 completion condition 5):
+    the two peer-packaged copies are byte-identical to `spec/
+    OPERATION_CATALOG.json` -- the SAME "3 複製、同一コミットで同一バイト"
+    regime the contract JSON's own 3 copies follow. Extends the
+    regeneration-identity test above (D-5's own "配布物まで延長した" 形)
+    rather than replacing it: the spec copy is still checked against a
+    fresh regeneration, and the two peer copies are checked against the
+    spec copy directly (transitively, against the regeneration too)."""
+    spec_bytes = CATALOG_PATH.read_bytes()
+    r2db_bytes = R2DB_CATALOG_PATH.read_bytes()
+    mitatedb_bytes = MITATEDB_CATALOG_PATH.read_bytes()
+    assert spec_bytes == r2db_bytes, (
+        f"{R2DB_CATALOG_PATH} is not byte-identical to {CATALOG_PATH} -- "
+        f"copy {CATALOG_PATH} over it and commit the result"
+    )
+    assert spec_bytes == mitatedb_bytes, (
+        f"{MITATEDB_CATALOG_PATH} is not byte-identical to {CATALOG_PATH} -- "
+        f"copy {CATALOG_PATH} over it and commit the result"
     )
 
 

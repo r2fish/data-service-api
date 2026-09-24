@@ -110,7 +110,12 @@ versus what remains unevidenced.
   procedure this CLI's `audit-report` subcommand supports). Whether a given
   deployment's application-plane process declares `control_plane: enabled`
   is a deployer decision (`R2DB_CONTROL_PLANE_STATUS`), not a detected
-  fact -- see `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7.
+  fact -- see `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7. `GET /v1/
+  operation-catalog`'s declared URL (`R2DB_OPERATION_CATALOG_URL`,
+  optional) is unset by default and derives from `surfaces.data.base_url`
+  (base-relative, not merely its origin -- reachable behind the same
+  reverse-proxy prefix `surfaces.data.base_url` itself carries) -- see
+  that same runbook section for when to override it.
 - **`DataService.catalog()`** and an optional per-operation `request_id`
   threaded through service calls, so a single request's audit events
   correlate.

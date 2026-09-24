@@ -244,6 +244,16 @@ def test_missing_authorization_header_is_auth_required(app_a_stack):
     assert response.headers["content-type"].split(";")[0].strip() == PROBLEM_CONTENT_TYPE
 
 
+def test_missing_authorization_header_on_operation_catalog_is_auth_required(app_a_stack):
+    """`GET /v1/operation-catalog` carries no unauthenticated face of its
+    own -- the SAME `AUTH_REQUIRED` gate
+    `test_missing_authorization_header_is_auth_required` immediately
+    above pins for `GET /v1/capabilities`."""
+    response = _get(app_a_stack, "/v1/operation-catalog")
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_REQUIRED"
+
+
 def test_malformed_bearer_without_dot_is_auth_invalid(app_a_stack):
     response = _get(app_a_stack, "/v1/capabilities", bearer="not-a-composite-token")
     assert response.status_code == 401
@@ -379,7 +389,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
     # commit as this host's own `process_ceilings` mapping (design D-5
     # (v)).
-    assert document["contract_version"] == "1.8.0"
+    assert document["contract_version"] == "1.9.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 

@@ -941,6 +941,16 @@ _SURFACES = {
     "control": {"base_url": "https://r2db-http-pg-control.conformance.invalid/control/v1"},
 }
 
+# Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5):
+# this HTTP (ASGI-transport) plug's own declared `operation_catalog_url` --
+# same synthetic, non-dialable convention as `_SURFACES` immediately above
+# (C-29's stage (i) never dials this string on an `"asgi"` plug; it calls
+# `operation_catalog_document()`, which goes through this SAME running
+# app's own real handler over the ASGI transport, not a literal dial
+# against this constant). The socket adapter (WP-4) overrides `_operation_
+# catalog_url_value` below to report a real, dialable URL instead.
+_OPERATION_CATALOG_URL = "https://r2db-http-pg-data.conformance.invalid/v1/operation-catalog"
+
 # port v1.12 (Phase 8 WP-1b, R-A/R-C 監督裁定 2026-09-06) -- same small
 # profile, same `operation_depth=5`/`concurrency=3` reasoning, as
 # `conformance_adapter_r2db.py`'s own identical constant (this peer's
@@ -1071,6 +1081,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         """Default: this module's own synthetic, non-dialable `_SURFACES`
         constant (unchanged behavior)."""
         return _SURFACES
+
+    def _operation_catalog_url_value(self) -> str:
+        """Phase 11 WP-3 (design D-5): same hook shape as `_surfaces_
+        value` immediately above -- default: this module's own synthetic,
+        non-dialable `_OPERATION_CATALOG_URL` constant. The socket
+        adapter (WP-4) overrides this to report a real, dialable URL."""
+        return _OPERATION_CATALOG_URL
 
     def _reset_surface_state(self) -> None:
         """Hook (monitor 裁定 2026-09-08, F-2 (b)): called on the ISOLATED
@@ -1255,6 +1272,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             self._service = DataService(
                 self._credentials, cell_factory=self._make_cell, control_plane_status="enabled",
                 durable_audit=self._application_durable_audit, surfaces=self._surfaces_value(),
+                operation_catalog_url=self._operation_catalog_url_value(),
             )
             self._control = ControlAuthority(self._service)
 
@@ -1494,6 +1512,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # from `platform_declarations` (rulings-q4-wp12-rework.md §2),
             # never a repeated literal `1000`.
             audit_visibility_lag_ms=CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS + CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS + VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS,
+            operation_catalog_url=self._operation_catalog_url_value(),
         )
         app = create_control_app(service)
         return app, stores
@@ -2406,13 +2425,35 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # ones.
         iso = copy.copy(self)
         iso._reset_surface_state()
+        # `_control_send`/`_privileged_control_send` are ordinary bound
+        # methods, so an unqualified `iso._control_send(...)` call runs
+        # with `self` bound to `iso`
+        # itself, not to the parent this comment above says the control
+        # plane is merely "borrowed" from. Once `iso`'s own request
+        # count on that borrowed-but-`iso`-bound path reaches the
+        # control-rebuild threshold, `iso._build_control_stack()` builds
+        # a NEW control app from `iso`'s own (isolated) data surface and
+        # then rebinds it onto `iso._control_surface` -- which is the
+        # SAME object the parent holds (shared by the shallow copy
+        # above), so the parent's real control dispatch silently starts
+        # answering with `iso`'s isolated surfaces, and the rebuild path
+        # closes the PARENT's own control client/store out from under it
+        # (measured: `test_c29_data_and_control_planes_declare_the_same_
+        # url[r2db-api-socket]` reproduces this deterministically with
+        # the rebuild threshold lowered). Rebinding these two methods to
+        # the PARENT's own bound instances here makes every control call
+        # `iso` makes run with `self` == the parent, so any rebuild the
+        # borrowed request count triggers happens on the real owner, not
+        # on this transient, isolated copy.
+        iso._control_send = self._control_send
+        iso._privileged_control_send = self._privileged_control_send
         iso._app_pg = {}
         iso._provisioned_cells = []
         iso._counter = 0
         iso._service = DataService(
             iso._credentials, limits=_ISOLATED_APPLICATION_LIMITS, cell_factory=iso._make_cell,
             control_plane_status="enabled", durable_audit=iso._application_durable_audit,
-            surfaces=iso._surfaces_value(),
+            surfaces=iso._surfaces_value(), operation_catalog_url=iso._operation_catalog_url_value(),
         )
         iso._control = ControlAuthority(iso._service)
         app = create_app(iso._service)
@@ -3489,6 +3530,26 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             extra_body=extra or None,
         )
         return {"items": result["items"], "request_id": result.get("request_id")}
+
+    def operation_catalog_document(self, session) -> bytes:
+        """port v1.17 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5, §7.1 item 2): a real `GET /v1/operation-catalog` over this
+        adapter's own transport (`_build_client`'s ASGI transport by
+        default; a real socket for the socket adapter, WP-4) -- unlike
+        `_send`, this reads `response.content` (raw bytes) rather than
+        `.json()`, so C-29's own byte-for-byte comparison has no re-
+        encoding step of this adapter's own to drift from."""
+        assert isinstance(session, _Session)
+        header_pairs = [("authorization", f"Bearer {session.secret}")]
+        request = self._client.build_request("GET", "/v1/operation-catalog", headers=header_pairs)
+        response = self._run(self._client.send(request))
+        if response.status_code >= 400:
+            failure = _HttpFailure(response)
+            raise ConformanceDenial(
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                details=_failure_details(failure),
+            ) from failure
+        return response.content
 
     # ------------------------------------------------------------------
     # WP-1 (contract 1.2.0, docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-1,

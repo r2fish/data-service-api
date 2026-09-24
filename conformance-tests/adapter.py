@@ -3000,6 +3000,41 @@ class ConformanceAdapter(ABC):
         the deployment rejects or exceeds.
         """
 
+    @abstractmethod
+    def operation_catalog_document(self, session) -> bytes:
+        """Port v1.17 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5, §7.1 item 2, work order docs/work-orders/
+        WORK_ORDER_PHASE11_MIN_COMMON_PROFILE_V1.md WP-3): the body the
+        peer itself returns for its own `operation_catalog` operation
+        (contract `endpoints.operation_catalog`, `GET /v1/operation-
+        catalog`), as raw BYTES -- never parsed/re-serialized by this
+        adapter -- so C-29's own byte-for-byte comparison against the
+        packaged derived catalog has no re-encoding step of this port's
+        own to drift from either side.
+
+        `session` is an already-authenticated application session/handle
+        (runtime or developer -- the same credential `capability_
+        document()` above provisions for itself; a caller here presents
+        one it already holds, mirroring `attempt_filter_with_result`'s own
+        `session` parameter), authenticated exactly as `GET /v1/
+        capabilities` requires (design §8.2: no anonymous face).
+
+        Realized on all SIX plugs (unlike `attempt_filter_with_result`
+        above, which the two socket plugs inherit from their peer's http
+        realization unchanged): C-29's stage (i) compares THIS method's
+        return value against the packaged catalog on every plug, in-
+        process included, since in-process plugs have no HTTP face to
+        dial (design D-5's own honest limit) -- so this method is the
+        ONLY way stage (i) observes an in-process plug's own served body
+        at all. Stage (ii) (socket plugs only) additionally dials the
+        declared `operation_catalog_url` for real and compares that
+        response against this SAME method's return value.
+
+        Raises `ConformanceDenial` on the peer's own real refusal (for
+        example an invalid/expired `session`), exactly like every other
+        `attempt_*`/`*_document` primitive on this port.
+        """
+
     # --- attack surface declarations ---
     @abstractmethod
     def native_command_surface(self) -> None: ...  # must always return None

@@ -385,6 +385,38 @@ class MitateDBSocketConformanceAdapter(MitateDBHttpConformanceAdapter):
             "control": {"base_url": f"http://127.0.0.1:{control_port}/control/v1"},
         }
 
+    def _operation_catalog_url_value(self) -> str:
+        """Override (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5): a real, dialable loopback URL against the SAME real nginx
+        `_surfaces_value` above reserves the data-plane port for --
+        `_reserve_named_port` is idempotent (returns the already-
+        committed port on a second call), so this never allocates a
+        second, independent port. C-29's stage (ii) dials THIS URL for
+        real.
+
+        Not cached (mirrors `conformance_adapter_r2db_socket.py`'s own
+        identically-purposed sibling): a value cached
+        in `self.__dict__` BEFORE `isolated_application_surface()`'s own
+        `copy.copy(self)` runs is carried forward into the isolated
+        copy's `__dict__` by that shallow copy, unaffected by `_reset_
+        surface_state()`'s own port reservations. `_reserve_named_port`
+        is itself idempotent, so re-deriving on every call is cheap and
+        carries no risk of its own.
+
+        Removing the cache here is NOT, by itself, what keeps the
+        isolated copy's own DATA document from declaring the PARENT's
+        port: `_application_config.operation_catalog_url` is a plain
+        dataclass field, read verbatim at document-build time (never a
+        live call to this hook) -- `isolated_application_surface()`'s own
+        `replace(..., operation_catalog_url=iso._operation_catalog_
+        url_value())` is what actually gives the isolated copy's config
+        its own, freshly reserved value; this hook returning a fresh
+        (never cached) value each time is what makes THAT explicit call
+        observe the isolated copy's own port rather than a stale one."""
+        self._ensure_socket_registry()
+        data_port = self._reserve_named_port("_data_listen_reservation")
+        return f"http://127.0.0.1:{data_port}/v1/operation-catalog"
+
     def _build_client(self, app: Any, base_url: str) -> httpx.AsyncClient:
         """Ignores the `base_url` argument (always this plug's own
         synthetic `BASE_URL` module constant, unchanged from the HTTP

@@ -141,6 +141,16 @@ _SURFACES = {
     "control": {"base_url": _CONTROL_SURFACE_BASE_URL},
 }
 
+# Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5):
+# this HTTP (ASGI-transport) plug's own declared `operation_catalog_url` --
+# same synthetic, non-dialable convention as `_SURFACES` immediately above
+# (C-29's stage (i) never dials this string on an `"asgi"` plug; it calls
+# `operation_catalog_document()`, which goes through this SAME running
+# app's own real handler over the ASGI transport). The socket adapter
+# (WP-4) overrides `_operation_catalog_url_value` below to report a real,
+# dialable URL instead.
+_OPERATION_CATALOG_URL = _DATA_SURFACE_BASE_URL + "/operation-catalog"
+
 # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): `isolated_
 # control_surface(limits_override=...)`'s only way to inject a small
 # control-plane limits profile on this plug -- unlike the in-process plug
@@ -921,6 +931,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         documents' `surfaces` can never silently diverge."""
         return _SURFACES
 
+    def _operation_catalog_url_value(self) -> str:
+        """Phase 11 WP-3 (design D-5): same hook shape as `_surfaces_
+        value` immediately above -- default: this module's own synthetic,
+        non-dialable `_OPERATION_CATALOG_URL` constant. The socket
+        adapter (WP-4) overrides this to report a real, dialable URL."""
+        return _OPERATION_CATALOG_URL
+
     def _reset_surface_state(self) -> None:
         """Hook (monitor 裁定 2026-09-08, F-2 (b)) -- see the identically-
         named hook on `r2db-api/conformance/conformance_adapter_r2db_http.
@@ -994,6 +1011,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             self._application_config = FoundationConfig(
                 control_plane_status="enabled",
                 data_base_url=surfaces["data"]["base_url"], control_base_url=surfaces["control"]["base_url"],
+                operation_catalog_url=self._operation_catalog_url_value(),
             )
             # Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス
             # 1個)"): this adapter (unlike the in-process one, which routes
@@ -1144,6 +1162,14 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 # _application_durable_audit`'s own (now argument-free)
                 # writer connection above.
                 "MITATEDB_AUDIT_DSN": self._platform.auditreader_dsn,
+                # Phase 11 WP-3 (design D-5, §7.1 訂正註): the SAME
+                # synthetic (or, on the socket adapter, real dialable)
+                # value `self._application_config` above carries -- both
+                # this "process"' own control-plane document and the
+                # data-plane document agree on `operation_catalog_url`
+                # structurally (one hook call feeds both), never by
+                # cross-checking two independently-configured copies.
+                "MITATEDB_OPERATION_CATALOG_URL": self._operation_catalog_url_value(),
                 # Q4 phase (design D-2, work order §4 WP-2 変更対象 D):
                 # `MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are
                 # REMOVED env vars (F-2) -- `surfaces` now comes from
@@ -1904,6 +1930,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             self._application_config,
             data_base_url=_iso_surfaces["data"]["base_url"],
             control_base_url=_iso_surfaces["control"]["base_url"],
+            operation_catalog_url=iso._operation_catalog_url_value(),
             max_batch_items=10, max_batch_entities=5, max_result_rows=5,
             max_filter_terms=5, max_request_bytes=4096, max_schema_objects=20,
             # Phase 8 WP-1a: same values/rationale as the in-process
@@ -2803,6 +2830,26 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             order_by=list(order_by) if order_by else None, page_size=page_size, extra_body=extra_body,
         )
         return {"items": result["items"], "request_id": result.get("request_id")}
+
+    def operation_catalog_document(self, session) -> bytes:
+        """port v1.17 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5, §7.1 item 2): a real `GET /v1/operation-catalog` over this
+        adapter's own transport (`_build_client`'s ASGI transport by
+        default; a real socket for the socket adapter, WP-4) -- unlike
+        `_send`, this reads `response.content` (raw bytes) rather than
+        `.json()`, so C-29's own byte-for-byte comparison has no re-
+        encoding step of this adapter's own to drift from."""
+        assert isinstance(session, _Session)
+        header_pairs = [("authorization", f"Bearer {session.bearer}")]
+        request = self._client.build_request("GET", "/v1/operation-catalog", headers=header_pairs)
+        response = self._run(self._client.send(request))
+        if response.status_code >= 400:
+            failure = _HttpFailure(response)
+            raise ConformanceDenial(
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                details=_failure_details(failure),
+            ) from failure
+        return response.content
 
     # ------------------------------------------------------------------
     # optional raw-accessor methods (WP-2.5 widening, `test_c11_response_

@@ -3762,6 +3762,24 @@ class ApplicationRuntime:
         with self.__cell._limit_gate(principal, None, request_id=request_id):  # noqa: SLF001
             return self.__build_capabilities_document(principal)
 
+    def operation_catalog(self, *, request_id=None):
+        """Contract `endpoints.operation_catalog`: authorization/rate
+        gate only, mirroring `capabilities()` immediately above -- the
+        SAME `_limit_gate` (rate/concurrency only -- `request=None`) this
+        session's own `capabilities()` call goes through, so `requests_
+        per_minute`/`concurrency` are charged for this endpoint exactly
+        like every other data-plane operation (design §8.2, SI-08).
+        The served bytes are the packaged `contract/OPERATION_CATALOG.
+        json`, read verbatim by `http.py`'s own handler and by the
+        in-process conformance adapter's port v1.17 `operation_catalog_
+        document()` -- there is nothing session-scoped to compute or
+        return here.
+        """
+        self.__authorize(request_id=request_id)
+        principal = self.__principal
+        with self.__cell._limit_gate(principal, None, request_id=request_id):  # noqa: SLF001
+            return None
+
     def __build_capabilities_document(self, principal):
         is_developer = principal.role == Role.DEVELOPER
         return build_capabilities_document(

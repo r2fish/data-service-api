@@ -30,6 +30,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import AuthContext
 from .errors import FoundationError, fail, observed_type_of, violation
+from .operation_catalog import load_operation_catalog_bytes
 from .service import DataService
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -72,6 +73,20 @@ def _load_contract_text() -> str:
 _CONTRACT = json.loads(_load_contract_text())
 _SCHEMAS = _CONTRACT["schemas"]
 _DEFINITIONS = _CONTRACT["definitions"]
+
+# The packaged, byte-identical derived operation catalog this deployment
+# serves at contract `endpoints.operation_catalog` (`GET /v1/operation-
+# catalog`, below) -- loaded once, as raw bytes, via `operation_catalog.
+# load_operation_catalog_bytes()` (shared with the in-process conformance
+# adapter's port v1.17 `operation_catalog_document()`, so both paths read
+# the identical source and can never silently re-encode it differently).
+_OPERATION_CATALOG_BYTES = load_operation_catalog_bytes()
+
+# The route path below is bound to the SAME `endpoints.operation_
+# catalog.path` the packaged contract (`_CONTRACT`, already loaded above
+# for `_SCHEMAS`/`_DEFINITIONS`) declares, never a hand-typed literal
+# that could silently drift from it.
+_OPERATION_CATALOG_ENDPOINT_PATH = _CONTRACT["endpoints"]["operation_catalog"]["path"]
 
 
 def _schema_property_type_name(schema: dict[str, Any], key: str) -> str | None:
@@ -452,6 +467,28 @@ async def get_capabilities(request: Request) -> Response:
 
 
 @_endpoint
+async def get_operation_catalog(request: Request) -> Response:
+    """Contract `endpoints.operation_catalog`: same auth as
+    `get_capabilities` immediately above (any authenticated
+    application credential -- `roles: [runtime, developer]`, no anonymous
+    face is added, design §8.2) and the SAME `DataService.operation_
+    catalog` rate/concurrency gate (SI-08's existing bound, unchanged).
+    The response body is the packaged `contract/OPERATION_CATALOG.json`
+    bytes, returned verbatim -- never re-serialized through `json.dumps`,
+    so this handler can never silently drift from the byte-for-byte value
+    C-29 checks."""
+    service: DataService = request.app.state.service
+
+    with service.acquire_concurrency_slot():
+        def _run() -> None:
+            context = _authenticate(request, service)
+            service.operation_catalog(context, concurrency_precharged=True)
+
+        await run_in_threadpool(_run)
+    return Response(content=_OPERATION_CATALOG_BYTES, status_code=200, media_type="application/json")
+
+
+@_endpoint
 async def post_query(request: Request) -> Response:
     service: DataService = request.app.state.service
     with service.acquire_concurrency_slot():
@@ -682,6 +719,7 @@ async def post_audit_query(request: Request) -> Response:
 
 _ROUTES = [
     Route("/v1/capabilities", get_capabilities, methods=["GET"]),
+    Route(_OPERATION_CATALOG_ENDPOINT_PATH, get_operation_catalog, methods=["GET"]),
     Route("/v1/data/{entity}/query", post_query, methods=["POST"]),
     Route("/v1/data/{entity}/mutations", post_mutate, methods=["POST"]),
     # Fixed 3-segment path, distinct from the 4-segment `/v1/data/{entity}/
