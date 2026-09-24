@@ -9,7 +9,7 @@ WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1): PostgreSQL
 | `pt.py` | mutation-journal check → `cd WT && .venv/bin/python -m pytest … \| tail`; `--wait` is forwarded to the pytest subprocess's own owned-mode suite-lock wait | 1.6-42 |
 | `mutate.py` | per mutation: backup → edit → test → `cp` back → `sleep 3` → sha256 ×2 → grep; `--wait` is forwarded the same way as `pt.py`'s | 1.4-28..31 |
 | `section.py` | paging a long document with `sed -n` / repeated reads | — |
-| `gate.py` | take the exclusive suite lock → start a throwaway cluster → catalog snapshot on it → root suite (`DSA_TEST_PG=external`) → judge → stop the cluster / release the lock | 1.3-19..23 |
+| `gate.py` | take the exclusive suite lock → start a throwaway cluster → catalog snapshot on it → root suite (`DSA_TEST_PG=external`) → judge → stop the cluster / release the lock; pytest runs with `--durations=25`, so the log's `slowest 25 durations` section is the standing slow-test list (1.6-44a) and stdout shows the top 3 | 1.3-19..23 |
 | `finalize.py` | per-change `finalize_*.sh`: allowlist → checks → commit → merge into main | 1.1-12a, 1.2, 1.9, 2-15 |
 | `fold.py` | walking `git worktree list` / `git branch` by hand to find already-merged linked worktrees and local branches safe to remove; `--apply` takes the exclusive suite lock for the whole run (default `--wait 0`); a `prunable` worktree is only reported, never pruned | — |
 | `handover_ready.py` | judging whether this is a safe boundary to move to a new chat; prints the continuation prompt | 1.10-67 |

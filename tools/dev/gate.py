@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -79,7 +80,11 @@ import _devlib as dl  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "testpg"))
 import dsa_testpg  # noqa: E402
 
-GATE_ARGS = ["-q", "-n", "5", "--dist", "loadgroup"]
+# R-86: `--durations=25` keeps pytest's "slowest 25 durations" section in every gate log
+# (the standing slow-test list, OPERATING_CONDITIONS 1.6-44a); pytest prints that section
+# BEFORE its final summary line, so `dl.tally_line()` still reads the tally as the last line.
+GATE_ARGS = ["-q", "-n", "5", "--dist", "loadgroup", "--durations=25"]
+SLOWEST_STDOUT = 3
 MUST_BE_ZERO = ("failed", "errors", "skipped", "xfailed", "xpassed", "deselected",
                 "subtests failed", "subtests skipped", "subtests xfailed", "subtests xpassed")
 STDOUT_NAMES = 10
@@ -170,6 +175,29 @@ def name_lines(changed: list[tuple[str, list[str], list[str]]], limit: int) -> l
     return lines
 
 
+_SLOWEST_HEADER_RE = re.compile(r"^=+ slowest \d+ durations =+$")
+_SLOWEST_LINE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s+(call|setup|teardown)\s+(\S+)")
+
+
+def slowest_lines(text: str) -> list[str]:
+    """R-86: the entries of pytest's `slowest N durations` section, in pytest's order
+    (slowest first), each as `<seconds>s <phase> <nodeid>`; [] when the section is absent."""
+    out: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if _SLOWEST_HEADER_RE.match(line.strip()):
+            inside = True
+            continue
+        if not inside:
+            continue
+        m = _SLOWEST_LINE_RE.match(line)
+        if m:
+            out.append(f"{m.group(1)}s {m.group(2)} {m.group(3)}")
+        elif line.startswith("=") or (out and not line.strip()):
+            break
+    return out
+
+
 def log_section(changed: list[tuple[str, list[str], list[str]]]) -> str:
     """Log form: every added / removed name, one per line (appended after pytest's output)."""
     lines = ["", f"== {LOG_SECTION} (names sorted) =="]
@@ -247,6 +275,9 @@ def main(argv: list[str] | None = None) -> int:
     reasons += changes
     ok = ok and not changes
     print(f"gate: {tally or '(no tally line)'}")
+    slowest = slowest_lines(log.read_text(encoding="utf-8"))
+    if slowest:
+        print(f"gate: slowest ({len(slowest)} in log): " + "; ".join(slowest[:SLOWEST_STDOUT]))
     print(f"gate: judge={'PASS' if ok else 'FAIL'}" + ("" if ok else f" ({', '.join(reasons)})"))
     for line in name_lines(changed, STDOUT_NAMES):
         print(f"gate: {line}")

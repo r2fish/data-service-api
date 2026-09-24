@@ -1571,3 +1571,35 @@ def test_handover_ready_not_ready(isolated_git, tmp_path, monkeypatch, case, nee
     assert ready.check(wt, denied, [str(wt)], handover, out=buf) == 1
     text = buf.getvalue()
     assert needle in text and "NOT READY" in text and "BEGIN CONTINUATION" not in text
+
+
+# R-86: the standing slow-test list.
+_DURATIONS_TAIL = (
+    "....                                                                     [100%]\n"
+    "============================ slowest 25 durations ============================\n"
+    "12.34s call     conformance-tests/test_c26_residue.py::test_c26_shutdown_leaves_no_residue[MitateDB-api-http]\n"
+    "3.50s setup    r2db-api/tests/test_postgres.py::test_deprovision_pre_check\n"
+    "0.90s teardown MitateDB-api/tests/test_ops_inventory.py::test_inventory_row\n"
+    "\n"
+    "(2 durations < 0.005s hidden.  Use -vv to show these durations.)\n"
+    "4018 passed, 2 subtests passed in 492.99s (0:08:12)\n"
+)
+
+
+def test_gate_args_keep_the_standing_durations_list():
+    """R-86: every gate log carries pytest's slowest-durations section."""
+    assert "--durations=25" in gate.GATE_ARGS
+
+
+def test_slowest_lines_parses_pytests_section_in_order():
+    assert gate.slowest_lines(_DURATIONS_TAIL) == [
+        "12.34s call conformance-tests/test_c26_residue.py::test_c26_shutdown_leaves_no_residue[MitateDB-api-http]",
+        "3.50s setup r2db-api/tests/test_postgres.py::test_deprovision_pre_check",
+        "0.90s teardown MitateDB-api/tests/test_ops_inventory.py::test_inventory_row",
+    ]
+    assert gate.slowest_lines("....\n3 passed in 0.10s\n") == []
+
+
+def test_tally_line_survives_a_durations_section():
+    """pytest prints the durations section before its final line, so the tally stays last."""
+    assert dl.tally_line(_DURATIONS_TAIL) == "4018 passed, 2 subtests passed in 492.99s (0:08:12)"
