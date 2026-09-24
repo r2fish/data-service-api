@@ -158,6 +158,21 @@ _CONTROL_LIMIT_ENV_NAMES: Mapping[str, str] = {
     "control_requests_per_minute": "MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT",
 }
 
+# R-105 (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-1): this
+# adapter's own declared writer-connection timeouts for the conformance
+# deployment -- NOT migration `0007_platform_declarations.sql`'s shipped
+# 5000ms/5000ms default. `_bootstrap_platform` issues `ALTER ROLE ... SET`
+# for both values, on both service writer roles, over its own admin
+# connection right after `0007` runs (same SQL shape as `tests/control_
+# plane_harness.py::set_role_timeouts`), so the peer's composition root
+# still derives `visibility_lag_ms` from the catalog unchanged -- only the
+# seeded numbers differ. The platform DB unit_of_work here is a handful of
+# ms-scale statements with no subprocess/external wait between them, so a
+# much smaller pair is sufficient for this deployment; see design D-1 for
+# the measurement that backs these two values.
+CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS = 1000
+CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS = 2000
+
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 
 # WP-5 (design v1.2 R-8): `MitateDB-api` is not pip-installed anywhere this
@@ -373,6 +388,25 @@ def _bootstrap_platform(
     # depends on 0002's two roles, run here (before the password-ALTER
     # block below, order-independent either way).
     _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+    # R-105 (design D-1): overwrite 0007's shipped 5000ms/5000ms role
+    # settings with this plug's own conformance-deployment values, on
+    # BOTH service writer roles 0007 just seeded into `audit_writer_
+    # roles` -- the SAME `ALTER ROLE ... SET` shape `tests/control_plane_
+    # harness.py::set_role_timeouts`/`ops set-platform-timeouts` use, over
+    # this adapter's own admin connection (autocommit, closed right after
+    # -- never kept open). The peer's composition root still derives
+    # `visibility_lag_ms` from `pg_db_role_setting` unchanged; only the
+    # seeded numbers differ from what 0007 alone would have left in place.
+    _admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with _admin.cursor() as _cur:
+            for _role in (api_role, controlplane_role):
+                _cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = {}").format(
+                    sql.Identifier(_role), sql.Literal(f"{CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS}ms")))
+                _cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = {}").format(
+                    sql.Identifier(_role), sql.Literal(f"{CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS}ms")))
+    finally:
+        _admin.close()
     # Phase 10 WP-6b (design D-5 (ii)): widens the CHECK constraint --
     # takes no psql variables (this migration only alters the key
     # vocabulary; it seeds no row of its own, `process_ceilings` is
@@ -1017,8 +1051,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # REMOVED product code) -- the two writer timeouts now come
             # from `<prefix>svc_api`'s own PostgreSQL role setting
             # (`_bootstrap_platform`'s own `0007_platform_declarations.
-            # sql` run, the SAME shipped 5000ms/5000ms default `main.
-            # build_app` relies on), applied automatically at login.
+            # sql` run, immediately overwritten by this adapter's own
+            # `CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS`/`_IDLE_TIMEOUT_MS`
+            # `ALTER ROLE` -- R-105 -- rather than the shipped 5000ms/
+            # 5000ms default `main.build_app` relies on), applied
+            # automatically at login.
             self._application_durable_audit = PostgresApplicationAuditSink(
                 self._platform.api_dsn, schema=self._platform.schema,
             )
@@ -1098,10 +1135,14 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 # auditreader` DSN -- `visibility_lag_ms` is now DERIVED
                 # by `build_control_service` from `pg_db_role_setting`
                 # (design D-1(c), `platform_declarations.derive_
-                # visibility_lag_ms`) -- the SAME shipped 5000ms/5000ms
-                # role-level default `_bootstrap_platform`'s own `0007`
-                # run seeds, matching `self._application_durable_audit`'s
-                # own (now argument-free) writer connection above.
+                # visibility_lag_ms`) -- R-105: this adapter's own
+                # conformance-deployment role-level default
+                # (`CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS`/`_IDLE_
+                # TIMEOUT_MS`, `_bootstrap_platform`'s own `ALTER ROLE`
+                # issued right after the `0007` run that seeds the
+                # shipped 5000ms/5000ms values), matching `self.
+                # _application_durable_audit`'s own (now argument-free)
+                # writer connection above.
                 "MITATEDB_AUDIT_DSN": self._platform.auditreader_dsn,
                 # Q4 phase (design D-2, work order §4 WP-2 変更対象 D):
                 # `MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are

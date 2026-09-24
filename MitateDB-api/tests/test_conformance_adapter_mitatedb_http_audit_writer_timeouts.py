@@ -17,7 +17,11 @@ regress: the adapter's own `_bootstrap_platform` forgetting to apply
 migration `0007_platform_declarations.sql` (or a caller reintroducing an
 explicit override) -- either would leave the writer connection's real
 GUCs at the bare PostgreSQL cluster default (typically unlimited/`0`)
-rather than the role-level 5000ms/5000ms declaration. The mechanism below
+rather than the role-level declaration this adapter's own bootstrap
+applies (R-105, design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-1:
+`CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS`/`_IDLE_TIMEOUT_MS`, 1000ms/2000ms
+-- overwritten after migration `0007`'s own shipped 5000ms/5000ms seed,
+not that seed itself). The mechanism below
 (build the real adapter, read its own sink's real connection via `SHOW`,
 compare against a fresh admin connection's own bare default) still proves
 exactly that -- it is now a proof that the DECLARATIONS-based mechanism
@@ -34,12 +38,14 @@ own `_bootstrap_platform` actually applied `0007`).
 Distinguishable from the untouched server default (P4-D17 review point 2):
 this test reads the real cluster's own compiled-in default via a bare
 admin connection FIRST, then asserts the adapter's own value differs from
-it -- the shipped role-level default the migration always seeds
-(`DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`DEFAULT_AUDIT_IDLE_TIMEOUT_MS`, both
-5000ms) is asserted for its literal value too, so a mutation that drops
-migration `0007` from `_bootstrap_platform`'s own list (falling back to
-the server's own default, typically "0" = disabled) goes red on both
-assertions.
+it -- the adapter's own conformance-deployment role-level value
+(`conformance_adapter_mitatedb_http.CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS`/
+`_IDLE_TIMEOUT_MS`, R-105) is asserted for its literal value too, so a
+mutation that drops `_bootstrap_platform`'s own `ALTER ROLE` step (leaving
+migration `0007`'s own shipped 5000ms/5000ms seed in place) OR that drops
+migration `0007` itself from `_bootstrap_platform`'s own list (falling
+back to the server's own default, typically "0" = disabled) goes red on
+both assertions.
 
 Building the real `MitateDBHttpConformanceAdapter` is heavyweight
 (provisions a throwaway PostgreSQL platform database + roles, runs every
@@ -62,10 +68,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "conforma
 import psycopg  # noqa: E402
 
 import conformance_adapter_mitatedb_http as _http_module  # noqa: E402
-from mitatedb_api.application_audit import (  # noqa: E402
-    DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
-    DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
-)
+from mitatedb_api import platform_declarations  # noqa: E402
 
 # Q4 phase WP-0 (design D-1 (b)(ii), work order §4 WP-0 完了条件 2): was
 # `from .test_application_audit import _ms_from_pg_timeout_text` -- now
@@ -115,8 +118,8 @@ def test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle
     finally:
         adapter.close()
 
-    assert statement_timeout_ms == DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
-    assert idle_timeout_ms == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
+    assert statement_timeout_ms == _http_module.CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS
+    assert idle_timeout_ms == _http_module.CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS
     # Distinguishable from the untouched server default -- otherwise a
     # mutation dropping the adapter's own kwargs would coincidentally still
     # read as "configured" (P4-D17 review point 2). Review fix (M1): the
@@ -129,3 +132,48 @@ def test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle
     # `test_conformance_adapter_r2db_http_audit_writer_timeouts.py`).
     assert statement_timeout_ms != cluster_default_statement_timeout_ms
     assert idle_timeout_ms != cluster_default_idle_timeout_ms
+
+
+def test_http_conformance_adapter_declares_the_conformance_deployment_visibility_lag() -> None:
+    """R-105 (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-1): this
+    adapter's peer declares `audit_visibility_lag_ms` as the sum of the
+    adapter's OWN conformance-deployment module constants
+    (`CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS` + `_IDLE_TIMEOUT_MS` +
+    `VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS`) -- checked (1) against that
+    same-source sum, (2) against the literal `4000` (design D-1: "両辺同
+    源の穴を塞ぐ" -- guards the two module constants drifting away from
+    the value both this plug and r2db-api's own HTTP plug must agree on),
+    and (3) against `platform_declarations.derive_visibility_lag_ms` fed
+    the SAME catalog rows `mitatedb_api.control_composition` itself reads
+    at startup (`read_platform_declarations`/`read_declared_role_
+    timeouts` over `audit_writer_roles`) -- proving the declared value is
+    genuinely the catalog-derived one, not a coincidentally-equal literal
+    somewhere else in the adapter."""
+    adapter = _http_module.build_adapter()
+    try:
+        lag_ms = adapter.audit_visibility_lag_ms()
+
+        conn = psycopg.connect(adapter._platform.controlplane_dsn)  # noqa: SLF001 -- adapter-internal reach-in, test-only (mirrors this file's own established convention)
+        try:
+            declarations = platform_declarations.read_platform_declarations(
+                conn, schema=adapter._platform.schema,  # noqa: SLF001
+                ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+            )
+            catalogs = [
+                platform_declarations.read_declared_role_timeouts(
+                    conn, role, ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+                )
+                for role in declarations.audit_writer_roles
+            ]
+        finally:
+            conn.close()
+    finally:
+        adapter.close()
+
+    assert lag_ms == (
+        _http_module.CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS
+        + _http_module.CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS
+        + platform_declarations.VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS
+    )
+    assert lag_ms == 4000
+    assert platform_declarations.derive_visibility_lag_ms(catalogs) == lag_ms

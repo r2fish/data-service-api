@@ -346,6 +346,20 @@ def test_c25_result_request_id(adapter: ConformanceAdapter, isolated, request: p
         # (the completeness_note's own "rows within visibility_lag_ms of
         # the current time are not yet returned").
         #
+        # R-105 correction (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.
+        # md D-1): both http plugs now declare the conformance-deployment
+        # value 4000, not 11000 -- r2db-api's HTTP plug still declares it
+        # as a fixed adapter-own constant sum (`CONFORMANCE_AUDIT_
+        # STATEMENT_TIMEOUT_MS` + `CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS` +
+        # margin, unchanged in character from the value L-1 above
+        # describes); MitateDB-api's HTTP plug has derived this value from
+        # `pg_db_role_setting` since the Q4 phase (design D-1(c)) -- R-105
+        # changes only the seeded numbers that its bootstrap's own `ALTER
+        # ROLE` places on the `api`/`controlplane` writer roles (5000/5000
+        # -> `CONFORMANCE_AUDIT_*` 1000/2000). L-1's "not of either peer"
+        # still describes a property of the deployment, not of the peer
+        # product -- what changed is the number, not the mechanism.
+        #
         # `_find_audit_event_by_request_id` pages the FULL log forward
         # (also discovered empirically, running inside the full suite: a
         # single `{"limit": 200}` no-`after` query only ever sees the

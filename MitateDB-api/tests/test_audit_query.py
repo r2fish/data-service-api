@@ -228,7 +228,16 @@ def _cleanup_postgres(control_platform) -> None:
 
 @pytest.fixture
 def pg(control_platform) -> Iterator[types.SimpleNamespace]:
-    h = _postgres_harness(control_platform)
+    # R-105 (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-4): the
+    # SAME small-timeout pair this file's own module-scoped `control_
+    # platform`-consuming call sites already pass (`_postgres_harness`'s
+    # own docstring). This fixture's only lag-dependent consumer reads
+    # the lag back from `pg.visibility_lag_ms` (measured from the role
+    # catalog by `_postgres_harness`, never a literal), so lowering the
+    # seeded pair (11,000 -> 3,000 derived) shortens its wait without
+    # changing what it observes (acceptance audit 2026-09-24 corrected
+    # this comment's former claim that consumers hold explicit values).
+    h = _postgres_harness(control_platform, audit_statement_timeout_ms=1000, audit_idle_timeout_ms=1000)
     try:
         yield h
     finally:
@@ -3059,6 +3068,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_156_rows() -> None:
     assert len(_ISOMORPHIC_TARGETS) == 156
 
 
+_ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}
+
+
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
     """Resolves ONE `_ISOMORPHIC_TARGETS` row's own per-side relative path
     against `peer_root` (either this peer's own root or the sibling's) via
@@ -3103,12 +3115,31 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) 
     string cannot itself be class-qualified; searching every top-level
     class's own direct body for a same-named method keeps this exactly as
     deliberate as the module-level match above, while staying agnostic to
-    which class each peer happens to name it under."""
+    which class each peer happens to name it under.
+
+    R-105 (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-5): caches
+    the `read_text` + `ast.parse` pair in `_ISOMORPHIC_PARSE_CACHE`, keyed
+    by the resolved ABSOLUTE path (`peer_root / relative_path`), never by
+    `relative_path` alone -- the same relative path resolves to a
+    DIFFERENT file depending on which side's `peer_root` it is joined
+    against, so a relative-path-only key would return one side's own tree
+    for the other side's lookup too, silently comparing a peer against
+    ITSELF and turning every diff in this module permanently green (the
+    isomorphism check's own worst failure mode). One entry serves every
+    `_ISOMORPHIC_TARGETS` row that shares a path, on either side, across
+    every call this test module makes -- `test_peer_local_helpers_are_
+    isomorphic_to_the_sibling_peer` alone re-parses each of the 156 rows'
+    files four times (self/sibling x two directions) without this cache."""
     path = peer_root / relative_path
     if not path.exists():
         return None
-    source = path.read_text()
-    tree = _ast.parse(source, filename=str(path))
+    cached = _ISOMORPHIC_PARSE_CACHE.get(path)
+    if cached is None:
+        source = path.read_text()
+        tree = _ast.parse(source, filename=str(path))
+        _ISOMORPHIC_PARSE_CACHE[path] = (source, tree)
+    else:
+        source, tree = cached
     node = next(
         (
             n
@@ -3345,6 +3376,43 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
         if _normalize(self_src) != _normalize(sibling_src):
             mismatches.append(f"{sibling_relative_path}::{symbol}")
     assert not mismatches, f"peer-local symbol(s) not isomorphic after normalization (or missing on the sibling side): {mismatches!r}"
+
+
+def test_isomorphic_symbol_source_cache_key_is_the_resolved_absolute_path() -> None:
+    """R-105 (design docs/design/SLOW_CALL_PHASE_TESTS_V0_1.md D-5):
+    guards `_ISOMORPHIC_PARSE_CACHE`'s own key choice -- a relative-path-
+    only key would collapse the self-side and sibling-side lookups below
+    onto the SAME cache entry (whichever side's `peer_root` is resolved
+    first "wins" for every later call, on either side), silently turning
+    this whole module's isomorphism check into a comparison of a peer
+    against ITSELF (the mechanism's own worst failure mode, see this
+    file's own `_isomorphic_symbol_source` docstring). `_postgres_
+    harness` is used, at THIS file's own relative path (`tests/test_
+    audit_query.py`) -- THE SAME STRING on both sides -- because it is
+    module-level (matched by the same node-matcher `_ISOMORPHIC_TARGETS`
+    rows use), it is NOT itself an `_ISOMORPHIC_TARGETS` row (its two
+    peer bodies are not asserted equal anywhere, unlike `_isomorphic_
+    symbol_source` itself -- R-105 made that ONE symbol's body byte-
+    identical between the two peers on purpose, so it cannot be used
+    here: a same-relative-path row whose real content happens to already
+    be equal on both sides could pass this assertion even with a broken,
+    relative-path-only cache key, for the wrong reason), and its two
+    peer bodies genuinely differ (each peer's own writer-timeout harness
+    talks to a differently-shaped backend). So a broken (relative-path-
+    only) cache key would collide the two lookups below and silently
+    return the same cached tree for both, making the assertion below
+    pass for the wrong reason; a genuinely path-keyed cache returns two
+    different trees, and the two reads below differ. A path that differs
+    textually between the two sides (a `src/` row) would not catch a
+    broken key at all -- there would be no collision to observe (design
+    D-5's own note on this)."""
+    self_root = Path(__file__).resolve().parents[1]
+    sibling_root = Path(__file__).resolve().parents[2] / "r2db-api"
+    self_src = _isomorphic_symbol_source(self_root, "tests/test_audit_query.py", "_postgres_harness")
+    sibling_src = _isomorphic_symbol_source(sibling_root, "tests/test_audit_query.py", "_postgres_harness")
+    assert self_src is not None
+    assert sibling_src is not None
+    assert self_src != sibling_src
 
 
 def test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts(control_platform) -> None:
