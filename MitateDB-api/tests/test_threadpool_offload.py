@@ -232,24 +232,28 @@ def test_control_sync_section_runs_off_the_event_loop():
 
 
 def test_post_query_sync_section_runs_off_the_event_loop(app_a_stack):
-    """Held: `POST /v1/data/<entity>/query` (`ApplicationRuntime.read`
-    stalled). Probe: `GET /v1/catalog` (untouched).
+    """Held: `POST /v1/data/<entity>/query` (`ApplicationRuntime.
+    read_page` stalled -- WP-2, design docs/design/
+    PHASE11_KEYSET_PAGING_V1.md D-2b.4: `post_query` now calls this
+    cursor-carrying entry point instead of the plain `read`). Probe:
+    `GET /v1/catalog` (untouched).
 
-    Mutation (`http.py::post_query`'s own `rows = await run_in_threadpool
-    (_sync)` reverted to `rows = _sync()`): the held request's own
-    synchronous section now runs directly on the ASGI event-loop thread,
-    so the probe never gets a turn until the held request's own 10s
-    `release.wait` times out on its own accord -- this test's own `assert
-    not held_task.done()` goes red once the probe is finally issued.
+    Mutation (`http.py::post_query`'s own `rows, next_page = await
+    run_in_threadpool(_sync)` reverted to `rows, next_page = _sync()`):
+    the held request's own synchronous section now runs directly on the
+    ASGI event-loop thread, so the probe never gets a turn until the held
+    request's own 10s `release.wait` times out on its own accord -- this
+    test's own `assert not held_task.done()` goes red once the probe is
+    finally issued.
     """
     entity = f"wp8b_query_offload_probe_{uuid.uuid4().hex[:12]}"
     _create_entity(app_a_stack, entity, ["item_key"])
 
     entered = threading.Event()
     release = threading.Event()
-    original = ApplicationRuntime.read
+    original = ApplicationRuntime.read_page
 
-    def _stalling_read(self, *args, **kwargs):
+    def _stalling_read_page(self, *args, **kwargs):
         entered.set()
         held = release.wait(timeout=10)
         assert held, "release was never set -- the held request would hang forever"
@@ -282,7 +286,7 @@ def test_post_query_sync_section_runs_off_the_event_loop(app_a_stack):
             held_response = await asyncio.wait_for(held_task, timeout=5)
             assert held_response.status_code == 200
 
-    with mock.patch.object(ApplicationRuntime, "read", _stalling_read):
+    with mock.patch.object(ApplicationRuntime, "read_page", _stalling_read_page):
         asyncio.run(_scenario())
 
 

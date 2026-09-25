@@ -377,3 +377,13 @@ Executability lands in the phase 11 work order's later work package. Until then 
 
 - Evidence cell: "the body a peer itself returns for its own operation_catalog operation (a new port method) compared byte-for-byte against the packaged derived catalog on all 6 adapters, plus a real dial of the declared operation_catalog_url on every socket-transport adapter -- landed in a later work package of this item"
 - Status cell: "declared; not yet executable -- this item's later work package lands the scenario, and the row is declared here so the design document's own C-29 references resolve, the same sequence C-20..C-27 followed (design first, condition row second). Unconditional 1.9.0 obligation, version-gated rather than capability-gated. The regeneration-identity test fixes that the derived catalog agrees with the contract; this row fixes that the document a deployment serves is that same catalog. [history](CONDITIONS_HISTORY.md#c-29)"
+
+---
+
+## C-30
+
+**起票 2026-09-25 (`docs/design/PHASE11_KEYSET_PAGING_V1.md` D-4, work order `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` WP-1):** this row was opened as `declared`, ahead of port v1.18's `query_page` and `conformance-tests/test_c30_keyset_paging.py`, so that the design document's own `C-30` references resolve -- the same sequence C-20..C-29 followed (design commit first, condition row second). The condition itself is new (it carried the provisional number `C-28` before the R-29 renumbering, work order §9); nothing was moved out of an earlier row into this section.
+
+**WP-2 landed (2026-09-25):** port v1.18's `query_page` and the test file came into existence and the row was rewritten to `executable (six adapters)`, driven across 9 nodes on 6 plugs -- both peers still declared 1.8.0 (1.9.0 after the R-29 merge `285cfe4`) at that point, so the concurrent-insert node ran as `xfail(strict=True)` and the other 8 as `xfail(strict=False)` (design D-4); the version-flip commit each peer's own WP-6 makes was intended to turn this row's `>= 1.10.0` branch on for real, without editing this suite.
+
+Both r2db-api and MitateDB-api have since flipped `contract_version` to 1.10.0 (WP-6), so the current row states the now-obtaining fact: the `>= 1.10.0` branch drives for real on all 6 plugs, all 9 nodes `passed` (`xfailed` 0, `xpassed` 0). **受け入れ監査 2026-09-25 観察 4e の訂正**: 「The test file itself is unchanged.」は事実誤り -- WP-2 landed 以後、この test file は T に変種を 2 つ足し (`tied_order_key`: WP-5 のコードレビュー差し戻し対応 B で足された; `null_valued_field_desc`: WP-4 のコードレビュー差し戻し (desc の NULL 分岐を観測する node が無かった) で足された)、B / A ノードの継続要求の `page.size` を発行時の値に合わせる監督裁定の修正を受け (WP-4 実施記録)、`test_c28_keyset_paging.py` から `test_c30_keyset_paging.py` へ改名された (R-29 renumbering、WP-6)。

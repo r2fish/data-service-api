@@ -640,8 +640,10 @@ class ControlPlaneService:
             # Flipped again to 1.8.0 in phase 10 WP-6a/pair-closing: the SAME commit as `service.py`'s own data-plane flip and this host's own `process_ceilings` mapping -- never ahead of the behavior it declares.
             #
             # This control-plane document also flips to 1.9.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
+            #
+            # This control-plane document also flips to 1.10.0 in the same commit as the data-plane flip in `capabilities_document.py` (the declaration `service.py` serves; C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
             # history: CH-0260
-            "contract_version": "1.9.0",
+            "contract_version": "1.10.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),

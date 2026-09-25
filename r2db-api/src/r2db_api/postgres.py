@@ -118,7 +118,7 @@ from .psycopg_counting import CountingConnection, prepared_stats_skeleton, probe
 # test_postgres.py`'s own facade test, which still imports it from
 # `postgres`.
 from .postgres_like import _escape_like_literal
-from .postgres_sql import _append_revision_predicate, _bind_value, _order_by_sql, _predicate_sql, _select_statement, _text_expression, _where_clause
+from .postgres_sql import _append_revision_predicate, _bind_value, _keyset_predicate_sql, _order_by_sql, _predicate_sql, _select_statement, _text_expression, _where_clause
 # `_FIELD_TYPE_SQL`/`_JSONB_SQL` are not used directly in this module; the import exists only as a facade-compat re-export for callers that still import them from `postgres`.
 # history: CH-0002
 from .postgres_types import _DOMAIN_TO_DECLARED, _FIELD_TYPE_SQL, _JSONB_SQL, _SQL_TYPE_TO_DECLARED, _TableInfo, _column_type_sql
@@ -134,16 +134,16 @@ from .structured import (
     idempotency_digest,
     _check_type,
     _ConstraintDeclarationError,
-    _decode_cursor,
     _declared_type_label,
-    _encode_cursor,
     _fail_constraint_declaration,
     _idempotency_record_has_request_id,
     _resolve_order_by,
-    _shape_hash,
     _validate_predicate_types,
     _reject_reserved_entity_name,
     bind_mutation,
+    canonical_page_binding,
+    decode_and_check_page_cursor,
+    encode_page_cursor,
     bind_schema_operation,
     delete_confirmation_phrase,
     drop_entity_confirmation_phrase,
@@ -1355,14 +1355,23 @@ class PostgresCell:
                     # validate every predicate's value type before touching stored rows at all -- the same shared function and the same ordering `ApplicationCell.query` uses.
                     # history: CH-0023
                     _validate_predicate_types(where, table_info.columns)
-                    # the cursor's opaque shape hash binds the Application scope, entity, and the full query shape (select/where/order_by/size) -- decoded (and validated) here, before any SQL referencing it runs.
+                    # keyset paging (design D-3 (3), D-6): the cursor's binding hash covers the Application scope, entity, and the normalized where/order_by only (never select/size, which do not decide a row's position) -- decoded (and count/type-checked) here, before any SQL referencing it runs.
                     # history: CH-0024
-                    shape = _shape_hash(self.application_id, entity, select, where, order_spec, page_size)
-                    offset = 0
+                    where_terms = [(p.field, p.operator, p.value) for p in where]
+                    binding = canonical_page_binding(self.application_id, entity, where_terms, order_spec)
+                    cursor_values: list[Any] | None = None
                     if cursor is not None:
-                        offset = _decode_cursor(cursor, shape)
+                        cursor_values = decode_and_check_page_cursor(cursor, binding, order_spec, table_info.columns)
                     where_sql, where_params = self._where_clause(where, table_info.columns)
-                    statement = self._select_statement(entity, select, where_sql, order_spec, offset, page_size, revision_column=_REVISION_COLUMN)
+                    if cursor_values is not None:
+                        # keyset paging (design D-3 (4)): the keyset predicate replaces the old OFFSET, ANDed onto the caller's own where clause.
+                        keyset_sql, keyset_params = _keyset_predicate_sql(order_spec, cursor_values, table_info.columns)
+                        where_sql = sql.SQL("{w} AND {k}").format(w=where_sql, k=keyset_sql) if where_sql is not None else keyset_sql
+                        where_params = list(where_params) + keyset_params
+                    # keyset paging (design D-3 (10)): the internal projection reads select's own columns plus every order_spec column select omits (tie-break `id` included), so the cursor can always be rebuilt from the fetched row -- trimmed back to select alone below, once the row is fetched.
+                    order_only_fields = [field_name for field_name, _direction in order_spec if field_name not in select]
+                    read_columns = list(select) + order_only_fields
+                    statement = self._select_statement(entity, read_columns, where_sql, order_spec, page_size, revision_column=_REVISION_COLUMN)
                     with conn.cursor() as cur:
                         _run(cur, statement, where_params)
                         rows = cur.fetchall()
@@ -1379,14 +1388,28 @@ class PostgresCell:
             limits.check_deadline(deadline, clock)
         has_more = len(rows) > page_size
         page_rows = rows[:page_size]
-        # Every row was selected as `select ++ [_r2db_revision::text]`
-        # (`_select_statement`, below (now in `postgres_sql.py`)) -- the revision is always the last
-        # column, index-aligned with `page_rows` (R-4: capability
-        # `revision_preconditions: enabled` means every entity is mutable,
-        # so a query response always includes revisions).
-        items = [dict(zip(select, row[:-1])) for row in page_rows]
+        # Every row was selected as `read_columns ++ [_r2db_revision::text]`
+        # (`_select_statement`, in `postgres_sql.py`) with `read_columns`
+        # = `select` followed by any order_spec-only columns (D-3 (10)) --
+        # `select` is therefore always `read_columns`'s own prefix, so
+        # `row[:len(select)]` recovers exactly the caller's own projection,
+        # and the revision stays the last column, index-aligned with
+        # `page_rows` (R-4: capability `revision_preconditions: enabled`
+        # means every entity is mutable, so a query response always
+        # includes revisions).
+        items = [dict(zip(select, row[: len(select)])) for row in page_rows]
         revisions = [row[-1] for row in page_rows]
-        next_cursor = _encode_cursor(offset + page_size, shape) if has_more else None
+        next_cursor = None
+        if has_more:
+            # keyset paging (design D-3 (4)): the next cursor encodes the LAST
+            # returned row's own order_spec values (tie-break included),
+            # never a count or an offset -- read back through `read_
+            # columns`'s own index, since `order_spec` fields may live
+            # past `select`'s own prefix.
+            column_index = {field_name: i for i, field_name in enumerate(read_columns)}
+            last_row = page_rows[-1]
+            cursor_position = [last_row[column_index[field_name]] for field_name, _direction in order_spec]
+            next_cursor = encode_page_cursor(cursor_position, binding)
         return QueryOutcome(items=items, revisions=revisions, has_more=has_more, next_cursor=next_cursor)
 
     _select_statement = staticmethod(_select_statement)

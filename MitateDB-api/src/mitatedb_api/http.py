@@ -653,7 +653,7 @@ async def post_query(request: Request) -> Response:
         # then `session.read` (a real cell/psycopg call on this HTTP
         # composition) -- and is delegated to `run_in_threadpool` as one unit,
         # started only once the async body read above has completed.
-        def _sync() -> list[Any]:
+        def _sync() -> tuple[list[Any], "str | None"]:
             _check_object_shape(body, _SCHEMAS["QueryRequest"], label="QueryRequest")
             _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS)
 
@@ -669,35 +669,27 @@ async def post_query(request: Request) -> Response:
 
             page = body.get("page")
             page_size = None
+            cursor = None
             if page is not None:
                 _check_object_shape(page, _DEFINITIONS["Page"], label="page", own_path="page")
+                # `page.cursor` is not rejected inline here -- it is passed
+                # verbatim to `session.read_page` below, whose own cursor-
+                # carrying entry point (`cell.py::ApplicationCell.read_page`)
+                # is the one call site that decides whether a cursor is
+                # refused or executed (design docs/design/
+                # PHASE11_KEYSET_PAGING_V1.md D-2b.4). This mirrors
+                # `select`/`where`/`order_by` above: this wire layer never
+                # interprets the field itself, only reads it off the checked
+                # shape.
                 if "cursor" in page:
-                    # WP-3 design decision (reported to the requester): `page.
-                    # cursor` has no implementation on this peer -- there is no
-                    # opaque-cursor pagination state anywhere in `cell.py`/either
-                    # backend. Presenting one is refused deterministically and
-                    # classified `CAPABILITY_UNSUPPORTED`: cursor-based pagination
-                    # is a real, optional target shape this contract defines
-                    # (`QueryResult.next_page`) that this peer simply does not
-                    # execute, matching `capability_status.rules`' own "optional
-                    # target operations ... must fail with CAPABILITY_UNSUPPORTED"
-                    # -- not a malformed request (`VALIDATION_FAILED`), and not a
-                    # structural absence (the field IS a real, accepted part of
-                    # this endpoint's own request shape; it is refused only once
-                    # actually presented, after shape/auth, before execution).
-                    # Left to a future capability-envelope decision whether to
-                    # implement cursor pagination at all (design v1.2 §7 ledger).
-                    raise CapabilityError(
-                        "page.cursor is not supported by this peer",
-                        details=violation("capability", field="page/cursor"),
-                    )
+                    cursor = page["cursor"]
                 if "size" in page:
                     page_size = page["size"]
 
             # Phase 9 WP-3d: `budget` now reaches `session.read` for real -- `ApplicationRuntime.read` (`cell.py`) is what turns it into `effective_limits` (`config.narrow_limits_by_budget`, `endpoint_kind="query"`) and validates it.
             # history: CH-0210
-            return session.read(entity, fields=list(select), filters=filters, order_by=order_by, limit=page_size,
-                                request_id=_request_id(request), budget=body.get("budget"))
+            return session.read_page(entity, fields=list(select), filters=filters, order_by=order_by, limit=page_size,
+                                     cursor=cursor, request_id=_request_id(request), budget=body.get("budget"))
 
         # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `request_id` on the
         # response is `_request_id(request)` -- the SAME per-request value
@@ -707,8 +699,8 @@ async def post_query(request: Request) -> Response:
         # back through (a bare row list, unlike `transact`'s/the schema
         # methods' own dict/list-with-envelope returns), so this endpoint
         # reads its own already-held local value instead of `rows`.
-        rows = await run_in_threadpool(_sync)
-    return JSONResponse({"items": rows, "next_page": None, "request_id": _request_id(request)}, status_code=200)
+        rows, next_page = await run_in_threadpool(_sync)
+    return JSONResponse({"items": rows, "next_page": next_page, "request_id": _request_id(request)}, status_code=200)
 
 
 def _mutation_item(entity: str, raw: Mapping[str, Any], *, index: int) -> dict[str, Any]:

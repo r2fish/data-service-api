@@ -15,10 +15,25 @@ module.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .errors import fail, observed_type_of, violation
 from .value_nul import _contains_nul
+
+
+def _contains_lone_surrogate(value: str) -> bool:
+    """Whether `value` holds a UTF-16 surrogate code point (U+D800-DFFF)
+    -- always unpaired at the Python `str` level, since a JSON `\\uD83D\\uDE00`-
+    style escaped pair is already combined into one supplementary-plane
+    character by the JSON decoder before this function ever sees it; a
+    lone one only ever reaches here from a request that spelled a single,
+    unmatched `\\uD800`-range escape. `psycopg` cannot encode it (a client-
+    supplied-value bug, the same class `_check_type` already refuses for
+    an out-of-range integer or a NUL byte), and letting it through to a
+    driver-level `UnicodeEncodeError` would surface as `SERVICE_UNAVAILABLE`
+    instead of `VALIDATION_FAILED`."""
+    return any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)
 
 
 # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication, docs/design/
@@ -121,10 +136,25 @@ def _check_type(value: Any, field_type: str | None, field_name: str, *, constrai
             )
     elif field_type == "number":
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if ok:
+            try:
+                representable = math.isfinite(float(value))
+            except (OverflowError, ValueError):
+                representable = False
+            if not representable:
+                # design PHASE11_KEYSET_PAGING_V1 D-3 (4a) (shared choke
+                # point, so `where` and `page/cursor` refuse alike): a
+                # magnitude/inf/nan PostgreSQL's own `float8` cannot hold
+                # would otherwise reach the driver as a raw bind value and
+                # come back as a `NumericValueOutOfRange`, surfacing as
+                # `SERVICE_UNAVAILABLE` instead of this refusal.
+                fail("VALIDATION_FAILED", "Value is out of range for the field's declared type.", details=violation("request_schema", field=field_name))
     elif field_type == "boolean":
         ok = isinstance(value, bool)
     elif field_type == "string":
         ok = isinstance(value, str)
+        if ok and _contains_lone_surrogate(value):
+            fail("VALIDATION_FAILED", "Value contains an unpaired UTF-16 surrogate.", details=violation("request_schema", field=field_name))
     elif field_type == "object":
         ok = isinstance(value, dict)
     elif field_type == "array":

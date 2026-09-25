@@ -56,22 +56,24 @@ LEDGER_TABLE_NAME = "_mdb_platform_upgrades"
 
 #: The complete set of per-application upgrade numbers THIS package's own
 #: shipped migrations set requires every application database to carry
-#: (design D-3(f), §8: MitateDB = {6, 8, 9, 10} -- `0006_declared_field_
-#: types_upgrade.sql` predates this WP's own ledger discipline,
+#: (design D-3(f), §8: MitateDB = {6, 8, 9, 10, 15} -- `0006_declared_
+#: field_types_upgrade.sql` predates this WP's own ledger discipline,
 #: `0008_platform_upgrades_upgrade.sql` is Q4 phase's own,
 #: `0009_field_constraints_upgrade.sql` is Phase 9 WP-3a's own (design
 #: docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2
 #: (1)/(4)): `enum_json`/`nullable` columns on `_mdb_field_types`,
 #: `0010_idempotency_records_upgrade.sql` is Phase 9 WP-3c's own (design
 #: D-5, 監督裁定集約 rulings-r5-r6.md I-1): the `_mdb_idempotency` side
-#: table). D-3(d) regulation (d)'s three-way static check (`tests/test_
-#: platform_upgrade_ledger_scan.py::test_real_migrations_three_way_
-#: match`) holds this set, the real `migrations/*_upgrade.sql` file-number
-#: set, and `0003`'s own seed list to the SAME set mechanically --
-#: forgetting to add a new number here when a new per-application upgrade
-#: script ships is caught by CI, not left to operator discipline (design
-#: §9.4 step 5).
-PLATFORM_UPGRADE_NUMBERS: frozenset[int] = frozenset({6, 8, 9, 10})
+#: table, `0015_row_order_column_upgrade.sql` (design docs/design/
+#: PHASE11_KEYSET_PAGING_V1.md D-2): the `_mdb_row` column on every
+#: declared collection table). D-3(d) regulation (d)'s
+#: three-way static check (`tests/test_platform_upgrade_ledger_scan.py::
+#: test_real_migrations_three_way_match`) holds this set, the real
+#: `migrations/*_upgrade.sql` file-number set, and `0003`'s own seed list
+#: to the SAME set mechanically -- forgetting to add a new number here
+#: when a new per-application upgrade script ships is caught by CI, not
+#: left to operator discipline (design §9.4 step 5).
+PLATFORM_UPGRADE_NUMBERS: frozenset[int] = frozenset({6, 8, 9, 10, 15})
 
 #: The `psql -v` variable name this peer's own per-application upgrade
 #: scripts (and `0003`/`0004`) take for the target application id --

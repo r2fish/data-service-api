@@ -519,7 +519,7 @@ def test_contract_version_is_1_7_0_on_data_plane(service):
     mapping -- function name kept, same precedent as the sibling peer's
     own re-flipped pins."""
     _, _, _dev, runtime = service
-    assert runtime.capabilities()["contract_version"] == "1.9.0"
+    assert runtime.capabilities()["contract_version"] == "1.10.0"
 
 
 def test_contract_version_is_1_7_0_on_control_plane():
@@ -533,7 +533,7 @@ def test_contract_version_is_1_7_0_on_control_plane():
     with backend.unit_of_work() as work:
         _cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     document = service.control_capabilities(secret)
-    assert document["contract_version"] == "1.9.0"
+    assert document["contract_version"] == "1.10.0"
 
 
 def test_operation_catalog_url_agrees_on_data_and_control_planes():

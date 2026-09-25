@@ -35,7 +35,7 @@ from .identifier_rules import (
     validate_identifier,
 )
 from .inmemory_predicate import _matches, _predicate_text, _wildcard_pattern
-from .inmemory_sort import _JSON_TYPE_RANK, _sort_key, _sort_rows
+from .inmemory_sort import _JSON_TYPE_RANK, _after_page_cursor, _sort_key, _sort_rows
 from .limits import ResourceLimits
 from .mutation_binding import (
     BoundMutation,
@@ -46,13 +46,12 @@ from .mutation_binding import (
     validate_projection,
 )
 from .paging import (
-    MAX_CURSOR_OFFSET,
     MAX_ORDER_BY_FIELDS,
     MAX_PAGE_SIZE,
-    _decode_cursor,
-    _encode_cursor,
     _resolve_order_by,
-    _shape_hash,
+    canonical_page_binding,
+    decode_and_check_page_cursor,
+    encode_page_cursor,
     validate_page_size,
 )
 from .pg_text_format import _float8out_text, _jsonb_numeric_text, _jsonb_scalar_text, _jsonb_text
@@ -599,8 +598,8 @@ def normalize_request_for_plan(request: dict[str, Any]) -> bytes:
     `apply_schema`'s `plan_request`), never a raw HTTP body (`service.py`
     assembles the same object whether a request arrived over HTTP or an
     in-process port, D-4 (7)'s own "同じ object になる" requirement).
-    Mirrors `_shape_hash`'s identical `json.dumps(..., sort_keys=True)` +
-    `hashlib.sha256` recipe immediately above (in `paging.py`), applied to
+    Mirrors `canonical_page_binding`'s identical `json.dumps(...,
+    sort_keys=True)` + `hashlib.sha256` recipe (in `paging.py`), applied to
     a different payload shape.
     """
     filtered = {key: value for key, value in request.items() if key not in ("plan", "dry_run")}
@@ -916,19 +915,37 @@ class ApplicationCell:
             # correctly needs no type pair.
             fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
         rows = _sort_rows(rows, order_spec)
-        shape = _shape_hash(self.application_id, entity, select, where, order_spec, page_size)
-        offset = 0
+        # keyset paging (design D-3 (3), D-6): the cursor's binding hash covers the Application scope, entity, and the normalized where/order_by only (never select/size) -- the same shared helper `PostgresCell.query` uses, so both backends bind/refuse a cursor identically.
+        where_terms = [(p.field, p.operator, p.value) for p in where]
+        binding = canonical_page_binding(self.application_id, entity, where_terms, order_spec)
+        cursor_values: list[Any] | None = None
         if cursor is not None:
-            offset = _decode_cursor(cursor, shape)
+            cursor_values = decode_and_check_page_cursor(cursor, binding, order_spec, field_types)
+        if cursor_values is not None:
+            # keyset paging (design D-3 (5)): the keyset window, using `_sort_
+            # key`-based position comparison -- the in-memory equivalent of
+            # `PostgresCell`'s own keyset predicate, same NULL/direction
+            # rules.
+            rows = [row for row in rows if _after_page_cursor([row.get(field_name) for field_name, _direction in order_spec], cursor_values, order_spec)]
+        # keyset paging: counted AFTER the cursor position narrows `rows`,
+        # so this cell agrees with `PostgresCell.query` (whose own `rows`
+        # is already the post-keyset, post-LIMIT fetch) on what a page
+        # "returns" -- never the count of matches from the start of the
+        # (unpaged) order, which page.size alone may have already left
+        # behind a cursor.
         limits.check("result_items", min(len(rows), page_size))
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        window = rows[offset : offset + page_size + 1]
+        window = rows[: page_size + 1]
         has_more = len(window) > page_size
         page_rows = window[:page_size]
         items = [{field_name: row.get(field_name) for field_name in select} for row in page_rows]
         revisions = [row["_r2db_revision"] for row in page_rows]
-        next_cursor = _encode_cursor(offset + page_size, shape) if has_more else None
+        next_cursor = None
+        if has_more:
+            last_row = page_rows[-1]
+            cursor_position = [last_row.get(field_name) for field_name, _direction in order_spec]
+            next_cursor = encode_page_cursor(cursor_position, binding)
         return QueryOutcome(items=items, revisions=revisions, has_more=has_more, next_cursor=next_cursor)
 
     def _describe_entity(self, name: str) -> dict[str, Any]:

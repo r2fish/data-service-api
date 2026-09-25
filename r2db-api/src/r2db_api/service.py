@@ -17,6 +17,7 @@ from .backend import StorageBackend
 from .capabilities_document import build_capabilities_document
 from .errors import FoundationError, fail, observed_type_of, violation
 from .limits import ResourceLimits, narrow_limits_by_budget
+from .paging import MAX_PAGE_SIZE
 from .request_shape import _check_mutation_request_shape, _check_query_request_shape
 from .service_results import MutationResult, QueryPage
 from .structured import ApplicationCell, fold_operation_idempotency_keys, parse_predicate
@@ -741,14 +742,22 @@ class DataService:
         with self._slot(context, concurrency_precharged=concurrency_precharged):
             return None
 
-    def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> list[dict[str, Any]]:
+    def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int | None = None, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> list[dict[str, Any]]:
         """Plain-item-list form, unchanged in shape since before CCR-13 (every existing caller -- `tests/test_foundation.py`, the in-process conformance adapter -- keeps working against exactly this return type). `order_by`/`cursor` (CCR-13) are accepted here too (so this method alone is enough to exercise/test them against the facade), but the pagination continuation itself only reaches a caller through `query_page` below, which `http.post_query` uses.
+
+        Keyset paging (design D-1 (2a), D-3 (9)): `page_size` of `None` (the
+        default, and what a request that omits `page.size` resolves to)
+        is answered as though it carried the least of the contract
+        maximum, this deployment's own declared `limits.result_items`,
+        and the request's own `budget.result_items` where it carries one
+        -- resolved once, in `_query_outcome` below, after `budget` has
+        already narrowed the effective limits.
 
         History: CH-0135
         """
         return list(self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id).items)
 
-    def query_page(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None, budget: dict[str, int] | None = None, concurrency_precharged: bool = False) -> "QueryPage":
+    def query_page(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int | None = None, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None, budget: dict[str, int] | None = None, concurrency_precharged: bool = False) -> "QueryPage":
         """The HTTP-facing shape (`{items, next_page, revisions}`,
         `spec/data-service-api.v1.json`'s `QueryResult`) -- used by `http.
         post_query` instead of `query` above, since building a real
@@ -767,7 +776,7 @@ class DataService:
         outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=rid, budget=budget, concurrency_precharged=concurrency_precharged)
         return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor, revisions=list(outcome.revisions or []), request_id=rid)
 
-    def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None, budget: dict[str, int] | None = None, concurrency_precharged: bool = False):
+    def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int | None, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None, budget: dict[str, int] | None = None, concurrency_precharged: bool = False):
         rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context, concurrency_precharged=concurrency_precharged) as canonical:
@@ -778,10 +787,20 @@ class DataService:
                 # Contract 1.7.0 (addendum 2 S-l, ruling): `request_budget` is `enabled` -- `budget` validity (applicable class / integer >= 1 / not above the deployed bound) is checked here, at request-shape time, before target existence -- the SAME single point every endpoint uses (`limits.narrow_limits_by_budget`) to turn `budget` into the "effective limits" every existing check point below reads, without any of them being rewritten.
                 # history: CH-0132
                 effective_limits = narrow_limits_by_budget(self.limits, budget, "query")
+                # Keyset paging (design D-1 (2a), D-3 (9)): a request that omits
+                # `page.size` is resolved to the least of the contract
+                # maximum, the deployed `limits.result_items`, and the
+                # request's own `budget.result_items` -- computed AFTER
+                # `budget` has already narrowed `effective_limits` above,
+                # so a smaller `budget.result_items` shrinks the default
+                # page too, and `LIMIT_EXCEEDED` never fires on the
+                # resolved default (the minimum of the three is always
+                # <= each of them).
+                resolved_page_size = page_size if page_size is not None else min(MAX_PAGE_SIZE, effective_limits.result_items)
                 predicates = [parse_predicate(item) for item in (where or [])]
                 deadline = self._clock() + effective_limits.execution_ms / 1000
                 outcome = self._cells[canonical.application_id].query(
-                    entity, select=select, where=predicates, page_size=page_size, order_by=order_by, cursor=cursor, limits=effective_limits, deadline=deadline, clock=self._clock
+                    entity, select=select, where=predicates, page_size=resolved_page_size, order_by=order_by, cursor=cursor, limits=effective_limits, deadline=deadline, clock=self._clock
                 )
                 # `query` never passes through the confirmation choke -- always buffer-class.
                 # history: CH-0131

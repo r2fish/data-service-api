@@ -64,3 +64,19 @@ Flipped again to 1.8.0 in phase 10 WP-6b/pair-closing (design D-5 (v)): the SAME
 
 This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
 ```
+
+### correction: 2026-09-25
+
+- reason: this host also declares contract 1.10.0 in the same commit as its own keyset paging behavior (query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default)
+
+old:
+```
+This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
+```
+
+new:
+```
+This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
+
+This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays declared other than unavailable (partial) here, never ahead of the behavior they declare.
+```

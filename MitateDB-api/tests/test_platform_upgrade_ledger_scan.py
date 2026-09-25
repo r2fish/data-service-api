@@ -635,17 +635,19 @@ def test_real_migrations_dir_has_zero_violations_and_the_expected_exemptions():
 def test_naming_convention_excludes_every_current_platform_single_shot_migration():
     """完了条件 5: platform 単発 migration がこの命名を使っていないこと
     -- 実 `migrations/` の中で `NAME_RE` に一致するファイルは per-
-    application upgrade script 4 件 (`0006_declared_field_types_
+    application upgrade script 5 件 (`0006_declared_field_types_
     upgrade.sql`、Q4 phase WP-4 の `0008_platform_upgrades_upgrade.sql`、
     Phase 9 WP-3a の `0009_field_constraints_upgrade.sql`、Phase 9 WP-3c
-    の `0010_idempotency_records_upgrade.sql`) だけであり、platform 単発
-    migration (`0001`/`0002`/`0007` 等) は含まれない。"""
+    の `0010_idempotency_records_upgrade.sql`、Phase 11 WP-3 の `0015_
+    row_order_column_upgrade.sql`) だけであり、platform 単発 migration
+    (`0001`/`0002`/`0007` 等) は含まれない。"""
     matching = {p.name for p in MIGRATIONS_DIR.glob("*.sql") if NAME_RE.match(p.name)}
     assert matching == {
         "0006_declared_field_types_upgrade.sql",
         "0008_platform_upgrades_upgrade.sql",
         "0009_field_constraints_upgrade.sql",
         "0010_idempotency_records_upgrade.sql",
+        "0015_row_order_column_upgrade.sql",
     }
 
 

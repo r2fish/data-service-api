@@ -496,6 +496,36 @@ Flipped again to 1.8.0 in phase 10 WP-6a/pair-closing: the SAME commit as `servi
 This control-plane document also flips to 1.9.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
 ```
 
+### correction: 2026-09-25
+
+- reason: this control-plane document also flips to 1.10.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert)
+
+old:
+```
+This control-plane document also flips to 1.9.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
+```
+
+new:
+```
+This control-plane document also flips to 1.9.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
+
+This control-plane document also flips to 1.10.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
+```
+
+### correction: 2026-09-25
+
+- reason: receiving-audit follow-up (受け入れ監査 2026-09-25 観察 4a) -- the data-plane declaration this paragraph names lives in `capabilities_document.py`, not `service.py` (`grep -rn '"contract_version": "1.10.0"' r2db-api/src/r2db_api/*.py` finds it only in `capabilities_document.py:53` and this file's own control-plane document)
+
+old:
+```
+This control-plane document also flips to 1.10.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
+```
+
+new:
+```
+This control-plane document also flips to 1.10.0 in the same commit as the data-plane flip in `capabilities_document.py` (the declaration `service.py` serves; C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
+```
+
 ## CH-0261
 
 - moved from: `src/r2db_api/control_plane.py` (`<module>`)

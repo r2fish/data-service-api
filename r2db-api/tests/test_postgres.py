@@ -51,7 +51,7 @@ from r2db_api import platform_upgrades
 from r2db_api.errors import FoundationError
 from r2db_api.limits import ResourceLimits
 from r2db_api.postgres import PostgresCell, SharedPoolManager, _RolePool
-from r2db_api.structured import ApplicationCell, Predicate
+from r2db_api.structured import ApplicationCell, Predicate, encode_page_cursor
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
@@ -2514,13 +2514,19 @@ def test_cursor_pagination_pages_through_results_and_signals_has_more(app_a: typ
         cell.close()
 
 
-def test_cursor_shape_mismatch_and_malformed_cursor_are_rejected(app_a: types.SimpleNamespace) -> None:
+def test_cursor_stays_valid_across_a_select_or_page_size_change_and_malformed_cursor_is_rejected(app_a: types.SimpleNamespace) -> None:
+    """Phase 11 keyset paging (design D-1 (4), D-3 (3)): the binding hash
+    covers only (Application, entity, `where`, `order_by`) -- `select` and
+    `page.size` are deliberately outside it (mirrors `test_foundation.py`'s
+    identically-named in-memory test; both cells share the same binding
+    rule, D-3 (5))."""
     cell = _numbered_cell(app_a, 5)
     try:
         first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
-        with pytest.raises(FoundationError) as exc:
-            cell.query("items", select=["id", "n"], where=[], page_size=2, limits=LIMITS, cursor=first.next_cursor)
-        assert exc.value.code == "VALIDATION_FAILED"
+        wider = cell.query("items", select=["id", "n"], where=[], page_size=2, limits=LIMITS, cursor=first.next_cursor)
+        assert wider.items == [{"id": 3, "n": 2}, {"id": 4, "n": 3}]
+        resized = cell.query("items", select=["n"], where=[], page_size=3, limits=LIMITS, cursor=first.next_cursor)
+        assert resized.items == [{"n": 2}, {"n": 3}, {"n": 4}]
         with pytest.raises(FoundationError) as exc:
             cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor="not-a-valid-cursor")
         assert exc.value.code == "VALIDATION_FAILED"
@@ -2533,22 +2539,106 @@ def _forge_cursor(payload) -> str:
     return base64.urlsafe_b64encode(blob).decode("ascii").rstrip("=")
 
 
-def _decode_cursor_shape(cursor: str) -> str:
+def _decode_cursor_binding(cursor: str) -> str:
     padded = cursor + "=" * (-len(cursor) % 4)
-    return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))["q"]
+    return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))["b"]
 
 
-def test_cursor_rejects_negative_offset_and_overflow(app_a: types.SimpleNamespace) -> None:
+def test_cursor_rejects_malformed_payload_shapes(app_a: types.SimpleNamespace) -> None:
+    """Phase 11 keyset paging (design D-6): mirrors `test_foundation.py`'s
+    identically-named in-memory test -- a well-formed base64url/JSON
+    envelope that is not a dict, is missing `v`/`b`, or carries `v` as a
+    non-list, is rejected the same as an undecodable string."""
     cell = _numbered_cell(app_a, 3)
     try:
         first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
-        shape = _decode_cursor_shape(first.next_cursor)
+        binding = _decode_cursor_binding(first.next_cursor)
         with pytest.raises(FoundationError) as exc:
-            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"o": -1, "q": shape}))
+            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor(["not", "a", "dict"]))
         assert exc.value.code == "VALIDATION_FAILED"
         with pytest.raises(FoundationError) as exc:
-            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"o": 10**9 + 1, "q": shape}))
+            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"v": [0], "b": binding, "extra": 1}))
         assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"v": "not-a-list", "b": binding}))
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_cursor_pagination_uses_the_id_tie_break_when_the_order_by_field_ties(app_a: types.SimpleNamespace) -> None:
+    """Design D-3 (2): mirrors `test_foundation.py`'s identically-named
+    in-memory test -- the deterministic `id ASC` tie-break the keyset
+    predicate's own trailing term supplies is what keeps a PostgreSQL cell
+    traversal total when the caller's own `order_by` field does not
+    already distinguish every row. Seeded so a group of tied rows (3 rows
+    of `bucket='x'`) is guaranteed to straddle a `page_size=1` page
+    boundary, in both directions."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "ties", "fields": ["bucket"]}, developer=True, limits=LIMITS)
+        cell.transact("ties", [{"operation": "insert", "values": {"bucket": b}} for b in ["x", "x", "x", "y", "y"]], LIMITS)
+        for direction in ("asc", "desc"):
+            order_by = [{"field": "bucket", "direction": direction}]
+            unpaged = cell.query("ties", select=["id", "bucket"], where=[], page_size=10, limits=LIMITS, order_by=order_by)
+            paged_items: list[dict] = []
+            cursor = None
+            for _ in range(10):
+                page = cell.query("ties", select=["id", "bucket"], where=[], page_size=1, limits=LIMITS, order_by=order_by, cursor=cursor)
+                paged_items.extend(page.items)
+                if page.next_cursor is None:
+                    break
+                cursor = page.next_cursor
+            assert paged_items == unpaged.items, (
+                f"direction={direction}: paged={paged_items!r} != unpaged={unpaged.items!r}"
+            )
+    finally:
+        cell.close()
+
+
+def test_domain_out_of_range_values_are_validation_failed_not_service_unavailable(app_a: types.SimpleNamespace) -> None:
+    """`value_types._check_type` (the shared choke point `where` and
+    `page/cursor` both pass through) refuses a value PostgreSQL's own
+    typed columns cannot represent, before it ever reaches a bind
+    parameter: a 401-digit integer bound to a `number` (`float8`) column
+    overflows `float()`, and a lone UTF-16 surrogate bound to a `string`
+    column cannot be encoded by the driver -- both would otherwise reach
+    the connection and come back mapped to `SERVICE_UNAVAILABLE` (503),
+    the wrong signal for a client-supplied-value bug. Fixed for `where`
+    directly, and for a tampered `page/cursor` token (which can carry the
+    identical kind of value, D-3 (4a))."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "domain_check", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "domain_check", "field": "score", "field_type": "number"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "domain_check", "field": "label", "field_type": "string"}, developer=True, limits=LIMITS)
+        cell.transact("domain_check", [{"operation": "insert", "values": {"score": 1.0, "label": "a"}}, {"operation": "insert", "values": {"score": 2.0, "label": "b"}}], LIMITS)
+
+        huge_integer = 10**401
+        with pytest.raises(FoundationError) as exc:
+            cell.query("domain_check", select=["score"], where=[Predicate("score", "gt", huge_integer)], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+        lone_surrogate = "\ud800"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("domain_check", select=["label"], where=[Predicate("label", "eq", lone_surrogate)], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+        first = cell.query("domain_check", select=["score"], where=[], page_size=1, limits=LIMITS, order_by=[{"field": "score", "direction": "asc"}])
+        binding = _decode_cursor_binding(first.next_cursor)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("domain_check", select=["score"], where=[], page_size=1, limits=LIMITS, order_by=[{"field": "score", "direction": "asc"}], cursor=encode_page_cursor([huge_integer, 1], binding))
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/cursor"}
+
+        first2 = cell.query("domain_check", select=["label"], where=[], page_size=1, limits=LIMITS, order_by=[{"field": "label", "direction": "asc"}])
+        binding2 = _decode_cursor_binding(first2.next_cursor)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("domain_check", select=["label"], where=[], page_size=1, limits=LIMITS, order_by=[{"field": "label", "direction": "asc"}], cursor=encode_page_cursor([lone_surrogate, 1], binding2))
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"violated_declaration": "request_schema", "field": "page/cursor"}
     finally:
         cell.close()
 
@@ -2817,25 +2907,25 @@ def test_matches_pattern_ending_in_an_unescaped_backslash_is_validation_failed(a
         cell.close()
 
 
-def test_postgres_data_error_from_an_out_of_range_number_value_is_validation_failed(app_a: types.SimpleNamespace) -> None:
-    """WP-3 review blocker-2, second layer of defence: `_check_type`'s
-    "number" branch only checks JSON type (int/float, not bool) -- unlike
-    "integer", it does not range-check against PostgreSQL's own `double
-    precision`. A value this large therefore reaches this backend's own SQL
-    execution, which is exactly the `psycopg.errors.DataError` ->
-    `VALIDATION_FAILED` mapping this test is for: it must never surface as
-    `SERVICE_UNAVAILABLE` (a false "retry" signal to an AI agent client),
-    and must never leak the value itself into the error.
+def test_postgres_write_of_an_out_of_range_number_value_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    """WP-3 review blocker-2 / review corrections 2026-09-25 (task C):
+    `_check_type`'s "number" branch now range-checks against a finite
+    float64 (design PHASE11_KEYSET_PAGING_V1 D-3 (4a), the same domain
+    check `where`/`page/cursor` share, `test_domain_out_of_range_values_
+    is_validation_failed_not_service_unavailable` above) -- a value this
+    large is refused there, before it ever reaches this backend's own SQL
+    execution. It must never surface as `SERVICE_UNAVAILABLE` (a false
+    "retry" signal to an AI agent client), and must never leak the value
+    itself into the error.
 
-    WP-2e rework (audit-wp2e.md I-6, ruling L-1 / D-1 = (A)): this is also
-    the completion-condition-6 pin (moved here from `test_denial_details_
-    and_request_id.py`) that `errors.details_vocabulary.layer_rule`'s
-    backend-layer exemption never carries `violated_declaration` -- unlike
-    every choke-point / request-shape site (D-1 = (A) applies the 4-key
-    rule to all 76 of those), `PostgresCell._fail_client_value`'s generic
-    catch cannot attribute a whole-statement `DataError` to one declared
-    field, so it stays a bare `VALIDATION_FAILED` with no `details` at all.
-    """
+    Renamed from `test_postgres_data_error_from_an_out_of_range_number_
+    value_is_validation_failed`: the domain check closing this gap means
+    the value no longer reaches `PostgresCell._fail_client_value`'s own
+    generic `psycopg.errors.DataError` catch (WP-2e rework audit-wp2e.md
+    I-6, ruling L-1 / D-1 = (A), completion-condition-6's own no-`details`
+    backend-layer exemption pin) for THIS trigger -- that pin's own
+    executable proof needs a different trigger value now, left to a
+    separate item (the domain check itself is this WP's own scope)."""
     cell = make_cell(app_a)
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "readings", "fields": []}, developer=True, limits=LIMITS)
@@ -2845,7 +2935,7 @@ def test_postgres_data_error_from_an_out_of_range_number_value_is_validation_fai
             cell.transact("readings", [{"operation": "insert", "values": {"n": huge}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         assert exc.value.status == 400
-        assert "violated_declaration" not in exc.value.details, exc.value.details
+        assert exc.value.details.get("violated_declaration") == "request_schema", exc.value.details
         rendered = repr(exc.value)
         assert str(huge)[:20] not in rendered
         # No side effect.

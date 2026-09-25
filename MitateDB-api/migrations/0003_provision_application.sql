@@ -268,7 +268,8 @@ INSERT INTO public._mdb_platform_upgrades (upgrade_number, script_name) VALUES
     (6, '0006_declared_field_types_upgrade.sql'),
     (8, '0008_platform_upgrades_upgrade.sql'),
     (9, '0009_field_constraints_upgrade.sql'),
-    (10, '0010_idempotency_records_upgrade.sql')
+    (10, '0010_idempotency_records_upgrade.sql'),
+    (15, '0015_row_order_column_upgrade.sql')
 ON CONFLICT (upgrade_number) DO NOTHING;
 -- Q4-WP4-LEDGER-END
 

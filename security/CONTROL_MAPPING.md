@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **3.2** (2026-09-25; R-29 / R-23 / R-16 -- phase 11 (contract 1.9.0): C-28 Evidence added to the Common blocks of SI-05, SI-09, SI-10, SI-11 and SI-14, C-29 Evidence to SI-10's; no Control claim and no new invariant (requester ruling U-5, design `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` section 5); `CONTROL_MAPPING_HISTORY.md` untouched)
+Version: **3.3** (2026-09-25; R-109 -- keyset paging (contract 1.10.0): C-30 Control and Evidence added to the Common blocks of SI-01, SI-08 and SI-10, a Status claim to SI-08's and SI-03's and two to SI-10's; no new invariant (design `docs/design/PHASE11_KEYSET_PAGING_V1.md` section 7); two stale `backend_postgres.py`/`cell.py` line references corrected to their current lines; `CONTROL_MAPPING_HISTORY.md` untouched)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -251,11 +251,12 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- —
+- C-30 query cursor binding -- a cursor whose recorded Application, entity, where or order_by differs from the request presenting it is refused before execution (`r2db-api/src/r2db_api/paging.py`, `MitateDB-api/src/mitatedb_api/paging.py`).
 
 #### Evidence
 
 - condition C-01 on all four adapters -- `conformance-tests/test_c01_scope_binding.py::test_positive_control_scope_is_bound_and_legitimate_access_succeeds`, `::test_cross_application_entity_is_unreachable`, `::test_cross_application_denial_does_not_disclose_existence`.
+- A cursor issued for one Application or entity is refused for another with no existence signal, and one reused under a different where or order_by is refused: `test_c30_keyset_paging.py::test_c30_cross_application_cursor_is_refused`, `::test_c30_cursor_binding`.
 
 #### Status
 
@@ -386,6 +387,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Status
 
 - **No cited evidence for the privilege separation**: no test is named for this block's runtime/developer privilege controls; version 2.25's uncited wording is in the history file.
+- A page cursor carries no authority: it encodes only ordering values of rows the client already received, and never role, credential or scope.
 
 ## SI-04 No Arbitrary DB Commands
 
@@ -412,7 +414,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Control
 
 - `ApplicationCell` exposes structured-only methods -- `MitateDB-api/src/mitatedb_api/cell.py`:507.
-- No command-text execution method exists on the PostgreSQL backend; only `Composed` objects reach the database -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:256`.
+- No command-text execution method exists on the PostgreSQL backend; only `Composed` objects reach the database -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:264`.
 
 #### Evidence
 
@@ -814,7 +816,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the same `batch_entities` boundary holds over real HTTP -- `test_cross_entity_mutation_batch_entities_boundary`.
 - F-17 -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_passes_from_migration_0013`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_zero`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_reset`.
 - F-17 -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_fails_when_a_per_database_override_exists`, `::test_verify_declarations_f17_passes_when_auditreader_role_is_absent`, `::test_f17_the_schema_owning_role_is_never_flagged_despite_an_explicit_select_grant`.
-- the isomorphic target -- `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_156_rows`.
+- the isomorphic target -- `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_159_rows`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r71_catalog_read_cancel_mapping.py::test_catalog_read_cancel_synthetic_injection_maps_to_resource_limit_error`, `::test_get_catalog_returns_limit_exceeded_not_validation_failed_when_the_read_is_canceled`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_blocked_catalog_read_is_bounded_by_the_constructed_value_not_the_role_value`, `::test_catalog_reads_use_the_constructed_statement_and_lock_timeout_inside_their_own_transaction`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_bare_construction_uses_the_foundation_config_default_execution_ms`, `::test_build_app_passes_the_declared_execution_ms_to_the_constructed_backend`.
@@ -963,10 +965,11 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- —
+- C-30 stateless paging -- a traversal's whole position lives in the token the client echoes back; the service keeps no cursor table, timer or ceiling (`r2db-api/src/r2db_api/paging.py`, `MitateDB-api/src/mitatedb_api/paging.py`).
 
 #### Evidence
 
+- A cursor is honored in a second session under a different credential, and two identical requests return the identical token: `test_c30_keyset_paging.py::test_c30_cursor_is_stateless`, `::test_c30_cursor_is_deterministic`.
 - the three control-plane SI-08 classes agree under C-14's vector 5 -- `conformance-tests/test_c14_authority_boundary.py` (see the SI-00 row above for the adapter-state detail).
 - `batch_entities` agrees under C-16, on all four adapters -- `conformance-tests/test_c16_cross_entity_atomicity.py` (see the SI-11 row below).
 - two real-socket plugs (`r2db-api-socket`/`MitateDB-api-socket`, a uvicorn process behind a real nginx) drive C-05's V2 vector over a real wire -- `conformance-tests/test_c05_limit_declaration_agreement.py::test_c05_v2_declaration_and_position_agree`.
@@ -978,6 +981,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Status
 
+- Statelessness itself is not observable from the port: no registered plug spans more than one process, so a server-side cursor table keyed by a deterministic token would pass both tests above; it is enforced by both peers' paging module holding no state.
 - **No cited evidence for the common SI-08 resource bounds**: no test is named for this block's blanket resource-boundary claim beyond C-05, C-14, C-16 and C-26; version 2.25's uncited wording is in the history file.
 - **Disclosed limits, carried from the C-05 and C-26 rows of `conformance-tests/CONDITIONS.md`**: this suite still cannot distinguish a deployment-wide counter from a credential-scoped one.
 - `execution_ms` and `idempotency_retention_ms` are never driven by this suite.
@@ -1050,12 +1054,12 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `ApplicationCell.delete` implements contract 1.2.0 declare-and-echo, the peer declaring `contract_version=1.3.0` and unaffected by the later additive flip -- `MitateDB-api/src/mitatedb_api/cell.py:2351`.
-- a valid confirmation requires `destructive is True` AND `confirm` to equal exactly the server's recomputed `DELETE <collection> @where=<digest16>` phrase -- `MitateDB-api/src/mitatedb_api/cell.py:2351`.
-- the `@where=<digest16>` digest is the SHA-256 of the canonically-serialized filter list, no state fingerprint being needed since this peer has no drop/recreate path -- `MitateDB-api/src/mitatedb_api/cell.py:2351`.
-- a non-bool `destructive` or non-str `confirm` is refused as a shape defect, never truthy-accepted -- `MitateDB-api/src/mitatedb_api/cell.py:2351`.
+- `ApplicationCell.delete` implements contract 1.2.0 declare-and-echo, the peer declaring `contract_version=1.3.0` and unaffected by the later additive flip -- `MitateDB-api/src/mitatedb_api/cell.py:2522`.
+- a valid confirmation requires `destructive is True` AND `confirm` to equal exactly the server's recomputed `DELETE <collection> @where=<digest16>` phrase -- `MitateDB-api/src/mitatedb_api/cell.py:2522`.
+- the `@where=<digest16>` digest is the SHA-256 of the canonically-serialized filter list, no state fingerprint being needed since this peer has no drop/recreate path -- `MitateDB-api/src/mitatedb_api/cell.py:2522`.
+- a non-bool `destructive` or non-str `confirm` is refused as a shape defect, never truthy-accepted -- `MitateDB-api/src/mitatedb_api/cell.py:2522`.
 - `DestructiveConfirmationRequired` carries the contract's 4 keys with `reversible_alternative`/`recovery` both null, mirroring r2db-api -- `MitateDB-api/src/mitatedb_api/errors.py`.
-- the `delete` phrase carries an `@schema_revision=<n>` fingerprint alongside `@where=<digest16>`, so a drop-then-recreate under the same name cannot leave a stale phrase valid -- `MitateDB-api/src/mitatedb_api/cell.py:2351`.
+- the `delete` phrase carries an `@schema_revision=<n>` fingerprint alongside `@where=<digest16>`, so a drop-then-recreate under the same name cannot leave a stale phrase valid -- `MitateDB-api/src/mitatedb_api/cell.py:2522`.
 - the control-plane `revoke_credential` last-active gate performs its target-set scan and state change inside the SAME transaction, closing the TOCTOU window exactly as r2db-api's does -- `MitateDB-api/src/mitatedb_api/control_plane.py:1895`.
 - the break-glass CLI's `revoke-credential` reuses that SAME gate rather than reimplementing it -- `MitateDB-api/src/mitatedb_api/ops.py:452`.
 - `deprovision <application_id>` is this peer's own second genuinely destructive CLI subcommand, provisioning-level, against `MITATEDB_PROVISION_DSN` -- `MitateDB-api/src/mitatedb_api/ops.py:767`.
@@ -1309,16 +1313,21 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- —
+- C-30 cursor refusal details -- an unusable cursor is refused with only request_schema/page/cursor, whether malformed, foreign, or bound to a stale where/order_by (`r2db-api/src/r2db_api/paging.py`, `MitateDB-api/src/mitatedb_api/cell.py:2317`).
 
 #### Evidence
 
 - C-28, on all six adapters: an enum refusal names the request-body position, never the rejected value or a declared member, with details keys inside the contract vocabulary -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
 - C-29: each plug serves a catalog byte-identical to the packaged one; socket plugs serve it at the declared URL -- `conformance-tests/test_c29_operation_catalog_url.py::test_c29_served_body_matches_the_packaged_catalog`, `::test_c29_operation_catalog_url_is_really_dialable_on_socket_plugs`.
+- An undecodable cursor and one bound to a different Application, entity, where or order_by all produce the identical 2-key denial: `test_c30_keyset_paging.py::test_c30_cursor_refusal_details`.
+- r2db pins a wrong-count/wrong-type cursor token as the same denial: `r2db-api/tests/test_foundation.py::test_cursor_rejects_a_tampered_token_with_the_wrong_value_count_or_type`.
+- MitateDB pins the same: `MitateDB-api/tests/test_http.py::test_tampered_page_cursor_count_and_type_and_domain_mismatches_are_validation_failed`.
 
 #### Status
 
 - **No cited evidence for the common error-probing coverage**: no test is named for this block's blanket error-probing claim; version 2.25's uncited wording is in the history file.
+- The count/type-mismatch causes above are not driven through the port (a cursor is contractually opaque, so the conformance suite cannot manufacture a tampered token); the port-only causes are malformed, cross-Application, cross-entity and where/order_by mismatch.
+- A page cursor is a recoverable encoding of a row's ordering values, so, as audit.forbidden_fields excludes row_value, no audit event field carries it; both peers' event field sets are fixed, so no further check is added.
 
 ## SI-11 Atomic Integrity
 

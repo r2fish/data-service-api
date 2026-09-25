@@ -49,6 +49,7 @@ from .field_types import (
     json_type_name,
 )
 from .identifiers import validate_identifier, is_identifier_syntax
+from . import paging
 from .provisional_gate import _deny_provisional_field
 from .request_binding import _check_predicate_value, _normalize_value, _normalize_value_for_storage
 from .request_limits import _check_operation_depth, _measure_request_bytes
@@ -942,6 +943,36 @@ class ApplicationCell:
         self._backend.check_reserved(value, label)
         return value
 
+    #: Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2's own "select"
+    #: decision: the internal row-order column every collection table now
+    #: carries (`backend_postgres.py`/`backend_sqlite.py`'s own `create_
+    #: collection`), never declarable by a client request (`identifiers.
+    #: py`'s own leading-`_` syntax rejection already makes it un-
+    #: nameable). Excluded here, never on either backend.
+    _ROW_ORDER_COLUMN = "_mdb_row"
+
+    def _visible_field_domains(self, collection):
+        """The single choke point every one of this class's own six
+        request-shape/catalog `field_domains` call sites goes through
+        (create/alter field-count and existence checks, select-all,
+        order_by binding, values/filters binding): wraps `self._backend.
+        field_domains(collection)` and drops `_ROW_ORDER_COLUMN` from the
+        result. Neither backend's own `field_domains` is told about this
+        exclusion -- both keep returning every physical column,
+        `_ROW_ORDER_COLUMN` included; this is the only place that hides
+        it from request-shape/catalog logic built on top.
+
+        Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.1's own cursor
+        value-domain check (`_decode_and_check_page_cursor` below) is a
+        deliberate SEVENTH, direct `self._backend.field_domains(...)` call
+        that bypasses this wrapper -- it is the one place that DOES need
+        `_ROW_ORDER_COLUMN`'s own domain (the row-order tie-break is
+        always part of a page cursor's own ordering values, D-2's "既定
+        順序"), never a select-all/order_by/values-binding site this
+        wrapper's own exclusion exists to protect."""
+        domains = self._backend.field_domains(collection)
+        return {name: domain for name, domain in domains.items() if name != self._ROW_ORDER_COLUMN}
+
     # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと合意;
     # `{scratchpad}/phase10/wp8b-review-2.md` §5 (A) / §7-1): この直前に
     # あった `_idempotency_lock_scope` ヘルパーは削除した。全 4 入口
@@ -1580,7 +1611,7 @@ class ApplicationCell:
                     # consumption class, so `ValidationError`, not `ResourceLimitError`
                     # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
                     # `ResourceLimitError` call-site count unaffected by this WP).
-                    current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+                    current = self._visible_field_domains(collection)  # NotFoundError if `collection` does not exist
                     if len(current) >= self.config.max_fields:
                         # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
                         # names the request key this bound is about -- `add_field`
@@ -1835,7 +1866,7 @@ class ApplicationCell:
                             # is never `request_id`-less (see `_idempotency_
                             # check`'s own docstring).
                             return replay
-                    available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+                    available = self._visible_field_domains(collection)  # NotFoundError if `collection` does not exist
                     if field not in available:
                         # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
                         # request NAMES a field the entity does not have -- a
@@ -2100,8 +2131,58 @@ class ApplicationCell:
         self._push_data_operation_event(principal, operation="insert", target_id=collection, request_id=request_id)
         return result
 
+    #: Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.2/D-3 (8): the
+    #: contract `Page.size` schema ceiling (`{"minimum": 1, "maximum":
+    #: 1000}`), independent of `limits.max_result_rows` (a deployment-
+    #: tunable resource class the deployment could in principle configure
+    #: to any positive value). A `page.size` outside this contract-
+    #: declared range is a request outside the contract's own vocabulary
+    #: (`VALIDATION_FAILED` / `request_schema` / `page/size`), not a
+    #: resource a deployment could simply raise or lower.
+    MAX_PAGE_SIZE = 1000
+
     def read(self, principal, collection, fields=None, filters=None,
              order_by=None, limit=None, *, request_id=None, budget=None):
+        """Delegates to `read_page` below with `cursor=None`, returning
+        only its own `rows` half (design docs/design/
+        PHASE11_KEYSET_PAGING_V1.md D-2b.4) -- this method's own external
+        shape (a bare `list[dict]`, no `next_page`) and every existing
+        caller of it are unchanged."""
+        rows, _next_page = self.read_page(
+            principal, collection, fields=fields, filters=filters, order_by=order_by, limit=limit,
+            cursor=None, request_id=request_id, budget=budget)
+        return rows
+
+    def read_page(self, principal, collection, fields=None, filters=None, order_by=None, limit=None, *,
+                  cursor=None, request_id=None, budget=None):
+        """Cursor-carrying read, returning `(items, next_page)` (design
+        docs/design/PHASE11_KEYSET_PAGING_V1.md D-2, D-2a, D-2b) -- every
+        read on this peer (`read` above included, by delegation) now goes
+        through this one core, ordered by `order_by`'s own bound terms
+        followed by the internal row-order tie-break (`_ROW_ORDER_COLUMN`,
+        always ascending, D-2's own "既定順序"; the response drops it and
+        any other order-only term before returning, D-2's own "応答").
+
+        A non-`None` `cursor` is decoded against this request's own
+        binding hash (`paging.canonical_page_binding`, D-2b.5 -- the
+        Application, entity, order-independent normalized `where`, and
+        `order_by`) and count/type-checked against the resolved order
+        terms (`_decode_and_check_page_cursor` below) before it is ever
+        used to build a keyset predicate; any failure along the way
+        collapses to the single `VALIDATION_FAILED` / `request_schema` /
+        `page/cursor` refusal (D-2b.1) -- the caller never learns which
+        one.
+
+        `limit` (`page.size`), when given, must fall within `MAX_PAGE_
+        SIZE` or this method refuses with `VALIDATION_FAILED` /
+        `request_schema` / `page/size` (D-2b.2) -- checked here,
+        immediately after `limit` is accepted and BEFORE the deployment-
+        bound `result_items` check below, for every caller (HTTP and
+        in-process alike; `http.py` performs no `page.size` check of its
+        own). Omitted, it defaults to the smaller of `MAX_PAGE_SIZE` and
+        this request's own effective `max_result_rows` (already budget-
+        narrowed), fetched with a size+1 look-ahead so `next_page` is
+        populated whenever more rows remain (D-2b.3)."""
         # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, once, so the
         # audit event below and this call's own caller (who already holds
         # the SAME value when it is `http.py`'s own per-request id, and
@@ -2111,7 +2192,8 @@ class ApplicationCell:
         # whose dict/list-shaped returns do) always agree.
         request_id = request_id or uuid.uuid4().hex
         self._require_data(principal, request_id=request_id)
-        request = {"collection": collection, "fields": fields, "filters": filters, "order_by": order_by, "limit": limit}
+        request = {"collection": collection, "fields": fields, "filters": filters, "order_by": order_by,
+                  "limit": limit, "cursor": cursor}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="query") as deadline:
             with self._lock:
                 # Phase 9 WP-3cd closure (K-1): `narrow_limits_by_budget` is
@@ -2130,21 +2212,110 @@ class ApplicationCell:
                 collection = self._identifier(collection, "entity")
                 selected = self._select_fields(collection, fields)
                 bound_filters = self._bind_filters(collection, filters, limits=limits)
-                order = self._bind_order_by(collection, order_by)
-                if limit is None:
-                    limit = limits.max_result_rows
-                if not isinstance(limit, int) or limit <= 0 or limit > limits.max_result_rows:
+                bound_order = self._bind_order_by(collection, order_by)
+                order_spec = (list(bound_order) if bound_order else []) + [(self._ROW_ORDER_COLUMN, "asc")]
+                if limit is not None:
+                    if not isinstance(limit, int) or limit <= 0 or limit > self.MAX_PAGE_SIZE:
+                        raise ValidationError(
+                            "page.size is outside the contract's declared range",
+                            details=violation("request_schema", field="page/size"),
+                        )
+                else:
+                    limit = min(self.MAX_PAGE_SIZE, limits.max_result_rows)
+                where_terms = [(item.field, item.operator, item.value) for item in (filters or [])]
+                binding = paging.canonical_page_binding(self.application_id, collection, where_terms, order_spec)
+                cursor_values = None
+                if cursor is not None:
+                    # A cursor is decoded and bound-checked BEFORE the
+                    # deployment-bound check just below -- a request this
+                    # peer would refuse for cursor reasons alone (an
+                    # undecodable token, a binding mismatch) is refused for
+                    # THAT reason, independent of how large `page.size`
+                    # happens to be (the isolated conformance surface's own
+                    # small `max_result_rows` must never mask a genuine
+                    # cursor-binding refusal behind a resource-limit one).
+                    cursor_values = self._decode_and_check_page_cursor(collection, cursor, binding, order_spec)
+                if limit > limits.max_result_rows:
                     raise ResourceLimitError("result limit exceeded", limit_class="result_items")
+                order_only_fields = [field_name for field_name, _direction in order_spec if field_name not in selected]
+                read_columns = list(selected) + order_only_fields
                 with self._lock:
-                    rows = self._backend.read(collection, selected, bound_filters, order, limit, deadline=deadline)
+                    rows = self._backend.read(collection, read_columns, bound_filters, order_spec, limit + 1,
+                                              cursor_values=cursor_values, deadline=deadline)
         rows = self._decode_rows(collection, rows)
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        items = [{field_name: row[field_name] for field_name in selected} for row in page_rows]
+        next_page = None
+        if has_more:
+            # design D-3 (4)/D-2b.5: the next cursor encodes the LAST
+            # returned row's own order_spec values (the row-order
+            # tie-break included), never a count or an offset.
+            cursor_position = [page_rows[-1][field_name] for field_name, _direction in order_spec]
+            next_page = paging.encode_page_cursor(cursor_position, binding)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit -- "query"
         # is this peer's own contract-vocabulary operation name for this
-        # method (`read`, internally), matching r2db-api's identical
-        # `operation="query"` durable-row value for the same conceptual
-        # event.
+        # method (`read`, internally; read_page since design docs/design/
+        # PHASE11_KEYSET_PAGING_V1.md D-2b.4 -- `read` delegates here),
+        # matching r2db-api's identical `operation="query"` durable-row
+        # value for the same conceptual event.
         self._push_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
-        return rows
+        return items, next_page
+
+    def _decode_and_check_page_cursor(self, collection, cursor, binding, order_spec):
+        """Decodes `cursor` against `binding` (`paging.decode_page_
+        cursor`), then checks the decoded ordering values against
+        `order_spec` (design D-2b.1) -- the count must match `order_spec`
+        (the row-order tie-break included) and each value must pass
+        `field_types.check_declared_value` for its own column's declared
+        type AND `self._backend.encode_value` for its own column's
+        backend-specific value domain -- the SAME two choke points a
+        `where`/write value already passes through (`_bind_filters`/
+        `_prepare_values` above). Any failure along the way -- decode,
+        binding mismatch, count, declared type, or value domain --
+        collapses to the single `VALIDATION_FAILED` / `request_schema` /
+        `page/cursor` refusal; the caller never learns which one, and the
+        failing choke point's own `details` are discarded (a `where`-
+        position `details.field` would otherwise name a request position
+        this cursor does not occupy)."""
+        try:
+            values = paging.decode_page_cursor(cursor, binding)
+        except ValueError:
+            self._reject_page_cursor()
+        if len(values) != len(order_spec):
+            self._reject_page_cursor()
+        declared_types = self._backend.field_types(collection)
+        domains = self._backend.field_domains(collection)
+        checked: list[Any] = []
+        for value, (field_name, _direction) in zip(values, order_spec):
+            # `_ROW_ORDER_COLUMN` carries no `_mdb_field_types` registry
+            # row (it is not a declared field), so `declared_types.get`
+            # would return `None` and `check_declared_value` would skip
+            # the check entirely -- the SQLite backend's own `field_
+            # domains`/`encode_value` tolerate any value for a `None`
+            # domain (dynamic column affinity, no declared-type concept
+            # of its own), so a tampered non-integer tie-break value
+            # would be silently accepted there while the PostgreSQL
+            # backend's own physical `bigint` domain check already
+            # rejects it -- the same unfixed cursor splitting into two
+            # different outcomes design D-2b.1 exists to prevent. This
+            # column's own declared type is fixed by construction (D-2:
+            # `BIGINT GENERATED ALWAYS AS IDENTITY` / SQLite `INTEGER
+            # PRIMARY KEY`), so it is supplied here explicitly instead.
+            declared_type = "integer" if field_name == self._ROW_ORDER_COLUMN else declared_types.get(field_name)
+            try:
+                check_declared_value(value, declared_type)
+                normalized = self._normalize_value_for_storage(value, declared_type)
+                checked.append(self._backend.encode_value(normalized, domain=domains.get(field_name), declared_type=declared_type))
+            except ValidationError:
+                self._reject_page_cursor()
+        return checked
+
+    def _reject_page_cursor(self):
+        raise ValidationError(
+            "cursor does not match this query's own order",
+            details=violation("request_schema", field="page/cursor"),
+        )
 
     def _validate_update(self, collection, values, filters, *, path_prefix="values", limits=None):
         """m-1 (independent review, P3-D2 follow-up): the single choke
@@ -3064,7 +3235,7 @@ class ApplicationCell:
                         return results
 
     def _select_fields(self, collection, requested):
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         if requested is None:
             return list(available)
         if not isinstance(requested, list) or not requested:
@@ -3169,7 +3340,7 @@ class ApplicationCell:
                 "order_by term limit exceeded",
                 details=violation("request_schema", field="order_by"),
             )
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         bound = []
         for i, item in enumerate(order_by):
             if not isinstance(item, dict):
@@ -3259,7 +3430,7 @@ class ApplicationCell:
         # `"operations/<i>/entity"`, its own path_prefix sibling.
         entity_path = (path_prefix.rsplit("/", 1)[0] + "/entity") if "/" in path_prefix else "entity"
         collection = self._identifier(collection, entity_path)
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         # Phase 6 WP-3 (design D-3, G3): the PRIMARY, backend-independent
         # declared-type choke point -- `field_types.check_declared_value`
         # runs BEFORE `encode_value` on every backend (sqlite included,
@@ -3421,7 +3592,7 @@ class ApplicationCell:
             # into, and `capabilities()` below publishes this exact bound
             # (`config.max_filter_terms`) under the `query_complexity` key.
             raise ResourceLimitError("filter limit exceeded", limit_class="query_complexity")
-        available = self._backend.field_domains(collection)
+        available = self._visible_field_domains(collection)
         # Phase 6 WP-3 (design D-3, G3): same choke point `_prepare_values`
         # above uses.
         declared_types = self._backend.field_types(collection)
@@ -3687,6 +3858,18 @@ class ApplicationRuntime:
         rows = self.read(collection, fields=fields, filters=filters, order_by=order_by, limit=limit,
                          request_id=request_id, budget=budget)
         return {"items": rows, "next_page": None, "request_id": request_id}
+
+    def read_page(self, collection, fields=None, filters=None, order_by=None, limit=None, *,
+                  cursor=None, request_id=None, budget=None):
+        """The cursor-carrying entry point `http.py` and the in-process
+        conformance adapter's `query_page` call (design docs/design/
+        PHASE11_KEYSET_PAGING_V1.md D-2b.4) -- `read` above stays the
+        plain, cursor-less in-process entry point (unchanged). Delegates
+        to `ApplicationCell.read_page`, whose own docstring states this
+        method's full contract."""
+        self.__authorize(request_id=request_id)
+        return self.__cell.read_page(self.__principal, collection, fields, filters, order_by, limit,
+                                     cursor=cursor, request_id=request_id, budget=budget)
 
     def catalog(self, *, request_id=None):
         self.__authorize(request_id=request_id)

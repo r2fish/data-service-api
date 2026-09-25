@@ -4,11 +4,11 @@ D-4: "SQL builder は capability を持たない").
 
 A pure leaf: every function here takes already-validated request-derived
 values (a `Predicate`, a column name, a bound value, an already-decided
-offset/page_size/order_spec) and returns a `psycopg.sql` fragment, a
-(fragment, params) pair, or a bound parameter value -- none of them opens
-a connection, calls `_run`, or reads a principal, a capability document,
-or the catalog. `postgres.PostgresCell` keeps a delegation
-attribute for each of the seven functions (the `_select_statement =
+page_size/order_spec/cursor-position) and returns a `psycopg.sql`
+fragment, a (fragment, params) pair, or a bound parameter value -- none of
+them opens a connection, calls `_run`, or reads a principal, a capability
+document, or the catalog. `postgres.PostgresCell` keeps a delegation
+attribute for each of the eight functions (the `_select_statement =
 staticmethod(_select_statement)` form); its existing call sites
 (`query`/`_apply`/`_insert`/`_update`/`_delete`/`_apply_upsert`/
 `apply_schema`) keep the same `self.`-qualified form --
@@ -43,7 +43,6 @@ def _select_statement(
     select: list[str],
     where_sql: sql.Composed | None,
     order_spec: list[tuple[str, str]],
-    offset: int,
     page_size: int,
     revision_column: str,
 ) -> sql.Composed:
@@ -58,12 +57,61 @@ def _select_statement(
     # String < Number < Boolean < Array < Object) falls directly out of
     # PostgreSQL's native `jsonb` comparison operators.
     #
-    # `offset`/`page_size` are always server-computed, already-validated
-    # non-negative integers (never client-supplied text) by this point
-    # -- `sql.Literal` here is composing a trusted value, the same
-    # pattern `_set_timeouts` already uses for its own computed values.
+    # keyset paging (design D-3 (4)): the caller's own keyset predicate (if
+    # any) is already folded into `where_sql` above, so this statement's
+    # own `LIMIT` is a look-ahead `size+1`, with no `OFFSET` clause.
+    # `page_size` is always a server-computed, already-validated positive
+    # integer (never client-supplied text) by this point -- `sql.Literal`
+    # here is composing a trusted value, the same pattern `_set_timeouts`
+    # already uses for its own computed values.
     # history: CH-0026
-    return sql.SQL("{base} OFFSET {offset} LIMIT {limit}").format(base=statement, offset=sql.Literal(int(offset)), limit=sql.Literal(int(page_size) + 1))
+    return sql.SQL("{base} LIMIT {limit}").format(base=statement, limit=sql.Literal(int(page_size) + 1))
+
+
+def _keyset_predicate_sql(order_spec: list[tuple[str, str]], cursor_values: list[Any], field_types: dict[str, str | None]) -> tuple[sql.Composed, list[Any]]:
+    """The keyset predicate that replaces `OFFSET` (design D-3 (4)): the
+    dictionary/lexicographic expansion of `order_spec` against the last
+    page's own ordering values `cursor_values` --
+
+        (f1 >op1> v1)
+        OR (f1 =eq= v1 AND f2 >op2> v2)
+        OR (f1 =eq= v1 AND f2 =eq= v2 AND ... AND id > vid)
+
+    with each term's comparison branched on whether its own cursor value
+    is NULL, so NULL is treated as the largest value in both directions
+    (asc -> NULLS LAST, desc -> NULLS FIRST -- PostgreSQL's own default,
+    the same total order `inmemory_sort._sort_key` gives the in-memory
+    cell). `cursor_values` is index-aligned with `order_spec` (tie-break
+    included) and has already passed `paging.decode_and_check_page_
+    cursor`'s own count/type check, so every zip below is total.
+    """
+    clauses: list[sql.Composed] = []
+    params: list[Any] = []
+    for i, (field_name, direction) in enumerate(order_spec):
+        column = sql.Identifier(field_name)
+        term_parts: list[sql.Composed] = []
+        for j in range(i):
+            prior_field, _prior_direction = order_spec[j]
+            prior_value = cursor_values[j]
+            prior_column = sql.Identifier(prior_field)
+            if prior_value is None:
+                term_parts.append(sql.SQL("{col} IS NULL").format(col=prior_column))
+            else:
+                term_parts.append(sql.SQL("{col} = {ph}").format(col=prior_column, ph=sql.Placeholder()))
+                params.append(_bind_value(prior_value, field_types.get(prior_field)))
+        value = cursor_values[i]
+        if value is None:
+            greater = sql.SQL("FALSE") if direction == "asc" else sql.SQL("{col} IS NOT NULL").format(col=column)
+        else:
+            operator = sql.SQL(">") if direction == "asc" else sql.SQL("<")
+            if direction == "asc":
+                greater = sql.SQL("(({col} IS NOT NULL AND {col} {op} {ph}) OR {col} IS NULL)").format(col=column, op=operator, ph=sql.Placeholder())
+            else:
+                greater = sql.SQL("({col} IS NOT NULL AND {col} {op} {ph})").format(col=column, op=operator, ph=sql.Placeholder())
+            params.append(_bind_value(value, field_types.get(field_name)))
+        term_parts.append(greater)
+        clauses.append(sql.SQL(" AND ").join(term_parts))
+    return sql.SQL("(") + sql.SQL(" OR ").join(clauses) + sql.SQL(")"), params
 
 
 def _order_by_sql(order_spec: list[tuple[str, str]]) -> sql.Composed:

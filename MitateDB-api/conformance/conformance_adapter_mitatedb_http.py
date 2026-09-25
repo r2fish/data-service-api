@@ -1298,15 +1298,25 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
     def _query(
         self, session: _Session, entity: str, *, select, where=None, order_by=None, page_size=None,
-        extra_body: Mapping[str, Any] | None = None,
+        cursor=None, extra_body: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"select": list(select)}
         if where is not None:
             body["where"] = where
         if order_by is not None:
             body["order_by"] = order_by
+        # port v1.18 (design D-4, C-30): `cursor` joins `page_size` in the
+        # SAME `page` wire object (`QueryRequest.page`) -- both land in one
+        # `body.update`-safe dict, mirroring `conformance_adapter_r2db_
+        # http.py::_query_request`'s own identical `page_size`/`cursor`
+        # merge (independent realization, no code shared between peers).
+        page: dict[str, Any] = {}
         if page_size is not None:
-            body["page"] = {"size": page_size}
+            page["size"] = page_size
+        if cursor is not None:
+            page["cursor"] = cursor
+        if page:
+            body["page"] = page
         # port v1.13 (design D-6): `budget` is a QueryRequest top-level
         # field, carried the same way `_mutate`'s own `extra_body` already
         # carries `idempotency_key`.
@@ -2269,14 +2279,38 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 break
         if not fields:
             return 0
-        # No `page.size` override: the server's own configured
-        # `result_items` default bound (500, `config.FoundationConfig.
-        # max_result_rows`) already comfortably covers this suite's own
-        # small fixtures, and requesting MORE than that bound would itself
-        # trigger a real `LIMIT_EXCEEDED` -- this method counts rows, it
-        # does not need to probe the limit.
-        result = self._query(session, entity, select=list(fields))
-        return len(result["items"])
+        # port v1.18 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        # a single `page.size`-less request used to rely on this
+        # deployment's own default bound (500) "comfortably covering this
+        # suite's own small fixtures" -- untrue on the isolated surface's
+        # own smaller `max_result_rows` once a collection holds more rows
+        # than that bound (C-30's own concurrent-insert node inserts a
+        # 6th row). Omitting `page_size` walks the entry point's own
+        # default page (design D-2b.3), which stays within ANY positive
+        # deployment bound while costing roughly one request per `max_
+        # result_rows` rows rather than one per row (a `page_size=1` walk
+        # would multiply this suite's own rate budget by the row count
+        # and collide with `max_requests_per_minute` on the `full`
+        # idempotency leg). A page count that outruns
+        # the rows actually counted, plus one, means the cursor stopped
+        # advancing; that is this adapter's own bug, not a rate-limit
+        # condition, so it is raised here rather than left to surface as
+        # a misleading `LIMIT_EXCEEDED`.
+        total = 0
+        cursor: str | None = None
+        pages = 0
+        while True:
+            result = self._query(session, entity, select=list(fields), cursor=cursor)
+            total += len(result["items"])
+            pages += 1
+            if pages > total + 1:
+                raise AssertionError(
+                    f"count({entity!r}) did not terminate: {pages} pages for {total} rows"
+                )
+            cursor = result.get("next_page")
+            if cursor is None:
+                break
+        return total
 
     def entities(self, session: object) -> set[str]:
         assert isinstance(session, _Session)
@@ -2850,6 +2884,32 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 details=_failure_details(failure),
             ) from failure
         return response.content
+
+    def query_page(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        *,
+        where: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[tuple[str, str]] | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """port v1.18 (design D-4, C-30): presents the wire body's own
+        `where`/`order_by`/`page.size`/`page.cursor`/`budget` fields
+        through `_query`'s own real `POST .../query` entry point,
+        verbatim -- never interpreted here."""
+        assert isinstance(session, _Session)
+        where_body = [{"field": f, "operator": op, "value": v} for f, op, v in where] if where else None
+        order_body = [{"field": f, "direction": d} for f, d in order_by] if order_by else None
+        extra_body = {"budget": dict(budget)} if budget else None
+        result = self._query(
+            session, entity, select=select, where=where_body, order_by=order_body,
+            page_size=page_size, cursor=cursor, extra_body=extra_body,
+        )
+        return result["items"], result.get("next_page")
 
     # ------------------------------------------------------------------
     # optional raw-accessor methods (WP-2.5 widening, `test_c11_response_

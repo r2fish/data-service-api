@@ -91,6 +91,19 @@ through the completion gate is recorded here and not filed in the ledger):
        caught by: the registry's own canonical `docs/code-history/` tree
        is never moved to `docs/archive/` (design DOC_ARCHIVE_SPLIT_V1.md
        section 6), so this gap has no live instance to catch.
+    6. not detected: a comment/docstring change under review when this
+       tool's own root checkout copy is run against a worktree's paths.
+       why: `REPO_ROOT` (`Path(__file__).resolve().parent.parent`) is
+       this tool's OWN copy's location, not the tree being reviewed --
+       running a main checkout's copy of this script against a
+       worktree's `src/` paths silently checks the main checkout's own
+       `docs/code-history/` and `src/` trees instead of the worktree's
+       edited ones.
+       caught by: a worktree-based review runs the worktree's own copy
+       of this tool (`cd` into the worktree, or an absolute path under
+       it), never the root checkout's copy with worktree-relative
+       arguments (accepted; no cross-checkout resolution is
+       implemented).
 """
 from __future__ import annotations
 

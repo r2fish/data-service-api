@@ -220,6 +220,7 @@ _EXPECTED_DISCOVERED_MODULES: dict[str, frozenset[str]] = {
         "limits.py",
         "main.py",
         "mutation_binding.py",
+        "operation_catalog.py",
         "ops.py",
         "paging.py",
         "pg_text_format.py",
@@ -271,7 +272,9 @@ _EXPECTED_DISCOVERED_MODULES: dict[str, frozenset[str]] = {
         "http.py",
         "identifiers.py",
         "main.py",
+        "operation_catalog.py",
         "ops.py",
+        "paging.py",
         "pg_timeouts.py",
         "platform_declarations.py",
         "platform_upgrades.py",
@@ -342,14 +345,14 @@ def _parse_qualified_execution_name(qualified: str) -> tuple[str, str, str]:
 # work order (D-6) for the acceptance decision on each row below.
 _ALLOWED_UNFOLDABLE: tuple[tuple[str, str, int, str, str], ...] = (
     (
-        "r2db", "postgres_sql.py", 71,
+        "r2db", "postgres_sql.py", 119,
         'sql.SQL("ASC" if direction == "asc" else "DESC")',
         "a ternary (ast.IfExp) between two string literals; not a "
         "literal, a `+`, or a name, so outside rule 1's narrow "
         "foldable-shape set",
     ),
     (
-        "mitatedb", "postgres_sql.py", 23,
+        "mitatedb", "postgres_sql.py", 33,
         "sql.SQL(token)",
         "`token` is a dict-comprehension for-target, not a `name = expr` "
         "assignment, so it does not resolve under rule 1's assignment-"

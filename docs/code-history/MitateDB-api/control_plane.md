@@ -46,3 +46,19 @@ Phase 10 WP-6b/pair-closing (design D-5 (v)): flipped again to 1.8.0 -- the SAME
 
 This control-plane document also flips to 1.9.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
 ```
+
+### correction: 2026-09-25
+
+- reason: this control-plane document also flips to 1.10.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert)
+
+old:
+```
+This control-plane document also flips to 1.9.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
+```
+
+new:
+```
+This control-plane document also flips to 1.9.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
+
+This control-plane document also flips to 1.10.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
+```

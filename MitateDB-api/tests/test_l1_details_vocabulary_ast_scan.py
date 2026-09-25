@@ -323,26 +323,41 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: shrank (it now calls the shared functions instead of defining them).
 #: Re-verified via `_fail_call_sites`, not hand-shifted. Entry count and
 #: site identity unchanged (20).
-    ("backend_postgres.py", 420),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 481),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 534),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 565),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 626),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 688),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 717),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 898),   # generic driver-exception translation
-    ("backend_postgres.py", 919),   # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1050),  # generic driver-exception translation
-    ("backend_postgres.py", 1208),  # generic driver-exception translation
-    ("backend_postgres.py", 1281),  # generic driver-exception translation
-    ("backend_postgres.py", 1334),  # generic driver-exception translation
-    ("backend_postgres.py", 1367),  # generic driver-exception translation
-    ("backend_postgres.py", 1393),  # generic driver-exception translation
-    ("backend_postgres.py", 1460),  # generic driver-exception translation
-    ("backend_postgres.py", 1488),  # generic driver-exception translation
-    ("backend_postgres.py", 1529),  # generic driver-exception translation
-    ("backend_postgres.py", 1798),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1867),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+#: Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2: the module-level
+#: `_ROW_ORDER_COLUMN` constant + its docstring comment inserted before
+#: `_execute` shifted every site below it DOWN by 13 (the 9 sites that sit
+#: between `schema_count` and `schema_revision`, inclusive); `create_
+#: collection`'s own new column-append statement, plus its own comment
+#: (also citing the same design doc), then shifted every site below IT
+#: DOWN by a further 11 (net +24 from the two edits combined, the 11
+#: sites from `create_collection` onward). Neither edit changed a single
+#: site's own identity or the entry count (still 20). Re-verified via
+#: `_fail_call_sites`, not hand-shifted.
+    ("backend_postgres.py", 433),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 494),   # field_domains: generic driver-exception translation
+    ("backend_postgres.py", 547),   # field_types: generic driver-exception translation
+    ("backend_postgres.py", 578),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 639),   # field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 701),   # field_types_and_constraints: generic driver-exception translation
+    ("backend_postgres.py", 730),   # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 911),   # generic driver-exception translation
+    ("backend_postgres.py", 932),   # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1074),  # generic driver-exception translation
+    ("backend_postgres.py", 1232),  # generic driver-exception translation
+    ("backend_postgres.py", 1305),  # generic driver-exception translation
+    ("backend_postgres.py", 1358),  # generic driver-exception translation
+    ("backend_postgres.py", 1391),  # generic driver-exception translation
+    ("backend_postgres.py", 1417),  # generic driver-exception translation
+    # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2a/D-3 (4): `read`'s
+    # own keyset-predicate/NULLS-clause assembly (`_keyset_predicate_sql`,
+    # `_NULLS_SQL`) added 16 lines before this site and every one below it
+    # in this file (1484 -> 1500, 1512 -> 1528, 1553 -> 1569, 1822 -> 1838,
+    # 1891 -> 1907) -- re-verified via `_fail_call_sites`, not hand-shifted.
+    ("backend_postgres.py", 1500),  # generic driver-exception translation
+    ("backend_postgres.py", 1528),  # generic driver-exception translation
+    ("backend_postgres.py", 1569),  # generic driver-exception translation
+    ("backend_postgres.py", 1838),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1907),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
@@ -587,11 +602,29 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # below. `_check_predicate_value`/`_normalize_value_for_storage`
         # raise no `ValidationError`/`CapabilityError` of their own (0
         # sites moved).
-        "cell.py": 42,
+        # WP-2 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.4,
+        # work order WP-2 task 6): +1 -- `ApplicationCell.read_page`'s own
+        # `CapabilityError` site (`page/cursor`), moved verbatim from
+        # `http.py::post_query`'s own former inline rejection (42 -> 43);
+        # see `http.py`'s own count immediately below.
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.1/D-2b.2:
+        # `read_page`'s own `CapabilityError` site above is REPLACED (a
+        # cursor is decoded and executed, not refused outright, from here
+        # on: -1), plus two new `ValidationError` sites -- `read_page`'s
+        # own `page/size` range check and `_reject_page_cursor`'s own
+        # site (called from 3 branches of `_decode_and_check_page_cursor`,
+        # counted once -- the AST scan counts the `raise ValidationError(
+        # ...)` call EXPRESSION, not its call count at runtime): +2
+        # (43 -> 44; measured directly against this fix's own tree).
+        "cell.py": 44,
         # WP-3e rework T2 (追補 L-4): +1 -- `_check_object_shape`'s own
         # new "present but wrong type" leg (a genuine new choke-point
         # call site, not a relabeling of an existing one).
-        "http.py": 27,
+        # WP-2 (design D-2b.4): -1 -- `post_query`'s own inline
+        # `page.cursor` rejection moved to `cell.py::ApplicationCell.
+        # read_page` above (the ONE call site design D-4 requires); the
+        # site's own wording/details are unchanged (27 -> 26).
+        "http.py": 26,
         "field_types.py": 4,
         "identifiers.py": 1,
         # WP-6d (ruling U-7): -1 -- `idempotency_begin`/`idempotency_
