@@ -23,6 +23,8 @@ server fails loudly.
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
 import secrets
 import subprocess
@@ -36,6 +38,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from mitatedb_api import paging
 from mitatedb_api.auth import Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.backend_sqlite import SQLiteBackend
@@ -117,6 +120,46 @@ def test_declaring_the_row_order_column_name_as_a_field_is_rejected_by_identifie
     with pytest.raises(ValidationError) as excinfo:
         developer.add_field("widgets", ROW_ORDER_COLUMN, "text")
     assert excinfo.value.details["violated_declaration"] == "identifier_syntax"
+
+
+def test_tampered_page_cursor_row_order_tie_break_type_mismatch_is_validation_failed_on_sqlite() -> None:
+    """受け入れ監査 2026-09-25 観察 1: 契約 1.10.0 義務 (5) (`page/cursor`
+    の順序値が declared type と数で合わないとき `VALIDATION_FAILED` /
+    `request_schema` / `page/cursor`) を、SQLite backend の tie-break
+    `_mdb_row` について固定する。`_mdb_row` は `_mdb_field_types` に登録
+    が無いため、`cell.py::_decode_and_check_page_cursor` はこの列の
+    declared type を `"integer"` に明示して検査する
+    (`field_name == self._ROW_ORDER_COLUMN` の特別扱い) -- この検査が
+    無ければ、SQLite backend は動的な列 affinity のため非整数の tie-
+    break 値を検査で弾かず、PostgreSQL backend (物理 `bigint` domain が
+    別途弾く) と結果が割れる。PostgreSQL 側の同じ tamper は
+    `test_http.py::test_tampered_page_cursor_count_and_type_and_domain_
+    mismatches_are_validation_failed` の脚 (f) が固定するので、ここは
+    SQLite backend だけを対象にする。"""
+    cell = ApplicationCell("app1", backend=SQLiteBackend())
+    developer, runtime = _sessions_for(cell, "app1")
+    developer.create_collection("widgets", {"name": "text"})
+    runtime.insert("widgets", {"name": "a"})
+    runtime.insert("widgets", {"name": "b"})
+    items, next_page = runtime.read_page(
+        "widgets", fields=["name"], order_by=[{"field": "name", "direction": "asc"}], limit=1)
+    assert len(items) == 1
+    assert next_page is not None, "a 1-of-2 page reported a null next_page"
+    padded = next_page + "=" * (-len(next_page) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    binding = payload["b"]
+    values = payload["v"]
+    # design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.1: `values` is
+    # `[name, _mdb_row]` -- the order-by term plus the row-order tie-break,
+    # index-aligned with `order_spec`.
+    assert len(values) == 2, values
+    for tampered_row_order in ("x", 1.5):
+        tampered_cursor = paging.encode_page_cursor([values[0], tampered_row_order], binding)
+        with pytest.raises(ValidationError) as excinfo:
+            runtime.read_page(
+                "widgets", fields=["name"], order_by=[{"field": "name", "direction": "asc"}],
+                limit=1, cursor=tampered_cursor)
+        assert excinfo.value.details == {"violated_declaration": "request_schema", "field": "page/cursor"}, tampered_row_order
 
 
 # ---------------------------------------------------------------------------

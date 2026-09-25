@@ -1,17 +1,37 @@
-# 引き継ぎ — 2026-09-24/25 (keyset ページング (高速化案 7、フェーズ11) の実装段階。統合 branch に WP-1/2/5/3 を積み、WP-4 は報告時点で中断。main は 1.8.0 のまま)
+# 引き継ぎ — 2026-09-24/25 (keyset ページング (高速化案 7、フェーズ11) の閉止。契約 1.10.0、C-30、main へ 1 回 merge)
 
-本書は前書の全項を写さない。生きている事項だけを載せる。恒久の運用規律は `docs/work-orders/OPERATING_CONDITIONS.md`。前書は `HANDOVER_20260924_FABLE6.md`。本書は依頼者指示 2026-09-24「keyset ページングと R-29 を新しいチャットで開始する」で始まったチャットのもので、**2 つのチャットを経て、依頼者の指示によりチャットを途中で移る** (2 つ目のチャットは設計 v0.3 の起草直後で中断。設計レビュー 2 回目・実装・コミットは未着手)。
+本書は前書の全項を写さない。生きている事項だけを載せる。恒久の運用規律は `docs/work-orders/OPERATING_CONDITIONS.md`。前書は `HANDOVER_20260924_FABLE6.md`。並走した最低共通機能プロファイル (R-29) のチャットの書は `HANDOVER_20260925_FABLE.md`。
+
+本書は依頼者指示 2026-09-24「keyset ページングと R-29 を新しいチャットで開始する」で始まった 3 つのチャットの記録である。1〜2 つ目のチャットは設計 (v0.6)・作業指示書 (v1.2)・WP-1/2/5/3 まで。**3 つ目のチャット (2026-09-25、本チャット) は WP-4 のコードレビューから再開し、WP-4 → main 取り込み (番号の振り直し) → WP-6 → WP-7 → 完了ゲート → 受け入れ監査 → Q-4 → main へ 1 回 merge まで進めた。** 本書の名前は `HANDOVER_20260924_FABLE7.md` から改めた (§2)。
+
+記録: `docs/archive/docs/work-orders/HANDOVER_20260924_FABLE7.md`
 
 ## 1. 現在地
 
-- ローカル main は `0fee6e5` (台帳 v1.119)。**本 worktree の branch には WP-1 を `3af11b3`、WP-2 を `a2ba943`、WP-5 を `f3b10ca`、WP-3 を `1c362fc` として積んだ (main には merge しない。統合 branch、main への merge は WP-7 後の 1 回)。WP-4 は作業ツリーに未コミット (実装担当の報告 = `.handover-materials/wp4-report.md`。MitateDB suite 1467 緑、C-28 は 6 plug で I が F・他 X、変異 17/17)。** push 停止中 (課金上限)。
-- 本チャットの worktree: `.claude/worktrees/cranky-visvesvaraya-616e67` (branch `claude/cranky-visvesvaraya-616e67`、main と同一 + 未追跡 2 点)。**次のチャットはこの worktree に入って続ける** (新しい worktree を切らない)。
-  - 未追跡: `docs/design/PHASE11_KEYSET_PAGING_V1.md` (**設計 v0.5** — 設計レビュー 1 (18 件) と 2 (16 件)、起草担当の疑義への監督裁定を反映済み) と **作業指示書 `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` v1.1** (WP 7 本、直列、統合 branch)。Q-3 / Q-5 / Q-4 は依頼者に提示済み・裁定待ち と本書。設計は単独で commit しない (`check_doc_refs` が C-28 / R-106 / R-107 の dangling で赤。台帳行と `CONDITIONS.md` の C-28 行と同じ変更セットで commit する)。
-  - 未追跡・**commit しない**: `.handover-materials/` (前チャットの scratchpad の写し。作業機の絶対パスを含むので公開値スキャンに掛かる。読み終えたら削除してよい): `frame-keyset.md` (枠と裁定 Q-1/Q-2 の逐語)、`rulings-draft-v01.md` (起草者の疑義 9 件への裁定)、`design-review-1.md` (設計レビュー 1 回目、18 件の全文と修正案)、**`rulings-review1.md` (設計レビュー 1 の 18 件への監督裁定。末尾の追記に #9 / #12 の確定形)**、**`rulings-drafter-v03.md` (v0.3 起草担当の疑義 7 件への監督裁定。v0.4 で反映する)**、`verbatim-190-draft.md` (契約 1.9.0 の案文 v0.3 追随済み。依頼者未確定)、探索ノート 4 本 (**`explore-page-defaults.md` は #9 / #12 の実測**)、`mitate-paging-requirements.md` (Mitate 要件の逐語)。
-- **逸脱の申告**: `tools/dev/handover_ready.py` は NOT READY (worktree が未コミットで dirty、本書が main に未コミット)。設計文書と本書は `check_doc_refs` の dangling (R-106 / R-107 / C-28) で単独 commit できないため、依頼者指示 (2026-09-24「新しいチャットで再開・継続します」) により **未コミットのまま**移る。次チャットは台帳行と `CONDITIONS.md` の C-28 行を足す変更セットで本書ごと commit する (本書はそのとき §1〜§3 を現在地に合わせて更新し、「裁定」節に設計レビュー 1 の全件を載せる)。
-- 並走: R-29 のチャット (worktree `laughing-feistel-31c19a`) が同じ spec / CONDITIONS / 台帳 / CONTROL_MAPPING に触れる。契約版数と C-番号は merge 直前に main を読んで振る (先に merge した側が 1.9.0)。他チャットの worktree に触らない。
+- **main への merge 済み**: `本書を含む閉止の変更セットを `finalize.py --tools-tests` で main `b283f48` へ no-ff で merge (branch HEAD の次の main の merge commit。依頼者裁定 Q-4 了承 2026-09-25)` (統合 branch `claude/cranky-visvesvaraya-616e67` を 1 回で merge)。統合 branch の commit: WP-1 `3af11b3` / WP-2 `a2ba943` / WP-5 `f3b10ca` / WP-3 `1c362fc` / WP-4 `cb64217` / 本書の改名 `c2a6a64` / main `b283f48` の取り込みと番号の振り直し `285cfe4` / WP-6 `5d988c6`。
+- **契約 1.10.0** (両 peer の data 面・control 面が宣言)。共通条件 **C-30** (9 node、T は 7 変種、6 plug)。port v1.18、従属判断 15、migration 0015、`_ISOMORPHIC_TARGETS` 159 行、`security/CONTROL_MAPPING.md` 3.3、台帳 v1.121。
+- 台帳: **R-109 閉止 / R-110 未着手 / R-111 起票** (規模 M、未着手)。
+- 完了ゲート: `gate: 4168 passed, 2 subtests passed in 327.60s (0:05:27), judge=PASS, pg_database/pg_roles diff 0, label p11b (final tree; the first gate on ff6ad67, label p11, was 4167 passed in 327.83s, judge=PASS, before the SQLite tampered-cursor test was added)`
+- WP-7 (性能の証拠、設計 §11): K=1 `perf_baseline.py --warmup 20 --n 200` (PERFRUN commit=5d988c6) 21 行すべて §0.1.4 の閾値内 (Δp50 最大 +24.2% / +40%、Δp95 最大 +25.5% / +50%、backend_calls 差分 +0.00。比較対象 PERF_PREPARED_STATEMENT_MEASUREMENT_V0_1 §2.3 2026-09-23); 深いページ比較 (r2db PostgreSQL、N=20000、page.size=100、25 回): offset (0fee6e5) 走査 1.401 s / 末尾ページ p50 4.096 ms、keyset 0.823 s / 3.287 ms、両方とも末尾行 n=19999 に到達 (非空振り)。commit ff6ad67
+- push は停止中 (GitHub 課金上限)。
+- 本チャットの裁定の材料は監督チャットの scratchpad の `rulings-*.md` (4 本。「裁定」節に逐語で転記済み)。前チャットの `.handover-materials/` は削除済み。
 
 ## 2. 本チャットで決めたもの
+
+| 件 | 結果 | 記録 |
+|---|---|---|
+| 番号の振り直し (main `b283f48` の取り込み) | 並走の R-29 が main へ先に merge し仮番号を消費したため: 契約 1.9.0 → **1.10.0**、C-28 → **C-30**、R-106 → **R-109**、R-107 → **R-110**、従属判断 14 → **15**、port v1.16 → **v1.18**、`CONTROL_MAPPING` 3.2 → **3.3**、台帳 v1.120 → **v1.121**。不変: migration 0015、件数ピン 156 → 159 | 作業指示書 §9 の訂正註、設計 §0、`285cfe4` |
+| 本書の名前 | `HANDOVER_20260924_FABLE7.md` → `HANDOVER_20260925_FABLE2.md` (main に R-29 側の同名の書があった) | `c2a6a64` |
+| main を WP-6 の前に取り込む | WP-6 が確定番号で書けるように、WP-6 の前に取り込んだ。main への merge は WP-7 後の 1 回のまま | `285cfe4` |
+| Opus 役のモデル実測 | reviewer の transcript の `"model"` 欄 18/18 件 `claude-opus-5-5` | — |
+| WP-4 の逸脱 8 件 | 採用 1・2・3・5、差し戻し 4 (誤りは C-30 側の継続要求の page_size。監督が 5 箇所を発行時と同じ page_size に直し、孤立化 fixture は 5 / 50 のまま)、6 は R-111 で起票、7 は pin テスト `MitateDB-api/tests/test_sqlite_version_floor.py` (>= 3.30) に、8 は対象外 | 「裁定」節、`cb64217` |
+| 遡及拒否の列挙 | main の Revision note 3 の方針に従い旧い遡及行を触らない (実装担当の機械的な拡張を戻した)。1.10.0 段落は自身の遡及文を持つ | 「裁定」節、`285cfe4` |
+| 台帳 §0.1.2 の C-30 | 「要求を作る」「判定を受ける」の 2 段 (作業指示書の「SI の段」は軸の取り違え) | `5d988c6`、台帳 v1.121 |
+| R-111 の併記撤回 | C-30 直列実行時の資源枯渇は main `f522610` 取り込み後の直列の再実測 (90 passed) で再現しないため R-111 から外した | 台帳 R-111 行、設計 §11 |
+| `tools/tests` の pin 9 件 | 両 peer の `paging.py`・keyset 述語・`MAX_CURSOR_OFFSET` 削除が静的インベントリの pin に未反映で赤。どの WP の触ってよいパスにも root gate にも無かった。WP-6 で追随 (規則は緩めない) | `5d988c6` |
+| 検査器 2 本の Known gaps | `tools/public_value_scan.py` と `tools/check_comment_provenance.py` は REPO_ROOT が道具自身の置き場 — worktree は worktree 側の copy で回す (§1.12 の 71 の 3 行形式) | `5d988c6`、`tools/dev/README.md` |
+
+1〜2 つ目のチャット (2026-09-24/25) で決めたもの (前の版の本書のまま。番号は振り直し前の仮番号):
 
 | 件 | 結果 | 記録 |
 |---|---|---|
@@ -24,32 +44,53 @@
 | 設計レビュー 1 の裁定 (2 つ目のチャット) | 18 件を裁定: **直す 17 件、観察 1 件 (#16 SQLite rowid の再利用 → §10 に開示、`AUTOINCREMENT` は採らない)**。監督の形で決めたもの: #4 版ゲートは (ii) 同時挿入判別 node だけ `xfail(strict=True)`、他 8 node は `< 1.9.0` で non-strict xfail、C-28 は 9 node; #9 `page.size` 省略時の既定 = その要求が運べる最大 (1000・宣言 `result_items`・`budget.result_items` の最小) を契約に置き義務 (7) とする (Q-3 に含む); #12 `page.size` 0 / 1001 は両 peer で `VALIDATION_FAILED` / `request_schema` / `page/size` (MitateDB は契約上限を検査していなかった。r2db 既存テスト 4 箇所を更新); #6 契約 C-6 は変えず観測を「既出行ちょうど 1 回 + 前に挿入した行は返らない」に絞る | `rulings-review1.md`、設計 v0.3、本書「裁定」節 |
 | v0.3 起草担当の疑義 7 件 | 裁定済み (直す 4、採用 3)。**v0.4 で反映する** — 最大のものは「select 未指定の走査は契約上送れない (`select` は required + `minItems: 1`)」→ #18 の観測を「select = 宣言 field 全部 → key 集合が完全一致」に置き換える | `rulings-drafter-v03.md` |
 
-## 3. 次の一手 (作業指示書 `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` v1.2 §1.1 の順序: WP-1 → WP-2 → WP-5 → WP-3 → WP-4 → WP-6 → WP-7)
+## 3. 次の一手
 
-1. **済み (統合 branch に commit 済み)**: WP-1 `3af11b3`、WP-2 `a2ba943`、WP-5 `f3b10ca`、WP-3 `1c362fc`。各 WP はコードレビュー 1 回 + 差し戻し 1 回を経て commit した (裁定は「裁定」節)。
-2. **WP-4 (MitateDB の keyset read と cursor)**: 実装担当の報告を受けた時点で中断 (依頼者指示 2026-09-25)。**作業ツリーは未コミット** — 次のチャットは (a) worktree の status で WP-4 の差分を確認し、(b) 実装担当の報告 (`.handover-materials/wp4-report.md`) を読み、(c) コードレビュー (reviewer、コードレビューモード、Class B + 同型性 helper) → 差し戻し → `finalize.py --no-merge` で commit する。期待結果表 (WP-4 完了時点): 6 plug すべてで I が F、他 8 node (T は 6 変種) が X。
-3. **WP-6 (版フリップと記録)**: 両 peer の `capabilities_document.py` と `control_plane.py` を 1.9.0 (同一コミット)、1.8.0 の pin テスト (作業指示書 WP-6 の触ってよいパスの 7 ファイル) の追随、`_ISOMORPHIC_TARGETS` に 3 行 (`encode_page_cursor` / `decode_page_cursor` / `canonical_page_binding`。**行の追加は監督の pair-closing**、件数ピン 156 → 159 を実測で確定)、`CONTROL_MAPPING` 3.1 → 3.2 (設計 §7 の案を確定した node 名で。**WP-3 でずれた行番号参照 2 箇所 (`:415` → `backend_postgres.py:268`、`:1052-1057` → `cell.py:2371`) も直す**)、`CONDITIONS.md` C-28 行の Status 本文の確定、台帳 (§0.1.1 G-2/G-3 → 1.9.0 / C-00〜C-28 の 29 件、§0.1.3、R-106 行の【追記】、**C-27 MitateDB-http の断続的な赤 (413 / AUTH_INVALID、直列と `-n 5` の両方で再現) と C-28 直列実行時の httpx 資源枯渇を R-107 の次の番号で起票**、版 v1.120、版数ログの v1.115 行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__VERSION_LOG.md` の先頭 (header comment の直後) へ逐語で回転)、`tools/public_value_scan.py` の docstring に Known gaps 2 行 (相対パスは main checkout 基準 / `R3_project_id` がログ名に偽陽性)。仮番号 (R-106 / R-107 / C-28 / 0015 / v1.16 / 従属判断 14) は merge 直前に main を読んで振り直す (別チャットに `test_c28_baseline_turn.py` がある)。
-4. **WP-7**: `tools/perf_baseline.py --warmup 20 --n 200` (K=1) と深いページの offset / keyset 比較 1 回を設計 §11 に記録。
-5. **完了ゲート** `./.venv/bin/python tools/dev/gate.py -C <worktree> --label p11` を 1 回 (root から)。**受け入れ監査** (evidence-auditor、全 WP、作業指示書の完了条件ごと)。**Q-4 の依頼者確認** (集計行と差分の stat を添える) → `finalize.py --tools-tests` (`--no-merge` なし) で main へ 1 回 merge。merge 直前に main を取り込む (R-29 のチャットが先に merge していれば契約版は 1.10.0、C-番号は振り直し)。
-6. 引き継ぎ書を最終状態に更新 (回転規則 §1.16-78: 本書を commit する変更セットで最新 2 通から外れる引き継ぎ書を `docs/archive/` へ)。
+WP-7 の後の手順 (作業指示書 §1.1 の 4、§8):
+
+1. (済) 完了ゲート (`tools/dev/gate.py`、root から worktree を `-C` で指定、1 回): `gate: 4168 passed, 2 subtests passed in 327.60s (0:05:27), judge=PASS, pg_database/pg_roles diff 0, label p11b (final tree; the first gate on ff6ad67, label p11, was 4167 passed in 327.83s, judge=PASS, before the SQLite tampered-cursor test was added)`
+2. (済) 受け入れ監査 (evidence-auditor、全 WP、作業指示書の完了条件ごと)。裁定は「裁定」節の末尾。
+3. (済) Q-4 の依頼者確認 (§4)。
+4. (済) `tools/dev/finalize.py --tools-tests` で main へ 1 回 merge: `本書を含む閉止の変更セットを `finalize.py --tools-tests` で main `b283f48` へ no-ff で merge (branch HEAD の次の main の merge commit。依頼者裁定 Q-4 了承 2026-09-25)`。
+5. (済) 本書を最終状態に確定し、main 由来の `HANDOVER_20260924_FABLE7.md` を `docs/archive/docs/work-orders/` へ回転 (§1.16 の 78。`docs/work-orders/` には本書と `HANDOVER_20260925_FABLE.md` の 2 通)。
+
+merge 後の残件:
+
+- **R-110** (`order_by` 未知 field の拒否コードが両 peer で不一致。規模 S、Class C): 未着手。契約の文を先に決める。
+- **R-111** (`test_c27_same_digest_executes_once[MitateDB-api-http]` の断続的な赤。規模 M): 未着手。
+- **CI の sqlite 版の実測**: push 再開後。pin テストは `MitateDB-api/tests/test_sqlite_version_floor.py` (>= 3.30。NULLS FIRST/LAST)。
+- **レビュー観察** (起票しない。「裁定」節): cursor 付き要求 1 回ごとに catalog を 2 回余分に読む (WP-7 で見る) / `tools/contract_catalog.py --help` が書き込む (内容は不変。道具の Known gaps 候補)。
+- **push は停止中** (GitHub 課金上限)。
 
 ## 4. 依頼者判断待ち・未決
 
-- (裁定済み 2026-09-24) Q-3 / Q-5 / Q-4 — §2 の行を見よ。
-- 役割定義の `model:` の変更は不要と分かった (2 つ目のチャットで `opus` 別名が 5.5 に解決)。毎チャットの最初の Opus 起動で実測を報告する。
+- **Q-4** (main への 1 回の merge の直前の確認。監督が完了ゲートの集計行と `git diff --stat` を添えて提示): **裁定済み 2026-09-25 (逐語)**: 「Q-4 了承」— 完了ゲート `4168 passed / judge=PASS` (label p11b) と main `b283f48` に対する diff の stat (85 files, +5884 / −452)、R-111 を抱えたまま merge する旨を添えて提示した形で了承
+- (裁定済み 2026-09-24) Q-3 / Q-5 / Q-4 の形 — §2 の 1〜2 つ目のチャットの行と「裁定」節を見よ。
+- 役割定義の `model:` の変更は不要 (`opus` 別名は 2 つ目・3 つ目のチャットで `claude-opus-5-5` に解決)。毎チャットの最初の Opus 起動で実測を報告する。
 
 ## 5. 本チャットで足した運用上の教訓
 
-1. **サブエージェントのモデルは transcript の `"model"` 欄で確かめる。** 自己申告 (「Opus 5 (1M)」等) は frontmatter の値に関わらず同じ文を返した。
-2. **役割定義の frontmatter はチャット開始後に変えても効かない** (worktree 側・root 側とも)。Agent ツールの `model` 引数は効く (haiku で実測) が別名 4 つのみ。
-3. **worktree には `.venv` が無い。** 道具は `./.venv/bin/python tools/dev/<tool>.py -C <worktree>` を root から、または リポジトリ root の `.venv/bin/python` を絶対パスで (文書には相対表記だけ書く)。
-4. **Mitate の要件 §3/§12 (f)/D4 は「cursor 走査で完全性を証明したい」であり、順序は Mitate 自身の typed field (`seq`) で指定している。** data-service-api 側に `seq` の実体は無い (探索の取り違えに注意)。
-5. **MitateDB は PostgreSQL の collection table に内部 id 列を持たず `ctid` は不安定。** keyset の tie-break には保存形の変更が要る (Q-1)。
-6. **`page.size` 省略時の挙動は両 peer で割れていた** (r2db 既定 100 + `next_page`、MitateDB は `effective max_result_rows` で黙って切り詰め `next_page` 常に null)。1.8.0 では `next_page` に意味が無いので違反ではなかったが、1.9.0 で「null = 末尾」を約束すると同じ要求の完全性判定が割れる — 契約に既定を置く (裁定 #9)。
-7. **MitateDB は契約 schema の `Page.size` 上限 1000 を検査していない** (`_check_object_shape` は `minimum`/`maximum` を見ない)。`max_result_rows ≥ 1001` の配備では 1001 が無検査で通る (裁定 #12)。
-8. **`opus` 別名の解決はチャットごとに違いうる** (同日に `claude-opus-5` と `claude-opus-5-5` の両方を実測)。
+1. **並走する 2 チャットの仮番号は両方が同じ番号を使う。** merge 直前ではなく「main が進んだと分かった時点」で main を取り込み、番号を振り直す (本件は WP-6 の前に取り込み、WP-6 を確定番号で書いた)。
+2. **検査器は自身の置き場を REPO_ROOT にする** (`tools/check_comment_provenance.py`・`tools/public_value_scan.py`・`tools/perf_baseline.py`・`tools/check_doc_refs.py`)。root の copy に worktree のパスを渡すと main を検査する — worktree は worktree 側の copy で回す。
+3. **`tools/dev/mutate.py` の `-x` と xdist (`-n`) の相互作用で error(2) になる。** 変異は単一 node id・非並列で回す。
+4. **同日の引き継ぎ書名は衝突する。** 命名の前に main の `docs/work-orders/` を読む。
+5. **manifest の触ってよいパスに `tools/tests` の pin と runbook を列挙する。** root gate は `tools/tests` を回さず、どの WP のパスにも無い pin (本件 9 件) は WP-6 まで見つからなかった。
+6. **部分集合の flake は原因を診断してから起票する。** r2db http adapter の孤立化 copy が共有 control client を閉じる既存欠陥 (main `f522610` で修正済み) が、item 配分の変化で C-30 の node に露出した例 (探索担当の診断で確定し、取り込みで解消。起票しなかった)。
+
+1〜2 つ目のチャットの教訓 (前の版の本書のまま):
+
+7. **サブエージェントのモデルは transcript の `"model"` 欄で確かめる。** 自己申告 (「Opus 5 (1M)」等) は frontmatter の値に関わらず同じ文を返した。
+8. **役割定義の frontmatter はチャット開始後に変えても効かない** (worktree 側・root 側とも)。Agent ツールの `model` 引数は効く (haiku で実測) が別名 4 つのみ。
+9. **worktree には `.venv` が無い。** 道具は `./.venv/bin/python tools/dev/<tool>.py -C <worktree>` を root から、または リポジトリ root の `.venv/bin/python` を絶対パスで (文書には相対表記だけ書く)。
+10. **Mitate の要件 §3/§12 (f)/D4 は「cursor 走査で完全性を証明したい」であり、順序は Mitate 自身の typed field (`seq`) で指定している。** data-service-api 側に `seq` の実体は無い (探索の取り違えに注意)。
+11. **MitateDB は PostgreSQL の collection table に内部 id 列を持たず `ctid` は不安定。** keyset の tie-break には保存形の変更が要る (Q-1)。
+12. **`page.size` 省略時の挙動は両 peer で割れていた** (r2db 既定 100 + `next_page`、MitateDB は `effective max_result_rows` で黙って切り詰め `next_page` 常に null)。1.8.0 では `next_page` に意味が無いので違反ではなかったが、1.9.0 で「null = 末尾」を約束すると同じ要求の完全性判定が割れる — 契約に既定を置く (裁定 #9)。
+13. **MitateDB は契約 schema の `Page.size` 上限 1000 を検査していない** (`_check_object_shape` は `minimum`/`maximum` を見ない)。`max_result_rows ≥ 1001` の配備では 1001 が無検査で通る (裁定 #12)。
+14. **`opus` 別名の解決はチャットごとに違いうる** (同日に `claude-opus-5` と `claude-opus-5-5` の両方を実測)。
 
 ## 裁定
+
+全件を載せる (`docs/work-orders/OPERATING_CONDITIONS.md` §1.15 の 77)。1〜2 つ目のチャットの行は前の版の本書のまま残す (番号は振り直し前の仮番号。「未裁定」の行は本チャットの行で裁定した)。本チャットの行は「WP-4 実装担当の逸脱 1」以降で、出所は監督チャットの scratchpad の `rulings-wp4.md` (WP-4 実装報告への裁定)・`rulings-wp4-review.md` (WP-4 コードレビューと再実測)・`rulings-wpm.md` (main 取り込みのレビュー)・`rulings-wp6.md` (WP-6 のレビューと実装報告) の逐語である。`rulings-wp4.md` の逸脱 1〜7 は `rulings-wp4-review.md` の表が同じ裁定を結果込みで再掲しているので後者を載せ、前者からは逸脱 8 と疑義 1〜3 の行だけを足した。
 
 | 指摘 | 裁定 | 理由 |
 |---|---|---|
@@ -130,3 +171,60 @@
 | WP-4 実装担当の逸脱 8 件・疑義 3 件 (未レビュー) | **未裁定 — 次チャットの監督がコードレビューの前に裁定する** (暫定見解は `.handover-materials/wp4-report.md` 末尾: 逸脱 2・3・5 は採用見込み、**逸脱 4 (孤立化 fixture の bound 5→100 / 50→150) は差し戻し見込み** — C-28 側が宣言 bound を読むべき) | チャット中断のため |
 | 作業指示書 v1.0 起草担当の疑義 1〜7 | 裁定済み (直す 5、採用 2)、設計 v0.5 / 作業指示書 v1.1 で反映 | `rulings-wo-v1.md`: control_plane と 1.8.0 pin テストを WP-6 に、R-107 行を WP-1 に、Revision note 3 本は既存 `## versioning.version_binding` 節に、MitateDB cell の cursor 入口を WP-2 で (WP-4 まで CAPABILITY_UNSUPPORTED)、conformance 全体は前景 1 回に収まらない (606 s) |
 | 設計 v0.5 / 作業指示書 v1.1 起草担当の疑義 1〜4 | 裁定済み (直す 3、採用 1) | OC §1.5 の 39 は変えない (実装担当は peer ごとの部分集合を前景で、全体は監督のゲートのみ)、1.8.0 pin 3 箇所を WP-6 に、cursor 入口は `ApplicationRuntime` (実体は `ApplicationCell`)、L1 件数ピンの条件付き追加は可 |
+| WP-4 実装担当の逸脱 1 (backend.read の cursor_values kwarg) | 採用 | 実装詳細 |
+| 逸脱 2 (read → read_page 委譲、page.size 検査を共有コアに) | 採用。設計 §11 に D-2b の 2 への訂正註 | 単一 choke point |
+| 逸脱 3 (cursor 検証を配備 bound より先) | 採用。設計 §11 に訂正註 | 要求の形の検査は資源の検査より先 |
+| 逸脱 4 (孤立化 fixture 5→100 / 50→150) | 差し戻し (直した): C-28 側の継続要求 5 箇所を発行時と同じ page_size (2 / 1) に監督が修正、fixture は 5 / 50 | 差し戻し 1・2 の裁定と同じ形。page.size 非束縛の観測は既存の page_size=1 の脚が担う |
+| 逸脱 5 (count() を keyset 走査に) | 採用 (直した: 1 行 1 要求 → 既定ページ走査 + ページ数ガード) | 単一 read の黙った切り詰めは adapter の実バグ |
+| 逸脱 6 (C-27 MitateDB-http flake 3/3) | fixture 復元後 2 回中 1 回。WP-6 で起票 (R-111) | 完了ゲートを赤にしうる |
+| 逸脱 7 (CI の sqlite 版未確認) | 直した: 完了条件 19 を pin テスト `MitateDB-api/tests/test_sqlite_version_floor.py` (>= 3.30) に。CI runner の実測は push 再開後 (未決) | 手元で確認不能 |
+| 逸脱 8 | 対象外 | `rulings-wp4.md` |
+| 疑義 1 (D-2b の 2 の file:line 陳腐化) / 疑義 2 / 疑義 3 | 疑義 1 → 逸脱 2 の訂正註。疑義 2 → 逸脱 3。疑義 3 → 逸脱 4 (値の調整ではなく C-28 側を直す) | `rulings-wp4.md` |
+| レビュー WP-4-1 count() 1 行 1 要求で fixture 復元後 C-23 が rate limit で赤 | 直した (既定ページ走査) | RV-1 で実測 |
+| レビュー WP-4-2 desc の NULL 分岐を観測するテストが無い | 直した (C-28 T に `null_valued_field_desc` 変種、7 変種。M4-5b / M4-5c 赤) | 退行が入れば行の欠落として利用者が気づく |
+| レビュー WP-4-3 SQLite NULLS 句 comment が未実施の CI 実測を主張 | 直した | OC §1.5 の 34 |
+| レビュー WP-4-4 `_mdb_row` の cursor 値を Python 側で型検査していない | 直した (`check_declared_value(value, "integer")` + tamper 脚) | D-2b の 1 |
+| レビュー WP-4-5 read → read_page の移動で経緯 comment が落ちた | 直した (逐語で移送) | OC §1.5 の 40c |
+| レビュー観察: cursor 付き要求 1 回ごとに catalog を 2 回余分に読む (cell.py の復号検査) | **観察** (WP-7 の性能計測で見る。利用者は気づかない、終了条件を破らない) | 起票の 2 問とも いいえ |
+| 再実測で発見: `test_c28_page_size_outside_schema_is_refused_at_page_size[r2db-api-http]` が `-n 5 --dist loadgroup` で closed-client RuntimeError (3/3) | **直した (main の取り込みで)**: 原因は r2db http adapter の孤立化 copy が親の共有 control client を rebuild して閉じる既存バグ。main f522610 (R-29 WP-3) が iso の control send を親に束縛して修正済み | 探索担当の診断 `explore-ps-flake.md` |
+| 再実測: comment provenance 検査器は自身の置き場 (root checkout) を REPO_ROOT にするため、root の copy で worktree のパスを渡すと main を検査する | **既知の穴** (§1.12 の 71: 製品欠陥は通らない): WP-6 で `tools/check_comment_provenance.py` の docstring Known gaps に 1 行 (worktree は worktree 側の copy で回す)。`public_value_scan.py` の同種の穴と同列 | 実装担当・レビュー担当の provenance 実測は main を見ていた。監督が worktree の copy で再実測: 履歴語 2 件 (直した)、他は関数跨ぎ移動の (2) (WP-2 と同じ観察) |
+| 変異 M4-x を `-k` + `-n 2` で回すと mutate.py の -x と xdist の相互作用で error(2) | 観察 (単一 node id・非並列で回す。memory の mutate -x pitfall と同種) | — |
+| main 取り込み 実装担当の判断 (a) 遡及拒否の列挙を main の 1.9.0 末尾文まで機械的に拡張 | **据え置き (直した = 拡張を戻した)** | main の Revision note 3 (旧い遡及行は一字も触らない) が新しい前例。依頼者確定の 1.9.0 段落を変えない。1.10.0 段落は自身の遡及文を持つ |
+| 判断 (b) 1.10.0 段落の前版参照を 1.8.0 → 1.9.0 | 採用 | 1.10.0 の前版は 1.9.0。数字のみの置換 (Q-4 で依頼者に見せる) |
+| 判断 (c) 1.8.0 entry の検査は main の index 固定形 | 採用 | — |
+| 判断 (d) C-29 declared_version が 6 plug で赤 (catalog 1.10.0 vs 宣言 1.9.0) | 期待どおりの中間状態 (WP-6 の版フリップで消える) | 統合 branch |
+| 判断 (e) port 文書に v1.18 の節が無い | 直した (版数行 1.18 + §28 v1.18 の節) | main の v1.16 / v1.17 の前例 |
+| 判断 (f) 台帳の「30 件全件が executable」 | WP-6 で §0.1.1 を 31 件に | — |
+| 判断 (g) `---` 区切りの流儀 | 採用 | — |
+| レビュー WP-M-1 test_c30 が未追跡・旧ファイル削除が未 stage | 直した (finalize.py が porcelain から両方を stage、rename として記録) | — |
+| レビュー WP-M-2 (a) が note 3 と逆 | 直した (据え置き) | 上 |
+| レビュー WP-M-3 Revision note 4 の記述が実測と不一致 | 直した (note 4 を書き直し) | — |
+| レビュー WP-M-4 1.10.0 entry の pin が obligations[-1] | 直した (index [8] + version assert) | main の §15 裁定 2 の形 |
+| レビュー WP-M-5 CONFORMANCE_ADAPTER_V1 の版数行 | 直した | 上 (e) |
+| レビュー WP-M-6 docs/work-orders に引き継ぎ書が 3 通 | 引き継ぎ書の変更セットで main 由来の FABLE7 を archive へ (§1.16 の 78) | 最新 2 通 = FABLE (main、R-29) と FABLE2 (本件) |
+| レビュー WP-M-7 (観察) main の 1.9.0 が structured_query を unavailable にすることを禁じるので 1.10.0 の条件付き義務は常に条件成立 | **観察** (確定文どおり。変えるなら依頼者判断) | 利用者は気づかない、終了条件を破らない |
+| レビュー担当の過失: `tools/contract_catalog.py --help` が書き込む (sha256 不変) | 観察 → 道具の Known gaps 候補 (後日) | 内容は不変 |
+| WP-6 実装担当の逸脱 1: SI-10 Evidence を設計案 (個数・型不一致を含む) から実際の R node の観測 (malformed / foreign / 束縛違い) に合わせ、個数・型は peer 単体テストへ | 採用 | 実測後に書く (OC §1.5 の 34)。WP-2 の裁定 (a) と整合 |
+| 逸脱 2: 件数ピン改名で dangling になった SI-08 Evidence 行の追随 | 採用 | — |
+| 逸脱 3: `tools/tests` 9 件が赤 (両 peer の `paging.py`・keyset 述語・`MAX_CURSOR_OFFSET` 削除が静的インベントリ pin に未反映) | 直した (本変更セットで pin を追随。規則は緩めない; SQL scan は規則遵守の根拠付きで登録) | root gate は tools/tests を回さない (memory: gate-chain-exit-masking)。教訓: manifest は tools/tests の pin を列挙する |
+| 疑義: §0.1.2 の C-30 の段 | 「要求を作る」+「判定を受ける」の 2 段 (作業指示書の「SI の段」は軸の取り違え) | §0.1.2 の軸は周回の段 |
+| レビュー WP-6-1 C-30 Status に §10 の 6 の開示が無い (「編集不要」は誤り) | 直した | 完了条件 7 |
+| WP-6-2 §0.1.2 が「catalog を読む」段のまま (同文 3 箇所) | 直した | 上 |
+| WP-6-3 SI-10 Control の MitateDB 側 path が paging.py (拒否は cell.py) | 直した | 監査者が制御を辿れる |
+| WP-6-4 MitateDB の宣言 comment「structured_query stays enabled」(実際は partial) | 直した (code-history も) | 主張 vs 実測 |
+| WP-6-5 CONDITIONS_HISTORY「1.9.0 at that point」(a2ba943 時点は 1.8.0) | 直した | — |
+| WP-6-6 R-111 の併記 (C-30 直列の資源枯渇) の plug 名なし・断定・node 数 | 実測で決める (直列 1 回。緑なら併記を外し §11 に記録、赤なら plug 名と推定を明記) | main f522610 が同 adapter の closed-client を直した |
+| WP-6-7 Known gaps が 3 行形式でない、README 索引の件数 | 直した (tools/dev/README.md を触ってよいパスに追加) | OC §1.12 の 71 |
+| WP-6-8 SI-09 の行参照 5 件の付け替え先 | main が指していた `def delete` の現在位置に (内容変更は範囲外) | Class D の claim 内容は変えない |
+| WP-6-9 軽微 (R-109 の WP 注記、Version 行の件数、SI-08 Status の文、§11 WP-5 記録のキリル文字) | 直した | — |
+| レビュー WP-4 観察の再掲: mutate.py の `-x` と xdist | 観察 | memory mutate-x-flag-pitfall |
+| 受け入れ監査 未充足 WP-3 の 4・9・11 (監査照合の逐語記録が設計 §11 に無い) | 直した (§11 WP-3 記録に grep 出力 / README の開示 2 点 / -rxX 実測を追記) | §1.7。中身は満たしていた |
+| 監査 未充足 WP-4 の 21 (当時 PS[r2db-api-http] が赤) | 直した (main f522610 の取り込み 285cfe4 で解消。作業指示書 §9 に訂正註) | — |
+| 監査 未充足 WP-6 の 10 (部分集合 "not r2db" で C-27 MitateDB-http が赤) | **起票済み R-111** (頻度を追記: 監査の再実測 2/2、完了ゲートの全体実行は緑)。R-111 を抱えたまま merge (Q-4 で依頼者に明示) | 完了ゲートは緑、利用者は気づかない、終了条件を破りうる → 起票 |
+| 監査 証拠不足 WP-4 の 19 (CI の sqlite 版) | 直した (作業指示書 §9 に訂正註: pin テストに置換、CI runner の実測は push 再開後) | — |
+| 監査 観察 1: SQLite の `_mdb_row` 型検査がテストで固定されていない (AU-4 NG) | 直した (`test_row_order_column.py` に SQLite の改変 cursor テスト、AU-4 赤) | 義務 (5)。先送りしない |
+| 監査 観察 2: R-111 の頻度が台帳の記録より高い | 直した (R-111 行に追記) | — |
+| 監査 観察 3: MitateDB の cursor 付き要求のコストが未計測 | 直した (§11 WP-7 に MitateDB の深いページ比較と cursor 有無の差を追記) | レビュー WP-4 観察の「WP-7 で見る」を実際に見た |
+| 監査 観察 4: 記述と実物のずれ 5 件 | 直した | — |
+| 監査 疑義: WP-7 の基準値の選択 (§2.3 vs フェーズ9) | 観察 (どちらでも判定は変わらない。§11 に両論を記録済み) | — |
+| 監査 疑義: WP-3 の完了条件 4 (2 本目の field_domains 直接呼び出し) | 直した (§11 に理由を記録) | — |

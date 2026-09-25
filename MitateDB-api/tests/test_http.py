@@ -876,8 +876,15 @@ def test_tampered_page_cursor_count_and_type_and_domain_mismatches_are_validatio
 
     # (d) out-of-domain: an embedded NUL byte for `label` -- rejected on
     # this peer's PostgreSQL plug (this fixture's own backend, design
-    # §10 の 11); the SQLite plug accepts the identical payload (measured
-    # separately, design §11).
+    # §10 の 11); the SQLite plug accepts the identical payload -- an
+    # accepted, undetermined divergence (design §10 の 11), never
+    # measured under design §11 (受け入れ監査 2026-09-25 観察 4d).
+    # `_mdb_row`'s own declared-type check (leg (f) below) is the ONE
+    # tamper leg design D-2b.1 requires on both backends, and IS fixed
+    # permanently on the SQLite backend by `MitateDB-api/tests/
+    # test_row_order_column.py::
+    # test_tampered_page_cursor_row_order_tie_break_type_mismatch_is_
+    # validation_failed_on_sqlite`.
     _assert_page_cursor_refused(_page(paging.encode_page_cursor(["tail\x00head", values[1]], binding)))
 
     # (e) out-of-domain: an out-of-64-bit-range integer for `_mdb_row`

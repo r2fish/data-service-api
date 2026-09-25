@@ -854,6 +854,12 @@ C-28 の Condition 欄は確定文ファイル。`CONTROL_MAPPING` の主張は�
   - port v1.16 (`query_page`) → **v1.18**。main の v1.16 は `attempt_filter_with_result`、v1.17 は `operation_catalog_document`。
   - 不変: migration 0015、`_ISOMORPHIC_TARGETS` の件数 156→159。
 
+- **2026-09-25 — 受け入れ監査の裁定 (WP-4 完了条件 19)**: CI の 2 job (`actions/setup-python@v5` の 3.11/3.12) の sqlite 版は push 停止中のため実測できない。監督裁定により、完了条件は監査照合ではなく実行可能な pin テスト `MitateDB-api/tests/test_sqlite_version_floor.py::test_sqlite_version_meets_the_nulls_first_last_floor` (sqlite >= 3.30) への置き換えとする。手元 `.venv` (sqlite 3.53.4) では緑。CI runner での実測は push 再開後の課題として未決のまま残す。
+- **2026-09-25 — 受け入れ監査の裁定 (WP-4 完了条件 21)**: WP-4 の commit `cb64217` 時点では `test_c28_page_size_outside_schema_is_refused_at_page_size[r2db-api-http]` が "not MitateDB" の部分集合で赤 (httpx `AsyncClient` の closed-client `RuntimeError`) だった。原因は r2db-http adapter の孤立化 copy が親の共有 control client を閉じる欠陥であり、main `f522610` の修正を取り込む merge commit `285cfe4` の時点で解消済み (以後の再実測で非発現)。
+- **2026-09-25 — 受け入れ監査の裁定 (WP-6 完了条件 10)**: `test_c27_same_digest_executes_once[MitateDB-api-http]` の断続的な flake (R-111、規模 M) を抱えたまま、完了ゲート (全体実行) は緑で通す。R-111 の頻度の追記は台帳側 (§8) にある。
+
 ## 10. 実施記録
 
 (統合時に監督が記す。WP ごとの commit、`pt.py` / `mutate.py` の集計行、確定した期待結果表、完了ゲートの集計行、Q-4 の確認の逐語。)
+
+**受け入れ監査 (2026-09-25、全 WP)**: `$SP/acceptance-packet.md` により WP-1〜WP-7 の完了条件 106 件 (9a・9b 込み) を判定 -- 充足 100・未充足 5 (WP-3 の完了条件 4・9・11 は設計 §11 への監査照合の記録欠落のみで実体は充足、本追記で解消; WP-4 の完了条件 21 は commit 時点の状態を指し main `f522610` の取り込みで解消済み; WP-6 の完了条件 10 は R-111 (flake) を抱えたまま)・証拠不足 1 (WP-4 の完了条件 19、CI の sqlite 版は pin テストへ置換、CI runner の実測は push 再開後)。監査担当の変異 36 件中 35 件が期待どおり、観察 1 (AU-4、`_mdb_row` の cursor 型検査が SQLite plug で固定されていない) は本追記の新テストで赤化し解消した。監査担当が単独実行した完了ゲートの集計行: `gate: 4167 passed, 2 subtests passed in 327.83s (0:05:27)`、`judge=PASS`、pg_database/pg_roles diff 0。本追記 (このドキュメント群の記述訂正 + 新テスト 1 本) を含めた最終の完了ゲートの集計行: `gate: `gate: 4168 passed, 2 subtests passed in 327.60s (0:05:27)`、judge=PASS、pg_database/pg_roles diff 0、label p11b (最終ツリー。SQLite の改変 cursor テスト追加前の ff6ad67 では label p11 `4167 passed in 327.83s`、judge=PASS)`(監督が最終ゲート後に埋める)。

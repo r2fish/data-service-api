@@ -758,6 +758,12 @@ D-2 の適用行 (migration 0015) の列挙元 (`information_schema.tables` の 
 
 **M3-5 (`PLATFORM_UPGRADE_NUMBERS` から 15 を外す)、`mutate.py` による実測のみ**: `M3-5    expect=red   got=red       OK  | 1 failed in 0.07s | restore=ok`(対象 `test_platform_upgrade_ledger_scan.py::test_real_migrations_three_way_match`、単一)。**コードレビュー差し戻し (指摘 1・6)**: 完了条件 3 の M3-3 は SQLite/PostgreSQL 2 test を 1 entry にまとめていたため、`mutate.py` の `-x` が SQLite 側の赤で止まり、PostgreSQL 側 (`test_visible_field_domains_excludes_the_row_order_column_on_postgres`) が本当に除外を観測しているかは実測されていなかった (`fields=["name","score"]` の明示 read だけでは除外の有無に関わらず `_mdb_row` は出ない)。両 test に select-all (`fields` 省略) の読み出しと assert を足し、PostgreSQL 側には `cell._visible_field_domains("widgets") == {"name": "string", "score": "int64"}` の等値 assert (ドメイン値は実測) を追加。M3-3 を M3-3a (SQLite) / M3-3b (PostgreSQL) の 2 entry に分けて `mutate.py` を再実行し、両方 `got=red` を確認した: `M3-3a    expect=red   got=red       OK  | 1 failed in 0.09s | restore=ok` / `M3-3b    expect=red   got=red       OK  | 1 failed in 0.30s | restore=ok`。以後、変異は `mutate.py` 経由のみで測る。
 
+**受け入れ監査 2026-09-25 追記 (作業指示書 §1.7、完了条件 4・9・11 の監査照合の逐語記録)**: 受け入れパケット (§2 WP-3) が「未充足 (記録のみ)」と判定した 3 件を、実体は既に充足していたことの逐語記録として本節に足す。
+
+- **完了条件 4 (`_visible_field_domains` が唯一の choke point であること)**: `grep -n 'self._backend.field_domains(' MitateDB-api/src/mitatedb_api/cell.py` → `973:        domains = self._backend.field_domains(collection)` (helper `_visible_field_domains` 自身の本体、唯一の非直接呼び出し元) と `2288:        domains = self._backend.field_domains(collection)` (`_decode_and_check_page_cursor`、WP-4 が意図して足した第 2 の直接呼び出し) の 2 箇所。理由は `_visible_field_domains` 自身の docstring (`cell.py`:963-972) に既にある — cursor の値域検査は `_ROW_ORDER_COLUMN` 自身の domain を要る「意図した SEVENTH の直接呼び出し」であり、select-all/order_by/values-binding のどの choke point もこの列を隠す helper を経由しない設計であって、helper を迂回する新しい第 3 の呼び出しではない。
+- **完了条件 9 (README の開示 2 点)**: `MitateDB-api/README.md`:78-86 (lock 保持時間の開示 — 「Two disclosures: an upgrade script that rewrites every collection table in one transaction (`0015`) holds each table's own `ACCESS EXCLUSIVE` lock ... `--lock-timeout` bounds only each lock's own *acquisition*, never how long it is then held once acquired.」) と `MitateDB-api/README.md`:86-90 (物理順採番の開示 — 「And, for that same script, the row numbers PostgreSQL assigns to a collection's own pre-existing rows follow PostgreSQL's own physical rewrite order, which is stable but not necessarily the order those rows were originally inserted in.」)。
+- **完了条件 11 (`-rxX` の実測、期待結果表との一致)**: `pt.py -- conformance-tests/test_c28_keyset_paging.py -n 2 -q -rxX` → `pt: 3 failed, 42 xfailed, 39 xpassed in 20.93s`(レビュー担当の出力、`$SP/hm/review-wp3.md` より逐語引用 — 監査担当が本監査で確かめた記録の出所であり、監査担当自身が再実行したものではない)。3 failed は I × r/rh/rs の `[XPASS(strict)]`、node×plug 集計は作業指示書 §5 の表 (= WP-5 の表) と全セル一致 (r2db: I=F、他 X / MitateDB 全 x)。
+
 ### WP-4 実施記録 (2026-09-25)
 
 **完了条件 9b (`1`/`1.0` の束縛の実測、MitateDB)**: `paging.canonical_page_binding("app_a", "widgets", [("rank", "eq", 1)], order_spec)` と同じ引数を値だけ `1.0` に変えた呼び出しを比較すると、2 つの hash は一致しない (`2d54e1f4758cac51` != `db98cd8339664684`) — MitateDB の `normalize_request_for_plan` と同じく、`canonical_page_binding` も数値を型変換せず `json.dumps` へ渡すため `1` と `1.0` が別の JSON 表現になる。r2db 側は WP-5 で同じ結果を実測済み (D-3 の 3)。
@@ -936,3 +942,17 @@ PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity
 
 **設計への疑義 (WP-7)**: なし(D-7・§0.1.4 の適用のみ)。強いて言えば、上の「両論」2 件(§0.1.4 の基準値選定における `--warmup`/`--n` 不一致の許容、深いページ比較を 1 点のみで「記録」と位置づけることの十分性)は D-7 の記述どおりに解けるが、将来 O(N) 傾向そのものを主張したい場合は複数 N・複数ページ位置の sweep が別途必要になる。
 
+### MitateDB の深いページ比較 (追記 2026-09-25)
+
+受け入れ監査の観察 3(MitateDB の cursor 付き要求のコストが測られていない)への対応。r2db と同じ script 構成(`scratchpad の deep_page_driver_mitate.py`、commit しない)を MitateDB の PostgreSQL データ面(in-process `ApplicationCell`/`ApplicationRuntime`/`ApplicationDeveloper`、`backend_postgres.PostgresBackend`。構成法は `MitateDB-api/tests/test_postgres.py` の `_bootstrap_platform`/`provision_app`/`make_cell`/`sessions_for` を手本に、`ApplicationCell`/`PostgresBackend` が要らない 0004/0005/0007/0011/0012 を省き 0001+0002+0003 のみ適用)へ移植し、本 worktree(keyset 実装後)だけを計測した。変更前 (`0fee6e5`) の MitateDB は `read_page`/cursor 自体が無い(比較対象なし)ため、同じ tree 上で「cursor なしの先頭ページ」と「cursor ありの末尾ページ」を比較し、レビュー観察(catalog を 2 回余分に読む)の差を ms で示す。
+
+entity `items`(field `n`、0..19999 の整数を挿入順どおりに格納)、`order_by=[{"field": "n", "direction": "asc"}]`、`page_size=100`。
+
+| 方式 | 行数 (N) | page_size | 走査ページ数 | 走査全体の所要時間 | 対象要求の p50 (n=25) | 末尾到達の根拠 |
+|---|---|---|---|---|---|---|
+| cursor なし (先頭ページ、`cursor=None`) | 20000 | 100 | - | - | 1.349 ms | (先頭ページのため対象外) |
+| cursor あり (末尾ページ、直前の cursor から 1 要求) | 20000 | 100 | 200 | 0.357 s | 1.690 ms | 最終ページの最後の行 `n=19999`(挿入した最大値と一致、`last_page_reached_end=true`) |
+
+**cursor 付与によるコスト差**: 1.690 ms − 1.349 ms = **+0.341 ms**(先頭ページ比 +25.3%)。レビュー観察「catalog を 2 回余分に読む」に対応する差分として記録する(契約の主張ではなく、この 1 点計測の記録)。
+
+script: `scratchpad の deep_page_driver_mitate.py`(commit しない)。呼び出しは `./.venv/bin/python tools/testpg/dsa_testpg.py run -- ./.venv/bin/python deep_page_driver_mitate.py --src-root <worktree>/MitateDB-api/src --migrations-dir <worktree>/MitateDB-api/migrations --n-rows 20000 --page-size 100 --repeats 25 --out-json <path>`。使い捨てクラスタは自分の分だけ `dsa_testpg.py run --` で起動・撤去、残骸なし。`perf_baseline.py` は回していない(別担当が `pt.py` を回している間の重複回避)。
