@@ -966,6 +966,22 @@ Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as this h
 This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
 ```
 
+### correction: 2026-09-25
+
+- reason: this host also declares contract 1.10.0 in the same commit as its own keyset paging behavior (query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default)
+
+old:
+```
+This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
+```
+
+new:
+```
+This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
+
+This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays enabled here, never ahead of the behavior they declare.
+```
+
 ## CH-0143
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)

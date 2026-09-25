@@ -1706,7 +1706,7 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
         cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     secret = bearer
     document = service.control_capabilities(secret)  # must NOT raise -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.9.0"
+    assert document["contract_version"] == "1.10.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -1736,7 +1736,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     regardless of role, and this omission does not weaken the proof."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.9.0"
+    assert document["contract_version"] == "1.10.0"
 
     fresh_backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with fresh_backend.unit_of_work() as work:
@@ -1748,7 +1748,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     fresh_secret = fresh_bearer
     fresh_service = ControlPlaneService(fresh_backend, limits=_GENEROUS_LIMITS)
     fresh_document = fresh_service.control_capabilities(fresh_secret)  # must_rotate=True path
-    assert fresh_document["contract_version"] == "1.9.0"
+    assert fresh_document["contract_version"] == "1.10.0"
 
     durable_operations = {event.operation for event in h.control_audit.snapshot()}
     durable_operations |= {event.operation for event in fresh_backend.audit_sink.snapshot()}
@@ -2208,7 +2208,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_156_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_159_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2719,10 +2719,13 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_count_registered_applications"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_read_connection_headroom_settings"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "HeadroomReport"),
+    ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "encode_page_cursor"),
+    ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "decode_page_cursor"),
+    ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "canonical_page_binding"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_156_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_159_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2774,7 +2777,11 @@ def test_isomorphic_target_table_is_pinned_to_its_current_156_rows() -> None:
     builder (`_psql_connection_env`) was found isomorphic too (its own
     module-level allow-list constant, `_LIBPQ_ENV_VAR_FOR_CONNINFO_KEY`,
     is an annotated assignment this table's own matcher cannot resolve,
-    so it stays unregistered -- see the comment beside its own row):
+    so it stays unregistered -- see the comment beside its own row);
+    widened a fourteenth time once the cursor codec (`encode_page_cursor`/
+    `decode_page_cursor`) and the binding-hash helper
+    (`canonical_page_binding`) had landed identically on both peers,
+    verified normalize-and-diff equal before adding:
     a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
@@ -2806,7 +2813,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_156_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_156_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_159_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3064,8 +3071,11 @@ def test_isomorphic_target_table_is_pinned_to_its_current_156_rows() -> None:
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_count_registered_applications"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_read_connection_headroom_settings"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "HeadroomReport"),
+        ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "encode_page_cursor"),
+        ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "decode_page_cursor"),
+        ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "canonical_page_binding"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 156
+    assert len(_ISOMORPHIC_TARGETS) == 159
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}
@@ -3589,7 +3599,7 @@ def test_control_capabilities_declares_contract_version_1_5_0() -> None:
     own re-flipped pins."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.9.0"
+    assert document["contract_version"] == "1.10.0"
 
 
 # ---------------------------------------------------------------------------

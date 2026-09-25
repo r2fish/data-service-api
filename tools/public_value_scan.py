@@ -61,6 +61,27 @@ through the completion gate is recorded here and not filed in the ledger):
        implemented" above).
        caught by: human review before publication, against
        `docs/security/public-repository-policy.md` (accepted).
+    4. not detected: a real value in a file this tool is handed by a
+       bare, worktree-relative path while it runs from a different
+       checkout of the tool itself.
+       why: a relative path resolves against `REPO_ROOT` (this script's
+       OWN location, `Path(__file__).resolve().parent.parent`), not
+       against the tree under review -- a main checkout's copy of this
+       tool given a worktree-relative path silently scans the unmodified
+       main-checkout file instead.
+       caught by: passing the worktree's own absolute path whenever the
+       file under review lives only in a worktree (accepted; no floor or
+       cross-checkout resolution is implemented).
+    5. over-detected, not under-detected: `R3_project_id` cannot tell a
+       `pt.py`/`mutate.py` log filename (`mutate-YYYYMMDD-NNNNNN`/
+       `pt-YYYYMMDD-NNNNNN`) from a real GCP project id/number.
+       why: the trailing `-NNNNNN` (6 digits) satisfies
+       `R3_PROJECT_ID_RE` exactly like a real suffix would; the rule
+       carries no log-filename exception.
+       caught by: the reporting convention of not writing a `pt.py`/
+       `mutate.py` log filename into a tracked document; human review
+       for the rare document that does (a log-name reference is not
+       itself a public-value violation).
 """
 from __future__ import annotations
 

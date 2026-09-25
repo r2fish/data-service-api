@@ -381,4 +381,9 @@ Executability lands in the phase 11 work order's later work package. Until then 
 ---
 
 ## C-30
-No historical narrative was separated out of this row's current text; the current row already reflects only today's state.
+
+**起票 2026-09-25 (`docs/design/PHASE11_KEYSET_PAGING_V1.md` D-4, work order `docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md` WP-1):** this row was opened as `declared`, ahead of port v1.18's `query_page` and `conformance-tests/test_c30_keyset_paging.py`, so that the design document's own `C-30` references resolve -- the same sequence C-20..C-29 followed (design commit first, condition row second). The condition itself is new (it carried the provisional number `C-28` before the R-29 renumbering, work order §9); nothing was moved out of an earlier row into this section.
+
+**WP-2 landed (2026-09-25):** port v1.18's `query_page` and the test file came into existence and the row was rewritten to `executable (six adapters)`, driven across 9 nodes on 6 plugs -- both peers still declared 1.8.0 (1.9.0 after the R-29 merge `285cfe4`) at that point, so the concurrent-insert node ran as `xfail(strict=True)` and the other 8 as `xfail(strict=False)` (design D-4); the version-flip commit each peer's own WP-6 makes was intended to turn this row's `>= 1.10.0` branch on for real, without editing this suite.
+
+Both r2db-api and MitateDB-api have since flipped `contract_version` to 1.10.0 (WP-6), so the current row states the now-obtaining fact: the `>= 1.10.0` branch drives for real on all 6 plugs, all 9 nodes `passed` (`xfailed` 0, `xpassed` 0). The test file itself is unchanged.

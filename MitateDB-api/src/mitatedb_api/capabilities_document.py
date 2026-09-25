@@ -94,8 +94,16 @@ def build_capabilities_document(*, is_developer, role, application_id, cell_conf
         # unconditional obligations, never ahead of the behavior they
         # declare. `control_plane.py`'s own control-plane document flips
         # in the same commit too (C-19's cross-plane version match).
+        #
+        # This host also declares contract 1.10.0 in the same commit as
+        # its own keyset paging behavior -- query results totally
+        # ordered, a stateless page.cursor with next_page, cursor
+        # binding, and a page.size default -- 1.10.0's own conditional
+        # obligations, bound while structured_query stays declared other
+        # than unavailable (partial) here, never ahead of the behavior
+        # they declare.
         # history: CH-0542
-        "contract_version": "1.9.0",
+        "contract_version": "1.10.0",
         "capabilities": {
             "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},

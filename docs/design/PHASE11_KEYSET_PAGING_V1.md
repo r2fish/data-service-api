@@ -718,7 +718,7 @@ v0.3 (2026-09-24) で上の文を設計レビュー 1 への裁定 (指摘 1・3
   | DP | X | X | X | x | x | x |
   | PS | X | X | X | x | x | x |
 
-  設計 §9 の見込み表 (WP-5 完了時点: r2db 3 plug の (ii) が XPASS(strict→FAILED)、他 8 node が XPASS(non-strict)) と完全一致。**既知の穴 (標準実行時の観察)**: この file を **並列度指定なしで単独実行**すると (`-n` を付けない場合)、r2db-api-http 側で `httpx.AsyncClient` が「Cannot send a request, as the client has been closed」を投げ、無関係な後続 node (例: PS) が FAILED になることを実測した (`tied_order_key` 追加後の 84 node で発現、5 変種времени の 78 node では未発現)。実測で切り分けた原因は **content ではなく総 node 数**（`-k` で任意の 3 node を追加で除外しても解消し、`tied_order_key` を並べ替えても位置に依らず再現する）——単独直列実行の httpx クライアント寿命に関わる資源上限で、`-n 2` 以上の並列度、または完了ゲートと同じ `-n 5 --dist loadgroup` では 3 回中 3 回とも発現しない (下記完了条件 24 の実測)。`conftest.py`/adapter 層はこの WP の触ってよいパス外であり、原因の切り分けのみ記録し実装しない。
+  設計 §9 の見込み表 (WP-5 完了時点: r2db 3 plug の (ii) が XPASS(strict→FAILED)、他 8 node が XPASS(non-strict)) と完全一致。**既知の穴 (標準実行時の観察)**: この file を **並列度指定なしで単独実行**すると (`-n` を付けない場合)、r2db-api-http 側で `httpx.AsyncClient` が「Cannot send a request, as the client has been closed」を投げ、無関係な後続 node (例: PS) が FAILED になることを実測した (`tied_order_key` 追加後の 84 node で発現、5 変種時の 78 node では未発現)。実測で切り分けた原因は **content ではなく総 node 数**（`-k` で任意の 3 node を追加で除外しても解消し、`tied_order_key` を並べ替えても位置に依らず再現する）——単独直列実行の httpx クライアント寿命に関わる資源上限で、`-n 2` 以上の並列度、または完了ゲートと同じ `-n 5 --dist loadgroup` では 3 回中 3 回とも発現しない (下記完了条件 24 の実測)。`conftest.py`/adapter 層はこの WP の触ってよいパス外であり、原因の切り分けのみ記録し実装しない。
 - **完了条件 9b (`1`/`1.0` の束縛の実測、r2db)**: `PYTHONPATH=r2db-api/src python3 -c "from r2db_api.paging import canonical_page_binding; ..."` → `canonical_page_binding('app-x', 'items', [('n', 'eq', 1)], [('id', 'asc')])` = `ea9471961335d955`、`canonical_page_binding('app-x', 'items', [('n', 'eq', 1.0)], [('id', 'asc')])` = `03f384074928d02a`。**`1` と `1.0` は異なる束縛になる**（設計 §10 の 14 の起草時見込みどおり — `json.dumps` は型変換せず、Python の `1`/`1.0` はそれぞれ `"1"`/`"1.0"` という別のテキストになる）。MitateDB 側の実測は WP-4 で行う。
 - **完了条件 21 (codec と `canonical_page_binding` の本体に comment が無く、`paging.py` に module 水準の可変状態が無い)**: `r2db-api/src/r2db_api/paging.py` の `canonical_page_binding`、`encode_page_cursor`、`decode_page_cursor` の本体を目視 — いずれも docstring のみで in-body `#` comment は 0 件。module 水準の代入は `MAX_PAGE_SIZE = 1000` と `MAX_ORDER_BY_FIELDS = 10` の 2 定数のみ（いずれも不変の int リテラルで、可変コンテナ・カウンタは無い）。
 - **完了条件 22 (`MAX_CURSOR_OFFSET` と offset の符号化が消えている)**: `grep -rn "MAX_CURSOR_OFFSET" r2db-api/src/r2db_api/*.py` → 0 件。`grep -rn "_shape_hash\|_encode_cursor\b\|_decode_cursor\b" r2db-api/src/r2db_api/*.py` → 実装側 0 件（コードレビュー差し戻し対応 E で `http.py:466` の comment も新名 `decode_and_check_page_cursor` に直し、旧名の残存は 0 件になった）。
@@ -788,4 +788,61 @@ D-2 の適用行 (migration 0015) の列挙元 (`information_schema.tables` の 
 - (D-2b の 3 について)cursor の復号・束縛検査(D-2b の 1)は、配備 bound (`result_items`) 検査(D-2b の 2)より先に実行される。cursor は要求の「形」の検査であり、配備 bound は「結果の資源」の検査である -- 前者を先に評価することで、孤立化 surface の小さい `max_result_rows` が cursor 由来の拒否を隠さない(C-28 の cross-application/cross-entity ノードが `page_size=100` を使う点で特に効く)。
 
 **指示書外の判断(孤立化 fixture、監督裁定により差し戻し)**: WP-4 実装担当は当初、C-28 の B/A/S ノードの `page_size=100` 継続要求を通すため、孤立化 `FoundationConfig` の `max_result_rows`/`max_requests_per_minute` を上げていた。監督裁定により、誤りは C-28 側(継続要求が発行時の宣言値を無視して `page_size=100` を固定していた)にあると判断され、`conformance-tests/test_c28_keyset_paging.py` の該当 5 箇所(B ノード 3 箇所 → 2、A ノード 2 箇所 → 1)を発行時と同じ page_size に直し(監督実施)、fixture の値と comment は HEAD `1c362fc` の 5/50 へ差し戻した。count() の既定ページ走査化(上記コードレビュー対応 1)と組み合わせても、C-23 の `full` 分岐(rate limit)を含む C-05/C-23/C-24/C-27 の MitateDB 部分集合が緑であることを再実測した(上記集計行)。
+
+### WP-6 実施記録 (2026-09-25)
+
+**完了条件 1・2・3・10・11 (版フリップ、C-19、部分集合 2 本、両 peer suite)**: 両 peer の `capabilities_document.py`/`control_plane.py` の宣言 `contract_version` を同一コミットで `1.9.0` → `1.10.0` に上げた(既存の複数段落コメント末尾へ 1 段落を追記し、その直後の `# history: CH-<id>` は元のまま。`docs/code-history/{r2db-api,MitateDB-api}/{capabilities_document,control_plane}.md` の各 CH-ID に `### correction: 2026-09-25` を追記して段落追加を登録)。`conformance-tests/test_c30_keyset_paging.py -q -rxX -n 2` → `pt: 90 passed`(9 node、T は 7 変種、6 plug、failed/xfailed/xpassed = 0)。`conformance-tests/test_c19_client_self_sufficiency.py -q` → `pt: 67 passed`。`conformance-tests/test_c29_operation_catalog_url.py -q -n 2` → `pt: 20 passed`。部分集合 2 本: `-k "not MitateDB" -q -rxX -n 5 --dist loadgroup` → `pt: 761 passed`(failed/xfailed/xpassed = 0)、`-k "not r2db" -q -rxX -n 5 --dist loadgroup` → `pt: 760 passed`(同前。R-111 の flake は今回の実測では非発現)。`r2db-api/tests -q` → `pt: 1469 passed`。`MitateDB-api/tests -q` → `pt: 1472 passed, 2 subtests passed`。両 peer `capabilities_document.py`/`control_plane.py` の `"1.9.0"`/`"1.8.0"` 宣言残留 0(grep)。
+
+**完了条件 4・5 (`_ISOMORPHIC_TARGETS` の 3 行、件数ピン改名)**: codec 2 行 + `canonical_page_binding` 1 行(計 3 行)は作業開始時点で既に監督の pair-closing 未コミット差分として両 peer の表末尾にあった(本 WP では触れていない)。件数ピン test を実測 159 行に基づき `test_isomorphic_target_table_is_pinned_to_its_current_156_rows` → `..._159_rows` へ両 peer同一の形で改名し、表内の登録行・pin 本体の `assert _ISOMORPHIC_TARGETS == (...)` の逐語コピー・docstring の「widened … time」列(14 回目、`canonical_page_binding`/codec の 3 シンボル)を追随させた。`r2db-api/tests/test_audit_query.py MitateDB-api/tests/test_audit_query.py -q` → `pt: 139 passed`。
+
+**完了条件 6 (`CONTROL_MAPPING` 3.2 → 3.3)**: SI-01/SI-08/SI-10 の Common 節に Control 1 件・Evidence 1〜3 件、SI-03/SI-08/SI-10 の Common 節に Status 1 件ずつを、確定した node 名(`test_c30_*`)で追加した。SI-10 の Evidence は WP-2 コードレビュー差し戻しにより R node の観測が「個数・型不一致」を含まないため、設計 §7 案の文言を「malformed / foreign / where・order_by 束縛違い」の 3 causes に縮め、個数・型不一致は各 peer の単体テスト(`r2db-api/tests/test_foundation.py::test_cursor_rejects_a_tampered_token_with_the_wrong_value_count_or_type`、`MitateDB-api/tests/test_http.py::test_tampered_page_cursor_count_and_type_and_domain_mismatches_are_validation_failed`)を Evidence に、その限界を Status に開示する形へ改めた(設計案からの逸脱、下記)。WP-3 でずれていた 2 箇所の file:line 参照(SI-04 MitateDB `backend_postgres.py:256` → `:264`、SI-09 MitateDB `cell.py:2351` の 5 件 → `:2396`)も実測して直した。他に、私の改名で dangling になっていた既存 SI-08 Evidence 行(`..._156_rows`)も同じ変更セットで追随させた(下記「指示書外の判断」)。`conformance-tests/test_control_mapping_register.py -q` → `pt: 58 passed`。Evidence 主張 357 件(3.2 の 352 + 5)、Control 主張 580 件(3.2 の 577 + 3)。
+
+**完了条件 7 (`CONDITIONS.md`/`CONDITIONS_HISTORY.md`)**: `CONDITIONS.md` の C-30 行 Condition 欄は確定文ファイル(`$SP/hm/verbatim-190.md` セクション E)と、番号の振り直し(1.9.0 → 1.10.0 の 1 箇所)を除き逐語一致することを実測で確認した(Condition 欄は本 WP で編集していない)。**コードレビュー指摘 1 への対応(監督裁定)**: 当初の実施では Status 欄も無編集のまま「既に確定形」と判断したが、これは誤りだった -- 設計 §10 の 6(既存行の `_mdb_row` は物理順で採番され挿入順ではないこと、SQLite の `_mdb_row` は rowid の別名で削除後に再利用されうること)の開示が Status 欄に無かった(`grep` で `_mdb_row`/`physical` 0 件)。Status 欄の末尾(`[history]` 直前)に §10 の 6 の開示 1 文を足し(cell 長 2,993 文字、上限 3,000 以内)、Condition 欄には触れていない。`CONDITIONS_HISTORY.md` の `## C-30` 節は監督裁定に基づき「起票 2026-09-25 (WP-1、declared)」→「WP-2 landed (executable)」→「WP-6 で 1.10.0 の分岐が実駆動」の 3 段の記録を追加した(プレースホルダの 1 行を置換)。**コードレビュー指摘 5 への対応**: WP-2 段落の「both peers still declared 1.9.0 at that point」は事実誤り(WP-2 の commit `a2ba943` 時点の宣言は 1.8.0)だったため「still declared 1.8.0 (1.9.0 after the R-29 merge `285cfe4`)」に直した。`conformance-tests/test_conditions_register.py conformance-tests/test_control_mapping_register.py conformance-tests/test_contract.py -q` → `3 failed, 115 passed`(赤 3 件は `test_conditions_register.py` の `test_every_executable_condition_has_a_marked_test`/`test_every_marked_condition_id_is_registered_in_conditions_md`/`test_every_marked_condition_id_maps_to_an_executable_status` -- いずれも同ファイル自身の `_collect_marked_condition_ids` が「conformance-tests/ 全体でしか意味を持たない」と自己申告する既知の部分収集アーティファクト。`-k "conditions_register"` は同ファイル内のキーワード一致でしか選択されず、他ファイルの marker を持つ node を deselect するため同じ既知アーティファクトが残ることを実測した;長さ上限などマーカーに依存しない同ファイルの他テストは `-k "length_cap"` で個別に緑を確認した。全体収集の下では緑になる設計であり、本 WP の変更に起因しない)。
+
+**完了条件 8 (`RM`)**: `docs/design/ROADMAP_POST_PHASE7_V1.md` を v1.121 に上げ、v1.116 行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__VERSION_LOG.md` へ逐語回転した。§0.1.1 の G-2/G-3 行(契約 1.10.0、条件 31 件)、§0.1.2(「要求を作る」「判定を受ける」の 2 段に C-30 追加 -- C-28 baseline と同じ軸。コードレビュー指摘 2、監督裁定)、§0.1.3(G-1/G-2・G-3 の 3 行を実測で更新、完了ゲート未実施の旨を明記)を更新した。§8 の R-109 行に本 WP-6 の commit 一覧・内容を【追記】し、**R-111 を起票した**(規模 M、C-27 MitateDB-http flake、着手条件印なし)。`python3 tools/check_doc_refs.py` → `check_doc_refs OK: 0 dangling references`。
+
+**コードレビュー指摘 6 への対応(実測で決定)**: `./.venv/bin/python tools/dev/pt.py -C <WT> --wait 600 -- conformance-tests/test_c30_keyset_paging.py -q -rxX`(`-n` なし、node 数 90)→ `pt: 90 passed`。WP-5 で観測した直列実行の赤(r2db-api-http の "client has been closed"、node 数 84 時点)は main `f522610`(r2db http adapter の孤立化 copy が親の共有 control client を閉じていた欠陥の修正)取り込み後には再現しない。R-111 からこの併記を外した。
+
+**完了条件 9 (grep 0 件)**: `grep -c '"contract_version": "1\.[89]\.0"' <4 files>` → 全て 0。
+
+**完了条件 12 (対応表)**: 下の変異表のとおり、監査照合を含む全 12 行に対応がある。
+
+**§1.12 の Known gaps 追加**: `tools/public_value_scan.py` の docstring に 2 件(相対パスが `REPO_ROOT`(このスクリプト自身の置き場)基準で解決されるため worktree の変更は絶対パスで渡す必要があること、`R3_project_id` が `pt`/`mutate` のログファイル名(`mutate-YYYYMMDD-NNNNNN` 形)に偽陽性を出すこと)、`tools/check_comment_provenance.py` の docstring に 1 件(同じ `REPO_ROOT` の性質)を足した。
+
+**`tools/tests` の 9 件の赤 (監督裁定により本変更セットで修正)**: `tools/tests -q` は当初 `9 failed, 582 passed` だった。原因は両 peer の新規 `paging.py`(WP-4/WP-5)・r2db `postgres_sql.py`/MitateDB `postgres_sql.py` の keyset 述語構築が既存の行番号ベース pin をずらしたこと、削除された `MAX_CURSOR_OFFSET` が facade-identity の許可表に残っていたこと、`operation_catalog.py`(別チャットの R-29 由来、本 WP とは無関係)が静的インベントリに未反映だったこと -- **`tools/tests/*` は WP-3〜WP-5 のどの touchable path にも root gate にも含まれておらず、検出されずに残っていた**。監督裁定によりこの変更セットで直した(触ってよいパスに `tools/tests/*` を追加):
+- `tools/tests/test_leaf_import_direction.py`: r2db `paging.py` の allowlist に `.value_types` を追加(WP-5 の `_check_type` 呼び出し)、r2db `value_types.py` の allowlist に `math` を追加(WP-5 コードレビュー対応 C の `math.isfinite` 有限性検査、`value_types.py:19`)、MitateDB に新規 leaf `paging.py`(allowlist `base64`/`hashlib`/`json`/`typing`、WP-4 の新規モジュール自身が「A pure leaf」と自己申告)を登録、両 peer に `operation_catalog.py` を non-leaf として分類(`importlib.resources` の I/O、R-29 由来、本 WP 無関係だが 0 failed に必要)。
+- `tools/tests/test_no_shared_cluster_defaults.py`: `ADMIN_DSN_ENV` の tracked file 数ピンを 31 → 32(32 件目は `MitateDB-api/tests/test_row_order_column.py`、WP-3 の `_mdb_row` 新設テスト。R-29 由来ではなく本フェーズの WP-3 が漏らしていたもの)。
+- `tools/tests/test_src_import_cycles.py`/`test_src_import_readers.py`: `PINNED_MODULES`(両ファイルが独立に持つ同名の集合)に `r2db_api.operation_catalog`・`mitatedb_api.operation_catalog`・`mitatedb_api.paging` を追加。
+- `tools/tests/test_src_import_readers.py`: 削除済み `MAX_CURSOR_OFFSET` の facade-identity 許可行(`r2db_api.structured` の reader-zero 許可表)を削除(`r2db-api/tests/test_foundation.py::test_paging_leaf_preserves_structured_facade` の `names` リストから既に外れている。新しい reader-zero import は無し、追加登録も不要)。
+- `tools/tests/test_sql_statement_safety_scan.py`: `_EXPECTED_DISCOVERED_MODULES` に両 peer の `operation_catalog.py`、mitatedb の `paging.py` を追加。`_ALLOWED_UNFOLDABLE` の 2 行(r2db `postgres_sql.py` の `sql.SQL("ASC" if ... else "DESC")` の三項演算、MitateDB `postgres_sql.py` の `sql.SQL(token)` の辞書内包表記)は WP-3〜WP-5 の挿入で行番号がずれただけの**既存の同一ソーステキスト**(`git show 0fee6e5` の同一関数と一致を確認済み)であり、規則そのものは変えず lineno のみ 71→119 / 23→33 に追随させた。keyset 述語のコード自体(r2db `postgres_sql.py`、MitateDB `postgres_sql.py`/`backend_sqlite.py`)を規則 1・2 に照らして読み、cursor 値・order_by 値はすべて `params.append(_bind_value(...))`/バインドパラメータ経由(`postgres_sql.py` の `_keyset_predicate`/`_where_sql` は列名を `sql.Identifier(...)` で quote し、値を `sql.Placeholder()` で束縛するのみ)であり、**新たな rule-1/rule-2 違反は 0 件**(unfiltered scan の実測、上表参照)。
+再実測: `tools/tests -q` → `pt: 591 passed`(0 failed)。
+
+**教訓 (次回への申し送り)**: 次回以降の manifest (作業指示書) は、新規 src module・削除された public シンボルを足す WP について `tools/tests/*` の静的インベントリ pin(leaf import allowlist、`PINNED_MODULES`、SQL safety scan の許可表、`ADMIN_DSN_ENV` ファイル数)を明示的に列挙し、その WP 自身の touchable path と完了条件に含める -- root gate は `tools/tests` を測らないので、後続 WP まで放置されると原因の切り分けが難しくなる。
+
+**RM §0.1.2 の C-30 段の訂正 (監督裁定)**: 作業指示書 §7 の「§0.1.2 の対応表に C-30 を (SI-01 / SI-03 / SI-08 / SI-10 の段。設計 §7)」という記述は、§0.1.2 の表の軸(周回の 4 段: catalog を読む/要求を作る/判定を受ける/安全に再送する)と設計 §7 の軸(Security Invariants: SI-01/SI-03/SI-08/SI-10)を取り違えたものだった。正しくは C-28 baseline と同じ軸で、C-30 は「要求を作る」(cursor と `page.size` の要求)と「判定を受ける」(ページの結果と cursor の拒否)の 2 段に置く(`RM` で訂正済み)。
+
+**変異表 (`$SP/p11-wp6-mutations.json`、`mutate.py` 実測)**:
+
+| 変異 | 完了条件 | expect | got | 判定 |
+|---|---|---|---|---|
+| M6-1-r | 1 | red | red | OK |
+| M6-1-rh | 1 | red | red | OK |
+| M6-1-rs | 1 | red | red | OK |
+| M6-2-m | 2 | red | red | OK |
+| M6-2-mh | 2 | red | red | OK |
+| M6-2-ms | 2 | red | red | OK |
+| M6-3a | 3 | red | red | OK |
+| M6-3b | 3 | red | red | OK |
+| M6-4 | 4 | red | red | OK |
+| M6-4b | 4 | red | red | OK |
+| M6-5 | 5 | red | red | OK |
+| M6-6 | 6 | red | red | OK |
+
+`mutate: 12 mutations, 12 as expected, restores verified 7/7 files (sha256 x2)`。
+
+**指示書外の判断・逸脱**:
+1. SI-10 の Evidence 文言を設計 §7 案(「malformed, mismatched in number or type, or foreign」)からその WP-2 コードレビュー差し戻し後の実際の R node の観測(個数・型不一致を含まない)に合わせて縮め、個数・型不一致は Control/Status の開示と各 peer 単体テストの Evidence 行に分離した(実測後に書く規律 `OC` §1.5-34 に従った結果であり、案そのものの誤りではないため設計は書き換えていない)。
+2. `security/CONTROL_MAPPING.md` の SI-08 Common 節に既存する、私の件数ピン改名で dangling になっていた 1 行(`..._156_rows` を引く Evidence 行、C-30 とは無関係な既存行)を同じ変更セットで `..._159_rows` に追随させた(触ってよいパスの `security/CONTROL_MAPPING.md` の範囲内、`test_control_mapping_md_every_test_name_reference_resolves` の実測で発見)。
+3. **`tools/tests -q` が当初 9 件で赤かった**(`test_leaf_import_direction.py` 2 件、`test_no_shared_cluster_defaults.py` 1 件、`test_sql_statement_safety_scan.py` 3 件、`test_src_import_cycles.py` 1 件、`test_src_import_readers.py` 2 件)。本 WP の変更 (版フリップ・記録) には起因せず、WP-3〜WP-5 が touchable path 外・root gate 外だった `tools/tests/` の静的インベントリ pin を追随させていなかったことが原因。**監督裁定 (2 件目、後述) により触ってよいパスに `tools/tests/*` を加え、本変更セットで修正した**(上の「`tools/tests` の 9 件の赤」参照。`pt: 591 passed`、0 failed)。
+4. **§0.1.2 の C-30 配置** — 作業指示書の指示文言 (「SI-01/03/08/10 の段」) が §0.1.2 の軸 (周回の 4 段) と設計 §7 の軸 (SI) を取り違えていたため、当初「catalog を読む」段に置いていたが、監督裁定によりC-28 baseline と同じ軸で「要求を作る」「判定を受ける」の 2 段に訂正した(上の「RM §0.1.2 の C-30 段の訂正」参照)。
 

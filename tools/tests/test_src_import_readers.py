@@ -150,6 +150,7 @@ PINNED_MODULES: dict[str, frozenset[str]] = {
             "r2db_api.limits",
             "r2db_api.main",
             "r2db_api.mutation_binding",
+            "r2db_api.operation_catalog",
             "r2db_api.ops",
             "r2db_api.paging",
             "r2db_api.pg_text_format",
@@ -204,7 +205,9 @@ PINNED_MODULES: dict[str, frozenset[str]] = {
             "mitatedb_api.http",
             "mitatedb_api.identifiers",
             "mitatedb_api.main",
+            "mitatedb_api.operation_catalog",
             "mitatedb_api.ops",
+            "mitatedb_api.paging",
             "mitatedb_api.pg_timeouts",
             "mitatedb_api.platform_declarations",
             "mitatedb_api.platform_upgrades",
@@ -372,13 +375,6 @@ ALLOWED_READER_ZERO_IMPORTS: frozenset[tuple[str, str, str, str]] = frozenset(
             "parse_predicate",
             "facade identity test r2db-api/tests/test_foundation.py:3194 "
             "test_mutation_binding_leaf_preserves_structured_facade",
-        ),
-        (
-            "r2db",
-            "r2db_api.structured",
-            "MAX_CURSOR_OFFSET",
-            "facade identity test r2db-api/tests/test_foundation.py:2274 "
-            "test_paging_leaf_preserves_structured_facade",
         ),
         (
             "r2db",
