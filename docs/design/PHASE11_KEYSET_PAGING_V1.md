@@ -846,3 +846,93 @@ D-2 の適用行 (migration 0015) の列挙元 (`information_schema.tables` の 
 3. **`tools/tests -q` が当初 9 件で赤かった**(`test_leaf_import_direction.py` 2 件、`test_no_shared_cluster_defaults.py` 1 件、`test_sql_statement_safety_scan.py` 3 件、`test_src_import_cycles.py` 1 件、`test_src_import_readers.py` 2 件)。本 WP の変更 (版フリップ・記録) には起因せず、WP-3〜WP-5 が touchable path 外・root gate 外だった `tools/tests/` の静的インベントリ pin を追随させていなかったことが原因。**監督裁定 (2 件目、後述) により触ってよいパスに `tools/tests/*` を加え、本変更セットで修正した**(上の「`tools/tests` の 9 件の赤」参照。`pt: 591 passed`、0 failed)。
 4. **§0.1.2 の C-30 配置** — 作業指示書の指示文言 (「SI-01/03/08/10 の段」) が §0.1.2 の軸 (周回の 4 段) と設計 §7 の軸 (SI) を取り違えていたため、当初「catalog を読む」段に置いていたが、監督裁定によりC-28 baseline と同じ軸で「要求を作る」「判定を受ける」の 2 段に訂正した(上の「RM §0.1.2 の C-30 段の訂正」参照)。
 
+### WP-7 実施記録 (2026-09-25)
+
+**直近の K=1 基準値の所在の探索**: `--warmup 20 --n 200` と厳密に同じ引数で取られた最新の記録は `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` §11.2(2026-09-08、commit `85e99fa`、14 行 -- in-process と `asgi-inprocess` のみ、socket plug は未実装)である。一方、直近の完全な計測(現行の `tools/perf_baseline.py` が既定で回す 6 plug・21 行、socket plug 込み)は `docs/design/PERF_PREPARED_STATEMENT_MEASUREMENT_V0_1.md` §2.3(2026-09-23、commit `fc891cb-dirty`、`--warmup 10 --n 100`)である。**本 WP は §2.3 を比較対象に採用した**: 理由は (a) socket plug がフェーズ9 の表に無く 21 行のうち 7 行が比較不能になる、(b) フェーズ9 (2026-09-08) 以降に R-29(最低共通機能プロファイル)・R-78/R-79(接続プール・prepared statement)が `backend_calls` を動かしており(例: `MitateDB-api-http` の `mutate` は 9.00 → 13.00、`batch` は 29.00 → 49.00)、フェーズ9 を基準にすると本 WP に起因しない差分を「理由の要る増加」として抱え込む。§2.3 はこれらを既に織り込んだ直近の値であり、実際に本 run との `backend_calls` 差分はどの行も +0(下表)。**両論**: 引数 (`--warmup`/`--n`) が完全一致しないため、p50/p95 の絶対値そのものの比較には `--warmup 10 --n 100` 由来のわずかな標本誤差が乗る一方、フェーズ9 の 14 行だけで比較する案は socket plug 7 行を評価不能のまま残す。
+
+**PERFRUN 行 (逐語)**:
+
+```
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=5d988c6 date=2026-09-25
+```
+
+**実行コマンド**: `./.venv/bin/python tools/perf_baseline.py --warmup 20 --n 200`(root の venv で worktree の copy を測定。EXIT=0)。
+
+**PERF 表 (逐語、ハーネスの出力順)**:
+
+```
+PERF peer=r2db-api plug=r2db-api transport=in-process op=query n=200 p50_ms=0.116 p95_ms=0.125 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=mutate n=200 p50_ms=0.216 p95_ms=0.305 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=batch n=200 p50_ms=0.858 p95_ms=1.225 backend_calls=1.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=query n=200 p50_ms=0.134 p95_ms=0.141 backend_calls=11.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=mutate n=200 p50_ms=0.102 p95_ms=0.105 backend_calls=7.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=batch n=200 p50_ms=0.171 p95_ms=0.184 backend_calls=37.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=cross_entity n=200 p50_ms=0.131 p95_ms=0.135 backend_calls=16.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=query n=200 p50_ms=1.349 p95_ms=1.430 backend_calls=14.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=mutate n=200 p50_ms=1.413 p95_ms=1.491 backend_calls=15.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=batch n=200 p50_ms=1.570 p95_ms=1.679 backend_calls=19.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=query n=200 p50_ms=6.185 p95_ms=6.431 backend_calls=21.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=mutate n=200 p50_ms=5.881 p95_ms=6.081 backend_calls=13.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=batch n=200 p50_ms=7.137 p95_ms=7.344 backend_calls=49.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=cross_entity n=200 p50_ms=6.234 p95_ms=6.437 backend_calls=22.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=query n=200 p50_ms=4.722 p95_ms=4.849 backend_calls=14.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=mutate n=200 p50_ms=4.809 p95_ms=5.312 backend_calls=15.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=batch n=200 p50_ms=4.984 p95_ms=5.136 backend_calls=19.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=query n=200 p50_ms=9.647 p95_ms=11.022 backend_calls=21.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=mutate n=200 p50_ms=9.345 p95_ms=10.691 backend_calls=13.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=batch n=200 p50_ms=10.669 p95_ms=11.974 backend_calls=49.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity n=200 p50_ms=9.736 p95_ms=11.089 backend_calls=22.00 concurrency=1
+```
+
+**直近基準値との差分 (基準 = `PERF_PREPARED_STATEMENT_MEASUREMENT_V0_1.md` §2.3、2026-09-23、commit `fc891cb-dirty`、`--warmup 10 --n 100`)**:
+
+| # | peer | plug | transport | op | bc(基準) | p50(基準) | p50(本 run) | Δp50% | p95(基準) | p95(本 run) | Δp95% | bc(本 run) | Δbc |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | r2db-api | `r2db-api` | in-process | query | 1.00 | 0.129 | 0.116 | -10.1% | 0.146 | 0.125 | -14.4% | 1.00 | +0.00 |
+| 2 | r2db-api | `r2db-api` | in-process | mutate | 1.00 | 0.197 | 0.216 | +9.6% | 0.243 | 0.305 | +25.5% | 1.00 | +0.00 |
+| 3 | r2db-api | `r2db-api` | in-process | batch | 1.00 | 0.691 | 0.858 | +24.2% | 1.021 | 1.225 | +20.0% | 1.00 | +0.00 |
+| 4 | MitateDB-api | `MitateDB-api` | in-process | query | 11.00 | 0.141 | 0.134 | -5.0% | 0.166 | 0.141 | -15.1% | 11.00 | +0.00 |
+| 5 | MitateDB-api | `MitateDB-api` | in-process | mutate | 7.00 | 0.111 | 0.102 | -8.1% | 0.137 | 0.105 | -23.4% | 7.00 | +0.00 |
+| 6 | MitateDB-api | `MitateDB-api` | in-process | batch | 37.00 | 0.197 | 0.171 | -13.2% | 0.219 | 0.184 | -16.0% | 37.00 | +0.00 |
+| 7 | MitateDB-api | `MitateDB-api` | in-process | cross_entity | 16.00 | 0.140 | 0.131 | -6.4% | 0.152 | 0.135 | -11.2% | 16.00 | +0.00 |
+| 8 | r2db-api | `r2db-api-http` | asgi-inprocess | query | 14.00 | 1.861 | 1.349 | -27.5% | 2.179 | 1.430 | -34.4% | 14.00 | +0.00 |
+| 9 | r2db-api | `r2db-api-http` | asgi-inprocess | mutate | 15.00 | 1.942 | 1.413 | -27.2% | 2.221 | 1.491 | -32.9% | 15.00 | +0.00 |
+| 10 | r2db-api | `r2db-api-http` | asgi-inprocess | batch | 19.00 | 2.002 | 1.570 | -21.6% | 2.311 | 1.679 | -27.3% | 19.00 | +0.00 |
+| 11 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | query | 21.00 | 8.106 | 6.185 | -23.7% | 8.546 | 6.431 | -24.7% | 21.00 | +0.00 |
+| 12 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | mutate | 13.00 | 7.775 | 5.881 | -24.4% | 8.121 | 6.081 | -25.1% | 13.00 | +0.00 |
+| 13 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | batch | 49.00 | 9.394 | 7.137 | -24.0% | 9.779 | 7.344 | -24.9% | 49.00 | +0.00 |
+| 14 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | cross_entity | 22.00 | 8.239 | 6.234 | -24.3% | 8.713 | 6.437 | -26.1% | 22.00 | +0.00 |
+| 15 | r2db-api | `r2db-api-socket` | socket | query | 14.00 | 6.036 | 4.722 | -21.8% | 6.410 | 4.849 | -24.4% | 14.00 | +0.00 |
+| 16 | r2db-api | `r2db-api-socket` | socket | mutate | 15.00 | 6.297 | 4.809 | -23.6% | 6.652 | 5.312 | -20.1% | 15.00 | +0.00 |
+| 17 | r2db-api | `r2db-api-socket` | socket | batch | 19.00 | 6.387 | 4.984 | -22.0% | 6.710 | 5.136 | -23.5% | 19.00 | +0.00 |
+| 18 | MitateDB-api | `MitateDB-api-socket` | socket | query | 21.00 | 12.954 | 9.647 | -25.5% | 15.415 | 11.022 | -28.5% | 21.00 | +0.00 |
+| 19 | MitateDB-api | `MitateDB-api-socket` | socket | mutate | 13.00 | 13.466 | 9.345 | -30.6% | 16.695 | 10.691 | -36.0% | 13.00 | +0.00 |
+| 20 | MitateDB-api | `MitateDB-api-socket` | socket | batch | 49.00 | 14.050 | 10.669 | -24.1% | 15.910 | 11.974 | -24.7% | 49.00 | +0.00 |
+| 21 | MitateDB-api | `MitateDB-api-socket` | socket | cross_entity | 22.00 | 13.069 | 9.736 | -25.5% | 14.950 | 11.089 | -25.8% | 22.00 | +0.00 |
+
+**判定 (`RM` §0.1.4 の 1・4)**: 21 行すべて Δp50 ≤ +40%、Δp95 ≤ +50%(最大は #3 の Δp50 +24.2%、#2 の Δp95 +25.5%。閾値超過は 0 件)。`backend_calls` の差分は 21 行すべて +0.00(理由を要する増加は 0 件)。前回計測比で軒並み p50/p95 が下がっているのは基準側 (`--warmup 10 --n 100`) より本 run (`--warmup 20 --n 200`) の方が warmup が長く測定機の負荷条件も run ごとに変わるためで、この計測はいずれも「非退行」の判定にのみ使う(閾値の外側に出ていない)。
+
+**深いページの前後比較 (D-7 の 2、r2db の PostgreSQL plug、記録としてだけ置く)**:
+
+- script: `$SP/deep_page_driver.py`(commit しない、$SP のみ)。呼び出しは `./.venv/bin/python tools/testpg/dsa_testpg.py run -- ./.venv/bin/python deep_page_driver.py --src-root <tree>/r2db-api/src --migrations-dir <tree>/r2db-api/migrations --n-rows 20000 --page-size 100 --repeats 25 --out-json <path>`(使い捨てクラスタの起動・停止・使い捨て role/database の掃除まで dsa_testpg.py の `run` サブコマンドと script 自身の `_sweep_prefix` が行う。実行中の役割ごとに独立したクラスタで、共有クラスタは未使用)。
+- (a) 変更前 (offset 方式、基点 `0fee6e5` の r2db-api tree を `git archive 0fee6e5 r2db-api` で取り出した copy): entity `items`(field `n`、0..19999 の整数を挿入順どおりに格納)。`order_by=[{"field": "n", "direction": "asc"}]`、`page_size=100` で `cursor=None` から歩いて最終ページ(`has_more=False`)に達する直前の cursor を求め、その 1 要求を 25 回繰り返した。
+- (b) 変更後 (keyset 方式、本 worktree の r2db-api tree): 同じ手順・同じ N・同じ order_by。
+
+| 方式 | 行数 (N) | page_size | 走査ページ数 | 走査全体の所要時間 | 最終ページ要求の p50 (n=25) | 末尾到達の根拠 |
+|---|---|---|---|---|---|---|
+| (a) offset (`0fee6e5`) | 20000 | 100 | 200 | 1.401 s | 4.096 ms | 最終ページの最後の行 `n=19999`(挿入した最大値と一致、`last_page_reached_end=true`) |
+| (b) keyset (本 worktree) | 20000 | 100 | 200 | 0.823 s | 3.287 ms | 同上、`n=19999`、`last_page_reached_end=true` |
+
+**D-7 の 2 の記録**: 設計 D-1 根拠 (3) から移した文言 ―― 「token は件数ではなく位置を名指すので、cursor を運ぶ要求に答える仕事は先行するページ数に応じて増えない」―― は、この 1 回の ad-hoc 計測が示す事実の記録としてのみここに置く(契約の主張ではない)。本計測では N=20000・page_size=100(200 ページ)という 1 点のみを取っており、(a) の最終ページ p50(4.096 ms)は (b)(3.287 ms)よりおよそ 19.7% 遅く、200 ページ全体を歩く所要時間も (a) 1.401 s に対し (b) 0.823 s と短い。**両論**: この差が「offset は末尾に近いほど遅くなる (O(N))・keyset は位置によらない (ほぼ一定)」という性質の直接証拠かどうかは、本計測(N・page_size の 1 点、繰り返し 25 回のみ)だけでは判定できない ―― page 位置を変えた複数点(例えば先頭・中間・末尾)の比較を伴わない限り、傾きそのものの実測ではなく 1 点の絶対値の差でしかない。D-7 の 2 はもとより「この計測の記録としてだけ置く」と明言しており、本 WP はこの 1 点計測を超える追加測定(op を harness に足す・複数 N での sweep)を行っていない(禁止事項どおり)。
+
+**`tools/` の差分**: `git diff --stat -- tools/` は出力 0 行。**設計 §11 以外の差分**: 本 WP は本節(§11 の本追記のみ)しか編集していない。ただし作業開始時点で `git diff --stat` 全体には `docs/work-orders/HANDOVER_20260925_FABLE2.md` への差分(本 WP 開始前後の時刻に更新されている)が既に存在した ―― 本 WP はこのファイルを一度も編集しておらず、内容にも触れていない(他セッションが同じ worktree で並行して作業した形跡と見られる。指示書外の判断・逸脱として下に記す)。
+
+**公開値スキャン**: `python3 tools/public_value_scan.py <このファイルの絶対パス>` → `total_flagged=0`。
+
+**指示書外の判断・逸脱 (WP-7)**:
+1. `PERF_PREPARED_STATEMENT_MEASUREMENT_V0_1.md` §2.3(2026-09-23、`--warmup 10 --n 100`)を「直近の基準値」として採用し、`--warmup 20 --n 200` で厳密に一致するフェーズ9 §11.2(2026-09-08)を使わなかった。理由は上の「直近の K=1 基準値の所在の探索」のとおり(§0.1.4 自身が名指すフェーズ9 の 14 行には socket plug が無く、フェーズ9 以降の `backend_calls` の変化も未反映のため)。設計 §11 は書き換えず、この判断根拠だけをここに記す。
+2. 深いページ比較で、cursor を求めるために `page_size=100` で `cursor=None` から順に歩く一回限りの助走(非計測、200 要求)を行った ―― 作業指示書は「末尾ページを読み」「1 要求」を計測対象とするとしか書いておらず、そこへ至る手段(歩く/cursor を算術的に構築する)を指定していない。offset 側は理論上オフセット値を直接計算できるが、keyset 側は cursor がオパークな値(内部の行位置をエンコードしたもの)であるため、これを両方の tree で共通のコードパスで得るために歩く方式を選んだ(計測対象はあくまで最後の 1 要求の 25 回反復であり、助走の 200 要求は走査全体の所要時間の欄にのみ現れる)。
+3. `docs/work-orders/HANDOVER_20260925_FABLE2.md` への未編集の差分が作業開始時点で worktree に存在していた(上記)。本 WP はこのファイルに触れておらず、原因調査もしていない(触ってよいパスの外)。
+
+**設計への疑義 (WP-7)**: なし(D-7・§0.1.4 の適用のみ)。強いて言えば、上の「両論」2 件(§0.1.4 の基準値選定における `--warmup`/`--n` 不一致の許容、深いページ比較を 1 点のみで「記録」と位置づけることの十分性)は D-7 の記述どおりに解けるが、将来 O(N) 傾向そのものを主張したい場合は複数 N・複数ページ位置の sweep が別途必要になる。
+
