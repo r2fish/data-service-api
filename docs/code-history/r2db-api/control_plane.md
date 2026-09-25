@@ -523,7 +523,7 @@ This control-plane document also flips to 1.10.0 in the same commit as `service.
 
 new:
 ```
-This control-plane document also flips to 1.10.0 in the same commit as `capabilities_document.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
+This control-plane document also flips to 1.10.0 in the same commit as the data-plane flip in `capabilities_document.py` (the declaration `service.py` serves; C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
 ```
 
 ## CH-0261
