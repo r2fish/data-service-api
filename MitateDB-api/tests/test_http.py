@@ -15,7 +15,9 @@ no separate skip policy is introduced here.
 """
 from __future__ import annotations
 
+import base64
 import json
+import uuid
 from importlib import resources
 from pathlib import Path
 
@@ -31,6 +33,7 @@ from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import CapabilityError, ResourceLimitError, ValidationError
 from mitatedb_api.http import PROBLEM_CONTENT_TYPE, HttpService, _problem_for_exception, create_app
+from mitatedb_api import paging
 
 # A RELATIVE import, not a bare `from test_postgres import ...`: this
 # package (`MitateDB-api/tests`, which carries an `__init__.py`) is
@@ -795,13 +798,88 @@ def test_multi_field_order_by(app_a_stack):
     assert [(item["bucket"], item["rank"]) for item in items] == [("a", 1), ("a", 2), ("b", 1)]
 
 
-def test_page_cursor_is_deterministically_rejected(app_a_stack):
+def test_undecodable_page_cursor_is_validation_failed(app_a_stack):
+    entity = f"http_page_cursor_probe_{uuid.uuid4().hex[:12]}"
+    _create_entity(app_a_stack, entity, fields=["item_key"])
     response = _post(
-        app_a_stack, "/v1/data/shared_items/query", bearer=app_a_stack.runtime_bearer,
+        app_a_stack, f"/v1/data/{entity}/query", bearer=app_a_stack.runtime_bearer,
         json_body={"select": ["item_key"], "page": {"cursor": "opaque-cursor-value"}},
     )
     assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    body = response.json()
+    assert body["code"] == "VALIDATION_FAILED"
+    assert body["details"]["violated_declaration"] == "request_schema"
+    assert body["details"]["field"] == "page/cursor"
+
+
+def _decoded_cursor_payload(cursor: str) -> dict:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+
+
+def _assert_page_cursor_refused(response):
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "VALIDATION_FAILED"
+    assert body["details"] == {"violated_declaration": "request_schema", "field": "page/cursor"}
+
+
+def test_tampered_page_cursor_count_and_type_and_domain_mismatches_are_validation_failed(app_a_stack):
+    entity = f"http_page_cursor_tamper_probe_{uuid.uuid4().hex[:12]}"
+    _create_entity(app_a_stack, entity, fields=["label"], field_types={"label": "string"})
+    for value in ("a", "b"):
+        response = _post(
+            app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.developer_bearer,
+            json_body={"operations": [{"operation": "insert", "values": {"label": value}}]},
+        )
+        assert response.status_code == 200, response.text
+
+    def _page(cursor=None):
+        page = {"size": 1}
+        if cursor is not None:
+            page["cursor"] = cursor
+        return _post(
+            app_a_stack, f"/v1/data/{entity}/query", bearer=app_a_stack.runtime_bearer,
+            json_body={"select": ["label"], "order_by": [{"field": "label", "direction": "asc"}], "page": page},
+        )
+
+    response = _page()
+    assert response.status_code == 200, response.text
+    cursor = response.json()["next_page"]
+    assert cursor is not None, "a 1-of-2 page reported a null next_page"
+    payload = _decoded_cursor_payload(cursor)
+    binding = payload["b"]
+    values = payload["v"]
+    # design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.1: `values` is
+    # `[label, _mdb_row]` -- the order-by term plus the row-order
+    # tie-break, index-aligned with `order_spec`.
+    assert len(values) == 2, values
+
+    # (a) count mismatch: one ordering value where two are declared.
+    _assert_page_cursor_refused(_page(paging.encode_page_cursor(values[:1], binding)))
+
+    # (b) declared-type mismatch: an integer where `label` (string) is declared.
+    _assert_page_cursor_refused(_page(paging.encode_page_cursor([1, values[1]], binding)))
+
+    # (c) out-of-domain: a lone UTF-16 surrogate code point for `label`.
+    _assert_page_cursor_refused(_page(paging.encode_page_cursor(["\ud800", values[1]], binding)))
+
+    # (d) out-of-domain: an embedded NUL byte for `label` -- rejected on
+    # this peer's PostgreSQL plug (this fixture's own backend, design
+    # §10 の 11); the SQLite plug accepts the identical payload (measured
+    # separately, design §11).
+    _assert_page_cursor_refused(_page(paging.encode_page_cursor(["tail\x00head", values[1]], binding)))
+
+    # (e) out-of-domain: an out-of-64-bit-range integer for `_mdb_row`
+    # (BIGINT on this peer's PostgreSQL plug).
+    _assert_page_cursor_refused(_page(paging.encode_page_cursor([values[0], 2**63], binding)))
+
+    # (f) declared-type mismatch: a string tie-break for `_mdb_row`, which
+    # carries no `_mdb_field_types` registry row of its own (code-review
+    # instruction, design D-2b.1) -- `_decode_and_check_page_cursor`
+    # supplies this column's declared type ("integer") explicitly rather
+    # than letting the missing registry row skip the check.
+    _assert_page_cursor_refused(_page(paging.encode_page_cursor([values[0], "x"], binding)))
 
 
 def test_nul_value_is_validation_failed(app_a_stack):

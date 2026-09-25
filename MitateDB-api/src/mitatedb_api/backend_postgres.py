@@ -108,7 +108,7 @@ from .psycopg_counting import CountingConnection, prepared_stats_skeleton, probe
 from .postgres_value_domain import _INT_DOMAIN_RANGES, _validate_value_domain, _check_domain
 from .postgres_reserved_names import _RESERVED_EXACT, _RESERVED_PREFIX, _check_reserved_name
 from .postgres_types import _TYPE_SQL, _DOMAIN_BY_DATA_TYPE, _TEXT_DOMAIN_BY_DECLARED_TYPE
-from .postgres_sql import _DIRECTION_SQL, _where_sql
+from .postgres_sql import _DIRECTION_SQL, _NULLS_SQL, _keyset_predicate_sql, _where_sql
 
 
 def _guard_pending_platform_upgrades(method):
@@ -1418,11 +1418,27 @@ class PostgresBackend:
         return {"deleted": deleted}
 
     @_guard_pending_platform_upgrades
-    def read(self, collection, selected, filters, order_by, limit, *, deadline=None):
+    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None):
         columns = sql.SQL(", ").join(sql.Identifier(x) for x in selected)
         statement = sql.SQL("SELECT {} FROM {}").format(columns, sql.Identifier(collection))
         where, where_params = self._where_sql(filters)
+        params = list(where_params)
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.4/D-3 (4):
+        # `cursor_values`, when given, is already count/type-checked and
+        # index-aligned with `order_by` (`cell.ApplicationCell.read_page`)
+        # -- the keyset predicate is AND-ed onto the caller's own WHERE
+        # clause, replacing the old OFFSET.
+        if cursor_values is not None:
+            keyset_sql, keyset_params = _keyset_predicate_sql(order_by, cursor_values)
+            where = (where + sql.SQL(" AND ") + keyset_sql) if filters else (sql.SQL(" WHERE ") + keyset_sql)
+            params = params + keyset_params
         statement = statement + where
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2a:
+        # `_NULLS_SQL[direction]` explicitly pins NULL placement to
+        # PostgreSQL's own default (asc -> NULLS LAST, desc -> NULLS
+        # FIRST) rather than leaving it implicit, so the keyset
+        # predicate's own NULL branch (`_keyset_predicate_sql`) always
+        # agrees with the actual row order.
         if order_by is not None:
             # WP-3: `order_by` is always `None` or a non-empty LIST of
             # `(field, direction)` tuples now (`cell.py::_bind_order_by`),
@@ -1442,7 +1458,7 @@ class PostgresBackend:
             # through.
             try:
                 terms = sql.SQL(", ").join(
-                    sql.SQL("{} {}").format(sql.Identifier(field), _DIRECTION_SQL[direction])
+                    sql.SQL("{} {} {}").format(sql.Identifier(field), _DIRECTION_SQL[direction], _NULLS_SQL[direction])
                     for field, direction in order_by
                 )
             except KeyError as exc:
@@ -1464,7 +1480,7 @@ class PostgresBackend:
                 ) from exc
             statement = statement + sql.SQL(" ORDER BY ") + terms
         statement = statement + sql.SQL(" LIMIT %s")
-        params = list(where_params) + [limit]
+        params = params + [limit]
         timeout_ms = self._timeout_ms(deadline)
         try:
             with self._runtime.cursor() as cur:

@@ -1413,10 +1413,43 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         return self._call(op)
 
     def count(self, session, entity: str) -> int:
-        # session.read() already re-checks authorization on every call
-        # (cell.py ApplicationRuntime.__authorize -> assert_active), so a
-        # revoked/disabled/unavailable session correctly denies here too.
-        return self._call(lambda: len(session.read(entity)))
+        # session.read_page() already re-checks authorization on every
+        # call (cell.py ApplicationRuntime.__authorize -> assert_active),
+        # so a revoked/disabled/unavailable session correctly denies here
+        # too.
+        #
+        # port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        # a single unbounded `session.read(entity)` silently truncated to
+        # this deployment's own `max_result_rows` bound once a collection
+        # held more rows than that (C-28's own concurrent-insert node
+        # inserts a 6th row past the isolated surface's own `max_result_
+        # rows=5`) -- `limit` omitted walks the entry point's own default
+        # page (design D-2b.3), which stays within ANY positive deployment
+        # bound while costing roughly one request per `max_result_rows`
+        # rows rather than one per row (a `limit=1` walk would multiply
+        # this suite's own rate budget by the row count and collide with
+        # `max_requests_per_minute` on the `full` idempotency leg). A
+        # page count that outruns the rows actually
+        # counted, plus one, means the cursor stopped advancing; that is
+        # this adapter's own bug, not a rate-limit condition, so it is
+        # raised here rather than left to surface as a misleading
+        # `LIMIT_EXCEEDED`.
+        def op() -> int:
+            total = 0
+            cursor = None
+            pages = 0
+            while True:
+                rows, cursor = session.read_page(entity, cursor=cursor)
+                total += len(rows)
+                pages += 1
+                if pages > total + 1:
+                    raise AssertionError(
+                        f"count({entity!r}) did not terminate: {pages} pages for {total} rows"
+                    )
+                if cursor is None:
+                    break
+            return total
+        return self._call(op)
 
     def entities(self, session) -> set[str]:
         # There is no public "list collections" operation on this peer
@@ -2577,14 +2610,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         budget: Mapping[str, int] | None = None,
     ) -> tuple[list[dict], str | None]:
         """port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md
-        D-2b.4): calls the runtime's own new cursor-carrying entry point,
-        `session.read_page(...)`, directly -- WP-2's own addition
-        (`cell.py::ApplicationRuntime.read_page`), passing `cursor`
-        verbatim. Through WP-4, that entry point's own body still refuses
-        any non-`None` cursor with `CAPABILITY_UNSUPPORTED` (design
-        D-2b.4); this adapter fabricates nothing on its own. `order_by`
-        is the SAME wire-shaped `[{"field":..., "direction":...}]` list
-        `_bind_order_by` already accepts (`cell.py:3147`)."""
+        D-2b.4): calls the runtime's own cursor-carrying entry point,
+        `session.read_page(...)`, directly (`cell.py::ApplicationRuntime.
+        read_page`), passing `cursor` verbatim -- `cell.py::
+        ApplicationCell.read_page`'s own body decodes and executes a
+        non-`None` cursor (design D-2b.1); this adapter fabricates
+        nothing on its own. `order_by` is the SAME wire-shaped
+        `[{"field":..., "direction":...}]` list `_bind_order_by` already
+        accepts (`cell.py:3147`)."""
         filters = [Filter(f, op, v) for f, op, v in where] if where else None
         order = [{"field": f, "direction": d} for f, d in order_by] if order_by else None
         kwargs: dict[str, Any] = {}

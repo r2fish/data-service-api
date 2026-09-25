@@ -348,11 +348,16 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     ("backend_postgres.py", 1358),  # generic driver-exception translation
     ("backend_postgres.py", 1391),  # generic driver-exception translation
     ("backend_postgres.py", 1417),  # generic driver-exception translation
-    ("backend_postgres.py", 1484),  # generic driver-exception translation
-    ("backend_postgres.py", 1512),  # generic driver-exception translation
-    ("backend_postgres.py", 1553),  # generic driver-exception translation
-    ("backend_postgres.py", 1822),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1891),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2a/D-3 (4): `read`'s
+    # own keyset-predicate/NULLS-clause assembly (`_keyset_predicate_sql`,
+    # `_NULLS_SQL`) added 16 lines before this site and every one below it
+    # in this file (1484 -> 1500, 1512 -> 1528, 1553 -> 1569, 1822 -> 1838,
+    # 1891 -> 1907) -- re-verified via `_fail_call_sites`, not hand-shifted.
+    ("backend_postgres.py", 1500),  # generic driver-exception translation
+    ("backend_postgres.py", 1528),  # generic driver-exception translation
+    ("backend_postgres.py", 1569),  # generic driver-exception translation
+    ("backend_postgres.py", 1838),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1907),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
@@ -602,7 +607,16 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # `CapabilityError` site (`page/cursor`), moved verbatim from
         # `http.py::post_query`'s own former inline rejection (42 -> 43);
         # see `http.py`'s own count immediately below.
-        "cell.py": 43,
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.1/D-2b.2:
+        # `read_page`'s own `CapabilityError` site above is REPLACED (a
+        # cursor is decoded and executed, not refused outright, from here
+        # on: -1), plus two new `ValidationError` sites -- `read_page`'s
+        # own `page/size` range check and `_reject_page_cursor`'s own
+        # site (called from 3 branches of `_decode_and_check_page_cursor`,
+        # counted once -- the AST scan counts the `raise ValidationError(
+        # ...)` call EXPRESSION, not its call count at runtime): +2
+        # (43 -> 44; measured directly against this fix's own tree).
+        "cell.py": 44,
         # WP-3e rework T2 (追補 L-4): +1 -- `_check_object_shape`'s own
         # new "present but wrong type" leg (a genuine new choke-point
         # call site, not a relabeling of an existing one).

@@ -29,6 +29,30 @@ def _check_deadline(deadline):
 # history: CH-0338
 _RESERVED = frozenset({"sqlite_sequence", "audit_events"})
 
+# Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2: mirrors `cell.
+# ApplicationCell._ROW_ORDER_COLUMN` -- the one backend-internal column
+# name that never passes through `identifiers.validate_identifier` (its
+# leading `_` fails that regex BY DESIGN, so a client can never declare or
+# reference it), yet `read()` below must still be able to SELECT/ORDER BY/
+# keyset-predicate it once `cell.py` appends it to `selected`/`order_by`.
+_ROW_ORDER_COLUMN = "_mdb_row"
+
+
+def _quote_column(name):
+    """`identifiers.quote_identifier`, except for `_ROW_ORDER_COLUMN`
+    above, which it quotes directly WITHOUT `validate_identifier`'s
+    client-facing syntax gate (the same double-quote/escape discipline
+    `quote_identifier` applies, R-2 -- only the regex gate is skipped).
+    Every OTHER name reaching this function has already passed `cell.
+    ApplicationCell._identifier` (the client-facing gate) before `read()`
+    is ever called, so re-validating it here would be redundant, not
+    protective; `_ROW_ORDER_COLUMN` is the one name that legitimately
+    never went through that gate at all."""
+    if name == _ROW_ORDER_COLUMN:
+        return '"' + name.replace('"', '""') + '"'
+    return quote_identifier(name)
+
+
 # SQLite's own native storage class is a signed 64-bit integer -- a bound Python `int` outside that range makes the underlying `sqlite3` C extension module raise a bare `OverflowError` (NOT a `sqlite3.Error` subclass) at parameter-binding time, which used to escape this backend's own `errors.FoundationError` boundary entirely AND, when hit inside `transact()` (`cell.py`), skip `cell.py`'s own `except (...): self._backend.rollback()` clause (that tuple does not list `OverflowError`) -- leaving the connection's already-`BEGIN`-started transaction open forever, so every subsequent `transact()` call failed with `sqlite3.OperationalError: cannot start a transaction within a transaction` (confirmed empirically). Checked deterministically here, BEFORE any statement reaches `cursor.execute`.
 # history: CH-0339
 _SQLITE_INT64_MIN = -9223372036854775808
@@ -45,6 +69,16 @@ _TYPES = {"text": "TEXT", "integer": "INTEGER", "real": "REAL",
 # a closed lookup table, mirroring `backend_postgres.py`'s own `_DIRECTION_SQL` (now in `postgres_sql.py`) constant dict -- this backend had none of its own, and instead concatenated `direction.upper()` directly into the SQL TEXT string in `read()` below. `cell.py`'s own `_bind_order_by` allowlist (`direction not in ("asc", "desc")`) is ALREADY the only thing standing between an arbitrary string and this backend's SQL text -- exactly the single-point-of-failure shape R-2/SI-04/SI-05 exist to close structurally, not merely by convention at the caller. A closed dict lookup here means an unexpected direction value raises (`KeyError`, translated to `errors.ValidationError` at the call site below) instead of ever reaching string concatenation, regardless of whether `cell.py`'s own allowlist is ever weakened or bypassed.
 # history: CH-0340
 _DIRECTION_TOKENS = {"asc": "ASC", "desc": "DESC"}
+
+# Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2a: explicit `NULLS
+# LAST`/`NULLS FIRST`, mirroring PostgreSQL's own default (asc -> NULLS
+# LAST, desc -> NULLS FIRST) rather than SQLite's own opposite default --
+# so NULL placement agrees between this backend's plug and the PostgreSQL
+# plug within this peer. Requires SQLite >= 3.30; `tests/test_sqlite_
+# version_floor.py` pins this floor against the interpreter actually
+# running the tests (the CI runner's own sqlite version is unmeasured
+# here).
+_NULLS_TOKENS = {"asc": "NULLS LAST", "desc": "NULLS FIRST"}
 
 
 class SQLiteBackend:
@@ -561,19 +595,72 @@ class SQLiteBackend:
                 params.append(item.value)
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
-    def read(self, collection, selected, filters, order_by, limit, *, deadline=None):
+    def _keyset_predicate_sql(self, order_by, cursor_values):
+        """The keyset predicate that replaces `OFFSET` (design D-2a/D-3
+        (4), mirroring `postgres_sql._keyset_predicate_sql`'s own form):
+        the dictionary/lexicographic expansion of `order_by` against the
+        last page's own ordering values `cursor_values`, each term's
+        comparison branched on whether its own cursor value is NULL (NULL
+        as the largest value in both directions, `_NULLS_TOKENS` above).
+        `cursor_values` is index-aligned with `order_by` (the `_mdb_row`
+        tie-break included) and has already passed `cell.ApplicationCell`'s
+        own count/type check.
+        """
+        clauses, params = [], []
+        for i, (field_name, direction) in enumerate(order_by):
+            column = _quote_column(field_name)
+            term_parts = []
+            for j in range(i):
+                prior_field, _prior_direction = order_by[j]
+                prior_value = cursor_values[j]
+                prior_column = _quote_column(prior_field)
+                if prior_value is None:
+                    term_parts.append(prior_column + " IS NULL")
+                else:
+                    term_parts.append(prior_column + " = ?")
+                    params.append(prior_value)
+            value = cursor_values[i]
+            if value is None:
+                greater = "0" if direction == "asc" else (column + " IS NOT NULL")
+            else:
+                operator = ">" if direction == "asc" else "<"
+                if direction == "asc":
+                    greater = "((" + column + " IS NOT NULL AND " + column + " " + operator + " ?) OR " + column + " IS NULL)"
+                else:
+                    greater = "(" + column + " IS NOT NULL AND " + column + " " + operator + " ?)"
+                params.append(value)
+            term_parts.append(greater)
+            clauses.append(" AND ".join(term_parts))
+        return "(" + " OR ".join(clauses) + ")", params
+
+    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None):
         _check_deadline(deadline)
         table = quote_identifier(collection)
-        statement = "SELECT " + ", ".join(quote_identifier(x) for x in selected) + " FROM " + table
+        statement = "SELECT " + ", ".join(_quote_column(x) for x in selected) + " FROM " + table
         where, params = self._where_sql(filters)
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.4/D-3 (4):
+        # `cursor_values`, when given, is already count/type-checked and
+        # index-aligned with `order_by` (`cell.ApplicationCell.read_page`)
+        # -- the keyset predicate is AND-ed onto the caller's own WHERE
+        # clause, replacing the old OFFSET.
+        if cursor_values is not None:
+            keyset_sql, keyset_params = self._keyset_predicate_sql(order_by, cursor_values)
+            where = (where + " AND " + keyset_sql) if filters else (" WHERE " + keyset_sql)
+            params = params + keyset_params
         statement += where
+        # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2a:
+        # `_NULLS_TOKENS[direction]` explicitly pins NULL placement to
+        # PostgreSQL's own default (asc -> NULLS LAST, desc -> NULLS
+        # FIRST), so the keyset predicate's own NULL branch above always
+        # agrees with this backend's actual row order too.
         if order_by is not None:
             # `order_by` is always `None` or a non-empty LIST of `(field, direction)` tuples now (`cell.py::_bind_order_by`), multi-field sort included -- a pre-WP-3 single-field caller already reaches this as a one-element list.
             # `_DIRECTION_TOKENS[direction]` (a closed dict lookup), never `direction.upper()` concatenated directly into SQL text -- see that constant's own docstring. `KeyError` for an unexpected value is translated to `errors.ValidationError` here rather than escaping raw, matching this backend's own existing translation discipline for every other native driver exception in this file.
             # history: CH-0371
             try:
                 order_terms = ", ".join(
-                    quote_identifier(field) + " " + _DIRECTION_TOKENS[direction] for field, direction in order_by
+                    _quote_column(field) + " " + _DIRECTION_TOKENS[direction] + " " + _NULLS_TOKENS[direction]
+                    for field, direction in order_by
                 )
             except KeyError as exc:
                 # mirrors `backend_postgres.PostgresBackend.read`'s own identical site -- same literal denial `cell.ApplicationCell._bind_order_by` already carries, same 4-key treatment.

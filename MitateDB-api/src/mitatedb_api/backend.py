@@ -335,13 +335,21 @@ class StorageBackend:
         """Returns ``{"rowid": <backend-assigned row identifier>}``."""
         raise NotImplementedError
 
-    def read(self, collection, selected, filters, order_by, limit):
+    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None):
         """``filters``: list of already-bound ``cell.Filter`` (field
         verified to exist, operator verified supported, value already
         encoded). ``order_by``: ``None`` or a non-empty list of
         ``(field, "asc"|"desc")`` tuples (WP-3: multi-field sort;
         ``cell.py::_bind_order_by`` always normalizes to this shape, a
-        single-field caller included). Returns a list of ``dict`` rows."""
+        single-field caller included). Returns a list of ``dict`` rows.
+
+        Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.4/D-3 (4):
+        ``cursor_values``, when not ``None``, is a list already count/
+        type-checked and index-aligned with ``order_by`` (the row-order
+        tie-break column included) -- the keyset predicate this backend
+        builds from it AND-ed onto ``filters``' own WHERE clause, replacing
+        the old OFFSET. ``None`` (the default) means "no cursor position",
+        matching this method's own pre-D-2b external behavior."""
         raise NotImplementedError
 
     def update(self, collection, fields, params, filters):

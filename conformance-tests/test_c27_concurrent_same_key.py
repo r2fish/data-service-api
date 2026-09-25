@@ -530,14 +530,12 @@ def test_c27_entries_bound_holds_under_concurrency(adapter: ConformanceAdapter, 
     assert outcomes[winner_name].get("affected") == 1, (
         f"{adapter.name}: the winning concurrent request did not actually insert -- {outcomes[winner_name]!r}"
     )
-    # Effect-row evidence keyed by marker, not a total `count()` (this
-    # peer's own `count()` realization caps at `limits.max_result_rows`
-    # via the underlying `read()`'s own default-limit behavior, so a
-    # deployment declaring `idempotency_entries` above that cap would
-    # make a total-count assertion silently wrong rather than red --
-    # `select_eq` on each request's own distinct marker sidesteps that
-    # cap entirely, the same convention test_c23_idempotency_semantics.py
-    # already uses throughout).
+    # Effect-row evidence keyed by marker, not a total `count()`:
+    # `select_eq` on each request's own distinct marker names the row
+    # this request produced and no other, the same convention
+    # test_c23_idempotency_semantics.py already uses throughout (a total
+    # count would also have to reason about every other row the
+    # collection holds).
     winner_marker = marker_a if winner_name == "a" else marker_b
     loser_marker = marker_b if winner_name == "a" else marker_a
     assert len(iso.select_eq(runtime, entity, ["label"], "label", winner_marker)) == 1, (

@@ -2252,14 +2252,38 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 break
         if not fields:
             return 0
-        # No `page.size` override: the server's own configured
-        # `result_items` default bound (500, `config.FoundationConfig.
-        # max_result_rows`) already comfortably covers this suite's own
-        # small fixtures, and requesting MORE than that bound would itself
-        # trigger a real `LIMIT_EXCEEDED` -- this method counts rows, it
-        # does not need to probe the limit.
-        result = self._query(session, entity, select=list(fields))
-        return len(result["items"])
+        # port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        # a single `page.size`-less request used to rely on this
+        # deployment's own default bound (500) "comfortably covering this
+        # suite's own small fixtures" -- untrue on the isolated surface's
+        # own smaller `max_result_rows` once a collection holds more rows
+        # than that bound (C-28's own concurrent-insert node inserts a
+        # 6th row). Omitting `page_size` walks the entry point's own
+        # default page (design D-2b.3), which stays within ANY positive
+        # deployment bound while costing roughly one request per `max_
+        # result_rows` rows rather than one per row (a `page_size=1` walk
+        # would multiply this suite's own rate budget by the row count
+        # and collide with `max_requests_per_minute` on the `full`
+        # idempotency leg). A page count that outruns
+        # the rows actually counted, plus one, means the cursor stopped
+        # advancing; that is this adapter's own bug, not a rate-limit
+        # condition, so it is raised here rather than left to surface as
+        # a misleading `LIMIT_EXCEEDED`.
+        total = 0
+        cursor: str | None = None
+        pages = 0
+        while True:
+            result = self._query(session, entity, select=list(fields), cursor=cursor)
+            total += len(result["items"])
+            pages += 1
+            if pages > total + 1:
+                raise AssertionError(
+                    f"count({entity!r}) did not terminate: {pages} pages for {total} rows"
+                )
+            cursor = result.get("next_page")
+            if cursor is None:
+                break
+        return total
 
     def entities(self, session: object) -> set[str]:
         assert isinstance(session, _Session)

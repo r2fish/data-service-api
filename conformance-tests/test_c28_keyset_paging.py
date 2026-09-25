@@ -96,6 +96,7 @@ def _cross_check_observed_branch(adapter: ConformanceAdapter, pre_1_9_0: bool, c
 _ORDER_BY_VARIANTS = (
     "plain",
     "null_valued_field",
+    "null_valued_field_desc",
     "mixed_direction",
     "field_outside_select",
     "select_every_declared_field",
@@ -153,6 +154,18 @@ def test_c28_paged_traversal_is_the_unpaged_sequence(
     elif variant == "null_valued_field":
         select = ["bucket", "rank", "tag"]
         order_by = [("tag", "asc"), ("bucket", "asc")]
+    elif variant == "null_valued_field_desc":
+        # supervisor ruling (code-review 指摘 2): `null_valued_field` above
+        # only exercises the ASC null branch (NULLS LAST) -- the DESC null
+        # branch (NULLS FIRST, `postgres_sql.py`'s own `_NULLS_SQL["desc"]`/
+        # `backend_sqlite.py`'s own `_NULLS_TOKENS["desc"]`) had no
+        # observing node at all. With this seed, `tag desc` places the two
+        # NULL-tag rows first (tie-broken by `bucket asc`: "a" then "b"),
+        # so the `page_size=2` traversal's first-page cursor encodes a NULL
+        # ordering value for `tag` -- the DESC-branch equivalent of `null_
+        # valued_field`'s own ASC-branch cursor.
+        select = ["bucket", "rank", "tag"]
+        order_by = [("tag", "desc"), ("bucket", "asc")]
     elif variant == "mixed_direction":
         select = ["bucket", "rank"]
         order_by = [("bucket", "asc"), ("rank", "desc")]
@@ -318,7 +331,7 @@ def test_c28_cursor_binding(
     )
     assert reordered_cursor is not None
     reordered_continuation, _next3 = iso.query_page(
-        runtime, entity, select, where=where_2_reordered, order_by=order_by, page_size=100, cursor=reordered_cursor,
+        runtime, entity, select, where=where_2_reordered, order_by=order_by, page_size=2, cursor=reordered_cursor,
     )
     assert reordered_continuation, (
         f"{adapter.name}: a cursor was refused when the SAME where predicates were only reordered -- "
@@ -327,14 +340,14 @@ def test_c28_cursor_binding(
 
     # where を変えると拒否。
     with pytest.raises(ConformanceDenial) as ei_where:
-        iso.query_page(runtime, entity, select, where=[("bucket", "eq", "b")], order_by=order_by, page_size=100, cursor=cursor)
+        iso.query_page(runtime, entity, select, where=[("bucket", "eq", "b")], order_by=order_by, page_size=2, cursor=cursor)
     assert ei_where.value.code == "VALIDATION_FAILED", f"{adapter.name}: where change -> {ei_where.value.code!r}"
     assert ei_where.value.details.get("violated_declaration") == "request_schema", ei_where.value.details
     assert ei_where.value.details.get("field") == "page/cursor", ei_where.value.details
 
     # order_by を変えると拒否。
     with pytest.raises(ConformanceDenial) as ei_order:
-        iso.query_page(runtime, entity, select, where=where, order_by=[("rank", "desc")], page_size=100, cursor=cursor)
+        iso.query_page(runtime, entity, select, where=where, order_by=[("rank", "desc")], page_size=2, cursor=cursor)
     assert ei_order.value.code == "VALIDATION_FAILED", f"{adapter.name}: order_by change -> {ei_order.value.code!r}"
     assert ei_order.value.details.get("violated_declaration") == "request_schema", ei_order.value.details
     assert ei_order.value.details.get("field") == "page/cursor", ei_order.value.details
@@ -370,7 +383,7 @@ def test_c28_cross_application_cursor_is_refused(
     assert cursor_a is not None
 
     with pytest.raises(ConformanceDenial) as ei_cross_app:
-        iso.query_page(run_b, entity, select, order_by=order_by, page_size=100, cursor=cursor_a)
+        iso.query_page(run_b, entity, select, order_by=order_by, page_size=1, cursor=cursor_a)
     assert ei_cross_app.value.code == "VALIDATION_FAILED", f"{adapter.name}: {ei_cross_app.value.code!r}"
     assert ei_cross_app.value.details.get("violated_declaration") == "request_schema", ei_cross_app.value.details
     assert ei_cross_app.value.details.get("field") == "page/cursor", ei_cross_app.value.details
@@ -387,7 +400,7 @@ def test_c28_cross_application_cursor_is_refused(
     other_entity = fresh_identifier("c28a2")
     iso.create_entity(dev_a, other_entity, {"bucket": "text"})
     with pytest.raises(ConformanceDenial) as ei_cross_entity:
-        iso.query_page(run_a, other_entity, select, order_by=order_by, page_size=100, cursor=cursor_a)
+        iso.query_page(run_a, other_entity, select, order_by=order_by, page_size=1, cursor=cursor_a)
     assert ei_cross_entity.value.code == "VALIDATION_FAILED", f"{adapter.name}: {ei_cross_entity.value.code!r}"
     assert ei_cross_entity.value.details.get("violated_declaration") == "request_schema", ei_cross_entity.value.details
     assert ei_cross_entity.value.details.get("field") == "page/cursor", ei_cross_entity.value.details
