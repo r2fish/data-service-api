@@ -183,6 +183,14 @@ _CONTROL_LIMIT_ENV_NAMES: Mapping[str, str] = {
 CONFORMANCE_AUDIT_STATEMENT_TIMEOUT_MS = 1000
 CONFORMANCE_AUDIT_IDLE_TIMEOUT_MS = 2000
 
+# The exact set of denial codes that mean "the cached control credential is
+# genuinely no longer live" (an authority refusal), as opposed to a
+# transient/unrelated denial (`LIMIT_EXCEEDED`, `AUTH_STATE_UNAVAILABLE`,
+# ...) that must never trigger a destructive `ops.py reset` -- see
+# `control_credential`/`_privileged_control_send`'s own call sites, both of
+# which share this one set rather than each hand-rolling their own copy.
+_REPAIRABLE_AUTH_DENIAL_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "AUTH_REQUIRED", "FORBIDDEN"})
+
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 
 # WP-5 (design v1.2 R-8): `MitateDB-api` is not pip-installed anywhere this
@@ -893,6 +901,22 @@ class _AuthGate:
         self._store.assert_active(principal, request_id=request_id)
 
 
+class _ControlCredentialHolder:
+    """Holds the one control credential handle a
+    `MitateDBHttpConformanceAdapter` instance believes is currently valid.
+    Kept as one small mutable object (rather than two bare attributes
+    directly on the adapter) so `isolated_application_surface`'s shallow
+    `copy.copy(self)` shares this SAME object with every isolated copy it
+    yields: neither side keeps a value-copied cache the other cannot see a
+    repair against."""
+
+    __slots__ = ("ref", "secret")
+
+    def __init__(self) -> None:
+        self.ref: str | None = None
+        self.secret: str | None = None
+
+
 class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to MitateDB-api's real HTTP +
     PostgreSQL stack: `mitatedb_api.http.create_app` in front of an
@@ -1196,9 +1220,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # `control_credential()`'s own maintained handle (memoize +
             # call-time validity check -- port v1.5 WP-1 independent review
             # major M-4), mirroring both the in-process adapter's and
-            # r2db-http's identical mechanism.
-            self._control_credential_ref: str | None = None
-            self._control_credential_secret: str | None = None
+            # r2db-http's identical mechanism. Held in one `_ControlCredentialHolder`
+            # (not two bare attributes) so `isolated_application_surface`'s
+            # shallow copy shares this same cache with every isolated copy.
+            self._control_credential_holder = _ControlCredentialHolder()
         except Exception:
             self._cleanup()
             atexit.unregister(self._cleanup)
@@ -1734,29 +1759,34 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             self._control_send(
                 "GET", "/control/v1/capabilities", ControlCredentialHandle(credential_ref=credential_ref, secret=secret))
             return True
-        except ConformanceDenial:
+        except ConformanceDenial as exc:
+            if exc.code not in _REPAIRABLE_AUTH_DENIAL_CODES:
+                # A transient/unrelated denial (`LIMIT_EXCEEDED`,
+                # `AUTH_STATE_UNAVAILABLE`, ...) never means the cached
+                # handle itself is dead -- propagate it unchanged rather
+                # than reading it as "repair via a destructive reset" (that
+                # would revoke a still-perfectly-live control credential
+                # and mask the real failure as a false "it was stale"
+                # story).
+                raise
             return False
 
     def _ensure_control_actor(self) -> ControlCredentialHandle:
-        """R-8 (`adapter の control credential handle はキャッシュし毎回
-        probe しない` -- read literally as "do not re-PROVISION a fresh
-        one every call", not "never re-validate the one already cached").
-        First-execution finding (this WP): a bare, unconditional cache
-        (this method's own original WP-5 revision) goes stale silently the
-        moment a LATER test's own real `adapter.reset()` call revokes
-        every existing control credential including the one this cache
-        still names -- `control_credential()` then hands out a dead handle
-        to whichever test asks next, which fails downstream with a
-        confusing `AUTH_INVALID` unrelated to what that test was actually
-        checking (measured directly: `test_c15...audit_and_denials_are_
-        recorded`, which runs after `test_c15...reset...atomically` in the
-        same session-scoped adapter). One cheap `GET .../capabilities`
-        against the CACHED handle -- not a fresh mint -- confirms liveness
-        before handing it out; only a genuinely dead cache pays the cost
-        of `_repair_control_actor`'s own real ritual run."""
-        if self._control_credential_ref is not None and self._control_actor_is_live(
-                self._control_credential_ref, self._control_credential_secret):
-            return ControlCredentialHandle(credential_ref=self._control_credential_ref, secret=self._control_credential_secret)
+        """Privileged internal helper (not a port method itself): returns a
+        control credential this adapter believes is currently valid and
+        must-rotate-cleared. Trusts the cached handle without a preflight
+        probe -- an extra `GET .../capabilities` before every real call
+        would double this adapter's own control-plane HTTP traffic for no
+        correctness benefit. A caller that actually needs certainty the
+        returned handle still authenticates (`control_credential()` itself)
+        gets that from its own preflight probe; a caller that only needs a
+        handle to perform a real privileged operation
+        (`_privileged_control_send`, below) gets that from the real
+        operation's own denial, repairing only when it is genuinely an
+        authority refusal."""
+        if self._control_credential_holder.ref is not None:
+            return ControlCredentialHandle(
+                credential_ref=self._control_credential_holder.ref, secret=self._control_credential_holder.secret)
         return self._repair_control_actor()
 
     def _repair_control_actor(self) -> ControlCredentialHandle:
@@ -1773,12 +1803,55 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             "POST", f"/control/v1/credentials/{quote(credential_id, safe='')}/rotate",
             ControlCredentialHandle(credential_ref=credential_id, secret=secret),
         )
-        self._control_credential_ref = credential_id
-        self._control_credential_secret = rotated["secret"]
-        return ControlCredentialHandle(credential_ref=credential_id, secret=self._control_credential_secret)
+        holder = self._control_credential_holder
+        holder.ref = credential_id
+        holder.secret = rotated["secret"]
+        return ControlCredentialHandle(credential_ref=credential_id, secret=holder.secret)
+
+    def _privileged_control_send(
+        self, method: str, path: str, *, json_body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Internal privileged control-plane call used by setup/observation
+        primitives that immediately consume the returned actor for one real
+        operation (never by `control_credential()` itself, whose own
+        preflight-probe contract is separate, below). Trusts the cached
+        handle (`_ensure_control_actor`, no probe) and only pays the cost of
+        a real `ops.py reset`/re-send when the actual operation comes back
+        with an authority denial -- a transient/unrelated denial
+        propagates as-is, with no retry and no repair."""
+        actor = self._ensure_control_actor()
+        try:
+            return self._control_send(method, path, actor, json_body=json_body)
+        except ConformanceDenial as exc:
+            if exc.code not in _REPAIRABLE_AUTH_DENIAL_CODES:
+                raise
+            # The cached handle was not actually live (revoked/disabled by
+            # some other test's own C-15 vector, or still must_rotate) --
+            # repair via a real ritual run and retry exactly once, never in
+            # a loop (a second failure is a genuine problem, not
+            # staleness).
+            actor = self._repair_control_actor()
+            return self._control_send(method, path, actor, json_body=json_body)
 
     def control_credential(self) -> ControlCredentialHandle:
-        return self._ensure_control_actor()
+        """Unlike `_ensure_control_actor` (this adapter's own internal
+        helper for the privileged setup/observation primitives, which
+        deliberately trusts its cache to keep ordinary traffic cheap -- see
+        that method's own docstring), this PUBLIC port method verifies
+        liveness with one real preflight call before returning: the port's
+        call-time validity contract (`docs/design/CONFORMANCE_ADAPTER_V1.md`,
+        Major M-4) ("genuinely valid AT CALL TIME") is load-bearing here
+        specifically, since C-15's own vectors revoke/reset control
+        credentials mid-suite and a LATER, unrelated caller of this method
+        must never receive a silently-dead handle it cannot itself detect
+        or retry around. A transient/unrelated denial (`LIMIT_EXCEEDED`,
+        `AUTH_STATE_UNAVAILABLE`, ...) is never read as "the cache is
+        dead" -- it propagates unchanged instead of triggering a
+        destructive reset."""
+        holder = self._control_credential_holder
+        if holder.ref is not None and self._control_actor_is_live(holder.ref, holder.secret):
+            return ControlCredentialHandle(credential_ref=holder.ref, secret=holder.secret)
+        return self._repair_control_actor()
 
     def control_audit_events(self) -> Sequence[Mapping[str, Any]]:
         # `mitatedbsvc_controlplane` has INSERT-only on `control_audit`
@@ -2058,11 +2131,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
     def _audit_query_status(self) -> str:
         # Reads via this adapter's OWN privileged control credential
-        # (`control_credential()`), never via the `actor` a caller of
-        # `audit_query` supplies -- see conformance_adapter_r2db_http.py's
-        # identical method for the full C-09-vector-3 rationale.
-        control_actor = self.control_credential()
-        document = self.control_capabilities(control_actor)
+        # (the cache-trusting `_privileged_control_send`, never the public
+        # probing `control_credential()`), and never via the `actor` a
+        # caller of `audit_query` supplies -- see
+        # conformance_adapter_r2db_http.py's `_audit_query_status` for the
+        # C-09-vector-3 rationale; this adapter's own copy trusts the
+        # cached actor and sends one request where r2db's probes first.
+        document = self._privileged_control_send("GET", "/control/v1/capabilities")
         return document.get("capabilities", {}).get("audit_query", {}).get("status", "unavailable")
 
     def _audit_surface_absent(self, operation: str, reason: str) -> SurfaceAbsent:
@@ -2103,8 +2178,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:
-        control_actor = self.control_credential()
-        document = self.control_capabilities(control_actor)
+        document = self._privileged_control_send("GET", "/control/v1/capabilities")
         audit_query_capability = document.get("capabilities", {}).get("audit_query", {})
         if audit_query_capability.get("status") not in ("enabled", "partial"):
             raise self._audit_surface_absent(
@@ -3042,7 +3116,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         def inband_enable_credential_after_revoke_then_reauthenticate_denied_attempt() -> None:
             # WP-5 flip (design v1.2 R-8 second-round M-4): `/control/v1`'s
             # own in-band enable is now real on this composition too --
-            # `set_credential_enabled_inband` and `handle` (minted via the
+            # the in-band enable call and `handle` (minted via the
             # privileged `_write_store`) both ultimately act on the SAME
             # `<schema>.credentials` row (R-4: the control-writer registry
             # and the application-plane's own read-only store are two
@@ -3052,9 +3126,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # required). `enable` itself succeeds (contract `enable_
             # credential.semantics`: reverses disable only); the proof this
             # is `must_deny`, not `must_ignore`, is that a genuine
-            # re-authenticate is chained inside this SAME `attempt()`.
-            control_actor = self.control_credential()
-            self.set_credential_enabled_inband(control_actor, handle.credential_ref, True)
+            # re-authenticate is chained inside this SAME `attempt()`. Uses
+            # the internal privileged path (`_privileged_control_send`),
+            # never the public probing `control_credential()`.
+            self._privileged_control_send(
+                "POST", f"/control/v1/credentials/{quote(handle.credential_ref, safe='')}/enable")
             self.authenticate(handle)
 
         return [
