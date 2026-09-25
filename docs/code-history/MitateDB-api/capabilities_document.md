@@ -80,3 +80,19 @@ This host also declares contract 1.9.0 in the same commit as `common_baseline`'s
 
 This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays declared other than unavailable (partial) here, never ahead of the behavior they declare.
 ```
+
+### correction: 2026-09-25
+
+- reason: R-110 (undeclared-field refusal alignment, subordinate ruling 16, acceptance audit observation O4) -- this host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names (the values position names itself by key, not by index; the mutation where predicate field is the fifth position)
+
+old:
+```
+This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays declared other than unavailable (partial) here, never ahead of the behavior they declare.
+```
+
+new:
+```
+This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays declared other than unavailable (partial) here, never ahead of the behavior they declare.
+
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names -- a select entry names its own index (select/<i>), matching where/order_by/mutation-where, and a mutation's values key names itself (operations/<i>/values/<name>) -- each refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares.
+```

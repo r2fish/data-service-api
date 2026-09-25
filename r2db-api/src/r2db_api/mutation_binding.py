@@ -66,8 +66,13 @@ def validate_projection(select: Any, known_fields: set[str]) -> list[str]:
         # per-index path (which is harmless on its own here, but N-1's
         # worked examples are followed verbatim across every position).
         validate_identifier(field_name, field="select")
-    if any(field_name not in known_fields for field_name in select):
-        fail("NOT_FOUND", "Field was not found.", status=404)
+    for i, field_name in enumerate(select):
+        # Contract 1.11.0 (subordinate ruling 16): an undeclared field name
+        # here is a request_schema violation naming the position -- NOT_FOUND
+        # is not a conforming refusal of it at this position
+        # (errors.details_vocabulary.undeclared_field).
+        if field_name not in known_fields:
+            fail("VALIDATION_FAILED", "Field is not declared.", details=violation("request_schema", field=f"select/{i}"))
     return select
 
 
@@ -80,8 +85,13 @@ def validate_predicates(where: list["Predicate"], known_fields: set[str], *, pat
     included)."""
     for i, predicate in enumerate(where):
         predicate.validate(base_path=f"{path_prefix}/{i}")
+        # Contract 1.11.0 (subordinate ruling 16): an undeclared field name
+        # in a `where` predicate -- whether a top-level query's own `where`
+        # or a mutation item's own `where` (`path_prefix` already carries
+        # `operations/<i>/where` in that case) -- is a request_schema
+        # violation naming `<path_prefix>/<i>/field`, not NOT_FOUND.
         if predicate.field not in known_fields:
-            fail("NOT_FOUND", "Field was not found.", status=404)
+            fail("VALIDATION_FAILED", "Field is not declared.", details=violation("request_schema", field=f"{path_prefix}/{i}/field"))
     return where
 
 
@@ -187,8 +197,14 @@ def bind_mutation(operation: Any, known_fields: set[str], *, operation_index: in
         # key echoed verbatim through this f-string). Stop at the
         # container position, `operations/<i>/values` (N-1's own example).
         validate_identifier(key, field=f"operations/{operation_index}/values")
+        # Contract 1.11.0 (subordinate ruling 16): an undeclared field name
+        # here is a request_schema violation naming the position, including
+        # the key itself (`operations/<i>/values/<name>`, the contract's
+        # own form for this position) -- the identifier check above has
+        # already rejected any key outside the identifier syntax, so `key`
+        # carries no adversarial content here.
         if key not in known_fields:
-            fail("NOT_FOUND", "Field was not found.", status=404)
+            fail("VALIDATION_FAILED", "Field is not declared.", details=violation("request_schema", field=f"operations/{operation_index}/values/{key}"))
     if name in {"insert", "update", "upsert"} and "id" in raw_values:
         # R-3, property 4: the row address is always server-assigned. A
         # client may read `id` (select/where/order_by) freely but can never

@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **3.3** (2026-09-25; R-109 -- keyset paging (contract 1.10.0): C-30 Control and Evidence added to the Common blocks of SI-01, SI-08 and SI-10, a Status claim to SI-08's and SI-03's and two to SI-10's; no new invariant (design `docs/design/PHASE11_KEYSET_PAGING_V1.md` section 7); two stale `backend_postgres.py`/`cell.py` line references corrected to their current lines; `CONTROL_MAPPING_HISTORY.md` untouched)
+Version: **3.4** (2026-09-25; R-110 -- undeclared-field refusal alignment (contract 1.11.0): C-31 Evidence added to the Common block of SI-10; no new invariant, no Control claim added (`CCR_DISPOSITION.md` subordinate ruling 16); `CONTROL_MAPPING_HISTORY.md` untouched)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -1322,6 +1322,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - An undecodable cursor and one bound to a different Application, entity, where or order_by all produce the identical 2-key denial: `test_c30_keyset_paging.py::test_c30_cursor_refusal_details`.
 - r2db pins a wrong-count/wrong-type cursor token as the same denial: `r2db-api/tests/test_foundation.py::test_cursor_rejects_a_tampered_token_with_the_wrong_value_count_or_type`.
 - MitateDB pins the same: `MitateDB-api/tests/test_http.py::test_tampered_page_cursor_count_and_type_and_domain_mismatches_are_validation_failed`.
+- C-31 (select/where), on all six adapters: an undeclared field name is refused as request_schema naming the position -- `conformance-tests/test_c31_undeclared_field_refusal.py::test_c31_select_names_the_undeclared_entrys_index`, `::test_c31_where_names_the_undeclared_predicates_field`.
+- C-31 (order_by/values), on all six adapters: an undeclared field name is refused as request_schema naming the position -- `conformance-tests/test_c31_undeclared_field_refusal.py::test_c31_order_by_names_the_undeclared_entrys_field`, `::test_c31_values_names_the_undeclared_keys_own_name`.
 
 #### Status
 

@@ -524,7 +524,10 @@ def test_ast_full_count_matches_the_audit_site_count():
         # is unchanged (4 sites). Net: 1 (`validate_page_size`) + 4
         # (`_resolve_order_by`) + 1 (`decode_and_check_page_cursor`) = 6
         # (10 -> 6).
-        "paging.py": 6,
+        # Contract 1.11.0 (subordinate ruling 16): +1 -- `_resolve_order_by`'s
+        # undeclared-field site converts from `NOT_FOUND` (not a vocabulary
+        # code, uncounted) to `VALIDATION_FAILED`/`request_schema` (6 -> 7).
+        "paging.py": 7,
         # R-37 WP-1i (2026-09-14): the 11 `fail("VALIDATION_FAILED", ...)`
         # sites `_check_type`/`_validate_wildcard_pattern`/`_validate_
         # predicate_types` carried in `structured.py` before the move,
@@ -543,7 +546,13 @@ def test_ast_full_count_matches_the_audit_site_count():
         # `fail("CAPABILITY_UNSUPPORTED", ...)` sites `Predicate.validate`/
         # `bind_mutation` carried in `structured.py` before the move,
         # unchanged in wording or `details=` shape.
-        "mutation_binding.py": 18,
+        # Contract 1.11.0 (subordinate ruling 16): +3 -- `validate_
+        # projection`'s select, `validate_predicates`'s where (shared by
+        # both a top-level query's own where and a mutation item's where)
+        # and `bind_mutation`'s values-key undeclared-field sites convert
+        # from `NOT_FOUND` (not a vocabulary code, uncounted) to
+        # `VALIDATION_FAILED`/`request_schema` (18 -> 21).
+        "mutation_binding.py": 21,
         # R-37 WP-3g (2026-09-15): the 1 `fail("VALIDATION_FAILED", ...)`
         # site `_fail_constraint_declaration` carried in `structured.py`
         # before the move, unchanged in wording or `details=` shape.

@@ -982,6 +982,22 @@ This host also declares contract 1.9.0 in the same commit as `common_baseline`'s
 This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays enabled here, never ahead of the behavior they declare.
 ```
 
+### correction: 2026-09-25
+
+- reason: R-110 (undeclared-field refusal alignment, subordinate ruling 16) -- this host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across select/where/order_by/mutation-values
+
+old:
+```
+This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays enabled here, never ahead of the behavior they declare.
+```
+
+new:
+```
+This host also declares contract 1.10.0 in the same commit as its own keyset paging behavior -- query results totally ordered, a stateless page.cursor with next_page, cursor binding, and a page.size default -- 1.10.0's own conditional obligations, bound while structured_query stays enabled here, never ahead of the behavior they declare.
+
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares.
+```
+
 ## CH-0143
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)

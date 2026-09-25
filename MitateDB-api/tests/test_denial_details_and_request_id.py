@@ -134,6 +134,36 @@ def test_single_unknown_field_names_it_as_field(service):
     assert "observed_type" not in details
 
 
+def test_select_unknown_field_names_its_index(service):
+    """Contract 1.11.0 (subordinate ruling 16): a `select` entry naming a
+    field the entity does not declare is `violated_declaration:
+    request_schema` with `field` naming the entry's own INDEX (`select/
+    <i>`), the same index form `where`/`order_by` already use for this
+    same rule."""
+    _, _, _dev, runtime = service
+    with pytest.raises(ValidationError) as ctx:
+        runtime.read("widgets", fields=["title", "no_such_field"])
+    details = ctx.value.details
+    assert details["violated_declaration"] == "request_schema"
+    assert details["field"] == "select/1"
+    assert "declared_type" not in details
+    assert "observed_type" not in details
+
+
+def test_undeclared_field_in_a_mutation_where_predicate_names_the_position(service):
+    """Contract 1.11.0 (subordinate ruling 16): an undeclared field name in
+    a mutation's own where predicate is request_schema, field naming
+    operations/<i>/where/<j>/field -- the same index form a top-level
+    query's own where already uses, with the operation's own index
+    threaded in front of it."""
+    from mitatedb_api.cell import Filter
+
+    _, _, _dev, runtime = service
+    with pytest.raises(ValidationError) as ctx:
+        runtime.update("widgets", {"title": "y"}, [Filter("title", "eq", "seed"), Filter("ghost", "eq", "z")])
+    assert ctx.value.details == {"violated_declaration": "request_schema", "field": "operations/0/where/1/field"}
+
+
 def test_multiple_unknown_fields_omit_field(service):
     """When a violation is NOT attributable to a single position (here:
     the request as a whole carries an unrecognized top-level key set),
@@ -519,7 +549,7 @@ def test_contract_version_is_1_7_0_on_data_plane(service):
     mapping -- function name kept, same precedent as the sibling peer's
     own re-flipped pins."""
     _, _, _dev, runtime = service
-    assert runtime.capabilities()["contract_version"] == "1.10.0"
+    assert runtime.capabilities()["contract_version"] == "1.11.0"
 
 
 def test_contract_version_is_1_7_0_on_control_plane():
@@ -533,7 +563,7 @@ def test_contract_version_is_1_7_0_on_control_plane():
     with backend.unit_of_work() as work:
         _cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     document = service.control_capabilities(secret)
-    assert document["contract_version"] == "1.10.0"
+    assert document["contract_version"] == "1.11.0"
 
 
 def test_operation_catalog_url_agrees_on_data_and_control_planes():

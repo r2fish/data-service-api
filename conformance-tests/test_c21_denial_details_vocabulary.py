@@ -189,10 +189,14 @@ def test_c21_denial_details_vocabulary(adapter: ConformanceAdapter, isolated, re
     assert_details_vocabulary_values_safe(ei_type.value.details, adapter_name=adapter.name)
     observed_codes.add("VALIDATION_FAILED")
 
-    # VALIDATION_FAILED -- request_schema violation (unknown field name),
-    # where this plug answers that code for this shape at all (C-07's own
-    # module docstring already discloses the measured cross-peer
-    # difference: NOT_FOUND on both r2db plugs for this exact probe).
+    # VALIDATION_FAILED -- request_schema violation (unknown field name).
+    # Contract 1.11.0 (subordinate ruling 16) unifies every registered
+    # plug on VALIDATION_FAILED for this exact probe (C-07's own module
+    # docstring records the pre-1.11.0 cross-peer difference this closed:
+    # NOT_FOUND on both r2db plugs, VALIDATION_FAILED on both MitateDB
+    # plugs); the `if` below is kept rather than tightened to an
+    # unconditional assert, since C-31 -- not C-21 -- is this suite's own
+    # dedicated pin for the code this position now answers with.
     bad_field = fresh_identifier("c21_nosuch")
     with pytest.raises(ConformanceDenial) as ei_schema:
         iso.attempt_mutation(runtime, entity, "insert", values={bad_field: "x"}, where_field=None, where_value=None)

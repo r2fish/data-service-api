@@ -138,7 +138,12 @@ def test_developer_schema_catalog_controls_fields(service):
     runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as field_error:
         service.mutate(runtime, "notes", [{"operation": "insert", "values": {"unlisted": "x"}}])
-    assert field_error.value.code == "NOT_FOUND"
+    # Contract 1.11.0 (subordinate ruling 16): an undeclared mutation
+    # values key is a request_schema violation naming the position
+    # (operations/<i>/values/<name>), not NOT_FOUND.
+    assert field_error.value.code == "VALIDATION_FAILED"
+    assert field_error.value.details["violated_declaration"] == "request_schema"
+    assert field_error.value.details["field"] == "operations/0/values/unlisted"
     with pytest.raises(FoundationError) as malformed:
         service.schema(developer, None)
     assert malformed.value.code == "VALIDATION_FAILED"
@@ -146,6 +151,9 @@ def test_developer_schema_catalog_controls_fields(service):
         service.schema(developer, {"operation": "create_entity", "entity": "partial", "fields": ["ok", "bad-field;"]})
     with pytest.raises(FoundationError) as ghost:
         service.query(runtime, "partial", select=["ok"])
+    # "partial" itself was never created (the create_entity above failed on
+    # the malformed second field name) -- this is the unknown-entity
+    # NOT_FOUND, untouched by contract 1.11.0.
     assert ghost.value.code == "NOT_FOUND"
 
 
@@ -241,7 +249,7 @@ def test_data_plane_capabilities_declares_contract_1_6_0(service):
     ships -- function name kept, same precedent."""
     runtime = service.authenticate("cred-a.secret-a")
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.10.0"
+    assert document["contract_version"] == "1.11.0"
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
@@ -932,7 +940,13 @@ def test_every_advertised_resource_limit_has_a_deterministic_boundary():
     assert error.value.code == "LIMIT_EXCEEDED"
     with pytest.raises(FoundationError) as no_side_effect:
         service.query(context, "items", select=["new_field"])
-    assert no_side_effect.value.code == "NOT_FOUND"
+    # Contract 1.11.0 (subordinate ruling 16): "new_field" was never
+    # actually declared (the add_field above failed closed on the
+    # schema_objects limit), so this is now the undeclared-field refusal,
+    # not the entity/row NOT_FOUND this assertion pinned before.
+    assert no_side_effect.value.code == "VALIDATION_FAILED"
+    assert no_side_effect.value.details["violated_declaration"] == "request_schema"
+    assert no_side_effect.value.details["field"] == "select/0"
 
     clock_values = iter([0.0, 0.0, 0.01])
     service, context = _limited(execution_ms=1)
@@ -2479,7 +2493,7 @@ def test_capabilities_document_is_built_only_from_explicit_arguments():
 
     developer_doc = build_capabilities_document(role="developer", application_id="app-x", **common)
     assert developer_doc == {
-        "contract_version": "1.10.0",
+        "contract_version": "1.11.0",
         "capabilities": {
             **expected_capabilities,
             "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"], "unsupported": ["jobs"]},
@@ -2494,7 +2508,7 @@ def test_capabilities_document_is_built_only_from_explicit_arguments():
 
     runtime_doc = build_capabilities_document(role="runtime", application_id="app-x", **common)
     assert runtime_doc == {
-        "contract_version": "1.10.0",
+        "contract_version": "1.11.0",
         "capabilities": {
             **expected_capabilities,
             "schema_operations": {"status": "partial", "operations": [], "unsupported": ["jobs"]},
@@ -2542,7 +2556,7 @@ def test_data_service_capabilities_passes_deployment_values_to_the_document():
     runtime = service.authenticate("wp3b-user.wp3b-user-secret")
 
     assert service.capabilities(developer) == {
-        "contract_version": "1.10.0",
+        "contract_version": "1.11.0",
         "capabilities": {
             "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
@@ -2577,7 +2591,7 @@ def test_data_service_capabilities_passes_deployment_values_to_the_document():
     }
 
     assert service.capabilities(runtime) == {
-        "contract_version": "1.10.0",
+        "contract_version": "1.11.0",
         "capabilities": {
             "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
@@ -2713,11 +2727,15 @@ def test_order_by_sorts_and_appends_id_when_absent():
     assert default_order.items == [{"id": 1}, {"id": 2}, {"id": 3}]
 
 
-def test_order_by_unknown_field_is_not_found():
+def test_order_by_unknown_field_is_validation_failed():
+    # Contract 1.11.0 (subordinate ruling 16): an undeclared order_by field
+    # is a request_schema violation naming the position, not NOT_FOUND.
     cell = _numbered_cell(1)
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "ghost", "direction": "asc"}])
-    assert exc.value.code == "NOT_FOUND"
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details["violated_declaration"] == "request_schema"
+    assert exc.value.details["field"] == "order_by/0/field"
 
 
 def test_order_by_rejects_a_repeated_field():
