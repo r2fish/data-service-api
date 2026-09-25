@@ -141,6 +141,16 @@ _SURFACES = {
     "control": {"base_url": _CONTROL_SURFACE_BASE_URL},
 }
 
+# Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5):
+# this HTTP (ASGI-transport) plug's own declared `operation_catalog_url` --
+# same synthetic, non-dialable convention as `_SURFACES` immediately above
+# (C-29's stage (i) never dials this string on an `"asgi"` plug; it calls
+# `operation_catalog_document()`, which goes through this SAME running
+# app's own real handler over the ASGI transport). The socket adapter
+# (WP-4) overrides `_operation_catalog_url_value` below to report a real,
+# dialable URL instead.
+_OPERATION_CATALOG_URL = _DATA_SURFACE_BASE_URL + "/operation-catalog"
+
 # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): `isolated_
 # control_surface(limits_override=...)`'s only way to inject a small
 # control-plane limits profile on this plug -- unlike the in-process plug
@@ -921,6 +931,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         documents' `surfaces` can never silently diverge."""
         return _SURFACES
 
+    def _operation_catalog_url_value(self) -> str:
+        """Phase 11 WP-3 (design D-5): same hook shape as `_surfaces_
+        value` immediately above -- default: this module's own synthetic,
+        non-dialable `_OPERATION_CATALOG_URL` constant. The socket
+        adapter (WP-4) overrides this to report a real, dialable URL."""
+        return _OPERATION_CATALOG_URL
+
     def _reset_surface_state(self) -> None:
         """Hook (monitor 裁定 2026-09-08, F-2 (b)) -- see the identically-
         named hook on `r2db-api/conformance/conformance_adapter_r2db_http.
@@ -994,6 +1011,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             self._application_config = FoundationConfig(
                 control_plane_status="enabled",
                 data_base_url=surfaces["data"]["base_url"], control_base_url=surfaces["control"]["base_url"],
+                operation_catalog_url=self._operation_catalog_url_value(),
             )
             # Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス
             # 1個)"): this adapter (unlike the in-process one, which routes
@@ -1144,6 +1162,14 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 # _application_durable_audit`'s own (now argument-free)
                 # writer connection above.
                 "MITATEDB_AUDIT_DSN": self._platform.auditreader_dsn,
+                # Phase 11 WP-3 (design D-5, §7.1 訂正註): the SAME
+                # synthetic (or, on the socket adapter, real dialable)
+                # value `self._application_config` above carries -- both
+                # this "process"' own control-plane document and the
+                # data-plane document agree on `operation_catalog_url`
+                # structurally (one hook call feeds both), never by
+                # cross-checking two independently-configured copies.
+                "MITATEDB_OPERATION_CATALOG_URL": self._operation_catalog_url_value(),
                 # Q4 phase (design D-2, work order §4 WP-2 変更対象 D):
                 # `MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are
                 # REMOVED env vars (F-2) -- `surfaces` now comes from
@@ -1279,7 +1305,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             body["where"] = where
         if order_by is not None:
             body["order_by"] = order_by
-        # port v1.16 (design D-4, C-28): `cursor` joins `page_size` in the
+        # port v1.18 (design D-4, C-30): `cursor` joins `page_size` in the
         # SAME `page` wire object (`QueryRequest.page`) -- both land in one
         # `body.update`-safe dict, mirroring `conformance_adapter_r2db_
         # http.py::_query_request`'s own identical `page_size`/`cursor`
@@ -1914,6 +1940,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             self._application_config,
             data_base_url=_iso_surfaces["data"]["base_url"],
             control_base_url=_iso_surfaces["control"]["base_url"],
+            operation_catalog_url=iso._operation_catalog_url_value(),
             max_batch_items=10, max_batch_entities=5, max_result_rows=5,
             max_filter_terms=5, max_request_bytes=4096, max_schema_objects=20,
             # Phase 8 WP-1a: same values/rationale as the in-process
@@ -2252,12 +2279,12 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 break
         if not fields:
             return 0
-        # port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        # port v1.18 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
         # a single `page.size`-less request used to rely on this
         # deployment's own default bound (500) "comfortably covering this
         # suite's own small fixtures" -- untrue on the isolated surface's
         # own smaller `max_result_rows` once a collection holds more rows
-        # than that bound (C-28's own concurrent-insert node inserts a
+        # than that bound (C-30's own concurrent-insert node inserts a
         # 6th row). Omitting `page_size` walks the entry point's own
         # default page (design D-2b.3), which stays within ANY positive
         # deployment bound while costing roughly one request per `max_
@@ -2807,6 +2834,57 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             "request_id": result.get("request_id"),
         }
 
+    def attempt_filter_with_result(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        §7 段 (9)): `attempt_filter`'s own `where` construction, presented
+        to `_query` (`:1273`) together with that SAME helper's pre-existing
+        `order_by`/`page_size` keywords and its `extra_body` merge (which
+        carries `budget`, exactly as `query_with_budget` above already
+        carries it alone)."""
+        assert isinstance(session, _Session)
+        where: list[dict[str, Any]] = [{"field": field, "operator": operator, "value": value}]
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
+        extra_body = {"budget": dict(budget)} if budget else None
+        result = self._query(
+            session, entity, select=select, where=where,
+            order_by=list(order_by) if order_by else None, page_size=page_size, extra_body=extra_body,
+        )
+        return {"items": result["items"], "request_id": result.get("request_id")}
+
+    def operation_catalog_document(self, session) -> bytes:
+        """port v1.17 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5, §7.1 item 2): a real `GET /v1/operation-catalog` over this
+        adapter's own transport (`_build_client`'s ASGI transport by
+        default; a real socket for the socket adapter, WP-4) -- unlike
+        `_send`, this reads `response.content` (raw bytes) rather than
+        `.json()`, so C-29's own byte-for-byte comparison has no re-
+        encoding step of this adapter's own to drift from."""
+        assert isinstance(session, _Session)
+        header_pairs = [("authorization", f"Bearer {session.bearer}")]
+        request = self._client.build_request("GET", "/v1/operation-catalog", headers=header_pairs)
+        response = self._run(self._client.send(request))
+        if response.status_code >= 400:
+            failure = _HttpFailure(response)
+            raise ConformanceDenial(
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                details=_failure_details(failure),
+            ) from failure
+        return response.content
+
     def query_page(
         self,
         session: object,
@@ -2819,7 +2897,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         cursor: str | None = None,
         budget: Mapping[str, int] | None = None,
     ) -> tuple[list[dict], str | None]:
-        """port v1.16 (design D-4, C-28): presents the wire body's own
+        """port v1.18 (design D-4, C-30): presents the wire body's own
         `where`/`order_by`/`page.size`/`page.cursor`/`budget` fields
         through `_query`'s own real `POST .../query` entry point,
         verbatim -- never interpreted here."""

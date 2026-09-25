@@ -300,6 +300,16 @@ async def test_missing_credential_is_auth_required(client):
     assert response.json()["code"] == "AUTH_REQUIRED"
 
 
+async def test_missing_credential_on_operation_catalog_is_auth_required(client):
+    """`GET /v1/operation-catalog` carries no unauthenticated face of its
+    own -- the SAME `AUTH_REQUIRED` gate
+    `test_missing_credential_is_auth_required` immediately above pins
+    for `GET /v1/capabilities`."""
+    response = await client.get("/v1/operation-catalog")
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_REQUIRED"
+
+
 async def test_invalid_credential_is_auth_invalid(client):
     response = await client.get("/v1/capabilities", headers=_auth("not-a-real-secret"))
     assert response.status_code == 401

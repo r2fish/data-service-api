@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import os
 from typing import Mapping, Optional
+from urllib.parse import urlsplit
 
 import psycopg
 
 from .audit_query import PostgresAuditQueryStore
 from .config import FoundationConfig
+from . import operation_catalog
 from .control_credential_store_postgres import PostgresControlCredentialStore
 from .control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
                             PostgresControlBackend, PostgresCredentialRegistry)
@@ -47,6 +49,25 @@ def _require(env: Mapping[str, str], name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required to start mitatedb_api's control-plane composition")
     return value
+
+
+def _operation_catalog_url(env: Mapping[str, str], *, default: str) -> str:
+    """The SAME `MITATEDB_OPERATION_CATALOG_URL` env var `config.
+    FoundationConfig.from_env` reads for the data-plane process -- read
+    independently here since the control-plane composition root does not
+    go through `FoundationConfig` at all. Form-only validated (absolute:
+    scheme + host) when present. Unset falls back to `default` -- the
+    caller derives that from `operation_catalog.
+    derive_operation_catalog_url(surfaces.data.base_url)` (the
+    contract's own `versioning.base_path`-relative `endpoints.
+    operation_catalog.path`, never a literal)."""
+    raw = env.get("MITATEDB_OPERATION_CATALOG_URL") or None
+    if raw is None:
+        return default
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"MITATEDB_OPERATION_CATALOG_URL must be an absolute URL (scheme and host), got {raw!r}")
+    return raw
 
 
 def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneService:
@@ -260,6 +281,9 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
         backend, limits=limits,
         audit_reader=audit_reader, audit_visibility_lag_ms=audit_visibility_lag_ms,
         surfaces=surfaces,
+        operation_catalog_url=_operation_catalog_url(
+            env, default=operation_catalog.derive_operation_catalog_url(declarations.surfaces.data_base_url)
+        ),
         # Q4 phase (design D-2(e)): the SAME single-source declaration
         # `main.build_app`'s own `AuditRouter` reads (`platform_
         # declarations.read_platform_declarations`) -- both processes now

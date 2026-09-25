@@ -1,12 +1,12 @@
-"""C-28 -- a peer declaring contract 1.9.0 returns query results in a
+"""C-30 -- a peer declaring contract 1.10.0 returns query results in a
 total order and pages them with a stateless keyset cursor (SI-01, SI-08,
 SI-10).
 
 design: docs/design/PHASE11_KEYSET_PAGING_V1.md D-4 (port `query_page`,
 the 9-node split, the "空振り禁止" paragraph, the node-transition table),
 §6.1 (Condition/Status text), §6.2 (relationship to existing conditions),
-§6.3 (port v1.16); registered in `conformance-tests/CONDITIONS.md`. Every
-test here carries `@pytest.mark.condition("C-28")` via the module-level
+§6.3 (port v1.18); registered in `conformance-tests/CONDITIONS.md`. Every
+test here carries `@pytest.mark.condition("C-30")` via the module-level
 `pytestmark`.
 
 Work order: docs/work-orders/WORK_ORDER_PHASE11_KEYSET_PAGING_V1.md §3
@@ -16,10 +16,10 @@ Version-gated exactly like C-21/C-25/C-27 -- branches on the plug's own
 declared `contract_version` (`adapter.parse_semver`, never a string
 compare), with the runtime-attached `xfail` read at execution time
 (`request.node.add_marker`). Only the concurrent-insert node
-(`test_c28_concurrent_insert_discriminates_keyset_from_offset`, design D-4
-(ii)) is `xfail(strict=True)` -- an offset implementation (or a 1.8.0 peer
+(`test_c30_concurrent_insert_discriminates_keyset_from_offset`, design D-4
+(ii)) is `xfail(strict=True)` -- an offset implementation (or a 1.9.0 peer
 with no keyset cursor at all) is EXPECTED to fail it, so passing it under a
-still-1.8.0 declaration means the peer's own real behavior has outrun its
+still-1.9.0 declaration means the peer's own real behavior has outrun its
 own declaration (D-1(7)). The other 8 nodes are `xfail(strict=False)`: an
 offset-shaped or partially-keyset-shaped implementation may already
 satisfy them honestly (r2db-api's own pre-existing `order_by`/`cursor`
@@ -29,14 +29,14 @@ The `observed_branch` cross-check against the plug's own declared version
 (work order §1's own hand-off from `WORK_ORDER_PHASE9_CONTRACT_170_V1.md`
 §6 correction 7, mirrored from `test_c25_result_request_id.py`:433-450
 and `test_c21_denial_details_vocabulary.py`:366-385) is done ONLY in the
-`>= 1.9.0` branch: doing it unconditionally would make `expected_branch`
-always disagree with a hardcoded `observed_branch` in the `< 1.9.0`
+`>= 1.10.0` branch: doing it unconditionally would make `expected_branch`
+always disagree with a hardcoded `observed_branch` in the `< 1.10.0`
 branch, making a genuine strict XPASS structurally impossible there. In
-the `< 1.9.0` branch, each node's own unconditional body assertions above
+the `< 1.10.0` branch, each node's own unconditional body assertions above
 are the entire detection mechanism.
 
 **Disclosed** (design D-4's own "空振り禁止"/Status paragraphs, carried
-into `CONDITIONS.md`'s own C-28 row): statelessness and determinism are
+into `CONDITIONS.md`'s own C-30 row): statelessness and determinism are
 not falsifiable by this port alone (no registered plug spans more than
 one process); connection independence and whether a cursor's own bytes
 hold a coarse timestamp are likewise not observed here.
@@ -50,22 +50,22 @@ import pytest
 from adapter import ConformanceAdapter, ConformanceDenial, Fixture, fresh_identifier, parse_semver
 from conftest import assert_details_vocabulary_values_safe, provision_pair
 
-pytestmark = pytest.mark.condition("C-28")
+pytestmark = pytest.mark.condition("C-30")
 
 
-_OBSERVED_BRANCH = "keyset_paging_1_9_0"
+_OBSERVED_BRANCH = "keyset_paging_1_10_0"
 
 
-def _expected_branch_for_pre_1_9_0(pre_1_9_0: bool) -> str:
-    return "pre_1_9_0" if pre_1_9_0 else _OBSERVED_BRANCH
+def _expected_branch_for_pre_1_10_0(pre_1_10_0: bool) -> str:
+    return "pre_1_10_0" if pre_1_10_0 else _OBSERVED_BRANCH
 
 
-def _pre_1_9_0_reason(adapter: ConformanceAdapter, contract_version: str) -> str:
+def _pre_1_10_0_reason(adapter: ConformanceAdapter, contract_version: str) -> str:
     return (
-        f"{adapter.name} declares contract_version {contract_version!r} (< 1.9.0) -- keyset paging is a "
-        "conditional 1.9.0 obligation (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-1, subordinate "
-        "ruling 14); this branch is expected to fail (not merely skip) until this peer's own version-flip "
-        "commit lands, per the contract's own 1.9.0-only retroactivity rule."
+        f"{adapter.name} declares contract_version {contract_version!r} (< 1.10.0) -- keyset paging is a "
+        "conditional 1.10.0 obligation (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-1, subordinate "
+        "ruling 15); this branch is expected to fail (not merely skip) until this peer's own version-flip "
+        "commit lands, per the contract's own 1.10.0-only retroactivity rule."
     )
 
 
@@ -73,15 +73,15 @@ def _capability_status(adapter: ConformanceAdapter, name: str) -> str:
     return adapter.capability_document().get("capabilities", {}).get(name, {}).get("status", "unavailable")
 
 
-def _cross_check_observed_branch(adapter: ConformanceAdapter, pre_1_9_0: bool, contract_version: str) -> None:
+def _cross_check_observed_branch(adapter: ConformanceAdapter, pre_1_10_0: bool, contract_version: str) -> None:
     """Work order §1.5/design D-4's own non-vacuity paragraph: done ONLY
-    in the `>= 1.9.0` branch -- see this module's own docstring for why an
+    in the `>= 1.10.0` branch -- see this module's own docstring for why an
     unconditional check here would make a genuine strict XPASS
     structurally impossible."""
-    if pre_1_9_0:
+    if pre_1_10_0:
         return
     observed_branch = _OBSERVED_BRANCH
-    expected_branch = _expected_branch_for_pre_1_9_0(pre_1_9_0)
+    expected_branch = _expected_branch_for_pre_1_10_0(pre_1_10_0)
     assert observed_branch == expected_branch, (
         f"{adapter.name}: contract_version {contract_version!r} implies branch {expected_branch!r}, but the "
         f"full body completed without any refusal -- observed {observed_branch!r} (an early implementation "
@@ -90,7 +90,7 @@ def _cross_check_observed_branch(adapter: ConformanceAdapter, pre_1_9_0: bool, c
 
 
 # ---------------------------------------------------------------------------
-# T -- test_c28_paged_traversal_is_the_unpaged_sequence (design D-4 (i)+(vi))
+# T -- test_c30_paged_traversal_is_the_unpaged_sequence (design D-4 (i)+(vi))
 # ---------------------------------------------------------------------------
 
 _ORDER_BY_VARIANTS = (
@@ -105,17 +105,17 @@ _ORDER_BY_VARIANTS = (
 
 
 @pytest.mark.parametrize("variant", _ORDER_BY_VARIANTS)
-def test_c28_paged_traversal_is_the_unpaged_sequence(
+def test_c30_paged_traversal_is_the_unpaged_sequence(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest, variant: str,
 ) -> None:
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    developer, runtime, _app_id = provision_pair(iso, app_prefix="c28t")
-    entity = fresh_identifier("c28t")
+    developer, runtime, _app_id = provision_pair(iso, app_prefix="c30t")
+    entity = fresh_identifier("c30t")
     declared_fields = ["bucket", "rank", "tag"]
     iso.create_entity(developer, entity, {"bucket": "text", "rank": "integer", "tag": "text"})
 
@@ -210,29 +210,29 @@ def test_c28_paged_traversal_is_the_unpaged_sequence(
         f"exactly once -- as one unpaged read of the same request: paged={paged_items!r}, unpaged={unpaged_items!r}"
     )
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# I -- test_c28_concurrent_insert_discriminates_keyset_from_offset (D-4 (ii))
+# I -- test_c30_concurrent_insert_discriminates_keyset_from_offset (D-4 (ii))
 # ---------------------------------------------------------------------------
 
-def test_c28_concurrent_insert_discriminates_keyset_from_offset(
+def test_c30_concurrent_insert_discriminates_keyset_from_offset(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest,
 ) -> None:
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
         # design D-4 (vii): this is the ONE node whose version gate is
-        # `strict=True` -- an offset implementation (or a 1.8.0 peer with
+        # `strict=True` -- an offset implementation (or a 1.9.0 peer with
         # no cursor at all) is EXPECTED to fail this node for real, so an
         # early XPASS here means the peer's own real behavior has already
-        # outrun its own 1.8.0 declaration (D-1(7)).
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=True))
+        # outrun its own 1.9.0 declaration (D-1(7)).
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=True))
 
-    developer, runtime, _app_id = provision_pair(iso, app_prefix="c28i")
-    entity = fresh_identifier("c28i")
+    developer, runtime, _app_id = provision_pair(iso, app_prefix="c30i")
+    entity = fresh_identifier("c30i")
     iso.create_entity(developer, entity, {"rank": "integer"})
     for value in (10, 20, 30, 40):
         iso.insert(runtime, entity, {"rank": value})
@@ -277,24 +277,24 @@ def test_c28_concurrent_insert_discriminates_keyset_from_offset(
     # (ii), C-6 第 3 文: "once or not at all").
     _saw_row_inserted_after_cursor = 35 in remaining_ranks  # noqa: F841
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# B -- test_c28_cursor_binding (design D-4 (iii))
+# B -- test_c30_cursor_binding (design D-4 (iii))
 # ---------------------------------------------------------------------------
 
-def test_c28_cursor_binding(
+def test_c30_cursor_binding(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest,
 ) -> None:
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    developer, runtime, _app_id = provision_pair(iso, app_prefix="c28b")
-    entity = fresh_identifier("c28b")
+    developer, runtime, _app_id = provision_pair(iso, app_prefix="c30b")
+    entity = fresh_identifier("c30b")
     iso.create_entity(developer, entity, {"bucket": "text", "rank": "integer"})
     for bucket, rank in [("a", 1), ("a", 2), ("a", 3), ("b", 1)]:
         iso.insert(runtime, entity, {"bucket": bucket, "rank": rank})
@@ -352,25 +352,25 @@ def test_c28_cursor_binding(
     assert ei_order.value.details.get("violated_declaration") == "request_schema", ei_order.value.details
     assert ei_order.value.details.get("field") == "page/cursor", ei_order.value.details
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# A -- test_c28_cross_application_cursor_is_refused (design D-4 (iv))
+# A -- test_c30_cross_application_cursor_is_refused (design D-4 (iv))
 # ---------------------------------------------------------------------------
 
-def test_c28_cross_application_cursor_is_refused(
+def test_c30_cross_application_cursor_is_refused(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest,
 ) -> None:
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    dev_a, run_a, app_a = provision_pair(iso, app_prefix="c28aa")
-    dev_b, run_b, app_b = provision_pair(iso, app_prefix="c28ab")
-    entity = fresh_identifier("c28a")
+    dev_a, run_a, app_a = provision_pair(iso, app_prefix="c30aa")
+    dev_b, run_b, app_b = provision_pair(iso, app_prefix="c30ab")
+    entity = fresh_identifier("c30a")
     iso.create_entity(dev_a, entity, {"bucket": "text"})
     iso.create_entity(dev_b, entity, {"bucket": "text"})
     for bucket in ("x", "y"):
@@ -397,7 +397,7 @@ def test_c28_cross_application_cursor_is_refused(
         )
 
     # 別 entity (同一 Application) の cursor も拒否 -- 束縛は entity も含む。
-    other_entity = fresh_identifier("c28a2")
+    other_entity = fresh_identifier("c30a2")
     iso.create_entity(dev_a, other_entity, {"bucket": "text"})
     with pytest.raises(ConformanceDenial) as ei_cross_entity:
         iso.query_page(run_a, other_entity, select, order_by=order_by, page_size=1, cursor=cursor_a)
@@ -405,14 +405,14 @@ def test_c28_cross_application_cursor_is_refused(
     assert ei_cross_entity.value.details.get("violated_declaration") == "request_schema", ei_cross_entity.value.details
     assert ei_cross_entity.value.details.get("field") == "page/cursor", ei_cross_entity.value.details
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# R -- test_c28_cursor_refusal_details (design D-4 (iii))
+# R -- test_c30_cursor_refusal_details (design D-4 (iii))
 # ---------------------------------------------------------------------------
 
-def test_c28_cursor_refusal_details(
+def test_c30_cursor_refusal_details(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest,
 ) -> None:
     """An undecodable string, a cursor issued under a different
@@ -427,15 +427,15 @@ def test_c28_cursor_refusal_details(
     と観測上区別がつかず、個数・型不一致だけを独立に駆動する黒箱の手段が
     無い)。個数・型検査の証拠は peer 固有の単体テスト (改変 token を知っ
     てよい層) に置く -- WP-5 (r2db) と WP-4 (MitateDB) で足す。この限界は
-    `conformance-tests/CONDITIONS.md` の C-28 行 Status に開示する。"""
+    `conformance-tests/CONDITIONS.md` の C-30 行 Status に開示する。"""
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    developer, runtime, _app_id = provision_pair(iso, app_prefix="c28r")
-    entity = fresh_identifier("c28r")
+    developer, runtime, _app_id = provision_pair(iso, app_prefix="c30r")
+    entity = fresh_identifier("c30r")
     iso.create_entity(developer, entity, {"bucket": "text", "rank": "integer"})
     for bucket, rank in [("a", 1), ("a", 2), ("b", 1)]:
         iso.insert(runtime, entity, {"bucket": bucket, "rank": rank})
@@ -454,7 +454,7 @@ def test_c28_cursor_refusal_details(
     assert cursor is not None, f"{adapter.name}: a 1-of-2 filtered page reported a null next_page"
 
     # 別 Application (同名 entity) で発行した cursor。
-    other_developer, other_runtime, _other_app = provision_pair(iso, app_prefix="c28r2")
+    other_developer, other_runtime, _other_app = provision_pair(iso, app_prefix="c30r2")
     iso.create_entity(other_developer, entity, {"bucket": "text", "rank": "integer"})
     iso.insert(other_runtime, entity, {"bucket": "a", "rank": 1})
     iso.insert(other_runtime, entity, {"bucket": "a", "rank": 2})
@@ -467,7 +467,7 @@ def test_c28_cursor_refusal_details(
     denials["cross_application"] = ei_cross_app.value
 
     # 同一 Application、別 entity で発行した cursor。
-    other_entity = fresh_identifier("c28r3")
+    other_entity = fresh_identifier("c30r3")
     iso.create_entity(developer, other_entity, {"bucket": "text", "rank": "integer"})
     iso.insert(runtime, other_entity, {"bucket": "a", "rank": 1})
     iso.insert(runtime, other_entity, {"bucket": "a", "rank": 2})
@@ -503,14 +503,14 @@ def test_c28_cursor_refusal_details(
         assert denial.details.get("field") == reference.details.get("field"), f"{adapter.name}: {name} -> {denial.details!r}"
         assert_details_vocabulary_values_safe(denial.details, adapter_name=adapter.name)
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# S -- test_c28_cursor_is_stateless (design D-4 (v))
+# S -- test_c30_cursor_is_stateless (design D-4 (v))
 # ---------------------------------------------------------------------------
 
-def test_c28_cursor_is_stateless(
+def test_c30_cursor_is_stateless(
     adapter: ConformanceAdapter, fx: Fixture, request: pytest.FixtureRequest,
 ) -> None:
     """Work order §3 task 3 / monitor note: this node deliberately does
@@ -522,11 +522,11 @@ def test_c28_cursor_is_stateless(
     still the SAME isolated instance's own state, not an independent
     re-authentication path)."""
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    entity = fresh_identifier("c28s")
+    entity = fresh_identifier("c30s")
     adapter.create_entity(fx.developer_a, entity, {"bucket": "text"})
     for bucket in ("a", "b", "c"):
         adapter.insert(fx.runtime_a, entity, {"bucket": bucket})
@@ -547,24 +547,24 @@ def test_c28_cursor_is_stateless(
     assert next_page is None
     assert [i["bucket"] for i in first_items] + [i["bucket"] for i in remaining_items] == ["a", "b", "c"]
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# D -- test_c28_cursor_is_deterministic (design D-4 (viii))
+# D -- test_c30_cursor_is_deterministic (design D-4 (viii))
 # ---------------------------------------------------------------------------
 
-def test_c28_cursor_is_deterministic(
+def test_c30_cursor_is_deterministic(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest,
 ) -> None:
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    developer, runtime, _app_id = provision_pair(iso, app_prefix="c28d")
-    entity = fresh_identifier("c28d")
+    developer, runtime, _app_id = provision_pair(iso, app_prefix="c30d")
+    entity = fresh_identifier("c30d")
     iso.create_entity(developer, entity, {"bucket": "text"})
     for bucket in ("a", "b", "c"):
         iso.insert(runtime, entity, {"bucket": bucket})
@@ -580,24 +580,24 @@ def test_c28_cursor_is_deterministic(
     )
     assert items1 == items2
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# DP -- test_c28_default_page_is_the_largest_page (design D-4, D-1(2a))
+# DP -- test_c30_default_page_is_the_largest_page (design D-4, D-1(2a))
 # ---------------------------------------------------------------------------
 
-def test_c28_default_page_is_the_largest_page(
+def test_c30_default_page_is_the_largest_page(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest,
 ) -> None:
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    developer, runtime, _app_id = provision_pair(iso, app_prefix="c28dp")
-    entity = fresh_identifier("c28dp")
+    developer, runtime, _app_id = provision_pair(iso, app_prefix="c30dp")
+    entity = fresh_identifier("c30dp")
     iso.create_entity(developer, entity, {"bucket": "text"})
     select = ["bucket"]
     order_by = [("bucket", "asc")]
@@ -632,24 +632,24 @@ def test_c28_default_page_is_the_largest_page(
         assert len(remaining_items) == 1
         assert next_page is None
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)
 
 
 # ---------------------------------------------------------------------------
-# PS -- test_c28_page_size_outside_schema_is_refused_at_page_size (D-3.8/D-2b.2)
+# PS -- test_c30_page_size_outside_schema_is_refused_at_page_size (D-3.8/D-2b.2)
 # ---------------------------------------------------------------------------
 
-def test_c28_page_size_outside_schema_is_refused_at_page_size(
+def test_c30_page_size_outside_schema_is_refused_at_page_size(
     adapter: ConformanceAdapter, isolated: ConformanceAdapter, request: pytest.FixtureRequest,
 ) -> None:
     iso = isolated
     contract_version = adapter.capability_document()["contract_version"]
-    pre_1_9_0 = parse_semver(contract_version) < (1, 9, 0)
-    if pre_1_9_0:
-        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_9_0_reason(adapter, contract_version), strict=False))
+    pre_1_10_0 = parse_semver(contract_version) < (1, 10, 0)
+    if pre_1_10_0:
+        request.node.add_marker(pytest.mark.xfail(reason=_pre_1_10_0_reason(adapter, contract_version), strict=False))
 
-    developer, runtime, _app_id = provision_pair(iso, app_prefix="c28ps")
-    entity = fresh_identifier("c28ps")
+    developer, runtime, _app_id = provision_pair(iso, app_prefix="c30ps")
+    entity = fresh_identifier("c30ps")
     iso.create_entity(developer, entity, {"bucket": "text"})
     iso.insert(runtime, entity, {"bucket": "a"})
 
@@ -666,4 +666,4 @@ def test_c28_page_size_outside_schema_is_refused_at_page_size(
         assert ei.value.details.get("field") == "page/size", ei.value.details
         assert_details_vocabulary_values_safe(ei.value.details, adapter_name=adapter.name)
 
-    _cross_check_observed_branch(adapter, pre_1_9_0, contract_version)
+    _cross_check_observed_branch(adapter, pre_1_10_0, contract_version)

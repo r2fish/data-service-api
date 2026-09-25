@@ -356,7 +356,29 @@ Executability lands in phase 10 WP-6d-ii. Until then the row carries no historic
 
 **なぜ直したか:** the Status cell's opening clause described the hook and test file as future work ("which lands", "the row is declared here so ... references resolve") and its Evidence cell qualified the test file "(not yet created)" -- both now exist, so the row is rewritten to state the now-obtaining, executable form. `_idempotency_lock_scope`, named in the old Status cell's `MitateDB-api` mutation sentence, was itself removed by phase 10 WP-8b (its outer `self._lock`, covering every public method's own lookup -> pass-1 -> pass-2 window, absorbed what it used to do) -- the current row's own text below names the cell's `RLock` without that now-stale method name.
 
+## C-28
+
+**起票 2026-09-24 (`docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §3 D-2/D-3, work order `docs/work-orders/WORK_ORDER_PHASE11_MIN_COMMON_PROFILE_V1.md` WP-1):** this row was opened as `declared; not yet executable`, ahead of the scenario test that makes it executable, so that the design document's own `C-28` references resolve -- the same sequence C-20..C-27 followed (design commit first, condition row second). The condition itself is new; nothing was moved out of an earlier row into this section.
+
+Executability lands in the phase 11 work order's later work package. Until then the row carries no historical narrative of its own: its current text is its first text.
+
+**WP-2 landed (2026-09-24, `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §3 D-2/D-3/D-6, §7, work order WP-2):** port v1.16 (`attempt_filter_with_result`, `conformance-tests/adapter.py`), its realizations in the 4 adapters (2 in-process, 2 http; the 2 socket adapters inherit unchanged) and `conformance-tests/test_c28_baseline_turn.py` now exist and this condition is `executable`, driven on all 6 registered adapters. **旧文は以下のとおりである (逐語, this same edit moved it here):**
+
+- Evidence cell: "one scenario per adapter, driven across all 6 registered adapters, carrying the same request body through the 12 steps this row states -- the enum refusal, the catalog-and-diagnosis repair, the dry run, the real send under the same idempotency_key and plan, and the resend -- landed in a later work package of this item"
+- Status cell: "declared; not yet executable -- this item's later work package lands the scenario, and the row is declared here so the design document's own C-28 references resolve, the same sequence C-20..C-27 followed (design first, condition row second). Unconditional 1.9.0 obligation, version-gated rather than capability-gated. Relationship to C-20/C-21/C-22/C-23/C-25: those rows fix each step's own meaning and stay as they are; this row fixes that the steps hand one request to each other. [history](CONDITIONS_HISTORY.md#c-28)"
+
+## C-29
+
+**起票 2026-09-24 (`docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §3 D-5, work order `docs/work-orders/WORK_ORDER_PHASE11_MIN_COMMON_PROFILE_V1.md` WP-1):** this row was opened as `declared; not yet executable`, ahead of the scenario test that makes it executable, so that the design document's own `C-29` references resolve -- the same sequence C-20..C-27 followed (design commit first, condition row second). The condition itself is new; nothing was moved out of an earlier row into this section.
+
+Executability lands in the phase 11 work order's later work package. Until then the row carries no historical narrative of its own: its current text is its first text.
+
+**WP-3 landed (2026-09-24, `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §3 D-5, §6.4, §6.6, §7.1 item 2, work order WP-3):** port v1.17 (`operation_catalog_document()`, `conformance-tests/adapter.py`), its realizations on all 6 adapters (the 2 socket adapters inherit no separate port-method redefinition, but override the `_operation_catalog_url_value()` hook to report a real, dialable URL) and `conformance-tests/test_c29_operation_catalog_url.py` now exist and this condition is `executable`, driven on all 6 registered adapters (stage (i)) with stage (ii) additionally driven on every `transport_kind == "socket"` plug. **旧文は以下のとおりである (逐語, this same edit moved it here):**
+
+- Evidence cell: "the body a peer itself returns for its own operation_catalog operation (a new port method) compared byte-for-byte against the packaged derived catalog on all 6 adapters, plus a real dial of the declared operation_catalog_url on every socket-transport adapter -- landed in a later work package of this item"
+- Status cell: "declared; not yet executable -- this item's later work package lands the scenario, and the row is declared here so the design document's own C-29 references resolve, the same sequence C-20..C-27 followed (design first, condition row second). Unconditional 1.9.0 obligation, version-gated rather than capability-gated. The regeneration-identity test fixes that the derived catalog agrees with the contract; this row fixes that the document a deployment serves is that same catalog. [history](CONDITIONS_HISTORY.md#c-29)"
+
 ---
 
-## C-28
+## C-30
 No historical narrative was separated out of this row's current text; the current row already reflects only today's state.

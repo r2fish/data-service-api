@@ -241,7 +241,7 @@ def test_data_plane_capabilities_declares_contract_1_6_0(service):
     ships -- function name kept, same precedent."""
     runtime = service.authenticate("cred-a.secret-a")
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.8.0"
+    assert document["contract_version"] == "1.9.0"
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
@@ -2479,7 +2479,7 @@ def test_capabilities_document_is_built_only_from_explicit_arguments():
 
     developer_doc = build_capabilities_document(role="developer", application_id="app-x", **common)
     assert developer_doc == {
-        "contract_version": "1.8.0",
+        "contract_version": "1.9.0",
         "capabilities": {
             **expected_capabilities,
             "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"], "unsupported": ["jobs"]},
@@ -2494,7 +2494,7 @@ def test_capabilities_document_is_built_only_from_explicit_arguments():
 
     runtime_doc = build_capabilities_document(role="runtime", application_id="app-x", **common)
     assert runtime_doc == {
-        "contract_version": "1.8.0",
+        "contract_version": "1.9.0",
         "capabilities": {
             **expected_capabilities,
             "schema_operations": {"status": "partial", "operations": [], "unsupported": ["jobs"]},
@@ -2542,7 +2542,7 @@ def test_data_service_capabilities_passes_deployment_values_to_the_document():
     runtime = service.authenticate("wp3b-user.wp3b-user-secret")
 
     assert service.capabilities(developer) == {
-        "contract_version": "1.8.0",
+        "contract_version": "1.9.0",
         "capabilities": {
             "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
@@ -2577,7 +2577,7 @@ def test_data_service_capabilities_passes_deployment_values_to_the_document():
     }
 
     assert service.capabilities(runtime) == {
-        "contract_version": "1.8.0",
+        "contract_version": "1.9.0",
         "capabilities": {
             "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
@@ -2826,7 +2826,7 @@ def test_cursor_stays_valid_across_a_select_or_page_size_change_and_malformed_cu
     `page.size` are deliberately outside it, since neither decides where a
     row sits in the order, so a cursor minted under one `select`/`page_
     size` stays valid when the caller narrows/widens the projection or
-    changes the page size on the next request (this replaces the pre-1.9.0
+    changes the page size on the next request (this replaces the pre-1.10.0
     `_shape_hash` behaviour, which bound `select`/`size` too and rejected
     both changes -- design D-3 (3)/(8), SI-01's own binding scope moved
     with it). A cursor that fails to decode is still rejected."""
@@ -2912,7 +2912,7 @@ def test_validate_page_size_refuses_zero_as_validation_failed():
     <= 0` with the SAME `VALIDATION_FAILED`/`request_schema`/`page/size`
     refusal as the `> 1000` leg above -- both are a value outside `Page.
     size`'s own declared `{minimum: 1, maximum: 1000}` schema range, not a
-    deployment resource class (the pre-1.9.0 split into `LIMIT_EXCEEDED`
+    deployment resource class (the pre-1.10.0 split into `LIMIT_EXCEEDED`
     for `<= 0` and `VALIDATION_FAILED`/`budget` for `> 1000` is gone) --
     the smallest positive value (1) passes silently."""
     from r2db_api.structured import validate_page_size
@@ -2964,7 +2964,7 @@ def test_cursor_binding_is_independent_of_where_predicate_order():
 
 def test_cursor_rejects_a_tampered_token_with_the_wrong_value_count_or_type():
     """Phase 11 keyset paging corrigendum (2026-09-25, work order §4
-    訂正註): C-28's black-box R node cannot forge an opaque cursor with a
+    訂正註): C-30's black-box R node cannot forge an opaque cursor with a
     tampered element count/type, so `paging.decode_and_check_page_
     cursor`'s own count/type check (design D-3 (4a)) is pinned here
     instead, at the one layer that CAN see the token's own structure. A
@@ -2995,7 +2995,7 @@ def test_cursor_pagination_uses_the_id_tie_break_when_the_order_by_field_ties():
     keyset traversal total when the caller's own `order_by` field does not
     already distinguish every row. Seeded so a group of tied rows (3 rows
     of `bucket="x"`) is guaranteed to straddle a `page_size=1` page
-    boundary, in both directions -- C-28's own fixtures never do this
+    boundary, in both directions -- C-30's own fixtures never do this
     (design D-1 (1): a client does not rely on which field is the
     tie-break, so the conformance port cannot observe it), so it is pinned
     here instead."""
@@ -3343,7 +3343,7 @@ def test_service_query_page_omits_size_and_uses_the_least_of_the_declared_bounds
     size` is answered as though it carried the least of the contract
     maximum (1000), the deployment's own declared `limits.result_items`,
     and the request's own `budget.result_items` where it carries one --
-    never the pre-1.9.0 fixed default of 100 (`service.py`'s old
+    never the pre-1.10.0 fixed default of 100 (`service.py`'s old
     `page_size: int = 100`). Exercised against a small `limits.
     result_items` (well under 100) so the old default would have silently
     returned every row on one page with a null `next_page`, hiding the
@@ -3732,7 +3732,7 @@ def test_keyset_predicate_sql_covers_every_order_spec_term_including_the_tie_bre
     """Phase 11 keyset paging (design D-3 (4)): the dictionary/lexicographic
     expansion `_keyset_predicate_sql` builds covers EVERY `order_spec` term,
     including the trailing tie-break (`id`, appended by `_resolve_order_by`
-    whenever the caller's own `order_by` does not already name it) -- C-28's
+    whenever the caller's own `order_by` does not already name it) -- C-30's
     own fixtures never seed two rows that tie on every visible ordering
     term (the tie-break's own contract-level role, D-1 (1): a client does
     not rely on which field it is), so dropping the tie-break from the

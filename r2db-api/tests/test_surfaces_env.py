@@ -50,6 +50,7 @@ import importlib
 import json
 import sys
 import types
+from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -568,12 +569,22 @@ def test_data_and_control_documents_agree_on_surfaces_over_real_http(
 
     _set_surfaces_row(platform, {"data": {"base_url": data_base_url}, "control": {"base_url": control_base_url}})
     try:
+        # Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        # D-5, §7.1 訂正註「control plane の宣言版」): the SAME
+        # `R2DB_OPERATION_CATALOG_URL` value fed to both processes -- the
+        # single assert below (`operation_catalog_url` agreement) is the
+        # peer-local counterpart of `surfaces`' own agreement assert
+        # immediately below it, mirroring how both are constructor-
+        # injected, echo-only values on this SAME two-process topology.
+        operation_catalog_url = "https://r2db-surfaces-agree-test.example.invalid/v1/operation-catalog"
         data_env = _main_env(platform, provisioned_app)
         data_env["R2DB_CONTROL_PLANE_STATUS"] = "enabled"
+        data_env["R2DB_OPERATION_CATALOG_URL"] = operation_catalog_url
         data_app = main_module.build_app(env=data_env)
 
         control_module = _control_main_module()
         control_env = _real_control_env(platform)
+        control_env["R2DB_OPERATION_CATALOG_URL"] = operation_catalog_url
         control_app = control_module.build_control_app(env=control_env)
 
         control_store = PostgresControlCredentialStore(platform.control_dsn, pepper=control_env["R2DB_CONTROL_CREDENTIAL_PEPPER"], schema=platform.schema)
@@ -598,8 +609,114 @@ def test_data_and_control_documents_agree_on_surfaces_over_real_http(
                 "data": {"base_url": data_base_url},
                 "control": {"base_url": control_base_url},
             }
+            # Phase 11 WP-3 (design D-5, §7.1 訂正註): the control
+            # surface's own document carries the SAME operation_
+            # catalog_url the data surface's own document carries.
+            assert data_response.json()["operation_catalog_url"] == control_response.json()["operation_catalog_url"] == operation_catalog_url
     finally:
         _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+
+
+def _independently_expected_operation_catalog_url(data_base_url: str) -> str:
+    """Reads the packaged contract JSON directly (never through `r2db_
+    api.operation_catalog.derive_operation_catalog_url`, so this test's
+    own expectation cannot share a bug with the function it is pinning)
+    and derives `data_base_url` BASE-RELATIVE (design/work order 訂正註
+    2026-09-25 (1)): `data_base_url` with its trailing contract
+    `versioning.base_path` replaced by the full `endpoints.operation_
+    catalog.path` -- never merely `data_base_url`'s origin plus `path`,
+    which would drop a reverse-proxy prefix a `data_base_url` ahead of
+    `versioning.base_path` might carry."""
+    contract_path = Path(__file__).resolve().parents[1] / "src" / "r2db_api" / "contract" / "data-service-api.v1.json"
+    contract = json.loads(contract_path.read_text())
+    base_path = contract["versioning"]["base_path"]
+    path = contract["endpoints"]["operation_catalog"]["path"]
+    assert data_base_url.endswith(base_path), f"{data_base_url!r} does not end with versioning.base_path {base_path!r}"
+    return data_base_url[: -len(base_path)] + path
+
+
+def test_data_and_control_documents_derive_the_same_operation_catalog_url_when_unset(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType
+) -> None:
+    """With `R2DB_OPERATION_CATALOG_URL` UNSET on both processes, both
+    planes derive the SAME `operation_catalog_url` from `surfaces.data.
+    base_url` alone -- this test's own
+    expectation is computed independently (`_independently_expected_
+    operation_catalog_url`, never calling `operation_catalog.derive_
+    operation_catalog_url` itself), and a real GET against the derived
+    path on the data plane serves the packaged operation catalog. The
+    superseded formula (`data_base_url + endpoints.operation_catalog.
+    path`, doubling `versioning.base_path`) would derive a 404'ing URL
+    here -- this is the peer-local regression guard for that defect."""
+    import psycopg
+    from psycopg import sql
+
+    from r2db_api.control_plane import bootstrap_control_credential
+    from r2db_api.credential_store import PostgresControlAuditSink, PostgresControlCredentialStore
+
+    data_base_url = "https://r2db-surfaces-derive-test.example.invalid/v1"
+    control_base_url = "https://r2db-surfaces-derive-test-control.example.invalid/control/v1"
+
+    _set_surfaces_row(platform, {"data": {"base_url": data_base_url}, "control": {"base_url": control_base_url}})
+    try:
+        expected_url = _independently_expected_operation_catalog_url(data_base_url)
+
+        data_env = _main_env(platform, provisioned_app)
+        data_env["R2DB_CONTROL_PLANE_STATUS"] = "enabled"
+        data_app = main_module.build_app(env=data_env)
+
+        control_module = _control_main_module()
+        control_env = _real_control_env(platform)
+        control_app = control_module.build_control_app(env=control_env)
+
+        # `platform` is a shared (module-scoped) fixture, and `bootstrap_
+        # control_credential` refuses a second call once ANY control
+        # credential row exists ("bootstrap runs at most once") -- clear
+        # any row a DIFFERENT test in this file/session left behind
+        # before bootstrapping this test's own (mirrors `test_control_
+        # capabilities_document_is_a_startup_snapshot_not_re_read_per_
+        # request`'s own established pre/post-cleanup convention below).
+        _precleanup = psycopg.connect(platform.control_dsn, autocommit=True)
+        try:
+            with _precleanup.cursor() as cur:
+                cur.execute(sql.SQL("DELETE FROM {table}").format(table=sql.Identifier(platform.schema, "control_credentials")))
+        finally:
+            _precleanup.close()
+
+        control_store = PostgresControlCredentialStore(platform.control_dsn, pepper=control_env["R2DB_CONTROL_CREDENTIAL_PEPPER"], schema=platform.schema)
+        control_audit = PostgresControlAuditSink(platform.control_dsn, schema=platform.schema)
+        try:
+            with control_store.unit_of_work() as work:
+                _credential_id, control_bearer = bootstrap_control_credential(control_store, control_audit, work=work)
+        finally:
+            control_store.close()
+            control_audit.close()
+
+        with TestClient(data_app) as data_client, TestClient(control_app) as control_client:
+            app_credential_id, app_secret = _issue_and_compose(platform, provisioned_app, main_module)
+            data_response = data_client.get("/v1/capabilities", headers={"authorization": f"Bearer {app_credential_id}.{app_secret}"})
+            assert data_response.status_code == 200
+            control_response = control_client.get("/control/v1/capabilities", headers={"authorization": f"Bearer {control_bearer}"})
+            assert control_response.status_code == 200, control_response.text
+
+            assert data_response.json()["operation_catalog_url"] == control_response.json()["operation_catalog_url"] == expected_url
+
+            catalog_response = data_client.get(
+                "/v1/operation-catalog", headers={"authorization": f"Bearer {app_credential_id}.{app_secret}"}
+            )
+            assert catalog_response.status_code == 200, catalog_response.text
+    finally:
+        _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+        # Leave the table exactly as this test found it (empty), same
+        # reasoning as the pre-cleanup above -- a later test in this same
+        # file/session that also bootstraps one must not find a leftover
+        # row.
+        _postcleanup = psycopg.connect(platform.control_dsn, autocommit=True)
+        try:
+            with _postcleanup.cursor() as cur:
+                cur.execute(sql.SQL("DELETE FROM {table}").format(table=sql.Identifier(platform.schema, "control_credentials")))
+        finally:
+            _postcleanup.close()
 
 
 # --------------------------------------------------------------------------

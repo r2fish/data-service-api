@@ -135,6 +135,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 import psycopg
 from psycopg import sql
@@ -146,6 +147,7 @@ from .credential_store import (
     PostgresCredentialStore,
 )
 from .http import create_app
+from . import operation_catalog
 from . import platform_declarations
 from .platform_declarations import (
     check_control_surface_consistency,
@@ -191,6 +193,30 @@ def _control_plane_status(env: Mapping[str, str]) -> str:
             f"R2DB_CONTROL_PLANE_STATUS must be one of {sorted(_VALID_CONTROL_PLANE_STATUSES)!r}, got {value!r}"
         )
     return value
+
+
+def _operation_catalog_url(env: Mapping[str, str], *, default: str | None) -> str | None:
+    """Design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5: reads
+    `R2DB_OPERATION_CATALOG_URL`, echoed verbatim into `CapabilityDocument.
+    operation_catalog_url` (`DataService.capabilities()`). Form-only
+    validated (absolute: scheme + host) when present. Unset falls back to
+    `default` -- `build_app`'s own caller derives that from `surfaces.
+    data.base_url` via `operation_catalog.derive_operation_catalog_url()`
+    (the contract's own `versioning.base_path`-relative `endpoints.
+    operation_catalog.path`, never a literal) -- so a deployment that
+    never set the env var still declares the URL its own `surfaces.data`
+    already implies. The env var exists
+    only to OVERRIDE that derived default (a CDN or other alternate
+    location for the same document). `None` (both env var and `default`
+    absent) omits the key entirely, exactly like a pre-1.9.0-style
+    deployment."""
+    raw = env.get("R2DB_OPERATION_CATALOG_URL")
+    if not raw:
+        return default
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"R2DB_OPERATION_CATALOG_URL must be an absolute URL (scheme and host), got {raw!r}")
+    return raw
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -384,6 +410,9 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     surfaces: dict[str, Any] = {"data": {"base_url": declarations.surfaces.data_base_url}}
     if declarations.surfaces.control_base_url is not None:
         surfaces["control"] = {"base_url": declarations.surfaces.control_base_url}
+    operation_catalog_url = _operation_catalog_url(
+        env, default=operation_catalog.derive_operation_catalog_url(declarations.surfaces.data_base_url)
+    )
     coalescing_window_ms = declarations.audit_coalescing_window_ms
     # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): the data-plane's own
     # ceiling -- constructor-injected into `DataService` the same way
@@ -555,6 +584,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # matching it.
         audit_alert_min_interval_s=audit_flush_interval_s,
         process_ceiling=process_ceiling,
+        operation_catalog_url=operation_catalog_url,
     )
     control = ControlAuthority(service)
     for slug in slugs:

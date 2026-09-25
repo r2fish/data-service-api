@@ -26,7 +26,10 @@ deprovisioning, so this is not real residue.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
+from pathlib import Path
 
 import httpx
 import psycopg
@@ -804,6 +807,222 @@ def test_control_service_factory_rejects_identical_peppers(main_module, platform
     }
     with pytest.raises(ValueError):
         main_module.build_control_service(env)
+
+
+def _independently_expected_operation_catalog_url(data_base_url: str) -> str:
+    """Reads the packaged contract JSON directly (never through
+    `mitatedb_api.operation_catalog.derive_operation_catalog_url`, so
+    this test's own expectation cannot share a bug with the function it
+    is pinning) and derives `data_base_url` BASE-RELATIVE (design/work
+    order 訂正註 2026-09-25 (1)): `data_base_url` with its trailing
+    contract `versioning.base_path` replaced by the full `endpoints.
+    operation_catalog.path` -- never merely `data_base_url`'s origin
+    plus `path`, which would drop a reverse-proxy prefix a `data_base_
+    url` ahead of `versioning.base_path` might carry. Mirrors r2db-api's
+    own `test_surfaces_env.py::_independently_expected_operation_catalog_
+    url` in SHAPE, never in code (peer-symmetry isomorphism test)."""
+    contract_path = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api" / "contract" / "data-service-api.v1.json"
+    contract = json.loads(contract_path.read_text())
+    base_path = contract["versioning"]["base_path"]
+    path = contract["endpoints"]["operation_catalog"]["path"]
+    assert data_base_url.endswith(base_path), f"{data_base_url!r} does not end with versioning.base_path {base_path!r}"
+    return data_base_url[: -len(base_path)] + path
+
+
+def test_data_and_control_documents_derive_the_same_operation_catalog_url_when_unset(main_module, platform) -> None:
+    """With `MITATEDB_OPERATION_CATALOG_URL` UNSET on both `build_app`'s
+    data plane and `build_control_service`'s control plane, both derive
+    the SAME `operation_
+    catalog_url` from `surfaces.data.base_url` alone -- this test's own
+    expectation is computed independently (`_independently_expected_
+    operation_catalog_url`), and a real GET against the derived path on
+    the data plane serves the packaged operation catalog. The superseded
+    formula (`data_base_url + endpoints.operation_catalog.path`,
+    doubling `versioning.base_path`) would derive a 404'ing URL here --
+    this is the peer-local regression guard for that defect."""
+    derive_app = provision_app(platform, "main_opcat_derive_probe")
+    data_base_url = "https://data.mitatedb-opcat-derive-test.example.invalid/v1"
+    control_base_url = "https://control.mitatedb-opcat-derive-test.example.invalid/control/v1"
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                [f'{{"data":{{"base_url":"{data_base_url}"}},"control":{{"base_url":"{control_base_url}"}}}}'],
+            )
+    finally:
+        conn.close()
+    try:
+        expected_url = _independently_expected_operation_catalog_url(data_base_url)
+
+        data_env = {
+            "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+            "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+            "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+            "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+            "MITATEDB_SERVE_APPS": derive_app.app_id,
+            f"MITATEDB_APP_{derive_app.app_id.upper()}_RUNTIME_DSN": derive_app.runtime_dsn,
+            f"MITATEDB_APP_{derive_app.app_id.upper()}_DEVELOPER_DSN": derive_app.developer_dsn,
+            "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+        }
+        app = main_module.build_app(data_env)
+
+        control_env = {
+            "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+            "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+            "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+            "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+        }
+        control_service = main_module.build_control_service(control_env)
+
+        from mitatedb_api.control_plane import bootstrap_control_credential
+
+        # `platform` is a shared (module-scoped) fixture -- `bootstrap_
+        # control_credential` refuses a second call once ANY control
+        # credential row exists ("bootstrap runs at most once"); clear
+        # any row a DIFFERENT test in this file/session left behind first.
+        _precleanup = psycopg.connect(platform.provision_dsn, autocommit=True)
+        try:
+            with _precleanup.cursor() as cur:
+                cur.execute(f"DELETE FROM {platform.registry_schema}.control_credentials")
+        finally:
+            _precleanup.close()
+
+        backend = control_service._backend  # test-only reach-in, mirrors test_control_service_factory_builds_a_real_working_service above
+        with backend.unit_of_work() as work:
+            _control_credential_id, control_bearer = bootstrap_control_credential(
+                backend.control_credential_store, backend.append_audit, work=work
+            )
+        try:
+            control_document = control_service.control_capabilities(control_bearer)
+        finally:
+            conn2 = psycopg.connect(platform.provision_dsn, autocommit=True)
+            try:
+                with conn2.cursor() as cur:
+                    cur.execute(f"DELETE FROM {platform.registry_schema}.control_credentials")
+            finally:
+                conn2.close()
+
+        write_store = PostgresCredentialStore(platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema)
+        try:
+            _credential_id, bearer = write_store.issue(derive_app.app_id, Role.RUNTIME)
+        finally:
+            write_store.close()
+
+        async def _call():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+                capabilities = await client.get("/v1/capabilities", headers={"authorization": f"Bearer {bearer}"})
+                catalog = await client.get("/v1/operation-catalog", headers={"authorization": f"Bearer {bearer}"})
+                return capabilities, catalog
+
+        data_response, catalog_response = asyncio.run(_call())
+        assert data_response.status_code == 200, data_response.text
+        assert data_response.json()["operation_catalog_url"] == control_document["operation_catalog_url"] == expected_url
+        assert catalog_response.status_code == 200, catalog_response.text
+    finally:
+        conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                    ['{"data":{"base_url":"https://data.mitatedb-main-test.example.invalid/v1"}}'],
+                )
+        finally:
+            conn.close()
+
+
+def test_data_and_control_documents_agree_on_an_overridden_operation_catalog_url(main_module, platform) -> None:
+    """Sibling of the test immediately above: with `MITATEDB_OPERATION_
+    CATALOG_URL` SET on both processes,
+    both echo that SAME override value -- the env var wins over the
+    derivation."""
+    override_app = provision_app(platform, "main_opcat_override_probe")
+    data_base_url = "https://data.mitatedb-opcat-override-test.example.invalid/v1"
+    control_base_url = "https://control.mitatedb-opcat-override-test.example.invalid/control/v1"
+    override_url = "https://cdn.mitatedb-opcat-override-test.example.invalid/catalog/operation-catalog.json"
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                [f'{{"data":{{"base_url":"{data_base_url}"}},"control":{{"base_url":"{control_base_url}"}}}}'],
+            )
+    finally:
+        conn.close()
+    try:
+        data_env = {
+            "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+            "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+            "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+            "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+            "MITATEDB_SERVE_APPS": override_app.app_id,
+            f"MITATEDB_APP_{override_app.app_id.upper()}_RUNTIME_DSN": override_app.runtime_dsn,
+            f"MITATEDB_APP_{override_app.app_id.upper()}_DEVELOPER_DSN": override_app.developer_dsn,
+            "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+            "MITATEDB_OPERATION_CATALOG_URL": override_url,
+        }
+        app = main_module.build_app(data_env)
+
+        control_env = {
+            "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+            "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+            "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+            "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+            "MITATEDB_OPERATION_CATALOG_URL": override_url,
+        }
+        control_service = main_module.build_control_service(control_env)
+
+        from mitatedb_api.control_plane import bootstrap_control_credential
+
+        # `platform` is a shared (module-scoped) fixture -- `bootstrap_
+        # control_credential` refuses a second call once ANY control
+        # credential row exists ("bootstrap runs at most once"); clear
+        # any row a DIFFERENT test in this file/session left behind first.
+        _precleanup = psycopg.connect(platform.provision_dsn, autocommit=True)
+        try:
+            with _precleanup.cursor() as cur:
+                cur.execute(f"DELETE FROM {platform.registry_schema}.control_credentials")
+        finally:
+            _precleanup.close()
+
+        backend = control_service._backend  # test-only reach-in, mirrors test_control_service_factory_builds_a_real_working_service above
+        with backend.unit_of_work() as work:
+            _control_credential_id, control_bearer = bootstrap_control_credential(
+                backend.control_credential_store, backend.append_audit, work=work
+            )
+        try:
+            control_document = control_service.control_capabilities(control_bearer)
+        finally:
+            conn2 = psycopg.connect(platform.provision_dsn, autocommit=True)
+            try:
+                with conn2.cursor() as cur:
+                    cur.execute(f"DELETE FROM {platform.registry_schema}.control_credentials")
+            finally:
+                conn2.close()
+
+        write_store = PostgresCredentialStore(platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema)
+        try:
+            _credential_id, bearer = write_store.issue(override_app.app_id, Role.RUNTIME)
+        finally:
+            write_store.close()
+
+        async def _call():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+                return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {bearer}"})
+
+        data_response = asyncio.run(_call())
+        assert data_response.status_code == 200, data_response.text
+        assert data_response.json()["operation_catalog_url"] == control_document["operation_catalog_url"] == override_url
+    finally:
+        conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                    ['{"data":{"base_url":"https://data.mitatedb-main-test.example.invalid/v1"}}'],
+                )
+        finally:
+            conn.close()
 
 
 # ===========================================================================

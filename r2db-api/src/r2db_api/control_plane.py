@@ -561,12 +561,21 @@ class ControlPlaneService:
         audit_coalescing_window_ms: int = DECLARED_COALESCING_WINDOW_MS,
         surfaces: dict[str, Any] | None = None,
         process_ceiling: int = 1,
+        operation_catalog_url: str | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit
         # Phase 6 WP-2: same constructor-injected, echo-only discipline as `DataService.__init__`'s own `surfaces` parameter -- see that class's comment. `control_main.py` (the real composition root) assembles this from the same two `R2DB_*_BASE_URL` environment variables `main.py` reads.
         # history: CH-0254
         self._surfaces = surfaces
+        # The control surface's own `CapabilityDocument` carries the SAME
+        # `operation_catalog_url` value the data surface's own document
+        # carries (the schema is shared, and the URL names a data-surface
+        # operation either credential holder may discover) --
+        # constructor-injected, same echo-only discipline as `surfaces`
+        # immediately above. `control_main.py` reads
+        # `R2DB_OPERATION_CATALOG_URL` (the same env var `main.py` reads).
+        self._operation_catalog_url = operation_catalog_url
         # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own declared process ceiling -- see `DataService.__init__`'s identical parameter/validation for the full rationale. `control_main.py` resolves this from `declarations.process_ceilings.control` (never `.data`, the data-plane's own). Default `1` preserves every pre-Phase-10 caller's behavior unchanged (this repository's own tests, the in-process conformance adapter).
         # history: CH-0255
         if isinstance(process_ceiling, bool) or not isinstance(process_ceiling, int) or process_ceiling < 1:
@@ -629,8 +638,10 @@ class ControlPlaneService:
             # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1 (5)): the SAME commit as `service.py`'s own data-plane flip (C-19's control-plane/data-plane match assert) -- never ahead of the R-3/R-7 behavior this data-plane host now implements.
             #
             # Flipped again to 1.8.0 in phase 10 WP-6a/pair-closing: the SAME commit as `service.py`'s own data-plane flip and this host's own `process_ceilings` mapping -- never ahead of the behavior it declares.
+            #
+            # This control-plane document also flips to 1.9.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
             # history: CH-0260
-            "contract_version": "1.8.0",
+            "contract_version": "1.9.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
@@ -644,6 +655,11 @@ class ControlPlaneService:
         # history: CH-0261
         if self._surfaces is not None:
             document["surfaces"] = self._surfaces
+        # Optional key, present only when this instance was constructed
+        # with one -- see `__init__`'s own comment on
+        # `self._operation_catalog_url` immediately above.
+        if self._operation_catalog_url is not None:
+            document["operation_catalog_url"] = self._operation_catalog_url
         return document
 
     def _audit_capability_declaration(self) -> dict[str, Any]:

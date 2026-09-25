@@ -79,6 +79,7 @@ from r2db_api.control_plane import (  # noqa: E402
 )
 from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.limits import ControlPlaneLimits, ResourceLimits  # noqa: E402
+from r2db_api.operation_catalog import load_operation_catalog_bytes  # noqa: E402
 
 
 # port v1.3 (WP-5a, design docs/design/R2DB_CCR13_STORAGE_V1.md M-8
@@ -115,6 +116,15 @@ _SURFACES = {
     "data": {"base_url": "https://r2db-inprocess.conformance.invalid/v1"},
     "control": {"base_url": "https://r2db-inprocess-control.conformance.invalid/control/v1"},
 }
+
+# Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5):
+# this in-process plug's own declared `operation_catalog_url` -- synthetic,
+# non-dialable (this plug has no real HTTP layer at all, the SAME honest
+# limit `_SURFACES` above already carries), used only so C-29's stage (i)
+# (`operation_catalog_document()`, port v1.17) has a real value to place
+# on BOTH the data and control `CapabilityDocument`s. C-29 does not check
+# that this URL sits under `surfaces.data.base_url` (design D-5).
+_OPERATION_CATALOG_URL = "https://r2db-inprocess.conformance.invalid/v1/operation-catalog"
 
 # port v1.11 (design D-6.1 V2/D-6.2, D-6.5 addendum): the SMALL conformance
 # profile `isolated_application_surface()` gives its own fresh `DataService`
@@ -382,7 +392,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # this adapter fabricates only in `capability_document()` -- see
         # `service.py`'s own `DataService.__init__` docstring for why this
         # is the one honest way to make that declaration.
-        self._service = DataService(self._credentials, limits=limits, control_plane_status="enabled", surfaces=_SURFACES)
+        self._service = DataService(self._credentials, limits=limits, control_plane_status="enabled", surfaces=_SURFACES, operation_catalog_url=_OPERATION_CATALOG_URL)
         self._control = ControlAuthority(self._service)
         self._counter = 0
 
@@ -492,6 +502,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             self._control_backend, audit=self._control_audit, limits=self._control_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
             surfaces=_SURFACES,
+            operation_catalog_url=_OPERATION_CATALOG_URL,
         )
         # `control_credential()`'s own maintained handle (memoize +
         # call-time validity check -- see that method's docstring below;
@@ -781,6 +792,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             self._control_backend, audit=self._control_audit, limits=effective_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
             surfaces=_SURFACES,
+            operation_catalog_url=_OPERATION_CATALOG_URL,
         )
         # This primitive's OWN residue list (supervisor ruling 2026-09-06
         # item 2): applications `register_application` below registers
@@ -1733,6 +1745,52 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             "request_id": getattr(page, "request_id", None),
         }
 
+    def attempt_filter_with_result(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        §7 段 (9)): `attempt_filter`'s own `where` construction, presented
+        to `DataService.query_page` (`service.py:726`) together with that
+        SAME method's pre-existing `order_by`/`page_size`/`budget`
+        keywords -- all four already live there (unchanged by this WP),
+        exactly as `query_with_budget` above already presents `budget`
+        alone to the same real entry point."""
+        where: list[dict[str, Any]] = [{"field": field, "operator": operator, "value": value}]
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
+        kwargs: dict[str, Any] = {}
+        if order_by:
+            kwargs["order_by"] = list(order_by)
+        if page_size is not None:
+            kwargs["page_size"] = page_size
+        if budget:
+            kwargs["budget"] = dict(budget)
+        page = self._call(lambda: self._service.query_page(session, entity, select=list(select), where=where, **kwargs))
+        return {"items": page.items, "request_id": getattr(page, "request_id", None)}
+
+    def operation_catalog_document(self, session) -> bytes:
+        """port v1.17 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5, §7.1 item 2): the SAME `DataService.operation_catalog`
+        authorization/rate gate `http.py::get_operation_catalog` goes
+        through, followed by the identical packaged-bytes read this in-
+        process plug has no HTTP handler to delegate to -- see `r2db_api.
+        operation_catalog.load_operation_catalog_bytes`'s own docstring
+        for why both paths read the same source and can never silently
+        re-encode it differently."""
+        self._call(lambda: self._service.operation_catalog(session))
+        return load_operation_catalog_bytes()
+
     def query_page(
         self,
         session,
@@ -1745,7 +1803,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         cursor: str | None = None,
         budget: Mapping[str, int] | None = None,
     ) -> tuple[list[dict], str | None]:
-        """port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        """port v1.18 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
         the SAME real `DataService.query_page` entry point `query_with_
         budget`/`query_with_revisions` above already call, generalized here
         to carry a caller-chosen `where`/`order_by` (a port-neutral tuple

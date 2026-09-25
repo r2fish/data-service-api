@@ -77,6 +77,7 @@ from mitatedb_api.cell import ApplicationDeveloper, ApplicationRuntime  # noqa: 
 from mitatedb_api.config import FoundationConfig  # noqa: E402
 from mitatedb_api.control_audit import ControlAuditSink  # noqa: E402
 from mitatedb_api.control_auth import ControlCredentialStore, _InMemoryWork  # noqa: E402
+from mitatedb_api.operation_catalog import load_operation_catalog_bytes  # noqa: E402
 from mitatedb_api.control_plane import (  # noqa: E402
     ControlPlaneLimits,
     ControlPlaneService,
@@ -105,6 +106,14 @@ from mitatedb_api.surfaces import build_surfaces  # noqa: E402
 # comment for why a real one is neither possible nor required here.
 _SYNTHETIC_DATA_BASE_URL = "http://mitatedb-inprocess.example.invalid/v1"
 _SYNTHETIC_CONTROL_BASE_URL = "http://mitatedb-inprocess.example.invalid/control/v1"
+# Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md D-5):
+# this in-process plug's own declared `operation_catalog_url` -- synthetic,
+# non-dialable (this plug has no real HTTP layer at all, the SAME honest
+# limit the two constants immediately above already carry), shared by the
+# data-plane `FoundationConfig` and the control-plane `ControlPlaneService`
+# below, exactly as `_SYNTHETIC_DATA_BASE_URL`/`_SYNTHETIC_CONTROL_BASE_URL`
+# already are.
+_SYNTHETIC_OPERATION_CATALOG_URL = "http://mitatedb-inprocess.example.invalid/v1/operation-catalog"
 
 _CLASSIFY_ORDER = (
     (AuthorizationStateUnavailable, "AUTH_STATE_UNAVAILABLE"),
@@ -608,6 +617,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 # (2)(iii)).
                 data_base_url=_SYNTHETIC_DATA_BASE_URL,
                 control_base_url=_SYNTHETIC_CONTROL_BASE_URL,
+                operation_catalog_url=_SYNTHETIC_OPERATION_CATALOG_URL,
             ),
             audit_router=self._audit_router,
         )
@@ -681,6 +691,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # (one Python object literally shares the values), never by
             # cross-checking two independently-configured copies.
             surfaces=build_surfaces(data_url=_SYNTHETIC_DATA_BASE_URL, control_url=_SYNTHETIC_CONTROL_BASE_URL),
+            operation_catalog_url=_SYNTHETIC_OPERATION_CATALOG_URL,
         )
         # `control_credential()`'s own maintained handle (memoize + call-
         # time validity check -- port v1.5 WP-1 independent review major
@@ -1010,6 +1021,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
             audit_coalescing_window_ms=int(self._audit_router.denial_coalesce_window_s * 1000),
             surfaces=build_surfaces(data_url=_SYNTHETIC_DATA_BASE_URL, control_url=_SYNTHETIC_CONTROL_BASE_URL),
+            operation_catalog_url=_SYNTHETIC_OPERATION_CATALOG_URL,
         )
         # This primitive's OWN residue list (supervisor ruling 2026-09-06
         # item 2): applications `register_application` below registers
@@ -1078,6 +1090,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             control_plane_status="enabled",
             data_base_url=_SYNTHETIC_DATA_BASE_URL,
             control_base_url=_SYNTHETIC_CONTROL_BASE_URL,
+            operation_catalog_url=_SYNTHETIC_OPERATION_CATALOG_URL,
             max_batch_items=10,
             max_batch_entities=5,
             max_result_rows=5,
@@ -1418,10 +1431,10 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # so a revoked/disabled/unavailable session correctly denies here
         # too.
         #
-        # port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
+        # port v1.18 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-4):
         # a single unbounded `session.read(entity)` silently truncated to
         # this deployment's own `max_result_rows` bound once a collection
-        # held more rows than that (C-28's own concurrent-insert node
+        # held more rows than that (C-30's own concurrent-insert node
         # inserts a 6th row past the isolated surface's own `max_result_
         # rows=5`) -- `limit` omitted walks the entry point's own default
         # page (design D-2b.3), which stays within ANY positive deployment
@@ -2597,6 +2610,59 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return {"items": list(result.get("items", [])), "revisions": result.get("revisions"), "request_id": result.get("request_id")}
         return {"items": result, "revisions": None, "request_id": None}
 
+    def attempt_filter_with_result(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+        order_by: Sequence[Mapping[str, Any]] | None = None,
+        page_size: int | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.16 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        §7 段 (9)): `attempt_filter`'s own `filters` construction, presented
+        to `session.read_with_result` (`cell.py:3664`) together with that
+        SAME method's pre-existing `order_by`/`limit`/`budget` keywords --
+        all three already live there (unchanged by this WP), exactly as
+        `query_with_budget` above already presents `budget` alone to the
+        same real entry point (including its own `hasattr` fallback to the
+        pre-`read_with_result` `session.read` for a checkout where WP-3e
+        has not landed)."""
+        filters = [Filter(field, operator, value)]
+        if extra_predicates:
+            filters.extend(Filter(f, o, v) for f, o, v in extra_predicates)
+        kwargs: dict[str, Any] = {}
+        if order_by:
+            kwargs["order_by"] = list(order_by)
+        if page_size is not None:
+            kwargs["limit"] = page_size
+        if budget:
+            kwargs["budget"] = dict(budget)
+        if hasattr(session, "read_with_result"):
+            result = self._call(lambda: session.read_with_result(entity, fields=list(select), filters=filters, **kwargs))
+            return {"items": list(result.get("items", [])), "request_id": result.get("request_id")}
+        result = self._call(lambda: session.read(entity, fields=list(select), filters=filters, **kwargs))
+        if isinstance(result, Mapping):
+            return {"items": list(result.get("items", [])), "request_id": result.get("request_id")}
+        return {"items": result, "request_id": None}
+
+    def operation_catalog_document(self, session) -> bytes:
+        """port v1.17 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5, §7.1 item 2): the SAME `ApplicationRuntime.operation_catalog`
+        authorization/rate gate `http.py::get_operation_catalog` goes
+        through, followed by the identical packaged-bytes read this in-
+        process plug has no HTTP handler to delegate to -- see `mitatedb_
+        api.operation_catalog.load_operation_catalog_bytes`'s own
+        docstring for why both paths read the same source and can never
+        silently re-encode it differently."""
+        self._call(lambda: session.operation_catalog())
+        return load_operation_catalog_bytes()
+
     def query_page(
         self,
         session,
@@ -2609,7 +2675,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         cursor: str | None = None,
         budget: Mapping[str, int] | None = None,
     ) -> tuple[list[dict], str | None]:
-        """port v1.16 (design docs/design/PHASE11_KEYSET_PAGING_V1.md
+        """port v1.18 (design docs/design/PHASE11_KEYSET_PAGING_V1.md
         D-2b.4): calls the runtime's own cursor-carrying entry point,
         `session.read_page(...)`, directly (`cell.py::ApplicationRuntime.
         read_page`), passing `cursor` verbatim -- `cell.py::
@@ -2664,7 +2730,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # WP-2 (design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.4):
             # the cursor-carrying counterpart of `read` above -- `http.py`'s
             # own `post_query` and this file's own `query_page` (port
-            # v1.16) both call it now. Same list-maintenance discipline as
+            # v1.18) both call it now. Same list-maintenance discipline as
             # `read_with_result` immediately below (this file's own module-
             # level comment: pinned to match `ApplicationRuntime`/
             # `ApplicationDeveloper`'s real public methods mechanically).
@@ -2693,6 +2759,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # `enabled` -- `catalog()` is a new, real public method, same
             # commit.
             ApplicationRuntime.catalog,
+            # Phase 11 WP-3 (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+            # D-5): `operation_catalog()` is a new, real public method,
+            # same commit as `GET /v1/operation-catalog` (`http.py`) and
+            # port v1.17 `operation_catalog_document()` -- see this list's
+            # own module-level comment above.
+            ApplicationRuntime.operation_catalog,
             ApplicationDeveloper.create_collection,
             ApplicationDeveloper.create_entity,
             ApplicationDeveloper.add_field,

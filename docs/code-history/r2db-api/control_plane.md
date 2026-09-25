@@ -480,6 +480,22 @@ has to charge the window before it can even read a request body.
 # (ii)) -- never ahead of the behavior it declares.
 ```
 
+### correction: 2026-09-25
+
+- reason: Phase 11 WP-3 (docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md §7.1 訂正註「control plane の宣言版」) -- the control-plane document also flips to 1.9.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert)
+
+old:
+```
+Flipped again to 1.8.0 in phase 10 WP-6a/pair-closing (design D-5 (v)): the SAME commit as `service.py`'s own data-plane flip and this host's own `process_ceilings` mapping (D-5 (ii)) -- never ahead of the behavior it declares.
+```
+
+new:
+```
+Flipped again to 1.8.0 in phase 10 WP-6a/pair-closing: the SAME commit as `service.py`'s own data-plane flip and this host's own `process_ceilings` mapping -- never ahead of the behavior it declares.
+
+This control-plane document also flips to 1.9.0 in the same commit as `service.py`'s own data-plane flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.9.0's `common_baseline` obligation governs the data surface's application-plane operations only.
+```
+
 ## CH-0261
 
 - moved from: `src/r2db_api/control_plane.py` (`<module>`)

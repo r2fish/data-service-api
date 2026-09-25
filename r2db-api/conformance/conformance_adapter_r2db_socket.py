@@ -544,6 +544,31 @@ class R2DBSocketConformanceAdapter(R2DBHttpConformanceAdapter):
             "control": {"base_url": f"{self._control_surface.declared_base_url}/control/v1"},
         }
 
+    def _operation_catalog_url_value(self) -> str:
+        """Override (design docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
+        D-5): a real, dialable loopback URL against this surface's own
+        nginx -- same `_ensure_declared_surfaces()` lazy-port-reservation
+        discipline as `_surfaces_value` immediately above -- instead of
+        the inherited synthetic, non-dialable `_OPERATION_CATALOG_URL`
+        constant. C-29's stage (ii) dials THIS URL for real.
+
+        Not cached: a value cached in
+        `self.__dict__` BEFORE `isolated_application_surface()`'s `iso =
+        copy.copy(self)` runs is carried forward into `iso.__dict__` by
+        that shallow copy (every existing entry, this one included) --
+        `iso._reset_surface_state()` only reassigns `iso._data_surface`
+        itself, not this unrelated cache key, so `iso`'s document could
+        declare `operation_catalog_url` pointing at the PARENT's port
+        while `surfaces.data.base_url` (uncached, always re-derived)
+        already points at `iso`'s own, freshly reset port -- the two
+        documents disagreeing is exactly what caching was meant to
+        prevent. `_ensure_declared_surfaces()` is itself idempotent
+        (returns the already-reserved port on a second call), so
+        re-deriving from `self._data_surface` on every call is cheap and
+        carries no risk of its own."""
+        self._ensure_declared_surfaces()
+        return f"{self._data_surface.declared_base_url}/v1/operation-catalog"
+
     def _build_client(self, app: Any, base_url: str) -> httpx.AsyncClient:
         """Override (design D-1 (A) 1/6): every call site inherited from
         `R2DBHttpConformanceAdapter` (`__init__`'s own data/control

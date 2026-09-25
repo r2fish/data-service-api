@@ -150,7 +150,13 @@ when PostgreSQL is unreachable, they fail loudly).
   (declare-and-echo gated) -- no in-band path exists anywhere. Whether the
   application-plane process declares `control_plane: enabled` is a
   deployer decision (`MITATEDB_CONTROL_PLANE_STATUS`), not a detected
-  fact -- see `docs/cloud-run-cloud-sql.md` §8 invariant 3. **Control
+  fact -- see `docs/cloud-run-cloud-sql.md` §8 invariant 3.
+  `GET /v1/operation-catalog`'s declared URL (`MITATEDB_OPERATION_
+  CATALOG_URL`, optional) is unset by default and derives from
+  `surfaces.data.base_url` (base-relative, not merely its origin --
+  reachable behind the same reverse-proxy prefix `surfaces.data.base_url`
+  itself carries) -- see `docs/cloud-run-cloud-sql.md` for when to
+  override it. **Control
   bundle, closed phase 3.5 WP-1/WP-5** (design §1/§4): `must_rotate`
   exposure on `list_credentials`; a second, narrower `role="audit"`
   control-credential class (read-only on the 3 read endpoints, ceremony-

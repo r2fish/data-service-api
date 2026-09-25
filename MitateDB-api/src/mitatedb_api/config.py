@@ -3,8 +3,10 @@
 from dataclasses import dataclass, replace
 import os
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from .errors import ResourceLimitError, ValidationError
+from . import operation_catalog
 from .surfaces import validate_control_base_url, validate_data_base_url
 
 
@@ -122,6 +124,16 @@ class FoundationConfig:
     data_base_url: Optional[str] = None
     control_base_url: Optional[str] = None
 
+    # The deployer's own declaration of the absolute URL at which
+    # THIS process serves `GET /v1/operation-catalog` -- same "deployer-
+    # declared, not derived" discipline as `control_plane_status` above
+    # (read directly from `MITATEDB_OPERATION_CATALOG_URL` in `from_env`
+    # below, unaffected by the Q4 `surfaces` migration to DB-side
+    # declarations, since this value has no cross-process form check to
+    # share). `None` omits `CapabilityDocument.operation_catalog_url`
+    # entirely (`capabilities_document._operation_catalog_url_fragment`).
+    operation_catalog_url: Optional[str] = None
+
     _VALID_CONTROL_PLANE_STATUSES = ("enabled", "unavailable")
 
     def __post_init__(self) -> None:
@@ -154,6 +166,16 @@ class FoundationConfig:
             validate_control_base_url(self.control_base_url)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
+        # Form-only (absolute URL, no required suffix -- design D-5's own
+        # "not required to sit under surfaces.data.base_url"), applies on
+        # every construction path, same discipline as the two checks
+        # immediately above.
+        if self.operation_catalog_url is not None:
+            parsed = urlsplit(self.operation_catalog_url)
+            if not parsed.scheme or not parsed.netloc:
+                raise ValidationError(
+                    f"operation_catalog_url must be an absolute URL (scheme and host), got {self.operation_catalog_url!r}"
+                )
 
     @classmethod
     def from_env(cls, environ=None, *, data_base_url: Optional[str] = None, control_base_url: Optional[str] = None):
@@ -219,6 +241,13 @@ class FoundationConfig:
                 f"got {control_plane_status!r}"
             )
         parsed["control_plane_status"] = control_plane_status
+        # The SAME env var `control_main.py` reads -- both processes are
+        # given the SAME deployer-set value,
+        # echoed verbatim into each process' own `CapabilityDocument.
+        # operation_catalog_url` (both name the SAME data-surface
+        # `operation_catalog` operation). Form validated by `__post_init__`
+        # above (applies on every construction path).
+        _raw_operation_catalog_url = values.get("MITATEDB_OPERATION_CATALOG_URL") or None
         # Q4 phase (design D-2, requester ruling 2026-09-05 overriding
         # Phase 6 supervisor ruling 5 -- see this module's own historical
         # note below): `data_base_url`/`control_base_url` are no longer
@@ -251,6 +280,12 @@ class FoundationConfig:
         parsed["data_base_url"] = data_base_url
         if control_plane_status != "unavailable" and control_base_url:
             parsed["control_base_url"] = control_base_url
+        # Unset falls back to the SAME derived default `control_
+        # composition.py` computes for the control surface:
+        # `operation_catalog.derive_operation_catalog_url(data_base_url)`.
+        parsed["operation_catalog_url"] = _raw_operation_catalog_url or (
+            operation_catalog.derive_operation_catalog_url(data_base_url)
+        )
         return cls(**parsed)
 
     def validate_request_size(self, size):

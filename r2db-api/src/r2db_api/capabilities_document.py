@@ -20,6 +20,7 @@ def build_capabilities_document(
     control_plane_status: str,
     process_ceiling: int,
     surfaces: dict[str, Any] | None,
+    operation_catalog_url: str | None = None,
 ) -> dict[str, Any]:
     # CCR-13 WP-5b: the WP-2-through-WP-5 provisional gate (design
     # R2DB_CCR13_STORAGE_V1.md §3) is removed in this same commit
@@ -44,8 +45,10 @@ def build_capabilities_document(
         # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1 (5)): the SAME commit as this host's own R-3 (`errors.details_vocabulary` 4-key details) and R-7 (`request_id` on every successful result) implementation -- the two 1.7.0 UNCONDITIONAL obligations -- never ahead of the behavior it declares (D-1 (7)'s xfail(strict=True) version gate is exactly what would catch that ordering mistake).
         #
         # Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as this host's own `process_ceilings` mapping -- the version's one unconditional obligation, `limit_enforcement_scoped_to_deployment_behind_base_url` -- never ahead of the behavior it declares.
+        #
+        # This host also declares contract 1.9.0 in the same commit as `common_baseline`'s operations all being genuinely executable (no status below moves) and `operation_catalog_url` (below) actually serving the byte-identical derived catalog (`http.py::get_operation_catalog`) -- the version's two unconditional obligations, never ahead of the behavior they declare. `control_plane.py`'s own control-plane document flips in the same commit too (C-19's cross-plane version match).
         # history: CH-0142
-        "contract_version": "1.8.0",
+        "contract_version": "1.9.0",
         "capabilities": {
             "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
             # Contract 1.1.0 (CCR-13, `structured_operations.
@@ -142,4 +145,12 @@ def build_capabilities_document(
     # history: CH-0136
     if surfaces is not None:
         document["surfaces"] = surfaces
+    # Same constructor-injected, echo-only discipline as `surfaces`
+    # immediately above -- optional key, present only when this instance
+    # was constructed with one. `main.py` (the real composition root)
+    # reads `R2DB_OPERATION_CATALOG_URL`; the conformance adapters inject
+    # a synthetic (in-process plugs) or a dialable (socket plugs) value
+    # directly.
+    if operation_catalog_url is not None:
+        document["operation_catalog_url"] = operation_catalog_url
     return document

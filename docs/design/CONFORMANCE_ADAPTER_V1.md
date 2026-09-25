@@ -2,6 +2,9 @@
 
 ## 文書情報
 
+- 版数: 1.18 (§28 を新設。port v1.18: design `docs/design/PHASE11_KEYSET_PAGING_V1.md` D-4 由来の coordinated revision -- 1 新規 abstract method `query_page(session, entity, select, *, where, order_by, page_size, cursor, budget) -> (items, next_page)` (条件 C-30 が使う。`order_by` と `cursor` を 1 つの query 要求で運び、peer の実 `next_page` をそのまま返す) を追加する。既存の query 系 method (`select_eq`/`attempt_filter`/`query_with_revisions`/`query_with_budget`/`attempt_filter_with_result`) は不変。4 registered adapter (両 peer の in-process/http) が実現し、socket plug は http adapter の実現をそのまま継承する (0 redefinition)。`_ISOMORPHIC_TARGETS` には追加しない (adapter の足場であり `src/` の symbol ではない)。削除は無い。詳細は §28)
+- 版数: 1.17 (§27 を新設。port v1.17: phase 11 WP-3、design `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §7.1 の 2 由来の coordinated revision -- 1 新規 abstract method `operation_catalog_document(session) -> bytes` (条件 C-29 が使う。配る本文を byte のまま返す) を追加する。全 6 registered adapter (両 peer の in-process/http/socket) が実現する -- socket adapter は port method 自体を継承する (0 redefinition) が、内部 hook `_operation_catalog_url_value()` (`_surfaces_value` と同形) を override して実 dial 可能な URL を返す。削除は無い。詳細は §27
+- 版数: 1.16 (§26 を新設。port v1.16: phase 11 WP-2、design `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §7.1 の 1・4 由来の coordinated revision -- 1 新規 abstract method `attempt_filter_with_result` (`attempt_filter` の request 形を `order_by`/`page.size`/`budget` で拡張、条件 C-28 段 (9) が使う) を追加する。`attempt_mutation` -> `attempt_mutation_with_result` / `query_with_revisions` -> `query_with_budget` の precedent どおり、既存 `attempt_filter`/`select_eq`/`query_with_budget` は不変。4 registered adapter (両 peer の in-process/http) が実現し、5・6 番目の socket plug は http adapter の composition をそのまま継承する (socket 固有のコードは無い)。`_ISOMORPHIC_TARGETS` (`tests/test_audit_query.py`、両 peer) には追加しない -- 既存 3 兄弟と同じ理由 (両 peer の実装本体が別のバックエンド呼び出しであり、正規化後も byte-identical にならない)。削除は無い。詳細は §26
 - 版数: 1.15 (§25 を新設。port v1.15: phase 10 WP-6d-ii、design `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-13「実装の形 (6d-ii) の確定」由来の coordinated revision -- 1 新規 abstract method `hold_after_idempotency_lookup(session, idempotency_key)` (新条件 C-27、同一 idempotency key の同時送信を決定的に直列化させる primitive) と、非 normative な yield handle `IdempotencyHold` (`wait_until_held(timeout_s=30.0) -> int`) を追加する。`hold_in_flight` (port v1.12) の構造を踏襲するが、この primitive 自身は要求を出さない (呼び出し側が先着・後着の両方を別々の OS スレッドから出す) 点が唯一の構造上の違いである。既存 4 registered adapter が実現し、5・6 番目の socket plug (`r2db-api-socket`/`MitateDB-api-socket`) は http adapter の composition をそのまま継承する (socket 固有のコードは無い)。削除は無い。詳細は §25
 - 版数: 1.14 (§24 を新設。port v1.14: phase 10 WP-3、design `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-1 (A) 4 由来の coordinated revision -- `ConformanceAdapter` に既定を持たない抽象属性 `transport_kind` (`"in_process"` / `"asgi"` / `"socket"`) を 1 個追加する。新規 abstract method は無い。既存 4 registered adapter は現状どおりの値 (`in_process` × 2、`asgi` × 2) を宣言し挙動は変わらない。5・6 番目の plug (`r2db-api-socket`/`MitateDB-api-socket`、`socket` を宣言) は本 WP では未登録 (WP-4 が登録する)。詳細は §24
 - §24.3 追補 (2026-09-08, WP-3 差し戻し反映、監督裁定 `{scratchpad}/phase10/wp3-rulings.md`): port v1.14 のまま (バージョン番号は据え置き、port-level 変更なし)。`_build_client` の契約を明記 (F-2 (c): app 1個につきclient 1個。socket実装はappごとにuvicorn+nginxの対を持ってよく、1 nginxで2 upstreamを束ねる形は要求しない)。3個目の hook `_reset_surface_state(self) -> None` (既定no-op、`isolated_application_surface`が`copy.copy(self)`直後に呼ぶ) を追加 (F-2 (b))。`hold_in_flight`実現 (`_hold_in_flight_via_http_requests`/`_hold_in_flight_via_http_requests_over_stalled_gate`) も`_build_client`hookを経由するよう修正 (F-10、旧extraction が見落としていた直接構築箇所)。§24.3末尾の未実測断定を訂正 (F-7)。§24.2 に、`test_c19_surfaces_are_really_dialable_on_socket_plugs` が `registry-guards` xdist group に入ることと WP-4a の非 vacuity assert がその group を跨がない形にすべき旨の注記を追加 (F-8 (ii))。詳細は §24.3
@@ -11,7 +14,7 @@
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - §23.4 追補 (2026-09-07, 監督裁定 A `{scratchpad}/rulings-wp3a-review.md`): port v1.13 のまま (バージョン番号は据え置き)。`schema_operation_with_result(..., enum=...)` に tri-state sentinel `ENUM_CLEAR` (`adapter.py` モジュールレベル、`_EnumClear` 単一インスタンス) を追加し、「省略」(`None`、既定) と「明示 `enum: null`」(`ENUM_CLEAR`) を区別できるようにした。既存呼び出し (省略、または `Sequence` を渡すもの) は byte 互換のまま。4 adapter (`conformance_adapter_r2db{,_http}.py`/`conformance_adapter_mitatedb{,_http}.py`) の `schema_operation_with_result` を同型に更新し、`test_c20_constraint_declaration_agreement.py` の肯定枝に leg (9) (`alter_field(enum=ENUM_CLEAR)` で enum が解除される) を追加。詳細は §23.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08。§26 (v1.16) / §27 (v1.17) 追記日: 2026-09-24。§28 (v1.18) 追記日: 2026-09-25
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -172,7 +175,7 @@ class ConformanceAdapter(ABC):
     def query_page(self, session, entity: str, select: Sequence[str], *,
                    where=None, order_by=None, page_size: int | None = None,
                    cursor: str | None = None, budget: Mapping[str, int] | None = None
-                   ) -> tuple[list[dict], str | None]: ...  # port v1.16, C-28
+                   ) -> tuple[list[dict], str | None]: ...  # port v1.18, C-30
     def delete(self, session, entity: str, field: str, value: Any, *,
                destructive: bool, confirmation: str | None) -> int: ...
     def count(self, session, entity: str) -> int: ...
@@ -3569,3 +3572,109 @@ lock's own non-vacuity is instead carried by the PEER-LOCAL `MitateDB-
 api/tests/test_idempotency_concurrency.py`, which drives two separate
 `cell_a`/`cell_b` objects against the SAME PostgreSQL database precisely
 to exercise it where the in-process cell lock cannot.
+
+## 26. v1.16 port revision (Phase 11 WP-2, coordinated with docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md §7.1 の 1・4)
+
+`attempt_filter`'s own request shape, extended with the contract's own
+request-level `order_by`/`page.size`/`budget` in ONE query request --
+needed for C-28 段 (9), which presents baseline query operators
+under all three at once. Mirrors the `attempt_mutation` -> `attempt_
+mutation_with_result` / `query_with_revisions` -> `query_with_budget`
+precedent this ABC already establishes (an additive `_with_result`
+sibling, not a change to the original method's fixed-arity return):
+`attempt_filter`/`select_eq`/`query_with_budget` all stay byte-for-byte
+untouched. Realized on 4 adapters (both peers' in-process and http
+plugs); the two socket plugs inherit their peer's http realization
+unchanged (0 redefinitions, measured). Not added to `_ISOMORPHIC_
+TARGETS` (`tests/test_audit_query.py`, both peers) -- like its three
+pre-existing siblings, its two peers' bodies call different real entry
+points (`r2db-api`'s `DataService.query_page`, `MitateDB-api`'s
+`session.read_with_result`), so they are not byte-identical after
+normalization.
+
+**v1.17 is WP-3's own addition (`operation_catalog_document()`), not
+this revision.**
+
+## 27. v1.17 port revision (Phase 11 WP-3, coordinated with docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md §7.1 の 2)
+
+1 新規 abstract method: `operation_catalog_document(self, session) -> bytes`
+-- the body the peer itself returns for its own `operation_catalog`
+operation (contract `endpoints.operation_catalog`, `GET /v1/operation-
+catalog`), as raw bytes, never parsed/re-serialized by the port -- needed
+for C-29's own byte-for-byte comparison against the packaged derived
+catalog. `session` is an already-authenticated application session/handle
+(runtime or developer), authenticated exactly as `GET /v1/capabilities`
+requires (design §8.2: no anonymous face).
+
+Realized on ALL SIX adapters (unlike port v1.16's `attempt_filter_with_
+result`, which the two socket plugs inherit unchanged from their peer's
+http realization) -- in-process plugs have no HTTP face to dial at all
+(design D-5's own honest limit), so this method is the only way C-29's
+stage (i) observes an in-process plug's own served body. The two socket
+plugs inherit their peer's http realization unchanged (identical body:
+authenticate, `GET /v1/operation-catalog` over `self._client`, return
+`response.content`) -- **0 redefinitions of the abstract port method
+itself** (measured: `grep -n "def operation_catalog_document"
+r2db-api/conformance/conformance_adapter_r2db_socket.py
+MitateDB-api/conformance/conformance_adapter_mitatedb_socket.py` returns
+no matches), since both socket adapter classes subclass their peer's http
+adapter class and this method's body is identical either way.
+
+**A second, internal (non-port) hook**: `_operation_catalog_url_value(self)
+-> str`, mirroring the existing `_surfaces_value()` hook shape (port
+v1.10/v1.14 machinery, not itself part of the `ConformanceAdapter` ABC) --
+default body returns a synthetic, non-dialable constant (the same honest
+limit `_surfaces_value()`'s own default already carries); the socket
+adapter subclass overrides it to report a real, dialable loopback URL
+(reusing the SAME port reservation `_surfaces_value()`'s own override
+commits, via the identical `_reserve_named_port`/`_ensure_declared_
+surfaces` idempotent machinery) -- this IS overridden on both socket
+adapters (that override is adapter-internal wiring, not a redefinition of
+the abstract port surface above).
+
+Not added to `_ISOMORPHIC_TARGETS` (`tests/test_audit_query.py`, both
+peers) -- that pin covers same-named helpers under each peer's own `src/`
+tree (product code), never `conformance/` adapter scaffolding; neither
+`operation_catalog_document` nor `_operation_catalog_url_value` is a
+`src/`-tree symbol.
+
+Deletions: none.
+
+## 28. v1.18 port revision (coordinated with docs/design/PHASE11_KEYSET_PAGING_V1.md D-4)
+
+1 新規 abstract method: `query_page(self, session, entity, select, *,
+where=None, order_by=None, page_size=None, cursor=None, budget=None) ->
+tuple[list[dict], str | None]` -- an independent, additive query
+primitive for C-30 (keyset paging). `select_eq`/`attempt_filter` carry
+neither `order_by` nor `cursor`, and `attempt_filter_with_result` (v1.16)
+carries no `cursor`, so this is a new abstract method rather than a change
+to any existing signature: every existing query method and its callers
+stay untouched.
+
+`where` is the same `(field, operator, value)` triple sequence
+`attempt_filter`'s own `extra_predicates` carries, ANDed together;
+`order_by` is a `(field, direction)` pair sequence. Both, together with
+`select`/`page_size`/`cursor`, are presented to the peer's own real query
+entry point verbatim -- never interpreted, validated or synthesized by the
+adapter. `budget` follows `query_with_budget`'s own convention: `None`
+omits it from the presented request entirely. Returns `(items,
+next_page)`, `next_page` being the peer's own real response value,
+returned unmodified -- the adapter neither interprets nor constructs a
+cursor. A peer's real refusal raises `ConformanceDenial`, as on every
+other primitive.
+
+Realized on 4 adapters (both peers' in-process and http plugs): the
+in-process plugs call `r2db-api`'s `DataService.query_page` and
+`MitateDB-api`'s `session.read_page`; the http plugs send one real
+`POST` query carrying `order_by` and `page.size`/`page.cursor` in the
+contract's own wire shape. The two socket plugs inherit their peer's http
+realization unchanged (0 redefinitions, measured: `grep -n "def
+query_page" r2db-api/conformance/conformance_adapter_r2db_socket.py
+MitateDB-api/conformance/conformance_adapter_mitatedb_socket.py` returns
+no matches).
+
+Not added to `_ISOMORPHIC_TARGETS` (`tests/test_audit_query.py`, both
+peers) -- that pin covers same-named helpers under each peer's own `src/`
+tree, never `conformance/` adapter scaffolding.
+
+Deletions: none.

@@ -845,6 +845,15 @@ C-28 の Condition 欄は確定文ファイル。`CONTROL_MAPPING` の主張は�
 
 (実施中に本書の誤り・発注後の監督裁定・番号の振り直しが生じたらここへ追記する。本文は書き換えない。`OC` §1.8 の 57。)
 
+- **2026-09-25 — 番号の振り直し (main `b283f48` の取り込み)**: 並走した最低共通機能プロファイル (R-29) が main (`b283f48`) へ先に merge し、本件が仮に使っていた番号を消費した。本件の番号を次のとおり振り直す (写像は監督確定)。本文は書き換えず、本文中の仮番号はこの写像で読み替える。
+  - 契約 1.9.0 (paging の文言・義務・`version_binding` の段落・Revision note・pin) → **1.10.0**。main の 1.9.0 (`common_baseline` と `operation_catalog`) はそのまま残る。遡及拒否の旧い列挙と 1.9.0 段落の末尾文は main の文面のまま触らない (main の Revision note 3 の方針。監督裁定 2026-09-25)。1.10.0 段落は自身の末尾の遡及文だけを持つ。`spec/CONTRACT_HISTORY.md` の本件の Revision note 3/4/5 は 4/5/6 に繰り下がる (main の note 3 が先)。
+  - C-28 (keyset) → **C-30**。main の C-28 は baseline turn、C-29 は operation catalog。conformance の試験ファイルは `conformance-tests/test_c30_keyset_paging.py` に改名する。
+  - R-106 (keyset 本体) → **R-109**。main の R-106 は MitateDB `row_addressability`、R-107 は `revision_preconditions`、R-108 は参照クライアント。
+  - R-107 (`order_by` 未知 field の拒否コード不一致) → **R-110**。
+  - 従属判断 14 (keyset。依頼者裁定 Q-1/Q-2/Q-3/Q-5) → **従属判断 15**。main の従属判断 14 は `common_baseline`。
+  - port v1.16 (`query_page`) → **v1.18**。main の v1.16 は `attempt_filter_with_result`、v1.17 は `operation_catalog_document`。
+  - 不変: migration 0015、`_ISOMORPHIC_TARGETS` の件数 156→159。
+
 ## 10. 実施記録
 
 (統合時に監督が記す。WP ごとの commit、`pt.py` / `mutate.py` の集計行、確定した期待結果表、完了ゲートの集計行、Q-4 の確認の逐語。)
