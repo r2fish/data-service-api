@@ -75,31 +75,22 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_10_0():
-    # Phase 11 WP-1 (docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md
-    # §3 D-4/D-5, CCR_DISPOSITION.md subordinate ruling 14):
-    # the version bump itself, pinned so a future revert of just this one
-    # line is caught here rather than only by whichever other test happens
-    # to touch contract_version. Supersedes the 1.8.0 pin (phase 10 WP-5a,
-    # subordinate ruling 13) this test itself carried before -- 1.8.0 is
+def test_contract_declares_1_11_0():
+    # CCR_DISPOSITION.md subordinate ruling 16: the version bump itself,
+    # pinned so a future revert of just this one line is caught here rather
+    # than only by whichever other test happens to touch contract_version.
+    # Supersedes the 1.10.0 pin this test itself carried before -- 1.10.0 is
     # already published, so this file never re-adds a standalone
-    # "declares 1.8.0" test: any implementation still declaring 1.8.0 or
-    # earlier is exercised by version_binding's own retroactivity rule,
-    # not by a dedicated pin here for a version this document no longer
-    # declares. NOTE (WP-1 scope): this is the contract JSON's OWN
-    # contract_version field -- neither peer's own runtime declaration
-    # (`service.py`/`control_plane.py`/`cell.py`) moves in this WP; both
-    # peers still declare 1.8.0 until WP-3's pair-closing version-flip
-    # commit (design D-4, work order §1 の 4).
-    # Contract 1.10.0 (keyset paging, docs/design/PHASE11_KEYSET_PAGING_V1.md
-    # §9 WP-1 row, CCR_DISPOSITION.md subordinate ruling 15; renumbered from
-    # a provisional 1.9.0 when main's 1.9.0 was taken in) bumps it again;
-    # neither peer's own runtime declaration
-    # (`capabilities_document.py`/`control_plane.py`) moves with it -- both
-    # peers still declare 1.9.0 until WP-6's pair-closing version-flip
-    # commit (design §9 WP-6 row, work order WP-1 "触らないファイル").
+    # "declares 1.10.0" test: any implementation still declaring 1.10.0 or
+    # earlier is exercised by version_binding's own retroactivity rule, not
+    # by a dedicated pin here for a version this document no longer
+    # declares. Unlike the 1.9.0 and 1.10.0 bumps, both peers' own runtime
+    # declaration (`capabilities_document.py`/`control_plane.py`) moves in
+    # the same commit as this one (the refusal-code behavior change and the
+    # declaration land together, per version_binding's own version-flip
+    # discipline).
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.10.0"
+    assert contract["contract_version"] == "1.11.0"
 
 
 # ---------------------------------------------------------------------------
@@ -668,9 +659,15 @@ def test_contract_pins_the_1_10_0_version_binding_paragraph_verbatim():
     including its own trailing 1.9.0-declaring retroactive-denial sentence
     -- is present verbatim in versioning.version_binding, and occupies
     EXACTLY the text between the 1.8.0-declaring retroactive-denial
-    sentence that ends the 1.9.0 paragraph and the version-flip sentence (an equality
-    check, not a mere containment check, so a further, unaccounted-for
-    sentence slipped in between the two anchors is caught here too)."""
+    sentence that ends the 1.9.0 paragraph and the start of the 1.11.0
+    paragraph (an equality check, not a mere containment check, so a
+    further, unaccounted-for sentence slipped in between the two anchors is
+    caught here too). Right edge follows contract 1.11.0 (subordinate
+    ruling 16): the 1.11.0 paragraph now sits between the 1.10.0 paragraph
+    and the version-flip sentence, so this test's own right anchor moves
+    from the version-flip sentence to the start of the 1.11.0 paragraph;
+    the 1.10.0 paragraph's own text (PIN_1_10_0_VERSION_BINDING_PARAGRAPH)
+    is unchanged."""
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
     version_binding = contract["versioning"]["version_binding"]
 
@@ -683,11 +680,105 @@ def test_contract_pins_the_1_10_0_version_binding_paragraph_verbatim():
 
     anchor_1_8_0_retroactive = "An implementation still declaring 1.8.0 is not held to any 1.9.0-only obligation retroactively."
     idx_1_8_0_retroactive_end = version_binding.index(anchor_1_8_0_retroactive) + len(anchor_1_8_0_retroactive)
-    idx_version_flip = version_binding.index("A peer's version-flip")
-    between = version_binding[idx_1_8_0_retroactive_end:idx_version_flip]
+    idx_1_11_0_paragraph = version_binding.index("Only an implementation declaring 1.11.0")
+    between = version_binding[idx_1_8_0_retroactive_end:idx_1_11_0_paragraph]
     assert between == " " + PIN_1_10_0_VERSION_BINDING_PARAGRAPH + " ", (
-        "the text between the 1.8.0-declaring retroactive row and the version-flip sentence is not exactly "
-        f"the monitor-finalized 1.10.0 paragraph (surrounded by one space on each side): {between!r}"
+        "the text between the 1.8.0-declaring retroactive row and the start of the 1.11.0 paragraph is not "
+        f"exactly the monitor-finalized 1.10.0 paragraph (surrounded by one space on each side): {between!r}"
+    )
+
+
+# Contract 1.11.0 (CCR_DISPOSITION.md subordinate ruling 16): the
+# monitor-finalized fixed text unifying both peers' refusal of a field name
+# a query's select/where/order_by, or a mutation's values/where, names but
+# the entity does not declare -- copied verbatim from the
+# requester-confirmed scratchpad file (OPERATING_CONDITIONS.md §1.5 items
+# 35/36) -- never paraphrased. The single obligation is unconditional (it
+# does not depend on any capability's own status).
+FIXED_1_11_0_OBLIGATIONS_ENTRY = {
+    "version": "1.11.0",
+    "subordinate_ruling": 16,
+    "unconditional": ["undeclared_field_name_refused_as_validation_failed_request_schema"],
+    "conditional": [],
+}
+
+PIN_1_11_0_VERSION_BINDING_PARAGRAPH = (
+    "Only an implementation declaring 1.11.0 or higher additionally claims conformance to the obligation "
+    "1.11.0 introduced (subordinate ruling 16), unconditional in the same sense as every unconditional "
+    "obligation enumerated above: an undeclared field name, at any of the positions "
+    "errors.details_vocabulary.undeclared_field names, is refused as that entry states -- VALIDATION_FAILED, "
+    "violated_declaration request_schema, field naming the position -- and no other code is a conforming "
+    "refusal of it. An implementation still declaring 1.10.0 is not held to any 1.11.0-only obligation "
+    "retroactively."
+)
+
+PIN_1_11_0_RETROACTIVE_DENIAL_ROW_1_10_0 = "is not held to any 1.11.0-only obligation retroactively"
+
+PIN_1_11_0_UNDECLARED_FIELD_VOCABULARY = (
+    "A request that names a field the entity does not declare -- an entry of a query's select, where or "
+    "order_by, a key of a mutation's values, or the field of a mutation's where predicate -- is refused with "
+    "VALIDATION_FAILED, violated_declaration request_schema and field naming the position that carries the "
+    "undeclared name (select/<i>, where/<i>/field, order_by/<i>/field, operations/<i>/values/<name>, "
+    "operations/<i>/where/<j>/field); declared_type and observed_type are absent, since no declaration "
+    "exists for that name. Schema operations that address a field by name are outside this rule. NOT_FOUND "
+    "is not a conforming refusal of an undeclared field name at these positions."
+)
+
+
+def test_contract_pins_the_1_11_0_obligations_entry_verbatim():
+    """Completion condition 1: `versioning.obligations`' 1.11.0 entry
+    byte-matches the monitor-finalized entry -- 1 unconditional obligation,
+    0 conditional."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    obligations = contract["versioning"]["obligations"]
+    # Pinned by an index fixed to its 1.11.0-era position (obligations[9],
+    # after 1.10.0's own entry at [8]) -- the same form the 1.10.0 entry's
+    # own obligations[8] pin uses, so a later version appending its own
+    # entry leaves this pin untouched.
+    assert obligations[9] == FIXED_1_11_0_OBLIGATIONS_ENTRY, (
+        f"versioning.obligations[9] does not byte-match the monitor-finalized 1.11.0 entry: {obligations[9]!r}"
+    )
+    assert obligations[9]["version"] == "1.11.0"
+    assert set(obligations[9].keys()) == {"version", "subordinate_ruling", "unconditional", "conditional"}
+
+
+def test_contract_pins_the_1_11_0_version_binding_paragraph_verbatim():
+    """Completion condition 2: the monitor-finalized 1.11.0 paragraph --
+    including its own trailing 1.10.0-declaring retroactive-denial sentence
+    -- is present verbatim in versioning.version_binding, and occupies
+    EXACTLY the text between the 1.9.0-declaring retroactive-denial
+    sentence that ends the 1.10.0 paragraph and the version-flip sentence
+    (an equality check, not a mere containment check, so a further,
+    unaccounted-for sentence slipped in between the two anchors is caught
+    here too)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = contract["versioning"]["version_binding"]
+
+    assert PIN_1_11_0_VERSION_BINDING_PARAGRAPH in version_binding, (
+        "versioning.version_binding no longer contains the monitor-finalized 1.11.0 paragraph verbatim"
+    )
+    assert PIN_1_11_0_RETROACTIVE_DENIAL_ROW_1_10_0 in version_binding, (
+        "versioning.version_binding is missing the new 1.10.0-declaring retroactive-denial row"
+    )
+
+    anchor_1_9_0_retroactive = "An implementation still declaring 1.9.0 is not held to any 1.10.0-only obligation retroactively."
+    idx_1_9_0_retroactive_end = version_binding.index(anchor_1_9_0_retroactive) + len(anchor_1_9_0_retroactive)
+    idx_version_flip = version_binding.index("A peer's version-flip")
+    between = version_binding[idx_1_9_0_retroactive_end:idx_version_flip]
+    assert between == " " + PIN_1_11_0_VERSION_BINDING_PARAGRAPH + " ", (
+        "the text between the 1.9.0-declaring retroactive row and the version-flip sentence is not exactly "
+        f"the monitor-finalized 1.11.0 paragraph (surrounded by one space on each side): {between!r}"
+    )
+
+
+def test_contract_pins_the_1_11_0_undeclared_field_vocabulary_verbatim():
+    """Completion condition 3: `errors.details_vocabulary.undeclared_field`
+    byte-matches the monitor-finalized text."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    dv = contract["errors"]["details_vocabulary"]
+    assert dv["undeclared_field"] == PIN_1_11_0_UNDECLARED_FIELD_VOCABULARY, (
+        f"errors.details_vocabulary.undeclared_field does not byte-match the monitor-finalized text: "
+        f"{dv['undeclared_field']!r}"
     )
 
 

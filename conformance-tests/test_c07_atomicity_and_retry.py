@@ -16,13 +16,15 @@ territory -- not duplicated here):
       invalid item (an unknown field name) is refused wholly, with ZERO
       rows written -- confirmed by a real read (`count`), not merely by
       the denial itself. The denial's own CODE is not pinned to one exact
-      value here (measured: `r2db-api`/`r2db-api-http` answer `NOT_FOUND`
-      for an unknown field name in this position, `MitateDB-api`/
-      `MitateDB-api-http` answer `VALIDATION_FAILED` -- both are genuine,
-      real, present refusals of the same underlying fact, and pinning the
-      exact code is C-03/C-17's own territory, not C-07's atomicity
-      proposition) -- any contract error code is accepted, so the
-      assertion here is squarely about the rollback, not the code.
+      value here (measured through contract 1.10.0: `r2db-api`/
+      `r2db-api-http` answered `NOT_FOUND` for an unknown field name in
+      this position, `MitateDB-api`/`MitateDB-api-http` answered
+      `VALIDATION_FAILED`; contract 1.11.0 (subordinate ruling 16, the
+      undeclared-field refusal alignment) unifies both peers on
+      `VALIDATION_FAILED` for this exact probe -- pinning the exact code
+      is C-03/C-17's/C-31's own territory, not C-07's atomicity
+      proposition) -- any contract error code is still accepted, so the
+      assertion here stays squarely about the rollback, not the code.
   (ii) **idempotency declaration branch** (C-17-shaped declare-first,
        supervisor ruling S-4): both currently-registered peers declare
        `idempotency: unavailable` (design D-6.7's own module note). The

@@ -102,8 +102,18 @@ def build_capabilities_document(*, is_developer, role, application_id, cell_conf
         # obligations, bound while structured_query stays declared other
         # than unavailable (partial) here, never ahead of the behavior
         # they declare.
+        #
+        # This host also declares contract 1.11.0 in the same commit as
+        # its own undeclared-field refusal alignment across all five
+        # positions the contract names -- a select entry names its own
+        # index (select/<i>), matching where/order_by/mutation-where,
+        # and a mutation's values key names itself
+        # (operations/<i>/values/<name>) -- each refused with
+        # VALIDATION_FAILED, violated_declaration request_schema and
+        # field naming the position -- 1.11.0's own unconditional
+        # obligation, never ahead of the behavior it declares.
         # history: CH-0542
-        "contract_version": "1.10.0",
+        "contract_version": "1.11.0",
         "capabilities": {
             "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},

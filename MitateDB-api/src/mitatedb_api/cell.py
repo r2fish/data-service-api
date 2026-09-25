@@ -3269,9 +3269,15 @@ class ApplicationCell:
                 # Phase 9 WP-3e (design D-3 (2)/(4)): mirrors `_prepare_
                 # values`'s identical "this entity has no field by this
                 # name" `request_schema` treatment above.
+                #
+                # Contract 1.11.0 (subordinate ruling 16): an undeclared
+                # field name is refused as request_schema naming the
+                # entry's own index (`select/<i>`), the same index form
+                # `where`/`order_by` use for this rule (errors.details_
+                # vocabulary.undeclared_field).
                 raise ValidationError(
                     "unknown field",
-                    details={"violated_declaration": "request_schema", "field": f"select/{field}"},
+                    details={"violated_declaration": "request_schema", "field": f"select/{i}"},
                 )
             result.append(field)
         return result

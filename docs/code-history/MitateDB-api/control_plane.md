@@ -62,3 +62,19 @@ This control-plane document also flips to 1.9.0 in the same commit as the data-p
 
 This control-plane document also flips to 1.10.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
 ```
+
+### correction: 2026-09-25
+
+- reason: R-110 (undeclared-field refusal alignment, subordinate ruling 16) -- this control-plane document also flips to 1.11.0 in the same commit as the data-plane document's own identical flip
+
+old:
+```
+This control-plane document also flips to 1.10.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
+```
+
+new:
+```
+This control-plane document also flips to 1.10.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
+
+This control-plane document also flips to 1.11.0 in the same commit as the data-plane document's own identical flip (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.11.0's own obligation governs the data surface's select/where/order_by/mutation-values operations only.
+```

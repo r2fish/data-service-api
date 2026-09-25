@@ -67,8 +67,13 @@ def _resolve_order_by(order_by: Any, known_fields: set[str]) -> list[tuple[str, 
             # (which would only be the literal key name "field", but N-1's
             # worked examples are followed verbatim).
             field_name = validate_identifier(item["field"], field=f"order_by/{i}")
+            # Contract 1.11.0 (subordinate ruling 16): an undeclared field
+            # name here is a request_schema violation naming the position
+            # (`order_by/<i>/field`) -- NOT_FOUND is not a conforming
+            # refusal of it at this position
+            # (errors.details_vocabulary.undeclared_field).
             if field_name not in known_fields:
-                fail("NOT_FOUND", "Field was not found.", status=404)
+                fail("VALIDATION_FAILED", "Field is not declared.", details=violation("request_schema", field=f"order_by/{i}/field"))
             if field_name in seen_fields:
                 # WP-2 review minor (b): a field named twice is always
                 # either redundant or self-contradictory (opposite

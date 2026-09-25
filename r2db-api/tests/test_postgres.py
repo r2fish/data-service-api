@@ -2419,12 +2419,16 @@ def test_order_by_sorts_and_appends_id_when_absent(app_a: types.SimpleNamespace)
         cell.close()
 
 
-def test_order_by_unknown_field_is_not_found_and_rejects_a_repeated_field(app_a: types.SimpleNamespace) -> None:
+def test_order_by_unknown_field_is_validation_failed_and_rejects_a_repeated_field(app_a: types.SimpleNamespace) -> None:
+    # Contract 1.11.0 (subordinate ruling 16): an undeclared order_by field
+    # is a request_schema violation naming the position, not NOT_FOUND.
     cell = _numbered_cell(app_a, 1)
     try:
         with pytest.raises(FoundationError) as exc:
             cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "ghost", "direction": "asc"}])
-        assert exc.value.code == "NOT_FOUND"
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details["violated_declaration"] == "request_schema"
+        assert exc.value.details["field"] == "order_by/0/field"
         with pytest.raises(FoundationError) as exc:
             cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "asc"}, {"field": "n", "direction": "desc"}])
         assert exc.value.code == "VALIDATION_FAILED"

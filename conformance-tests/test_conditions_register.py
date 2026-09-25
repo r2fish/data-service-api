@@ -58,6 +58,13 @@ through the completion gate is recorded here and not filed in the ledger):
        why: it holds `test_` but matches none of the 5 forms.
        caught by: that allowlist being pinned as an exact set, so a
        second such span is red and needs its own explicit commit.
+    5. not detected: whether a row's Invariants column names the right
+       Security Invariants for its own Condition text.
+       why: this file reads only the ID and Status columns; Invariants is
+       never parsed by either direction above.
+       caught by: the acceptance audit, reading the Condition text and
+       the Invariants column together against the supervisor ruling that
+       fixed the value (e.g. C-31's own ruling 6).
 """
 from __future__ import annotations
 

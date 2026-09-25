@@ -443,14 +443,19 @@ async def test_query_order_by_multiple_clauses(client):
     assert body["next_page"] is None
 
 
-async def test_query_order_by_unknown_field_is_not_found(client):
+async def test_query_order_by_unknown_field_is_validation_failed(client):
+    # Contract 1.11.0 (subordinate ruling 16): an undeclared order_by field
+    # is a request_schema violation naming the position, not NOT_FOUND.
     response = await client.post(
         "/v1/data/notes/query",
         headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "order_by": [{"field": "ghost", "direction": "asc"}]},
     )
-    assert response.status_code == 404
-    assert response.json()["code"] == "NOT_FOUND"
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "VALIDATION_FAILED"
+    assert body["details"]["violated_declaration"] == "request_schema"
+    assert body["details"]["field"] == "order_by/0/field"
 
 
 async def test_query_cursor_pagination_pages_through_results_and_terminates(client):

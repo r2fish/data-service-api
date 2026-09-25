@@ -237,6 +237,21 @@ def test_identifier_invalid_field_reflects_batch_index_for_a_mutation_where_pred
     assert exc.value.details.get("field") == "operations/1/where/0"
 
 
+def test_undeclared_field_in_a_mutation_where_predicate_names_the_position(service, runtime):
+    """Contract 1.11.0 (subordinate ruling 16): an undeclared field name in
+    a mutation's own where predicate is request_schema, field naming
+    operations/<i>/where/<j>/field -- the same index form a top-level
+    query's own where already uses, with the operation's own index
+    threaded in front of it."""
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(
+            runtime, "notes",
+            [{"operation": "update", "where": [{"field": "body", "operator": "eq", "value": "a"}, {"field": "ghost", "operator": "eq", "value": "z"}], "values": {"body": "y"}}],
+        )
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "operations/0/where/1/field"}
+
+
 # ---------------------------------------------------------------------------
 # Completion condition 4: CAPABILITY_UNSUPPORTED always carries
 # `violated_declaration: capability`.
@@ -496,7 +511,7 @@ def test_contract_version_is_1_7_0_on_data_plane(service, runtime):
     ships -- function name kept, same precedent as `test_foundation.py`'s
     own re-flipped pin."""
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.10.0"
+    assert document["contract_version"] == "1.11.0"
 
 
 # ---------------------------------------------------------------------------

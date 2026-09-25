@@ -270,6 +270,24 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     **番号の振り直し (2026-09-25)**: 本項は起票時に従属判断 14・契約 1.9.0・C-28 を仮に名乗っていた。並走した最低共通機能プロファイルの裁定 (上の 14.) が main (`b283f48`) で従属判断 14・契約 1.9.0・C-28/C-29 を先に消費したため、本項を従属判断 15・契約 1.10.0・C-30 に振り直した (設計 `docs/design/PHASE11_KEYSET_PAGING_V1.md` §0 と作業指示書 §9 の訂正註)。依頼者裁定の逐語引用は起票時のまま改めない。
 
+16. **契約 1.11.0 (未宣言 field 名の拒否を両 peer で `VALIDATION_FAILED`/`request_schema`/位置 path に揃える) への裁定 (2026-09-25、依頼者裁定「A で 1.11.0、規模 M で進めてください」、監督起票 R-110)。** 新規 CCR ではなく、既存の意味論 (`errors.details_vocabulary` の `VALIDATION_FAILED` 語彙、CCR-13 storage の field 宣言可能性) を明確化・実効化する additive 変更として採用する。実施は作業指示書 `docs/work-orders/WORK_ORDER_R110_UNDECLARED_FIELD_REFUSAL_V1.md` WP-1 で完了する。前例は従属判断 9 (1.4.0 の束 8 件一括)・10 (1.5.0 の束 2 件一括)・11 (1.6.0 の束 4 件一括)・12 (1.7.0 の束 7 件一括)・13 (1.8.0 の束 2 件一括)・14 (1.9.0)・15 (1.10.0)。
+
+    **発端**: `order_by` に未知の field を指定したときの拒否コードが両 peer で違った — r2db-api は `NOT_FOUND` (詳細なし。訂正記録 m-6 による)、MitateDB-api は `VALIDATION_FAILED`/`request_schema`/`order_by/<i>/field`。同じ誤りに別のコードが返るので、共通契約を読んで書いたクライアントが片方でしか通らない分岐を持つ。契約の沈黙は `order_by` に限らず、`select`・`where`・mutation の `values` の未宣言 field 名にも及んでいた。
+
+    **本文 — 1.11.0 が足す義務 (無条件義務 1 件のみ、`errors.details_vocabulary.undeclared_field` の全文)**:
+
+    > A request that names a field the entity does not declare -- an entry of a query's select, where or order_by, a key of a mutation's values, or the field of a mutation's where predicate -- is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position that carries the undeclared name (select/<i>, where/<i>/field, order_by/<i>/field, operations/<i>/values/<name>, operations/<i>/where/<j>/field); declared_type and observed_type are absent, since no declaration exists for that name. Schema operations that address a field by name are outside this rule. NOT_FOUND is not a conforming refusal of an undeclared field name at these positions.
+
+    schema 操作 (`alter_field`・`create_index` などが未知の field を名指す場合) はこの規則の対象外とする — 利用者は catalog を読んで宣言 field を知り、既存の拒否 (r2db の `NOT_FOUND`、MitateDB の `constraint_declaration`) を変えない。
+
+    **依頼者裁定 A (逐語)**:
+
+    > A で 1.11.0、規模 M で進めてください
+
+    起票側の疑義に対する回答であり、A は「4 位置 (`select`/`where`/`order_by`/mutation `values`) を両 peer で `VALIDATION_FAILED`/`violated_declaration: request_schema`/`field` = 位置 path に揃え、`declared_type`・`observed_type` は載せない」案を指す。監督裁定 (作業指示書 §1 監督確定事項) が mutation の `where` (`operations/<i>/where/<j>/field`) を明示的に含め、schema 操作の不一致を範囲外と明記した。
+
+    **版数の扱い**: 契約 1.10.0 は既に main へ公開済みであるため、この裁定を単独の 1.11.0 として出荷する。**実施記録 (契約公開・両 peer の拒否・宣言、WP-1)**: 契約 1.11.0 は作業指示書 `docs/work-orders/WORK_ORDER_R110_UNDECLARED_FIELD_REFUSAL_V1.md` WP-1 で公開する。**この WP は両 peer の `contract_version` を同一コミットで動かす** (4 位置の拒否コードの実装と `select`/`where`/`order_by`/`values` の path 統一が実挙動として揃うため、契約の文言化・実装・宣言 flip を 1 commit に収める — 従属判断 9〜15 が契約文と実装 flip を別 WP に分けたのとは異なる)。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**

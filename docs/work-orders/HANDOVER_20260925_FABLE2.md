@@ -1,4 +1,4 @@
-# 引き継ぎ — 2026-09-24/25 (keyset ページング (高速化案 7、フェーズ11) の閉止。契約 1.10.0、C-30、main へ 1 回 merge)
+# 引き継ぎ — 2026-09-24/25 (keyset ページング (高速化案 7、フェーズ11) の閉止。契約 1.10.0、C-30、main へ 1 回 merge。同じチャットで続けて R-110 (契約 1.11.0、C-31) を実施し main へ merge)
 
 本書は前書の全項を写さない。生きている事項だけを載せる。恒久の運用規律は `docs/work-orders/OPERATING_CONDITIONS.md`。前書は `HANDOVER_20260924_FABLE6.md`。並走した最低共通機能プロファイル (R-29) のチャットの書は `HANDOVER_20260925_FABLE.md`。
 
@@ -8,9 +8,10 @@
 
 ## 1. 現在地
 
+- **R-110 (同じチャットで続けて実施し main へ merge 済み)**: R-110 の変更セット (worktree r110、branch r110) を `finalize.py --tools-tests` で main `b9a41ef` へ no-ff で merge (依頼者裁定 Q-4 了承 2026-09-26)。契約 **1.11.0**、共通条件 **C-31**、`security/CONTROL_MAPPING.md` 3.4、台帳 v1.122、R-110 閉止。詳細は「R-110 (2026-09-25、同じチャット)」節。次の行以降は keyset ページングの merge 時点の現在地である。
 - **main への merge 済み**: `本書を含む閉止の変更セットを `finalize.py --tools-tests` で main `b283f48` へ no-ff で merge (branch HEAD の次の main の merge commit。依頼者裁定 Q-4 了承 2026-09-25)` (統合 branch `claude/cranky-visvesvaraya-616e67` を 1 回で merge)。統合 branch の commit: WP-1 `3af11b3` / WP-2 `a2ba943` / WP-5 `f3b10ca` / WP-3 `1c362fc` / WP-4 `cb64217` / 本書の改名 `c2a6a64` / main `b283f48` の取り込みと番号の振り直し `285cfe4` / WP-6 `5d988c6`。
 - **契約 1.10.0** (両 peer の data 面・control 面が宣言)。共通条件 **C-30** (9 node、T は 7 変種、6 plug)。port v1.18、従属判断 15、migration 0015、`_ISOMORPHIC_TARGETS` 159 行、`security/CONTROL_MAPPING.md` 3.3、台帳 v1.121。
-- 台帳: **R-109 閉止 / R-110 未着手 / R-111 起票** (規模 M、未着手)。
+- 台帳: **R-109 閉止 / R-110 未着手 / R-111 起票** (規模 M、未着手)。(R-110 はその後閉止 — 上の行)
 - 完了ゲート: `gate: 4168 passed, 2 subtests passed in 327.60s (0:05:27), judge=PASS, pg_database/pg_roles diff 0, label p11b (final tree; the first gate on ff6ad67, label p11, was 4167 passed in 327.83s, judge=PASS, before the SQLite tampered-cursor test was added)`
 - WP-7 (性能の証拠、設計 §11): K=1 `perf_baseline.py --warmup 20 --n 200` (PERFRUN commit=5d988c6) 21 行すべて §0.1.4 の閾値内 (Δp50 最大 +24.2% / +40%、Δp95 最大 +25.5% / +50%、backend_calls 差分 +0.00。比較対象 PERF_PREPARED_STATEMENT_MEASUREMENT_V0_1 §2.3 2026-09-23); 深いページ比較 (r2db PostgreSQL、N=20000、page.size=100、25 回): offset (0fee6e5) 走査 1.401 s / 末尾ページ p50 4.096 ms、keyset 0.823 s / 3.287 ms、両方とも末尾行 n=19999 に到達 (非空振り)。commit ff6ad67
 - push は停止中 (GitHub 課金上限)。
@@ -56,15 +57,22 @@ WP-7 の後の手順 (作業指示書 §1.1 の 4、§8):
 
 merge 後の残件:
 
-- **R-110** (`order_by` 未知 field の拒否コードが両 peer で不一致。規模 S、Class C): 未着手。契約の文を先に決める。
+- **R-110** (`order_by` 未知 field の拒否コードが両 peer で不一致。規模 S、Class C): 未着手。契約の文を先に決める。 **→ 同じチャットで続けて実施し閉止 (「R-110 (2026-09-25、同じチャット)」節)。**
 - **R-111** (`test_c27_same_digest_executes_once[MitateDB-api-http]` の断続的な赤。規模 M): 未着手。
 - **CI の sqlite 版の実測**: push 再開後。pin テストは `MitateDB-api/tests/test_sqlite_version_floor.py` (>= 3.30。NULLS FIRST/LAST)。
 - **レビュー観察** (起票しない。「裁定」節): cursor 付き要求 1 回ごとに catalog を 2 回余分に読む (WP-7 で見る) / `tools/contract_catalog.py --help` が書き込む (内容は不変。道具の Known gaps 候補)。
 - **push は停止中** (GitHub 課金上限)。
 
+R-110 由来の残件:
+
+- **R-111 は継続**: R-110 の部分集合実行 (`-k "not r2db"`) でも `test_c27_same_digest_executes_once[MitateDB-api-http]` が 3/3 再現 (R-110 の変更とは無関係の経路)。
+- **観察 (起票しない) F9**: 欠陥が 2 つある要求で、拒否コードの判定順が両 peer で違う。契約は複数欠陥の優先順位を定めない (「裁定」節の R-110 レビュー F9)。
+- **観察 (起票しない)**: schema 操作 (`alter_field` / `create_index`) の未知 field / index の拒否コードが両 peer で不一致 (r2db `NOT_FOUND` / MitateDB `constraint_declaration`)。1.11.0 の規則の範囲外 (「裁定」節の R-110 起草 疑義 2)。
+
 ## 4. 依頼者判断待ち・未決
 
 - **Q-4** (main への 1 回の merge の直前の確認。監督が完了ゲートの集計行と `git diff --stat` を添えて提示): **裁定済み 2026-09-25 (逐語)**: 「Q-4 了承」— 完了ゲート `4168 passed / judge=PASS` (label p11b) と main `b283f48` に対する diff の stat (85 files, +5884 / −452)、R-111 を抱えたまま merge する旨を添えて提示した形で了承
+- **Q-4 (R-110)**: **裁定済み 2026-09-26 (逐語)**: 「Q-4 了承」— 完了ゲート `4198 passed / judge=PASS` (label r110b)、main `b9a41ef` に対する diff の stat (44 files, +744 / −105)、確定文の末尾を「at these positions」に狭めた点、R-111 / F9 / schema 操作を抱えたまま merge する旨を添えて提示した形で了承。提示では、監督が依頼者に提示した「NOT_FOUND は未知 entity / row に限る」をレビュー F1 で確定文の末尾「at these positions」に狭めたことを明示する (「R-110 (2026-09-25、同じチャット)」節)。
 - (裁定済み 2026-09-24) Q-3 / Q-5 / Q-4 の形 — §2 の 1〜2 つ目のチャットの行と「裁定」節を見よ。
 - 役割定義の `model:` の変更は不要 (`opus` 別名は 2 つ目・3 つ目のチャットで `claude-opus-5-5` に解決)。毎チャットの最初の Opus 起動で実測を報告する。
 
@@ -88,9 +96,37 @@ merge 後の残件:
 13. **MitateDB は契約 schema の `Page.size` 上限 1000 を検査していない** (`_check_object_shape` は `minimum`/`maximum` を見ない)。`max_result_rows ≥ 1001` の配備では 1001 が無検査で通る (裁定 #12)。
 14. **`opus` 別名の解決はチャットごとに違いうる** (同日に `claude-opus-5` と `claude-opus-5-5` の両方を実測)。
 
+R-110 (同じチャット) の教訓:
+
+15. **契約文の英訳は既存の契約文と突合してから確定文にする。** R-110 では「NOT_FOUND は未知 entity / row に限る」の英訳が upsert の unique_key と schema 操作の `NOT_FOUND` と両立せず、レビュー F1 で「at these positions」に狭めた。
+16. **契約が名指す位置には固定テストを置く。** mutation の where (`operations/<i>/where/<j>/field`) は共有関数で同時に変わるため作業指示書のタスクが観測を明示しておらず、レビュー F3 で両 peer の unit test と変異を足した。
+
+## R-110 (2026-09-25、同じチャット)
+
+keyset ページングの merge の後、同じチャットで R-110 を実施した。作業指示書 `docs/work-orders/WORK_ORDER_R110_UNDECLARED_FIELD_REFUSAL_V1.md` (v1.0、1 WP。規模 M なので設計文書は持たない)。
+
+| 件 | 結果 | 記録 |
+|---|---|---|
+| 依頼者裁定 (逐語) | 「A で 1.11.0、規模 M で進めてください」。A = 未宣言 field 名の拒否を両 peer で `VALIDATION_FAILED` / `violated_declaration: request_schema` / `field` = 位置 path に揃える。位置は 5 つ (`select/<i>`、`where/<i>/field`、`order_by/<i>/field`、`operations/<i>/values/<name>`、`operations/<i>/where/<j>/field`)。`declared_type`・`observed_type` は載せない。これらの位置で `NOT_FOUND` は非適合 (「at these positions」)。schema 操作は範囲外 | 作業指示書 §1、§4 訂正註 1 |
+| 規模・クラス | 規模 S → **M** (契約版 1.11.0 と新条件 C-31 を伴うため)。**Class D** | 作業指示書 §0 |
+| 契約 1.11.0 | 従属判断 16。`errors.details_vocabulary.undeclared_field` を新設、`versioning.version_binding` に 1.11.0 の段落、`versioning.obligations` [9] (無条件 1 件)。旧い遡及行と 1.9.0 / 1.10.0 の段落は触らない | `spec/CCR_DISPOSITION.md` 16、`spec/CONTRACT_HISTORY.md` Revision note 7 |
+| C-31 | 4 位置 (select / where / order_by / values) × 6 plug = 24 node。非空振り = 同じ要求で未宣言名だけを宣言 field に替えた成功脚 | `conformance-tests/test_c31_undeclared_field_refusal.py` |
+| r2db-api | 5 位置とも `NOT_FOUND` (details なし) → `VALIDATION_FAILED` / `request_schema` / 位置 path。旧い `NOT_FOUND` の由来は `R2DB_CCR13_STORAGE_V1.md` の訂正記録 m-6 (同文書末尾に訂正註。本文は不変) | `mutation_binding.py`、`paging.py` |
+| MitateDB-api | select の path を `select/<名前>` → `select/<i>` (wire で見える)。where / order_by / values は既に目標の形 | `cell.py` の `_select_fields`、`test_select_unknown_field_names_its_index` |
+| 両 peer の unit test | mutation の where の path を固定 (`test_undeclared_field_in_a_mutation_where_predicate_names_the_position`、変異 RV1 / RV1-m 赤) | 両 peer の `tests/test_denial_details_and_request_id.py` |
+| 宣言 | 両 peer の data 面・control 面を同じ commit で 1.11.0 に | — |
+| `security/CONTROL_MAPPING.md` | **3.4** (SI-10 の Common の Evidence に C-31 の 2 行。新しい不変条件・Control claim なし) | — |
+| 台帳 | **v1.122** (R-110 閉止。§0.1.1 契約 1.11.0 / C-00〜C-31 の 32 件、§0.1.2 の「判定を受ける」段に C-31) | `RM` の R-110 行 |
+| 変異 | 32 件すべて期待どおり (M22 は expect green、1 xfailed) | 作業指示書 §5 |
+| 完了ゲート | `gate: 4198 passed, 2 subtests passed in 330.17s (0:05:30)`、judge=PASS、pg_database/pg_roles diff 0、label r110b (最終ツリー。監査追記前の r110 は 4198 passed in 349.99s、judge=PASS) | 作業指示書 §5 |
+| 受け入れ監査 | 受け入れ監査 (opus、2026-09-25): 33 条件中 充足 31、未充足 2 (30 = provenance --base は code 変更 WP では (5) 0 と --register OK と読む (訂正註)、31 = R-111 の C-27 flake 4/4、完了ゲート全体は緑)、証拠不足 0; 10 位置の path を in-process で実測し契約の位置規則と一致; 監査変異 6/6 期待どおり; 観察 O1〜O5 は同じ変更セットで対応 (O5 は既知の穴) | 「裁定」節 |
+| Q-4 | **裁定済み 2026-09-26 (逐語)**: 「Q-4 了承」— 完了ゲート `4198 passed / judge=PASS` (label r110b)、main `b9a41ef` に対する diff の stat (44 files, +744 / −105)、確定文の末尾を「at these positions」に狭めた点、R-111 / F9 / schema 操作を抱えたまま merge する旨を添えて提示した形で了承 | §4 |
+
+**確定文の狭め (Q-4 で明示する)**: 監督が依頼者に提示した「NOT_FOUND は未知 entity / row に限る」(作業指示書 §1 の 1) は、レビュー F1 で契約の既存文 (upsert の unique_key、schema 操作の `NOT_FOUND`) と両立しないと分かった。確定文 §1 の末尾を「NOT_FOUND is not a conforming refusal of an undeclared field name at these positions.」に狭めた (A の 5 位置は保つ)。
+
 ## 裁定
 
-全件を載せる (`docs/work-orders/OPERATING_CONDITIONS.md` §1.15 の 77)。1〜2 つ目のチャットの行は前の版の本書のまま残す (番号は振り直し前の仮番号。「未裁定」の行は本チャットの行で裁定した)。本チャットの行は「WP-4 実装担当の逸脱 1」以降で、出所は監督チャットの scratchpad の `rulings-wp4.md` (WP-4 実装報告への裁定)・`rulings-wp4-review.md` (WP-4 コードレビューと再実測)・`rulings-wpm.md` (main 取り込みのレビュー)・`rulings-wp6.md` (WP-6 のレビューと実装報告) の逐語である。`rulings-wp4.md` の逸脱 1〜7 は `rulings-wp4-review.md` の表が同じ裁定を結果込みで再掲しているので後者を載せ、前者からは逸脱 8 と疑義 1〜3 の行だけを足した。
+全件を載せる (`docs/work-orders/OPERATING_CONDITIONS.md` §1.15 の 77)。1〜2 つ目のチャットの行は前の版の本書のまま残す (番号は振り直し前の仮番号。「未裁定」の行は本チャットの行で裁定した)。本チャットの行は「WP-4 実装担当の逸脱 1」以降で、出所は監督チャットの scratchpad の `rulings-wp4.md` (WP-4 実装報告への裁定)・`rulings-wp4-review.md` (WP-4 コードレビューと再実測)・`rulings-wpm.md` (main 取り込みのレビュー)・`rulings-wp6.md` (WP-6 のレビューと実装報告) の逐語である。`rulings-wp4.md` の逸脱 1〜7 は `rulings-wp4-review.md` の表が同じ裁定を結果込みで再掲しているので後者を載せ、前者からは逸脱 8 と疑義 1〜3 の行だけを足した。R-110 の行 (「R-110 起草 疑義 1」以降) の出所は `rulings-r110-wo.md` (作業指示書 v1.0 起草担当の疑義 8 件)・`rulings-r110-review.md` (コードレビュー 9 件) の逐語と、実装担当の逸脱 (a)〜(d) への裁定 (採用) である。
 
 | 指摘 | 裁定 | 理由 |
 |---|---|---|
@@ -228,3 +264,33 @@ merge 後の残件:
 | 監査 観察 4: 記述と実物のずれ 5 件 | 直した | — |
 | 監査 疑義: WP-7 の基準値の選択 (§2.3 vs フェーズ9) | 観察 (どちらでも判定は変わらない。§11 に両論を記録済み) | — |
 | 監査 疑義: WP-3 の完了条件 4 (2 本目の field_domains 直接呼び出し) | 直した (§11 に理由を記録) | — |
+| R-110 起草 疑義 1 (M22 の形) | M22 (宣言を戻す + 本体変異、expect green、-rxX で XFAIL 照合) の形: 採用。宣言は M23 (C-19) が押さえる。 | `rulings-r110-wo.md` |
+| R-110 起草 疑義 2 (範囲) | 範囲: 確定文 §1 を改めた — mutation の where (`operations/<i>/where/<j>/field`) を明示的に含め、schema 操作 (alter_field / create_index の未知 field) は範囲外と明記。§2 の「wherever a request carries one」は「at any of the positions errors.details_vocabulary.undeclared_field names」に狭めた。schema 操作の不一致 (r2db NOT_FOUND / MitateDB constraint_declaration) は引き継ぎ書に観察として残す (起票しない: 利用者は catalog を読んで宣言 field を知り、終了条件を破らない)。C-31 の観測は 4 位置のまま (mutation の where は共有関数で同時に変わる。追加観測は任意)。 | `rulings-r110-wo.md` |
+| R-110 起草 疑義 3 (C-07 の docstring と C-21 の注釈) | C-07 の docstring と C-21 の条件付き assert の注釈: 触ってよいパスに加え、事実に合わせて更新する (assert を弱めない。C-21 の `if code == "VALIDATION_FAILED"` はそのままでよいが注釈を 1.11.0 の事実に)。 | `rulings-r110-wo.md` |
+| R-110 起草 疑義 4 (MitateDB の select の path の固定) | MitateDB の select の path を固定する unit test: 新設を認める (既存の details テストの隣に)。 | `rulings-r110-wo.md` |
+| R-110 起草 疑義 5 (監査照合の記録先) | 監査照合の記録は作業指示書 §5: 採用。 | `rulings-r110-wo.md` |
+| R-110 起草 疑義 6 (C-31 行の Invariants 欄) | C-31 行の Invariants 欄: C-21 (details vocabulary) の行と同じ値 + SI-10。 | `rulings-r110-wo.md` |
+| R-110 起草 疑義 7 (行番号) | 行番号は実測値と関数名で: 採用。 | `rulings-r110-wo.md` |
+| R-110 起草 疑義 8 (`tools/tests` の静的 pin) | tools/tests の静的 pin: 赤になったら本変更セットで追随してよい (触ってよいパスに加える。規則は緩めない)。 | `rulings-r110-wo.md` |
+| R-110 実装担当 逸脱 (a) C-31 に details の key 集合の等号 assert を足した (完了条件 21 を検出するため) | 採用 | — |
+| R-110 実装担当 逸脱 (b) 両 peer の配布 `OPERATION_CATALOG.json` へ再生成物を copy (触ってよいパスに明記なし。byte 同一テストを緑に保つため) | 採用 | — |
+| R-110 実装担当 逸脱 (c) `check_comment_provenance --base` の §4.1 (1)/(2) を構造的副作用として報告し CH-ID は新設しない (件数はレビュー F4 で 4 → 6 件に訂正) | 採用 | — |
+| R-110 実装担当 逸脱 (d) R-111 の flake で `-k "not r2db"` を 2 回で止めた (差し戻し後の実行で 3 回目も同一) | 採用 | — |
+| R-110 レビュー F1 確定文の末尾「NOT_FOUND ... reserved for an entity or row」が upsert の unique_key (C-17 (j)) と schema 操作の NOT_FOUND に衝突 | 直した (確定文を「NOT_FOUND is not a conforming refusal of an undeclared field name at these positions.」に狭めた。監督が依頼者に提示した「NOT_FOUND は未知 entity / row に限る」は契約の既存文と両立しないので、A の実体 (5 位置) を保って範囲を狭めた。Q-4 で明示) | 公開後は版上げ無しに直せない |
+| R-110 レビュー F2 C-31 の values 脚が帰属を示さない | 直した (entity {a,b}、成功脚 2 key、RV3 相当の変異) | 非空振り |
+| R-110 レビュー F3 mutation の where の path を固定するテストが無い | 直した (両 peer の unit test + 変異) | G-2/G-3。契約が名指す位置には固定が要る |
+| R-110 レビュー F4 §5 の記録欠落 (8 / 22 / 27 / 33、30 の件数) | 直した | — |
+| R-110 レビュー F5 Revision note 7 の要旨 3 点欠落 | 直した | MitateDB の path 変更は wire で見える |
+| R-110 レビュー F6 台帳 R-110 行の形式 (【追記】の欄、`gate: 4198 passed, 2 subtests passed in 330.17s (0:05:30)`、judge=PASS、pg_database/pg_roles diff 0、label r110b (最終ツリー。監査追記前の r110 は 4198 passed in 349.99s、judge=PASS)、秒数) | 直した (GATE_LINE は監督が完了ゲート後に埋める) | — |
+| R-110 レビュー F7 src comment の経緯語・裁定名 | 直した | §2.4 の 13 |
+| R-110 レビュー F8 docstring の SI 列と CM 行の node 参照 | 直した (SI-05, SI-10; CM 行に 4 node) | — |
+| R-110 レビュー F9 欠陥が 2 つある要求で両 peer の拒否コードが割れる (判定順) | **観察** (契約は複数欠陥の優先順位を定めない。既存の LIMIT_EXCEEDED / values-where の順の割れと同種。利用者は要求を 1 欠陥ずつ直せる。終了条件を破らない) | 引き継ぎ書に残す |
+| R-110 監査 未充足 30 (provenance --base が緑でない: (1) 7 / (2) 6 / (5) 0) | 観察 → 作業指示書 §4 に訂正註 (コード変更を伴う WP では (5) 履歴語 0 と --register OK を条件と読む。keyset の WP-2 以来の同じ読み替え) | 検査器は comment だけの変更向け |
+| R-110 監査 未充足 31 (部分集合 "not r2db" の C-27 MitateDB-http、4/4) | 起票済み R-111 (頻度を追記)。完了ゲート全体は緑。抱えたまま merge (Q-4 で明示) | — |
+| R-110 監査 疑義 (2) src comment の「subordinate ruling 16」 | 観察 (契約本文が引く識別子。裁定名ではない) | 先例あり |
+| R-110 監査 疑義 (3) C-31 Condition 文「the four positions the contract names」(契約は 5 位置) | 直した (確定文 §4 を「four of the five positions ... the fifth ... pinned by each peer's own unit test」に) | 監督の文の誤り |
+| R-110 監査 O1 r2db comment が F1 で外した「reserved for a missing entity or row」を主張 | 直した | 保守者が C-17 (j) を壊しうる |
+| R-110 監査 O2 mutation の operation index <i> を固定するテストが無い (op 0 のみ) | 直した (C-31 の values 脚を 2 operation にし、2 つ目に未宣言名 → operations/1/values/<name>; 変異 AU-6 相当を赤に) | 非空振り |
+| R-110 監査 O3 記録の細かなずれ 3 点 | 直した | — |
+| R-110 監査 O4 MitateDB の宣言 comment のずれ 3 点 (code-history も) | 直した | — |
+| R-110 監査 O5 CONDITIONS.md の Invariants 欄はどの register も読まない | 既知の穴 (§1.12 の 71: test_conditions_register.py の docstring Known gaps に 1 行。製品欠陥は通らない、監査照合が受け止める) | — |

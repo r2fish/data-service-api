@@ -298,3 +298,7 @@ blocker 2・major 4群・minor 数件。SQL 合成面 (識別子二段階防御�
 - catalog への field 型の公開 (AI エージェントが discovery で型を知る手段)
 - create_entity での区分選択・一括型指定 (必要が実証されたら)
 - 大文字小文字を区別しない比較演算子 (必要が実証されたら)
+
+## 13. 訂正註
+
+**訂正註 (2026-09-25、R-110、本文は書き換えない)**: §1 の `order_by` の行と §8 の m-6 が記す `NOT_FOUND` は、契約 1.11.0 (従属判断 16、`errors.details_vocabulary.undeclared_field`) により覆された -- `order_by` を含む select/where/order_by/mutation values の 4 位置の未宣言 field 名の拒否は、両 peer とも `VALIDATION_FAILED`/`violated_declaration: request_schema`/位置 path に統一された (`r2db-api/src/r2db_api/paging.py`の`_resolve_order_by`)。本節より上の本文 (§1・§8 を含む) は当時の記述として変えない。
