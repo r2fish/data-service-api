@@ -26,13 +26,22 @@ Never reads psycopg's own private `_prepared`/`_counts`/`_names` attributes
 anywhere in this file (work order §1.1 (e))."""
 from __future__ import annotations
 
+import ast
+import inspect
 import os
+import secrets
+import textwrap
 
+import psycopg
 import pytest
+from psycopg import sql
 from psycopg.pq import TransactionStatus
 
+from mitatedb_api.application_audit import PostgresApplicationAuditSink
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.cell import ApplicationCell
+from mitatedb_api.credential_store_postgres import PostgresCredentialStore
+from mitatedb_api.errors import AuthorizationStateUnavailable
 from mitatedb_api.pool import BoundedConnectionPool
 from mitatedb_api.psycopg_counting import CountingConnection, probe_prepared_statements
 
@@ -306,3 +315,177 @@ def test_probe_truncates_statement_text_to_80_characters():
         assert stmt == _LONG_QUERY[:80]
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------
+# R-101 WP-1: MitateDB's own per-call (no-pool) platform DB-time folding
+# -- `credential_store_postgres.PostgresCredentialStore`/`application_
+# audit.PostgresApplicationAuditSink`, both `CountingConnection`-backed
+# per-call connections mirroring `_RolePool`'s own pooled fold (tested
+# directly against `r2db-api/tests/test_r79_prepared_stats.py`).
+# ---------------------------------------------------------------------
+
+_R101_PEPPER = "r101-platform-stats-test-pepper-value"
+
+
+def test_credential_store_authenticate_increases_platform_session_and_wall_stats():
+    """Completion condition 20 (訂正 2026-09-26, 作業指示書 §6.1 の 1):
+    calling `authenticate` once increases the store's own `platform_
+    stats()` -- `sessions` by exactly 1, `connect_wall_ms` and `db_wall_
+    ms` by more than 0, `txn_count` stays at 0 -- observed against a real
+    PostgreSQL connect + query attempt, whether or not the `credentials`/
+    `applications` tables exist at the target DSN (`authenticate` fails
+    closed either way; the connect and the query attempt both still
+    happen and both still count, since the fold runs in a `finally`).
+    `txn_count` stays 0 because `authenticate`'s own body is a single
+    read-only `SELECT`, with no `commit()`/`rollback()` call anywhere on
+    its own path -- the per-call connection closes without ever sending
+    either.
+
+    mutation M19 (`credential_store_postgres.py`): drop the `_fold_
+    closed_connection_stats` call from `_borrow_connection`'s no-pool
+    branch -- this test's own `db_wall_ms > 0` assertion goes red (stays
+    at 0, since the closed connection's own total is never folded in)."""
+    store = PostgresCredentialStore(_admin_dsn(), pepper=_R101_PEPPER, schema="public")
+    before = store.platform_stats()
+    assert before == {"sessions": 0, "connect_wall_ms": 0.0, "db_wall_ms": 0.0, "txn_count": 0, "db_calls": 0}
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.authenticate("r101-probe-id.r101-probe-secret")
+    after = store.platform_stats()
+    assert after["sessions"] == 1
+    assert after["connect_wall_ms"] > 0
+    assert after["db_wall_ms"] > 0
+    assert after["txn_count"] == 0
+    assert after["db_calls"] >= 1
+
+
+def test_application_audit_sink_append_increases_platform_stats():
+    """Completion condition 21: calling `append` once increases the
+    sink's own `platform_stats()` -- `sessions` by exactly 1, `db_wall_
+    ms` and `txn_count` by more than 0 (the INSERT's own real `commit()`
+    is what raises `txn_count`) -- against a real, successfully written
+    PostgreSQL row on a throwaway schema/table this test creates and drops
+    (same column set as migration `0005_application_audit.sql`, minus the
+    defaulted `audit_seq`/`recorded_at`).
+
+    mutation M20 (`application_audit.py`): drop the `_fold_closed_
+    connection_stats` call from `append`'s own `finally` block -- this
+    test's own `db_wall_ms > 0` assertion goes red first (stays at 0;
+    `txn_count > 0`, asserted right after it, would go red too)."""
+    schema = f"r101appaud{secrets.token_hex(4)}"
+    admin = psycopg.connect(_admin_dsn(), autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            cur.execute(sql.SQL(
+                "CREATE TABLE {} (audit_seq bigserial, event_id text PRIMARY KEY, "
+                "event_class text NOT NULL, occurred_at timestamptz NOT NULL, request_id text, "
+                "application_id text, actor_type text, actor_id text, role text, "
+                "operation text NOT NULL, target_kind text, outcome text NOT NULL, "
+                "reason_code text, target_id text, count integer)"
+            ).format(sql.Identifier(schema, "application_audit")))
+        sink = PostgresApplicationAuditSink(_admin_dsn(), schema=schema)
+        before = sink.platform_stats()
+        assert before == {"sessions": 0, "connect_wall_ms": 0.0, "db_wall_ms": 0.0, "txn_count": 0, "db_calls": 0}
+        sink.append(
+            event_class="probe", request_id=None, application_id=None, actor_type=None,
+            actor_id=None, role=None, operation="r101_probe", target_kind=None, outcome="ok",
+        )
+        after = sink.platform_stats()
+        assert after["sessions"] == 1
+        assert after["connect_wall_ms"] > 0
+        assert after["db_wall_ms"] > 0
+        assert after["txn_count"] > 0
+        assert after["db_calls"] == 1
+    finally:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        admin.close()
+
+
+def _self_attr(node: ast.AST, attr: str) -> bool:
+    """`True` iff `node` is exactly the attribute access `self.<attr>`."""
+    return isinstance(node, ast.Attribute) and node.attr == attr and isinstance(node.value, ast.Name) and node.value.id == "self"
+
+
+def _find_with_lock_body(tree: ast.AST, *, lock_attr: str) -> "list[ast.stmt] | None":
+    """The `body` of the first `with self.<lock_attr>:` statement found
+    anywhere in `tree`, or `None` if there is no such statement at all."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if _self_attr(item.context_expr, lock_attr):
+                    return node.body
+    return None
+
+
+def _body_contains(body: "list[ast.stmt]", predicate) -> bool:
+    """`True` iff any statement in `body` (searched recursively) contains
+    a node matching `predicate`."""
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if predicate(node):
+                return True
+    return False
+
+
+def test_platform_stats_fold_is_lexically_inside_the_platform_stats_lock():
+    """Completion condition 26 (守る条件 (b)): `PostgresCredentialStore.
+    _fold_closed_connection_stats`'s three accumulator increments (`self.
+    _platform_db_wall_ms += db_wall_ms`, `self._platform_txn_count +=
+    txn_count`, `self._platform_db_calls += db_calls`) must be lexically
+    inside the SAME `with self._platform_stats_lock:` block. A source-shape
+    pin, not a running-thread race: a 32-thread x 1000-iteration `sys.
+    setswitchinterval(1e-6)` trial against this same method, run with the
+    lock actually removed, still passed -- CPython's GIL does not
+    reliably turn this unguarded accumulate into an observable lost update
+    at this call rate, mirroring this repository's own prior finding for a
+    different check-then-act race (`r2db-api/tests/test_threadpool_
+    offload.py`, item 6's own header comment) -- so this deterministic AST
+    pin is used instead.
+
+    mutation M64 (`credential_store_postgres.py`): drop the `with self.
+    _platform_stats_lock:` around the three accumulator additions in `_fold_
+    closed_connection_stats` -- this test's own assertions go red (the
+    three `AugAssign` nodes are no longer inside any `with self._platform_
+    stats_lock:` block)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(PostgresCredentialStore._fold_closed_connection_stats)))
+    body = _find_with_lock_body(tree, lock_attr="_platform_stats_lock")
+    assert body is not None, "no `with self._platform_stats_lock:` block found in `_fold_closed_connection_stats`"
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_wall_ms") and isinstance(n.op, ast.Add)), (
+        "the db_wall_ms accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_txn_count") and isinstance(n.op, ast.Add)), (
+        "the txn_count accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_calls") and isinstance(n.op, ast.Add)), (
+        "the db_calls accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+
+
+def test_audit_sink_fold_is_lexically_inside_the_platform_stats_lock():
+    """Completion condition 26 (守る条件 (b)): `PostgresApplicationAuditSink.
+    _fold_closed_connection_stats`'s three accumulator increments (`self.
+    _platform_db_wall_ms += db_wall_ms`, `self._platform_txn_count +=
+    txn_count`, `self._platform_db_calls += db_calls`) must be lexically
+    inside the SAME `with self._platform_stats_lock:` block, mirroring the
+    credential store's own pin above (both classes fold a closed
+    connection's counters the same way, under a statistics-only lock).
+
+    mutation M64b (`application_audit.py`): drop the `with self.
+    _platform_stats_lock:` around the three accumulator additions in `_fold_
+    closed_connection_stats` -- this test's own assertions go red (the
+    three `AugAssign` nodes are no longer inside any `with self._platform_
+    stats_lock:` block)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(PostgresApplicationAuditSink._fold_closed_connection_stats)))
+    body = _find_with_lock_body(tree, lock_attr="_platform_stats_lock")
+    assert body is not None, "no `with self._platform_stats_lock:` block found in `_fold_closed_connection_stats`"
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_wall_ms") and isinstance(n.op, ast.Add)), (
+        "the db_wall_ms accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_txn_count") and isinstance(n.op, ast.Add)), (
+        "the txn_count accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_calls") and isinstance(n.op, ast.Add)), (
+        "the db_calls accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )

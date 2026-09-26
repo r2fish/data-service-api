@@ -92,6 +92,7 @@ import json
 import math
 import os
 import platform
+import resource
 import subprocess
 import sys
 import time
@@ -729,16 +730,50 @@ def _replay_factory(adapter_obj: "ConformanceAdapter", request: Any) -> Callable
     return _send_one
 
 
+def _capture_dbtime_pre(adapter_obj: Any) -> "dict | None":
+    """One PRE snapshot, taken by `_measure_op` right after warmup and
+    right before the measured `_run_concurrent` call, on both branches.
+    `None` when `adapter_obj` has no `prepared_stats` (every plug this
+    tool does not add DBTIME to -- mirrors `_emit_prepared_rows`'s own
+    identical skip): no `prepared_stats()`/`platform_db_time_stats()`
+    call is attempted at all in that case. Otherwise this is the ONE
+    `prepared_stats()` call this function itself makes; the POST half is
+    a separate, later call from `_emit_measurement_rows` (never this
+    function) -- together exactly 2 per op without `--roundtrip`, 3 with
+    it (`_roundtrip_pre_probe`'s own PRE call is the third, taken before
+    this one, in `_measure_op_and_emit`)."""
+    prepared_stats = getattr(adapter_obj, "prepared_stats", None)
+    if prepared_stats is None:
+        return None
+    conn_stats = prepared_stats()
+    platform_db_time_stats = getattr(adapter_obj, "platform_db_time_stats", None)
+    platform_stats = platform_db_time_stats() if platform_db_time_stats is not None else None
+    return {"conn_stats": conn_stats, "platform_stats": platform_stats}
+
+
 def _measure_op(
     fn: Callable[[], None], *, warmup: int, n: int, concurrency: int, counter: _CallCounter, adapter_obj: "ConformanceAdapter",
-) -> tuple[list[float], list[float]]:
+) -> tuple[list[float], list[float], dict]:
     """Measures one (plug, op): `n` samples, each a GROUP of `concurrency`
     simultaneous requests dispatched via `_run_concurrent`, preceded by
     `warmup` such groups (not timed, not counted). Returns `(durations_
-    ms, calls)`, one entry per sample -- `n` of each, never the raw `--n`/
-    `--warmup` CLI arguments echoed through (WP-5 rework ruling item 1,
-    unchanged by WP-7: `len(durations_ms)` IS the `n=` a printed row
-    carries).
+    ms, calls, measured)`, `durations_ms`/`calls` one entry per sample --
+    `n` of each, never the raw `--n`/`--warmup` CLI arguments echoed
+    through (WP-5 rework ruling item 1, unchanged by WP-7: `len(durations_
+    ms)` IS the `n=` a printed row carries).
+
+    `measured` is a plain dict -- `wall_ms` (the
+    sum of the MEASURED group durations only, never warmup's), `cpu_
+    total_ms`/`cpu_main_ms` (`resource.getrusage(RUSAGE_SELF)`'s own
+    `ru_utime + ru_stime` and `time.thread_time()`, each a difference
+    taken strictly around the measured `_run_concurrent` call below, never
+    warmup's), and `dbtime_pre` (`_capture_dbtime_pre`'s own return value,
+    taken at that same boundary: after warmup, before measured). Both
+    reads are taken on THIS process/thread regardless of which branch
+    runs below -- the real-loop branch's own `adapter_obj._loop.run_
+    until_complete` and the trivial-loop branch's own `asyncio.new_event_
+    loop()` both still execute on the SAME OS thread this function itself
+    runs on.
 
     Two dispatch shapes, chosen by whether `adapter_obj` has a real event
     loop of its own (see this section's own module-level comment):
@@ -755,12 +790,24 @@ def _measure_op(
         ]
         _run_concurrent(adapter_obj._loop, warmup_groups)  # noqa: SLF001 -- discard timings/calls
 
+        dbtime_pre = _capture_dbtime_pre(adapter_obj)
+
         measured_requests = [_capture_one_request(adapter_obj, fn) for _ in range(n * concurrency)]
         measured_groups = [
             [_replay_factory(adapter_obj, r) for r in measured_requests[i : i + concurrency]]
             for i in range(0, len(measured_requests), concurrency)
         ]
+        # CPU reads start HERE, after every measured request's own capture
+        # (`_capture_one_request`, main-thread work building the request
+        # object) has already happened -- never before it: a capture is
+        # not part of the measured window, so its own CPU must not land in
+        # `cpu_total_ms`/`cpu_main_ms` either.
+        cpu_before = resource.getrusage(resource.RUSAGE_SELF)
+        thread_before = time.thread_time()
         durations, group_calls = _run_concurrent(adapter_obj._loop, measured_groups, counter=counter)  # noqa: SLF001
+
+        thread_after = time.thread_time()
+        cpu_after = resource.getrusage(resource.RUSAGE_SELF)
     else:
 
         def _trivial_factory() -> Any:
@@ -773,11 +820,34 @@ def _measure_op(
         try:
             warmup_groups = [[_trivial_factory for _ in range(concurrency)] for _ in range(warmup)]
             _run_concurrent(loop, warmup_groups)
+
+            dbtime_pre = _capture_dbtime_pre(adapter_obj)
+
             measured_groups = [[_trivial_factory for _ in range(concurrency)] for _ in range(n)]
+            # Same boundary as the real-loop branch above (CPU reads right
+            # before the measured `_run_concurrent` call, after the
+            # measured groups are already built) -- an in_process plug's
+            # own group construction is trivial (bare closure references),
+            # so both branches read CPU at the same boundary, keeping
+            # their own shapes aligned.
+            cpu_before = resource.getrusage(resource.RUSAGE_SELF)
+            thread_before = time.thread_time()
             durations, group_calls = _run_concurrent(loop, measured_groups, counter=counter)
+
+            thread_after = time.thread_time()
+            cpu_after = resource.getrusage(resource.RUSAGE_SELF)
         finally:
             loop.close()
-    return _rows_from_groups(durations, group_calls, concurrency)
+    rows_durations, rows_calls = _rows_from_groups(durations, group_calls, concurrency)
+    cpu_total_ms = ((cpu_after.ru_utime + cpu_after.ru_stime) - (cpu_before.ru_utime + cpu_before.ru_stime)) * 1000.0
+    cpu_main_ms = (thread_after - thread_before) * 1000.0
+    measured = {
+        "wall_ms": sum(durations),
+        "cpu_total_ms": cpu_total_ms,
+        "cpu_main_ms": cpu_main_ms,
+        "dbtime_pre": dbtime_pre,
+    }
+    return rows_durations, rows_calls, measured
 
 
 def _row(
@@ -821,6 +891,28 @@ def _format_row(row: dict) -> str:
         f"op={row['op']} n={row['n']} p50_ms={row['p50_ms']:.3f} "
         f"p95_ms={row['p95_ms']:.3f} backend_calls={row['backend_calls']:.2f} "
         f"concurrency={row['concurrency']}"
+    )
+
+
+def _format_cpu_row(peer: str, plug: str, op: str, m: dict) -> str:
+    """One `CPU` line per (plug, op) -- always the FIRST line of that op's
+    own block (before `POOL`/`DBTIME`/`PREPARED`/`ROUNDTRIP`). `m` is the
+    `measurement` dict `_measure_op_and_emit` builds: `concurrency`,
+    `thread_limit` (already resolved to the literal string `"default"`
+    when the plug's own `perf_thread_limit()` is absent or returns
+    `None`), `requests` (measured requests only, `n * concurrency`),
+    `wall_ms` (the measured group durations' own sum), `cpu_total_ms`/
+    `cpu_main_ms` (`resource.getrusage`/`time.thread_time` differences
+    around that same measured window). `cpu_other_ms` is computed here,
+    not stored in `m`: `cpu_total_ms - cpu_main_ms`, the CPU this process
+    spent OUTSIDE the calling thread (anyio worker threads, or a socket
+    plug's own uvicorn thread)."""
+    cpu_other_ms = m["cpu_total_ms"] - m["cpu_main_ms"]
+    return (
+        f"CPU peer={peer} plug={plug} op={op} concurrency={m['concurrency']} "
+        f"thread_limit={m['thread_limit']} requests={m['requests']} "
+        f"wall_ms={m['wall_ms']:.3f} cpu_total_ms={m['cpu_total_ms']:.3f} "
+        f"cpu_main_ms={m['cpu_main_ms']:.3f} cpu_other_ms={cpu_other_ms:.3f}"
     )
 
 
@@ -875,6 +967,91 @@ def _emit_pool_rows(peer: str, plug: str, op: str, adapter_obj: Any) -> None:
         print(_format_pool_row(peer, plug, op, key, stats))
 
 
+def _format_dbtime_app_row(
+    peer: str, plug: str, op: str, concurrency: int, requests: int, conns: int, gone: int, db_calls: int, txns: int, db_wall_ms: float,
+) -> str:
+    """One `DBTIME ... scope=app` line: the application-database round
+    trips a measured window's own connections spent, from the PRE/POST
+    difference of `prepared_stats()` (`db_wall_ms`/`txn_count`, matched by
+    connection `label`)."""
+    return (
+        f"DBTIME peer={peer} plug={plug} op={op} concurrency={concurrency} scope=app "
+        f"conns={conns} gone={gone} db_calls={db_calls} txns={txns} "
+        f"db_wall_ms={db_wall_ms:.3f} db_wall_ms_per_req={_per_request(db_wall_ms, requests):.3f}"
+    )
+
+
+def _format_dbtime_platform_row(
+    peer: str, plug: str, op: str, concurrency: int, requests: int,
+    sessions: int, connect_wall_ms: float, db_calls: int, txns: int, db_wall_ms: float,
+) -> str:
+    """One `DBTIME ... scope=platform` line: the platform-side (credential
+    store / durable audit sink) round trips, from the PRE/POST difference
+    of `platform_db_time_stats()`. `db_calls` is the PRE/POST delta of the
+    platform accessor's own `execute_count + executemany_count` sum (the
+    same pair `scope=app` diffs per connection, folded here across every
+    platform-side connection instead). `db_wall_ms_per_req` divides by
+    `db_wall_ms + connect_wall_ms`, folding the connect cost into the same
+    per-request denominator `scope=app` uses for its own round-trip-only
+    wall time."""
+    return (
+        f"DBTIME peer={peer} plug={plug} op={op} concurrency={concurrency} scope=platform "
+        f"sessions={sessions} connect_wall_ms={connect_wall_ms:.3f} db_calls={db_calls} txns={txns} "
+        f"db_wall_ms={db_wall_ms:.3f} db_wall_ms_per_req={_per_request(db_wall_ms + connect_wall_ms, requests):.3f}"
+    )
+
+
+def _emit_dbtime_rows(
+    peer: str, plug: str, op: str, measurement: dict, post_conn_stats: "list[dict]", post_platform_stats: "dict | None",
+) -> None:
+    """Prints `DBTIME scope=app` (always, when reached at all -- see
+    `_emit_measurement_rows`'s own `prepared_stats` gate) and `DBTIME
+    scope=platform` (only when `post_platform_stats` is not `None`, i.e.
+    `adapter_obj` also has `platform_db_time_stats`). `scope=app`'s own
+    `conns=`/`gone=`/`db_calls=`/`txns=`/`db_wall_ms=` are all PRE/POST
+    differences matched by connection `label` -- a label present only in
+    the POST snapshot (a connection opened during the measured window)
+    treats its own PRE value as 0 (never carried over from a different
+    label); a label present only in the PRE snapshot (a connection closed
+    during the window) counts toward `gone=` and contributes nothing to
+    the sums."""
+    dbtime_pre = measurement["dbtime_pre"]
+    pre_conn_stats = (dbtime_pre or {}).get("conn_stats") or []
+    pre_by_label = {c["label"]: c for c in pre_conn_stats}
+    post_labels = {c["label"] for c in post_conn_stats}
+    gone = sum(1 for label in pre_by_label if label not in post_labels)
+    db_calls = 0
+    txns = 0
+    db_wall_ms = 0.0
+    for c in post_conn_stats:
+        pre = pre_by_label.get(c["label"])
+        pre_calls = (pre["execute_count"] + pre["executemany_count"]) if pre is not None else 0
+        db_calls += (c["execute_count"] + c["executemany_count"]) - pre_calls
+        # `.get(..., 0/0.0)`, not `[...]`: a stub `prepared_stats()` result
+        # (any `tools/tests/test_perf_baseline.py` fixture that omits
+        # `db_wall_ms`/`txn_count`) carries neither key -- reads as 0/0.0
+        # rather than raising `KeyError`, exactly like a fresh connection
+        # with no traffic yet would.
+        txns += c.get("txn_count", 0) - (pre.get("txn_count", 0) if pre is not None else 0)
+        db_wall_ms += c.get("db_wall_ms", 0.0) - (pre.get("db_wall_ms", 0.0) if pre is not None else 0.0)
+    print(_format_dbtime_app_row(
+        peer, plug, op, measurement["concurrency"], measurement["requests"], len(post_conn_stats), gone, db_calls, txns, db_wall_ms,
+    ))
+    if post_platform_stats is not None:
+        pre_platform = (dbtime_pre or {}).get("platform_stats") or {
+            "sessions": 0, "connect_wall_ms": 0.0, "db_wall_ms": 0.0, "txn_count": 0, "db_calls": 0,
+        }
+        sessions = post_platform_stats["sessions"] - pre_platform["sessions"]
+        connect_wall_ms = post_platform_stats["connect_wall_ms"] - pre_platform["connect_wall_ms"]
+        platform_txns = post_platform_stats["txn_count"] - pre_platform["txn_count"]
+        platform_db_wall_ms = post_platform_stats["db_wall_ms"] - pre_platform["db_wall_ms"]
+        platform_db_calls = post_platform_stats.get("db_calls", 0) - pre_platform.get("db_calls", 0)
+        print(_format_dbtime_platform_row(
+            peer, plug, op, measurement["concurrency"], measurement["requests"],
+            sessions, connect_wall_ms, platform_db_calls, platform_txns, platform_db_wall_ms,
+        ))
+
+
 def _format_prepared_row(peer: str, plug: str, op: str, conn_stats: dict) -> str:
     """R-79 (WO §1.2 D-3): one `PREPARED` line for one connection-shaped
     dict `<adapter>.prepared_stats()` returns (11 keys, WO §1.2 D-2).
@@ -918,7 +1095,9 @@ def _format_prepstmt_row(peer: str, plug: str, op: str, conn_label: str, stmt: d
     )
 
 
-def _emit_prepared_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, detail: bool) -> "list[dict] | None":
+def _emit_prepared_rows(
+    peer: str, plug: str, op: str, adapter_obj: Any, *, detail: bool, conn_stats: "list[dict] | None" = None,
+) -> "list[dict] | None":
     """R-79 (WO §1.2 D-3): print one `PREPARED` line per connection `adapter_
     obj.prepared_stats()` returns (skipped entirely, no exception, for a
     plug with no such method -- every plug this WP does not touch, mirrors
@@ -938,11 +1117,20 @@ def _emit_prepared_rows(peer: str, plug: str, op: str, adapter_obj: Any, *, deta
     of discarding it -- the ONE probe call this makes is reused by `_emit_
     measurement_rows`' own `ROUNDTRIP` `conn=` rows below, so a `--roundtrip`
     run still calls `prepared_stats()` only once per op on this, the POST
-    side (completion condition 3)."""
-    prepared_stats = getattr(adapter_obj, "prepared_stats", None)
-    if prepared_stats is None:
-        return None
-    conn_stats_list = prepared_stats()
+    side (completion condition 3).
+
+    `conn_stats`, when given (not `None`), is used AS-IS instead of
+    calling `adapter_obj.prepared_stats()` again -- lets `_emit_
+    measurement_rows` share the ONE POST call across a `DBTIME scope=app`
+    line and these `PREPARED` lines rather than probing twice for one op.
+    `conn_stats=None` (any caller that does not itself share a POST
+    snapshot) fetches it here instead, once."""
+    if conn_stats is None:
+        prepared_stats = getattr(adapter_obj, "prepared_stats", None)
+        if prepared_stats is None:
+            return None
+        conn_stats = prepared_stats()
+    conn_stats_list = conn_stats
     for conn_stats in conn_stats_list:
         print(_format_prepared_row(peer, plug, op, conn_stats))
         if detail:
@@ -1116,6 +1304,7 @@ def _emit_roundtrip_db_rows(
     peer: str, plug: str, op: str, requests: int, db_names: "dict[str, str]",
     pre_db_values: "dict[str, dict] | None", post_db_values: "dict[str, dict] | None",
     post_conn_stats: "list[dict] | None", correction_matcher: "Callable[[dict], bool] | None",
+    *, pre_probe_conn_stats: "list[dict] | None" = None,
 ) -> None:
     """WO §1.2 D-1 (ii): one `db=` line per resolved kind in `db_names`
     (`"app"`/`"platform"`) present in both `pre_db_values`/`post_db_
@@ -1124,7 +1313,15 @@ def _emit_roundtrip_db_rows(
     condition 9) -- `db=platform`'s own correction is always 0 (WO §1.2
     D-1: neither peer's platform/credential connections are ever probed),
     `db=app`'s is `_probe_correction_count(post_conn_stats,
-    correction_matcher)`. `sessions` is `Δsessions`, unconnected. Prints
+    correction_matcher)` PLUS, when `pre_probe_conn_stats` is given,
+    `_probe_correction_count(pre_probe_conn_stats, correction_matcher)`
+    -- `DBTIME`'s own PRE snapshot (taken inside `_measure_op`, between
+    `ROUNDTRIP`'s own PRE poll and the measured window) probes every IDLE
+    application connection it reaches exactly like the shared POST
+    snapshot does, and each such probe's own `commit()` lands inside the
+    SAME `ROUNDTRIP` window, so its `xact_commit` also needs subtracting.
+    `pre_probe_conn_stats=None` (any caller that does not supply it) skips
+    this second subtraction entirely. `sessions` is `Δsessions`, unconnected. Prints
     nothing for a kind whose read is missing from either side (never
     raises `KeyError`).
 
@@ -1145,6 +1342,8 @@ def _emit_roundtrip_db_rows(
         xacts = (post_commit - pre_commit) + (post_rollback - pre_rollback)
         if kind == "app" and post_conn_stats is not None and correction_matcher is not None:
             xacts -= _probe_correction_count(post_conn_stats, correction_matcher)
+            if pre_probe_conn_stats is not None:
+                xacts -= _probe_correction_count(pre_probe_conn_stats, correction_matcher)
         sessions = post_sessions - pre_sessions
         stale = bool(pre_entry["stale"]) or bool(post_entry["stale"])
         print(_format_roundtrip_db_row(peer, plug, op, requests, kind, xacts, sessions, stale))
@@ -1182,7 +1381,8 @@ def _roundtrip_pre_probe(
 
 
 def _emit_measurement_rows(
-    peer: str, plug: str, op: str, adapter_obj: Any, *, prepared_detail: bool, roundtrip: "dict | None" = None,
+    peer: str, plug: str, op: str, adapter_obj: Any, *, prepared_detail: bool,
+    roundtrip: "dict | None" = None, measurement: "dict | None" = None,
 ) -> "list[dict] | None":
     """R-79 (WO §1.2 D-3, rework item (C)): the ONE call site
     `_measure_plug` uses per (plug, op) -- always `_emit_pool_rows` FIRST,
@@ -1203,9 +1403,32 @@ def _emit_measurement_rows(
     POST `_poll_pg_stat_database` cycle. `roundtrip=None` (the default --
     every call site `--roundtrip` did not ask for) emits nothing new at
     all, byte-identical to the pre-R-80 function (completion condition
-    21a/21b)."""
+    21a/21b).
+
+    `measurement`, when given (a plain dict `_measure_op_and_emit` builds
+    from `_measure_op`'s own return value plus `concurrency`/`requests`/
+    `thread_limit`), prints one `CPU` line FIRST -- before `POOL` -- then,
+    when `adapter_obj` has `prepared_stats`, fetches the POST `prepared_
+    stats()` snapshot itself (right after `_emit_pool_rows`, preserving
+    the existing pool-then-prepared call order) and prints `DBTIME`
+    line(s) from the PRE/POST difference, BEFORE handing that SAME POST
+    snapshot to `_emit_prepared_rows` below via its own `conn_stats`
+    parameter -- one POST `prepared_stats()` call shared by `DBTIME
+    scope=app` and every `PREPARED` line, never two. `measurement=None`
+    (any call site that does not supply it) emits no `CPU`/`DBTIME` line
+    at all and fetches nothing extra."""
+    if measurement is not None:
+        print(_format_cpu_row(peer, plug, op, measurement))
     _emit_pool_rows(peer, plug, op, adapter_obj)
-    post_conn_stats = _emit_prepared_rows(peer, plug, op, adapter_obj, detail=prepared_detail)
+    post_conn_stats = None
+    if measurement is not None:
+        prepared_stats = getattr(adapter_obj, "prepared_stats", None)
+        if prepared_stats is not None:
+            post_conn_stats = prepared_stats()
+            platform_db_time_stats = getattr(adapter_obj, "platform_db_time_stats", None)
+            post_platform_stats = platform_db_time_stats() if platform_db_time_stats is not None else None
+            _emit_dbtime_rows(peer, plug, op, measurement, post_conn_stats, post_platform_stats)
+    post_conn_stats = _emit_prepared_rows(peer, plug, op, adapter_obj, detail=prepared_detail, conn_stats=post_conn_stats)
     if roundtrip is not None:
         requests = roundtrip["requests"]
         _emit_roundtrip_conn_rows(peer, plug, op, requests, roundtrip["pre_conn_stats"], post_conn_stats)
@@ -1223,9 +1446,12 @@ def _emit_measurement_rows(
                 min_wait=roundtrip["min_wait"], poll_interval=roundtrip["poll_interval"], max_wait=roundtrip["max_wait"],
             )
             post_db_values = {kind: by_dbname[db_name] for kind, db_name in db_names.items()}
+            dbtime_pre = (measurement or {}).get("dbtime_pre")
+            pre_probe_conn_stats = dbtime_pre.get("conn_stats") if dbtime_pre is not None else None
             _emit_roundtrip_db_rows(
                 peer, plug, op, requests, db_names, roundtrip["pre_db_values"], post_db_values,
                 post_conn_stats, roundtrip["correction_matcher"],
+                pre_probe_conn_stats=pre_probe_conn_stats,
             )
     return post_conn_stats
 
@@ -1246,20 +1472,30 @@ def _measure_op_and_emit(
     wires PRE/POST the same way, rather than 4 near-identical copies.
 
     `roundtrip_enabled=False` (every call site when `--roundtrip` was not
-    given) skips the PRE probe/poll entirely -- `prepared_stats()` stays
-    at exactly its pre-R-80 call count of 1 per op (POST only, completion
-    condition 21b) and no `db=` poll ever touches `admin_conn` (completion
-    condition 21a).
+    given) skips the ROUNDTRIP PRE probe/poll entirely -- no `db=` poll
+    ever touches `admin_conn` (completion condition 21a). `prepared_
+    stats()` is still called twice per op in that case (a separate DBTIME
+    PRE snapshot inside `_measure_op` itself, plus the POST call below) --
+    completion condition 21b's own count.
 
     `after_measure`, when given, runs on the measured `calls` list right
     after `_measure_op` returns but BEFORE any emission -- `_measure_plug`'s
     own `query` block uses this for `_run_self_check`. **順序は保存されて
-    いる**: pre-R-80, `_run_self_check` ran after `_measure_op` and before
-    `_emit_measurement_rows`'s own prints; here it runs after `_measure_op`
-    and before this function's own call to `_emit_measurement_rows` --
-    the SAME position relative to every printed line. Only its position
-    relative to `_measure_plug`'s own `_row(...)`/`rows.append(...)` (no
-    side effect of their own) moved, from after to before."""
+    いる**: `_run_self_check` runs after `_measure_op` and before `_emit_
+    measurement_rows`'s own prints, in the same position relative to every
+    printed line; its only position relative to `_measure_plug`'s own `_row(
+    ...)`/`rows.append(...)` (no side effect of their own) differs, running
+    before them rather than after.
+
+    Builds `measurement` (`wall_ms`/`cpu_total_ms`/`cpu_main_ms`/`dbtime_
+    pre` from `_measure_op`'s own third return value, plus `concurrency`,
+    `requests=n * concurrency` -- MEASURED requests only, never `warmup`'s,
+    unlike `roundtrip`'s own `(warmup + n) * concurrency`, and `thread_
+    limit` from `adapter_obj.perf_thread_limit()` when present, else the
+    literal string `"default"`) and always passes it to `_emit_
+    measurement_rows`, which is what actually prints the `CPU`/`DBTIME`
+    lines -- this function itself has no keyword toggle for that; every
+    call, direct or through `_measure_plug`, gets it."""
     pre_conn_stats: "list[dict] | None" = None
     pre_db_values: "dict[str, dict] | None" = None
     if roundtrip_enabled:
@@ -1267,7 +1503,9 @@ def _measure_op_and_emit(
             adapter_obj, admin_conn=admin_conn, db_names=db_names,
             min_wait=min_wait, poll_interval=poll_interval, max_wait=max_wait,
         )
-    durations, calls = _measure_op(fn, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj)
+    durations, calls, measured = _measure_op(
+        fn, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+    )
     if after_measure is not None:
         after_measure(calls)
     roundtrip: "dict | None" = None
@@ -1283,7 +1521,20 @@ def _measure_op_and_emit(
             "poll_interval": poll_interval,
             "max_wait": max_wait,
         }
-    _emit_measurement_rows(peer, plug, op, adapter_obj, prepared_detail=prepared_detail, roundtrip=roundtrip)
+    accessor = getattr(adapter_obj, "perf_thread_limit", None)
+    thread_limit = accessor() if accessor is not None else None
+    measurement = {
+        "concurrency": concurrency,
+        "requests": n * concurrency,
+        "thread_limit": thread_limit if thread_limit is not None else "default",
+        "wall_ms": measured["wall_ms"],
+        "cpu_total_ms": measured["cpu_total_ms"],
+        "cpu_main_ms": measured["cpu_main_ms"],
+        "dbtime_pre": measured["dbtime_pre"],
+    }
+    _emit_measurement_rows(
+        peer, plug, op, adapter_obj, prepared_detail=prepared_detail, roundtrip=roundtrip, measurement=measurement,
+    )
     return durations, calls
 
 

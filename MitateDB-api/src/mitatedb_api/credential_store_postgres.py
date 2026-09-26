@@ -113,6 +113,8 @@ import hashlib
 import hmac
 import os
 import secrets
+import threading
+import time
 from typing import Optional
 
 import psycopg
@@ -125,6 +127,7 @@ from .errors import (AuthenticationError, AuthorizationStateUnavailable,
                      NotFoundError, StorageConfigurationError)
 from .identifiers import validate_identifier
 from .pool import BoundedConnectionPool
+from .psycopg_counting import CountingConnection
 
 DEFAULT_SCHEMA = "mitatedb_registry"
 
@@ -268,6 +271,20 @@ class PostgresCredentialStore:
         # private, unshared router) as `auth.CredentialStore`'s identical
         # parameter.
         self._audit_router = audit_router if audit_router is not None else AuditRouter()
+        # Platform DB-time accounting for this store's own no-pool, per-
+        # call connections (`_connect`/`_borrow_connection` below): a
+        # dedicated `threading.Lock` (never `self._pool`'s own locking,
+        # unrelated) guards five running totals that only ever grow, added
+        # to once per connection -- `_sessions`/`_connect_wall_ms` in
+        # `_connect` right after the connect returns, `_platform_db_wall_
+        # ms`/`_platform_txn_count`/`_platform_db_calls` in `_borrow_
+        # connection`'s no-pool branch right before that connection closes.
+        self._platform_stats_lock = threading.Lock()
+        self._sessions = 0
+        self._connect_wall_ms = 0.0
+        self._platform_db_wall_ms = 0.0
+        self._platform_txn_count = 0
+        self._platform_db_calls = 0
 
     def _route_denial(self, *, application_id, credential_id, operation, request_id=None):
         """Phase 4 (design D-3): `AUTH_INVALID` is this store's own only
@@ -295,11 +312,61 @@ class PostgresCredentialStore:
         "DB 不達" case WP-2 instruction #5 requires to fail closed as
         `AuthorizationStateUnavailable`, never surfaced as a raw driver
         exception and never silently treated as an authentication failure.
+
+        Returns a `psycopg_counting.CountingConnection` (a `psycopg.
+        Connection` subclass) instead of a plain `psycopg.connect(...)`
+        result, so this connection's own `db_wall_ms`/`txn_count` can
+        later be folded into this store's platform totals, right before
+        it closes (`_borrow_connection`'s no-pool branch, below). The
+        connect call itself is timed into `_connect_wall_ms`/`_sessions`
+        under `self._platform_stats_lock`.
         """
+        connect_start = time.monotonic()
         try:
-            return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+            conn = CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
+        with self._platform_stats_lock:
+            self._sessions += 1
+            self._connect_wall_ms += connect_wall_ms
+        return conn
+
+    def _fold_closed_connection_stats(self, conn: "psycopg.Connection") -> None:
+        """Called right before every `conn.close()` on a no-pool (per-
+        call) connection this store opened (`_borrow_connection`'s no-pool
+        branch, below): adds this one connection's own `db_wall_ms`/
+        `txn_count`/`execute_count + executemany_count` into this store's
+        own running totals, under `self._platform_stats_lock`, so closing
+        a connection never loses time, transactions, or statements it
+        already spent. The pool branch (`_borrow_connection`, below) is out
+        of scope here -- its own connections are owned and closed by
+        `self._pool`, not by this store directly."""
+        db_wall_ms = getattr(conn, "db_wall_ms", 0.0)
+        txn_count = getattr(conn, "txn_count", 0)
+        db_calls = getattr(conn, "execute_count", 0) + getattr(conn, "executemany_count", 0)
+        with self._platform_stats_lock:
+            self._platform_db_wall_ms += db_wall_ms
+            self._platform_txn_count += txn_count
+            self._platform_db_calls += db_calls
+
+    def platform_stats(self) -> dict[str, int | float]:
+        """Read-only sum of this store's own no-pool platform DB-time
+        accounting: `sessions`/`connect_wall_ms` from every `_connect`
+        call, `db_wall_ms`/`txn_count`/`db_calls` folded in from every
+        no-pool connection this store has already closed. A connection
+        presently checked out (mid-call) is not yet reflected -- its own
+        totals land here once that call's `_borrow_connection` closes it.
+        No DB round trip: every value read here is a plain Python
+        attribute, under `self._platform_stats_lock`."""
+        with self._platform_stats_lock:
+            return {
+                "sessions": self._sessions,
+                "connect_wall_ms": self._connect_wall_ms,
+                "db_wall_ms": self._platform_db_wall_ms,
+                "txn_count": self._platform_txn_count,
+                "db_calls": self._platform_db_calls,
+            }
 
     @contextmanager
     def _borrow_connection(self):
@@ -351,6 +418,7 @@ class PostgresCredentialStore:
             try:
                 yield conn
             finally:
+                self._fold_closed_connection_stats(conn)
                 conn.close()
 
     def close(self) -> None:
