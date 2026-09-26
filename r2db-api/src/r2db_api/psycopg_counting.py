@@ -40,14 +40,17 @@ assignment moved into `__init__`).
 No lock anywhere in this module: every connection either class ever wraps
 is used by exactly one caller at a time already (pool checkout / cell
 lock serializes it upstream, WO §1.2 D-1's own docstring on the four call
-sites this applies to) -- the two counters below are plain integer
-increments, nothing more, matching the work order's own "hot path gets
-one integer addition, nothing else" constraint (WO §1.1 (b)). `probe_
-prepared_statements` itself is read-only and runs strictly after the
-measured operation, never on the hot path (WO §1.2 D-2).
+sites this applies to) -- every counter/wall-time update below runs on
+that one caller's own thread, needing no lock of its own, whether it is a
+plain increment or a `time.perf_counter()` pair wrapped in `try`/`finally`
+around a delegated call that may itself raise. `probe_prepared_statements`
+itself is read-only and runs strictly after the measured operation, never
+on the hot path (WO §1.2 D-2).
 """
 from __future__ import annotations
 
+import time
+from contextlib import contextmanager
 from typing import Any
 
 import psycopg
@@ -58,15 +61,26 @@ class CountingCursor(psycopg.Cursor):
     """A `psycopg.Cursor` that increments its own connection's
     `execute_count`/`executemany_count` before delegating to the base
     implementation -- counted whether or not the call goes on to raise,
-    since a failed statement is still one attempt at execution."""
+    since a failed statement is still one attempt at execution. The
+    connection's `db_wall_ms` also rises by the wall time the delegated
+    call itself takes, added in a `finally` so a raised exception still
+    counts the round trip that failed."""
 
     def execute(self, *args: Any, **kwargs: Any) -> Any:
         self.connection.execute_count += 1
-        return super().execute(*args, **kwargs)
+        start = time.perf_counter()
+        try:
+            return super().execute(*args, **kwargs)
+        finally:
+            self.connection.db_wall_ms += (time.perf_counter() - start) * 1000.0
 
     def executemany(self, *args: Any, **kwargs: Any) -> Any:
         self.connection.executemany_count += 1
-        return super().executemany(*args, **kwargs)
+        start = time.perf_counter()
+        try:
+            return super().executemany(*args, **kwargs)
+        finally:
+            self.connection.db_wall_ms += (time.perf_counter() - start) * 1000.0
 
 
 class CountingConnection(psycopg.Connection):
@@ -76,13 +90,97 @@ class CountingConnection(psycopg.Connection):
     this connection itself produced. Construct via `CountingConnection.
     connect(dsn, ...)` -- the same classmethod plain `psycopg.connect` is
     itself an alias for (`psycopg/__init__.py`: `connect = Connection.
-    connect`)."""
+    connect`).
+
+    Also carries `db_wall_ms` (float, milliseconds) and `txn_count` (int),
+    both starting at 0/0.0 and rising through `CountingCursor.execute`/
+    `executemany` above and the `commit`/`rollback`/`transaction`
+    overrides below -- together the total time this one connection spends
+    waiting on PostgreSQL and the number of transaction boundaries it
+    opens or closes (`transaction()`'s own enter side counts one boundary
+    for `BEGIN`, its exit side counts a second for `COMMIT`/`ROLLBACK`/
+    `RELEASE`/`ROLLBACK TO SAVEPOINT`). A statement's own implicit `BEGIN`
+    (psycopg opens one silently before the first statement of a new
+    transaction) lands inside that statement's own `execute()` wall time
+    above and is never counted as a separate entry in `txn_count`."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.execute_count = 0
         self.executemany_count = 0
+        self.db_wall_ms = 0.0
+        self.txn_count = 0
         self.cursor_factory = CountingCursor
+
+    def commit(self) -> None:
+        """Times the delegated `commit()` into `db_wall_ms` and counts it
+        as one transaction boundary, in a `finally` so a raised exception
+        still counts the round trip that was attempted."""
+        start = time.perf_counter()
+        try:
+            super().commit()
+        finally:
+            self.db_wall_ms += (time.perf_counter() - start) * 1000.0
+            self.txn_count += 1
+
+    def rollback(self) -> None:
+        """Same accounting as `commit` above, for `rollback()`."""
+        start = time.perf_counter()
+        try:
+            super().rollback()
+        finally:
+            self.db_wall_ms += (time.perf_counter() - start) * 1000.0
+            self.txn_count += 1
+
+    @contextmanager
+    def transaction(self, *args: Any, **kwargs: Any) -> Any:
+        """Wraps the base `Connection.transaction()` context manager
+        (never its private `_exec_command`/`Transaction` internals) by
+        driving its `__enter__`/`__exit__` directly rather than through a
+        nested `with`, so the wall time and transaction count on either
+        side of `yield` are each attributed to exactly the boundary that
+        produced them: entering this context sends `BEGIN` (one round
+        trip, one `txn_count`), leaving it sends `COMMIT`/`ROLLBACK`/
+        `RELEASE`/`ROLLBACK TO SAVEPOINT` (a second round trip, a second
+        `txn_count`). Exception handling on the exit side is delegated
+        entirely to the base `__exit__`'s own return value, so `psycopg.
+        Rollback` raised inside the `with` block is swallowed exactly as
+        the base class swallows it, and any other exception propagates
+        with its original type unchanged."""
+        base_cm = super().transaction(*args, **kwargs)
+        enter_start = time.perf_counter()
+        try:
+            tx = base_cm.__enter__()
+        finally:
+            # Counted even if BEGIN itself raises (the round trip was still
+            # attempted), matching `commit`/`rollback` above rather than
+            # only counting a round trip that succeeded.
+            self.db_wall_ms += (time.perf_counter() - enter_start) * 1000.0
+            self.txn_count += 1
+        try:
+            yield tx
+        except BaseException as exc:
+            exit_start = time.perf_counter()
+            try:
+                suppressed = base_cm.__exit__(type(exc), exc, exc.__traceback__)
+            finally:
+                # Counted even if the exit round trip (ROLLBACK/ROLLBACK TO
+                # SAVEPOINT) itself raises; that raised exception still
+                # propagates below unchanged, exactly as it did before this
+                # `finally` was added.
+                self.db_wall_ms += (time.perf_counter() - exit_start) * 1000.0
+                self.txn_count += 1
+            if not suppressed:
+                raise
+        else:
+            exit_start = time.perf_counter()
+            try:
+                base_cm.__exit__(None, None, None)
+            finally:
+                # Counted even if the exit round trip (COMMIT/RELEASE) itself
+                # raises; that raised exception still propagates unchanged.
+                self.db_wall_ms += (time.perf_counter() - exit_start) * 1000.0
+                self.txn_count += 1
 
 
 # R-79 (WO §1.2 D-2): read-only probe of `pg_prepared_statements`, shared
@@ -98,14 +196,16 @@ PREPARED_STATEMENTS_SQL = (
 
 
 def prepared_stats_skeleton(conn: "psycopg.Connection[Any]", label: str, *, error: str | None = None) -> dict[str, Any]:
-    """The 11-key dict shape `probe_prepared_statements` (below) and its
+    """The 13-key dict shape `probe_prepared_statements` (below) and its
     caller's own exception branch both build from -- kept as one function
     so the key set can never drift between the "everything worked",
     "left alone because not IDLE", and "probe itself raised" cases. Reads
     only PUBLIC `psycopg.Connection` surface (`.info.transaction_status`,
-    `.prepare_threshold`, `.prepared_max`) plus the two plain integer
-    attributes `CountingConnection` itself defines -- never the private
-    `_prepared`/`_counts`/`_names` psycopg keeps internally (WO §1.1 (e))."""
+    `.prepare_threshold`, `.prepared_max`) plus the four plain integer/
+    float attributes `CountingConnection` itself defines -- never the
+    private `_prepared`/`_counts`/`_names` psycopg keeps internally (WO
+    §1.1 (e)). `db_wall_ms`/`txn_count` read the connection's own running
+    totals, unaffected by this read itself."""
     return {
         "label": label,
         "transaction_status": TransactionStatus(conn.info.transaction_status).name,
@@ -118,6 +218,8 @@ def prepared_stats_skeleton(conn: "psycopg.Connection[Any]", label: str, *, erro
         "prepared_max": conn.prepared_max,
         "prepared_statements": [],
         "error": error,
+        "db_wall_ms": conn.db_wall_ms,
+        "txn_count": conn.txn_count,
     }
 
 
@@ -136,9 +238,13 @@ def probe_prepared_statements(conn: "psycopg.Connection[Any]", label: str) -> di
     bookkeeping either way, but `prepare=False` keeps the probe's own
     SELECT from ever becoming a SERVER-side prepared statement, so it never
     shows up in the very view it reads -- completion condition 12).
-    Immediately followed by `conn.commit()`, never `rollback()` (WO §1.1
-    F2: a rollback on a non-IDLE connection clears every prepared statement
-    on it -- this function must not destroy the very thing it observes).
+    Immediately followed by `psycopg.Connection.commit(conn)` -- the BASE
+    class method, called directly rather than through this connection's
+    own `commit()` override, so probing a connection never counts the
+    probe's own commit into that connection's `db_wall_ms`/`txn_count`.
+    Never `rollback()` either way (WO §1.1 F2: a rollback on a non-IDLE
+    connection clears every prepared statement on it -- this function
+    must not destroy the very thing it observes).
 
     Raises whatever the database round trip itself raises (a real driver
     error, a mocked failure injected by a test) -- this function does NOT
@@ -159,7 +265,7 @@ def probe_prepared_statements(conn: "psycopg.Connection[Any]", label: str) -> di
     with psycopg.Cursor(conn) as cur:
         cur.execute(PREPARED_STATEMENTS_SQL, prepare=False)
         rows = cur.fetchall()
-    conn.commit()
+    psycopg.Connection.commit(conn)
     statements = [
         {"name": name, "generic_plans": generic, "custom_plans": custom, "statement": statement[:80]}
         for name, statement, _prepare_time, generic, custom in rows

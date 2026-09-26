@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "perf_baseline.py"
@@ -654,17 +655,20 @@ def test_roundtrip_db_row_format_is_stable():
     assert line.endswith("stale=1")
 
 
-def test_roundtrip_probes_prepared_stats_exactly_twice_per_op(capsys):
-    """WO §2.2 completion condition 3 (design review 1 M-3): a `--roundtrip`
-    op calls `prepared_stats()` exactly twice -- once as the PRE baseline
-    (`_roundtrip_pre_probe`), once as the POST value `_emit_prepared_rows`
-    already uses for its own `PREPARED` lines -- and the `ROUNDTRIP conn=`
-    lines are built from that SAME POST return value, never a third call.
+def test_roundtrip_probes_prepared_stats_exactly_three_times_per_op(capsys):
+    """WO §2.2 completion condition 3 (design review 1 M-3), updated by
+    R-101 WP-1 completion condition 50: a `--roundtrip` op calls `prepared_
+    stats()` exactly three times -- the ROUNDTRIP PRE baseline (`_roundtrip_
+    pre_probe`), a separate DBTIME PRE snapshot inside `_measure_op` itself
+    (taken after warmup, before the measured window), and the ONE shared
+    POST call `_emit_measurement_rows` makes for `DBTIME scope=app` and
+    `PREPARED` together -- and the `ROUNDTRIP conn=` lines are built from
+    that SAME POST return value, never a fourth call.
 
     mutation M3 (`tools/perf_baseline.py`): call `prepared_stats()` once
-    more for the `ROUNDTRIP` lines instead of reusing `_emit_prepared_
-    rows`' own return value -- this test's own `len(call_log) == 2`
-    assertion goes red (3 calls instead of 2)."""
+    more for the `ROUNDTRIP` lines instead of reusing the shared POST
+    value -- this test's own `len(call_log) == 3` assertion goes red (4
+    calls instead of 3)."""
     call_log: list[int] = []
 
     def prepared_stats():
@@ -681,7 +685,7 @@ def test_roundtrip_probes_prepared_stats_exactly_twice_per_op(capsys):
         prepared_detail=False, roundtrip_enabled=True, admin_conn=None, db_names={},
         correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
     )
-    assert len(call_log) == 2
+    assert len(call_log) == 3
     out = capsys.readouterr().out
     assert out.count("PREPARED ") == 1
     assert out.count("ROUNDTRIP ") == 1
@@ -1095,16 +1099,19 @@ def test_roundtrip_disabled_never_touches_the_admin_connection_and_prints_nothin
     assert "ROUNDTRIP" not in out
 
 
-def test_default_run_probes_prepared_stats_exactly_once_per_op(capsys):
-    """WO §2.2 completion condition 21b (design review 1 M-5): with
-    `--roundtrip` absent, `prepared_stats()` is called exactly once per
-    op (POST only) -- the PRE probe never runs outside the flag, so
-    R-79's own established `POOL lock=` `acquire`/`PREPARED` baseline
-    stays undisturbed.
+def test_default_run_probes_prepared_stats_exactly_twice_per_op(capsys):
+    """WO §2.2 completion condition 21b (design review 1 M-5), updated by
+    R-101 WP-1 completion condition 36: with `--roundtrip` absent,
+    `prepared_stats()` is called exactly twice per op -- a DBTIME PRE
+    snapshot inside `_measure_op` (after warmup, before the measured
+    window) and the POST call `_emit_measurement_rows` shares between
+    `DBTIME scope=app` and `PREPARED` -- the ROUNDTRIP PRE probe never
+    runs outside `--roundtrip`, so R-79's own established `POOL lock=`
+    `acquire`/`PREPARED` baseline stays undisturbed by that flag.
 
-    mutation M18 (`tools/perf_baseline.py`): run the PRE probe regardless
-    of `roundtrip_enabled` -- this test's own `len(call_log) == 1`
-    assertion goes red (2 calls instead of 1)."""
+    mutation M31 (`tools/perf_baseline.py`): drop the PRE `prepared_
+    stats()` call inside `_measure_op` -- this test's own `len(call_log)
+    == 2` assertion goes red (1 call instead of 2)."""
     call_log: list[int] = []
 
     def prepared_stats():
@@ -1121,7 +1128,7 @@ def test_default_run_probes_prepared_stats_exactly_once_per_op(capsys):
         prepared_detail=False, roundtrip_enabled=False, admin_conn=None, db_names={},
         correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
     )
-    assert len(call_log) == 1
+    assert len(call_log) == 2
 
 
 def test_emit_measurement_rows_reads_roundtrip_db_poll_by_real_name_and_prints_by_kind(monkeypatch, capsys):
@@ -1260,3 +1267,513 @@ def test_poll_confirms_when_two_kinds_resolve_to_the_same_database_name():
     )
     assert result["same_db"]["stale"] is False
     assert fake_clock["t"] < 3.0
+
+
+# ---------------------------------------------------------------------
+# R-101 WP-1: `CPU`/`DBTIME` rows (D-1/D-2) -- format, PRE/POST windows,
+# ordering, and the `thread_limit=`/`requests=` denominators.
+# ---------------------------------------------------------------------
+
+
+def test_cpu_row_format_matches_the_declared_columns():
+    """Completion condition 40: the `CPU` line's own column names/order
+    match the declared format exactly, and `cpu_other_ms` is `cpu_total_ms
+    - cpu_main_ms`.
+
+    mutation M34 (`tools/perf_baseline.py`): rename `cpu_main_ms=` to
+    `main_cpu_ms=` in `_format_cpu_row` -- this test's own equality
+    assertion goes red.
+    mutation M36 (`tools/perf_baseline.py`): make `cpu_other_ms` print
+    `cpu_total_ms` unchanged instead of the difference -- this test's own
+    `cpu_other_ms=40.000` assertion goes red (would read `50.000`)."""
+    m = {"concurrency": 4, "thread_limit": 40, "requests": 400, "wall_ms": 62.7, "cpu_total_ms": 50.0, "cpu_main_ms": 10.0}
+    line = pb._format_cpu_row("r2db-api", "r2db-api-http", "query", m)
+    assert line == (
+        "CPU peer=r2db-api plug=r2db-api-http op=query concurrency=4 thread_limit=40 "
+        "requests=400 wall_ms=62.700 cpu_total_ms=50.000 cpu_main_ms=10.000 cpu_other_ms=40.000"
+    )
+
+
+def test_dbtime_app_row_format_matches_the_declared_columns():
+    """Completion condition 28: the `DBTIME ... scope=app` line's own
+    column names/order match the declared format.
+
+    mutation M23 (`tools/perf_baseline.py`): rename `gone=` to `lost=` in
+    `_format_dbtime_app_row` -- this test's own equality assertion goes
+    red."""
+    line = pb._format_dbtime_app_row(
+        "r2db-api", "r2db-api", "query", concurrency=1, requests=10, conns=3, gone=1, db_calls=5, txns=2, db_wall_ms=12.5,
+    )
+    assert line == (
+        "DBTIME peer=r2db-api plug=r2db-api op=query concurrency=1 scope=app "
+        "conns=3 gone=1 db_calls=5 txns=2 db_wall_ms=12.500 db_wall_ms_per_req=1.250"
+    )
+
+
+def test_dbtime_platform_row_format_matches_the_declared_columns():
+    """Completion condition 29: the `DBTIME ... scope=platform` line's own
+    column names/order match the declared format, and `db_wall_ms_per_req`
+    folds `connect_wall_ms` into the numerator.
+
+    mutation M24 (`tools/perf_baseline.py`): rename `connect_wall_ms=` to
+    `connect_ms=` in `_format_dbtime_platform_row` -- this test's own
+    equality assertion goes red.
+    mutation M29 (`tools/perf_baseline.py`): drop `connect_wall_ms` from
+    the `db_wall_ms_per_req` division -- this test's own
+    `db_wall_ms_per_req=1.000` assertion goes red (would read `0.600`)."""
+    line = pb._format_dbtime_platform_row(
+        "r2db-api", "r2db-api", "query", concurrency=1, requests=10,
+        sessions=2, connect_wall_ms=4.0, db_calls=0, txns=3, db_wall_ms=6.0,
+    )
+    assert line == (
+        "DBTIME peer=r2db-api plug=r2db-api op=query concurrency=1 scope=platform "
+        "sessions=2 connect_wall_ms=4.000 db_calls=0 txns=3 db_wall_ms=6.000 db_wall_ms_per_req=1.000"
+    )
+
+
+def test_dbtime_app_db_wall_ms_is_a_pre_post_difference(capsys):
+    """Completion condition 30: `scope=app`'s own `db_wall_ms`/`txns`/
+    `db_calls` are POST minus PRE, matched by connection `label` --
+    never the raw POST value.
+
+    mutation M25 (`tools/perf_baseline.py`): use the POST value directly
+    for `db_wall_ms` in `_emit_dbtime_rows`, without subtracting PRE --
+    this test's own `db_wall_ms=40.000` assertion goes red (would read
+    `140.000`)."""
+    measurement = {
+        "concurrency": 1, "requests": 1,
+        "dbtime_pre": {
+            "conn_stats": [{"label": "a@1", "execute_count": 10, "executemany_count": 0, "db_wall_ms": 100.0, "txn_count": 5}],
+            "platform_stats": None,
+        },
+    }
+    post = [{"label": "a@1", "execute_count": 16, "executemany_count": 0, "db_wall_ms": 140.0, "txn_count": 7}]
+    pb._emit_dbtime_rows("r2db-api", "r2db-api", "query", measurement, post, None)
+    out = capsys.readouterr().out
+    assert "db_wall_ms=40.000" in out
+
+
+def test_dbtime_app_treats_a_connection_new_since_pre_as_a_zero_baseline(capsys):
+    """Completion condition 31 (空振り禁止): a connection `label` present
+    only in the POST snapshot (opened during the measured window) is
+    still counted into `scope=app`'s own sums, its own PRE treated as 0 --
+    never dropped from the aggregation.
+
+    mutation M26 (`tools/perf_baseline.py`): skip a POST-only label
+    entirely in `_emit_dbtime_rows`'s own aggregation loop -- this test's
+    own `db_wall_ms=9.000` assertion goes red (would read `0.000`)."""
+    measurement = {"concurrency": 1, "requests": 1, "dbtime_pre": {"conn_stats": [], "platform_stats": None}}
+    post = [{"label": "new@9", "execute_count": 3, "executemany_count": 0, "db_wall_ms": 9.0, "txn_count": 1}]
+    pb._emit_dbtime_rows("r2db-api", "r2db-api", "query", measurement, post, None)
+    out = capsys.readouterr().out
+    assert "conns=1" in out
+    assert "db_wall_ms=9.000" in out
+
+
+def test_dbtime_app_conns_counts_every_post_label_including_new_ones(capsys):
+    """Completion condition 32: `conns=` is the number of labels in the
+    POST snapshot alone -- including one absent from PRE -- never the
+    intersection of PRE and POST.
+
+    mutation M27 (`tools/perf_baseline.py`): compute `conns=` as `len(pre_
+    by_label.keys() & post_labels)` (the intersection) instead of `len(
+    post_conn_stats)` -- this test's own `conns=2` assertion goes red
+    (would read `conns=1`)."""
+    measurement = {
+        "concurrency": 1, "requests": 1,
+        "dbtime_pre": {
+            "conn_stats": [{"label": "a@1", "execute_count": 1, "executemany_count": 0, "db_wall_ms": 1.0, "txn_count": 1}],
+            "platform_stats": None,
+        },
+    }
+    post = [
+        {"label": "a@1", "execute_count": 2, "executemany_count": 0, "db_wall_ms": 2.0, "txn_count": 2},
+        {"label": "new@2", "execute_count": 1, "executemany_count": 0, "db_wall_ms": 1.0, "txn_count": 1},
+    ]
+    pb._emit_dbtime_rows("r2db-api", "r2db-api", "query", measurement, post, None)
+    out = capsys.readouterr().out
+    assert "conns=2" in out
+
+
+def test_dbtime_app_gone_counts_connections_missing_from_post(capsys):
+    """Completion condition 33: `gone=` is the number of labels present
+    only in the PRE snapshot (closed during the measured window).
+
+    mutation M28 (`tools/perf_baseline.py`): hardcode `gone=0` in `_emit_
+    dbtime_rows` -- this test's own `gone=1` assertion goes red."""
+    measurement = {
+        "concurrency": 1, "requests": 1,
+        "dbtime_pre": {
+            "conn_stats": [
+                {"label": "a@1", "execute_count": 1, "executemany_count": 0, "db_wall_ms": 1.0, "txn_count": 1},
+                {"label": "closed@2", "execute_count": 1, "executemany_count": 0, "db_wall_ms": 1.0, "txn_count": 1},
+            ],
+            "platform_stats": None,
+        },
+    }
+    post = [{"label": "a@1", "execute_count": 2, "executemany_count": 0, "db_wall_ms": 2.0, "txn_count": 2}]
+    pb._emit_dbtime_rows("r2db-api", "r2db-api", "query", measurement, post, None)
+    out = capsys.readouterr().out
+    assert "gone=1" in out
+
+
+def test_dbtime_rows_absent_when_the_plug_has_no_prepared_stats(capsys):
+    """Completion condition 35 (mirrors R-79's own identical skip): a plug
+    with no `prepared_stats` gets zero `DBTIME` lines and no exception,
+    even though `measurement` (the `CPU` row's own data) is given.
+
+    mutation M30 (`tools/perf_baseline.py`): call `_emit_dbtime_rows`
+    unconditionally in `_emit_measurement_rows`, regardless of whether
+    `adapter_obj` has `prepared_stats` -- this test's own `"DBTIME" not in
+    out` assertion goes red (`AttributeError`/a stray `DBTIME` line)."""
+    stub = SimpleNamespace(transport_kind="in_process")
+    measurement = {
+        "concurrency": 1, "requests": 1, "thread_limit": "default",
+        "wall_ms": 0.0, "cpu_total_ms": 0.0, "cpu_main_ms": 0.0, "dbtime_pre": None,
+    }
+    pb._emit_measurement_rows("r2db-api", "r2db-api", "query", stub, prepared_detail=False, measurement=measurement)
+    out = capsys.readouterr().out
+    assert "DBTIME" not in out
+    assert "CPU " in out
+
+
+def test_dbtime_pre_snapshot_in_the_in_process_branch_is_after_warmup_before_measured():
+    """Completion condition 37: on the in_process branch, the DBTIME PRE
+    snapshot is taken after every warmup group has run and before the
+    first measured group.
+
+    mutation M32 (`tools/perf_baseline.py`): move `_capture_dbtime_pre`'s
+    own call to before the warmup `_run_concurrent` line in the in_process
+    branch of `_measure_op` -- this test's own `call_log[:pre_idx] ==
+    ["call", "call"]` assertion goes red (`pre_idx` would be `0`)."""
+    call_log: list[str] = []
+
+    def fn() -> None:
+        call_log.append("call")
+
+    def prepared_stats():
+        call_log.append("pre")
+        return []
+
+    stub = SimpleNamespace(transport_kind="in_process", prepared_stats=prepared_stats)
+    pb._measure_op(fn, warmup=2, n=3, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
+    assert call_log.count("call") == 5
+    pre_idx = call_log.index("pre")
+    assert call_log[:pre_idx] == ["call", "call"]
+    assert call_log[pre_idx + 1:] == ["call", "call", "call"]
+
+
+def test_dbtime_pre_snapshot_in_the_real_loop_branch_is_after_warmup_before_measured():
+    """Completion condition 38: on the real-loop (asgi/socket) branch, the
+    DBTIME PRE snapshot is taken after warmup's own `_run_concurrent` call
+    and before the measured one -- the SAME property condition 37 pins
+    for the in_process branch, observed through a real `httpx.AsyncClient`
+    + a real fresh event loop this time (never a mock): each request
+    actually reaches a tiny ASGI app, which records a `"call"` tag in the
+    SAME `call_log` the stub's own `prepared_stats()` records a `"pre"`
+    tag into, so their real relative order is observable, not merely
+    their total count (a mutation that only reorders WHEN `prepared_
+    stats()` runs, without changing HOW MANY times it runs, would be
+    invisible to a bare count).
+
+    mutation M33 (`tools/perf_baseline.py`): move `_capture_dbtime_pre`'s
+    own call to before the warmup `_run_concurrent` line in the real-loop
+    branch of `_measure_op` -- this test's own `call_log[:pre_idx] ==
+    ["call", "call"]` assertion goes red (`pre_idx` would be `0`)."""
+    call_log: list[str] = []
+
+    async def _logging_asgi_app(scope, receive, send) -> None:
+        call_log.append("call")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    def prepared_stats():
+        call_log.append("pre")
+        return []
+
+    loop = asyncio.new_event_loop()
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=_logging_asgi_app), base_url="http://perfbaselinetest.invalid")
+    stub = SimpleNamespace(transport_kind="asgi", _loop=loop, _client=client, prepared_stats=prepared_stats)
+
+    def fn() -> None:
+        request = client.build_request("GET", "/")
+        loop.run_until_complete(client.send(request))
+
+    try:
+        pb._measure_op(fn, warmup=2, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
+    finally:
+        loop.run_until_complete(client.aclose())
+        loop.close()
+
+    assert call_log.count("call") == 3
+    pre_idx = call_log.index("pre")
+    assert call_log[:pre_idx] == ["call", "call"]
+    assert call_log[pre_idx + 1:] == ["call"]
+
+
+def test_cpu_window_excludes_warmup_from_the_total(monkeypatch):
+    """Completion condition 43: the CPU difference is taken strictly
+    around the measured `_run_concurrent` call -- warmup's own CPU is
+    never included.
+
+    mutation M37 (`tools/perf_baseline.py`): move the `cpu_before`/
+    `thread_before` reads to before the warmup `_run_concurrent` call in
+    `_measure_op` -- this test's own `cpu_total_ms == pytest.approx(20.0)`
+    assertion goes red (would read `50.0`, warmup's own 3 ticks folded
+    in)."""
+    counter = {"n": 0}
+
+    def fake_getrusage(who):
+        return SimpleNamespace(ru_utime=counter["n"] * 0.01, ru_stime=0.0)
+
+    monkeypatch.setattr(pb.resource, "getrusage", fake_getrusage)
+    monkeypatch.setattr(pb.time, "thread_time", lambda: counter["n"] * 0.01)
+
+    def fn() -> None:
+        counter["n"] += 1
+
+    stub = SimpleNamespace(transport_kind="in_process")
+    _, _, measured = pb._measure_op(fn, warmup=3, n=2, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
+    assert measured["cpu_total_ms"] == pytest.approx(20.0)
+    assert measured["cpu_main_ms"] == pytest.approx(20.0)
+
+
+def test_cpu_wall_ms_is_the_measured_group_durations_only(monkeypatch):
+    """Completion condition 44: the `CPU` row's own `wall_ms` is the sum
+    of the MEASURED group durations only -- never warmup's.
+
+    mutation M38 (`tools/perf_baseline.py`): compute `wall_ms` from every
+    group `_run_concurrent` timed (warmup included) instead of the
+    measured list alone -- this test's own `wall_ms == pytest.approx(
+    5000.0)` assertion goes red (would read `105000.0`, the 100s warmup
+    group folded in)."""
+    perf_values = iter([0.0, 100.0, 100.0, 102.0, 102.0, 105.0])
+    monkeypatch.setattr(pb.time, "perf_counter", lambda: next(perf_values))
+    stub = SimpleNamespace(transport_kind="in_process")
+    _, _, measured = pb._measure_op(lambda: None, warmup=1, n=2, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
+    assert measured["wall_ms"] == pytest.approx(5000.0)
+
+
+def test_cpu_row_appears_for_an_in_process_plug(capsys):
+    """Completion condition 45: the `CPU` row is printed for every plug,
+    including an in_process one with no real event loop of its own.
+
+    mutation M39 (`tools/perf_baseline.py`): print the `CPU` row only when
+    `adapter_obj` has `_loop` -- this test's own `out.count("CPU ") == 1`
+    assertion goes red (0 instead of 1)."""
+    stub = SimpleNamespace(transport_kind="in_process")
+    pb._measure_op_and_emit(
+        lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+        warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub,
+        prepared_detail=False, roundtrip_enabled=False, admin_conn=None, db_names={},
+        correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    out = capsys.readouterr().out
+    assert out.count("CPU ") == 1
+
+
+def test_cpu_row_prints_before_pool_dbtime_prepared_and_roundtrip(capsys):
+    """Completion conditions 46/47: `CPU` prints before `POOL`, `DBTIME`
+    prints after `POOL` and before `PREPARED`, and `ROUNDTRIP` prints
+    last -- `CPU` -> `POOL` -> `DBTIME` -> `PREPARED` -> `ROUNDTRIP`.
+
+    mutation M40 (`tools/perf_baseline.py`): print the `CPU` row from
+    `_emit_measurement_rows` AFTER the `ROUNDTRIP` block instead of first
+    -- this test's own `cpu_idx < pool_idx` assertion goes red.
+    mutation M41 (`tools/perf_baseline.py`): print `DBTIME` lines from
+    `_emit_measurement_rows` AFTER calling `_emit_prepared_rows` instead
+    of before -- this test's own `dbtime_idx < prepared_idx` assertion
+    goes red."""
+    stub = SimpleNamespace(
+        transport_kind="in_process",
+        pool_stats=lambda: {"app1/runtime": {
+            "size": 1, "acquire_count": 1, "wait_count": 0, "wait_total_ms": 0.0, "wait_max_ms": 0.0, "in_use_peak": 1,
+        }},
+        prepared_stats=lambda: [{
+            "label": "app1/runtime@1", "execute_count": 1, "executemany_count": 0,
+            "prepared": 0, "prepared_execs": 0, "prepared_statements": [], "probed": True,
+            "db_wall_ms": 1.0, "txn_count": 1,
+        }],
+    )
+    pb._measure_op_and_emit(
+        lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+        warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub,
+        prepared_detail=False, roundtrip_enabled=True, admin_conn=None, db_names={},
+        correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    out = capsys.readouterr().out
+    cpu_idx = out.index("CPU ")
+    pool_idx = out.index("POOL ")
+    dbtime_idx = out.index("DBTIME ")
+    prepared_idx = out.index("PREPARED ")
+    roundtrip_idx = out.index("ROUNDTRIP ")
+    assert cpu_idx < pool_idx < dbtime_idx < prepared_idx < roundtrip_idx
+
+
+def test_measurement_requests_is_n_times_concurrency_never_warmup_plus_n(capsys):
+    """Completion condition 48: `CPU`/`DBTIME`'s own `requests=` is `n *
+    concurrency` (measured requests only) -- never `(warmup + n) *
+    concurrency`, unlike `ROUNDTRIP`'s own `requests=`.
+
+    mutation M42 (`tools/perf_baseline.py`): compute `measurement["
+    requests"]` as `(warmup + n) * concurrency` in `_measure_op_and_emit`
+    -- this test's own `requests=6` assertion goes red (would read
+    `requests=21`)."""
+    stub = SimpleNamespace(transport_kind="in_process")
+    pb._measure_op_and_emit(
+        lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+        warmup=5, n=2, concurrency=3, counter=pb._CallCounter(), adapter_obj=stub,
+        prepared_detail=False, roundtrip_enabled=False, admin_conn=None, db_names={},
+        correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+    )
+    out = capsys.readouterr().out
+    assert "requests=6" in out
+    assert "requests=21" not in out
+
+
+def test_measurement_thread_limit_resolution(capsys):
+    """Completion condition 41: `thread_limit=` reads the plug's own
+    `perf_thread_limit()` when present and non-`None`, and falls back to
+    the literal `default` both when the accessor is absent and when it
+    returns `None`.
+
+    mutation M35 (`tools/perf_baseline.py`): make `_measure_op_and_emit`
+    always resolve `thread_limit` to `"default"`, never calling `adapter_
+    obj.perf_thread_limit()` at all -- this test's own `"thread_limit=4"
+    in out` assertion goes red (only `"thread_limit=default"` would ever
+    appear)."""
+    def _run(stub) -> str:
+        pb._measure_op_and_emit(
+            lambda: None, peer="r2db-api", plug="r2db-api", op="query",
+            warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub,
+            prepared_detail=False, roundtrip_enabled=False, admin_conn=None, db_names={},
+            correction_matcher=None, min_wait=0.0, poll_interval=0.0, max_wait=0.0,
+        )
+        return capsys.readouterr().out
+
+    assert "thread_limit=default" in _run(SimpleNamespace(transport_kind="in_process"))
+    assert "thread_limit=default" in _run(SimpleNamespace(transport_kind="in_process", perf_thread_limit=lambda: None))
+    assert "thread_limit=4" in _run(SimpleNamespace(transport_kind="in_process", perf_thread_limit=lambda: 4))
+
+
+# ---------------------------------------------------------------------
+# R-101 WP-1 差し戻し 2 (code review 1, F1/F4): the real-loop branch's own
+# CPU window must exclude request capture, and the diff-computation tests
+# below exercise `_emit_dbtime_rows`/`_measure_op` themselves rather than
+# a formatter called with already-subtracted numbers.
+# ---------------------------------------------------------------------
+
+
+def test_cpu_window_in_the_real_loop_branch_excludes_capture(monkeypatch):
+    """F1 (code review 1, highest priority): the real-loop branch's own
+    CPU window starts AFTER every measured request has been captured
+    (`_capture_one_request`, main-thread work building the request
+    object) -- never before. `resource.getrusage`/`time.thread_time` are
+    monkeypatched to a counter `fn` itself advances once per capture
+    (never per real send, which goes through `_replay_factory` instead),
+    so a capture folded into the window would show up as a nonzero delta.
+
+    mutation (reviewer RV1, `tools/perf_baseline.py`): move `cpu_before`/
+    `thread_before` back to right after warmup's own `_run_concurrent`
+    call (before measured capture) -- this test's own `cpu_total_ms ==
+    0.0` assertion goes red (the 3 measured captures would be counted).
+    mutation (`tools/perf_baseline.py`): move the reads to before warmup's
+    own `_run_concurrent` call entirely -- also goes red (warmup's own 2
+    captures would be counted too)."""
+    counter = {"n": 0}
+
+    def fake_getrusage(who):
+        return SimpleNamespace(ru_utime=counter["n"] * 0.01, ru_stime=0.0)
+
+    monkeypatch.setattr(pb.resource, "getrusage", fake_getrusage)
+    monkeypatch.setattr(pb.time, "thread_time", lambda: counter["n"] * 0.01)
+
+    async def _noop_app(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    loop = asyncio.new_event_loop()
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=_noop_app), base_url="http://perfbaselinetest.invalid")
+    stub = SimpleNamespace(transport_kind="asgi", _loop=loop, _client=client)
+
+    def fn() -> None:
+        counter["n"] += 1  # simulates a capture's own main-thread CPU cost
+        request = client.build_request("GET", "/")
+        loop.run_until_complete(client.send(request))
+
+    try:
+        _, _, measured = pb._measure_op(fn, warmup=2, n=3, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
+    finally:
+        loop.run_until_complete(client.aclose())
+        loop.close()
+    assert measured["cpu_total_ms"] == 0.0
+    assert measured["cpu_main_ms"] == 0.0
+
+
+def test_dbtime_platform_values_are_pre_post_differences_through_emit(capsys):
+    """F4(a) (code review 1): `scope=platform`'s own `sessions`/`connect_
+    wall_ms`/`db_calls`/`txns`/`db_wall_ms` are PRE/POST differences
+    computed by `_emit_dbtime_rows` itself -- calling `_format_dbtime_
+    platform_row` directly with already-subtracted numbers (completion
+    condition 29's own test) cannot catch a missing subtraction upstream.
+
+    mutation RV2 (`tools/perf_baseline.py`): use `post_platform_stats[
+    "sessions"]` directly, without subtracting `pre_platform["sessions"]`
+    -- this test's own `sessions=1` assertion goes red (would read
+    `sessions=6`)."""
+    measurement = {
+        "concurrency": 1, "requests": 1,
+        "dbtime_pre": {"conn_stats": [], "platform_stats": {
+            "sessions": 5, "connect_wall_ms": 10.0, "db_wall_ms": 20.0, "txn_count": 3, "db_calls": 7,
+        }},
+    }
+    post_platform_stats = {"sessions": 6, "connect_wall_ms": 14.0, "db_wall_ms": 26.0, "txn_count": 5, "db_calls": 10}
+    pb._emit_dbtime_rows("r2db-api", "r2db-api", "query", measurement, [], post_platform_stats)
+    out = capsys.readouterr().out
+    assert "sessions=1 " in out
+    assert "connect_wall_ms=4.000" in out
+    assert "db_calls=3 " in out
+    assert "txns=2 " in out
+    assert "db_wall_ms=6.000 " in out
+
+
+def test_dbtime_app_txns_and_db_calls_are_pre_post_differences(capsys):
+    """F4(b) (code review 1): `scope=app`'s own `txns`/`db_calls` are
+    PRE/POST differences too -- completion condition 30's own existing
+    test pins only `db_wall_ms`.
+
+    mutation RV4 (`tools/perf_baseline.py`): use the POST value directly
+    for `txns`, without subtracting PRE -- this test's own `txns=2`
+    assertion goes red (would read `txns=9`)."""
+    measurement = {
+        "concurrency": 1, "requests": 1,
+        "dbtime_pre": {
+            "conn_stats": [{"label": "a@1", "execute_count": 3, "executemany_count": 0, "db_wall_ms": 1.0, "txn_count": 7}],
+            "platform_stats": None,
+        },
+    }
+    post = [{"label": "a@1", "execute_count": 8, "executemany_count": 0, "db_wall_ms": 2.0, "txn_count": 9}]
+    pb._emit_dbtime_rows("r2db-api", "r2db-api", "query", measurement, post, None)
+    out = capsys.readouterr().out
+    assert "db_calls=5 " in out
+    assert "txns=2 " in out
+
+
+def test_cpu_total_ms_includes_both_ru_utime_and_ru_stime(monkeypatch):
+    """F4(c) (code review 1): `cpu_total_ms` is the `ru_utime + ru_stime`
+    difference -- completion condition 42's own existing test used a stub
+    with `ru_stime=0` on both reads, which cannot catch a mutation that
+    drops `ru_stime` from the sum entirely.
+
+    mutation RV3 (`tools/perf_baseline.py`): compute `cpu_total_ms` from
+    `ru_utime` alone -- this test's own `cpu_total_ms == pytest.approx(
+    1500.0)` assertion goes red (would read `1000.0`)."""
+    values = iter([
+        SimpleNamespace(ru_utime=1.0, ru_stime=0.5),
+        SimpleNamespace(ru_utime=2.0, ru_stime=1.0),
+    ])
+    monkeypatch.setattr(pb.resource, "getrusage", lambda who: next(values))
+    monkeypatch.setattr(pb.time, "thread_time", lambda: 0.0)
+    stub = SimpleNamespace(transport_kind="in_process")
+    _, _, measured = pb._measure_op(lambda: None, warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
+    assert measured["cpu_total_ms"] == pytest.approx(1500.0)

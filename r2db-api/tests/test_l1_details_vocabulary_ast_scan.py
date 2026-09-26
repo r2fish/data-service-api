@@ -218,7 +218,33 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: reference line was added above this call site's own scope; `_fail_
 #: client_value`'s own single `fail()` call is otherwise unchanged.
 #: Re-verified via `_fail_call_sites`.
-    ("postgres.py", 1627),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+#: R-101 WP-1 (2026-09-26): line shift only (1627 -> 1694) -- `_RolePool`
+#: gained platform DB-time accounting (`_connect_wall_ms`/`_sessions`/
+#: `_closed_db_wall_ms`/`_closed_txn_count` in `__init__`, connect timing
+#: in `_connect`, `_fold_closed_connection_stats`, and the read-only
+#: `platform_stats` method), all inserted ABOVE `_fail_client_value`'s own
+#: single `fail()` call, pushing it down by 67 lines. Re-verified against
+#: the current file via `_fail_call_sites`. Entry count and site identity
+#: unchanged (1) -- this WP calls no `fail()`/`violation()`/`_VOCAB_
+#: CLASSES` site of its own; only the line number of this one pre-existing
+#: generic `except psycopg.errors.DataError` backstop moves.
+#: R-101 WP-1 差し戻し 1 (2026-09-26): line shift only (1694 -> 1703) --
+#: `_RolePool` gained a `_closed_db_calls` counter (`__init__`), folded in
+#: by `_fold_closed_connection_stats` and read back by `platform_stats`
+#: (`db_calls=` on the `DBTIME scope=platform` line, no longer a fixed
+#: `0`), all inserted ABOVE `_fail_client_value`'s own single `fail()`
+#: call, pushing it down by 9 lines. Re-verified against the current file
+#: via `_fail_call_sites`. Entry count and site identity unchanged (1).
+#: R-101 WP-1 差し戻し 2 (2026-09-26): line shift only (1703 -> 1733) --
+#: `_RolePool.connection()` now folds an already-`.closed` dequeued
+#: connection's own stats before replacing it, and tracks that connection
+#: (`already_folded_conn`) so the `finally` block does not fold the same
+#: connection's stats a second time when its own replacement `_connect()`
+#: call raises, all inserted ABOVE `_fail_client_value`'s own single
+#: `fail()` call, pushing it down by 30 lines. Re-verified against the
+#: current file via `_fail_call_sites`. Entry count and site identity
+#: unchanged (1).
+    ("postgres.py", 1733),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

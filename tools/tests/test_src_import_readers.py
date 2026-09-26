@@ -524,6 +524,13 @@ STRING_ANNOTATION_ONLY_READERS: frozenset[tuple[str, str, str]] = frozenset(
         ("r2db", "r2db_api.postgres", "BoundMutation"),
         ("mitatedb", "mitatedb_api.audit_query", "Sequence"),
         ("mitatedb", "mitatedb_api.http", "Iterator"),
+        # R-101 WP-1: `PostgresApplicationAuditSink._connect`'s own
+        # `psycopg.connect(...)` call (the module's only other reader of
+        # this import) was replaced with `psycopg_counting.CountingConnection.
+        # connect(...)`, so `psycopg` itself is now read only inside this
+        # module's own string-literal annotations (`"psycopg.Connection"`
+        # on `_connect`/`_fold_closed_connection_stats`).
+        ("mitatedb", "mitatedb_api.application_audit", "psycopg"),
     }
 )
 

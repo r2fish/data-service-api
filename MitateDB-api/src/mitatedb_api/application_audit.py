@@ -30,11 +30,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import threading
+import time
 from typing import Any, Optional
 import uuid
 
 import psycopg
 from psycopg import sql
+
+from .psycopg_counting import CountingConnection
 
 DEFAULT_SCHEMA = "mitatedb_registry"
 
@@ -323,9 +327,65 @@ class PostgresApplicationAuditSink:
         self._dsn = dsn
         self._connect_timeout = connect_timeout
         self._table = sql.Identifier(schema, "application_audit")
+        # Platform DB-time accounting for this sink's own per-call
+        # connections (mirrors `credential_store_postgres.py`'s identical
+        # shape): a dedicated `threading.Lock` guards five running totals
+        # that only ever grow -- `_sessions`/`_connect_wall_ms` in
+        # `_connect` right after the connect returns, `_platform_db_wall_
+        # ms`/`_platform_txn_count`/`_platform_db_calls` folded in by
+        # `_fold_closed_connection_stats` right before each connection
+        # closes.
+        self._platform_stats_lock = threading.Lock()
+        self._sessions = 0
+        self._connect_wall_ms = 0.0
+        self._platform_db_wall_ms = 0.0
+        self._platform_txn_count = 0
+        self._platform_db_calls = 0
 
     def _connect(self) -> "psycopg.Connection":
-        return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        """Opens a `psycopg_counting.CountingConnection` (a `psycopg.
+        Connection` subclass), timed into `_connect_wall_ms`/`_sessions`
+        under `self._platform_stats_lock`, so this connection's own later
+        `db_wall_ms`/`txn_count` can be folded into this sink's platform
+        totals right before it closes."""
+        connect_start = time.monotonic()
+        conn = CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
+        with self._platform_stats_lock:
+            self._sessions += 1
+            self._connect_wall_ms += connect_wall_ms
+        return conn
+
+    def _fold_closed_connection_stats(self, conn: "psycopg.Connection") -> None:
+        """Called right before every `conn.close()` below: adds this one
+        connection's own `db_wall_ms`/`txn_count`/`execute_count +
+        executemany_count` into this sink's own running totals, under
+        `self._platform_stats_lock`, so closing a connection never loses
+        time, transactions, or statements it already spent."""
+        db_wall_ms = getattr(conn, "db_wall_ms", 0.0)
+        txn_count = getattr(conn, "txn_count", 0)
+        db_calls = getattr(conn, "execute_count", 0) + getattr(conn, "executemany_count", 0)
+        with self._platform_stats_lock:
+            self._platform_db_wall_ms += db_wall_ms
+            self._platform_txn_count += txn_count
+            self._platform_db_calls += db_calls
+
+    def platform_stats(self) -> dict[str, int | float]:
+        """Read-only sum of this sink's own platform DB-time accounting
+        (same shape as `credential_store_postgres.PostgresCredentialStore.
+        platform_stats`): `sessions`/`connect_wall_ms` from every
+        `_connect` call, `db_wall_ms`/`txn_count`/`db_calls` folded in
+        from every connection this sink has already closed. No DB round
+        trip: every value read here is a plain Python attribute, under
+        `self._platform_stats_lock`."""
+        with self._platform_stats_lock:
+            return {
+                "sessions": self._sessions,
+                "connect_wall_ms": self._connect_wall_ms,
+                "db_wall_ms": self._platform_db_wall_ms,
+                "txn_count": self._platform_txn_count,
+                "db_calls": self._platform_db_calls,
+            }
 
     def append(
         self, *, event_class: str, request_id: Optional[str], application_id: Optional[str],
@@ -353,6 +413,7 @@ class PostgresApplicationAuditSink:
                 cur.execute(statement, params)
             conn.commit()
         finally:
+            self._fold_closed_connection_stats(conn)
             conn.close()
 
     def append_many(self, events: "list[ApplicationAuditEvent]") -> None:
@@ -383,6 +444,7 @@ class PostgresApplicationAuditSink:
                 cur.execute(statement, params)
             conn.commit()
         finally:
+            self._fold_closed_connection_stats(conn)
             conn.close()
 
     def events(self) -> "list[tuple[Any, ...]]":
@@ -401,6 +463,7 @@ class PostgresApplicationAuditSink:
                 cur.execute(statement)
                 return cur.fetchall()
         finally:
+            self._fold_closed_connection_stats(conn)
             conn.close()
 
 

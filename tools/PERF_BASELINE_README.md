@@ -106,6 +106,20 @@ Plug selection is read from `conformance-tests/registry.json` -- this file
 never hardcodes a plug or adapter module name; adding a registry entry
 grows this tool's own output with no code change here.
 
+**`DSA_PERF_THREAD_LIMIT` (both peers' `-http`/`-socket` plugs).** Set to
+a positive integer, this wraps the plug's own data-plane ASGI app so the
+first request served on any one event loop sets that loop's own default
+anyio thread limiter (`anyio.to_thread.current_default_thread_limiter()`)
+to that many tokens, then never touches it again on that loop -- an
+`-http` plug's own asgi loop and an `-socket` plug's own uvicorn thread
+each get this treatment independently, the first time either serves a
+request. Absent, empty, or not a positive integer, the app is left
+completely unwrapped -- identical to before this variable existed. **Do
+not leave this variable set while running `pytest`**: every conformance/
+unit test that builds one of these plugs would then run its own requests
+under the reduced thread limit too, changing timing-sensitive test
+behaviour that has nothing to do with this tool.
+
 ## Output format
 
 One `PERFRUN` line, then one `PERF` line per (peer, plug, op):
@@ -119,6 +133,11 @@ PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess|socket> op=<qu
 to this line since the format above -- every other column keeps its exact
 pre-WP-7 name, order, and formatting; see "Concurrency (`--concurrency K`)"
 above for what `K` means.
+
+**Row order, per (plug, op):** `CPU` -> `POOL` -> `DBTIME` -> `PREPARED`/
+`PREPSTMT` -> `ROUNDTRIP` (the last two lines only under `--roundtrip`),
+then, once every op for that plug has run, that plug's own `PERF` lines
+as one block (unchanged from before `CPU`/`DBTIME` existed).
 
 Three operations are measured on every plug: `query` (`select_eq`, one
 predicate), `mutate` (`insert`, one operation), `batch` (a single-entity
@@ -140,6 +159,116 @@ their own -- comparing the two is what the judgement rule above is for
 (the three `r2db-api` plugs -- in-process, `-http`, `-socket` -- still
 declare `cross_entity_mutation: unavailable`, so none of them ever carries
 a `cross_entity` line).
+
+## `CPU` lines (R-101)
+
+One `CPU` line per (plug, op), printed FIRST in that op's own block --
+before `POOL`, `DBTIME`, `PREPARED`, and `ROUNDTRIP`:
+
+```
+CPU peer=<peer> plug=<plug> op=<op> concurrency=<K> thread_limit=<N|default> requests=<n * K> wall_ms=<x.xxx> cpu_total_ms=<x.xxx> cpu_main_ms=<x.xxx> cpu_other_ms=<x.xxx>
+```
+
+The window is the MEASURED `--n` samples only -- warmup is excluded, the
+same convention every other row on this page already follows.
+`thread_limit=` is the plug's own `perf_thread_limit()` value (the
+resolved `DSA_PERF_THREAD_LIMIT` this run was started with), or the
+literal `default` when the plug has no such accessor or it returns
+`None` (env absent at construction time). `requests=` is `n * K` --
+measured requests only, never `(warmup + n) * K` (`ROUNDTRIP`'s own
+`requests=` below uses the warmup-inclusive count instead; the two are
+deliberately different denominators for different purposes). `wall_ms=`
+is the sum of the measured groups' own wall-clock durations (the same
+numbers `p50_ms`/`p95_ms` on the `PERF` line are computed from).
+`cpu_total_ms=` is `resource.getrusage(RUSAGE_SELF)`'s own `ru_utime +
+ru_stime` difference across that same window -- every CPU-second this
+whole OS process spent, on any of its threads, while the measured window
+ran. `cpu_main_ms=` is `time.thread_time()`'s own difference on the
+CALLING thread only (the main thread, where this tool's own client loop
+and, for an asgi plug, the app's own async layer all run). `cpu_other_
+ms=` is `cpu_total_ms - cpu_main_ms`: the CPU spent on every OTHER thread
+in the process -- an anyio worker thread running a `run_in_threadpool`
+call, or, for a `-socket` plug, the uvicorn server thread. This tool
+takes no position on what "the primary serialization actor" is; it prints
+these numbers so a reader with the plug's own `thread_limit=`/`concurrency=`
+sweep in hand can judge that themselves.
+
+## `DBTIME` lines (R-101)
+
+For each (plug, op), immediately AFTER that op's own `POOL` line(s) and
+BEFORE its `PREPARED` line(s), this tool prints one or two `DBTIME`
+lines -- only for a plug with a `prepared_stats()` method (every plug
+this addition does not touch prints none, no exception):
+
+```
+DBTIME peer=<peer> plug=<plug> op=<op> concurrency=<K> scope=app conns=<n> gone=<n> db_calls=<n> txns=<n> db_wall_ms=<x.xxx> db_wall_ms_per_req=<x.xxx>
+DBTIME peer=<peer> plug=<plug> op=<op> concurrency=<K> scope=platform sessions=<n> connect_wall_ms=<x.xxx> db_calls=<n> txns=<n> db_wall_ms=<x.xxx> db_wall_ms_per_req=<x.xxx>
+```
+
+Both lines are PRE/POST differences across the same measured window `CPU`
+uses -- the PRE snapshot is taken inside `_measure_op`, after warmup and
+before the measured window starts (its own `prepared_stats()` call); the
+POST snapshot is the same call `PREPARED` already makes. `prepared_stats(
+)` therefore runs TWICE per op (PRE + POST) without `--roundtrip`, three
+times with it (`ROUNDTRIP`'s own separate PRE probe is a third call) --
+the POST call itself is shared by `DBTIME scope=app` and every `PREPARED`
+line, never a second POST probe for this addition's own sake.
+
+**`scope=app`** covers the application-database round trips the connections
+`prepared_stats()` itself returns spent: `conns=` is the number of
+connection labels in the POST snapshot (including one opened during the
+window, absent from PRE); `gone=` is the number of labels present only in
+PRE (closed during the window, contributing nothing to the sums below);
+`db_calls=` is the summed `execute_count + executemany_count` delta per
+label (a POST-only label's own PRE is treated as 0, never dropped from
+the sum); `txns=` and `db_wall_ms=` are the same PRE/POST delta on
+`psycopg_counting.CountingConnection`'s own `txn_count`/`db_wall_ms`
+attributes. `db_wall_ms_per_req=` divides by `requests=n * K` (not
+printed on this line itself, but the same denominator `CPU`'s own
+`requests=` column carries for the same op).
+
+**`scope=platform`** covers the platform-side connections (the
+credential store and the durable application-audit sink) the data-plane
+measurement path itself opens -- never a plug's own control-plane or
+provisioning connections. `sessions=` and `connect_wall_ms=` are the
+PRE/POST delta of how many NEW connections opened during the window and
+how long those `connect()` calls themselves took; `txns=`/`db_wall_ms=`/
+`db_calls=` are the same delta on the platform accessor's own `txn_
+count`/`db_wall_ms`/`execute_count + executemany_count` sum (`_RolePool.
+platform_stats()` on r2db-api, each per-call store's own `platform_
+stats()` on MitateDB-api -- both fold every closed connection's own
+counters in before it closes, the same discipline `scope=app` relies on
+for its own connections). `db_wall_ms_per_req=` divides `db_wall_ms +
+connect_wall_ms` by
+`requests=` -- the connect cost is folded into the same per-request
+denominator `scope=app` uses for its own round-trip-only wall time.
+
+**`txns=` is not `ROUNDTRIP`'s own `xacts=`.** `txns=` counts `commit()`/
+`rollback()`/`transaction()` enter-and-exit calls on `psycopg_counting.
+CountingConnection` (SAVEPOINT/RELEASE included, each side of a `with
+conn.transaction():` block counted separately) -- a client-side call
+count. `ROUNDTRIP`'s own `xacts=` (below) counts PostgreSQL's own
+server-side `pg_stat_database.xact_commit + xact_rollback` delta. The two
+peers' own connection-management shapes give these different units, and
+this tool does not attempt to reconcile them into one number.
+
+**MitateDB's `POOL lock=` `acquire`, from this addition onward, includes
+TWO acquisitions per preceding op (not one)**: `DBTIME scope=app`'s own
+POST snapshot and `PREPARED`'s own line(s) now share ONE `prepared_
+stats()` call, but `ApplicationCell.prepared_stats()` still takes the
+cell's own lock every time it runs at all, and this addition itself adds
+a SEPARATE PRE snapshot call, taken earlier in the SAME op (inside
+`_measure_op`, before the measured window) -- so one op now drives two
+separate lock-guarded probe calls (PRE and POST) where R-79 drove one.
+
+**A probe that fails still shows up as a windowed round trip.** If the
+POST (or PRE) `prepared_stats()` call itself raises on a particular
+connection, `psycopg_counting.probe_prepared_statements` reports `probed=
+False` and the caller rolls that connection back before returning it --
+that rollback is itself one `txn_count`/`db_wall_ms` entry on the SAME
+connection, so a probe failure shows up in `DBTIME scope=app`'s own
+numbers as one extra transaction on the window it happened in, not as a
+silently missing connection.
 
 ## `POOL` lines (R-78)
 
@@ -278,8 +407,11 @@ same LRU behaviour `_counts` always has, `_preparing.py`'s own `_rotate`)
 appears in `pg_prepared_statements`/`PREPSTMT`, but it is not entirely
 free on the client side either (design memo §1's own F3 note).
 
-**MitateDB's `POOL lock=` `acquire`, from R-79 onward, includes one
-acquisition per PRECEDING probe.** `ApplicationCell.prepared_stats()`
+**MitateDB's `POOL lock=` `acquire`, at this section's own R-79 baseline,
+included one acquisition per PRECEDING probe** (superseded by the `## CPU
+lines (R-101)` section above, which now runs `prepared_stats()` twice per
+op -- see that section's own "TWO acquisitions per preceding op" note for
+the current count). `ApplicationCell.prepared_stats()`
 takes the SAME cell lock every other operation on that cell takes
 (`cell.py::ApplicationCell._lock`), so calling it once (to print the
 `PREPARED` line(s) for the op that just ran) raises that cell's own
@@ -327,8 +459,12 @@ that op**, `(warmup + n) * concurrency` -- a DIFFERENT number from the
 Immediately before `_measure_op` starts timing an op, and again
 immediately after, this tool takes a PROBE (`prepared_stats()`, same as
 the `PREPARED` line above -- the POST probe's own return value is reused
-for both, so a `--roundtrip` run still calls `prepared_stats()` only
-twice per op, not three times) and a `pg_stat_database` read. `stmts=`
+for both `ROUNDTRIP` and `DBTIME scope=app`) and a `pg_stat_database`
+read. `ROUNDTRIP`'s own PRE probe is a SEPARATE call from `DBTIME`'s own
+PRE probe (each taken at a different point: `ROUNDTRIP`'s before warmup,
+`DBTIME`'s after warmup/before measured) -- a `--roundtrip` run therefore
+calls `prepared_stats()` three times per op in total (two PRE + one
+shared POST), not twice. `stmts=`
 is that op's own `Δexecute_count` for one connection (matched by
 `label`; a label absent from the PRE probe -- a reconnect -- reads as
 baseline 0, never a raised exception and never the value carried over
@@ -397,19 +533,23 @@ stats()` returns, but `db=app`'s own probe-commit correction (above)
 only ever counts THIS run's own resolved cell, never that second
 application's.
 
-**Under `--roundtrip`, MitateDB's `POOL lock=` `acquire` carries ONE
-MORE extra acquisition per op than the `--roundtrip`-less baseline
-above.** The `## PREPARED / PREPSTMT lines (R-79)` section above already
-notes that the (single, POST-only) probe every op takes raises `acquire_
-count` by 1, reflected on the NEXT op's own `POOL lock=` line.
-`--roundtrip` takes that SAME probe twice per op (PRE and POST,
-`ROUNDTRIP` section above), so each op's own `POOL lock=` line runs 1
-higher than the R-79 baseline, from the very first op onward -- not just
-the last one. Measured against the real, registered `MitateDB-api-http`
-plug (a throwaway-cluster confirmation run, `--warmup 2 --n 5`, `perfbase_
-*` lock, `query`/`mutate`/`batch`/`cross_entity` in order, not a `tools/
-tests` assertion): `acquire=20/35/50/69` without `--roundtrip`, `acquire=
-21/37/53/73` with it.
+**Under `--roundtrip`, MitateDB's `POOL lock=` `acquire` carries ONE MORE
+extra acquisition per op than without it.** The `## CPU lines (R-101)`
+section above already notes that `DBTIME`'s own PRE + shared POST probe
+(two calls, present on EVERY op regardless of `--roundtrip`) each raise
+`acquire_count` by 1, reflected on the NEXT op's own `POOL lock=` line.
+`--roundtrip` adds `ROUNDTRIP`'s own SEPARATE PRE probe on top of those
+two (three calls per op in total), so each op's own `POOL lock=` line
+runs 1 higher under `--roundtrip` than without it, from the very first op
+onward -- not just the last one. **R-80 時点の実測** (before `DBTIME`'s
+own PRE probe existed, when the baseline was a single POST-only probe per
+op): against the real, registered `MitateDB-api-http` plug (a throwaway-
+cluster confirmation run, `--warmup 2 --n 5`, `perfbase_*` lock, `query`/
+`mutate`/`batch`/`cross_entity` in order, not a `tools/tests` assertion):
+`acquire=20/35/50/69` without `--roundtrip`, `acquire=21/37/53/73` with
+it -- these two specific series are from that R-80-era baseline (one
+probe per op) and are not re-measured against the current (two-probe)
+baseline here.
 
 ## The limits of what these numbers mean
 

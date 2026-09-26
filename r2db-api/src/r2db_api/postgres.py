@@ -304,6 +304,21 @@ class _RolePool:
         self._wait_max_ms = 0.0
         self._in_use = 0
         self._in_use_peak = 0
+        # Platform DB-time accounting, under the same `self._stats_lock`
+        # as the acquisition counters above: `_sessions`/`_connect_wall_
+        # ms` rise once per `_connect()` call (below), and `_closed_db_
+        # wall_ms`/`_closed_txn_count`/`_closed_db_calls` receive a
+        # connection's own `CountingConnection.db_wall_ms`/`txn_count`/
+        # `execute_count + executemany_count` folded in right before that
+        # connection is closed (`_liveness_check`, `close_all`, and
+        # `connection()`'s own non-recycle path) -- so a closed
+        # connection's own totals are never lost, only moved from "on the
+        # connection" to "on this pool".
+        self._connect_wall_ms = 0.0
+        self._sessions = 0
+        self._closed_db_wall_ms = 0.0
+        self._closed_txn_count = 0
+        self._closed_db_calls = 0
 
     def _connect(self) -> "psycopg.Connection[Any]":
         # `connect_timeout` (a real libpq connection parameter, merged into
@@ -316,11 +331,32 @@ class _RolePool:
         # which is exactly the kind of unbounded wait `_acquire` below must
         # not be exposed to while holding `self._lock` (see that method's
         # own comment on why `_connect()` is never called under the lock).
+        connect_start = time.monotonic()
         conn = CountingConnection.connect(self._dsn, autocommit=False, connect_timeout=self._connect_timeout)
+        connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
+        with self._stats_lock:
+            self._sessions += 1
+            self._connect_wall_ms += connect_wall_ms
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SET search_path TO {}").format(sql.Identifier(self._schema)))
         conn.commit()
         return conn
+
+    def _fold_closed_connection_stats(self, conn: "psycopg.Connection[Any]") -> None:
+        """Called right before every `conn.close()` in this class (`_
+        liveness_check`, `connection()`'s non-recycle path, `close_all`):
+        adds this one connection's own `db_wall_ms`/`txn_count`/`execute_
+        count + executemany_count` (from `psycopg_counting.
+        CountingConnection`) into this pool's own running totals, under
+        `self._stats_lock`, so closing a connection never loses time,
+        transactions, or statements it already spent."""
+        db_wall_ms = getattr(conn, "db_wall_ms", 0.0)
+        txn_count = getattr(conn, "txn_count", 0)
+        db_calls = getattr(conn, "execute_count", 0) + getattr(conn, "executemany_count", 0)
+        with self._stats_lock:
+            self._closed_db_wall_ms += db_wall_ms
+            self._closed_txn_count += txn_count
+            self._closed_db_calls += db_calls
 
     def _acquire(self) -> "psycopg.Connection[Any]":
         try:
@@ -410,6 +446,44 @@ class _RolePool:
                 "wait_total_ms": self._wait_total_ms,
                 "wait_max_ms": self._wait_max_ms,
                 "in_use_peak": self._in_use_peak,
+            }
+
+    def platform_stats(self) -> dict[str, int | float]:
+        """Read-only sum of this pool's own DB-time accounting: every
+        connection currently idle in `self._queue` (drained via `get_
+        nowait` and put back with `put_nowait`, exactly like `prepared_
+        stats` below -- never through `_acquire()`, so `acquire_count`
+        above stays untouched) plus the running totals `_fold_closed_
+        connection_stats`/`_connect` already folded in for connections
+        that are now closed. A connection some other caller currently has
+        checked out is not in the queue right now, so its own not-yet-
+        closed `db_wall_ms`/`txn_count`/`db_calls` are not yet visible
+        here -- they land in this method's next call, once that
+        connection is returned or closed. No DB round trip: every value
+        read here is a plain Python attribute. `db_calls` is `execute_
+        count + executemany_count`, the same pair `DBTIME scope=app` sums
+        for the application-database side."""
+        conns: list["psycopg.Connection[Any]"] = []
+        live_db_wall_ms = 0.0
+        live_txn_count = 0
+        live_db_calls = 0
+        while True:
+            try:
+                conns.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        for conn in conns:
+            live_db_wall_ms += getattr(conn, "db_wall_ms", 0.0)
+            live_txn_count += getattr(conn, "txn_count", 0)
+            live_db_calls += getattr(conn, "execute_count", 0) + getattr(conn, "executemany_count", 0)
+            self._queue.put_nowait(conn)
+        with self._stats_lock:
+            return {
+                "sessions": self._sessions,
+                "connect_wall_ms": self._connect_wall_ms,
+                "db_wall_ms": live_db_wall_ms + self._closed_db_wall_ms,
+                "txn_count": live_txn_count + self._closed_txn_count,
+                "db_calls": live_db_calls + self._closed_db_calls,
             }
 
     def prepared_stats(self, label_prefix: str) -> list[dict[str, Any]]:
@@ -502,6 +576,7 @@ class _RolePool:
                 conn.autocommit = False
             return True
         except Exception:
+            self._fold_closed_connection_stats(conn)
             try:
                 conn.close()
             except Exception:
@@ -511,8 +586,30 @@ class _RolePool:
     @contextmanager
     def connection(self) -> Iterator["psycopg.Connection[Any]"]:
         conn = self._acquire()
+        # `already_folded_conn` names whichever object this method itself
+        # has ALREADY folded (and, for the `conn.closed` branch, closed)
+        # before attempting a replacement `_connect()` -- so the `finally`
+        # block below, which sees the OLD `conn` value again if `_connect(
+        # )` itself raises, never folds that same connection's own stats a
+        # second time.
+        already_folded_conn: "psycopg.Connection[Any] | None" = None
         try:
-            if conn.closed or not self._liveness_check(conn):
+            if conn.closed:
+                # A connection dequeued already `closed` (server-
+                # terminated, observed here rather than via `_liveness_
+                # check`'s own round trip) is about to be discarded and
+                # replaced -- fold its own accumulated stats in BEFORE
+                # replacing it, or they vanish from both "idle in queue"
+                # (it is no longer queued -- `_acquire()` already removed
+                # it) and the closed-connection accumulator, showing up as
+                # a window that lost time it should never lose.
+                self._fold_closed_connection_stats(conn)
+                already_folded_conn = conn
+                conn = self._connect()
+            elif not self._liveness_check(conn):
+                # `_liveness_check`'s own `except` branch already folded
+                # and closed `conn` before reporting `False` here.
+                already_folded_conn = conn
                 conn = self._connect()
             yield conn
         finally:
@@ -547,6 +644,15 @@ class _RolePool:
                 except queue.Full:
                     recycled = False
             if not recycled:
+                # `conn` here is the SAME object already folded above
+                # (`already_folded_conn`) exactly when this method's own
+                # replacement `_connect()` call itself raised -- the
+                # assignment `conn = self._connect()` never completed, so
+                # `conn` still names the old, already-discarded connection
+                # when this `finally` block runs. Folding it again here
+                # would double-count that one connection's own stats.
+                if conn is not already_folded_conn:
+                    self._fold_closed_connection_stats(conn)
                 try:
                     conn.close()
                 except Exception:
@@ -561,6 +667,7 @@ class _RolePool:
                 conn = self._queue.get_nowait()
             except queue.Empty:
                 break
+            self._fold_closed_connection_stats(conn)
             try:
                 conn.close()
             except Exception:
