@@ -361,6 +361,37 @@ def test_perf_thread_limit_leaves_the_http_adapter_unwrapped_when_env_is_absent(
         adapter.close()
 
 
+def test_perf_thread_limit_accessor_reflects_the_env_on_a_live_http_adapter(monkeypatch):
+    """Completion condition 67: `perf_thread_limit()` returns the SAME
+    value `DSA_PERF_THREAD_LIMIT` resolves to on an ACTUALLY constructed
+    `-http` adapter -- `N` when the env names a positive integer at
+    construction time, `None` when it is absent -- confirming the env
+    reader's own value reaches the accessor through a real `__init__`,
+    not merely a hand-built stand-in carrying the attribute already set.
+
+    mutation AU-66 (`conformance_adapter_mitatedb_http.py`): immediately
+    after `self._perf_thread_limit = _perf_thread_limit_value()` in
+    `__init__`, overwrite it with `self._perf_thread_limit = None` (the
+    wrapper itself stays in place, so `adapter._app` is still a `_Perf
+    ThreadLimitWrapper` instance) -- this test's own `== 5` assertion
+    goes red (the accessor reads `None` even though the env named `5`)."""
+    monkeypatch.setenv("DSA_PERF_THREAD_LIMIT", "5")
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    try:
+        assert isinstance(adapter._app, _http_module._PerfThreadLimitWrapper)
+        assert adapter.perf_thread_limit() == 5
+    finally:
+        monkeypatch.delenv("DSA_PERF_THREAD_LIMIT", raising=False)
+        adapter.close()
+
+    monkeypatch.delenv("DSA_PERF_THREAD_LIMIT", raising=False)
+    adapter_no_env = _http_module.MitateDBHttpConformanceAdapter()
+    try:
+        assert adapter_no_env.perf_thread_limit() is None
+    finally:
+        adapter_no_env.close()
+
+
 def test_perf_thread_limit_wraps_the_http_adapters_own_app_and_the_asgi_client_dials_it(monkeypatch):
     """Completion conditions 69/59 (code review 1 F2: the identity checks
     alone are a proxy for the condition's own words, "1 要求を通した後、
@@ -414,8 +445,10 @@ def test_perf_thread_limit_wraps_the_socket_adapters_own_data_plane_surface_app(
 
     mutation M46 (`conformance_adapter_mitatedb_http.py`): assign the
     UNWRAPPED app to `self._app` while still handing the wrapped one to
-    `self._build_client(...)` -- this test's own `surface.app is adapter.
-    _app` assertion goes red.
+    `self._build_client(...)` -- this test's own `isinstance(adapter.
+    _app, _PerfThreadLimitWrapper)` assertion goes red first (`adapter.
+    _app` now holds the plain, unwrapped app, so the dict lookup and
+    identity check below it are never reached).
 
     Looks the surface up by `id(adapter._app)` in `adapter._socket_
     surfaces` itself, rather than calling `_socket_surface_for(adapter.

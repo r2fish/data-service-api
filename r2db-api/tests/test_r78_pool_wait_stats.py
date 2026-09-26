@@ -410,6 +410,37 @@ def test_perf_thread_limit_leaves_the_http_adapter_unwrapped_when_env_is_absent(
         adapter.close()
 
 
+def test_perf_thread_limit_accessor_reflects_the_env_on_a_live_http_adapter(monkeypatch):
+    """Completion condition 66: `perf_thread_limit()` returns the SAME
+    value `DSA_PERF_THREAD_LIMIT` resolves to on an ACTUALLY constructed
+    `-http` adapter -- `N` when the env names a positive integer at
+    construction time, `None` when it is absent -- confirming the env
+    reader's own value reaches the accessor through a real `__init__`,
+    not merely a hand-built stand-in carrying the attribute already set.
+
+    mutation AU-66 (`conformance_adapter_r2db_http.py`): immediately
+    after `self._perf_thread_limit = _perf_thread_limit_value()` in
+    `__init__`, overwrite it with `self._perf_thread_limit = None` (the
+    wrapper itself stays in place, so `adapter._app` is still a `_Perf
+    ThreadLimitWrapper` instance) -- this test's own `== 5` assertion
+    goes red (the accessor reads `None` even though the env named `5`)."""
+    monkeypatch.setenv("DSA_PERF_THREAD_LIMIT", "5")
+    adapter = _http_module.R2DBHttpConformanceAdapter()
+    try:
+        assert isinstance(adapter._app, _http_module._PerfThreadLimitWrapper)
+        assert adapter.perf_thread_limit() == 5
+    finally:
+        monkeypatch.delenv("DSA_PERF_THREAD_LIMIT", raising=False)
+        adapter.close()
+
+    monkeypatch.delenv("DSA_PERF_THREAD_LIMIT", raising=False)
+    adapter_no_env = _http_module.R2DBHttpConformanceAdapter()
+    try:
+        assert adapter_no_env.perf_thread_limit() is None
+    finally:
+        adapter_no_env.close()
+
+
 def test_perf_thread_limit_wraps_the_http_adapters_own_app_and_the_asgi_client_dials_it(monkeypatch):
     """Completion conditions 68/58 (code review 1 F2: the identity checks
     alone are a proxy -- the condition's own words are "1 要求を通した後、
@@ -468,9 +499,10 @@ def test_perf_thread_limit_wraps_the_socket_adapters_own_data_surface_app(monkey
 
     mutation M45 (`conformance_adapter_r2db_http.py`): assign the
     UNWRAPPED app to `self._app` while still handing the wrapped one to
-    `self._build_client(...)` -- this test's own `surface_app is adapter.
-    _app` assertion goes red (the socket surface's own bound app would be
-    the wrapper, while `adapter._app` is the plain app)."""
+    `self._build_client(...)` -- this test's own `isinstance(adapter.
+    _app, _PerfThreadLimitWrapper)` assertion goes red first (`adapter.
+    _app` now holds the plain, unwrapped app, so the identity check
+    below it is never reached)."""
     monkeypatch.setenv("DSA_PERF_THREAD_LIMIT", "3")
     import conformance_adapter_r2db_socket as _socket_module  # noqa: E402 - conformance dir already on sys.path (module level, above)
 
