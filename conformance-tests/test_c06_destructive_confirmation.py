@@ -106,6 +106,32 @@ updated in the same commit as this flip.
   any `details` value (`adapter.assert_no_payload_echo_in_details`, made
   recursive by review M-4).
 
+## Vectors (R-41, `destructive_confirmation.phrase_construction.rules`)
+
+Added against `phrase_construction`'s own 6 named rules (derivation-input
+scope, determinism, scope-included, state-fingerprint, identifier-validated
+names only, bounded length), which V1-V8 probe only partially (V3: a
+different where, V4: determinism/requester, V6: drop_entity fingerprint):
+
+- V9 (rule 1, derivation-input scope): a probed phrase must not depend on
+  the request's OWN `destructive`/`confirmation` values or on which
+  independently-issued request obtained it -- 4 differently-shaped denied
+  requests against the identical target all name the SAME phrase.
+- V10 (rule 3, scope-included): two `where` predicates on the SAME field
+  that differ only in the JSON type of the compared value (`1` vs `"1"`)
+  must obtain two different phrases -- the scope encoding is type-aware,
+  not merely value-aware.
+- V11 (rule 6, bounded): the longest legal entity name plus a very long
+  `where` value must still produce a phrase within `confirmation`'s own
+  contract `maxLength`.
+- V12 (rule 4, state-fingerprint): a `delete` phrase for a row on a given
+  entity is invalidated by an unrelated schema change (`add_field`) to
+  THAT SAME entity, mirroring V6's own `drop_entity` fingerprint check for
+  the `delete` operation.
+- V13 (rule 5, identifier-validated names only): an entity name violating
+  the contract's own identifier grammar is refused, at `delete`'s entity
+  position, before any confirmation phrase is ever computed for it.
+
 A registry-wide vacuity guard (review blocker B-1,
 `test_c06_branch_dispatch_vacuity_guard`) independently re-verifies every
 registered adapter's strict/baseline classification and asserts the
@@ -119,6 +145,8 @@ real assertions on both sides, never a silent no-op.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Mapping
 
 import pytest
@@ -141,6 +169,10 @@ from conftest import registered_adapters, residue_tracking_suppressed
 pytestmark = pytest.mark.condition("C-06")
 
 _REQUIRED_DETAIL_KEYS = ("required_confirmation", "consequence", "reversible_alternative", "recovery")
+
+# R-41 V11: the same `ROOT / "spec" / "data-service-api.v1.json"` reading
+# `test_contract.py` itself uses.
+_CONTRACT_PATH = Path(__file__).parents[1] / "spec" / "data-service-api.v1.json"
 
 # ---------------------------------------------------------------------------
 # Module-local `fx` override (one half of a two-part fix for a real,
@@ -1141,6 +1173,279 @@ def test_c06_v8_no_payload_echo_in_declarations(adapter, fx: Fixture):
 
     denial = _probe_delete(adapter, session, entity, "probe_value", adversarial_value)
     assert_no_payload_echo_in_details(denial.details, adversarial_value, context="V8 adversarial where-value probe")
+
+
+# ---------------------------------------------------------------------------
+# V9-V13 (R-41): contract `destructive_confirmation.phrase_construction`'s
+# own 6 named rules, beyond V1-V8's partial coverage above.
+# ---------------------------------------------------------------------------
+
+
+def test_c06_v9_phrase_is_independent_of_destructive_and_confirmation_values(adapter, fx: Fixture):
+    """`phrase_construction` rule 1: a phrase is derived only from the
+    operation/target/consequence class -- never from the request's own
+    `destructive`/`confirmation` values, its `request_id`, or which
+    independently-issued request obtained it. This port's own
+    `ConformanceDenial` carries no `request_id` to compare directly, and
+    the contract gives a client no way to set one at all (`QueryResult.
+    request_id`'s own description), so independence is observed the only
+    way it CAN be here: 4 differently-shaped, separately-issued requests
+    against the identical target all naming the SAME `required_confirmation`
+    as an initial probe of that
+    target. `(False, None)` additionally corroborates V2's own assertion
+    (destructive=false is still denied) with the phrase-equality check V2
+    itself does not make.
+    """
+    if _branch_for(adapter) != "strict":
+        _assert_baseline_delete_invariant(adapter, fx)
+        return
+
+    session = fx.runtime_a
+    entity = fx.shared_entity
+    other_entity = fx.a_only_entity
+    before = adapter.count(session, entity)
+
+    probe_denial = _probe_delete(adapter, session, entity, "item_key", 1)
+    phrase = probe_denial.details["required_confirmation"]
+
+    other_denial = _probe_delete(adapter, session, other_entity, "item_key", 1)
+    other_phrase = other_denial.details["required_confirmation"]
+    assert other_phrase != phrase, (
+        "fixture/peer defect: two different entities' delete phrases collided -- phrase_construction's own "
+        "scope-included rule requires the target to be part of the derivation"
+    )
+
+    variants: list[tuple[bool, Any]] = [
+        (True, "c06-v9-not-the-phrase"),
+        (True, other_phrase),
+        (False, phrase),
+        (False, None),
+    ]
+    for destructive, confirmation in variants:
+        denial = _assert_delete_denied(
+            adapter, session, entity, "item_key", 1, destructive=destructive, confirmation=confirmation
+        )
+        assert denial.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED", (
+            f"{adapter.name}: V9 variant (destructive={destructive!r}, confirmation={confirmation!r}) got "
+            f"{denial.code!r}"
+        )
+        assert denial.details["required_confirmation"] == phrase, (
+            f"{adapter.name}: V9 variant (destructive={destructive!r}, confirmation={confirmation!r}) declared a "
+            f"phrase {denial.details['required_confirmation']!r} different from the initial probe's {phrase!r} -- "
+            "phrase_construction rule 1 forbids the phrase depending on the request's own destructive/confirmation "
+            "values"
+        )
+
+    assert adapter.count(session, entity) == before, "V9: no variant may ever change state"
+
+
+def test_c06_v10_where_value_type_is_part_of_the_scope(adapter, fx: Fixture):
+    """`phrase_construction` rule 3 (scope-included): the target's
+    description in the phrase includes the operation's own scope, and two
+    different scopes must never collide onto the same phrase. `where`
+    equality on the same field but a differently-TYPED value (JSON integer
+    `1` vs JSON string `"1"`) is a different scope; this vector requires
+    the two probed phrases to differ, and each phrase to be refused when
+    presented for the other request.
+    """
+    if _branch_for(adapter) != "strict":
+        _assert_baseline_delete_invariant(adapter, fx)
+        return
+
+    developer = fx.developer_a
+    session = fx.runtime_a
+    entity = fresh_identifier("c06_v10_entity")
+    adapter.create_entity_with_declared_types(
+        developer, entity, ["item_key", "tag"], {"item_key": "integer", "tag": "json"}
+    )
+    adapter.insert(session, entity, {"item_key": 1, "tag": 1})
+    adapter.insert(session, entity, {"item_key": 2, "tag": "1"})
+    before = adapter.count(session, entity)
+
+    int_denial = _probe_delete(adapter, session, entity, "tag", 1)
+    int_phrase = int_denial.details["required_confirmation"]
+    str_denial = _probe_delete(adapter, session, entity, "tag", "1")
+    str_phrase = str_denial.details["required_confirmation"]
+    assert int_phrase != str_phrase, (
+        f"{adapter.name}: `tag eq 1` and `tag eq \"1\"` collided onto the same phrase -- phrase_construction's own "
+        "scope-included rule requires the where-value's own JSON type to be part of the derivation"
+    )
+
+    # Acceptance-audit observation O-1 (R-41): each cross-presented leg must
+    # be refused by the declare-and-echo gate itself (with its four
+    # declarations), not merely refused -- a peer regressing to a bare
+    # denial without `required_confirmation` would otherwise stay green.
+    for value, wrong_phrase in ((1, str_phrase), ("1", int_phrase)):
+        crossed = _assert_delete_denied(adapter, session, entity, "tag", value, destructive=True, confirmation=wrong_phrase)
+        assert crossed.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED", (
+            f"{adapter.name}: V10 cross-presented phrase for `tag eq {value!r}` was refused with {crossed.code!r}, "
+            "not DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        )
+        _assert_four_declarations(crossed.details, context=f"V10 cross-presented leg tag eq {value!r}")
+    assert adapter.count(session, entity) == before, "V10: a mismatched-type phrase must never change state"
+
+
+def test_c06_v11_phrase_fits_confirmation_max_length(adapter, fx: Fixture):
+    """`phrase_construction` rule 6 (bounded): a phrase always fits within
+    `confirmation`'s own contract `maxLength` -- read here from
+    `definitions.Mutation.properties.confirmation.maxLength` (the same
+    reading `test_contract.py` uses), cross-checked against
+    `definitions.ScopedMutation`, `schemas.SchemaOperationRequest`, and
+    `schemas.CredentialRevokeRequest`'s own `properties.confirmation.
+    maxLength` (all 4 must agree). Presents the longest legal entity name
+    (63 characters -- both peers' own common identifier-length policy, not
+    a contract bound: the contract does not bound identifier length at all,
+    which is exactly why `phrase_construction` rule 6's bounded-digest
+    escape exists) together with a 2,000-character `where` value to a
+    `delete` probe, and to a `drop_entity` probe when that peer's own
+    unconfirmed `drop_entity` takes the `"present"` form (`_drop_entity_
+    form_and_probe`); either absence form has no real phrase to check here.
+    """
+    if _branch_for(adapter) != "strict":
+        _assert_baseline_delete_invariant(adapter, fx)
+        return
+
+    contract = json.loads(_CONTRACT_PATH.read_text())
+    max_length = contract["definitions"]["Mutation"]["properties"]["confirmation"]["maxLength"]
+    for path in (
+        ("definitions", "ScopedMutation", "properties", "confirmation", "maxLength"),
+        ("schemas", "SchemaOperationRequest", "properties", "confirmation", "maxLength"),
+        ("schemas", "CredentialRevokeRequest", "properties", "confirmation", "maxLength"),
+    ):
+        node: Any = contract
+        for key in path:
+            node = node[key]
+        assert node == max_length, (
+            f"{'/'.join(path)}'s own maxLength {node!r} does not match Mutation.properties.confirmation."
+            f"maxLength {max_length!r}"
+        )
+
+    developer = fx.developer_a
+    session = fx.runtime_a
+    # `fresh_identifier` appends "_" plus 12 hex characters to its own
+    # prefix; a 50-character prefix therefore yields exactly a 63-character
+    # identifier, the longest name both peers' own common policy accepts.
+    prefix_len = 63 - 1 - 12
+    prefix = ("c06v11" + "x" * prefix_len)[:prefix_len]
+    entity = fresh_identifier(prefix)
+    assert len(entity) == 63, f"{adapter.name}: constructed entity name is {len(entity)} characters, expected 63"
+    adapter.create_entity(developer, entity, {"item_key": "integer", "label": "text"})
+
+    long_value = "x" * 2000
+    denial = _probe_delete(adapter, session, entity, "label", long_value)
+    phrase = denial.details["required_confirmation"]
+    assert len(phrase) <= max_length, (
+        f"{adapter.name}: delete phrase for the longest legal entity name is {len(phrase)} characters, exceeds "
+        f"confirmation's own maxLength {max_length}"
+    )
+
+    form, drop_denial = _drop_entity_form_and_probe(adapter, developer, entity)
+    if form == "present":
+        drop_phrase = drop_denial.details["required_confirmation"]
+        assert len(drop_phrase) <= max_length, (
+            f"{adapter.name}: drop_entity phrase for the longest legal entity name is {len(drop_phrase)} "
+            f"characters, exceeds confirmation's own maxLength {max_length}"
+        )
+
+
+def test_c06_v12_delete_phrase_invalidated_by_add_field(adapter, fx: Fixture):
+    """`phrase_construction` rule 4 (state-fingerprinted): a `delete`
+    phrase is invalidated by ANY schema change to its own target entity,
+    not only by that entity's own re-creation -- mirroring V6's identical
+    `drop_entity` check, applied here to `delete`. Uses a throwaway entity
+    of its own (`fresh_identifier`, never the shared fixture's rows) and
+    `add_field_with_declared_type` on that SAME entity (never a different
+    entity -- the contract's own state-fingerprint rule is scoped to the
+    target the schema change actually touches, the reading recorded in
+    docs/work-orders/WORK_ORDER_R41_C06_PHRASE_RULES_V1.md §1 item 2)."""
+    if _branch_for(adapter) != "strict":
+        _assert_baseline_delete_invariant(adapter, fx)
+        return
+
+    developer = fx.developer_a
+    session = fx.runtime_a
+    entity = fresh_identifier("c06_v12_entity")
+    adapter.create_entity(developer, entity, {"item_key": "integer"})
+    adapter.insert(session, entity, {"item_key": 1})
+    before = adapter.count(session, entity)
+
+    first_denial = _probe_delete(adapter, session, entity, "item_key", 1)
+    p1 = first_denial.details["required_confirmation"]
+
+    # Review correction M-1 (V6's own precedent): establish determinism
+    # before testing invalidation, so a later phrase change can only be
+    # explained by the schema change itself.
+    redundant_denial = _probe_delete(adapter, session, entity, "item_key", 1)
+    assert redundant_denial.details["required_confirmation"] == p1, (
+        f"{adapter.name}: delete's phrase for the IDENTICAL request changed between two probes taken before any "
+        "schema change"
+    )
+
+    adapter.add_field_with_declared_type(developer, entity, "label", "string")
+
+    with pytest.raises(ConformanceDenial) as excinfo:
+        adapter.delete(session, entity, "item_key", 1, destructive=True, confirmation=p1)
+    assert excinfo.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED", (
+        f"{adapter.name}: the pre-add_field delete phrase was still accepted after add_field_with_declared_type "
+        "to the SAME entity -- the state fingerprint did not invalidate it"
+    )
+    assert adapter.count(session, entity) == before
+
+    second_denial = _probe_delete(adapter, session, entity, "item_key", 1)
+    p2 = second_denial.details["required_confirmation"]
+    assert p2 != p1, (
+        f"{adapter.name}: delete's re-probed phrase after add_field_with_declared_type is identical to the "
+        "pre-change phrase -- the state fingerprint did not change"
+    )
+
+    affected = adapter.delete(session, entity, "item_key", 1, destructive=True, confirmation=p2)
+    assert affected == 1, f"{adapter.name}: echoing the fresh post-add_field phrase did not execute"
+    assert adapter.count(session, entity) == before - 1
+
+
+def test_c06_v13_unvalidated_entity_name_is_refused_without_a_phrase(adapter, fx: Fixture):
+    """`phrase_construction` rule 5 (identifier-validated names only): a
+    phrase never reflects an unvalidated client-supplied string back to the
+    client. What this vector actually observes (disclosed here, per
+    CONDITIONS.md's own C-06 range (6)) is narrower than the rule's full
+    text: `delete` against an entity name violating the contract's own
+    `structured_operations.identifier` grammar is refused, at the entity
+    position, BEFORE existence is checked (`NOT_FOUND`) -- so a
+    `required_confirmation` phrase is never even computed for it. Rule 5
+    itself (would an unvalidated name be reflected INTO a phrase, if one
+    were ever computed) cannot be exercised this way, because
+    `evaluation_order`'s own existence-before-confirmation ordering means a
+    non-existent/unvalidated target is refused before a phrase is ever
+    reached. Two syntax violations are checked (a leading digit, and a
+    symbol character) -- neither uppercase (correct under this contract's
+    own grammar, so not a violation) nor a literal `/` (which would instead
+    exercise URL routing on an HTTP peer, a different failure class)."""
+    if _branch_for(adapter) != "strict":
+        _assert_baseline_delete_invariant(adapter, fx)
+        return
+
+    session = fx.runtime_a
+    for bad_name in ("1c06_bad", "c06-bad!name"):
+        with pytest.raises(ConformanceDenial) as excinfo:
+            adapter.delete(session, bad_name, "item_key", 1, destructive=True, confirmation=None)
+        denial = excinfo.value
+        assert denial.code in ("VALIDATION_FAILED", "IDENTIFIER_INVALID"), (
+            f"{adapter.name}: delete against {bad_name!r} (violates the contract's identifier grammar) got "
+            f"{denial.code!r}, expected VALIDATION_FAILED or IDENTIFIER_INVALID"
+        )
+        assert denial.code != "NOT_FOUND", (
+            f"{adapter.name}: delete against {bad_name!r} was refused as NOT_FOUND instead of an identifier-syntax "
+            "refusal -- existence must not be checked ahead of identifier syntax"
+        )
+        assert denial.details.get("violated_declaration") == "identifier_syntax", (
+            f"{adapter.name}: delete against {bad_name!r} did not carry violated_declaration == 'identifier_syntax' "
+            f"-- {denial.details!r}"
+        )
+        assert "required_confirmation" not in denial.details, (
+            f"{adapter.name}: an identifier-syntax refusal for {bad_name!r} carried a required_confirmation phrase "
+            "-- a phrase must never be computed for an unvalidated name"
+        )
+        assert_no_payload_echo_in_details(denial.details, bad_name, context=f"V13 unvalidated entity name {bad_name!r}")
 
 
 # ---------------------------------------------------------------------------
