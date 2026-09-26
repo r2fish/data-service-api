@@ -50,6 +50,7 @@ R-38 閉止後の残件 (前書 `HANDOVER_20260926_FABLE2.md` §3 と `docs/arch
 
 ## 4. 依頼者判断待ち・未決
 
+- **【追記 2026-09-26、merge 後】依頼者裁定 (逐語)「(i)で。2は後で。」** -- R-112 は (i) で着手 (台帳 v1.126)。下の (2) peer 間の JSON 値の順序差は保留。
 - **R-112 文字列の照合順序** (作業指示書 §1.5 の U-1)。order_by の文字列の比較順序が 1 実装の backend 間で違う (r2db: PostgreSQL は DB 既定照合、in-memory は codepoint 順。MitateDB: PostgreSQL は DB 既定照合、SQLite は BINARY)。両論のまま:
   - (i) PostgreSQL 側を `COLLATE "C"` 相当にして in-memory / SQLite と揃える (jsonb の中の文字列は DB の照合を C にしないと揃わない = provisioning の変更、既存 client の見る順序が変わる)。
   - (ii) 現状維持し文書化する。
