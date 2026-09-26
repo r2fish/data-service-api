@@ -98,8 +98,15 @@ SELECT * FROM r2dbsvc_registry.begin_provision_application(:'app_slug', :'runtim
 -- executing role (`r2dbsvc_control`), matching how `0001` creates
 -- `r2dbsvc_platform` the same way. `TEMPLATE template0` avoids inheriting
 -- any accumulated customisation of `template1` on this cluster, the same
--- reasoning `0001` already applied to the platform database.
-CREATE DATABASE :"database_name" TEMPLATE template0 ENCODING 'UTF8';
+-- reasoning `0001` already applied to the platform database. `LC_COLLATE
+-- 'C'` makes this database's own string ordering (both TEXT columns and
+-- the strings inside a jsonb value, which cannot carry a COLLATE clause
+-- of its own) byte order rather than the cluster's locale-collation
+-- order, matching this peer's in-memory backend; the ctype setting is
+-- left unset so it still inherits the cluster's own UTF-8 locale from
+-- `template0` -- case folding and pattern matching over non-ASCII text
+-- stay locale-aware, only ordering changes.
+CREATE DATABASE :"database_name" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C';
 
 -- §8.5 condition 1, the primary wall: a newly created PostgreSQL database
 -- grants `CONNECT` to `PUBLIC` by default. Close that immediately, then

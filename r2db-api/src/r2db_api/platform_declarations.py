@@ -1395,6 +1395,90 @@ def check_max_connections_headroom(
     )
 
 
+def _f19_message(database_name: str, *, reason: str) -> str:
+    if reason == "missing":
+        return (
+            f"application database '{database_name}' has no matching row in pg_database -- its collation "
+            f"cannot be judged. Re-provision this application with the current 0003_provision_application.sql, "
+            f"or complete its deprovisioning (0004_deprovision_application.sql) instead if this row is a "
+            f"deprovision left mid-way."
+        )
+    if reason == "collate":
+        return (
+            f"application database '{database_name}' was not provisioned with a codepoint-order collation. "
+            f"Re-provision it with the current 0003_provision_application.sql -- an existing database's own "
+            f"collation cannot be changed in place."
+        )
+    if reason == "ctype":
+        return (
+            f"application database '{database_name}' has its own ctype set to 'C', which would turn non-ASCII "
+            f"case folding and pattern matching ASCII-only. Re-provision it with the current 0003_provision_"
+            f"application.sql."
+        )
+    return (
+        f"application database '{database_name}' does not use the libc locale provider, so its own LC_COLLATE "
+        f"setting does not govern its string ordering. Re-provision it with the current 0003_provision_"
+        f"application.sql, against a cluster initialized (initdb) with the libc locale provider -- re-running "
+        f"0003 against a cluster whose own template0 already uses ICU will not fix this."
+    )
+
+
+def check_application_collations(conn: "psycopg.Connection", *, schema: str) -> None:
+    """F-19: every REGISTERED, PROVISIONED application's own database
+    (`database_name IS NOT NULL`: provisioned rows only, not the full
+    `count(*)` target set `check_max_connections_headroom`'s own `_count_
+    registered_applications` counts) was provisioned with a codepoint-order
+    collation, matching this peer's own non-PostgreSQL backend. Raises
+    `PlatformDeclarationError(code="F-19")` for the FIRST such database, in
+    `database_name` order, that fails any of the following.
+
+    `pg_database.datcollate` is not `'C'` -- the database's own string
+    ordering is still locale-dependent. `pg_database.datctype` IS `'C'`
+    -- the ctype must stay the cluster's own UTF-8 locale; a `'C'` ctype
+    would turn non-ASCII case folding and pattern matching ASCII-only.
+    On a server that can
+    report it (`pg_database.datlocprovider`, PostgreSQL 15 and later
+    only -- older servers have no such column and this third condition
+    is skipped there), the locale provider is something other than libc
+    (`'c'`): an ICU-provider database's own `LC_COLLATE` string does not
+    actually govern its ordering, so the first two conditions passing
+    would be a false green.
+
+    A registered application whose own `database_name` has no matching
+    `pg_database` row at all also fails -- an existing database's own
+    collation cannot be judged, or fixed in place, once it no longer
+    exists; re-provisioning is the only remedy either way."""
+    table = sql.Identifier(schema, "applications")
+    checks_provider = conn.info.server_version >= 150000
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "SELECT database_name FROM {table} WHERE database_name IS NOT NULL ORDER BY database_name"
+            ).format(table=table)
+        )
+        applications = cur.fetchall()
+        for (database_name,) in applications:
+            if checks_provider:
+                cur.execute(
+                    "SELECT datcollate, datctype, datlocprovider FROM pg_database WHERE datname = %s",
+                    [database_name],
+                )
+            else:
+                cur.execute(
+                    "SELECT datcollate, datctype FROM pg_database WHERE datname = %s",
+                    [database_name],
+                )
+            row = cur.fetchone()
+            if row is None:
+                raise PlatformDeclarationError(_f19_message(database_name, reason="missing"), code="F-19")
+            if row[0] != "C":
+                raise PlatformDeclarationError(_f19_message(database_name, reason="collate"), code="F-19")
+            if row[1] == "C":
+                raise PlatformDeclarationError(_f19_message(database_name, reason="ctype"), code="F-19")
+            if checks_provider and row[2] != "c":
+                raise PlatformDeclarationError(_f19_message(database_name, reason="provider"), code="F-19")
+
+
 def ops_module_hint() -> str:
     """`PEER_MODULE`, named through a function (not referenced directly by
     `check_contract_170_declarations`'s own f-strings) so this check's
@@ -1424,6 +1508,7 @@ __all__ = [
     "ProcessCeilings",
     "RoleTimeoutCatalog",
     "Surfaces",
+    "check_application_collations",
     "check_auditreader_statement_timeout",
     "check_contract_170_declarations",
     "check_control_surface_consistency",

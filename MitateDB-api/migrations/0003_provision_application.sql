@@ -60,7 +60,13 @@ SELECT * FROM mitatedb_registry.begin_provision_application(:'app_id', :'runtime
 -- (`mitatedbsvc_provision`), matching how `0001` creates
 -- `mitatedb_platform` the same way. `TEMPLATE template0` avoids inheriting
 -- any accumulated customisation of `template1` on this cluster.
-CREATE DATABASE :"database_name" TEMPLATE template0 ENCODING 'UTF8';
+-- `LC_COLLATE 'C'` makes this database's own string ordering (TEXT
+-- columns) byte order rather than the cluster's locale-collation order,
+-- matching this peer's SQLite backend; the ctype setting is left unset
+-- so it still inherits the cluster's own UTF-8 locale from `template0`
+-- -- case folding and pattern matching over non-ASCII text stay
+-- locale-aware, only ordering changes.
+CREATE DATABASE :"database_name" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C';
 
 -- Primary wall: a newly created PostgreSQL database grants `CONNECT` to
 -- `PUBLIC` by default. Close that immediately, then grant `CONNECT` only
