@@ -244,7 +244,13 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: `fail()` call, pushing it down by 30 lines. Re-verified against the
 #: current file via `_fail_call_sites`. Entry count and site identity
 #: unchanged (1).
-    ("postgres.py", 1733),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+#: R-101 WP-1 差し戻し 2 comment fix (2026-09-26): line shift only (1733
+#: -> 1734) -- a one-line net growth in the comments above `_RolePool.
+#: connection()` and its own `_stats_lock` accounting note, still ABOVE
+#: `_fail_client_value`'s own single `fail()` call. Re-verified against
+#: the current file via `_fail_call_sites`. Entry count and site identity
+#: unchanged (1).
+    ("postgres.py", 1734),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

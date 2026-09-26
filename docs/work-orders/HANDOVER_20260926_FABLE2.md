@@ -88,8 +88,10 @@
 | コードレビュー 1 F4〜F9: 差分の未固定、README、WeakSet、`_RolePool` の畳み込み、transaction 往復の例外、コメント 5 箇所 | 直す (差し戻し 2) | — |
 | コードレビュー 1 F10 (低): 記録の不一致 | 直した (`WO` 訂正註 4、裁定 1 の 11 行) + 条件 23 の assert は差し戻し 2 | — |
 
-## 追記 — commit 時点 (2026-09-26、監督)
+## 追記 — commit 時点 (2026-09-26、監督。2 回目の commit で確定)
 
-- 依頼者の指示で、implementer の差し戻し 2 の対応が終わる前にチャットを閉じた。**commit した木は差し戻し 2 の途中の状態で、どの項目 (F1〜F9、条件 23、条件 26) まで反映されたかは未確認、テストの緑も未確認** (最後に確認できた集計行は差し戻し 1 の後: `pt: 1498 passed` (r2db) / `pt: 1492 passed, 2 subtests passed` (MitateDB) / `pt: 607 passed` (tools/tests) / conformance `pt: 1253 passed in 570.84s`)。
-- **新チャットの最初の手**: (1) `tools/dev/pt.py --wait 1800 -C .claude/worktrees/r101 -- tools/tests -q`、`-- r2db-api/tests -q`、`-- MitateDB-api/tests -q` を各 1 回回して木の状態を確定する (赤なら差し戻し 2 の途中の編集が原因。`git diff` で該当箇所を見て仕上げるか戻す)。(2) `git diff` を差し戻し 2 の項目 (本書「裁定」節のコードレビュー 1 の表) と突き合わせ、未反映の項目を新しい implementer (別起動、`WO` §2 と本書の表を渡す) に発注する。(3) 以降は §3 の 2〜7。
-- 変異の JSON (`r101-mutations-*.json`) と実装報告は旧チャットの scratchpad にしか無い。新チャットでは §2.3 の表から変異を作り直す (実装担当が自作分を持つ)。
+- 1 回目の WIP commit `5b73b48` の直後に implementer の最終報告が届いた。**差し戻し 2 は条件 26 (AST pin を 3 箇所に広げる。監督裁定 3) を除いて全件反映済み**: F1 (変異 M104・M105 赤)、F2 (M49)、F4 (RV2〜RV4 が赤になるテスト 3 本)、F5、F6 (WeakSet、M51・M52・M55・M106)、F7 (M101・M102)、F8 (M103)、F9 (コメント 5 箇所)、条件 23 の assert。implementer は「F3 は裁定待ち」と読んだが、裁定 3 (AST pin を credential store / audit sink / r2db `_RolePool` の 3 箇所に) は `WO` §6.1 に出ている — **新チャットの最初の実装項目は条件 26 の 3 箇所化と変異 3 件だけ**。
+- 最終集計行 (implementer、差し戻し 2 の後): `pt: 611 passed in 55.66s` (tools/tests) / `pt: 1502 passed in 108.63s` (r2db-api/tests、`test_l1_details_vocabulary_ast_scan.py` の `_BACKEND_LAYER_ALLOWLIST` を 1733 → 1734 に実測更新後) / `pt: 1493 passed, 2 subtests passed in 135.35s` (MitateDB-api/tests)。conformance-tests は差し戻し 2 の前の `pt: 1253 passed in 570.84s` (監督) が最後で、**差し戻し 2 の後は未実行** (完了ゲートで判定)。
+- 2 回目の commit は `_BACKEND_LAYER_ALLOWLIST` の 1 行と本追記だけ。**新チャットでも最初に 3 suite を 1 回ずつ回して木の状態を確定する** (§3 の 1)。
+- **新しい疑義 (裁定は新チャットの監督)**: `tools/check_comment_provenance.py --base a1c1ee3` の §4.1 (2) が、監督裁定 1 の 11 行 (両 peer `psycopg_counting.py` + `MC`) の対象範囲外で 7 行 (r2db `postgres.py`、両 peer の http adapter、`tools/perf_baseline.py`) 生じている。今回分か既存分か未検証。既存関数への docstring 追加なら裁定 1 と同じ扱い (受理、コードレビューで現在形・経緯語なしを確認) が筋。
+- 変異の JSON (`r101-mutations-*.json`、`review-wp1-mutations.json`) と実装報告は旧チャットの scratchpad にしか無い。新チャットの受け入れ監査では §2.3 の表から変異を作り直す。
