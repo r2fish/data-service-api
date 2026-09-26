@@ -847,6 +847,33 @@ def test_roundtrip_db_app_xacts_subtracts_only_this_apps_own_probes(capsys):
     assert "xacts=5 " in lines["platform"]
 
 
+def test_roundtrip_db_app_xacts_also_subtracts_the_dbtime_pre_probe(capsys):
+    """WO §1.2 D-1 (i, 案 (a)): `db=app`'s own `xacts` correction
+    subtracts BOTH probes that land inside a `--roundtrip` window -- the
+    shared POST snapshot (already covered by `test_roundtrip_db_app_
+    xacts_subtracts_only_this_apps_own_probes` above) and `DBTIME`'s own
+    separate PRE snapshot, passed in via the `pre_probe_conn_stats`
+    keyword. Every other test in this module calls `_emit_roundtrip_db_
+    rows` without that keyword, so its default (`None`) leaves the
+    correction unchanged for them.
+
+    mutation M107 (`tools/perf_baseline.py`): drop the `pre_probe_conn_
+    stats` subtraction -- this test's own `xacts=1` assertion goes red
+    (would read `xacts=2`, the POST-only correction)."""
+    pre_db = {"app": {"values": (0, 0, 0), "stale": False}}
+    post_db = {"app": {"values": (3, 0, 0), "stale": False}}
+    post_conn_stats = [{"label": "app1/runtime@1", "probed": True}]
+    pre_probe_conn_stats = [{"label": "app1/runtime@2", "probed": True}]
+    matcher = lambda stats: stats["label"].startswith("app1/")  # noqa: E731 - test-local, mirrors production shape
+    pb._emit_roundtrip_db_rows(
+        "r2db-api", "r2db-api", "query", 10, {"app": "appdb"},
+        pre_db, post_db, post_conn_stats, matcher,
+        pre_probe_conn_stats=pre_probe_conn_stats,
+    )
+    out = capsys.readouterr().out
+    assert "xacts=1 " in out
+
+
 def test_poll_clears_snapshot_before_reading_stats():
     """WO §2.2 completion condition 10: `_poll_pg_stat_database` calls
     `clear_snapshot()` before its first `read_stats()` call -- observed
@@ -1536,6 +1563,28 @@ def test_cpu_window_excludes_warmup_from_the_total(monkeypatch):
     _, _, measured = pb._measure_op(fn, warmup=3, n=2, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
     assert measured["cpu_total_ms"] == pytest.approx(20.0)
     assert measured["cpu_main_ms"] == pytest.approx(20.0)
+
+
+def test_cpu_main_ms_is_the_thread_time_difference_not_getrusage(monkeypatch):
+    """完了条件 42 の 2 つ目の部分 (コードレビュー 2 差し戻し 3 指摘 3):
+    `cpu_main_ms` is `time.thread_time()`'s own difference across the
+    measured window, never derived from `resource.getrusage`'s reading --
+    distinct fake clocks on the two calls here, unlike `test_cpu_window_
+    excludes_warmup_from_the_total` above (which advances both by the
+    same amount and so cannot tell the two sources apart).
+
+    mutation M108 (`tools/perf_baseline.py`): compute `cpu_main_ms` from
+    `cpu_total_ms` instead of the `time.thread_time()` difference -- this
+    test's own `cpu_main_ms == pytest.approx(2.0)` assertion goes red
+    (would read `100.0`, `cpu_total_ms`'s own value)."""
+    getrusage_values = iter([SimpleNamespace(ru_utime=0.0, ru_stime=0.0), SimpleNamespace(ru_utime=0.05, ru_stime=0.05)])
+    monkeypatch.setattr(pb.resource, "getrusage", lambda who: next(getrusage_values))
+    thread_time_values = iter([0.0, 0.002])
+    monkeypatch.setattr(pb.time, "thread_time", lambda: next(thread_time_values))
+    stub = SimpleNamespace(transport_kind="in_process")
+    _, _, measured = pb._measure_op(lambda: None, warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
+    assert measured["cpu_total_ms"] == pytest.approx(100.0)
+    assert measured["cpu_main_ms"] == pytest.approx(2.0)
 
 
 def test_cpu_wall_ms_is_the_measured_group_durations_only(monkeypatch):

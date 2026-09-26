@@ -431,24 +431,24 @@ def _body_contains(body: "list[ast.stmt]", predicate) -> bool:
 
 def test_platform_stats_fold_is_lexically_inside_the_platform_stats_lock():
     """Completion condition 26 (守る条件 (b)): `PostgresCredentialStore.
-    _fold_closed_connection_stats`'s two accumulator increments (`self.
+    _fold_closed_connection_stats`'s three accumulator increments (`self.
     _platform_db_wall_ms += db_wall_ms`, `self._platform_txn_count +=
-    txn_count`) must be lexically inside the SAME `with self.
-    _platform_stats_lock:` block. A source-shape pin, not a running-thread
-    race: a 32-thread x 1000-iteration `sys.setswitchinterval(1e-6)` trial
-    against this same method (see report) passed even with the lock
-    actually removed -- CPython's GIL does not reliably turn this
-    unguarded accumulate into an observable lost update at this call
-    rate, mirroring this repository's own prior finding for a different
-    check-then-act race (`r2db-api/tests/test_threadpool_offload.py`,
-    item 6's own header comment) -- so this deterministic AST pin is used
-    instead.
+    txn_count`, `self._platform_db_calls += db_calls`) must be lexically
+    inside the SAME `with self._platform_stats_lock:` block. A source-shape
+    pin, not a running-thread race: a 32-thread x 1000-iteration `sys.
+    setswitchinterval(1e-6)` trial against this same method, run with the
+    lock actually removed, still passed -- CPython's GIL does not
+    reliably turn this unguarded accumulate into an observable lost update
+    at this call rate, mirroring this repository's own prior finding for a
+    different check-then-act race (`r2db-api/tests/test_threadpool_
+    offload.py`, item 6's own header comment) -- so this deterministic AST
+    pin is used instead.
 
     mutation M64 (`credential_store_postgres.py`): drop the `with self.
-    _platform_stats_lock:` around the two accumulator additions in `_fold_
-    closed_connection_stats` -- this test's own assertions go red (the two
-    `AugAssign` nodes are no longer inside any `with self._platform_stats_
-    lock:` block)."""
+    _platform_stats_lock:` around the three accumulator additions in `_fold_
+    closed_connection_stats` -- this test's own assertions go red (the
+    three `AugAssign` nodes are no longer inside any `with self._platform_
+    stats_lock:` block)."""
     tree = ast.parse(textwrap.dedent(inspect.getsource(PostgresCredentialStore._fold_closed_connection_stats)))
     body = _find_with_lock_body(tree, lock_attr="_platform_stats_lock")
     assert body is not None, "no `with self._platform_stats_lock:` block found in `_fold_closed_connection_stats`"
@@ -457,4 +457,35 @@ def test_platform_stats_fold_is_lexically_inside_the_platform_stats_lock():
     )
     assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_txn_count") and isinstance(n.op, ast.Add)), (
         "the txn_count accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_calls") and isinstance(n.op, ast.Add)), (
+        "the db_calls accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+
+
+def test_audit_sink_fold_is_lexically_inside_the_platform_stats_lock():
+    """Completion condition 26 (守る条件 (b)): `PostgresApplicationAuditSink.
+    _fold_closed_connection_stats`'s three accumulator increments (`self.
+    _platform_db_wall_ms += db_wall_ms`, `self._platform_txn_count +=
+    txn_count`, `self._platform_db_calls += db_calls`) must be lexically
+    inside the SAME `with self._platform_stats_lock:` block, mirroring the
+    credential store's own pin above (both classes fold a closed
+    connection's counters the same way, under a statistics-only lock).
+
+    mutation M64b (`application_audit.py`): drop the `with self.
+    _platform_stats_lock:` around the three accumulator additions in `_fold_
+    closed_connection_stats` -- this test's own assertions go red (the
+    three `AugAssign` nodes are no longer inside any `with self._platform_
+    stats_lock:` block)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(PostgresApplicationAuditSink._fold_closed_connection_stats)))
+    body = _find_with_lock_body(tree, lock_attr="_platform_stats_lock")
+    assert body is not None, "no `with self._platform_stats_lock:` block found in `_fold_closed_connection_stats`"
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_wall_ms") and isinstance(n.op, ast.Add)), (
+        "the db_wall_ms accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_txn_count") and isinstance(n.op, ast.Add)), (
+        "the txn_count accumulation is not lexically inside `with self._platform_stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_calls") and isinstance(n.op, ast.Add)), (
+        "the db_calls accumulation is not lexically inside `with self._platform_stats_lock:`"
     )

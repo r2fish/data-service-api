@@ -114,7 +114,7 @@ to that many tokens, then never touches it again on that loop -- an
 `-http` plug's own asgi loop and an `-socket` plug's own uvicorn thread
 each get this treatment independently, the first time either serves a
 request. Absent, empty, or not a positive integer, the app is left
-completely unwrapped -- identical to before this variable existed. **Do
+completely unwrapped (its identity is the `create_app` result itself). **Do
 not leave this variable set while running `pytest`**: every conformance/
 unit test that builds one of these plugs would then run its own requests
 under the reduced thread limit too, changing timing-sensitive test
@@ -252,14 +252,18 @@ server-side `pg_stat_database.xact_commit + xact_rollback` delta. The two
 peers' own connection-management shapes give these different units, and
 this tool does not attempt to reconcile them into one number.
 
-**MitateDB's `POOL lock=` `acquire`, from this addition onward, includes
-TWO acquisitions per preceding op (not one)**: `DBTIME scope=app`'s own
-POST snapshot and `PREPARED`'s own line(s) now share ONE `prepared_
-stats()` call, but `ApplicationCell.prepared_stats()` still takes the
-cell's own lock every time it runs at all, and this addition itself adds
-a SEPARATE PRE snapshot call, taken earlier in the SAME op (inside
-`_measure_op`, before the measured window) -- so one op now drives two
-separate lock-guarded probe calls (PRE and POST) where R-79 drove one.
+**MitateDB's `POOL lock=` `acquire`, on any op after the first, reflects
+TWO probe acquisitions, not one**: this op's own DBTIME PRE snapshot
+(taken inside `_measure_op`, before the measured window, so it lands on
+THIS SAME op's own `POOL lock=` line) and the PRECEDING op's own shared
+POST snapshot (`DBTIME scope=app`'s and `PREPARED`'s common `prepared_
+stats()` call, which runs after that preceding op's own `POOL lock=` line
+already printed, so it lands on the NEXT op's own line instead -- this
+op's). `ApplicationCell.prepared_stats()` takes the cell's own lock every
+time it runs at all, so each of the two calls raises `acquire_count` by 1
+independently. **The very first op's own `POOL lock=` line carries only
+its own PRE snapshot's acquisition** -- there is no preceding op's own
+POST snapshot to add.
 
 **A probe that fails still shows up as a windowed round trip.** If the
 POST (or PRE) `prepared_stats()` call itself raises on a particular
@@ -408,10 +412,11 @@ appears in `pg_prepared_statements`/`PREPSTMT`, but it is not entirely
 free on the client side either (design memo §1's own F3 note).
 
 **MitateDB's `POOL lock=` `acquire`, at this section's own R-79 baseline,
-included one acquisition per PRECEDING probe** (superseded by the `## CPU
-lines (R-101)` section above, which now runs `prepared_stats()` twice per
-op -- see that section's own "TWO acquisitions per preceding op" note for
-the current count). `ApplicationCell.prepared_stats()`
+included one acquisition per PRECEDING probe** (superseded by the `##
+DBTIME lines (R-101)` section above, which now runs `prepared_stats()`
+twice per op -- see that section's own note on this op's own PRE
+acquisition and the preceding op's own POST acquisition for the current
+count). `ApplicationCell.prepared_stats()`
 takes the SAME cell lock every other operation on that cell takes
 (`cell.py::ApplicationCell._lock`), so calling it once (to print the
 `PREPARED` line(s) for the op that just ran) raises that cell's own
@@ -497,7 +502,11 @@ is always 0** -- neither peer's platform/credential connections are ever
 probed (r2db-api's platform/credential/audit-sink pools are never
 registered with `SharedPoolManager`; MitateDB-api's credential store
 opens and closes a fresh connection per call, never leaving one IDLE for
-a probe to reach).
+a probe to reach). `db=app`'s correction subtracts BOTH probes that land
+inside a `--roundtrip` window: `DBTIME`'s own PRE snapshot (taken after
+warmup, before the measured window) and the shared POST snapshot
+(`DBTIME scope=app`/`PREPARED`'s common call) -- each probes the same
+connections and each commit counts once against `xacts`.
 
 **`pg_stat_database`'s own counters lag real time -- the poll waits for
 them to settle.** This tool's own admin connection to the throwaway
@@ -534,14 +543,18 @@ only ever counts THIS run's own resolved cell, never that second
 application's.
 
 **Under `--roundtrip`, MitateDB's `POOL lock=` `acquire` carries ONE MORE
-extra acquisition per op than without it.** The `## CPU lines (R-101)`
-section above already notes that `DBTIME`'s own PRE + shared POST probe
-(two calls, present on EVERY op regardless of `--roundtrip`) each raise
-`acquire_count` by 1, reflected on the NEXT op's own `POOL lock=` line.
-`--roundtrip` adds `ROUNDTRIP`'s own SEPARATE PRE probe on top of those
-two (three calls per op in total), so each op's own `POOL lock=` line
-runs 1 higher under `--roundtrip` than without it, from the very first op
-onward -- not just the last one. **R-80 時点の実測** (before `DBTIME`'s
+extra acquisition per op than without it.** The `## DBTIME lines (R-101)`
+section above already notes that `DBTIME`'s own PRE probe (present on
+EVERY op regardless of `--roundtrip`) lands on THAT SAME op's own `POOL
+lock=` line, while its shared POST probe lands on the NEXT op's own line.
+`--roundtrip` adds `ROUNDTRIP`'s own SEPARATE PRE probe, taken even
+earlier (before warmup) but still before that op's own `POOL lock=` line
+prints, so it too lands on the SAME op's own line -- three calls in total
+across the two probed ops' own lines (two of this op's own, one carried
+over from the preceding op's own POST) where two ran without
+`--roundtrip` (one of this op's own, one carried over), so each op's own
+`POOL lock=` line runs 1 higher under `--roundtrip` than without it, from
+the very first op onward -- not just the last one. **R-80 時点の実測** (before `DBTIME`'s
 own PRE probe existed, when the baseline was a single POST-only probe per
 op): against the real, registered `MitateDB-api-http` plug (a throwaway-
 cluster confirmation run, `--warmup 2 --n 5`, `perfbase_*` lock, `query`/

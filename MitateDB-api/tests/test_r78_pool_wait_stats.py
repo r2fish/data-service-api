@@ -252,7 +252,13 @@ def test_perf_thread_limit_wrapper_sets_the_limiter_once_per_loop():
     mutation M54 (`conformance_adapter_mitatedb_http.py`): track
     "configured" with a single instance-wide flag instead of a per-loop-id
     set -- this test's own third assertion (loop B independently reaching
-    `7`) goes red."""
+    `7`) goes red.
+
+    Completion condition 59's own negative side (コードレビュー 2 差し戻し 3
+    指摘 9, matching r2db-side `test_perf_thread_limit_wrapper_sets_the_
+    limiter_once_per_loop` above): a THIRD fresh loop the wrapper is never
+    called on at all stays at anyio's own untouched default (40) -- the
+    wrapper's own effect is strictly per-loop, never process-global."""
     import anyio.to_thread
 
     async def _noop_app(scope, receive, send) -> None:
@@ -282,6 +288,15 @@ def test_perf_thread_limit_wrapper_sets_the_limiter_once_per_loop():
         assert loop_b.run_until_complete(_call_once()) == 7
     finally:
         loop_b.close()
+
+    async def _read_default() -> int:
+        return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+    loop_c = asyncio.new_event_loop()
+    try:
+        assert loop_c.run_until_complete(_read_default()) == 40
+    finally:
+        loop_c.close()
 
 
 def test_perf_thread_limit_wrapper_is_detected_as_asgi3_by_uvicorn():
@@ -400,14 +415,22 @@ def test_perf_thread_limit_wraps_the_socket_adapters_own_data_plane_surface_app(
     mutation M46 (`conformance_adapter_mitatedb_http.py`): assign the
     UNWRAPPED app to `self._app` while still handing the wrapped one to
     `self._build_client(...)` -- this test's own `surface.app is adapter.
-    _app` assertion goes red."""
+    _app` assertion goes red.
+
+    Looks the surface up by `id(adapter._app)` in `adapter._socket_
+    surfaces` itself, rather than calling `_socket_surface_for(adapter.
+    _app)` here: that method builds a fresh entry for WHATEVER app id it
+    is handed, even a wrong one, so calling it with `adapter._app` can
+    never observe what `_build_client` (the ONLY other caller) was
+    actually given -- a `KeyError` here means `_build_client` ran with a
+    different app object (コードレビュー 2 差し戻し 3 指摘 5)."""
     monkeypatch.setenv("DSA_PERF_THREAD_LIMIT", "3")
     import conformance_adapter_mitatedb_socket as _socket_module  # noqa: E402 - conformance dir already on sys.path (module level, above)
 
     adapter = _socket_module.MitateDBSocketConformanceAdapter()
     try:
         assert isinstance(adapter._app, _http_module._PerfThreadLimitWrapper)
-        surface = adapter._socket_surface_for(adapter._app)
+        surface = adapter._socket_surfaces[id(adapter._app)]
         assert surface.app is adapter._app
         assert surface._started is False  # noqa: SLF001 -- no real server started by this test
     finally:

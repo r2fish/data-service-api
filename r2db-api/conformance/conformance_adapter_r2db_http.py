@@ -1044,8 +1044,7 @@ def _perf_pool_size() -> int:
 # thread-limit sweep can measure this same plug at a reduced anyio
 # thread-pool size, never production code. Absent, empty, or not a
 # positive integer all mean "no override" (`None`) -- the data-plane app
-# is left completely unwrapped in that case, identical to before this
-# existed.
+# is left completely unwrapped in that case.
 _PERF_THREAD_LIMIT_ENV = "DSA_PERF_THREAD_LIMIT"
 
 
@@ -1338,8 +1337,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # `app is self._app` identity) end up driving the identical
             # instance either way. `self._perf_thread_limit` stays `None`
             # (no wrapper) when the env is absent, invalid, or non-positive
-            # -- app identity is then exactly what it was before this
-            # existed.
+            # -- app identity is then the `create_app` result itself,
+            # unwrapped.
             self._perf_thread_limit = _perf_thread_limit_value()
             if self._perf_thread_limit is not None:
                 app = _PerfThreadLimitWrapper(app, total_tokens=self._perf_thread_limit)
@@ -4227,8 +4226,9 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         own `_RolePool.platform_stats()` -- the two platform-side pools
         the data-plane measurement path actually uses (`self._write_
         credentials` is provisioning-only, never touched by a measured
-        request). Read-only: neither pool's `_acquire()` runs, so R-78's
-        own `acquire_count` for either pool is untouched by calling this."""
+        request). Read-only: neither pool's `_acquire()` runs, so `_RolePool.
+        stats()`'s own `acquire_count` for either pool is untouched by
+        calling this."""
         credentials_stats = self._credentials._pool.platform_stats()  # noqa: SLF001 -- read-only accessor, same discipline as pool_stats() above
         audit_stats = self._application_durable_audit._pool.platform_stats()  # noqa: SLF001
         return {

@@ -828,8 +828,8 @@ def _measure_op(
             # before the measured `_run_concurrent` call, after the
             # measured groups are already built) -- an in_process plug's
             # own group construction is trivial (bare closure references),
-            # so this move changes nothing observable here, only keeps
-            # both branches' own shape aligned.
+            # so both branches read CPU at the same boundary, keeping
+            # their own shapes aligned.
             cpu_before = resource.getrusage(resource.RUSAGE_SELF)
             thread_before = time.thread_time()
             durations, group_calls = _run_concurrent(loop, measured_groups, counter=counter)
@@ -1028,11 +1028,10 @@ def _emit_dbtime_rows(
         pre_calls = (pre["execute_count"] + pre["executemany_count"]) if pre is not None else 0
         db_calls += (c["execute_count"] + c["executemany_count"]) - pre_calls
         # `.get(..., 0/0.0)`, not `[...]`: a stub `prepared_stats()` result
-        # built before `psycopg_counting.py` gained `db_wall_ms`/`txn_
-        # count` (every `tools/tests/test_perf_baseline.py` fixture that
-        # predates this) carries neither key -- reads as 0/0.0 rather than
-        # raising `KeyError`, exactly like a fresh connection with no
-        # traffic yet would.
+        # (any `tools/tests/test_perf_baseline.py` fixture that omits
+        # `db_wall_ms`/`txn_count`) carries neither key -- reads as 0/0.0
+        # rather than raising `KeyError`, exactly like a fresh connection
+        # with no traffic yet would.
         txns += c.get("txn_count", 0) - (pre.get("txn_count", 0) if pre is not None else 0)
         db_wall_ms += c.get("db_wall_ms", 0.0) - (pre.get("db_wall_ms", 0.0) if pre is not None else 0.0)
     print(_format_dbtime_app_row(
@@ -1124,8 +1123,8 @@ def _emit_prepared_rows(
     calling `adapter_obj.prepared_stats()` again -- lets `_emit_
     measurement_rows` share the ONE POST call across a `DBTIME scope=app`
     line and these `PREPARED` lines rather than probing twice for one op.
-    `conn_stats=None` (every direct caller that predates that sharing)
-    keeps this function's own original behaviour: fetch it here, once."""
+    `conn_stats=None` (any caller that does not itself share a POST
+    snapshot) fetches it here instead, once."""
     if conn_stats is None:
         prepared_stats = getattr(adapter_obj, "prepared_stats", None)
         if prepared_stats is None:
@@ -1305,6 +1304,7 @@ def _emit_roundtrip_db_rows(
     peer: str, plug: str, op: str, requests: int, db_names: "dict[str, str]",
     pre_db_values: "dict[str, dict] | None", post_db_values: "dict[str, dict] | None",
     post_conn_stats: "list[dict] | None", correction_matcher: "Callable[[dict], bool] | None",
+    *, pre_probe_conn_stats: "list[dict] | None" = None,
 ) -> None:
     """WO §1.2 D-1 (ii): one `db=` line per resolved kind in `db_names`
     (`"app"`/`"platform"`) present in both `pre_db_values`/`post_db_
@@ -1313,7 +1313,15 @@ def _emit_roundtrip_db_rows(
     condition 9) -- `db=platform`'s own correction is always 0 (WO §1.2
     D-1: neither peer's platform/credential connections are ever probed),
     `db=app`'s is `_probe_correction_count(post_conn_stats,
-    correction_matcher)`. `sessions` is `Δsessions`, unconnected. Prints
+    correction_matcher)` PLUS, when `pre_probe_conn_stats` is given,
+    `_probe_correction_count(pre_probe_conn_stats, correction_matcher)`
+    -- `DBTIME`'s own PRE snapshot (taken inside `_measure_op`, between
+    `ROUNDTRIP`'s own PRE poll and the measured window) probes every IDLE
+    application connection it reaches exactly like the shared POST
+    snapshot does, and each such probe's own `commit()` lands inside the
+    SAME `ROUNDTRIP` window, so its `xact_commit` also needs subtracting.
+    `pre_probe_conn_stats=None` (any caller that does not supply it) skips
+    this second subtraction entirely. `sessions` is `Δsessions`, unconnected. Prints
     nothing for a kind whose read is missing from either side (never
     raises `KeyError`).
 
@@ -1334,6 +1342,8 @@ def _emit_roundtrip_db_rows(
         xacts = (post_commit - pre_commit) + (post_rollback - pre_rollback)
         if kind == "app" and post_conn_stats is not None and correction_matcher is not None:
             xacts -= _probe_correction_count(post_conn_stats, correction_matcher)
+            if pre_probe_conn_stats is not None:
+                xacts -= _probe_correction_count(pre_probe_conn_stats, correction_matcher)
         sessions = post_sessions - pre_sessions
         stale = bool(pre_entry["stale"]) or bool(post_entry["stale"])
         print(_format_roundtrip_db_row(peer, plug, op, requests, kind, xacts, sessions, stale))
@@ -1405,9 +1415,8 @@ def _emit_measurement_rows(
     snapshot to `_emit_prepared_rows` below via its own `conn_stats`
     parameter -- one POST `prepared_stats()` call shared by `DBTIME
     scope=app` and every `PREPARED` line, never two. `measurement=None`
-    (every call site that predates this) emits no `CPU`/`DBTIME` line at
-    all and fetches nothing extra -- byte-identical to the function this
-    replaces."""
+    (any call site that does not supply it) emits no `CPU`/`DBTIME` line
+    at all and fetches nothing extra."""
     if measurement is not None:
         print(_format_cpu_row(peer, plug, op, measurement))
     _emit_pool_rows(peer, plug, op, adapter_obj)
@@ -1437,9 +1446,12 @@ def _emit_measurement_rows(
                 min_wait=roundtrip["min_wait"], poll_interval=roundtrip["poll_interval"], max_wait=roundtrip["max_wait"],
             )
             post_db_values = {kind: by_dbname[db_name] for kind, db_name in db_names.items()}
+            dbtime_pre = (measurement or {}).get("dbtime_pre")
+            pre_probe_conn_stats = dbtime_pre.get("conn_stats") if dbtime_pre is not None else None
             _emit_roundtrip_db_rows(
                 peer, plug, op, requests, db_names, roundtrip["pre_db_values"], post_db_values,
                 post_conn_stats, roundtrip["correction_matcher"],
+                pre_probe_conn_stats=pre_probe_conn_stats,
             )
     return post_conn_stats
 
@@ -1464,17 +1476,16 @@ def _measure_op_and_emit(
     ever touches `admin_conn` (completion condition 21a). `prepared_
     stats()` is still called twice per op in that case (a separate DBTIME
     PRE snapshot inside `_measure_op` itself, plus the POST call below) --
-    once was the pre-DBTIME baseline (completion condition 21b's own
-    updated count).
+    completion condition 21b's own count.
 
     `after_measure`, when given, runs on the measured `calls` list right
     after `_measure_op` returns but BEFORE any emission -- `_measure_plug`'s
     own `query` block uses this for `_run_self_check`. **順序は保存されて
     いる**: `_run_self_check` runs after `_measure_op` and before `_emit_
-    measurement_rows`'s own prints -- the SAME position relative to every
-    printed line as before ROUNDTRIP was added. Only its position relative
-    to `_measure_plug`'s own `_row(...)`/`rows.append(...)` (no side effect
-    of their own) ever moved, from after to before.
+    measurement_rows`'s own prints, in the same position relative to every
+    printed line; its only position relative to `_measure_plug`'s own `_row(
+    ...)`/`rows.append(...)` (no side effect of their own) differs, running
+    before them rather than after.
 
     Builds `measurement` (`wall_ms`/`cpu_total_ms`/`cpu_main_ms`/`dbtime_
     pre` from `_measure_op`'s own third return value, plus `concurrency`,

@@ -25,8 +25,11 @@ threshold`, `.prepared_max`).
 """
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import os
+import textwrap
 from pathlib import Path
 
 import psycopg
@@ -691,6 +694,13 @@ class _R101ProbeError(Exception):
     override must not swallow it."""
 
 
+class _R101ProbeExitError(Exception):
+    """A SECOND distinct exception type, used only where the exit round
+    trip itself (`base_cm.__exit__`) raises while a block-body exception
+    is also in flight -- distinct from `_R101ProbeError` so a test can
+    tell which of the two the caller actually observes."""
+
+
 def test_counting_cursor_execute_increases_db_wall_ms():
     """Completion condition 1: `CountingCursor.execute` increases the
     owning connection's `db_wall_ms` by the real round-trip wall time --
@@ -970,6 +980,76 @@ def test_transaction_enter_still_accumulates_when_begin_itself_raises(monkeypatc
         conn.close()
 
 
+def test_transaction_exit_still_accumulates_when_the_success_path_exit_itself_raises(monkeypatch):
+    """コードレビュー 2 差し戻し 3 指摘 4: when the exit round trip itself
+    (`base_cm.__exit__(None, None, None)`, e.g. COMMIT failing) raises on
+    the success path -- a stub failure here, not a real PostgreSQL
+    round-trip failure -- the exit side's own `db_wall_ms`/`txn_count`
+    accumulation still runs (matching `test_transaction_enter_still_
+    accumulates_when_begin_itself_raises` above, for the exit side of the
+    success branch), and the stub's own exception propagates with its
+    original type.
+
+    mutation M109 (`psycopg_counting.py`, both copies): drop the `try`/
+    `finally` around `base_cm.__exit__(None, None, None)` in `transaction(
+    )`'s success-path exit side -- this test's own `txn_count - before_
+    txn == 2` assertion goes red (observes 1: only the enter side
+    counted)."""
+    conn = CountingConnection.connect(_admin_dsn(), autocommit=False)
+    try:
+        class _StubTransactionCM:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *exc_info):
+                raise _R101ProbeError("R-101 WP-1 test: simulated exit-side COMMIT failure")
+
+        monkeypatch.setattr(psycopg.Connection, "transaction", lambda self, *a, **kw: _StubTransactionCM())
+        before_wall = conn.db_wall_ms
+        before_txn = conn.txn_count
+        with pytest.raises(_R101ProbeError):
+            with conn.transaction():
+                pass
+        assert conn.db_wall_ms > before_wall
+        assert conn.txn_count - before_txn == 2
+    finally:
+        conn.close()
+
+
+def test_transaction_exit_still_accumulates_when_the_exception_path_exit_itself_raises(monkeypatch):
+    """コードレビュー 2 差し戻し 3 指摘 4: when the block itself raises AND
+    the exit round trip (`base_cm.__exit__(type, exc, tb)`, e.g. ROLLBACK
+    failing) also raises -- a stub failure here -- the exit side's own
+    `db_wall_ms`/`txn_count` accumulation still runs, and the exit's own
+    exception (not the block's own) is what the caller observes, with its
+    original type (ordinary context-manager semantics: an `__exit__` that
+    raises replaces the exception already in flight).
+
+    mutation M110 (`psycopg_counting.py`, both copies): drop the `try`/
+    `finally` around `base_cm.__exit__(...)` in `transaction()`'s
+    exception-path exit side -- this test's own `txn_count - before_txn
+    == 2` assertion goes red (observes 1: only the enter side counted)."""
+    conn = CountingConnection.connect(_admin_dsn(), autocommit=False)
+    try:
+        class _StubTransactionCM:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *exc_info):
+                raise _R101ProbeExitError("R-101 WP-1 test: simulated exit-side ROLLBACK failure")
+
+        monkeypatch.setattr(psycopg.Connection, "transaction", lambda self, *a, **kw: _StubTransactionCM())
+        before_wall = conn.db_wall_ms
+        before_txn = conn.txn_count
+        with pytest.raises(_R101ProbeExitError):
+            with conn.transaction():
+                raise _R101ProbeError("boom")
+        assert conn.db_wall_ms > before_wall
+        assert conn.txn_count - before_txn == 2
+    finally:
+        conn.close()
+
+
 def test_failed_statement_still_increases_db_wall_ms_and_execute_count():
     """Completion condition 14: a statement PostgreSQL itself rejects (a
     real driver error, not a mocked one) still counts as one attempt --
@@ -1049,10 +1129,13 @@ def test_role_pool_platform_stats_does_not_decrease_when_a_connection_closes():
     mutation M100 (code review 1 F4(d), `r2db_api/postgres.py`): drop
     JUST the `self._closed_db_calls += db_calls` line from `_fold_closed_
     connection_stats`, leaving the `db_wall_ms`/`txn_count` folding
-    otherwise intact -- this test's own `before["db_calls"] > 0`
-    assertion goes red on its own (the other two assertions above stay
-    green), proving `db_calls` folding is independently observed, not
-    merely incidental to the `db_wall_ms`/`txn_count` mutation above."""
+    otherwise intact -- `before["db_calls"]` is read from the connection
+    while it is still LIVE in the queue (unaffected by this mutation), so
+    this test's own `after["db_calls"] >= before["db_calls"]` assertion is
+    the one that goes red on its own (the other two `after` assertions
+    above stay green), proving `db_calls` folding is independently
+    observed, not merely incidental to the `db_wall_ms`/`txn_count`
+    mutation above."""
     pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
     try:
         with pool.connection() as conn:
@@ -1069,6 +1152,44 @@ def test_role_pool_platform_stats_does_not_decrease_when_a_connection_closes():
         assert after["db_calls"] >= before["db_calls"]
     finally:
         pool.close_all()
+
+
+def test_role_pool_platform_stats_does_not_decrease_when_liveness_check_kills_a_connection():
+    """コードレビュー 2 差し戻し 3 指摘 8: `_liveness_check`'s own `except`
+    branch (a real server-side termination, discovered by a failed ping --
+    never `retire()`'s own drain loop above, nor a pre-closed dequeue
+    below) also folds the dying connection's own accumulated stats into
+    the pool's accumulator before closing it -- `platform_stats()` does
+    not drop when that path runs.
+
+    mutation M112 (`r2db_api/postgres.py`): drop the `self._fold_closed_
+    connection_stats(conn)` call from `_liveness_check`'s own `except`
+    branch -- this test's own `after["db_wall_ms"] >= before["db_wall_
+    ms"]` assertion goes red (drops to 0, since the terminated
+    connection's own totals are lost)."""
+    admin = psycopg.connect(_admin_dsn(), autocommit=True)
+    try:
+        pool = _RolePool(_admin_dsn(), schema="public", maxconn=1)
+        try:
+            with pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_sleep(0.05)")
+                dead_pid = conn.info.backend_pid
+            before = pool.platform_stats()
+            assert before["db_wall_ms"] > 0
+            assert before["txn_count"] > 0
+            with admin.cursor() as cur:
+                cur.execute("SELECT pg_terminate_backend(%s)", [dead_pid])
+            with pool.connection() as conn:
+                new_pid = conn.info.backend_pid
+            assert new_pid != dead_pid
+            after = pool.platform_stats()
+            assert after["db_wall_ms"] >= before["db_wall_ms"]
+            assert after["txn_count"] >= before["txn_count"]
+        finally:
+            pool.close_all()
+    finally:
+        admin.close()
 
 
 def test_role_pool_connection_folds_stats_from_an_already_closed_dequeued_connection():
@@ -1165,3 +1286,61 @@ def test_role_pool_platform_stats_counts_one_session_on_first_connect():
         assert after["connect_wall_ms"] > 0
     finally:
         pool.close_all()
+
+
+def _self_attr(node: ast.AST, attr: str) -> bool:
+    """`True` iff `node` is exactly the attribute access `self.<attr>`."""
+    return isinstance(node, ast.Attribute) and node.attr == attr and isinstance(node.value, ast.Name) and node.value.id == "self"
+
+
+def _find_with_lock_body(tree: ast.AST, *, lock_attr: str) -> "list[ast.stmt] | None":
+    """The `body` of the first `with self.<lock_attr>:` statement found
+    anywhere in `tree`, or `None` if there is no such statement at all."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if _self_attr(item.context_expr, lock_attr):
+                    return node.body
+    return None
+
+
+def _body_contains(body: "list[ast.stmt]", predicate) -> bool:
+    """`True` iff any statement in `body` (searched recursively) contains
+    a node matching `predicate`."""
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if predicate(node):
+                return True
+    return False
+
+
+def test_role_pool_fold_is_lexically_inside_the_stats_lock():
+    """Completion condition 26 (守る条件 (b)): `_RolePool.
+    _fold_closed_connection_stats`'s three accumulator increments (`self.
+    _closed_db_wall_ms += db_wall_ms`, `self._closed_txn_count +=
+    txn_count`, `self._closed_db_calls += db_calls`) must be lexically
+    inside the SAME `with self._stats_lock:` block. A source-shape pin,
+    not a running-thread race: mirroring the peer's own finding for the
+    same shape (`MitateDB-api/tests/test_r79_prepared_stats.py`'s own
+    `test_platform_stats_fold_is_lexically_inside_the_platform_stats_
+    lock`), CPython's GIL does not reliably turn this unguarded accumulate
+    into an observable lost update at achievable call rates -- so this
+    deterministic AST pin is used instead.
+
+    mutation M64c (`r2db_api/postgres.py`): drop the `with self._stats_
+    lock:` around the three accumulator additions in `_fold_closed_
+    connection_stats` -- this test's own assertions go red (the three
+    `AugAssign` nodes are no longer inside any `with self._stats_lock:`
+    block)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_RolePool._fold_closed_connection_stats)))
+    body = _find_with_lock_body(tree, lock_attr="_stats_lock")
+    assert body is not None, "no `with self._stats_lock:` block found in `_fold_closed_connection_stats`"
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_wall_ms") and isinstance(n.op, ast.Add)), (
+        "the db_wall_ms accumulation is not lexically inside `with self._stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_txn_count") and isinstance(n.op, ast.Add)), (
+        "the txn_count accumulation is not lexically inside `with self._stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_calls") and isinstance(n.op, ast.Add)), (
+        "the db_calls accumulation is not lexically inside `with self._stats_lock:`"
+    )

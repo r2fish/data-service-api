@@ -2413,7 +2413,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_162_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_165_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2953,10 +2953,17 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_perf_thread_limit_value"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_PerfThreadLimitWrapper"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "perf_thread_limit"),
+    # R-101 WP-1 completion condition 26 (supervisor ruling 3): the AST
+    # static pin's own three helpers (`_self_attr`, `_find_with_lock_body`,
+    # `_body_contains`) placed identically in both peers' own `tests/
+    # test_r79_prepared_stats.py`, per OC §1.5 の 38.
+    ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_self_attr"),
+    ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_find_with_lock_body"),
+    ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_body_contains"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_162_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_165_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -3016,10 +3023,13 @@ def test_isomorphic_target_table_is_pinned_to_its_current_162_rows() -> None:
     verified normalize-and-diff equal before adding; widened a fifteenth
     time by R-101 WP-1, once the `DSA_PERF_THREAD_LIMIT` env reader
     (`_perf_thread_limit_value`), the wrapper class that applies it to a
-    data-plane app's own event loop (`_PerfThreadLimitWrapper`), and the
+    data-plane app's own event loop (`_PerfThreadLimitWrapper`), the
     `perf_thread_limit()` accessor the measurement harness reads it back
-    through had all landed identically on both peers, verified
-    normalize-and-diff equal before adding:
+    through, and the closed-connection-fold static pin's own three
+    helpers (`_self_attr`, `_find_with_lock_body`, `_body_contains`,
+    `tests/test_r79_prepared_stats.py` on both peers) had all landed
+    identically on both peers, verified normalize-and-diff equal before
+    adding:
     a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
@@ -3051,7 +3061,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_162_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_162_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_165_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3315,8 +3325,15 @@ def test_isomorphic_target_table_is_pinned_to_its_current_162_rows() -> None:
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_perf_thread_limit_value"),
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_PerfThreadLimitWrapper"),
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "perf_thread_limit"),
+        # R-101 WP-1 completion condition 26 (supervisor ruling 3): the AST
+        # static pin's own three helpers (`_self_attr`, `_find_with_lock_body`,
+        # `_body_contains`) placed identically in both peers' own `tests/
+        # test_r79_prepared_stats.py`, per OC §1.5 の 38.
+        ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_self_attr"),
+        ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_find_with_lock_body"),
+        ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_body_contains"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 162
+    assert len(_ISOMORPHIC_TARGETS) == 165
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}

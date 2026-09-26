@@ -135,7 +135,7 @@ class CountingConnection(psycopg.Connection):
     @contextmanager
     def transaction(self, *args: Any, **kwargs: Any) -> Any:
         """Wraps the base `Connection.transaction()` context manager
-        (never its private `_exec_command`/`Transaction` internals) by
+        (never psycopg's own private internal command machinery) by
         driving its `__enter__`/`__exit__` directly rather than through a
         nested `with`, so the wall time and transaction count on either
         side of `yield` are each attributed to exactly the boundary that
@@ -166,8 +166,7 @@ class CountingConnection(psycopg.Connection):
             finally:
                 # Counted even if the exit round trip (ROLLBACK/ROLLBACK TO
                 # SAVEPOINT) itself raises; that raised exception still
-                # propagates below unchanged, exactly as it did before this
-                # `finally` was added.
+                # propagates below unchanged.
                 self.db_wall_ms += (time.perf_counter() - exit_start) * 1000.0
                 self.txn_count += 1
             if not suppressed:

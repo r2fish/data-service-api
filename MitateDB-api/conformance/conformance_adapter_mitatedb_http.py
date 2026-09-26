@@ -907,8 +907,7 @@ class _AuthGate:
 # thread-limit sweep can measure this same plug at a reduced anyio
 # thread-pool size, never production code. Absent, empty, or not a
 # positive integer all mean "no override" (`None`) -- the data-plane app
-# is left completely unwrapped in that case, identical to before this
-# existed.
+# is left completely unwrapped in that case.
 _PERF_THREAD_LIMIT_ENV = "DSA_PERF_THREAD_LIMIT"
 
 
@@ -1196,8 +1195,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # `app is self._app` identity) end up driving the identical
             # instance either way. `self._perf_thread_limit` stays `None`
             # (no wrapper) when the env is absent, invalid, or non-positive
-            # -- app identity is then exactly what it was before this
-            # existed.
+            # -- app identity is then the `create_app` result itself,
+            # unwrapped.
             self._perf_thread_limit = _perf_thread_limit_value()
             if self._perf_thread_limit is not None:
                 app = _PerfThreadLimitWrapper(app, total_tokens=self._perf_thread_limit)
