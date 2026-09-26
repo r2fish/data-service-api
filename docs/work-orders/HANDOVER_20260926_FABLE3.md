@@ -161,6 +161,20 @@ M7 expect=red got=red OK | mutate: 1 mutations, 1 as expected, restores verified
 2. **jsonb には式レベルの COLLATE が付かない。** jsonb の中の文字列の順序は DB 単位の照合が唯一の経路。
 3. **実装担当が「テストを先に赤にする」順を守らなかったときは、同じ編集の変異が同じ node を赤にした実測で代替できるかを見てから差し戻しを決める** (訂正註 3)。
 
+### 完了 (2026-09-26、次のチャット)
+
+- 本節の「次の一手」0〜7 をすべて行い、R-112 を閉止した (`RM` v1.127、作業指示書 §5 実施記録、§4 訂正註 5)。差し戻し反映後の最終ツリー (WIP commit `738ca3a` + `8268dd7` + 修正 commit) を 1 回の `--no-ff` merge で main に入れる (訂正註 4 (2))。worktree r38 は fold 対象。
+- 役割とモデル: reviewer (opus、transcript の `"model"` 欄は `claude-opus-5-5`、Class D コードレビュー、指摘 10 件)、implementer (sonnet、差し戻し 1〜9)、evidence-auditor (opus、`claude-opus-5-5`、充足 21 / 21、観察 2 件)。commit・完了ゲート・merge は監督。
+- 完了ゲート (監督、solo、使い捨てクラスタ): 差し戻し反映後 `gate: 4262 passed, 2 subtests passed in 367.27s (0:06:07)`、`judge=PASS`、pg_database/pg_roles diff 0; 監査の観察 2 件を直した最終ツリーで再実行 (label r112b): `gate: 4262 passed, 2 subtests passed in 406.72s (0:06:46)`、`judge=PASS`、diff 0。main `0d7065c` は動かなかったので取り込みなし。`conformance-tests/COLLECTION_FLOOR` 4233 → 4262。
+- 差し戻しで直したもの (作業指示書 §4 訂正註 5): `security/CONTROL_MAPPING.md` の `file:line` 参照 102 件 (ops.py 両 peer + r2db 0003 の行挿入) + range 1 件 + MitateDB runbook への 4 件 + 件数 pin の test 名 1 件 (:819 `_159_rows` → `_161_rows`。実装担当は「R-41 で改名済みの既存の齟齬」と報告したが、基点 `0d7065c` では `_159_rows` が正で、改名は本 WP 自身の変更) を追従 (版 3.4 は不変)、`tools/dev/README.md`:78; src docstring の経緯語; F-19 の provider 枝・DB 不在枝の単体テスト 3 × 2 peer + 変異 M8 / M9; `inmemory_sort.py` docstring の「11 passed」の内訳 (既存 5 + pin 2 + 新規 4。訂正註 3 (3) の「既存 jsonb 4 node」は監督の誤り); 復元手順の platform / application の分離; FAIL message (ICU、deprovision 途中); runbook の文面と終了コード 18; MitateDB テストの `close_cell`。
+- 依頼者判断待ち: 変わらず「2」だけ。
+
+### 教訓 (完了時に追加)
+
+4. **参照される側のファイルに行を足す変更セットは、`security/CONTROL_MAPPING.md` の `file:line` を必ず追従する。** 差分の全ファイルについて `grep -c '<path>:' security/CONTROL_MAPPING.md` を差し戻し前に監督が取る (本件: ops.py 両 peer 131 件、runbook 5 件、0003 1 件)。`conformance-tests/test_control_mapping_register.py` は行の存在しか見ない (Known gap 1)。範囲参照 (`:217-218`) は前半だけの置換で壊れる。
+5. **実装担当の「既存の齟齬」は基点で再実測してから裁定する。** 本件の `_159_rows` は本 WP 自身の改名だった。
+6. **テストの docstring に書く変異の結果は「このテストが赤になる」の向きで書く。** 「turns this green」は検査対象が緑になる意味で書かれたが、テストが緑になると読める (監査の観察 2)。
+
 ## 裁定
 
 全件を載せる (`OC` §1.15 の 77)。出所は監督チャットの scratchpad の `rulings-r38.md` (監督、2026-09-26) の逐語である。表中の D-N / U-N / § 番号 / タスク / 付録 A は作業指示書のもの。
@@ -202,3 +216,22 @@ M7 expect=red got=red OK | mutate: 1 mutations, 1 as expected, restores verified
 | 実装担当 訂正 (c): 0003 comment の `LC_CTYPE` の語を除去 | 採用 | 完了条件 18 |
 | 実装担当 判断 (d): D-7 の grep は README / deploy に限る | 採用 (訂正註 3 (2)) | `docs/` の既存言及は写しではない |
 | 実装担当 逸脱 (e): 絞り込み 4 コマンドの基点を未変更 tree で未実測 | 採用 (期待形と一致。監査照合の欄にその旨を書く) | (a) と同根 |
+| コードレビュー 1 (高): `security/CONTROL_MAPPING.md` の `file:line` 参照 102 件が本変更セットの行挿入でずれる | 直した (訂正註 5 (1)。実装担当が対応表を機械適用し基点の行内容と 102 / 102 一致を再照合、版 3.4 は不変) | 監督実測: 基点 :1221 = `cmd_verify_declarations` が :1230 に |
+| コードレビュー 2 (中): src docstring の経緯語 `F-19 (R-112 D-2)` 等 | 直した | §1.2 の 5、§2.13 |
+| コードレビュー 3 (中): F-19 の provider 枝・DB 不在枝にテストも変異も無い (RV1 / RV2 緑) | 直した (偽 conn の単体テスト 3 × 2 peer、変異 M8 / M9 赤) | 主張は実測の後 (`OC` §1.5 の 34)。runbook が両枝を検査すると書く |
+| コードレビュー 4 (低〜中): `inmemory_sort.py` docstring の「11 passed together with this module's own …」が誤読を招く。実際は既存 5 + pin 2 + 新規 4 | 直した (内訳を実測で書き、`gt` / `lt` を `inmemory_predicate.py` の比較として分け、一致の主張を最上位の文字列に限定) | 訂正註 3 (3) の「既存 jsonb 4 node」は監督の誤り |
+| コードレビュー 5 (低): 「`_count_registered_applications` と同じ対象集合」は偽 (`count(*)` vs `IS NOT NULL`) | 直した | — |
+| コードレビュー 6 (低): 復元コマンド 1 本が platform DB にも掛かり `LC_COLLATE 'C'` になる | 直した (application / platform の 2 行に分離。訂正註 2 (a) を上書き) | D-1 (0001 は変えない) と整合 |
+| コードレビュー 7 (低): FAIL message の対処が ICU クラスタと deprovision 途中の行で誤り | 直した (message と runbook に両場合を追記) | 検出は安全側、文言だけ |
+| コードレビュー 8 (低): runbook の意味の通らない文、終了コード 18 の欠落 | 直した | — |
+| コードレビュー 9 (低): MitateDB 新規テスト 3 本が `close_cell` を呼ばない | 直した (`try/finally`) | — |
+| コードレビュー 10 (低): §5 の変異表の「逐語」表記が実際は圧縮 | 直した (監督が §5 の文言を「報告の形」に) | — |
+| コードレビュー 問い (1): 完了条件 1 の代替は意図を満たす (M1 / M2 は `CREATE DATABASE` 文を基点と同じに戻し、T1・T2・T4 は A-1 / A-3 と直接比較) | 採用 | 訂正註 3 (1) の独立確認 |
+| コードレビュー 問い (5): `database_name` は両 peer で UNIQUE・NULL 可、NULL は provision 前の行で除外が正しい | 採用 | 訂正註 3 (5) の独立確認 |
+| 実装担当 逸脱 (a): 対応表の range 参照 `:217-218` を前半だけ置換して `:224-218` を生成 → 自分で検出し `:224-225` に修正 | 採用 (直した) | 教訓 4 |
+| 実装担当 逸脱 (b): `CONTROL_MAPPING.md`:819 の `_159_rows` を「R-41 で改名済みの既存の齟齬、範囲外」と報告 | 採用しない → 監督が直した (基点で `_159_rows` が正、改名は本 WP) | 教訓 5 |
+| 実装担当 判断 (c): 0003 未変更のため M1 / M2 / M5 / M6 を再実行しない | 採用 | 変異対象のファイルに差分なし |
+| 監査 但し書き: 初回変異 20 件の証拠は要約の転記のみ (生ログ無し) | **観察** | 前チャットの scratchpad は読めない。差し戻し後の 7 件は log 実在。同じ編集の変異 (M3 / M4 / M7) は再実行で赤 |
+| 監査 但し書き: 基点 4 コマンドの未再実測 (逸脱 (e)) | **観察** (ast の静的再導出と整合) | 起票の 2 問とも いいえ |
+| 監査 観察 1 (中): `CONTROL_MAPPING.md` の MitateDB runbook への参照 4 件が F-19 段落の +2 行でずれる | 直した (監督。:1123 → :1125、:2484 → :2486 ×3。基点と現在の行内容の一致を確認) | 教訓 4 |
+| 監査 観察 2 (低): F-19 単体テストの docstring「turns this green」が実測 (赤) と逆に読める | 直した (監督。両 peer 同文) | 教訓 6 |

@@ -87,15 +87,27 @@ def _sort_key(value: Any) -> tuple[Any, ...]:
     String comparison (top-level or nested) is Python's own codepoint
     order; application databases are provisioned with `LC_COLLATE 'C'`
     (`0003_provision_application.sql`), so a real PostgreSQL server's own
-    string ordering matches this key byte-for-byte, including for a typed
-    `string` column, an untyped (jsonb) column, keyset-cursor paging, and
+    string ordering matches this key byte-for-byte for a *top-level*
+    string value (a nested string's own ordering is not separately
+    measured) -- checked against a real PostgreSQL server, for a typed
+    `string` column, an untyped (jsonb) column, and keyset-cursor paging
+    respectively, by `test_postgres.py`'s `test_parity_string_collation_
+    order_by_string_column`, `test_parity_string_collation_order_by_
+    untyped_column`, and `test_parity_string_collation_keyset_cursor_
+    walk`.
+
     `gt`/`lt` comparisons over strings mixing case and non-ASCII
-    characters -- checked against a real PostgreSQL server by `test_
-    postgres.py`'s `test_parity_string_collation_order_by_string_column`,
-    `test_parity_string_collation_order_by_untyped_column`, `test_parity_
-    string_collation_keyset_cursor_walk`, and `test_parity_string_
-    collation_where_gt_lt` (11 passed together with this module's own
-    pre-existing jsonb-order tests, `-k "collation or parity_order"`).
+    characters go through `inmemory_predicate.py`'s own native Python `<`/
+    `>` comparison instead (the same codepoint order, but not this
+    module's `_sort_key`), checked by `test_parity_string_collation_
+    where_gt_lt`.
+
+    These 4 tests, together with the 2 provisioning pins `test_
+    application_database_collation_is_c` and `test_application_database_
+    collation_keeps_the_cluster_ctype`, and the 5 pre-existing parity
+    tests (the 4 `test_parity_order_by_jsonb_*` tests above and `test_
+    parity_order_by_null_placement_and_cross_type`) -- 11 passed under
+    `-k "collation or parity_order"`.
     """
     if value is None:
         return (1, 0, "")

@@ -3499,22 +3499,25 @@ def test_parity_string_collation_order_by_string_column(app_a) -> None:
     SQLite backend for both `asc`/`desc`, and the PostgreSQL side's own
     `asc` output equals A-1 (codepoint order)."""
     pg_cell = make_cell(app_a)
-    sqlite_cell = ApplicationCell("collation_parity_app")
-    pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
-    sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
-    pg_developer.create_collection("collation_strings", {"value": "text"})
-    sqlite_developer.create_collection("collation_strings", {"value": "text"})
-    for value in _COLLATION_INSERT_ORDER:
-        pg_runtime.insert("collation_strings", {"value": value})
-        sqlite_runtime.insert("collation_strings", {"value": value})
-    for direction in ("asc", "desc"):
-        order_by = [{"field": "value", "direction": direction}]
-        pg_items = pg_runtime.read("collation_strings", fields=["value"], order_by=order_by)
-        sqlite_items = sqlite_runtime.read("collation_strings", fields=["value"], order_by=order_by)
-        assert pg_items == sqlite_items, direction
-        assert len(pg_items) >= len(_COLLATION_ASC_ORDER), direction
-        expected = _COLLATION_ASC_ORDER if direction == "asc" else list(reversed(_COLLATION_ASC_ORDER))
-        assert [item["value"] for item in pg_items] == expected, direction
+    try:
+        sqlite_cell = ApplicationCell("collation_parity_app")
+        pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
+        sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
+        pg_developer.create_collection("collation_strings", {"value": "text"})
+        sqlite_developer.create_collection("collation_strings", {"value": "text"})
+        for value in _COLLATION_INSERT_ORDER:
+            pg_runtime.insert("collation_strings", {"value": value})
+            sqlite_runtime.insert("collation_strings", {"value": value})
+        for direction in ("asc", "desc"):
+            order_by = [{"field": "value", "direction": direction}]
+            pg_items = pg_runtime.read("collation_strings", fields=["value"], order_by=order_by)
+            sqlite_items = sqlite_runtime.read("collation_strings", fields=["value"], order_by=order_by)
+            assert pg_items == sqlite_items, direction
+            assert len(pg_items) >= len(_COLLATION_ASC_ORDER), direction
+            expected = _COLLATION_ASC_ORDER if direction == "asc" else list(reversed(_COLLATION_ASC_ORDER))
+            assert [item["value"] for item in pg_items] == expected, direction
+    finally:
+        close_cell(pg_cell)
 
 
 def _walk_all_pages_mitatedb(runtime, collection: str, order_by: list, limit: int, max_pages: int) -> list:
@@ -3538,26 +3541,29 @@ def test_parity_string_collation_keyset_cursor_walk(app_a) -> None:
     連結列が一致し、各 backend の連結列がその backend の page 無しの
     items と一致し、件数が値集合の件数と一致し、page 数が 1 より大きい。"""
     pg_cell = make_cell(app_a)
-    sqlite_cell = ApplicationCell("collation_parity_app")
-    pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
-    sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
-    pg_developer.create_collection("collation_cursor", {"value": "text"})
-    sqlite_developer.create_collection("collation_cursor", {"value": "text"})
-    for value in _COLLATION_INSERT_ORDER:
-        pg_runtime.insert("collation_cursor", {"value": value})
-        sqlite_runtime.insert("collation_cursor", {"value": value})
-    max_pages = 40
-    for limit in (1, 2):
-        for direction in ("asc", "desc"):
-            order_by = [{"field": "value", "direction": direction}]
-            pg_walked = _walk_all_pages_mitatedb(pg_runtime, "collation_cursor", order_by, limit, max_pages)
-            sqlite_walked = _walk_all_pages_mitatedb(sqlite_runtime, "collation_cursor", order_by, limit, max_pages)
-            assert pg_walked == sqlite_walked, (limit, direction)
-            pg_unpaged = pg_runtime.read("collation_cursor", fields=["value"], order_by=order_by)
-            sqlite_unpaged = sqlite_runtime.read("collation_cursor", fields=["value"], order_by=order_by)
-            assert pg_walked == pg_unpaged, (limit, direction)
-            assert sqlite_walked == sqlite_unpaged, (limit, direction)
-            assert len(pg_walked) == len(_COLLATION_ASC_ORDER), (limit, direction)
+    try:
+        sqlite_cell = ApplicationCell("collation_parity_app")
+        pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
+        sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
+        pg_developer.create_collection("collation_cursor", {"value": "text"})
+        sqlite_developer.create_collection("collation_cursor", {"value": "text"})
+        for value in _COLLATION_INSERT_ORDER:
+            pg_runtime.insert("collation_cursor", {"value": value})
+            sqlite_runtime.insert("collation_cursor", {"value": value})
+        max_pages = 40
+        for limit in (1, 2):
+            for direction in ("asc", "desc"):
+                order_by = [{"field": "value", "direction": direction}]
+                pg_walked = _walk_all_pages_mitatedb(pg_runtime, "collation_cursor", order_by, limit, max_pages)
+                sqlite_walked = _walk_all_pages_mitatedb(sqlite_runtime, "collation_cursor", order_by, limit, max_pages)
+                assert pg_walked == sqlite_walked, (limit, direction)
+                pg_unpaged = pg_runtime.read("collation_cursor", fields=["value"], order_by=order_by)
+                sqlite_unpaged = sqlite_runtime.read("collation_cursor", fields=["value"], order_by=order_by)
+                assert pg_walked == pg_unpaged, (limit, direction)
+                assert sqlite_walked == sqlite_unpaged, (limit, direction)
+                assert len(pg_walked) == len(_COLLATION_ASC_ORDER), (limit, direction)
+    finally:
+        close_cell(pg_cell)
 
 
 def test_parity_string_collation_where_gt_lt(app_a) -> None:
@@ -3565,19 +3571,22 @@ def test_parity_string_collation_where_gt_lt(app_a) -> None:
     で一致し、PostgreSQL 側の集合が付録 A の A-3 と一致し、いずれも空で
     ない。"""
     pg_cell = make_cell(app_a)
-    sqlite_cell = ApplicationCell("collation_parity_app")
-    pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
-    sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
-    pg_developer.create_collection("collation_where", {"value": "text"})
-    sqlite_developer.create_collection("collation_where", {"value": "text"})
-    for value in _COLLATION_INSERT_ORDER:
-        pg_runtime.insert("collation_where", {"value": value})
-        sqlite_runtime.insert("collation_where", {"value": value})
-    for operator, expected in (("gt", _COLLATION_GT_A), ("lt", _COLLATION_LT_A)):
-        pg_items = pg_runtime.read("collation_where", fields=["value"], filters=[Filter("value", operator, "a")])
-        sqlite_items = sqlite_runtime.read("collation_where", fields=["value"], filters=[Filter("value", operator, "a")])
-        pg_values = {item["value"] for item in pg_items}
-        sqlite_values = {item["value"] for item in sqlite_items}
-        assert pg_values == sqlite_values, operator
-        assert pg_values == expected, operator
-        assert pg_values, operator
+    try:
+        sqlite_cell = ApplicationCell("collation_parity_app")
+        pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
+        sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
+        pg_developer.create_collection("collation_where", {"value": "text"})
+        sqlite_developer.create_collection("collation_where", {"value": "text"})
+        for value in _COLLATION_INSERT_ORDER:
+            pg_runtime.insert("collation_where", {"value": value})
+            sqlite_runtime.insert("collation_where", {"value": value})
+        for operator, expected in (("gt", _COLLATION_GT_A), ("lt", _COLLATION_LT_A)):
+            pg_items = pg_runtime.read("collation_where", fields=["value"], filters=[Filter("value", operator, "a")])
+            sqlite_items = sqlite_runtime.read("collation_where", fields=["value"], filters=[Filter("value", operator, "a")])
+            pg_values = {item["value"] for item in pg_items}
+            sqlite_values = {item["value"] for item in sqlite_items}
+            assert pg_values == sqlite_values, operator
+            assert pg_values == expected, operator
+            assert pg_values, operator
+    finally:
+        close_cell(pg_cell)

@@ -41,6 +41,7 @@ import mitatedb_api.platform_declarations as platform_declarations
 from mitatedb_api.platform_declarations import (
     PlatformDeclarationError,
     ProcessCeilings,
+    check_application_collations,
     check_auditreader_statement_timeout,
     check_max_connections_headroom,
     check_role_connection_limits,
@@ -1421,3 +1422,109 @@ def test_verify_declarations_f19_passes_after_provisioning_with_0003(
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "OK   F-19" in out, out
+
+
+class _FakeCollationCursor:
+    """A fake cursor -- never a real connection -- standing in for BOTH of
+    `check_application_collations`'s own reads (the registered-
+    application listing, then each application's own `pg_database` row):
+    lets a unit test drive the `datlocprovider`/missing-row branches
+    directly, without provisioning a real database for each case."""
+
+    def __init__(self, *, applications: list, rows: dict) -> None:
+        self._applications = applications
+        self._rows = rows
+        self.executed_sql: list[str] = []
+        self._pending: tuple[str, object] | None = None
+
+    def __enter__(self) -> "_FakeCollationCursor":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def execute(self, query: object, params: list | None = None) -> None:
+        text = str(query)
+        self.executed_sql.append(text)
+        if "FROM pg_database" in text:
+            (database_name,) = params
+            self._pending = ("row", self._rows.get(database_name))
+        else:
+            self._pending = ("apps", None)
+
+    def fetchall(self) -> list:
+        kind, _ = self._pending
+        assert kind == "apps"
+        return list(self._applications)
+
+    def fetchone(self) -> tuple | None:
+        kind, row = self._pending
+        assert kind == "row"
+        return row
+
+
+class _FakeCollationConn:
+    def __init__(self, *, server_version: int, applications: list, rows: dict) -> None:
+        self.info = types.SimpleNamespace(server_version=server_version)
+        self._applications = applications
+        self._rows = rows
+        self.last_cursor: _FakeCollationCursor | None = None
+
+    def cursor(self) -> _FakeCollationCursor:
+        self.last_cursor = _FakeCollationCursor(applications=self._applications, rows=self._rows)
+        return self.last_cursor
+
+
+def test_check_application_collations_fails_on_icu_provider_on_pg15() -> None:
+    """コードレビュー指摘 3(a) (完了条件 14 の追加の脚): a registered
+    application whose own database reports `datlocprovider = 'i'` (ICU) on
+    a server that CAN report it (`server_version >= 150000`) fails F-19
+    even though `datcollate`/`datctype` both pass -- the provider branch,
+    not just the two column-value branches, must be judged. Mutation M8
+    (dropping the `checks_provider and row[2] != "c"` condition) makes the
+    check pass silently, so this test goes red (measured)."""
+    conn = _FakeCollationConn(
+        server_version=150000,
+        applications=[("app_icu",)],
+        rows={"app_icu": ("C", "en_US.UTF-8", "i")},
+    )
+    with pytest.raises(PlatformDeclarationError) as excinfo:
+        check_application_collations(conn, schema="s")
+    assert excinfo.value.code == "F-19"
+    assert "provider" in str(excinfo.value)
+
+
+def test_check_application_collations_fails_when_the_database_is_missing() -> None:
+    """コードレビュー指摘 3(b) (完了条件 14 の追加の脚): a registered,
+    `database_name`-bearing application whose own database has no
+    matching `pg_database` row at all fails F-19 (the `row is None`
+    branch), rather than being silently skipped. Mutation M9 (dropping
+    the `row is None` check) makes the check fall through to a `TypeError`
+    instead of the F-19 message, so this test goes red (measured)."""
+    conn = _FakeCollationConn(
+        server_version=150000,
+        applications=[("app_gone",)],
+        rows={},
+    )
+    with pytest.raises(PlatformDeclarationError) as excinfo:
+        check_application_collations(conn, schema="s")
+    assert excinfo.value.code == "F-19"
+    assert "no matching row in pg_database" in str(excinfo.value)
+
+
+def test_check_application_collations_skips_the_provider_column_before_pg15() -> None:
+    """コードレビュー指摘 3(c) (完了条件 14 の追加の脚): on a server that
+    CANNOT report `datlocprovider` (`server_version < 150000`), the
+    `pg_database` query this function issues never names that column at
+    all -- a server this old would reject it outright. Non-空振り: asserts
+    against the fake cursor's own recorded SQL text, not merely "no
+    exception"."""
+    conn = _FakeCollationConn(
+        server_version=140000,
+        applications=[("app_old",)],
+        rows={"app_old": ("C", "en_US.UTF-8")},
+    )
+    check_application_collations(conn, schema="s")
+    assert conn.last_cursor is not None
+    assert conn.last_cursor.executed_sql, "no SQL was issued"
+    assert not any("datlocprovider" in text for text in conn.last_cursor.executed_sql)

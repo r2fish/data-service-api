@@ -23,9 +23,20 @@ pg_dump --format=custom \
 
 ## 2. 復元先 DB の作成
 
+application 個別 DB とプラットフォーム DB とで **異なる文** を使う — application DB は `0003_provision_application.sql` と同じく `LC_COLLATE 'C'` で作る (F-19 の対象であり、この codepoint-order collation は provision 時にしか付けられない)。プラットフォーム DB は `LC_COLLATE` を付けず、クラスタの既定ロケール (UTF-8) のままにする — こちらに `'C'` を付けると F-19 の対象外であるにもかかわらず既定ロケールと食い違う状態を作ってしまう。
+
+application 個別 DB の場合:
+
 ```sh
 psql "$<UPPER_SNAKE_ADMIN_DSN_ENV>" -c \
   "CREATE DATABASE <RESTORED_DB_NAME> TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' OWNER <UPPER_SNAKE_OWNER_ROLE>"
+```
+
+プラットフォーム DB の場合 (`LC_COLLATE` を付けない):
+
+```sh
+psql "$<UPPER_SNAKE_ADMIN_DSN_ENV>" -c \
+  "CREATE DATABASE <RESTORED_DB_NAME> TEMPLATE template0 ENCODING 'UTF8' OWNER <UPPER_SNAKE_OWNER_ROLE>"
 ```
 
 - `<UPPER_SNAKE_OWNER_ROLE>` は元の DB を所有していたロールと**同じロール**にする (プラットフォーム DB なら `..._control` 相当、application DB ならそれを provision したロール)。owner が違うと次段の `pg_restore` が `CREATE SCHEMA`/`CREATE TABLE` で `permission denied for database` になる。

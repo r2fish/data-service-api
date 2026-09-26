@@ -1374,7 +1374,9 @@ def _f19_message(database_name: str, *, reason: str) -> str:
     if reason == "missing":
         return (
             f"application database '{database_name}' has no matching row in pg_database -- its collation "
-            f"cannot be judged. Re-provision this application with the current 0003_provision_application.sql."
+            f"cannot be judged. Re-provision this application with the current 0003_provision_application.sql, "
+            f"or complete its deprovisioning (0004_deprovision_application.sql) instead if this row is a "
+            f"deprovision left mid-way."
         )
     if reason == "collate":
         return (
@@ -1391,24 +1393,25 @@ def _f19_message(database_name: str, *, reason: str) -> str:
     return (
         f"application database '{database_name}' does not use the libc locale provider, so its own LC_COLLATE "
         f"setting does not govern its string ordering. Re-provision it with the current 0003_provision_"
-        f"application.sql."
+        f"application.sql, against a cluster initialized (initdb) with the libc locale provider -- re-running "
+        f"0003 against a cluster whose own template0 already uses ICU will not fix this."
     )
 
 
 def check_application_collations(conn: "psycopg.Connection", *, schema: str) -> None:
-    """F-19 (R-112 D-2): every REGISTERED, PROVISIONED application's own
-    database (`database_name IS NOT NULL`, the same target set `check_
-    max_connections_headroom`'s own `_count_registered_applications`
-    counts) was provisioned with a codepoint-order collation, matching
-    this peer's own non-PostgreSQL backend. Raises `PlatformDeclarationError
-    (code="F-19")` for the FIRST such database, in `database_name`
-    order, that fails any of the following.
+    """F-19: every REGISTERED, PROVISIONED application's own database
+    (`database_name IS NOT NULL`: provisioned rows only, not the full
+    `count(*)` target set `check_max_connections_headroom`'s own `_count_
+    registered_applications` counts) was provisioned with a codepoint-order
+    collation, matching this peer's own non-PostgreSQL backend. Raises
+    `PlatformDeclarationError(code="F-19")` for the FIRST such database, in
+    `database_name` order, that fails any of the following.
 
     `pg_database.datcollate` is not `'C'` -- the database's own string
     ordering is still locale-dependent. `pg_database.datctype` IS `'C'`
-    -- the ctype must stay the cluster's own UTF-8 locale (§1.2 condition
-    2 of the governing work order); a `'C'` ctype would turn non-ASCII
-    case folding and pattern matching ASCII-only. On a server that can
+    -- the ctype must stay the cluster's own UTF-8 locale; a `'C'` ctype
+    would turn non-ASCII case folding and pattern matching ASCII-only.
+    On a server that can
     report it (`pg_database.datlocprovider`, PostgreSQL 15 and later
     only -- older servers have no such column and this third condition
     is skipped there), the locale provider is something other than libc

@@ -298,36 +298,109 @@
 
 **訂正註 4 (2026-09-26、監督、チャット終了時)**: (1) 実装担当は §5 を埋めていない (実施記録の材料は引き継ぎ書 `docs/work-orders/HANDOVER_20260926_FABLE3.md` の「追記 — R-112 (i) の着手」節に逐語で写してある: 集計行 10 本、変異表 20/20、provenance の分類、`_ISOMORPHIC_TARGETS` 159 → 161、V1 の作り方)。次のチャットは、コードレビューの前に §5 を引き継ぎ書から転記し、完了条件 1 の読み替え (訂正註 3 (1)) と、完了条件 16 (終了コード表の file:line)・18 (`git diff 0d7065c --name-only`、両 peer の 0001 の diff が空、両 peer の 0003 に `LC_CTYPE` 0 件)・19 (D-7 の grep) の監査照合を実測して記す。(2) §0 と §3 の「1 commit」は、WIP commit `738ca3a` (branch r38、main 未 merge) と修正 commit の 2 commit を 1 回の `--no-ff` merge で main に入れる形に読み替える。
 
+**訂正註 5 (2026-09-26、監督裁定、コードレビュー (opus、Class D、指摘 10 件) への回答)**: (1) 指摘 1 (`security/CONTROL_MAPPING.md` の `file:line` 参照 102 件が本変更セットの行挿入でずれる。監督実測: 基点 `0d7065c` の `r2db-api/src/r2db_api/ops.py:1221` = `cmd_verify_declarations` が現在は :1230) は**直す**: レビュー担当の対応表 (旧行 → 新行、102 件すべて一意) を機械的に当て、当てた後に基点の行の内容と新しい行の内容が一致することを再照合し、`conformance-tests/test_control_mapping_register.py` を `pt.py` で回す。§2.5 に `security/CONTROL_MAPPING.md` (行参照の追従だけ。文言・claim・版は変えない) を加え、§2.6・§3 の 3 の「触らない」を「制御は変えない」と読み替える。版は **3.4 のまま** (`OC` §1.13 の 74: 版上げは制御が変わるときだけ)。`tools/dev/README.md`:78 の同種のずれ (`ops.py:1728` → :1737) は監督が直す (`tools/` は実装担当の禁止パス)。(2) 指摘 2 (両 peer の `check_application_collations` docstring の経緯語 `F-19 (R-112 D-2)`・`(§1.2 condition 2 of the governing work order)`) は直す (§1.2 の 5、§2.13)。同型性テストと provenance を再実行する。(3) 指摘 3 (F-19 の provider 枝 (PostgreSQL 15 以上で `datlocprovider = 'c'`) と DB 不在枝を固定するテストが無い。レビュー担当の変異 RV1・RV2 が緑のまま) は直す: 両 peer の `test_ops_verify_declarations.py` 末尾に、偽の conn / cursor で pg_database の読み取りを偽装する単体テスト (D-4 の 2 通り目) を足す — (a) `datlocprovider = 'i'` かつ `server_version_num >= 150000` で FAIL、(b) `pg_database` に行が無いとき FAIL (訂正註 2 (c) の「単体で assert を 1 つ足してよい」をここで使う)、(c) `server_version_num < 150000` では provider の列を読まない。両 peer 同名・同本体を要求しない (テストは同型 target ではない)。RV1・RV2 と同じ編集を変異 M8 (provider 条件の除去 → (a) が赤)・M9 (不在枝の除去 → (b) が赤) として両 peer で赤にする。§2.14 の表に M8・M9 の行を足す (完了条件 7・14 の追加の脚)。(4) 指摘 4 (`inmemory_sort.py`:87-98 の「11 passed together with this module's own pre-existing jsonb-order tests」は誤読を招く。実際の 11 = 既存 5 (jsonb 4 + `test_parity_order_by_null_placement_and_cross_type`) + 新規 6 (T1〜T4 + P1・P2)。訂正註 3 (3) の「既存 jsonb 4 node」は監督の誤り) は直す: 括弧書きを実測の内訳に改め、`gt` / `lt` は `inmemory_predicate.py` のネイティブ比較 (同じ codepoint 順) と別に書き、一致を主張する範囲を最上位の文字列に限る。r2db runbook の同じ括弧書きも合わせる。provenance を再実行する。(5) 指摘 5 (docstring の「`_count_registered_applications` と同じ対象集合」は偽: 向こうは `count(*)`、こちらは `database_name IS NOT NULL`) は直す。(6) 指摘 6 (`docs/ops/BACKUP_RESTORE_R2DB.md`:28 の復元コマンド 1 本が platform DB にも適用され、復元した platform DB が `LC_COLLATE 'C'` になり D-1 と食い違う) は直す: application DB 用 (`LC_COLLATE 'C'` あり) と platform DB 用 (なし) の 2 行に分ける。訂正註 2 (a) の文言を本註が上書きする。(7) 指摘 7 (FAIL message の対処の文言: ICU で initdb されたクラスタでは PostgreSQL 15 以上の `CREATE DATABASE` が template の provider を継ぐので「現行の 0003 で再 provision」では解けない; deprovision が途中で止まった行 (DROP 済みで行が残る) の正しい対処は 0004 の再実行) は直す: provider の message に libc locale のクラスタで再 provision する旨、missing の message に deprovision (0004) を完了させる旨を足す (値・接続情報は出さない)。両 runbook の F-19 段落にも ICU の場合を 1 文足す。(8) 指摘 8 (r2db runbook の意味の通らない文、両 runbook の F-19 段落に終了コード 18 が無い) は直す。(9) 指摘 9 (MitateDB の新規テスト 3 本が `close_cell(pg_cell)` を呼ばない) は直す: `try/finally`。(10) 指摘 10 (§5 の変異表は「逐語」ではなく実装担当の報告で圧縮された形) は監督が §5 の文言を直す。レビュー担当の問い (1) (完了条件 1 の代替は意図を満たす: M1/M2 は実行される `CREATE DATABASE` 文を基点と同じ文に戻し、T1・T2・T4 は A-1 / A-3 との直接比較を持つ) と (5) (`database_name` は両 peer で UNIQUE・NULL 可、NULL は provision 前の行で DB が無いので除外して正しい) は指摘なしで採用。完了条件 20 の期待形は、指摘 3 の新規 node の分だけ `r2db-api/tests`・`MitateDB-api/tests`・両 peer の `test_ops_verify_declarations.py` の件数が増える (実装担当が実測して報告する)。
+
 ## 5. 実施記録
 
-(監査照合の逐語記録 — 実行したコマンドと集計行、または file:line — を完了条件番号ごとに記す。log のパス・log 名・traceback は書かない (§1.6)。完了ゲートの集計行は監督が記す。)
+(監査照合の逐語記録 — 実行したコマンドと集計行、または file:line — を完了条件番号ごとに記す。log のパス・log 名・traceback は書かない (§1.6)。完了ゲートの集計行は監督が記す。実装担当の集計行・変異表・provenance の分類は `docs/work-orders/HANDOVER_20260926_FABLE3.md` の「追記 — R-112 (i) の着手」節から監督が転記した (訂正註 4 (1))。完了条件 16・18・19 の監査照合は監督が 2026-09-26 に worktree r38 (HEAD `8268dd7`) で実測した。)
 
 **完了条件 1** (未変更の実装での赤、タスク 2):
 
-**完了条件 1〜15** (変異表、`mutate.py` の出力行):
+読み替え (訂正註 3 (1)): 実装担当はテストより先に実装し、未変更の `R3` / `M3` での赤を実測していない (逸脱 (a)、採用しないが差し戻さない)。代替の実測は下の変異表の M1a〜M1f (脚 A) と M2a〜M2e (脚 B): `0003` の `CREATE DATABASE` から `LC_COLLATE 'C'` を外す同じ編集で P1・T1〜T4・V2 (脚 A 6 node)、P1・T1・T3・T4・V2 (脚 B 5 node) がすべて赤 (`expect=red got=red`)。この代替が完了条件 1 の意図 (テストが照合の性質を検出する) を満たすかは、コードレビュー (Class D) が独立に確かめる。
 
-**完了条件 16** (終了コード表と同型性テスト):
+**完了条件 1〜15** (変異表。実装担当の報告に載った形 (`mutate.py` の per-line 出力のうち件数と `restore=ok` を実装担当が省いた要約。コードレビュー指摘 10、訂正註 5 (10))。3 回に分けて実行、計 20/20 as expected。末尾の `mutate:` 集計行は逐語):
+
+```
+M1a expect=red got=red OK | M1b red/red OK | M1c red/red OK | M1d red/red OK
+M1e red/red OK | M1f red/red OK | M5a red/red OK | M5b red/red OK
+M5c expect=green got=green OK | M3 red/red OK
+mutate: 10 mutations, 10 as expected, restores verified 2/2 files (sha256 x2), grep counts unchanged
+---
+M2a red/red OK | M2b red/red OK | M2c red/red OK | M2d red/red OK | M2e red/red OK
+M6a red/red OK | M6b red/red OK | M6c expect=green got=green OK | M4 red/red OK
+mutate: 9 mutations, 9 as expected, restores verified 2/2 files (sha256 x2), grep counts unchanged
+---
+M7 expect=red got=red OK | mutate: 1 mutations, 1 as expected, restores verified 1/1 files (sha256 x2), grep counts unchanged
+```
+
+完了条件との対応: 1→M1a、3→M1b、4→M1c、5→M1d、6→M1e、8→M1f / M5b、2→M5a / M5c (緑の対照)、7→M3、9→M2a、11→M2b、12→M2c、13→M2d、15→M2e / M6b、10→M6a / M6c (緑の対照)、14→M4、16→M7 (+監査照合)、17〜21→監査照合のみ。V1 は D-4 の 2 通りのうち「`0003` を読み `LC_COLLATE 'C'` だけを除いた本文で provision する」方 (`_provision_app_for_verify_without_collation_c`)。
+
+差し戻し後の再実行 (訂正註 5。実装担当、逐語。`check_application_collations` の本体と message を触ったので M3・M4・M7 を作り直して再実行、新規 M8 / M9 (両 peer) を追加。0003 は触っていないので M1 / M2 / M5 / M6 は再実行していない):
+
+```
+M3       expect=red   got=red       OK  | 1 failed in 0.37s | restore=ok
+M4       expect=red   got=red       OK  | 1 failed in 0.35s | restore=ok
+M7       expect=red   got=red       OK  | 1 failed in 1.74s | restore=ok
+M8       expect=red   got=red       OK  | 1 failed in 0.07s | restore=ok
+M8b      expect=red   got=red       OK  | 1 failed in 0.07s | restore=ok
+M9       expect=red   got=red       OK  | 1 failed in 0.08s | restore=ok
+M9b      expect=red   got=red       OK  | 1 failed in 0.09s | restore=ok
+mutate: 7 mutations, 7 as expected, restores verified 2/2 files (sha256 x2), grep counts unchanged
+```
+
+対応: M8 / M8b = `check_application_collations` の provider 条件の除去 → `test_check_application_collations_fails_on_icu_provider_on_pg15` (r2db / MitateDB) が赤 (完了条件 7 / 14 の追加の脚)、M9 / M9b = DB 不在枝の除去 → `test_check_application_collations_fails_when_the_database_is_missing` (r2db / MitateDB) が赤 (同)。`test_check_application_collations_skips_the_provider_column_before_pg15` は偽 cursor が受けた SQL に `datlocprovider` が無いことを assert する (変異なし。監査照合: 上の M8 と対で読む)。コードレビュー担当の対照変異 (RV0 `check_application_collations` の datcollate 条件の除去 → r2db V1 赤、RV1 / RV2 = 修正前の provider / 不在枝の除去が緑のまま = 指摘 3 の根拠) はレビュー報告に逐語で残る。
+
+**完了条件 16** (終了コード表と同型性テスト。訂正註 1 の読み替え):
+
+- 終了コード表: `r2db-api/src/r2db_api/ops.py`:1021 `"F-19": 18,` (直前 :1020 `"F-18": 17,`)、`MitateDB-api/src/mitatedb_api/ops.py`:1289 `"F-19": 18,` (直前 :1288 `"F-18": 17,`)。
+- `_ISOMORPHIC_TARGETS` の登録: `r2db-api/tests/test_audit_query.py`:2947 (`_f19_message`)・:2948 (`check_application_collations`)、`MitateDB-api/tests/test_audit_query.py`:2730・:2731。件数 pin 159 → 161: r2db :2952 (test 名) / :3310 (`assert len(_ISOMORPHIC_TARGETS) == 161`)、MitateDB :2735 / :3092。
+- 同型性テストの集計行 (実装担当): `r2db test_audit_query.py -k isomorphic: pt: 4 passed, 72 deselected in 1.71s`、`MitateDB test_audit_query.py -k isomorphic: pt: 4 passed, 59 deselected in 1.71s`。監督の再実測 (2026-09-26、`8268dd7`): r2db `pt: 4 passed, 72 deselected in 1.77s`、MitateDB `pt: 4 passed, 59 deselected in 1.68s`。
+- 登録が効いていることの変異: M7 (上の変異表、red。差し戻し後に作り直して再実行、red)。差し戻し後の同型性テスト (実装担当): r2db `pt: 4 passed, 72 deselected in 1.69s`、MitateDB `pt: 4 passed, 59 deselected in 1.65s`。
 
 **完了条件 17** (provenance 2 本の出力と docstring の file:line):
 
-**完了条件 18** (範囲外):
+- `check_comment_provenance.py --register`: `comment provenance register OK: 92 files scanned, 433 CH-IDs` (実装担当。監督の再実測 2026-09-26 も同一行)。
+- `check_comment_provenance.py --base 0d7065c` (触った src 5 本。監督の再実測 2026-09-26、実装担当の報告と同じ 5 本): 赤 5 本、すべて `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §4.1 の分類で想定内、登録済み block への赤は無し。
+  - (1) 新規関数 / 新規呼び出し: `r2db-api/src/r2db_api/platform_declarations.py`:1398、`r2db-api/src/r2db_api/ops.py`:1021、`MitateDB-api/src/mitatedb_api/platform_declarations.py`:1373、`MitateDB-api/src/mitatedb_api/ops.py`:1289 (`FAIL (§4.1 (1)) … code changed (AST differs, docstrings excluded)`)。
+  - (2) CH-ID 無し docstring 段落の内容変更 (D-5、R-38 と同じ扱い): `r2db-api/src/r2db_api/inmemory_sort.py`:46 (`FAIL (§4.1 (2)) … scope/anchor ('_sort_key', 'stmt#1'): the sequence of CH-ID-less blocks changed (old 1, new 1)`)。
+- docstring の位置 (差し戻し後): `r2db-api/src/r2db_api/inmemory_sort.py`:87-110 (`_sort_key` の照合の段落。完了条件 3〜5 の test 名 3 つを `_sort_key` の一致の証拠に、完了条件 6 の `test_parity_string_collation_where_gt_lt` を `inmemory_predicate.py` のネイティブ比較の証拠に分けて引き、`-k "collation or parity_order"` の 11 の内訳 (新規 4 + provisioning pin 2 + 既存 parity 5) を書く。一致の主張は最上位の文字列に限る。コードレビュー指摘 4、訂正註 5 (4))。差し戻し後の provenance (実装担当): `--register` 同一行、`--base 0d7065c` は同じ 5 本・同じ分類・同じ行番号 (message の追記は各 def 行より後ろ)。
 
-**完了条件 19** (D-7 の grep):
+**完了条件 18** (範囲外。監督実測 2026-09-26):
 
-**完了条件 20** (基点と実装後の集計行):
+- `git diff 0d7065c --name-only` = 18 件: `MitateDB-api/docs/cloud-run-cloud-sql.md`、`MitateDB-api/migrations/0003_provision_application.sql`、`MitateDB-api/src/mitatedb_api/ops.py`、`MitateDB-api/src/mitatedb_api/platform_declarations.py`、`MitateDB-api/tests/test_audit_query.py`、`MitateDB-api/tests/test_ops_verify_declarations.py`、`MitateDB-api/tests/test_postgres.py`、`docs/ops/BACKUP_RESTORE_R2DB.md`、`docs/work-orders/HANDOVER_20260926_FABLE3.md`、`docs/work-orders/WORK_ORDER_R112_STRING_COLLATION_V1.md`、`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`、`r2db-api/migrations/0003_provision_application.sql`、`r2db-api/src/r2db_api/inmemory_sort.py`、`r2db-api/src/r2db_api/ops.py`、`r2db-api/src/r2db_api/platform_declarations.py`、`r2db-api/tests/test_audit_query.py`、`r2db-api/tests/test_ops_verify_declarations.py`、`r2db-api/tests/test_postgres.py`。§2.5 (訂正註 1 で両 peer の `test_audit_query.py`、訂正註 2 (a) で `docs/ops/BACKUP_RESTORE_R2DB.md` と両 peer の runbook を加えた後) と §3 の 4 の引き継ぎ書の和集合の部分集合。
+- 両 peer の `0001` の diff: `git diff 0d7065c -- r2db-api/migrations/0001_*.sql MitateDB-api/migrations/0001_*.sql | wc -l` = 0。
+- 両 peer の `0003` の `LC_CTYPE`: `grep -c 'LC_CTYPE'` = r2db 0、MitateDB 0。
+- 差し戻し後に加わったファイル (訂正註 5): `security/CONTROL_MAPPING.md` (行参照の追従だけ: 実装担当の機械適用 102 件、基点 `0d7065c` の旧行の内容と現在の新行の内容の一致 102 / 102 を script で再照合; range 参照 :88 `0003_provision_application.sql:217-218` → `:224-225` は対応表が前半だけを置換したのを実装担当が検出して直した; `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_159_rows` → `_161_rows` (:819) は本 WP の件数 pin 改名への追従、監督が直した。文言・claim・版 3.4 は不変。`conformance-tests/test_control_mapping_register.py`: 監督 `pt: 58 passed in 2.11s`)、`tools/dev/README.md`:78 (`ops.py:1728-1752` → `:1737-1761`、監督)。 受け入れ監査の観察 1 で `security/CONTROL_MAPPING.md` の `MitateDB-api/docs/cloud-run-cloud-sql.md` への参照 4 件 (:1123 → :1125 ×1、:2484 → :2486 ×3。F-19 段落の +2 行) も追従した (監督。基点と現在の行内容の一致を確認。r2db runbook と `docs/ops/BACKUP_RESTORE_R2DB.md` への参照は無い)。`conformance-tests/COLLECTION_FLOOR` 4233 → 4262 (完了ゲートでの監督更新)。受け入れ監査の観察 2 (F-19 単体テスト 2 本 × 2 peer の docstring が変異の結果を「turns this green」と書き実測 (赤) と逆に読める) は監督が文言を直した。
+
+**完了条件 19** (D-7 の grep。監督実測 2026-09-26):
+
+- `grep -rn -e 'TEMPLATE template0' -e 'CREATE DATABASE' r2db-api/README.md r2db-api/deploy MitateDB-api/README.md` = **0 件** (`MitateDB-api/deploy/` は存在しない)。
+- 同じ grep を `docs/` に掛けると `docs/ops/BACKUP_RESTORE_R2DB.md` の復元先の `CREATE DATABASE` だけに当たる (訂正註 2 (a) で本変更セットが直した文そのもの。差し戻し前 1 件 :28、訂正註 5 (6) で application DB 用と platform DB 用に分けた後は 2 件 :32・:39)。README / deploy に限る読み方 (訂正註 3 (2)) で 0 件。
+
+**完了条件 20** (基点と実装後の集計行。実装担当、逐語):
+
+基点は供与値 (未変更ツリーでの再実測は `r2db-api/tests`・`MitateDB-api/tests`・`tools/tests` の 3 本。絞り込み 4 コマンドの基点は未変更ツリーで再実測していない = 逸脱 (e)、期待形と一致するので採用)。
 
 | コマンド | 基点 | 実装後 |
 |---|---|---|
-| r2db `test_postgres.py -k "collation or parity_order"` | | |
-| r2db `test_ops_verify_declarations.py` | | |
-| MitateDB `test_postgres.py -k "collation or parity_order"` | | |
-| MitateDB `test_ops_verify_declarations.py` | | |
-| `r2db-api/tests` | | |
-| `MitateDB-api/tests` | | |
-| conformance `-k "c30 or c28 or c06"` | | |
-| `tools/tests` | | |
+| r2db `test_postgres.py -k "collation or parity_order"` | (未再実測。起草時の grep で該当 def 5 件 = 期待形 `<基点 + 6>` = 11) | `pt: 11 passed, 212 deselected in 2.92s`; 差し戻し後 `pt: 11 passed, 212 deselected in 1.74s` |
+| r2db `test_ops_verify_declarations.py` | (未再実測。期待形 `<基点 + 2>`) | `pt: 49 passed in 12.28s`; 差し戻し後 (+3) `pt: 52 passed in 7.19s` |
+| MitateDB `test_postgres.py -k "collation or parity_order"` | (未再実測。起草時 0 件 = `no tests ran`) | `pt: 5 passed, 93 deselected in 0.92s`; 差し戻し後 `pt: 5 passed, 93 deselected in 0.78s` |
+| MitateDB `test_ops_verify_declarations.py` | (未再実測。期待形 `<基点 + 2>`) | `pt: 51 passed in 11.49s`; 差し戻し後 (+3) `pt: 54 passed in 7.01s` |
+| `r2db-api/tests` | `1478 passed` | `pt: 1486 passed in 112.14s` (+8); 差し戻し後 (+3) `pt: 1489 passed in 126.61s` |
+| `MitateDB-api/tests` | `1480 passed, 2 subtests passed` | `pt: 1487 passed, 2 subtests passed in 246.62s` (+7); 差し戻し後 (+3) `pt: 1490 passed, 2 subtests passed in 194.85s` |
+| conformance `-k "c30 or c28 or c06"` | (基点の参考値: 202) | `pt: 202 passed in 40.44s` |
+| `tools/tests` | `591 passed` | `pt: 591 passed in 54.24s`; 差し戻し後 `pt: 591 passed in 54.88s` |
 
-**完了ゲート** (監督):
+**完了条件 21** (本表): §2.14 の表の全行が変異 (1〜16) または監査照合 (16〜21) を持つ。訂正註 5 (3) で足した M8 / M9 は完了条件 7 / 14 の追加の脚 (本節の差し戻し後の変異表)。
+
+**完了ゲート** (監督、2026-09-26、差し戻し反映後の最終ツリー、main `0d7065c` は動いていないので取り込みなし、solo、使い捨てクラスタ、`tools/dev/gate.py -C .claude/worktrees/r38 --label r112`):
+
+```
+gate: 4262 passed, 2 subtests passed in 367.27s (0:06:07)
+gate: judge=PASS
+gate: pg_database/pg_roles diff 0
+```
+
+受け入れ監査の観察 2 件 (CONTROL_MAPPING の runbook 参照 4 件、F-19 単体テストの docstring) を直した最終ツリーで再実行 (label r112b、solo、使い捨てクラスタ):
+
+```
+gate: 4262 passed, 2 subtests passed in 406.72s (0:06:46)
+gate: judge=PASS
+gate: pg_database/pg_roles diff 0
+```
+
+`conformance-tests/COLLECTION_FLOOR` 4233 → 4262 (完了ゲートでの監督更新、`conformance-tests/README.md` の運用 3)。内訳: main `0d7065c` の 4241 (R-41 の 4233 + R-38 の 8) + 本 WP の 21 (r2db 11 = T1〜T4・P1・P2・V1・V2・F-19 単体 3、MitateDB 10 = T1・T3・T4・P1・P2・V1・V2・F-19 単体 3)。
 
 ## 付録 A. 値集合と PostgreSQL の期待順序
 
