@@ -3985,3 +3985,133 @@ def test_verify_platform_upgrades_applied_raises_when_the_ledger_table_is_entire
         assert "missing platform upgrade(s) 9" in exc.value.message
     finally:
         cell.close()
+
+
+# ==========================================================================
+# jsonb structural order parity (work order appendix A): the in-memory
+# `_sort_key` list/dict branches against real PostgreSQL jsonb comparison,
+# for an untyped column, an `array`-typed column, and an `object`-typed
+# column, plus the keyset cursor that walks the same order.
+# `test_inmemory_sort_jsonb_order.py` exercises the same values against the
+# leaf alone, PostgreSQL-free.
+# ==========================================================================
+
+_JSONB_ORDER_COLUMNS = {
+    "a1": [[], "x", 0, False, True, [0], {}, {"a": 0}],
+    "a2": [[None], ["a"], [-1], [0], [1.5], [False], [True], [[]], [{}]],
+    "a3": [[], [None], ["b"], [3], [9], [10], [True], [[1]], [{"a": 1}], ["a", "b"], ["a", 1], [1, "a"], [1, 2], [1, 2, 3]],
+    "a4": [[{"a": 1}], [{"a": 2}], [{"b": 0}], [{"a": 1, "b": 1}]],
+    "a5": [{}, {"a": 1}, {"a": 2}, {"b": 0}, {"b": 1}, {"a": 1, "b": 2}],
+    "a6": [
+        {"a": 1, "b": 2},
+        {"a": 1, "bb": 0},
+        {"a": 1, "c": 0},
+        {"a": 9, "c": 0},
+        {"b": 0, "c": 0},
+        {"b": 1, "aa": 2},
+        {"b": 2, "aa": 1},
+        {"c": 0, "ab": 1},
+    ],
+    "a7": [{"a": None}, {"a": "s"}, {"a": 0}, {"a": True}, {"a": [3]}, {"a": [1, 2]}, {"a": {"x": 1}}],
+    "a8": [-0.00001, 0.0, 0, 1, 1.0, 1.5, 9, 10, 12345678901234567890, 100000000000000000000],
+}
+
+
+def _seed_jsonb_column(cell, entity: str, values: list, *, field_type: str | None) -> None:
+    if field_type is None:
+        cell.apply_schema({"operation": "create_entity", "entity": entity, "fields": ["value"]}, developer=True, limits=LIMITS)
+    else:
+        cell.apply_schema({"operation": "create_entity", "entity": entity, "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": entity, "field": "value", "field_type": field_type}, developer=True, limits=LIMITS)
+    cell.transact(entity, [{"operation": "insert", "values": {"value": v}} for v in values], LIMITS)
+
+
+def _assert_jsonb_column_order(pg, mem, entity: str, values: list) -> None:
+    for direction in ("asc", "desc"):
+        order_by = [{"field": "value", "direction": direction}]
+        pg_items = pg.query(entity, select=["value"], where=[], page_size=len(values) + 10, limits=LIMITS, order_by=order_by).items
+        mem_items = mem.query(entity, select=["value"], where=[], page_size=len(values) + 10, limits=LIMITS, order_by=order_by).items
+        assert pg_items == mem_items, (entity, direction)
+        assert len(pg_items) >= len(values), (entity, direction)
+        expected = values if direction == "asc" else list(reversed(values))
+        assert [item["value"] for item in pg_items] == expected, (entity, direction)
+
+
+def test_parity_order_by_jsonb_untyped_column(app_a: types.SimpleNamespace) -> None:
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            for label, values in _JSONB_ORDER_COLUMNS.items():
+                _seed_jsonb_column(cell, f"untyped_{label}", values, field_type=None)
+        for label, values in _JSONB_ORDER_COLUMNS.items():
+            _assert_jsonb_column_order(pg, mem, f"untyped_{label}", values)
+    finally:
+        pg.close()
+
+
+def test_parity_order_by_jsonb_array_column(app_a: types.SimpleNamespace) -> None:
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            for label in ("a2", "a3", "a4"):
+                _seed_jsonb_column(cell, f"arraycol_{label}", _JSONB_ORDER_COLUMNS[label], field_type="array")
+        for label in ("a2", "a3", "a4"):
+            _assert_jsonb_column_order(pg, mem, f"arraycol_{label}", _JSONB_ORDER_COLUMNS[label])
+    finally:
+        pg.close()
+
+
+def test_parity_order_by_jsonb_object_column(app_a: types.SimpleNamespace) -> None:
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            for label in ("a5", "a6", "a7"):
+                _seed_jsonb_column(cell, f"objectcol_{label}", _JSONB_ORDER_COLUMNS[label], field_type="object")
+        for label in ("a5", "a6", "a7"):
+            _assert_jsonb_column_order(pg, mem, f"objectcol_{label}", _JSONB_ORDER_COLUMNS[label])
+    finally:
+        pg.close()
+
+
+def _walk_all_pages(cell, entity: str, order_by: list, page_size: int, max_pages: int) -> list:
+    walked: list = []
+    cursor = None
+    pages = 0
+    while True:
+        page = cell.query(entity, select=["value"], where=[], page_size=page_size, limits=LIMITS, order_by=order_by, cursor=cursor)
+        walked.extend(page.items)
+        pages += 1
+        assert pages <= max_pages, entity
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    assert pages > 1, (entity, page_size)
+    return walked
+
+
+def test_parity_order_by_jsonb_keyset_cursor_walk(app_a: types.SimpleNamespace) -> None:
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            for label, values in _JSONB_ORDER_COLUMNS.items():
+                _seed_jsonb_column(cell, f"cursorcol_{label}", values, field_type=None)
+        max_pages = 40
+        for label, values in _JSONB_ORDER_COLUMNS.items():
+            entity = f"cursorcol_{label}"
+            for page_size in (1, 2):
+                for direction in ("asc", "desc"):
+                    order_by = [{"field": "value", "direction": direction}]
+                    pg_walked = _walk_all_pages(pg, entity, order_by, page_size, max_pages)
+                    mem_walked = _walk_all_pages(mem, entity, order_by, page_size, max_pages)
+                    assert pg_walked == mem_walked, (entity, page_size, direction)
+                    pg_unpaged = pg.query(entity, select=["value"], where=[], page_size=len(values) + 10, limits=LIMITS, order_by=order_by).items
+                    mem_unpaged = mem.query(entity, select=["value"], where=[], page_size=len(values) + 10, limits=LIMITS, order_by=order_by).items
+                    assert pg_walked == pg_unpaged, (entity, page_size, direction)
+                    assert mem_walked == mem_unpaged, (entity, page_size, direction)
+                    assert len(pg_walked) == len(values), (entity, page_size, direction)
+    finally:
+        pg.close()

@@ -14,7 +14,7 @@ in `structured.py`) remains in its own module.
 """
 from __future__ import annotations
 
-import json
+from decimal import Decimal
 from typing import Any
 
 # PostgreSQL's own jsonb cross-type ordering (ascending: String < Number <
@@ -25,30 +25,126 @@ from typing import Any
 _JSON_TYPE_RANK = {"string": 0, "number": 1, "boolean": 2, "array": 3, "object": 4}
 
 
+def _numeric_key(value: int | float) -> Decimal:
+    """The number a real PostgreSQL server actually receives and compares,
+    for an `int`/`float` value (never `bool`, which branches before this is
+    called): `psycopg`'s `Jsonb` binds it through `json.dumps`, so a real
+    server never sees the Python `float`'s own binary value, only
+    `repr(value)`'s decimal text (`json.dumps`'s own shortest round-
+    tripping form) -- comparing that same text as a `Decimal` matches a
+    real server for a value near/beyond 2**53, where a `float`'s decimal
+    text and a same-sized `int`'s own decimal text can round to different
+    values. An `int` already has no such representation gap, so it is
+    read as a `Decimal` directly. `Decimal(1) == Decimal("1.0")` and
+    `Decimal("-0.0") == Decimal(0)` keep `_sort_key`/`_jsonb_value_key`'s
+    existing numeric equivalences.
+    """
+    return Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
+
+
 def _sort_key(value: Any) -> tuple[Any, ...]:
     """A total ordering key matching PostgreSQL's own defaults (WP-2 review
-    M-6): a `NULL` sorts as if larger than any non-null value (`NULLS LAST`
-    for ascending, `NULLS FIRST` for descending -- both fall out of giving
-    it the single highest rank here and reusing `_sort_rows`'s existing
-    per-field `reverse=(direction == "desc")`, with no direction-specific
-    branch needed in this function). Non-null values are additionally
-    grouped by jsonb type rank first, so two rows whose values for the same
-    untyped (JSONB-equivalent) column differ in JSON type never reach a
-    native `<` comparison between incompatible Python types.
+    M-6, and for a list/dict value's own internal structure, a real
+    PostgreSQL server's measured `jsonb` comparison): a `NULL` sorts as if
+    larger than any non-null value (`NULLS LAST` for ascending, `NULLS
+    FIRST` for descending -- both fall out of giving it the single highest
+    rank here and reusing `_sort_rows`'s existing per-field
+    `reverse=(direction == "desc")`, with no direction-specific branch
+    needed in this function). Non-null values are additionally grouped by
+    jsonb type rank first, so two rows whose values for the same untyped
+    (JSONB-equivalent) column differ in JSON type never reach a native `<`
+    comparison between incompatible Python types.
+
+    A list or dict value's own internal order (once two values share the
+    array/object rank) matches PostgreSQL's own `jsonb` comparison: an
+    array compares by element count first, then element by element; an
+    object compares by pair count first, then by its own storage-order
+    pairs (shortest key first, ties broken by key byte order), each pair
+    comparing its key before its value -- so two objects holding the same
+    pairs in a different insertion order compare equal. A nested value's
+    own type ranks Null < String < Number < Boolean < Array < Object
+    (`_jsonb_value_key` below); this differs from a *top-level* `None`,
+    which this function gives the single highest rank instead, matching
+    SQL `NULL` rather than a nested JSON `null`. A top-level empty array is
+    the one exception to sharing the array rank with other arrays: it
+    sorts below every non-null scalar, matching a real server's measured
+    output (`[] < "x" < 0 < ... < [0] < {} < ...`).
+
+    This array/object ordering is checked leaf-only, against values a real
+    PostgreSQL 16 server has measured, by `test_inmemory_sort_jsonb_
+    order.py`'s 4 tests, and against a real PostgreSQL 16 server directly
+    (for an untyped, an `array`-typed, and an `object`-typed column, plus
+    the keyset cursor built on the same key) by `test_postgres.py`'s 4
+    `test_parity_order_by_jsonb_*` tests -- 8 tests total, all passing.
+
+    A number (top-level or nested) compares as the `Decimal` of the same
+    JSON text a real server actually receives through `psycopg`'s
+    `Jsonb` binding (`repr(value)` for a `float`, matching `json.dumps`'s
+    own shortest round-tripping form; the value itself for an `int`), not
+    Python's own binary float comparison, which a real server can
+    disagree with near/beyond 2**53.
+
+    String comparison (top-level or nested) is Python's own codepoint
+    order; a real PostgreSQL server instead compares under its database's
+    collation, so this key does not match a server byte-for-byte for
+    strings mixing case or non-ASCII characters -- that collation-order
+    difference is not addressed here.
     """
     if value is None:
         return (1, 0, "")
     if isinstance(value, bool):
         return (0, _JSON_TYPE_RANK["boolean"], int(value))
     if isinstance(value, (int, float)):
-        return (0, _JSON_TYPE_RANK["number"], value)
+        return (0, _JSON_TYPE_RANK["number"], _numeric_key(value))
     if isinstance(value, str):
         return (0, _JSON_TYPE_RANK["string"], value)
     if isinstance(value, list):
-        return (0, _JSON_TYPE_RANK["array"], json.dumps(value, sort_keys=True, default=str))
+        if not value:
+            # A top-level empty array is, uniquely among non-null values,
+            # smaller than every scalar (measured against a real server:
+            # `[] < "x" < 0 < ... < [0] < {} < ...`), so it cannot share
+            # `_JSON_TYPE_RANK["array"]`'s rank with a non-empty array.
+            return (0, -1)
+        return (0, _JSON_TYPE_RANK["array"], len(value), tuple(_jsonb_value_key(item) for item in value))
     if isinstance(value, dict):
-        return (0, _JSON_TYPE_RANK["object"], json.dumps(value, sort_keys=True, default=str))
+        return (0, _JSON_TYPE_RANK["object"], len(value), _dict_pair_key(value))
     return (0, _JSON_TYPE_RANK["string"], str(value))  # pragma: no cover - values are always JSON-shaped
+
+
+def _dict_pair_key(value: dict[str, Any]) -> tuple[tuple[str, tuple[Any, ...]], ...]:
+    """The comparison key for a jsonb object's own pairs: `sorted` puts the
+    pairs in the object's own storage order (shortest key first, then byte
+    order for a tie -- jsonb's own key layout), and the resulting tuple of
+    `(key, value_key)` pairs then compares key-first-then-value at each
+    position, which is what makes two objects holding the same pairs in a
+    different insertion order compare equal.
+    """
+    ordered = sorted(value.items(), key=lambda pair: (len(pair[0].encode("utf-8")), pair[0].encode("utf-8")))
+    return tuple((key, _jsonb_value_key(item)) for key, item in ordered)
+
+
+def _jsonb_value_key(value: Any) -> tuple[Any, ...]:
+    """The ordering key for a value nested inside a jsonb array/object
+    (used by `_sort_key`'s own list/dict branches above): a JSON `null`
+    ranks below every other type here (unlike a *top-level* `None`, which
+    `_sort_key` gives the single highest rank -- a nested `null` and a
+    top-level SQL `NULL` are different things), and the remaining types
+    keep `_JSON_TYPE_RANK`'s own String < Number < Boolean < Array <
+    Object order (offset by one to make room for `null`'s rank 0).
+    """
+    if value is None:
+        return (0,)
+    if isinstance(value, bool):
+        return (_JSON_TYPE_RANK["boolean"] + 1, int(value))
+    if isinstance(value, (int, float)):
+        return (_JSON_TYPE_RANK["number"] + 1, _numeric_key(value))
+    if isinstance(value, str):
+        return (_JSON_TYPE_RANK["string"] + 1, value)
+    if isinstance(value, list):
+        return (_JSON_TYPE_RANK["array"] + 1, len(value), tuple(_jsonb_value_key(item) for item in value))
+    if isinstance(value, dict):
+        return (_JSON_TYPE_RANK["object"] + 1, len(value), _dict_pair_key(value))
+    return (_JSON_TYPE_RANK["string"] + 1, str(value))  # pragma: no cover - values are always JSON-shaped
 
 
 def _sort_rows(rows: list[dict[str, Any]], spec: list[tuple[str, str]]) -> list[dict[str, Any]]:
