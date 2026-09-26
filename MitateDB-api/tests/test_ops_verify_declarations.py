@@ -1346,3 +1346,78 @@ def test_main_catches_non_psycopg_exceptions_without_a_traceback(
     assert sentinel not in captured.err
     assert "Traceback" not in captured.err
     assert "RuntimeError" in captured.err
+
+
+# ===========================================================================
+# F-19 (R-112 D-2/D-4): application database collation.
+# ===========================================================================
+
+
+def _provision_app_for_verify_without_collation_c(platform: types.SimpleNamespace, app_id: str) -> types.SimpleNamespace:
+    """D-4: constructs the FAIL case for F-19 by running the real
+    `0003_provision_application.sql` with the `LC_COLLATE 'C'` clause
+    stripped from its own `CREATE DATABASE` line -- everything else in
+    the script (the ledger seed F-14 depends on, the two roles, the
+    `CONNECT` walls) is untouched, mirroring `_provision_app_for_verify`
+    above except for that one substring."""
+    script_text = (MIGRATIONS_DIR / "0003_provision_application.sql").read_text().replace("mitatedb", platform.prefix)
+    marker = "CREATE DATABASE :\"database_name\" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C';"
+    assert script_text.count(marker) == 1, "0003's own CREATE DATABASE line no longer matches this fixture's own copy"
+    script_text = script_text.replace(marker, "CREATE DATABASE :\"database_name\" TEMPLATE template0 ENCODING 'UTF8';")
+    script = Path(tempfile.mkdtemp(prefix="mitatedb_ops_verify_app_nocollate_")) / "0003_provision_application.sql"
+    script.write_text(script_text)
+    runtime_password = secrets.token_urlsafe(24)
+    developer_password = secrets.token_urlsafe(24)
+    _run_psql(
+        platform.provision_dsn, script,
+        {"app_id": app_id, "runtime_password": runtime_password, "developer_password": developer_password},
+    )
+    database = f"{platform.prefix}_app_{app_id}"
+    return types.SimpleNamespace(app_id=app_id, database=database)
+
+
+def test_verify_declarations_f19_fails_when_an_application_database_collation_is_not_c(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """完了条件 14: an application database provisioned WITHOUT
+    `LC_COLLATE 'C'` (D-4's own construction, above) fails F-19 -- exit
+    code 18, a `FAIL F-19` line naming that database, and `OK   F-18`
+    printed before it (F-19 runs after F-18)."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_provision_role_as_the_writer(platform)
+    app = _provision_app_for_verify_without_collation_c(platform, "verifyf19bad")
+    _set_row(platform, "process_ceilings", {"data": 2, "control": 2})
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 18
+    lines = out.splitlines()
+    f19_lines = [line for line in lines if line.startswith("FAIL F-19")]
+    assert len(f19_lines) == 1, out
+    assert app.database in f19_lines[0], out
+    f18_index = next(i for i, line in enumerate(lines) if line.startswith("OK   F-18"))
+    f19_index = lines.index(f19_lines[0])
+    assert f18_index < f19_index, out
+
+
+def test_verify_declarations_f19_passes_after_provisioning_with_0003(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """完了条件 15: an application database provisioned with the CURRENT,
+    unmodified `0003` (via `_provision_app_for_verify`) passes F-19 --
+    exit code 0 and an `OK   F-19` line. Non-空振り: independently counts
+    the registered `applications` row before running `verify-
+    declarations`, so this positive result is not merely "F-19 read
+    nothing"."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_provision_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf19ok")
+    _set_row(platform, "process_ceilings", {"data": 2, "control": 2})
+    with psycopg.connect(platform.provision_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("SELECT count(*) FROM {table}").format(table=sql.Identifier(platform.schema, "applications")))
+            (registered_count,) = cur.fetchone()
+    assert registered_count >= 1
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "OK   F-19" in out, out

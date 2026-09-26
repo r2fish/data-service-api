@@ -85,10 +85,17 @@ def _sort_key(value: Any) -> tuple[Any, ...]:
     disagree with near/beyond 2**53.
 
     String comparison (top-level or nested) is Python's own codepoint
-    order; a real PostgreSQL server instead compares under its database's
-    collation, so this key does not match a server byte-for-byte for
-    strings mixing case or non-ASCII characters -- that collation-order
-    difference is not addressed here.
+    order; application databases are provisioned with `LC_COLLATE 'C'`
+    (`0003_provision_application.sql`), so a real PostgreSQL server's own
+    string ordering matches this key byte-for-byte, including for a typed
+    `string` column, an untyped (jsonb) column, keyset-cursor paging, and
+    `gt`/`lt` comparisons over strings mixing case and non-ASCII
+    characters -- checked against a real PostgreSQL server by `test_
+    postgres.py`'s `test_parity_string_collation_order_by_string_column`,
+    `test_parity_string_collation_order_by_untyped_column`, `test_parity_
+    string_collation_keyset_cursor_walk`, and `test_parity_string_
+    collation_where_gt_lt` (11 passed together with this module's own
+    pre-existing jsonb-order tests, `-k "collation or parity_order"`).
     """
     if value is None:
         return (1, 0, "")

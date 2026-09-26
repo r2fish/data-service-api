@@ -25,7 +25,7 @@ pg_dump --format=custom \
 
 ```sh
 psql "$<UPPER_SNAKE_ADMIN_DSN_ENV>" -c \
-  "CREATE DATABASE <RESTORED_DB_NAME> OWNER <UPPER_SNAKE_OWNER_ROLE>"
+  "CREATE DATABASE <RESTORED_DB_NAME> TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' OWNER <UPPER_SNAKE_OWNER_ROLE>"
 ```
 
 - `<UPPER_SNAKE_OWNER_ROLE>` は元の DB を所有していたロールと**同じロール**にする (プラットフォーム DB なら `..._control` 相当、application DB ならそれを provision したロール)。owner が違うと次段の `pg_restore` が `CREATE SCHEMA`/`CREATE TABLE` で `permission denied for database` になる。

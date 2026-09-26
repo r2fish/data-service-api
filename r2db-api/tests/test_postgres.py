@@ -4115,3 +4115,156 @@ def test_parity_order_by_jsonb_keyset_cursor_walk(app_a: types.SimpleNamespace) 
                     assert len(pg_walked) == len(values), (entity, page_size, direction)
     finally:
         pg.close()
+
+
+# ==========================================================================
+# R-112 string collation: application DB is provisioned with `LC_COLLATE
+# 'C'` (0003) so a real PostgreSQL server's own string ordering matches
+# this peer's in-memory backend (codepoint order) rather than the
+# cluster's own locale collation. Value set, insertion order, and the
+# expected orderings below are taken verbatim from the governing work
+# order's own appendix A (`docs/work-orders/
+# WORK_ORDER_R112_STRING_COLLATION_V1.md` 付録 A) -- not re-derived here.
+# ==========================================================================
+
+_COLLATION_INSERT_ORDER = ["b", "Z", "ä", "_", "aa", "1", "B", "a", "z", "A"]
+_COLLATION_ASC_ORDER = ["1", "A", "B", "Z", "_", "a", "aa", "b", "z", "ä"]
+_COLLATION_GT_A = {"aa", "b", "z", "ä"}
+_COLLATION_LT_A = {"1", "A", "B", "Z", "_"}
+
+
+def test_application_database_collation_is_c(app_a: types.SimpleNamespace, platform: types.SimpleNamespace) -> None:
+    """完了条件 1 (P1): the application database this fixture just
+    provisioned (via the real `0003_provision_application.sql`) reports
+    `pg_database.datcollate == 'C'`."""
+    conn = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT datcollate FROM pg_database WHERE datname = %s", [app_a.database])
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    assert row is not None, app_a.database
+    (datcollate,) = row
+    assert datcollate == "C"
+
+
+def test_application_database_collation_keeps_the_cluster_ctype(app_a: types.SimpleNamespace, platform: types.SimpleNamespace) -> None:
+    """完了条件 2 (P2): `pg_database.datctype` is NOT `'C'` (the cluster's
+    own UTF-8 locale is preserved), and an application-role connection's
+    own `upper('ä')` still folds through that locale -- evaluated on the
+    real server, never a string comparison against `datctype` alone."""
+    conn = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT datctype FROM pg_database WHERE datname = %s", [app_a.database])
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    assert row is not None, app_a.database
+    (datctype,) = row
+    assert datctype != "C"
+    app_conn = psycopg.connect(app_a.runtime_dsn, autocommit=True)
+    try:
+        with app_conn.cursor() as cur:
+            cur.execute("SELECT upper('ä')")
+            (upper_value,) = cur.fetchone()
+    finally:
+        app_conn.close()
+    assert upper_value == "Ä"
+
+
+def test_parity_string_collation_order_by_string_column(app_a: types.SimpleNamespace) -> None:
+    """完了条件 3 (T1): a typed `string` column, seeded in the fixed A-2
+    insertion order, orders identically on the PostgreSQL backend and the
+    in-memory backend for both `asc`/`desc`, and the PostgreSQL side's
+    own `asc` output equals A-1 (codepoint order)."""
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "collation_strings", "fields": []}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "add_field", "entity": "collation_strings", "field": "value", "field_type": "string"}, developer=True, limits=LIMITS)
+            cell.transact("collation_strings", [{"operation": "insert", "values": {"value": v}} for v in _COLLATION_INSERT_ORDER], LIMITS)
+        for direction in ("asc", "desc"):
+            order_by = [{"field": "value", "direction": direction}]
+            pg_items = pg.query("collation_strings", select=["value"], where=[], page_size=20, limits=LIMITS, order_by=order_by).items
+            mem_items = mem.query("collation_strings", select=["value"], where=[], page_size=20, limits=LIMITS, order_by=order_by).items
+            assert pg_items == mem_items, direction
+            assert len(pg_items) >= len(_COLLATION_ASC_ORDER), direction
+            expected = _COLLATION_ASC_ORDER if direction == "asc" else list(reversed(_COLLATION_ASC_ORDER))
+            assert [item["value"] for item in pg_items] == expected, direction
+    finally:
+        pg.close()
+
+
+def test_parity_string_collation_order_by_untyped_column(app_a: types.SimpleNamespace) -> None:
+    """完了条件 4 (T2, 脚 A のみ): T1 と同じ 3 点を untyped 列 (jsonb の中
+    の文字列) で確かめる -- D-1 の `LC_COLLATE 'C'` は列の型を問わず DB
+    全体にかかる。"""
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "collation_untyped", "fields": ["value"]}, developer=True, limits=LIMITS)
+            cell.transact("collation_untyped", [{"operation": "insert", "values": {"value": v}} for v in _COLLATION_INSERT_ORDER], LIMITS)
+        for direction in ("asc", "desc"):
+            order_by = [{"field": "value", "direction": direction}]
+            pg_items = pg.query("collation_untyped", select=["value"], where=[], page_size=20, limits=LIMITS, order_by=order_by).items
+            mem_items = mem.query("collation_untyped", select=["value"], where=[], page_size=20, limits=LIMITS, order_by=order_by).items
+            assert pg_items == mem_items, direction
+            assert len(pg_items) >= len(_COLLATION_ASC_ORDER), direction
+            expected = _COLLATION_ASC_ORDER if direction == "asc" else list(reversed(_COLLATION_ASC_ORDER))
+            assert [item["value"] for item in pg_items] == expected, direction
+    finally:
+        pg.close()
+
+
+def test_parity_string_collation_keyset_cursor_walk(app_a: types.SimpleNamespace) -> None:
+    """完了条件 5 (T3): page_size 1/2 x asc/desc の各組で、2 backend の
+    連結列 (`_walk_all_pages`) が一致し、各 backend の連結列がその
+    backend の page 無しの items と一致し、件数が値集合の件数と一致し、
+    page 数が 1 より大きい。"""
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "collation_cursor", "fields": []}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "add_field", "entity": "collation_cursor", "field": "value", "field_type": "string"}, developer=True, limits=LIMITS)
+            cell.transact("collation_cursor", [{"operation": "insert", "values": {"value": v}} for v in _COLLATION_INSERT_ORDER], LIMITS)
+        max_pages = 40
+        for page_size in (1, 2):
+            for direction in ("asc", "desc"):
+                order_by = [{"field": "value", "direction": direction}]
+                pg_walked = _walk_all_pages(pg, "collation_cursor", order_by, page_size, max_pages)
+                mem_walked = _walk_all_pages(mem, "collation_cursor", order_by, page_size, max_pages)
+                assert pg_walked == mem_walked, (page_size, direction)
+                pg_unpaged = pg.query("collation_cursor", select=["value"], where=[], page_size=len(_COLLATION_ASC_ORDER) + 10, limits=LIMITS, order_by=order_by).items
+                mem_unpaged = mem.query("collation_cursor", select=["value"], where=[], page_size=len(_COLLATION_ASC_ORDER) + 10, limits=LIMITS, order_by=order_by).items
+                assert pg_walked == pg_unpaged, (page_size, direction)
+                assert mem_walked == mem_unpaged, (page_size, direction)
+                assert len(pg_walked) == len(_COLLATION_ASC_ORDER), (page_size, direction)
+    finally:
+        pg.close()
+
+
+def test_parity_string_collation_where_gt_lt(app_a: types.SimpleNamespace) -> None:
+    """完了条件 6 (T4): `gt "a"` / `lt "a"` の値の集合が 2 backend で一致
+    し、PostgreSQL 側の集合が付録 A の A-3 と一致し、いずれも空でない。"""
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "collation_where", "fields": []}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "add_field", "entity": "collation_where", "field": "value", "field_type": "string"}, developer=True, limits=LIMITS)
+            cell.transact("collation_where", [{"operation": "insert", "values": {"value": v}} for v in _COLLATION_INSERT_ORDER], LIMITS)
+        for operator, expected in (("gt", _COLLATION_GT_A), ("lt", _COLLATION_LT_A)):
+            pg_items = pg.query("collation_where", select=["value"], where=[P("value", operator, "a")], page_size=20, limits=LIMITS).items
+            mem_items = mem.query("collation_where", select=["value"], where=[Predicate("value", operator, "a")], page_size=20, limits=LIMITS).items
+            pg_values = {item["value"] for item in pg_items}
+            mem_values = {item["value"] for item in mem_items}
+            assert pg_values == mem_values, operator
+            assert pg_values == expected, operator
+            assert pg_values, operator
+    finally:
+        pg.close()
