@@ -2208,7 +2208,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_165_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_167_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2743,10 +2743,17 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_self_attr"),
     ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_find_with_lock_body"),
     ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_body_contains"),
+    # R-112 D-2/訂正註1: the new application-collation check (F-19) and
+    # its own message builder -- neither carries a peer-specific literal
+    # (both peers' `applications` table is read by `database_name` only,
+    # never the differently-spelled slug/id column), verified
+    # normalize-and-diff equal before adding both rows.
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f19_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_application_collations"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_165_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_167_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2802,7 +2809,13 @@ def test_isomorphic_target_table_is_pinned_to_its_current_165_rows() -> None:
     widened a fourteenth time once the cursor codec (`encode_page_cursor`/
     `decode_page_cursor`) and the binding-hash helper
     (`canonical_page_binding`) had landed identically on both peers,
-    verified normalize-and-diff equal before adding; widened a fifteenth
+    verified normalize-and-diff equal before adding; widened a
+    fifteenth time (R-112 D-2/訂正註1) once the application-collation
+    check (`check_application_collations`) and its own message builder
+    (`_f19_message`) had landed identically on both peers, neither
+    reading either peer's own differently-spelled `applications` slug/id
+    column, verified normalize-and-diff equal before adding;
+    widened a sixteenth
     time by R-101 WP-1, once the `DSA_PERF_THREAD_LIMIT` env reader
     (`_perf_thread_limit_value`), the wrapper class that applies it to a
     data-plane app's own event loop (`_PerfThreadLimitWrapper`), the
@@ -2843,7 +2856,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_165_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_165_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_167_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3114,8 +3127,10 @@ def test_isomorphic_target_table_is_pinned_to_its_current_165_rows() -> None:
         ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_self_attr"),
         ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_find_with_lock_body"),
         ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_body_contains"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f19_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_application_collations"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 165
+    assert len(_ISOMORPHIC_TARGETS) == 167
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}

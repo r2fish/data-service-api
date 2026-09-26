@@ -3433,3 +3433,160 @@ def test_postgres_idempotency_record_without_request_id_on_schema_op_is_treated_
             developer.add_field("o4idem_probe_2", "o4_field", "text", idempotency_key=key)
     finally:
         close_cell(cell)
+
+
+# ==========================================================================
+# R-112 string collation: application DB is provisioned with `LC_COLLATE
+# 'C'` (0003) so a real PostgreSQL server's own string ordering matches
+# this peer's SQLite backend (BINARY, byte order) rather than the
+# cluster's own locale collation. Value set, insertion order, and the
+# expected orderings below are taken verbatim from the governing work
+# order's own appendix A (`docs/work-orders/
+# WORK_ORDER_R112_STRING_COLLATION_V1.md` 付録 A) -- not re-derived here.
+# ==========================================================================
+
+_COLLATION_INSERT_ORDER = ["b", "Z", "ä", "_", "aa", "1", "B", "a", "z", "A"]
+_COLLATION_ASC_ORDER = ["1", "A", "B", "Z", "_", "a", "aa", "b", "z", "ä"]
+_COLLATION_GT_A = {"aa", "b", "z", "ä"}
+_COLLATION_LT_A = {"1", "A", "B", "Z", "_"}
+
+
+def test_application_database_collation_is_c(app_a, platform) -> None:
+    """完了条件 9 (P1、脚 B): the application database this fixture just
+    provisioned (via the real `0003_provision_application.sql`) reports
+    `pg_database.datcollate == 'C'`."""
+    conn = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT datcollate FROM pg_database WHERE datname = %s", [app_a.database])
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    assert row is not None, app_a.database
+    (datcollate,) = row
+    assert datcollate == "C"
+
+
+def test_application_database_collation_keeps_the_cluster_ctype(app_a, platform) -> None:
+    """完了条件 10 (P2、脚 B): `pg_database.datctype` is NOT `'C'` (the
+    cluster's own UTF-8 locale is preserved), and an application-role
+    connection's own `upper('ä')` still folds through that locale --
+    evaluated on the real server, never a string comparison against
+    `datctype` alone."""
+    conn = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT datctype FROM pg_database WHERE datname = %s", [app_a.database])
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    assert row is not None, app_a.database
+    (datctype,) = row
+    assert datctype != "C"
+    app_conn = psycopg.connect(app_a.runtime_dsn, autocommit=True)
+    try:
+        with app_conn.cursor() as cur:
+            cur.execute("SELECT upper('ä')")
+            (upper_value,) = cur.fetchone()
+    finally:
+        app_conn.close()
+    assert upper_value == "Ä"
+
+
+def test_parity_string_collation_order_by_string_column(app_a) -> None:
+    """完了条件 11 (T1、脚 B): a `text` field, seeded in the fixed A-2
+    insertion order, orders identically on the PostgreSQL backend and the
+    SQLite backend for both `asc`/`desc`, and the PostgreSQL side's own
+    `asc` output equals A-1 (codepoint order)."""
+    pg_cell = make_cell(app_a)
+    try:
+        sqlite_cell = ApplicationCell("collation_parity_app")
+        pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
+        sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
+        pg_developer.create_collection("collation_strings", {"value": "text"})
+        sqlite_developer.create_collection("collation_strings", {"value": "text"})
+        for value in _COLLATION_INSERT_ORDER:
+            pg_runtime.insert("collation_strings", {"value": value})
+            sqlite_runtime.insert("collation_strings", {"value": value})
+        for direction in ("asc", "desc"):
+            order_by = [{"field": "value", "direction": direction}]
+            pg_items = pg_runtime.read("collation_strings", fields=["value"], order_by=order_by)
+            sqlite_items = sqlite_runtime.read("collation_strings", fields=["value"], order_by=order_by)
+            assert pg_items == sqlite_items, direction
+            assert len(pg_items) >= len(_COLLATION_ASC_ORDER), direction
+            expected = _COLLATION_ASC_ORDER if direction == "asc" else list(reversed(_COLLATION_ASC_ORDER))
+            assert [item["value"] for item in pg_items] == expected, direction
+    finally:
+        close_cell(pg_cell)
+
+
+def _walk_all_pages_mitatedb(runtime, collection: str, order_by: list, limit: int, max_pages: int) -> list:
+    walked: list = []
+    cursor = None
+    pages = 0
+    while True:
+        items, next_page = runtime.read_page(collection, fields=["value"], order_by=order_by, limit=limit, cursor=cursor)
+        walked.extend(items)
+        pages += 1
+        assert pages <= max_pages, collection
+        if next_page is None:
+            break
+        cursor = next_page
+    assert pages > 1, (collection, limit)
+    return walked
+
+
+def test_parity_string_collation_keyset_cursor_walk(app_a) -> None:
+    """完了条件 12 (T3、脚 B): limit 1/2 x asc/desc の各組で、2 backend の
+    連結列が一致し、各 backend の連結列がその backend の page 無しの
+    items と一致し、件数が値集合の件数と一致し、page 数が 1 より大きい。"""
+    pg_cell = make_cell(app_a)
+    try:
+        sqlite_cell = ApplicationCell("collation_parity_app")
+        pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
+        sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
+        pg_developer.create_collection("collation_cursor", {"value": "text"})
+        sqlite_developer.create_collection("collation_cursor", {"value": "text"})
+        for value in _COLLATION_INSERT_ORDER:
+            pg_runtime.insert("collation_cursor", {"value": value})
+            sqlite_runtime.insert("collation_cursor", {"value": value})
+        max_pages = 40
+        for limit in (1, 2):
+            for direction in ("asc", "desc"):
+                order_by = [{"field": "value", "direction": direction}]
+                pg_walked = _walk_all_pages_mitatedb(pg_runtime, "collation_cursor", order_by, limit, max_pages)
+                sqlite_walked = _walk_all_pages_mitatedb(sqlite_runtime, "collation_cursor", order_by, limit, max_pages)
+                assert pg_walked == sqlite_walked, (limit, direction)
+                pg_unpaged = pg_runtime.read("collation_cursor", fields=["value"], order_by=order_by)
+                sqlite_unpaged = sqlite_runtime.read("collation_cursor", fields=["value"], order_by=order_by)
+                assert pg_walked == pg_unpaged, (limit, direction)
+                assert sqlite_walked == sqlite_unpaged, (limit, direction)
+                assert len(pg_walked) == len(_COLLATION_ASC_ORDER), (limit, direction)
+    finally:
+        close_cell(pg_cell)
+
+
+def test_parity_string_collation_where_gt_lt(app_a) -> None:
+    """完了条件 13 (T4、脚 B): `gt "a"` / `lt "a"` の値の集合が 2 backend
+    で一致し、PostgreSQL 側の集合が付録 A の A-3 と一致し、いずれも空で
+    ない。"""
+    pg_cell = make_cell(app_a)
+    try:
+        sqlite_cell = ApplicationCell("collation_parity_app")
+        pg_developer, pg_runtime = sessions_for(pg_cell, app_a.app_id)
+        sqlite_developer, sqlite_runtime = sessions_for(sqlite_cell, "collation_parity_app")
+        pg_developer.create_collection("collation_where", {"value": "text"})
+        sqlite_developer.create_collection("collation_where", {"value": "text"})
+        for value in _COLLATION_INSERT_ORDER:
+            pg_runtime.insert("collation_where", {"value": value})
+            sqlite_runtime.insert("collation_where", {"value": value})
+        for operator, expected in (("gt", _COLLATION_GT_A), ("lt", _COLLATION_LT_A)):
+            pg_items = pg_runtime.read("collation_where", fields=["value"], filters=[Filter("value", operator, "a")])
+            sqlite_items = sqlite_runtime.read("collation_where", fields=["value"], filters=[Filter("value", operator, "a")])
+            pg_values = {item["value"] for item in pg_items}
+            sqlite_values = {item["value"] for item in sqlite_items}
+            assert pg_values == sqlite_values, operator
+            assert pg_values == expected, operator
+            assert pg_values, operator
+    finally:
+        close_cell(pg_cell)

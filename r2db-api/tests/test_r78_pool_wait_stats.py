@@ -374,7 +374,7 @@ def test_perf_thread_limit_env_reader_and_wrapper_and_accessor_are_registered_is
 
     names = {row[2] for row in test_audit_query._ISOMORPHIC_TARGETS}
     assert {"_perf_thread_limit_value", "_PerfThreadLimitWrapper", "perf_thread_limit"} <= names
-    assert len(test_audit_query._ISOMORPHIC_TARGETS) == 165
+    assert len(test_audit_query._ISOMORPHIC_TARGETS) == 167
 
 
 # ---------------------------------------------------------------------
