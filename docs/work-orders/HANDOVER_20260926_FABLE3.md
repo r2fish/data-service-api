@@ -133,6 +133,8 @@ M7 expect=red got=red OK | mutate: 1 mutations, 1 as expected, restores verified
 
 ### 次の一手
 
+0. (監督、チャット終了時に追加) 作業指示書 §5 は空欄のまま。コードレビューの前に本節の実測を §5 に転記し、完了条件 16・18・19 の監査照合を実測して記す (作業指示書 §4 訂正註 4)。WIP commit は `738ca3a`。
+
 順に行う。
 
 1. 新しいチャットで worktree r38 を開き、`git log --oneline -3` と `git diff 0d7065c --stat` で WIP commit を確かめる。

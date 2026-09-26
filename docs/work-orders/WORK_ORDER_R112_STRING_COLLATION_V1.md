@@ -296,6 +296,8 @@
 
 **訂正註 3 (2026-09-26、監督裁定、実装担当の報告への回答)**: (1) タスク順の逸脱 (テストより先に実装し、未変更の実装での赤を確認していない) は**採用しない**が差し戻さない: 完了条件 1 の「未変更の `R3` で赤」は、M1a〜M1f / M2a〜M2e (`LC_COLLATE 'C'` を外す変異) が同じ node をすべて赤にした実測で代替する (同じ編集で同じ node が赤になる)。§5 の完了条件 1 の欄にはこの読み替えを書く。次のチャットのコードレビューは、この代替が完了条件 1 の意図 (テストが照合の性質を検出する) を満たすかを独立に確かめる。(2) D-7 の grep の対象を README・deploy に限る読み方は採用 (`docs/` の既存文書の `CREATE DATABASE` への言及は provisioning 文の写しではない)。`docs/ops/BACKUP_RESTORE_R2DB.md` は訂正註 2 (a) で個別に直した。(3) `inmemory_sort.py` の docstring が引く「11 passed」は既存 jsonb 4 node + 新規の合算である旨を、docstring の文言が誤解を生まないかレビューで確かめる。(4) 本 WP の実装は 2026-09-26 のチャット終了時点で worktree r38 の branch r38 に **WIP commit (main 未 merge)** として置く。次のチャットはコードレビュー (テンプレ 5、Class D) から再開する (§3)。 (5) 実装担当の判断: `applications` の列名が peer で違う (r2db `application_slug` / MitateDB `application_id`) ため、`check_application_collations` は `database_name` だけで問い合わせて両 peer byte-identical にした -- 採用。レビューで、登録済み application の列挙が `database_name` だけで全件を覆うこと (欠落・重複が無いこと) を確かめる。(6) 0003 の comment に一時的に書いた `LC_CTYPE` の語は訂正済み (両 peer 0 件) -- 採用。
 
+**訂正註 4 (2026-09-26、監督、チャット終了時)**: (1) 実装担当は §5 を埋めていない (実施記録の材料は引き継ぎ書 `docs/work-orders/HANDOVER_20260926_FABLE3.md` の「追記 — R-112 (i) の着手」節に逐語で写してある: 集計行 10 本、変異表 20/20、provenance の分類、`_ISOMORPHIC_TARGETS` 159 → 161、V1 の作り方)。次のチャットは、コードレビューの前に §5 を引き継ぎ書から転記し、完了条件 1 の読み替え (訂正註 3 (1)) と、完了条件 16 (終了コード表の file:line)・18 (`git diff 0d7065c --name-only`、両 peer の 0001 の diff が空、両 peer の 0003 に `LC_CTYPE` 0 件)・19 (D-7 の grep) の監査照合を実測して記す。(2) §0 と §3 の「1 commit」は、WIP commit `738ca3a` (branch r38、main 未 merge) と修正 commit の 2 commit を 1 回の `--no-ff` merge で main に入れる形に読み替える。
+
 ## 5. 実施記録
 
 (監査照合の逐語記録 — 実行したコマンドと集計行、または file:line — を完了条件番号ごとに記す。log のパス・log 名・traceback は書かない (§1.6)。完了ゲートの集計行は監督が記す。)
