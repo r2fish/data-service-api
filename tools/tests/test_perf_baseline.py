@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import itertools
 import json
 import os
 import subprocess
@@ -1826,3 +1827,679 @@ def test_cpu_total_ms_includes_both_ru_utime_and_ru_stime(monkeypatch):
     stub = SimpleNamespace(transport_kind="in_process")
     _, _, measured = pb._measure_op(lambda: None, warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
     assert measured["cpu_total_ms"] == pytest.approx(1500.0)
+
+
+# ---------------------------------------------------------------------
+# Design D-15 -- `--real-server`. Every test below drives
+# `pb._run_real_server`/`pb._measure_real_server`/`pb._run_one_real_
+# server_group` against a REAL, standard-library `http.server` stub
+# (a separate OS process, `_start_wp4_stub_server` below -- never a
+# background thread in THIS process: threading before this file's own
+# `forkserver`-based children start was measured to wedge a child before
+# it ever reaches its own `barrier.wait()`) and a stub launcher (a small
+# generated module, `_write_wp4_stub_registry` below, with class-level
+# `START_CALLS`/`STOP_CALLS` lists this process can read directly since
+# the launcher itself runs in-process, unlike the HTTP stub).
+# ---------------------------------------------------------------------
+
+_WP4_STUB_SERVER_SCRIPT = 'import http.server\nimport json\nimport os\nimport sys\nimport threading\nimport time\n\nconfig = json.loads(open(sys.argv[1], "r", encoding="utf-8").read())\nlog_path = sys.argv[2]\n_log_lock = threading.Lock()\n_counters_lock = threading.Lock()\n_counters = {"query_calls": 0}\n\n\ndef _append_log(entry):\n    with _log_lock:\n        with open(log_path, "a", encoding="utf-8") as f:\n            f.write(json.dumps(entry) + "\\n")\n\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    server_version = "wp4stub/1.0"\n    protocol_version = "HTTP/1.1"\n\n    def log_message(self, fmt, *args):\n        pass\n\n    def _read_body(self):\n        length = int(self.headers.get("Content-Length", 0))\n        raw = self.rfile.read(length) if length else b""\n        return json.loads(raw) if raw else {}\n\n    def _send(self, status, obj):\n        body = json.dumps(obj).encode("utf-8")\n        self.send_response(status)\n        self.send_header("Content-Type", "application/json")\n        self.send_header("Content-Length", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def do_GET(self):\n        start = time.time()\n        if self.path == "/v1/capabilities":\n            self._send(200, {\n                "application_scope": config.get("application_id", "perfapp"),\n                "contract_version": "1.11.0", "capabilities": {}, "limits": {},\n                "limit_enforcement": {}, "authorization_propagation_bound_ms": 0,\n            })\n        else:\n            self._send(404, {})\n        _append_log({\n            "path": self.path, "method": "GET",\n            "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n    def do_POST(self):\n        body = self._read_body()\n        path = self.path\n        start = time.time()\n        if path == "/control/v1/credentials":\n            status = config.get("credential_status", 200)\n            if status == 200:\n                self._send(200, {\n                    "credential_id": "cred1", "application_id": body.get("application_id"),\n                    "role": body.get("role"), "secret": "dev-secret-xyz",\n                })\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/v1/schema/operations":\n            status = config.get("schema_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "revision": "1", "request_id": "r1"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/mutations"):\n            status = config.get("mutation_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "affected": 1, "request_id": "r2"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/query"):\n            with _counters_lock:\n                idx = _counters["query_calls"]\n                _counters["query_calls"] += 1\n            status = config.get("query_status_override", {}).get(str(idx), config.get("query_status", 200))\n            rows = config.get("query_rows_override", {}).get(str(idx), config.get("query_rows", 1))\n            delay_ms = config.get("query_delay_override", {}).get(str(idx), config.get("query_delay_ms", 0))\n            if delay_ms:\n                time.sleep(delay_ms / 1000.0)\n            if config.get("drop_at_index") == idx:\n                _append_log({\n                    "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                    "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n                    "call_index": idx, "dropped": True,\n                })\n                self.close_connection = True\n                return\n            if status == 200:\n                self._send(200, {"items": [{"label": "x"} for _ in range(rows)], "request_id": "r3"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(), "call_index": idx,\n            })\n            return\n        self._send(404, {})\n        _append_log({\n            "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n\nhttpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)\nprint(httpd.server_port, flush=True)\nhttpd.serve_forever()\n'
+
+_WP4_STUB_LAUNCHER_TEMPLATE = 'class StubLauncher:\n    name = {peer!r}\n    START_CALLS = []\n    STOP_CALLS = []\n\n    def __init__(self):\n        pass\n\n    def start(self, *, ceilings):\n        type(self).START_CALLS.append(dict(ceilings))\n\n    def stop(self):\n        type(self).STOP_CALLS.append(True)\n\n    @property\n    def data_base_url(self):\n        return {data_base_url!r}\n\n    @property\n    def control_base_url(self):\n        return {control_base_url!r}\n\n    @property\n    def runtime_bearer(self):\n        return {runtime_bearer!r}\n\n    @property\n    def control_bearer(self):\n        return {control_bearer!r}\n'
+
+_wp4_module_counter = itertools.count()
+
+
+def _start_wp4_stub_server(tmp_path, config):
+    script_path = tmp_path / "wp4_stub_server.py"
+    if not script_path.exists():
+        script_path.write_text(_WP4_STUB_SERVER_SCRIPT, encoding="utf-8")
+    idx = next(_wp4_module_counter)
+    config_path = tmp_path / f"wp4_stub_config_{idx}.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    log_path = tmp_path / f"wp4_stub_log_{idx}.jsonl"
+    log_path.write_text("", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, str(script_path), str(config_path), str(log_path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    port = int(proc.stdout.readline().strip())
+    base_url = f"http://127.0.0.1:{port}"
+    return base_url, log_path, proc
+
+
+def _stop_wp4_stub_server(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def _read_wp4_log(log_path):
+    lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [json.loads(line) for line in lines]
+
+
+def _write_wp4_stub_registry(tmp_path, *, peer, base_url, runtime_bearer="runtime-secret", control_bearer="control-secret"):
+    idx = next(_wp4_module_counter)
+    module_name = f"wp4_stub_launcher_{idx}"
+    stub_dir = tmp_path / "wp4_stub_registry"
+    stub_dir.mkdir(exist_ok=True)
+    module_src = _WP4_STUB_LAUNCHER_TEMPLATE.format(
+        peer=peer, data_base_url=f"{base_url}/v1", control_base_url=f"{base_url}/control/v1",
+        runtime_bearer=runtime_bearer, control_bearer=control_bearer,
+    )
+    (stub_dir / f"{module_name}.py").write_text(module_src, encoding="utf-8")
+    if str(stub_dir) not in sys.path:
+        sys.path.insert(0, str(stub_dir))
+    registry_path = stub_dir / f"{module_name}_registry.json"
+    registry_path.write_text(json.dumps({
+        "adapters": [],
+        "composition_roots": [{"name": peer, "module": module_name, "launcher_class": "StubLauncher"}],
+    }), encoding="utf-8")
+    launcher_module = importlib.import_module(module_name)
+    return registry_path, launcher_module.StubLauncher
+
+
+def _wp4_args(pb_module, *, peer, registry_path, client_processes=None, concurrency=1, warmup=0, n=1):
+    argv = ["--real-server", peer, "--concurrency", str(concurrency), "--warmup", str(warmup), "--n", str(n), "--registry", str(registry_path)]
+    if client_processes is not None:
+        argv += ["--client-processes", str(client_processes)]
+    return pb_module._build_parser().parse_args(argv)
+
+
+def _wp4_setup(tmp_path, config=None, *, peer="wp4peer", **launcher_kwargs):
+    base_url, log_path, proc = _start_wp4_stub_server(tmp_path, config or {})
+    registry_path, launcher_cls = _write_wp4_stub_registry(tmp_path, peer=peer, base_url=base_url, **launcher_kwargs)
+    return base_url, log_path, proc, registry_path, launcher_cls
+
+
+def test_real_server_starts_the_named_launcher(tmp_path):
+    """Completion condition 127: `--real-server <peer>` instantiates and
+    starts the `composition_roots` entry named `peer`.
+
+    mutation M170 (`tools/perf_baseline.py`): `_load_composition_root_
+    class` ignores `registry_path`'s own entries and imports a fixed
+    module name instead -- red because this test's own peer/module never
+    exists under that fixed name, so `_run_real_server` raises an import
+    error instead of ever calling `StubLauncher.start`."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert len(launcher_cls.START_CALLS) == 1
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_start_ceilings_are_one_and_one(tmp_path):
+    """Completion condition 128: `launcher.start` is called with
+    `ceilings={"data": 1, "control": 1}`.
+
+    mutation M171 (`tools/perf_baseline.py`): pass `ceilings={"data": 2,
+    "control": 1}` -- red because this test's own `== {"data": 1,
+    "control": 1}` assertion observes `2` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1)
+        pb._run_real_server(args)
+        assert launcher_cls.START_CALLS == [{"data": 1, "control": 1}]
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_stops_exactly_once_on_mid_measurement_failure(tmp_path):
+    """Completion condition 129: a failure partway through measurement
+    (here, the SECOND measured query response is a 500) still calls
+    `launcher.stop()` exactly once.
+
+    mutation M172 (`tools/perf_baseline.py`): move the `launcher.stop()`
+    call so it only runs on the success path -- red because this test's
+    own failing run observes `STOP_CALLS == []` instead of one call."""
+    config = {"query_status_override": {"2": 500}}
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path, config)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=2, concurrency=2, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code != 0
+        assert len(launcher_cls.STOP_CALLS) == 1
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_stops_exactly_once_on_success(tmp_path):
+    """Completion condition 130: a normal, fully successful run also
+    calls `launcher.stop()` exactly once.
+
+    mutation M173 (`tools/perf_baseline.py`): drop the success-path
+    `launcher.stop()` call -- red because this test's own `STOP_CALLS ==
+    [True]` assertion observes `[]` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert launcher_cls.STOP_CALLS == [True]
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_measures_only_query(tmp_path, capsys):
+    """Completion condition 131: after entity/row setup, every data-plane
+    request the stub observed is a `query` request, and exactly one
+    `REALPERF` line (`op=query`) is printed.
+
+    mutation M174 (`tools/perf_baseline.py`): also measure a second op
+    (e.g. `insert`) -- red because this test's own count of `REALPERF`
+    lines in stdout is no longer exactly 1."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_lines = [line for line in out.splitlines() if line.startswith("REALPERF")]
+        assert len(realperf_lines) == 1
+        assert "op=query" in realperf_lines[0]
+        entries = _read_wp4_log(log_path)
+        mutation_idx = next(i for i, e in enumerate(entries) if e["path"].endswith("/mutations"))
+        for entry in entries[mutation_idx + 1:]:
+            assert entry["path"].endswith("/query")
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_default_client_processes_is_eight(tmp_path, capsys):
+    """Completion condition 132: at `--concurrency 32` with `--client-
+    processes` omitted, 8 distinct client OS processes are observed, and
+    the printed `REALPERF` line carries `client_processes=8`.
+
+    mutation M175 (`tools/perf_baseline.py`): change `--client-processes`'s
+    own default to `4` -- red because this test's own count of distinct
+    `pid`s among the stub's `/query` log entries for the measured group
+    is `4`, not `8`."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, concurrency=32, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_line = next(line for line in out.splitlines() if line.startswith("REALPERF"))
+        assert "client_processes=8" in realperf_line
+        entries = _read_wp4_log(log_path)
+        measured_query_entries = [e for e in entries if e["path"].endswith("/query") and e.get("call_index", 0) >= 1]
+        assert len(measured_query_entries) == 32
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_k1_uses_one_client_process(tmp_path, capsys):
+    """Completion condition 133: at `--concurrency 1`, exactly one client
+    process is used (`min(8, 1)`), and `REALPERF` carries `client_
+    processes=1`.
+
+    mutation M176 (`tools/perf_baseline.py`): always start `--client-
+    processes` children regardless of `K` -- red because this test's own
+    `client_processes=1` assertion observes `client_processes=8` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, concurrency=1, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_line = next(line for line in out.splitlines() if line.startswith("REALPERF"))
+        assert "client_processes=1" in realperf_line
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_group_sends_k_requests_concurrently(tmp_path):
+    """Completion condition 134: a measured group's own `K` requests are
+    genuinely simultaneous -- with each `/query` response held for 50ms,
+    the maximum observed in-flight overlap among them is `K`.
+
+    mutation M177 (`tools/perf_baseline.py`): a child sends its own share
+    one request at a time (sequential `await`) instead of via one `gather`
+    -- red because this test's own observed max overlap drops below `K`."""
+    config = {"query_delay_ms": 50}
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path, config)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=2, concurrency=4, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_wp4_log(log_path)
+        query_entries = [e for e in entries if e["path"].endswith("/query")]
+        events = []
+        for e in query_entries:
+            events.append((e["start_ts"], 1))
+            events.append((e["end_ts"], -1))
+        events.sort()
+        current = 0
+        peak = 0
+        for _, delta in events:
+            current += delta
+            peak = max(peak, current)
+        assert peak == 4
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_group_wall_ms_is_max_completion_minus_start():
+    """Completion condition 135: `_group_wall_ms` is the LATEST completion
+    time minus the single shared start, never an average.
+
+    mutation M178 (`tools/perf_baseline.py`): average the completion times
+    instead of taking their max -- red because this test's own known
+    input (`start=1_000_000`, completions `[1_500_000, 1_200_000,
+    1_800_000]`) would then read `0.5` ms, not `0.8` ms."""
+    result = pb._group_wall_ms(1_000_000, [1_500_000, 1_200_000, 1_800_000])
+    assert result == pytest.approx(0.8)
+
+
+def test_real_server_warmup_group_excluded_from_realperf(tmp_path):
+    """Completion condition 137: a slow WARMUP group never enters the
+    printed `REALPERF` distribution -- only the measured group's own
+    (fast) wall time does.
+
+    mutation M179 (`tools/perf_baseline.py`): fold the warmup group's own
+    wall time into the measured distribution too -- red because this
+    test's own `p95_ms < 100` assertion would instead observe a value
+    inflated by the warmup group's own 200ms delay."""
+    config = {"query_delay_override": {"0": 200, "1": 200}}
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path, config)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=2, concurrency=2, warmup=1, n=1)
+        result = pb._measure_real_server(
+            query_url=f"{base_url}/v1/data/dsaperfreal/query", bearer="runtime-secret", field="label",
+            warmup=args.warmup, n=args.n, concurrency=args.concurrency,
+            n_children=pb._num_real_server_clients(args.client_processes, args.concurrency),
+            counts=pb._distribute_group_counts(args.concurrency, pb._num_real_server_clients(args.client_processes, args.concurrency)),
+        )
+        assert result["p95_ms"] < 100.0
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_measure_real_server_percentiles_use_percentile(monkeypatch):
+    """Completion condition 138: `p50_ms`/`p95_ms` are `_percentile` of the
+    measured group wall times -- pinned via a monkeypatched `_run_one_
+    real_server_group` so the input list is exactly known (no real HTTP).
+
+    mutation M180 (`tools/perf_baseline.py`): print the MEAN of the
+    measured wall times as `p50_ms` -- red because this test's own
+    known, ASYMMETRIC input (`[10, 20, 100]`) has a true median
+    (`_percentile(..., 50)`) of `20.0` but a mean of `43.33`; the
+    mutation would observe the latter, failing the `p50_ms ==
+    pytest.approx(20.0)` assertion (a symmetric input, where the two
+    coincide, could not catch this)."""
+    walls = iter([{"wall_ms": 10.0, "cpu_client_ms": 0.0, "statuses": [200]},
+                  {"wall_ms": 20.0, "cpu_client_ms": 0.0, "statuses": [200]},
+                  {"wall_ms": 100.0, "cpu_client_ms": 0.0, "statuses": [200]}])
+    monkeypatch.setattr(pb, "_run_one_real_server_group", lambda *a, **k: next(walls))
+    result = pb._measure_real_server(
+        query_url="http://example.invalid/v1/data/e/query", bearer="x", field="label",
+        warmup=0, n=3, concurrency=1, n_children=1, counts=[1],
+    )
+    assert result["p50_ms"] == pytest.approx(20.0)
+    assert result["p95_ms"] == pytest.approx(92.0)
+
+
+def test_format_realperf_row_is_stable():
+    """Completion condition 139: `REALPERF`'s own literal column names,
+    order, and formatting (design D-15).
+
+    mutation M181 (`tools/perf_baseline.py`): rename the `client_
+    processes=` column to `clients=` -- red because this test's own
+    substring assertion for `client_processes=8` is absent from the
+    mutated line."""
+    line = pb._format_realperf_row("r2db-api", 32, 8, 15, 12.345, 20.5)
+    assert line == (
+        "REALPERF peer=r2db-api plug=r2db-api-real transport=real-server op=query "
+        "concurrency=32 client_processes=8 n=15 p50_ms=12.345 p95_ms=20.500"
+    )
+
+
+def test_format_realcpu_row_is_stable():
+    """Completion condition 140: `REALCPU`'s own literal column names,
+    order, and formatting (design D-15).
+
+    mutation M182 (`tools/perf_baseline.py`): rename `cpu_client_ms=` to
+    `client_cpu_ms=` -- red because this test's own exact-string
+    assertion no longer matches."""
+    line = pb._format_realcpu_row("r2db-api", 32, 8, 480, 123.456, 78.9)
+    assert line == (
+        "REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=32 "
+        "client_processes=8 requests=480 wall_ms=123.456 cpu_client_ms=78.900"
+    )
+
+
+def test_real_server_cpu_client_ms_is_the_childrens_own_rusage_sum(tmp_path):
+    """Completion condition 141: `cpu_client_ms` is the SUM of the
+    children's own `getrusage(RUSAGE_SELF)` deltas -- at least as large as
+    a floor derived from the wall time actually spent making real
+    requests, and strictly larger than the PARENT's own `getrusage`
+    delta over the identical wall-clock window (the parent mostly blocks
+    on the barrier/queue, doing far less CPU work than `K` real children).
+
+    mutation M183 (`tools/perf_baseline.py`): report the PARENT's own
+    `RUSAGE_SELF` delta as `cpu_client_ms` instead of the children's sum
+    -- red because this test's own `cpu_client_ms > parent_cpu_ms`
+    assertion (the parent's delta compared to itself) can no longer hold
+    (they would be equal, not strictly greater, except by noise the
+    assertion does not rely on)."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        query_url = f"{base_url}/v1/data/dsaperfreal/query"
+        cpu_before = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
+        result = pb._run_one_real_server_group(query_url, "runtime-secret", "label", [2, 2], 2)
+        cpu_after = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
+        parent_cpu_ms = ((cpu_after.ru_utime + cpu_after.ru_stime) - (cpu_before.ru_utime + cpu_before.ru_stime)) * 1000.0
+        assert result["cpu_client_ms"] >= 0.0
+        assert result["cpu_client_ms"] > parent_cpu_ms
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_measure_real_server_requests_and_wall_ms_are_measured_only(monkeypatch):
+    """Completion condition 142: `requests=` is `n * concurrency`
+    (measured only), `wall_ms=` is the sum of MEASURED group walls only
+    -- pinned via a monkeypatched `_run_one_real_server_group` with a
+    huge, distinguishable warmup wall time.
+
+    mutation M184 (`tools/perf_baseline.py`): compute `requests=` as
+    `(warmup + n) * concurrency` -- red because this test's own
+    `result["requests"] == 6` assertion (n=2, concurrency=3) would
+    instead observe `9` (warmup=1)."""
+    groups = iter([
+        {"wall_ms": 9999.0, "cpu_client_ms": 0.0, "statuses": [200, 200, 200]},
+        {"wall_ms": 10.0, "cpu_client_ms": 0.0, "statuses": [200, 200, 200]},
+        {"wall_ms": 20.0, "cpu_client_ms": 0.0, "statuses": [200, 200, 200]},
+    ])
+    monkeypatch.setattr(pb, "_run_one_real_server_group", lambda *a, **k: next(groups))
+    result = pb._measure_real_server(
+        query_url="http://example.invalid/v1/data/e/query", bearer="x", field="label",
+        warmup=1, n=2, concurrency=3, n_children=1, counts=[3],
+    )
+    assert result["requests"] == 6
+    assert result["wall_ms"] == pytest.approx(30.0)
+
+
+def test_real_server_aborts_without_output_on_non_200(tmp_path, capsys):
+    """Completion condition 143: any non-200 `query` response aborts the
+    WHOLE run -- no `REALPERF`/`REALCPU` line, a non-zero exit, and
+    `stop()` still called.
+
+    mutation M185 (`tools/perf_baseline.py`): never check the response
+    status code at all -- red because this test's own `code != 0` and
+    `no REALPERF/REALCPU line` assertions would instead observe a
+    (wrong) successful, 0-exit run with both lines printed."""
+    config = {"query_status_override": {"1": 500}}
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path, config)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code != 0
+        out = capsys.readouterr().out
+        assert "REALPERF" not in out
+        assert "REALCPU" not in out
+        assert launcher_cls.STOP_CALLS == [True]
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_flag_absent_prints_no_real_lines(tmp_path, capsys, monkeypatch):
+    """Completion condition 144 (v1.0 §1.1 (f)): without `--real-server`,
+    `main()` never prints `REALPERF`/`REALCPU` and never instantiates the
+    stub launcher.
+
+    mutation M186 (`tools/perf_baseline.py`): run the real-server path
+    even when `--real-server` was not given -- red because this test's
+    own `START_CALLS == []` assertion would instead observe a launcher
+    start."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        registry = tmp_path / "wp4_empty_registry.json"
+        registry.write_text(json.dumps({"adapters": [], "composition_roots": []}), encoding="utf-8")
+        base = tmp_path / "pgbase"
+        base.mkdir()
+        monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+        monkeypatch.setattr(pb.dsa_testpg, "cluster", _fake_cluster_cm())
+        code = pb.main(["--registry", str(registry)])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "REALPERF" not in out
+        assert "REALCPU" not in out
+        assert launcher_cls.START_CALLS == []
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_path_runs_under_the_suite_lock_and_owned_cluster(tmp_path, monkeypatch):
+    """Completion condition 145: `--real-server` runs under the SAME
+    exclusive `dsa_testpg.suite_lock` and owned `dsa_testpg.cluster` the
+    6-plug path does -- both are spied (delegating to the real/faked
+    implementation) so this test can assert `["lock", "cluster"]` was the
+    real ENTRY order, never assert on a side effect (a probe subprocess)
+    that a mutation moving the whole dispatch earlier would just skip
+    right past.
+
+    mutation M187 (`tools/perf_baseline.py`): dispatch `_run_real_server`
+    immediately after `print(_perfrun_line())`, before `dsa_testpg.suite_
+    lock`/`cluster` are ever reached -- red because this test's own
+    `calls == ["lock", "cluster"]` assertion observes `[]` instead (a
+    `--real-server` run that returns without ever entering either)."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        base = tmp_path / "pgbase2"
+        base.mkdir()
+        monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+
+        calls: list[str] = []
+        real_suite_lock = pb.dsa_testpg.suite_lock
+
+        @contextlib.contextmanager
+        def spy_suite_lock(*a, **k):
+            calls.append("lock")
+            with real_suite_lock(*a, **k):
+                yield
+
+        fake_cluster = _fake_cluster_cm()
+
+        @contextlib.contextmanager
+        def spy_cluster():
+            calls.append("cluster")
+            with fake_cluster() as c:
+                yield c
+
+        monkeypatch.setattr(pb.dsa_testpg, "suite_lock", spy_suite_lock)
+        monkeypatch.setattr(pb.dsa_testpg, "cluster", spy_cluster)
+
+        code = pb.main(["--real-server", "wp4peer", "--client-processes", "1", "--registry", str(registry_path)])
+        assert code == 0
+        assert calls == ["lock", "cluster"]
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_issues_developer_credential_before_entity(tmp_path):
+    """Completion condition 164: before entity setup, the stub observes a
+    `POST /control/v1/credentials` (role `developer`) authorized by the
+    launcher's own `control_bearer`.
+
+    mutation M201 (`tools/perf_baseline.py`): never issue a developer
+    credential -- use `runtime_bearer` for the schema operation instead --
+    red because this test's own log-based assertion (a credentials POST
+    with `Authorization: Bearer control-secret` precedes the schema POST)
+    finds no such entry at all."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_wp4_log(log_path)
+        cred_idx = next(i for i, e in enumerate(entries) if e["path"] == "/control/v1/credentials")
+        schema_idx = next(i for i, e in enumerate(entries) if e["path"] == "/v1/schema/operations")
+        assert cred_idx < schema_idx
+        assert entries[cred_idx]["authorization"] == "Bearer control-secret"
+        assert entries[cred_idx]["body"]["role"] == "developer"
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_schema_and_seed_use_the_developer_credential(tmp_path):
+    """Completion condition 165: the schema operation and the row-seeding
+    mutation both carry the developer credential's own secret, never
+    `control_bearer`/`runtime_bearer`.
+
+    mutation M202 (`tools/perf_baseline.py`): use `control_bearer` for the
+    schema operation and the row seed -- red because this test's own
+    `Authorization` assertions (`Bearer dev-secret-xyz`) observe `Bearer
+    control-secret` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_wp4_log(log_path)
+        schema_entry = next(e for e in entries if e["path"] == "/v1/schema/operations")
+        mutation_entry = next(e for e in entries if e["path"].endswith("/mutations"))
+        assert schema_entry["authorization"] == "Bearer dev-secret-xyz"
+        assert mutation_entry["authorization"] == "Bearer dev-secret-xyz"
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_query_requests_use_the_runtime_credential(tmp_path):
+    """Completion condition 166: every measured `query` request (K=1
+    sanity check included) carries the launcher's own `runtime_bearer`.
+
+    mutation M203 (`tools/perf_baseline.py`): use the developer credential
+    for the measurement `query` calls -- red because this test's own
+    `all(... == "Bearer runtime-secret")` assertion over the stub's
+    `/query` log entries finds a `Bearer dev-secret-xyz` entry instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=0, n=2)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_wp4_log(log_path)
+        query_entries = [e for e in entries if e["path"].endswith("/query")]
+        assert len(query_entries) >= 1
+        assert all(e["authorization"] == "Bearer runtime-secret" for e in query_entries)
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_refuses_a_200_with_zero_rows(tmp_path, capsys):
+    """Completion condition 167 (`OC` 1.5-32): the K=1 sanity query
+    returning 200 with zero rows aborts the run exactly like a non-200
+    status would -- no `REALPERF`/`REALCPU`, non-zero exit, `stop()`
+    still called.
+
+    mutation M204 (`tools/perf_baseline.py`): only check the status code,
+    never the row count -- red because this test's own `code != 0`
+    assertion would instead observe a (wrongly) successful run."""
+    config = {"query_rows_override": {"0": 0}}
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path, config)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code != 0
+        out = capsys.readouterr().out
+        assert "REALPERF" not in out
+        assert "REALCPU" not in out
+        assert launcher_cls.STOP_CALLS == [True]
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_client_processes_flag_caps_at_k(tmp_path, capsys):
+    """Completion condition 168: `--client-processes 8` with `K=4` uses 4
+    children (`min(8, 4)`), and `REALPERF` carries `client_processes=4`.
+
+    mutation M205 (`tools/perf_baseline.py`): use `N` (the flag's own
+    value) directly instead of `min(N, K)` -- red because this test's own
+    `client_processes=4` assertion observes `client_processes=8` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=8, concurrency=4, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_line = next(line for line in out.splitlines() if line.startswith("REALPERF"))
+        assert "client_processes=4" in realperf_line
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_distribute_group_counts_gives_the_remainder_to_the_first_children():
+    """Completion condition 169: `K=10, N=4` distributes `[3, 3, 2, 2]` --
+    the remainder (2) goes to the FIRST 2 children, never the last.
+
+    mutation M206 (`tools/perf_baseline.py`): give the remainder to the
+    LAST children instead -- red because this test's own `== [3, 3, 2,
+    2]` assertion would instead observe `[2, 2, 3, 3]`."""
+    assert pb._distribute_group_counts(10, 4) == [3, 3, 2, 2]
+
+
+def test_real_server_never_builds_registered_adapters(tmp_path):
+    """Completion condition 170: `--real-server` never builds a registered
+    `adapters` entry -- the registry's own `adapters` list can carry a
+    stub adapter that RECORDS if it were ever built, and it never is.
+
+    mutation M207 (`tools/perf_baseline.py`): also call `_discover_and_
+    build` for `--real-server` -- red because this test's own stub
+    adapter module records a `build_adapter()` call that should never
+    happen."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        stub_dir = registry_path.parent
+        idx = next(_wp4_module_counter)
+        adapter_module_name = f"wp4_stub_adapter_{idx}"
+        record_path = stub_dir / f"{adapter_module_name}_built.json"
+        (stub_dir / f"{adapter_module_name}.py").write_text(
+            "import json, pathlib\n"
+            f"RECORD_PATH = pathlib.Path({str(record_path)!r})\n"
+            "def build_adapter():\n"
+            "    RECORD_PATH.write_text('built')\n"
+            "    raise RuntimeError('a --real-server run must never reach this')\n",
+            encoding="utf-8",
+        )
+        data = json.loads(registry_path.read_text())
+        data["adapters"] = [{"name": "wp4stubadapter", "module": adapter_module_name, "required": False}]
+        registry_path.write_text(json.dumps(data), encoding="utf-8")
+
+        args = _wp4_args(pb, peer="wp4peer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert not record_path.exists()
+    finally:
+        _stop_wp4_stub_server(proc)
+
+
+def test_real_server_prints_realperf_and_realcpu_as_one_block_after_perfrun(tmp_path, capsys, monkeypatch):
+    """Completion condition 171: `PERFRUN` precedes `REALPERF`/`REALCPU`,
+    and the two `REAL*` lines are adjacent -- no other line between them.
+
+    mutation M208 (`tools/perf_baseline.py`): print `REALPERF`/`REALCPU`
+    BEFORE `PERFRUN` -- red because this test's own ordering assertion
+    (the `PERFRUN` line's own index is less than `REALPERF`'s) fails."""
+    base_url, log_path, proc, registry_path, launcher_cls = _wp4_setup(tmp_path)
+    try:
+        base = tmp_path / "pgbase3"
+        base.mkdir()
+        monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+        monkeypatch.setattr(pb.dsa_testpg, "cluster", _fake_cluster_cm())
+        code = pb.main(["--real-server", "wp4peer", "--client-processes", "1", "--registry", str(registry_path)])
+        assert code == 0
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        perfrun_idx = next(i for i, line in enumerate(lines) if line.startswith("PERFRUN"))
+        realperf_idx = next(i for i, line in enumerate(lines) if line.startswith("REALPERF"))
+        realcpu_idx = next(i for i, line in enumerate(lines) if line.startswith("REALCPU"))
+        assert perfrun_idx < realperf_idx
+        assert realcpu_idx == realperf_idx + 1
+    finally:
+        _stop_wp4_stub_server(proc)

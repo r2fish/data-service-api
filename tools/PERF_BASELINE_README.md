@@ -564,6 +564,107 @@ it -- these two specific series are from that R-80-era baseline (one
 probe per op) and are not re-measured against the current (two-probe)
 baseline here.
 
+## `REALPERF` / `REALCPU` lines
+
+**`--real-server <peer>` measures a real, separately-started composition
+root instead of the 6 registered conformance plugs** (design
+`docs/design/PERF_SERIALIZATION_MEASUREMENT_V0_1.md` D-15, work order
+`docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` WP-4)
+-- the SAME C-26 launcher `conformance-tests/test_c26_composition_root.py`
+drives (`conformance-tests/registry.json`'s own `composition_roots`
+entry named `peer`), started and stopped as a real, separate OS process
+pair (application + control, fronted by nginx), never the in-process/
+ASGI-in-process composition the 6 plugs above measure. A `--real-server`
+run measures `query` ONLY, and prints ONLY the two lines below -- never
+`PERF`/`CPU`/`POOL`/`DBTIME`/`PREPARED`/`ROUNDTRIP`, and never both in one
+invocation with the 6-plug path. Without `--real-server`, nothing here
+changes: the launcher is never even instantiated.
+
+```
+REALPERF peer=<peer> plug=<peer>-real transport=real-server op=query concurrency=<K> client_processes=<N> n=<n> p50_ms=<x.xxx> p95_ms=<x.xxx>
+REALCPU peer=<peer> plug=<peer>-real op=query concurrency=<K> client_processes=<N> requests=<n * K> wall_ms=<x.xxx> cpu_client_ms=<x.xxx>
+```
+
+Both lines print as one block, immediately after `PERFRUN`, with nothing
+else printed between or before them.
+
+**Why no server-side `CPU`/`DBTIME` line.** The measured server is a
+separate OS process (in fact two: application and control), not this
+tool's own process -- there is nothing in THIS process's own
+`resource.getrusage`/`prepared_stats()` that could describe it. The floor
+this measurement exists to demonstrate (design §7.1's own "床の算術") is
+precisely that client and server no longer share one process/one GIL --
+see `cpu_client_ms=` below for the client side of that same floor.
+
+**Window and denominator.** `--warmup`/`--n` mean exactly what they mean
+for the 6-plug path (see "How to run it" above) -- `--concurrency K`
+(default 1) is `--real-server`'s own load per measured sample: every
+warmup and measured sample is one GROUP of `K` real, concurrent `query`
+requests, dispatched across `min(--client-processes, K)` real OS client
+processes (default `--client-processes 8`; see below), never `K`
+sequential requests. `n=`/`p50_ms=`/`p95_ms=` on `REALPERF` are the
+MEASURED groups only -- a slow warmup group never enters the printed
+distribution, exactly like the 6-plug path's own `PERF` line.
+`REALCPU`'s own `requests=` is `n * K` (measured only, never `(warmup +
+n) * K`); `wall_ms=` is the sum of the measured groups' own wall-clock
+spans (the same numbers `p50_ms=`/`p95_ms=` are computed from).
+
+**`cpu_client_ms=` is a floor visualization, never a judgement this tool
+makes (P-8).** It is the SUM, across every measured group's own client OS
+processes, of that process's own `resource.getrusage(RUSAGE_SELF)`
+difference (`ru_utime + ru_stime`) across the one `asyncio.gather` call
+that group's own share of `K` requests went through -- the client-side
+CPU cost of driving `K` real concurrent HTTP requests through a real TCP
++ TLS-less loopback stack, spread across real OS processes specifically
+so it does NOT share a GIL with the measured server (or with this
+harness's own process). D-16's closure judgement (query `p50` at `K=32`
+within 8x of `K=1`, both peers, two runs) is made and recorded by the
+supervisor from `REALPERF`'s own `p50_ms=` alone; `REALCPU` is recorded
+alongside it for context, never compared against a threshold by this tool
+itself.
+
+**Launcher start/stop and cleanup.** `launcher.start(ceilings={"data": 1,
+"control": 1})` runs once, at the top of a `--real-server` run;
+`launcher.stop()` runs exactly once, in a `finally`, whether the run
+succeeded, failed partway through the HTTP setup, or failed partway
+through measurement (a non-200 `query` response mid-run aborts the WHOLE
+run -- see below) -- a `--real-server` run never leaves the launcher's own
+throwaway platform, processes, or bound ports behind. The launcher itself
+is never modified by this flag: it is reused exactly as `test_c26_
+composition_root.py` already uses it.
+
+**Credential use, in order.** `launcher.control_bearer` issues ONE
+developer credential (`POST /control/v1/credentials`, `role=developer`)
+for this run's own application (its `application_id`, read from `GET
+/v1/capabilities` via `launcher.runtime_bearer` -- the launcher's own
+observation surface names no `application_id` property directly). That
+developer credential -- never `control_bearer`/`runtime_bearer` -- creates
+the one measurement entity (`POST /v1/schema/operations`) and seeds its
+one row (`POST /v1/data/<entity>/mutations`). Every `query` request from
+that point on, including the K=1 sanity check below, uses `launcher.
+runtime_bearer` -- never the developer credential.
+
+**The K=1 sanity check (空振り禁止, `OPERATING_CONDITIONS.md` 1.5-32).**
+Before any concurrent measurement starts, this tool sends exactly ONE real
+`query` request and confirms BOTH a `200` status AND at least one row in
+the response -- a `200` with zero rows is refused exactly like a non-200
+status is. Either failure aborts the run before any `REALPERF`/`REALCPU`
+line is printed (a non-zero exit; `stop()` still runs).
+
+**`client_processes=<N>` and the remainder.** The actual number of client
+OS processes a run uses is `min(--client-processes, K)` -- never more
+processes than there are requests in one group to spread across them.
+Each client process sends its own share of one group's `K` requests via
+exactly ONE `asyncio.gather` call, never one request at a time; when `K`
+does not divide evenly by the process count, the remainder goes to the
+FIRST that many processes, one extra request each (`K=10`, 4 processes:
+`[3, 3, 2, 2]`, never `[2, 2, 3, 3]`).
+
+**`--real-server` never builds one of the 6 registered plugs.** Only
+`registry.json`'s own `composition_roots` section is read for this flag
+-- its `adapters` section (the 6 plugs) is never touched, and no adapter
+is ever built for a `--real-server` run.
+
 ## The limits of what these numbers mean
 
 - **In-process / ASGI-in-process / real socket.** `_classify_plug` (Phase
