@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.3 (2026-09-28)。WP-3 / WP-4 の再計測を §5 (D-12) と §6 (D-16) に足した。§1〜§4 は書き換えない。** 作業指示書は WO v1.1 (§7〜§12)。判定規則は WO §10.1 (§7.3 の D-12・D-16) の逐語で、計測前に固定したもの。§5・§6 の実測・事実・判断は監督が記入する (WO §10)。
 - **v0.2 (2026-09-27)。WP-2 の実測 (§2)・事実 (§3)・判断 (§4) を監督が記入し、§1 の 2 箇所 (`cpu_other_ms` の式、最初の op の `POOL lock=` の例外) を確定した。** v0.1 (2026-09-26) は骨だけだった。 基点は local main `a1c1ee3`、作業指示書は `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` (以下「WO」)。台帳は `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-101** 行、横断条件は同ファイルの **P-8**・**R-20**、再検討条件の受け皿は **R-84**、終了条件は **G-4** である。
 - §2 (実測) と §3 (事実) と §4 (判断) は **WO §3 = WP-2 で監督が埋めた** (v0.2)。判定規則は WO §3.3 の逐語で、計測後に動かしていない。
 - 先行する実測の記録は `docs/design/PERF_CONCURRENCY_MEASUREMENT_V0_1.md` (R-78) に在る。本メモはその続きであり、同じ計測器 (`tools/perf_baseline.py`) の新しい行 (`CPU`・`DBTIME`) を使う。
@@ -1651,3 +1652,398 @@ PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity
 4. **R-101 は閉じない**: `RM` §0.1.4 の 2 (8 倍以内) はどの plug も満たさない (29.5〜33.3 倍。thread limit 4 でも 15.2〜32.9 倍)。
 5. **是正の候補 (本書では選ばない。作業指示書 v1.1 で依頼者確認)**: (a) production の composition root で anyio の既定 limiter を小さくする (計測上の効きは上記 2。それだけでは 8 倍に届かない)、(b) process を分ける (multi-process worker。GIL の外に出す)、(c) MitateDB の cell lock (R-102)、(d) async psycopg (R-84)。(a) は寸法の変更なので P-8 / R-20 の別変更セット。
 6. **規則の次版への申し送り (今回は動かさない)**: r > 1 の場合 (複数 core) と、J-1 (i) で limit 4 の方が速い場合の扱い。J-2 と J-5 が同時に成立したときの優先順位。
+
+## 5. WP-3 の再計測 (D-12。監督が埋める)
+
+**目的**: WP-3 (両 peer の `create_app` の thread limiter、既定 4。MitateDB の http adapter の credential store の platform pool) の効きを、計測前に固定した D-12 で判定する。8 倍 (`RM` §0.1.4 の 2) は WP-3 では判定しない (床。WO §7.1)。
+
+**方法**: §2.2 と同じ道具・同じ条件 — `tools/perf_baseline.py`、`DSA_PERF_POOL_SIZE=32`、`DSA_PERF_THREAD_LIMIT` 無し、K=1 は `--warmup 10 --n 100 --concurrency 1`、K=32 は `--warmup 3 --n 15 --concurrency 32`。道具の木は `d7a7500` (r101b、WP-3 と WP-4 の merge)。基準は v0.2 §2.2 の既定 run (小見出し「thread limit = 既定 (無し) × K=1」と「thread limit = 既定 (無し) × K=32」の 1 回目。D-12 の逐語の行番号 :625- / :1213- は v0.2 のもので、v0.3 では §0 の 1 行分ずれる)。他の pytest と nginx を止めて直列に取る (WO §10.2 の 1)。
+
+### 5.1 実測 (逐語)
+
+#### K=1 `--warmup 10 --n 100 --concurrency 1`
+
+```
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=d7a7500 date=2026-09-28
+CPU peer=r2db-api plug=r2db-api op=query concurrency=1 thread_limit=default requests=100 wall_ms=11.951 cpu_total_ms=6.499 cpu_main_ms=6.495 cpu_other_ms=0.004
+CPU peer=r2db-api plug=r2db-api op=mutate concurrency=1 thread_limit=default requests=100 wall_ms=16.611 cpu_total_ms=11.178 cpu_main_ms=11.178 cpu_other_ms=0.000
+CPU peer=r2db-api plug=r2db-api op=batch concurrency=1 thread_limit=default requests=100 wall_ms=51.194 cpu_total_ms=45.745 cpu_main_ms=45.743 cpu_other_ms=0.002
+PERF peer=r2db-api plug=r2db-api transport=in-process op=query n=100 p50_ms=0.117 p95_ms=0.137 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=mutate n=100 p50_ms=0.163 p95_ms=0.207 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=batch n=100 p50_ms=0.510 p95_ms=0.700 backend_calls=1.00 concurrency=1
+CPU peer=MitateDB-api plug=MitateDB-api op=query concurrency=1 thread_limit=default requests=100 wall_ms=13.536 cpu_total_ms=8.126 cpu_main_ms=8.125 cpu_other_ms=0.001
+CPU peer=MitateDB-api plug=MitateDB-api op=mutate concurrency=1 thread_limit=default requests=100 wall_ms=10.417 cpu_total_ms=4.946 cpu_main_ms=4.945 cpu_other_ms=0.001
+CPU peer=MitateDB-api plug=MitateDB-api op=batch concurrency=1 thread_limit=default requests=100 wall_ms=16.978 cpu_total_ms=11.617 cpu_main_ms=11.615 cpu_other_ms=0.002
+CPU peer=MitateDB-api plug=MitateDB-api op=cross_entity concurrency=1 thread_limit=default requests=100 wall_ms=12.827 cpu_total_ms=7.401 cpu_main_ms=7.399 cpu_other_ms=0.002
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=query n=100 p50_ms=0.133 p95_ms=0.144 backend_calls=11.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=mutate n=100 p50_ms=0.102 p95_ms=0.120 backend_calls=7.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=batch n=100 p50_ms=0.168 p95_ms=0.182 backend_calls=37.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=cross_entity n=100 p50_ms=0.127 p95_ms=0.143 backend_calls=16.00 concurrency=1
+CPU peer=r2db-api plug=r2db-api-http op=query concurrency=1 thread_limit=4 requests=100 wall_ms=140.068 cpu_total_ms=76.490 cpu_main_ms=25.092 cpu_other_ms=51.398
+POOL peer=r2db-api plug=r2db-api-http op=query role=perfbase_73efe9e7e787/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=query role=perfbase_73efe9e7e787/runtime size=32 acquire=111 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+DBTIME peer=r2db-api plug=r2db-api-http op=query concurrency=1 scope=app conns=2 gone=0 db_calls=600 txns=200 db_wall_ms=44.549 db_wall_ms_per_req=0.445
+DBTIME peer=r2db-api plug=r2db-api-http op=query concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=800 txns=400 db_wall_ms=35.095 db_wall_ms_per_req=0.351
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_73efe9e7e787/developer@93521 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_73efe9e7e787/runtime@93523 executes=668 executemany=0 prepared=6 prepared_execs=633 share=0.948
+CPU peer=r2db-api plug=r2db-api-http op=mutate concurrency=1 thread_limit=4 requests=100 wall_ms=146.911 cpu_total_ms=78.790 cpu_main_ms=25.110 cpu_other_ms=53.680
+POOL peer=r2db-api plug=r2db-api-http op=mutate role=perfbase_73efe9e7e787/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=mutate role=perfbase_73efe9e7e787/runtime size=32 acquire=221 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+DBTIME peer=r2db-api plug=r2db-api-http op=mutate concurrency=1 scope=app conns=2 gone=0 db_calls=700 txns=400 db_wall_ms=52.137 db_wall_ms_per_req=0.521
+DBTIME peer=r2db-api plug=r2db-api-http op=mutate concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=800 txns=400 db_wall_ms=35.825 db_wall_ms_per_req=0.358
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_73efe9e7e787/developer@93521 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_73efe9e7e787/runtime@93523 executes=1438 executemany=0 prepared=8 prepared_execs=1395 share=0.970
+CPU peer=r2db-api plug=r2db-api-http op=batch concurrency=1 thread_limit=4 requests=100 wall_ms=162.490 cpu_total_ms=91.141 cpu_main_ms=25.149 cpu_other_ms=65.992
+POOL peer=r2db-api plug=r2db-api-http op=batch role=perfbase_73efe9e7e787/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=batch role=perfbase_73efe9e7e787/runtime size=32 acquire=331 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+DBTIME peer=r2db-api plug=r2db-api-http op=batch concurrency=1 scope=app conns=2 gone=0 db_calls=1100 txns=400 db_wall_ms=60.512 db_wall_ms_per_req=0.605
+DBTIME peer=r2db-api plug=r2db-api-http op=batch concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=800 txns=400 db_wall_ms=35.591 db_wall_ms_per_req=0.356
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_73efe9e7e787/developer@93521 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_73efe9e7e787/runtime@93523 executes=2648 executemany=0 prepared=8 prepared_execs=2605 share=0.984
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=query n=100 p50_ms=1.388 p95_ms=1.518 backend_calls=14.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=mutate n=100 p50_ms=1.454 p95_ms=1.596 backend_calls=15.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=batch n=100 p50_ms=1.602 p95_ms=1.748 backend_calls=19.00 concurrency=1
+CPU peer=MitateDB-api plug=MitateDB-api-http op=query concurrency=1 thread_limit=4 requests=100 wall_ms=127.513 cpu_total_ms=76.937 cpu_main_ms=24.777 cpu_other_ms=52.160
+POOL peer=MitateDB-api plug=MitateDB-api-http op=query lock=perfbase_9ea1cc4785d9 acquire=227 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=query concurrency=1 scope=app conns=2 gone=0 db_calls=1900 txns=500 db_wall_ms=57.406 db_wall_ms_per_req=0.574
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=query concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=14.480 db_wall_ms_per_req=0.145
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=query conn=runtime@93539 executes=334 executemany=0 prepared=3 prepared_execs=305 share=0.913
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@93540 executes=1788 executemany=0 prepared=5 prepared_execs=1748 share=0.978
+CPU peer=MitateDB-api plug=MitateDB-api-http op=mutate concurrency=1 thread_limit=4 requests=100 wall_ms=99.124 cpu_total_ms=60.665 cpu_main_ms=23.894 cpu_other_ms=36.771
+POOL peer=MitateDB-api plug=MitateDB-api-http op=mutate lock=perfbase_9ea1cc4785d9 acquire=449 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=mutate concurrency=1 scope=app conns=2 gone=0 db_calls=1100 txns=400 db_wall_ms=35.086 db_wall_ms_per_req=0.351
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=mutate concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=14.135 db_wall_ms_per_req=0.141
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=runtime@93539 executes=664 executemany=0 prepared=4 prepared_execs=631 share=0.950
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@93540 executes=2668 executemany=0 prepared=6 prepared_execs=2625 share=0.984
+CPU peer=MitateDB-api plug=MitateDB-api-http op=batch concurrency=1 thread_limit=4 requests=100 wall_ms=230.648 cpu_total_ms=131.299 cpu_main_ms=25.251 cpu_other_ms=106.048
+POOL peer=MitateDB-api plug=MitateDB-api-http op=batch lock=perfbase_9ea1cc4785d9 acquire=671 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=batch concurrency=1 scope=app conns=2 gone=0 db_calls=4700 txns=1200 db_wall_ms=147.310 db_wall_ms_per_req=1.473
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=batch concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=14.746 db_wall_ms_per_req=0.147
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@93539 executes=1434 executemany=0 prepared=6 prepared_execs=1401 share=0.977
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@93540 executes=7068 executemany=0 prepared=6 prepared_execs=7025 share=0.994
+CPU peer=MitateDB-api plug=MitateDB-api-http op=cross_entity concurrency=1 thread_limit=4 requests=100 wall_ms=132.219 cpu_total_ms=77.942 cpu_main_ms=24.582 cpu_other_ms=53.360
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity lock=cap_probe_1_34caaa6d acquire=1 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity lock=perfbase_9ea1cc4785d9 acquire=897 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=cross_entity concurrency=1 scope=app conns=4 gone=0 db_calls=2000 txns=600 db_wall_ms=62.284 db_wall_ms_per_req=0.623
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=cross_entity concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=14.550 db_wall_ms_per_req=0.146
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@93553 executes=1 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@93554 executes=0 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@93539 executes=1874 executemany=0 prepared=9 prepared_execs=1828 share=0.975
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@93540 executes=8848 executemany=0 prepared=6 prepared_execs=1730 share=0.196
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=query n=100 p50_ms=1.266 p95_ms=1.381 backend_calls=21.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=mutate n=100 p50_ms=0.986 p95_ms=1.084 backend_calls=13.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=batch n=100 p50_ms=2.238 p95_ms=2.410 backend_calls=49.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=cross_entity n=100 p50_ms=1.311 p95_ms=1.410 backend_calls=22.00 concurrency=1
+CPU peer=r2db-api plug=r2db-api-socket op=query concurrency=1 thread_limit=4 requests=100 wall_ms=484.182 cpu_total_ms=392.894 cpu_main_ms=313.560 cpu_other_ms=79.334
+POOL peer=r2db-api plug=r2db-api-socket op=query role=perfbase_e8d1c51479f9/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=query role=perfbase_e8d1c51479f9/runtime size=32 acquire=111 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+DBTIME peer=r2db-api plug=r2db-api-socket op=query concurrency=1 scope=app conns=2 gone=0 db_calls=600 txns=200 db_wall_ms=48.813 db_wall_ms_per_req=0.488
+DBTIME peer=r2db-api plug=r2db-api-socket op=query concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=800 txns=400 db_wall_ms=37.757 db_wall_ms_per_req=0.378
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_e8d1c51479f9/developer@93579 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_e8d1c51479f9/runtime@93580 executes=668 executemany=0 prepared=6 prepared_execs=633 share=0.948
+CPU peer=r2db-api plug=r2db-api-socket op=mutate concurrency=1 thread_limit=4 requests=100 wall_ms=494.435 cpu_total_ms=397.667 cpu_main_ms=315.316 cpu_other_ms=82.351
+POOL peer=r2db-api plug=r2db-api-socket op=mutate role=perfbase_e8d1c51479f9/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=mutate role=perfbase_e8d1c51479f9/runtime size=32 acquire=221 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+DBTIME peer=r2db-api plug=r2db-api-socket op=mutate concurrency=1 scope=app conns=2 gone=0 db_calls=700 txns=400 db_wall_ms=56.575 db_wall_ms_per_req=0.566
+DBTIME peer=r2db-api plug=r2db-api-socket op=mutate concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=800 txns=400 db_wall_ms=38.640 db_wall_ms_per_req=0.386
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_e8d1c51479f9/developer@93579 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_e8d1c51479f9/runtime@93580 executes=1438 executemany=0 prepared=8 prepared_execs=1395 share=0.970
+CPU peer=r2db-api plug=r2db-api-socket op=batch concurrency=1 thread_limit=4 requests=100 wall_ms=514.363 cpu_total_ms=413.114 cpu_main_ms=316.277 cpu_other_ms=96.837
+POOL peer=r2db-api plug=r2db-api-socket op=batch role=perfbase_e8d1c51479f9/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=batch role=perfbase_e8d1c51479f9/runtime size=32 acquire=331 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+DBTIME peer=r2db-api plug=r2db-api-socket op=batch concurrency=1 scope=app conns=2 gone=0 db_calls=1100 txns=400 db_wall_ms=65.752 db_wall_ms_per_req=0.658
+DBTIME peer=r2db-api plug=r2db-api-socket op=batch concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=800 txns=400 db_wall_ms=39.069 db_wall_ms_per_req=0.391
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_e8d1c51479f9/developer@93579 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_e8d1c51479f9/runtime@93580 executes=2648 executemany=0 prepared=8 prepared_execs=2605 share=0.984
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=query n=100 p50_ms=4.837 p95_ms=4.981 backend_calls=14.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=mutate n=100 p50_ms=4.937 p95_ms=5.133 backend_calls=15.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=batch n=100 p50_ms=5.137 p95_ms=5.336 backend_calls=19.00 concurrency=1
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=query concurrency=1 thread_limit=4 requests=100 wall_ms=476.907 cpu_total_ms=398.663 cpu_main_ms=301.772 cpu_other_ms=96.891
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=query lock=perfbase_14754dc0d276 acquire=227 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=query concurrency=1 scope=app conns=2 gone=0 db_calls=1900 txns=500 db_wall_ms=66.612 db_wall_ms_per_req=0.666
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=query concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=25.587 db_wall_ms_per_req=0.256
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=query conn=runtime@93599 executes=334 executemany=0 prepared=5 prepared_execs=303 share=0.907
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@93600 executes=1788 executemany=0 prepared=5 prepared_execs=1748 share=0.978
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=mutate concurrency=1 thread_limit=4 requests=100 wall_ms=451.597 cpu_total_ms=384.705 cpu_main_ms=303.720 cpu_other_ms=80.985
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=mutate lock=perfbase_14754dc0d276 acquire=449 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=mutate concurrency=1 scope=app conns=2 gone=0 db_calls=1100 txns=400 db_wall_ms=50.867 db_wall_ms_per_req=0.509
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=mutate concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=17.157 db_wall_ms_per_req=0.172
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=runtime@93599 executes=664 executemany=0 prepared=6 prepared_execs=629 share=0.947
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@93600 executes=2668 executemany=0 prepared=6 prepared_execs=2625 share=0.984
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=batch concurrency=1 thread_limit=4 requests=100 wall_ms=584.174 cpu_total_ms=454.144 cpu_main_ms=304.173 cpu_other_ms=149.971
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=batch lock=perfbase_14754dc0d276 acquire=671 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=batch concurrency=1 scope=app conns=2 gone=0 db_calls=4700 txns=1200 db_wall_ms=157.256 db_wall_ms_per_req=1.573
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=batch concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=26.894 db_wall_ms_per_req=0.269
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@93599 executes=1434 executemany=0 prepared=6 prepared_execs=1393 share=0.971
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@93600 executes=7068 executemany=0 prepared=6 prepared_execs=7025 share=0.994
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity concurrency=1 thread_limit=4 requests=100 wall_ms=487.909 cpu_total_ms=404.814 cpu_main_ms=305.327 cpu_other_ms=99.487
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity lock=cap_probe_1_5c84f812 acquire=1 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity lock=perfbase_14754dc0d276 acquire=897 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity concurrency=1 scope=app conns=4 gone=0 db_calls=2000 txns=600 db_wall_ms=78.627 db_wall_ms_per_req=0.786
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity concurrency=1 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=200 txns=200 db_wall_ms=17.639 db_wall_ms_per_req=0.176
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@93617 executes=1 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@93618 executes=0 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@93599 executes=1874 executemany=0 prepared=9 prepared_execs=1828 share=0.975
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@93600 executes=8848 executemany=0 prepared=6 prepared_execs=1730 share=0.196
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=query n=100 p50_ms=4.630 p95_ms=5.892 backend_calls=21.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=mutate n=100 p50_ms=4.376 p95_ms=5.662 backend_calls=13.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=batch n=100 p50_ms=5.687 p95_ms=7.008 backend_calls=49.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity n=100 p50_ms=4.733 p95_ms=6.093 backend_calls=22.00 concurrency=1
+```
+```
+
+#### K=32 `--warmup 3 --n 15 --concurrency 32`
+
+```
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=d7a7500 date=2026-09-28
+CPU peer=r2db-api plug=r2db-api op=query concurrency=32 thread_limit=default requests=480 wall_ms=23.189 cpu_total_ms=22.379 cpu_main_ms=22.376 cpu_other_ms=0.003
+CPU peer=r2db-api plug=r2db-api op=mutate concurrency=32 thread_limit=default requests=480 wall_ms=157.492 cpu_total_ms=156.612 cpu_main_ms=156.609 cpu_other_ms=0.003
+CPU peer=r2db-api plug=r2db-api op=batch concurrency=32 thread_limit=default requests=480 wall_ms=959.307 cpu_total_ms=957.614 cpu_main_ms=957.611 cpu_other_ms=0.003
+PERF peer=r2db-api plug=r2db-api transport=in-process op=query n=15 p50_ms=1.517 p95_ms=1.740 backend_calls=1.00 concurrency=32
+PERF peer=r2db-api plug=r2db-api transport=in-process op=mutate n=15 p50_ms=10.582 p95_ms=15.977 backend_calls=1.00 concurrency=32
+PERF peer=r2db-api plug=r2db-api transport=in-process op=batch n=15 p50_ms=63.713 p95_ms=91.481 backend_calls=1.00 concurrency=32
+CPU peer=MitateDB-api plug=MitateDB-api op=query concurrency=32 thread_limit=default requests=480 wall_ms=30.325 cpu_total_ms=29.445 cpu_main_ms=29.442 cpu_other_ms=0.003
+CPU peer=MitateDB-api plug=MitateDB-api op=mutate concurrency=32 thread_limit=default requests=480 wall_ms=17.210 cpu_total_ms=16.320 cpu_main_ms=16.318 cpu_other_ms=0.002
+CPU peer=MitateDB-api plug=MitateDB-api op=batch concurrency=32 thread_limit=default requests=480 wall_ms=51.257 cpu_total_ms=50.424 cpu_main_ms=50.414 cpu_other_ms=0.010
+CPU peer=MitateDB-api plug=MitateDB-api op=cross_entity concurrency=32 thread_limit=default requests=480 wall_ms=28.548 cpu_total_ms=27.687 cpu_main_ms=27.683 cpu_other_ms=0.004
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=query n=15 p50_ms=2.030 p95_ms=2.241 backend_calls=11.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=mutate n=15 p50_ms=1.122 p95_ms=1.361 backend_calls=7.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=batch n=15 p50_ms=3.228 p95_ms=4.237 backend_calls=37.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=cross_entity n=15 p50_ms=1.905 p95_ms=2.055 backend_calls=16.00 concurrency=32
+CPU peer=r2db-api plug=r2db-api-http op=query concurrency=32 thread_limit=4 requests=480 wall_ms=438.250 cpu_total_ms=591.218 cpu_main_ms=109.320 cpu_other_ms=481.898
+POOL peer=r2db-api plug=r2db-api-http op=query role=perfbase_ad4d86316d7d/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=query role=perfbase_ad4d86316d7d/runtime size=32 acquire=577 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+DBTIME peer=r2db-api plug=r2db-api-http op=query concurrency=32 scope=app conns=5 gone=0 db_calls=2880 txns=960 db_wall_ms=513.376 db_wall_ms_per_req=1.070
+DBTIME peer=r2db-api plug=r2db-api-http op=query concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=3840 txns=1920 db_wall_ms=703.870 db_wall_ms_per_req=1.466
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_ad4d86316d7d/developer@93758 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_ad4d86316d7d/runtime@93764 executes=859 executemany=0 prepared=6 prepared_execs=826 share=0.962
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_ad4d86316d7d/runtime@93760 executes=896 executemany=0 prepared=6 prepared_execs=861 share=0.961
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_ad4d86316d7d/runtime@93765 executes=853 executemany=0 prepared=6 prepared_execs=820 share=0.961
+PREPARED peer=r2db-api plug=r2db-api-http op=query conn=perfbase_ad4d86316d7d/runtime@93766 executes=859 executemany=0 prepared=6 prepared_execs=826 share=0.962
+CPU peer=r2db-api plug=r2db-api-http op=mutate concurrency=32 thread_limit=4 requests=480 wall_ms=479.818 cpu_total_ms=644.030 cpu_main_ms=115.520 cpu_other_ms=528.510
+POOL peer=r2db-api plug=r2db-api-http op=mutate role=perfbase_ad4d86316d7d/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=mutate role=perfbase_ad4d86316d7d/runtime size=32 acquire=1153 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+DBTIME peer=r2db-api plug=r2db-api-http op=mutate concurrency=32 scope=app conns=5 gone=0 db_calls=3360 txns=1920 db_wall_ms=614.439 db_wall_ms_per_req=1.280
+DBTIME peer=r2db-api plug=r2db-api-http op=mutate concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=3842 txns=1921 db_wall_ms=708.155 db_wall_ms_per_req=1.475
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_ad4d86316d7d/developer@93758 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_ad4d86316d7d/runtime@93764 executes=1867 executemany=0 prepared=8 prepared_execs=1824 share=0.977
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_ad4d86316d7d/runtime@93765 executes=1861 executemany=0 prepared=8 prepared_execs=1818 share=0.977
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_ad4d86316d7d/runtime@93766 executes=1867 executemany=0 prepared=8 prepared_execs=1824 share=0.977
+PREPARED peer=r2db-api plug=r2db-api-http op=mutate conn=perfbase_ad4d86316d7d/runtime@93760 executes=1904 executemany=0 prepared=8 prepared_execs=1861 share=0.977
+CPU peer=r2db-api plug=r2db-api-http op=batch concurrency=32 thread_limit=4 requests=480 wall_ms=575.665 cpu_total_ms=775.738 cpu_main_ms=125.333 cpu_other_ms=650.405
+POOL peer=r2db-api plug=r2db-api-http op=batch role=perfbase_ad4d86316d7d/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-http op=batch role=perfbase_ad4d86316d7d/runtime size=32 acquire=1729 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+DBTIME peer=r2db-api plug=r2db-api-http op=batch concurrency=32 scope=app conns=5 gone=0 db_calls=5280 txns=1920 db_wall_ms=850.879 db_wall_ms_per_req=1.773
+DBTIME peer=r2db-api plug=r2db-api-http op=batch concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=3842 txns=1921 db_wall_ms=775.070 db_wall_ms_per_req=1.615
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_ad4d86316d7d/developer@93758 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_ad4d86316d7d/runtime@93765 executes=3445 executemany=0 prepared=8 prepared_execs=3402 share=0.988
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_ad4d86316d7d/runtime@93764 executes=3451 executemany=0 prepared=8 prepared_execs=3408 share=0.988
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_ad4d86316d7d/runtime@93760 executes=3488 executemany=0 prepared=8 prepared_execs=3445 share=0.988
+PREPARED peer=r2db-api plug=r2db-api-http op=batch conn=perfbase_ad4d86316d7d/runtime@93766 executes=3451 executemany=0 prepared=8 prepared_execs=3408 share=0.988
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=query n=15 p50_ms=28.868 p95_ms=31.296 backend_calls=14.00 concurrency=32
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=mutate n=15 p50_ms=30.564 p95_ms=37.904 backend_calls=15.00 concurrency=32
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=batch n=15 p50_ms=37.001 p95_ms=46.747 backend_calls=19.00 concurrency=32
+CPU peer=MitateDB-api plug=MitateDB-api-http op=query concurrency=32 thread_limit=4 requests=480 wall_ms=562.456 cpu_total_ms=481.284 cpu_main_ms=109.376 cpu_other_ms=371.908
+POOL peer=MitateDB-api plug=MitateDB-api-http op=query lock=perfbase_3149b9d5ceab acquire=1159 waits=558 wait_total_ms=1217.444 wait_max_ms=8.174
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=query concurrency=32 scope=app conns=2 gone=0 db_calls=9120 txns=2400 db_wall_ms=546.929 db_wall_ms_per_req=1.139
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=query concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=960 txns=960 db_wall_ms=193.137 db_wall_ms_per_req=0.402
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=query conn=runtime@93779 executes=1732 executemany=0 prepared=9 prepared_execs=1673 share=0.966
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=query conn=developer@93780 executes=9244 executemany=0 prepared=5 prepared_execs=9204 share=0.996
+CPU peer=MitateDB-api plug=MitateDB-api-http op=mutate concurrency=32 thread_limit=4 requests=480 wall_ms=424.351 cpu_total_ms=379.386 cpu_main_ms=103.776 cpu_other_ms=275.610
+POOL peer=MitateDB-api plug=MitateDB-api-http op=mutate lock=perfbase_3149b9d5ceab acquire=2313 waits=1116 wait_total_ms=2082.047 wait_max_ms=30.775
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=mutate concurrency=32 scope=app conns=2 gone=0 db_calls=5280 txns=1920 db_wall_ms=250.962 db_wall_ms_per_req=0.523
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=mutate concurrency=32 scope=platform sessions=1 connect_wall_ms=2.638 db_calls=961 txns=961 db_wall_ms=219.162 db_wall_ms_per_req=0.462
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=runtime@93779 executes=3460 executemany=0 prepared=10 prepared_execs=3395 share=0.981
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=mutate conn=developer@93780 executes=13852 executemany=0 prepared=6 prepared_execs=13809 share=0.997
+CPU peer=MitateDB-api plug=MitateDB-api-http op=batch concurrency=32 thread_limit=4 requests=480 wall_ms=1076.639 cpu_total_ms=720.901 cpu_main_ms=114.544 cpu_other_ms=606.357
+POOL peer=MitateDB-api plug=MitateDB-api-http op=batch lock=perfbase_3149b9d5ceab acquire=3467 waits=1674 wait_total_ms=5107.784 wait_max_ms=30.775
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=batch concurrency=32 scope=app conns=2 gone=0 db_calls=22560 txns=5760 db_wall_ms=824.396 db_wall_ms_per_req=1.717
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=batch concurrency=32 scope=platform sessions=1 connect_wall_ms=2.580 db_calls=961 txns=961 db_wall_ms=214.852 db_wall_ms_per_req=0.453
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=batch conn=runtime@93779 executes=7492 executemany=0 prepared=16 prepared_execs=7401 share=0.988
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=batch conn=developer@93780 executes=36892 executemany=0 prepared=6 prepared_execs=36849 share=0.999
+CPU peer=MitateDB-api plug=MitateDB-api-http op=cross_entity concurrency=32 thread_limit=4 requests=480 wall_ms=566.902 cpu_total_ms=452.173 cpu_main_ms=112.218 cpu_other_ms=339.955
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity lock=cap_probe_1_719f1470 acquire=1 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity lock=perfbase_3149b9d5ceab acquire=4625 waits=2232 wait_total_ms=6518.476 wait_max_ms=30.775
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=cross_entity concurrency=32 scope=app conns=4 gone=0 db_calls=9600 txns=2880 db_wall_ms=395.865 db_wall_ms_per_req=0.825
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=cross_entity concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=960 txns=960 db_wall_ms=195.892 db_wall_ms_per_req=0.408
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@93804 executes=1 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@93805 executes=0 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=runtime@93779 executes=9796 executemany=0 prepared=17 prepared_execs=9690 share=0.989
+PREPARED peer=MitateDB-api plug=MitateDB-api-http op=cross_entity conn=developer@93780 executes=46128 executemany=0 prepared=6 prepared_execs=9186 share=0.199
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=query n=15 p50_ms=36.928 p95_ms=39.536 backend_calls=21.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=mutate n=15 p50_ms=26.282 p95_ms=35.421 backend_calls=13.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=batch n=15 p50_ms=69.825 p95_ms=81.381 backend_calls=49.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=cross_entity n=15 p50_ms=37.288 p95_ms=39.887 backend_calls=22.00 concurrency=32
+CPU peer=r2db-api plug=r2db-api-socket op=query concurrency=32 thread_limit=4 requests=480 wall_ms=2072.362 cpu_total_ms=2457.744 cpu_main_ms=1601.485 cpu_other_ms=856.259
+POOL peer=r2db-api plug=r2db-api-socket op=query role=perfbase_5ca13b9d9e14/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=query role=perfbase_5ca13b9d9e14/runtime size=32 acquire=577 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+DBTIME peer=r2db-api plug=r2db-api-socket op=query concurrency=32 scope=app conns=5 gone=0 db_calls=2880 txns=960 db_wall_ms=869.818 db_wall_ms_per_req=1.812
+DBTIME peer=r2db-api plug=r2db-api-socket op=query concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=3840 txns=1920 db_wall_ms=1306.472 db_wall_ms_per_req=2.722
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_5ca13b9d9e14/developer@93834 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_5ca13b9d9e14/runtime@93840 executes=853 executemany=0 prepared=6 prepared_execs=816 share=0.957
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_5ca13b9d9e14/runtime@93835 executes=896 executemany=0 prepared=6 prepared_execs=859 share=0.959
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_5ca13b9d9e14/runtime@93841 executes=853 executemany=0 prepared=6 prepared_execs=820 share=0.961
+PREPARED peer=r2db-api plug=r2db-api-socket op=query conn=perfbase_5ca13b9d9e14/runtime@93839 executes=865 executemany=0 prepared=6 prepared_execs=832 share=0.962
+CPU peer=r2db-api plug=r2db-api-socket op=mutate concurrency=32 thread_limit=4 requests=480 wall_ms=2125.689 cpu_total_ms=2547.886 cpu_main_ms=1629.055 cpu_other_ms=918.831
+POOL peer=r2db-api plug=r2db-api-socket op=mutate role=perfbase_5ca13b9d9e14/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=mutate role=perfbase_5ca13b9d9e14/runtime size=32 acquire=1153 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+DBTIME peer=r2db-api plug=r2db-api-socket op=mutate concurrency=32 scope=app conns=5 gone=0 db_calls=3360 txns=1920 db_wall_ms=1135.155 db_wall_ms_per_req=2.365
+DBTIME peer=r2db-api plug=r2db-api-socket op=mutate concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=3842 txns=1921 db_wall_ms=1264.746 db_wall_ms_per_req=2.635
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_5ca13b9d9e14/developer@93834 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_5ca13b9d9e14/runtime@93841 executes=1861 executemany=0 prepared=8 prepared_execs=1818 share=0.977
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_5ca13b9d9e14/runtime@93839 executes=1866 executemany=0 prepared=8 prepared_execs=1823 share=0.977
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_5ca13b9d9e14/runtime@93835 executes=1911 executemany=0 prepared=8 prepared_execs=1864 share=0.975
+PREPARED peer=r2db-api plug=r2db-api-socket op=mutate conn=perfbase_5ca13b9d9e14/runtime@93840 executes=1861 executemany=0 prepared=8 prepared_execs=1814 share=0.975
+CPU peer=r2db-api plug=r2db-api-socket op=batch concurrency=32 thread_limit=4 requests=480 wall_ms=2243.284 cpu_total_ms=2732.379 cpu_main_ms=1640.622 cpu_other_ms=1091.757
+POOL peer=r2db-api plug=r2db-api-socket op=batch role=perfbase_5ca13b9d9e14/developer size=32 acquire=2 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=1
+POOL peer=r2db-api plug=r2db-api-socket op=batch role=perfbase_5ca13b9d9e14/runtime size=32 acquire=1729 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+DBTIME peer=r2db-api plug=r2db-api-socket op=batch concurrency=32 scope=app conns=5 gone=0 db_calls=5280 txns=1920 db_wall_ms=1511.751 db_wall_ms_per_req=3.149
+DBTIME peer=r2db-api plug=r2db-api-socket op=batch concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=3842 txns=1921 db_wall_ms=1385.632 db_wall_ms_per_req=2.887
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_5ca13b9d9e14/developer@93834 executes=21 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_5ca13b9d9e14/runtime@93841 executes=3467 executemany=0 prepared=8 prepared_execs=3424 share=0.988
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_5ca13b9d9e14/runtime@93835 executes=3495 executemany=0 prepared=8 prepared_execs=3446 share=0.986
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_5ca13b9d9e14/runtime@93840 executes=3434 executemany=0 prepared=8 prepared_execs=3385 share=0.986
+PREPARED peer=r2db-api plug=r2db-api-socket op=batch conn=perfbase_5ca13b9d9e14/runtime@93839 executes=3439 executemany=0 prepared=8 prepared_execs=3396 share=0.987
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=query n=15 p50_ms=137.486 p95_ms=144.378 backend_calls=14.00 concurrency=32
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=mutate n=15 p50_ms=139.778 p95_ms=149.785 backend_calls=15.00 concurrency=32
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=batch n=15 p50_ms=147.695 p95_ms=158.195 backend_calls=19.00 concurrency=32
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=query concurrency=32 thread_limit=4 requests=480 wall_ms=2147.333 cpu_total_ms=2213.648 cpu_main_ms=1577.751 cpu_other_ms=635.897
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=query lock=perfbase_414bba9d27bc acquire=1159 waits=556 wait_total_ms=1816.279 wait_max_ms=7.026
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=query concurrency=32 scope=app conns=2 gone=0 db_calls=9120 txns=2400 db_wall_ms=786.683 db_wall_ms_per_req=1.639
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=query concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=960 txns=960 db_wall_ms=357.535 db_wall_ms_per_req=0.745
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=query conn=runtime@93864 executes=1732 executemany=0 prepared=15 prepared_execs=1645 share=0.950
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=query conn=developer@93865 executes=9244 executemany=0 prepared=5 prepared_execs=9204 share=0.996
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=mutate concurrency=32 thread_limit=4 requests=480 wall_ms=1995.349 cpu_total_ms=2113.840 cpu_main_ms=1565.971 cpu_other_ms=547.869
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=mutate lock=perfbase_414bba9d27bc acquire=2313 waits=1112 wait_total_ms=3215.567 wait_max_ms=37.142
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=mutate concurrency=32 scope=app conns=2 gone=0 db_calls=5280 txns=1920 db_wall_ms=469.110 db_wall_ms_per_req=0.977
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=mutate concurrency=32 scope=platform sessions=1 connect_wall_ms=2.641 db_calls=961 txns=961 db_wall_ms=400.158 db_wall_ms_per_req=0.839
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=runtime@93864 executes=3460 executemany=0 prepared=16 prepared_execs=3367 share=0.973
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=mutate conn=developer@93865 executes=13852 executemany=0 prepared=6 prepared_execs=13809 share=0.997
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=batch concurrency=32 thread_limit=4 requests=480 wall_ms=2651.762 cpu_total_ms=2448.662 cpu_main_ms=1582.182 cpu_other_ms=866.480
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=batch lock=perfbase_414bba9d27bc acquire=3467 waits=1670 wait_total_ms=6855.898 wait_max_ms=37.142
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=batch concurrency=32 scope=app conns=2 gone=0 db_calls=22560 txns=5760 db_wall_ms=1039.630 db_wall_ms_per_req=2.166
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=batch concurrency=32 scope=platform sessions=1 connect_wall_ms=2.664 db_calls=961 txns=961 db_wall_ms=359.423 db_wall_ms_per_req=0.754
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=runtime@93864 executes=7492 executemany=0 prepared=24 prepared_execs=7367 share=0.983
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=batch conn=developer@93865 executes=36892 executemany=0 prepared=6 prepared_execs=36849 share=0.999
+CPU peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity concurrency=32 thread_limit=4 requests=480 wall_ms=2155.417 cpu_total_ms=2191.265 cpu_main_ms=1602.857 cpu_other_ms=588.408
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity lock=cap_probe_1_3d9104f4 acquire=1 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity lock=perfbase_414bba9d27bc acquire=4625 waits=2228 wait_total_ms=8822.115 wait_max_ms=37.142
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity concurrency=32 scope=app conns=4 gone=0 db_calls=9600 txns=2880 db_wall_ms=613.251 db_wall_ms_per_req=1.278
+DBTIME peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity concurrency=32 scope=platform sessions=0 connect_wall_ms=0.000 db_calls=960 txns=960 db_wall_ms=324.808 db_wall_ms_per_req=0.677
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@93900 executes=1 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@93901 executes=0 executemany=0 prepared=0 prepared_execs=0 share=0.000
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=runtime@93864 executes=9796 executemany=0 prepared=25 prepared_execs=9664 share=0.987
+PREPARED peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity conn=developer@93865 executes=46128 executemany=0 prepared=6 prepared_execs=9186 share=0.199
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=query n=15 p50_ms=142.583 p95_ms=150.958 backend_calls=21.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=mutate n=15 p50_ms=131.104 p95_ms=146.901 backend_calls=13.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=batch n=15 p50_ms=174.617 p95_ms=188.120 backend_calls=49.00 concurrency=32
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity n=15 p50_ms=141.771 p95_ms=155.670 backend_calls=22.00 concurrency=32
+```
+```
+
+### 5.2 事実 (§5.1 の数字だけから。判断語を含まない)
+
+1. **`query` の p50 (ms)**。基準は v0.2 §3 の 2 の「既定 K1」「既定 K32」列の転記。相対差 = (今回 − 基準) / 基準。
+
+| plug | 基準 K=1 | 今回 K=1 | 相対差 K=1 | 基準 K=32 | 今回 K=32 | 相対差 K=32 |
+|---|---|---|---|---|---|---|
+| r2db-api-http | 1.478 | 1.388 | -6.1% | 49.255 | 28.868 | -41.4% (K=32/K=1 = 20.8) |
+| r2db-api-socket | 4.834 | 4.837 | +0.1% | 153.881 | 137.486 | -10.7% (K=32/K=1 = 28.4) |
+| MitateDB-api-http | 6.301 | 1.266 | -79.9% | 188.586 | 36.928 | -80.4% (K=32/K=1 = 29.2) |
+| MitateDB-api-socket | 9.869 | 4.630 | -53.1% | 291.281 | 142.583 | -51.0% (K=32/K=1 = 30.8) |
+
+2. **`CPU` 行の `thread_limit=`**: PostgreSQL の 4 plug の各行 は K=1・K=32 とも `thread_limit=4` (4 plug × 2 run = 8 行、`op=query`。他の op も同じ)。in-process の 2 plug は D-10 のとおり accessor を持たない [監督: 値]。
+3. **MitateDB 2 plug の `DBTIME scope=platform`**: 基準は K=1 で connect_wall_ms 4.189 / 4.485 ms/req、sessions 2/req (v0.2 §3 の 7)。今回は K=1・K=32 とも `sessions=0 connect_wall_ms=0.000` (http / socket、`op=query`)。db_wall_ms_per_req は K=1 で 0.145 / 0.256、K=32 で 0.402 / 0.745 ms。
+4. どの run も `LIMIT_EXCEEDED` で欠けていない (`PERF` 行は run ごと 21 行 = 6 plug、in-process 2 plug は 3 op)。r2db の `POOL` 行の waits は全 run で 0。in-process 2 plug の `CPU` 行は `thread_limit=default` (accessor を持たない。WO §7.3 D-10)。
+
+### 5.3 判断 (監督)
+
+判定規則 (WO §10.1 の逐語。計測前に固定):
+
+```text
+D-12 判定規則 (計測前に固定): 同じ道具・同じ条件 (`DSA_PERF_POOL_SIZE=32`、K=1 `--warmup 10 --n 100`、K=32 `--warmup 3 --n 15`、`DSA_PERF_THREAD_LIMIT` 無し)、基準 = 設計メモ v0.2 §2.2 の既定 run (K=1 :625-、K=32 :1213-)。合格: query p50 (K=32) が 4 plug 中 3 plug 以上で 10% を超えて改善、どの plug も 10% を超えて悪化しない、K=1 の p50 が ±10% 内 (MitateDB 2 plug の K=1 は D-11 で connect が消えるので「悪化しない」だけを見る)。設計メモ v0.3 §5 に逐語。8 倍は WP-3 では判定しない (床)。
+```
+
+| 項 | r2db-api-http | r2db-api-socket | MitateDB-api-http | MitateDB-api-socket |
+|---|---|---|---|---|
+| K=32 の p50 が 10% を超えて改善 (4 plug 中 3 plug 以上) | 成立 (−41.4%) | 成立 (−10.7%) | 成立 (−80.4%) | 成立 (−51.1%) |
+| K=32 の p50 が 10% を超えて悪化しない | 成立 | 成立 | 成立 | 成立 |
+| K=1 の p50 が ±10% 内 (MitateDB は悪化しないことだけ) | 成立 (−6.1%) | 成立 (+0.1%) | 成立 (−79.9%、悪化なし) | 成立 (−53.1%、悪化なし) |
+
+**判定**: **D-12 成立** (改善 >10% は 4/4 plug、悪化 0、K=1 は r2db 2 plug が ±10% 内、MitateDB 2 plug は悪化なし)。8 倍 (`RM` §0.1.4 の 2) は現行 plug では 20.8 / 28.4 / 29.2 / 30.8 倍で不成立 — WO §7.1 の床 (client が同 GIL) のとおりで、判定は §6 (D-16) に委ねる。WP-3 の効きの読み (規則の出力ではなく観察): thread limiter 4 は K=32 で −41% / −11% (r2db)、MitateDB は platform pool で K=1 から −80% / −53% (per-call `psycopg.connect` ×2 が消えた分) が主。
+
+## 6. real-server plug の実測 (D-16。監督が埋める)
+
+**目的**: R-101 の閉止を D-16 (`RM` §0.1.4 の 2 の改訂形) で判定する。8 倍を満たさないときは、その実測を R-113 (multi-process worker) の出発点にする (WO §10.1)。
+
+**方法**: `tools/perf_baseline.py --real-server r2db-api` と `--real-server MitateDB-api`。server は `conformance-tests/registry.json` の `composition_roots` の launcher (C-26) が production の composition root で別 process に起動する (`start(ceilings={"data": 1, "control": 1})`、thread limit は既定 4)。client は子 process (`--client-processes` 既定 8、実際の数は min(8, K))。K=1 と K=32 を取り、K=32 は 2 run。いずれも `--warmup 3 --n 15`。`REALCPU` は床の可視化であり判定に使わない。server 側の `CPU` / `DBTIME` 行は出ない (別 process。WO §7.3 の D-15)。実行順は [監督]。道具の木は `d7a7500` (r101b、WP-3 と WP-4 の merge)。
+
+### 6.1 実測 (逐語)
+
+#### r2db-api K=1
+
+```
+[監督: PERFRUN / REALPERF / REALCPU 行]
+```
+
+#### r2db-api K=32 (1 回目)
+
+```
+[監督: PERFRUN / REALPERF / REALCPU 行]
+```
+
+#### r2db-api K=32 (2 回目)
+
+```
+[監督: PERFRUN / REALPERF / REALCPU 行]
+```
+
+#### MitateDB-api K=1
+
+```
+[監督: PERFRUN / REALPERF / REALCPU 行]
+```
+
+#### MitateDB-api K=32 (1 回目)
+
+```
+[監督: PERFRUN / REALPERF / REALCPU 行]
+```
+
+#### MitateDB-api K=32 (2 回目)
+
+```
+[監督: PERFRUN / REALPERF / REALCPU 行]
+```
+
+### 6.2 事実 (§6.1 の数字だけから。判断語を含まない)
+
+1. **`query` の p50 (ms) と K=32 / K=1 の比**:
+
+| peer | K=1 | K=32 (1 回目) | K=32 (2 回目) | 比 (1 回目) | 比 (2 回目) |
+|---|---|---|---|---|---|
+| r2db-api | [監督] | [監督] | [監督] | [監督] | [監督] |
+| MitateDB-api | [監督] | [監督] | [監督] | [監督] | [監督] |
+
+2. **ε と δ** (記録のみ。判定に使わない): ε = K=32 の 2 run の p50 の相対差 = [監督: r2db / MitateDB]。δ = max(10%, 2ε) = [監督]。
+3. **`REALCPU`** (床の可視化): `client_processes=` [監督]、`cpu_client_ms` / `requests` = [監督: peer × K]。[監督: 床の可視化の値と式]
+4. **後始末の照合** (WO §10.2 の 4): 各 run の後の `pg_database` / `pg_roles` の差分 [監督]、launcher が起こした uvicorn / nginx の残り [監督]。
+
+### 6.3 判断 (監督)
+
+判定規則 (WO §10.1 の逐語。計測前に固定):
+
+```text
+D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=32 (`--warmup 3 --n 15`) を取り、K=32 は 2 run 取る。query の p50 の K=32 / K=1 の比が両 peer で K=32 の 2 run とも 8 倍以内 = R-101 閉止 (RM §0.1.4 の 2 の改訂形)。ε (K=32 の 2 run の相対差) と δ = max(10%, 2ε) は記録だけで、判定には使わない。本変更セットでは server は 1 process なので 8 倍は満たさない見込み — その実測を設計メモ v0.3 §6 に逐語で残し、R-113 (multi-process、規模 L) の出発点にする。
+```
+
+| peer | K=32 (1 回目) の比 ≤ 8 | K=32 (2 回目) の比 ≤ 8 |
+|---|---|---|
+| r2db-api | [監督] | [監督] |
+| MitateDB-api | [監督] | [監督] |
+
+**判定**: [監督: D-16 の成立 / 不成立]
+**R-101 の閉止**: [監督: 可否]
+**R-113 への申し送り**: [監督]
