@@ -102,6 +102,17 @@ Environment variable contract:
                                            flush()` (D-4's periodic flush
                                            trigger); a latency knob only,
                                            never a correctness one.
+    MITATEDB_THREAD_LIMIT                 optional, unset or empty
+                                           defaults to `DEFAULT_THREAD_
+                                           LIMIT` (4) -- `run_in_
+                                           threadpool`'s own worker-thread
+                                           limiter for this process' event
+                                           loop (`http.py`'s `create_app(
+                                           ..., thread_limit=)`). A
+                                           positive integer raises or
+                                           lowers it; zero, negative, or
+                                           non-numeric is a startup
+                                           failure naming this variable.
 
 Startup failure policy: every `RuntimeError` below is an intentional,
 loud "refuse to start" -- there is no partial-startup mode.
@@ -128,7 +139,7 @@ from .backend_postgres import PostgresBackend
 from .cell import ApplicationCell, _LimitStateHolder
 from .config import FoundationConfig, role_pool_size
 from .credential_store_postgres import DEFAULT_SCHEMA, PostgresCredentialStore
-from .http import HttpService, create_app
+from .http import DEFAULT_THREAD_LIMIT, HttpService, create_app
 from .identifiers import validate_identifier
 from . import platform_declarations
 from .platform_declarations import (check_control_surface_consistency,
@@ -195,6 +206,26 @@ def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
     return value
 
 
+def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
+    """Same fail-loud discipline as `_optional_float`, for a positive int:
+    unset or empty falls back to `default`, but a non-empty value that is
+    not a positive integer stops startup (`ValueError` naming the
+    variable) rather than silently degrading -- this sizes a worker-
+    thread pool, a resource dimension a deployer's typo should never
+    silently mis-size.
+    """
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
 def _parse_served_apps(raw: str) -> list[str]:
     ids = [item.strip() for item in raw.split(",")]
     ids = [item for item in ids if item]
@@ -244,6 +275,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     """
     env = env if env is not None else os.environ
 
+    thread_limit = _thread_limit_from_env(env, "MITATEDB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT)
     app_pepper = _require(env, "MITATEDB_CREDENTIAL_PEPPER")
     control_pepper = env.get("MITATEDB_CONTROL_CREDENTIAL_PEPPER")
     # R-7: called at startup regardless of whether a control-plane process
@@ -587,7 +619,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             for cell in cells.values():
                 cell._backend.close()
 
-    return create_app(service, request_bytes_limit=config.max_request_bytes, lifespan=_lifespan)
+    return create_app(service, request_bytes_limit=config.max_request_bytes, lifespan=_lifespan, thread_limit=thread_limit)
 
 
 # WP-5: the real assembly logic now lives in `control_composition.py` (its

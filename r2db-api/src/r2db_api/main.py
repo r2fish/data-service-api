@@ -108,6 +108,16 @@ Environment variable contract (P2-D5, updated Q4 WP-1):
                                           (D-4's periodic flush trigger); a
                                           latency knob only, never a
                                           correctness one.
+    R2DB_THREAD_LIMIT                     optional, unset or empty defaults
+                                          to `DEFAULT_THREAD_LIMIT` (4) --
+                                          `run_in_threadpool`'s own worker-
+                                          thread limiter for this process'
+                                          event loop (`http.py`'s
+                                          `create_app(..., thread_limit=)`).
+                                          A positive integer raises or
+                                          lowers it; zero, negative, or
+                                          non-numeric is a startup failure
+                                          naming this variable.
 
 REMOVED (Q4 WP-1, rejected outright if still defined -- see
 `_reject_removed_env_vars`): `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`, `R2DB_
@@ -146,7 +156,7 @@ from .credential_store import (
     PostgresApplicationAuditSink,
     PostgresCredentialStore,
 )
-from .http import create_app
+from .http import DEFAULT_THREAD_LIMIT, create_app
 from . import operation_catalog
 from . import platform_declarations
 from .platform_declarations import (
@@ -271,6 +281,26 @@ def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
     return value
 
 
+def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
+    """Same fail-loud discipline as `_optional_float`, for a positive int:
+    unset or empty falls back to `default`, but a non-empty value that is
+    not a positive integer stops startup (`ValueError` naming the
+    variable) rather than silently degrading -- this sizes a worker-
+    thread pool, a resource dimension a deployer's typo should never
+    silently mis-size.
+    """
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
 def _parse_served_apps(raw: str) -> list[str]:
     slugs = [item.strip() for item in raw.split(",")]
     slugs = [item for item in slugs if item]
@@ -351,6 +381,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
     slugs = _parse_served_apps(_require(env, "R2DB_SERVE_APPS"))
     control_plane_status = _control_plane_status(env)
+    thread_limit = _thread_limit_from_env(env, "R2DB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT)
 
     # Step 2 (F-1/F-2): must run before anything else touches the network
     # -- a deployer who left one of these four defined must find out
@@ -661,7 +692,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             credentials.close()
             durable_audit.close()
 
-    return create_app(service, lifespan=_lifespan)
+    return create_app(service, lifespan=_lifespan, thread_limit=thread_limit)
 
 
 app = build_app()

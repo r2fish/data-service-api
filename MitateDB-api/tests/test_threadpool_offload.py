@@ -35,7 +35,7 @@ import mitatedb_api.http as http_module
 import mitatedb_api.credential_store_postgres as credential_store_postgres_module
 from mitatedb_api.auth import Role
 from mitatedb_api.backend_postgres import PostgresBackend
-from mitatedb_api.cell import ApplicationRuntime, _LimitStateHolder
+from mitatedb_api.cell import ApplicationCell, ApplicationRuntime, _LimitStateHolder
 from mitatedb_api.config import FoundationConfig, role_pool_size
 from mitatedb_api.control_plane import ControlPlaneService
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
@@ -1153,3 +1153,285 @@ def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(platfo
         assert all(principal.application_id == credential_app for principal in results)
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# R-101 WP-3 D-8: `create_app`'s own `thread_limit=` middleware wiring.
+# No real PostgreSQL needed -- `HttpService` itself only requires a
+# `credential_store`/`cell_factory` pair and a `_LimitStateHolder` at
+# construction time (`http.py::HttpService.__init__`'s own fail-closed
+# guard); these tests never reach `_authenticate`'s own store lookup
+# (`ThreadLimitMiddleware` runs before routing, on every http-scope
+# request, success or failure alike), so a stand-in (`None`) is enough.
+# ---------------------------------------------------------------------------
+
+
+def _build_light_service() -> "http_module.HttpService":
+    limit_holder = _LimitStateHolder()
+    return http_module.HttpService(
+        None, lambda application_id: None, limit_holder=limit_holder, max_concurrency=FoundationConfig().max_concurrency,
+    )
+
+
+async def _one_capabilities_request(app) -> None:
+    """The minimal http-scope request completion conditions 79/etc. call
+    "1 回呼ぶ" -- any real http request through the SAME app object is
+    enough (`ThreadLimitMiddleware` runs ahead of routing/auth, so an
+    eventual 401/500 from the unauthenticated stand-in credential store
+    below still exercises it)."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        await client.get("/v1/capabilities")
+
+
+def test_create_app_default_thread_limit_sets_4_on_a_fresh_loop():
+    """Completion condition 79.
+
+    mutation M121 (`mitatedb_api/http.py`): `DEFAULT_THREAD_LIMIT = 40`
+    -- this test's own `== 4` assertion goes red."""
+    import anyio.to_thread
+
+    service = _build_light_service()
+    app = http_module.create_app(service, request_bytes_limit=1_048_576)
+
+    async def _scenario() -> int:
+        await _one_capabilities_request(app)
+        return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+    assert _run(_scenario()) == 4
+
+
+def test_create_app_thread_limit_none_adds_no_middleware():
+    """Completion condition 81.
+
+    mutation M123 (`mitatedb_api/http.py`): add the middleware even when
+    `thread_limit is None` -- this test's own `total_tokens == 40`
+    (untouched) assertion goes red."""
+    import anyio.to_thread
+
+    service = _build_light_service()
+    app = http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=None)
+    assert not any(m.cls is http_module.ThreadLimitMiddleware for m in app.app.user_middleware)
+
+    async def _scenario() -> int:
+        await _one_capabilities_request(app)
+        return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+    assert _run(_scenario()) == 40
+
+
+def test_create_app_explicit_thread_limit_sets_that_value():
+    """Completion condition 83.
+
+    mutation M125 (`mitatedb_api/http.py`): the middleware sets `DEFAULT_
+    THREAD_LIMIT` instead of the value it was constructed with -- this
+    test's own `== 7` assertion goes red (reads `4`)."""
+    import anyio.to_thread
+
+    service = _build_light_service()
+    app = http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=7)
+
+    async def _scenario() -> int:
+        await _one_capabilities_request(app)
+        return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+    assert _run(_scenario()) == 7
+
+
+def test_create_app_middleware_sets_the_limiter_once_per_loop():
+    """Completion conditions 86/87: the middleware sets `total_tokens`
+    only the first time a given (fresh) loop serves a request through it;
+    a DIFFERENT fresh loop gets the same one-time treatment
+    independently. `_run` (`asyncio.run`) gives each call its own fresh
+    loop, so a manual-reset-then-call-again check within ONE loop needs
+    its own scenario, driven on a loop this test creates directly.
+
+    mutation M128 (`mitatedb_api/http.py`): drop the loop-membership
+    check so the middleware sets `total_tokens` on EVERY request -- this
+    test's own second assertion (still `== 3`, unchanged after a manual
+    reset) goes red (would read `4` again).
+    mutation M129 (`mitatedb_api/http.py`): track "configured" with a
+    single instance-wide flag instead of a per-loop set -- this test's
+    own third assertion (loop B independently reaching `4`) goes red."""
+    import anyio.to_thread
+
+    service = _build_light_service()
+    app = http_module.create_app(service, request_bytes_limit=1_048_576)
+
+    loop_a = asyncio.new_event_loop()
+    try:
+        loop_a.run_until_complete(_one_capabilities_request(app))
+
+        async def _read() -> int:
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop_a.run_until_complete(_read()) == 4
+
+        async def _reset_and_call_again() -> int:
+            anyio.to_thread.current_default_thread_limiter().total_tokens = 3
+            await _one_capabilities_request(app)
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop_a.run_until_complete(_reset_and_call_again()) == 3
+    finally:
+        loop_a.close()
+
+    loop_b = asyncio.new_event_loop()
+    try:
+        loop_b.run_until_complete(_one_capabilities_request(app))
+
+        async def _read_b() -> int:
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop_b.run_until_complete(_read_b()) == 4
+    finally:
+        loop_b.close()
+
+
+def test_thread_limit_middleware_call_is_a_coroutine_function():
+    """Completion condition 89: `ThreadLimitMiddleware.__call__` is a
+    coroutine function.
+
+    mutation M131 (`mitatedb_api/http.py`): make `__call__` a plain
+    (non-async) method that itself returns a coroutine -- this test's own
+    `iscoroutinefunction` assertion goes red."""
+    import inspect
+
+    assert inspect.iscoroutinefunction(http_module.ThreadLimitMiddleware.__call__)
+
+
+def test_create_app_default_return_shape_matches_thread_limit_none():
+    """Completion condition 91: the returned value's own shape is the
+    same whether `thread_limit` is left at its default or explicitly
+    `None` -- only the middleware list differs.
+
+    mutation M133 (`mitatedb_api/http.py`): wrap the FINAL returned value
+    in an extra layer instead of adding to the Starlette middleware list
+    -- this test's own `isinstance(app.app, Starlette)` assertion goes
+    red."""
+    from starlette.applications import Starlette
+
+    service = _build_light_service()
+    app_default = http_module.create_app(service, request_bytes_limit=1_048_576)
+    app_none = http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=None)
+
+    assert isinstance(app_default, type(app_none))
+    assert isinstance(app_default.app, Starlette)
+    assert app_default.app.state.service is service
+    default_paths = {r.path for r in app_default.app.routes}
+    none_paths = {r.path for r in app_none.app.routes}
+    assert default_paths == none_paths
+    assert default_paths, "route table must not be empty"
+
+
+# ---------------------------------------------------------------------------
+# D-13: the thread limiter (4, default) bounds how many requests run their
+# synchronous section at once, WITHOUT changing concurrency-slot admission.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# D-13: the thread limiter (4, default) bounds how many requests run their
+# synchronous section at once, WITHOUT changing concurrency-slot admission
+# (still `max_concurrency`, 8 here) or the deadlock-free wait discipline.
+# Real, throwaway-provisioned PostgreSQL (`platform`/`app_a`, same recipe
+# `test_preauth_concurrency_bound.py::preauth_stack` uses) -- `_authenticate`
+# must genuinely succeed so `ApplicationRuntime.capabilities` (the patched
+# blocking point) is ever reached at all.
+# ---------------------------------------------------------------------------
+
+
+def test_thread_limit_bounds_synchronous_concurrency_while_slot_admission_stays_at_the_declared_ceiling(platform, app_a):
+    """Completion conditions 118/119: with `max_concurrency=8` and
+    `create_app`'s own default `thread_limit` (4), 8 concurrent requests
+    are all ADMITTED (their concurrency slot is taken on the event-loop
+    thread, before any of them ever reaches a worker thread) while at
+    most 4 of them ever run their own synchronous section
+    (`ApplicationRuntime.capabilities`) at once; a 9th, sent once the
+    first 8 have already been admitted, is refused with 413 (this peer's
+    own `LIMIT_EXCEEDED` -> 413 status mapping, `http.py`'s own
+    `_STATUS_BY_CODE`, unlike r2db's 429 -- a pre-existing, unrelated
+    cross-peer difference, not something this WP changes); once released,
+    all 8 complete with 200.
+
+    mutation M158 (`mitatedb_api/http.py`): move the handler's own slot
+    acquisition INTO the function delegated to `run_in_threadpool` (so it
+    happens AFTER a worker thread is granted) -- only the (up to 4)
+    requests that already hold a worker thread would then hold a slot at
+    the moment the 9th is sent, so this test's own `resp9.status_code ==
+    413` assertion goes red (the 9th finds a free slot and is served).
+    mutation M159 (`mitatedb_api/http.py`): drop the `total_tokens`
+    assignment from the middleware's own `__call__` -- this test's own
+    `peak == 4` assertion goes red (all 8 requests run their synchronous
+    section concurrently, `peak == 8`)."""
+    read_store = PostgresCredentialStore(
+        platform.api_dsn, pepper="synthetic-test-pepper-r101-wp3-thread-limit-0000", schema=platform.registry_schema,
+    )
+    write_store = PostgresCredentialStore(
+        platform.controlplane_dsn, pepper="synthetic-test-pepper-r101-wp3-thread-limit-0000", schema=platform.registry_schema,
+    )
+    backend = PostgresBackend(app_a.runtime_dsn, app_a.developer_dsn)
+    concurrency = 8
+    config = FoundationConfig(max_concurrency=concurrency, max_requests_per_minute=100_000)
+    limit_holder = _LimitStateHolder()
+    app_cell = ApplicationCell(app_a.app_id, config=config, backend=backend, limit_holder=limit_holder)
+
+    def _cell_factory(application_id: str):
+        assert application_id == app_a.app_id
+        return app_cell
+
+    service = http_module.HttpService(read_store, _cell_factory, limit_holder=limit_holder, max_concurrency=config.max_concurrency)
+    app = http_module.create_app(service, request_bytes_limit=1024)
+    runtime_id, runtime_bearer = write_store.issue(app_a.app_id, Role.RUNTIME)
+
+    lock = threading.Lock()
+    current = 0
+    peak = 0
+    release = threading.Event()
+    original = ApplicationRuntime.capabilities
+
+    def blocking_capabilities(self, *, request_id=None):
+        nonlocal current, peak
+        with lock:
+            current += 1
+            peak = max(peak, current)
+        release.wait(timeout=5.0)
+        with lock:
+            current -= 1
+        return original(self, request_id=request_id)
+
+    async def _scenario():
+        with mock.patch.object(ApplicationRuntime, "capabilities", blocking_capabilities):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+
+                async def _one():
+                    return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {runtime_bearer}"})
+
+                tasks = [asyncio.ensure_future(_one()) for _ in range(concurrency)]
+                await asyncio.sleep(0)
+
+                resp9 = await client.get("/v1/capabilities", headers={"authorization": f"Bearer {runtime_bearer}"})
+                assert resp9.status_code == 413, resp9.text
+
+                # Real worker-thread dispatch needs actual wall-clock time
+                # for the OS scheduler to run the up-to-4 threads the
+                # limiter grants.
+                for _ in range(100):
+                    await asyncio.sleep(0.01)
+                    with lock:
+                        if current == 4:
+                            break
+
+                release.set()
+                return await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)
+
+    try:
+        responses = _run(_scenario())
+    finally:
+        backend.close()
+        read_store.close()
+        write_store.close()
+
+    assert peak == 4, f"synchronous concurrency must be bounded to the thread limiter (4), observed peak={peak}"
+    statuses = [r.status_code for r in responses]
+    assert statuses.count(200) == concurrency, statuses

@@ -43,7 +43,7 @@ from r2db_api.audit import ControlAuditSink
 from r2db_api.control_http import create_control_app
 from r2db_api.control_plane import ControlPlaneService, InMemoryControlBackend
 from r2db_api.errors import FoundationError
-from r2db_api.http import create_app
+from r2db_api.http import DEFAULT_THREAD_LIMIT, create_app
 from r2db_api.limits import ControlPlaneLimits, ResourceLimits, role_pool_size
 from r2db_api.postgres import _RolePool
 from r2db_api.service import ControlAuthority, DataService
@@ -83,8 +83,8 @@ def _auth(secret: str) -> dict[str, str]:
 
 
 @asynccontextmanager
-async def _client(service: DataService):
-    transport = httpx.ASGITransport(app=create_app(service))
+async def _client(service: DataService, *, thread_limit: "int | None" = DEFAULT_THREAD_LIMIT):
+    transport = httpx.ASGITransport(app=create_app(service, thread_limit=thread_limit))
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
         yield client
 
@@ -685,6 +685,314 @@ def test_main_composition_root_wires_pool_size_from_role_pool_size():
         ), f"`{var_name}` must be assigned from `role_pool_size(...)`, not a literal constant"
 
 
+def test_main_composition_root_wires_thread_limit_from_the_env_reader():
+    """Structural (AST) pin, same technique and same reason as `test_
+    main_composition_root_wires_pool_size_from_role_pool_size` above:
+    `build_app` requires a real platform database this file avoids
+    needing. Asserts `create_app(...)`'s own `thread_limit=` keyword
+    references a variable (never a literal, never `None`), and that
+    variable is assigned from calling `_thread_limit_from_env(env,
+    "R2DB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT)` -- completion conditions
+    92/93's own runtime claim (env value reaches the loop's limiter) is
+    the composition of this wiring pin with `_thread_limit_from_env`'s
+    own unit tests below and `create_app`'s own D-8 tests above in this
+    file, never re-executed against a live platform database here.
+
+    mutation M134 (`r2db_api/main.py`): pass `None` instead of the
+    variable when the env is unset -- this test's own `isinstance(...,
+    ast.Name)` assertion goes red (a `None` keyword value is an
+    `ast.Constant`, not an `ast.Name`).
+    mutation M135 (`r2db_api/main.py`): assign the variable from
+    `DEFAULT_THREAD_LIMIT` unconditionally, discarding the env -- this
+    test's own `_thread_limit_from_env` call-site assertion goes red (no
+    assignment calls that function at all).
+    """
+    spec = importlib.util.find_spec("r2db_api.main")
+    assert spec is not None and spec.origin
+    source = pathlib.Path(spec.origin).read_text()
+    tree = ast.parse(source)
+
+    create_app_calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "create_app"
+    ]
+    assert create_app_calls, "no `create_app(...)` call found in r2db_api/main.py"
+    call = create_app_calls[0]
+    thread_limit_kw = next((kw for kw in call.keywords if kw.arg == "thread_limit"), None)
+    assert thread_limit_kw is not None, "`create_app(...)` has no `thread_limit=` keyword"
+    assert isinstance(thread_limit_kw.value, ast.Name), (
+        f"`thread_limit=` must reference a variable, not a literal ({ast.dump(thread_limit_kw.value)})"
+    )
+    var_name = thread_limit_kw.value.id
+    assigns = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == var_name for t in n.targets)
+    ]
+    assert assigns, f"no assignment found for `{var_name}`"
+    assert any(
+        isinstance(a.value, ast.Call) and isinstance(a.value.func, ast.Name) and a.value.func.id == "_thread_limit_from_env"
+        and len(a.value.args) >= 2 and isinstance(a.value.args[1], ast.Constant) and a.value.args[1].value == "R2DB_THREAD_LIMIT"
+        for a in assigns
+    ), f"`{var_name}` must be assigned from `_thread_limit_from_env(env, \"R2DB_THREAD_LIMIT\", ...)`"
+
+
+# ---------------------------------------------------------------------------
+# D-9: `_thread_limit_from_env`'s own strict-parse contract (unit-level,
+# no real platform database -- see the structural pin immediately above
+# for why `build_app` itself is never executed here).
+# ---------------------------------------------------------------------------
+
+
+def _load_thread_limit_from_env():
+    """Loads `_thread_limit_from_env` from `r2db_api/main.py`'s own
+    source via AST + isolated exec -- never a plain `import r2db_api.
+    main`, which would trigger that module's own module-level `app =
+    build_app()` (needs real env vars and a live platform database, the
+    SAME reason `test_main_composition_root_wires_pool_size_from_role_
+    pool_size` above reads source instead of importing). The function
+    itself references nothing else at module scope (a pure parse/raise),
+    so lifting just its own AST node out and exec'ing it in an isolated
+    namespace is sufficient."""
+    spec = importlib.util.find_spec("r2db_api.main")
+    assert spec is not None and spec.origin
+    source = pathlib.Path(spec.origin).read_text()
+    tree = ast.parse(source)
+    func_node = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_thread_limit_from_env"
+    )
+    isolated = ast.Module(body=[func_node], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+    namespace: dict = {}
+    exec(compile(isolated, spec.origin, "exec"), namespace)
+    return namespace["_thread_limit_from_env"]
+
+
+def test_thread_limit_from_env_defaults_when_unset_or_empty():
+    """Completion conditions 92/152: unset or empty falls back to
+    `default`, startup does not fail.
+
+    mutation M190 (`r2db_api/main.py`): treat an empty string as if it
+    were a valid override (skip the `not raw` short-circuit) -- this
+    test's own second assertion (`""` -> `4`) goes red (an empty string
+    fails `int("")` and would instead raise, not return `4`)."""
+    _thread_limit_from_env = _load_thread_limit_from_env()
+
+    assert _thread_limit_from_env({}, "R2DB_THREAD_LIMIT", 4) == 4
+    assert _thread_limit_from_env({"R2DB_THREAD_LIMIT": ""}, "R2DB_THREAD_LIMIT", 4) == 4
+
+
+def test_thread_limit_from_env_accepts_a_positive_integer():
+    """Completion condition 93: a positive integer is returned as-is."""
+    _thread_limit_from_env = _load_thread_limit_from_env()
+
+    assert _thread_limit_from_env({"R2DB_THREAD_LIMIT": "6"}, "R2DB_THREAD_LIMIT", 4) == 6
+
+
+def test_thread_limit_from_env_rejects_zero_negative_or_non_numeric():
+    """Completion conditions 94/95/96: `0`, a negative integer, and a
+    non-numeric value all stop startup with a `ValueError` naming the
+    variable -- never a silent fallback (a resource dimension, per
+    `_thread_limit_from_env`'s own docstring).
+
+    mutation M136 (`r2db_api/main.py`): only reject a negative value,
+    letting `0` through -- this test's own `"0"` `pytest.raises` goes red
+    (no exception is raised).
+    mutation M137 (`r2db_api/main.py`): only reject `0`, letting a
+    negative value through -- this test's own `"-3"` `pytest.raises` goes
+    red.
+    mutation M138 (`r2db_api/main.py`): fall back to `default` instead of
+    raising when `int()` fails -- this test's own `"abc"` `pytest.raises`
+    goes red (returns `4` instead of raising)."""
+    _thread_limit_from_env = _load_thread_limit_from_env()
+
+    for raw in ("0", "-3", "abc"):
+        with pytest.raises(ValueError, match="R2DB_THREAD_LIMIT"):
+            _thread_limit_from_env({"R2DB_THREAD_LIMIT": raw}, "R2DB_THREAD_LIMIT", 4)
+
+
+# ---------------------------------------------------------------------------
+# D-8: `create_app`'s own `thread_limit=` middleware wiring.
+# ---------------------------------------------------------------------------
+
+
+def _run_one_capabilities_request(app) -> None:
+    """The minimal http-scope request completion conditions 78/79/etc.
+    call "1 回呼ぶ" -- a real `GET /v1/capabilities` through the SAME app
+    object, on whichever event loop is currently running (the caller's
+    own fresh loop)."""
+
+    async def _once() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+            await client.get("/v1/capabilities", headers=_auth("cred-a.secret-a"))
+
+    asyncio.get_event_loop().run_until_complete(_once())
+
+
+def test_create_app_default_thread_limit_sets_4_on_a_fresh_loop():
+    """Completion condition 78.
+
+    mutation M120 (`r2db_api/http.py`): `DEFAULT_THREAD_LIMIT = 40` --
+    this test's own `== 4` assertion goes red."""
+    import anyio.to_thread
+
+    service = _build_service()
+    app = create_app(service)
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        _run_one_capabilities_request(app)
+
+        async def _read() -> int:
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop.run_until_complete(_read()) == 4
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_create_app_thread_limit_none_adds_no_middleware():
+    """Completion condition 80.
+
+    mutation M122 (`r2db_api/http.py`): add the middleware even when
+    `thread_limit is None` (hardcode `40` in that branch) -- this test's
+    own `total_tokens == 40` (untouched) assertion goes red."""
+    import anyio.to_thread
+
+    service = _build_service()
+    app = create_app(service, thread_limit=None)
+    assert not any(m.cls is http_module.ThreadLimitMiddleware for m in app.app.user_middleware)
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        _run_one_capabilities_request(app)
+
+        async def _read() -> int:
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop.run_until_complete(_read()) == 40
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_create_app_explicit_thread_limit_sets_that_value():
+    """Completion condition 82.
+
+    mutation M124 (`r2db_api/http.py`): the middleware sets `DEFAULT_
+    THREAD_LIMIT` instead of the value it was constructed with -- this
+    test's own `== 7` assertion goes red (reads `4`)."""
+    import anyio.to_thread
+
+    service = _build_service()
+    app = create_app(service, thread_limit=7)
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        _run_one_capabilities_request(app)
+
+        async def _read() -> int:
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop.run_until_complete(_read()) == 7
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_create_app_middleware_sets_the_limiter_once_per_loop():
+    """Completion conditions 84/85: the middleware sets `total_tokens`
+    only the FIRST time a given loop serves a request through it (a
+    manual reset in between is left untouched by a second request on the
+    SAME loop); a DIFFERENT fresh loop gets the same one-time treatment
+    independently.
+
+    mutation M126 (`r2db_api/http.py`): drop the loop-membership check so
+    the middleware sets `total_tokens` on EVERY request -- this test's
+    own second assertion (still `== 3`, unchanged after a manual reset)
+    goes red (would read `4` again).
+    mutation M127 (`r2db_api/http.py`): track "configured" with a single
+    instance-wide flag instead of a per-loop set -- this test's own third
+    assertion (loop B independently reaching `4`) goes red (loop B would
+    be skipped as "already configured")."""
+    import anyio.to_thread
+
+    service = _build_service()
+    app = create_app(service)
+
+    loop_a = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop_a)
+        _run_one_capabilities_request(app)
+
+        async def _read() -> int:
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop_a.run_until_complete(_read()) == 4
+
+        async def _reset_and_call_again() -> int:
+            anyio.to_thread.current_default_thread_limiter().total_tokens = 3
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+                await client.get("/v1/capabilities", headers=_auth("cred-a.secret-a"))
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop_a.run_until_complete(_reset_and_call_again()) == 3
+    finally:
+        asyncio.set_event_loop(None)
+        loop_a.close()
+
+    loop_b = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop_b)
+        _run_one_capabilities_request(app)
+
+        async def _read_b() -> int:
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+
+        assert loop_b.run_until_complete(_read_b()) == 4
+    finally:
+        asyncio.set_event_loop(None)
+        loop_b.close()
+
+
+def test_thread_limit_middleware_call_is_a_coroutine_function():
+    """Completion condition 88: `ThreadLimitMiddleware.__call__` is a
+    coroutine function (pure-ASGI middleware shape), so `uvicorn.Config(
+    ..., interface="auto")` resolves it to asgi3.
+
+    mutation M130 (`r2db_api/http.py`): make `__call__` a plain
+    (non-async) method that itself returns a coroutine -- this test's own
+    `iscoroutinefunction` assertion goes red."""
+    assert inspect.iscoroutinefunction(http_module.ThreadLimitMiddleware.__call__)
+
+
+def test_create_app_default_return_shape_matches_thread_limit_none():
+    """Completion condition 90: the returned value's own shape (identity
+    kind, `.app.state.service`, `.app.routes` path set) is the same
+    whether `thread_limit` is left at its default or explicitly `None` --
+    only the middleware list differs.
+
+    mutation M132 (`r2db_api/http.py`): wrap the FINAL returned value in
+    an extra layer instead of adding to the Starlette middleware list --
+    this test's own `isinstance(app.app, Starlette)` assertion goes red
+    (`app.app` would be the extra wrapper, not the Starlette instance)."""
+    from starlette.applications import Starlette
+
+    service = _build_service()
+    app_default = create_app(service)
+    app_none = create_app(service, thread_limit=None)
+
+    assert isinstance(app_default, type(app_none))
+    assert isinstance(app_default.app, Starlette)
+    assert app_default.app.state.service is service
+    default_paths = {r.path for r in app_default.app.routes}
+    none_paths = {r.path for r in app_none.app.routes}
+    assert default_paths == none_paths
+    assert default_paths, "route table must not be empty"
+
 class _PoolBackedFakeCell:
     """Minimal `StorageBackend` stand-in whose `query()` checks out a
     connection from a REAL `_RolePool` (fake `_connect`, no live
@@ -741,7 +1049,18 @@ async def test_role_pool_sized_to_declared_concurrency_avoids_premature_503(monk
     the 5th/6th requests in the first batch, and up to 3 of the 7 in the
     second, then time out waiting for a pooled connection and get 503
     instead of the assertions below.
-    """
+
+    R-101 WP-3 (D-13): this test tries the declared `concurrency`'s own
+    simultaneous arrival, so it builds the app with `thread_limit=None`
+    (anyio's own untouched default, 40) -- `create_app`'s own production
+    default (`DEFAULT_THREAD_LIMIT`, 4) would itself become the bottleneck
+    at `concurrency=6`, which is exactly the OTHER thing (D-13's own
+    trade-off) this behavioural pin is not testing.
+
+    mutation M200 (`r2db_api/limits.py`): `role_pool_size` always returns
+    `4` -- this test's own 503-count assertions go red (the pool
+    under-sizes relative to the declared `concurrency=6`, so requests
+    time out waiting for a pooled connection instead of completing)."""
     monkeypatch.setattr(_RolePool, "_connect", _fake_pool_connect)
     monkeypatch.setattr(_RolePool, "_liveness_check", lambda self, conn: True)
 
@@ -761,15 +1080,99 @@ async def test_role_pool_sized_to_declared_concurrency_avoids_premature_503(monk
     async def _one_query(client: httpx.AsyncClient):
         return await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
 
-    async with _client(service) as client:
+    async with _client(service, thread_limit=None) as client:
         responses = await asyncio.wait_for(asyncio.gather(*[_one_query(client) for _ in range(concurrency)]), timeout=5.0)
     statuses = [r.status_code for r in responses]
     assert statuses.count(503) == 0, f"pool exhaustion (503) at in-flight == declared concurrency: {statuses}"
     assert statuses.count(200) == concurrency, statuses
 
-    async with _client(service) as client:
+    async with _client(service, thread_limit=None) as client:
         responses = await asyncio.wait_for(asyncio.gather(*[_one_query(client) for _ in range(concurrency + 1)]), timeout=5.0)
     statuses = [r.status_code for r in responses]
     assert statuses.count(503) == 0, f"pool exhaustion (503) below the declared concurrency + 1 bound: {statuses}"
     assert statuses.count(429) == 1, f"exactly one request must be refused by the slot limiter (429), got: {statuses}"
+    assert statuses.count(200) == concurrency, statuses
+
+
+# ---------------------------------------------------------------------------
+# D-13: the thread limiter (4, default) bounds how many requests run their
+# synchronous section at once, WITHOUT changing concurrency-slot admission
+# (still `concurrency`, 8 here) or the deadlock-free wait discipline.
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_limit_bounds_synchronous_concurrency_while_slot_admission_stays_at_the_declared_ceiling():
+    """Completion conditions 116/117: with `concurrency=8` and `create_
+    app`'s own default `thread_limit` (4), 8 concurrent requests are all
+    ADMITTED (their concurrency slot is taken on the event-loop thread,
+    before any of them ever reaches a worker thread) while at most 4 of
+    them ever run their own synchronous section (`query_page`) at once; a
+    9th, sent once the first 8 have already been admitted, is refused
+    with 429 (slot exhaustion, never a worker-thread queue effect); once
+    released, all 8 complete with 200 (no deadlock, no timeout).
+
+    mutation M156 (`r2db_api/http.py`): move the handler's own slot
+    acquisition INTO the function delegated to `run_in_threadpool` (so it
+    happens AFTER a worker thread is granted, not before) -- only the
+    (up to 4) requests that already hold a worker thread would then hold
+    a slot at the moment the 9th is sent, so this test's own `resp9.
+    status_code == 429` assertion goes red (the 9th finds a free slot
+    among the 4 not yet admitted and is served, 200).
+    mutation M157 (`r2db_api/http.py`): drop the `total_tokens`
+    assignment from the middleware's own `__call__` (limiter stays
+    anyio's untouched default, 40) -- this test's own `peak == 4`
+    assertion goes red (all 8 requests run their synchronous section
+    concurrently, `peak == 8`)."""
+    concurrency = 8
+    service = _build_service(concurrency=concurrency, requests_per_minute=100_000)
+
+    lock = threading.Lock()
+    current = 0
+    peak = 0
+    release = threading.Event()
+    original_query_page = service.query_page
+
+    def blocking_query_page(*args, **kwargs):
+        nonlocal current, peak
+        with lock:
+            current += 1
+            peak = max(peak, current)
+        release.wait(timeout=5.0)
+        with lock:
+            current -= 1
+        return original_query_page(*args, **kwargs)
+
+    service.query_page = blocking_query_page
+
+    async with _client(service) as client:
+
+        async def _one_query():
+            return await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
+
+        tasks = [asyncio.ensure_future(_one_query()) for _ in range(concurrency)]
+        # All 8 handler coroutines run synchronously up to their own first
+        # `await` (the body read, AFTER slot acquisition) within this one
+        # loop iteration -- a single yield-back is enough for all 8 to
+        # have already been admitted (same ordering guarantee `test_sync_
+        # section_runs_off_the_event_loop` above relies on).
+        await asyncio.sleep(0)
+
+        resp9 = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
+        assert resp9.status_code == 429, resp9.text
+
+        # Real worker-thread dispatch (unlike slot admission above) needs
+        # actual wall-clock time for the OS scheduler to run the up-to-4
+        # threads the limiter grants -- long enough that `peak` has
+        # genuinely reached its ceiling before `release` unblocks them.
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            with lock:
+                if current == 4:
+                    break
+
+        release.set()
+        responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)
+
+    assert peak == 4, f"synchronous concurrency must be bounded to the thread limiter (4), observed peak={peak}"
+    statuses = [r.status_code for r in responses]
     assert statuses.count(200) == concurrency, statuses

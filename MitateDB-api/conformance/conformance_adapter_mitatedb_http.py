@@ -65,7 +65,6 @@ import tempfile
 import threading
 import time
 import uuid
-import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -73,7 +72,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import quote
 
-import anyio.to_thread
 import httpx
 import psycopg
 from psycopg import sql
@@ -120,7 +118,7 @@ from mitatedb_api.control_composition import build_control_service  # noqa: E402
 from mitatedb_api.control_http import create_control_app  # noqa: E402
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore  # noqa: E402
 from mitatedb_api.errors import AuthorizationStateUnavailable  # noqa: E402
-from mitatedb_api.http import PROBLEM_CONTENT_TYPE, HttpService, create_app  # noqa: E402
+from mitatedb_api.http import DEFAULT_THREAD_LIMIT, PROBLEM_CONTENT_TYPE, HttpService, create_app  # noqa: E402
 
 BASE_URL = "http://mitatedb-http-pg.conformance.invalid"
 
@@ -904,52 +902,24 @@ class _AuthGate:
 
 
 # Harness-only escape hatch: `tools/perf_baseline.py` sets this so a
-# thread-limit sweep can measure this same plug at a reduced anyio
-# thread-pool size, never production code. Absent, empty, or not a
-# positive integer all mean "no override" (`None`) -- the data-plane app
-# is left completely unwrapped in that case.
+# thread-limit sweep can measure this same plug at a size other than
+# `create_app`'s own production default, never production code. Absent,
+# empty, or not a positive integer all resolve to `DEFAULT_THREAD_LIMIT`
+# (`create_app`'s own default) -- the data-plane app is built with the
+# SAME effective value either way, never left with anyio's untouched
+# default.
 _PERF_THREAD_LIMIT_ENV = "DSA_PERF_THREAD_LIMIT"
 
 
-def _perf_thread_limit_value() -> "int | None":
+def _perf_thread_limit_value() -> int:
     raw = os.environ.get(_PERF_THREAD_LIMIT_ENV)
     if raw is None or raw == "":
-        return None
+        return DEFAULT_THREAD_LIMIT
     try:
         value = int(raw)
     except ValueError:
-        return None
-    return value if value > 0 else None
-
-
-class _PerfThreadLimitWrapper:
-    """Wraps a data-plane ASGI app so the FIRST request served on any one
-    event loop sets that loop's own default anyio thread limiter
-    (`anyio.to_thread.current_default_thread_limiter()`) to a fixed token
-    count, then never touches it again on that same loop -- a second loop
-    (a socket plug's own uvicorn thread, distinct from an asgi plug's own
-    loop) gets the same one-time treatment independently, the first time
-    IT serves a request. `async def __call__(self, scope, receive, send)`
-    (never a plain function) so `uvicorn.Config(..., interface="auto")`
-    resolves this object to the asgi3 shape rather than asgi2. The loop-
-    to-already-configured membership is tracked by holding the actual loop
-    OBJECT in a `weakref.WeakSet` -- never `id(loop)` in a plain `set`,
-    which would risk a closed, garbage-collected loop's reused id being
-    mistaken for the loop this wrapper actually configured before; a
-    `WeakSet` instead drops its own entry the moment a loop is collected,
-    so a later, unrelated loop can never collide with it."""
-
-    def __init__(self, app: Any, *, total_tokens: int) -> None:
-        self._app = app
-        self._total_tokens = total_tokens
-        self._configured_loops: "weakref.WeakSet" = weakref.WeakSet()
-
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        loop = asyncio.get_running_loop()
-        if loop not in self._configured_loops:
-            anyio.to_thread.current_default_thread_limiter().total_tokens = self._total_tokens
-            self._configured_loops.add(loop)
-        await self._app(scope, receive, send)
+        return DEFAULT_THREAD_LIMIT
+    return value if value > 0 else DEFAULT_THREAD_LIMIT
 
 
 class _ControlCredentialHolder:
@@ -1185,21 +1155,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 self._gate, _cell_factory, audit_router=self._audit_router,
                 limit_holder=self._limit_holder, max_concurrency=self._application_config.max_concurrency,
             )
-            app = create_app(self._service, request_bytes_limit=1_048_576)
             # `DSA_PERF_THREAD_LIMIT` (harness-only, absent in every real
-            # conformance run): wraps the freshly built app the ONE place
-            # it is ever constructed here, before it is assigned anywhere
-            # else -- both `self._app` and `self._build_client` below
-            # receive the SAME wrapped object, so an asgi-plug client and a
-            # socket-plug's own data-plane surface (which dispatches by
-            # `app is self._app` identity) end up driving the identical
-            # instance either way. `self._perf_thread_limit` stays `None`
-            # (no wrapper) when the env is absent, invalid, or non-positive
-            # -- app identity is then the `create_app` result itself,
-            # unwrapped.
+            # conformance run): resolved to its effective value BEFORE
+            # `create_app` builds the app, and passed straight through as
+            # `thread_limit=` -- `create_app`'s own middleware is what
+            # configures the loop's limiter now, this adapter no longer
+            # wraps the app itself. `self._perf_thread_limit` always holds
+            # that same effective int (`DEFAULT_THREAD_LIMIT` when the env
+            # is absent, invalid, or non-positive), so the accessor and
+            # `create_app`'s own argument never disagree.
             self._perf_thread_limit = _perf_thread_limit_value()
-            if self._perf_thread_limit is not None:
-                app = _PerfThreadLimitWrapper(app, total_tokens=self._perf_thread_limit)
+            app = create_app(
+                self._service, request_bytes_limit=1_048_576, thread_limit=self._perf_thread_limit,
+            )
             self._app = app
             self._loop_owner = True
             import asyncio
@@ -3392,10 +3360,12 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             rows.extend(cell.prepared_stats())
         return rows
 
-    def perf_thread_limit(self) -> "int | None":
-        """The resolved `DSA_PERF_THREAD_LIMIT` value the data-plane app
-        was wrapped with at construction time, or `None` when no wrapper
-        is in place (env absent, empty, or not a positive integer)."""
+    def perf_thread_limit(self) -> int:
+        """The effective `thread_limit` the data-plane app's own
+        `create_app` call was built with: the resolved `DSA_PERF_THREAD_
+        LIMIT` value when the env names a positive integer, `DEFAULT_
+        THREAD_LIMIT` otherwise (absent, empty, or not a positive
+        integer)."""
         return self._perf_thread_limit
 
     def platform_db_time_stats(self) -> dict[str, int | float]:
