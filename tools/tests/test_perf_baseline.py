@@ -2047,10 +2047,13 @@ def test_real_server_default_client_processes_is_eight(tmp_path, capsys, monkeyp
     processes=8` assertion observes `client_processes=4` instead.
     mutation RV1-132 (`tools/perf_baseline.py`): `_spawn_real_server_
     clients` always spawns exactly TWO real child processes regardless of
-    its own `n_children` argument -- red because this test's own
-    observed pid count (a real OS-process boundary this test's `_spy_
-    group_client_pids` helper reads back, never a formula) becomes 2,
-    not 8, and `client_processes=8` no longer holds either."""
+    its own `n_children` argument -- red because `_run_one_real_server_
+    group` still waits for 8 (the caller's own `n_children`) queue
+    messages that only 2 real processes ever send, so `result_queue.
+    get()` times out after `_REAL_SERVER_QUEUE_TIMEOUT_S` (60s) and
+    `_run_real_server` returns 1; this test's own `assert code == 0`
+    fails on that non-zero exit, well before it ever reaches the
+    `client_processes=8`/pid-count assertions below."""
     observed_pids = _spy_group_client_pids(monkeypatch)
     base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
     try:
@@ -2101,19 +2104,26 @@ def test_real_server_k1_uses_one_client_process(tmp_path, capsys, monkeypatch):
 
 
 def test_real_server_client_process_pids_are_stable_across_every_group(tmp_path, monkeypatch):
-    """Acceptance audit observation 1, the work order's §6.1 監督裁定 17: one run's own
-    client OS processes are spawned exactly ONCE (`_spawn_real_server_clients`) and serve
-    every group of that run -- warmup AND measured
-    alike -- never respawned per group. Pinned against the REAL, observed OS `pid` each
-    group's own messages carry (`_spy_group_client_pids`, a real process boundary, never a
-    value this test computes independently): across a run with two warmup groups and two
-    measured groups, the pid SET observed in every single group is identical to the pid set
-    observed in the first.
+    """The work order's §6.1 監督裁定 17 (D-15a): one run's own client OS processes are
+    spawned exactly ONCE (`_spawn_real_server_clients`) and serve every group of that run --
+    warmup AND measured alike -- never respawned per group. Pinned against the REAL,
+    observed OS `pid` each group's own messages carry (`_spy_group_client_pids`, a real
+    process boundary, never a value this test computes independently): across a run with
+    two warmup groups and two measured groups, the pid SET observed in every single group
+    is identical to the pid set observed in the first. After the run, every one of those
+    pids is actually dead (`os.kill(pid, 0)` raises `ProcessLookupError`) -- `_stop_real_
+    server_clients` (called from `_measure_real_server`'s own `finally`) has already
+    joined them by the time `_run_real_server` returns, never left running past that point.
 
     mutation M215 (`tools/perf_baseline.py`): spawn a fresh set of client processes for
     every group instead of once for the whole run -- red because this test's own per-group
     pid-set equality assertion fails (each group's own observed pid set becomes disjoint
-    from the first group's)."""
+    from the first group's).
+    mutation M217 (`tools/perf_baseline.py`): `_stop_real_server_clients` returns
+    immediately, without ever calling `barrier.abort()` or joining a process -- red because
+    this test's own `os.kill(pid, 0)` check finds a live process instead of `ProcessLookup
+    Error` (the children only exit later, on their own 60s barrier timeout, well after this
+    test has already made its assertion)."""
     observed_pids = _spy_group_client_pids(monkeypatch)
     base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
     try:
@@ -2125,6 +2135,9 @@ def test_real_server_client_process_pids_are_stable_across_every_group(tmp_path,
         assert len(first_group_pids) == 2
         for messages in observed_pids[1:]:
             assert {message["pid"] for message in messages} == first_group_pids
+        for pid in first_group_pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
     finally:
         _stop_realserver_stub_server(proc)
 
@@ -2379,7 +2392,7 @@ def test_real_server_cpu_client_ms_is_the_childrens_own_rusage_sum(tmp_path, cap
 
 
 def test_real_server_warmup_import_cost_does_not_leak_into_measured_cpu(tmp_path, monkeypatch):
-    """Acceptance audit observation 1, the work order's §6.1 監督裁定 17: a client
+    """The work order's §6.1 監督裁定 17 (D-15a): a client
     process's own one-time httpcore anyio-backend import (paid once, on the FIRST real
     request any persistent client process ever sends, never per group) lands inside
     whichever group happens first -- a warmup group, for this `--warmup 1` run -- and is
@@ -2755,10 +2768,13 @@ def test_real_server_client_processes_flag_caps_at_k(tmp_path, capsys, monkeypat
     `client_processes=4` assertion observes `client_processes=8` instead.
     mutation RV1-168 (`tools/perf_baseline.py`): `_spawn_real_server_
     clients` always spawns exactly TWO real child processes regardless of
-    its own `n_children` argument -- red because this test's own
-    observed pid count (a real OS-process boundary, never a formula)
-    becomes 2, not 4, and `client_processes=4` no longer holds
-    either."""
+    its own `n_children` argument -- red because `_run_one_real_server_
+    group` still waits for 4 (the caller's own `n_children`) queue
+    messages that only 2 real processes ever send, so `result_queue.
+    get()` times out after `_REAL_SERVER_QUEUE_TIMEOUT_S` (60s) and
+    `_run_real_server` returns 1; this test's own `assert code == 0`
+    fails on that non-zero exit, well before it ever reaches the
+    `client_processes=4`/pid-count assertions below."""
     observed_pids = _spy_group_client_pids(monkeypatch)
     base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
     try:
