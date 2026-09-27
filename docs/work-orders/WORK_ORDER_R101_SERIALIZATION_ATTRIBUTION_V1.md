@@ -476,6 +476,8 @@ D-5 判定規則 (計測前に固定。§2 の数字だけで判定。計測後�
 
 - **【監督裁定 18 (2026-09-28)】差し戻し 5 (D-15a) の実装の疑義**: (1) 子の measured の CPU 基準は「group ごとに取り直す」(子は warmup / measured を知らない) でよい — 裁定 17 の「親の指示で伝える」と数値は同値で、信号経路が減る。(2) 子の停止は `multiprocessing.Barrier.abort()` + join でよい (sentinel の queue を要求しない)。残 process 0 はコードレビューの再確認で見る。(3) tools/ だけの差分なので `conformance-tests -q` の再実行は完了ゲートに委ねる (§9.4 の列挙は WP-4 全体の道具の引数で、段ごとの必須ではない)。実装後の報告 (指示書外の判断 3 件) は受理。
 
+- **【監督裁定 19 (2026-09-28)】差し戻し 5 の再確認 (opus、`$SP/review-wp4-4.md`)**: (i)〜(vi) は閉じた (M215 / M216 は主張どおりの assert で赤)。N1 (子の停止 = 残 process 0 を固定するテストが無く、`_stop_real_server_clients` を外す変異 RV4 が生存) は直す (差し戻し 6: run 後に各 pid の `os.kill(pid, 0)` が `ProcessLookupError` になることを assert、変異を追加)。N2 (RV1-132 / RV1-168 の docstring が赤の理由を取り違え = 実際は queue の 60 s timeout 後の `assert code == 0`) と、新規テストの docstring の文書名の無い参照は直す (docstring のみ)。N3 (M216 のテストが「warmup の CPU > measured の CPU」という経験的な大小関係に依存し flaky になり得る) は**観察** (現行は緑、変異には決定的に赤。CI で揺れたときに閾値の形を見直す)。
+
 ### 6.2 実施と受け入れ
 
 - **WP-1 (実装担当 sonnet、2 チャットで 4 起動: 前チャットは 1 起動を 3 段継続 (第 1 段 / 第 2 段 + 差し戻し 1 / 差し戻し 2)、再開チャットは条件 26 の段 / 差し戻し 3 / 差し戻し 4 を段ごとに別起動)。** 差分は `git diff a1c1ee3` の 22 file (`security/CONTROL_MAPPING.md` を含む)。`spec/`・`conformance-tests/`・`security/` (CM の参照追随 2 行を除く) の差分 0。
