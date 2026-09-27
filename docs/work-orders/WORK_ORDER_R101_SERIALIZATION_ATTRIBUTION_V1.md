@@ -452,6 +452,9 @@ D-5 判定規則 (計測前に固定。§2 の数字だけで判定。計測後�
   「1〜4 すべて監督案どおりで進める」
   ```
 
+- **【依頼者裁定 (2026-09-28、逐語)】「D で進める」** — v1.1 の変更クラス D の宣言に対する裁定。監督の提示: 契機は `_ISOMORPHIC_TARGETS` の集合の増減 (追加 = 両 peer の `src/*/http.py` に同名・本体同一で置く thread-limit の pure-ASGI middleware class と定数 `DEFAULT_THREAD_LIMIT = 4`、両 `main.py` の env 読み取り helper が同名・本体同一ならそれも; 削除 = WP-1 の `_PerfThreadLimitWrapper`)。「版付きの security-contract 決定」は該当なし (`security/` は件数 pin のテスト名が変わるときの Evidence 参照追随と版行のみ、契約 1.11.0 不変、Security Invariants 不変)。証拠は C の全部 + 本項の逐語。代替案 = 38 の適用除外で Class B に留める、は本体が同一なので除外の理由がない (WP-1 の裁定と同じ)。
+- **【監督裁定 9 (2026-09-28)】WP-3 と WP-4 の worktree**: §7.6 の重なり (`tools/PERF_BASELINE_README.md` 1 本) を承知のうえで、WP-4 を worktree `r101b` (branch `r101b`)、WP-3 を同じ基点 `01d38c5` から切った worktree `r101b-wp3` (branch `r101b-wp3`) で並行させる。README の重なりは統合時に監督が解く (WP-4 は新しい節を足し、WP-3 は既存の文を直すので、行の重なりは無い見込み。重なれば監督が手で合成し、両 implementer の記述を残す)。
+
 ### 6.2 実施と受け入れ
 
 - **WP-1 (実装担当 sonnet、2 チャットで 4 起動: 前チャットは 1 起動を 3 段継続 (第 1 段 / 第 2 段 + 差し戻し 1 / 差し戻し 2)、再開チャットは条件 26 の段 / 差し戻し 3 / 差し戻し 4 を段ごとに別起動)。** 差分は `git diff a1c1ee3` の 22 file (`security/CONTROL_MAPPING.md` を含む)。`spec/`・`conformance-tests/`・`security/` (CM の参照追随 2 行を除く) の差分 0。
