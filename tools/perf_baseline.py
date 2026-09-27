@@ -187,7 +187,7 @@ class UnknownAdapterShape(RuntimeError):
 
 
 class RealServerMeasurementFailure(RuntimeError):
-    """Design D-15: raised anywhere along `--real-server`'s
+    """Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15: raised anywhere along `--real-server`'s
     own setup (resolving this deployment's own `application_id`, issuing
     a developer credential, creating the measurement entity, seeding its
     one row, the K=1 sanity query) or measurement (any query response
@@ -1831,7 +1831,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "confirm-wait this adds costs several seconds per (plug, op)"
         ),
     )
-    # Design D-15: measures a real, separately-started
+    # Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15: measures a real, separately-started
     # composition root (`conformance-tests/registry.json`'s own
     # `composition_roots` entry named PEER, the SAME C-26 launcher
     # `conformance-tests/test_c26_composition_root.py` drives) instead of
@@ -1844,7 +1844,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "measure a real, separately-started composition root (registry.json's own "
             "composition_roots entry PEER) instead of the 6 conformance plugs -- prints "
-            "REALPERF/REALCPU lines only, never PERF/CPU/POOL/DBTIME/PREPARED/ROUNDTRIP (design D-15)"
+            "REALPERF/REALCPU lines only, never PERF/CPU/POOL/DBTIME/PREPARED/ROUNDTRIP (work order "
+            "docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md §7.3 D-15)"
         ),
     )
     parser.add_argument(
@@ -1867,7 +1868,7 @@ def _roundtrip_enabled(args: argparse.Namespace) -> bool:
 
 
 # ---------------------------------------------------------------------
-# Design D-15: `--real-server` -- measures a real,
+# Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15: `--real-server` -- measures a real,
 # separately-started composition root (the C-26 launcher, `registry.json`'s
 # own `composition_roots` section) instead of the 6 registered conformance
 # plugs `_run` above measures. Never both in the same invocation: `main()`
@@ -1880,14 +1881,10 @@ _REAL_SERVER_BARRIER_TIMEOUT_S = 60.0
 _REAL_SERVER_QUEUE_TIMEOUT_S = 60.0
 
 # `forkserver`, never the default `fork`: forking directly from THIS
-# process, after its own HTTP setup calls have already touched the
-# network, was measured to leave a forked child unpredictably wedged
-# before it ever reaches `barrier.wait()` below (a real, if platform-
-# specific, fork-after-network hazard on this repository's own
-# development machine). `forkserver` starts the ONE process that actually
-# calls `fork()` once, via `_warm_forkserver` below, before this run's
-# own setup ever touches the network -- every subsequent child is forked
-# from THAT clean helper, never from this process.
+# process after it has already made HTTP calls is a known fork-after-
+# network hazard. `_warm_forkserver` below starts the forkserver helper
+# before this run's first HTTP call -- every child process is forked
+# from that helper, never from this process.
 _REAL_SERVER_MP_CONTEXT = multiprocessing.get_context("forkserver")
 _real_server_forkserver_warmed = False
 
@@ -1901,9 +1898,10 @@ def _real_server_forkserver_noop() -> None:
 def _warm_forkserver() -> None:
     """Starts `_REAL_SERVER_MP_CONTEXT`'s own `forkserver` helper process
     if it has not already started -- a no-op on every call after the
-    first. `_run_real_server` calls this BEFORE any HTTP setup call (see
-    `_REAL_SERVER_MP_CONTEXT`'s own docstring for why the ordering
-    matters)."""
+    first. `_run_real_server` calls this before any HTTP setup call:
+    without this, a child process hung mid-import on macOS during
+    development when the helper started after the first HTTP call
+    instead."""
     global _real_server_forkserver_warmed
     if _real_server_forkserver_warmed:
         return
@@ -1934,10 +1932,11 @@ def _distribute_group_counts(concurrency: int, n_children: int) -> "list[int]":
 def _group_wall_ms(start_ns: int, completion_ns: "list[int]") -> float:
     """D-15: one group's own wall-clock span -- the LATEST child's own
     completion time (`time.time_ns()`, never an average of them) minus the
-    single shared start (the parent's own `time.time_ns()`, read
-    immediately after its own `multiprocessing.Barrier.wait()` returns --
-    completion condition 135). Milliseconds, like every other `_ms` value
-    this file prints."""
+    single shared start (the MINIMUM of the children's own `time.
+    time_ns()`, each read immediately after ITS OWN `multiprocessing.
+    Barrier.wait()` returns, never the parent's -- completion condition
+    135, supervisor ruling on code review 1 F5). Milliseconds, like
+    every other `_ms` value this file prints."""
     return (max(completion_ns) - start_ns) / 1_000_000.0
 
 
@@ -2011,7 +2010,12 @@ def _real_server_request(method: str, url: str, *, bearer: str, body: "dict | No
     except urllib.error.HTTPError as exc:
         status = exc.code
         raw = exc.read()
-    parsed = json.loads(raw) if raw else None
+    except (urllib.error.URLError, OSError) as exc:
+        raise RealServerMeasurementFailure(f"{method} {url} failed: {exc}") from exc
+    try:
+        parsed = json.loads(raw) if raw else None
+    except json.JSONDecodeError as exc:
+        raise RealServerMeasurementFailure(f"{method} {url} returned a non-JSON body: {exc}") from exc
     return status, parsed
 
 
@@ -2126,16 +2130,19 @@ def _real_server_client_worker(
                 barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
             except threading.BrokenBarrierError:
                 return
+            started_ns = time.time_ns()
             before = resource.getrusage(resource.RUSAGE_SELF)
             results = await asyncio.gather(*(_one(client) for _ in range(count)))
             completed_ns = time.time_ns()
             after = resource.getrusage(resource.RUSAGE_SELF)
             cpu_ms = ((after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)) * 1000.0
             result_queue.put({
+                "t0": started_ns,
                 "t1": completed_ns,
                 "cpu_ms": cpu_ms,
                 "statuses": [status for status, _rows in results],
                 "row_counts": [rows for _status, rows in results],
+                "pid": os.getpid(),
             })
 
     asyncio.run(_run_group())
@@ -2150,13 +2157,17 @@ def _run_one_real_server_group(
     reached), a `Barrier(n_children + 1)` the parent is itself a party of
     (`multiprocessing.Barrier`'s own re-entrant `.wait()`, completion
     condition 136), and one shared `Queue` every child's single result
-    lands on.
-    The parent's OWN `barrier.wait()` return is `start_ns` -- the single
-    shared start `_group_wall_ms` subtracts every child's own completion
-    from. Every child process is joined (and, if still alive past its own
-    timeout, terminated) in `finally`, whether this group succeeded or
-    not -- a broken barrier or a queue timeout never leaves an orphaned
-    child process behind."""
+    lands on. The parent calls `barrier.wait()` too, only to release the
+    barrier -- its own return from that call is never read as a
+    timestamp.
+    `start_ns` is the MINIMUM of the children's own `t0` (each child's
+    own `time.time_ns()`, read immediately after ITS OWN `barrier.wait()`
+    returns) -- never the parent's, which lags the first child to resume
+    by however long the parent itself takes to wake and re-schedule
+    (supervisor ruling on code review 1 F5). Every child process is
+    joined (and, if still alive past its own timeout, terminated) in
+    `finally`, whether this group succeeded or not -- a broken barrier or
+    a queue timeout never leaves an orphaned child process behind."""
     ctx = _REAL_SERVER_MP_CONTEXT
     barrier = ctx.Barrier(n_children + 1)
     result_queue: Any = ctx.Queue()
@@ -2171,7 +2182,6 @@ def _run_one_real_server_group(
             barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
         except threading.BrokenBarrierError as exc:
             raise RealServerMeasurementFailure(f"real-server client processes did not start together in time: {exc}") from exc
-        start_ns = time.time_ns()
         try:
             messages = [result_queue.get(timeout=_REAL_SERVER_QUEUE_TIMEOUT_S) for _ in range(n_children)]
         except queue.Empty as exc:
@@ -2182,11 +2192,14 @@ def _run_one_real_server_group(
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=5)
+    start_ns = min(message["t0"] for message in messages)
     completion_ns = [message["t1"] for message in messages]
     return {
         "wall_ms": _group_wall_ms(start_ns, completion_ns),
         "cpu_client_ms": sum(message["cpu_ms"] for message in messages),
         "statuses": [status for message in messages for status in message["statuses"]],
+        "client_processes": len({message["pid"] for message in messages}),
+        "messages": messages,
     }
 
 
@@ -2195,13 +2208,26 @@ def _measure_real_server(
 ) -> dict:
     """D-15: `warmup + n` groups, each one call to `_run_one_real_server_
     group` -- warmup groups run identically but never enter the returned
-    `p50_ms`/`p95_ms`/`wall_ms` (completion condition 137, the same
-    warmup/measured split `_measure_op` already applies to the 6
-    registered plugs). Any non-200 status anywhere -- warmup or measured
-    -- aborts the WHOLE run (completion condition 143): no `REALPERF`/
-    `REALCPU` line is ever built from a partially-failed measurement."""
+    `p50_ms`/`p95_ms`/`wall_ms`/`cpu_client_ms`/`requests`/`client_
+    processes` (completion condition 137, the same warmup/measured split
+    `_measure_op` already applies to the 6 registered plugs). Any non-200
+    status anywhere -- warmup or measured -- aborts the WHOLE run
+    (completion condition 143): no `REALPERF`/`REALCPU` line is ever
+    built from a partially-failed measurement. `requests` is the number
+    of MEASURED responses this run actually observed, never `n *
+    concurrency`'s own formula alone -- a run that observed fewer than
+    that (`OC` 1.5-32, the same guard completion condition 167's own
+    K=1 check already applies) aborts too, refusing to print a row that
+    undercounts its own measurement. `client_processes` is the FIRST
+    measured group's own observed distinct child-process count (`_run_
+    one_real_server_group`'s own `client_processes`), never the caller's
+    precomputed `n_children` -- a regression that spawns fewer real
+    child processes than `n_children` says is now visible in the printed
+    row, not just in an unobserved argument."""
     measured_wall_ms: "list[float]" = []
     cpu_client_ms_total = 0.0
+    measured_requests = 0
+    client_processes: "int | None" = None
     for index in range(warmup + n):
         is_warmup = index < warmup
         group = _run_one_real_server_group(query_url, bearer, field, counts, n_children)
@@ -2211,6 +2237,15 @@ def _measure_real_server(
         if not is_warmup:
             measured_wall_ms.append(group["wall_ms"])
             cpu_client_ms_total += group["cpu_client_ms"]
+            measured_requests += len(group["statuses"])
+            if client_processes is None:
+                client_processes = group["client_processes"]
+    expected_requests = n * concurrency
+    if measured_requests < expected_requests:
+        raise RealServerMeasurementFailure(
+            f"measured only {measured_requests} query responses, expected {expected_requests} "
+            f"(n={n} x concurrency={concurrency}) -- refusing a short measurement"
+        )
     sorted_wall_ms = sorted(measured_wall_ms)
     return {
         "n": len(measured_wall_ms),
@@ -2218,7 +2253,8 @@ def _measure_real_server(
         "p95_ms": _percentile(sorted_wall_ms, 95),
         "wall_ms": sum(measured_wall_ms),
         "cpu_client_ms": cpu_client_ms_total,
-        "requests": n * concurrency,
+        "requests": measured_requests,
+        "client_processes": client_processes,
     }
 
 
@@ -2243,23 +2279,31 @@ def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace) -> No
         query_url=query_url, bearer=launcher.runtime_bearer, field=_REAL_SERVER_FIELD,
         warmup=args.warmup, n=args.n, concurrency=args.concurrency, n_children=n_children, counts=counts,
     )
-    print(_format_realperf_row(args.real_server, args.concurrency, n_children, result["n"], result["p50_ms"], result["p95_ms"]))
-    print(_format_realcpu_row(args.real_server, args.concurrency, n_children, result["requests"], result["wall_ms"], result["cpu_client_ms"]))
+    print(_format_realperf_row(args.real_server, args.concurrency, result["client_processes"], result["n"], result["p50_ms"], result["p95_ms"]))
+    print(_format_realcpu_row(args.real_server, args.concurrency, result["client_processes"], result["requests"], result["wall_ms"], result["cpu_client_ms"]))
 
 
 def _run_real_server(args: argparse.Namespace) -> int:
     """D-15: `--real-server`'s own entry point, called by `main()` in
     place of `_run` -- never both (completion condition 144). Discovers
     and starts the launcher (`ceilings={"data": 1, "control": 1}`,
-    completion condition 128), then ALWAYS calls `launcher.stop()` exactly
+    completion condition 128); a failure discovering/starting it (a
+    registry lookup miss, for instance) is reported and returns 1, the
+    same as a measurement failure below, never an uncaught traceback out
+    of `main()`. Once started, `launcher.stop()` is ALWAYS called exactly
     once (completion conditions 129/130), success or failure -- outside
-    the `try` that wraps only the post-`start()` work, so a `start()`
-    failure (which every launcher's own `start()` already resolves with
-    its own internal `stop()` before re-raising) is never double-stopped."""
+    the second `try`, which wraps only the post-`start()` work, so a
+    `start()` failure (which every launcher's own `start()` already
+    resolves with its own internal `stop()` before re-raising) is never
+    double-stopped."""
     _warm_forkserver()
-    launcher_cls = _load_composition_root_class(args.registry, args.real_server)
-    launcher = launcher_cls()
-    launcher.start(ceilings={"data": 1, "control": 1})
+    try:
+        launcher_cls = _load_composition_root_class(args.registry, args.real_server)
+        launcher = launcher_cls()
+        launcher.start(ceilings={"data": 1, "control": 1})
+    except RealServerMeasurementFailure as exc:
+        print(f"perf_baseline: {exc}", file=sys.stderr)
+        return 1
     try:
         _measure_real_server_and_emit(launcher, args)
     except RealServerMeasurementFailure as exc:
@@ -2330,10 +2374,11 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     os.environ.update(cluster_env)
                     os.environ.pop("PGPASSWORD", None)
-                    # Design D-15 (completion condition 145): the
+                    # Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+                    # §7.3 D-15 (§9.2 completion condition 145): the
                     # `--real-server` path runs under the SAME exclusive lock
                     # and throwaway cluster as the 6-plug path below -- never
-                    # both in one invocation (completion condition 144).
+                    # both in one invocation (§9.2 completion condition 144).
                     if args.real_server:
                         return _run_real_server(args)
                     return _run(args)

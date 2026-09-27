@@ -567,9 +567,9 @@ baseline here.
 ## `REALPERF` / `REALCPU` lines
 
 **`--real-server <peer>` measures a real, separately-started composition
-root instead of the 6 registered conformance plugs** (design
-`docs/design/PERF_SERIALIZATION_MEASUREMENT_V0_1.md` D-15, work order
-`docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` WP-4)
+root instead of the 6 registered conformance plugs** (work order
+`docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+§7.3 D-15, §9 WP-4)
 -- the SAME C-26 launcher `conformance-tests/test_c26_composition_root.py`
 drives (`conformance-tests/registry.json`'s own `composition_roots`
 entry named `peer`), started and stopped as a real, separate OS process
@@ -592,7 +592,8 @@ else printed between or before them.
 separate OS process (in fact two: application and control), not this
 tool's own process -- there is nothing in THIS process's own
 `resource.getrusage`/`prepared_stats()` that could describe it. The floor
-this measurement exists to demonstrate (design §7.1's own "床の算術") is
+this measurement exists to demonstrate (work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+§7.1's own "床の算術") is
 precisely that client and server no longer share one process/one GIL --
 see `cpu_client_ms=` below for the client side of that same floor.
 
@@ -602,11 +603,19 @@ for the 6-plug path (see "How to run it" above) -- `--concurrency K`
 warmup and measured sample is one GROUP of `K` real, concurrent `query`
 requests, dispatched across `min(--client-processes, K)` real OS client
 processes (default `--client-processes 8`; see below), never `K`
-sequential requests. `n=`/`p50_ms=`/`p95_ms=` on `REALPERF` are the
-MEASURED groups only -- a slow warmup group never enters the printed
-distribution, exactly like the 6-plug path's own `PERF` line.
-`REALCPU`'s own `requests=` is `n * K` (measured only, never `(warmup +
-n) * K`); `wall_ms=` is the sum of the measured groups' own wall-clock
+sequential requests. Every client process is released together by a
+shared `multiprocessing.Barrier`; a group's own start is the MINIMUM
+of the children's own `time.time_ns()`, each read immediately after
+ITS OWN barrier release -- never the parent's, which lags the first
+child to resume by however long the parent itself takes to wake and
+re-schedule -- and `wall_ms=` is the LATEST child's own completion
+time minus that minimum. `n=`/`p50_ms=`/`p95_ms=` on `REALPERF` are
+the MEASURED groups only -- a slow warmup group never enters the
+printed distribution, exactly like the 6-plug path's own `PERF` line.
+`REALCPU`'s own `requests=` is the number of MEASURED responses this
+run actually observed (`n * K` when every measured group completes;
+fewer than that aborts the run rather than printing an undercount);
+`wall_ms=` is the sum of the measured groups' own wall-clock
 spans (the same numbers `p50_ms=`/`p95_ms=` are computed from).
 
 **`cpu_client_ms=` is a floor visualization, never a judgement this tool
@@ -659,6 +668,19 @@ exactly ONE `asyncio.gather` call, never one request at a time; when `K`
 does not divide evenly by the process count, the remainder goes to the
 FIRST that many processes, one extra request each (`K=10`, 4 processes:
 `[3, 3, 2, 2]`, never `[2, 2, 3, 3]`).
+
+**Staying under the server's own request budget.** Both peers' own
+composition roots default to `requests_per_minute`/`max_requests_per_
+minute` `600` (work order
+`docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+§7.5 (W-17) -- the composition root's own value; the conformance
+adapter plugs' own `requests_per_minute` (`50`) is unrelated). A
+`--real-server` run sends `(--warmup + --n) * K` measured/warmup
+`query` requests plus 4 one-shot setup requests -- at
+`K=32` with D-16's own `--warmup 3 --n 15`, that is `576 + 4`, well
+under the budget; the DEFAULT `--warmup 10 --n 100` at `K=32` would be
+`3520`, well over it (the run aborts on the first `429`, never a
+silently wrong number).
 
 **`--real-server` never builds one of the 6 registered plugs.** Only
 `registry.json`'s own `composition_roots` section is read for this flag
