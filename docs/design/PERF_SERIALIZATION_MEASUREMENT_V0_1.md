@@ -1954,7 +1954,7 @@ PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity
 | MitateDB-api-http | 6.301 | 1.266 | -79.9% | 188.586 | 36.928 | -80.4% (K=32/K=1 = 29.2) |
 | MitateDB-api-socket | 9.869 | 4.630 | -53.1% | 291.281 | 142.583 | -51.0% (K=32/K=1 = 30.8) |
 
-2. **`CPU` 行の `thread_limit=`**: PostgreSQL の 4 plug の各行 は K=1・K=32 とも `thread_limit=4` (4 plug × 2 run = 8 行、`op=query`。他の op も同じ)。in-process の 2 plug は D-10 のとおり accessor を持たない [監督: 値]。
+2. **`CPU` 行の `thread_limit=`**: PostgreSQL の 4 plug の各行 は K=1・K=32 とも `thread_limit=4` (4 plug × 2 run = 8 行、`op=query`。他の op も同じ)。in-process の 2 plug は D-10 のとおり accessor を持たないので `thread_limit=default` のまま (WO §6.1 の監督裁定 12 の残り = 疑義 (8))。
 3. **MitateDB 2 plug の `DBTIME scope=platform`**: 基準は K=1 で connect_wall_ms 4.189 / 4.485 ms/req、sessions 2/req (v0.2 §3 の 7)。今回は K=1・K=32 とも `sessions=0 connect_wall_ms=0.000` (http / socket、`op=query`)。db_wall_ms_per_req は K=1 で 0.145 / 0.256、K=32 で 0.402 / 0.745 ms。
 4. どの run も `LIMIT_EXCEEDED` で欠けていない (`PERF` 行は run ごと 21 行 = 6 plug、in-process 2 plug は 3 op)。r2db の `POOL` 行の waits は全 run で 0。in-process 2 plug の `CPU` 行は `thread_limit=default` (accessor を持たない。WO §7.3 D-10)。
 
@@ -1978,7 +1978,7 @@ D-12 判定規則 (計測前に固定): 同じ道具・同じ条件 (`DSA_PERF_P
 
 **目的**: R-101 の閉止を D-16 (`RM` §0.1.4 の 2 の改訂形) で判定する。8 倍を満たさないときは、その実測を R-113 (multi-process worker) の出発点にする (WO §10.1)。
 
-**方法**: `tools/perf_baseline.py --real-server r2db-api` と `--real-server MitateDB-api`。server は `conformance-tests/registry.json` の `composition_roots` の launcher (C-26) が production の composition root で別 process に起動する (`start(ceilings={"data": 1, "control": 1})`、thread limit は既定 4)。client は子 process (`--client-processes` 既定 8、実際の数は min(8, K))。K=1 と K=32 を取り、K=32 は 2 run。いずれも `--warmup 3 --n 15`。`REALCPU` は床の可視化であり判定に使わない。server 側の `CPU` / `DBTIME` 行は出ない (別 process。WO §7.3 の D-15)。実行順は [監督]。道具の木は `d7a7500` (r101b、WP-3 と WP-4 の merge)。
+**方法**: `tools/perf_baseline.py --real-server r2db-api` と `--real-server MitateDB-api`。server は `conformance-tests/registry.json` の `composition_roots` の launcher (C-26) が production の composition root で別 process に起動する (`start(ceilings={"data": 1, "control": 1})`、thread limit は既定 4)。client は子 process (`--client-processes` 既定 8、実際の数は min(8, K))。K=1 と K=32 を取り、K=32 は 2 run。いずれも `--warmup 3 --n 15`。`REALCPU` は床の可視化であり判定に使わない。server 側の `CPU` / `DBTIME` 行は出ない (別 process。WO §7.3 の D-15)。実行順は r2db K=1 → K=32 → K=32、MitateDB K=1 → K=32 → K=32 (直列、他の pytest と nginx 無し)。道具の木は `fdb5e61` (r101b。`d7a7500` での最初の試行は両 peer とも `POST /control/v1/credentials -> 403` で止まり (WO §6.1 の訂正註 14)、launcher の `control_credential_id` と perf tool の自己 rotate を足した木で取り直した)。
 
 ### 6.1 実測 (逐語)
 
