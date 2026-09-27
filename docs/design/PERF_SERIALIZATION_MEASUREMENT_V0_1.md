@@ -1982,7 +1982,7 @@ D-12 判定規則 (計測前に固定): 同じ道具・同じ条件 (`DSA_PERF_P
 
 ### 6.1 実測 (逐語)
 
-#### r2db-api K=1
+#### 【1 回目 = 欠陥のある計測器 (tree fdb5e61、子 process を group ごとに生成)】r2db-api K=1
 
 ```
 ```text
@@ -1992,7 +1992,7 @@ REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=1 client_processes
 ```
 ```
 
-#### r2db-api K=32 (1 回目)
+#### 【1 回目 = 欠陥のある計測器 (tree fdb5e61、子 process を group ごとに生成)】r2db-api K=32 (1 回目)
 
 ```
 ```text
@@ -2002,7 +2002,7 @@ REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=32 client_processe
 ```
 ```
 
-#### r2db-api K=32 (2 回目)
+#### 【1 回目 = 欠陥のある計測器 (tree fdb5e61、子 process を group ごとに生成)】r2db-api K=32 (2 回目)
 
 ```
 ```text
@@ -2012,7 +2012,7 @@ REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=32 client_processe
 ```
 ```
 
-#### MitateDB-api K=1
+#### 【1 回目 = 欠陥のある計測器 (tree fdb5e61、子 process を group ごとに生成)】MitateDB-api K=1
 
 ```
 ```text
@@ -2022,7 +2022,7 @@ REALCPU peer=MitateDB-api plug=MitateDB-api-real op=query concurrency=1 client_p
 ```
 ```
 
-#### MitateDB-api K=32 (1 回目)
+#### 【1 回目 = 欠陥のある計測器 (tree fdb5e61、子 process を group ごとに生成)】MitateDB-api K=32 (1 回目)
 
 ```
 ```text
@@ -2032,7 +2032,7 @@ REALCPU peer=MitateDB-api plug=MitateDB-api-real op=query concurrency=32 client_
 ```
 ```
 
-#### MitateDB-api K=32 (2 回目)
+#### 【1 回目 = 欠陥のある計測器 (tree fdb5e61、子 process を group ごとに生成)】MitateDB-api K=32 (2 回目)
 
 ```
 ```text
@@ -2042,18 +2042,70 @@ REALCPU peer=MitateDB-api plug=MitateDB-api-real op=query concurrency=32 client_
 ```
 ```
 
+**2 回目 (D-15a、WO §6.1 監督裁定 17)。** 受け入れ監査の観察 1 (client の子 process と `httpx.AsyncClient` が group ごとに新しく作られ、K=1 の measured 窓に httpcore の遅延 import (CPU 6.5〜7.4 ms) が入る) を計測器の欠陥として採り、子を (plug, K) ごとに 1 回だけ作って warmup と measured の全 group を同じ子で送る形に直した (差し戻し 5〜6、M215〜M217)。tree `715e8ad` (最終ゲート r101d の tree)。実行順は 1 回目と同じ。
+
+#### 【2 回目 = D-15a (tree 715e8ad、子 process は (plug, K) ごとに 1 回、warmup も同じ子)】r2db-api K=1
+
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=715e8ad date=2026-09-28
+REALPERF peer=r2db-api plug=r2db-api-real transport=real-server op=query concurrency=1 client_processes=1 n=15 p50_ms=2.252 p95_ms=3.570
+REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=1 client_processes=1 requests=15 wall_ms=40.518 cpu_client_ms=8.250
+```
+
+#### 【2 回目 = D-15a (tree 715e8ad、子 process は (plug, K) ごとに 1 回、warmup も同じ子)】r2db-api K=32 (1 回目)
+
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=715e8ad date=2026-09-28
+REALPERF peer=r2db-api plug=r2db-api-real transport=real-server op=query concurrency=32 client_processes=8 n=15 p50_ms=35.414 p95_ms=37.754
+REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=32 client_processes=8 requests=480 wall_ms=535.706 cpu_client_ms=599.113
+```
+
+#### 【2 回目 = D-15a (tree 715e8ad、子 process は (plug, K) ごとに 1 回、warmup も同じ子)】r2db-api K=32 (2 回目)
+
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=715e8ad date=2026-09-28
+REALPERF peer=r2db-api plug=r2db-api-real transport=real-server op=query concurrency=32 client_processes=8 n=15 p50_ms=35.491 p95_ms=36.746
+REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=32 client_processes=8 requests=480 wall_ms=533.868 cpu_client_ms=591.860
+```
+
+#### 【2 回目 = D-15a (tree 715e8ad、子 process は (plug, K) ごとに 1 回、warmup も同じ子)】MitateDB-api K=1
+
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=715e8ad date=2026-09-28
+REALPERF peer=MitateDB-api plug=MitateDB-api-real transport=real-server op=query concurrency=1 client_processes=1 n=15 p50_ms=1.915 p95_ms=2.996
+REALCPU peer=MitateDB-api plug=MitateDB-api-real op=query concurrency=1 client_processes=1 requests=15 wall_ms=33.893 cpu_client_ms=8.160
+```
+
+#### 【2 回目 = D-15a (tree 715e8ad、子 process は (plug, K) ごとに 1 回、warmup も同じ子)】MitateDB-api K=32 (1 回目)
+
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=715e8ad date=2026-09-28
+REALPERF peer=MitateDB-api plug=MitateDB-api-real transport=real-server op=query concurrency=32 client_processes=8 n=15 p50_ms=35.757 p95_ms=37.344
+REALCPU peer=MitateDB-api plug=MitateDB-api-real op=query concurrency=32 client_processes=8 requests=480 wall_ms=541.236 cpu_client_ms=576.760
+```
+
+#### 【2 回目 = D-15a (tree 715e8ad、子 process は (plug, K) ごとに 1 回、warmup も同じ子)】MitateDB-api K=32 (2 回目)
+
+```text
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=715e8ad date=2026-09-28
+REALPERF peer=MitateDB-api plug=MitateDB-api-real transport=real-server op=query concurrency=32 client_processes=8 n=15 p50_ms=36.058 p95_ms=37.518
+REALCPU peer=MitateDB-api plug=MitateDB-api-real op=query concurrency=32 client_processes=8 requests=480 wall_ms=543.595 cpu_client_ms=584.081
+```
+
 ### 6.2 事実 (§6.1 の数字だけから。判断語を含まない)
 
 1. **`query` の p50 (ms) と K=32 / K=1 の比**:
 
 | peer | K=1 | K=32 (1 回目) | K=32 (2 回目) | 比 (1 回目) | 比 (2 回目) |
 |---|---|---|---|---|---|
-| r2db-api | 10.425 | 48.265 | 47.712 | 4.63 | 4.58 |
-| MitateDB-api | 10.905 | 46.761 | 46.571 | 4.29 | 4.27 |
+| r2db-api | 10.425 | 48.265 | 47.712 | 4.63 | 4.58 | (1 回目、欠陥のある計測器)
+| MitateDB-api | 10.905 | 46.761 | 46.571 | 4.29 | 4.27 | (1 回目、欠陥のある計測器)
+| r2db-api (2 回目、D-15a) | 2.252 | 35.414 | 35.491 | 15.72 | 15.76 |
+| MitateDB-api (2 回目、D-15a) | 1.915 | 35.757 | 36.058 | 18.67 | 18.83 |
 
-2. **ε と δ** (記録のみ。判定に使わない): ε = K=32 の 2 run の p50 の相対差 = r2db 1.1% (48.265 vs 47.712) / MitateDB 0.4% (46.761 vs 46.571)。δ = max(10%, 2ε) = 10% (両 peer)。
-3. **`REALCPU`** (床の可視化): `client_processes=` は K=1 で 1、K=32 で 8 (両 peer)。`cpu_client_ms` / `requests` = r2db K=1 8.03 ms/req (120.456 / 15)、K=32 3.80 / 3.80 ms/req (1822.714 / 480、1825.603 / 480); MitateDB K=1 8.25 (123.702 / 15)、K=32 3.82 / 3.83 ms/req。K=1 の wall/req (162.368 / 15 = 10.82 ms、160.788 / 15 = 10.72 ms) の 74〜77% が client 自身の CPU。K=32 では 8 process に分かれるので client の床 = 32 × 3.80 / 8 = 15.2 ms (r2db)、15.3 ms (MitateDB) で、group p50 48 / 47 ms の約 1/3。real-server の K=1 p50 (10.4 / 10.9 ms) は socket plug の K=1 (4.837 / 4.630 ms、§5) の 2.2 / 2.4 倍で、差は client 経路 (別 process の httpx、nginx 経由) の固定費。
-4. **後始末の照合** (WO §10.2 の 4): 6 run とも `perf_baseline` は launcher の `stop()` を 1 回呼んで終了し (run の最終行は `REALCPU`、traceback 無し)、run 後の `ps` に uvicorn / nginx / perf_baseline の残プロセスは 0 (監督が `ps -eo args=` で照合)。使い捨て cluster は run ごとに作られ捨てられる (`suite_lock(exclusive=True)` の下、WO §7.5 の (W-12))。
+2. **ε と δ** (記録のみ。判定に使わない): ε = K=32 の 2 run の p50 の相対差 = r2db 1.1% (48.265 vs 47.712) / MitateDB 0.4% (46.761 vs 46.571)。δ = max(10%, 2ε) = 10% (両 peer)。 **2 回目**: ε = r2db 0.2% (35.414 vs 35.491) / MitateDB 0.8% (35.757 vs 36.058)。δ = 10%。
+3. **`REALCPU`** (床の可視化): `client_processes=` は K=1 で 1、K=32 で 8 (両 peer)。`cpu_client_ms` / `requests` = r2db K=1 8.03 ms/req (120.456 / 15)、K=32 3.80 / 3.80 ms/req (1822.714 / 480、1825.603 / 480); MitateDB K=1 8.25 (123.702 / 15)、K=32 3.82 / 3.83 ms/req。K=1 の wall/req (162.368 / 15 = 10.82 ms、160.788 / 15 = 10.72 ms) の 74〜77% が client 自身の CPU。K=32 では 8 process に分かれるので client の床 = 32 × 3.80 / 8 = 15.2 ms (r2db)、15.3 ms (MitateDB) で、group p50 48 / 47 ms の約 1/3。real-server の K=1 p50 (10.4 / 10.9 ms) は socket plug の K=1 (4.837 / 4.630 ms、§5) の 2.2 / 2.4 倍で、差は client 経路 (別 process の httpx、nginx 経由) の固定費。 **2 回目**: `cpu_client_ms` / `requests` = r2db K=1 0.55 ms/req (8.250 / 15)、K=32 1.25 / 1.23 ms/req; MitateDB K=1 0.54、K=32 1.20 / 1.22 ms/req。K=1 の wall/req (40.518 / 15 = 2.70 ms、33.893 / 15 = 2.26 ms) のうち client の CPU は 20〜24%。1 回目との差 (K=1 の client CPU 8.0 → 0.55 ms/req、p50 10.4 → 2.25 ms) が、監査の観察 1 の「子の初回コスト」そのものである。real-server の K=1 p50 (2.25 / 1.92 ms) は socket plug の K=1 (4.837 / 4.630 ms、§5) より小さい (client が別 process で GIL を分け合わないため)。
+4. **後始末の照合** (WO §10.2 の 4): 6 run とも `perf_baseline` は launcher の `stop()` を 1 回呼んで終了し (run の最終行は `REALCPU`、traceback 無し)、run 後の `ps` に uvicorn / nginx / perf_baseline の残プロセスは 0 (監督が `ps -eo args=` で照合)。使い捨て cluster は run ごとに作られ捨てられる (`suite_lock(exclusive=True)` の下、WO §7.5 の (W-12))。 **2 回目**も同じ (6 run とも最終行は `REALCPU`、run 後の `ps` に今回の uvicorn / nginx / perf_baseline / 子 process は 0。開発機には 2026-09-05〜17 の別セッションの socket harness の nginx と conformance の uvicorn が残っているが、今回の run のものではない = 引き継ぎ書に観察として記す)。共有クラスタの pg_database / pg_roles 差分は完了ゲート r101d で 0。
 
 ### 6.3 判断 (監督)
 
@@ -2065,9 +2117,9 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 
 | peer | K=32 (1 回目) の比 ≤ 8 | K=32 (2 回目) の比 ≤ 8 |
 |---|---|---|
-| r2db-api | 成立 (4.63 / 4.58 ≤ 8) | 成立 |
-| MitateDB-api | 成立 (4.29 / 4.27 ≤ 8) | 成立 |
+| r2db-api | 1 回目 成立 (4.63 / 4.58 ≤ 8) → **無効** (計測器の欠陥) / **2 回目 不成立 (15.72 / 15.76 > 8)** | **不成立** |
+| MitateDB-api | 1 回目 成立 (4.29 / 4.27 ≤ 8) → **無効** (計測器の欠陥) / **2 回目 不成立 (18.67 / 18.83 > 8)** | **不成立** |
 
-**判定**: **D-16 成立** (両 peer、K=32 の 2 run とも 8 倍以内。server は 1 process、thread limiter 4)。
-**R-101 の閉止**: **可** — `RM` §0.1.4 の 2 (2026-09-28 改訂形 = real-server plug で判定) を両 peer で満たす。規則は計測前に固定した D-16 のとおりで、計測後に動かしていない。**観察 (規則の出力ではない。依頼者へ)**: この計測器の K=1 の分母は client 自身の CPU (8.0 / 8.3 ms/req、§6.2 の 3) が 74〜77% を占め、server の直列化に対して甘い形である (K=32 の group p50 48 / 47 ms のうち client の床が約 15 ms、server 側の直列区間が残り。§5 の socket plug の K=1 4.8 / 4.6 ms を分母にすると 10.0 / 10.1 倍)。閉止をこの形で受理するか、client の固定費を差し引く形 (例: 分母を socket plug の K=1 p50 にする、または `REALCPU` の client CPU/req を引く) に再改訂するかは依頼者判断 (引き継ぎ書 §4)。
-**R-113 への申し送り**: 1 process の server で 8 倍以内が出たので、§0.1.4 の 2 は multi-process を要求しない。R-113 は起票のまま残し (着手条件: 設計レビュー、依頼者判断)、着手の要否は上の観察に対する依頼者裁定 (分母の形) の後に決める。server 側の直列区間の実測値 (K=32 の group p50 − client の床 ≈ 33 / 31 ms = 要求あたり約 1.0 ms) が出発点。
+**判定**: **D-16 不成立** (2 回目 = 欠陥を直した計測器。両 peer とも K=32 の 2 run が 8 倍を超える: r2db 15.7 / 15.8、MitateDB 18.7 / 18.8)。1 回目の「成立」は計測器の欠陥 (K=1 の分母に子の初回コストが入る) による見かけで、無効とする (WO §6.1 監督裁定 17・20)。規則 D-16 は動かしていない。
+**R-101 の閉止**: **否** — `RM` §0.1.4 の 2 (改訂形) を満たさない。台帳 R-101 行の「閉止 2026-09-28」は監督裁定 20 で取り消す (R-14 の形で行を残す)。**観察**: 2 回目の分母 (K=1 2.25 / 1.92 ms) は client の CPU が 20〜24% で、1 回目の懸念 (分母が client に支配される) は解消している。server 1 process・thread limiter 4 での実効並行は 32 / 15.7 ≈ 2.0 (r2db)、32 / 18.7 ≈ 1.7 (MitateDB)。
+**R-113 への申し送り**: 1 process の server では 8 倍以内に届かない (15.7 / 18.7 倍、実効並行 2.0 / 1.7) ので、§0.1.4 の 2 を満たす候補は GIL の外に出る multi-process worker (R-113、規模 L、設計レビュー、in-memory の limit 状態の置き場を含む) である。着手は依頼者判断 (引き継ぎ書 §4)。出発点の数字: 2 回目の `REALPERF` / `REALCPU` (§6.1)、server 側の直列区間 ≈ group p50 − client の床 (32 × 1.25 / 8 = 5.0 ms) ≈ 30 ms = 要求あたり約 0.95 ms (r2db)。
