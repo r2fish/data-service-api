@@ -2,7 +2,7 @@
 
 ## 0. 版数・位置づけ
 
-- 状態: **起草 (v0.1) + 監督裁定 1〜9 (v0.2) + 設計レビュー 1 回目への監督裁定 10〜22 (v0.3、§10) + 同レビューの再確認 (新 1〜8) への監督裁定 26〜33 (v0.4、§10.4)。§5 の Q-1・Q-3・Q-4・Q-5 は依頼者判断待ち。Q-2 は監督裁定 15 で閉じた。** 着手条件は設計レビュー 1 回 (1 回目は済み) と、裁定 10〜22 の反映の再確認 (同じレビュー担当。済み、新 1〜8 は裁定 26〜33 で反映) である (§10 の裁定 22)。v0.2 の「(A)(C) なら 2 回」は、裁定 1 が裁定 10 で覆ったので失効した。
+- 状態: **v0.5 (2026-09-28): 依頼者裁定 Q-1 (A')・Q-3 = 1・Q-4 = (B)・Q-5 = 行う を §5 に逐語記録、設計レビュー 1 回目 + 再確認 3 回 (旧 13 / 新 8 / 新 A〜F) を裁定 1〜42 で反映。作業指示書の起草に進める。** 起草 (v0.1) + 監督裁定 1〜9 (v0.2) + 設計レビュー 1 回目への監督裁定 10〜22 (v0.3、§10) + 同レビューの再確認 (新 1〜8) への監督裁定 26〜33 (v0.4、§10.4)。§5 の Q-1・Q-3・Q-4・Q-5 は依頼者判断待ち。Q-2 は監督裁定 15 で閉じた。** 着手条件は設計レビュー 1 回 (1 回目は済み) と、裁定 10〜22 の反映の再確認 (同じレビュー担当。済み、新 1〜8 は裁定 26〜33 で反映) である (§10 の裁定 22)。v0.2 の「(A)(C) なら 2 回」は、裁定 1 が裁定 10 で覆ったので失効した。
 - 台帳: 計画文書 `RM` §8 の **R-113** (規模 L)。R-101 の是正の 2 段目 (`RM`:521、:533)。
 - 基点: main `443a79a`。本書の file:line はこの木の現物である (uvicorn は開発機の venv の 0.52.4。両 peer の `pyproject.toml` は `uvicorn>=0.30`、`r2db-api/pyproject.toml`:33、`MitateDB-api/pyproject.toml`:30)。v0.3 で足した事実 (§1.4) と v0.4 で足した事実 (§1.4 の (6)) も同じ木で確かめた。
 - 契約: **1.11.0 不変** (§10 の裁定 10・13)。v0.2 の「Q-1 が (A)(C) なら 1.12.0」は裁定 10 で覆した。
@@ -247,17 +247,19 @@ D-3 **区分 (ii) の置き場 = class ごとに 2 分する (両 peer 同型)**
 
 - 行の形: 1 credential 1 行 (`credential_id`, `stamps timestamptz[]`)。 **【v0.4、2026-09-28】裁定 30 で覆す (下の v0.4 の行の形)。**
 - 数え方 (1 文): `INSERT … ON CONFLICT (credential_id) DO UPDATE SET stamps = (期限切れを落とした配列 || clock_timestamp()) WHERE cardinality(期限切れを落とした配列) < L RETURNING …`。行が返らなければ `LIMIT_EXCEEDED` (`limit_class` = `requests_per_minute`、現行と同じ details)。配列の上限は L (既定 600、`r2db-api/src/r2db_api/limits.py`:18)。 **【v0.4、2026-09-28】裁定 30 で覆す (配列は固定長 60、下の 1 文の骨子)。**
-- 窓は DB の時計 (`clock_timestamp()`) で決める。process ごとの時計のずれは窓に入らない。fixed window の境目の flake (C-05 V2、新条件 (b)) と境目での 2L の突発は起きない。 **【v0.4】** int[60] でも窓は DB の時計の秒で決まる。境目の 1 秒は多めに数える (裁定 30。数え方の正しさは §9 (s))。
-- **【v0.4、2026-09-28 (裁定 30)】行の形 = 秒単位の 60 個の計数の配列 + 基点の秒。** 1 credential 1 行 (`credential_id`、基点の秒 `base_s` (bigint)、`counts int[60]`)。約 240 B で TOAST にならない。配列は固定長なので 1 文の費用が L (既定 600) に依らない。境目の 1 秒を多めに数えるので上限を超えて通すことが無く、60 s 未満の drive (C-05 V2) では拒否位置が変わらない。
-- **1 文の骨子 (v0.4)**。`<…>` は作業指示書で具体化する部分である。秒の位置の決め方 (秒 mod 60 の環か、基点から詰め直すか) も作業指示書で固定する。
+- 窓は DB の時計 (`clock_timestamp()`) で決める。process ごとの時計のずれは窓に入らない。fixed window の境目の flake (C-05 V2、新条件 (b)) と境目での 2L の突発は起きない。 **【v0.4、v0.5 で 61 個】** int[61] でも窓は DB の時計の秒で決まる。境目の 1 秒は多めに数える (裁定 30。数え方の正しさは §9 (s))。
+- **【v0.4、2026-09-28 (裁定 30)】行の形 = 秒単位の 61 個の計数の配列 + 基点の秒 (v0.4 の 60 個は裁定 34 で 61 個に改めた)。** 1 credential 1 行 (`credential_id`、基点の秒 `base_s` (bigint)、`counts int[61]`)。約 244 B で TOAST にならない。配列は固定長なので 1 文の費用が L (既定 600) に依らない。境目の 1 秒を多めに数えるので上限を超えて通すことが無く、60 s 未満の drive (C-05 V2) では拒否位置が変わらない。
+- **1 文の骨子 (v0.4)**。`<…>` は作業指示書で具体化する部分である。秒の位置の決め方 (秒 mod 61 の環か、基点から詰め直すか) も作業指示書で固定する。基点の進め方は裁定 37 のとおり単調 (戻さない)。
 
 ```sql
+-- v0.5 (裁定 37): 基点は単調に進め (GREATEST)、進める幅は max(0, s - base_s)、61 以上なら全部 0。
 WITH t AS (SELECT floor(extract(epoch FROM clock_timestamp()))::bigint AS s)
 INSERT INTO <platform の rate 表> (credential_id, base_s, counts)
-SELECT $credential_id, t.s, <長さ 60 の 0 の配列の t.s の位置を 1 にしたもの> FROM t
+SELECT $credential_id, t.s, <長さ 61 の 0 の配列の t.s の位置を 1 にしたもの> FROM t
 ON CONFLICT (credential_id) DO UPDATE
-   SET base_s = EXCLUDED.base_s,
-       counts = <既存の counts を base_s から EXCLUDED.base_s まで進めた配列 (過ぎた秒の位置を 0 に落とす)> の EXCLUDED.base_s の位置に +1
+   SET base_s = GREATEST(<現在の base_s>, EXCLUDED.base_s),
+       counts = <既存の counts を shift = LEAST(61, GREATEST(0, EXCLUDED.base_s - 現在の base_s)) だけ進めた配列 (過ぎた秒の位置を 0 に落とす。shift = 61 なら全部 0)> の
+                GREATEST(現在の base_s, EXCLUDED.base_s) の位置に +1
  WHERE <進めた配列の合計> < $L
 RETURNING 1;
 ```
@@ -441,7 +443,7 @@ D-7 **記録**: 台帳 R-113・R-101・R-18・R-52 行に【追記】、CONTROL_
 - (B) の側: 契約不変。コードの変更が最小。代わりに bound が N 倍に緩み、条件 9 の「制約で回避」に当たる。
 - (C') の側: 撤回 (設計レビュー 1 回目の指摘 2)。却下理由: K=32 が 4 worker に均等に分かれる確率は 0.54% で、宣言 32 のうち 9〜20 本目で 429 が出る (§4)。加えて契約 1.12.0 の文言の明確化を要する (v0.2 の裁定 1、裁定 10 で覆した)。
 - 監督案: (A')。
-- 裁定: 
+- 裁定: **依頼者裁定 2026-09-28 (逐語: 「Q-1 は (A')、Q-3 は 1、Q-4 は (B)、Q-5 は行う で進めます。」)** → (A') を採る。再審議しない (`OPERATING_CONDITIONS.md` §1.7 の 51)。
 
 ### Q-2 `requests_per_minute` の窓の形
 
@@ -457,7 +459,7 @@ D-7 **記録**: 台帳 R-113・R-101・R-18・R-52 行に【追記】、CONTROL_
 - (A) の側: 既存配備は宣言 `process_ceilings` = 1 のままで一致する。N と ceiling を配備者が同時に書く。
 - (B) の側: 何も書かなくても GIL の外に出る。代わりに実 process 数が宣言と独立に決まり、不一致 (§9 (c)) の機会が増える。
 - 監督案: (A) 1。
-- 裁定: 
+- 裁定: **依頼者裁定 2026-09-28 (逐語: 「Q-1 は (A')、Q-3 は 1、Q-4 は (B)、Q-5 は行う で進めます。」)** → N の既定値は 1。
 - 註 (v0.3): 裁定 11 で `--workers` は 1 のときも常に明示し、env に必須で置く。
 
 ### Q-4 MitateDB の Cloud Run で増やす軸
@@ -468,7 +470,7 @@ D-7 **記録**: 台帳 R-113・R-101・R-18・R-52 行に【追記】、CONTROL_
 - (B) の側: 1 instance の中で GIL の外に出る。Cloud Run の instance 数は現行の Invariant 1 (`MitateDB-api/docs/cloud-run-cloud-sql.md`:1327-1358) のまま。host 共有の slot がそのまま効く。`--cpu` ≥ workers を runbook に置く。 **【v0.4】** 推測 (現物未確認): Cloud Run は急な負荷で一時的に max-instances を超えることがある。その間は 2 host になり slot が共有されない。runbook の開示に「推測」と明記して 1 行添える (裁定 33)。revision の切り替えの重なりは R-52 の射程 (裁定 25)。
 - (C) の側: 両方の自由度を残す。代わりに runbook に積の算術と、両方を変えたときの宣言の書き直しを置く。autoscaling の算術: P = max-instances × workers を分母にすると、Cloud Run が縮退している平常時 (実 instance 数 < max) は宣言値に届かない (例: max-instances 4 × workers 4 = 16 で、v0.2 の分割なら `concurrency` 32 に対して b = 2)。container の vCPU が workers より少なければ GIL の外にも出ないので、`--cpu` ≥ workers が要る。instances ≥ 2 は (A) と同じく host 共有の slot の射程の外である。
 - 監督案: (B) (裁定 20。v0.2 の監督案 (C) は裁定 20 で改めた)。
-- 裁定: 
+- 裁定: **依頼者裁定 2026-09-28 (逐語: 「Q-1 は (A')、Q-3 は 1、Q-4 は (B)、Q-5 は行う で進めます。」)** → (B) instance は 1 のまま `--workers` と `--cpu` で伸ばす。
 
 ### Q-5 R-101 の閉止を本変更セットの D-5 の結果で行うか
 
@@ -476,7 +478,7 @@ D-7 **記録**: 台帳 R-113・R-101・R-18・R-52 行に【追記】、CONTROL_
 - (A) の側: 閉止形 (`RM` §0.1.4 の 2) は R-101 のものであり、同じ判定規則で同じ計測器を使う。R-101 の行は「次は R-113」と記している (`RM`:521)。
 - (B) の側: R-101 の範囲は直列化の切り分けと 1 process 内の是正で、multi-process は R-113 の範囲として起票された (R-101 作業指示書 §12 の (12-1))。
 - 監督案: (A) 行う。
-- 裁定: 
+- 裁定: **依頼者裁定 2026-09-28 (逐語: 「Q-1 は (A')、Q-3 は 1、Q-4 は (B)、Q-5 は行う で進めます。」)** → 行う (R-101 の閉止は本変更セットの D-5 の結果 = D-16 で判定する)。
 
 ## 6. WP 分割案 (conformance を実装より先に置く)
 
@@ -485,8 +487,8 @@ D-7 **記録**: 台帳 R-113・R-101・R-18・R-52 行に【追記】、CONTROL_
 | WP | 内容 | 触る経路 (現物) | クラス見込み |
 |---|---|---|---|
 | **WP-1** conformance | C-26 (4) を宣言で分岐する形に改める (裁定 12)。新条件 (a)(b) の行とテストを足す (裁定 14)。C-26 (5) を workers ≥ 2 の起動形 (事前検査 → uvicorn) でも観測する (裁定 11)。launcher に `workers`、`LOCK TABLE` で保持する port、process group の起動と killpg、pidfile への子の pid の記録と孤児掃除 (裁定 19)。C-05 の honest limits (6) を新条件の分だけ狭める。`COLLECTION_FLOOR` の追随。**【v0.4】** 新条件 (b) の 3 主張と波の送り方 (裁定 32)。孤児掃除を pgid で記録 (裁定 33。子の pid の記録を改める)。C-26 (5) の起動形を preflight → uvicorn に (裁定 26)。launcher が `mkdtemp` の slot directory と workers を env で渡す (裁定 27) | `conformance-tests/CONDITIONS.md` (:34、:55、新しい行)、`conformance-tests/test_c26_composition_root.py`、新条件のテストファイル (新規)、`conformance-tests/socket_harness.py`、`r2db-api/conformance/real_server_r2db.py`、`MitateDB-api/conformance/real_server_mitatedb.py`、`conformance-tests/` の `COLLECTION_FLOOR` | C (`conformance-tests/` 配下)。launcher に同名 helper を足して登録すれば D |
-| **WP-2** r2db 実装 | migration `0015` (rate の表、FK `ON DELETE CASCADE`、api role への INSERT / UPDATE / SELECT)。`requests_per_minute` を PG の sliding 行へ (裁定 15)。slot helper (裁定 10)。写像の 2 戦略の helper (裁定 18)。接続の `application_name` (裁定 14)。`verify-declarations` の workers 検査 (裁定 11)。接続予算の式 (pool の寸法、F-16、F-18 を thread limit 基準に。裁定 16)。配線と migration 一覧の追随。**【v0.4】** `main.py` に preflight の entry (裁定 26)。`build_app()` に workers ≤ ceiling の検査と slot directory の検査 (存在・所有者・0700、裁定 27)。slot helper は D-3 (2') の決定どおり (開き方・errno・自己検査・要求ごとの open / close。裁定 28・29)。rate 表は int[60] + 基点の秒の 1 文 (裁定 30。上の「sliding 行」の形を改める)。写像の `concurrency` に ceiling ≤ workers (裁定 27)。rate の文は認証で借りた接続を返した後に借りる (裁定 33。完了条件)。http adapter は instance ごとに `mkdtemp` の slot directory を配線 | `r2db-api/migrations/0015_*.sql` (新規)、slot helper の module (新規。名は作業指示書)、`r2db-api/src/r2db_api/service.py` (:1019-1109)、`http.py`、`capabilities_document.py`、`limits.py` (:121-165)、`main.py`、`platform_declarations.py` (:1343-1375)、`ops.py` (:1183-1187 ほか)、`postgres.py` と credential store / audit sink の接続工場、`r2db-api/conformance/conformance_adapter_r2db_http.py`、`r2db-api/deploy/scripts/part1_provision_host_and_db.sh`、`r2db-api/tests/` (`test_audit_query.py`:2393 の `_ISOMORPHIC_TARGETS` を含む) | D (`_ISOMORPHIC_TARGETS` の増減。`RM` §9 の 8) |
-| **WP-3** MitateDB 実装 | WP-2 と同型。migration `0016`、`_LimitStateHolder` の `requests_per_minute` を PG の sliding 行へ、slot helper、写像の 2 戦略、`application_name`、`verify-declarations` の workers 検査、接続予算の式、配線と migration 一覧の追随。**【v0.4】** WP-2 の v0.4 の項と同型 (preflight の entry、`build_app()` の workers と slot directory の検査、slot helper、rate 表 int[60]、写像、借りる順序、http adapter の `mkdtemp`) | `MitateDB-api/migrations/0016_*.sql` (新規)、slot helper の module (新規)、`MitateDB-api/src/mitatedb_api/cell.py` (:306-411)、`http.py`、`capabilities_document.py`、`config.py` (:300-319)、`main.py`、`platform_declarations.py` (:1209-1235、:1318-1350)、`ops.py` (:1452- ほか)、`backend_postgres.py` と platform pool の接続工場、`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py`、`MitateDB-api/tests/` | D (同上) |
+| **WP-2** r2db 実装 | migration `0015` (rate の表、FK `ON DELETE CASCADE`、api role への INSERT / UPDATE / SELECT)。`requests_per_minute` を PG の sliding 行へ (裁定 15)。slot helper (裁定 10)。写像の 2 戦略の helper (裁定 18)。接続の `application_name` (裁定 14)。`verify-declarations` の workers 検査 (裁定 11)。接続予算の式 (pool の寸法、F-16、F-18 を thread limit 基準に。裁定 16)。配線と migration 一覧の追随。**【v0.4】** `main.py` に preflight の entry (裁定 26)。`build_app()` に workers ≤ ceiling の検査と slot directory の検査 (存在・所有者・0700、裁定 27)。slot helper は D-3 (2') の決定どおり (開き方・errno・自己検査・要求ごとの open / close。裁定 28・29)。rate 表は int[61] (裁定 34) + 基点の秒の 1 文 (裁定 30。上の「sliding 行」の形を改める)。写像の `concurrency` に ceiling ≤ workers (裁定 27)。rate の文は認証で借りた接続を返した後に借りる (裁定 33。完了条件)。http adapter は instance ごとに `mkdtemp` の slot directory を配線 | `r2db-api/migrations/0015_*.sql` (新規)、slot helper の module (新規。名は作業指示書)、`r2db-api/src/r2db_api/service.py` (:1019-1109)、`http.py`、`capabilities_document.py`、`limits.py` (:121-165)、`main.py`、`platform_declarations.py` (:1343-1375)、`ops.py` (:1183-1187 ほか)、`postgres.py` と credential store / audit sink の接続工場、`r2db-api/conformance/conformance_adapter_r2db_http.py`、`r2db-api/deploy/scripts/part1_provision_host_and_db.sh`、`r2db-api/tests/` (`test_audit_query.py`:2393 の `_ISOMORPHIC_TARGETS` を含む) | D (`_ISOMORPHIC_TARGETS` の増減。`RM` §9 の 8) |
+| **WP-3** MitateDB 実装 | WP-2 と同型。migration `0016`、`_LimitStateHolder` の `requests_per_minute` を PG の sliding 行へ、slot helper、写像の 2 戦略、`application_name`、`verify-declarations` の workers 検査、接続予算の式、配線と migration 一覧の追随。**【v0.4】** WP-2 の v0.4 の項と同型 (preflight の entry、`build_app()` の workers と slot directory の検査、slot helper、rate 表 int[61] (裁定 34)、写像、借りる順序、http adapter の `mkdtemp`) | `MitateDB-api/migrations/0016_*.sql` (新規)、slot helper の module (新規)、`MitateDB-api/src/mitatedb_api/cell.py` (:306-411)、`http.py`、`capabilities_document.py`、`config.py` (:300-319)、`main.py`、`platform_declarations.py` (:1209-1235、:1318-1350)、`ops.py` (:1452- ほか)、`backend_postgres.py` と platform pool の接続工場、`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py`、`MitateDB-api/tests/` | D (同上) |
 | **WP-4** 計測 | `tools/perf_baseline.py --real-server <peer> --workers N` (launcher に渡し、宣言 ceiling を N にする)。計測時の `concurrency` 64 の宣言 (§7.2、r2db の入口は両論。**【v0.4】裁定 31 で覆す: 本番既定の 32 で計測し、`concurrency` を上書きしない**)。子の access log を pid 付きで保存し、worker ごとの受付数を記録する (裁定 17)。§7 の実測は監督。**【v0.4】前提: rate の文の小実験 (§7.3、表 7-5) が 0.2 ms/文以内であること。超えれば監督に上げる (裁定 30)** | `tools/perf_baseline.py`、`tools/tests/`、`tools/PERF_BASELINE_README.md`、launcher (`r2db-api/conformance/real_server_r2db.py`、`MitateDB-api/conformance/real_server_mitatedb.py`) の log 設定 | B (launcher に触れれば C) |
 | **WP-5** 配備 | r2db の unit に `ExecStartPre=` (`ops verify-declarations`) と `--workers`、env `R2DB_WORKERS` を必須に。MitateDB の Dockerfile `CMD` に事前検査と SERVICE ごとの workers。slot directory の置き場 (§9 (j))。runbook に「1 host」「`--max-instances=1`、`--cpu` ≥ workers」、SIGTTIN の禁止、workers と ceilings の対応、接続予算。**【v0.4】** `ExecStartPre=` の中身は preflight の entry (裁定 26。`ops verify-declarations` は置かない)。unit に `RuntimeDirectory=<unit>/slots` と `RuntimeDirectoryMode=0700`、env に `R2DB_SLOT_DIR`。Dockerfile に `USER` 所有の 0700 の slot directory、env に `MITATEDB_SLOT_DIR`、`CMD` の data の枝に preflight (裁定 27)。runbook に `verify-declarations` の workers 検査を運用者の手動検査として (裁定 26)、Cloud Run が一時的に max-instances を超えうる件を「推測」と明記して 1 行 (裁定 33) | `r2db-api/deploy/systemd/r2dbsvc-api.service` (:60 ほか)、`r2db-api/deploy/env/api.env.example`、`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` (:96-106)、`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`、`MitateDB-api/docker/Dockerfile` (:145)、`MitateDB-api/docs/cloud-run-cloud-sql.md` (:1327-1358 Invariant 1 ほか) | B (unit・Dockerfile)。runbook だけなら A |
 | **WP-6** 記録 | 台帳・`CONTROL_MAPPING`・本書の版上げ、起票文案 (§8) の台帳行 | §8 | D (`security/` 配下) |
@@ -535,7 +537,7 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 - 宣言: launcher の `start(ceilings=...)` に data = N を渡す。control の値は launcher が起動する control の process 数 (1) とする。
 - **計測時の `concurrency` の宣言値は 64** (裁定 17)。理由: K=32 の一斉送信が slot の解放の遅れ (応答送信後の `finally`) で 429 を踏まないため。宣言値は接続予算に入らない (D-3 (5)) ので他に影響しない。本番既定は 32 のまま。 **【v0.4、2026-09-28】裁定 31 で覆す。理由の前提が現物と違う (slot の `with` は応答を作る前に抜ける。r2db `r2db-api/src/r2db_api/http.py`:524-557、MitateDB `MitateDB-api/src/mitatedb_api/http.py`:645-656)。**
 - **【v0.4】計測時の `concurrency` は本番既定の 32** (裁定 31)。launcher は `concurrency` を env で上書きしない。実測で 429 が出たときだけ再検討する (表 7-4 に記録し、監督に上げる)。
-- **r2db での 64 の与え方 (両論。監督が決める)**: r2db には `concurrency` を env で変える入口が無い (§1.4 の (3))。MitateDB は launcher の env に `MITATEDB_MAX_CONCURRENCY=64` を置けば足りる。 **【v0.4、2026-09-28】裁定 31 で不要 (64 を与えないので、下の (甲)(乙) はどちらも採らない。裁定 24 の (甲) も裁定 31 で覆した)。**
+- **【裁定 31 (v0.4) で不要になった両論。記録として残す】** **r2db での 64 の与え方 (両論。監督が決める)**: r2db には `concurrency` を env で変える入口が無い (§1.4 の (3))。MitateDB は launcher の env に `MITATEDB_MAX_CONCURRENCY=64` を置けば足りる。 **【v0.4、2026-09-28】裁定 31 で不要 (64 を与えないので、下の (甲)(乙) はどちらも採らない。裁定 24 の (甲) も裁定 31 で覆した)。**
   - (甲) r2db に env の入口を足す (MitateDB の `MITATEDB_MAX_CONCURRENCY` と対称)。launcher は両 peer とも env で 64 を与える。代わりに本番の設定面が 1 つ増え、`ops.py`:1183-1187 の「fixed on this peer」の docstring と `verify-declarations` の F-16 の値の出所が変わる (WP-2 の範囲が広がる)。
   - (乙) r2db の `build_app` に limits の引数を足し、launcher が計測用の import string (factory) で 64 を渡す。本番の設定面は増えない。代わりに計測の起動形が本番の起動形 (`r2db_api.main:app`) と分かれ、real-server plug が「文書化された composition root をそのまま起動する」性質を r2db だけ失う。
 - 各 run で worker ごとの受付数を記録する (launcher が子の access log を pid 付きで保存する。uvicorn の log 設定で pid を出す)。均等でなくてもよいが、4 worker すべてが受けたことを確かめる (裁定 17)。
@@ -549,12 +551,12 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 
 - 使い捨てクラスタの `max_connections` は 300 (`tools/testpg/dsa_testpg.py`:837)。
 - 現行の式 (v0.2 の記述。D-3 (5) の改定前): F-18 の下限を既定 `concurrency` 32・登録 application ≥ 1 で数えると、P_data × 128 + P_control × 16。P_data = 4、P_control = 1 で 528 となり 300 を超える。P_data = 2 では 272。v0.2 の裁定 3 の b 基準 (4 × (16 + 16) + 16 = 144) は裁定 16 で覆した。
-- **thread limit 基準 (裁定 16)**: P = 4、thread_limit 4、c = 2 → F-18 の下限は 4 × (2 × (4 + 2)) + 16 = 64 ≤ 300。計測時の `concurrency` 64 (§7.2) はこの算術に入らない。
+- **thread limit 基準 (裁定 16)**: P = 4、thread_limit 4、c = 2 → F-18 の下限は 4 × (2 × (4 + 2)) + 16 = 64 ≤ 300。計測は本番既定の 32 で行う (裁定 31。宣言値は接続予算に入らない。
 - role の `CONNECTION LIMIT` に対する需要 (r2db): application の role (runtime / developer 各 36) は P × (4 + c) = 24。api role (68) は credential store と durable audit sink の 2 つの pool が同じ role なので (`main.py`:493、:502) P × 2 × (4 + c) = 48。どちらも収まる。
 - MitateDB の role ごとの需要 (api role 132 に対する platform pool と audit sink の一時接続、application の role 68 に対する永続接続 × N) は作業指示書で数える (§9 (e))。
 - **【v0.4、2026-09-28 (裁定 30)】rate の文の小実験 (WP-4 の前提)**: 使い捨て cluster で、同じ credential の 1 行に 32 並行の upsert (D-3 (1) の 1 文) を流し、1 文の p50 / p95 を取る。**0.2 ms/文を超えるなら監督に上げる (再裁定)**。
   - 0.2 ms の出所 (設計レビュー 1 回目の再確認、新 5 の算術): K=1 ≈ 2.25 ms + 往復なので、8 倍の上限は約 18〜20 ms。client の床 5.0 ms と worker あたりの直列区間 8 × 0.95 ≈ 7.6 ms で約 12.6 ms を使い、残りは約 6 ms。同じ bearer の 32 要求は全 worker をまたいで 1 行に並ぶので、32 本の直列で割ると 1 文あたり約 0.2 ms を超えると 8 倍を割る。
-  - 前提: R-101 の計測は runtime bearer 1 本で `query` を送る (R-101 作業指示書 D-15) ので、K=32 の全要求が 1 行を取り合う。D-16 の 1 run は 18 group × 32 = 576 要求を送る (`tools/perf_baseline.py`:2155-2162 の group の送り方)。int[60] の行は L に依らず固定長 (約 240 B) である (D-3 (1))。
+  - 前提: R-101 の計測は runtime bearer 1 本で `query` を送る (R-101 作業指示書 D-15) ので、K=32 の全要求が 1 行を取り合う。D-16 の 1 run は 18 group × 32 = 576 要求を送る (`tools/perf_baseline.py`:2155-2162 の group の送り方)。int[61] (裁定 34) の行は L に依らず固定長 (約 240 B) である (D-3 (1))。
   - 記録: 表 7-5。
 
 ### 7.4 実測の表 (空欄。監督が埋める)
@@ -802,3 +804,13 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 34. **(§9 (s)) rate 行の計数は 61 個にする** (`int[61]` = 現在の整数秒 + 直前の 60 秒。裁定 30 の「60 個」を覆す)。秒の途中から始まる 60 秒の窓は 61 個の整数秒にまたがるので、60 個では数え落としが出て L を超えて通しうる。61 個は境目で多めに数えるだけで、上限を超えて通すことは無い。固定長 (約 244 B) は変わらない。
 35. **(§9 (t)) C-26 (4) の起動形**: ceiling 1 / workers 1 → `enforced`、**ceiling 2 / workers 2 → `enforced`** (slot directory を配線した launcher)、**ceiling 2 / workers 1 → `deployment_required`** の 3 通りを観測する (裁定 27 の写像の両側を pin する。3 通り目は安い)。新条件 (a)(b) は ceiling 2 / workers 2 の起動形で駆動する。
 36. **(§9 (r)、未確認 4 件)** 自己検査は slot directory 内の専用ファイル `selfcheck` を同じ process で 2 回 open して行う (slot ファイルを使わない)。flock が close で外れること (POSIX の flock 意味論。fcntl 模倣では同 process のどの fd の close でも外れる = 自己検査が捕らえる) と、systemd の `RuntimeDirectory` が unit の停止で消えること (`RuntimeDirectoryPreserve=no` が既定) は文書上の事実として採り、作業指示書 WP-2 / WP-5 の完了条件に「開発機と配備先の現物で確かめた」を置く。両 peer の cell を閉じる経路 (preflight の後始末) は WP-2 / WP-3 の実装で現物確認し、無ければ足す (preflight は process 終了で接続が閉じるので、閉じる経路が無くても正しさは損なわれない。行儀のためだけ)。Cloud Run の一時超過は「推測」のまま (裁定 33)。
+
+### 10.6 監督裁定 37〜42 (最終再確認 `r113_design_review_1c.md` の新 A〜F への裁定、2026-09-28。v0.5)
+
+37. **(新 A、高) rate の 1 文の基点は単調に進める。** `base_s = GREATEST(現在の base_s, EXCLUDED.base_s)`、進める幅は `LEAST(61, GREATEST(0, EXCLUDED.base_s − 現在の base_s))`、61 以上なら配列を全部 0 にする。行 lock を待った要求が古い秒を持ち込んでも基点を戻さない (戻すと次の要求がその秒の計数を 0 に落として L を超えて通す)。時計が大きく進んでから戻った場合は窓が伸びる (厳しい側) ので開示で足りる。D-3 (1) の骨子を v0.5 で書き換えた。変異: `GREATEST` を外す → 新条件 (b) と peer-local の「秒の境目で lock 待ちが混ざる」テストが赤。
+38. **(新 B、中) 本文の残りの「60」を 61 に、§7.3 の「64」の記述を「裁定 31 で取り下げ (計測は既定 32)」に揃えた** (v0.5 で監督が直接編集。D-3 (1)、WP-2 の表、§7.3)。
+39. **(新 C、低中) 配備物は env の同じ変数からだけ `--workers` を渡す** (systemd の `ExecStart=… --workers ${R2DB_WORKERS}`、Dockerfile の CMD は `${MITATEDB_WORKERS}`)。引数の直書きを禁じ、静的テスト (unit / Dockerfile の文面を読む) で pin する。WP-5 の完了条件。
+40. **(新 D、低中) SIGHUP による reload は runbook で禁じる** (再起動は stop / start。SIGHUP の間は N+1 process になり、接続予算 F-16 が P で数える前提が破れる: N=5 で 72 > r2db api role 68)。F-16 は P のまま。両 runbook に 1 行、§9 (c) の入口の表に 1 行。
+41. **(新 E、低) preflight entry は module の `app` (= `build_app()` の結果) を使い回し、二重に `build_app()` を呼ばない。MitateDB の CMD は `set -e` (または `&&`) で繋ぐ。起動時の検査は `build_app()` の中に置き、lifespan に置かない。** WP-2 / WP-3 / WP-5 の完了条件。
+42. **(新 F、低) int[61] は境目で最大 1 秒分を多めに数える (L を超えて通すことは無い)。** C-05 の honest limits と両 runbook に開示する。 **(n)**: `hold_in_flight` が pool の接続を持たずに止まることは r2db で現物確認済み (レビュー担当)、MitateDB は WP-3 の完了条件に置く。
+
