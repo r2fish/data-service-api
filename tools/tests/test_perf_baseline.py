@@ -2045,8 +2045,8 @@ def test_real_server_default_client_processes_is_eight(tmp_path, capsys, monkeyp
     mutation M175 (`tools/perf_baseline.py`): change `--client-processes`'s
     own default to `4` -- red because this test's own `client_
     processes=8` assertion observes `client_processes=4` instead.
-    mutation RV1-132 (`tools/perf_baseline.py`): `_run_one_real_server_
-    group` always spawns exactly TWO real child processes regardless of
+    mutation RV1-132 (`tools/perf_baseline.py`): `_spawn_real_server_
+    clients` always spawns exactly TWO real child processes regardless of
     its own `n_children` argument -- red because this test's own
     observed pid count (a real OS-process boundary this test's `_spy_
     group_client_pids` helper reads back, never a formula) becomes 2,
@@ -2078,8 +2078,8 @@ def test_real_server_k1_uses_one_client_process(tmp_path, capsys, monkeypatch):
     mutation M176 (`tools/perf_baseline.py`): always start `--client-
     processes` children regardless of `K` -- red because this test's own
     `client_processes=1` assertion observes `client_processes=8` instead.
-    mutation RV1-133 (`tools/perf_baseline.py`): `_run_one_real_server_
-    group` always spawns exactly TWO real child processes regardless of
+    mutation RV1-133 (`tools/perf_baseline.py`): `_spawn_real_server_
+    clients` always spawns exactly TWO real child processes regardless of
     its own `n_children` argument -- red because this test's own
     observed pid count (a real OS-process boundary, never a formula)
     becomes 2, not 1, and `client_processes=1` no longer holds
@@ -2096,6 +2096,35 @@ def test_real_server_k1_uses_one_client_process(tmp_path, capsys, monkeypatch):
         observed_child_pids = {message["pid"] for message in observed_pids[-1]}
         assert len(observed_child_pids) == 1
         assert os.getpid() not in observed_child_pids
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_client_process_pids_are_stable_across_every_group(tmp_path, monkeypatch):
+    """Acceptance audit observation 1, the work order's §6.1 監督裁定 17: one run's own
+    client OS processes are spawned exactly ONCE (`_spawn_real_server_clients`) and serve
+    every group of that run -- warmup AND measured
+    alike -- never respawned per group. Pinned against the REAL, observed OS `pid` each
+    group's own messages carry (`_spy_group_client_pids`, a real process boundary, never a
+    value this test computes independently): across a run with two warmup groups and two
+    measured groups, the pid SET observed in every single group is identical to the pid set
+    observed in the first.
+
+    mutation M215 (`tools/perf_baseline.py`): spawn a fresh set of client processes for
+    every group instead of once for the whole run -- red because this test's own per-group
+    pid-set equality assertion fails (each group's own observed pid set becomes disjoint
+    from the first group's)."""
+    observed_pids = _spy_group_client_pids(monkeypatch)
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=2, concurrency=2, warmup=2, n=2)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert len(observed_pids) == 4
+        first_group_pids = {message["pid"] for message in observed_pids[0]}
+        assert len(first_group_pids) == 2
+        for messages in observed_pids[1:]:
+            assert {message["pid"] for message in messages} == first_group_pids
     finally:
         _stop_realserver_stub_server(proc)
 
@@ -2153,7 +2182,10 @@ def test_real_server_group_start_is_the_min_of_childrens_own_time_ns(tmp_path):
     re-schedule. Pinned against `_run_one_real_server_group`'s own
     real, per-child `t0`/`t1` (`messages`) -- an independent ground
     truth this test computes `wall_ms` from itself, never a value this
-    test fabricates.
+    test fabricates. The work order's §6.1 監督裁定 17: the client
+    processes are spawned once (`_spawn_real_server_clients`) and
+    stopped once (`_stop_real_server_clients`), around the single
+    `_run_one_real_server_group` call this test makes.
 
     mutation M210 (`tools/perf_baseline.py`): use the PARENT's own
     `time.time_ns()`, read after `result_queue.get()` has already
@@ -2165,7 +2197,11 @@ def test_real_server_group_start_is_the_min_of_childrens_own_time_ns(tmp_path):
     base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
     try:
         query_url = f"{base_url}/v1/data/dsaperfreal/query"
-        result = pb._run_one_real_server_group(query_url, "runtime-secret", "label", [1, 1], 2)
+        processes, barrier, result_queue = pb._spawn_real_server_clients(query_url, "runtime-secret", "label", [1, 1], 2)
+        try:
+            result = pb._run_one_real_server_group(barrier, result_queue, 2)
+        finally:
+            pb._stop_real_server_clients(processes, barrier)
         min_child_t0 = min(message["t0"] for message in result["messages"])
         max_child_t1 = max(message["t1"] for message in result["messages"])
         expected_wall_ms = (max_child_t1 - min_child_t0) / 1_000_000.0
@@ -2258,38 +2294,41 @@ _REALSERVER_BUSY_LOOP_ITERATIONS_PER_REQUEST = 300_000
 
 def _stub_busy_loop_client_worker(count, _query_url, _bearer, _field, barrier, result_queue):
     """Test-only child worker (completion condition 141, code review 1
-    F2): burns a FIXED, known amount of CPU per request via a tight
-    loop instead of making a real HTTP call, so a test can
-    independently cross-check `_run_one_real_server_group`'s own
-    `getrusage`-based `cpu_ms` against a `time.process_time()` ground
-    truth this worker reports back alongside it -- never the real `_one`/
-    httpx path. Runs the SAME loop for every request it is given,
-    warmup or measured alike; only the caller decides which groups
-    count."""
-    try:
-        barrier.wait(timeout=60.0)
-    except pb.threading.BrokenBarrierError:
-        return
-    started_ns = pb.time.time_ns()
-    before_rusage = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
-    before_process_time = pb.time.process_time()
-    total = 0
-    for _ in range(count):
-        for _ in range(_REALSERVER_BUSY_LOOP_ITERATIONS_PER_REQUEST):
-            total += 1
-    after_rusage = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
-    after_process_time = pb.time.process_time()
-    cpu_ms = ((after_rusage.ru_utime + after_rusage.ru_stime) - (before_rusage.ru_utime + before_rusage.ru_stime)) * 1000.0
-    process_time_ms = (after_process_time - before_process_time) * 1000.0
-    result_queue.put({
-        "t0": started_ns,
-        "t1": pb.time.time_ns(),
-        "cpu_ms": cpu_ms,
-        "statuses": [200] * count,
-        "row_counts": [1] * count,
-        "pid": os.getpid(),
-        "process_time_ms": process_time_ms,
-    })
+    F2; loop shape from the work order's §6.1 監督裁定 17): burns a
+    FIXED, known amount of CPU per request via a tight loop instead of
+    making a real HTTP call, so a test can independently cross-check
+    `_run_one_real_server_group`'s own `getrusage`-based `cpu_ms`
+    against a `time.process_time()` ground truth this worker reports
+    back alongside it -- never the real `_one`/httpx path. Serves every
+    group (warmup or measured alike) the SAME persistent child process
+    would, running the SAME loop each time; only the caller decides
+    which served groups count as measured. Runs until the parent's own
+    `barrier.abort()` breaks it out of its next `barrier.wait()`."""
+    while True:
+        try:
+            barrier.wait(timeout=60.0)
+        except pb.threading.BrokenBarrierError:
+            return
+        started_ns = pb.time.time_ns()
+        before_rusage = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
+        before_process_time = pb.time.process_time()
+        total = 0
+        for _ in range(count):
+            for _ in range(_REALSERVER_BUSY_LOOP_ITERATIONS_PER_REQUEST):
+                total += 1
+        after_rusage = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
+        after_process_time = pb.time.process_time()
+        cpu_ms = ((after_rusage.ru_utime + after_rusage.ru_stime) - (before_rusage.ru_utime + before_rusage.ru_stime)) * 1000.0
+        process_time_ms = (after_process_time - before_process_time) * 1000.0
+        result_queue.put({
+            "t0": started_ns,
+            "t1": pb.time.time_ns(),
+            "cpu_ms": cpu_ms,
+            "statuses": [200] * count,
+            "row_counts": [1] * count,
+            "pid": os.getpid(),
+            "process_time_ms": process_time_ms,
+        })
 
 
 def test_real_server_cpu_client_ms_is_the_childrens_own_rusage_sum(tmp_path, capsys, monkeypatch):
@@ -2335,6 +2374,48 @@ def test_real_server_cpu_client_ms_is_the_childrens_own_rusage_sum(tmp_path, cap
         assert measured_ground_truth > 0.0
         assert printed_cpu_ms == pytest.approx(measured_ground_truth, rel=0.2)
         assert printed_cpu_ms < measured_ground_truth + warmup_ground_truth
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_warmup_import_cost_does_not_leak_into_measured_cpu(tmp_path, monkeypatch):
+    """Acceptance audit observation 1, the work order's §6.1 監督裁定 17: a client
+    process's own one-time httpcore anyio-backend import (paid once, on the FIRST real
+    request any persistent client process ever sends, never per group) lands inside
+    whichever group happens first -- a warmup group, for this `--warmup 1` run -- and is
+    EXCLUDED from every later group's own `cpu_client_ms`, because the CPU baseline is
+    taken FRESH at the top of every group (never held over from an earlier one). Pinned
+    against the REAL child worker (`_real_server_client_worker`, never a synthetic
+    stand-in, which cannot exercise httpcore's own real import cost) via `_run_one_real_
+    server_group`'s own reported per-group `cpu_client_ms` (`_spy_group_client_pids`'s own
+    spy wrapper, reused here for its `messages`): the warmup group's own summed `cpu_
+    client_ms` is larger than EVERY measured group's own.
+
+    mutation M216 (`tools/perf_baseline.py`): take the CPU baseline once, before the
+    child's own per-group loop starts, instead of freshly at the top of every iteration --
+    red because every group's own reported `cpu_ms` becomes CUMULATIVE from that one stale
+    baseline (it never stops including the warmup group's own import cost, and keeps
+    growing group over group), so the first measured group's own `cpu_client_ms` exceeds
+    the warmup group's instead of staying smaller."""
+    observed_groups = []
+    real_run_group = pb._run_one_real_server_group
+
+    def _spy(*a, **k):
+        result = real_run_group(*a, **k)
+        observed_groups.append(result)
+        return result
+
+    monkeypatch.setattr(pb, "_run_one_real_server_group", _spy)
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=1, n=2)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert len(observed_groups) == 3
+        warmup_cpu_ms = observed_groups[0]["cpu_client_ms"]
+        measured_cpu_ms = [g["cpu_client_ms"] for g in observed_groups[1:]]
+        assert measured_cpu_ms  # OC 1.5-32 (空振り禁止): at least one measured group observed
+        assert all(warmup_cpu_ms > m for m in measured_cpu_ms)
     finally:
         _stop_realserver_stub_server(proc)
 
@@ -2672,8 +2753,8 @@ def test_real_server_client_processes_flag_caps_at_k(tmp_path, capsys, monkeypat
     mutation M205 (`tools/perf_baseline.py`): use `N` (the flag's own
     value) directly instead of `min(N, K)` -- red because this test's own
     `client_processes=4` assertion observes `client_processes=8` instead.
-    mutation RV1-168 (`tools/perf_baseline.py`): `_run_one_real_server_
-    group` always spawns exactly TWO real child processes regardless of
+    mutation RV1-168 (`tools/perf_baseline.py`): `_spawn_real_server_
+    clients` always spawns exactly TWO real child processes regardless of
     its own `n_children` argument -- red because this test's own
     observed pid count (a real OS-process boundary, never a formula)
     becomes 2, not 4, and `client_processes=4` no longer holds

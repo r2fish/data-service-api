@@ -2112,21 +2112,29 @@ def _confirm_first_query(data_base_url: str, runtime_bearer: str, entity: str, f
 def _real_server_client_worker(
     count: int, query_url: str, bearer: str, field: str, barrier: Any, result_queue: Any,
 ) -> None:
-    """The work order's D-15: one client OS process's own share of one group -- `count`
-    real `query` requests, fired together via exactly ONE `asyncio.gather`
-    call (never one `await` at a time -- its completion condition 134), after
-    `barrier.wait()` releases every client process (and the parent, which
-    is a party too) together. A per-request failure (a non-2xx status, or
-    the connection dropping mid-flight) is caught HERE and turned into a
-    status this worker reports back (`599` for a transport-level failure
-    that never got a real HTTP status at all) -- it never raises out of
-    this function, which would otherwise leave the parent's own
-    `result_queue.get()` for this group waiting forever. Completion
-    times are `time.time_ns()` only (never `time.perf_counter()`, which
-    cannot be compared across process boundaries -- its completion condition
-    136); CPU is this process's own `resource.getrusage(RUSAGE_SELF)`
-    difference across the SAME `asyncio.gather` call (`ru_utime +
-    ru_stime`, the same pair `_measure_op`'s own `cpu_total_ms` reads)."""
+    """The work order's §6.1 監督裁定 17: one client OS process's own share of every group
+    (warmup AND measured) of one (plug, K) run -- spawned exactly ONCE by `_spawn_real_
+    server_clients` and reused for the run's whole lifetime, never respawned per group.
+    Holds exactly ONE `httpx.AsyncClient` (below) for that whole lifetime, so a client
+    library's own one-time costs (httpcore's lazy anyio-backend import, the first
+    connection's dial) land inside whichever group happens first -- a warmup group, for any
+    `--warmup >= 1` run -- and never repeat for any later group, including every measured
+    one. Serves one group per `barrier.wait()` release: `count` real `query` requests, fired
+    together via exactly ONE `asyncio.gather` call (never one `await` at a time -- its
+    completion condition 134). A per-request failure (a non-2xx status, or the connection
+    dropping mid-flight) is caught HERE and turned into a status this worker reports back
+    (`599` for a transport-level failure that never got a real HTTP status at all) -- it
+    never raises out of this function, which would otherwise leave the parent's own
+    `result_queue.get()` for this group waiting forever. Completion times are `time.
+    time_ns()` only (never `time.perf_counter()`, which cannot be compared across process
+    boundaries -- its completion condition 136); CPU is this process's own `resource.
+    getrusage(RUSAGE_SELF)` difference across the SAME `asyncio.gather` call (`ru_utime +
+    ru_stime`, the same pair `_measure_op`'s own `cpu_total_ms` reads), freshly taken at the
+    top of every group -- never a stale reading held over from an earlier group, which would
+    let one group's own CPU keep accumulating into every later one. Runs until the parent's
+    own `barrier.abort()` (an explicit stop, sent on every exit path -- 監督裁定 17) breaks
+    this process out of its next `barrier.wait()` (raising `BrokenBarrierError`, caught
+    below) and lets it return."""
     import httpx  # noqa: PLC0415 -- lazy, real-transport dependency (module docstring)
 
     async def _one(client: "httpx.AsyncClient") -> "tuple[int, int | None]":
@@ -2143,50 +2151,43 @@ def _real_server_client_worker(
                 rows = None
         return response.status_code, rows
 
-    async def _run_group() -> None:
+    async def _serve_groups() -> None:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
-            except threading.BrokenBarrierError:
-                return
-            started_ns = time.time_ns()
-            before = resource.getrusage(resource.RUSAGE_SELF)
-            results = await asyncio.gather(*(_one(client) for _ in range(count)))
-            completed_ns = time.time_ns()
-            after = resource.getrusage(resource.RUSAGE_SELF)
-            cpu_ms = ((after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)) * 1000.0
-            result_queue.put({
-                "t0": started_ns,
-                "t1": completed_ns,
-                "cpu_ms": cpu_ms,
-                "statuses": [status for status, _rows in results],
-                "row_counts": [rows for _status, rows in results],
-                "pid": os.getpid(),
-            })
+            while True:
+                try:
+                    barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
+                except threading.BrokenBarrierError:
+                    return
+                started_ns = time.time_ns()
+                before = resource.getrusage(resource.RUSAGE_SELF)
+                results = await asyncio.gather(*(_one(client) for _ in range(count)))
+                completed_ns = time.time_ns()
+                after = resource.getrusage(resource.RUSAGE_SELF)
+                cpu_ms = ((after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)) * 1000.0
+                result_queue.put({
+                    "t0": started_ns,
+                    "t1": completed_ns,
+                    "cpu_ms": cpu_ms,
+                    "statuses": [status for status, _rows in results],
+                    "row_counts": [rows for _status, rows in results],
+                    "pid": os.getpid(),
+                })
 
-    asyncio.run(_run_group())
+    asyncio.run(_serve_groups())
 
 
-def _run_one_real_server_group(
+def _spawn_real_server_clients(
     query_url: str, bearer: str, field: str, counts: "list[int]", n_children: int,
-) -> dict:
-    """The work order's D-15: one group (warmup or measured) -- spawns `n_children` fresh
-    OS processes via `_REAL_SERVER_MP_CONTEXT` (`forkserver`, warmed by
-    `_run_real_server`'s own `_warm_forkserver` call before this is ever
-    reached), a `Barrier(n_children + 1)` the parent is itself a party of
-    (`multiprocessing.Barrier`'s own re-entrant `.wait()`, its
-    completion condition 136), and one shared `Queue` every child's
-    single result lands on. The parent calls `barrier.wait()` too,
-    only to release the barrier -- its own return from that call is
-    never read as a timestamp.
-    `start_ns` is the MINIMUM of the children's own `t0` (each child's
-    own `time.time_ns()`, read immediately after ITS OWN `barrier.wait()`
-    returns) -- never the parent's, which lags the first child to resume
-    by however long the parent itself takes to wake and re-schedule.
-    Every child process is joined (and, if still alive past its own
-    timeout, terminated) in
-    `finally`, whether this group succeeded or not -- a broken barrier or
-    a queue timeout never leaves an orphaned child process behind."""
+) -> "tuple[list[Any], Any, Any]":
+    """The work order's §6.1 監督裁定 17: spawns `n_children` client OS processes via
+    `_REAL_SERVER_MP_CONTEXT` (`forkserver`, warmed by `_run_real_server`'s own `_warm_
+    forkserver` call before this is ever reached) ONCE for the whole (plug, K) run --
+    `_measure_real_server` calls this exactly once, before its own first group. Returns the
+    started `Process` list together with the `Barrier(n_children + 1)` (the parent is itself
+    a party) and the shared `Queue` every child's group reports land on -- `_run_one_real_
+    server_group` releases the barrier and collects from the queue, one group at a time, for
+    as many groups as the run has; `_stop_real_server_clients` is this function's own
+    required counterpart, called exactly once regardless of how the run ends."""
     ctx = _REAL_SERVER_MP_CONTEXT
     barrier = ctx.Barrier(n_children + 1)
     result_queue: Any = ctx.Queue()
@@ -2196,21 +2197,27 @@ def _run_one_real_server_group(
     ]
     for process in processes:
         process.start()
+    return processes, barrier, result_queue
+
+
+def _run_one_real_server_group(barrier: Any, result_queue: Any, n_children: int) -> dict:
+    """The work order's §6.1 監督裁定 17: releases the shared barrier for ONE group (warmup
+    or measured) of an already-running set of client processes (`_spawn_real_server_clients`
+    spawns them once, for the whole run) and collects exactly `n_children` result messages,
+    one per process. The parent's own `barrier.wait()` only releases the barrier -- its own
+    return from that call is never read as a timestamp. `start_ns` is the MINIMUM of the
+    children's own `t0` (each child's own `time.time_ns()`, read immediately after ITS OWN
+    `barrier.wait()` returns) -- never the parent's, which lags the first child to resume by
+    however long the parent itself takes to wake and re-schedule (its completion condition
+    136)."""
     try:
-        try:
-            barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
-        except threading.BrokenBarrierError as exc:
-            raise RealServerMeasurementFailure(f"real-server client processes did not start together in time: {exc}") from exc
-        try:
-            messages = [result_queue.get(timeout=_REAL_SERVER_QUEUE_TIMEOUT_S) for _ in range(n_children)]
-        except queue.Empty as exc:
-            raise RealServerMeasurementFailure(f"a real-server client process did not report a result in time: {exc}") from exc
-    finally:
-        for process in processes:
-            process.join(timeout=30)
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=5)
+        barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
+    except threading.BrokenBarrierError as exc:
+        raise RealServerMeasurementFailure(f"real-server client processes did not start together in time: {exc}") from exc
+    try:
+        messages = [result_queue.get(timeout=_REAL_SERVER_QUEUE_TIMEOUT_S) for _ in range(n_children)]
+    except queue.Empty as exc:
+        raise RealServerMeasurementFailure(f"a real-server client process did not report a result in time: {exc}") from exc
     start_ns = min(message["t0"] for message in messages)
     completion_ns = [message["t1"] for message in messages]
     return {
@@ -2222,43 +2229,64 @@ def _run_one_real_server_group(
     }
 
 
+def _stop_real_server_clients(processes: "list[Any]", barrier: Any) -> None:
+    """The work order's §6.1 監督裁定 17: the explicit stop `_spawn_real_server_clients`
+    requires -- called exactly once by `_measure_real_server`'s own `finally`, on every exit
+    path (the run's normal end AND every failure). `barrier.abort()` breaks every client
+    process out of its own next `barrier.wait()` (raising `BrokenBarrierError`, which `_real_
+    server_client_worker` catches and returns from) without ever releasing one more round of
+    real HTTP traffic. Every process is then joined (and, if still alive past its own
+    timeout, terminated) -- no run ever leaves an orphaned client process behind."""
+    barrier.abort()
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+
 def _measure_real_server(
     *, query_url: str, bearer: str, field: str, warmup: int, n: int, concurrency: int, n_children: int, counts: "list[int]",
 ) -> dict:
-    """The work order's D-15: `warmup + n` groups, each one call to `_run_one_real_server_
-    group` -- warmup groups run identically but never enter the returned
-    `p50_ms`/`p95_ms`/`wall_ms`/`cpu_client_ms`/`requests`/`client_
-    processes` (its completion condition 137, the same warmup/measured split
-    `_measure_op` already applies to the 6 registered plugs). Any non-200
-    status anywhere -- warmup or measured -- aborts the WHOLE run
-    (its completion condition 143): no `REALPERF`/`REALCPU` line is ever
-    built from a partially-failed measurement. `requests` is the number
-    of MEASURED responses this run actually observed, never `n *
-    concurrency`'s own formula alone -- a run that observed fewer than
-    that (`OC` 1.5-32, the same guard its completion condition 167's own
-    K=1 check already applies) aborts too, refusing to print a row that
-    undercounts its own measurement. `client_processes` is the FIRST
-    measured group's own observed distinct child-process count (`_run_
-    one_real_server_group`'s own `client_processes`), never the caller's
-    precomputed `n_children` -- a regression that spawns fewer real
-    child processes than `n_children` says is now visible in the printed
-    row, not just in an unobserved argument."""
-    measured_wall_ms: "list[float]" = []
-    cpu_client_ms_total = 0.0
-    measured_requests = 0
-    client_processes: "int | None" = None
-    for index in range(warmup + n):
-        is_warmup = index < warmup
-        group = _run_one_real_server_group(query_url, bearer, field, counts, n_children)
-        for status in group["statuses"]:
-            if status != 200:
-                raise RealServerMeasurementFailure(f"query response status {status} (expected 200)")
-        if not is_warmup:
-            measured_wall_ms.append(group["wall_ms"])
-            cpu_client_ms_total += group["cpu_client_ms"]
-            measured_requests += len(group["statuses"])
-            if client_processes is None:
-                client_processes = group["client_processes"]
+    """The work order's §6.1 監督裁定 17: spawns the run's own client processes exactly
+    ONCE (`_spawn_real_server_clients`), before its first group, and stops them exactly
+    once (`_stop_real_server_clients`, a `finally` covering the WHOLE run -- the normal end
+    AND every failure) -- never per group. `warmup + n` groups follow, each one call to
+    `_run_one_real_server_group` against that SAME already-running set of processes --
+    warmup groups run identically but never enter the returned `p50_ms`/`p95_ms`/`wall_ms`/
+    `cpu_client_ms`/`requests`/`client_processes` (its completion condition 137, the same
+    warmup/measured split `_measure_op` already applies to the 6 registered plugs). Any
+    non-200 status anywhere -- warmup or measured -- aborts the WHOLE run (its completion
+    condition 143): no `REALPERF`/`REALCPU` line is ever built from a partially-failed
+    measurement. `requests` is the number of MEASURED responses this run actually observed,
+    never `n * concurrency`'s own formula alone -- a run that observed fewer than that (`OC`
+    1.5-32, the same guard its completion condition 167's own K=1 check already applies)
+    aborts too, refusing to print a row that undercounts its own measurement.
+    `client_processes` is the FIRST measured group's own observed distinct child-process
+    count (`_run_one_real_server_group`'s own `client_processes`), never the caller's
+    precomputed `n_children` -- a regression that spawns fewer real child processes than
+    `n_children` says is now visible in the printed row, not just in an unobserved
+    argument."""
+    processes, barrier, result_queue = _spawn_real_server_clients(query_url, bearer, field, counts, n_children)
+    try:
+        measured_wall_ms: "list[float]" = []
+        cpu_client_ms_total = 0.0
+        measured_requests = 0
+        client_processes: "int | None" = None
+        for index in range(warmup + n):
+            is_warmup = index < warmup
+            group = _run_one_real_server_group(barrier, result_queue, n_children)
+            for status in group["statuses"]:
+                if status != 200:
+                    raise RealServerMeasurementFailure(f"query response status {status} (expected 200)")
+            if not is_warmup:
+                measured_wall_ms.append(group["wall_ms"])
+                cpu_client_ms_total += group["cpu_client_ms"]
+                measured_requests += len(group["statuses"])
+                if client_processes is None:
+                    client_processes = group["client_processes"]
+    finally:
+        _stop_real_server_clients(processes, barrier)
     expected_requests = n * concurrency
     if measured_requests < expected_requests:
         raise RealServerMeasurementFailure(

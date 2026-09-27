@@ -627,7 +627,15 @@ printed distribution, exactly like the 6-plug path's own `PERF` line.
 run actually observed (`n * K` when every measured group completes;
 fewer than that aborts the run rather than printing an undercount);
 `wall_ms=` is the sum of the measured groups' own wall-clock
-spans (the same numbers `p50_ms=`/`p95_ms=` are computed from).
+spans (the same numbers `p50_ms=`/`p95_ms=` are computed from). The
+work order's §6.1 監督裁定 17: one run's own client processes are spawned
+ONCE, before the FIRST group (warmup or measured), and serve every
+group of that run -- never respawned per group -- so a client
+library's own one-time costs (httpcore's lazy anyio-backend import,
+the first connection's dial) land inside whichever group happens
+first (a warmup group, for any `--warmup >= 1` run) and are excluded
+from `REALCPU`'s own `cpu_client_ms=` the same way a slow warmup
+group's own wall time is excluded from `REALPERF`.
 
 **`cpu_client_ms=` is a floor visualization, never a judgement this tool
 makes (P-8).** It is the SUM, across every measured group's own client OS
@@ -681,7 +689,11 @@ Each client process sends its own share of one group's `K` requests via
 exactly ONE `asyncio.gather` call, never one request at a time; when `K`
 does not divide evenly by the process count, the remainder goes to the
 FIRST that many processes, one extra request each (`K=10`, 4 processes:
-`[3, 3, 2, 2]`, never `[2, 2, 3, 3]`).
+`[3, 3, 2, 2]`, never `[2, 2, 3, 3]`). These are the SAME `N` OS
+processes for the run's whole `--warmup + --n` group count, holding one
+`httpx.AsyncClient` apiece for that whole lifetime -- stopped exactly
+once, after the run's last group (or on any failure), never after each
+individual group.
 
 **Staying under the server's own request budget.** Both peers' own
 composition roots default to `requests_per_minute`/`max_requests_per_
