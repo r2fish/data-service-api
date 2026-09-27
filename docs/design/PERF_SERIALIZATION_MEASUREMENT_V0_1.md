@@ -1954,7 +1954,7 @@ PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity
 | MitateDB-api-http | 6.301 | 1.266 | -79.9% | 188.586 | 36.928 | -80.4% (K=32/K=1 = 29.2) |
 | MitateDB-api-socket | 9.869 | 4.630 | -53.1% | 291.281 | 142.583 | -51.0% (K=32/K=1 = 30.8) |
 
-2. **`CPU` 行の `thread_limit=`**: PostgreSQL の 4 plug の各行 は K=1・K=32 とも `thread_limit=4` (4 plug × 2 run = 8 行、`op=query`。他の op も同じ)。in-process の 2 plug は D-10 のとおり accessor を持たないので `thread_limit=default` のまま (WO §6.1 の監督裁定 12 の残り = 疑義 (8))。
+2. **`CPU` 行の `thread_limit=`**: PostgreSQL の 4 plug の各行 は K=1・K=32 とも `thread_limit=4` (4 plug × 2 run = 8 行、`op=query`。他の op も同じ)。in-process の 2 plug は D-10 のとおり accessor を持たないので `thread_limit=default` のまま (WO §7.3 D-10、起草の疑義 (8) の残り)。
 3. **MitateDB 2 plug の `DBTIME scope=platform`**: 基準は K=1 で connect_wall_ms 4.189 / 4.485 ms/req、sessions 2/req (v0.2 §3 の 7)。今回は K=1・K=32 とも `sessions=0 connect_wall_ms=0.000` (http / socket、`op=query`)。db_wall_ms_per_req は K=1 で 0.145 / 0.256、K=32 で 0.402 / 0.745 ms。
 4. どの run も `LIMIT_EXCEEDED` で欠けていない (`PERF` 行は run ごと 21 行 = 6 plug、in-process 2 plug は 3 op)。r2db の `POOL` 行の waits は全 run で 0。in-process 2 plug の `CPU` 行は `thread_limit=default` (accessor を持たない。WO §7.3 D-10)。
 
@@ -2052,7 +2052,7 @@ REALCPU peer=MitateDB-api plug=MitateDB-api-real op=query concurrency=32 client_
 | MitateDB-api | 10.905 | 46.761 | 46.571 | 4.29 | 4.27 |
 
 2. **ε と δ** (記録のみ。判定に使わない): ε = K=32 の 2 run の p50 の相対差 = r2db 1.1% (48.265 vs 47.712) / MitateDB 0.4% (46.761 vs 46.571)。δ = max(10%, 2ε) = 10% (両 peer)。
-3. **`REALCPU`** (床の可視化): `client_processes=` は K=1 で 1、K=32 で 8 (両 peer)。`cpu_client_ms` / `requests` = r2db K=1 8.03 ms/req (120.456 / 15)、K=32 3.80 / 3.80 ms/req (1822.714 / 480、1825.603 / 480); MitateDB K=1 8.25 (123.702 / 15)、K=32 3.82 / 3.83 ms/req。K=1 の wall/req (162.368 / 15 = 10.82 ms、160.788 / 15 = 10.72 ms) の 74〜77% が client 自身の CPU。K=32 では 8 process に分かれるので client の床 = 32 × 3.80 / 8 = 15.2 ms (r2db)、15.3 ms (MitateDB) で、group p50 48 / 47 ms の約 1/3。real-server の K=1 p50 (10.4 / 10.9 ms) は socket plug の K=1 (4.837 / 4.630 ms、§5) の 2.2 / 2.4 倍で、差は client 経路 (別 process の urllib、nginx 経由) の固定費。
+3. **`REALCPU`** (床の可視化): `client_processes=` は K=1 で 1、K=32 で 8 (両 peer)。`cpu_client_ms` / `requests` = r2db K=1 8.03 ms/req (120.456 / 15)、K=32 3.80 / 3.80 ms/req (1822.714 / 480、1825.603 / 480); MitateDB K=1 8.25 (123.702 / 15)、K=32 3.82 / 3.83 ms/req。K=1 の wall/req (162.368 / 15 = 10.82 ms、160.788 / 15 = 10.72 ms) の 74〜77% が client 自身の CPU。K=32 では 8 process に分かれるので client の床 = 32 × 3.80 / 8 = 15.2 ms (r2db)、15.3 ms (MitateDB) で、group p50 48 / 47 ms の約 1/3。real-server の K=1 p50 (10.4 / 10.9 ms) は socket plug の K=1 (4.837 / 4.630 ms、§5) の 2.2 / 2.4 倍で、差は client 経路 (別 process の httpx、nginx 経由) の固定費。
 4. **後始末の照合** (WO §10.2 の 4): 6 run とも `perf_baseline` は launcher の `stop()` を 1 回呼んで終了し (run の最終行は `REALCPU`、traceback 無し)、run 後の `ps` に uvicorn / nginx / perf_baseline の残プロセスは 0 (監督が `ps -eo args=` で照合)。使い捨て cluster は run ごとに作られ捨てられる (`suite_lock(exclusive=True)` の下、WO §7.5 の (W-12))。
 
 ### 6.3 判断 (監督)
