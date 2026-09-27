@@ -1952,7 +1952,7 @@ PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity
 | r2db-api-http | 1.478 | 1.388 | -6.1% | 49.255 | 28.868 | -41.4% (K=32/K=1 = 20.8) |
 | r2db-api-socket | 4.834 | 4.837 | +0.1% | 153.881 | 137.486 | -10.7% (K=32/K=1 = 28.4) |
 | MitateDB-api-http | 6.301 | 1.266 | -79.9% | 188.586 | 36.928 | -80.4% (K=32/K=1 = 29.2) |
-| MitateDB-api-socket | 9.869 | 4.630 | -53.1% | 291.281 | 142.583 | -51.0% (K=32/K=1 = 30.8) |
+| MitateDB-api-socket | 9.869 | 4.630 | -53.1% | 291.281 | 142.583 | -51.1% (K=32/K=1 = 30.8) |
 
 2. **`CPU` 行の `thread_limit=`**: PostgreSQL の 4 plug の各行 は K=1・K=32 とも `thread_limit=4` (4 plug × 2 run = 8 行、`op=query`。他の op も同じ)。in-process の 2 plug は D-10 のとおり accessor を持たないので `thread_limit=default` のまま (WO §7.3 D-10、起草の疑義 (8) の残り)。
 3. **MitateDB 2 plug の `DBTIME scope=platform`**: 基準は K=1 で connect_wall_ms 4.189 / 4.485 ms/req、sessions 2/req (v0.2 §3 の 7)。今回は K=1・K=32 とも `sessions=0 connect_wall_ms=0.000` (http / socket、`op=query`)。db_wall_ms_per_req は K=1 で 0.145 / 0.256、K=32 で 0.402 / 0.745 ms。
