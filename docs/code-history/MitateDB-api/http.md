@@ -570,7 +570,7 @@ old:
 
 new:
 ```
-`run_in_threadpool` runs on anyio's default worker limiter, which `create_app`'s own middleware sets to `DEFAULT_THREAD_LIMIT` (4) once per event loop unless the composition root raises it via `MITATEDB_THREAD_LIMIT` -- a declared `concurrency` bound above that limiter is therefore capped by the worker pool, not by `_LimitStateHolder.concurrency_slot`, on a single process (a fact only, not a change this WP makes to any limit declaration).
+`run_in_threadpool` runs on anyio's default worker limiter, which `create_app`'s own middleware sets to `DEFAULT_THREAD_LIMIT` (4) once per event loop unless the composition root raises it via `MITATEDB_THREAD_LIMIT` -- that limiter caps how many admitted requests run their synchronous section at once; admission itself (`_LimitStateHolder.concurrency_slot`, taken on the event-loop thread before `run_in_threadpool`) still counts up to the declared `concurrency` on a single process (a fact only, not a change this WP makes to any limit declaration).
 ```
 
 ## CH-0203

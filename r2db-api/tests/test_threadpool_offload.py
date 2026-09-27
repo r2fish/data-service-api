@@ -706,6 +706,15 @@ def test_main_composition_root_wires_thread_limit_from_the_env_reader():
     `DEFAULT_THREAD_LIMIT` unconditionally, discarding the env -- this
     test's own `_thread_limit_from_env` call-site assertion goes red (no
     assignment calls that function at all).
+    mutation M201 (`r2db_api/main.py`): replace the call's first
+    argument with a literal `{}` instead of `env` -- this test's own
+    `args[0]` `ast.Name(id="env")` assertion goes red (a `{}` literal is
+    an `ast.Dict`, not an `ast.Name`).
+    mutation M202 (`r2db_api/main.py`): replace the call's third
+    argument with a literal `None` instead of `DEFAULT_THREAD_LIMIT` --
+    this test's own `args[2]` `ast.Name(id="DEFAULT_THREAD_LIMIT")`
+    assertion goes red (a `None` literal is an `ast.Constant`, not an
+    `ast.Name`).
     """
     spec = importlib.util.find_spec("r2db_api.main")
     assert spec is not None and spec.origin
@@ -731,9 +740,12 @@ def test_main_composition_root_wires_thread_limit_from_the_env_reader():
     assert assigns, f"no assignment found for `{var_name}`"
     assert any(
         isinstance(a.value, ast.Call) and isinstance(a.value.func, ast.Name) and a.value.func.id == "_thread_limit_from_env"
-        and len(a.value.args) >= 2 and isinstance(a.value.args[1], ast.Constant) and a.value.args[1].value == "R2DB_THREAD_LIMIT"
+        and len(a.value.args) == 3 and not a.value.keywords
+        and isinstance(a.value.args[0], ast.Name) and a.value.args[0].id == "env"
+        and isinstance(a.value.args[1], ast.Constant) and a.value.args[1].value == "R2DB_THREAD_LIMIT"
+        and isinstance(a.value.args[2], ast.Name) and a.value.args[2].id == "DEFAULT_THREAD_LIMIT"
         for a in assigns
-    ), f"`{var_name}` must be assigned from `_thread_limit_from_env(env, \"R2DB_THREAD_LIMIT\", ...)`"
+    ), f"`{var_name}` must be assigned from `_thread_limit_from_env(env, \"R2DB_THREAD_LIMIT\", DEFAULT_THREAD_LIMIT)`"
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +863,25 @@ def test_create_app_default_thread_limit_sets_4_on_a_fresh_loop():
     finally:
         asyncio.set_event_loop(None)
         loop.close()
+
+
+def test_create_app_rejects_a_non_positive_thread_limit():
+    """Review round 1 finding F11 (supervisor ruling 2026-09-28): `create_
+    app(thread_limit=...)` rejects zero, a negative int, and a non-int at
+    construction time, before any request is ever served -- a
+    misconfigured deployment fails fast at startup instead of every
+    request hitting `ThreadLimitMiddleware`'s own attempt to apply an
+    invalid value to the loop's limiter.
+
+    mutation M205 (`r2db_api/http.py`): drop the validation `if` and its
+    `raise ValueError` from `create_app` -- this test's own `pytest.
+    raises(ValueError)` assertions go red (`create_app(thread_limit=0)`
+    and `create_app(thread_limit=-1)` both return a plain app instead)."""
+    service = _build_service()
+    with pytest.raises(ValueError, match="thread_limit"):
+        create_app(service, thread_limit=0)
+    with pytest.raises(ValueError, match="thread_limit"):
+        create_app(service, thread_limit=-1)
 
 
 def test_create_app_thread_limit_none_adds_no_middleware():
@@ -1107,22 +1138,25 @@ async def test_thread_limit_bounds_synchronous_concurrency_while_slot_admission_
     ADMITTED (their concurrency slot is taken on the event-loop thread,
     before any of them ever reaches a worker thread) while at most 4 of
     them ever run their own synchronous section (`query_page`) at once; a
-    9th, sent once the first 8 have already been admitted, is refused
-    with 429 (slot exhaustion, never a worker-thread queue effect); once
-    released, all 8 complete with 200 (no deadlock, no timeout).
+    9th, sent only once 5-8 have genuinely reached the worker-thread
+    queue (observed directly: `current == 4` and `service._active == 8`,
+    not merely inferred from a fixed sleep), is refused with 429 (slot
+    exhaustion, never a worker-thread queue effect, confirmed by the 9th
+    response's own `code`/`details.limit_class`); once released, all 8
+    complete with 200 (no deadlock, no timeout).
 
     mutation M156 (`r2db_api/http.py`): move the handler's own slot
     acquisition INTO the function delegated to `run_in_threadpool` (so it
     happens AFTER a worker thread is granted, not before) -- only the
     (up to 4) requests that already hold a worker thread would then hold
-    a slot at the moment the 9th is sent, so this test's own `resp9.
-    status_code == 429` assertion goes red (the 9th finds a free slot
-    among the 4 not yet admitted and is served, 200).
+    a slot at the moment the 9th is sent, so this test's own `service.
+    _active == 8` assertion goes red (only 4 are ever admitted at once).
     mutation M157 (`r2db_api/http.py`): drop the `total_tokens`
     assignment from the middleware's own `__call__` (limiter stays
-    anyio's untouched default, 40) -- this test's own `peak == 4`
-    assertion goes red (all 8 requests run their synchronous section
-    concurrently, `peak == 8`)."""
+    anyio's untouched default, 40) -- this test's own `current == 4` wait
+    loop never observes 4 (all 8 requests run their synchronous section
+    concurrently, jumping straight to `current == 8`), so its own
+    post-loop assertion goes red."""
     concurrency = 8
     service = _build_service(concurrency=concurrency, requests_per_minute=100_000)
 
@@ -1157,18 +1191,25 @@ async def test_thread_limit_bounds_synchronous_concurrency_while_slot_admission_
         # section_runs_off_the_event_loop` above relies on).
         await asyncio.sleep(0)
 
-        resp9 = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
-        assert resp9.status_code == 429, resp9.text
-
         # Real worker-thread dispatch (unlike slot admission above) needs
         # actual wall-clock time for the OS scheduler to run the up-to-4
-        # threads the limiter grants -- long enough that `peak` has
-        # genuinely reached its ceiling before `release` unblocks them.
+        # threads the limiter grants -- wait for it BEFORE sending the
+        # 9th request below, so the 9th is genuinely sent while 5-8 are
+        # holding their own slot but still queued for a worker thread
+        # (never merely inferred from a fixed sleep).
         for _ in range(100):
             await asyncio.sleep(0.01)
             with lock:
                 if current == 4:
                     break
+        assert current == 4, f"synchronous concurrency never reached the thread limiter's own ceiling (4), observed current={current}"
+        assert service._active == 8, f"all 8 requests must already hold their own concurrency slot, observed _active={service._active}"
+
+        resp9 = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
+        assert resp9.status_code == 429, resp9.text
+        resp9_body = resp9.json()
+        assert resp9_body["code"] == "LIMIT_EXCEEDED", resp9_body
+        assert resp9_body["details"]["limit_class"] == "concurrency", resp9_body
 
         release.set()
         responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)

@@ -154,7 +154,7 @@ class BoundedConnectionPool:
         # (`psycopg.connect` is itself `Connection.connect`, `psycopg/
         # __init__.py`), the only difference is every connection this pool
         # ever hands out now carries its own `execute_count`/`executemany_
-        # count` and a `CountingCursor` factory. No other line changes.
+        # count` and a `CountingCursor` factory.
         #
         # The connect call itself is timed into `_connect_wall_ms`/
         # `_sessions` under `self._stats_lock`, mirroring `r2db_api.

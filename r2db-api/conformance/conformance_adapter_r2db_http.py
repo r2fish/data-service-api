@@ -1300,12 +1300,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # `DSA_PERF_THREAD_LIMIT` (harness-only, absent in every real
             # conformance run): resolved to its effective value BEFORE
             # `create_app` builds the app, and passed straight through as
-            # `thread_limit=` -- `create_app`'s own middleware is what
-            # configures the loop's limiter now, this adapter no longer
-            # wraps the app itself. `self._perf_thread_limit` always holds
-            # that same effective int (`DEFAULT_THREAD_LIMIT` when the env
-            # is absent, invalid, or non-positive), so the accessor and
-            # `create_app`'s own argument never disagree.
+            # `thread_limit=` -- `create_app`'s own middleware configures
+            # the loop's limiter; this adapter passes the effective value
+            # through without wrapping the app itself. `self._perf_
+            # thread_limit` always holds that same effective int
+            # (`DEFAULT_THREAD_LIMIT` when the env is absent, invalid, or
+            # non-positive), so the accessor and `create_app`'s own
+            # argument never disagree.
             self._perf_thread_limit = _perf_thread_limit_value()
             app = create_app(self._service, thread_limit=self._perf_thread_limit)
             # Kept on the instance (not just the local `app` above) so

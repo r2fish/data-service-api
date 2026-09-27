@@ -1201,6 +1201,25 @@ def test_create_app_default_thread_limit_sets_4_on_a_fresh_loop():
     assert _run(_scenario()) == 4
 
 
+def test_create_app_rejects_a_non_positive_thread_limit():
+    """Review round 1 finding F11 (supervisor ruling 2026-09-28): `create_
+    app(thread_limit=...)` rejects zero, a negative int, and a non-int at
+    construction time, before any request is ever served -- a
+    misconfigured deployment fails fast at startup instead of every
+    request hitting `ThreadLimitMiddleware`'s own attempt to apply an
+    invalid value to the loop's limiter.
+
+    mutation M206 (`mitatedb_api/http.py`): drop the validation `if` and
+    its `raise ValueError` from `create_app` -- this test's own `pytest.
+    raises(ValueError)` assertions go red (`create_app(thread_limit=0)`
+    and `create_app(thread_limit=-1)` both return a plain app instead)."""
+    service = _build_light_service()
+    with pytest.raises(ValueError, match="thread_limit"):
+        http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=0)
+    with pytest.raises(ValueError, match="thread_limit"):
+        http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=-1)
+
+
 def test_create_app_thread_limit_none_adds_no_middleware():
     """Completion condition 81.
 
@@ -1326,12 +1345,6 @@ def test_create_app_default_return_shape_matches_thread_limit_none():
 
 # ---------------------------------------------------------------------------
 # D-13: the thread limiter (4, default) bounds how many requests run their
-# synchronous section at once, WITHOUT changing concurrency-slot admission.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# D-13: the thread limiter (4, default) bounds how many requests run their
 # synchronous section at once, WITHOUT changing concurrency-slot admission
 # (still `max_concurrency`, 8 here) or the deadlock-free wait discipline.
 # Real, throwaway-provisioned PostgreSQL (`platform`/`app_a`, same recipe
@@ -1347,23 +1360,27 @@ def test_thread_limit_bounds_synchronous_concurrency_while_slot_admission_stays_
     are all ADMITTED (their concurrency slot is taken on the event-loop
     thread, before any of them ever reaches a worker thread) while at
     most 4 of them ever run their own synchronous section
-    (`ApplicationRuntime.capabilities`) at once; a 9th, sent once the
-    first 8 have already been admitted, is refused with 413 (this peer's
-    own `LIMIT_EXCEEDED` -> 413 status mapping, `http.py`'s own
-    `_STATUS_BY_CODE`, unlike r2db's 429 -- a pre-existing, unrelated
-    cross-peer difference, not something this WP changes); once released,
-    all 8 complete with 200.
+    (`ApplicationRuntime.capabilities`) at once; a 9th, sent only once
+    5-8 have genuinely reached the worker-thread queue (observed
+    directly: `current == 4` and `limit_holder._active == 8`, not merely
+    inferred from a fixed sleep), is refused with 413 (this peer's own
+    `LIMIT_EXCEEDED` -> 413 status mapping, `http.py`'s own `_STATUS_BY_
+    CODE`, unlike r2db's 429 -- a pre-existing, unrelated cross-peer
+    difference, not something this WP changes; confirmed by the 9th
+    response's own `code`/`details.limit_class`); once released, all 8
+    complete with 200.
 
     mutation M158 (`mitatedb_api/http.py`): move the handler's own slot
     acquisition INTO the function delegated to `run_in_threadpool` (so it
     happens AFTER a worker thread is granted) -- only the (up to 4)
     requests that already hold a worker thread would then hold a slot at
-    the moment the 9th is sent, so this test's own `resp9.status_code ==
-    413` assertion goes red (the 9th finds a free slot and is served).
+    the moment the 9th is sent, so this test's own `limit_holder._active
+    == 8` assertion goes red (only 4 are ever admitted at once).
     mutation M159 (`mitatedb_api/http.py`): drop the `total_tokens`
     assignment from the middleware's own `__call__` -- this test's own
-    `peak == 4` assertion goes red (all 8 requests run their synchronous
-    section concurrently, `peak == 8`)."""
+    `current == 4` wait loop never observes 4 (all 8 requests run their
+    synchronous section concurrently, jumping straight to `current ==
+    8`), so its own post-loop assertion goes red."""
     read_store = PostgresCredentialStore(
         platform.api_dsn, pepper="synthetic-test-pepper-r101-wp3-thread-limit-0000", schema=platform.registry_schema,
     )
@@ -1410,17 +1427,26 @@ def test_thread_limit_bounds_synchronous_concurrency_while_slot_admission_stays_
                 tasks = [asyncio.ensure_future(_one()) for _ in range(concurrency)]
                 await asyncio.sleep(0)
 
-                resp9 = await client.get("/v1/capabilities", headers={"authorization": f"Bearer {runtime_bearer}"})
-                assert resp9.status_code == 413, resp9.text
-
                 # Real worker-thread dispatch needs actual wall-clock time
                 # for the OS scheduler to run the up-to-4 threads the
-                # limiter grants.
+                # limiter grants -- wait for it BEFORE sending the 9th
+                # request below, so the 9th is genuinely sent while 5-8
+                # are holding their own slot but still queued for a
+                # worker thread (never merely inferred from a fixed
+                # sleep).
                 for _ in range(100):
                     await asyncio.sleep(0.01)
                     with lock:
                         if current == 4:
                             break
+                assert current == 4, f"synchronous concurrency never reached the thread limiter's own ceiling (4), observed current={current}"
+                assert limit_holder._active == 8, f"all 8 requests must already hold their own concurrency slot, observed _active={limit_holder._active}"
+
+                resp9 = await client.get("/v1/capabilities", headers={"authorization": f"Bearer {runtime_bearer}"})
+                assert resp9.status_code == 413, resp9.text
+                resp9_body = resp9.json()
+                assert resp9_body["code"] == "LIMIT_EXCEEDED", resp9_body
+                assert resp9_body["details"]["limit_class"] == "concurrency", resp9_body
 
                 release.set()
                 return await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)

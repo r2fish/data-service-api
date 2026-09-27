@@ -292,17 +292,15 @@ class ThreadLimitMiddleware:
     for the synchronous section of each handler) never draws on more than
     `thread_limit` OS threads at once, on any one event loop.
 
-    A pure-ASGI middleware (`async def __call__`), so `uvicorn.Config(...,
-    interface="auto")` resolves it to the asgi3 shape. The first request
-    served on a given running loop sets that loop's own
-    `anyio.to_thread.current_default_thread_limiter().total_tokens` to
-    `thread_limit`; every later request on the SAME loop passes through
-    untouched. A second, distinct loop gets the same one-time treatment
-    independently, the first time it serves a request. The loop-to-
-    already-configured membership is held in a `weakref.WeakSet` (never
-    `id(loop)` in a plain `set`), so a closed, garbage-collected loop's
-    own entry disappears with it rather than risking a later, unrelated
-    loop's reused id colliding with it.
+    A pure-ASGI middleware (`async def __call__`); Starlette's middleware
+    stack calls it as an ASGI3 app. The first request served on a given
+    running loop sets that loop's own `anyio.to_thread.
+    current_default_thread_limiter().total_tokens` to `thread_limit`;
+    every later request on the SAME loop passes through untouched. A
+    second, distinct loop gets the same one-time treatment independently,
+    the first time it serves a request. The loop-to-already-configured
+    membership is held in a `weakref.WeakSet` (never `id(loop)` in a
+    plain `set`).
     """
 
     def __init__(self, app: ASGIApp, thread_limit: int) -> None:
@@ -441,11 +439,15 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
 # authenticate-then-call sequence in one `run_in_threadpool` call, since
 # there is no `await` in between to delegate around.
 #
-# What IS true: exhausting it does not deadlock -- a caller unable to get
-# a worker thread right away waits for one to free up (the same
-# fail-open-to-latency, never-a-hang shape `_RolePool`'s own
-# `acquire_timeout` already has), it does not hang forever or crash the
-# process.
+# `run_in_threadpool` draws from anyio's default worker-thread limiter,
+# one event-loop-wide resource shared with every other `run_in_threadpool`
+# caller in this process; `create_app`'s own `ThreadLimitMiddleware` sets
+# it to `DEFAULT_THREAD_LIMIT` (4) once per event loop unless the
+# composition root raises it via `R2DB_THREAD_LIMIT`. Exhausting it does
+# not deadlock -- a caller unable to get a worker thread right away waits
+# for one to free up (the same fail-open-to-latency, never-a-hang shape
+# `_RolePool`'s own `acquire_timeout` already has), it does not hang
+# forever or crash the process.
 #
 # Phase 10 WP-8c (design D-8 (3), review F-2): every handler below now
 # enters `service.acquire_concurrency_slot()` as its OWN first statement,
@@ -798,15 +800,21 @@ def create_app(
     to `DEFAULT_THREAD_LIMIT` (4), smaller than a served application's
     declared `concurrency`; a deployer raises it via the composition
     root's own env var (`r2db_api.main`'s `R2DB_THREAD_LIMIT`). Every
-    handler below still takes `service.acquire_concurrency_slot()` on the
-    event-loop thread, before its own `run_in_threadpool` call, so the
+    handler in this module takes `service.acquire_concurrency_slot()` on
+    the event-loop thread, before its own `run_in_threadpool` call, so the
     limiter only bounds how many requests can run their synchronous
     section at once -- concurrency admission and the 429-vs-503 split
     between it and pool exhaustion are unaffected either way. The returned
     value's own shape (`RequestByteBoundMiddleware` wrapping a Starlette
     app; that app's `state`/`routes`) is the same whichever value
-    `thread_limit` takes.
+    `thread_limit` takes. Anything else (zero, negative, or a non-int)
+    raises `ValueError` naming `thread_limit`, at construction time --
+    before any request is ever served, never a per-request 500 once
+    `ThreadLimitMiddleware` tries to apply an invalid value to the loop's
+    own limiter.
     """
+    if thread_limit is not None and (not isinstance(thread_limit, int) or thread_limit <= 0):
+        raise ValueError(f"thread_limit must be a positive integer or None, got {thread_limit!r}")
     middleware = []
     if thread_limit is not None:
         middleware.append(Middleware(ThreadLimitMiddleware, thread_limit=thread_limit))

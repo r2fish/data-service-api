@@ -31,6 +31,8 @@ import inspect
 import os
 import secrets
 import textwrap
+import threading
+import time
 
 import psycopg
 import pytest
@@ -613,3 +615,95 @@ def test_bounded_connection_pool_fold_is_lexically_inside_the_stats_lock():
     assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_calls") and isinstance(n.op, ast.Add)), (
         "the db_calls accumulation is not lexically inside `with self._stats_lock:`"
     )
+
+
+
+class _FakeDeadConnection:
+    """A minimal stand-in for a server-closed `psycopg.Connection`: only
+    the attributes `BoundedConnectionPool.acquire()`/`_fold_closed_
+    connection_stats` actually read (never a real socket, never a real
+    PostgreSQL server) -- review round 1 finding F6 (deviation (a) from
+    work order §8.1's own AST-pin-only default for this file, accepted by
+    supervisor ruling 2026-09-28)."""
+
+    def __init__(self, db_wall_ms: float, txn_count: int, execute_count: int, executemany_count: int) -> None:
+        self.closed = True
+        self.db_wall_ms = db_wall_ms
+        self.txn_count = txn_count
+        self.execute_count = execute_count
+        self.executemany_count = executemany_count
+
+
+class _FakeLiveConnection:
+    """A minimal stand-in for a healthy, open `psycopg.Connection` --
+    same reasoning as `_FakeDeadConnection` above."""
+
+    closed = False
+
+
+def test_bounded_connection_pool_acquire_folds_a_dead_idle_connection_found_at_the_top_of_acquire(monkeypatch: pytest.MonkeyPatch):
+    """Review round 1 finding F6: a connection found dead (`closed=True`)
+    at the TOP of `acquire()` (stage 1, the `get_nowait` loop that reuses
+    an idle connection, before a new one is ever created) still has its
+    own `db_wall_ms`/`txn_count`/`execute_count + executemany_count`
+    folded into `platform_stats()` before it is discarded -- a connection
+    the server closed while idle never silently drops the time,
+    transactions, or statements it already spent.
+
+    mutation M203 (`pool.py`): drop the `_fold_closed_connection_stats
+    (conn)` call from stage (1)'s dead-connection branch -- this test's
+    own `db_wall_ms`/`txn_count`/`db_calls` assertions go red (stay at 0,
+    the dead connection's own totals are never folded in)."""
+    pool = BoundedConnectionPool("postgresql://unit-test-pool/not-a-real-dsn", max_size=1)
+    dead = _FakeDeadConnection(db_wall_ms=5.0, txn_count=2, execute_count=2, executemany_count=1)
+    pool._idle.put_nowait(dead)
+    live = _FakeLiveConnection()
+    monkeypatch.setattr(pool, "_new_connection", lambda: live)
+
+    conn = pool.acquire()
+
+    assert conn is live
+    stats = pool.platform_stats()
+    assert stats["db_wall_ms"] >= 5.0
+    assert stats["txn_count"] >= 2
+    assert stats["db_calls"] >= 3
+
+
+def test_bounded_connection_pool_acquire_folds_a_dead_connection_found_while_waiting_at_budget():
+    """Review round 1 finding F6: a connection found dead (`closed=True`)
+    in stage (3) (the pool already at `max_size`, waiting on `self._idle.
+    get(timeout=...)` for a released connection) still has its own
+    `db_wall_ms`/`txn_count`/`execute_count + executemany_count` folded
+    into `platform_stats()` before it is discarded -- same property as
+    the test above, reached through the wait branch instead of the
+    top-of-`acquire()` branch.
+
+    The idle queue starts EMPTY (stage (1)'s own `get_nowait` must find
+    nothing, or `acquire()` never reaches stage (3) at all) -- a
+    background thread delivers both connections only once `acquire()` is
+    already blocked in stage (3)'s own wait loop.
+
+    mutation M204 (`pool.py`): drop the `_fold_closed_connection_stats
+    (conn)` call from stage (3)'s dead-connection branch -- this test's
+    own `db_wall_ms`/`txn_count`/`db_calls` assertions go red (stay at 0,
+    the dead connection's own totals are never folded in)."""
+    pool = BoundedConnectionPool("postgresql://unit-test-pool/not-a-real-dsn", max_size=1)
+    pool._created = pool._max_size  # already at budget: acquire() skips stage (2) and enters the stage (3) wait loop
+    live = _FakeLiveConnection()
+    dead = _FakeDeadConnection(db_wall_ms=7.0, txn_count=3, execute_count=4, executemany_count=0)
+
+    def _deliver_once_acquire_is_already_waiting() -> None:
+        time.sleep(0.1)
+        # LIFO queue: put the live connection first so the dead one (put
+        # last) is the first one `acquire()` pops.
+        pool._idle.put(live)
+        pool._idle.put(dead)
+
+    threading.Thread(target=_deliver_once_acquire_is_already_waiting, daemon=True).start()
+    conn = pool.acquire()
+
+    assert conn is live
+    stats = pool.platform_stats()
+    assert stats["db_wall_ms"] >= 7.0
+    assert stats["txn_count"] >= 3
+    assert stats["db_calls"] >= 4

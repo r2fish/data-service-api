@@ -81,3 +81,17 @@ Companion for `r2db-api/src/r2db_api/http.py` per `docs/code-history/README.md`.
 # on the shared `DataService` instance, not anything thread-affine.
 # --------------------------------------------------------------------------
 ```
+
+### correction: 2026-09-28
+
+- reason: the sentence lost its own antecedent (the removed "capacity 40" contrast) when an earlier edit in this same change set shortened this paragraph, and never stated the current default (4) or the `R2DB_THREAD_LIMIT` override.
+
+old:
+```
+What IS true: exhausting it does not deadlock -- a caller unable to get a worker thread right away waits for one to free up (the same fail-open-to-latency, never-a-hang shape `_RolePool`'s own `acquire_timeout` already has), it does not hang forever or crash the process.
+```
+
+new:
+```
+`run_in_threadpool` draws from anyio's default worker-thread limiter, one event-loop-wide resource shared with every other `run_in_threadpool` caller in this process; `create_app`'s own `ThreadLimitMiddleware` sets it to `DEFAULT_THREAD_LIMIT` (4) once per event loop unless the composition root raises it via `R2DB_THREAD_LIMIT`. Exhausting it does not deadlock -- a caller unable to get a worker thread right away waits for one to free up (the same fail-open-to-latency, never-a-hang shape `_RolePool`'s own `acquire_timeout` already has), it does not hang forever or crash the process.
+```

@@ -1158,12 +1158,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # `DSA_PERF_THREAD_LIMIT` (harness-only, absent in every real
             # conformance run): resolved to its effective value BEFORE
             # `create_app` builds the app, and passed straight through as
-            # `thread_limit=` -- `create_app`'s own middleware is what
-            # configures the loop's limiter now, this adapter no longer
-            # wraps the app itself. `self._perf_thread_limit` always holds
-            # that same effective int (`DEFAULT_THREAD_LIMIT` when the env
-            # is absent, invalid, or non-positive), so the accessor and
-            # `create_app`'s own argument never disagree.
+            # `thread_limit=` -- `create_app`'s own middleware configures
+            # the loop's limiter; this adapter passes the effective value
+            # through without wrapping the app itself. `self._perf_
+            # thread_limit` always holds that same effective int
+            # (`DEFAULT_THREAD_LIMIT` when the env is absent, invalid, or
+            # non-positive), so the accessor and `create_app`'s own
+            # argument never disagree.
             self._perf_thread_limit = _perf_thread_limit_value()
             app = create_app(
                 self._service, request_bytes_limit=1_048_576, thread_limit=self._perf_thread_limit,
@@ -3376,8 +3377,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         checks connections out of), never from `self._read_store.platform_
         stats()` itself: with a pool wired, `self._read_store` no longer
         opens its own per-call connections (`_borrow_connection`'s pool
-        branch), so `self._read_store`'s own no-pool accumulators stay at
-        zero -- the pool is where the real traffic now lands.
+        branch); `self._read_store`'s own no-pool accumulators stay at
+        zero, and the pool is where the real traffic lands.
         `self._application_durable_audit` stays unpooled (matches `main.
         py`'s own audit sink), and `self._write_store` is provisioning-
         only, never touched by a measured request. Read-only: every value

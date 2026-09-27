@@ -2722,17 +2722,17 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "encode_page_cursor"),
     ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "decode_page_cursor"),
     ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "canonical_page_binding"),
-    # R-101 WP-1: the `DSA_PERF_THREAD_LIMIT` env reader, the wrapper
-    # class that applies it to a data-plane app's own event loop, and the
-    # `perf_thread_limit()` accessor the measurement harness reads it back
-    # through -- all three verified normalize-and-diff equal before
-    # adding (a peer-specific comment naming r2db-api's own unrelated
-    # `_PERF_POOL_SIZE_ENV` constant was reworded to a generic sentence so
-    # both copies stay byte-identical). `platform_db_time_stats()` is NOT
-    # a row: its body differs structurally between peers (r2db-api sums
-    # two `_RolePool.platform_stats()` calls, this peer sums two per-call
-    # stores' own `platform_stats()`), the same carve-out already applied
-    # to `pool_stats()` elsewhere in this table.
+    # R-101 WP-1: the `DSA_PERF_THREAD_LIMIT` env reader and the
+    # `perf_thread_limit()` accessor the measurement harness reads it
+    # back through, verified normalize-and-diff equal before adding (a
+    # peer-specific comment naming r2db-api's own unrelated `_PERF_POOL_
+    # SIZE_ENV` constant was reworded to a generic sentence so both
+    # copies stay byte-identical). `platform_db_time_stats()` is NOT a
+    # row: its body differs structurally between peers (r2db-api sums two
+    # `_RolePool.platform_stats()` calls, this peer sums its own `_read_
+    # pool`'s `platform_stats()` and `_application_durable_audit`'s
+    # `platform_stats()`), the same carve-out already applied to `pool_
+    # stats()` elsewhere in this table.
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_perf_thread_limit_value"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "perf_thread_limit"),
     # R-101 WP-3 (D-8/D-9/D-10): the production thread-limit middleware

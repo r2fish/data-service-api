@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **3.6** (2026-09-28; R-101 remedy WP-3 -- the SI-08 Common Evidence reference to the isomorphic-target count pin follows its rename (`_167_rows` -> `_169_rows`: the thread-limit ASGI middleware class and `DEFAULT_THREAD_LIMIT` registered in `_ISOMORPHIC_TARGETS`, the perf-harness wrapper class removed from it); no new invariant, no Control claim added, no other claim changed)
+Version: **3.6** (2026-09-28; R-101 remedy WP-3 -- the SI-08 Common Evidence reference to the isomorphic-target count pin follows its rename (`_167_rows` -> `_169_rows`: the thread-limit ASGI middleware class, `DEFAULT_THREAD_LIMIT` and the composition roots' `_thread_limit_from_env` registered in `_ISOMORPHIC_TARGETS`, the perf-harness wrapper class removed from it); no new invariant, no Control claim added, no other claim changed)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 

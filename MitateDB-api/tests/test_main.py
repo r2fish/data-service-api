@@ -504,7 +504,7 @@ def test_thread_limit_from_env_unit_contract(main_module) -> None:
     itself, in isolation (mirrors `test_optional_float_default_path_is_
     not_regressed` immediately below).
 
-    mutation M139 (`mitatedb_api/main.py`): treat an empty string as if
+    mutation M191 (`mitatedb_api/main.py`): treat an empty string as if
     it were a valid override -- this test's own second assertion (`""`
     -> `4`) goes red."""
     assert main_module._thread_limit_from_env({}, "MITATEDB_THREAD_LIMIT", 4) == 4
@@ -539,6 +539,11 @@ def test_build_app_wires_thread_limit_from_the_env(main_module, platform, probe_
     `N`; composing that with this wiring check is condition 97/98's own
     full claim).
 
+    mutation M139 (`mitatedb_api/main.py`): pass a hardcoded `None`
+    instead of the computed value to `create_app(...)`'s own `thread_
+    limit=` keyword -- this test's own `next(m for m in ... if m.cls is
+    ThreadLimitMiddleware)` lookup goes red (no `ThreadLimitMiddleware`
+    in the list at all, `StopIteration`).
     mutation M140 (`mitatedb_api/main.py`): assign the wired value from
     `DEFAULT_THREAD_LIMIT` unconditionally, discarding the env -- this
     test's own `== 6` assertion (env set to `"6"`) goes red (reads `4`)."""

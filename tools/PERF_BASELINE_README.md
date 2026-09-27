@@ -510,9 +510,10 @@ cell, such as the one `capability_document()` provisions once to probe
 `cross_entity_mutation` availability). **`db=platform`'s own correction
 is always 0** -- neither peer's platform/credential connections are ever
 probed (r2db-api's platform/credential/audit-sink pools are never
-registered with `SharedPoolManager`; MitateDB-api's credential store
-opens and closes a fresh connection per call, never leaving one IDLE for
-a probe to reach). `db=app`'s correction subtracts BOTH probes that land
+registered with `SharedPoolManager`; MitateDB-api's credential-store
+pool (`pool.BoundedConnectionPool`, `_read_pool`) does hold IDLE
+connections, but the adapter's own `prepared_stats()` walks application
+cells only, never that pool). `db=app`'s correction subtracts BOTH probes that land
 inside a `--roundtrip` window: `DBTIME`'s own PRE snapshot (taken after
 warmup, before the measured window) and the shared POST snapshot
 (`DBTIME scope=app`/`PREPARED`'s common call) -- each probes the same

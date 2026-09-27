@@ -2946,9 +2946,10 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # SIZE_ENV` constant was reworded to a generic sentence so both
     # copies stay byte-identical). `platform_db_time_stats()` is NOT a
     # row: its body differs structurally between peers (this peer sums
-    # two `_RolePool.platform_stats()` calls, MitateDB-api sums two
-    # per-call stores' own `platform_stats()`), the same carve-out
-    # already applied to `pool_stats()` elsewhere in this table.
+    # two `_RolePool.platform_stats()` calls, MitateDB-api sums its own
+    # `_read_pool`'s `platform_stats()` and `_application_durable_audit`'s
+    # `platform_stats()`), the same carve-out already applied to `pool_
+    # stats()` elsewhere in this table.
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_perf_thread_limit_value"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "perf_thread_limit"),
     # R-101 WP-3 (D-8/D-9/D-10): the production thread-limit middleware
