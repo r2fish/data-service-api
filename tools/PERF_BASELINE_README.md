@@ -677,10 +677,10 @@ minute` `600` (work order
 adapter plugs' own `requests_per_minute` (`50`) is unrelated). A
 `--real-server` run sends `(--warmup + --n) * K` measured/warmup
 `query` requests plus 4 one-shot setup requests -- at
-`K=32` with D-16's own `--warmup 3 --n 15`, that is `576 + 4`, well
-under the budget; the DEFAULT `--warmup 10 --n 100` at `K=32` would be
-`3520`, well over it (the run aborts on the first `429`, never a
-silently wrong number).
+`K=32` with D-16's own `--warmup 3 --n 15`, that is `576 + 4 = 580`
+of the `600` budget (20 to spare; `--n 16` already exceeds it); the
+DEFAULT `--warmup 10 --n 100` at `K=32` would be `3520`, well over it
+(the run aborts on the first `429`, never a silently wrong number).
 
 **`--real-server` never builds one of the 6 registered plugs.** Only
 `registry.json`'s own `composition_roots` section is read for this flag

@@ -2430,17 +2430,13 @@ def test_real_server_flag_absent_prints_no_real_lines(tmp_path, capsys, monkeypa
         base.mkdir()
         monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
         monkeypatch.setattr(pb.dsa_testpg, "cluster", _fake_cluster_cm())
-        try:
-            code = pb.main(["--registry", str(registry_path)])
-        except Exception:  # noqa: BLE001 - `load_calls` is checked either way below
-            code = None
+        code = pb.main(["--registry", str(registry_path)])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "REALPERF" not in out
+        assert "REALCPU" not in out
         assert load_calls == []
         assert launcher_cls.START_CALLS == []
-        if code is not None:
-            assert code == 0
-            out = capsys.readouterr().out
-            assert "REALPERF" not in out
-            assert "REALCPU" not in out
     finally:
         _stop_realserver_stub_server(proc)
 
@@ -2683,3 +2679,24 @@ def test_real_server_prints_realperf_and_realcpu_as_one_block_after_perfrun(tmp_
         assert realcpu_idx == realperf_idx + 1
     finally:
         _stop_realserver_stub_server(proc)
+
+
+def test_real_server_n_must_be_at_least_one(capsys):
+    """Code review 1 re-check observation (差し戻し 2 (5)): at `--n 0`
+    under `--real-server`, no measured group would ever run, so
+    `_measure_real_server`'s own `client_processes` would stay `None`
+    (never set by any measured group) and `REALPERF`/`REALCPU` would
+    print `client_processes=None` -- refused up front instead, the same
+    way `--concurrency`/`--client-processes` already refuse below 1.
+    Raised before any registry/network access, so no stub server or
+    registry is needed here.
+
+    mutation M211 (`tools/perf_baseline.py`): drop the `--n >= 1` check
+    for `--real-server` -- red because this test's own `SystemExit`
+    assertion (`pb.main` exits 2 via `argparse`'s own `parser.error`)
+    no longer holds."""
+    with pytest.raises(SystemExit) as exc_info:
+        pb.main(["--real-server", "stubpeer", "--n", "0", "--registry", "/nonexistent/registry.json"])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--n must be >= 1" in err
