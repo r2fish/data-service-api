@@ -452,6 +452,9 @@ D-5 判定規則 (計測前に固定。§2 の数字だけで判定。計測後�
   「1〜4 すべて監督案どおりで進める」
   ```
 
+- **【監督裁定 12 (2026-09-28)】WP-4 のコードレビュー 1 (opus、F1〜F9 + P1、`$SP/review-wp4.md`)**: F1 (client_processes= が算術値)・F2 (141 の既知 CPU の stub 未実装)・F3 (144 の空振り)・F4 (出所・文書名・経緯語)・F6 (`requests=` が算術)・F7 (例外の包み漏れ)・F8 (要求数の上限の注意)・F9 (`_warm_forkserver` の主張) は差し戻し 1 で直した。F5 (group の開始時刻) は採る = 各子が barrier から戻った直後の `time.time_ns()` の最小値 (差し戻し 1、M210)。F2 の実現法 = stub の子が固定回数の busy loop を回し `time.process_time()` の差分を返す (measured の合計と ±20% で一致、warmup 分を含まない)。F6 = 応答数が n×K に満たない run は `RealServerMeasurementFailure`。P1 (指示書外 (a)〜(d) の事後報告) は中身が妥当なので受理。差し戻し 1 の指示書外 1〜4 (F6 の補助テスト、RV1 の形の変更、mutate.py の `--recover`、README のプレースホルダ) と疑義 1 (子の pid は返り値を spy で観測、HTTP 越しの独立経路は D-15 に無いので不採用)・疑義 2 (README に composition root の 600 と adapter の 50 は別と明記) は受理。
+- **【訂正註 13 (2026-09-28)】`.github/workflows/ci.yml` の `tools-tests` job を §9.1 の触ってよいパスに足す (監督だけが触る)。** コードレビュー 1 の範囲外の観察: 同 job は pytest しか入れないが、`tools/tests/test_perf_baseline.py` は R-101 WP-1 (5b73b48) 以来 `import httpx` を持ち、WP-4 も子 process で httpx を使う。push 停止中で CI は走っておらず、再開時に collection が赤になる見込みなので、同 job の install を `pip install -c constraints.txt pytest httpx` に改める (tools/ 配下の third-party import は httpx だけ = `grep -rlE '^(import|from) (anyio|httpx|psycopg|starlette|uvicorn)\b' tools/` の実測)。検証は push 再開後の CI に委ねる (`OC` §2 の 20)。
+
 ### 6.2 実施と受け入れ
 
 - **WP-1 (実装担当 sonnet、2 チャットで 4 起動: 前チャットは 1 起動を 3 段継続 (第 1 段 / 第 2 段 + 差し戻し 1 / 差し戻し 2)、再開チャットは条件 26 の段 / 差し戻し 3 / 差し戻し 4 を段ごとに別起動)。** 差分は `git diff a1c1ee3` の 22 file (`security/CONTROL_MAPPING.md` を含む)。`spec/`・`conformance-tests/`・`security/` (CM の参照追随 2 行を除く) の差分 0。
