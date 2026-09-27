@@ -1243,6 +1243,14 @@ service URLs (`gcloud run services describe ... --format='value
 (status.url)'`) before going live, then restart BOTH services (design
 U-3: startup snapshot).
 
+`MITATEDB_THREAD_LIMIT` (optional, data service only -- the control
+service's own composition root/ASGI app is untouched): `run_in_
+threadpool`'s own worker-thread limiter for this process' event loop
+(`http.py`'s `create_app(..., thread_limit=)`). Unset or empty defaults
+to `DEFAULT_THREAD_LIMIT` (4). A positive integer raises or lowers it;
+zero, negative, or non-numeric is a startup failure naming this
+variable.
+
 **Phase 10 WP-6b (design D-5 (ii)): `process_ceilings` is declared the
 same way, and is REQUIRED (F-15) alongside `surfaces` before either
 service will start**:

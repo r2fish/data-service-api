@@ -106,19 +106,21 @@ Plug selection is read from `conformance-tests/registry.json` -- this file
 never hardcodes a plug or adapter module name; adding a registry entry
 grows this tool's own output with no code change here.
 
-**`DSA_PERF_THREAD_LIMIT` (both peers' `-http`/`-socket` plugs).** Set to
-a positive integer, this wraps the plug's own data-plane ASGI app so the
-first request served on any one event loop sets that loop's own default
-anyio thread limiter (`anyio.to_thread.current_default_thread_limiter()`)
-to that many tokens, then never touches it again on that loop -- an
-`-http` plug's own asgi loop and an `-socket` plug's own uvicorn thread
-each get this treatment independently, the first time either serves a
-request. Absent, empty, or not a positive integer, the app is left
-completely unwrapped (its identity is the `create_app` result itself). **Do
-not leave this variable set while running `pytest`**: every conformance/
-unit test that builds one of these plugs would then run its own requests
-under the reduced thread limit too, changing timing-sensitive test
-behaviour that has nothing to do with this tool.
+**`DSA_PERF_THREAD_LIMIT` (both peers' `-http`/`-socket` plugs).** Passed
+straight through to the plug's own `create_app(..., thread_limit=)` call
+(R-101 WP-3, D-10) -- a positive integer is that value; absent, empty, or
+not a positive integer resolves to `create_app`'s own production default
+(`DEFAULT_THREAD_LIMIT`, 4), **never** anyio's own untouched default (40).
+`create_app`'s own middleware sets the first request served on any one
+event loop's own default anyio thread limiter (`anyio.to_thread.
+current_default_thread_limiter()`) to that resolved value, then never
+touches it again on that loop -- an `-http` plug's own asgi loop and an
+`-socket` plug's own uvicorn thread each get this treatment
+independently, the first time either serves a request. **Do not leave
+this variable set while running `pytest`**: every conformance/unit test
+that builds one of these plugs would then run its own requests under the
+reduced thread limit too, changing timing-sensitive test behaviour that
+has nothing to do with this tool.
 
 ## Output format
 
@@ -172,9 +174,12 @@ CPU peer=<peer> plug=<plug> op=<op> concurrency=<K> thread_limit=<N|default> req
 The window is the MEASURED `--n` samples only -- warmup is excluded, the
 same convention every other row on this page already follows.
 `thread_limit=` is the plug's own `perf_thread_limit()` value (the
-resolved `DSA_PERF_THREAD_LIMIT` this run was started with), or the
-literal `default` when the plug has no such accessor or it returns
-`None` (env absent at construction time). `requests=` is `n * K` --
+resolved `DSA_PERF_THREAD_LIMIT` this run was started with, `create_
+app`'s own default -- 4 -- when the env was absent or invalid) -- always
+an integer for the two `-http`/`-socket` plugs per peer (R-101 WP-3, D-10:
+`perf_thread_limit()` no longer returns `None`), or the literal `default`
+only for the two `in_process` plugs, which have no such accessor at all.
+`requests=` is `n * K` --
 measured requests only, never `(warmup + n) * K` (`ROUNDTRIP`'s own
 `requests=` below uses the warmup-inclusive count instead; the two are
 deliberately different denominators for different purposes). `wall_ms=`
@@ -235,10 +240,15 @@ PRE/POST delta of how many NEW connections opened during the window and
 how long those `connect()` calls themselves took; `txns=`/`db_wall_ms=`/
 `db_calls=` are the same delta on the platform accessor's own `txn_
 count`/`db_wall_ms`/`execute_count + executemany_count` sum (`_RolePool.
-platform_stats()` on r2db-api, each per-call store's own `platform_
-stats()` on MitateDB-api -- both fold every closed connection's own
-counters in before it closes, the same discipline `scope=app` relies on
-for its own connections). `db_wall_ms_per_req=` divides `db_wall_ms +
+platform_stats()` on r2db-api; on MitateDB-api, the durable audit sink's
+own per-call `platform_stats()` plus the credential store's pooled
+connections' own `pool.BoundedConnectionPool.platform_stats()` -- the
+credential store itself no longer opens per-call connections once a pool
+is wired, so its share comes from the pool it checks connections out of,
+not from the store's own no-pool accumulators. Both accessors fold every
+closed/discarded connection's own counters in before it closes/discards,
+the same discipline `scope=app` relies on for its own connections).
+`db_wall_ms_per_req=` divides `db_wall_ms +
 connect_wall_ms` by
 `requests=` -- the connect cost is folded into the same per-request
 denominator `scope=app` uses for its own round-trip-only wall time.
@@ -500,9 +510,10 @@ cell, such as the one `capability_document()` provisions once to probe
 `cross_entity_mutation` availability). **`db=platform`'s own correction
 is always 0** -- neither peer's platform/credential connections are ever
 probed (r2db-api's platform/credential/audit-sink pools are never
-registered with `SharedPoolManager`; MitateDB-api's credential store
-opens and closes a fresh connection per call, never leaving one IDLE for
-a probe to reach). `db=app`'s correction subtracts BOTH probes that land
+registered with `SharedPoolManager`; MitateDB-api's credential-store
+pool (`pool.BoundedConnectionPool`, `_read_pool`) does hold IDLE
+connections, but the adapter's own `prepared_stats()` walks application
+cells only, never that pool). `db=app`'s correction subtracts BOTH probes that land
 inside a `--roundtrip` window: `DBTIME`'s own PRE snapshot (taken after
 warmup, before the measured window) and the shared POST snapshot
 (`DBTIME scope=app`/`PREPARED`'s common call) -- each probes the same

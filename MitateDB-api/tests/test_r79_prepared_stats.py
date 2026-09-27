@@ -31,6 +31,8 @@ import inspect
 import os
 import secrets
 import textwrap
+import threading
+import time
 
 import psycopg
 import pytest
@@ -489,3 +491,228 @@ def test_audit_sink_fold_is_lexically_inside_the_platform_stats_lock():
     assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_calls") and isinstance(n.op, ast.Add)), (
         "the db_calls accumulation is not lexically inside `with self._platform_stats_lock:`"
     )
+
+
+
+def test_bounded_connection_pool_new_connection_increases_platform_session_and_wall_stats():
+    """Completion condition 156 (R-101 WP-3 D-11): acquiring a connection
+    that opens a brand-new session (nothing idle yet) increases `platform_
+    stats()`'s own `sessions` by exactly 1 and `connect_wall_ms` by more
+    than 0, observed against a real PostgreSQL connect.
+
+    mutation M194 (`pool.py`): drop the `sessions`/`connect_wall_ms`
+    accumulation from `_new_connection` -- this test's own `sessions == 1`
+    assertion goes red (stays at 0)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    before = pool.platform_stats()
+    assert before == {"sessions": 0, "connect_wall_ms": 0.0, "db_wall_ms": 0.0, "txn_count": 0, "db_calls": 0}
+    conn = pool.acquire()
+    try:
+        after = pool.platform_stats()
+        assert after["sessions"] == 1
+        assert after["connect_wall_ms"] > 0
+    finally:
+        pool.release(conn)
+
+
+def test_bounded_connection_pool_discard_preserves_db_wall_ms_and_txn_count():
+    """Completion condition 157 (R-101 WP-3 D-11): a connection that has
+    run a real query and a real transaction, then discarded, still shows
+    up in `platform_stats()`'s own `db_wall_ms`/`txn_count`/`db_calls` --
+    discarding a connection never loses the time/transactions/statements
+    it already spent, observed against a real PostgreSQL round trip.
+
+    mutation M195 (`pool.py`): drop the `_fold_closed_connection_stats`
+    call from `discard` -- this test's own `db_wall_ms > 0`/`txn_count ==
+    1` assertions go red (drop back to 0, the discarded connection's own
+    totals are never folded in)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    conn = pool.acquire()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+    conn.commit()
+    pool.discard(conn)
+    after = pool.platform_stats()
+    assert after["db_wall_ms"] > 0
+    assert after["txn_count"] == 1
+    assert after["db_calls"] >= 1
+
+
+def test_bounded_connection_pool_closeall_preserves_db_wall_ms_and_txn_count():
+    """Completion condition 158 (R-101 WP-3 D-11): same property as 157
+    above, reached through `closeall()` instead of `discard()` -- a
+    connection released back to idle, then closed by `closeall()`, still
+    shows up in `platform_stats()`'s own `db_wall_ms`/`txn_count`/
+    `db_calls`, against a real PostgreSQL round trip.
+
+    mutation M196 (`pool.py`): drop the `_fold_closed_connection_stats`
+    call from `closeall` -- this test's own `db_wall_ms > 0`/`txn_count ==
+    1` assertions go red (drop back to 0, the closed connection's own
+    totals are never folded in)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    conn = pool.acquire()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+    conn.commit()
+    pool.release(conn)
+    pool.closeall()
+    after = pool.platform_stats()
+    assert after["db_wall_ms"] > 0
+    assert after["txn_count"] == 1
+    assert after["db_calls"] >= 1
+
+
+def test_bounded_connection_pool_platform_stats_makes_no_round_trip():
+    """Completion condition 159 (R-101 WP-3 D-11): calling `platform_
+    stats()` never touches `stats()`'s own `acquire_count`, nor any live
+    idle connection's own `execute_count`/`db_wall_ms` -- no DB round trip,
+    observed against a real PostgreSQL connection sitting idle in the pool.
+
+    mutation M197 (`pool.py`): route `platform_stats()` through `acquire()`
+    (checks a connection out, reads it, puts it back) instead of draining
+    `self._idle` directly with `get_nowait`/`put_nowait` -- this test's own
+    `acquire_count` assertion goes red (rises with every `platform_stats()`
+    call instead of staying fixed)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    conn = pool.acquire()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+    pool.release(conn)
+    before_acquire_count = pool.stats()["acquire_count"]
+    before_execute_count = conn.execute_count
+    before_db_wall_ms = conn.db_wall_ms
+    pool.platform_stats()
+    pool.platform_stats()
+    assert pool.stats()["acquire_count"] == before_acquire_count
+    assert conn.execute_count == before_execute_count
+    assert conn.db_wall_ms == before_db_wall_ms
+
+
+def test_bounded_connection_pool_fold_is_lexically_inside_the_stats_lock():
+    """Completion condition 160 (守る条件 (b), R-101 WP-3 D-11):
+    `BoundedConnectionPool._fold_closed_connection_stats`'s three
+    accumulator increments (`self._closed_db_wall_ms += db_wall_ms`,
+    `self._closed_txn_count += txn_count`, `self._closed_db_calls +=
+    db_calls`) must be lexically inside the SAME `with self._stats_lock:`
+    block, mirroring the credential store's own pin above (§6.1 の監督裁定
+    3 の前例, and `r2db_api.postgres._RolePool._fold_closed_connection_
+    stats`'s identical shape). A source-shape pin, not a running-thread
+    race, for the same reason the credential-store pin above gives.
+
+    mutation M198 (`pool.py`): drop the `with self._stats_lock:` around
+    the three accumulator additions in `_fold_closed_connection_stats` --
+    this test's own assertions go red (the three `AugAssign` nodes are no
+    longer inside any `with self._stats_lock:` block)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(BoundedConnectionPool._fold_closed_connection_stats)))
+    body = _find_with_lock_body(tree, lock_attr="_stats_lock")
+    assert body is not None, "no `with self._stats_lock:` block found in `_fold_closed_connection_stats`"
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_wall_ms") and isinstance(n.op, ast.Add)), (
+        "the db_wall_ms accumulation is not lexically inside `with self._stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_txn_count") and isinstance(n.op, ast.Add)), (
+        "the txn_count accumulation is not lexically inside `with self._stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_calls") and isinstance(n.op, ast.Add)), (
+        "the db_calls accumulation is not lexically inside `with self._stats_lock:`"
+    )
+
+
+
+class _FakeDeadConnection:
+    """A minimal stand-in for a server-closed `psycopg.Connection`: only
+    the attributes `BoundedConnectionPool.acquire()`/`_fold_closed_
+    connection_stats` actually read (never a real socket, never a real
+    PostgreSQL server) -- review round 1 finding F6 (deviation (a) from
+    work order §8.1's own AST-pin-only default for this file, accepted by
+    supervisor ruling 2026-09-28)."""
+
+    def __init__(self, db_wall_ms: float, txn_count: int, execute_count: int, executemany_count: int) -> None:
+        self.closed = True
+        self.db_wall_ms = db_wall_ms
+        self.txn_count = txn_count
+        self.execute_count = execute_count
+        self.executemany_count = executemany_count
+
+
+class _FakeLiveConnection:
+    """A minimal stand-in for a healthy, open `psycopg.Connection` --
+    same reasoning as `_FakeDeadConnection` above."""
+
+    closed = False
+
+
+def test_bounded_connection_pool_acquire_folds_a_dead_idle_connection_found_at_the_top_of_acquire(monkeypatch: pytest.MonkeyPatch):
+    """Review round 1 finding F6: a connection found dead (`closed=True`)
+    at the TOP of `acquire()` (stage 1, the `get_nowait` loop that reuses
+    an idle connection, before a new one is ever created) still has its
+    own `db_wall_ms`/`txn_count`/`execute_count + executemany_count`
+    folded into `platform_stats()` before it is discarded -- a connection
+    the server closed while idle never silently drops the time,
+    transactions, or statements it already spent.
+
+    mutation M203 (`pool.py`): drop the `_fold_closed_connection_stats
+    (conn)` call from stage (1)'s dead-connection branch -- this test's
+    own `db_wall_ms`/`txn_count`/`db_calls` assertions go red (stay at 0,
+    the dead connection's own totals are never folded in)."""
+    pool = BoundedConnectionPool("postgresql://unit-test-pool/not-a-real-dsn", max_size=1)
+    dead = _FakeDeadConnection(db_wall_ms=5.0, txn_count=2, execute_count=2, executemany_count=1)
+    pool._idle.put_nowait(dead)
+    live = _FakeLiveConnection()
+    monkeypatch.setattr(pool, "_new_connection", lambda: live)
+
+    conn = pool.acquire()
+
+    assert conn is live
+    stats = pool.platform_stats()
+    assert stats["db_wall_ms"] >= 5.0
+    assert stats["txn_count"] >= 2
+    assert stats["db_calls"] >= 3
+
+
+def test_bounded_connection_pool_acquire_folds_a_dead_connection_found_while_waiting_at_budget():
+    """Review round 1 finding F6: a connection found dead (`closed=True`)
+    in stage (3) (the pool already at `max_size`, waiting on `self._idle.
+    get(timeout=...)` for a released connection) still has its own
+    `db_wall_ms`/`txn_count`/`execute_count + executemany_count` folded
+    into `platform_stats()` before it is discarded -- same property as
+    the test above, reached through the wait branch instead of the
+    top-of-`acquire()` branch.
+
+    The idle queue starts EMPTY (stage (1)'s own `get_nowait` must find
+    nothing, or `acquire()` never reaches stage (3) at all) -- a
+    background thread delivers both connections only once `acquire()` is
+    already blocked in stage (3)'s own wait loop. Review round 2 finding
+    N1: `pool._idle.empty()` right after `acquire()` returns makes this
+    deterministic -- without it, `acquire()`'s own wait-loop `get(timeout
+    =...)` could fire between the two `put()` calls below, grab `live`
+    straight away, and return BEFORE `dead` is ever delivered; `dead`
+    would then sit unprocessed in `self._idle`, and `platform_stats()`'s
+    own idle-scan (reading a still-idle connection's attributes directly,
+    never through the fold path) would make the assertions below pass
+    for the wrong reason, even under mutation M204.
+
+    mutation M204 (`pool.py`): drop the `_fold_closed_connection_stats
+    (conn)` call from stage (3)'s dead-connection branch -- this test's
+    own `db_wall_ms`/`txn_count`/`db_calls` assertions go red (stay at 0,
+    the dead connection's own totals are never folded in)."""
+    pool = BoundedConnectionPool("postgresql://unit-test-pool/not-a-real-dsn", max_size=1)
+    pool._created = pool._max_size  # already at budget: acquire() skips stage (2) and enters the stage (3) wait loop
+    live = _FakeLiveConnection()
+    dead = _FakeDeadConnection(db_wall_ms=7.0, txn_count=3, execute_count=4, executemany_count=0)
+
+    def _deliver_once_acquire_is_already_waiting() -> None:
+        time.sleep(0.1)
+        # LIFO queue: put the live connection first so the dead one (put
+        # last) is the first one `acquire()` pops.
+        pool._idle.put(live)
+        pool._idle.put(dead)
+
+    threading.Thread(target=_deliver_once_acquire_is_already_waiting, daemon=True).start()
+    conn = pool.acquire()
+
+    assert conn is live
+    assert pool._idle.empty(), "both delivered connections must already be drained by acquire() itself (dead folded+forgotten, live returned), never left for platform_stats() to find still idle"
+    stats = pool.platform_stats()
+    assert stats["db_wall_ms"] >= 7.0
+    assert stats["txn_count"] >= 3
+    assert stats["db_calls"] >= 4

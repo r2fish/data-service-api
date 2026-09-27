@@ -2413,7 +2413,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_167_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_169_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2939,20 +2939,29 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "encode_page_cursor"),
     ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "decode_page_cursor"),
     ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "canonical_page_binding"),
-    # R-101 WP-1: the `DSA_PERF_THREAD_LIMIT` env reader, the wrapper
-    # class that applies it to a data-plane app's own event loop, and the
-    # `perf_thread_limit()` accessor the measurement harness reads it back
-    # through -- all three verified normalize-and-diff equal before
-    # adding (a peer-specific comment naming this peer's own unrelated
-    # `_PERF_POOL_SIZE_ENV` constant was reworded to a generic sentence so
-    # both copies stay byte-identical). `platform_db_time_stats()` is NOT
-    # a row: its body differs structurally between peers (this peer sums
-    # two `_RolePool.platform_stats()` calls, MitateDB-api sums two
-    # per-call stores' own `platform_stats()`), the same carve-out already
-    # applied to `pool_stats()` elsewhere in this table.
+    # R-101 WP-1: the `DSA_PERF_THREAD_LIMIT` env reader and the
+    # `perf_thread_limit()` accessor the measurement harness reads it
+    # back through, verified normalize-and-diff equal before adding (a
+    # peer-specific comment naming this peer's own unrelated `_PERF_POOL_
+    # SIZE_ENV` constant was reworded to a generic sentence so both
+    # copies stay byte-identical). `platform_db_time_stats()` is NOT a
+    # row: its body differs structurally between peers (this peer sums
+    # two `_RolePool.platform_stats()` calls, MitateDB-api sums its own
+    # `_read_pool`'s `platform_stats()` and `_application_durable_audit`'s
+    # `platform_stats()`), the same carve-out already applied to `pool_
+    # stats()` elsewhere in this table.
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_perf_thread_limit_value"),
-    ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_PerfThreadLimitWrapper"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "perf_thread_limit"),
+    # R-101 WP-3 (D-8/D-9/D-10): the production thread-limit middleware
+    # and its default constant (`http.py`), and the composition root's
+    # own strict env parser (`main.py`) -- `_PerfThreadLimitWrapper`
+    # (WP-1's harness-only wrapper) is removed from this table: `create_
+    # app`'s own middleware replaces it, so both adapters now pass an
+    # already-resolved `thread_limit=` int through instead of wrapping
+    # the app themselves.
+    ("src/r2db_api/http.py", "src/mitatedb_api/http.py", "ThreadLimitMiddleware"),
+    ("src/r2db_api/http.py", "src/mitatedb_api/http.py", "DEFAULT_THREAD_LIMIT"),
+    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_thread_limit_from_env"),
     # R-101 WP-1 completion condition 26 (supervisor ruling 3): the AST
     # static pin's own three helpers (`_self_attr`, `_find_with_lock_body`,
     # `_body_contains`) placed identically in both peers' own `tests/
@@ -2970,7 +2979,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_167_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_169_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -3050,6 +3059,13 @@ def test_isomorphic_target_table_is_pinned_to_its_current_167_rows() -> None:
     fixation, same character as Phase 5's "走査対象フィールド集合を pin
     する" test -- a future WP that adds/removes a row edits this
     assertion deliberately, not by accident.
+    Widened a seventeenth time by R-101 WP-3 (D-8/D-9/D-10): `_PerfThread
+    LimitWrapper` (WP-1's own harness-only wrapper) is REMOVED -- `create
+    _app`'s own production middleware (`ThreadLimitMiddleware`, its
+    default `DEFAULT_THREAD_LIMIT`) and the composition root's strict env
+    parser (`_thread_limit_from_env`) replace it, all three verified
+    normalize-and-diff equal before adding; `_perf_thread_limit_value`
+    and `perf_thread_limit` keep their own rows, unchanged in name.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -3074,7 +3090,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_167_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_167_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_169_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3336,8 +3352,10 @@ def test_isomorphic_target_table_is_pinned_to_its_current_167_rows() -> None:
         ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "decode_page_cursor"),
         ("src/r2db_api/paging.py", "src/mitatedb_api/paging.py", "canonical_page_binding"),
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_perf_thread_limit_value"),
-        ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_PerfThreadLimitWrapper"),
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "perf_thread_limit"),
+        ("src/r2db_api/http.py", "src/mitatedb_api/http.py", "ThreadLimitMiddleware"),
+        ("src/r2db_api/http.py", "src/mitatedb_api/http.py", "DEFAULT_THREAD_LIMIT"),
+        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_thread_limit_from_env"),
         # R-101 WP-1 completion condition 26 (supervisor ruling 3): the AST
         # static pin's own three helpers (`_self_attr`, `_find_with_lock_body`,
         # `_body_contains`) placed identically in both peers' own `tests/
@@ -3348,7 +3366,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_167_rows() -> None:
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f19_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_application_collations"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 167
+    assert len(_ISOMORPHIC_TARGETS) == 169
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}
