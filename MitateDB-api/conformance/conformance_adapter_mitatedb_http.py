@@ -112,13 +112,14 @@ from mitatedb_api.audit_dispatch import AuditRouter  # noqa: E402
 from mitatedb_api.auth import Role  # noqa: E402
 from mitatedb_api.backend_postgres import PostgresBackend  # noqa: E402
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime, _LimitStateHolder  # noqa: E402
-from mitatedb_api.config import FoundationConfig  # noqa: E402
+from mitatedb_api.config import FoundationConfig, role_pool_size  # noqa: E402
 from mitatedb_api.control_audit import read_control_audit_events  # noqa: E402
 from mitatedb_api.control_composition import build_control_service  # noqa: E402
 from mitatedb_api.control_http import create_control_app  # noqa: E402
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore  # noqa: E402
 from mitatedb_api.errors import AuthorizationStateUnavailable  # noqa: E402
 from mitatedb_api.http import DEFAULT_THREAD_LIMIT, PROBLEM_CONTENT_TYPE, HttpService, create_app  # noqa: E402
+from mitatedb_api.pool import BoundedConnectionPool  # noqa: E402
 
 BASE_URL = "http://mitatedb-http-pg.conformance.invalid"
 
@@ -1084,27 +1085,22 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # two-store split and its own documented reasoning (the read
             # path must run under the same least-privilege grants a real
             # deployment's application-plane process has).
-            # WP-3 review finding (measured, not theoretical): a bounded
-            # POOL was tried here too at first, but this adapter's own
-            # workload is sequential (one pytest test body at a time, no
-            # concurrent requests), unlike the HTTP composition root
-            # (`main.py`) the WP-3 completion condition's bounded-pool
-            # requirement actually targets. For a sequential caller, WP-2's
-            # original per-call `connect()`/`close()` never holds more than
-            # one credential-store connection open AT ONCE; a pool instead
-            # holds up to `max_size` IDLE connections open continuously
-            # between calls, which is a net INCREASE in this adapter's own
-            # steady-state connection footprint against the shared local
-            # cluster's `max_connections` -- exactly the resource this
-            # adapter's own `_MAX_OPEN_CELLS` cap (above) exists to
-            # protect. Measured directly: `r2db-api-http`'s own tests
-            # (registered alongside this adapter in the SAME combined root
-            # suite) intermittently failed on cluster-wide connection
-            # exhaustion when this adapter pooled its credential stores;
-            # reverting to `pool=None` (WP-2's original behavior) resolved
-            # it. `pool.BoundedConnectionPool` remains genuinely used and
-            # exercised by `main.py`'s own composition root, where the
-            # concurrency it is actually for exists.
+            # `self._read_store` carries a real `pool.BoundedConnectionPool`
+            # (`self._read_pool`, below), matching the HTTP composition
+            # root's identical wiring (`main.py`'s own `platform_pool`):
+            # every authenticated request this adapter sends through
+            # `_gate`/`_read_store.authenticate` reuses a pooled connection
+            # instead of opening a fresh one, so this adapter's `DBTIME
+            # scope=platform` reading reflects the same connection shape a
+            # real deployment's application-plane process has. The pool's
+            # own size is derived the same way `main.py` derives its
+            # production pool's size (`role_pool_size`, `config.py`), from
+            # this surface's own declared `max_concurrency` -- never a
+            # fixed literal. `self._write_store` (below) stays per-call/
+            # unpooled: it is this adapter's own privileged setup path
+            # (`issue_credential`/`revoke_credential`/...), never touched
+            # by a measured request, matching `main.py`'s own audit sink
+            # (no pool either, `application_audit.py`'s module docstring).
             # Q4 phase (design D-1(b), work order §4 WP-2 変更対象 D): a
             # real Postgres `application_audit` writer -- the SAME
             # `<prefix>svc_api` role/DSN `self._read_store` above already
@@ -1124,9 +1120,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             )
             self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
 
+            self._read_pool = BoundedConnectionPool(
+                self._platform.api_dsn,
+                max_size=role_pool_size(FoundationConfig(max_concurrency=self._application_config.max_concurrency)),
+            )
             self._read_store = PostgresCredentialStore(
                 self._platform.api_dsn, pepper="synthetic-conformance-pepper-mitatedb-http-0000",
-                schema=self._platform.schema, audit_router=self._audit_router,
+                schema=self._platform.schema, audit_router=self._audit_router, pool=self._read_pool,
             )
             self._write_store = PostgresCredentialStore(
                 self._platform.controlplane_dsn, pepper="synthetic-conformance-pepper-mitatedb-http-0000",
@@ -3369,13 +3369,21 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         return self._perf_thread_limit
 
     def platform_db_time_stats(self) -> dict[str, int | float]:
-        """Sums `self._read_store`/`self._application_durable_audit`'s own
-        `platform_stats()` -- the two platform-side, per-call (no-pool)
-        connection sources the data-plane measurement path actually uses
-        (`self._write_store` is provisioning-only, never touched by a
-        measured request). Read-only: every value read here is a plain
-        accumulated attribute, no new connection opens."""
-        credentials_stats = self._read_store.platform_stats()
+        """Sums `self._read_pool`/`self._application_durable_audit`'s own
+        `platform_stats()` -- the two platform-side connection sources the
+        data-plane measurement path actually uses. The credential-store
+        share comes from `self._read_pool` (the pool `self._read_store`
+        checks connections out of), never from `self._read_store.platform_
+        stats()` itself: with a pool wired, `self._read_store` no longer
+        opens its own per-call connections (`_borrow_connection`'s pool
+        branch), so `self._read_store`'s own no-pool accumulators stay at
+        zero -- the pool is where the real traffic now lands.
+        `self._application_durable_audit` stays unpooled (matches `main.
+        py`'s own audit sink), and `self._write_store` is provisioning-
+        only, never touched by a measured request. Read-only: every value
+        read here is a plain accumulated attribute, no new connection
+        opens."""
+        credentials_stats = self._read_pool.platform_stats()
         audit_stats = self._application_durable_audit.platform_stats()
         return {
             "sessions": credentials_stats["sessions"] + audit_stats["sessions"],

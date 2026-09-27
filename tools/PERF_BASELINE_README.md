@@ -240,10 +240,15 @@ PRE/POST delta of how many NEW connections opened during the window and
 how long those `connect()` calls themselves took; `txns=`/`db_wall_ms=`/
 `db_calls=` are the same delta on the platform accessor's own `txn_
 count`/`db_wall_ms`/`execute_count + executemany_count` sum (`_RolePool.
-platform_stats()` on r2db-api, each per-call store's own `platform_
-stats()` on MitateDB-api -- both fold every closed connection's own
-counters in before it closes, the same discipline `scope=app` relies on
-for its own connections). `db_wall_ms_per_req=` divides `db_wall_ms +
+platform_stats()` on r2db-api; on MitateDB-api, the durable audit sink's
+own per-call `platform_stats()` plus the credential store's pooled
+connections' own `pool.BoundedConnectionPool.platform_stats()` -- the
+credential store itself no longer opens per-call connections once a pool
+is wired, so its share comes from the pool it checks connections out of,
+not from the store's own no-pool accumulators. Both accessors fold every
+closed/discarded connection's own counters in before it closes/discards,
+the same discipline `scope=app` relies on for its own connections).
+`db_wall_ms_per_req=` divides `db_wall_ms +
 connect_wall_ms` by
 `requests=` -- the connect cost is folded into the same per-request
 denominator `scope=app` uses for its own round-trip-only wall time.

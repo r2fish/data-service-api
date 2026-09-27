@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import pytest
 
 from mitatedb_api.cell import ApplicationCell, _CountingRLock
+from mitatedb_api.config import FoundationConfig, role_pool_size
 from mitatedb_api.errors import AuthorizationStateUnavailable
 from mitatedb_api.pool import BoundedConnectionPool
 
@@ -252,9 +253,11 @@ def test_perf_thread_limit_accessor_reads_the_instance_attribute():
 # ---------------------------------------------------------------------
 # R-101 WP-3 D-10: adapter construction-time wiring identity (completion
 # conditions 103/105/107/109/155) and `platform_db_time_stats()` observed
-# through a real, authenticated HTTP request (D-11, unaffected by this
-# WP: the credential store still opens a per-call connection, no pool
-# yet -- see the work order's own §8 scope note).
+# through a real, authenticated HTTP request (D-11: `self._read_store`
+# now checks connections out of `self._read_pool`, a real `pool.Bounded
+# ConnectionPool` sized from this surface's own declared `max_
+# concurrency` -- see the tests below this section for the pool's own
+# reuse/size/close-on-cleanup properties, completion conditions 112-114).
 # ---------------------------------------------------------------------
 
 
@@ -365,21 +368,27 @@ def test_platform_db_time_stats_observes_a_real_authenticated_http_request():
     """MitateDB side of completion conditions 22/23 (差し戻し 1 item 2;
     the work order's own §2.3 table names only r2db-api mutations for this
     pair -- this test and its own mutation, M99, are an addition the
-    supervisor's return-file ruling directed): sending one real,
-    authenticated HTTP request through the `-http` adapter (`authenticate
-    ()` -- a real `GET /v1/capabilities` round trip) increases `platform_
-    db_time_stats()`'s own `sessions`, `connect_wall_ms`, `db_wall_ms`,
-    and `db_calls` (the per-call credential store opens and closes a real
-    connection to run `authenticate`'s SELECT). A second, back-to-back
-    call to the accessor itself changes nothing further -- it opens no
-    connection of its own. Unaffected by WP-3 (D-11, this WP's own credential-
-    store pool wiring, is out of scope for this change set -- this
-    adapter's `_read_store` still opens a connection per call).
+    supervisor's return-file ruling directed), also completion condition
+    161 (R-101 WP-3 D-11, expected values re-measured for this WP): sending
+    one real, authenticated HTTP request through the `-http` adapter
+    (`authenticate()` -- a real `GET /v1/capabilities` round trip)
+    increases `platform_db_time_stats()`'s own `sessions`, `connect_wall_
+    ms`, `db_wall_ms`, and `db_calls`. Since D-11, that traffic runs
+    through `self._read_pool` (a real `pool.BoundedConnectionPool`) rather
+    than a fresh per-call connection: the first authenticated request
+    opens exactly one new pooled session, and its own `db_wall_ms`/
+    `db_calls` still show up in the sum because `platform_db_time_stats()`
+    reads `self._read_pool.platform_stats()`, which includes every
+    connection currently idle in the pool (not only ones already closed).
+    A second, back-to-back call to the accessor itself changes nothing
+    further -- it opens no connection of its own and makes no DB round
+    trip.
 
-    mutation M99 (`conformance_adapter_mitatedb_http.py`): drop `self.
-    _read_store` from `platform_db_time_stats()`'s own sum -- this test's
-    own `sessions`/`db_wall_ms`/`db_calls` delta assertions go red (the
-    credential store's own real traffic is excluded from the total)."""
+    mutation M199 (`conformance_adapter_mitatedb_http.py`): drop the
+    credential-store pool's own contribution from `platform_db_time_
+    stats()`'s sum -- this test's own `sessions`/`db_wall_ms`/`db_calls`
+    delta assertions go red (the pooled connection's own real traffic is
+    excluded from the total)."""
     adapter = _http_module.MitateDBHttpConformanceAdapter()
     app_id = f"r101perf{secrets.token_hex(4)}"
     try:
@@ -398,3 +407,82 @@ def test_platform_db_time_stats_observes_a_real_authenticated_http_request():
         with contextlib.suppress(Exception):
             adapter.deprovision_application(app_id)
         adapter.close()
+
+
+def test_read_pool_reuses_connection_across_two_authenticated_requests():
+    """Completion condition 112 (R-101 WP-3 D-11): sending a second real,
+    authenticated request after the first no longer opens a new session on
+    the credential-store pool -- `adapter._read_pool.platform_stats()`'s
+    own `sessions` stays unchanged between the two, while `stats()["
+    acquire_count"]` still rises (the same pooled connection is acquired
+    and released again, never a fresh `connect()`).
+
+    mutation M153 (`conformance_adapter_mitatedb_http.py`): construct
+    `self._read_store` without `pool=self._read_pool` (the pre-D-11 shape)
+    -- this test's own `acquire_count` assertion goes red (`self._read_
+    pool` is never touched by `authenticate()`, so it stays 0 for both
+    calls instead of rising)."""
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    app_id = f"r101poolreuse{secrets.token_hex(4)}"
+    try:
+        adapter.provision_application(app_id)
+        handle = adapter.issue_credential(app_id, "runtime")
+        adapter.authenticate(handle)
+        sessions_after_first = adapter._read_pool.platform_stats()["sessions"]
+        acquire_count_after_first = adapter._read_pool.stats()["acquire_count"]
+        adapter.authenticate(handle)
+        sessions_after_second = adapter._read_pool.platform_stats()["sessions"]
+        acquire_count_after_second = adapter._read_pool.stats()["acquire_count"]
+        assert sessions_after_second == sessions_after_first
+        assert acquire_count_after_second > acquire_count_after_first
+    finally:
+        with contextlib.suppress(Exception):
+            adapter.deprovision_application(app_id)
+        adapter.close()
+
+
+def test_read_pool_size_matches_role_pool_size_of_declared_concurrency():
+    """Completion condition 113 (R-101 WP-3 D-11): the credential-store
+    pool's own `size` (`stats()["size"]`, its `max_size`) is derived the
+    same way `main.py`'s production pool is -- `role_pool_size(Foundation
+    Config(max_concurrency=<this surface's own declared max_concurrency>))`
+    -- never a fixed literal.
+
+    mutation M154 (`conformance_adapter_mitatedb_http.py`): fix the pool's
+    `max_size` at `1` regardless of the declared `max_concurrency` -- this
+    test's own equality assertion goes red (the adapter's declared `max_
+    concurrency` is 32, `role_pool_size` of that is 32, not 1)."""
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    try:
+        expected = role_pool_size(FoundationConfig(max_concurrency=adapter._application_config.max_concurrency))
+        assert adapter._read_pool.stats()["size"] == expected
+    finally:
+        adapter.close()
+
+
+def test_read_pool_closes_all_connections_on_adapter_close():
+    """Completion condition 114 (R-101 WP-3 D-11): after a real
+    authenticated request leaves a connection idle in the credential-store
+    pool, `adapter.close()` (which reaches `self._read_store.close()` ->
+    `self._pool.closeall()`) closes every connection the pool was holding.
+
+    mutation M155 (`conformance_adapter_mitatedb_http.py`): drop `self.
+    _read_store.close()` from `_cleanup` -- this test's own `conn.closed`
+    assertion goes red (the pooled connection this test captured a
+    reference to stays open)."""
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    app_id = f"r101poolclose{secrets.token_hex(4)}"
+    conn = None
+    try:
+        adapter.provision_application(app_id)
+        handle = adapter.issue_credential(app_id, "runtime")
+        adapter.authenticate(handle)
+        conn = adapter._read_pool.acquire()
+        assert conn.closed is False
+        adapter._read_pool.release(conn)
+    finally:
+        with contextlib.suppress(Exception):
+            adapter.deprovision_application(app_id)
+        adapter.close()
+    assert conn is not None
+    assert conn.closed is True

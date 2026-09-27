@@ -489,3 +489,127 @@ def test_audit_sink_fold_is_lexically_inside_the_platform_stats_lock():
     assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_platform_db_calls") and isinstance(n.op, ast.Add)), (
         "the db_calls accumulation is not lexically inside `with self._platform_stats_lock:`"
     )
+
+
+
+def test_bounded_connection_pool_new_connection_increases_platform_session_and_wall_stats():
+    """Completion condition 156 (R-101 WP-3 D-11): acquiring a connection
+    that opens a brand-new session (nothing idle yet) increases `platform_
+    stats()`'s own `sessions` by exactly 1 and `connect_wall_ms` by more
+    than 0, observed against a real PostgreSQL connect.
+
+    mutation M194 (`pool.py`): drop the `sessions`/`connect_wall_ms`
+    accumulation from `_new_connection` -- this test's own `sessions == 1`
+    assertion goes red (stays at 0)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    before = pool.platform_stats()
+    assert before == {"sessions": 0, "connect_wall_ms": 0.0, "db_wall_ms": 0.0, "txn_count": 0, "db_calls": 0}
+    conn = pool.acquire()
+    try:
+        after = pool.platform_stats()
+        assert after["sessions"] == 1
+        assert after["connect_wall_ms"] > 0
+    finally:
+        pool.release(conn)
+
+
+def test_bounded_connection_pool_discard_preserves_db_wall_ms_and_txn_count():
+    """Completion condition 157 (R-101 WP-3 D-11): a connection that has
+    run a real query and a real transaction, then discarded, still shows
+    up in `platform_stats()`'s own `db_wall_ms`/`txn_count`/`db_calls` --
+    discarding a connection never loses the time/transactions/statements
+    it already spent, observed against a real PostgreSQL round trip.
+
+    mutation M195 (`pool.py`): drop the `_fold_closed_connection_stats`
+    call from `discard` -- this test's own `db_wall_ms > 0`/`txn_count ==
+    1` assertions go red (drop back to 0, the discarded connection's own
+    totals are never folded in)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    conn = pool.acquire()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+    conn.commit()
+    pool.discard(conn)
+    after = pool.platform_stats()
+    assert after["db_wall_ms"] > 0
+    assert after["txn_count"] == 1
+    assert after["db_calls"] >= 1
+
+
+def test_bounded_connection_pool_closeall_preserves_db_wall_ms_and_txn_count():
+    """Completion condition 158 (R-101 WP-3 D-11): same property as 157
+    above, reached through `closeall()` instead of `discard()` -- a
+    connection released back to idle, then closed by `closeall()`, still
+    shows up in `platform_stats()`'s own `db_wall_ms`/`txn_count`/
+    `db_calls`, against a real PostgreSQL round trip.
+
+    mutation M196 (`pool.py`): drop the `_fold_closed_connection_stats`
+    call from `closeall` -- this test's own `db_wall_ms > 0`/`txn_count ==
+    1` assertions go red (drop back to 0, the closed connection's own
+    totals are never folded in)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    conn = pool.acquire()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+    conn.commit()
+    pool.release(conn)
+    pool.closeall()
+    after = pool.platform_stats()
+    assert after["db_wall_ms"] > 0
+    assert after["txn_count"] == 1
+    assert after["db_calls"] >= 1
+
+
+def test_bounded_connection_pool_platform_stats_makes_no_round_trip():
+    """Completion condition 159 (R-101 WP-3 D-11): calling `platform_
+    stats()` never touches `stats()`'s own `acquire_count`, nor any live
+    idle connection's own `execute_count`/`db_wall_ms` -- no DB round trip,
+    observed against a real PostgreSQL connection sitting idle in the pool.
+
+    mutation M197 (`pool.py`): route `platform_stats()` through `acquire()`
+    (checks a connection out, reads it, puts it back) instead of draining
+    `self._idle` directly with `get_nowait`/`put_nowait` -- this test's own
+    `acquire_count` assertion goes red (rises with every `platform_stats()`
+    call instead of staying fixed)."""
+    pool = BoundedConnectionPool(_admin_dsn(), max_size=1)
+    conn = pool.acquire()
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+    pool.release(conn)
+    before_acquire_count = pool.stats()["acquire_count"]
+    before_execute_count = conn.execute_count
+    before_db_wall_ms = conn.db_wall_ms
+    pool.platform_stats()
+    pool.platform_stats()
+    assert pool.stats()["acquire_count"] == before_acquire_count
+    assert conn.execute_count == before_execute_count
+    assert conn.db_wall_ms == before_db_wall_ms
+
+
+def test_bounded_connection_pool_fold_is_lexically_inside_the_stats_lock():
+    """Completion condition 160 (守る条件 (b), R-101 WP-3 D-11):
+    `BoundedConnectionPool._fold_closed_connection_stats`'s three
+    accumulator increments (`self._closed_db_wall_ms += db_wall_ms`,
+    `self._closed_txn_count += txn_count`, `self._closed_db_calls +=
+    db_calls`) must be lexically inside the SAME `with self._stats_lock:`
+    block, mirroring the credential store's own pin above (§6.1 の監督裁定
+    3 の前例, and `r2db_api.postgres._RolePool._fold_closed_connection_
+    stats`'s identical shape). A source-shape pin, not a running-thread
+    race, for the same reason the credential-store pin above gives.
+
+    mutation M198 (`pool.py`): drop the `with self._stats_lock:` around
+    the three accumulator additions in `_fold_closed_connection_stats` --
+    this test's own assertions go red (the three `AugAssign` nodes are no
+    longer inside any `with self._stats_lock:` block)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(BoundedConnectionPool._fold_closed_connection_stats)))
+    body = _find_with_lock_body(tree, lock_attr="_stats_lock")
+    assert body is not None, "no `with self._stats_lock:` block found in `_fold_closed_connection_stats`"
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_wall_ms") and isinstance(n.op, ast.Add)), (
+        "the db_wall_ms accumulation is not lexically inside `with self._stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_txn_count") and isinstance(n.op, ast.Add)), (
+        "the txn_count accumulation is not lexically inside `with self._stats_lock:`"
+    )
+    assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_calls") and isinstance(n.op, ast.Add)), (
+        "the db_calls accumulation is not lexically inside `with self._stats_lock:`"
+    )
