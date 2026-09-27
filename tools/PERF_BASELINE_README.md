@@ -106,19 +106,21 @@ Plug selection is read from `conformance-tests/registry.json` -- this file
 never hardcodes a plug or adapter module name; adding a registry entry
 grows this tool's own output with no code change here.
 
-**`DSA_PERF_THREAD_LIMIT` (both peers' `-http`/`-socket` plugs).** Set to
-a positive integer, this wraps the plug's own data-plane ASGI app so the
-first request served on any one event loop sets that loop's own default
-anyio thread limiter (`anyio.to_thread.current_default_thread_limiter()`)
-to that many tokens, then never touches it again on that loop -- an
-`-http` plug's own asgi loop and an `-socket` plug's own uvicorn thread
-each get this treatment independently, the first time either serves a
-request. Absent, empty, or not a positive integer, the app is left
-completely unwrapped (its identity is the `create_app` result itself). **Do
-not leave this variable set while running `pytest`**: every conformance/
-unit test that builds one of these plugs would then run its own requests
-under the reduced thread limit too, changing timing-sensitive test
-behaviour that has nothing to do with this tool.
+**`DSA_PERF_THREAD_LIMIT` (both peers' `-http`/`-socket` plugs).** Passed
+straight through to the plug's own `create_app(..., thread_limit=)` call
+(R-101 WP-3, D-10) -- a positive integer is that value; absent, empty, or
+not a positive integer resolves to `create_app`'s own production default
+(`DEFAULT_THREAD_LIMIT`, 4), **never** anyio's own untouched default (40).
+`create_app`'s own middleware sets the first request served on any one
+event loop's own default anyio thread limiter (`anyio.to_thread.
+current_default_thread_limiter()`) to that resolved value, then never
+touches it again on that loop -- an `-http` plug's own asgi loop and an
+`-socket` plug's own uvicorn thread each get this treatment
+independently, the first time either serves a request. **Do not leave
+this variable set while running `pytest`**: every conformance/unit test
+that builds one of these plugs would then run its own requests under the
+reduced thread limit too, changing timing-sensitive test behaviour that
+has nothing to do with this tool.
 
 ## Output format
 
@@ -172,9 +174,12 @@ CPU peer=<peer> plug=<plug> op=<op> concurrency=<K> thread_limit=<N|default> req
 The window is the MEASURED `--n` samples only -- warmup is excluded, the
 same convention every other row on this page already follows.
 `thread_limit=` is the plug's own `perf_thread_limit()` value (the
-resolved `DSA_PERF_THREAD_LIMIT` this run was started with), or the
-literal `default` when the plug has no such accessor or it returns
-`None` (env absent at construction time). `requests=` is `n * K` --
+resolved `DSA_PERF_THREAD_LIMIT` this run was started with, `create_
+app`'s own default -- 4 -- when the env was absent or invalid) -- always
+an integer for the two `-http`/`-socket` plugs per peer (R-101 WP-3, D-10:
+`perf_thread_limit()` no longer returns `None`), or the literal `default`
+only for the two `in_process` plugs, which have no such accessor at all.
+`requests=` is `n * K` --
 measured requests only, never `(warmup + n) * K` (`ROUNDTRIP`'s own
 `requests=` below uses the warmup-inclusive count instead; the two are
 deliberately different denominators for different purposes). `wall_ms=`
@@ -235,10 +240,15 @@ PRE/POST delta of how many NEW connections opened during the window and
 how long those `connect()` calls themselves took; `txns=`/`db_wall_ms=`/
 `db_calls=` are the same delta on the platform accessor's own `txn_
 count`/`db_wall_ms`/`execute_count + executemany_count` sum (`_RolePool.
-platform_stats()` on r2db-api, each per-call store's own `platform_
-stats()` on MitateDB-api -- both fold every closed connection's own
-counters in before it closes, the same discipline `scope=app` relies on
-for its own connections). `db_wall_ms_per_req=` divides `db_wall_ms +
+platform_stats()` on r2db-api; on MitateDB-api, the durable audit sink's
+own per-call `platform_stats()` plus the credential store's pooled
+connections' own `pool.BoundedConnectionPool.platform_stats()` -- the
+credential store itself no longer opens per-call connections once a pool
+is wired, so its share comes from the pool it checks connections out of,
+not from the store's own no-pool accumulators. Both accessors fold every
+closed/discarded connection's own counters in before it closes/discards,
+the same discipline `scope=app` relies on for its own connections).
+`db_wall_ms_per_req=` divides `db_wall_ms +
 connect_wall_ms` by
 `requests=` -- the connect cost is folded into the same per-request
 denominator `scope=app` uses for its own round-trip-only wall time.
@@ -500,9 +510,10 @@ cell, such as the one `capability_document()` provisions once to probe
 `cross_entity_mutation` availability). **`db=platform`'s own correction
 is always 0** -- neither peer's platform/credential connections are ever
 probed (r2db-api's platform/credential/audit-sink pools are never
-registered with `SharedPoolManager`; MitateDB-api's credential store
-opens and closes a fresh connection per call, never leaving one IDLE for
-a probe to reach). `db=app`'s correction subtracts BOTH probes that land
+registered with `SharedPoolManager`; MitateDB-api's credential-store
+pool (`pool.BoundedConnectionPool`, `_read_pool`) does hold IDLE
+connections, but the adapter's own `prepared_stats()` walks application
+cells only, never that pool). `db=app`'s correction subtracts BOTH probes that land
 inside a `--roundtrip` window: `DBTIME`'s own PRE snapshot (taken after
 warmup, before the measured window) and the shared POST snapshot
 (`DBTIME scope=app`/`PREPARED`'s common call) -- each probes the same
@@ -563,6 +574,144 @@ cluster confirmation run, `--warmup 2 --n 5`, `perfbase_*` lock, `query`/
 it -- these two specific series are from that R-80-era baseline (one
 probe per op) and are not re-measured against the current (two-probe)
 baseline here.
+
+## `REALPERF` / `REALCPU` lines
+
+**`--real-server <peer>` measures a real, separately-started composition
+root instead of the 6 registered conformance plugs** (work order
+`docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+§7.3 D-15, §9 WP-4)
+-- the SAME C-26 launcher `conformance-tests/test_c26_composition_root.py`
+drives (`conformance-tests/registry.json`'s own `composition_roots`
+entry named `peer`), started and stopped as a real, separate OS process
+pair (application + control, fronted by nginx), never the in-process/
+ASGI-in-process composition the 6 plugs above measure. A `--real-server`
+run measures `query` ONLY, and prints ONLY the two lines below -- never
+`PERF`/`CPU`/`POOL`/`DBTIME`/`PREPARED`/`ROUNDTRIP`, and never both in one
+invocation with the 6-plug path. Without `--real-server`, nothing here
+changes: the launcher is never even instantiated.
+
+```
+REALPERF peer=<peer> plug=<peer>-real transport=real-server op=query concurrency=<K> client_processes=<N> n=<n> p50_ms=<x.xxx> p95_ms=<x.xxx>
+REALCPU peer=<peer> plug=<peer>-real op=query concurrency=<K> client_processes=<N> requests=<n * K> wall_ms=<x.xxx> cpu_client_ms=<x.xxx>
+```
+
+Both lines print as one block, immediately after `PERFRUN`, with nothing
+else printed between or before them.
+
+**Why no server-side `CPU`/`DBTIME` line.** The measured server is a
+separate OS process (in fact two: application and control), not this
+tool's own process -- there is nothing in THIS process's own
+`resource.getrusage`/`prepared_stats()` that could describe it. The floor
+this measurement exists to demonstrate (work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+§7.1's own "床の算術") is
+precisely that client and server no longer share one process/one GIL --
+see `cpu_client_ms=` below for the client side of that same floor.
+
+**Window and denominator.** `--warmup`/`--n` mean exactly what they mean
+for the 6-plug path (see "How to run it" above) -- `--concurrency K`
+(default 1) is `--real-server`'s own load per measured sample: every
+warmup and measured sample is one GROUP of `K` real, concurrent `query`
+requests, dispatched across `min(--client-processes, K)` real OS client
+processes (default `--client-processes 8`; see below), never `K`
+sequential requests. Every client process is released together by a
+shared `multiprocessing.Barrier`; a group's own start is the MINIMUM
+of the children's own `time.time_ns()`, each read immediately after
+ITS OWN barrier release -- never the parent's, which lags the first
+child to resume by however long the parent itself takes to wake and
+re-schedule -- and `wall_ms=` is the LATEST child's own completion
+time minus that minimum. `n=`/`p50_ms=`/`p95_ms=` on `REALPERF` are
+the MEASURED groups only -- a slow warmup group never enters the
+printed distribution, exactly like the 6-plug path's own `PERF` line.
+`REALCPU`'s own `requests=` is the number of MEASURED responses this
+run actually observed (`n * K` when every measured group completes;
+fewer than that aborts the run rather than printing an undercount);
+`wall_ms=` is the sum of the measured groups' own wall-clock
+spans (the same numbers `p50_ms=`/`p95_ms=` are computed from). The
+work order's §6.1 監督裁定 17: one run's own client processes are spawned
+ONCE, before the FIRST group (warmup or measured), and serve every
+group of that run -- never respawned per group -- so a client
+library's own one-time costs (httpcore's lazy anyio-backend import,
+the first connection's dial) land inside whichever group happens
+first (a warmup group, for any `--warmup >= 1` run) and are excluded
+from `REALCPU`'s own `cpu_client_ms=` the same way a slow warmup
+group's own wall time is excluded from `REALPERF`.
+
+**`cpu_client_ms=` is a floor visualization, never a judgement this tool
+makes (P-8).** It is the SUM, across every measured group's own client OS
+processes, of that process's own `resource.getrusage(RUSAGE_SELF)`
+difference (`ru_utime + ru_stime`) across the one `asyncio.gather` call
+that group's own share of `K` requests went through -- the client-side
+CPU cost of driving `K` real concurrent HTTP requests through a real TCP
++ TLS-less loopback stack, spread across real OS processes specifically
+so it does NOT share a GIL with the measured server (or with this
+harness's own process). D-16's closure judgement (query `p50` at `K=32`
+within 8x of `K=1`, both peers, two runs) is made and recorded by the
+supervisor from `REALPERF`'s own `p50_ms=` alone; `REALCPU` is recorded
+alongside it for context, never compared against a threshold by this tool
+itself.
+
+**Launcher start/stop and cleanup.** `launcher.start(ceilings={"data": 1,
+"control": 1})` runs once, at the top of a `--real-server` run;
+`launcher.stop()` runs exactly once, in a `finally`, whether the run
+succeeded, failed partway through the HTTP setup, or failed partway
+through measurement (a non-200 `query` response mid-run aborts the WHOLE
+run -- see below) -- a `--real-server` run never leaves the launcher's own
+throwaway platform, processes, or bound ports behind. The launcher itself
+is never modified by this flag: it is reused exactly as `test_c26_
+composition_root.py` already uses it.
+
+**Credential use, in order.** `launcher.control_bearer` starts `must_
+rotate=true`, so this tool first self-rotates it (`POST /control/v1/
+credentials/<launcher.control_credential_id>/rotate`, no request body) --
+the returned secret, never the original `control_bearer`, then issues ONE
+developer credential (`POST /control/v1/credentials`, `role=developer`)
+for this run's own application (its `application_id`, read from `GET
+/v1/capabilities` via `launcher.runtime_bearer` -- the launcher's own
+observation surface names no `application_id` property directly). That
+developer credential -- never `control_bearer`/`runtime_bearer` -- creates
+the one measurement entity (`POST /v1/schema/operations`) and seeds its
+one row (`POST /v1/data/<entity>/mutations`). Every `query` request from
+that point on, including the K=1 sanity check below, uses `launcher.
+runtime_bearer` -- never the developer credential.
+
+**The K=1 sanity check (空振り禁止, `OPERATING_CONDITIONS.md` 1.5-32).**
+Before any concurrent measurement starts, this tool sends exactly ONE real
+`query` request and confirms BOTH a `200` status AND at least one row in
+the response -- a `200` with zero rows is refused exactly like a non-200
+status is. Either failure aborts the run before any `REALPERF`/`REALCPU`
+line is printed (a non-zero exit; `stop()` still runs).
+
+**`client_processes=<N>` and the remainder.** The actual number of client
+OS processes a run uses is `min(--client-processes, K)` -- never more
+processes than there are requests in one group to spread across them.
+Each client process sends its own share of one group's `K` requests via
+exactly ONE `asyncio.gather` call, never one request at a time; when `K`
+does not divide evenly by the process count, the remainder goes to the
+FIRST that many processes, one extra request each (`K=10`, 4 processes:
+`[3, 3, 2, 2]`, never `[2, 2, 3, 3]`). These are the SAME `N` OS
+processes for the run's whole `--warmup + --n` group count, holding one
+`httpx.AsyncClient` apiece for that whole lifetime -- stopped exactly
+once, after the run's last group (or on any failure), never after each
+individual group.
+
+**Staying under the server's own request budget.** Both peers' own
+composition roots default to `requests_per_minute`/`max_requests_per_
+minute` `600` (work order
+`docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+§7.5 (W-17) -- the composition root's own value; the conformance
+adapter plugs' own `requests_per_minute` (`50`) is unrelated). A
+`--real-server` run sends `(--warmup + --n) * K` measured/warmup
+`query` requests plus 4 one-shot setup requests -- at
+`K=32` with D-16's own `--warmup 3 --n 15`, that is `576 + 4 = 580`
+of the `600` budget (20 to spare; `--n 16` already exceeds it); the
+DEFAULT `--warmup 10 --n 100` at `K=32` would be `3520`, well over it
+(the run aborts on the first `429`, never a silently wrong number).
+
+**`--real-server` never builds one of the 6 registered plugs.** Only
+`registry.json`'s own `composition_roots` section is read for this flag
+-- its `adapters` section (the 6 plugs) is never touched, and no adapter
+is ever built for a `--real-server` run.
 
 ## The limits of what these numbers mean
 

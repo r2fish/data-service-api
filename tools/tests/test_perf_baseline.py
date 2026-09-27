@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import itertools
 import json
 import os
 import subprocess
@@ -1826,3 +1827,1057 @@ def test_cpu_total_ms_includes_both_ru_utime_and_ru_stime(monkeypatch):
     stub = SimpleNamespace(transport_kind="in_process")
     _, _, measured = pb._measure_op(lambda: None, warmup=0, n=1, concurrency=1, counter=pb._CallCounter(), adapter_obj=stub)
     assert measured["cpu_total_ms"] == pytest.approx(1500.0)
+
+
+# ---------------------------------------------------------------------
+# Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_
+# ATTRIBUTION_V1.md` §7.3 D-15 -- `--real-server`. Every test below
+# drives `pb._run_real_server`/`pb._measure_real_server`/`pb._run_one_
+# real_server_group` against a REAL, standard-library `http.server`
+# stub (a separate OS process, `_start_realserver_stub_server` below --
+# never a background thread in THIS process: a background thread
+# before this file's own `forkserver`-based children start can wedge a
+# child before it ever reaches its own `barrier.wait()`) and a stub
+# launcher (a small generated module, `_write_realserver_stub_registry`
+# below, with class-level `START_CALLS`/`STOP_CALLS` lists this process
+# can read directly since the launcher itself runs in-process, unlike
+# the HTTP stub).
+# ---------------------------------------------------------------------
+
+_REALSERVER_STUB_SERVER_SCRIPT = 'import http.server\nimport json\nimport os\nimport sys\nimport threading\nimport time\n\nconfig = json.loads(open(sys.argv[1], "r", encoding="utf-8").read())\nlog_path = sys.argv[2]\n_log_lock = threading.Lock()\n_counters_lock = threading.Lock()\n_counters = {"query_calls": 0}\n_rotation_lock = threading.Lock()\n_rotation_state = {"rotated": False, "new_control_secret": None}\n\n\ndef _append_log(entry):\n    with _log_lock:\n        with open(log_path, "a", encoding="utf-8") as f:\n            f.write(json.dumps(entry) + "\\n")\n\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    server_version = "realserverstub/1.0"\n    protocol_version = "HTTP/1.1"\n\n    def log_message(self, fmt, *args):\n        pass\n\n    def _read_body(self):\n        length = int(self.headers.get("Content-Length", 0))\n        raw = self.rfile.read(length) if length else b""\n        return json.loads(raw) if raw else {}\n\n    def _send(self, status, obj):\n        body = json.dumps(obj).encode("utf-8")\n        self.send_response(status)\n        self.send_header("Content-Type", "application/json")\n        self.send_header("Content-Length", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def do_GET(self):\n        start = time.time()\n        if self.path == "/v1/capabilities":\n            self._send(200, {\n                "application_scope": config.get("application_id", "perfapp"),\n                "contract_version": "1.11.0", "capabilities": {}, "limits": {},\n                "limit_enforcement": {}, "authorization_propagation_bound_ms": 0,\n            })\n        else:\n            self._send(404, {})\n        _append_log({\n            "path": self.path, "method": "GET",\n            "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n    def do_POST(self):\n        body = self._read_body()\n        path = self.path\n        start = time.time()\n        if path.startswith("/control/v1/credentials/") and path.endswith("/rotate"):\n            target_id = path[len("/control/v1/credentials/"):-len("/rotate")]\n            expected_id = config.get("control_credential_id", "ctl1")\n            new_secret = config.get("new_control_secret", "rotated-control-secret")\n            if target_id == expected_id:\n                with _rotation_lock:\n                    _rotation_state["rotated"] = True\n                    _rotation_state["new_control_secret"] = new_secret\n                self._send(200, {"credential_id": target_id, "secret": new_secret})\n            else:\n                self._send(403, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/control/v1/credentials":\n            auth = self.headers.get("Authorization", "")\n            bearer = auth[len("Bearer "):] if auth.startswith("Bearer ") else auth\n            with _rotation_lock:\n                rotated = _rotation_state["rotated"]\n                new_secret = _rotation_state["new_control_secret"]\n            if not rotated or bearer != new_secret:\n                self._send(403, {"error": "must_rotate"})\n            else:\n                status = config.get("credential_status", 200)\n                if status == 200:\n                    self._send(200, {\n                        "credential_id": "cred1", "application_id": body.get("application_id"),\n                        "role": body.get("role"), "secret": "dev-secret-xyz",\n                    })\n                else:\n                    self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/v1/schema/operations":\n            status = config.get("schema_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "revision": "1", "request_id": "r1"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/mutations"):\n            status = config.get("mutation_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "affected": 1, "request_id": "r2"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/query"):\n            with _counters_lock:\n                idx = _counters["query_calls"]\n                _counters["query_calls"] += 1\n            status = config.get("query_status_override", {}).get(str(idx), config.get("query_status", 200))\n            rows = config.get("query_rows_override", {}).get(str(idx), config.get("query_rows", 1))\n            delay_ms = config.get("query_delay_override", {}).get(str(idx), config.get("query_delay_ms", 0))\n            if delay_ms:\n                time.sleep(delay_ms / 1000.0)\n            if config.get("drop_at_index") == idx:\n                _append_log({\n                    "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                    "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n                    "call_index": idx, "dropped": True,\n                })\n                self.close_connection = True\n                return\n            if status == 200:\n                self._send(200, {"items": [{"label": "x"} for _ in range(rows)], "request_id": "r3"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(), "call_index": idx,\n            })\n            return\n        self._send(404, {})\n        _append_log({\n            "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n\nhttpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)\nprint(httpd.server_port, flush=True)\nhttpd.serve_forever()\n'
+
+_REALSERVER_STUB_LAUNCHER_TEMPLATE = 'class StubLauncher:\n    name = {peer!r}\n    START_CALLS = []\n    STOP_CALLS = []\n\n    def __init__(self):\n        pass\n\n    def start(self, *, ceilings):\n        type(self).START_CALLS.append(dict(ceilings))\n\n    def stop(self):\n        type(self).STOP_CALLS.append(True)\n\n    @property\n    def data_base_url(self):\n        return {data_base_url!r}\n\n    @property\n    def control_base_url(self):\n        return {control_base_url!r}\n\n    @property\n    def runtime_bearer(self):\n        return {runtime_bearer!r}\n\n    @property\n    def control_bearer(self):\n        return {control_bearer!r}\n\n    @property\n    def control_credential_id(self):\n        return {control_credential_id!r}\n'
+
+_realserver_module_counter = itertools.count()
+
+
+def _start_realserver_stub_server(tmp_path, config):
+    script_path = tmp_path / "realserver_stub_server.py"
+    if not script_path.exists():
+        script_path.write_text(_REALSERVER_STUB_SERVER_SCRIPT, encoding="utf-8")
+    idx = next(_realserver_module_counter)
+    config_path = tmp_path / f"realserver_stub_config_{idx}.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    log_path = tmp_path / f"realserver_stub_log_{idx}.jsonl"
+    log_path.write_text("", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, str(script_path), str(config_path), str(log_path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    port = int(proc.stdout.readline().strip())
+    base_url = f"http://127.0.0.1:{port}"
+    return base_url, log_path, proc
+
+
+def _stop_realserver_stub_server(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def _read_realserver_log(log_path):
+    lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [json.loads(line) for line in lines]
+
+
+def _write_realserver_stub_registry(
+    tmp_path, *, peer, base_url, runtime_bearer="runtime-secret", control_bearer="control-secret", control_credential_id="ctl1",
+):
+    idx = next(_realserver_module_counter)
+    module_name = f"realserver_stub_launcher_{idx}"
+    stub_dir = tmp_path / "realserver_stub_registry"
+    stub_dir.mkdir(exist_ok=True)
+    module_src = _REALSERVER_STUB_LAUNCHER_TEMPLATE.format(
+        peer=peer, data_base_url=f"{base_url}/v1", control_base_url=f"{base_url}/control/v1",
+        runtime_bearer=runtime_bearer, control_bearer=control_bearer, control_credential_id=control_credential_id,
+    )
+    (stub_dir / f"{module_name}.py").write_text(module_src, encoding="utf-8")
+    if str(stub_dir) not in sys.path:
+        sys.path.insert(0, str(stub_dir))
+    registry_path = stub_dir / f"{module_name}_registry.json"
+    registry_path.write_text(json.dumps({
+        "adapters": [],
+        "composition_roots": [{"name": peer, "module": module_name, "launcher_class": "StubLauncher"}],
+    }), encoding="utf-8")
+    launcher_module = importlib.import_module(module_name)
+    return registry_path, launcher_module.StubLauncher
+
+
+def _realserver_args(pb_module, *, peer, registry_path, client_processes=None, concurrency=1, warmup=0, n=1):
+    argv = ["--real-server", peer, "--concurrency", str(concurrency), "--warmup", str(warmup), "--n", str(n), "--registry", str(registry_path)]
+    if client_processes is not None:
+        argv += ["--client-processes", str(client_processes)]
+    return pb_module._build_parser().parse_args(argv)
+
+
+def _realserver_setup(tmp_path, config=None, *, peer="stubpeer", **launcher_kwargs):
+    base_url, log_path, proc = _start_realserver_stub_server(tmp_path, config or {})
+    registry_path, launcher_cls = _write_realserver_stub_registry(tmp_path, peer=peer, base_url=base_url, **launcher_kwargs)
+    return base_url, log_path, proc, registry_path, launcher_cls
+
+
+def test_real_server_starts_the_named_launcher(tmp_path):
+    """Completion condition 127: `--real-server <peer>` instantiates and
+    starts the `composition_roots` entry named `peer`.
+
+    mutation M170 (`tools/perf_baseline.py`): `_load_composition_root_
+    class` ignores `registry_path`'s own entries and imports a fixed
+    module name instead -- red because this test's own peer/module never
+    exists under that fixed name, so `_run_real_server` raises an import
+    error instead of ever calling `StubLauncher.start`."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert len(launcher_cls.START_CALLS) == 1
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_start_ceilings_are_one_and_one(tmp_path):
+    """Completion condition 128: `launcher.start` is called with
+    `ceilings={"data": 1, "control": 1}`.
+
+    mutation M171 (`tools/perf_baseline.py`): pass `ceilings={"data": 2,
+    "control": 1}` -- red because this test's own `== {"data": 1,
+    "control": 1}` assertion observes `2` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        pb._run_real_server(args)
+        assert launcher_cls.START_CALLS == [{"data": 1, "control": 1}]
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_stops_exactly_once_on_mid_measurement_failure(tmp_path):
+    """Completion condition 129: a failure partway through measurement
+    (here, the SECOND measured query response is a 500) still calls
+    `launcher.stop()` exactly once.
+
+    mutation M172 (`tools/perf_baseline.py`): move the `launcher.stop()`
+    call so it only runs on the success path -- red because this test's
+    own failing run observes `STOP_CALLS == []` instead of one call."""
+    config = {"query_status_override": {"2": 500}}
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path, config)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=2, concurrency=2, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code != 0
+        assert len(launcher_cls.STOP_CALLS) == 1
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_stops_exactly_once_on_success(tmp_path):
+    """Completion condition 130: a normal, fully successful run also
+    calls `launcher.stop()` exactly once.
+
+    mutation M173 (`tools/perf_baseline.py`): drop the success-path
+    `launcher.stop()` call -- red because this test's own `STOP_CALLS ==
+    [True]` assertion observes `[]` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert launcher_cls.STOP_CALLS == [True]
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_measures_only_query(tmp_path, capsys):
+    """Completion condition 131: after entity/row setup, every data-plane
+    request the stub observed is a `query` request, and exactly one
+    `REALPERF` line (`op=query`) is printed.
+
+    mutation M174 (`tools/perf_baseline.py`): also measure a second op
+    (e.g. `insert`) -- red because this test's own count of `REALPERF`
+    lines in stdout is no longer exactly 1."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_lines = [line for line in out.splitlines() if line.startswith("REALPERF")]
+        assert len(realperf_lines) == 1
+        assert "op=query" in realperf_lines[0]
+        entries = _read_realserver_log(log_path)
+        mutation_idx = next(i for i, e in enumerate(entries) if e["path"].endswith("/mutations"))
+        for entry in entries[mutation_idx + 1:]:
+            assert entry["path"].endswith("/query")
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def _spy_group_client_pids(monkeypatch):
+    """Test helper: wraps `pb._run_one_real_server_group` so a test can
+    inspect each call's own OBSERVED `messages` (each carrying the real
+    OS `pid` the SAME call actually spawned that child under) after the
+    run -- a real process boundary, never a value this helper computes
+    independently. Returns the list of per-call `messages` lists, in
+    call order (index 0 = the first group, warmup or not)."""
+    observed = []
+    real_run_group = pb._run_one_real_server_group
+
+    def _spy(*a, **k):
+        result = real_run_group(*a, **k)
+        observed.append(result["messages"])
+        return result
+
+    monkeypatch.setattr(pb, "_run_one_real_server_group", _spy)
+    return observed
+
+
+def test_real_server_default_client_processes_is_eight(tmp_path, capsys, monkeypatch):
+    """Completion condition 132: at `--concurrency 32` with `--client-
+    processes` omitted, 8 distinct client OS processes are observed, and
+    the printed `REALPERF` line carries `client_processes=8` (the SAME
+    observed count, `_measure_real_server`'s own `client_processes` --
+    never a `min(client_processes, concurrency)` formula the printed row
+    could drift from, code review 1 F1).
+
+    mutation M175 (`tools/perf_baseline.py`): change `--client-processes`'s
+    own default to `4` -- red because this test's own `client_
+    processes=8` assertion observes `client_processes=4` instead.
+    mutation RV1-132 (`tools/perf_baseline.py`): `_spawn_real_server_
+    clients` always spawns exactly TWO real child processes regardless of
+    its own `n_children` argument -- red because `_run_one_real_server_
+    group` still waits for 8 (the caller's own `n_children`) queue
+    messages that only 2 real processes ever send, so `result_queue.
+    get()` times out after `_REAL_SERVER_QUEUE_TIMEOUT_S` (60s) and
+    `_run_real_server` returns 1; this test's own `assert code == 0`
+    fails on that non-zero exit, well before it ever reaches the
+    `client_processes=8`/pid-count assertions below."""
+    observed_pids = _spy_group_client_pids(monkeypatch)
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, concurrency=32, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_line = next(line for line in out.splitlines() if line.startswith("REALPERF"))
+        assert "client_processes=8" in realperf_line
+        entries = _read_realserver_log(log_path)
+        measured_query_entries = [e for e in entries if e["path"].endswith("/query") and e.get("call_index", 0) >= 1]
+        assert len(measured_query_entries) == 32
+        observed_child_pids = {message["pid"] for message in observed_pids[-1]}
+        assert len(observed_child_pids) == 8
+        assert os.getpid() not in observed_child_pids
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_k1_uses_one_client_process(tmp_path, capsys, monkeypatch):
+    """Completion condition 133: at `--concurrency 1`, exactly one client
+    process is used (`min(8, 1)`), and `REALPERF` carries `client_
+    processes=1` -- the SAME observed count (code review 1 F1).
+
+    mutation M176 (`tools/perf_baseline.py`): always start `--client-
+    processes` children regardless of `K` -- red because this test's own
+    `client_processes=1` assertion observes `client_processes=8` instead.
+    mutation RV1-133 (`tools/perf_baseline.py`): `_spawn_real_server_
+    clients` always spawns exactly TWO real child processes regardless of
+    its own `n_children` argument -- red because this test's own
+    observed pid count (a real OS-process boundary, never a formula)
+    becomes 2, not 1, and `client_processes=1` no longer holds
+    either."""
+    observed_pids = _spy_group_client_pids(monkeypatch)
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, concurrency=1, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_line = next(line for line in out.splitlines() if line.startswith("REALPERF"))
+        assert "client_processes=1" in realperf_line
+        observed_child_pids = {message["pid"] for message in observed_pids[-1]}
+        assert len(observed_child_pids) == 1
+        assert os.getpid() not in observed_child_pids
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_client_process_pids_are_stable_across_every_group(tmp_path, monkeypatch):
+    """The work order's §6.1 監督裁定 17 (D-15a): one run's own client OS processes are
+    spawned exactly ONCE (`_spawn_real_server_clients`) and serve every group of that run --
+    warmup AND measured alike -- never respawned per group. Pinned against the REAL,
+    observed OS `pid` each group's own messages carry (`_spy_group_client_pids`, a real
+    process boundary, never a value this test computes independently): across a run with
+    two warmup groups and two measured groups, the pid SET observed in every single group
+    is identical to the pid set observed in the first. After the run, every one of those
+    pids is actually dead (`os.kill(pid, 0)` raises `ProcessLookupError`) -- `_stop_real_
+    server_clients` (called from `_measure_real_server`'s own `finally`) has already
+    joined them by the time `_run_real_server` returns, never left running past that point.
+
+    mutation M215 (`tools/perf_baseline.py`): spawn a fresh set of client processes for
+    every group instead of once for the whole run -- red because this test's own per-group
+    pid-set equality assertion fails (each group's own observed pid set becomes disjoint
+    from the first group's).
+    mutation M217 (`tools/perf_baseline.py`): `_stop_real_server_clients` returns
+    immediately, without ever calling `barrier.abort()` or joining a process -- red because
+    this test's own `os.kill(pid, 0)` check finds a live process instead of `ProcessLookup
+    Error` (the children only exit later, on their own 60s barrier timeout, well after this
+    test has already made its assertion)."""
+    observed_pids = _spy_group_client_pids(monkeypatch)
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=2, concurrency=2, warmup=2, n=2)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert len(observed_pids) == 4
+        first_group_pids = {message["pid"] for message in observed_pids[0]}
+        assert len(first_group_pids) == 2
+        for messages in observed_pids[1:]:
+            assert {message["pid"] for message in messages} == first_group_pids
+        for pid in first_group_pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_group_sends_k_requests_concurrently(tmp_path):
+    """Completion condition 134: a measured group's own `K` requests are
+    genuinely simultaneous -- with each `/query` response held for 50ms,
+    the maximum observed in-flight overlap among them is `K`.
+
+    mutation M177 (`tools/perf_baseline.py`): a child sends its own share
+    one request at a time (sequential `await`) instead of via one `gather`
+    -- red because this test's own observed max overlap drops below `K`."""
+    config = {"query_delay_ms": 50}
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path, config)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=2, concurrency=4, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        query_entries = [e for e in entries if e["path"].endswith("/query")]
+        events = []
+        for e in query_entries:
+            events.append((e["start_ts"], 1))
+            events.append((e["end_ts"], -1))
+        events.sort()
+        current = 0
+        peak = 0
+        for _, delta in events:
+            current += delta
+            peak = max(peak, current)
+        assert peak == 4
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_group_wall_ms_is_max_completion_minus_start():
+    """Completion condition 135: `_group_wall_ms` is the LATEST completion
+    time minus the single shared start, never an average.
+
+    mutation M178 (`tools/perf_baseline.py`): average the completion times
+    instead of taking their max -- red because this test's own known
+    input (`start=1_000_000`, completions `[1_500_000, 1_200_000,
+    1_800_000]`) would then read `0.5` ms, not `0.8` ms."""
+    result = pb._group_wall_ms(1_000_000, [1_500_000, 1_200_000, 1_800_000])
+    assert result == pytest.approx(0.8)
+
+
+def test_real_server_group_start_is_the_min_of_childrens_own_time_ns(tmp_path):
+    """Completion condition 135/136 (code review 1 F5, supervisor
+    ruling -- 採る): a group's own start is the MINIMUM of the
+    children's own `time.time_ns()`, each read immediately after ITS
+    OWN `multiprocessing.Barrier.wait()` returns -- never the parent's
+    own post-barrier `time.time_ns()`, which lags the first child to
+    resume by however long the parent itself takes to wake and
+    re-schedule. Pinned against `_run_one_real_server_group`'s own
+    real, per-child `t0`/`t1` (`messages`) -- an independent ground
+    truth this test computes `wall_ms` from itself, never a value this
+    test fabricates. The work order's §6.1 監督裁定 17: the client
+    processes are spawned once (`_spawn_real_server_clients`) and
+    stopped once (`_stop_real_server_clients`), around the single
+    `_run_one_real_server_group` call this test makes.
+
+    mutation M210 (`tools/perf_baseline.py`): use the PARENT's own
+    `time.time_ns()`, read after `result_queue.get()` has already
+    collected every child's report, as the group's start instead --
+    red because this test's own `wall_ms == pytest.approx(expected_
+    wall_ms)` assertion (computed from the children's own reported
+    `t0`/`t1`) no longer holds (the parent's own late timestamp makes
+    the printed span far shorter than the real one)."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        query_url = f"{base_url}/v1/data/dsaperfreal/query"
+        processes, barrier, result_queue = pb._spawn_real_server_clients(query_url, "runtime-secret", "label", [1, 1], 2)
+        try:
+            result = pb._run_one_real_server_group(barrier, result_queue, 2)
+        finally:
+            pb._stop_real_server_clients(processes, barrier)
+        min_child_t0 = min(message["t0"] for message in result["messages"])
+        max_child_t1 = max(message["t1"] for message in result["messages"])
+        expected_wall_ms = (max_child_t1 - min_child_t0) / 1_000_000.0
+        assert result["wall_ms"] == pytest.approx(expected_wall_ms)
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_warmup_group_excluded_from_realperf(tmp_path):
+    """Completion condition 137: a slow WARMUP group never enters the
+    printed `REALPERF` distribution -- only the measured group's own
+    (fast) wall time does.
+
+    mutation M179 (`tools/perf_baseline.py`): fold the warmup group's own
+    wall time into the measured distribution too -- red because this
+    test's own `p95_ms < 100` assertion would instead observe a value
+    inflated by the warmup group's own 200ms delay."""
+    config = {"query_delay_override": {"0": 200, "1": 200}}
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path, config)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=2, concurrency=2, warmup=1, n=1)
+        result = pb._measure_real_server(
+            query_url=f"{base_url}/v1/data/dsaperfreal/query", bearer="runtime-secret", field="label",
+            warmup=args.warmup, n=args.n, concurrency=args.concurrency,
+            n_children=pb._num_real_server_clients(args.client_processes, args.concurrency),
+            counts=pb._distribute_group_counts(args.concurrency, pb._num_real_server_clients(args.client_processes, args.concurrency)),
+        )
+        assert result["p95_ms"] < 100.0
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_measure_real_server_percentiles_use_percentile(monkeypatch):
+    """Completion condition 138: `p50_ms`/`p95_ms` are `_percentile` of the
+    measured group wall times -- pinned via a monkeypatched `_run_one_
+    real_server_group` so the input list is exactly known (no real HTTP).
+
+    mutation M180 (`tools/perf_baseline.py`): print the MEAN of the
+    measured wall times as `p50_ms` -- red because this test's own
+    known, ASYMMETRIC input (`[10, 20, 100]`) has a true median
+    (`_percentile(..., 50)`) of `20.0` but a mean of `43.33`; the
+    mutation would observe the latter, failing the `p50_ms ==
+    pytest.approx(20.0)` assertion (a symmetric input, where the two
+    coincide, could not catch this)."""
+    walls = iter([{"wall_ms": 10.0, "cpu_client_ms": 0.0, "statuses": [200], "client_processes": 1},
+                  {"wall_ms": 20.0, "cpu_client_ms": 0.0, "statuses": [200], "client_processes": 1},
+                  {"wall_ms": 100.0, "cpu_client_ms": 0.0, "statuses": [200], "client_processes": 1}])
+    monkeypatch.setattr(pb, "_run_one_real_server_group", lambda *a, **k: next(walls))
+    result = pb._measure_real_server(
+        query_url="http://example.invalid/v1/data/e/query", bearer="x", field="label",
+        warmup=0, n=3, concurrency=1, n_children=1, counts=[1],
+    )
+    assert result["p50_ms"] == pytest.approx(20.0)
+    assert result["p95_ms"] == pytest.approx(92.0)
+
+
+def test_format_realperf_row_is_stable():
+    """Completion condition 139: `REALPERF`'s own literal column names,
+    order, and formatting (work order `docs/work-orders/WORK_ORDER_
+    R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15).
+
+    mutation M181 (`tools/perf_baseline.py`): rename the `client_
+    processes=` column to `clients=` -- red because this test's own
+    substring assertion for `client_processes=8` is absent from the
+    mutated line."""
+    line = pb._format_realperf_row("r2db-api", 32, 8, 15, 12.345, 20.5)
+    assert line == (
+        "REALPERF peer=r2db-api plug=r2db-api-real transport=real-server op=query "
+        "concurrency=32 client_processes=8 n=15 p50_ms=12.345 p95_ms=20.500"
+    )
+
+
+def test_format_realcpu_row_is_stable():
+    """Completion condition 140: `REALCPU`'s own literal column names,
+    order, and formatting (work order `docs/work-orders/WORK_ORDER_
+    R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15).
+
+    mutation M182 (`tools/perf_baseline.py`): rename `cpu_client_ms=` to
+    `client_cpu_ms=` -- red because this test's own exact-string
+    assertion no longer matches."""
+    line = pb._format_realcpu_row("r2db-api", 32, 8, 480, 123.456, 78.9)
+    assert line == (
+        "REALCPU peer=r2db-api plug=r2db-api-real op=query concurrency=32 "
+        "client_processes=8 requests=480 wall_ms=123.456 cpu_client_ms=78.900"
+    )
+
+
+_REALSERVER_BUSY_LOOP_ITERATIONS_PER_REQUEST = 300_000
+
+
+def _stub_busy_loop_client_worker(count, _query_url, _bearer, _field, barrier, result_queue):
+    """Test-only child worker (completion condition 141, code review 1
+    F2; loop shape from the work order's §6.1 監督裁定 17): burns a
+    FIXED, known amount of CPU per request via a tight loop instead of
+    making a real HTTP call, so a test can independently cross-check
+    `_run_one_real_server_group`'s own `getrusage`-based `cpu_ms`
+    against a `time.process_time()` ground truth this worker reports
+    back alongside it -- never the real `_one`/httpx path. Serves every
+    group (warmup or measured alike) the SAME persistent child process
+    would, running the SAME loop each time; only the caller decides
+    which served groups count as measured. Runs until the parent's own
+    `barrier.abort()` breaks it out of its next `barrier.wait()`."""
+    while True:
+        try:
+            barrier.wait(timeout=60.0)
+        except pb.threading.BrokenBarrierError:
+            return
+        started_ns = pb.time.time_ns()
+        before_rusage = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
+        before_process_time = pb.time.process_time()
+        total = 0
+        for _ in range(count):
+            for _ in range(_REALSERVER_BUSY_LOOP_ITERATIONS_PER_REQUEST):
+                total += 1
+        after_rusage = pb.resource.getrusage(pb.resource.RUSAGE_SELF)
+        after_process_time = pb.time.process_time()
+        cpu_ms = ((after_rusage.ru_utime + after_rusage.ru_stime) - (before_rusage.ru_utime + before_rusage.ru_stime)) * 1000.0
+        process_time_ms = (after_process_time - before_process_time) * 1000.0
+        result_queue.put({
+            "t0": started_ns,
+            "t1": pb.time.time_ns(),
+            "cpu_ms": cpu_ms,
+            "statuses": [200] * count,
+            "row_counts": [1] * count,
+            "pid": os.getpid(),
+            "process_time_ms": process_time_ms,
+        })
+
+
+def test_real_server_cpu_client_ms_is_the_childrens_own_rusage_sum(tmp_path, capsys, monkeypatch):
+    """Completion condition 141: `cpu_client_ms` is the SUM of the
+    MEASURED children's own `getrusage(RUSAGE_SELF)` deltas, excluding
+    warmup -- pinned against `_stub_busy_loop_client_worker` (a
+    known, fixed amount of CPU per request) so this test can
+    independently verify the printed `cpu_client_ms` against a `time.
+    process_time()` ground truth within ±20%, and confirm it stays
+    SMALLER than that ground truth with the warmup group's own CPU
+    folded in too (code review 1 F2; the supervisor's ruling drops the
+    earlier 'parent's own startup CPU' comparison this test used to
+    rely on).
+
+    mutation M183 (`tools/perf_baseline.py`): report the PARENT's own
+    `RUSAGE_SELF` delta as `cpu_client_ms` instead of the children's sum
+    -- red because the printed value no longer tracks the known,
+    per-child busy-loop ground truth at all.
+    mutation M209 (`tools/perf_baseline.py`): fold the warmup group's
+    own `cpu_client_ms` into the total too -- red because the printed
+    value then EXCEEDS the measured-only ground truth."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    monkeypatch.setattr(pb, "_real_server_client_worker", _stub_busy_loop_client_worker)
+    observed_groups = []
+    real_run_group = pb._run_one_real_server_group
+
+    def _spy_run_group(*a, **k):
+        result = real_run_group(*a, **k)
+        observed_groups.append(result)
+        return result
+
+    monkeypatch.setattr(pb, "_run_one_real_server_group", _spy_run_group)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=2, concurrency=4, warmup=1, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realcpu_line = next(line for line in out.splitlines() if line.startswith("REALCPU"))
+        printed_cpu_ms = float(realcpu_line.split("cpu_client_ms=")[1])
+        assert len(observed_groups) == 2
+        warmup_ground_truth = sum(m["process_time_ms"] for m in observed_groups[0]["messages"])
+        measured_ground_truth = sum(m["process_time_ms"] for m in observed_groups[1]["messages"])
+        assert measured_ground_truth > 0.0
+        assert printed_cpu_ms == pytest.approx(measured_ground_truth, rel=0.2)
+        assert printed_cpu_ms < measured_ground_truth + warmup_ground_truth
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_warmup_import_cost_does_not_leak_into_measured_cpu(tmp_path, monkeypatch):
+    """The work order's §6.1 監督裁定 17 (D-15a): a client
+    process's own one-time httpcore anyio-backend import (paid once, on the FIRST real
+    request any persistent client process ever sends, never per group) lands inside
+    whichever group happens first -- a warmup group, for this `--warmup 1` run -- and is
+    EXCLUDED from every later group's own `cpu_client_ms`, because the CPU baseline is
+    taken FRESH at the top of every group (never held over from an earlier one). Pinned
+    against the REAL child worker (`_real_server_client_worker`, never a synthetic
+    stand-in, which cannot exercise httpcore's own real import cost) via `_run_one_real_
+    server_group`'s own reported per-group `cpu_client_ms` (`_spy_group_client_pids`'s own
+    spy wrapper, reused here for its `messages`): the warmup group's own summed `cpu_
+    client_ms` is larger than EVERY measured group's own.
+
+    mutation M216 (`tools/perf_baseline.py`): take the CPU baseline once, before the
+    child's own per-group loop starts, instead of freshly at the top of every iteration --
+    red because every group's own reported `cpu_ms` becomes CUMULATIVE from that one stale
+    baseline (it never stops including the warmup group's own import cost, and keeps
+    growing group over group), so the first measured group's own `cpu_client_ms` exceeds
+    the warmup group's instead of staying smaller."""
+    observed_groups = []
+    real_run_group = pb._run_one_real_server_group
+
+    def _spy(*a, **k):
+        result = real_run_group(*a, **k)
+        observed_groups.append(result)
+        return result
+
+    monkeypatch.setattr(pb, "_run_one_real_server_group", _spy)
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=1, n=2)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert len(observed_groups) == 3
+        warmup_cpu_ms = observed_groups[0]["cpu_client_ms"]
+        measured_cpu_ms = [g["cpu_client_ms"] for g in observed_groups[1:]]
+        assert measured_cpu_ms  # OC 1.5-32 (空振り禁止): at least one measured group observed
+        assert all(warmup_cpu_ms > m for m in measured_cpu_ms)
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_measure_real_server_requests_and_wall_ms_are_measured_only(monkeypatch):
+    """Completion condition 142: `requests=` is the number of MEASURED
+    responses actually observed (`n * concurrency` when every measured
+    group is complete, never a bare formula on its own -- code review 1
+    F6), `wall_ms=` is the sum of MEASURED group walls only -- pinned
+    via a monkeypatched `_run_one_real_server_group` with a huge,
+    distinguishable warmup wall time.
+
+    mutation M184 (`tools/perf_baseline.py`): fold the warmup group's
+    own responses into `requests=` too -- red because this test's own
+    `result["requests"] == 6` assertion (n=2, concurrency=3) would
+    instead observe `9` (warmup=1)."""
+    groups = iter([
+        {"wall_ms": 9999.0, "cpu_client_ms": 0.0, "statuses": [200, 200, 200], "client_processes": 1},
+        {"wall_ms": 10.0, "cpu_client_ms": 0.0, "statuses": [200, 200, 200], "client_processes": 1},
+        {"wall_ms": 20.0, "cpu_client_ms": 0.0, "statuses": [200, 200, 200], "client_processes": 1},
+    ])
+    monkeypatch.setattr(pb, "_run_one_real_server_group", lambda *a, **k: next(groups))
+    result = pb._measure_real_server(
+        query_url="http://example.invalid/v1/data/e/query", bearer="x", field="label",
+        warmup=1, n=2, concurrency=3, n_children=1, counts=[3],
+    )
+    assert result["requests"] == 6
+    assert result["wall_ms"] == pytest.approx(30.0)
+
+
+def test_measure_real_server_aborts_on_a_short_measurement(monkeypatch):
+    """Code review 1 F6 (`OC` 1.5-32): a run whose measured groups
+    report fewer responses than `n * concurrency` refuses to print a
+    row that would understate its own measurement -- it raises
+    `RealServerMeasurementFailure` instead."""
+    groups = iter([
+        {"wall_ms": 10.0, "cpu_client_ms": 0.0, "statuses": [200, 200], "client_processes": 1},
+    ])
+    monkeypatch.setattr(pb, "_run_one_real_server_group", lambda *a, **k: next(groups))
+    with pytest.raises(pb.RealServerMeasurementFailure):
+        pb._measure_real_server(
+            query_url="http://example.invalid/v1/data/e/query", bearer="x", field="label",
+            warmup=0, n=1, concurrency=3, n_children=1, counts=[3],
+        )
+
+
+def test_real_server_aborts_without_output_on_non_200(tmp_path, capsys):
+    """Completion condition 143: any non-200 `query` response aborts the
+    WHOLE run -- no `REALPERF`/`REALCPU` line, a non-zero exit, and
+    `stop()` still called.
+
+    mutation M185 (`tools/perf_baseline.py`): never check the response
+    status code at all -- red because this test's own `code != 0` and
+    `no REALPERF/REALCPU line` assertions would instead observe a
+    (wrong) successful, 0-exit run with both lines printed."""
+    config = {"query_status_override": {"1": 500}}
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path, config)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code != 0
+        out = capsys.readouterr().out
+        assert "REALPERF" not in out
+        assert "REALCPU" not in out
+        assert launcher_cls.STOP_CALLS == [True]
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_flag_absent_prints_no_real_lines(tmp_path, capsys, monkeypatch):
+    """Completion condition 144 (v1.0 §1.1 (f)): without `--real-server`,
+    `main()` never prints `REALPERF`/`REALCPU` and never instantiates the
+    stub launcher -- pinned by spying on `pb._load_composition_root_
+    class` itself (the real-server path's own entry point into the
+    registry), never on a registry entry name matching `args.real_
+    server`'s own `None` default, which no real peer name ever does and
+    would only red via an unrelated `RealServerMeasurementFailure`
+    lookup-miss instead of the assertion below (code review 1 F3).
+
+    mutation M186 (`tools/perf_baseline.py`): run the real-server path
+    even when `--real-server` was not given -- red because this test's
+    own `load_calls == []` assertion (was the real-server registry
+    lookup ever entered at all) observes a call instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    load_calls = []
+    real_load = pb._load_composition_root_class
+
+    def _spy_load(*a, **k):
+        load_calls.append(True)
+        return real_load(*a, **k)
+
+    monkeypatch.setattr(pb, "_load_composition_root_class", _spy_load)
+    try:
+        base = tmp_path / "pgbase"
+        base.mkdir()
+        monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+        monkeypatch.setattr(pb.dsa_testpg, "cluster", _fake_cluster_cm())
+        code = pb.main(["--registry", str(registry_path)])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "REALPERF" not in out
+        assert "REALCPU" not in out
+        assert load_calls == []
+        assert launcher_cls.START_CALLS == []
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_path_runs_under_the_suite_lock_and_owned_cluster(tmp_path, monkeypatch):
+    """Completion condition 145: `--real-server` runs under the SAME
+    exclusive `dsa_testpg.suite_lock` and owned `dsa_testpg.cluster` the
+    6-plug path does -- both are spied (delegating to the real/faked
+    implementation) so this test can assert `["lock", "cluster"]` was the
+    real ENTRY order, never assert on a side effect (a probe subprocess)
+    that a mutation moving the whole dispatch earlier would just skip
+    right past.
+
+    mutation M187 (`tools/perf_baseline.py`): dispatch `_run_real_server`
+    immediately after `print(_perfrun_line())`, before `dsa_testpg.suite_
+    lock`/`cluster` are ever reached -- red because this test's own
+    `calls == ["lock", "cluster"]` assertion observes `[]` instead (a
+    `--real-server` run that returns without ever entering either)."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        base = tmp_path / "pgbase2"
+        base.mkdir()
+        monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+
+        calls: list[str] = []
+        real_suite_lock = pb.dsa_testpg.suite_lock
+
+        @contextlib.contextmanager
+        def spy_suite_lock(*a, **k):
+            calls.append("lock")
+            with real_suite_lock(*a, **k):
+                yield
+
+        fake_cluster = _fake_cluster_cm()
+
+        @contextlib.contextmanager
+        def spy_cluster():
+            calls.append("cluster")
+            with fake_cluster() as c:
+                yield c
+
+        monkeypatch.setattr(pb.dsa_testpg, "suite_lock", spy_suite_lock)
+        monkeypatch.setattr(pb.dsa_testpg, "cluster", spy_cluster)
+
+        code = pb.main(["--real-server", "stubpeer", "--client-processes", "1", "--registry", str(registry_path)])
+        assert code == 0
+        assert calls == ["lock", "cluster"]
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_issues_developer_credential_before_entity(tmp_path):
+    """Completion condition 164: before entity setup, the stub observes a
+    `POST /control/v1/credentials` (role `developer`) authorized by the
+    launcher's own control credential, rotated first (the launcher's
+    `control_bearer` starts `must_rotate=true` and cannot authorize
+    `issue_credential` on its own).
+
+    mutation M201 (`tools/perf_baseline.py`): never issue a developer
+    credential -- use `runtime_bearer` for the schema operation instead --
+    red because this test's own log-based assertion (a credentials POST
+    with `Authorization: Bearer rotated-control-secret` precedes the
+    schema POST) finds no such entry at all."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        cred_idx = next(i for i, e in enumerate(entries) if e["path"] == "/control/v1/credentials")
+        schema_idx = next(i for i, e in enumerate(entries) if e["path"] == "/v1/schema/operations")
+        assert cred_idx < schema_idx
+        assert entries[cred_idx]["authorization"] == "Bearer rotated-control-secret"
+        assert entries[cred_idx]["body"]["role"] == "developer"
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_rotates_the_control_credential_before_issuing_developer_credential(tmp_path):
+    """the work order's §6.1 監督裁定 15 (the rotate step of the credential
+    flow, completion condition 164's side): before the developer
+    credential is issued, the stub observes a `POST /control/v1/
+    credentials/<control_credential_id>/rotate` authorized by the
+    launcher's own (pre-rotation) `control_bearer` -- the launcher's
+    control credential starts `must_rotate=true`, so no other control-
+    plane call (`issue_credential` included) succeeds until this runs.
+
+    mutation M212 (`tools/perf_baseline.py`): drop the rotate call
+    entirely -- red because the stub's must_rotate gate then 403s the
+    developer-credential POST (it never observes a rotated secret), so
+    `code == 0` goes red before this test's own log-based rotate
+    assertion is ever reached."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        rotate_idx = next(i for i, e in enumerate(entries) if e["path"] == "/control/v1/credentials/ctl1/rotate")
+        cred_idx = next(i for i, e in enumerate(entries) if e["path"] == "/control/v1/credentials")
+        assert rotate_idx < cred_idx
+        assert entries[rotate_idx]["authorization"] == "Bearer control-secret"
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_issues_developer_credential_with_the_rotated_secret(tmp_path):
+    """the work order's §6.1 監督裁定 15 (the rotate step of the credential
+    flow, completion condition 164's side): the developer-credential
+    issuance is authorized by the NEW secret the rotate call returned --
+    never the launcher's original `control_bearer`.
+
+    mutation M213 (`tools/perf_baseline.py`): issue the developer
+    credential with the launcher's original `control_bearer` instead of
+    the rotated secret -- red because the stub's must_rotate gate 403s
+    any credentials POST that does not carry the post-rotate secret, so
+    `code == 0` goes red before this test's own `Authorization`
+    assertion is even reached."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(
+        tmp_path, {"new_control_secret": "rotated-secret-for-this-test"},
+    )
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        cred_entry = next(e for e in entries if e["path"] == "/control/v1/credentials")
+        assert cred_entry["authorization"] == "Bearer rotated-secret-for-this-test"
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_rotate_uses_the_launchers_own_control_credential_id(tmp_path):
+    """the work order's §6.1 監督裁定 15 (the rotate step of the credential
+    flow, completion condition 164's side): the rotate call's path
+    `credential_id` is read from the launcher's own `control_credential_
+    id` -- never a fixed literal -- so a launcher whose id differs from
+    the common default still rotates successfully.
+
+    mutation M214 (`tools/perf_baseline.py`): rotate a fixed literal id
+    (the common default `"ctl1"`) instead of reading `launcher.control_
+    credential_id` -- red because this test's launcher/stub pair share a
+    DIFFERENT id (`"custom-ctl-id-7"`), so the fixed-literal rotate call
+    403s against the stub's own `control_credential_id` check and the
+    whole run fails (`code == 0` goes red)."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(
+        tmp_path, {"control_credential_id": "custom-ctl-id-7"}, control_credential_id="custom-ctl-id-7",
+    )
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        assert any(e["path"] == "/control/v1/credentials/custom-ctl-id-7/rotate" for e in entries)
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_schema_and_seed_use_the_developer_credential(tmp_path):
+    """Completion condition 165: the schema operation and the row-seeding
+    mutation both carry the developer credential's own secret, never
+    `control_bearer`/`runtime_bearer`.
+
+    mutation M202 (`tools/perf_baseline.py`): use `control_bearer` for the
+    schema operation and the row seed -- red because this test's own
+    `Authorization` assertions (`Bearer dev-secret-xyz`) observe `Bearer
+    control-secret` instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        schema_entry = next(e for e in entries if e["path"] == "/v1/schema/operations")
+        mutation_entry = next(e for e in entries if e["path"].endswith("/mutations"))
+        assert schema_entry["authorization"] == "Bearer dev-secret-xyz"
+        assert mutation_entry["authorization"] == "Bearer dev-secret-xyz"
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_query_requests_use_the_runtime_credential(tmp_path):
+    """Completion condition 166: every measured `query` request (K=1
+    sanity check included) carries the launcher's own `runtime_bearer`.
+
+    mutation M203 (`tools/perf_baseline.py`): use the developer credential
+    for the measurement `query` calls -- red because this test's own
+    `all(... == "Bearer runtime-secret")` assertion over the stub's
+    `/query` log entries finds a `Bearer dev-secret-xyz` entry instead."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1, warmup=0, n=2)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        query_entries = [e for e in entries if e["path"].endswith("/query")]
+        assert len(query_entries) >= 1
+        assert all(e["authorization"] == "Bearer runtime-secret" for e in query_entries)
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_refuses_a_200_with_zero_rows(tmp_path, capsys):
+    """Completion condition 167 (`OC` 1.5-32): the K=1 sanity query
+    returning 200 with zero rows aborts the run exactly like a non-200
+    status would -- no `REALPERF`/`REALCPU`, non-zero exit, `stop()`
+    still called.
+
+    mutation M204 (`tools/perf_baseline.py`): only check the status code,
+    never the row count -- red because this test's own `code != 0`
+    assertion would instead observe a (wrongly) successful run."""
+    config = {"query_rows_override": {"0": 0}}
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path, config)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code != 0
+        out = capsys.readouterr().out
+        assert "REALPERF" not in out
+        assert "REALCPU" not in out
+        assert launcher_cls.STOP_CALLS == [True]
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_client_processes_flag_caps_at_k(tmp_path, capsys, monkeypatch):
+    """Completion condition 168: `--client-processes 8` with `K=4` uses 4
+    children (`min(8, 4)`), and `REALPERF` carries `client_processes=4`
+    -- the SAME observed count (code review 1 F1).
+
+    mutation M205 (`tools/perf_baseline.py`): use `N` (the flag's own
+    value) directly instead of `min(N, K)` -- red because this test's own
+    `client_processes=4` assertion observes `client_processes=8` instead.
+    mutation RV1-168 (`tools/perf_baseline.py`): `_spawn_real_server_
+    clients` always spawns exactly TWO real child processes regardless of
+    its own `n_children` argument -- red because `_run_one_real_server_
+    group` still waits for 4 (the caller's own `n_children`) queue
+    messages that only 2 real processes ever send, so `result_queue.
+    get()` times out after `_REAL_SERVER_QUEUE_TIMEOUT_S` (60s) and
+    `_run_real_server` returns 1; this test's own `assert code == 0`
+    fails on that non-zero exit, well before it ever reaches the
+    `client_processes=4`/pid-count assertions below."""
+    observed_pids = _spy_group_client_pids(monkeypatch)
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=8, concurrency=4, warmup=0, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        out = capsys.readouterr().out
+        realperf_line = next(line for line in out.splitlines() if line.startswith("REALPERF"))
+        assert "client_processes=4" in realperf_line
+        observed_child_pids = {message["pid"] for message in observed_pids[-1]}
+        assert len(observed_child_pids) == 4
+        assert os.getpid() not in observed_child_pids
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_distribute_group_counts_gives_the_remainder_to_the_first_children():
+    """Completion condition 169: `K=10, N=4` distributes `[3, 3, 2, 2]` --
+    the remainder (2) goes to the FIRST 2 children, never the last.
+
+    mutation M206 (`tools/perf_baseline.py`): give the remainder to the
+    LAST children instead -- red because this test's own `== [3, 3, 2,
+    2]` assertion would instead observe `[2, 2, 3, 3]`."""
+    assert pb._distribute_group_counts(10, 4) == [3, 3, 2, 2]
+
+
+def test_real_server_never_builds_registered_adapters(tmp_path):
+    """Completion condition 170: `--real-server` never builds a registered
+    `adapters` entry -- the registry's own `adapters` list can carry a
+    stub adapter that RECORDS if it were ever built, and it never is.
+
+    mutation M207 (`tools/perf_baseline.py`): also call `_discover_and_
+    build` for `--real-server` -- red because this test's own stub
+    adapter module records a `build_adapter()` call that should never
+    happen."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        stub_dir = registry_path.parent
+        idx = next(_realserver_module_counter)
+        adapter_module_name = f"realserver_stub_adapter_{idx}"
+        record_path = stub_dir / f"{adapter_module_name}_built.json"
+        (stub_dir / f"{adapter_module_name}.py").write_text(
+            "import json, pathlib\n"
+            f"RECORD_PATH = pathlib.Path({str(record_path)!r})\n"
+            "def build_adapter():\n"
+            "    RECORD_PATH.write_text('built')\n"
+            "    raise RuntimeError('a --real-server run must never reach this')\n",
+            encoding="utf-8",
+        )
+        data = json.loads(registry_path.read_text())
+        data["adapters"] = [{"name": "stubadapter", "module": adapter_module_name, "required": False}]
+        registry_path.write_text(json.dumps(data), encoding="utf-8")
+
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        assert not record_path.exists()
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_prints_realperf_and_realcpu_as_one_block_after_perfrun(tmp_path, capsys, monkeypatch):
+    """Completion condition 171: `PERFRUN` precedes `REALPERF`/`REALCPU`,
+    and the two `REAL*` lines are adjacent -- no other line between them.
+
+    mutation M208 (`tools/perf_baseline.py`): print `REALPERF`/`REALCPU`
+    BEFORE `PERFRUN` -- red because this test's own ordering assertion
+    (the `PERFRUN` line's own index is less than `REALPERF`'s) fails."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        base = tmp_path / "pgbase3"
+        base.mkdir()
+        monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+        monkeypatch.setattr(pb.dsa_testpg, "cluster", _fake_cluster_cm())
+        code = pb.main(["--real-server", "stubpeer", "--client-processes", "1", "--registry", str(registry_path)])
+        assert code == 0
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        perfrun_idx = next(i for i, line in enumerate(lines) if line.startswith("PERFRUN"))
+        realperf_idx = next(i for i, line in enumerate(lines) if line.startswith("REALPERF"))
+        realcpu_idx = next(i for i, line in enumerate(lines) if line.startswith("REALCPU"))
+        assert perfrun_idx < realperf_idx
+        assert realcpu_idx == realperf_idx + 1
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_n_must_be_at_least_one(capsys):
+    """Code review 1 re-check observation (差し戻し 2 (5)): at `--n 0`
+    under `--real-server`, no measured group would ever run, so
+    `_measure_real_server`'s own `client_processes` would stay `None`
+    (never set by any measured group) and `REALPERF`/`REALCPU` would
+    print `client_processes=None` -- refused up front instead, the same
+    way `--concurrency`/`--client-processes` already refuse below 1.
+    Raised before any registry/network access, so no stub server or
+    registry is needed here.
+
+    mutation M211 (`tools/perf_baseline.py`): drop the `--n >= 1` check
+    for `--real-server` -- red because this test's own `SystemExit`
+    assertion (`pb.main` exits 2 via `argparse`'s own `parser.error`)
+    no longer holds."""
+    with pytest.raises(SystemExit) as exc_info:
+        pb.main(["--real-server", "stubpeer", "--n", "0", "--registry", "/nonexistent/registry.json"])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--n must be >= 1" in err

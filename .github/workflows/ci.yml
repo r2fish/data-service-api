@@ -516,8 +516,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install pytest (pinned via constraints.txt)
-        run: pip install -c constraints.txt pytest
+      - name: Install pytest and httpx (pinned via constraints.txt; tools/tests/test_perf_baseline.py imports httpx)
+        run: pip install -c constraints.txt pytest httpx
       - name: Run tools/tests
         run: python -m pytest tools/tests -q
 

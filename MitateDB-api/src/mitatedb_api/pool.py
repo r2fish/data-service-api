@@ -98,6 +98,22 @@ class BoundedConnectionPool:
         self._wait_max_ms = 0.0
         self._in_use = 0
         self._in_use_peak = 0
+        # Platform DB-time accounting, under the same `self._stats_lock`
+        # as the acquisition counters above -- `_sessions`/`_connect_wall_
+        # ms` rise once per `_new_connection()` call (below), and `_closed_
+        # db_wall_ms`/`_closed_txn_count`/`_closed_db_calls` receive a
+        # connection's own `CountingConnection.db_wall_ms`/`txn_count`/
+        # `execute_count + executemany_count` folded in right before that
+        # connection is discarded (`discard`, `closeall`, and the dead-
+        # connection branches of `acquire()`) -- so a discarded
+        # connection's own totals are never lost, only moved from "on the
+        # connection" to "on this pool". Same shape as `r2db_api.postgres.
+        # _RolePool`'s identical accounting.
+        self._connect_wall_ms = 0.0
+        self._sessions = 0
+        self._closed_db_wall_ms = 0.0
+        self._closed_txn_count = 0
+        self._closed_db_calls = 0
 
     def _record_acquire(self) -> None:
         """Count one successful acquisition under `self._stats_lock`: `acquire_count` rises by one, `in_use` rises by one, and `in_use_peak` keeps the highest value `in_use` ever reaches."""
@@ -138,8 +154,72 @@ class BoundedConnectionPool:
         # (`psycopg.connect` is itself `Connection.connect`, `psycopg/
         # __init__.py`), the only difference is every connection this pool
         # ever hands out now carries its own `execute_count`/`executemany_
-        # count` and a `CountingCursor` factory. No other line changes.
-        return CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        # count` and a `CountingCursor` factory.
+        #
+        # The connect call itself is timed into `_connect_wall_ms`/
+        # `_sessions` under `self._stats_lock`, mirroring `r2db_api.
+        # postgres._RolePool._connect`. A failed connect raises before
+        # either counter is touched.
+        connect_start = time.monotonic()
+        conn = CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
+        with self._stats_lock:
+            self._sessions += 1
+            self._connect_wall_ms += connect_wall_ms
+        return conn
+
+    def _fold_closed_connection_stats(self, conn: "psycopg.Connection") -> None:
+        """Called right before every connection this pool discards leaves
+        this pool for good (`discard`, `closeall`, and the dead-connection
+        branches of `acquire()` below): adds this one connection's own
+        `db_wall_ms`/`txn_count`/`execute_count + executemany_count` (from
+        `psycopg_counting.CountingConnection`) into this pool's own running
+        totals, under `self._stats_lock`, so discarding a connection never
+        loses time, transactions, or statements it already spent. Same
+        shape as `r2db_api.postgres._RolePool._fold_closed_connection_
+        stats`."""
+        db_wall_ms = getattr(conn, "db_wall_ms", 0.0)
+        txn_count = getattr(conn, "txn_count", 0)
+        db_calls = getattr(conn, "execute_count", 0) + getattr(conn, "executemany_count", 0)
+        with self._stats_lock:
+            self._closed_db_wall_ms += db_wall_ms
+            self._closed_txn_count += txn_count
+            self._closed_db_calls += db_calls
+
+    def platform_stats(self) -> dict[str, int | float]:
+        """Read-only sum of this pool's own DB-time accounting: every
+        connection currently idle in `self._idle` (drained via `get_
+        nowait` and put back with `put_nowait`, never through `acquire()`,
+        so `acquire_count` above stays untouched) plus the running totals
+        `_fold_closed_connection_stats`/`_new_connection` already folded in
+        for connections that are now discarded. A connection some other
+        caller currently has checked out is not in the idle queue right
+        now, so its own not-yet-discarded `db_wall_ms`/`txn_count`/
+        `db_calls` are not yet visible here -- they land in this method's
+        next call, once that connection is released or discarded. No DB
+        round trip: every value read here is a plain Python attribute."""
+        conns: "list[psycopg.Connection]" = []
+        live_db_wall_ms = 0.0
+        live_txn_count = 0
+        live_db_calls = 0
+        while True:
+            try:
+                conns.append(self._idle.get_nowait())
+            except queue.Empty:
+                break
+        for conn in conns:
+            live_db_wall_ms += getattr(conn, "db_wall_ms", 0.0)
+            live_txn_count += getattr(conn, "txn_count", 0)
+            live_db_calls += getattr(conn, "execute_count", 0) + getattr(conn, "executemany_count", 0)
+            self._idle.put_nowait(conn)
+        with self._stats_lock:
+            return {
+                "sessions": self._sessions,
+                "connect_wall_ms": self._connect_wall_ms,
+                "db_wall_ms": live_db_wall_ms + self._closed_db_wall_ms,
+                "txn_count": live_txn_count + self._closed_txn_count,
+                "db_calls": live_db_calls + self._closed_db_calls,
+            }
 
     def _forget_one(self) -> None:
         with self._lock:
@@ -163,6 +243,7 @@ class BoundedConnectionPool:
             except queue.Empty:
                 break
             if conn.closed:
+                self._fold_closed_connection_stats(conn)
                 self._forget_one()
                 continue
             self._record_acquire()
@@ -200,6 +281,7 @@ class BoundedConnectionPool:
             except queue.Empty:
                 continue
             if conn.closed:
+                self._fold_closed_connection_stats(conn)
                 self._forget_one()
                 continue
             self._record_wait((time.monotonic() - wait_start) * 1000.0)
@@ -217,6 +299,7 @@ class BoundedConnectionPool:
     def discard(self, conn: "psycopg.Connection") -> None:
         """Close and forget a connection that must never be reused."""
         self._record_release()
+        self._fold_closed_connection_stats(conn)
         try:
             conn.close()
         except psycopg.Error:
@@ -232,6 +315,7 @@ class BoundedConnectionPool:
                 conn = self._idle.get_nowait()
             except queue.Empty:
                 break
+            self._fold_closed_connection_stats(conn)
             try:
                 conn.close()
             except psycopg.Error:

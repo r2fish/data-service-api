@@ -11,13 +11,17 @@ History: CH-0182
 """
 from __future__ import annotations
 
+import asyncio
+import weakref
 from contextlib import contextmanager
 import json
 from importlib import resources
 from typing import Any, Awaitable, Callable, Iterator, Mapping
 
+import anyio.to_thread
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware import Middleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -243,6 +247,39 @@ class RequestByteBoundMiddleware:
         headers.append((b"content-length", str(len(body)).encode()))
         await send({"type": "http.response.start", "status": response.status_code, "headers": headers})
         await send({"type": "http.response.body", "body": body})
+
+
+DEFAULT_THREAD_LIMIT = 4
+
+
+class ThreadLimitMiddleware:
+    """Bounds anyio's default worker-thread limiter for every request this
+    process serves, so `run_in_threadpool` (used throughout this module
+    for the synchronous section of each handler) never draws on more than
+    `thread_limit` OS threads at once, on any one event loop.
+
+    A pure-ASGI middleware (`async def __call__`); Starlette's middleware
+    stack calls it as an ASGI3 app. The first request served on a given
+    running loop sets that loop's own `anyio.to_thread.
+    current_default_thread_limiter().total_tokens` to `thread_limit`;
+    every later request on the SAME loop passes through untouched. A
+    second, distinct loop gets the same one-time treatment independently,
+    the first time it serves a request. The loop-to-already-configured
+    membership is held in a `weakref.WeakSet` (never `id(loop)` in a
+    plain `set`).
+    """
+
+    def __init__(self, app: ASGIApp, thread_limit: int) -> None:
+        self.app = app
+        self._thread_limit = thread_limit
+        self._configured_loops: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        loop = asyncio.get_running_loop()
+        if loop not in self._configured_loops:
+            anyio.to_thread.current_default_thread_limiter().total_tokens = self._thread_limit
+            self._configured_loops.add(loop)
+        await self.app(scope, receive, send)
 
 
 # --------------------------------------------------------------------------
@@ -512,7 +549,7 @@ class HttpService:
 
 Handler = Callable[[Request], Awaitable[Response]]
 
-# WP-8b: every endpoint below delegates its own synchronous section (authenticate / cell call / psycopg) to `starlette.concurrency.run_in_threadpool` so a slow request no longer serializes the whole event loop behind it (D-8 (2)'s own measured trigger: a single-process `hold_in_flight(n>1)` could not exceed in-flight=1 before this WP). `run_in_threadpool` runs on anyio's default worker limiter (40 threads unless the composition root raises `anyio.to_thread.current_default_thread_limiter().total_tokens`, which this WP does not do) -- a declared `concurrency` bound above 40 is therefore capped by that worker pool, not by `_LimitStateHolder.concurrency_slot`, on a single process (a fact only, not a change this WP makes to any limit declaration).
+# WP-8b: every endpoint below delegates its own synchronous section (authenticate / cell call / psycopg) to `starlette.concurrency.run_in_threadpool` so a slow request no longer serializes the whole event loop behind it (D-8 (2)'s own measured trigger: a single-process `hold_in_flight(n>1)` could not exceed in-flight=1 before this WP). `run_in_threadpool` runs on anyio's default worker limiter, which `create_app`'s own middleware sets to `DEFAULT_THREAD_LIMIT` (4) once per event loop unless the composition root raises it via `MITATEDB_THREAD_LIMIT` -- that limiter caps how many admitted requests run their synchronous section at once; admission itself (`_LimitStateHolder.concurrency_slot`, taken on the event-loop thread before `run_in_threadpool`) still counts up to the declared `concurrency` on a single process (a fact only, not a change this WP makes to any limit declaration).
 # history: CH-0202
 
 
@@ -1258,14 +1295,49 @@ _ROUTES = [
 ]
 
 
-def create_app(service: HttpService, *, request_bytes_limit: int, lifespan: Any = None) -> ASGIApp:
+def create_app(
+    service: HttpService,
+    *,
+    request_bytes_limit: int,
+    lifespan: Any = None,
+    thread_limit: int | None = DEFAULT_THREAD_LIMIT,
+) -> ASGIApp:
     """Build the ASGI application exposing `service` over the contract's
     HTTP surface. The returned callable is `RequestByteBoundMiddleware`
     wrapping a Starlette application, so SI-08's request-byte bound is
     enforced before any Starlette routing or body parsing runs.
+
+    `thread_limit` names a positive int, or `None`. A positive int adds
+    `ThreadLimitMiddleware` (this module, above) to the Starlette
+    application's own middleware stack, so it runs inside
+    `RequestByteBoundMiddleware` and ahead of routing; `None` adds nothing,
+    leaving anyio's own default worker-thread limiter untouched. Defaults
+    to `DEFAULT_THREAD_LIMIT` (4), smaller than a served application's
+    declared `max_concurrency`; a deployer raises it via the composition
+    root's own env var (`mitatedb_api.main`'s `MITATEDB_THREAD_LIMIT`).
+    Every handler in this module takes `service.acquire_concurrency_slot()`
+    on the event-loop thread, before its own `run_in_threadpool` call, so
+    the limiter only bounds how many requests can run their synchronous
+    section at once -- concurrency admission and the 413-vs-503 split
+    between it and pool exhaustion are unaffected either way. The
+    returned value's own shape (`RequestByteBoundMiddleware` wrapping a
+    Starlette app; that app's `state`/`routes`) is the same whichever
+    value `thread_limit` takes. Anything else (zero, negative, a
+    non-int, or a `bool` -- `bool` is an `int` subclass in Python,
+    rejected explicitly rather than silently accepted as `0`/`1`) raises
+    `ValueError` naming `thread_limit`, at construction time -- before
+    any request is ever served, never a per-request 500 once
+    `ThreadLimitMiddleware` tries to apply an invalid value to the
+    loop's own limiter.
     """
+    if thread_limit is not None and (isinstance(thread_limit, bool) or not isinstance(thread_limit, int) or thread_limit < 1):
+        raise ValueError(f"thread_limit must be a positive integer or None, got {thread_limit!r}")
+    middleware = []
+    if thread_limit is not None:
+        middleware.append(Middleware(ThreadLimitMiddleware, thread_limit=thread_limit))
     app = Starlette(
         routes=_ROUTES,
+        middleware=middleware,
         exception_handlers={
             StarletteHTTPException: _http_exception_handler,
             Exception: _unhandled_exception_handler,

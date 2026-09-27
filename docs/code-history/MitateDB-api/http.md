@@ -559,6 +559,20 @@ CONSTRUCTION time instead of silently disabling this check --
 # declaration).
 ```
 
+### correction: 2026-09-28
+
+- reason: `run_in_threadpool`'s worker limiter is no longer anyio's untouched default (40) -- `create_app`'s own middleware (R-101 WP-3, D-8) now sets it to `DEFAULT_THREAD_LIMIT` (4) by default, raisable via the composition root's `MITATEDB_THREAD_LIMIT`.
+
+old:
+```
+`run_in_threadpool` runs on anyio's default worker limiter (40 threads unless the composition root raises `anyio.to_thread.current_default_thread_limiter().total_tokens`, which this WP does not do) -- a declared `concurrency` bound above 40 is therefore capped by that worker pool, not by `_LimitStateHolder.concurrency_slot`, on a single process (a fact only, not a change this WP makes to any limit declaration).
+```
+
+new:
+```
+`run_in_threadpool` runs on anyio's default worker limiter, which `create_app`'s own middleware sets to `DEFAULT_THREAD_LIMIT` (4) once per event loop unless the composition root raises it via `MITATEDB_THREAD_LIMIT` -- that limiter caps how many admitted requests run their synchronous section at once; admission itself (`_LimitStateHolder.concurrency_slot`, taken on the event-loop thread before `run_in_threadpool`) still counts up to the declared `concurrency` on a single process (a fact only, not a change this WP makes to any limit declaration).
+```
+
 ## CH-0203
 
 - moved from: `src/mitatedb_api/http.py` (`<module>`)

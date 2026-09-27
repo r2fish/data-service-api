@@ -57,14 +57,12 @@ import sys
 import tempfile
 import threading
 import uuid
-import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import quote
 
-import anyio.to_thread
 import httpx
 import psycopg
 from psycopg import sql
@@ -148,7 +146,7 @@ from r2db_api.credential_store import (  # noqa: E402
     PostgresCredentialStore,
 )
 from r2db_api.errors import FoundationError  # noqa: E402
-from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
+from r2db_api.http import DEFAULT_THREAD_LIMIT, PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
 from r2db_api.limits import ControlPlaneLimits, ResourceLimits, role_pool_size  # noqa: E402
 from r2db_api.platform_declarations import VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS  # noqa: E402
 from r2db_api.postgres import PostgresCell, default_pool_manager  # noqa: E402
@@ -1041,52 +1039,24 @@ def _perf_pool_size() -> int:
 
 
 # Harness-only escape hatch: `tools/perf_baseline.py` sets this so a
-# thread-limit sweep can measure this same plug at a reduced anyio
-# thread-pool size, never production code. Absent, empty, or not a
-# positive integer all mean "no override" (`None`) -- the data-plane app
-# is left completely unwrapped in that case.
+# thread-limit sweep can measure this same plug at a size other than
+# `create_app`'s own production default, never production code. Absent,
+# empty, or not a positive integer all resolve to `DEFAULT_THREAD_LIMIT`
+# (`create_app`'s own default) -- the data-plane app is built with the
+# SAME effective value either way, never left with anyio's untouched
+# default.
 _PERF_THREAD_LIMIT_ENV = "DSA_PERF_THREAD_LIMIT"
 
 
-def _perf_thread_limit_value() -> "int | None":
+def _perf_thread_limit_value() -> int:
     raw = os.environ.get(_PERF_THREAD_LIMIT_ENV)
     if raw is None or raw == "":
-        return None
+        return DEFAULT_THREAD_LIMIT
     try:
         value = int(raw)
     except ValueError:
-        return None
-    return value if value > 0 else None
-
-
-class _PerfThreadLimitWrapper:
-    """Wraps a data-plane ASGI app so the FIRST request served on any one
-    event loop sets that loop's own default anyio thread limiter
-    (`anyio.to_thread.current_default_thread_limiter()`) to a fixed token
-    count, then never touches it again on that same loop -- a second loop
-    (a socket plug's own uvicorn thread, distinct from an asgi plug's own
-    loop) gets the same one-time treatment independently, the first time
-    IT serves a request. `async def __call__(self, scope, receive, send)`
-    (never a plain function) so `uvicorn.Config(..., interface="auto")`
-    resolves this object to the asgi3 shape rather than asgi2. The loop-
-    to-already-configured membership is tracked by holding the actual loop
-    OBJECT in a `weakref.WeakSet` -- never `id(loop)` in a plain `set`,
-    which would risk a closed, garbage-collected loop's reused id being
-    mistaken for the loop this wrapper actually configured before; a
-    `WeakSet` instead drops its own entry the moment a loop is collected,
-    so a later, unrelated loop can never collide with it."""
-
-    def __init__(self, app: Any, *, total_tokens: int) -> None:
-        self._app = app
-        self._total_tokens = total_tokens
-        self._configured_loops: "weakref.WeakSet" = weakref.WeakSet()
-
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        loop = asyncio.get_running_loop()
-        if loop not in self._configured_loops:
-            anyio.to_thread.current_default_thread_limiter().total_tokens = self._total_tokens
-            self._configured_loops.add(loop)
-        await self._app(scope, receive, send)
+        return DEFAULT_THREAD_LIMIT
+    return value if value > 0 else DEFAULT_THREAD_LIMIT
 
 
 class R2DBHttpConformanceAdapter(ConformanceAdapter):
@@ -1327,21 +1297,18 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             )
             self._control = ControlAuthority(self._service)
 
-            app = create_app(self._service)
             # `DSA_PERF_THREAD_LIMIT` (harness-only, absent in every real
-            # conformance run): wraps the freshly built app the ONE place
-            # it is ever constructed here, before it is assigned anywhere
-            # else -- both `self._app` and `self._build_client` below
-            # receive the SAME wrapped object, so an asgi-plug client and a
-            # socket-plug's own data-plane surface (which dispatches by
-            # `app is self._app` identity) end up driving the identical
-            # instance either way. `self._perf_thread_limit` stays `None`
-            # (no wrapper) when the env is absent, invalid, or non-positive
-            # -- app identity is then the `create_app` result itself,
-            # unwrapped.
+            # conformance run): resolved to its effective value BEFORE
+            # `create_app` builds the app, and passed straight through as
+            # `thread_limit=` -- `create_app`'s own middleware configures
+            # the loop's limiter; this adapter passes the effective value
+            # through without wrapping the app itself. `self._perf_
+            # thread_limit` always holds that same effective int
+            # (`DEFAULT_THREAD_LIMIT` when the env is absent, invalid, or
+            # non-positive), so the accessor and `create_app`'s own
+            # argument never disagree.
             self._perf_thread_limit = _perf_thread_limit_value()
-            if self._perf_thread_limit is not None:
-                app = _PerfThreadLimitWrapper(app, total_tokens=self._perf_thread_limit)
+            app = create_app(self._service, thread_limit=self._perf_thread_limit)
             # Kept on the instance (not just the local `app` above) so
             # `_control_surface_absent` (port v1.5) can inspect this exact,
             # live running app's own route table -- not a second app built
@@ -4215,10 +4182,12 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         (`SharedPoolManager.prepared_stats()`'s own docstring)."""
         return default_pool_manager.prepared_stats()
 
-    def perf_thread_limit(self) -> "int | None":
-        """The resolved `DSA_PERF_THREAD_LIMIT` value the data-plane app
-        was wrapped with at construction time, or `None` when no wrapper
-        is in place (env absent, empty, or not a positive integer)."""
+    def perf_thread_limit(self) -> int:
+        """The effective `thread_limit` the data-plane app's own
+        `create_app` call was built with: the resolved `DSA_PERF_THREAD_
+        LIMIT` value when the env names a positive integer, `DEFAULT_
+        THREAD_LIMIT` otherwise (absent, empty, or not a positive
+        integer)."""
         return self._perf_thread_limit
 
     def platform_db_time_stats(self) -> dict[str, int | float]:

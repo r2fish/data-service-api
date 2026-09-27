@@ -90,12 +90,17 @@ import importlib
 import inspect
 import json
 import math
+import multiprocessing
 import os
 import platform
+import queue
 import resource
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -103,11 +108,20 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFORMANCE_TESTS_DIR = ROOT / "conformance-tests"
 REGISTRY_PATH = CONFORMANCE_TESTS_DIR / "registry.json"
 TESTPG_DIR = ROOT / "tools" / "testpg"
+# This file's OWN directory -- on `sys.path` unconditionally
+# (never only when run as `__main__`), so a `--real-server` child process
+# spawned via `_REAL_SERVER_MP_CONTEXT` (`forkserver`, below) can `import
+# perf_baseline` fresh and find THIS SAME file even when a test harness
+# loaded it under a file-based module alias rather than running it as a
+# script.
+_TOOLS_DIR = Path(__file__).resolve().parent
 
 if str(CONFORMANCE_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(CONFORMANCE_TESTS_DIR))
 if str(TESTPG_DIR) not in sys.path:
     sys.path.insert(0, str(TESTPG_DIR))
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
 
 from adapter import (  # noqa: E402  (path insertion above must run first)
     BatchOperation,
@@ -170,6 +184,17 @@ class UnknownAdapterShape(RuntimeError):
     was never safe to guess from). `main()` turns this into a non-zero
     exit, never a silent guess -- see `_classify_plug`'s own docstring
     for the exact agreement this checks."""
+
+
+class RealServerMeasurementFailure(RuntimeError):
+    """Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15: raised anywhere along `--real-server`'s
+    own setup (resolving this deployment's own `application_id`, issuing
+    a developer credential, creating the measurement entity, seeding its
+    one row, the K=1 sanity query) or measurement (any query response
+    other than 200, condition 143) path. `_run_real_server` catches only
+    this, prints it, and returns a non-zero exit WITHOUT ever printing a
+    `REALPERF`/`REALCPU` line -- the two lines are printed together, from
+    one return value, or not at all."""
 
 
 # ---------------------------------------------------------------------
@@ -1806,6 +1831,30 @@ def _build_parser() -> argparse.ArgumentParser:
             "confirm-wait this adds costs several seconds per (plug, op)"
         ),
     )
+    # Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15: measures a real, separately-started
+    # composition root (`conformance-tests/registry.json`'s own
+    # `composition_roots` entry named PEER, the SAME C-26 launcher
+    # `conformance-tests/test_c26_composition_root.py` drives) instead of
+    # the 6 registered conformance plugs -- `None` (default) keeps every
+    # existing run exactly as it was. `--concurrency`/`--n`/`--warmup`
+    # above are shared with this path unchanged; `--client-processes`
+    # below is the one flag this path alone reads.
+    parser.add_argument(
+        "--real-server", type=str, default=None, metavar="PEER",
+        help=(
+            "measure a real, separately-started composition root (registry.json's own "
+            "composition_roots entry PEER) instead of the 6 conformance plugs -- prints "
+            "REALPERF/REALCPU lines only, never PERF/CPU/POOL/DBTIME/PREPARED/ROUNDTRIP (work order "
+            "docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md §7.3 D-15)"
+        ),
+    )
+    parser.add_argument(
+        "--client-processes", type=int, default=8, metavar="N",
+        help=(
+            "OS client processes --real-server dispatches --concurrency K requests across "
+            "(default 8); the actual count used is min(N, K)"
+        ),
+    )
     return parser
 
 
@@ -1816,6 +1865,505 @@ def _roundtrip_enabled(args: argparse.Namespace) -> bool:
     its own function so a test can pin the exact gating decision without
     running `_run`/`main` end-to-end against a real registry."""
     return bool(args.roundtrip)
+
+
+# ---------------------------------------------------------------------
+# Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md` §7.3 D-15: `--real-server` -- measures a real,
+# separately-started composition root (the C-26 launcher, `registry.json`'s
+# own `composition_roots` section) instead of the 6 registered conformance
+# plugs `_run` above measures. Never both in the same invocation: `main()`
+# branches on `args.real_server` before either path is entered.
+# ---------------------------------------------------------------------
+
+_REAL_SERVER_ENTITY = "dsaperfreal"
+_REAL_SERVER_FIELD = "label"
+_REAL_SERVER_BARRIER_TIMEOUT_S = 60.0
+_REAL_SERVER_QUEUE_TIMEOUT_S = 60.0
+
+# `forkserver`, never the default `fork`: forking directly from THIS
+# process after it has already made HTTP calls is a known fork-after-
+# network hazard. `_warm_forkserver` below starts the forkserver helper
+# before this run's first HTTP call -- every child process is forked
+# from that helper, never from this process.
+_REAL_SERVER_MP_CONTEXT = multiprocessing.get_context("forkserver")
+_real_server_forkserver_warmed = False
+
+
+def _real_server_forkserver_noop() -> None:
+    """A trivial, picklable target -- used only to force `forkserver`'s
+    own helper process to start, in `_warm_forkserver` below."""
+    return None
+
+
+def _warm_forkserver() -> None:
+    """Starts `_REAL_SERVER_MP_CONTEXT`'s own `forkserver` helper process
+    if it has not already started -- a no-op on every call after the
+    first. `_run_real_server` calls this before any HTTP setup call:
+    without this, a child process hung mid-import on macOS during
+    development when the helper started after the first HTTP call
+    instead."""
+    global _real_server_forkserver_warmed
+    if _real_server_forkserver_warmed:
+        return
+    warmup_process = _REAL_SERVER_MP_CONTEXT.Process(target=_real_server_forkserver_noop)
+    warmup_process.start()
+    warmup_process.join()
+    _real_server_forkserver_warmed = True
+
+
+def _num_real_server_clients(client_processes: int, concurrency: int) -> int:
+    """The work order's D-15: the ACTUAL client-process count for one `--real-server` run --
+    never more OS processes than there are requests to spread across them
+    (its completion conditions 132/133/168: `min(client_processes,
+    concurrency)`)."""
+    return min(client_processes, concurrency)
+
+
+def _distribute_group_counts(concurrency: int, n_children: int) -> "list[int]":
+    """The work order's D-15: how many of one group's `concurrency` requests each of `n_
+    children` client processes sends, in the SAME order those processes
+    are started in. `concurrency // n_children` each, with the remainder
+    (`concurrency % n_children`) giving the FIRST that many children one
+    EXTRA request apiece (its completion condition 169) -- never the last."""
+    base, remainder = divmod(concurrency, n_children)
+    return [base + 1 if i < remainder else base for i in range(n_children)]
+
+
+def _group_wall_ms(start_ns: int, completion_ns: "list[int]") -> float:
+    """The work order's D-15: one group's own wall-clock span -- the LATEST child's own
+    completion time (`time.time_ns()`, never an average of them) minus the
+    single shared start (the MINIMUM of the children's own `time.
+    time_ns()`, each read immediately after ITS OWN `multiprocessing.
+    Barrier.wait()` returns, never the parent's -- its completion condition
+    135). Milliseconds, like every other `_ms` value this file prints."""
+    return (max(completion_ns) - start_ns) / 1_000_000.0
+
+
+def _format_realperf_row(
+    peer: str, concurrency: int, client_processes: int, n: int, p50_ms: float, p95_ms: float,
+) -> str:
+    """The work order's D-15's own literal format -- its completion condition 139. `plug=` is
+    always `<peer>-real`: a real-server run is its own transport, never one
+    of the 6 registered plugs' own names."""
+    return (
+        f"REALPERF peer={peer} plug={peer}-real transport=real-server op=query "
+        f"concurrency={concurrency} client_processes={client_processes} n={n} "
+        f"p50_ms={p50_ms:.3f} p95_ms={p95_ms:.3f}"
+    )
+
+
+def _format_realcpu_row(
+    peer: str, concurrency: int, client_processes: int, requests: int, wall_ms: float, cpu_client_ms: float,
+) -> str:
+    """The work order's D-15's own literal format -- its completion condition 140. The floor's
+    own visualization (D-16), never a judgement this tool itself makes
+    (P-8)."""
+    return (
+        f"REALCPU peer={peer} plug={peer}-real op=query concurrency={concurrency} "
+        f"client_processes={client_processes} requests={requests} wall_ms={wall_ms:.3f} "
+        f"cpu_client_ms={cpu_client_ms:.3f}"
+    )
+
+
+def _load_composition_root_class(registry_path: Path, peer: str) -> type:
+    """The work order's D-15: reads ONLY `registry_path`'s own `composition_roots` section
+    (never `adapters` -- `--real-server` never builds one of the 6
+    registered conformance plugs, its completion condition 170/127) for the
+    entry named `peer`, discovering the launcher CLASS exactly the way
+    `conformance-tests/conftest.py`'s own `_discover_composition_roots`
+    does (`<peer>/conformance` added to `sys.path`, the module imported,
+    the class read off it by name) -- never an instance: starting it is
+    `_run_real_server`'s own job, once, after this returns."""
+    data = json.loads(registry_path.read_text())
+    for entry in data.get("composition_roots", []):
+        if entry["name"] != peer:
+            continue
+        conformance_dir = str(ROOT / entry["name"] / "conformance")
+        if conformance_dir not in sys.path:
+            sys.path.insert(0, conformance_dir)
+        module = importlib.import_module(entry["module"])
+        return getattr(module, entry["launcher_class"])
+    raise RealServerMeasurementFailure(
+        f"--real-server {peer!r}: no composition_roots entry named {peer!r} in {registry_path}"
+    )
+
+
+def _real_server_request(method: str, url: str, *, bearer: str, body: "dict | None" = None) -> "tuple[int, Any]":
+    """The work order's D-15's own one-shot setup calls (never the measured `query` traffic
+    below, which goes through real, concurrent `httpx.AsyncClient` calls in
+    the child processes instead): a single synchronous request, `urllib`
+    only (this file's own standard-library-only-at-the-top convention,
+    module docstring) -- mirrors `tools/deploy_smoke.py`'s own `_request`,
+    a separate copy rather than an import (that tool is a standalone
+    operational aid, not a dependency of this one)."""
+    data = None
+    headers = {"Authorization": f"Bearer {bearer}"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status = response.status
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        raw = exc.read()
+    except (urllib.error.URLError, OSError) as exc:
+        raise RealServerMeasurementFailure(f"{method} {url} failed: {exc}") from exc
+    try:
+        parsed = json.loads(raw) if raw else None
+    except json.JSONDecodeError as exc:
+        raise RealServerMeasurementFailure(f"{method} {url} returned a non-JSON body: {exc}") from exc
+    return status, parsed
+
+
+def _resolve_application_id(data_base_url: str, runtime_bearer: str) -> str:
+    """The work order's D-15: this deployment's own `application_id`, needed to build the
+    `POST /control/v1/credentials` body below -- the launcher's own
+    observation surface (`data_base_url`/`control_base_url`/`runtime_
+    bearer`/`control_bearer`) names no such property, so this reads it the
+    one documented way an authenticated application credential can (`GET
+    /v1/capabilities`'s own `application_scope`, `r2db_api.capabilities_
+    document`:144 / `mitatedb_api.capabilities_document`:421 -- the SAME
+    field `runtime`/`developer` role always carries)."""
+    status, document = _real_server_request("GET", f"{data_base_url}/capabilities", bearer=runtime_bearer)
+    if status != 200 or not isinstance(document, dict) or not document.get("application_scope"):
+        raise RealServerMeasurementFailure(
+            f"GET /v1/capabilities -> {status}, could not resolve this deployment's own application_id"
+        )
+    return document["application_scope"]
+
+
+def _rotate_control_credential(control_base_url: str, control_bearer: str, control_credential_id: str) -> str:
+    """The launcher's own `control_bearer` is `must_rotate=true` (`ops bootstrap`'s own
+    printed warning) -- the only operations it authorizes are `GET /control/v1/capabilities`
+    and rotating itself, so this MUST run before any other control-plane call
+    (`issue_credential` included) can succeed. `POST /control/v1/credentials/
+    {credential_id}/rotate`, no request body, path `credential_id` the launcher's own
+    `control_credential_id` (the rotate path requires the path id to equal the
+    presented credential's own id; the contract forbids deriving that id from the
+    secret, so this never parses `control_bearer` itself). Returns the new secret --
+    every control-plane call after this uses it, never the original `control_bearer`."""
+    status, document = _real_server_request(
+        "POST", f"{control_base_url}/credentials/{control_credential_id}/rotate", bearer=control_bearer,
+    )
+    if status != 200 or not isinstance(document, dict) or not document.get("secret"):
+        raise RealServerMeasurementFailure(
+            f"POST /control/v1/credentials/{control_credential_id}/rotate -> {status}, could not rotate the launcher's own control credential"
+        )
+    return document["secret"]
+
+
+def _issue_developer_credential(control_base_url: str, control_bearer: str, application_id: str) -> str:
+    """The work order's D-15: `POST /control/v1/credentials`, `role=developer`, authorized
+    by the rotated control credential `_rotate_control_credential` just returned --
+    its completion conditions 164/165 (the entity/row setup right after this reuses
+    the returned secret, never `control_bearer`/`runtime_bearer`)."""
+    status, document = _real_server_request(
+        "POST", f"{control_base_url}/credentials", bearer=control_bearer,
+        body={"application_id": application_id, "role": "developer"},
+    )
+    if status != 200 or not isinstance(document, dict) or not document.get("secret"):
+        raise RealServerMeasurementFailure(
+            f"POST /control/v1/credentials -> {status}, could not issue a developer credential"
+        )
+    return document["secret"]
+
+
+def _prepare_real_server_entity(data_base_url: str, developer_bearer: str, entity: str, field: str) -> None:
+    """The work order's D-15: creates the one measurement entity and seeds its one row,
+    both with the developer credential `_issue_developer_credential` just
+    returned (its completion condition 165) -- never `control_bearer`/
+    `runtime_bearer`."""
+    status, _document = _real_server_request(
+        "POST", f"{data_base_url}/schema/operations", bearer=developer_bearer,
+        body={"operation": "create_entity", "entity": entity, "fields": [field], "field_types": {field: "string"}},
+    )
+    if status != 200:
+        raise RealServerMeasurementFailure(f"POST /v1/schema/operations -> {status}, could not create {entity!r}")
+    status, _document = _real_server_request(
+        "POST", f"{data_base_url}/data/{entity}/mutations", bearer=developer_bearer,
+        body={"operations": [{"operation": "insert", "values": {field: "perfbase-real-seed"}}]},
+    )
+    if status != 200:
+        raise RealServerMeasurementFailure(f"POST /v1/data/{entity}/mutations -> {status}, could not seed {entity!r}")
+
+
+def _confirm_first_query(data_base_url: str, runtime_bearer: str, entity: str, field: str) -> None:
+    """The work order's D-15: the K=1 sanity query -- one real `query`, with the `runtime_
+    bearer` every measured request below also uses (its completion condition
+    166), BEFORE any concurrent measurement starts. `OC` 1.5-32 (空振り禁
+    止): 200 alone is not enough -- a 200 with zero rows is refused exactly
+    like a non-200 status is (its completion condition 167), never silently
+    measured as if it were a real read."""
+    status, document = _real_server_request(
+        "POST", f"{data_base_url}/data/{entity}/query", bearer=runtime_bearer, body={"select": [field]},
+    )
+    if status != 200:
+        raise RealServerMeasurementFailure(f"POST /v1/data/{entity}/query (K=1 sanity check) -> {status} (expected 200)")
+    items = document.get("items") if isinstance(document, dict) else None
+    if not isinstance(items, list) or not items:
+        raise RealServerMeasurementFailure(
+            f"POST /v1/data/{entity}/query (K=1 sanity check) -> 200 but zero rows -- refusing an empty measurement"
+        )
+
+
+def _real_server_client_worker(
+    count: int, query_url: str, bearer: str, field: str, barrier: Any, result_queue: Any,
+) -> None:
+    """The work order's §6.1 監督裁定 17: one client OS process's own share of every group
+    (warmup AND measured) of one (plug, K) run -- spawned exactly ONCE by `_spawn_real_
+    server_clients` and reused for the run's whole lifetime, never respawned per group.
+    Holds exactly ONE `httpx.AsyncClient` (below) for that whole lifetime, so a client
+    library's own one-time costs (httpcore's lazy anyio-backend import, the first
+    connection's dial) land inside whichever group happens first -- a warmup group, for any
+    `--warmup >= 1` run -- and never repeat for any later group, including every measured
+    one. Serves one group per `barrier.wait()` release: `count` real `query` requests, fired
+    together via exactly ONE `asyncio.gather` call (never one `await` at a time -- its
+    completion condition 134). A per-request failure (a non-2xx status, or the connection
+    dropping mid-flight) is caught HERE and turned into a status this worker reports back
+    (`599` for a transport-level failure that never got a real HTTP status at all) -- it
+    never raises out of this function, which would otherwise leave the parent's own
+    `result_queue.get()` for this group waiting forever. Completion times are `time.
+    time_ns()` only (never `time.perf_counter()`, which cannot be compared across process
+    boundaries -- its completion condition 136); CPU is this process's own `resource.
+    getrusage(RUSAGE_SELF)` difference across the SAME `asyncio.gather` call (`ru_utime +
+    ru_stime`, the same pair `_measure_op`'s own `cpu_total_ms` reads), freshly taken at the
+    top of every group -- never a stale reading held over from an earlier group, which would
+    let one group's own CPU keep accumulating into every later one. Runs until the parent's
+    own `barrier.abort()` (an explicit stop, sent on every exit path -- 監督裁定 17) breaks
+    this process out of its next `barrier.wait()` (raising `BrokenBarrierError`, caught
+    below) and lets it return."""
+    import httpx  # noqa: PLC0415 -- lazy, real-transport dependency (module docstring)
+
+    async def _one(client: "httpx.AsyncClient") -> "tuple[int, int | None]":
+        try:
+            response = await client.post(query_url, json={"select": [field]}, headers={"Authorization": f"Bearer {bearer}"})
+        except Exception:  # noqa: BLE001 - a transport failure is a reported status, never an uncaught worker crash
+            return 599, None
+        rows: "int | None" = None
+        if response.status_code == 200:
+            try:
+                items = response.json().get("items")
+                rows = len(items) if isinstance(items, list) else None
+            except Exception:  # noqa: BLE001 - an unparseable 200 body is reported, not raised
+                rows = None
+        return response.status_code, rows
+
+    async def _serve_groups() -> None:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                try:
+                    barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
+                except threading.BrokenBarrierError:
+                    return
+                started_ns = time.time_ns()
+                before = resource.getrusage(resource.RUSAGE_SELF)
+                results = await asyncio.gather(*(_one(client) for _ in range(count)))
+                completed_ns = time.time_ns()
+                after = resource.getrusage(resource.RUSAGE_SELF)
+                cpu_ms = ((after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)) * 1000.0
+                result_queue.put({
+                    "t0": started_ns,
+                    "t1": completed_ns,
+                    "cpu_ms": cpu_ms,
+                    "statuses": [status for status, _rows in results],
+                    "row_counts": [rows for _status, rows in results],
+                    "pid": os.getpid(),
+                })
+
+    asyncio.run(_serve_groups())
+
+
+def _spawn_real_server_clients(
+    query_url: str, bearer: str, field: str, counts: "list[int]", n_children: int,
+) -> "tuple[list[Any], Any, Any]":
+    """The work order's §6.1 監督裁定 17: spawns `n_children` client OS processes via
+    `_REAL_SERVER_MP_CONTEXT` (`forkserver`, warmed by `_run_real_server`'s own `_warm_
+    forkserver` call before this is ever reached) ONCE for the whole (plug, K) run --
+    `_measure_real_server` calls this exactly once, before its own first group. Returns the
+    started `Process` list together with the `Barrier(n_children + 1)` (the parent is itself
+    a party) and the shared `Queue` every child's group reports land on -- `_run_one_real_
+    server_group` releases the barrier and collects from the queue, one group at a time, for
+    as many groups as the run has; `_stop_real_server_clients` is this function's own
+    required counterpart, called exactly once regardless of how the run ends."""
+    ctx = _REAL_SERVER_MP_CONTEXT
+    barrier = ctx.Barrier(n_children + 1)
+    result_queue: Any = ctx.Queue()
+    processes = [
+        ctx.Process(target=_real_server_client_worker, args=(counts[i], query_url, bearer, field, barrier, result_queue))
+        for i in range(n_children)
+    ]
+    for process in processes:
+        process.start()
+    return processes, barrier, result_queue
+
+
+def _run_one_real_server_group(barrier: Any, result_queue: Any, n_children: int) -> dict:
+    """The work order's §6.1 監督裁定 17: releases the shared barrier for ONE group (warmup
+    or measured) of an already-running set of client processes (`_spawn_real_server_clients`
+    spawns them once, for the whole run) and collects exactly `n_children` result messages,
+    one per process. The parent's own `barrier.wait()` only releases the barrier -- its own
+    return from that call is never read as a timestamp. `start_ns` is the MINIMUM of the
+    children's own `t0` (each child's own `time.time_ns()`, read immediately after ITS OWN
+    `barrier.wait()` returns) -- never the parent's, which lags the first child to resume by
+    however long the parent itself takes to wake and re-schedule (its completion condition
+    136)."""
+    try:
+        barrier.wait(timeout=_REAL_SERVER_BARRIER_TIMEOUT_S)
+    except threading.BrokenBarrierError as exc:
+        raise RealServerMeasurementFailure(f"real-server client processes did not start together in time: {exc}") from exc
+    try:
+        messages = [result_queue.get(timeout=_REAL_SERVER_QUEUE_TIMEOUT_S) for _ in range(n_children)]
+    except queue.Empty as exc:
+        raise RealServerMeasurementFailure(f"a real-server client process did not report a result in time: {exc}") from exc
+    start_ns = min(message["t0"] for message in messages)
+    completion_ns = [message["t1"] for message in messages]
+    return {
+        "wall_ms": _group_wall_ms(start_ns, completion_ns),
+        "cpu_client_ms": sum(message["cpu_ms"] for message in messages),
+        "statuses": [status for message in messages for status in message["statuses"]],
+        "client_processes": len({message["pid"] for message in messages}),
+        "messages": messages,
+    }
+
+
+def _stop_real_server_clients(processes: "list[Any]", barrier: Any) -> None:
+    """The work order's §6.1 監督裁定 17: the explicit stop `_spawn_real_server_clients`
+    requires -- called exactly once by `_measure_real_server`'s own `finally`, on every exit
+    path (the run's normal end AND every failure). `barrier.abort()` breaks every client
+    process out of its own next `barrier.wait()` (raising `BrokenBarrierError`, which `_real_
+    server_client_worker` catches and returns from) without ever releasing one more round of
+    real HTTP traffic. Every process is then joined (and, if still alive past its own
+    timeout, terminated) -- no run ever leaves an orphaned client process behind."""
+    barrier.abort()
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+
+def _measure_real_server(
+    *, query_url: str, bearer: str, field: str, warmup: int, n: int, concurrency: int, n_children: int, counts: "list[int]",
+) -> dict:
+    """The work order's §6.1 監督裁定 17: spawns the run's own client processes exactly
+    ONCE (`_spawn_real_server_clients`), before its first group, and stops them exactly
+    once (`_stop_real_server_clients`, a `finally` covering the WHOLE run -- the normal end
+    AND every failure) -- never per group. `warmup + n` groups follow, each one call to
+    `_run_one_real_server_group` against that SAME already-running set of processes --
+    warmup groups run identically but never enter the returned `p50_ms`/`p95_ms`/`wall_ms`/
+    `cpu_client_ms`/`requests`/`client_processes` (its completion condition 137, the same
+    warmup/measured split `_measure_op` already applies to the 6 registered plugs). Any
+    non-200 status anywhere -- warmup or measured -- aborts the WHOLE run (its completion
+    condition 143): no `REALPERF`/`REALCPU` line is ever built from a partially-failed
+    measurement. `requests` is the number of MEASURED responses this run actually observed,
+    never `n * concurrency`'s own formula alone -- a run that observed fewer than that (`OC`
+    1.5-32, the same guard its completion condition 167's own K=1 check already applies)
+    aborts too, refusing to print a row that undercounts its own measurement.
+    `client_processes` is the FIRST measured group's own observed distinct child-process
+    count (`_run_one_real_server_group`'s own `client_processes`), never the caller's
+    precomputed `n_children` -- a regression that spawns fewer real child processes than
+    `n_children` says is now visible in the printed row, not just in an unobserved
+    argument."""
+    processes, barrier, result_queue = _spawn_real_server_clients(query_url, bearer, field, counts, n_children)
+    try:
+        measured_wall_ms: "list[float]" = []
+        cpu_client_ms_total = 0.0
+        measured_requests = 0
+        client_processes: "int | None" = None
+        for index in range(warmup + n):
+            is_warmup = index < warmup
+            group = _run_one_real_server_group(barrier, result_queue, n_children)
+            for status in group["statuses"]:
+                if status != 200:
+                    raise RealServerMeasurementFailure(f"query response status {status} (expected 200)")
+            if not is_warmup:
+                measured_wall_ms.append(group["wall_ms"])
+                cpu_client_ms_total += group["cpu_client_ms"]
+                measured_requests += len(group["statuses"])
+                if client_processes is None:
+                    client_processes = group["client_processes"]
+    finally:
+        _stop_real_server_clients(processes, barrier)
+    expected_requests = n * concurrency
+    if measured_requests < expected_requests:
+        raise RealServerMeasurementFailure(
+            f"measured only {measured_requests} query responses, expected {expected_requests} "
+            f"(n={n} x concurrency={concurrency}) -- refusing a short measurement"
+        )
+    sorted_wall_ms = sorted(measured_wall_ms)
+    return {
+        "n": len(measured_wall_ms),
+        "p50_ms": _percentile(sorted_wall_ms, 50),
+        "p95_ms": _percentile(sorted_wall_ms, 95),
+        "wall_ms": sum(measured_wall_ms),
+        "cpu_client_ms": cpu_client_ms_total,
+        "requests": measured_requests,
+        "client_processes": client_processes,
+    }
+
+
+def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace) -> None:
+    """The work order's D-15's own full sequence, in order: rotate the launcher's own
+    control credential (it starts `must_rotate=true`, and no other control-plane
+    call succeeds until this runs) -> resolve `application_id` -> issue a
+    developer credential (with the ROTATED control credential, never the
+    original `control_bearer`) -> create the entity and seed its one row
+    -> the K=1 sanity query -> the real `--client-processes`/`--
+    concurrency` measurement -> print `REALPERF` then `REALCPU`, with
+    nothing printed between or before them past `PERFRUN` (its
+    completion condition 171 -- `main()` prints `PERFRUN` before this
+    function is ever reached). Raises `RealServerMeasurementFailure`
+    (never prints either line) for any failure along the way --
+    `_run_real_server` is
+    the one place that catches it."""
+    rotated_control_bearer = _rotate_control_credential(launcher.control_base_url, launcher.control_bearer, launcher.control_credential_id)
+    application_id = _resolve_application_id(launcher.data_base_url, launcher.runtime_bearer)
+    developer_bearer = _issue_developer_credential(launcher.control_base_url, rotated_control_bearer, application_id)
+    _prepare_real_server_entity(launcher.data_base_url, developer_bearer, _REAL_SERVER_ENTITY, _REAL_SERVER_FIELD)
+    _confirm_first_query(launcher.data_base_url, launcher.runtime_bearer, _REAL_SERVER_ENTITY, _REAL_SERVER_FIELD)
+    n_children = _num_real_server_clients(args.client_processes, args.concurrency)
+    counts = _distribute_group_counts(args.concurrency, n_children)
+    query_url = f"{launcher.data_base_url}/data/{_REAL_SERVER_ENTITY}/query"
+    result = _measure_real_server(
+        query_url=query_url, bearer=launcher.runtime_bearer, field=_REAL_SERVER_FIELD,
+        warmup=args.warmup, n=args.n, concurrency=args.concurrency, n_children=n_children, counts=counts,
+    )
+    print(_format_realperf_row(args.real_server, args.concurrency, result["client_processes"], result["n"], result["p50_ms"], result["p95_ms"]))
+    print(_format_realcpu_row(args.real_server, args.concurrency, result["client_processes"], result["requests"], result["wall_ms"], result["cpu_client_ms"]))
+
+
+def _run_real_server(args: argparse.Namespace) -> int:
+    """The work order's D-15: `--real-server`'s own entry point, called by `main()` in
+    place of `_run` -- never both (its completion condition 144). Discovers
+    and starts the launcher (`ceilings={"data": 1, "control": 1}`,
+    its completion condition 128); a failure discovering/starting it (a
+    registry lookup miss, for instance) is reported and returns 1, the
+    same as a measurement failure below, never an uncaught traceback out
+    of `main()`. Once started, `launcher.stop()` is ALWAYS called exactly
+    once (its completion conditions 129/130), success or failure -- outside
+    the second `try`, which wraps only the post-`start()` work, so a
+    `start()` failure (which every launcher's own `start()` already
+    resolves with its own internal `stop()` before re-raising) is never
+    double-stopped."""
+    _warm_forkserver()
+    try:
+        launcher_cls = _load_composition_root_class(args.registry, args.real_server)
+        launcher = launcher_cls()
+        launcher.start(ceilings={"data": 1, "control": 1})
+    except RealServerMeasurementFailure as exc:
+        print(f"perf_baseline: {exc}", file=sys.stderr)
+        return 1
+    try:
+        _measure_real_server_and_emit(launcher, args)
+    except RealServerMeasurementFailure as exc:
+        print(f"perf_baseline: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        launcher.stop()
+    return 0
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -1861,6 +2409,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.concurrency < 1:
         parser.error("--concurrency must be >= 1")
+    if args.client_processes < 1:
+        parser.error("--client-processes must be >= 1")
+    if args.real_server and args.n < 1:
+        # The work order's D-15 measures MEASURED groups only; at
+        # `--n 0` `_measure_real_server`'s own `client_processes` is
+        # never set (no measured group ever runs to set it), printing
+        # `client_processes=None` -- refuse before that, the same way
+        # `--concurrency`/`--client-processes` already refuse below 1.
+        parser.error("--n must be >= 1 for --real-server")
 
     print(_perfrun_line())
 
@@ -1876,6 +2433,13 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     os.environ.update(cluster_env)
                     os.environ.pop("PGPASSWORD", None)
+                    # Work order `docs/work-orders/WORK_ORDER_R101_SERIALIZATION_ATTRIBUTION_V1.md`
+                    # §7.3 D-15 (§9.2 completion condition 145): the
+                    # `--real-server` path runs under the SAME exclusive lock
+                    # and throwaway cluster as the 6-plug path below -- never
+                    # both in one invocation (§9.2 completion condition 144).
+                    if args.real_server:
+                        return _run_real_server(args)
                     return _run(args)
                 finally:
                     for name, value in saved_env.items():  # put the caller's own environment back, always

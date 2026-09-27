@@ -35,6 +35,7 @@ import httpx
 import psycopg
 import pytest
 
+import mitatedb_api.http as http_module
 from mitatedb_api.application_audit import PostgresApplicationAuditSink
 from mitatedb_api.auth import Role
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
@@ -495,6 +496,84 @@ def test_build_app_rejects_invalid_control_plane_status_value(main_module, platf
     env["MITATEDB_CONTROL_PLANE_STATUS"] = "ENABLED"  # wrong case -- not one of the two exact members
     with pytest.raises(Exception, match="MITATEDB_CONTROL_PLANE_STATUS"):
         main_module.build_app(env)
+
+
+def test_thread_limit_from_env_unit_contract(main_module) -> None:
+    """Completion conditions 97/153: unset or empty falls back to
+    `default`; a positive integer is returned as-is -- the function
+    itself, in isolation (mirrors `test_optional_float_default_path_is_
+    not_regressed` immediately below).
+
+    mutation M191 (`mitatedb_api/main.py`): treat an empty string as if
+    it were a valid override -- this test's own second assertion (`""`
+    -> `4`) goes red."""
+    assert main_module._thread_limit_from_env({}, "MITATEDB_THREAD_LIMIT", 4) == 4
+    assert main_module._thread_limit_from_env({"MITATEDB_THREAD_LIMIT": ""}, "MITATEDB_THREAD_LIMIT", 4) == 4
+    assert main_module._thread_limit_from_env({"MITATEDB_THREAD_LIMIT": "6"}, "MITATEDB_THREAD_LIMIT", 4) == 6
+
+
+def test_thread_limit_from_env_rejects_zero_negative_or_non_numeric(main_module) -> None:
+    """Completion conditions 99/100/101: `0`, a negative integer, and a
+    non-numeric value all raise `ValueError` naming the variable.
+
+    mutation M141 (`mitatedb_api/main.py`): only reject a negative value,
+    letting `0` through -- this test's own `"0"` `pytest.raises` goes red.
+    mutation M142 (`mitatedb_api/main.py`): only reject `0`, letting a
+    negative value through -- this test's own `"-3"` `pytest.raises` goes
+    red.
+    mutation M143 (`mitatedb_api/main.py`): fall back to `default`
+    instead of raising when `int()` fails -- this test's own `"abc"`
+    `pytest.raises` goes red."""
+    for raw in ("0", "-3", "abc"):
+        with pytest.raises(ValueError, match="MITATEDB_THREAD_LIMIT"):
+            main_module._thread_limit_from_env({"MITATEDB_THREAD_LIMIT": raw}, "MITATEDB_THREAD_LIMIT", 4)
+
+
+def test_build_app_wires_thread_limit_from_the_env(main_module, platform, probe_app) -> None:
+    """Completion conditions 97/98: `build_app`'s own `create_app(...)`
+    call receives the SAME effective value `_thread_limit_from_env`
+    resolves -- observed on the constructed app's own Starlette middleware
+    list (`Middleware.kwargs`), never re-executed against a live request
+    here (`test_threadpool_offload.py`'s own D-8 tests already pin that
+    `create_app(thread_limit=N)` itself sets a fresh loop's limiter to
+    `N`; composing that with this wiring check is condition 97/98's own
+    full claim).
+
+    mutation M139 (`mitatedb_api/main.py`): pass a hardcoded `None`
+    instead of the computed value to `create_app(...)`'s own `thread_
+    limit=` keyword -- this test's own `next(m for m in ... if m.cls is
+    ThreadLimitMiddleware)` lookup goes red (no `ThreadLimitMiddleware`
+    in the list at all, `StopIteration`).
+    mutation M140 (`mitatedb_api/main.py`): assign the wired value from
+    `DEFAULT_THREAD_LIMIT` unconditionally, discarding the env -- this
+    test's own `== 6` assertion (env set to `"6"`) goes red (reads `4`)."""
+    env = _base_env(platform, probe_app)
+    env["MITATEDB_THREAD_LIMIT"] = "6"
+    app = main_module.build_app(env)
+    inner_app = app.app
+    middleware = next(m for m in inner_app.user_middleware if m.cls is http_module.ThreadLimitMiddleware)
+    assert middleware.kwargs["thread_limit"] == 6
+
+    env_unset = _base_env(platform, probe_app)
+    app_unset = main_module.build_app(env_unset)
+    middleware_unset = next(m for m in app_unset.app.user_middleware if m.cls is http_module.ThreadLimitMiddleware)
+    assert middleware_unset.kwargs["thread_limit"] == 4
+
+
+def test_build_app_rejects_invalid_thread_limit_env(main_module, platform, probe_app) -> None:
+    """Completion conditions 99/100/101 (wiring level): `build_app`
+    itself fails to start on `0`/negative/non-numeric `MITATEDB_THREAD_
+    LIMIT`.
+
+    mutation M143 (`mitatedb_api/main.py`, wiring level): silently
+    degrading to `DEFAULT_THREAD_LIMIT` on an unparsable value -- this
+    test's own `pytest.raises` goes red (`build_app` returns an app
+    instead of raising)."""
+    for raw in ("0", "-3", "abc"):
+        env = _base_env(platform, probe_app)
+        env["MITATEDB_THREAD_LIMIT"] = raw
+        with pytest.raises(ValueError, match="MITATEDB_THREAD_LIMIT"):
+            main_module.build_app(env)
 
 
 _INVALID_AUDIT_FLUSH_INTERVAL_VALUES = ["0", "-1", "nan", "inf", "not-a-number"]
