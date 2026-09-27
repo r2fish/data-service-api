@@ -1844,9 +1844,9 @@ def test_cpu_total_ms_includes_both_ru_utime_and_ru_stime(monkeypatch):
 # the HTTP stub).
 # ---------------------------------------------------------------------
 
-_REALSERVER_STUB_SERVER_SCRIPT = 'import http.server\nimport json\nimport os\nimport sys\nimport threading\nimport time\n\nconfig = json.loads(open(sys.argv[1], "r", encoding="utf-8").read())\nlog_path = sys.argv[2]\n_log_lock = threading.Lock()\n_counters_lock = threading.Lock()\n_counters = {"query_calls": 0}\n\n\ndef _append_log(entry):\n    with _log_lock:\n        with open(log_path, "a", encoding="utf-8") as f:\n            f.write(json.dumps(entry) + "\\n")\n\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    server_version = "realserverstub/1.0"\n    protocol_version = "HTTP/1.1"\n\n    def log_message(self, fmt, *args):\n        pass\n\n    def _read_body(self):\n        length = int(self.headers.get("Content-Length", 0))\n        raw = self.rfile.read(length) if length else b""\n        return json.loads(raw) if raw else {}\n\n    def _send(self, status, obj):\n        body = json.dumps(obj).encode("utf-8")\n        self.send_response(status)\n        self.send_header("Content-Type", "application/json")\n        self.send_header("Content-Length", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def do_GET(self):\n        start = time.time()\n        if self.path == "/v1/capabilities":\n            self._send(200, {\n                "application_scope": config.get("application_id", "perfapp"),\n                "contract_version": "1.11.0", "capabilities": {}, "limits": {},\n                "limit_enforcement": {}, "authorization_propagation_bound_ms": 0,\n            })\n        else:\n            self._send(404, {})\n        _append_log({\n            "path": self.path, "method": "GET",\n            "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n    def do_POST(self):\n        body = self._read_body()\n        path = self.path\n        start = time.time()\n        if path == "/control/v1/credentials":\n            status = config.get("credential_status", 200)\n            if status == 200:\n                self._send(200, {\n                    "credential_id": "cred1", "application_id": body.get("application_id"),\n                    "role": body.get("role"), "secret": "dev-secret-xyz",\n                })\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/v1/schema/operations":\n            status = config.get("schema_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "revision": "1", "request_id": "r1"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/mutations"):\n            status = config.get("mutation_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "affected": 1, "request_id": "r2"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/query"):\n            with _counters_lock:\n                idx = _counters["query_calls"]\n                _counters["query_calls"] += 1\n            status = config.get("query_status_override", {}).get(str(idx), config.get("query_status", 200))\n            rows = config.get("query_rows_override", {}).get(str(idx), config.get("query_rows", 1))\n            delay_ms = config.get("query_delay_override", {}).get(str(idx), config.get("query_delay_ms", 0))\n            if delay_ms:\n                time.sleep(delay_ms / 1000.0)\n            if config.get("drop_at_index") == idx:\n                _append_log({\n                    "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                    "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n                    "call_index": idx, "dropped": True,\n                })\n                self.close_connection = True\n                return\n            if status == 200:\n                self._send(200, {"items": [{"label": "x"} for _ in range(rows)], "request_id": "r3"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(), "call_index": idx,\n            })\n            return\n        self._send(404, {})\n        _append_log({\n            "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n\nhttpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)\nprint(httpd.server_port, flush=True)\nhttpd.serve_forever()\n'
+_REALSERVER_STUB_SERVER_SCRIPT = 'import http.server\nimport json\nimport os\nimport sys\nimport threading\nimport time\n\nconfig = json.loads(open(sys.argv[1], "r", encoding="utf-8").read())\nlog_path = sys.argv[2]\n_log_lock = threading.Lock()\n_counters_lock = threading.Lock()\n_counters = {"query_calls": 0}\n_rotation_lock = threading.Lock()\n_rotation_state = {"rotated": False, "new_control_secret": None}\n\n\ndef _append_log(entry):\n    with _log_lock:\n        with open(log_path, "a", encoding="utf-8") as f:\n            f.write(json.dumps(entry) + "\\n")\n\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    server_version = "realserverstub/1.0"\n    protocol_version = "HTTP/1.1"\n\n    def log_message(self, fmt, *args):\n        pass\n\n    def _read_body(self):\n        length = int(self.headers.get("Content-Length", 0))\n        raw = self.rfile.read(length) if length else b""\n        return json.loads(raw) if raw else {}\n\n    def _send(self, status, obj):\n        body = json.dumps(obj).encode("utf-8")\n        self.send_response(status)\n        self.send_header("Content-Type", "application/json")\n        self.send_header("Content-Length", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def do_GET(self):\n        start = time.time()\n        if self.path == "/v1/capabilities":\n            self._send(200, {\n                "application_scope": config.get("application_id", "perfapp"),\n                "contract_version": "1.11.0", "capabilities": {}, "limits": {},\n                "limit_enforcement": {}, "authorization_propagation_bound_ms": 0,\n            })\n        else:\n            self._send(404, {})\n        _append_log({\n            "path": self.path, "method": "GET",\n            "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n    def do_POST(self):\n        body = self._read_body()\n        path = self.path\n        start = time.time()\n        if path.startswith("/control/v1/credentials/") and path.endswith("/rotate"):\n            target_id = path[len("/control/v1/credentials/"):-len("/rotate")]\n            expected_id = config.get("control_credential_id", "ctl1")\n            new_secret = config.get("new_control_secret", "rotated-control-secret")\n            if target_id == expected_id:\n                with _rotation_lock:\n                    _rotation_state["rotated"] = True\n                    _rotation_state["new_control_secret"] = new_secret\n                self._send(200, {"credential_id": target_id, "secret": new_secret})\n            else:\n                self._send(403, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/control/v1/credentials":\n            auth = self.headers.get("Authorization", "")\n            bearer = auth[len("Bearer "):] if auth.startswith("Bearer ") else auth\n            with _rotation_lock:\n                rotated = _rotation_state["rotated"]\n                new_secret = _rotation_state["new_control_secret"]\n            if not rotated or bearer != new_secret:\n                self._send(403, {"error": "must_rotate"})\n            else:\n                status = config.get("credential_status", 200)\n                if status == 200:\n                    self._send(200, {\n                        "credential_id": "cred1", "application_id": body.get("application_id"),\n                        "role": body.get("role"), "secret": "dev-secret-xyz",\n                    })\n                else:\n                    self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/v1/schema/operations":\n            status = config.get("schema_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "revision": "1", "request_id": "r1"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/mutations"):\n            status = config.get("mutation_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "affected": 1, "request_id": "r2"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/query"):\n            with _counters_lock:\n                idx = _counters["query_calls"]\n                _counters["query_calls"] += 1\n            status = config.get("query_status_override", {}).get(str(idx), config.get("query_status", 200))\n            rows = config.get("query_rows_override", {}).get(str(idx), config.get("query_rows", 1))\n            delay_ms = config.get("query_delay_override", {}).get(str(idx), config.get("query_delay_ms", 0))\n            if delay_ms:\n                time.sleep(delay_ms / 1000.0)\n            if config.get("drop_at_index") == idx:\n                _append_log({\n                    "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                    "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n                    "call_index": idx, "dropped": True,\n                })\n                self.close_connection = True\n                return\n            if status == 200:\n                self._send(200, {"items": [{"label": "x"} for _ in range(rows)], "request_id": "r3"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(), "call_index": idx,\n            })\n            return\n        self._send(404, {})\n        _append_log({\n            "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n\nhttpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)\nprint(httpd.server_port, flush=True)\nhttpd.serve_forever()\n'
 
-_REALSERVER_STUB_LAUNCHER_TEMPLATE = 'class StubLauncher:\n    name = {peer!r}\n    START_CALLS = []\n    STOP_CALLS = []\n\n    def __init__(self):\n        pass\n\n    def start(self, *, ceilings):\n        type(self).START_CALLS.append(dict(ceilings))\n\n    def stop(self):\n        type(self).STOP_CALLS.append(True)\n\n    @property\n    def data_base_url(self):\n        return {data_base_url!r}\n\n    @property\n    def control_base_url(self):\n        return {control_base_url!r}\n\n    @property\n    def runtime_bearer(self):\n        return {runtime_bearer!r}\n\n    @property\n    def control_bearer(self):\n        return {control_bearer!r}\n'
+_REALSERVER_STUB_LAUNCHER_TEMPLATE = 'class StubLauncher:\n    name = {peer!r}\n    START_CALLS = []\n    STOP_CALLS = []\n\n    def __init__(self):\n        pass\n\n    def start(self, *, ceilings):\n        type(self).START_CALLS.append(dict(ceilings))\n\n    def stop(self):\n        type(self).STOP_CALLS.append(True)\n\n    @property\n    def data_base_url(self):\n        return {data_base_url!r}\n\n    @property\n    def control_base_url(self):\n        return {control_base_url!r}\n\n    @property\n    def runtime_bearer(self):\n        return {runtime_bearer!r}\n\n    @property\n    def control_bearer(self):\n        return {control_bearer!r}\n\n    @property\n    def control_credential_id(self):\n        return {control_credential_id!r}\n'
 
 _realserver_module_counter = itertools.count()
 
@@ -1883,14 +1883,16 @@ def _read_realserver_log(log_path):
     return [json.loads(line) for line in lines]
 
 
-def _write_realserver_stub_registry(tmp_path, *, peer, base_url, runtime_bearer="runtime-secret", control_bearer="control-secret"):
+def _write_realserver_stub_registry(
+    tmp_path, *, peer, base_url, runtime_bearer="runtime-secret", control_bearer="control-secret", control_credential_id="ctl1",
+):
     idx = next(_realserver_module_counter)
     module_name = f"realserver_stub_launcher_{idx}"
     stub_dir = tmp_path / "realserver_stub_registry"
     stub_dir.mkdir(exist_ok=True)
     module_src = _REALSERVER_STUB_LAUNCHER_TEMPLATE.format(
         peer=peer, data_base_url=f"{base_url}/v1", control_base_url=f"{base_url}/control/v1",
-        runtime_bearer=runtime_bearer, control_bearer=control_bearer,
+        runtime_bearer=runtime_bearer, control_bearer=control_bearer, control_credential_id=control_credential_id,
     )
     (stub_dir / f"{module_name}.py").write_text(module_src, encoding="utf-8")
     if str(stub_dir) not in sys.path:
@@ -2491,13 +2493,15 @@ def test_real_server_path_runs_under_the_suite_lock_and_owned_cluster(tmp_path, 
 def test_real_server_issues_developer_credential_before_entity(tmp_path):
     """Completion condition 164: before entity setup, the stub observes a
     `POST /control/v1/credentials` (role `developer`) authorized by the
-    launcher's own `control_bearer`.
+    launcher's own control credential, rotated first (the launcher's
+    `control_bearer` starts `must_rotate=true` and cannot authorize
+    `issue_credential` on its own).
 
     mutation M201 (`tools/perf_baseline.py`): never issue a developer
     credential -- use `runtime_bearer` for the schema operation instead --
     red because this test's own log-based assertion (a credentials POST
-    with `Authorization: Bearer control-secret` precedes the schema POST)
-    finds no such entry at all."""
+    with `Authorization: Bearer rotated-control-secret` precedes the
+    schema POST) finds no such entry at all."""
     base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
     try:
         args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
@@ -2507,8 +2511,84 @@ def test_real_server_issues_developer_credential_before_entity(tmp_path):
         cred_idx = next(i for i, e in enumerate(entries) if e["path"] == "/control/v1/credentials")
         schema_idx = next(i for i, e in enumerate(entries) if e["path"] == "/v1/schema/operations")
         assert cred_idx < schema_idx
-        assert entries[cred_idx]["authorization"] == "Bearer control-secret"
+        assert entries[cred_idx]["authorization"] == "Bearer rotated-control-secret"
         assert entries[cred_idx]["body"]["role"] == "developer"
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_rotates_the_control_credential_before_issuing_developer_credential(tmp_path):
+    """Completion condition 128 相当 (rotate 追加分): before the developer
+    credential is issued, the stub observes a `POST /control/v1/
+    credentials/<control_credential_id>/rotate` authorized by the
+    launcher's own (pre-rotation) `control_bearer` -- the launcher's
+    control credential starts `must_rotate=true`, so no other control-
+    plane call (`issue_credential` included) succeeds until this runs.
+
+    mutation M212 (`tools/perf_baseline.py`): drop the rotate call
+    entirely -- red because this test's own log-based assertion (a
+    rotate POST at the launcher's own `control_credential_id` precedes
+    the credentials POST) finds no such entry at all."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        rotate_idx = next(i for i, e in enumerate(entries) if e["path"] == "/control/v1/credentials/ctl1/rotate")
+        cred_idx = next(i for i, e in enumerate(entries) if e["path"] == "/control/v1/credentials")
+        assert rotate_idx < cred_idx
+        assert entries[rotate_idx]["authorization"] == "Bearer control-secret"
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_issues_developer_credential_with_the_rotated_secret(tmp_path):
+    """Completion condition 164 相当 (rotate 追加分): the developer-credential
+    issuance is authorized by the NEW secret the rotate call returned --
+    never the launcher's original `control_bearer`.
+
+    mutation M213 (`tools/perf_baseline.py`): issue the developer
+    credential with the launcher's original `control_bearer` instead of
+    the rotated secret -- red because the stub's must_rotate gate 403s
+    any credentials POST that does not carry the post-rotate secret, so
+    `code == 0` goes red before this test's own `Authorization`
+    assertion is even reached."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(
+        tmp_path, {"new_control_secret": "rotated-secret-for-this-test"},
+    )
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        cred_entry = next(e for e in entries if e["path"] == "/control/v1/credentials")
+        assert cred_entry["authorization"] == "Bearer rotated-secret-for-this-test"
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_rotate_uses_the_launchers_own_control_credential_id(tmp_path):
+    """Completion condition 128 相当 (rotate 追加分): the rotate call's path
+    `credential_id` is read from the launcher's own `control_credential_
+    id` -- never a fixed literal -- so a launcher whose id differs from
+    the common default still rotates successfully.
+
+    mutation M214 (`tools/perf_baseline.py`): rotate a fixed literal id
+    (the common default `"ctl1"`) instead of reading `launcher.control_
+    credential_id` -- red because this test's launcher/stub pair share a
+    DIFFERENT id (`"custom-ctl-id-7"`), so the fixed-literal rotate call
+    403s against the stub's own `control_credential_id` check and the
+    whole run fails (`code == 0` goes red)."""
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(
+        tmp_path, {"control_credential_id": "custom-ctl-id-7"}, control_credential_id="custom-ctl-id-7",
+    )
+    try:
+        args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        entries = _read_realserver_log(log_path)
+        assert any(e["path"] == "/control/v1/credentials/custom-ctl-id-7/rotate" for e in entries)
     finally:
         _stop_realserver_stub_server(proc)
 

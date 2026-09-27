@@ -2035,11 +2035,31 @@ def _resolve_application_id(data_base_url: str, runtime_bearer: str) -> str:
     return document["application_scope"]
 
 
+def _rotate_control_credential(control_base_url: str, control_bearer: str, control_credential_id: str) -> str:
+    """The launcher's own `control_bearer` is `must_rotate=true` (`ops bootstrap`'s own
+    printed warning) -- the only operations it authorizes are `GET /control/v1/capabilities`
+    and rotating itself, so this MUST run before any other control-plane call
+    (`issue_credential` included) can succeed. `POST /control/v1/credentials/
+    {credential_id}/rotate`, no request body, path `credential_id` the launcher's own
+    `control_credential_id` (the rotate path requires the path id to equal the
+    presented credential's own id; the contract forbids deriving that id from the
+    secret, so this never parses `control_bearer` itself). Returns the new secret --
+    every control-plane call after this uses it, never the original `control_bearer`."""
+    status, document = _real_server_request(
+        "POST", f"{control_base_url}/credentials/{control_credential_id}/rotate", bearer=control_bearer,
+    )
+    if status != 200 or not isinstance(document, dict) or not document.get("secret"):
+        raise RealServerMeasurementFailure(
+            f"POST /control/v1/credentials/{control_credential_id}/rotate -> {status}, could not rotate the launcher's own control credential"
+        )
+    return document["secret"]
+
+
 def _issue_developer_credential(control_base_url: str, control_bearer: str, application_id: str) -> str:
     """The work order's D-15: `POST /control/v1/credentials`, `role=developer`, authorized
-    by the launcher's own `control_bearer` -- its completion conditions 164/
-    165 (the entity/row setup right after this reuses the returned
-    secret, never `control_bearer`/`runtime_bearer`)."""
+    by the rotated control credential `_rotate_control_credential` just returned --
+    its completion conditions 164/165 (the entity/row setup right after this reuses
+    the returned secret, never `control_bearer`/`runtime_bearer`)."""
     status, document = _real_server_request(
         "POST", f"{control_base_url}/credentials", bearer=control_bearer,
         body={"application_id": application_id, "role": "developer"},
@@ -2258,8 +2278,11 @@ def _measure_real_server(
 
 
 def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace) -> None:
-    """The work order's D-15's own full sequence, in order: resolve `application_id` ->
-    issue a developer credential -> create the entity and seed its one row
+    """The work order's D-15's own full sequence, in order: rotate the launcher's own
+    control credential (it starts `must_rotate=true`, and no other control-plane
+    call succeeds until this runs) -> resolve `application_id` -> issue a
+    developer credential (with the ROTATED control credential, never the
+    original `control_bearer`) -> create the entity and seed its one row
     -> the K=1 sanity query -> the real `--client-processes`/`--
     concurrency` measurement -> print `REALPERF` then `REALCPU`, with
     nothing printed between or before them past `PERFRUN` (its
@@ -2268,8 +2291,9 @@ def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace) -> No
     (never prints either line) for any failure along the way --
     `_run_real_server` is
     the one place that catches it."""
+    rotated_control_bearer = _rotate_control_credential(launcher.control_base_url, launcher.control_bearer, launcher.control_credential_id)
     application_id = _resolve_application_id(launcher.data_base_url, launcher.runtime_bearer)
-    developer_bearer = _issue_developer_credential(launcher.control_base_url, launcher.control_bearer, application_id)
+    developer_bearer = _issue_developer_credential(launcher.control_base_url, rotated_control_bearer, application_id)
     _prepare_real_server_entity(launcher.data_base_url, developer_bearer, _REAL_SERVER_ENTITY, _REAL_SERVER_FIELD)
     _confirm_first_query(launcher.data_base_url, launcher.runtime_bearer, _REAL_SERVER_ENTITY, _REAL_SERVER_FIELD)
     n_children = _num_real_server_clients(args.client_processes, args.concurrency)

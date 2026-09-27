@@ -653,7 +653,10 @@ throwaway platform, processes, or bound ports behind. The launcher itself
 is never modified by this flag: it is reused exactly as `test_c26_
 composition_root.py` already uses it.
 
-**Credential use, in order.** `launcher.control_bearer` issues ONE
+**Credential use, in order.** `launcher.control_bearer` starts `must_
+rotate=true`, so this tool first self-rotates it (`POST /control/v1/
+credentials/<launcher.control_credential_id>/rotate`, no request body) --
+the returned secret, never the original `control_bearer`, then issues ONE
 developer credential (`POST /control/v1/credentials`, `role=developer`)
 for this run's own application (its `application_id`, read from `GET
 /v1/capabilities` via `launcher.runtime_bearer` -- the launcher's own

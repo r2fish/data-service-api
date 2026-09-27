@@ -532,6 +532,18 @@ class RealServerR2db:
         if bootstrapped.returncode != 0:
             raise LauncherStartupError(f"ops bootstrap failed:\n{bootstrapped.stdout}\n{bootstrapped.stderr}")
         self._control_secret = _parse_issued_secret(bootstrapped.stdout)
+        # `control_bearer` alone cannot self-rotate: the control plane's
+        # must_rotate gate requires the rotate path's `credential_id` to
+        # equal this credential's own id, and the contract forbids
+        # deriving `credential_id` from the secret -- so this reads the
+        # id off the same `ops bootstrap` output `control_bearer` above
+        # already reads, rather than parsing it out of the secret.
+        for line in bootstrapped.stdout.splitlines():
+            if line.startswith("credential_id: "):
+                self._control_credential_id = line[len("credential_id: "):]
+                break
+        else:
+            raise LauncherStartupError(f"could not find a 'credential_id: ' line in ops output:\n{bootstrapped.stdout}")
 
     # -- events (design D-1 (B) 1's own ordering, test 1) -------------
 
@@ -826,6 +838,11 @@ class RealServerR2db:
     def control_bearer(self) -> str:
         assert self._control_secret is not None
         return self._control_secret
+
+    @property
+    def control_credential_id(self) -> str:
+        assert self._control_credential_id is not None
+        return self._control_credential_id
 
     def attempt_start_without_process_ceilings(self) -> subprocess.CompletedProcess:
         """Design D-1 (B) 5 / completion condition 5: builds a SEPARATE,
