@@ -2518,7 +2518,8 @@ def test_real_server_issues_developer_credential_before_entity(tmp_path):
 
 
 def test_real_server_rotates_the_control_credential_before_issuing_developer_credential(tmp_path):
-    """Completion condition 128 相当 (rotate 追加分): before the developer
+    """the work order's §6.1 監督裁定 15 (the rotate step of the credential
+    flow, completion condition 164's side): before the developer
     credential is issued, the stub observes a `POST /control/v1/
     credentials/<control_credential_id>/rotate` authorized by the
     launcher's own (pre-rotation) `control_bearer` -- the launcher's
@@ -2526,9 +2527,10 @@ def test_real_server_rotates_the_control_credential_before_issuing_developer_cre
     plane call (`issue_credential` included) succeeds until this runs.
 
     mutation M212 (`tools/perf_baseline.py`): drop the rotate call
-    entirely -- red because this test's own log-based assertion (a
-    rotate POST at the launcher's own `control_credential_id` precedes
-    the credentials POST) finds no such entry at all."""
+    entirely -- red because the stub's must_rotate gate then 403s the
+    developer-credential POST (it never observes a rotated secret), so
+    `code == 0` goes red before this test's own log-based rotate
+    assertion is ever reached."""
     base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path)
     try:
         args = _realserver_args(pb, peer="stubpeer", registry_path=registry_path, client_processes=1, concurrency=1)
@@ -2544,7 +2546,8 @@ def test_real_server_rotates_the_control_credential_before_issuing_developer_cre
 
 
 def test_real_server_issues_developer_credential_with_the_rotated_secret(tmp_path):
-    """Completion condition 164 相当 (rotate 追加分): the developer-credential
+    """the work order's §6.1 監督裁定 15 (the rotate step of the credential
+    flow, completion condition 164's side): the developer-credential
     issuance is authorized by the NEW secret the rotate call returned --
     never the launcher's original `control_bearer`.
 
@@ -2569,7 +2572,8 @@ def test_real_server_issues_developer_credential_with_the_rotated_secret(tmp_pat
 
 
 def test_real_server_rotate_uses_the_launchers_own_control_credential_id(tmp_path):
-    """Completion condition 128 相当 (rotate 追加分): the rotate call's path
+    """the work order's §6.1 監督裁定 15 (the rotate step of the credential
+    flow, completion condition 164's side): the rotate call's path
     `credential_id` is read from the launcher's own `control_credential_
     id` -- never a fixed literal -- so a launcher whose id differs from
     the common default still rotates successfully.
