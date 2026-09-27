@@ -681,7 +681,15 @@ def test_bounded_connection_pool_acquire_folds_a_dead_connection_found_while_wai
     The idle queue starts EMPTY (stage (1)'s own `get_nowait` must find
     nothing, or `acquire()` never reaches stage (3) at all) -- a
     background thread delivers both connections only once `acquire()` is
-    already blocked in stage (3)'s own wait loop.
+    already blocked in stage (3)'s own wait loop. Review round 2 finding
+    N1: `pool._idle.empty()` right after `acquire()` returns makes this
+    deterministic -- without it, `acquire()`'s own wait-loop `get(timeout
+    =...)` could fire between the two `put()` calls below, grab `live`
+    straight away, and return BEFORE `dead` is ever delivered; `dead`
+    would then sit unprocessed in `self._idle`, and `platform_stats()`'s
+    own idle-scan (reading a still-idle connection's attributes directly,
+    never through the fold path) would make the assertions below pass
+    for the wrong reason, even under mutation M204.
 
     mutation M204 (`pool.py`): drop the `_fold_closed_connection_stats
     (conn)` call from stage (3)'s dead-connection branch -- this test's
@@ -703,6 +711,7 @@ def test_bounded_connection_pool_acquire_folds_a_dead_connection_found_while_wai
     conn = pool.acquire()
 
     assert conn is live
+    assert pool._idle.empty(), "both delivered connections must already be drained by acquire() itself (dead folded+forgotten, live returned), never left for platform_stats() to find still idle"
     stats = pool.platform_stats()
     assert stats["db_wall_ms"] >= 7.0
     assert stats["txn_count"] >= 3

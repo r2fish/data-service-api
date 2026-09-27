@@ -1203,7 +1203,9 @@ def test_create_app_default_thread_limit_sets_4_on_a_fresh_loop():
 
 def test_create_app_rejects_a_non_positive_thread_limit():
     """Review round 1 finding F11 (supervisor ruling 2026-09-28): `create_
-    app(thread_limit=...)` rejects zero, a negative int, and a non-int at
+    app(thread_limit=...)` rejects zero, a negative int, a non-int
+    (`"4"`), and a `bool` (`True` -- `bool` is an `int` subclass in
+    Python, rejected explicitly rather than silently accepted as `1`) at
     construction time, before any request is ever served -- a
     misconfigured deployment fails fast at startup instead of every
     request hitting `ThreadLimitMiddleware`'s own attempt to apply an
@@ -1212,12 +1214,22 @@ def test_create_app_rejects_a_non_positive_thread_limit():
     mutation M206 (`mitatedb_api/http.py`): drop the validation `if` and
     its `raise ValueError` from `create_app` -- this test's own `pytest.
     raises(ValueError)` assertions go red (`create_app(thread_limit=0)`
-    and `create_app(thread_limit=-1)` both return a plain app instead)."""
+    and `create_app(thread_limit=-1)` both return a plain app instead).
+    mutation M208 (`mitatedb_api/http.py`, review round 2 finding N2):
+    drop the `isinstance(thread_limit, bool) or ` clause from the
+    validation -- this test's own `create_app(thread_limit=True)`
+    assertion goes red (`True` passes the remaining `isinstance(...,
+    int)`/`< 1` checks unrejected, since `bool` is an `int` subclass and
+    `True == 1`)."""
     service = _build_light_service()
     with pytest.raises(ValueError, match="thread_limit"):
         http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=0)
     with pytest.raises(ValueError, match="thread_limit"):
         http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=-1)
+    with pytest.raises(ValueError, match="thread_limit"):
+        http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit="4")
+    with pytest.raises(ValueError, match="thread_limit"):
+        http_module.create_app(service, request_bytes_limit=1_048_576, thread_limit=True)
 
 
 def test_create_app_thread_limit_none_adds_no_middleware():

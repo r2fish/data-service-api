@@ -807,13 +807,14 @@ def create_app(
     between it and pool exhaustion are unaffected either way. The returned
     value's own shape (`RequestByteBoundMiddleware` wrapping a Starlette
     app; that app's `state`/`routes`) is the same whichever value
-    `thread_limit` takes. Anything else (zero, negative, or a non-int)
-    raises `ValueError` naming `thread_limit`, at construction time --
-    before any request is ever served, never a per-request 500 once
-    `ThreadLimitMiddleware` tries to apply an invalid value to the loop's
-    own limiter.
+    `thread_limit` takes. Anything else (zero, negative, a non-int, or a
+    `bool` -- `bool` is an `int` subclass in Python, rejected explicitly
+    rather than silently accepted as `0`/`1`) raises `ValueError` naming
+    `thread_limit`, at construction time -- before any request is ever
+    served, never a per-request 500 once `ThreadLimitMiddleware` tries to
+    apply an invalid value to the loop's own limiter.
     """
-    if thread_limit is not None and (not isinstance(thread_limit, int) or thread_limit <= 0):
+    if thread_limit is not None and (isinstance(thread_limit, bool) or not isinstance(thread_limit, int) or thread_limit < 1):
         raise ValueError(f"thread_limit must be a positive integer or None, got {thread_limit!r}")
     middleware = []
     if thread_limit is not None:
