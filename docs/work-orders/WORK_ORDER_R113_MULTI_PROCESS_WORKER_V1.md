@@ -455,6 +455,18 @@ peer-local のテストは小さい L を宣言した構成で駆動してよい
 41. **訂正註 (§4.1)**: launcher `real_server_r2db.py` が controlplane / auditreader の CONNECTION LIMIT を 32 / 8 に上げる ALTER ROLE を受理する (C-26 の lifecycle が control の ceiling 2 を宣言するので、裁定 28 の倍率の下で必要なテスト環境の provisioning)。製品側は migration を足さない (0013 の値は control 1 process の値。ceiling ≥ 2 の配備は F-16 が要る床を名指しで報告する)。**WP-5 の完了条件に足す**: runbook に「`process_ceilings.control` ≥ 2 は controlplane ≥ 16 × control、auditreader ≥ 4 × control の CONNECTION LIMIT が要り、F-16 が正確な床を報告する」の 1 段。
 42. **訂正註 (裁定 39)**: CH-0174 の `--base` の (3) の赤は訂正記録の `old` を第 1 文だけにすれば消える (レビュー担当の clone 実測) ので WP-2 で直す。「基点由来」の分類を撤回。
 
+**監督裁定 43 (2026-09-29、WP-4 の実装報告 1 の逸脱 (a)〜(g)。裁定表は監督保管 `r113_wp4_rulings_1.md`)**
+
+43. WP-4 の逸脱 (a) stub テンプレートへの `workers=` / access log accessor の追加、(b) `REALWORKERS` の 1 行 (REALCPU の直後)、(c) 受付数の窓 (sanity の後〜最後の group、止まった run でも出す)、(d) process group の特定 (`ps` の前後差分、stop 後 10 s、残骸は stderr + 終了コード 1)、(e) `--workers` < 1 は終了コード 2、(f) 146 は stub で観測 (本物の N 本は WP-1 と表 7-3)、(g) 既存コメントの追記、をすべて受理。疑義 2 点 (子の数を道具が数える、成功時の 1 行) は §7.1 の範囲外で採らない (観察)。
+
+**監督裁定 44 (2026-09-29、WP-4 コードレビュー 1 (4 件。裁定表は監督保管 `r113_wp4_rulings_2.md`、レビューは `r113_wp4_code_review_1.md`) の帰結)**
+
+44. 表 7-4 の件数は `REALWORKERS` 行の非 200 の status ごとの件数 (access log から) で埋める (**完了条件 149b**、変異 M149b)。§7.5 の 4 と表 7-4 の「429」は LIMIT_EXCEEDED の意 (r2db 429 / MitateDB 413、裁定 18)。`ps -e` は macOS の legacy モードで全 process を列挙しないので `ps -A` に改め、start 後に launcher の process group を観測できなければ終了コード 1 の番兵を置く (**完了条件 153c**、変異 M153c)。zombie は残骸に数えず件数だけ情報として出す。nginx は道具の検査に入れず、§7.5 の 6 に「nginx の残存 0 (`ps` で確認)」を足す (訂正註)。
+
+**監督裁定 45 (2026-09-29、WP-4 差し戻し 1 の報告の逸脱 (a)〜(f)。裁定表は監督保管 `r113_wp4_rulings_3.md`)**
+
+45. WP-4 差し戻し 1 の逸脱 (a) 非 200 の件数は status 100〜599 の順問い合わせ (非 200 が無ければ問わない)、(b) group stub の拡張、(c) zombie の観測テストと M153z、(d) 153c は monkeypatch の stub で観測、(e) group 候補から zombie を除く、(f) docstring の「live」削除、をすべて受理。再確認は次チャット。
+
 ### 6.2 実施と受け入れ
 
 - **WP-2 (2026-09-28〜29、worktree `r113-wp2`、WIP `934554c` → `2d23741`、r113 に merge)**: 実装担当 sonnet (初回 + 差し戻し 1 / 1b) と opus (差し戻し 1c。sonnet は週次上限)、コードレビュー opus (1 回 + 再確認 1b / 1c、1c は「指摘なし」+ 観察 3)。監督裁定 22〜42 (§6.1)。最終 pt: `pt: 1 failed, 1609 passed in 122.05s` (r2db-api/tests。赤 = 同型性テスト 1 件、残る helper は `_VERIFY_DECLARATIONS_EXIT_CODES` / `_verify_declarations_checks` / `check_max_connections_headroom` の 3 つ = 完了条件 78、WP-3 で消える)、`pt: 67 passed, 73 deselected in 32.78s` (c05 / c26 / c32 -k r2db)、`pt: 303 passed in 36.97s` (tools/tests/test_comment_provenance.py、commit 後)。期待される赤: C-26 `test_c26_ceiling_maps_to_limit_enforcement[MitateDB-api]` (WP-3 まで)、tools/tests の共有 pin 4 件 (`concurrency_slots.py` の分類。完了ゲートで監督が更新)。変異: 初回 `mutate: 47 mutations, 47 as expected` + 差し戻しで足した / 差し替えた 22 件 (M29b、M56b、M70、M70b、M71c、M72c、M74b、M35b、M36b、M45b、M76、M76i、M77、M77i、M8r〜M18r、M31、M32) = 全 69 件 red (変異表は監督保管 `wp2-mutation-table.md` と実装報告 `r113-wp2-report-4.md` 付録)。静的検査: `check_comment_provenance --register` OK (93 files, 434 CH-IDs)、`--base 74d90f3` は 29 行 ((1) AST 差分 10、CH-0322 の改名 2 (裁定 30)、新規ファイル 1、(2) 新規 / 追随 / 改名の追随 16 (裁定 32)、(3)(5) 0)、`check_doc_refs OK`、`public_value_scan total_flagged=0`、`change_class` = C (宣言は D)。`HAVE_FLOCK` = 1。完了条件 29 の SQL 逐語・67 の file:line は `r113-wp2-report-4.md` 付録。
