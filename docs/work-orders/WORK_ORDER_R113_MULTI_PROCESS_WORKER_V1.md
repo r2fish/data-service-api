@@ -419,8 +419,45 @@ peer-local のテストは小さい L を宣言した構成で駆動してよい
 
 21. WP-1 のコードレビュー (opus): 1 回目 18 件 (F1〜F18)、再確認 1b で新規 4 件 (N1〜N4)、再確認 1c で全件閉止・新規 0。裁定: F14 (leader が死んだ後の process group を `sweep_orphans` が掃除できない = cmdline に識別子が無い) は **既知の穴** (`OC` §1.12 の 71: 製品の欠陥がゲートを抜ける穴ではない) として同関数の docstring の `Known gaps` に置き、効かない枝は削った。N1 は launcher の既存 `.name` (`"r2db-api"` / `"MitateDB-api"`) を peer token に使う (WP-2 の 68 / WP-3 の 126 と同値)。N3 は残骸テストを ceiling 2 / workers 2 に広げて (6) の「nor any of its own workers」を実測にした。N4 (pt log が `$SP` の外) は観察 = 発注プロンプトに `export SP` を必ず書く。観察 3 点 (レビュー 1c): C-05 の int[61] の文は WP-2/3 の後に現物と一致する (WP-1 だけを main に統合しない)、C-26 の行は control の preflight fail-fast に触れないが偽ではない、C-26 の残り 21 字 (次の訂正は参照を HISTORY へ)。
 
+**監督裁定 22〜27 (2026-09-28、WP-2 の実装報告 1 回目の逸脱 (a)〜(f) への裁定。裁定表は監督保管 `r113_wp2_rulings_1.md`)**
+
+22. (a) 0015 の rate 加算は PL/pgSQL 関数 `credential_request_rate_admit` でよい (api role pool の autocommit 1 文の呼び出し、SECURITY INVOKER、`clock_timestamp()` 1 回、環の算術は裁定 3 と同値)。設計 D-3 (1) の「1 文」はこの性質を指す。migration ヘッダの経緯トークンは既存 migration と同じ慣行 = 観察。
+23. (b) 【裁定 28 で撤回】F-16 の倍率を control にも呼び出し元で掛ける。
+24. (c) provenance regex の誤書き換えは復元済み (レビュー担当が 65 hunk を囲みの symbol に写し、触った symbol の外の docstring / comment の変更 0 件を実測)。
+25. (d) `record_rate_and_check` の流用 History 行の削除を受理 (新規の塊に History 行は要らない)。
+26. (e) CH-0322 の訂正記録は全文置換 1 件でよい (設計 `CODE_COMMENT_PROVENANCE_V1` §9.3 規則 3 は `old` がちょうど 1 回現れれば足りる)。ただし記録の `old` が基点の塊と一致せず赤だったので差し戻し。
+27. (f) `--base` の残る赤のうち §4.1 (1) の AST 差分と `old 0, new 1` の新規塊 (Known gap 3) は受理。登録済みの塊 (CH-0137 / CH-0257 / CH-0322) の直後への書き足しと偽になった本文は既知の穴ではなく差し戻し (CH-0137 は訂正記録の上で言い換え、CH-0257 は切り離し)。
+
+**監督裁定 28〜36 (2026-09-28、WP-2 コードレビュー 1 回目 (14 件、F1〜F14。裁定表は監督保管 `r113_wp2_rulings_2.md`、レビューは `r113_wp2_code_review_1.md`) の帰結)**
+
+28. **訂正註 (裁定 23 を撤回)**: F-16 の process 数の倍率は `check_role_connection_limits` の中に置く (keyword `process_ceilings`。api / application の床 × `process_ceilings.data`、controlplane / auditreader の床 × `process_ceilings.control`)。3 つの呼び出し元 (main / control_main / ops `verify-declarations`) は `pool_size` を掛けずに渡す。control の F-18 の `pool_size` は `ResourceLimits().concurrency` ではなく data と同じ `role_pool_size(実効 thread limit)`。実効 thread limit の読み方は `limits.py` の 1 関数 (未設定は既定、空でない不正値は fail-loud) に統一し 3 箇所が使う (裁定 25 の (i))。**完了条件を足す**: 71c (control の F-18 の下限は data と同じ式)、72c (control の F-16 の床 = 定数の床 × `process_ceilings.control`)、74b (`verify-declarations` の F-16 も同じ関数・同じ倍率)。変異 M71c (control の `pool_size` を `ResourceLimits().concurrency` に戻す)、M72c (control の倍率を掛けない)、M74b (ops が 1/1 を渡す)。
+29. **訂正註 (§4.1)**: WP-2 は `conformance-tests/test_c26_composition_root.py::test_c26_ceiling_maps_to_limit_enforcement` の 1 テストだけ触ってよい。WP-2 の rate の配線で real-server launcher の ceiling 2 の `requests_per_minute` は `enforced` になる (設計 D-3 (4)) ので、期待値は裁定 20 と同じ宣言分岐 + launcher の rate 配線 accessor との cross-check にする。`CONDITIONS.md` の C-26 は WP-6 で監督が直す。
+30. `_declared_concurrency` → `_declared_pool_size` の改名は残す (名が事実と一致することを優先)。改名で scope の鍵が変わるため `--base` の (2) は赤のまま残る。報告で「改名 (scope key)」と分類し、検査器の Known gaps への追記は WP-6 で監督が行う。
+31. CH-0174 (削除した定数 `_IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES` の塊) は定数と一緒に削除する。
+32. code に追随した CH 無しの塊の書き換え (ops.py 2、limits.py 1、platform_declarations.py 2、main.py 1) は code を変える WP に固有として受理 (Known gap 3 と同じ扱い)。新しい文が事実で現在形であることが条件。
+33. F8 の壊れた文と経緯語は直す (完了条件 73・80)。`docs/code-history/r2db-api/ops.md` の reason 行は訂正記録の場所なので観察。
+34. **訂正註 (裁定 3)**: +1 する位置は `s mod 61` ではなく `GREATEST(base_s, s) mod 61` (通した秒 = 行の現在の基点)。lock を待った古い秒の要求も通した時点の秒に入る。完了条件 29 の逐語もこの形。
+35. `real_server_mitatedb.py::stop` の同型性の赤 (WP-2 の変更ではない) は、差が r2db 側なら WP-2 で揃え、MitateDB 側なら WP-3 で揃える。
+36. F13: `DataService` は `concurrency_configured=True` かつ slot 未配線を `ValueError` にする (**完了条件 56b**、変異 = 検査を外す)。F14: 完了条件 75 の開示は `verify-declarations` の docstring に置く。
+
+**監督裁定 37〜39 (2026-09-29、WP-2 差し戻し 1 の報告の逸脱への裁定。裁定表は監督保管 `r113_wp2_rulings_3.md`)**
+
+37. main.py の `_thread_limit_from_env` は登録済み同型 helper なので本体を残し、`limits.thread_limit_from_env` (control_main / ops が使う) との同値を 1 テストで pin する (**完了条件 70b**、変異 M70b = 共有関数の 1 分岐を変える)。裁定 28 の (ii) の「3 箇所が使う」はこの形で満たす。
+38. service.py の「before this WP」2 文は基点 74d90f3 に在る文で WP-2 の追加ではない (観察)。
+39. **訂正註 (裁定 31)**: CH-0174 の塊は削除せず、訂正記録の上で `resolve_limit_enforcement` を説明する現在形の文に言い換える。`--base 74d90f3` の `capabilities_document.py:10` の残る赤は基点のソース本文と受け皿の原文の不一致 (WP-2 より前) の顕在化 = 基点由来。WP-2 では直さず引き継ぎ書に観察として残す。
+
+**監督裁定 40 (2026-09-29、差し戻し 1 の報告の逸脱 (f)(g)。裁定表は監督保管 `r113_wp2_rework_1b.md`)**
+
+40. 完了条件 76 / 77 は http plug の adapter の session と隔離 surface が配線していることの観測であり、composition root (`build_app()`) のテストでは代替できない (代理指標の禁止、`OC` §1.7 の 52)。composition root 側のテストは **76a** として残し、76 / 77 は adapter の session (`hold_in_flight` で保持中の slot の flock、credential の rate 行) と隔離 surface (session と別の directory) で観測する。変異 M76 / M76i / M77 は adapter 側の配線を外す形。
+
+**監督裁定 41〜42 (2026-09-29、WP-2 再確認 1b (G1〜G8。裁定表は監督保管 `r113_wp2_rulings_4.md`、レビューは `r113_wp2_code_review_1b.md`) の帰結)**
+
+41. **訂正註 (§4.1)**: launcher `real_server_r2db.py` が controlplane / auditreader の CONNECTION LIMIT を 32 / 8 に上げる ALTER ROLE を受理する (C-26 の lifecycle が control の ceiling 2 を宣言するので、裁定 28 の倍率の下で必要なテスト環境の provisioning)。製品側は migration を足さない (0013 の値は control 1 process の値。ceiling ≥ 2 の配備は F-16 が要る床を名指しで報告する)。**WP-5 の完了条件に足す**: runbook に「`process_ceilings.control` ≥ 2 は controlplane ≥ 16 × control、auditreader ≥ 4 × control の CONNECTION LIMIT が要り、F-16 が正確な床を報告する」の 1 段。
+42. **訂正註 (裁定 39)**: CH-0174 の `--base` の (3) の赤は訂正記録の `old` を第 1 文だけにすれば消える (レビュー担当の clone 実測) ので WP-2 で直す。「基点由来」の分類を撤回。
+
 ### 6.2 実施と受け入れ
 
+- **WP-2 (2026-09-28〜29、worktree `r113-wp2`、WIP `934554c` → `2d23741`、r113 に merge)**: 実装担当 sonnet (初回 + 差し戻し 1 / 1b) と opus (差し戻し 1c。sonnet は週次上限)、コードレビュー opus (1 回 + 再確認 1b / 1c、1c は「指摘なし」+ 観察 3)。監督裁定 22〜42 (§6.1)。最終 pt: `pt: 1 failed, 1609 passed in 122.05s` (r2db-api/tests。赤 = 同型性テスト 1 件、残る helper は `_VERIFY_DECLARATIONS_EXIT_CODES` / `_verify_declarations_checks` / `check_max_connections_headroom` の 3 つ = 完了条件 78、WP-3 で消える)、`pt: 67 passed, 73 deselected in 32.78s` (c05 / c26 / c32 -k r2db)、`pt: 303 passed in 36.97s` (tools/tests/test_comment_provenance.py、commit 後)。期待される赤: C-26 `test_c26_ceiling_maps_to_limit_enforcement[MitateDB-api]` (WP-3 まで)、tools/tests の共有 pin 4 件 (`concurrency_slots.py` の分類。完了ゲートで監督が更新)。変異: 初回 `mutate: 47 mutations, 47 as expected` + 差し戻しで足した / 差し替えた 22 件 (M29b、M56b、M70、M70b、M71c、M72c、M74b、M35b、M36b、M45b、M76、M76i、M77、M77i、M8r〜M18r、M31、M32) = 全 69 件 red (変異表は監督保管 `wp2-mutation-table.md` と実装報告 `r113-wp2-report-4.md` 付録)。静的検査: `check_comment_provenance --register` OK (93 files, 434 CH-IDs)、`--base 74d90f3` は 29 行 ((1) AST 差分 10、CH-0322 の改名 2 (裁定 30)、新規ファイル 1、(2) 新規 / 追随 / 改名の追随 16 (裁定 32)、(3)(5) 0)、`check_doc_refs OK`、`public_value_scan total_flagged=0`、`change_class` = C (宣言は D)。`HAVE_FLOCK` = 1。完了条件 29 の SQL 逐語・67 の file:line は `r113-wp2-report-4.md` 付録。
 - **WP-1 (2026-09-28、worktree `r113-wp1`、WIP `8a0327d`、r113 に merge)**: 実装担当 sonnet (差し戻し 1〜4)、コードレビュー opus (1 回 + 再確認 2 回、全件閉止)。最終 pt (4 ファイルの絞った run): `pt: 16 failed, 105 passed in 56.11s` — 赤は完了条件 9・11・14〜18 の両 peer (宣言分岐の cross-check「configured … but declares deployment_required」= WP-2/3 待ちの期待、完了条件 22)、r2db control の preflight 観測 (WP-2 待ち)、`test_every_executable_condition_has_a_marked_test` (部分実行の既知の穴)。変異: `mutate: 12 mutations, 12 as expected, restores verified 4/4 files (sha256 x2)` (M1〜M7 r/m、M19)。静的検査: `check_doc_refs OK`、`change_class` = C、`public_value_scan total_flagged=0`。新条件は **C-32** (`conformance-tests/test_c32_shared_limits.py`、`CONDITIONS.md` の行、cell 長 C-05 2966 / C-26 2979)。
 
 ## 7. WP-4 — `--real-server <peer> --workers N` (実装担当) と計測 (監督)
