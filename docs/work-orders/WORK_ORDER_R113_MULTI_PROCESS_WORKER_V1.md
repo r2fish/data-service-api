@@ -394,6 +394,18 @@ peer-local のテストは小さい L を宣言した構成で駆動してよい
 
 - 番号の註: 裁定 3 の「完了条件 29」は本文でも 29、裁定 6 の「完了条件 158」は本文では 170 (control の配備の行を足して番号が動いた)。
 
+**監督裁定 9〜16 (2026-09-28、WP-1 の実装報告の逸脱 1〜8 への裁定)**
+
+9. preflight は両 plane で常時実行する (逸脱 1)。§6.1 の裁定 4 (control でも workers ≤ ceiling を検査) の帰結であり、完了条件 5 の「data の uvicorn より前」は control にも同じ順で読む。
+10. access log の pid 付き FileHandler は `UVICORN_LOG_CONFIG` (env) で注入し、`start_uvicorn_subprocess` の引数は `workers` 以外増やさない (逸脱 2)。採る。
+11. probe entity 用の developer credential 発行を launcher の `_ensure_provisioned` に足す (逸脱 3)。§3.1 の範囲内。採る。
+12. WP-1 の `_run_preflight` は `python -m <package>.main --preflight` を呼び、現行 (WP-2/3 前) は module-level の `app = build_app()` が同じ検査を同じ権限で走らせて終了コードを決める (逸脱 4)。**WP-2 / WP-3 の完了条件に足す: `--preflight` entry を足した後も launcher 側を変えずに完了条件 5・13 が緑のままであること (entry は module の `app` を使い回し、引数を解釈して 0 / 非 0 で終わる。設計 §10 の裁定 41)。**
+13. lock 保持の接続の `application_name` は `"<peer>:lockholder:<pid>"` とし、WP-2 / WP-3 の `"<peer>:<plane>:<pid>"` と衝突させない (逸脱 5)。採る。完了条件 15 の絞り込みは data plane の名前だけを数える。
+14. `CONDITIONS.md` / `CONDITIONS_HISTORY.md` は cell 長 3000 の制約下で追記方式でよい (逸脱 6)。条件: 既存の文が偽にならないこと (C-26 (4) の「ceiling 2 → deployment_required」は workers 1 のとき今も真)。偽になる文が出たときは旧文を history へ移す通常の訂正に戻す。レビュー担当が (e) で確かめる。
+15. 新 method 名は両 peer 同名同引数 (逸脱 7)。採る (launcher は `_ISOMORPHIC_TARGETS` の対象外だが、対称性はレビューの観点 (g))。
+16. `sweep_orphans` の `PermissionError` を pid 再利用として許容する (逸脱 8)。採るが、レビュー担当が (b) で「本当の残骸を見逃さない」ことを確かめる。許容は `os.getpgid(pid) == pid` の場合に限る現行の形を保つ。
+17. 完了条件 22 の赤リストは §3.2 の本文 (9・11・14〜17) が正で、発注プロンプトの「5・13」は誤り (実測は本文と一致)。
+
 ### 6.2 実施と受け入れ
 
 ## 7. WP-4 — `--real-server <peer> --workers N` (実装担当) と計測 (監督)
