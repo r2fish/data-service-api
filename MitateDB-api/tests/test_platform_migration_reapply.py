@@ -283,6 +283,7 @@ def _run_ops(platform: types.SimpleNamespace, *args: str) -> subprocess.Complete
 # | 0013_role_statement_timeouts.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (0012 と同型の内部ループを持つ) |
 # | 0014_role_connection_limits_rollout.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (0012/0013 と同型の内部ループを持つ) |
 # | 0015_row_order_column_upgrade.sql | per-application upgrade | `:app_id` を取り、冪等 (`ADD COLUMN IF NOT EXISTS`)、`PLATFORM_UPGRADE_NUMBERS` の一員 |
+# | 0016_credential_request_rate.sql | platform migration | `:app_id` を取らない、ヘッダに "IDEMPOTENCY" 明記 (`CREATE TABLE IF NOT EXISTS`/`CREATE OR REPLACE FUNCTION`/`GRANT`) |
 # ===========================================================================
 
 _REAPPLY_EXCLUDED_FILENAME = "0004_deprovision_application.sql"
@@ -303,6 +304,7 @@ _REAPPLY_PLATFORM_MIGRATION_FILENAMES = (
     "0005_application_audit.sql", "0007_platform_declarations.sql",
     "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
     "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
+    "0016_credential_request_rate.sql",
 )
 
 
@@ -354,6 +356,7 @@ def test_reapply_platform_migration_solo_and_run_groups_partition_the_real_const
     never a name listed by hand."""
     assert _REAPPLY_PLATFORM_MIGRATION_SOLO_FILENAMES == (
         "0005_application_audit.sql", "0007_platform_declarations.sql", "0011_process_ceilings.sql",
+        "0016_credential_request_rate.sql",
     )
     assert _REAPPLY_PLATFORM_MIGRATION_RUN_FILENAMES == (
         "0012_role_connection_limits.sql", "0013_role_statement_timeouts.sql",
@@ -1132,7 +1135,7 @@ def test_platform_migrations_declare_on_error_stop_in_the_file() -> None:
     the only guarantee. Derived from the pinned constant (never a
     hand-written list) so a future accepted file is covered without an
     edit here."""
-    assert len(ops._PLATFORM_MIGRATION_FILENAMES) == 6
+    assert len(ops._PLATFORM_MIGRATION_FILENAMES) == 7
     for name in ops._PLATFORM_MIGRATION_FILENAMES:
         text = (MIGRATIONS_DIR / name).read_text()
         assert "\\set ON_ERROR_STOP on" in text, name

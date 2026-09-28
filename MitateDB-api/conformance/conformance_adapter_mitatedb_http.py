@@ -112,6 +112,7 @@ from mitatedb_api.audit_dispatch import AuditRouter  # noqa: E402
 from mitatedb_api.auth import Role  # noqa: E402
 from mitatedb_api.backend_postgres import PostgresBackend  # noqa: E402
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime, _LimitStateHolder  # noqa: E402
+from mitatedb_api.concurrency_slots import HostSharedConcurrencySlots  # noqa: E402
 from mitatedb_api.config import FoundationConfig, role_pool_size  # noqa: E402
 from mitatedb_api.control_audit import read_control_audit_events  # noqa: E402
 from mitatedb_api.control_composition import build_control_service  # noqa: E402
@@ -378,6 +379,11 @@ def _bootstrap_platform(
         # construction time (design's own "宣言表を通る全経路で、宣言を
         # 先に書く").
         "0011_process_ceilings.sql",
+        # design D-3 (1): the credential-keyed `requests_per_minute` rate
+        # table -- depends only on 0002 above (`credentials`), so it is
+        # applied right after 0002/0005 below, independent of the
+        # declarations-table migrations.
+        "0016_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -398,6 +404,7 @@ def _bootstrap_platform(
     # (`WHO RUNS THIS: mitatedbsvc_provision`, migration 0005's own
     # header) -- runs as the SAME `provision_dsn` 0002 already ran as.
     _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
+    _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
     # Phase 10 WP-4f: unconditional, like 0002/0005 above -- depends only
     # on those two, so it always runs here regardless of the declarations-
     # table migrations below.
@@ -1014,6 +1021,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         surfaces = self._surfaces_value()
 
         self._script_dir = tempfile.mkdtemp(prefix="mitatedb_http_migrations_")
+        # design D-3 (2')/(4): this instance's own `mkdtemp`ed slot
+        # directory -- a subdirectory of `self._script_dir`, so `_cleanup`
+        # (which `shutil.rmtree`s `self._script_dir`) removes it too. Mode
+        # 0700 set explicitly (`mkdir(mode=...)` is masked by umask).
+        self._slot_dir = Path(self._script_dir) / "slots"
+        self._slot_dir.mkdir(mode=0o700)
+        os.chmod(self._slot_dir, 0o700)
         try:
             self._platform = _bootstrap_platform(prefix, admin_dsn, Path(self._script_dir), surfaces)
         except Exception:
@@ -1068,8 +1082,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # holder explicitly -- exactly one, shared by every cell THIS
             # adapter provisions. `isolated_application_surface()` below
             # gives its own `iso` a FRESH one (never this shared surface's
-            # own instance).
-            self._limit_holder = _LimitStateHolder()
+            # own instance). Built below, once `self._read_store` (its own
+            # `rate`) exists.
             self._contract_version_cache: str | None = None
             self._capability_probe_session: "_Session | None" = None
             self._capability_probe_app_id: "str | None" = None
@@ -1095,8 +1109,9 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # real deployment's application-plane process has. The pool's
             # own size is derived the same way `main.py` derives its
             # production pool's size (`role_pool_size`, `config.py`), from
-            # this surface's own declared `max_concurrency` -- never a
-            # fixed literal. `self._write_store` (below) stays per-call/
+            # the thread limit (`DEFAULT_THREAD_LIMIT`, the same per-process
+            # simultaneous-borrow ceiling `main.build_app` sizes from) --
+            # never a fixed literal. `self._write_store` (below) stays per-call/
             # unpooled: it is this adapter's own privileged setup path
             # (`issue_credential`/`revoke_credential`/...), never touched
             # by a measured request, matching `main.py`'s own audit sink
@@ -1122,7 +1137,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
             self._read_pool = BoundedConnectionPool(
                 self._platform.api_dsn,
-                max_size=role_pool_size(FoundationConfig(max_concurrency=self._application_config.max_concurrency)),
+                max_size=role_pool_size(DEFAULT_THREAD_LIMIT),
             )
             self._read_store = PostgresCredentialStore(
                 self._platform.api_dsn, pepper="synthetic-conformance-pepper-mitatedb-http-0000",
@@ -1133,6 +1148,20 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 schema=self._platform.schema,
             )
             self._gate = _AuthGate(self._read_store)
+            # design D-3 (4), plug table: `rate` is `self._read_store`
+            # itself (the SAME `PostgresCredentialStore` and platform pool
+            # its own read path already uses -- no second, dedicated pool
+            # for the rate statement), `concurrency_slots` is this
+            # instance's own `mkdtemp`ed directory, and
+            # `concurrency_configured=True`: this plug's `process_
+            # ceilings` row is `{"data": 1, "control": 1}` (seeded by
+            # `_bootstrap_platform`) and this in-process "supervisor" runs
+            # exactly 1 worker, so `ceiling <= workers` always holds.
+            self._limit_holder = _LimitStateHolder(
+                rate=self._read_store,
+                concurrency_slots=HostSharedConcurrencySlots(self._slot_dir),
+                concurrency_configured=True,
+            )
 
             def _cell_factory(application_id: str) -> ApplicationCell:
                 cell = self._cells.get(application_id)
@@ -2029,8 +2058,20 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # shared, session-scoped surface's own holder. A fresh instance
         # here is what keeps a `hold_in_flight`/rate-window drive against
         # `iso` from ever touching the shared surface's own in-flight
-        # counter or rate windows.
-        iso._limit_holder = _LimitStateHolder()
+        # counter or rate windows. design D-3 (2')/§1.4 (6): its own,
+        # SEPARATE `mkdtemp`ed slot directory -- never `self._slot_dir`,
+        # so this surface's declared `concurrency` (3) never contends
+        # with the shared surface's own slots; removed in the `finally`
+        # block below. `rate` is the SAME shared platform store (the rate
+        # row is keyed by the credential, and this surface issues its own
+        # credentials).
+        iso_slot_dir = Path(tempfile.mkdtemp(prefix="mitatedb_http_isolated_slots_"))
+        iso._slot_dir = iso_slot_dir
+        iso._limit_holder = _LimitStateHolder(
+            rate=iso._read_store,
+            concurrency_slots=HostSharedConcurrencySlots(iso_slot_dir),
+            concurrency_configured=True,
+        )
         # port v1.14 (design D-1 (A) 6, WP-3): `data_base_url`/
         # `control_base_url` are named explicitly here (via `iso`'s OWN
         # `_surfaces_value()` call, not inherited unnamed through
@@ -2124,6 +2165,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 for cell in iso._cells.values():
                     cell._backend.close()  # noqa: SLF001
                 iso._loop.close()
+                shutil.rmtree(iso_slot_dir, ignore_errors=True)
 
     # port v1.12 (design D-2 実装の形 (b), work order WP-1b): see
     # `_hold_in_flight_via_http_requests_over_stalled_gate`'s own

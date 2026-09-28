@@ -34,6 +34,7 @@ here as comments (the report is where "変異の赤 verbatim" is recorded).
 from __future__ import annotations
 
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -63,6 +64,11 @@ from mitatedb_api.platform_declarations import (DEFAULT_SCHEMA, PEER_MODULE,
                                                 validate_process_ceilings_value)
 
 _APP_PEPPER = "process-ceilings-pg-app-pepper-x"
+# `main.build_app` requires `MITATEDB_WORKERS`/`MITATEDB_SLOT_DIR`: one
+# shared, real slot directory (mode 0700, `mkdtemp`'s own default),
+# `workers=1` -- every ceiling this file declares (1 or 2) accepts
+# `workers=1` at startup (only `workers > ceiling` fails).
+_SLOT_DIR = tempfile.mkdtemp(prefix="mitatedb-test-slots-process-ceilings-")
 _CONTROL_PEPPER = "process-ceilings-pg-ctl-pepper-x"
 
 # region (i): request-scoped classes -- unaffected by `process_ceilings`
@@ -308,6 +314,8 @@ def _main_module_for(platform, probe_app):
                 "MITATEDB_PLATFORM_DSN": platform.api_dsn,
                 "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
                 "MITATEDB_SERVE_APPS": probe_app.app_id,
+                "MITATEDB_WORKERS": "1",
+                "MITATEDB_SLOT_DIR": _SLOT_DIR,
                 f"MITATEDB_APP_{probe_app.app_id.upper()}_RUNTIME_DSN": probe_app.runtime_dsn,
                 f"MITATEDB_APP_{probe_app.app_id.upper()}_DEVELOPER_DSN": probe_app.developer_dsn,
             })
@@ -331,6 +339,8 @@ def _data_plane_env(data_platform, probe_app) -> dict:
         "MITATEDB_PLATFORM_DSN": data_platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": data_platform.registry_schema,
         "MITATEDB_SERVE_APPS": probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_RUNTIME_DSN": probe_app.runtime_dsn,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_DEVELOPER_DSN": probe_app.developer_dsn,
     }
@@ -361,6 +371,18 @@ def test_ceiling_two_maps_through_a_real_composition_root_control_plane(control_
     import mitatedb_api.control_composition as control_composition_module
 
     _set_declaration(control_platform, "process_ceilings", '{"data": 1, "control": 2}')
+    # F-16 multiplies controlplane's own floor by `process_ceilings.
+    # control` (2): 16*2=32 is above the role's CONNECTION LIMIT (20 from
+    # 0012), so the limit is raised to 32 here for this test's own
+    # control-plane mapping assertion to be reached, and put back to the
+    # value read below in `finally` (the `control_platform` fixture is
+    # shared by later tests).
+    controlplane_role = f"{control_platform.prefix}svc_controlplane"
+    with psycopg.connect(control_platform.admin_dsn, autocommit=True) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname = %s", [controlplane_role])
+            (original_connlimit,) = _cur.fetchone()
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 32").format(sql.Identifier(controlplane_role)))
     try:
         env = {
             "MITATEDB_CREDENTIAL_PEPPER": "synthetic-pc-ceiling2-pepper",
@@ -379,6 +401,13 @@ def test_ceiling_two_maps_through_a_real_composition_root_control_plane(control_
         for name in _REGION_III_CONTROL_CLASSES:
             assert document["limit_enforcement"][name] == "enforced", name
     finally:
+        with psycopg.connect(control_platform.admin_dsn, autocommit=True) as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    sql.SQL("ALTER ROLE {} CONNECTION LIMIT {}").format(
+                        sql.Identifier(controlplane_role), sql.Literal(int(original_connlimit))
+                    )
+                )
         _set_declaration(control_platform, "process_ceilings", '{"data": 1, "control": 1}')
         conn = psycopg.connect(control_platform.provision_dsn, autocommit=True)
         try:
@@ -405,9 +434,13 @@ def test_ceiling_asymmetric_declaration_maps_through_a_real_composition_root_dat
     "control": 1}` row and drives the REAL data-plane composition root
     (`main.build_app`) through a genuine authenticated HTTP request
     (`GET /v1/capabilities`, `httpx.ASGITransport`) -- the data plane's
-    own in-memory-per-process region (ii) classes must read `deployment_
-    required` (its OWN declared value, 2), never `enforced` (what reading
-    the CONTROL side's 1, or a hardcoded default, would wrongly produce).
+    own `concurrency` must read `deployment_required` (its OWN declared
+    value, 2, above this composition root's `MITATEDB_WORKERS=1`), never
+    `enforced` (what reading the CONTROL side's 1, or a hardcoded
+    default, would wrongly produce). `requests_per_minute` reads
+    `enforced`: `main.build_app` always wires the PostgreSQL-backed rate
+    row (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (4)), which
+    holds at any declared ceiling.
 
     Mutation: swapping `main.py:437`'s `declarations.process_ceilings.
     data` for `.control` (or for a literal `1`) makes this test's own
@@ -442,8 +475,8 @@ def test_ceiling_asymmetric_declaration_maps_through_a_real_composition_root_dat
         response = asyncio.run(_call())
         assert response.status_code == 200, response.text
         enforcement = response.json()["limit_enforcement"]
-        for name in _REGION_II_DATA_CLASSES:
-            assert enforcement[name] == "deployment_required", (name, enforcement[name])
+        assert enforcement["concurrency"] == "deployment_required", enforcement["concurrency"]
+        assert enforcement["requests_per_minute"] == "enforced", enforcement["requests_per_minute"]
         # Region (i) stays unaffected regardless of plane or ceiling value
         # (the SAME pin `test_region_i_classes_are_unaffected_by_ceiling`
         # already holds for direct construction -- this proves it also

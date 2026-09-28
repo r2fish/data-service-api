@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -51,6 +52,12 @@ BASE_URL = "http://mitatedb-main-test.invalid"
 _PEPPER = "synthetic-test-pepper-mitatedb-main-0000"
 _CONTROL_PEPPER = "synthetic-test-pepper-mitatedb-main-ctl-0000"
 _PROBE_APP_ID = "main_import_probe"
+# `main.build_app` requires `MITATEDB_WORKERS`/`MITATEDB_SLOT_DIR`: one
+# shared, real slot directory (mode 0700, `mkdtemp`'s own default) for
+# every `build_app(env)` call in this module, mirroring a single-process
+# (`workers=1`) deployment; left to the OS temp dir like this repository's
+# other `tempfile.mkdtemp` test call sites.
+_SLOT_DIR = tempfile.mkdtemp(prefix="mitatedb-test-slots-main-")
 
 
 def _base_env(platform, probe_app) -> dict[str, str]:
@@ -65,6 +72,8 @@ def _base_env(platform, probe_app) -> dict[str, str]:
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
         "MITATEDB_SERVE_APPS": probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_RUNTIME_DSN": probe_app.runtime_dsn,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_DEVELOPER_DSN": probe_app.developer_dsn,
     }
@@ -276,6 +285,8 @@ def _h1_env(platform, good_app, bad_app) -> dict[str, str]:
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
         "MITATEDB_SERVE_APPS": f"{good_app.app_id},{bad_app.app_id}",
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{good_app.app_id.upper()}_RUNTIME_DSN": good_app.runtime_dsn,
         f"MITATEDB_APP_{good_app.app_id.upper()}_DEVELOPER_DSN": good_app.developer_dsn,
         f"MITATEDB_APP_{bad_app.app_id.upper()}_RUNTIME_DSN": bad_app.runtime_dsn,
@@ -413,6 +424,8 @@ def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_a
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
         "MITATEDB_SERVE_APPS": h1_bad_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{h1_bad_app.app_id.upper()}_RUNTIME_DSN": h1_bad_app.runtime_dsn,
         f"MITATEDB_APP_{h1_bad_app.app_id.upper()}_DEVELOPER_DSN": h1_bad_app.developer_dsn,
     }
@@ -659,6 +672,8 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
         "MITATEDB_SERVE_APPS": flip_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{flip_app.app_id.upper()}_RUNTIME_DSN": flip_app.runtime_dsn,
         f"MITATEDB_APP_{flip_app.app_id.upper()}_DEVELOPER_DSN": flip_app.developer_dsn,
         "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
@@ -733,6 +748,8 @@ def test_build_app_wires_the_preauth_concurrency_slot(main_module, platform) -> 
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
         "MITATEDB_SERVE_APPS": wiring_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{wiring_app.app_id.upper()}_RUNTIME_DSN": wiring_app.runtime_dsn,
         f"MITATEDB_APP_{wiring_app.app_id.upper()}_DEVELOPER_DSN": wiring_app.developer_dsn,
         "MITATEDB_MAX_CONCURRENCY": "7",
@@ -940,6 +957,8 @@ def test_data_and_control_documents_derive_the_same_operation_catalog_url_when_u
             "MITATEDB_PLATFORM_DSN": platform.api_dsn,
             "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
             "MITATEDB_SERVE_APPS": derive_app.app_id,
+            "MITATEDB_WORKERS": "1",
+            "MITATEDB_SLOT_DIR": _SLOT_DIR,
             f"MITATEDB_APP_{derive_app.app_id.upper()}_RUNTIME_DSN": derive_app.runtime_dsn,
             f"MITATEDB_APP_{derive_app.app_id.upper()}_DEVELOPER_DSN": derive_app.developer_dsn,
             "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
@@ -1035,6 +1054,8 @@ def test_data_and_control_documents_agree_on_an_overridden_operation_catalog_url
             "MITATEDB_PLATFORM_DSN": platform.api_dsn,
             "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
             "MITATEDB_SERVE_APPS": override_app.app_id,
+            "MITATEDB_WORKERS": "1",
+            "MITATEDB_SLOT_DIR": _SLOT_DIR,
             f"MITATEDB_APP_{override_app.app_id.upper()}_RUNTIME_DSN": override_app.runtime_dsn,
             f"MITATEDB_APP_{override_app.app_id.upper()}_DEVELOPER_DSN": override_app.developer_dsn,
             "MITATEDB_CONTROL_PLANE_STATUS": "enabled",

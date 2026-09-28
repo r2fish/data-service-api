@@ -53,6 +53,46 @@ from .psycopg_counting import CountingConnection
 DEFAULT_MAX_SIZE = 20
 
 
+# design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4: the
+# `application_name` every PostgreSQL connection this process opens
+# carries, process-wide. `None` (the default -- this repository's own
+# tests and every conformance adapter never set it) omits the parameter
+# entirely, leaving libpq's own default (`""`) untouched.
+# `mitatedb_api.main.build_app`/`mitatedb_api.control_main.build_control_
+# app` each set this ONCE, near the top, to `"MitateDB-api:data:<pid>"`/
+# `"MitateDB-api:control:<pid>"` -- every connection factory in this
+# package (this module's own `_new_connection`, `backend_postgres.
+# PostgresBackend`'s two persistent connections, the credential stores,
+# the audit sinks and readers, the control-plane stores) spreads
+# `_application_name_connect_kwargs()` into its own `connect(...)` call,
+# so every connection this SAME process opens afterward carries that one
+# value without a constructor-parameter change at each call site. A real
+# deployment's data/control planes are always two separate OS processes,
+# so this process-wide value is never ambiguous between the two.
+_connection_application_name: str | None = None
+
+
+def set_connection_application_name(name: str | None) -> None:
+    """Sets (or clears, with `None`) the `application_name` every
+    connection this package opens from now on carries -- see the module-
+    level comment above. Every real caller (`main.py`/`control_main.py`)
+    calls this exactly once, at composition-root startup, before any
+    request-serving thread exists."""
+    global _connection_application_name
+    _connection_application_name = name
+
+
+def _application_name_connect_kwargs() -> dict[str, str]:
+    """`{"application_name": ...}` when `set_connection_application_name`
+    has been called with a non-`None` value, `{}` otherwise -- spread into
+    a `psycopg.connect(...)`/`CountingConnection.connect(...)` call so an
+    unset value omits the keyword argument entirely (never passes
+    `application_name=None`)."""
+    if _connection_application_name is None:
+        return {}
+    return {"application_name": _connection_application_name}
+
+
 class BoundedConnectionPool:
     """Bounded, thread-safe pool of `psycopg.Connection` objects against one
     fixed DSN. `acquire()`/`release()`/`discard()` are the only mutating
@@ -161,7 +201,10 @@ class BoundedConnectionPool:
         # postgres._RolePool._connect`. A failed connect raises before
         # either counter is touched.
         connect_start = time.monotonic()
-        conn = CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        conn = CountingConnection.connect(
+            self._dsn, connect_timeout=self._connect_timeout, autocommit=False,
+            **_application_name_connect_kwargs(),
+        )
         connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
         with self._stats_lock:
             self._sessions += 1

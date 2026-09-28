@@ -41,6 +41,7 @@ from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import (AuthenticationError, AuthorizationStateUnavailable, NotFoundError,
                      StorageConfigurationError, ValidationError)
 from .identifiers import validate_identifier
+from .pool import _application_name_connect_kwargs
 
 DEFAULT_SCHEMA = "mitatedb_registry"
 _CONTROL_CREDENTIAL_PEPPER_ENV = "MITATEDB_CONTROL_CREDENTIAL_PEPPER"
@@ -82,7 +83,7 @@ class PostgresControlCredentialStore:
 
     def _connect(self) -> "psycopg.Connection":
         try:
-            return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+            return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False, **_application_name_connect_kwargs())
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
 

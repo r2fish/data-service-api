@@ -909,10 +909,11 @@ _CONTRACT_170_LIMIT_CLASSES: tuple = ("enum_members", "idempotency_entries", "id
 # ---------------------------------------------------------------------------
 
 #: `mitatedb_api.main`'s own platform pool (`PostgresCredentialStore`'s
-#: `BoundedConnectionPool`, pool-sized to the declared `max_concurrency`
-#: ceiling, Phase 10 WP-4e) PLUS `PostgresApplicationAuditSink`'s own
-#: per-write transient connections against the SAME role (worst case, one
-#: per in-flight request, also bounded by `max_concurrency`) -- both
+#: `BoundedConnectionPool`, pool-sized to `config.role_pool_size(thread_
+#: limit)` unless `MITATEDB_PLATFORM_POOL_SIZE` overrides it) PLUS
+#: `PostgresApplicationAuditSink`'s own per-write transient connections
+#: against the SAME role (worst case, one per worker thread plus the audit
+#: flush thread, also within `role_pool_size(thread_limit)`) -- both
 #: against `mitatedbsvc_api`. Identified by `INSERT` on `application_audit`.
 _API_ROLE_STORE_COUNT = 2
 
@@ -991,26 +992,40 @@ _ROLE_CLASSES = frozenset({"api", "controlplane", "auditreader"})
 
 
 def check_role_connection_limits(
-    conn: "psycopg.Connection", *, schema: str, ops_module: str, concurrency: int,
+    conn: "psycopg.Connection", *, schema: str, ops_module: str, pool_size: int,
+    process_ceilings: ProcessCeilings,
     role_classes: "frozenset[str] | None" = None,
     application_ids: "Sequence[str] | None" = None,
 ) -> None:
     """F-16: raises `PlatformDeclarationError(code="F-16")` for the FIRST
     role (in the deterministic order built below) whose `pg_roles.
     rolconnlimit` is neither `-1` nor at least its own computed floor.
-    `concurrency` is the caller's own declared per-role pool ceiling
-    (`config.FoundationConfig.max_concurrency`) -- this function takes it
-    as a plain argument rather than reading `MITATEDB_MAX_CONCURRENCY`
-    itself, so a deployment that has genuinely raised its declared
-    concurrency is checked against ITS OWN real floor, not a silently-stale
-    code-level default.
+    `pool_size` is the caller's own per-process pool ceiling (`config.
+    role_pool_size(thread_limit)`, the real per-process simultaneous-
+    borrow ceiling) -- this function takes it as a plain argument rather
+    than reading `MITATEDB_THREAD_LIMIT` itself, so a deployment that has
+    genuinely raised its thread limit is checked against ITS OWN real
+    floor, not a silently-stale code-level default.
+
+    design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5): `pool_size`
+    sizes ONE process' own pool; `pg_roles.rolconnlimit` is a
+    CLUSTER-WIDE cap shared by every one of `process_ceilings.<plane>`
+    processes that connects against that role -- this function
+    multiplies every floor it computes by the process count of the plane
+    that role belongs to: `process_ceilings.data` for the `api` class and
+    every application's runtime/developer role, `process_ceilings.
+    control` for the `controlplane` and `auditreader` classes. Every
+    caller passes its own plain, un-multiplied `pool_size` and the SAME
+    `process_ceilings` it read from the declarations row.
 
     Checks exactly the role classes `0012_role_connection_limits.sql`
     (this peer) raises: the platform-plane `<...>_api`/`<...>_
     controlplane`/`<...>_auditreader` roles (module-level floor constants
     above) and every PROVISIONED application's own runtime/developer roles
-    (floor = `concurrency`, Phase 10 WP-4f peer-symmetric with r2db-api's
-    own WP-8a). A role with no grants matching any of the three
+    (floor = `pool_size * process_ceilings.data`, the same floor r2db-
+    api's sibling uses; this peer's own per-application demand is two
+    persistent connections per process, one per role, which this floor
+    covers). A role with no grants matching any of the three
     platform-plane shapes above (identity unknown to this check) is
     silently skipped, never flagged.
 
@@ -1049,19 +1064,19 @@ def check_role_connection_limits(
         for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
             if role == application_audit_owner:
                 continue
-            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * concurrency)
+            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * pool_size * process_ceilings.data)
     if "controlplane" in role_classes:
         for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
             if role == control_audit_owner:
                 continue
-            floors[role] = max(floors.get(role, 0), _CONTROLPLANE_ROLE_POOL_FLOOR)
+            floors[role] = max(floors.get(role, 0), _CONTROLPLANE_ROLE_POOL_FLOOR * process_ceilings.control)
     if "auditreader" in role_classes:
         reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
         reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
         for role in sorted(reader_of_application_audit & reader_of_control_audit):
             if role == application_audit_owner or role == control_audit_owner:
                 continue
-            floors[role] = max(floors.get(role, 0), _AUDITREADER_ROLE_POOL_FLOOR)
+            floors[role] = max(floors.get(role, 0), _AUDITREADER_ROLE_POOL_FLOOR * process_ceilings.control)
 
     # Two-state registry (0002's own header): a registered-but-never-
     # provisioned row has `runtime_role`/`developer_role` still NULL --
@@ -1079,8 +1094,8 @@ def check_role_connection_limits(
                     [list(application_ids)],
                 )
             for runtime_role, developer_role in cur.fetchall():
-                floors[runtime_role] = concurrency
-                floors[developer_role] = concurrency
+                floors[runtime_role] = pool_size * process_ceilings.data
+                floors[developer_role] = pool_size * process_ceilings.data
 
     if not floors:
         return
@@ -1201,8 +1216,9 @@ def check_auditreader_statement_timeout(conn: "psycopg.Connection", *, schema: s
 # registered_applications`/`_read_connection_headroom_settings`/
 # `HeadroomReport` helpers they call -- none of these six takes a
 # peer-specific argument; `check_max_connections_headroom`'s own caller
-# passes this peer's own already-declared `concurrency` the same way
-# `check_role_connection_limits`'s callers already do.
+# passes this peer's own per-process `pool_size` (`config.role_pool_
+# size(thread_limit)`) the same way `check_role_connection_limits`'s
+# callers do.
 # ---------------------------------------------------------------------------
 
 
@@ -1317,7 +1333,7 @@ def _f18_message(
 
 def check_max_connections_headroom(
     conn: "psycopg.Connection", *, schema: str, ops_module: str,
-    process_ceilings: ProcessCeilings, concurrency: int,
+    process_ceilings: ProcessCeilings, pool_size: int,
 ) -> HeadroomReport:
     """F-18: raises `PlatformDeclarationError(code="F-18")` when the LOWER
     bound of the connections `process_ceilings` guarantees this deployment
@@ -1330,10 +1346,16 @@ def check_max_connections_headroom(
     floor added to the control side too -- reported only, never judged,
     §1.1 (c′)), both reserved-connection settings, and `max_connections`
     itself, so the caller can print all four numbers without a second
-    round of reads."""
+    round of reads.
+
+    design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5): every caller
+    passes `config.role_pool_size(thread_limit)` as `pool_size` -- with
+    `process_ceilings.data` = 4, `thread_limit` = 4 and the headroom 2
+    (`pool_size` = 6), the lower bound this judges does not scale with
+    the declared `concurrency` bound at all."""
     registered_applications = _count_registered_applications(conn, schema)
-    platform_pool_floor = _API_ROLE_STORE_COUNT * concurrency
-    application_pair_floor = 2 * concurrency
+    platform_pool_floor = _API_ROLE_STORE_COUNT * pool_size
+    application_pair_floor = 2 * pool_size
     control_plane_floor = _CONTROLPLANE_ROLE_POOL_FLOOR
     auditreader_floor = _AUDITREADER_ROLE_POOL_FLOOR
     lower_bound = headroom_lower_bound(

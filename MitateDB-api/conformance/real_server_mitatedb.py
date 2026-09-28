@@ -438,7 +438,7 @@ class _EntityLockHold:
 
 
 def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
-    """Runs `0001`/`0002`/`0005`/`0007`/`0011`/`0012` (with the literal
+    """Runs `0001`/`0002`/`0005`/`0007`/`0011`/`0012`/`0013`/`0016` (with the literal
     token `mitatedb` textually replaced by `prefix`) through the real
     `psql` binary. `0003`/`0004` are kept for per-application provisioning
     only. Unlike `conformance_adapter_mitatedb_http.py`'s own `_bootstrap_
@@ -476,6 +476,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0011_process_ceilings.sql",
         "0012_role_connection_limits.sql",
         "0013_role_statement_timeouts.sql",
+        # design D-3 (1): the credential-keyed `requests_per_minute` rate
+        # table -- depends only on 0002 above.
+        "0016_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -497,10 +500,24 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
     _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
     _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
+    _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
 
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
+            # design D-3 (5): `check_role_connection_limits` (F-16)
+            # multiplies the controlplane/auditreader floors (`_CONTROLPLANE_
+            # ROLE_POOL_FLOOR`/`_AUDITREADER_ROLE_POOL_FLOOR`, 16/4) by
+            # `process_ceilings.control`; 0012 (controlplane 20) and 0005
+            # (auditreader 5) cover a control ceiling of 1 only. This
+            # launcher's conformance lifecycle declares a control ceiling
+            # of 2, so both roles are set here, once, up front, to values
+            # that meet the F-16 floors for 2 control processes (16*2=32,
+            # 4*2=8) -- the provisioning step any deployment declaring
+            # `process_ceilings.control` >= 2 needs (F-16 otherwise stops
+            # control startup and reports the exact floor).
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 32").format(sql.Identifier(controlplane_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 8").format(sql.Identifier(auditreader_role)))
             cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(api_role), sql.Literal(api_password)))
             cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(controlplane_role), sql.Literal(controlplane_password)))
             cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(auditreader_role), sql.Literal(auditreader_password)))

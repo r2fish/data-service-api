@@ -55,6 +55,10 @@ def _env(control_platform, **overrides) -> dict[str, str]:
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
         "MITATEDB_CONTROLPLANE_DSN": control_platform.controlplane_dsn,
         "MITATEDB_PLATFORM_SCHEMA": control_platform.registry_schema,
+        # `control_main.build_control_app` requires its own workers count
+        # (always `1` in a real deployment); `build_control_service`
+        # alone never reads it.
+        "MITATEDB_CONTROL_WORKERS": "1",
     }
     env.update(overrides)
     return env
@@ -176,12 +180,24 @@ def test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_b
     test just above), this new startup check is run UNSCOPED --
     `control_platform.controlplane_role`'s own `CONNECTION LIMIT` is left
     healthy (F-16 alone would pass), but the declared `process_ceilings`
-    (`{"data": 1, "control": 20}`, lower bound 1*64+20*16=384, decoupled
-    from whether this fixture happens to have a registered application)
-    exceeds this throwaway cluster's own real headroom (297, §1.3 (8)).
-    Mutation M9d (dropping this startup call from `mitatedb_api.control_
-    composition.build_control_service`) turns this red."""
+    (`{"data": 1, "control": 20}`, lower bound at least 1*12+20*16=332
+    with `pool_size` 6 -- design docs/design/MULTI_PROCESS_WORKER_V0_1.md
+    D-3 (5) -- decoupled from whether this fixture happens to have a
+    registered application) exceeds this throwaway cluster's own real
+    headroom (297, §1.3 (8)). F-16 multiplies controlplane's own floor by
+    `process_ceilings.control` (20): 16*20=320 is above the role's
+    CONNECTION LIMIT (20 from 0012), so the limit is lifted to -1 here for
+    F-18 to be the check that fires, and put back to the value read below
+    in `finally`. Mutation M9d (dropping this startup call from
+    `mitatedb_api.control_composition.build_control_service`) turns this
+    red."""
     env = _env(control_platform)
+    controlplane_role = f"{control_platform.prefix}svc_controlplane"
+    with psycopg.connect(control_platform.admin_dsn, autocommit=True) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname = %s", [controlplane_role])
+            (original_connlimit,) = _cur.fetchone()
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(sql.Identifier(controlplane_role)))
     with psycopg.connect(control_platform.provision_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -197,6 +213,13 @@ def test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_b
             control_main_module.build_control_app(env)
         assert excinfo.value.code == "F-18"
     finally:
+        with psycopg.connect(control_platform.admin_dsn, autocommit=True) as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    sql.SQL("ALTER ROLE {} CONNECTION LIMIT {}").format(
+                        sql.Identifier(controlplane_role), sql.Literal(int(original_connlimit))
+                    )
+                )
         with psycopg.connect(control_platform.provision_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(

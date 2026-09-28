@@ -30,6 +30,7 @@ import pytest
 from mitatedb_api.cell import ApplicationCell, _CountingRLock
 from mitatedb_api.config import FoundationConfig, role_pool_size
 from mitatedb_api.errors import AuthorizationStateUnavailable
+from mitatedb_api.http import DEFAULT_THREAD_LIMIT
 from mitatedb_api.pool import BoundedConnectionPool
 
 _CONFORMANCE_DIR = os.path.join(os.path.dirname(__file__), "..", "conformance")
@@ -441,20 +442,20 @@ def test_read_pool_reuses_connection_across_two_authenticated_requests():
         adapter.close()
 
 
-def test_read_pool_size_matches_role_pool_size_of_declared_concurrency():
+def test_read_pool_size_matches_role_pool_size_of_the_thread_limit():
     """Completion condition 113 (R-101 WP-3 D-11): the credential-store
     pool's own `size` (`stats()["size"]`, its `max_size`) is derived the
-    same way `main.py`'s production pool is -- `role_pool_size(Foundation
-    Config(max_concurrency=<this surface's own declared max_concurrency>))`
-    -- never a fixed literal.
+    same way `main.py`'s production pool is -- `role_pool_size(<the
+    thread limit>)` (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3
+    (5): `DEFAULT_THREAD_LIMIT` here, the per-process simultaneous-borrow
+    ceiling) -- never a fixed literal.
 
     mutation M154 (`conformance_adapter_mitatedb_http.py`): fix the pool's
-    `max_size` at `1` regardless of the declared `max_concurrency` -- this
-    test's own equality assertion goes red (the adapter's declared `max_
-    concurrency` is 32, `role_pool_size` of that is 32, not 1)."""
+    `max_size` at `1` -- this test's own equality assertion goes red
+    (`role_pool_size(DEFAULT_THREAD_LIMIT)` is 6, not 1)."""
     adapter = _http_module.MitateDBHttpConformanceAdapter()
     try:
-        expected = role_pool_size(FoundationConfig(max_concurrency=adapter._application_config.max_concurrency))
+        expected = role_pool_size(DEFAULT_THREAD_LIMIT)
         assert adapter._read_pool.stats()["size"] == expected
     finally:
         adapter.close()

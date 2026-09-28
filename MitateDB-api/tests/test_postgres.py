@@ -206,6 +206,10 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         # fixture) now depends on this migration + the row seeded below,
         # or it fails startup with F-15.
         "0011_process_ceilings.sql",
+        # design D-3 (1): `main.build_app` always wires the PostgreSQL-
+        # backed `requests_per_minute` rate row -- every real request
+        # through a `build_app()` app needs this table/function.
+        "0016_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -239,6 +243,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
+        _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
         # Q4 phase (design D-2(c)): synthetic example.invalid `surfaces` --
         # a real deployment declares this with `ops declare-surfaces`.
         # DATA ONLY (no `control` key) -- this shared fixture's own
