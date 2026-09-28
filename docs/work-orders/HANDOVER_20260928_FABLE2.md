@@ -16,6 +16,9 @@
 - push は停止中 (GitHub 課金上限)。ローカル commit のみ。
 - 役割とモデル: drafter = opus (`claude-opus-5-5`)、reviewer = opus、implementer = sonnet、explorer = sonnet ×3。
 
+- **追記 (チャット終了直前)**: WP-2 の実装担当が完了を報告した。差分は `r113-wp2` に WIP commit **`934554c`** (28 ファイル、+2828 / −208。新規 `r2db-api/migrations/0015_credential_request_rate.sql`、`r2db-api/src/r2db_api/concurrency_slots.py`、`r2db-api/tests/test_r113_multi_process_wiring.py` (62 テスト))。実測: `pt: 1 failed, 1596 passed in 115.68s` (赤 1 = 同型性テスト、完了条件 78 の想定内)、conformance の r2db subset `1 failed, 66 passed` (赤は WP-1 由来の既知)、`mutate: 47 mutations, 47 as expected, restores verified 13/13 files`、hang した M52 / M63 / M64 は上限付きに直して再実行 `6 mutations, 6 as expected`。**コードレビューは未実施** (新チャットの最初の一手)。実装担当の逸脱で監督裁定が要るもの: (a) 0015 の rate 加算を「1 文 SQL」でなく PL/pgSQL 関数で実装、(b) F-16 の倍率修正は data 面の `main.py` のみ (`control_main.py` は §4.1 の範囲外)、(c) 自作の provenance 一括 regex が範囲外の docstring 74 行を書き換えたのを全復元 (レビューで差分の外側を確かめる)、(d) `credential_store.py` の新 method が既存の History ID を流用していたバグを削除、(e) `ops.py` の `_declared_pool_size` (旧 `_declared_concurrency`、CH-0322) は全文置換 1 件で §9.3 訂正記録 (文単位の粒度と違う可能性 = 裁定要)。`check_comment_provenance.py --base 74d90f3` は §4.1 (5)(3) は 0 件、(1)(2) は道具の Known gaps 相当として打ち切り (レビューで確かめる)。実装報告の全文は `.claude/worktrees/r113/.r113-handoff/r113-wp2-report-1.md` (未追跡)。
+- r113 は main `22a37b3` を merge 済み (`a24ece9`)。
+
 ## 2. 本チャットで閉じたもの
 
 | 件 | 結果 | 記録 |
