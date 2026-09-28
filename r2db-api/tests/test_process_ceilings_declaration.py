@@ -707,6 +707,18 @@ def test_control_plane_ceiling_mapping_reads_control_not_data_through_build_cont
 
     credential_id: str | None = None
     _set_row(platform, "process_ceilings", {"data": 1, "control": 2})
+    # F-16 multiplies controlplane's own floor by `process_ceilings.
+    # control` (2): 16*2=32 is above the role's CONNECTION LIMIT (20 from
+    # 0013), so the limit is raised to 32 here for this test's own
+    # control-plane ceiling-mapping assertion to be reached, and put back
+    # to the value read below in `finally` (the `platform` fixture is
+    # shared by later tests).
+    with psycopg.connect(platform.admin_dsn) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname = %s", [platform.controlplane_role])
+            (original_connlimit,) = _cur.fetchone()
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 32").format(sql.Identifier(platform.controlplane_role)))
+        _conn.commit()
     try:
         import r2db_api.control_main as control_main_module
 
@@ -749,6 +761,14 @@ def test_control_plane_ceiling_mapping_reads_control_not_data_through_build_cont
                 with conn.cursor() as cur:
                     cur.execute(sql.SQL("DELETE FROM {table} WHERE credential_id = %s").format(table=sql.Identifier(platform.schema, "control_credentials")), [credential_id])
                 conn.commit()
+        with psycopg.connect(platform.admin_dsn) as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    sql.SQL("ALTER ROLE {} CONNECTION LIMIT {}").format(
+                        sql.Identifier(platform.controlplane_role), sql.Literal(int(original_connlimit))
+                    )
+                )
+            _conn.commit()
         _restore_default_ceilings(platform)
 
 

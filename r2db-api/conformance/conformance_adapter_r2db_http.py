@@ -1013,9 +1013,10 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
 # governs a PostgresCell's own per-application pool -- `_make_cell`'s
 # pool_size=2 -- not this platform-plane one) via the SAME `role_pool_
 # size` production code (`r2db_api.main`) already uses, so the two can
-# never drift apart. `role_pool_size` no longer takes a `ResourceLimits`
-# instance as of this WP -- see that function's own docstring for why the
-# basis changed from `concurrency` to `thread_limit`.
+# never drift apart. `role_pool_size` takes the per-process thread limit,
+# not a `ResourceLimits` instance -- see that function's own docstring for
+# why the per-process simultaneous-borrow ceiling is the thread limit
+# rather than `concurrency`.
 #
 # Deliberately NOT reused for the control stack's own stores below
 # (`self._control_pool_size`, `r2dbsvc_controlplane`, migration `0006`)
@@ -1185,13 +1186,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # context manager) is used deliberately so this directory outlives
         # this function; `close()`/`_cleanup` below remove it explicitly.
         self._script_dir = tempfile.mkdtemp(prefix="r2db_http_migrations_")
-        # (design D-3 (2')/(4): instance-per-`mkdtemp`
+        # design D-3 (2')/(4): instance-per-`mkdtemp`
         # slot directory -- a subdirectory of `self._script_dir` so `_cleanup`
         # above (which already `shutil.rmtree`s `self._script_dir`) removes
         # it too, with no separate teardown call needed. Mode 0700
         # explicitly (never trusting the parent's own mode, which `mkdtemp`
-        # already gives 0700 by default but this WP names the requirement
-        # directly rather than relying on that default silently).
+        # already gives 0700 by default -- the explicit mode states the
+        # requirement here rather than relying on that default silently).
         self._slot_dir = Path(self._script_dir) / "slots"
         self._slot_dir.mkdir(mode=0o700)
         os.chmod(self._slot_dir, 0o700)  # `mkdir(mode=...)` is masked by umask; this is not.
@@ -2520,7 +2521,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         iso._app_pg = {}
         iso._provisioned_cells = []
         iso._counter = 0
-        # (design D-3 (2')/§1.4 (6): a SEPARATE, freshly
+        # design D-3 (2')/§1.4 (6): a SEPARATE, freshly
         # `mkdtemp`ed slot directory for this isolated instance -- never
         # `self._slot_dir` (the shared surface's own), so this isolated
         # surface's own concurrency admission never contends with (or is

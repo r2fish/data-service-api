@@ -350,7 +350,8 @@ class PostgresCredentialStore:
                 # `autocommit=False` (this pool's own general-purpose
                 # default -- every OTHER write in this class runs inside
                 # an explicit `unit_of_work()`/`conn.commit()` instead).
-                # This call is the one exception (design 完了条件 29):
+                # This call is the one exception (design D-3 (1): the
+                # rate count is one statement):
                 # toggled to `True` for the duration of this ONE
                 # statement, exactly like `_RolePool._liveness_check`'s
                 # own temporary toggle, and restored to `False` in

@@ -14,6 +14,7 @@ duplicating that bootstrap -- the same import-for-fixture-reuse pattern
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
@@ -46,6 +47,17 @@ from test_credential_persistence import (  # noqa: F401 -- imported for fixture 
     platform,
     provisioned_app,
 )
+
+# WO 裁定 40: completion conditions 76/77's own primary observation goes
+# through the SAME session `conformance-tests` itself drives (never a
+# hand-built fake) -- `conformance-tests/registry.json`'s own `r2db-api-
+# http` entry names this exact module. Mirrors the established `sys.path`
+# + import pattern `test_r78_pool_wait_stats.py` already uses for the
+# same module.
+_CONFORMANCE_DIR = os.path.join(os.path.dirname(__file__), "..", "conformance")
+if _CONFORMANCE_DIR not in sys.path:
+    sys.path.insert(0, _CONFORMANCE_DIR)
+import conformance_adapter_r2db_http as _http_module  # noqa: E402
 
 from test_ops_verify_declarations import (  # noqa: F401 -- imported for fixture re-export
     _declare_control_role_as_the_writer as _verify_declare_control_role_as_the_writer,
@@ -250,6 +262,62 @@ def test_pg_rate_db_failure_maps_to_service_unavailable_503(
         store.close()
 
 
+def test_pg_rate_concurrent_first_admissions_for_a_new_credential_never_race(platform: types.SimpleNamespace) -> None:
+    """完了条件 29 の監査照合 (裁定 22 の差し戻し, F1) -- 変異 M29b (0015
+    の分岐を `INSERT ... ON CONFLICT DO NOTHING` + `SELECT ... FOR UPDATE`
+    の再読みから、素の `IF NOT FOUND THEN INSERT` に戻す): a brand-new
+    credential (no rate row yet) admits deterministically when the FIRST
+    two admissions for it race -- one connection holds its own INSERT
+    open (uncommitted), a second connection's own call for the SAME
+    credential blocks behind it rather than racing a duplicate `INSERT`
+    into a unique-violation 503 (the M29b-reverted branch: both miss the
+    uncommitted row, both `INSERT`, the second fails its unique key)."""
+    _register_application(platform, "r113r29race", enabled=True)
+    credential_id = _issue_credential(platform, "r113r29race")
+
+    conn_a = psycopg.connect(platform.api_dsn)
+    conn_a.autocommit = False
+    ready = threading.Event()
+    hold_release = threading.Event()
+    result_b: list[object] = []
+
+    def _first_caller() -> None:
+        with conn_a.cursor() as cur:
+            cur.execute(_rate_fn(platform.schema), [credential_id, 100])
+            cur.fetchone()
+        ready.set()
+        hold_release.wait(timeout=5)
+        conn_a.commit()
+
+    def _second_caller() -> None:
+        ready.wait(timeout=5)
+        try:
+            with psycopg.connect(platform.api_dsn) as conn_b:
+                conn_b.autocommit = True
+                with conn_b.cursor() as cur:
+                    cur.execute(_rate_fn(platform.schema), [credential_id, 100])
+                    (admitted,) = cur.fetchone()
+            result_b.append(admitted)
+        except Exception as exc:  # captured for the assertion below, never re-raised on the wrong thread
+            result_b.append(exc)
+
+    t1 = threading.Thread(target=_first_caller)
+    t2 = threading.Thread(target=_second_caller)
+    t1.start()
+    assert ready.wait(timeout=5), "the first caller never reached its own uncommitted INSERT"
+    t2.start()
+    time.sleep(0.2)  # let the second connection reach and block on the row-level conflict
+    hold_release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    conn_a.close()
+
+    assert result_b, "the second admission's own thread never returned -- non-空振り guard"
+    assert result_b[0] is True, f"second concurrent first-admission must be cleanly admitted, not an exception: {result_b[0]!r}"
+    _base_after, counts_after = _read_rate_row(platform, credential_id)
+    assert sum(counts_after) == 2, "both concurrent first admissions for this credential must be counted exactly once each"
+
+
 def test_rate_call_is_lexically_outside_the_authentication_borrow() -> None:
     """完了条件 35 (AST pin) -- 変異 M35 (rate の呼び出しを認証の借用の内側
     へ): `DataService._slot`'s own `self._acquire_rate(canonical)` call is
@@ -276,6 +344,36 @@ def test_rate_call_is_lexically_outside_the_authentication_borrow() -> None:
     assert top_level_calls, "no self._acquire_rate(...) call found in _slot's source"
     for stmt in top_level_calls:
         assert not isinstance(stmt, ast.With), f"_acquire_rate call sits inside a `with` statement: {ast.dump(stmt)}"
+
+
+def test_record_rate_and_check_borrows_and_executes_exactly_once() -> None:
+    """完了条件 35 後半 (AST pin, レビュー F6 の (h)): `PostgresCredentialStore.
+    record_rate_and_check`'s own body borrows `self._pool.connection()`
+    exactly ONCE and runs `_execute(...)` exactly ONCE -- a single round
+    trip per call (design D-3 (1)'s own "1 文"), never two statements on
+    the same borrow and never a second, nested borrow."""
+    import ast
+    import inspect
+    import textwrap
+
+    from r2db_api import credential_store as credential_store_module
+
+    source = textwrap.dedent(inspect.getsource(credential_store_module.PostgresCredentialStore.record_rate_and_check))
+    tree = ast.parse(source)
+    method = tree.body[0]
+    assert isinstance(method, ast.FunctionDef)
+
+    pool_borrow_calls = [
+        node for node in ast.walk(method)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "connection"
+        and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "_pool"
+    ]
+    execute_calls = [
+        node for node in ast.walk(method)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_execute"
+    ]
+    assert len(pool_borrow_calls) == 1, f"expected exactly 1 self._pool.connection() borrow, found {len(pool_borrow_calls)}"
+    assert len(execute_calls) == 1, f"expected exactly 1 _execute(...) call, found {len(execute_calls)}"
 
 
 def test_denied_authentication_never_writes_a_rate_row(platform: types.SimpleNamespace) -> None:
@@ -313,18 +411,120 @@ def test_denied_authentication_never_writes_a_rate_row(platform: types.SimpleNam
         store.close()
 
 
-def _reset_rate_row(platform: types.SimpleNamespace, credential_id: str, *, base_s: int, counts: list[int]) -> None:
-    assert len(counts) == 61
+def test_denied_authentication_of_a_revoked_registered_credential_never_writes_a_rate_row(
+    platform: types.SimpleNamespace,
+) -> None:
+    """完了条件 36 の補強 (レビュー F6 (g)): `test_denied_authentication_
+    never_writes_a_rate_row` above uses a credential_id that never exists
+    in `credentials` at all, so a mutation moving the rate call BEFORE
+    authentication (M36) would already turn that test red for the WRONG
+    reason -- the rate row's own FK to `credentials` rejects the INSERT
+    (a different failure mode, never `_acquire_rate` genuinely not being
+    reached). This uses a REAL, REGISTERED credential that has been
+    revoked (the FK is satisfied; only `assert_active` denies it), so a
+    successful INSERT is genuinely possible and its absence is what this
+    test observes."""
+    from r2db_api.auth import AuthContext
+    from r2db_api.errors import FoundationError as _FE
+    from r2db_api.service import DataService
+
+    _register_application(platform, "r113r36rev", enabled=True)
+    revoked_credential_id = _issue_credential(platform, "r113r36rev")
+    # `set_state` (a write against `credentials`) needs the control role's
+    # own pool -- the `api` role (`store`, below) has only SELECT/INSERT/
+    # UPDATE on the rate table and SELECT on `credentials`, matching
+    # least privilege (`test_credential_persistence.py`'s own `_write_
+    # store`/`_read_store` split).
+    revoker = PostgresCredentialStore(platform.control_dsn, pepper=PEPPER, schema=platform.schema, pool_size=2)
+    try:
+        with revoker.unit_of_work() as work:
+            revoker.set_state(revoked_credential_id, revoked=True, work=work)
+    finally:
+        revoker.close()
+    store = PostgresCredentialStore(platform.api_dsn, pepper=PEPPER, schema=platform.schema, pool_size=4)
+    try:
+        service = DataService(store, rate=store)
+        with pytest.raises(_FE) as excinfo:
+            service.capabilities(AuthContext(revoked_credential_id, "r113r36rev", "runtime"))
+        assert excinfo.value.code == "AUTH_REVOKED"
+        with psycopg.connect(_platform_dsn(platform)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT count(*) FROM {} WHERE credential_id = %s").format(sql.Identifier(platform.schema, RATE_TABLE)),
+                    [revoked_credential_id],
+                )
+                (count,) = cur.fetchone()
+        assert count == 0
+        # non-空振り: a SIBLING credential registered against the SAME
+        # application (so the same FK target exists) but never revoked
+        # genuinely IS rate-table-eligible -- the FK the first assertion
+        # above relied on is real, not incidentally always-satisfiable.
+        sibling_credential_id = _issue_credential(platform, "r113r36rev")
+        assert store.record_rate_and_check(sibling_credential_id, 100) is True
+    finally:
+        store.close()
+
+
+def _read_db_now_s(platform: types.SimpleNamespace) -> int:
+    """The DB's OWN current second (`clock_timestamp()`, same reading the
+    admission function itself uses) -- 差し戻し1b item4 (F10): every
+    second-boundary-sensitive test below anchors its own arithmetic to
+    THIS, never `time.time()` (a separate clock read, racing the DB's own
+    by however long the round trip to set the row up takes)."""
+    with psycopg.connect(platform.api_dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            (now_s,) = cur.fetchone()
+    return int(now_s)
+
+
+def _prime_and_ring_length(platform: types.SimpleNamespace, credential_id: str) -> int:
+    """Primes `credential_id`'s own row through the SAME admission
+    function (`credential_request_rate_admit`) the tests below exercise
+    directly -- never a raw INSERT hardcoded to a specific ring length
+    (差し戻し1b item2) -- then returns the row's CURRENT `counts` array
+    length, read back, never assumed to be 61: a mutation that changes
+    the ring's own length (M32) is reflected automatically, so this
+    helper's own row-creation step never trips a tightened `CHECK`."""
+    with psycopg.connect(platform.api_dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(_rate_fn(platform.schema), [credential_id, 2_000_000_000])
+    _base_s, counts = _read_rate_row(platform, credential_id)
+    return len(counts)
+
+
+def _write_rate_row(platform: types.SimpleNamespace, credential_id: str, *, base_s: int, counts: list[int]) -> None:
+    """Overwrites an ALREADY-EXISTING row (primed by `_prime_and_ring_
+    length` above) with an exact `base_s`/`counts` -- never the INSERT
+    itself, so this never needs to know or assume the ring length."""
     with psycopg.connect(platform.control_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                sql.SQL(
-                    "INSERT INTO {table} (credential_id, base_s, counts) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (credential_id) DO UPDATE SET base_s = EXCLUDED.base_s, counts = EXCLUDED.counts"
-                ).format(table=sql.Identifier(platform.schema, RATE_TABLE)),
-                [credential_id, base_s, counts],
+                sql.SQL("UPDATE {} SET base_s = %s, counts = %s WHERE credential_id = %s").format(
+                    sql.Identifier(platform.schema, RATE_TABLE)
+                ),
+                [base_s, counts, credential_id],
             )
         conn.commit()
+
+
+def _reset_rate_row(
+    platform: types.SimpleNamespace, credential_id: str, *, base_s: int, at: dict[int, int] | None = None, fill: int = 0
+) -> int:
+    """差し戻し1b item2: primes the row via `_prime_and_ring_length` (the
+    admission function itself, never a raw INSERT), then overwrites it
+    with `base_s` and a `counts` array derived from the CURRENT ring
+    length -- never a literal `61`. Returns the ring length used. `at`
+    maps a ring OFFSET (taken mod the actual, current length) to the
+    count placed there; every other position is `fill`."""
+    n = _prime_and_ring_length(platform, credential_id)
+    counts = [fill] * n
+    for offset, value in (at or {}).items():
+        counts[offset % n] = value
+    _write_rate_row(platform, credential_id, base_s=base_s, counts=counts)
+    return n
 
 
 def _read_rate_row(platform: types.SimpleNamespace, credential_id: str) -> tuple[int, list[int]]:
@@ -348,10 +548,8 @@ def test_rate_ring_base_s_never_rewinds_after_a_lock_wait(platform: types.Simple
     _register_application(platform, "r113r30", enabled=True)
     credential_id = _issue_credential(platform, "r113r30")
     now_s = int(time.time())
-    newer_base = now_s + 5  # simulates "a newer request already committed"
-    counts = [0] * 61
-    counts[newer_base % 61] = 1
-    _reset_rate_row(platform, credential_id, base_s=newer_base, counts=counts)
+    newer_base = now_s + 5  # comfortably future -- no second-boundary risk
+    _reset_rate_row(platform, credential_id, base_s=newer_base, at={newer_base: 1})
     with psycopg.connect(platform.api_dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -364,15 +562,17 @@ def test_rate_ring_base_s_never_rewinds_after_a_lock_wait(platform: types.Simple
 
 
 def test_rate_ring_stale_base_s_beyond_61_seconds_resets_from_zero(platform: types.SimpleNamespace) -> None:
-    """完了条件 31 -- 変異 M31 (shift = 61 の全 0 化を外す): a row whose
-    `base_s` is 61+ seconds stale is treated as fully expired -- the next
-    admission starts counting from a clean slate."""
+    """完了条件 31 -- 変異 M31 (shift >= 61 の全 0 化の本体を `NULL;` に:
+    F6 の等価変異指摘 -- `IF` の条件自体を外すのではなく分岐の本体を no-op
+    にする、ELSIF の loop が shift=61 では二度と走らない no-op のみでは殺
+    せないため): a row whose `base_s` is 61+ seconds stale is treated as
+    fully expired -- the next admission starts counting from a clean
+    slate."""
     _register_application(platform, "r113r31", enabled=True)
     credential_id = _issue_credential(platform, "r113r31")
     now_s = int(time.time())
-    stale_base = now_s - 120
-    counts = [61] * 61  # deliberately "full" -- would deny if not reset
-    _reset_rate_row(platform, credential_id, base_s=stale_base, counts=counts)
+    stale_base = now_s - 120  # comfortably past -- no second-boundary risk
+    _reset_rate_row(platform, credential_id, base_s=stale_base, fill=61)  # deliberately "full" -- would deny if not reset
     with psycopg.connect(platform.api_dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -384,22 +584,43 @@ def test_rate_ring_stale_base_s_beyond_61_seconds_resets_from_zero(platform: typ
 
 
 def test_rate_ring_full_count_60_seconds_ago_still_denies(platform: types.SimpleNamespace) -> None:
-    """完了条件 32 (int[61], 裁定34) -- 変異 M32 (配列の長さを 60 に): a
-    row with the declared limit already reached at exactly 60 seconds ago
-    (still inside the 61-slot ring) denies the next request -- an
-    `int[60]` array would instead zero that position and wrongly admit."""
+    """完了条件 32 (int[61], 裁定34) -- 変異 M32 (関数本体の `61` を `60`
+    に揃えて下げる: CHECK、両方の `array_fill`、`IF`/`LEAST` の閾値、両方の
+    `% 61`、loop の上限): a row with the declared limit already reached at
+    exactly 60 seconds before the ADMIT CALL's own DB-side second denies
+    that call -- a ring shrunk to `int[60]` wraps its own zeroing loop
+    exactly once around that position and wrongly admits instead.
+
+    差し戻し1b item2: `_reset_rate_row` never assumes the ring is 61 long
+    (it primes the row through `credential_request_rate_admit` itself and
+    reads the length back), so M32's own tightened `CHECK` never rejects
+    this row's own setup -- the observation is the ring math, not a setup
+    `CheckViolation` (F6's 代理 finding).
+    差し戻し1b item4 (F10): retries up to 3 times, anchored to the DB's
+    OWN clock (`_read_db_now_s`), detected via the row's own `base_s`
+    after the call -- a call landing one second later than assumed is
+    redone rather than flaking."""
     _register_application(platform, "r113r32", enabled=True)
     credential_id = _issue_credential(platform, "r113r32")
-    now_s = int(time.time())
-    old_base = now_s - 60
-    counts = [0] * 61
-    counts[old_base % 61] = 5
-    _reset_rate_row(platform, credential_id, base_s=old_base, counts=counts)
-    with psycopg.connect(platform.api_dsn) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(_rate_fn(platform.schema), [credential_id, 5])
-            (admitted,) = cur.fetchone()
+    admitted = None
+    for _attempt in range(3):
+        db_now_s = _read_db_now_s(platform)
+        old_base = db_now_s - 60
+        _reset_rate_row(platform, credential_id, base_s=old_base, at={old_base: 5})
+        with psycopg.connect(platform.api_dsn) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(_rate_fn(platform.schema), [credential_id, 5])
+                (admitted,) = cur.fetchone()
+        # bracketing check (never the row's own `base_s`: a DENIED call
+        # persists NOTHING at all, so `base_s` legitimately never advances
+        # on the very outcome this test asserts -- checking it here would
+        # make a correctly-denied call look like a missed second, always).
+        db_now_s_after = _read_db_now_s(platform)
+        if db_now_s_after == db_now_s:
+            break
+    else:
+        pytest.fail("the setup+call sequence never landed within one DB second after 3 attempts (差し戻し1b item4 flake guard)")
     assert admitted is False, "a full count 60s ago must still be inside the 61-slot window and deny"
 
 
@@ -407,30 +628,47 @@ def test_rate_ring_shift_zeroes_only_the_shifted_range(platform: types.SimpleNam
     """完了条件 33 (監督裁定3 の環) -- 変異 M33 (0 にする範囲を base_s ..
     base_s+shift-1 にずらす): a row with known counts at every position,
     `base_s` moved forward by a known `k` seconds, zeroes exactly the `k`
-    positions `(base_s+1 .. base_s+k) mod 61` -- every other position's
-    own count survives untouched."""
+    positions `(base_s+1 .. base_s+k) mod n` (`n` = the CURRENT ring
+    length, read back from the row `_prime_and_ring_length` itself just
+    created -- 差し戻し1b item2, never a literal 61) -- every other
+    position's own count survives untouched.
+
+    差し戻し1b item4 (F10): same second-boundary retry guard as 完了条件
+    32 above."""
     _register_application(platform, "r113r33", enabled=True)
     credential_id = _issue_credential(platform, "r113r33")
-    now_s = int(time.time())
     k = 5
-    old_base = now_s - k
-    counts = [i + 1 for i in range(61)]  # every position has a distinct, known, non-zero value
-    _reset_rate_row(platform, credential_id, base_s=old_base, counts=counts)
-    with psycopg.connect(platform.api_dsn) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(_rate_fn(platform.schema), [credential_id, 10_000])
-            (admitted,) = cur.fetchone()
+    admitted = base_after = counts_after = counts = old_base = n = None
+    for _attempt in range(3):
+        db_now_s = _read_db_now_s(platform)
+        old_base = db_now_s - k
+        n = _prime_and_ring_length(platform, credential_id)
+        counts = [i + 1 for i in range(n)]  # every position has a distinct, known, non-zero value
+        _write_rate_row(platform, credential_id, base_s=old_base, counts=counts)
+        with psycopg.connect(platform.api_dsn) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(_rate_fn(platform.schema), [credential_id, 10_000])
+                (admitted,) = cur.fetchone()
+        base_after, counts_after = _read_rate_row(platform, credential_id)
+        # bracketing check (never `base_after` alone -- consistent with
+        # 完了条件 32's own guard immediately above, so both tests share
+        # one robust shape rather than depending on the row's own
+        # post-call state, which differs by outcome).
+        db_now_s_after = _read_db_now_s(platform)
+        if db_now_s_after == db_now_s:
+            break
+    else:
+        pytest.fail("the setup+call sequence never landed within one DB second after 3 attempts (差し戻し1b item4 flake guard)")
     assert admitted is True
-    base_after, counts_after = _read_rate_row(platform, credential_id)
-    expected_zeroed = {(old_base + i) % 61 for i in range(1, k + 1)}
-    incremented_idx = base_after % 61
-    for idx in range(61):
+    expected_zeroed = {(old_base + i) % n for i in range(1, k + 1)}
+    incremented_idx = base_after % n
+    for idx in range(n):
         if idx == incremented_idx:
             # the incremented position: `(zeroed if it was in range else its
             # own original value) + 1` -- checked separately below, never
             # folded into either branch here (it is always the LAST
-            # position of the zeroed range when shift < 61, so it would
+            # position of the zeroed range when shift < n, so it would
             # otherwise wrongly be asserted `== 0`).
             continue
         if idx in expected_zeroed:
@@ -731,6 +969,234 @@ def test_one_http_request_holds_exactly_one_slot(tmp_path: Path) -> None:
             assert canonical is context
 
 
+def test_slot_is_reacquirable_after_a_holding_child_process_is_sigkilled_and_after_a_plain_close(tmp_path: Path) -> None:
+    """完了条件 54 (監督裁定 6, 監査照合 -- WO §4.3's own "29・37・54・67・
+    73・75・78-82: 監査照合" row, no paired mutation): design D-3 (2)'s own
+    crash-safety claim ("process が死ねば kernel が解放する"), confirmed on
+    THIS development machine -- a CHILD process holds `slot-0` (writes a
+    ready-marker file once held, then sleeps); the PARENT observes
+    `LimitExceeded` while the child holds it; `proc.kill()` (SIGKILL)
+    followed by a TIMED `proc.wait()` (every process-wait below carries a
+    timeout, never unbounded); the PARENT then re-acquires the SAME slot.
+    Separately, an ordinary `with ... .acquire(1):` release (a plain
+    `close()`, no process death at all) is immediately re-acquirable too.
+
+    `sysconfig.get_config_var("HAVE_FLOCK")`'s own value on this
+    development machine (whether `fcntl.flock` here calls the real
+    `flock(2)` syscall directly rather than an `fcntl()`-based emulation,
+    design §1.4 (4)/§9 (r)) is reported in the report body, not this
+    docstring."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    ready_path = tmp_path / "child_ready"
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    child_src = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {src_dir!r})\n"
+        "from r2db_api import concurrency_slots\n"
+        f"slots = concurrency_slots.HostSharedConcurrencySlots(Path({str(slot_dir)!r}))\n"
+        "with slots.acquire(1):\n"
+        f"    open({str(ready_path)!r}, 'w').close()\n"
+        "    time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", child_src])
+    try:
+        deadline = time.time() + 10.0
+        while not ready_path.exists():
+            assert time.time() < deadline, "child process never signalled it holds the slot"
+            time.sleep(0.05)
+
+        slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+        with pytest.raises(concurrency_slots.LimitExceeded):
+            with slots.acquire(1):
+                pass  # unreachable -- the child still holds slot-0
+
+        proc.kill()  # SIGKILL
+        proc.wait(timeout=10.0)
+
+        # crash safety: the kernel released the child's flock on process death.
+        with slots.acquire(1):
+            pass
+
+        # a plain close() (no process death at all) is also immediately re-acquirable.
+        with slots.acquire(1):
+            pass
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10.0)
+
+
+def test_data_service_rejects_concurrency_configured_true_without_slots() -> None:
+    """完了条件 56 の補強 (訂正註 56b, F13) -- 変異なし (`concurrency_
+    slots=None` かつ `concurrency_configured=True` を渡すと `DataService.
+    __init__` が `ValueError` を送出する): `concurrency_configured=True`
+    は「host-shared slot が配線されている」ことを`capabilities().limit_
+    enforcement.concurrency` に対して意味するので、slot オブジェクトが
+    無いのにこのフラグだけ真にする呼び出し元を構造で拒む。"""
+    from r2db_api.service import DataService
+
+    class _FakeCredentials:
+        def assert_active(self, context):
+            return context
+
+    with pytest.raises(ValueError, match="concurrency_configured"):
+        DataService(
+            _FakeCredentials(), limits=ResourceLimits(concurrency=1), initial_cells={"app": object()},
+            concurrency_slots=None, concurrency_configured=True,
+        )
+
+
+def test_slot_backend_error_maps_to_service_unavailable_through_data_service() -> None:
+    """完了条件 45 (レビュー F6 (i)): a `concurrency_slots.SlotBackendError`
+    (design 裁定 28 -- an unexpected `flock` errno, fail-closed) reaches
+    the SAME `SERVICE_UNAVAILABLE`/503 mapping through BOTH `DataService.
+    acquire_concurrency_slot()` (pre-auth) and `DataService._slot()`
+    (post-auth, `concurrency_precharged=False`) -- never `LIMIT_EXCEEDED`/
+    429 (a genuine "all slots taken") and never silently admitted."""
+    from contextlib import contextmanager
+
+    from r2db_api.auth import AuthContext
+    from r2db_api.errors import FoundationError as _FE
+    from r2db_api.service import DataService
+
+    class _FakeCredentials:
+        def assert_active(self, context):
+            return context
+
+    class _BackendErrorSlots:
+        @contextmanager
+        def acquire(self, limit: int):
+            raise concurrency_slots.SlotBackendError("synthetic backend failure for condition 45")
+            yield  # pragma: no cover -- unreachable, makes this a generator function
+
+    service = DataService(
+        _FakeCredentials(), limits=ResourceLimits(concurrency=1), initial_cells={"app": object()},
+        concurrency_slots=_BackendErrorSlots(), concurrency_configured=True,
+    )
+    context = AuthContext("crd", "app", "runtime")
+
+    with pytest.raises(_FE) as excinfo_pre_auth:
+        with service.acquire_concurrency_slot():
+            pass  # pragma: no cover -- acquire() raises before yielding
+    assert excinfo_pre_auth.value.code == "SERVICE_UNAVAILABLE"
+    assert excinfo_pre_auth.value.status == 503
+
+    with pytest.raises(_FE) as excinfo_post_auth:
+        with service._slot(context, concurrency_precharged=False):  # noqa: SLF001
+            pass  # pragma: no cover -- acquire() raises before yielding
+    assert excinfo_post_auth.value.code == "SERVICE_UNAVAILABLE"
+    assert excinfo_post_auth.value.status == 503
+
+
+def test_real_http_request_holds_the_shared_slot_and_writes_a_rate_row(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
+) -> None:
+    """完了条件 76a (WO 裁定 40: supplementary composition-root evidence,
+    never a substitute for 76/77's own adapter-session primary
+    observation -- `test_http_adapter_session_holds_the_shared_slot_and_
+    writes_a_rate_row` below): a REAL `build_app()` (host-shared slot
+    directory AND the PostgreSQL-backed rate row both wired, exactly the
+    production composition -- never a hand-built fake) proves, over a
+    real HTTP round trip (`starlette.testclient.TestClient`), that
+    exactly one of the declared `concurrency` slot files is held (a
+    second, independent `flock(LOCK_EX|LOCK_NB)` on it fails with
+    EWOULDBLOCK/EAGAIN) for the duration of a request stalled inside its
+    own synchronous section, and free again once it completes, and the
+    request leaves a `credential_request_rate` row for the authenticating
+    credential."""
+    import errno
+    import fcntl
+
+    from r2db_api import service as service_module
+
+    env = _preflight_env(platform, provisioned_app)
+    app = main_module.build_app(env=env)
+    slot_dir = Path(env["R2DB_SLOT_DIR"])
+    bearer = _issue_and_rotate_bearer(platform, provisioned_app)
+    credential_id = bearer.split(".", 1)[0]
+
+    # `capabilities()` (`service.py`) runs its own body -- the module-
+    # level `build_capabilities_document` call -- LEXICALLY INSIDE the
+    # `with self._slot(...)` block, so blocking THIS call (rather than
+    # `DataService.capabilities` itself, which would block BEFORE the
+    # slot is ever entered) holds the slot for the stall's own duration,
+    # the same way `test_threadpool_offload.py`'s own `query_page` stub
+    # does for a data-plane query. Chosen over an actual entity query so
+    # this test needs no schema/entity-type setup for `provisioned_app`'s
+    # own real per-application database at all -- `/v1/capabilities`
+    # goes through the SAME `_slot`/rate/concurrency gate (`capabilities`'s
+    # own docstring, `operation_catalog`'s docstring) as every other
+    # endpoint.
+    entered = threading.Event()
+    release = threading.Event()
+    original_build_capabilities_document = service_module.build_capabilities_document
+
+    def blocking_build_capabilities_document(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=5.0)
+        return original_build_capabilities_document(*args, **kwargs)
+
+    service_module.build_capabilities_document = blocking_build_capabilities_document
+
+    from starlette.testclient import TestClient
+
+    result: list[object] = []
+    held_names: list[str] = []
+    try:
+        with TestClient(app.app) as client:
+            def _hold() -> None:
+                response = client.get(
+                    "/v1/capabilities",
+                    headers={"authorization": f"Bearer {bearer}"},
+                )
+                result.append(response)
+
+            holder = threading.Thread(target=_hold)
+            holder.start()
+            assert entered.wait(timeout=5.0), "the held request never reached its own blocking sync section"
+
+            # 完了条件 76: exactly one slot file is exclusively held right now.
+            for candidate in sorted(slot_dir.glob("slot-*")):
+                probe_fd = os.open(str(candidate), os.O_RDWR)
+                try:
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(probe_fd, fcntl.LOCK_UN)
+                except OSError as exc:
+                    assert exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN), exc
+                    held_names.append(candidate.name)
+                finally:
+                    os.close(probe_fd)
+            assert held_names, "no slot file was found exclusively held during the stalled request"
+            assert len(held_names) == 1, f"expected exactly 1 held slot, found {held_names}"
+
+            release.set()
+            holder.join(timeout=5.0)
+    finally:
+        service_module.build_capabilities_document = original_build_capabilities_document
+
+    assert result and result[0].status_code == 200, result
+
+    # The slot is free again once the request has completed.
+    freed_fd = os.open(str(slot_dir / held_names[0]), os.O_RDWR)
+    try:
+        fcntl.flock(freed_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(freed_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(freed_fd)
+
+    # 完了条件 77: the request left a rate row for the authenticating credential.
+    with psycopg.connect(_platform_dsn(platform)) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT count(*) FROM {} WHERE credential_id = %s").format(sql.Identifier(platform.schema, RATE_TABLE)),
+                [credential_id],
+            )
+            (count,) = cur.fetchone()
+    assert count == 1, "the http request must leave exactly one rate row for its own credential"
+
+
 # ===========================================================================
 # completion conditions 55-57: the 2-strategy mapping helper
 # ===========================================================================
@@ -869,6 +1335,14 @@ def test_control_plane_mapping_goes_through_the_same_helper_unconfigured(platfor
                 [json.dumps({"data": 1, "control": 2})],
             )
         conn.commit()
+    # 裁定 28 (i): controlplane's own F-16 floor is now * `process_
+    # ceilings.control` (2) -- 16*2=32 -- raise its real CONNECTION LIMIT
+    # (20 by 0013) so F-16 does not fire before this test's own
+    # control-mapping assertion runs.
+    with psycopg.connect(platform.admin_dsn) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 32").format(sql.Identifier(f"{platform.prefix}_controlplane")))
+        _conn.commit()
     env = {
         "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
         "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-r113-m57",
@@ -1061,6 +1535,29 @@ def test_data_preflight_exits_nonzero_with_f15_when_process_ceilings_missing(
                     [json.dumps({"data": 1, "control": 1})],
                 )
             conn.commit()
+
+
+def test_control_preflight_exits_0_on_a_sound_env(platform: types.SimpleNamespace) -> None:
+    """完了条件 64 の監査照合 (レビュー F6 (j)): `python -m r2db_api.
+    control_main --preflight` exits 0, over a real subprocess, on a
+    genuinely sound env (surfaces declared, `process_ceilings.control`
+    present and >= `R2DB_CONTROL_WORKERS`) -- the positive control this
+    file's own `test_control_preflight_exits_nonzero_with_f15_when_
+    process_ceilings_missing` (below) needs to show the anomaly path is
+    genuinely anomalous, not merely "always non-zero"."""
+    _declare_control_surface(platform)
+    env = {
+        "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+        "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-r113-ctl-preflight-ok",
+        "R2DB_CREDENTIAL_PEPPER": PEPPER,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_CONTROL_WORKERS": "1",
+    }
+    try:
+        result = _run_preflight_subprocess("r2db_api.control_main", env)
+        assert result.returncode == 0, result.stderr
+    finally:
+        _restore_data_only_surface(platform)
 
 
 def test_control_preflight_exits_nonzero_with_f15_when_process_ceilings_missing(platform: types.SimpleNamespace) -> None:
@@ -1310,8 +1807,49 @@ def test_control_plane_connections_carry_the_documented_application_name(platfor
 
 
 def test_role_pool_size_is_thread_limit_plus_two() -> None:
-    """完了条件 70 -- 変異 M70 (pool を `DEFAULT_THREAD_LIMIT` から導く)."""
+    """完了条件 70 の helper の算術 (`role_pool_size`). composition root
+    で `R2DB_THREAD_LIMIT` が pool の寸法に効くことの観測は、直後の
+    `test_build_app_sizes_platform_and_application_pools_from_r2db_
+    thread_limit` (変異 M70) が担う."""
     assert role_pool_size(6) == 8
+
+
+def test_build_app_sizes_platform_and_application_pools_from_r2db_thread_limit(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
+) -> None:
+    """完了条件 70 -- 変異 M70 (`main.py` の `role_pool_size(thread_limit)`
+    2 か所を `role_pool_size(DEFAULT_THREAD_LIMIT)` にする): the REAL
+    `build_app()` run with `R2DB_THREAD_LIMIT=6` (and no
+    `R2DB_PLATFORM_POOL_SIZE` override) sizes the platform pool (the
+    credential store and the durable audit sink) and the served
+    application's own runtime/developer role pools all at
+    `role_pool_size(6)` = 8, never the `DEFAULT_THREAD_LIMIT` (4)
+    derived 6."""
+    env = _preflight_env(platform, provisioned_app)
+    env.pop("R2DB_PLATFORM_POOL_SIZE", None)
+    env["R2DB_THREAD_LIMIT"] = "6"
+    app = main_module.build_app(env=env)
+    service = app.app.state.service
+    try:
+        platform_sizes = {
+            "credentials": service._credentials._pool._maxconn,  # noqa: SLF001
+            "durable_audit": service._durable_audit._pool._maxconn,  # noqa: SLF001
+        }
+        cells = dict(service._cells)  # noqa: SLF001
+        assert cells, "build_app() registered no served application cell (空振り)"
+        cell_sizes = {}
+        for application_id, cell in cells.items():
+            cell_sizes[(application_id, "runtime")] = cell._runtime._maxconn  # noqa: SLF001
+            cell_sizes[(application_id, "developer")] = cell._developer._maxconn  # noqa: SLF001
+        assert platform_sizes == {"credentials": 8, "durable_audit": 8}, platform_sizes
+        assert cell_sizes and all(size == 8 for size in cell_sizes.values()), cell_sizes
+    finally:
+        service._durable_audit.close()  # noqa: SLF001
+        service._credentials.close()  # noqa: SLF001
+        from r2db_api.postgres import default_pool_manager, set_connection_application_name
+
+        default_pool_manager.dispose_all()
+        set_connection_application_name(None)
 
 
 def test_f18_check_max_connections_headroom_uses_pool_size_not_concurrency() -> None:
@@ -1417,23 +1955,117 @@ def test_verify_declarations_reports_workers_exceeding_ceiling_with_a_dedicated_
 # ===========================================================================
 
 
-def test_http_adapter_wires_an_instance_scoped_slot_directory() -> None:
-    """完了条件 76 -- 変異 M76 (adapter が slot を配線しない): a static pin
-    of `conformance_adapter_r2db_http.py`'s own `DataService(...)` call
-    site -- it passes `concurrency_slots=HostSharedConcurrencySlots(self.
-    _slot_dir)`, the instance's own `mkdtemp`ed directory (real end-to-end
-    coverage of this wiring is `conformance-tests/test_c32_shared_limits.
-    py`'s own job, driven against the REAL launcher, never the in-process
-    http plug -- this adapter's own construction is what this WP's own
-    touched-file boundary actually owns)."""
-    source = (Path(__file__).resolve().parents[1] / "conformance" / "conformance_adapter_r2db_http.py").read_text()
-    assert "concurrency_slots=HostSharedConcurrencySlots(self._slot_dir)," in source
+def _probe_slot_dir_held_names(slot_dir: Path) -> list[str]:
+    """Every `slot-*` file under `slot_dir` a second, independent
+    `flock(LOCK_EX|LOCK_NB)` cannot take right now (EWOULDBLOCK/EAGAIN) --
+    the same direct-flock-probe shape `test_real_http_request_holds_the_
+    shared_slot_and_writes_a_rate_row` (完了条件 76a) already uses."""
+    import errno
+    import fcntl
+
+    held: list[str] = []
+    for candidate in sorted(slot_dir.glob("slot-*")):
+        probe_fd = os.open(str(candidate), os.O_RDWR)
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(probe_fd, fcntl.LOCK_UN)
+        except OSError as exc:
+            assert exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN), exc
+            held.append(candidate.name)
+        finally:
+            os.close(probe_fd)
+    return held
 
 
-def test_http_adapter_wires_the_credential_store_as_the_rate_backend() -> None:
-    """完了条件 77 -- 変異 M77 (adapter が PG の rate を配線しない): the
-    SAME `DataService(...)` call site passes `rate=self._credentials`
-    (the adapter's own `PostgresCredentialStore` -- the identical store
-    its own read path already uses, 裁定15: no second pool)."""
-    source = (Path(__file__).resolve().parents[1] / "conformance" / "conformance_adapter_r2db_http.py").read_text()
-    assert "rate=self._credentials," in source
+def test_http_adapter_session_holds_the_shared_slot_and_writes_a_rate_row() -> None:
+    """完了条件 76/77 (WO 裁定 40): the SAME session `conformance-tests`
+    itself drives (`R2DBHttpConformanceAdapter()`, the object `build_
+    adapter()` -- the `r2db-api-http` entry `conformance-tests/registry.
+    json` names -- returns; never a hand-built fake) proves, through the
+    adapter's own `hold_in_flight` (1 request held AFTER the concurrency
+    slot is acquired and BEFORE the DB catalog read, `adapter.py`'s own
+    docstring), that (76) exactly one of this session's own instance-
+    scoped `mkdtemp` slot directory's `slot-*` files is exclusively held
+    for the hold's own duration and free again once released, and (77)
+    the authenticating credential has exactly one `credential_request_
+    rate` row once the hold is released.
+
+    変異 M76 (adapter が session に slot directory を配線せず、宣言も
+    `concurrency_configured=False` にそろえる): adapter construction
+    succeeds and the held request is admitted by the in-process counter
+    instead, so no `slot-*` file is held -- the "no slot file was
+    exclusively held" assertion below goes red. 変異 M77 (adapter が PG
+    の rate を配線しない): the held request still completes, but no rate
+    row is ever written -- the `== 1` row-count assertion below goes red
+    (stays 0)."""
+    adapter = _http_module.R2DBHttpConformanceAdapter()
+    app_id = adapter._fresh_slug("r76s")
+    try:
+        adapter.provision_application(app_id)
+        handle = adapter.issue_credential(app_id, "runtime")
+        session = adapter.authenticate(handle)
+
+        with adapter.hold_in_flight(session, 1) as entered:
+            assert entered == 1
+            held_names = _probe_slot_dir_held_names(adapter._slot_dir)
+            assert held_names, "no slot file was exclusively held during the held request"
+            assert len(held_names) == 1, f"expected exactly 1 held slot, found {held_names}"
+
+        # free again once the hold above released it
+        assert not _probe_slot_dir_held_names(adapter._slot_dir)
+
+        with psycopg.connect(adapter._platform.api_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT count(*) FROM {} WHERE credential_id = %s").format(
+                        sql.Identifier(adapter._platform.schema, RATE_TABLE)
+                    ),
+                    [handle.credential_ref],
+                )
+                (rate_row_count,) = cur.fetchone()
+        assert rate_row_count == 1, "the http request must leave exactly one rate row for its own credential"
+    finally:
+        with contextlib.suppress(Exception):
+            adapter.deprovision_application(app_id)
+        adapter.close()
+
+
+def test_http_adapter_isolated_surface_wires_a_separate_slot_directory_and_still_gates() -> None:
+    """完了条件 76 (isolated surface, WO 裁定 40): `isolated_application_
+    surface()` wires a DIFFERENT `mkdtemp` slot directory than the
+    session's own (never the same path -- 裁定40's own "session と別の
+    directory"), and the same held-request/flock observation holds
+    against it, and (77) the isolated surface's own authenticating
+    credential has exactly one `credential_request_rate` row once the
+    hold is released.
+
+    変異 M76i (隔離 surface に session と同じ directory を渡す): the
+    `iso._slot_dir != adapter._slot_dir` assertion below goes red (both
+    equal the parent's own directory). 変異 M77i (隔離 surface が PG の
+    rate を配線しない): the held request is counted in-process instead,
+    so the `== 1` rate-row assertion below goes red (stays 0)."""
+    adapter = _http_module.R2DBHttpConformanceAdapter()
+    try:
+        with adapter.isolated_application_surface() as iso:
+            assert iso._slot_dir != adapter._slot_dir, "the isolated surface must wire its OWN, separate slot directory"
+            app_id = iso._fresh_slug("r76i")
+            iso.provision_application(app_id)
+            handle = iso.issue_credential(app_id, "runtime")
+            session = iso.authenticate(handle)
+            with iso.hold_in_flight(session, 1) as entered:
+                assert entered == 1
+                held_names = _probe_slot_dir_held_names(iso._slot_dir)
+                assert len(held_names) == 1, f"expected exactly 1 held slot, found {held_names}"
+
+            with psycopg.connect(iso._platform.api_dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql.SQL("SELECT count(*) FROM {} WHERE credential_id = %s").format(
+                            sql.Identifier(iso._platform.schema, RATE_TABLE)
+                        ),
+                        [handle.credential_ref],
+                    )
+                    (rate_row_count,) = cur.fetchone()
+            assert rate_row_count == 1, "the isolated surface's request must leave exactly one rate row for its own credential"
+    finally:
+        adapter.close()

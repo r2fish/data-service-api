@@ -219,7 +219,8 @@ from .credential_store import (
     PostgresCredentialStore,
     validate_control_pepper_separation,
 )
-from .limits import ControlPlaneLimits, ResourceLimits
+from .http import DEFAULT_THREAD_LIMIT
+from .limits import ControlPlaneLimits, role_pool_size, thread_limit_from_env
 from . import platform_declarations
 from . import postgres
 from .platform_declarations import (
@@ -265,9 +266,9 @@ def _workers_from_env(env: Mapping[str, str], name: str) -> int:
     main._workers_from_env` -- `name` must be set, non-empty, and a
     positive integer; unset/empty/`0`/negative/non-numeric all stop
     startup naming `name`. `R2DB_CONTROL_WORKERS` is always `1` in a real
-    deployment (this composition root never serves more than one worker,
-     -- checked here, and again against `process_ceilings.
-    control` below, rather than assumed."""
+    deployment (this composition root never serves more than one worker)
+    -- checked here, and again against `process_ceilings.control` below,
+    rather than assumed."""
     raw = env.get(name)
     if not raw:
         raise RuntimeError(f"{name} is required to start r2db_api.control_main:build_control_app")
@@ -641,14 +642,21 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         _own_role_classes = {"controlplane"}
         if audit_dsn:
             _own_role_classes.add("auditreader")
+        # design D-3 (5): control's own F-16/F-18 basis is
+        # `role_pool_size` of the thread limit -- the same function
+        # `main.py`'s own startup and `ops verify-declarations` use -- read
+        # from THIS process' own env (`R2DB_THREAD_LIMIT`, through
+        # `r2db_api.limits.thread_limit_from_env`), never
+        # `ResourceLimits().concurrency`, which sizes no pool.
+        _control_role_pool_size = role_pool_size(thread_limit_from_env(env, "R2DB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT))
         check_role_connection_limits(
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            pool_size=ResourceLimits().concurrency,
+            pool_size=_control_role_pool_size, process_ceilings=declarations.process_ceilings,
             role_classes=frozenset(_own_role_classes), application_slugs=(),
         )
         check_max_connections_headroom(
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            process_ceilings=declarations.process_ceilings, pool_size=ResourceLimits().concurrency,
+            process_ceilings=declarations.process_ceilings, pool_size=_control_role_pool_size,
         )
 
     # Step 6: assemble the rest of the stack -- `surfaces`/`audit_

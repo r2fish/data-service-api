@@ -825,6 +825,50 @@ def test_thread_limit_from_env_rejects_zero_negative_or_non_numeric():
             _thread_limit_from_env({"R2DB_THREAD_LIMIT": raw}, "R2DB_THREAD_LIMIT", 4)
 
 
+def test_thread_limit_from_env_agrees_with_the_shared_limits_reader():
+    """完了条件 70b (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3
+    (5)/裁定 28 (ii)、監督裁定 37): `main.py`'s own `_thread_limit_from_env`
+    is a registered isomorphism target (`tests/test_audit_query.py`'s own
+    `_ISOMORPHIC_TARGETS`, main.py-to-main.py) and an AST-isolated-exec
+    unit-test subject (the 3 tests immediately above), so it keeps its
+    OWN body rather than delegating to `r2db_api.limits.thread_limit_
+    from_env` (the ONE reader `control_main.py`/`ops._declared_pool_size`
+    both use) -- but the two must still agree on every input, since they
+    read the SAME variable (`R2DB_THREAD_LIMIT`) with the SAME intended
+    discipline. This pins that agreement directly, for unset, empty, a
+    valid positive integer, `0`, a negative integer, and a non-numeric
+    value alike: same return value, or both raise `ValueError`.
+
+    mutation M70b (`r2db_api/limits.py`): change `thread_limit_from_env`'s
+    own `value <= 0` branch to `value < 0` (letting `0` degrade instead of
+    raising) -- `main.py`'s own copy still raises for `"0"`, so this
+    test's own agreement check for that input goes red (one side raises,
+    the other returns 0)."""
+    from r2db_api.limits import thread_limit_from_env as _shared_thread_limit_from_env
+
+    _main_thread_limit_from_env = _load_thread_limit_from_env()
+
+    for env in ({}, {"R2DB_THREAD_LIMIT": ""}, {"R2DB_THREAD_LIMIT": "6"}):
+        assert _main_thread_limit_from_env(env, "R2DB_THREAD_LIMIT", 4) == _shared_thread_limit_from_env(env, "R2DB_THREAD_LIMIT", 4)
+
+    for raw in ("0", "-3", "abc"):
+        env = {"R2DB_THREAD_LIMIT": raw}
+        main_exc = None
+        shared_exc = None
+        try:
+            _main_thread_limit_from_env(env, "R2DB_THREAD_LIMIT", 4)
+        except ValueError as exc:
+            main_exc = exc
+        try:
+            _shared_thread_limit_from_env(env, "R2DB_THREAD_LIMIT", 4)
+        except ValueError as exc:
+            shared_exc = exc
+        assert (main_exc is None) == (shared_exc is None), (
+            f"raw={raw!r}: main.py's own reader raised {main_exc!r}, "
+            f"limits.thread_limit_from_env raised {shared_exc!r} -- disagreement"
+        )
+
+
 # ---------------------------------------------------------------------------
 # D-8: `create_app`'s own `thread_limit=` middleware wiring.
 # ---------------------------------------------------------------------------

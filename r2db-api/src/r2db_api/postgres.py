@@ -242,8 +242,8 @@ def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, param
 # design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4
 # (completion conditions 68/69): the `application_name` every
 # connection this module opens carries, process-wide. `None` (the
-# default -- every pre-this change caller: this repository's own tests, both
-# conformance adapters) omits the parameter entirely, leaving libpq's own
+# default -- this repository's own tests and both conformance adapters
+# never set it) omits the parameter entirely, leaving libpq's own
 # default (`""`) untouched. `r2db_api.main`/`r2db_api.control_main` each
 # set this ONCE, near the top of their own `build_app()`/`build_control_
 # app()`, to `"r2db-api:data:<pid>"`/`"r2db-api:control:<pid>"` -- every

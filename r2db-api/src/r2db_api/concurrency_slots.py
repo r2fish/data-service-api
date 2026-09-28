@@ -25,8 +25,6 @@ Stdlib only. Every syscall in this module runs on the event-loop thread
 triple, and the worst case (every slot already held) costs `limit` such
 triples -- L = 32 is 96 syscalls, all non-blocking (`LOCK_NB`), never a
 wait.
-
-History: CH-0001
 """
 from __future__ import annotations
 
@@ -163,7 +161,7 @@ class HostSharedConcurrencySlots:
 
     def __init__(self, directory: Path, *, random_below: Callable[[int], int] = secrets.randbelow) -> None:
         self._directory = directory
-        # design completion condition 51: the search start point follows a
+        # completion condition 51: the search start point follows a
         # random source -- injectable so a test can observe it, never
         # hardcoded to 0.
         self._random_below = random_below

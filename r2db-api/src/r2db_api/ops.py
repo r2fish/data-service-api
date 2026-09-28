@@ -52,7 +52,7 @@ from .credential_store import (
 )
 from .errors import FoundationError, fail
 from .http import DEFAULT_THREAD_LIMIT
-from .limits import role_pool_size
+from .limits import role_pool_size, thread_limit_from_env
 from .platform_declarations import (
     MIGRATION_NUMBER,
     PEER_MODULE,
@@ -1144,7 +1144,7 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     try:
         platform_declarations.check_role_connection_limits(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            pool_size=_declared_pool_size(),
+            pool_size=_declared_pool_size(), process_ceilings=declarations.process_ceilings,
         )
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
@@ -1232,31 +1232,29 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
 def _declared_pool_size() -> int:
     """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)):
     this peer's own declared per-role pool ceiling, consulted by
-    `_verify_declarations_checks`'s own F-16/F-18 checks -- renamed from
-    `_declared_concurrency` (`ResourceLimits.concurrency` no longer sizes
-    any pool). Reads `R2DB_THREAD_LIMIT` from THIS CLI
-    invocation's own process env (falling back to `DEFAULT_THREAD_LIMIT`
-    when unset/empty/unparsable, mirroring `main.py`'s own degrade-to-
-    default discipline for the same variable) and derives the floor via
-    `role_pool_size` -- the SAME function `main.py`'s own startup check
-    uses. This is a disclosed limitation this command already carries for
-    every other env-derived check (`_verify_declarations_checks`'s own
-    workers-vs-ceiling check right below states it too): the value this
-    CLI invocation's own shell happens to have set for `R2DB_THREAD_LIMIT`
-    may not match the REAL running `r2db_api.main`/`r2db_api.control_main`
-    process' own env -- this check only ever verifies agreement with
-    WHATEVER value this one invocation was run under.
+    `_verify_declarations_checks`'s own F-16/F-18 checks. Reads
+    `R2DB_THREAD_LIMIT` from THIS CLI invocation's own process env
+    through `r2db_api.limits.thread_limit_from_env` -- the SAME reader
+    `control_main.py`'s own startup check uses, and the same rules
+    `main.py`'s own `_thread_limit_from_env` applies
+    (`tests/test_threadpool_offload.py::test_thread_limit_from_env_agrees_with_the_shared_limits_reader`
+    pins the two equal on every input): unset/empty falls back to
+    `DEFAULT_THREAD_LIMIT`, a
+    non-empty value that is not a positive integer raises `ValueError`
+    naming the variable (fail-loud, never a silent fallback) -- and
+    derives the floor via `role_pool_size`, the SAME function `main.py`'s
+    own startup check uses. This is a disclosed limitation this command
+    already carries for every other env-derived check
+    (`_verify_declarations_checks`'s own workers-vs-ceiling check right
+    below states it too): the value this CLI invocation's own shell
+    happens to have set for `R2DB_THREAD_LIMIT` may not match the REAL
+    running `r2db_api.main`/`r2db_api.control_main` process' own env --
+    this check only ever verifies agreement with WHATEVER value this one
+    invocation was run under.
 
     History: CH-0322
     """
-    raw = os.environ.get("R2DB_THREAD_LIMIT")
-    thread_limit = DEFAULT_THREAD_LIMIT
-    if raw:
-        try:
-            thread_limit = int(raw)
-        except ValueError:
-            thread_limit = DEFAULT_THREAD_LIMIT
-    return role_pool_size(thread_limit)
+    return role_pool_size(thread_limit_from_env(os.environ, "R2DB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT))
 
 
 def _served_capabilities_document() -> dict[str, Any]:
@@ -1336,7 +1334,15 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     output line, printed for every code `_verify_declarations_checks`
     returns (0 through 15 alike -- F-14's own exit code (contract 1.7.0),
     F-15's own (Phase 10 WP-6a, contract 1.8.0), and F-16's own (Phase 10
-    WP-4f) included), never only on the 0 path."""
+    WP-4f) included), never only on the 0 path.
+
+    design docs/design/MULTI_PROCESS_WORKER_V0_1.md §9 (c): the F-20
+    workers-vs-ceiling check and F-16/F-18's own `_declared_pool_size()`
+    both read `R2DB_THREAD_LIMIT`/`R2DB_WORKERS`/`R2DB_CONTROL_WORKERS`
+    from THIS CLI invocation's own process env -- never the real running
+    `r2db_api.main`/`r2db_api.control_main` process' own env, which this
+    command has no way to observe. A value this shell happens to have set
+    may not match what the real process was started with."""
     schema = _schema()
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:

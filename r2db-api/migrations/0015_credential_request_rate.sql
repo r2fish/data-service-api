@@ -94,6 +94,19 @@ GRANT SELECT, INSERT, UPDATE ON r2dbsvc_registry.credential_request_rate TO r2db
 -- (the default -- never declared SECURITY DEFINER), so it needs no
 -- privilege beyond the table grant immediately above.
 --
+-- First admission for a credential with no row yet (`INSERT ... ON
+-- CONFLICT (credential_id) DO NOTHING` immediately below, before the
+-- `SELECT ... FOR UPDATE` re-read): a plain `IF NOT FOUND THEN INSERT`
+-- lets two concurrent first requests for the same credential both miss
+-- the `SELECT` (an uncommitted row is invisible to every other
+-- transaction, locked or not) and both attempt the `INSERT`, so the
+-- second one fails its unique-key constraint instead of being admitted
+-- or denied by the ring math below. `ON CONFLICT DO NOTHING` makes the
+-- losing transaction block on the winning transaction's row lock
+-- instead of racing it; once the winner commits, the loser's own
+-- `SELECT ... FOR UPDATE` re-read (below) sees the now-committed row and
+-- runs the same ring math as any other request for this credential.
+--
 -- Ring math (裁定 3/30/34/37): reads the row `FOR UPDATE`, computes
 -- `shift = LEAST(61, GREATEST(0, now_s - base_s))`, zeroes the `shift`
 -- positions immediately after the row's OWN `base_s` (a ring index,
@@ -108,7 +121,10 @@ GRANT SELECT, INSERT, UPDATE ON r2dbsvc_registry.credential_request_rate TO r2db
 -- (and persists NOTHING -- the row keeps its prior `base_s`/`counts`
 -- untouched) otherwise, mirroring the literal template's own `WHERE
 -- <sum> < $L` -- a denied request never advances or zeroes the window a
--- later request depends on.
+-- later request depends on. The freshly inserted row's own `base_s`
+-- equals its inserting request's `now_s`, so `shift` computes to 0 for
+-- that same request's re-read and the ring math below applies to it
+-- unchanged.
 CREATE OR REPLACE FUNCTION r2dbsvc_registry.credential_request_rate_admit(
     p_credential_id text,
     p_limit integer
@@ -128,19 +144,14 @@ DECLARE
 BEGIN
     v_now_s := floor(extract(epoch FROM clock_timestamp()))::bigint;
 
+    INSERT INTO r2dbsvc_registry.credential_request_rate (credential_id, base_s, counts)
+    VALUES (p_credential_id, v_now_s, array_fill(0, ARRAY[61]))
+    ON CONFLICT (credential_id) DO NOTHING;
+
     SELECT base_s, counts INTO v_base_s, v_counts
       FROM r2dbsvc_registry.credential_request_rate
      WHERE credential_id = p_credential_id
        FOR UPDATE;
-
-    IF NOT FOUND THEN
-        v_counts := array_fill(0, ARRAY[61]);
-        v_now_idx := v_now_s % 61;
-        v_counts[v_now_idx + 1] := 1;
-        INSERT INTO r2dbsvc_registry.credential_request_rate (credential_id, base_s, counts)
-        VALUES (p_credential_id, v_now_s, v_counts);
-        RETURN true;
-    END IF;
 
     v_shift := LEAST(61, GREATEST(0, v_now_s - v_base_s));
     IF v_shift >= 61 THEN

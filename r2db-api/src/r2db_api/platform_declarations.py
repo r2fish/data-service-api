@@ -941,9 +941,9 @@ _CONTRACT_170_LIMIT_CLASSES: tuple[str, ...] = ("enum_members", "idempotency_ent
 # ---------------------------------------------------------------------------
 
 #: `r2db_api.main`'s own `credentials` + `durable_audit` stores, both
-#: pool-sized to the declared concurrency ceiling and both against
-#: `r2dbsvc_api` (Phase 10 WP-4e) -- identified by `INSERT` on
-#: `application_audit`.
+#: pool-sized to `role_pool_size(thread_limit)` (unless
+#: `R2DB_PLATFORM_POOL_SIZE` overrides it) and both against
+#: `r2dbsvc_api` -- identified by `INSERT` on `application_audit`.
 _API_ROLE_STORE_COUNT = 2
 
 #: `r2db_api.control_main`'s own 4 platform-plane stores (`applications`/
@@ -1019,36 +1019,45 @@ _ROLE_CLASSES = frozenset({"api", "controlplane", "auditreader"})
 
 def check_role_connection_limits(
     conn: "psycopg.Connection", *, schema: str, ops_module: str, pool_size: int,
+    process_ceilings: ProcessCeilings,
     role_classes: "frozenset[str] | None" = None,
     application_slugs: "Sequence[str] | None" = None,
 ) -> None:
     """F-16: raises `PlatformDeclarationError(code="F-16")` for the FIRST
     role (in the deterministic order built below) whose `pg_roles.
     rolconnlimit` is neither `-1` nor at least its own computed floor.
-    `pool_size` is the caller's own declared per-role pool ceiling --
-    this function takes it as a plain argument rather than constructing
-    its own default instance, so a deployment that has genuinely raised
-    its real pool size is checked against ITS OWN real floor, not a
-    silently-stale code-level default.
+    `pool_size` is the caller's own declared per-role pool ceiling
+    (`r2db_api.limits.role_pool_size(thread_limit)`, the real per-process
+    simultaneous-borrow ceiling) -- this function takes it as a plain
+    argument rather than constructing its own default instance, so a
+    deployment that has genuinely raised its real pool size is checked
+    against ITS OWN real floor, not a silently-stale code-level default.
 
-    (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)):
-    renamed from `concurrency` -- every caller now passes `r2db_api.
-    limits.role_pool_size(thread_limit)` (the real per-process
-    simultaneous-borrow ceiling), not `ResourceLimits.concurrency` (the
-    deployment-wide admission bound, which no longer sizes any pool --
-    see that function's own docstring).
+    design D-3 (5): `role_pool_size(thread_limit)`
+    sizes ONE process' own pool; `pg_roles.rolconnlimit` is a
+    CLUSTER-WIDE cap shared by every one of `process_ceilings.<plane>`
+    processes that pools a connection against that role, each with its
+    own `pool_size`-sized pool -- this function multiplies every floor
+    it computes by the process count of the plane that role belongs to:
+    `process_ceilings.data` for the `api` class and every application's
+    runtime/developer role, `process_ceilings.control` for the
+    `controlplane` and `auditreader` classes. A caller multiplying
+    `pool_size` itself before calling in would count the process count
+    twice, since this function already multiplies by it -- every caller
+    passes its own plain, un-multiplied `pool_size` and the SAME
+    `process_ceilings` this process read from the declarations row.
 
     Checks exactly the role classes `0013_role_connection_limits.sql`
     (this peer) / the sibling peer's own same-numbered migration raises:
     the platform-plane `<...>_api`/`<...>_controlplane`/`<...>_
     auditreader` roles (module-level floor constants above) and every
     REGISTERED application's own runtime/developer roles (floor =
-    `concurrency`, one store each, Phase 10 WP-8a). A role with no grants
-    matching any of the three platform-plane shapes above (identity
-    unknown to this check) is silently skipped, never flagged -- this
-    check only ever verifies roles it can positively identify, exactly
-    like every other read in this module never guesses at what it cannot
-    observe.
+    `pool_size * process_ceilings.data`, one store each, Phase 10 WP-8a).
+    A role with no grants matching any of the three platform-plane shapes
+    above (identity unknown to this check) is silently skipped, never
+    flagged -- this check only ever verifies roles it can positively
+    identify, exactly like every other read in this module never guesses
+    at what it cannot observe.
 
     Phase 10 WP-4g (supervisor ruling 2026-09-09): `role_classes`/
     `application_slugs` let a caller narrow this check to exactly the
@@ -1085,19 +1094,19 @@ def check_role_connection_limits(
         for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
             if role == application_audit_owner:
                 continue
-            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * pool_size)
+            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * pool_size * process_ceilings.data)
     if "controlplane" in role_classes:
         for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
             if role == control_audit_owner:
                 continue
-            floors[role] = max(floors.get(role, 0), _CONTROLPLANE_ROLE_POOL_FLOOR)
+            floors[role] = max(floors.get(role, 0), _CONTROLPLANE_ROLE_POOL_FLOOR * process_ceilings.control)
     if "auditreader" in role_classes:
         reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
         reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
         for role in sorted(reader_of_application_audit & reader_of_control_audit):
             if role == application_audit_owner or role == control_audit_owner:
                 continue
-            floors[role] = max(floors.get(role, 0), _AUDITREADER_ROLE_POOL_FLOOR)
+            floors[role] = max(floors.get(role, 0), _AUDITREADER_ROLE_POOL_FLOOR * process_ceilings.control)
 
     if application_slugs is None or len(application_slugs) > 0:
         applications_table = sql.Identifier(schema, "applications")
@@ -1111,8 +1120,8 @@ def check_role_connection_limits(
                     [list(application_slugs)],
                 )
             for runtime_role, developer_role in cur.fetchall():
-                floors[runtime_role] = pool_size
-                floors[developer_role] = pool_size
+                floors[runtime_role] = pool_size * process_ceilings.data
+                floors[developer_role] = pool_size * process_ceilings.data
 
     if not floors:
         return
@@ -1363,13 +1372,12 @@ def check_max_connections_headroom(
     itself, so the caller can print all four numbers without a second
     round of reads.
 
-    design D-3 (5): renamed from `concurrency` -- every
-    caller now passes `r2db_api.limits.role_pool_size(thread_limit)`; see
-    `check_role_connection_limits`'s own docstring for the full
-    rationale. Completion condition 71: with `process_ceilings.data` = 4,
-    `thread_limit` = 4, `c` = 2 (`pool_size` = 6), the lower bound this
-    function judges no longer scales with the declared `concurrency`
-    bound at all."""
+    design D-3 (5): every caller passes
+    `r2db_api.limits.role_pool_size(thread_limit)`; see `check_role_
+    connection_limits`'s own docstring for the full rationale. Completion
+    condition 71: with `process_ceilings.data` = 4, `thread_limit` = 4,
+    `c` = 2 (`pool_size` = 6), the lower bound this function judges does
+    not scale with the declared `concurrency` bound at all."""
     registered_applications = _count_registered_applications(conn, schema)
     platform_pool_floor = _API_ROLE_STORE_COUNT * pool_size
     application_pair_floor = 2 * pool_size

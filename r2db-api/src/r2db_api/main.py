@@ -261,6 +261,35 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
         return default
 
 
+def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
+    """Same fail-loud discipline as `_optional_float`, for a positive int:
+    unset or empty falls back to `default`, but a non-empty value that is
+    not a positive integer stops startup (`ValueError` naming the
+    variable) rather than silently degrading -- this sizes a worker-
+    thread pool, a resource dimension a deployer's typo should never
+    silently mis-size. The same discipline (unset/empty -> default,
+    invalid -> `ValueError` naming the variable) is shared with `r2db_
+    api.control_main`'s own startup and `r2db_api.ops`'s own
+    `_declared_pool_size` through `r2db_api.limits.thread_limit_from_
+    env` -- this function keeps its own body (rather than delegating to
+    that one) so the registered `_thread_limit_from_env` isomorphism
+    target (`tests/test_audit_query.py`) and the AST-level unit tests in
+    `tests/test_threadpool_offload.py` that `exec()` this function's
+    node in isolation (no imports available in that namespace) both stay
+    intact.
+    """
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
 def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
     """Phase 6 WP-0 (design D-4(a)): unlike `_optional_int`, this
     function's only consumer is the audit-buffer flush interval, and a
@@ -283,26 +312,6 @@ def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
         raise ValueError(f"{name} must be a finite, positive number, got {raw!r}") from None
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be a finite, positive number, got {raw!r}")
-    return value
-
-
-def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
-    """Same fail-loud discipline as `_optional_float`, for a positive int:
-    unset or empty falls back to `default`, but a non-empty value that is
-    not a positive integer stops startup (`ValueError` naming the
-    variable) rather than silently degrading -- this sizes a worker-
-    thread pool, a resource dimension a deployer's typo should never
-    silently mis-size.
-    """
-    raw = env.get(name)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
-    if value <= 0:
-        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
     return value
 
 
@@ -431,11 +440,12 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     slot_dir = _require_slot_dir(env, "R2DB_SLOT_DIR")
     concurrency_slots.check_slot_directory(slot_dir)
     concurrency_slots.selfcheck_slot_locking(slot_dir)
-    # design D-4 (completion condition 68): every
-    # connection this process opens from here on carries this
-    # `application_name` (`postgres.py`'s own module-level toggle) --
-    # set before ANY connection (including the one-shot registry lookup
-    # two steps below) opens.
+    # design D-4: every pooled connection (`postgres._RolePool`) and
+    # every `PostgresCell.verify_platform_upgrades_applied` connection
+    # this process opens from here on carries this `application_name`
+    # (`postgres.py`'s own module-level toggle). The one-shot
+    # `psycopg.connect` reads this function makes itself (`_load_
+    # registry_rows`, the declarations read) do not carry it.
     postgres.set_connection_application_name(f"r2db-api:data:{os.getpid()}")
 
     # Step 2 (F-1/F-2): must run before anything else touches the network
@@ -554,14 +564,16 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # parameter of its own) and defeat `build_app(env=...)`'s whole point
     # of being fully driven by its argument for testability.
     #
-    # Phase 10 WP-4e (supervisor ruling 2026-09-09): the default used to be
-    # a fixed `4`, entirely disconnected from any real per-process ceiling.
-    # this replaces that `concurrency`-derived default
-    # with the same `thread_limit`-derived one `_role_pool_size` above now
-    # uses (completion condition 70) -- both derivations share the one
-    # `role_pool_size` function, so they can never drift apart either.
-    # `_optional_int` still honors an explicit `R2DB_PLATFORM_POOL_SIZE`
-    # (an operator's own deliberate override always wins).
+    # The default is `role_pool_size(thread_limit)` -- the same function
+    # and the same `thread_limit` `_role_pool_size` above is built from,
+    # so this platform pool and every per-application role pool are
+    # sized from one per-process simultaneous-borrow ceiling and cannot
+    # drift apart. A pool smaller than that ceiling makes the concurrent
+    # authentication reads `run_in_threadpool` lets through wait for a
+    # free connection and fail closed with `AUTH_STATE_UNAVAILABLE` (503)
+    # well under the declared bound (the F-1 shape). `_optional_int`
+    # honors an explicit `R2DB_PLATFORM_POOL_SIZE` (an operator's own
+    # deliberate override always wins).
     platform_pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", role_pool_size(thread_limit))
     credentials = PostgresCredentialStore(platform_dsn, pepper=pepper, schema=schema, pool_size=platform_pool_size)
     # Step 7 (Q4 D-1(b)): the durable application-plane audit sink -- the
@@ -602,20 +614,19 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # docstring for what each parameter narrows. Run on this same
         # borrowed connection (login role = the real `r2dbsvc_api` writer
         # role, D-1(c)), right after the writer-role dual check above.
-        # (design D-3 (5), completion condition 72):
+
+        # design D-3 (5), completion condition 72:
         # `r2dbsvc_api`'s own real CONNECTION LIMIT is a CLUSTER-WIDE cap
         # shared by every one of `process_ceilings.data` data-plane
         # processes this deployment runs, each with its own `_role_pool_
-        # size`-sized pool -- the floor this startup check verifies
-        # against must therefore be `process_ceilings.data * _role_pool_
-        # size` worth of demand, not one process' own share of it (F-18's
-        # own `check_max_connections_headroom`/`headroom_lower_bound`
-        # already multiplies by `data_processes` internally; this
-        # function does not, so the multiplication happens here, at the
-        # call site, instead).
+        # size`-sized pool -- `check_role_connection_limits` multiplies
+        # `pool_size` by `process_ceilings.data` internally for the `api`
+        # class, so this call passes its own plain, un-multiplied
+        # `_role_pool_size` alongside the SAME `declarations.process_
+        # ceilings` `check_max_connections_headroom` right below reads.
         check_role_connection_limits(
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            pool_size=_role_pool_size * process_ceiling,
+            pool_size=_role_pool_size, process_ceilings=declarations.process_ceilings,
             role_classes=frozenset({"api"}), application_slugs=slugs,
         )
         check_max_connections_headroom(
@@ -700,10 +711,10 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         audit_alert_min_interval_s=audit_flush_interval_s,
         process_ceiling=process_ceiling,
         operation_catalog_url=operation_catalog_url,
-        # (design D-3 (1)/(2): `rate` is `credentials`
+        # design D-3 (1)/(2): `rate` is `credentials`
         # itself -- `PostgresCredentialStore.record_rate_and_check` runs on
-        # the SAME pool/role this store's own read path already uses (裁定
-        # 15: "計数用の pool を新設しない"). `concurrency_slots` is always
+        # the SAME pool/role this store's own read path already uses (no
+        # separate pool exists for counting). `concurrency_slots` is always
         # wired here (`R2DB_SLOT_DIR` is a required env var, checked
         # above); `concurrency_configured` is the separate declaration-only
         # boolean (workers vs. ceiling, computed above) -- the mechanism

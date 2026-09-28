@@ -695,12 +695,11 @@ class DataService:
         self._rate_windows: dict[str, list[float]] = {}
         self._clock = clock or time.monotonic
         # design D-3: the 2-strategy region (ii)
-        # wiring -- `rate`/`concurrency_slots` default `None` (every
-        # pre-existing caller, this repository's own unit tests and the
-        # in-process conformance adapter included, is unaffected: `_acquire_
-        # rate`/`acquire_concurrency_slot`/`_slot` below keep the exact
-        # pre-this change in-memory branch whenever the corresponding object is
-        # `None`). `rate` (when given) is a `PostgresCredentialStore`-
+        # wiring -- `rate`/`concurrency_slots` default to `None` (this
+        # repository's own unit tests and the in-process conformance
+        # adapter never pass either): `_acquire_rate`/`acquire_
+        # concurrency_slot`/`_slot` below run their in-memory branch
+        # whenever the corresponding object is `None`. `rate` (when given) is a `PostgresCredentialStore`-
         # shaped object exposing `record_rate_and_check(credential_id,
         # limit) -> bool`; `concurrency_slots` is a `concurrency_slots.
         # HostSharedConcurrencySlots`-shaped object exposing `acquire(limit)`
@@ -716,6 +715,13 @@ class DataService:
         # working, only that ANOTHER host might not share it).
         self._rate = rate
         self._concurrency_slots = concurrency_slots
+        if concurrency_configured and concurrency_slots is None:
+            raise ValueError(
+                "concurrency_configured=True requires a concurrency_slots object -- "
+                "declaring the host-shared bound configured without wiring the mechanism "
+                "that shares it would let capabilities().limit_enforcement.concurrency read "
+                "\"enforced\" for a process-local counter no other worker shares"
+            )
         self._concurrency_configured = concurrency_configured
         self.topology.validate()
 
@@ -1124,10 +1130,10 @@ class DataService:
 
         History: CH-0110
         """
-        # this change: same host-shared-slot branch `_slot` above carries (its
-        # own docstring) -- deliberately its OWN copy too, for the exact
-        # reason the pre-existing in-memory copy right below already is
-        # one (this method's own docstring, unchanged).
+        # same host-shared-slot branch `_slot` above carries (its
+        # own docstring) -- deliberately its own copy too, for the same
+        # reason the in-memory copy right below is (this method's own
+        # docstring).
         if self._concurrency_slots is not None:
             try:
                 with self._concurrency_slots.acquire(self.limits.concurrency):
