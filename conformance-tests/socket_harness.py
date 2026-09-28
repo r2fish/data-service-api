@@ -31,7 +31,12 @@ proxy management that carries no contract-level meaning of its own:
       names -- but ONLY when that pid's own command line still carries
       this harness's own marker (owner check, monitor 裁定 2026-09-08,
       F-4): a pid a stale pidfile names that has since been reused by an
-      unrelated process is never signalled.
+      unrelated process is never signalled. A recorded pid
+      that is ALSO its own process group's leader (`start_uvicorn_
+      subprocess`'s own supervisors, always their own session/group)
+      is signalled as a whole GROUP (`os.killpg`), reaching worker
+      children too; every other pidfile writer (nginx) keeps the
+      single-pid `os.kill` this always used.
   (g) lazy startup -- `RealSocketSurface` binds no port and spawns no
       process until `.data_base_url`/`.control_base_url` is first read.
       `conformance-tests/conftest.py`'s `_discover_and_build()` builds
@@ -383,6 +388,43 @@ def _terminate_then_kill(process: subprocess.Popen, *, timeout_s: float = 10.0) 
         process.wait(timeout=timeout_s)
 
 
+def _terminate_then_kill_group(process: subprocess.Popen, *, timeout_s: float = 10.0) -> None:
+    """Same unconditional stop discipline as `_terminate_then_kill` (design
+    D-2 (d): SIGTERM, a bounded wait, then SIGKILL if still alive), but
+    signals the WHOLE process GROUP via `os.killpg(process.pid, ...)`
+    rather than `process`'s own pid alone -- correct ONLY because every
+    caller (`UvicornSubprocessHandle.stop()`) started `process` with
+    `start_new_session=True`, so `process.pid` is guaranteed to already be
+    that group's own pgid (never some unrelated, pre-existing group this
+    would otherwise blast). Reaches worker children a `--workers >= 2`
+    supervisor forked -- `process.send_signal`/`.kill()` (this module's own
+    `_terminate_then_kill`) only ever reach the supervisor itself, never
+    its children, which would then be orphaned still serving on the
+    now-stopped listener's own fd. Tolerates a group that is already gone
+    (`ProcessLookupError` -- e.g. every member exited on its own) and one
+    whose only remaining member(s) are zombies (`PermissionError` --
+    `killpg` finds no live member left to actually signal, `sweep_
+    orphans`'s own identical measured behavior above); a caller reaching
+    this a second time (e.g. `restart()`'s own preflight failure, followed
+    by its own `except: self.stop()`, followed by the ORIGINAL caller's
+    own `stop()`) is exactly this shape, not a defect."""
+    if process.poll() is not None:
+        with _suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        return
+    with _suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=timeout_s)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    with _suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    with _suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=timeout_s)
+
+
 class _suppress:
     """Minimal `contextlib.suppress` re-implementation kept local so this
     module has no import-order dependency on `contextlib` beyond the
@@ -719,7 +761,16 @@ class UvicornSubprocessHandle:
     """A uvicorn server running as a real, separate OS process -- used by
     the C-26 composition-root launchers (design D-1 (B)), which must start
     a peer's `<peer>.main:app`/`<peer>.control_main:app` with NO in-process
-    hand held open at all."""
+    hand held open at all.
+
+    design D-1 (監督裁定 19/33): this process is ALWAYS its own
+    session/process-group leader (`start_new_session=True` in `subprocess.
+    Popen`, below), so `process.pid` doubles as this group's own pgid --
+    true whether `workers` is 1 (a lone process, its own one-member group)
+    or >= 2 (a uvicorn `Multiprocess` supervisor whose forked workers
+    inherit that SAME pgid, never their own). `stop()` therefore signals
+    the whole GROUP (`os.killpg`), not merely the supervisor's own pid --
+    the only way to reach worker children uvicorn itself spawned."""
 
     process: subprocess.Popen
     port: int
@@ -733,7 +784,7 @@ class UvicornSubprocessHandle:
     _owned_reservation: Optional["ReservedPort"] = field(default=None, repr=False)
 
     def stop(self, *, timeout_s: float = 10.0) -> None:
-        _terminate_then_kill(self.process, timeout_s=timeout_s)
+        _terminate_then_kill_group(self.process, timeout_s=timeout_s)
         with _suppress(FileNotFoundError):
             self.pidfile.unlink()
         if self._owned_reservation is not None:
@@ -747,19 +798,36 @@ def start_uvicorn_subprocess(
     reserved: Optional[ReservedPort] = None,
     env: Optional[Mapping[str, str]] = None,
     cwd: Optional[Path] = None,
+    workers: int = 1,
 ) -> UvicornSubprocessHandle:
     """(a) subprocess-version uvicorn launcher (design D-2: "subprocess版
     はC-26(B)が使う"). Launches `app_import_string` (e.g.
     "r2db_api.main:app") with `python -m uvicorn` (the shared venv's own
     interpreter, `sys.executable` -- never a bare `uvicorn` off PATH,
     which could resolve to a different environment) as a genuinely
-    separate process. `pidfile` records the child's pid for the startup-
-    time orphan sweep (f); the caller is responsible for polling
-    readiness via `wait_until_ready` -- this function only starts the
-    process, it does not itself block on readiness (the two peers' own
-    composition roots take different amounts of time to become
-    reachable, and a caller may want to start both upstreams before
-    waiting on either).
+    separate process. `pidfile` records this process' own pgid (see
+    `UvicornSubprocessHandle`'s own docstring) for the startup-time orphan
+    sweep (f); the caller is responsible for polling readiness via `wait_
+    until_ready` -- this function only starts the process, it does not
+    itself block on readiness (the two peers' own composition roots take
+    different amounts of time to become reachable, and a caller may want
+    to start both upstreams before waiting on either).
+
+    design D-1 (監督裁定 19/26/27/33): `workers` (default 1) is
+    ALWAYS passed as a literal `--workers <n>` argv pair -- even at the
+    default, so a caller never depends on uvicorn's own bare-`--workers`-
+    omitted default staying 1. `n >= 2` makes uvicorn start its own
+    `Multiprocess` supervisor (`uvicorn/supervisors/multiprocess.py`) in
+    THIS process, forking/spawning `n` worker children that inherit the
+    `--fd` socket this function already binds below -- unaffected by
+    `workers`, since `Config.bind_socket()` binds once, in the supervisor,
+    before any worker exists. This process is started in its OWN new
+    session (`start_new_session=True`) specifically so its pid is also a
+    fresh pgid no other process could already belong to -- worker
+    children (forked/spawned by the supervisor, never `setsid`'d
+    themselves) inherit that SAME pgid, letting `stop()`/`sweep_orphans`
+    reach every worker via one `os.killpg` even after uvicorn's own
+    `restart_all()` has silently replaced one.
 
     【追記 2026-09-16、R-44 WP-3 (e)、W44-3-5、W44-3-10】`reserved` (a
     `ReservedPort` from `reserve_port()`) is handed to the child via
@@ -799,13 +867,27 @@ def start_uvicorn_subprocess(
         if env:
             merged_env.update(env)
         process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", app_import_string, "--host", "127.0.0.1", "--fd", str(fd)],
+            [
+                sys.executable, "-m", "uvicorn", app_import_string, "--host", "127.0.0.1",
+                "--fd", str(fd), "--workers", str(workers),
+            ],
             env=merged_env,
             cwd=str(cwd) if cwd is not None else None,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             pass_fds=(fd,),
+            # 裁定 19: a fresh session/process group, so
+            # `process.pid` is also this group's own pgid -- see this
+            # function's own docstring and `UvicornSubprocessHandle`'s.
+            start_new_session=True,
         )
+        # This process' own pid IS this group's own pgid (start_new_
+        # session=True above) -- recording it is recording the pgid, not
+        # merely "the child's pid", which is what `stop()`/`sweep_orphans`
+        # need: a worker child uvicorn's own supervisor replaces later
+        # (`Multiprocess.keep_subprocess_alive`/`restart_all`) never
+        # invalidates this value, since it always inherits the SAME pgid
+        # (裁定 33).
         pidfile.write_text(str(process.pid))
     except BaseException:
         if owned_reservation is not None:
@@ -881,6 +963,35 @@ def _process_cmdline(pid: int) -> str:
     return result.stdout.strip()
 
 
+def _pids_with_pgid(pgid: int) -> list[int]:
+    """Every currently-live pid whose OWN process group is `pgid`, read via
+    `ps -e -o pid=,pgid=` -- unlike `os.getpgid(specific_pid)`, this finds
+    every member of a group even when the ONE pid originally used to name
+    that group (its former leader) has since exited: a pgid is a plain
+    number the kernel keeps allocated as long as ANY member remains, not
+    something tied to one specific still-living pid. Used by `sweep_
+    orphans` to recognize a group whose OWN leader died (e.g. SIGKILLed)
+    while worker children under the SAME pgid are still alive."""
+    try:
+        result = subprocess.run(
+            ["ps", "-e", "-o", "pid=,pgid="], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except OSError:
+        return []
+    members: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            member_pid, member_pgid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if member_pgid == pgid:
+            members.append(member_pid)
+    return members
+
+
 def sweep_orphans(prefix_root: Path, *, marker: str = NGINX_PREFIX_MARKER) -> Sequence[int]:
     """Reads every `*.pid`/`*.pidfile` file directly under `prefix_root`
     and kills (SIGTERM, then SIGKILL if still alive after a short wait)
@@ -907,7 +1018,27 @@ def sweep_orphans(prefix_root: Path, *, marker: str = NGINX_PREFIX_MARKER) -> Se
     a non-empty `marker`, so this is handled by the SAME owner-check
     branch, not a separate code path) and a pidfile that races out from
     under this function. Returns the pids this call actually signalled
-    (for tests to observe)."""
+    (for tests to observe).
+
+    Known gaps (review finding F14, measured, ruled: documented rather
+    than papered over with a check that cannot actually work -- `OC`
+    §1.12 の 71): a group whose recorded pid (its own former leader, a
+    `start_uvicorn_subprocess` supervisor) has ITSELF already died --
+    e.g. SIGKILLed directly, bypassing this harness -- while worker
+    children it spawned survive under the SAME pgid is NOT recognized as
+    ours and is never swept, even though live members remain. This
+    function's own owner check reads only the recorded pid's own cmdline
+    for `marker`; a real uvicorn worker's own cmdline (`multiprocessing-
+    fork`) and the `multiprocessing` "spawn" start method's own
+    `resource_tracker` helper process never carry this harness's own
+    marker anywhere in their own argv, so checking a surviving member's
+    cmdline instead of the (now-unreadable) leader's cannot establish
+    ownership either -- there is no marker left anywhere in the group
+    once its leader is gone. Closing this would need a different
+    ownership record entirely (e.g. a marker written into the pidfile's
+    own name/contents alongside the pgid, checked without depending on
+    any one member's cmdline), not a code change to this owner check
+    alone."""
     killed: list[int] = []
     if not prefix_root.exists():
         return killed
@@ -935,15 +1066,56 @@ def sweep_orphans(prefix_root: Path, *, marker: str = NGINX_PREFIX_MARKER) -> Se
             with _suppress(FileNotFoundError):
                 pidfile.unlink()
             continue
-        if marker not in _process_cmdline(pid):
+        leader_cmdline = _process_cmdline(pid)
+        # `_pids_with_pgid` still finds every surviving group member (used
+        # below, ONLY once ownership is already established from the
+        # recorded pid's own cmdline, to decide whether a since-died
+        # leader's own surviving children must be reached via `killpg`) --
+        # it is NOT used to widen ownership itself (review finding F14,
+        # this function's own docstring `Known gaps`): a surviving
+        # member's cmdline never carries `marker` either, so checking it
+        # cannot recognize a group whose leader already died.
+        surviving_group_members = _pids_with_pgid(pid)
+        if marker not in leader_cmdline:
             # Not (recognizably) ours: either already dead, or a DIFFERENT
             # process has since reused this pid. Never signal it -- only
             # the stale pidfile record is cleaned up.
             with _suppress(FileNotFoundError):
                 pidfile.unlink()
             continue
+        # A pidfile this recorded pid is ALSO the pgid of (i.e. it is its
+        # OWN process group's leader) belongs to a `start_uvicorn_
+        # subprocess` supervisor (this module's own `start_new_session=
+        # True` guarantees pid == pgid for exactly those) -- signalling
+        # the whole GROUP (`os.killpg`) is what reaches any worker
+        # children it spawned, including one uvicorn's own `Multiprocess.
+        # keep_subprocess_alive`/`restart_all` silently replaced after
+        # this pidfile was written (a replacement child inherits the SAME
+        # pgid, never a fresh one, so this stays correct across that
+        # replacement). A pid that is NOT its own pgid (every OTHER
+        # pidfile writer in this module -- nginx, started with no
+        # `start_new_session`, shares the caller's own ambient group) is
+        # never group-killed here: `os.getpgid(pid)` returning something
+        # other than `pid` itself means signalling THAT group would reach
+        # processes this harness does not own at all (potentially this
+        # very interpreter).
         try:
-            os.kill(pid, signal.SIGTERM)
+            is_group_leader = os.getpgid(pid) == pid
+        except ProcessLookupError:
+            # A genuine TOCTOU race, not the leader-already-dead Known
+            # gap above (ownership was JUST established from this SAME
+            # pid's own, then-live cmdline, above) -- the leader died in
+            # the brief window between that check and this one.
+            # `killpg(pid, ...)` still reaches every surviving member
+            # sharing that SAME pgid number (`surviving_group_members`,
+            # checked non-empty here), so this is treated the same as "is
+            # its own pgid", not as "nothing left to kill".
+            is_group_leader = bool(surviving_group_members)
+        try:
+            if is_group_leader:
+                os.killpg(pid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         else:
@@ -954,10 +1126,37 @@ def sweep_orphans(prefix_root: Path, *, marker: str = NGINX_PREFIX_MARKER) -> Se
                     os.kill(pid, 0)
                 except ProcessLookupError:
                     break
+                except PermissionError:
+                    # This loop's own call is `os.kill(pid, 0)`, never
+                    # `killpg` -- measured on macOS (this repository's own
+                    # dev machines): once every member of `pid`'s own
+                    # group is a ZOMBIE (exited but not yet reaped by its
+                    # real parent), `os.kill(pid, 0)` on the zombie leader
+                    # itself still SUCCEEDS (a zombie's pid entry still
+                    # exists), so a zombie-only group does NOT raise
+                    # `PermissionError` here at all -- it runs the full 5s
+                    # wait instead. The only way THIS `kill(pid, 0)` call
+                    # raises `PermissionError` is a DIFFERENT, unrelated
+                    # process now holding this reused pid (owned by
+                    # another user) -- never "no live member to signal",
+                    # which is what the escalation `killpg`'s own
+                    # `PermissionError` (suppressed below) actually means.
+                    # Treated the same as "gone" here too: this harness no
+                    # longer owns whatever now holds this pid.
+                    break
                 time.sleep(0.05)
             else:
-                with _suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
+                # Same group-of-zombies-only shape the wait loop above
+                # measures: the 5s deadline can be reached with the
+                # leader still passing `kill(pid, 0)` (a zombie), and the
+                # escalation `killpg`/`kill` below then raises the SAME
+                # `PermissionError` for the SAME reason (no live member
+                # left to signal).
+                with _suppress(ProcessLookupError, PermissionError):
+                    if is_group_leader:
+                        os.killpg(pid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
         with _suppress(FileNotFoundError):
             pidfile.unlink()
     return killed

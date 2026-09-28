@@ -1037,6 +1037,249 @@ def test_start_uvicorn_subprocess_closes_its_own_reservation_when_popen_fails(mo
 
 
 # ---------------------------------------------------------------------------
+# design D-1 (監督裁定 19/26/27/33): `--workers`, the process-
+# group supervisor start, pgid-recording pidfile, pgid-based `sweep_
+# orphans`. Completion conditions 1-3.
+# ---------------------------------------------------------------------------
+
+
+def _pids_in_group(pgid: int) -> "list[int]":
+    """Every currently-live pid whose OWN process group is `pgid`, read via
+    `ps -e -o pid=,pgid=` -- works unmodified on both this repository's own
+    macOS dev machines and Linux CI, unlike `/proc`-based enumeration.
+    Observation-only test helper -- never part of `socket_harness.py`'s own
+    product surface."""
+    result = subprocess.run(
+        ["ps", "-e", "-o", "pid=,pgid="], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, group = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if group == pgid:
+            pids.append(pid)
+    return pids
+
+
+def _wait_for_group_size(pgid: int, *, at_least: int, timeout_s: float = 15.0) -> "list[int]":
+    deadline = time.monotonic() + timeout_s
+    members: list[int] = []
+    while time.monotonic() < deadline:
+        members = _pids_in_group(pgid)
+        if len(members) >= at_least:
+            return members
+        time.sleep(0.1)
+    return members
+
+
+def test_start_uvicorn_subprocess_always_passes_workers_even_at_the_default(tmp_path, monkeypatch):
+    """Completion condition 1 (design D-1, 監督裁定 19): `--workers <n>` is
+    ALWAYS a literal argv pair, even when the caller omits `workers`
+    entirely (default 1) -- never left to uvicorn's own bare-omitted
+    default.
+
+    mutation (`socket_harness.py`): only append `"--workers", str(workers)`
+    when `workers != 1` -- this test goes red because the default call's
+    own captured argv no longer carries `--workers` at all.
+    """
+    module_path = tmp_path / "conf_socket_probe_app_workers_default.py"
+    module_path.write_text(_PROBE_APP_SOURCE)
+    real_popen = sh.subprocess.Popen
+    captured: dict = {}
+
+    def _capturing_popen(argv, *args, **kwargs):
+        captured["argv"] = list(argv)
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(sh.subprocess, "Popen", _capturing_popen)
+    handle = sh.start_uvicorn_subprocess(
+        "conf_socket_probe_app_workers_default:app", pidfile=tmp_path / "probe_workers_default.pid", cwd=tmp_path,
+    )
+    try:
+        sh.wait_until_ready(f"http://127.0.0.1:{handle.port}/anything", timeout_s=10.0, label="probe-workers-default")
+        assert "--workers" in captured["argv"], f"argv carries no --workers at all: {captured['argv']!r}"
+        idx = captured["argv"].index("--workers")
+        assert captured["argv"][idx + 1] == "1", f"default --workers value was {captured['argv'][idx + 1]!r}, expected '1'"
+    finally:
+        handle.stop()
+
+
+def test_start_uvicorn_subprocess_workers_two_starts_a_supervisor_with_two_children(tmp_path):
+    """Completion condition 1's own `n = 2` half: the supervisor's own
+    process group carries EXACTLY 2 real uvicorn worker children -- their
+    own cmdline carries "multiprocessing-fork" (`multiprocessing.spawn.
+    spawn_main`'s own argv marker). Never merely ">= 3 total members":
+    `multiprocessing`'s own "spawn" start method (this repository's macOS
+    dev machines' default) also starts a `resource_tracker` helper
+    process in the SAME pgid -- not a uvicorn worker at all -- which a
+    bare member-count check cannot tell apart from a genuine 3rd worker."""
+    module_path = tmp_path / "conf_socket_probe_app_workers_two.py"
+    module_path.write_text(_PROBE_APP_SOURCE)
+    handle = sh.start_uvicorn_subprocess(
+        "conf_socket_probe_app_workers_two:app", pidfile=tmp_path / "probe_workers_two.pid",
+        cwd=tmp_path, workers=2,
+    )
+    try:
+        sh.wait_until_ready(f"http://127.0.0.1:{handle.port}/anything", timeout_s=10.0, label="probe-workers-two")
+        pgid = handle.process.pid
+        deadline = time.monotonic() + 15.0
+        workers: list[int] = []
+        while time.monotonic() < deadline:
+            members = _pids_in_group(pgid)
+            workers = [pid for pid in members if pid != pgid and "multiprocessing-fork" in sh._process_cmdline(pid)]
+            if len(workers) >= 2:
+                break
+            time.sleep(0.1)
+        assert len(workers) == 2, (
+            f"process group {pgid} carries {len(workers)} real uvicorn worker(s) (cmdline-verified), "
+            f"expected exactly 2: {workers!r}"
+        )
+    finally:
+        handle.stop()
+
+
+def test_uvicorn_subprocess_stop_signals_the_whole_process_group(tmp_path, monkeypatch):
+    """Completion condition 2 (design 裁定 19): `stop()` signals the WHOLE
+    process group via `os.killpg`, not merely the supervisor's own pid --
+    after `stop()`, zero processes remain in that pgid.
+
+    mutation (`socket_harness.py`): revert `UvicornSubprocessHandle.stop()`
+    to `_terminate_then_kill(self.process, ...)` (a single-pid signal) --
+    this test goes red because `os.killpg` is never called at all.
+    """
+    module_path = tmp_path / "conf_socket_probe_app_stop_group.py"
+    module_path.write_text(_PROBE_APP_SOURCE)
+    handle = sh.start_uvicorn_subprocess(
+        "conf_socket_probe_app_stop_group:app", pidfile=tmp_path / "probe_stop_group.pid",
+        cwd=tmp_path, workers=2,
+    )
+    sh.wait_until_ready(f"http://127.0.0.1:{handle.port}/anything", timeout_s=10.0, label="probe-stop-group")
+    _wait_for_group_size(handle.process.pid, at_least=3)
+    pgid = handle.process.pid
+    real_killpg = sh.os.killpg
+    killpg_calls: list[tuple] = []
+
+    def _capturing_killpg(target_pgid, sig):
+        killpg_calls.append((target_pgid, sig))
+        return real_killpg(target_pgid, sig)
+
+    monkeypatch.setattr(sh.os, "killpg", _capturing_killpg)
+    handle.stop()
+
+    assert killpg_calls, "UvicornSubprocessHandle.stop() never called os.killpg at all"
+    assert killpg_calls[0] == (pgid, signal.SIGTERM), f"first os.killpg call was {killpg_calls[0]!r}, expected SIGTERM on {pgid}"
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and _pids_in_group(pgid):
+        time.sleep(0.1)
+    assert _pids_in_group(pgid) == [], f"process group {pgid} still has member(s) after stop(): {_pids_in_group(pgid)!r}"
+
+
+def test_sweep_orphans_reaches_a_replaced_worker_via_the_recorded_pgid(tmp_path):
+    """Completion condition 3 (design 裁定 33): the pidfile records the
+    supervisor's own PGID (not a worker's own pid, which uvicorn's `Multi
+    process.keep_subprocess_alive` silently replaces on a crash) -- after
+    one worker is SIGKILLed and uvicorn has replaced it with a new child
+    (same pgid, different pid), `sweep_orphans` reading that SAME pidfile
+    still reaches and kills the WHOLE group, including the replacement.
+
+    mutation (`socket_harness.py`): `pidfile.write_text(str(process.pid))`
+    -> `pidfile.write_text(str(process.pid + 1))` (a stale/wrong value,
+    standing in for "recorded the wrong process") -- this test goes red
+    because `sweep_orphans` can no longer resolve a real pgid from the
+    pidfile's own content, so the replaced worker (and its supervisor)
+    survive the sweep.
+    """
+    module_path = tmp_path / "conf_socket_probe_app_pgid_sweep.py"
+    module_path.write_text(_PROBE_APP_SOURCE)
+    pidfile = tmp_path / "probe_pgid_sweep.pid"
+    handle = sh.start_uvicorn_subprocess(
+        "conf_socket_probe_app_pgid_sweep:app", pidfile=pidfile, cwd=tmp_path, workers=2,
+    )
+    try:
+        sh.wait_until_ready(f"http://127.0.0.1:{handle.port}/anything", timeout_s=10.0, label="probe-pgid-sweep")
+        pgid = handle.process.pid
+        members = _wait_for_group_size(pgid, at_least=3)
+        assert len(members) >= 3, f"process group {pgid} never reached 3 members: {members!r}"
+        # `multiprocessing`'s own "spawn" start method (this repository's
+        # macOS dev machines' default) also starts a `resource_tracker`
+        # helper process in the SAME pgid -- invisible to uvicorn's own
+        # `Multiprocess` bookkeeping, so killing it is never "replaced".
+        # A real worker's own cmdline carries "multiprocessing-fork"
+        # (`multiprocessing.spawn.spawn_main`'s own argv marker); this
+        # selects one of THOSE, never the supervisor or the tracker.
+        worker_pids = [
+            pid for pid in members
+            if pid != pgid and "multiprocessing-fork" in sh._process_cmdline(pid)
+        ]
+        assert worker_pids, f"no real uvicorn worker (multiprocessing-fork) found among group members {members!r}"
+        killed_worker = worker_pids[0]
+        original_members = set(members)
+        os.kill(killed_worker, signal.SIGKILL)
+
+        # Wait for uvicorn's own supervisor to notice and spawn a
+        # replacement (`Multiprocess.keep_subprocess_alive`, polled every
+        # 0.5s) -- a NEW pid (never among the ORIGINAL members) must join
+        # the SAME pgid. The killed worker's own pid may still be visible
+        # to `ps` as a zombie until reaped (not checked here -- that is
+        # orthogonal to whether a replacement was actually spawned).
+        deadline = time.monotonic() + 15.0
+        replaced_pid = None
+        while time.monotonic() < deadline:
+            current = _pids_in_group(pgid)
+            new_pids = set(current) - original_members
+            if new_pids:
+                replaced_pid = next(iter(new_pids))
+                break
+            time.sleep(0.2)
+        assert replaced_pid is not None, (
+            f"uvicorn never replaced the SIGKILLed worker {killed_worker} "
+            f"(original members {sorted(original_members)!r}, last observed: {_pids_in_group(pgid)!r})"
+        )
+
+        killed = sh.sweep_orphans(tmp_path, marker="conf_socket_probe_app_pgid_sweep")
+        assert pgid in killed, f"sweep_orphans did not report signalling pgid {pgid}: {killed!r}"
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            # `handle.process.poll()` (this test's own still-live `Popen`
+            # object, never reaped by `sweep_orphans` itself, which never
+            # held a `Popen` handle at all -- only the bare pid from the
+            # pidfile) actually reaps the supervisor once it has exited;
+            # without this, its own zombie entry keeps showing up in `ps`
+            # (and therefore `_pids_in_group`) forever, since nothing else
+            # in this process ever calls `wait()`/`poll()` on it.
+            handle.process.poll()
+            if not _pids_in_group(pgid):
+                break
+            time.sleep(0.1)
+        assert _pids_in_group(pgid) == [], (
+            f"process group {pgid} still has member(s) after sweep_orphans: {_pids_in_group(pgid)!r}"
+        )
+        assert not pidfile.exists()
+    finally:
+        with _suppress_test_teardown_errors():
+            handle.stop()
+
+
+class _suppress_test_teardown_errors:
+    """Local, minimal `contextlib.suppress(Exception)` for this test's own
+    best-effort `finally` cleanup (the group is normally already empty by
+    that point -- this only guards against `stop()` re-raising on an
+    already-fully-torn-down handle)."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return exc_type is not None and issubclass(exc_type, Exception)
+
+
+# ---------------------------------------------------------------------------
 # F-2 (a) (監督裁定 2026-09-08): a port can be RESERVED (bound + listening)
 # before the server that will answer on it starts, and handed straight to
 # uvicorn's own `Server.run(sockets=[...])`.
