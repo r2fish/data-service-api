@@ -415,7 +415,13 @@ peer-local のテストは小さい L を宣言した構成で駆動してよい
 
 20. 完了条件 9・11 と新条件 (a)(b) (14〜17) は **宣言で分岐する** (設計 §10 の裁定 12、本書 §6.1 の (甲))。`limit_enforcement` が `enforced` なら (a)(b) を駆動、`deployment_required` なら現行の写像の検査だけを行い分岐を記録して緑、他の値は赤。空振り禁止 (`OC` §1.5 の 32) は launcher の「配線した (slot directory + workers = ceiling)」accessor との cross-check で担う: 配線したのに `deployment_required` は赤 (WP-2/3 前は期待の赤 = 完了条件 22)、配線していないのに `enforced` も赤。C-30 の版分岐と同じ書き方。差し戻し 2 で実装。
 
+**監督裁定 21 (2026-09-28、WP-1 コードレビューの再確認 1b / 1c)**
+
+21. WP-1 のコードレビュー (opus): 1 回目 18 件 (F1〜F18)、再確認 1b で新規 4 件 (N1〜N4)、再確認 1c で全件閉止・新規 0。裁定: F14 (leader が死んだ後の process group を `sweep_orphans` が掃除できない = cmdline に識別子が無い) は **既知の穴** (`OC` §1.12 の 71: 製品の欠陥がゲートを抜ける穴ではない) として同関数の docstring の `Known gaps` に置き、効かない枝は削った。N1 は launcher の既存 `.name` (`"r2db-api"` / `"MitateDB-api"`) を peer token に使う (WP-2 の 68 / WP-3 の 126 と同値)。N3 は残骸テストを ceiling 2 / workers 2 に広げて (6) の「nor any of its own workers」を実測にした。N4 (pt log が `$SP` の外) は観察 = 発注プロンプトに `export SP` を必ず書く。観察 3 点 (レビュー 1c): C-05 の int[61] の文は WP-2/3 の後に現物と一致する (WP-1 だけを main に統合しない)、C-26 の行は control の preflight fail-fast に触れないが偽ではない、C-26 の残り 21 字 (次の訂正は参照を HISTORY へ)。
+
 ### 6.2 実施と受け入れ
+
+- **WP-1 (2026-09-28、worktree `r113-wp1`、WIP `8a0327d`、r113 に merge)**: 実装担当 sonnet (差し戻し 1〜4)、コードレビュー opus (1 回 + 再確認 2 回、全件閉止)。最終 pt (4 ファイルの絞った run): `pt: 16 failed, 105 passed in 56.11s` — 赤は完了条件 9・11・14〜18 の両 peer (宣言分岐の cross-check「configured … but declares deployment_required」= WP-2/3 待ちの期待、完了条件 22)、r2db control の preflight 観測 (WP-2 待ち)、`test_every_executable_condition_has_a_marked_test` (部分実行の既知の穴)。変異: `mutate: 12 mutations, 12 as expected, restores verified 4/4 files (sha256 x2)` (M1〜M7 r/m、M19)。静的検査: `check_doc_refs OK`、`change_class` = C、`public_value_scan total_flagged=0`。新条件は **C-32** (`conformance-tests/test_c32_shared_limits.py`、`CONDITIONS.md` の行、cell 長 C-05 2966 / C-26 2979)。
 
 ## 7. WP-4 — `--real-server <peer> --workers N` (実装担当) と計測 (監督)
 
