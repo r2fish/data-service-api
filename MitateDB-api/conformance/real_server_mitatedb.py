@@ -32,17 +32,22 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import psycopg
 from psycopg import sql
@@ -177,6 +182,32 @@ def _dsn_with(base_dsn: str, **overrides: str) -> str:
     return make_conninfo(**params)
 
 
+# ---------------------------------------------------------------------------
+# design D-4 (裁定 14/23): a tiny stdlib-only HTTP client for the
+# real requests the new condition's own hold/probe methods below issue
+# against THIS launcher's own running composition root -- never `httpx`
+# (peer counterpart of `real_server_r2db.py`'s own identical helpers).
+# ---------------------------------------------------------------------------
+
+
+def _get_json(url: str, bearer: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"authorization": f"Bearer {bearer}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else {}
+
+
+def _post_json(url: str, bearer: str, body: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url, method="POST", data=data,
+        headers={"authorization": f"Bearer {bearer}", "content-type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else {}
+
+
 def _lock_path(prefix: str) -> Path:
     return _LOCK_DIR / f"{prefix}.lock"
 
@@ -239,6 +270,71 @@ def _run_ops(env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
         [sys.executable, "-m", "mitatedb_api.ops", *args],
         capture_output=True, text=True, env=full_env,
     )
+
+
+def _run_preflight(module: str, env: Mapping[str, str]) -> subprocess.CompletedProcess:
+    """Peer counterpart of `real_server_r2db.py::_run_preflight` -- see
+    that function's own docstring. Runs `python -m <module> --preflight`
+    as a real, separate, short-lived subprocess in the SAME env the
+    eventual long-lived uvicorn subprocess for that SAME module gets.
+    Unlike r2db's own control plane, both of this peer's modules
+    (`mitatedb_api.main`, `mitatedb_api.control_main`) build their own
+    `app` at IMPORT time, so this call exercises real startup checks on
+    both planes already."""
+    full_env = _scrub_peer_env_prefixes(os.environ)
+    full_env.update(_with_pythonpath(dict(env)))
+    return subprocess.run(
+        [sys.executable, "-m", module, "--preflight"],
+        capture_output=True, text=True, env=full_env, timeout=60,
+    )
+
+
+def _write_access_log_config(config_path: Path, log_path: Path) -> None:
+    """Peer counterpart of `real_server_r2db.py::_write_access_log_config`
+    -- see that function's own docstring."""
+    config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {"r113_pid_access": {"format": "PID=%(process)d %(message)s"}},
+        "handlers": {
+            "r113_access_file": {
+                "class": "logging.FileHandler",
+                "filename": str(log_path),
+                "formatter": "r113_pid_access",
+            },
+        },
+        "loggers": {
+            "uvicorn.access": {"handlers": ["r113_access_file"], "level": "INFO", "propagate": False},
+        },
+    }
+    config_path.write_text(json.dumps(config))
+
+
+_ACCESS_LOG_LINE_RE = re.compile(r"^PID=(\d+) .*\" (\d+)\s*$")
+
+
+def _access_log_line_count(log_path: Path) -> int:
+    """Peer counterpart of `real_server_r2db.py::_access_log_line_count`
+    -- see that function's own docstring."""
+    if not log_path.exists():
+        return 0
+    return len(log_path.read_text().splitlines())
+
+
+def _access_log_pids_for_status(log_path: Path, status: int, *, since: int = 0) -> list[int]:
+    """Peer counterpart of `real_server_r2db.py::_access_log_pids_for_
+    status` -- see that function's own docstring."""
+    pids: list[int] = []
+    if not log_path.exists():
+        return pids
+    for line in log_path.read_text().splitlines()[since:]:
+        match = _ACCESS_LOG_LINE_RE.match(line.strip())
+        if match is None:
+            continue
+        pid, status_text = int(match.group(1)), int(match.group(2))
+        if status_text == status:
+            pids.append(pid)
+    return pids
 
 
 def _sweep_prefix(admin_dsn: str, prefix: str) -> None:
@@ -325,6 +421,20 @@ class _AppInfo:
     application_id: str
     runtime_dsn: str
     developer_dsn: str
+
+
+@dataclass
+class _EntityLockHold:
+    """Peer counterpart of `real_server_r2db.py::_EntityLockHold` -- see
+    that class' own docstring."""
+
+    hold_s: float
+    _thread: threading.Thread
+    _release_now: threading.Event
+
+    def release_now(self) -> None:
+        self._release_now.set()
+        self._thread.join(timeout=10.0)
 
 
 def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
@@ -454,6 +564,16 @@ def _issue_runtime_credential(platform: _Platform, application_id: str) -> str:
     return bearer
 
 
+def _issue_developer_credential(platform: _Platform, application_id: str) -> str:
+    """完了条件 14/15: the SAME out-of-band precedent as
+    `_issue_runtime_credential` above, `role="developer"` -- needed by
+    `create_probe_entity` (schema operations are refused for a runtime
+    credential, C-02/C-14)."""
+    store = PostgresCredentialStore(platform.controlplane_dsn, pepper=platform.app_pepper, schema=platform.schema)
+    _credential_id, bearer = store.issue(application_id, "developer")
+    return bearer
+
+
 class RealServerMitateDB:
     """The C-26 launcher registered for MitateDB-api. Provisioning is
     lazy -- see `RealServerR2db`'s identical docstring for why."""
@@ -469,8 +589,26 @@ class RealServerMitateDB:
         self._control_credential_id: Optional[str] = None
         self._control_secret: Optional[str] = None
         self._runtime_secret: Optional[str] = None
+        # 完了条件 14/15: see `RealServerR2db.__init__`'s
+        # identical comment.
+        self._developer_secret: Optional[str] = None
         self._data_handle: Optional[sh.UvicornSubprocessHandle] = None
         self._control_handle: Optional[sh.UvicornSubprocessHandle] = None
+        # design D-3 (2') / 完了条件 4: see `RealServerR2db.
+        # __init__`'s identical comment.
+        self._slot_dir: Optional[Path] = None
+        # 完了条件 6: see `RealServerR2db.__init__`'s identical
+        # comment.
+        self._access_log_path: Optional[Path] = None
+        self._access_log_config_path: Optional[Path] = None
+        # The data plane's own most recent preflight `CompletedProcess` --
+        # see `RealServerR2db.__init__`'s identical comment.
+        self._data_preflight_result: Optional[subprocess.CompletedProcess] = None
+        # The data plane's own declared ceiling and worker count from the
+        # most recent start()/restart() call -- see `RealServerR2db.
+        # __init__`'s identical comment.
+        self._last_data_ceiling: Optional[int] = None
+        self._last_data_workers: Optional[int] = None
         # R-44 WP-3 (e), W44-3-9: the data/control upstream port
         # reservations this launcher itself owns for its whole lifetime --
         # `start()` mints both and `restart()` hands the SAME two objects
@@ -496,6 +634,7 @@ class RealServerMitateDB:
         self._platform = _bootstrap_platform(self._prefix, _admin_dsn(), self._script_dir)
         self._app = _provision_app(self._platform, self._script_dir, "c26app")
         self._runtime_secret = _issue_runtime_credential(self._platform, self._app.application_id)
+        self._developer_secret = _issue_developer_credential(self._platform, self._app.application_id)
         bootstrapped = _run_ops(_ops_env(self._platform), "bootstrap")
         if bootstrapped.returncode != 0:
             raise LauncherStartupError(f"ops bootstrap failed:\n{bootstrapped.stdout}\n{bootstrapped.stderr}")
@@ -560,10 +699,30 @@ class RealServerMitateDB:
             "MITATEDB_PLATFORM_SCHEMA": self._platform.schema,
         }
 
-    def start(self, *, ceilings: Mapping[str, int]) -> None:
+    # -- per-start data-plane env (workers/slot directory/access log,
+    # design D-3 (2')/D-4 ----------------------------------------------
+
+    def _data_env(self, *, workers: int) -> dict[str, str]:
+        assert self._slot_dir is not None and self._access_log_config_path is not None
+        env = dict(self._app_env())
+        env["MITATEDB_WORKERS"] = str(workers)
+        env["MITATEDB_SLOT_DIR"] = str(self._slot_dir)
+        env["UVICORN_LOG_CONFIG"] = str(self._access_log_config_path)
+        return env
+
+    def _control_env_with_workers(self) -> dict[str, str]:
+        # 監督裁定 4 (§6.1): control plane also passes `--workers` from the
+        # SAME env-variable shape, always 1 (`MITATEDB_CONTROL_WORKERS`).
+        env = dict(self._control_env())
+        env["MITATEDB_CONTROL_WORKERS"] = "1"
+        return env
+
+    def start(self, *, ceilings: Mapping[str, int], workers: int = 1) -> None:
         if self._started:
             raise LauncherStartupError("start() called while already started -- call stop() or restart() first")
         self._events = []
+        self._last_data_ceiling = ceilings["data"]
+        self._last_data_workers = workers
         # F3 correction (WP-6c review 2026-09-09): see `RealServerR2db.
         # start`'s identical comment -- the ENTIRE body below is now
         # inside this one `try`, so ANY failure anywhere in `start()` runs
@@ -596,6 +755,34 @@ class RealServerMitateDB:
             self._record("declare_process_ceilings")
 
             assert self._script_dir is not None
+            # design D-3 (2') / 完了条件 4/6: a fresh slot directory (also
+            # re-minted on every `restart()`, below) and an access-log
+            # config that keeps naming the same log file for this
+            # instance's whole lifetime.
+            self._slot_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-slots-"))
+            self._access_log_path = self._script_dir / "uvicorn-data-access.log"
+            self._access_log_config_path = self._script_dir / "uvicorn-data-access-logconfig.json"
+            _write_access_log_config(self._access_log_config_path, self._access_log_path)
+
+            # design D-1 (裁定 26): a preflight one-shot for
+            # EACH plane, in the SAME env its own long-lived uvicorn
+            # subprocess below gets, before that subprocess ever starts.
+            data_env = self._data_env(workers=workers)
+            preflight_data = _run_preflight("mitatedb_api.main", data_env)
+            self._data_preflight_result = preflight_data
+            if preflight_data.returncode != 0:
+                raise LauncherStartupError(
+                    f"preflight (mitatedb_api.main) failed:\n{preflight_data.stdout}\n{preflight_data.stderr}"
+                )
+            self._record("preflight_data")
+            control_env = self._control_env_with_workers()
+            preflight_control = _run_preflight("mitatedb_api.control_main", control_env)
+            if preflight_control.returncode != 0:
+                raise LauncherStartupError(
+                    f"preflight (mitatedb_api.control_main) failed:\n{preflight_control.stdout}\n{preflight_control.stderr}"
+                )
+            self._record("preflight_control")
+
             # R-44 WP-3 (e): each upstream gets its OWN `reserve_port()`
             # reservation, held by THIS launcher (never the handle -- W44-
             # 3-5's own caller-owns-when-reserved-is-given rule) for as
@@ -606,14 +793,16 @@ class RealServerMitateDB:
             with _peer_env_prefixes_removed_from_os_environ():
                 self._data_handle = sh.start_uvicorn_subprocess(
                     "mitatedb_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid",
-                    reserved=self._data_reservation, env=_with_pythonpath(self._app_env()),
+                    reserved=self._data_reservation, env=_with_pythonpath(data_env),
+                    workers=workers,
                 )
             self._record("uvicorn_data_start")
             self._control_reservation = sh.reserve_port()
             with _peer_env_prefixes_removed_from_os_environ():
                 self._control_handle = sh.start_uvicorn_subprocess(
                     "mitatedb_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid",
-                    reserved=self._control_reservation, env=_with_pythonpath(self._control_env()),
+                    reserved=self._control_reservation, env=_with_pythonpath(control_env),
+                    workers=1,
                 )
             self._record("uvicorn_control_start")
 
@@ -648,11 +837,13 @@ class RealServerMitateDB:
 
         self._started = True
 
-    def restart(self, *, ceilings: Mapping[str, int]) -> None:
+    def restart(self, *, ceilings: Mapping[str, int], workers: int = 1) -> None:
         if not self._started:
             raise LauncherStartupError("restart() called before start()")
         assert self._platform is not None
         assert self._data_handle is not None and self._control_handle is not None
+        self._last_data_ceiling = ceilings["data"]
+        self._last_data_workers = workers
 
         ceilings_result = _run_ops(
             _ops_env(self._platform), "declare-process-ceilings",
@@ -672,17 +863,43 @@ class RealServerMitateDB:
         self._data_handle.stop()
         self._control_handle.stop()
 
+        # Both uvicorn subprocesses are down now -- safe to remove the
+        # OLD slot directory and mint a fresh one for this restart (裁定
+        # 27's own "起動ごとの mkdtemp" applies to `restart()` too, not
+        # only the launcher's first `start()`).
+        assert self._slot_dir is not None
+        shutil.rmtree(self._slot_dir, ignore_errors=True)
+        self._slot_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-slots-"))
+
         assert self._script_dir is not None
+        data_env = self._data_env(workers=workers)
+        preflight_data = _run_preflight("mitatedb_api.main", data_env)
+        self._data_preflight_result = preflight_data
+        if preflight_data.returncode != 0:
+            raise LauncherStartupError(
+                f"preflight (mitatedb_api.main, restart) failed:\n{preflight_data.stdout}\n{preflight_data.stderr}"
+            )
+        self._record("preflight_data_restart")
+        control_env = self._control_env_with_workers()
+        preflight_control = _run_preflight("mitatedb_api.control_main", control_env)
+        if preflight_control.returncode != 0:
+            raise LauncherStartupError(
+                f"preflight (mitatedb_api.control_main, restart) failed:\n{preflight_control.stdout}\n{preflight_control.stderr}"
+            )
+        self._record("preflight_control_restart")
+
         with _peer_env_prefixes_removed_from_os_environ():
             self._data_handle = sh.start_uvicorn_subprocess(
                 "mitatedb_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid",
-                reserved=self._data_reservation, env=_with_pythonpath(self._app_env()),
+                reserved=self._data_reservation, env=_with_pythonpath(data_env),
+                workers=workers,
             )
         self._record("uvicorn_data_restart")
         with _peer_env_prefixes_removed_from_os_environ():
             self._control_handle = sh.start_uvicorn_subprocess(
                 "mitatedb_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid",
-                reserved=self._control_reservation, env=_with_pythonpath(self._control_env()),
+                reserved=self._control_reservation, env=_with_pythonpath(control_env),
+                workers=1,
             )
         self._record("uvicorn_control_restart")
 
@@ -731,6 +948,16 @@ class RealServerMitateDB:
         if self._nginx_prefix_dir is not None:
             shutil.rmtree(self._nginx_prefix_dir, ignore_errors=True)
             self._nginx_prefix_dir = None
+        # 完了条件 4: the per-instance slot directory never
+        # outlives this launcher instance.
+        if self._slot_dir is not None:
+            shutil.rmtree(self._slot_dir, ignore_errors=True)
+            self._slot_dir = None
+        self._access_log_path = None
+        self._access_log_config_path = None
+        self._data_preflight_result = None
+        self._last_data_ceiling = None
+        self._last_data_workers = None
         if self._prefix is not None:
             _sweep_prefix(_admin_dsn(), self._prefix)
             _release_prefix_lock(self._prefix, self._prefix_lock)
@@ -741,6 +968,7 @@ class RealServerMitateDB:
             self._script_dir = None
         self._platform = None
         self._app = None
+        self._developer_secret = None
         self._started = False
         self._listen_port = None
 
@@ -759,6 +987,12 @@ class RealServerMitateDB:
         assert self._runtime_secret is not None
         return self._runtime_secret
 
+    def issue_runtime_credential(self) -> str:
+        """Peer counterpart of `RealServerR2db.issue_runtime_credential`
+        -- see that method's own docstring."""
+        assert self._platform is not None and self._app is not None
+        return _issue_runtime_credential(self._platform, self._app.application_id)
+
     @property
     def control_bearer(self) -> str:
         assert self._control_secret is not None
@@ -768,6 +1002,121 @@ class RealServerMitateDB:
     def control_credential_id(self) -> str:
         assert self._control_credential_id is not None
         return self._control_credential_id
+
+    @property
+    def developer_bearer(self) -> str:
+        assert self._developer_secret is not None
+        return self._developer_secret
+
+    @property
+    def data_preflight_result(self) -> subprocess.CompletedProcess:
+        """Peer counterpart of `RealServerR2db.data_preflight_result` --
+        see that property's own docstring."""
+        assert self._data_preflight_result is not None
+        return self._data_preflight_result
+
+    def data_multi_process_mapping_configured(self) -> bool:
+        """Peer counterpart of `RealServerR2db.data_multi_process_mapping_
+        configured` -- see that method's own docstring."""
+        return (
+            self._slot_dir is not None
+            and self._last_data_ceiling is not None
+            and self._last_data_workers is not None
+            and self._last_data_workers == self._last_data_ceiling
+        )
+
+    def data_rate_row_configured(self) -> bool:
+        """Peer counterpart of `RealServerR2db.data_rate_row_configured`
+        -- see that method's own docstring."""
+        return True
+
+    # -- pid-tagged data-plane access log --
+
+    def access_log_line_count(self) -> int:
+        assert self._access_log_path is not None
+        return _access_log_line_count(self._access_log_path)
+
+    def access_log_pids_for_status(self, status: int, *, since: int = 0) -> list[int]:
+        assert self._access_log_path is not None
+        return _access_log_pids_for_status(self._access_log_path, status, since=since)
+
+    # -- new condition (a)/(b) support (design D-4) --
+    # See `RealServerR2db`'s identical methods for the shared rationale.
+
+    def create_probe_entity(self, entity_name: str, field_names: Sequence[str]) -> None:
+        _post_json(
+            f"{self.data_base_url}/schema/operations", self.developer_bearer,
+            {"operation": "create_entity", "entity": entity_name, "fields": list(field_names)},
+        )
+
+    def _locking_dsn(self) -> str:
+        assert self._platform is not None and self._app is not None
+        database = conninfo_to_dict(self._app.runtime_dsn)["dbname"]
+        return _dsn_with(self._platform.admin_dsn, dbname=database)
+
+    def _application_role_statement_timeout_ms(self) -> float:
+        assert self._app is not None
+        with psycopg.connect(self._app.runtime_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+                (value,) = cur.fetchone()
+        value_ms = int(value)
+        return float(value_ms) if value_ms > 0 else float("inf")
+
+    def _declared_execution_ms(self, *, bearer: Optional[str] = None) -> float:
+        doc = _get_json(f"{self.data_base_url}/capabilities", bearer or self.runtime_bearer)
+        return float(doc["limits"]["execution_ms"])
+
+    def retained_lock_hold_s(self, *, bearer: Optional[str] = None) -> float:
+        bound_s = min(self._application_role_statement_timeout_ms(), self._declared_execution_ms(bearer=bearer)) / 1000.0
+        return bound_s * 0.5
+
+    def hold_entity_storage_lock(self, entity_name: str, *, bearer: Optional[str] = None) -> _EntityLockHold:
+        hold_s = self.retained_lock_hold_s(bearer=bearer)
+        started = threading.Event()
+        release_now = threading.Event()
+        error: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                conn = psycopg.connect(self._locking_dsn(), application_name=f"mitatedb:lockholder:{os.getpid()}")
+            except BaseException as exc:  # noqa: BLE001 -- reported to the caller via `error`, never raised here
+                error.append(exc)
+                started.set()
+                return
+            try:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(sql.Identifier(entity_name)))
+                except BaseException as exc:  # noqa: BLE001 -- reported to the caller via `error`, never raised here
+                    error.append(exc)
+                    return
+                started.set()
+                release_now.wait(timeout=hold_s)
+            finally:
+                if not started.is_set():
+                    started.set()
+                conn.rollback()
+                conn.close()
+
+        thread = threading.Thread(target=_worker, name="mitatedb-lockholder", daemon=True)
+        thread.start()
+        if not started.wait(timeout=10.0):
+            raise LauncherStartupError(f"hold_entity_storage_lock({entity_name!r}) never acquired its lock within 10s")
+        if error:
+            raise LauncherStartupError(f"hold_entity_storage_lock({entity_name!r}) failed: {error[0]!r}")
+        return _EntityLockHold(hold_s=hold_s, _thread=thread, _release_now=release_now)
+
+    def lock_waiter_application_names(self, entity_name: str) -> list[str]:
+        with psycopg.connect(self._locking_dsn()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT a.application_name "
+                    "FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                    "WHERE l.relation = %s::regclass AND l.granted = false",
+                    [entity_name],
+                )
+                return [row[0] for row in cur.fetchall()]
 
     def attempt_start_without_process_ceilings(self) -> subprocess.CompletedProcess:
         """Design D-1 (B) 5 / completion condition 5. See `RealServerR2db.
@@ -786,31 +1135,109 @@ class RealServerMitateDB:
             if surfaces.returncode != 0:
                 raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
             app_id_upper = app.application_id.upper()
-            env = _scrub_peer_env_prefixes(os.environ)
-            env.update(_with_pythonpath({
-                "MITATEDB_CREDENTIAL_PEPPER": platform.app_pepper,
-                "MITATEDB_PLATFORM_DSN": platform.api_dsn,
-                "MITATEDB_PLATFORM_SCHEMA": platform.schema,
-                "MITATEDB_SERVE_APPS": app.application_id,
-                f"MITATEDB_APP_{app_id_upper}_RUNTIME_DSN": app.runtime_dsn,
-                f"MITATEDB_APP_{app_id_upper}_DEVELOPER_DSN": app.developer_dsn,
-                "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
-            }))
-            # R-44 WP-3 (e), R-19: a `reserve_port()` reservation, handed
-            # to uvicorn via `--fd`/`pass_fds` (never a bare `--port`), so
-            # this fail-fast observation is never confused with a lost
-            # bind race against some concurrent xdist worker's own
-            # harness surface.
-            f15_reservation = sh.reserve_port()
+            f15_slot_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-f15-slots-"))
             try:
-                f15_fd = f15_reservation.sock.fileno()
-                result = subprocess.run(
-                    [sys.executable, "-m", "uvicorn", "mitatedb_api.main:app", "--host", "127.0.0.1", "--fd", str(f15_fd)],
-                    env=env, capture_output=True, text=True, timeout=30, pass_fds=(f15_fd,),
-                )
+                env = _scrub_peer_env_prefixes(os.environ)
+                env.update(_with_pythonpath({
+                    "MITATEDB_CREDENTIAL_PEPPER": platform.app_pepper,
+                    "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+                    "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+                    "MITATEDB_SERVE_APPS": app.application_id,
+                    f"MITATEDB_APP_{app_id_upper}_RUNTIME_DSN": app.runtime_dsn,
+                    f"MITATEDB_APP_{app_id_upper}_DEVELOPER_DSN": app.developer_dsn,
+                    "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+                    "MITATEDB_WORKERS": "1",
+                    "MITATEDB_SLOT_DIR": str(f15_slot_dir),
+                }))
+                # R-44 WP-3 (e), R-19: a `reserve_port()` reservation, handed
+                # to uvicorn via `--fd`/`pass_fds` (never a bare `--port`), so
+                # this fail-fast observation is never confused with a lost
+                # bind race against some concurrent xdist worker's own
+                # harness surface.
+                f15_reservation = sh.reserve_port()
+                try:
+                    f15_fd = f15_reservation.sock.fileno()
+                    result = subprocess.run(
+                        [sys.executable, "-m", "uvicorn", "mitatedb_api.main:app", "--host", "127.0.0.1", "--fd", str(f15_fd)],
+                        env=env, capture_output=True, text=True, timeout=30, pass_fds=(f15_fd,),
+                    )
+                finally:
+                    f15_reservation.close()
+                return result
             finally:
-                f15_reservation.close()
-            return result
+                shutil.rmtree(f15_slot_dir, ignore_errors=True)
+        finally:
+            _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
+            shutil.rmtree(script_dir, ignore_errors=True)
+
+    def attempt_start_without_process_ceilings_multi_worker(self, *, workers: int = 2) -> subprocess.CompletedProcess:
+        """C-26 (5)'s `workers >= 2` form (design D-1, 裁定 26, 完了条件
+        13). See `RealServerR2db.attempt_start_without_process_ceilings_
+        multi_worker`'s identical docstring."""
+        script_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-f15w-"))
+        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f15w"
+        lock = _claim_prefix_lock(prefix)
+        try:
+            platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
+            app = _provision_app(platform, script_dir, "f15wapp")
+            surfaces = _run_ops(
+                _ops_env(platform), "declare-surfaces",
+                "--data-base-url", "http://127.0.0.1:1/v1",
+                "--control-base-url", "http://127.0.0.1:1/control/v1",
+            )
+            if surfaces.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
+            app_id_upper = app.application_id.upper()
+            slot_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-f15w-slots-"))
+            try:
+                env = {
+                    "MITATEDB_CREDENTIAL_PEPPER": platform.app_pepper,
+                    "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+                    "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+                    "MITATEDB_SERVE_APPS": app.application_id,
+                    f"MITATEDB_APP_{app_id_upper}_RUNTIME_DSN": app.runtime_dsn,
+                    f"MITATEDB_APP_{app_id_upper}_DEVELOPER_DSN": app.developer_dsn,
+                    "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+                    "MITATEDB_WORKERS": str(workers),
+                    "MITATEDB_SLOT_DIR": str(slot_dir),
+                }
+                # `process_ceilings` is deliberately never declared above.
+                return _run_preflight("mitatedb_api.main", env)
+            finally:
+                shutil.rmtree(slot_dir, ignore_errors=True)
+        finally:
+            _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
+            shutil.rmtree(script_dir, ignore_errors=True)
+
+    def attempt_control_preflight_without_process_ceilings(self) -> subprocess.CompletedProcess:
+        """Peer counterpart of `RealServerR2db.attempt_control_preflight_
+        without_process_ceilings` -- see that method's own docstring. This
+        peer's own control plane builds `app` eagerly at import time
+        (`_run_preflight`'s own docstring), so -- unlike r2db -- this call
+        is expected to observe a real F-15 fail-fast."""
+        script_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-f15c-"))
+        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f15c"
+        lock = _claim_prefix_lock(prefix)
+        try:
+            platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
+            surfaces = _run_ops(
+                _ops_env(platform), "declare-surfaces",
+                "--data-base-url", "http://127.0.0.1:1/v1",
+                "--control-base-url", "http://127.0.0.1:1/control/v1",
+            )
+            if surfaces.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
+            env = {
+                "MITATEDB_CREDENTIAL_PEPPER": platform.app_pepper,
+                "MITATEDB_CONTROL_CREDENTIAL_PEPPER": platform.control_pepper,
+                "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+                "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+                "MITATEDB_CONTROL_WORKERS": "1",
+            }
+            # `process_ceilings` is deliberately never declared above.
+            return _run_preflight("mitatedb_api.control_main", env)
         finally:
             _sweep_prefix(_admin_dsn(), prefix)
             _release_prefix_lock(prefix, lock)
@@ -850,6 +1277,7 @@ class RealServerMitateDB:
         prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f16"
         lock = _claim_prefix_lock(prefix)
         restored_handle: Optional[sh.UvicornSubprocessHandle] = None
+        f16_slot_dir: Optional[Path] = None
         try:
             platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
             app = _provision_app(platform, script_dir, "f16app")
@@ -868,6 +1296,7 @@ class RealServerMitateDB:
 
             runtime_role = f"{prefix}_app_{app.application_id}_rt"
             app_id_upper = app.application_id.upper()
+            f16_slot_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-f16-slots-"))
             env = _scrub_peer_env_prefixes(os.environ)
             env.update(_with_pythonpath({
                 "MITATEDB_CREDENTIAL_PEPPER": platform.app_pepper,
@@ -877,6 +1306,8 @@ class RealServerMitateDB:
                 f"MITATEDB_APP_{app_id_upper}_RUNTIME_DSN": app.runtime_dsn,
                 f"MITATEDB_APP_{app_id_upper}_DEVELOPER_DSN": app.developer_dsn,
                 "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+                "MITATEDB_WORKERS": "1",
+                "MITATEDB_SLOT_DIR": str(f16_slot_dir),
             }))
 
             admin = psycopg.connect(_admin_dsn(), autocommit=True)
@@ -926,6 +1357,8 @@ class RealServerMitateDB:
         finally:
             if restored_handle is not None:
                 restored_handle.stop()
+            if f16_slot_dir is not None:
+                shutil.rmtree(f16_slot_dir, ignore_errors=True)
             _sweep_prefix(_admin_dsn(), prefix)
             _release_prefix_lock(prefix, lock)
             shutil.rmtree(script_dir, ignore_errors=True)
