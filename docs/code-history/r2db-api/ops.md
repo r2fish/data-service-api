@@ -867,6 +867,34 @@ body) so `_verify_declarations_checks`'s own call site stays textually
 isomorphic across peers.
 ```
 
+### correction: 2026-09-28
+
+- reason: design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5) -- the pool ceiling this function returns derives from `R2DB_THREAD_LIMIT` via `role_pool_size`, not from the fixed `ResourceLimits.concurrency`; the function is renamed `_declared_pool_size` and this first sentence rewritten to match.
+
+old:
+```
+Phase 10 WP-4f: this peer's own declared per-role pool ceiling, consulted by `_verify_declarations_checks`'s own F-16 check.
+```
+
+new:
+```
+(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)): this peer's own declared per-role pool ceiling, consulted by `_verify_declarations_checks`'s own F-16/F-18 checks.
+```
+
+### correction: 2026-09-28
+
+- reason: design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)/裁定 28 (ii) -- the floor this function derives now reads `R2DB_THREAD_LIMIT` through the shared `r2db_api.limits.thread_limit_from_env` reader (the one `control_main.py` uses; `main.py`'s own `_thread_limit_from_env` applies the same rules, pinned equal by a test) with the SAME fail-loud discipline those two use, replacing the plain `ResourceLimits.concurrency`/`_declared_concurrency` cross-reference this sentence pair used to carry.
+
+old:
+```
+`ResourceLimits.concurrency` is fixed on this peer -- no env var overrides it anywhere in this peer's own composition roots -- unlike MitateDB-api's own same-named `_declared_concurrency` (`MITATEDB_MAX_CONCURRENCY`, deployer-configurable on that peer; see that peer's own docstring). Named identically (peer-IDENTICAL name, peer-SPECIFIC body) so `_verify_declarations_checks`'s own call site stays textually isomorphic across peers.
+```
+
+new:
+```
+Reads `R2DB_THREAD_LIMIT` from THIS CLI invocation's own process env through `r2db_api.limits.thread_limit_from_env` -- the SAME reader `control_main.py`'s own startup check uses, and the same rules `main.py`'s own `_thread_limit_from_env` applies (`tests/test_threadpool_offload.py::test_thread_limit_from_env_agrees_with_the_shared_limits_reader` pins the two equal on every input): unset/empty falls back to `DEFAULT_THREAD_LIMIT`, a non-empty value that is not a positive integer raises `ValueError` naming the variable (fail-loud, never a silent fallback) -- and derives the floor via `role_pool_size`, the SAME function `main.py`'s own startup check uses. This is a disclosed limitation this command already carries for every other env-derived check (`_verify_declarations_checks`'s own workers-vs-ceiling check right below states it too): the value this CLI invocation's own shell happens to have set for `R2DB_THREAD_LIMIT` may not match the REAL running `r2db_api.main`/`r2db_api.control_main` process' own env -- this check only ever verifies agreement with WHATEVER value this one invocation was run under.
+```
+
 ## CH-0323
 
 - moved from: `src/r2db_api/ops.py` (`_served_capabilities_document`)

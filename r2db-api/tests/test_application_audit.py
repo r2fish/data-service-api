@@ -26,6 +26,7 @@ import logging
 import os
 import secrets
 import subprocess
+import tempfile
 import threading
 import time
 import types
@@ -56,6 +57,15 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
 PEPPER = "synthetic-test-pepper-application-audit-0000"
 
+# WP-2 (design D-1/D-3 (2'), 監督裁定 11/27): `R2DB_WORKERS`/`R2DB_SLOT_DIR`
+# are now required for `build_app()` to start at all -- one shared, real
+# slot directory (mode 0700 by `mkdtemp`'s own default) for this whole
+# test module's several `build_app(env=...)` call sites, mirroring a
+# single-process (`workers=1`) deployment. Not explicitly torn down --
+# this repository's own other `tempfile.mkdtemp` test call sites follow
+# the same "leaked to the OS temp dir" convention.
+_SLOT_DIR = tempfile.mkdtemp(prefix="r2db-test-slots-application-audit-")
+
 MIGRATION_NAMES = (
     "0001_bootstrap_control_plane.sql",
     "0002_provisioning_functions.sql",
@@ -82,6 +92,9 @@ MIGRATION_NAMES = (
     # `platform` fixture can seed that row below (F-15 is unconditional,
     # like F-3 for `surfaces`, since WP-6a).
     "0012_process_ceilings.sql",
+    # WP-2 (design D-3 (1), 監督裁定15): `r2db_api.main.build_app` now
+    # always wires the PostgreSQL-backed `requests_per_minute` rate row.
+    "0015_credential_request_rate.sql",
     # Q4 rework (supervisor ruling 2026-09-05, H-1 test (ii)): rewritten
     # (its own literal `r2dbsvc_registry` textually replaced by this
     # module's own throwaway prefix, same as every other migration file
@@ -220,6 +233,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
+        _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(
@@ -801,6 +815,8 @@ def test_build_app_double_check_reflects_the_real_role_setting_not_a_cached_defa
             "R2DB_PLATFORM_DSN": platform.api_dsn,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
             "R2DB_SERVE_APPS": app_a.slug,
+            "R2DB_WORKERS": "1",
+            "R2DB_SLOT_DIR": _SLOT_DIR,
             f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
             f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
         }
@@ -854,6 +870,8 @@ def test_build_app_f9_fires_when_a_connection_string_options_override_changes_th
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": app_a.slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
     }
@@ -883,6 +901,8 @@ def test_build_app_checks_the_env_mapping_argument_not_os_environ(
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": app_a.slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
     }
@@ -921,6 +941,8 @@ def test_build_app_rejects_a_hand_edited_coalescing_window_value(
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": app_a.slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
     }
@@ -968,6 +990,8 @@ def test_build_app_rejects_removed_audit_timeout_env_vars(
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": app_a.slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
     }
@@ -998,6 +1022,8 @@ def test_build_app_rejects_removed_surface_env_vars(
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": app_a.slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
     }
@@ -1031,6 +1057,7 @@ def test_build_control_app_double_check_reflects_the_real_role_setting_not_a_cac
             "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-m1-control-ctl",
             "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-m1-control-app",
             "R2DB_PLATFORM_SCHEMA": platform.schema,
+            "R2DB_CONTROL_WORKERS": "1",
         }
 
     module = _reload_module_with_env("r2db_api.control_main", _env(), monkeypatch)
@@ -1099,6 +1126,7 @@ def test_build_control_app_rejects_removed_audit_timeout_env_vars(
         "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-f1-control-ctl",
         "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f1-control-app",
         "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_CONTROL_WORKERS": "1",
     }
     module = _reload_module_with_env("r2db_api.control_main", base_env, monkeypatch)
     for name, value in (
@@ -1126,6 +1154,7 @@ def test_build_control_app_rejects_removed_surface_env_vars(
         "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-f2-control-ctl",
         "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f2-control-app",
         "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_CONTROL_WORKERS": "1",
     }
     module = _reload_module_with_env("r2db_api.control_main", base_env, monkeypatch)
     for name, value in (
@@ -1167,6 +1196,8 @@ def test_both_composition_roots_derive_the_same_visibility_lag_ms_from_one_db_si
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": app_a.slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
     }
@@ -1187,6 +1218,7 @@ def test_both_composition_roots_derive_the_same_visibility_lag_ms_from_one_db_si
         "R2DB_CONTROL_CREDENTIAL_PEPPER": control_pepper,
         "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-n6-control-app",
         "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_CONTROL_WORKERS": "1",
         "R2DB_AUDIT_DSN": platform.auditreader_dsn,
     }
     control_main_module = _reload_module_with_env("r2db_api.control_main", control_env, monkeypatch)
@@ -1268,6 +1300,7 @@ def test_control_visibility_lag_ms_reflects_the_sibling_roles_catalog_not_only_i
         "R2DB_CONTROL_CREDENTIAL_PEPPER": control_pepper,
         "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-sibling-app",
         "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_CONTROL_WORKERS": "1",
         "R2DB_AUDIT_DSN": platform.auditreader_dsn,
     }
     control_main_module = _reload_module_with_env("r2db_api.control_main", control_env, monkeypatch)
@@ -3225,6 +3258,8 @@ def test_build_app_h1_serves_every_application_and_refuses_only_the_one_with_a_p
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": f"{app_a.slug},{app_b.slug}",
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
         f"R2DB_APP_{app_b.slug.upper()}_RUNTIME_DSN": app_b.runtime_dsn,
@@ -3291,6 +3326,8 @@ def test_build_app_h1_logs_the_f12_message_verbatim_at_cell_open_time(
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": f"{app_a.slug},{app_b.slug}",
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
         f"R2DB_APP_{app_b.slug.upper()}_RUNTIME_DSN": app_b.runtime_dsn,
@@ -3332,6 +3369,8 @@ def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_a
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": f"{app_a.slug},{app_b.slug}",
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _SLOT_DIR,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
         f"R2DB_APP_{app_b.slug.upper()}_RUNTIME_DSN": app_b.runtime_dsn,

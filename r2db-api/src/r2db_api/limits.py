@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, replace
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .errors import fail, violation
 
@@ -118,51 +118,85 @@ class ResourceLimits:
             stack.extend((child, next_depth) for child in children)
 
 
-def role_pool_size(limits: ResourceLimits) -> int:
-    """Phase 10 WP-8a review F-1 fix (supervisor ruling 2026-09-08): the
-    per-served-application PostgreSQL role pool capacity (runtime AND
-    developer -- `r2db_api.postgres.PostgresCell` takes one `pool_size`
-    for both roles) `r2db_api.main`'s composition root hands to
-    `PostgresCell` MUST be at least `limits.concurrency`, the SAME
-    declared ceiling `DataService._slot` enforces (`service.py`).
+#: (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)):
+#: the constant added to the real effective thread limit --
+#: `role_pool_size`'s own docstring below spells out what the 2 extra
+#: connections are for (the audit flush thread and this process' own
+#: platform rate statement, `credential_store.PostgresCredentialStore.
+#: record_rate_and_check`).
+_POOL_SIZE_HEADROOM = 2
 
-    Before WP-8a's `run_in_threadpool` delegation, a single event-loop
-    thread serialized every request's synchronous section, so one
-    application could never actually present more than 1 concurrent
-    request to its own pool regardless of how small that pool was
-    (WP-4b ruling 3). Once delegation let concurrent requests reach the
-    pool for real, a pool sized below the declared `concurrency` ceiling
-    (previously: whatever `SharedPoolManager`'s own fixed default worked
-    out to -- `R2DB_POOL_SIZE + R2DB_POOL_MAX_OVERFLOW`, default 2 + 2 =
-    4, entirely disconnected from `ResourceLimits.concurrency`, default
-    32) opened a NEW failure mode: the 5th concurrent request against ONE
-    application, still comfortably under the declared bound, timed out in
-    `_RolePool.connection()` (`postgres.py`'s own `_DEFAULT_ACQUIRE_
-    TIMEOUT_S`) and failed closed with 503 SERVICE_UNAVAILABLE instead of
-    the declared 429 LIMIT_EXCEEDED a client is told to expect at 32. This
-    function is the single place that ties the two together, so the pool
-    can never again silently under-provision relative to the declared
-    bound -- see `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`'s role-
-    pool-ceiling note for the resulting `max_connections` arithmetic.
 
-    Deliberately NOT `max(limits.concurrency, R2DB_POOL_SIZE + R2DB_POOL_
-    MAX_OVERFLOW)`: those two env vars now govern only `SharedPoolManager`'s
-    own fallback default (used by any pool that does not specify a size
-    explicitly) -- letting them silently override the served-application
-    floor back down again would reopen exactly this failure mode for an
-    operator who had tuned them before this fix existed. An operator who
-    wants MORE than `concurrency` connections per application pool can
-    still raise `ResourceLimits.concurrency` itself (there is currently no
-    separate per-application override), which raises both bounds in
-    lockstep by construction.
-
-    The platform pool (`R2DB_PLATFORM_POOL_SIZE`, `r2db_api.main.
-    build_app`) is intentionally NOT changed by this function -- Phase 10
-    WP-8a review F-2 (`_authenticate` running before any limiter, so the
-    platform pool's own demand is not bounded by `concurrency` either) is
-    a separate, both-peers fix (WP-8c), not this one.
+def thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
+    """(design D-3 (5)): the env-declared-thread-limit reader
+    `r2db_api.control_main`'s own startup and `r2db_api.ops`'s own
+    `verify-declarations` operator diagnostic both read `R2DB_THREAD_
+    LIMIT` through directly. `r2db_api.main`'s own startup keeps its OWN
+    body of the same reader instead (a registered isomorphism target
+    against MitateDB-api's own same-named function, and an AST-isolated-
+    exec unit-test subject, `tests/test_threadpool_offload.py`) --
+    `tests/test_threadpool_offload.py::test_thread_limit_from_env_agrees_
+    with_the_shared_limits_reader` pins that the two bodies agree on
+    every input (completion condition 70b) rather than letting them
+    diverge silently. Unset or empty falls back to `default`; a non-empty
+    value that is not a positive integer stops the caller (`ValueError`
+    naming `name`) rather than silently degrading -- this sizes a
+    worker-thread pool (`role_pool_size`), a resource dimension a
+    deployer's typo should never silently mis-size.
     """
-    return limits.concurrency
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def role_pool_size(thread_limit: int) -> int:
+    """(design D-3 (5)): the per-served-application PostgreSQL role pool
+    capacity (runtime AND developer -- `r2db_api.postgres.PostgresCell`
+    takes one `pool_size` for both roles) AND `r2db_api.main`'s own
+    platform pool (`R2DB_PLATFORM_POOL_SIZE`'s own default) both derive
+    from `thread_limit` -- the effective, env-overridden `ThreadLimit
+    Middleware` value (`http.py`'s own `create_app(..., thread_limit=)`).
+
+    Basis: the number of connections ONE process can genuinely have in
+    flight at once is bounded by how many worker THREADS that process'
+    own event loop ever hands a synchronous request section to (`run_in_
+    threadpool`, `http.py`) -- `thread_limit` is that real per-process
+    ceiling. `ResourceLimits.concurrency` is the deployment-wide
+    admission bound every worker process enforces TOGETHER (the host-
+    shared slot directory), never a per-process connection ceiling, so
+    it is not the basis this function reads. `thread_limit + 2` (the
+    `+ 2` headroom below: the audit-flush thread's own occasional
+    connection, and this process' own platform rate statement) lets
+    `process_ceilings.data` processes share `max_connections` without
+    the connection-budget arithmetic scaling with the declared
+    `concurrency` bound (design's own "宣言値 L は接続予算に入らない
+    (slot は接続を持たない)").
+
+    A per-application pool sized below the real number of requests that
+    application can present to it at once turns a declared 429 LIMIT_
+    EXCEEDED into a pool-wait-timeout 503 instead (`postgres.py`'s own
+    `_DEFAULT_ACQUIRE_TIMEOUT_S`) -- `_RolePool.connection()` times out
+    and fails closed at 503 well under the declared bound. The real
+    per-process ceiling on simultaneous borrows is `thread_limit` (a
+    `run_in_threadpool` caller waits for a free WORKER THREAD before it
+    can ever reach the pool at all, `http.py`'s own `ThreadLimit
+    Middleware`); `concurrency` bounds admission across every worker
+    process together (the host-shared slot directory), not simultaneous
+    DB borrows by any one process -- so this function sizes the pool
+    from `thread_limit`, not from `concurrency`.
+    `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`'s role-pool-ceiling
+    note carries the resulting `max_connections` arithmetic.
+    """
+    if isinstance(thread_limit, bool) or not isinstance(thread_limit, int) or thread_limit < 1:
+        raise ValueError(f"thread_limit must be a positive integer, got {thread_limit!r}")
+    return thread_limit + _POOL_SIZE_HEADROOM
 
 
 # Contract 1.7.0 (D-6 (2), addendum R-g, WP-2d): the applicability table --

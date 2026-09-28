@@ -404,6 +404,15 @@ psql "${R2DBSVC_CONTROL_DSN}" \
     -v ON_ERROR_STOP=1 \
     -f "${R2DBSVC_MIGRATIONS_DIR}/0014_auditreader_statement_timeout.sql"
 
+# R-113 WP-2 (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (1)):
+# the credential-keyed `requests_per_minute` rate table -- no `-v`/
+# `\getenv` variables, takes no precondition beyond 0005 above having
+# already created `r2dbsvc_credentials`/`r2dbsvc_api`.
+log "0015_credential_request_rate.sql (r2dbsvc_control)"
+psql "${R2DBSVC_CONTROL_DSN}" \
+    -v ON_ERROR_STOP=1 \
+    -f "${R2DBSVC_MIGRATIONS_DIR}/0015_credential_request_rate.sql"
+
 # ---------------------------------------------------------------------------
 # Role-name / pg_roles consistency check (supervisor ruling 2026-09-06
 # L-3), run after 0005/0006 -- which create these two roles under FIXED,

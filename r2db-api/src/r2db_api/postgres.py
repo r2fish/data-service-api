@@ -239,6 +239,48 @@ def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, param
     cursor.execute(statement, list(params))
 
 
+# design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4
+# (completion conditions 68/69): the `application_name` every
+# connection this module opens carries, process-wide. `None` (the
+# default -- this repository's own tests and both conformance adapters
+# never set it) omits the parameter entirely, leaving libpq's own
+# default (`""`) untouched. `r2db_api.main`/`r2db_api.control_main` each
+# set this ONCE, near the top of their own `build_app()`/`build_control_
+# app()`, to `"r2db-api:data:<pid>"`/`"r2db-api:control:<pid>"` -- every
+# `_RolePool` this SAME process opens afterward (regardless of which
+# store class in `credential_store.py` constructs it) then carries that
+# one value, without a constructor-parameter change at each of this
+# module's several call sites. A real deployment's data/control planes
+# are always two separate OS processes (`r2db_api.main:app`/`r2db_api.
+# control_main:app`, both peer launchers' own `start()`), so this
+# process-wide value is never ambiguous between the two.
+_connection_application_name: str | None = None
+
+
+def set_connection_application_name(name: str | None) -> None:
+    """Sets (or clears, with `None`) the `application_name` every
+    connection this module opens from now on carries -- see the module-
+    level comment above for the full rationale. Not thread-safe against a
+    concurrent `_RolePool._connect()`/`PostgresCell.verify_platform_
+    upgrades_applied()` call in a DIFFERENT thread of the SAME process --
+    unneeded in practice, since every real caller (`main.py`/`control_
+    main.py`) calls this exactly once, at composition-root startup,
+    before any request-serving thread exists."""
+    global _connection_application_name
+    _connection_application_name = name
+
+
+def _application_name_connect_kwargs() -> dict[str, str]:
+    """`{"application_name": ...}` when `set_connection_application_name`
+    has been called with a non-`None` value, `{}` otherwise -- spread
+    into a `psycopg.connect(...)`/`CountingConnection.connect(...)` call
+    so an unset value omits the keyword argument entirely (never passes
+    `application_name=None`, which psycopg would reject)."""
+    if _connection_application_name is None:
+        return {}
+    return {"application_name": _connection_application_name}
+
+
 class _RolePool:
     """A small connection pool dedicated to exactly one (login role,
     database, schema) triple.
@@ -332,7 +374,10 @@ class _RolePool:
         # not be exposed to while holding `self._lock` (see that method's
         # own comment on why `_connect()` is never called under the lock).
         connect_start = time.monotonic()
-        conn = CountingConnection.connect(self._dsn, autocommit=False, connect_timeout=self._connect_timeout)
+        conn = CountingConnection.connect(
+            self._dsn, autocommit=False, connect_timeout=self._connect_timeout,
+            **_application_name_connect_kwargs(),
+        )
         connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
         with self._stats_lock:
             self._sessions += 1
@@ -1004,7 +1049,7 @@ class PostgresCell:
         (`SERVICE_UNAVAILABLE`, F-12's own verbatim text) if anything is
         pending; does nothing otherwise.
         """
-        conn = psycopg.connect(self._runtime_dsn)
+        conn = psycopg.connect(self._runtime_dsn, **_application_name_connect_kwargs())
         try:
             try:
                 platform_upgrades.require_application_upgrades_applied(

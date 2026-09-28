@@ -15,6 +15,7 @@ from .audit_counts import _coalesced_count
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
 from .capabilities_document import build_capabilities_document
+from . import concurrency_slots
 from .errors import FoundationError, fail, observed_type_of, violation
 from .limits import ResourceLimits, narrow_limits_by_budget
 from .paging import MAX_PAGE_SIZE
@@ -638,7 +639,7 @@ class _DenialCoalescer:
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1, operation_catalog_url: str | None = None) -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1, operation_catalog_url: str | None = None, rate: Any | None = None, concurrency_slots: Any | None = None, concurrency_configured: bool = False) -> None:
         # R-9 (CCR-14, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §1: "capability 申告は環境変数由来で composition root 注入"): whether this application-plane process' own `capabilities()` declares `control_plane: enabled` is a *deployer* fact this class cannot know on its own (a separated deployment, the default, means the application-plane process has no idea whether a control-plane process is running anywhere at all) -- it is constructor-injected, defaulting to the safe, honest `unavailable` so nothing short of an explicit composition-root decision (`main.py`, reading `R2DB_CONTROL_PLANE_STATUS`) ever declares `enabled`. Validated here too (not only at `main.py`'s env-parsing boundary) so any other caller constructing a `DataService` directly (this repository's own tests, the in-process conformance adapter) gets the same fail-loud guard against a typo'd status string, rather than silently publishing an invalid capability value.
         # history: CH-0148
         if control_plane_status not in {"enabled", "unavailable"}:
@@ -693,6 +694,35 @@ class DataService:
         self._rate_lock = threading.Lock()
         self._rate_windows: dict[str, list[float]] = {}
         self._clock = clock or time.monotonic
+        # design D-3: the 2-strategy region (ii)
+        # wiring -- `rate`/`concurrency_slots` default to `None` (this
+        # repository's own unit tests and the in-process conformance
+        # adapter never pass either): `_acquire_rate`/`acquire_
+        # concurrency_slot`/`_slot` below run their in-memory branch
+        # whenever the corresponding object is `None`. `rate` (when given) is a `PostgresCredentialStore`-
+        # shaped object exposing `record_rate_and_check(credential_id,
+        # limit) -> bool`; `concurrency_slots` is a `concurrency_slots.
+        # HostSharedConcurrencySlots`-shaped object exposing `acquire(limit)`
+        # as a context manager. `concurrency_configured` is a SEPARATE
+        # boolean (never derived from `concurrency_slots is not None`
+        # alone): whether `capabilities().limit_enforcement.
+        # concurrency` may honestly read `enforced` depends on this
+        # supervisor's own workers vs. the declared ceiling too, a
+        # comparison only the composition root (`main.py`) can make --
+        # this class enforces the wired mechanism whenever it is given
+        # one, REGARDLESS of this flag (an honest `deployment_required`
+        # declaration does not mean the local host-shared bound stops
+        # working, only that ANOTHER host might not share it).
+        self._rate = rate
+        self._concurrency_slots = concurrency_slots
+        if concurrency_configured and concurrency_slots is None:
+            raise ValueError(
+                "concurrency_configured=True requires a concurrency_slots object -- "
+                "declaring the host-shared bound configured without wiring the mechanism "
+                "that shares it would let capabilities().limit_enforcement.concurrency read "
+                "\"enforced\" for a process-local counter no other worker shares"
+            )
+        self._concurrency_configured = concurrency_configured
         self.topology.validate()
 
     def authenticate(self, secret: str | None, *, request_id: str | None = None) -> AuthContext:
@@ -724,6 +754,8 @@ class DataService:
                 process_ceiling=self._process_ceiling,
                 surfaces=self._surfaces,
                 operation_catalog_url=self._operation_catalog_url,
+                rate_configured=self._rate is not None,
+                concurrency_configured=self._concurrency_configured,
             )
 
     def operation_catalog(self, context: AuthContext, *, concurrency_precharged: bool = False) -> None:
@@ -1042,6 +1074,24 @@ class DataService:
         if concurrency_precharged:
             yield canonical
             return
+        # design D-3 (2): whenever a host-shared
+        # slot directory is wired (`self._concurrency_slots is not None`),
+        # this non-precharged caller (a direct `DataService` caller --
+        # this repository's own tests, the in-process conformance
+        # adapter -- never an HTTP request, which always precharges via
+        # `acquire_concurrency_slot()` below before reaching here) is
+        # admitted through the SAME mechanism, never the in-memory
+        # counter. The pinned in-memory check-then-increment block below
+        # is unchanged, lexically intact, for the unwired path.
+        if self._concurrency_slots is not None:
+            try:
+                with self._concurrency_slots.acquire(self.limits.concurrency):
+                    yield canonical
+                return
+            except concurrency_slots.LimitExceeded:
+                fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
+            except concurrency_slots.SlotBackendError:
+                fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         with self._active_lock:
             if self._active >= self.limits.concurrency:
                 fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
@@ -1080,6 +1130,19 @@ class DataService:
 
         History: CH-0110
         """
+        # same host-shared-slot branch `_slot` above carries (its
+        # own docstring) -- deliberately its own copy too, for the same
+        # reason the in-memory copy right below is (this method's own
+        # docstring).
+        if self._concurrency_slots is not None:
+            try:
+                with self._concurrency_slots.acquire(self.limits.concurrency):
+                    yield
+                return
+            except concurrency_slots.LimitExceeded:
+                fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
+            except concurrency_slots.SlotBackendError:
+                fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         with self._active_lock:
             if self._active >= self.limits.concurrency:
                 fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
@@ -1101,6 +1164,19 @@ class DataService:
         return canonical
 
     def _acquire_rate(self, context: AuthContext) -> None:
+        # design D-3 (1): whenever a PostgreSQL-backed
+        # rate row is wired (`self._rate is not None`), every worker this
+        # deployment runs shares ONE credential-keyed count instead of
+        # each keeping its own in-memory window below. Called AFTER
+        # `_check`'s own authentication borrow has already returned its
+        # connection (`_slot`'s own `canonical = self._check(context);
+        # self._acquire_rate(canonical)`, sequential, never nested) --
+        # completion condition 35.
+        if self._rate is not None:
+            admitted = self._rate.record_rate_and_check(context.credential_id, self.limits.requests_per_minute)
+            if not admitted:
+                fail("LIMIT_EXCEEDED", "Request rate limit exceeded.", status=429, details={"resource": "requests_per_minute", "limit_class": "requests_per_minute", "limit": self.limits.requests_per_minute})
+            return
         now = self._clock()
         with self._rate_lock:
             window = self._rate_windows.setdefault(context.credential_id, [])

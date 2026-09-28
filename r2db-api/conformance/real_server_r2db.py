@@ -559,6 +559,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0008_platform_declarations_and_writer_timeouts.sql",
         "0012_process_ceilings.sql",
         "0013_role_connection_limits.sql",
+        # design D-3 (1): the credential-keyed
+        # `requests_per_minute` rate table -- depends only on 0005 above.
+        "0015_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -578,6 +581,23 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     )
     _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
+    _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+
+    # design D-3 (5): `check_role_connection_limits` (F-16) multiplies
+    # the controlplane/auditreader floors (`_CONTROLPLANE_ROLE_POOL_FLOOR`/
+    # `_AUDITREADER_ROLE_POOL_FLOOR`, 16/4) by `process_ceilings.control`;
+    # 0013's own CONNECTION LIMIT (20/5) covers a control ceiling of 1
+    # only. This launcher's conformance lifecycle declares a control
+    # ceiling of 2, so both roles are set here, once, up front, to values
+    # that meet the F-16 floors for 2 control processes (16*2=32,
+    # 4*2=8) -- the provisioning step any deployment declaring
+    # `process_ceilings.control` >= 2 needs (F-16 otherwise stops control
+    # startup and reports the exact floor).
+    with psycopg.connect(control_dsn) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 32").format(sql.Identifier(controlplane_role)))
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 8").format(sql.Identifier(auditreader_role)))
+        _conn.commit()
 
     return _Platform(
         prefix=prefix,
@@ -1074,8 +1094,8 @@ class RealServerR2db:
         if self._nginx_prefix_dir is not None:
             shutil.rmtree(self._nginx_prefix_dir, ignore_errors=True)
             self._nginx_prefix_dir = None
-        # The per-instance slot directory never outlives this launcher
-        # instance.
+        # 完了条件 4: the per-instance slot directory never
+        # outlives this launcher instance.
         if self._slot_dir is not None:
             shutil.rmtree(self._slot_dir, ignore_errors=True)
             self._slot_dir = None

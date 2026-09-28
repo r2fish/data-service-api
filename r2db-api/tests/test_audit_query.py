@@ -4105,6 +4105,9 @@ def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(p
             "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
             "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
+            # WP-2 (design D-1, 監督裁定 4/11): required for `build_control_
+            # app()` to start at all -- always `1` in a real deployment.
+            "R2DB_CONTROL_WORKERS": "1",
             # Q4 phase WP-1 (design D-2(f)): surfaces are now a DB-side
             # declaration (this file's own `platform` fixture seeds a
             # working `surfaces` row, `_DEFAULT_SURFACES_VALUE`) -- these
@@ -4177,6 +4180,9 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(platform
             "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
             "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
+            # WP-2 (design D-1, 監督裁定 4/11): required for `build_control_
+            # app()` to start at all -- always `1` in a real deployment.
+            "R2DB_CONTROL_WORKERS": "1",
             # Q4 phase WP-1 (design D-2(f)): surfaces are now a DB-side
             # declaration (this file's own `platform` fixture seeds a
             # working `surfaces` row, `_DEFAULT_SURFACES_VALUE`) -- these

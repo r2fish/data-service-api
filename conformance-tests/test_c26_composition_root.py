@@ -289,20 +289,27 @@ def test_c26_deploy_smoke_is_green(lifecycle: SimpleNamespace) -> None:
 def test_c26_ceiling_maps_to_limit_enforcement(lifecycle: SimpleNamespace) -> None:
     """`process_ceilings` declared as 1, then as 2 (one real restart in
     between -- design's own "宣言値 -> limit_enforcement の写像が実起動で
-    成立すること"), exhibits the mapping both planes' own `capability_
-    status.rules` promise: `enforced` at ceiling 1, `deployment_required`
-    at ceiling >= 2, for the in-memory-per-process-bound limit classes
-    (`requests_per_minute` on the data plane, `control_requests_per_
-    minute` on the control plane)."""
+    成立すること"). `control_requests_per_minute` (control plane, never
+    wired to a shared mechanism) keeps the single-process rule: `enforced`
+    at ceiling 1, `deployment_required` at ceiling >= 2. The data plane's
+    `requests_per_minute` mapping instead depends on whether THIS
+    launcher wires the PostgreSQL-backed rate row at all (design D-3 (4)
+    v0.4, 裁定 18, `data_rate_row_configured()`, WO 裁定 29): wired ->
+    `enforced` at both ceilings; unwired -> the single-process rule, same
+    as `control_requests_per_minute`."""
     data_1 = lifecycle.data_doc_1["limit_enforcement"]["requests_per_minute"]
     data_2 = lifecycle.data_doc_2["limit_enforcement"]["requests_per_minute"]
     control_1 = lifecycle.control_doc_1["limit_enforcement"]["control_requests_per_minute"]
     control_2 = lifecycle.control_doc_2["limit_enforcement"]["control_requests_per_minute"]
+    rate_wired = configured_for_limit_class(lifecycle.launcher, "requests_per_minute")
 
-    assert data_1 == "enforced", f"ceiling=1 data requests_per_minute was {data_1!r}, expected 'enforced'"
-    assert data_2 == "deployment_required", f"ceiling=2 data requests_per_minute was {data_2!r}, expected 'deployment_required'"
     assert control_1 == "enforced", f"ceiling=1 control_requests_per_minute was {control_1!r}, expected 'enforced'"
     assert control_2 == "deployment_required", f"ceiling=2 control_requests_per_minute was {control_2!r}, expected 'deployment_required'"
+    assert data_1 == "enforced", f"ceiling=1 data requests_per_minute was {data_1!r}, expected 'enforced'"
+    if rate_wired:
+        assert data_2 == "enforced", f"rate row wired: ceiling=2 data requests_per_minute was {data_2!r}, expected 'enforced'"
+    else:
+        assert data_2 == "deployment_required", f"rate row unwired: ceiling=2 data requests_per_minute was {data_2!r}, expected 'deployment_required'"
 
 
 # ---------------------------------------------------------------------------
