@@ -1,4 +1,4 @@
-# multi-process worker と in-memory の limit 状態の置き場 設計文書（v0.4）
+# multi-process worker と in-memory の limit 状態の置き場 設計文書（v0.5）
 
 ## 0. 版数・位置づけ
 
