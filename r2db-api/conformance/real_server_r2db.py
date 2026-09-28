@@ -559,6 +559,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0008_platform_declarations_and_writer_timeouts.sql",
         "0012_process_ceilings.sql",
         "0013_role_connection_limits.sql",
+        # design D-3 (1): the credential-keyed
+        # `requests_per_minute` rate table -- depends only on 0005 above.
+        "0015_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -578,6 +581,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     )
     _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
+    _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
 
     return _Platform(
         prefix=prefix,

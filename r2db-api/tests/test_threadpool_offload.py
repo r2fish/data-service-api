@@ -634,16 +634,18 @@ async def test_control_service_call_delegation_pinned_for_rotate_and_issue_crede
 # ---------------------------------------------------------------------------
 
 
-def test_role_pool_size_derives_from_declared_concurrency():
-    """Pins `role_pool_size` itself as a real derivation, not a constant
-    that happens to match one value: two different `concurrency` settings
-    must produce two different pool sizes, and the untouched default must
-    not be the old fixed default of 4. Mutation: `return limits.
-    concurrency` -> `return 4` turns every assertion here red.
+def test_role_pool_size_derives_from_thread_limit():
+    """WP-2 (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5), 監督
+    裁定16): pins `role_pool_size` as a real derivation of `thread_limit`
+    (never `ResourceLimits.concurrency`, as of this WP) -- two different
+    `thread_limit` values must produce two different pool sizes (`+ 2`
+    apart, the headroom constant), and the pool size must not equal
+    `ResourceLimits().concurrency` (32) for the default thread limit (4),
+    proving this is no longer concurrency-derived at all.
     """
-    assert role_pool_size(ResourceLimits(concurrency=7)) == 7
-    assert role_pool_size(ResourceLimits(concurrency=32)) == 32
-    assert role_pool_size(ResourceLimits()) != 4, "pool size must not be pinned back to the old fixed default of 4"
+    assert role_pool_size(4) == 6
+    assert role_pool_size(6) == 8
+    assert role_pool_size(4) != ResourceLimits().concurrency, "pool size must not be pinned back to ResourceLimits.concurrency"
 
 
 def test_main_composition_root_wires_pool_size_from_role_pool_size():
@@ -1075,42 +1077,48 @@ def _fake_pool_connect(self: _RolePool) -> types.SimpleNamespace:
     return conn
 
 
-async def test_role_pool_sized_to_declared_concurrency_avoids_premature_503(monkeypatch):
-    """Behavioural pin for F-1: with the pool sized via `role_pool_size`
-    (the exact function `r2db_api.main`'s composition root uses), exactly
-    `concurrency` concurrent requests against ONE application are all
-    served (0 x 503); the `concurrency + 1`-th is refused by `DataService.
-    _slot` (429 LIMIT_EXCEEDED), never by pool exhaustion (503). `hold_s`
-    (how long each request holds its checked-out connection) is longer
-    than `acquire_timeout` (how long a waiting request tolerates none
-    being free) specifically so an under-sized pool provably times out
-    rather than merely running slower.
+async def test_role_pool_sized_to_thread_limit_avoids_premature_503(monkeypatch):
+    """Behavioural pin for F-1, updated for WP-2 (design docs/design/
+    MULTI_PROCESS_WORKER_V0_1.md D-3 (5), 監督裁定16): with the pool sized
+    via `role_pool_size(thread_limit)` (the exact function `r2db_api.
+    main`'s composition root now uses -- the real per-process simultaneous
+    -borrow ceiling is `thread_limit`, never the deployment-wide admission
+    bound `concurrency`, as of this WP), exactly `thread_limit` concurrent
+    requests against ONE application are all served (0 x 503); a
+    `concurrency + 1`-th (`concurrency` set equal to `thread_limit` here,
+    so slot admission and the synchronous-section limiter share one
+    ceiling) is refused by `DataService._slot` (429 LIMIT_EXCEEDED), never
+    by pool exhaustion (503). `hold_s` (how long each request holds its
+    checked-out connection) is longer than `acquire_timeout` (how long a
+    waiting request tolerates none being free) specifically so an
+    under-sized pool provably times out rather than merely running
+    slower.
 
     Mutation: hardcoding the pool's `maxconn` back to a fixed 4 regardless
-    of the declared `concurrency=6` this test configures turns this red --
-    the 5th/6th requests in the first batch, and up to 3 of the 7 in the
-    second, then time out waiting for a pooled connection and get 503
+    of the declared `thread_limit=6` this test configures turns this red
+    -- the 5th/6th requests in the first batch, and up to 3 of the 7 in
+    the second, then time out waiting for a pooled connection and get 503
     instead of the assertions below.
 
-    R-101 WP-3 (D-13): this test tries the declared `concurrency`'s own
-    simultaneous arrival, so it builds the app with `thread_limit=None`
-    (anyio's own untouched default, 40) -- `create_app`'s own production
-    default (`DEFAULT_THREAD_LIMIT`, 4) would itself become the bottleneck
-    at `concurrency=6`, which is exactly the OTHER thing (D-13's own
-    trade-off) this behavioural pin is not testing.
+    R-101 WP-3 (D-13) / WP-2: this test tries `thread_limit`'s own
+    simultaneous arrival for real (`thread_limit=6`, explicit, never
+    `create_app`'s own production default 4, which would itself become
+    the bottleneck here -- D-13's own trade-off, not what this
+    behavioural pin tests).
 
     mutation M200 (`r2db_api/limits.py`): `role_pool_size` always returns
     `4` -- this test's own 503-count assertions go red (the pool
-    under-sizes relative to the declared `concurrency=6`, so requests
-    time out waiting for a pooled connection instead of completing)."""
+    under-sizes relative to `thread_limit=6`, so requests time out
+    waiting for a pooled connection instead of completing)."""
     monkeypatch.setattr(_RolePool, "_connect", _fake_pool_connect)
     monkeypatch.setattr(_RolePool, "_liveness_check", lambda self, conn: True)
 
-    concurrency = 6
+    thread_limit = 6
+    concurrency = thread_limit
     resource_limits = ResourceLimits(concurrency=concurrency, requests_per_minute=100_000)
     pool = _RolePool(
         "postgresql://unused.example.invalid/db", schema="public",
-        maxconn=role_pool_size(resource_limits), acquire_timeout=0.3,
+        maxconn=role_pool_size(thread_limit), acquire_timeout=0.3,
     )
     cell = _PoolBackedFakeCell(pool, hold_s=0.6)
 
@@ -1122,13 +1130,13 @@ async def test_role_pool_sized_to_declared_concurrency_avoids_premature_503(monk
     async def _one_query(client: httpx.AsyncClient):
         return await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
 
-    async with _client(service, thread_limit=None) as client:
+    async with _client(service, thread_limit=thread_limit) as client:
         responses = await asyncio.wait_for(asyncio.gather(*[_one_query(client) for _ in range(concurrency)]), timeout=5.0)
     statuses = [r.status_code for r in responses]
     assert statuses.count(503) == 0, f"pool exhaustion (503) at in-flight == declared concurrency: {statuses}"
     assert statuses.count(200) == concurrency, statuses
 
-    async with _client(service, thread_limit=None) as client:
+    async with _client(service, thread_limit=thread_limit) as client:
         responses = await asyncio.wait_for(asyncio.gather(*[_one_query(client) for _ in range(concurrency + 1)]), timeout=5.0)
     statuses = [r.status_code for r in responses]
     assert statuses.count(503) == 0, f"pool exhaustion (503) below the declared concurrency + 1 bound: {statuses}"

@@ -138,6 +138,7 @@ os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-http-conformance-import-pl
 # never actually reads either variable for anything this adapter uses).
 
 from r2db_api import ControlAuthority, DataService  # noqa: E402
+from r2db_api.concurrency_slots import HostSharedConcurrencySlots  # noqa: E402
 from r2db_api.control_http import create_control_app  # noqa: E402
 from r2db_api.control_main import assemble_control_stack  # noqa: E402
 from r2db_api.credential_store import (  # noqa: E402
@@ -377,6 +378,12 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         # control stack never reads the DB-side `platform_declarations`
         # table at all.
         "0013_role_connection_limits.sql",
+        # design D-3 (1): the credential-keyed
+        # `requests_per_minute` rate table -- depends only on 0005 above
+        # (`credentials`), so it is safe to apply here even though this
+        # adapter's own control stack never reads the DB-side `platform_
+        # declarations` table at all (same reasoning as 0013/0014 above).
+        "0015_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -390,6 +397,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
     _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
+    _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
     controlplane_dsn = _dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db)
     auditreader_dsn = _dsn_with(admin_dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db)
@@ -1000,12 +1008,14 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
 # `<prefix>_api`'s own `CONNECTION LIMIT` (migration `0005`); it only
 # removes the artificial wait/timeout a genuine (if modest) burst of
 # concurrent auth traffic used to hit well under that real ceiling.
-# Derived from the SAME default `ResourceLimits()` profile `self._service`
-# is built against here (never the small `_ISOLATED_APPLICATION_LIMITS`
-# profile above, which governs a PostgresCell's own per-application pool
-# -- `_make_cell`'s pool_size=2 -- not this platform-plane one) via the
-# SAME `role_pool_size` production code (`r2db_api.main`) already uses,
-# so the two can never drift apart.
+# design D-3 (5): derived from `DEFAULT_THREAD_LIMIT`
+# (never the small `_ISOLATED_APPLICATION_LIMITS` profile above, which
+# governs a PostgresCell's own per-application pool -- `_make_cell`'s
+# pool_size=2 -- not this platform-plane one) via the SAME `role_pool_
+# size` production code (`r2db_api.main`) already uses, so the two can
+# never drift apart. `role_pool_size` no longer takes a `ResourceLimits`
+# instance as of this WP -- see that function's own docstring for why the
+# basis changed from `concurrency` to `thread_limit`.
 #
 # Deliberately NOT reused for the control stack's own stores below
 # (`self._control_pool_size`, `r2dbsvc_controlplane`, migration `0006`)
@@ -1014,13 +1024,13 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
 # PostgreSQL `CONNECTION LIMIT` refusal, not a local pool timeout) -- see
 # `self._control_pool_size`'s own assignment below for the measured
 # detail and why it stays at its original value.
-_DEFAULT_PLATFORM_POOL_SIZE = role_pool_size(ResourceLimits())
+_DEFAULT_PLATFORM_POOL_SIZE = role_pool_size(DEFAULT_THREAD_LIMIT)
 
 # R-78 (D-2 追補): this adapter's own pre-existing per-application data-plane
 # pool size, unconditionally `2` until now (`_make_cell` below). `DSA_PERF_
 # POOL_SIZE` is a harness-only escape hatch `tools/perf_baseline.py` sets so
 # a K-sweep can measure this same plug at the production dimension (`role_
-# pool_size(ResourceLimits())`, i.e. `ResourceLimits.concurrency`) as well as
+# pool_size(DEFAULT_THREAD_LIMIT)`) as well as
 # the existing default -- production code never reads this variable, and
 # this function returns the unchanged default `2` whenever it is absent,
 # empty, or not a positive integer.
@@ -1175,6 +1185,16 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # context manager) is used deliberately so this directory outlives
         # this function; `close()`/`_cleanup` below remove it explicitly.
         self._script_dir = tempfile.mkdtemp(prefix="r2db_http_migrations_")
+        # (design D-3 (2')/(4): instance-per-`mkdtemp`
+        # slot directory -- a subdirectory of `self._script_dir` so `_cleanup`
+        # above (which already `shutil.rmtree`s `self._script_dir`) removes
+        # it too, with no separate teardown call needed. Mode 0700
+        # explicitly (never trusting the parent's own mode, which `mkdtemp`
+        # already gives 0700 by default but this WP names the requirement
+        # directly rather than relying on that default silently).
+        self._slot_dir = Path(self._script_dir) / "slots"
+        self._slot_dir.mkdir(mode=0o700)
+        os.chmod(self._slot_dir, 0o700)  # `mkdir(mode=...)` is masked by umask; this is not.
         try:
             self._platform = _bootstrap_platform(prefix, admin_dsn, Path(self._script_dir))
         except Exception:
@@ -1294,6 +1314,17 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 self._credentials, cell_factory=self._make_cell, control_plane_status="enabled",
                 durable_audit=self._application_durable_audit, surfaces=self._surfaces_value(),
                 operation_catalog_url=self._operation_catalog_url_value(),
+                # (design D-3 (4), plug table): `rate` is
+                # `self._credentials` itself (the SAME `PostgresCredentialStore`
+                # its own read path already uses -- no second, dedicated pool
+                # is created for the rate statement). `concurrency_slots` is this instance's own
+                # `mkdtemp`ed directory. `concurrency_configured=True`: this
+                # plug's `process_ceiling` stays the default `1` (never
+                # passed above) and this in-process "supervisor" always has
+                # exactly 1 worker, so `ceiling <= workers` always holds.
+                rate=self._credentials,
+                concurrency_slots=HostSharedConcurrencySlots(self._slot_dir),
+                concurrency_configured=True,
             )
             self._control = ControlAuthority(self._service)
 
@@ -2489,10 +2520,21 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         iso._app_pg = {}
         iso._provisioned_cells = []
         iso._counter = 0
+        # (design D-3 (2')/§1.4 (6): a SEPARATE, freshly
+        # `mkdtemp`ed slot directory for this isolated instance -- never
+        # `self._slot_dir` (the shared surface's own), so this isolated
+        # surface's own concurrency admission never contends with (or is
+        # confused for) the shared one's. Removed in the `finally` block
+        # below, alongside this instance's own other isolated teardown.
+        iso_slot_dir = Path(tempfile.mkdtemp(prefix="r2db_http_isolated_slots_"))
+        iso._slot_dir = iso_slot_dir
         iso._service = DataService(
             iso._credentials, limits=_ISOLATED_APPLICATION_LIMITS, cell_factory=iso._make_cell,
             control_plane_status="enabled", durable_audit=iso._application_durable_audit,
             surfaces=iso._surfaces_value(), operation_catalog_url=iso._operation_catalog_url_value(),
+            rate=iso._credentials,
+            concurrency_slots=HostSharedConcurrencySlots(iso_slot_dir),
+            concurrency_configured=True,
         )
         iso._control = ControlAuthority(iso._service)
         app = create_app(iso._service)
@@ -2522,6 +2564,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             for app_id in list(iso._app_pg):
                 iso.deprovision_application(app_id)
             iso._loop.close()
+            shutil.rmtree(iso_slot_dir, ignore_errors=True)
 
     # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps the
     # SAME per-application `PostgresCell.catalog()` `DataService._slot`'s

@@ -51,7 +51,8 @@ from .credential_store import (
     validate_control_pepper_separation,
 )
 from .errors import FoundationError, fail
-from .limits import ResourceLimits
+from .http import DEFAULT_THREAD_LIMIT
+from .limits import role_pool_size
 from .platform_declarations import (
     MIGRATION_NUMBER,
     PEER_MODULE,
@@ -1019,6 +1020,13 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     "F-17": 16,
     "F-18": 17,
     "F-19": 18,
+    # design D-1: `R2DB_WORKERS`/`R2DB_CONTROL_WORKERS`
+    # (this CLI invocation's own process env) exceed their declared
+    # process_ceilings -- the next unused exit code. Documented here for
+    # completeness; `_verify_declarations_checks` returns this literal
+    # directly (there is no `PlatformDeclarationError` to route through
+    # `_verify_declarations_fail` for this operator-only diagnostic).
+    "F-20": 19,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1129,14 +1137,14 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     # never a schema/role-name string-rewrite convention -- see `check_
     # role_connection_limits`'s own docstring) must have a CONNECTION
     # LIMIT of -1 or at least its own real pool-composition floor.
-    # `_declared_concurrency()` is peer-local -- this function's own call
+    # `_declared_pool_size()` is peer-local -- this function's own call
     # site stays textually isomorphic across peers; see that helper's own
     # docstring for the peer-specific body it hides. Run unconditionally
     # like the writer-role/F-14 checks above.
     try:
         platform_declarations.check_role_connection_limits(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            concurrency=_declared_concurrency(),
+            pool_size=_declared_pool_size(),
         )
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
@@ -1151,14 +1159,14 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     # R-91 (work order §1.2 D-1/D-2): the declared process_ceilings' own
     # lower-bound connection count (never the upper bound, §1.1 (c′)) fits
     # under max_connections once both reserved-connection GUCs are added.
-    # `_declared_concurrency()` is peer-local -- this function's own call
+    # `_declared_pool_size()` is peer-local -- this function's own call
     # site stays textually isomorphic across peers; see that helper's own
     # docstring for the peer-specific body it hides. Run unconditionally
     # like the F-16/F-17 checks above.
     try:
         headroom = platform_declarations.check_max_connections_headroom(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            process_ceilings=declarations.process_ceilings, concurrency=_declared_concurrency(),
+            process_ceilings=declarations.process_ceilings, pool_size=_declared_pool_size(),
         )
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
@@ -1176,15 +1184,79 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     _verify_declarations_ok(
         "F-19", "every registered application's own database was provisioned with a codepoint-order collation"
     )
+
+    # design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1
+    # (completion conditions 74/75): the startup-time `workers <=
+    # process_ceilings.<plane>` check `build_app()`/`build_control_app()`
+    # both run for real is ALSO offered here, as an out-of-band
+    # operator diagnostic -- reads `R2DB_WORKERS`/`R2DB_CONTROL_WORKERS`
+    # from THIS CLI invocation's OWN process env (never the real running
+    # api/controlplane process' own env, which this command has no way to
+    # observe): a disclosed limitation identical to `_declared_pool_size`'s
+    # own (above) and to `control_plane_status`'s own `R2DB_CONTROL_PLANE_
+    # STATUS` cross-check earlier in this function. Optional -- an
+    # operator who ran this command without either variable set (this
+    # command's own default invocation) sees neither line at all, never a
+    # spurious FAIL for a variable they deliberately did not pass.
+    data_workers_raw = os.environ.get("R2DB_WORKERS")
+    control_workers_raw = os.environ.get("R2DB_CONTROL_WORKERS")
+    if data_workers_raw is not None or control_workers_raw is not None:
+        problems: list[str] = []
+        if data_workers_raw is not None:
+            try:
+                data_workers = int(data_workers_raw)
+            except ValueError:
+                data_workers = -1
+            if data_workers < 1 or data_workers > declarations.process_ceilings.data:
+                problems.append(
+                    f"R2DB_WORKERS={data_workers_raw!r} exceeds process_ceilings.data={declarations.process_ceilings.data}"
+                )
+        if control_workers_raw is not None:
+            try:
+                control_workers = int(control_workers_raw)
+            except ValueError:
+                control_workers = -1
+            if control_workers < 1 or control_workers > declarations.process_ceilings.control:
+                problems.append(
+                    f"R2DB_CONTROL_WORKERS={control_workers_raw!r} exceeds process_ceilings.control={declarations.process_ceilings.control}"
+                )
+        if problems:
+            print("FAIL F-20  " + "; ".join(problems) + " (read from this CLI invocation's own process env)")
+            return 19
+        _verify_declarations_ok(
+            "F-20", "R2DB_WORKERS/R2DB_CONTROL_WORKERS (this CLI invocation's own process env) do not exceed their declared process_ceilings"
+        )
     return 0
 
 
-def _declared_concurrency() -> int:
-    """this peer's own declared per-role pool ceiling, consulted by `_verify_declarations_checks`'s own F-16 check. `ResourceLimits.concurrency` is fixed on this peer -- no env var overrides it anywhere in this peer's own composition roots -- unlike MitateDB-api's own same-named `_declared_concurrency` (`MITATEDB_MAX_CONCURRENCY`, deployer-configurable on that peer; see that peer's own docstring). Named identically (peer-IDENTICAL name, peer-SPECIFIC body) so `_verify_declarations_checks`'s own call site stays textually isomorphic across peers.
+def _declared_pool_size() -> int:
+    """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)):
+    this peer's own declared per-role pool ceiling, consulted by
+    `_verify_declarations_checks`'s own F-16/F-18 checks -- renamed from
+    `_declared_concurrency` (`ResourceLimits.concurrency` no longer sizes
+    any pool). Reads `R2DB_THREAD_LIMIT` from THIS CLI
+    invocation's own process env (falling back to `DEFAULT_THREAD_LIMIT`
+    when unset/empty/unparsable, mirroring `main.py`'s own degrade-to-
+    default discipline for the same variable) and derives the floor via
+    `role_pool_size` -- the SAME function `main.py`'s own startup check
+    uses. This is a disclosed limitation this command already carries for
+    every other env-derived check (`_verify_declarations_checks`'s own
+    workers-vs-ceiling check right below states it too): the value this
+    CLI invocation's own shell happens to have set for `R2DB_THREAD_LIMIT`
+    may not match the REAL running `r2db_api.main`/`r2db_api.control_main`
+    process' own env -- this check only ever verifies agreement with
+    WHATEVER value this one invocation was run under.
 
     History: CH-0322
     """
-    return ResourceLimits().concurrency
+    raw = os.environ.get("R2DB_THREAD_LIMIT")
+    thread_limit = DEFAULT_THREAD_LIMIT
+    if raw:
+        try:
+            thread_limit = int(raw)
+        except ValueError:
+            thread_limit = DEFAULT_THREAD_LIMIT
+    return role_pool_size(thread_limit)
 
 
 def _served_capabilities_document() -> dict[str, Any]:
@@ -1719,6 +1791,7 @@ _PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
     "0012_process_ceilings.sql",
     "0013_role_connection_limits.sql",
     "0014_auditreader_statement_timeout.sql",
+    "0015_credential_request_rate.sql",
 )
 
 #: the psql `-v NAME=VALUE` variables each file above references, by
@@ -1732,6 +1805,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
     "0012_process_ceilings.sql": (),
     "0013_role_connection_limits.sql": (),
     "0014_auditreader_statement_timeout.sql": (),
+    "0015_credential_request_rate.sql": (),
 }
 
 #: design D-1: `file -> the LATER accepted files that redefine at least

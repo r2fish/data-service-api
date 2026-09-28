@@ -653,9 +653,14 @@ def test_real_migrations_dir_has_zero_violations_and_the_expected_exemptions():
     R-56 WP-1 で `0014_auditreader_statement_timeout.sql` が加わり
     (platform 単発 -- `_upgrade.sql` で終わらない命名)、実測は
     `{'適合': 3, '違反': 0, '免除': 0, '対象外': 11}` に更新された (対象外
-    が 10 -> 11; 適合の 3 本は不変)。"""
+    が 10 -> 11; 適合の 3 本は不変)。
+
+    WP-2 で `0015_credential_request_rate.sql` が加わり (platform 単発 --
+    `_upgrade.sql` で終わらない命名)、実測は `{'適合': 3, '違反': 0, '免除':
+    0, '対象外': 12}` に更新された (対象外が 11 -> 12; 適合の 3 本は不変)。
+    """
     result = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME)
-    assert result.tally == {"適合": 3, "違反": 0, "免除": 0, "対象外": 11}
+    assert result.tally == {"適合": 3, "違反": 0, "免除": 0, "対象外": 12}
     assert result.exempted_numbers == ALLOW_LIST_NUMBERS == frozenset()
 
 
@@ -681,6 +686,7 @@ def test_naming_convention_excludes_every_current_platform_single_shot_migration
         "0012_process_ceilings.sql",
         "0013_role_connection_limits.sql",
         "0014_auditreader_statement_timeout.sql",
+        "0015_credential_request_rate.sql",
     )
     for name in platform_single_shot_migrations:
         assert name not in matching, f"{name} incorrectly matches the per-application upgrade naming convention"

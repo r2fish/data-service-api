@@ -139,11 +139,14 @@ docstring).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
+import sys
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -151,6 +154,7 @@ import psycopg
 from psycopg import sql
 from starlette.types import ASGIApp
 
+from . import concurrency_slots
 from .credential_store import (
     DEFAULT_SCHEMA,
     PostgresApplicationAuditSink,
@@ -170,6 +174,7 @@ from .platform_declarations import (
 )
 from .errors import FoundationError
 from .limits import ResourceLimits, role_pool_size
+from . import postgres
 from .postgres import PostgresCell, _RefusingPlatformUpgradeCell, default_pool_manager
 from .service import _DEFAULT_AUDIT_FLUSH_INTERVAL_S, ControlAuthority, DataService
 
@@ -301,6 +306,36 @@ def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> i
     return value
 
 
+def _workers_from_env(env: Mapping[str, str], name: str) -> int:
+    """design D-1: `name` must be set, non-empty, and a
+    positive integer -- unset, empty, `0`, negative, or non-numeric all
+    stop startup with a message naming `name` (completion condition 58).
+    Unlike `_thread_limit_from_env`/`_optional_int` above, there is no
+    default to degrade to: `--workers` is always explicit."""
+    raw = env.get(name)
+    if not raw:
+        raise RuntimeError(f"{name} is required to start r2db_api.main:app")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def _require_slot_dir(env: Mapping[str, str], name: str) -> Path:
+    """(design D-3 (2'), completion condition 38): `name`
+    must be set and non-empty -- unset or empty stops startup with a
+    message naming `name`. The path itself is checked separately
+    (`concurrency_slots.check_slot_directory`/`selfcheck_slot_locking`,
+    both called right after this in `build_app`)."""
+    raw = env.get(name)
+    if not raw:
+        raise RuntimeError(f"{name} is required to start r2db_api.main:app")
+    return Path(raw)
+
+
 def _parse_served_apps(raw: str) -> list[str]:
     slugs = [item.strip() for item in raw.split(",")]
     slugs = [item for item in slugs if item]
@@ -382,6 +417,26 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     slugs = _parse_served_apps(_require(env, "R2DB_SERVE_APPS"))
     control_plane_status = _control_plane_status(env)
     thread_limit = _thread_limit_from_env(env, "R2DB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT)
+    # design D-1: `--workers` is always explicit (env
+    # required, no default) -- closes the `WEB_CONCURRENCY` entry point
+    # uvicorn's own config would otherwise read. Compared below, once
+    # `process_ceilings.data` is known, against the declared ceiling
+    # (completion condition 60).
+    workers = _workers_from_env(env, "R2DB_WORKERS")
+    # design D-3 (2'): `build_app()` only CHECKS the
+    # slot directory (existence/owner/mode 0700) and self-checks real
+    # mutual exclusion on it -- it never creates the directory itself
+    # (the deployer's own runtime-directory mechanism does, so every
+    # worker this supervisor starts always opens the SAME directory).
+    slot_dir = _require_slot_dir(env, "R2DB_SLOT_DIR")
+    concurrency_slots.check_slot_directory(slot_dir)
+    concurrency_slots.selfcheck_slot_locking(slot_dir)
+    # design D-4 (completion condition 68): every
+    # connection this process opens from here on carries this
+    # `application_name` (`postgres.py`'s own module-level toggle) --
+    # set before ANY connection (including the one-shot registry lookup
+    # two steps below) opens.
+    postgres.set_connection_application_name(f"r2db-api:data:{os.getpid()}")
 
     # Step 2 (F-1/F-2): must run before anything else touches the network
     # -- a deployer who left one of these four defined must find out
@@ -453,6 +508,28 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # `concurrency`): `enforced` while this reads `1`, `deployment_required`
     # once it reads `>= 2`.
     process_ceiling = declarations.process_ceilings.data
+    # design D-1 (completion condition 60): checked
+    # here, inside `build_app()` itself (never `verify-declarations`,
+    # never `lifespan`), against the SAME `process_ceilings.
+    # data` value the mapping below reads. `--workers` above the declared
+    # ceiling means this supervisor alone would already exceed the
+    # deployer's own stated maximum -- a startup failure, not merely a
+    # `deployment_required` declaration.
+    if workers > process_ceiling:
+        raise RuntimeError(
+            f"R2DB_WORKERS ({workers}) exceeds process_ceilings.data ({process_ceiling}) -- "
+            f"declare a higher process_ceilings.data (python -m r2db_api.ops declare-process-ceilings) "
+            f"or lower R2DB_WORKERS"
+        )
+    # design D-3 (4): the `concurrency` mapping's own
+    # extra condition, computed once here from real, already-known values
+    # -- `enforced` only when this supervisor's own worker count is AT
+    # LEAST the declared ceiling (workers <= ceiling always holds by this
+    # point, so this is `workers == process_ceiling` in practice); a
+    # ceiling ABOVE workers means a second, unrelated host could be
+    # counted toward the same declared total, where this host's own slot
+    # directory is not shared.
+    concurrency_configured = workers >= process_ceiling
 
     # Phase 10 WP-8a review F-1 fix: ONE `ResourceLimits` instance, shared
     # between the `DataService` this process serves requests through and
@@ -463,7 +540,11 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # platform pool sizing immediately below (WP-4e) so BOTH derivations
     # read from this same instance.
     resource_limits = ResourceLimits()
-    _role_pool_size = role_pool_size(resource_limits)
+    # design D-3 (5): derived from `thread_limit`
+    # (the real per-process simultaneous-borrow ceiling, `role_pool_size`'s
+    # own docstring) rather than from `resource_limits.concurrency` --
+    # completion condition 70.
+    _role_pool_size = role_pool_size(thread_limit)
 
     # Computed from `env` (this function's own parameter), and always
     # passed explicitly below -- not left as `None` for `PostgresCredential
@@ -474,22 +555,14 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # of being fully driven by its argument for testability.
     #
     # Phase 10 WP-4e (supervisor ruling 2026-09-09): the default used to be
-    # a fixed `4`, entirely disconnected from the declared `concurrency`
-    # ceiling -- the exact F-1 shape WP-8a already fixed for the per-
-    # application role pools (`role_pool_size`, above), just not yet for
-    # this platform pool. Once `run_in_threadpool` (WP-8a) let concurrent
-    # requests' authentication reads genuinely reach this pool at once,
-    # a fixed `4` under-provisioned it relative to `concurrency` (default
-    # 32), and the same pool this credential store and the durable audit
-    # sink below share timed out waiting for a free connection and failed
-    # closed with `AUTH_STATE_UNAVAILABLE` (503) well under the declared
-    # bound. `_optional_int` still honors an explicit `R2DB_PLATFORM_POOL_
-    # SIZE` (an operator's own deliberate override always wins); only the
-    # SILENT fallback changes, from the old literal `4` to `role_pool_size
-    # (resource_limits)` -- the SAME derivation `_role_pool_size` above
-    # already uses, reused rather than reimplemented so the two ceilings
-    # can never drift apart either.
-    platform_pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", role_pool_size(resource_limits))
+    # a fixed `4`, entirely disconnected from any real per-process ceiling.
+    # this replaces that `concurrency`-derived default
+    # with the same `thread_limit`-derived one `_role_pool_size` above now
+    # uses (completion condition 70) -- both derivations share the one
+    # `role_pool_size` function, so they can never drift apart either.
+    # `_optional_int` still honors an explicit `R2DB_PLATFORM_POOL_SIZE`
+    # (an operator's own deliberate override always wins).
+    platform_pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", role_pool_size(thread_limit))
     credentials = PostgresCredentialStore(platform_dsn, pepper=pepper, schema=schema, pool_size=platform_pool_size)
     # Step 7 (Q4 D-1(b)): the durable application-plane audit sink -- the
     # SAME `R2DB_PLATFORM_DSN` (already `r2dbsvc_api`, which migration
@@ -529,14 +602,25 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # docstring for what each parameter narrows. Run on this same
         # borrowed connection (login role = the real `r2dbsvc_api` writer
         # role, D-1(c)), right after the writer-role dual check above.
+        # (design D-3 (5), completion condition 72):
+        # `r2dbsvc_api`'s own real CONNECTION LIMIT is a CLUSTER-WIDE cap
+        # shared by every one of `process_ceilings.data` data-plane
+        # processes this deployment runs, each with its own `_role_pool_
+        # size`-sized pool -- the floor this startup check verifies
+        # against must therefore be `process_ceilings.data * _role_pool_
+        # size` worth of demand, not one process' own share of it (F-18's
+        # own `check_max_connections_headroom`/`headroom_lower_bound`
+        # already multiplies by `data_processes` internally; this
+        # function does not, so the multiplication happens here, at the
+        # call site, instead).
         check_role_connection_limits(
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            concurrency=resource_limits.concurrency,
+            pool_size=_role_pool_size * process_ceiling,
             role_classes=frozenset({"api"}), application_slugs=slugs,
         )
         check_max_connections_headroom(
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            process_ceilings=declarations.process_ceilings, concurrency=resource_limits.concurrency,
+            process_ceilings=declarations.process_ceilings, pool_size=_role_pool_size,
         )
 
     audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
@@ -616,6 +700,18 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         audit_alert_min_interval_s=audit_flush_interval_s,
         process_ceiling=process_ceiling,
         operation_catalog_url=operation_catalog_url,
+        # (design D-3 (1)/(2): `rate` is `credentials`
+        # itself -- `PostgresCredentialStore.record_rate_and_check` runs on
+        # the SAME pool/role this store's own read path already uses (裁定
+        # 15: "計数用の pool を新設しない"). `concurrency_slots` is always
+        # wired here (`R2DB_SLOT_DIR` is a required env var, checked
+        # above); `concurrency_configured` is the separate declaration-only
+        # boolean (workers vs. ceiling, computed above) -- the mechanism
+        # itself stays active regardless of what this deployment honestly
+        # declares.
+        rate=credentials,
+        concurrency_slots=concurrency_slots.HostSharedConcurrencySlots(slot_dir),
+        concurrency_configured=concurrency_configured,
     )
     control = ControlAuthority(service)
     for slug in slugs:
@@ -696,3 +792,51 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
 
 
 app = build_app()
+
+
+# design D-1 v0.4: the `--preflight` one-shot entry.
+# `python -m r2db_api.main --preflight` imports this module -- which, by
+# the line right above, already calls `build_app()` exactly once and
+# raises whatever `build_app()` raises (F-13/F-15/F-16/F-18/registry/
+# pepper/the workers-vs-ceiling check/the slot-directory checks, all
+# already inside `build_app()` itself, never `--preflight`-specific
+# code) if this deployment's own environment is not sound -- Python's own
+# unhandled-exception exit (non-zero, traceback on stderr, the raising
+# `PlatformDeclarationError`'s own `code="F-15"` text included) is
+# already the desired outcome for that path, with NOTHING below this
+# point ever executing. Reached only once `app` above has ALREADY been
+# built successfully.
+async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
+    """Drives exactly one ASGI `lifespan` startup+shutdown cycle against
+    `asgi_app` (the ALREADY-BUILT module-level `app` above -- `build_app()`
+    is never called a second time, completion condition 65) -- the
+    standard ASGI lifespan scope protocol, driven directly rather than
+    through a real server. `build_app()`'s own `_lifespan` hook is what
+    actually closes every pool this process opened (`default_pool_
+    manager.dispose_all()`/`credentials.close()`/`durable_audit.close()`,
+    above) -- reused here rather than duplicated (completion condition
+    66)."""
+    to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+    from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+
+    async def receive() -> dict[str, str]:
+        return await to_app.get()
+
+    async def send(message: dict[str, str]) -> None:
+        await from_app.put(message)
+
+    task = asyncio.ensure_future(asgi_app({"type": "lifespan"}, receive, send))
+    await to_app.put({"type": "lifespan.startup"})
+    startup_result = await from_app.get()
+    if startup_result["type"] == "lifespan.startup.failed":
+        raise RuntimeError(startup_result.get("message") or "lifespan startup failed")
+    await to_app.put({"type": "lifespan.shutdown"})
+    shutdown_result = await from_app.get()
+    await task
+    if shutdown_result["type"] == "lifespan.shutdown.failed":
+        raise RuntimeError(shutdown_result.get("message") or "lifespan shutdown failed")
+
+
+if __name__ == "__main__" and "--preflight" in sys.argv:
+    asyncio.run(_run_lifespan_once(app))
+    sys.exit(0)

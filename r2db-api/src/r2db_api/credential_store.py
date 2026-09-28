@@ -315,6 +315,60 @@ class PostgresCredentialStore:
                 conn.rollback()
                 raise
 
+    # ---- region (ii), wired `requests_per_minute` (design D-3 (1)) ------
+
+    def record_rate_and_check(self, credential_id: str, limit: int) -> bool:
+        """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (1)):
+        one round trip against migration `0015`'s
+        own `credential_request_rate_admit` function, on THIS store's
+        OWN pool (the same `r2dbsvc_api` pool `authenticate`/`assert_
+        active` already read from, toggled to autocommit for this one
+        statement -- see below) -- never the credentials table itself,
+        and never a second, dedicated pool. Called from `service.py`'s `_acquire_
+        rate` AFTER the caller's own authentication borrow has already
+        returned its connection (completion condition 35) -- this
+        method's own borrow-execute-return is a single, separate unit of
+        work, never nested inside another.
+
+        Returns `True` when the request is admitted (this credential's
+        own `requests_per_minute` window, shared by every worker process
+        this deployment runs, was strictly under `limit` before this
+        call), `False` when it is not -- the caller (`service.py`) maps
+        `False` to the SAME `LIMIT_EXCEEDED`/`requests_per_minute` denial
+        the pre-existing in-memory window already raised. A PostgreSQL
+        failure raises `FoundationError(SERVICE_UNAVAILABLE, 503)`
+        instead of returning either boolean (completion condition 34):
+        fail-closed, never silently admitted nor silently denied, mirroring
+        every other write in this class (`add`/`set_state`/`rotate`).
+        """
+        statement = sql.SQL("SELECT {schema}.credential_request_rate_admit(%s, %s)").format(
+            schema=sql.Identifier(self._schema)
+        )
+        try:
+            with self._pool.connection() as conn:
+                # `_RolePool._connect` opens every connection with
+                # `autocommit=False` (this pool's own general-purpose
+                # default -- every OTHER write in this class runs inside
+                # an explicit `unit_of_work()`/`conn.commit()` instead).
+                # This call is the one exception (design 完了条件 29):
+                # toggled to `True` for the duration of this ONE
+                # statement, exactly like `_RolePool._liveness_check`'s
+                # own temporary toggle, and restored to `False` in
+                # `finally` before the connection is ever returned to the
+                # pool -- so the rate statement commits immediately, on
+                # its own, never joining any other caller's transaction.
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        _execute(cur, statement, [credential_id, limit])
+                        (admitted,) = cur.fetchone()
+                finally:
+                    conn.autocommit = False
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+        return bool(admitted)
+
     # ---- shared verifier computation (identical to `auth.CredentialStore`) --
 
     def verifier(self, secret: str) -> str:

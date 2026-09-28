@@ -867,6 +867,43 @@ body) so `_verify_declarations_checks`'s own call site stays textually
 isomorphic across peers.
 ```
 
+### correction: 2026-09-28
+
+- reason: design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5) -- the pool ceiling this function returns is no longer derived from the fixed `ResourceLimits.concurrency`; it is now derived from `R2DB_THREAD_LIMIT` via `role_pool_size`, so the function is renamed `_declared_pool_size` and its body rewritten to match.
+
+old:
+```
+Phase 10 WP-4f: this peer's own declared per-role pool ceiling,
+consulted by `_verify_declarations_checks`'s own F-16 check.
+`ResourceLimits.concurrency` is fixed on this peer -- no env var
+overrides it anywhere in this peer's own composition roots -- unlike
+MitateDB-api's own same-named `_declared_concurrency` (`MITATEDB_MAX_
+CONCURRENCY`, deployer-configurable on that peer; see that peer's own
+docstring). Named identically (peer-IDENTICAL name, peer-SPECIFIC
+body) so `_verify_declarations_checks`'s own call site stays textually
+isomorphic across peers.
+```
+
+new:
+```
+(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)):
+this peer's own declared per-role pool ceiling, consulted by
+`_verify_declarations_checks`'s own F-16/F-18 checks -- renamed from
+`_declared_concurrency` (`ResourceLimits.concurrency` no longer sizes
+any pool). Reads `R2DB_THREAD_LIMIT` from THIS CLI
+invocation's own process env (falling back to `DEFAULT_THREAD_LIMIT`
+when unset/empty/unparsable, mirroring `main.py`'s own degrade-to-
+default discipline for the same variable) and derives the floor via
+`role_pool_size` -- the SAME function `main.py`'s own startup check
+uses. This is a disclosed limitation this command already carries for
+every other env-derived check (`_verify_declarations_checks`'s own
+workers-vs-ceiling check right below states it too): the value this
+CLI invocation's own shell happens to have set for `R2DB_THREAD_LIMIT`
+may not match the REAL running `r2db_api.main`/`r2db_api.control_main`
+process' own env -- this check only ever verifies agreement with
+WHATEVER value this one invocation was run under.
+```
+
 ## CH-0323
 
 - moved from: `src/r2db_api/ops.py` (`_served_capabilities_document`)

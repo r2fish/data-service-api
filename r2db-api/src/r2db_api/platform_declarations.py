@@ -1018,19 +1018,25 @@ _ROLE_CLASSES = frozenset({"api", "controlplane", "auditreader"})
 
 
 def check_role_connection_limits(
-    conn: "psycopg.Connection", *, schema: str, ops_module: str, concurrency: int,
+    conn: "psycopg.Connection", *, schema: str, ops_module: str, pool_size: int,
     role_classes: "frozenset[str] | None" = None,
     application_slugs: "Sequence[str] | None" = None,
 ) -> None:
     """F-16: raises `PlatformDeclarationError(code="F-16")` for the FIRST
     role (in the deterministic order built below) whose `pg_roles.
     rolconnlimit` is neither `-1` nor at least its own computed floor.
-    `concurrency` is the caller's own declared per-role pool ceiling
-    (`ResourceLimits.concurrency`/`FoundationConfig.max_concurrency`) --
+    `pool_size` is the caller's own declared per-role pool ceiling --
     this function takes it as a plain argument rather than constructing
     its own default instance, so a deployment that has genuinely raised
-    its declared concurrency is checked against ITS OWN real floor, not a
+    its real pool size is checked against ITS OWN real floor, not a
     silently-stale code-level default.
+
+    (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)):
+    renamed from `concurrency` -- every caller now passes `r2db_api.
+    limits.role_pool_size(thread_limit)` (the real per-process
+    simultaneous-borrow ceiling), not `ResourceLimits.concurrency` (the
+    deployment-wide admission bound, which no longer sizes any pool --
+    see that function's own docstring).
 
     Checks exactly the role classes `0013_role_connection_limits.sql`
     (this peer) / the sibling peer's own same-numbered migration raises:
@@ -1079,7 +1085,7 @@ def check_role_connection_limits(
         for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
             if role == application_audit_owner:
                 continue
-            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * concurrency)
+            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * pool_size)
     if "controlplane" in role_classes:
         for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
             if role == control_audit_owner:
@@ -1105,8 +1111,8 @@ def check_role_connection_limits(
                     [list(application_slugs)],
                 )
             for runtime_role, developer_role in cur.fetchall():
-                floors[runtime_role] = concurrency
-                floors[developer_role] = concurrency
+                floors[runtime_role] = pool_size
+                floors[developer_role] = pool_size
 
     if not floors:
         return
@@ -1342,7 +1348,7 @@ def _f18_message(
 
 def check_max_connections_headroom(
     conn: "psycopg.Connection", *, schema: str, ops_module: str,
-    process_ceilings: ProcessCeilings, concurrency: int,
+    process_ceilings: ProcessCeilings, pool_size: int,
 ) -> HeadroomReport:
     """F-18: raises `PlatformDeclarationError(code="F-18")` when the LOWER
     bound of the connections `process_ceilings` guarantees this deployment
@@ -1355,10 +1361,18 @@ def check_max_connections_headroom(
     floor added to the control side too -- reported only, never judged,
     §1.1 (c′)), both reserved-connection settings, and `max_connections`
     itself, so the caller can print all four numbers without a second
-    round of reads."""
+    round of reads.
+
+    design D-3 (5): renamed from `concurrency` -- every
+    caller now passes `r2db_api.limits.role_pool_size(thread_limit)`; see
+    `check_role_connection_limits`'s own docstring for the full
+    rationale. Completion condition 71: with `process_ceilings.data` = 4,
+    `thread_limit` = 4, `c` = 2 (`pool_size` = 6), the lower bound this
+    function judges no longer scales with the declared `concurrency`
+    bound at all."""
     registered_applications = _count_registered_applications(conn, schema)
-    platform_pool_floor = _API_ROLE_STORE_COUNT * concurrency
-    application_pair_floor = 2 * concurrency
+    platform_pool_floor = _API_ROLE_STORE_COUNT * pool_size
+    application_pair_floor = 2 * pool_size
     control_plane_floor = _CONTROLPLANE_ROLE_POOL_FLOOR
     auditreader_floor = _AUDITREADER_ROLE_POOL_FLOOR
     lower_bound = headroom_lower_bound(

@@ -36,6 +36,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 from typing import Iterator
@@ -55,6 +56,13 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
 PEPPER = "synthetic-test-pepper-credential-persistence-0000"
+# WP-2 (design D-1/D-3 (2'), 監督裁定 11/27): a shared, real slot
+# directory (mode 0700 by `mkdtemp`'s own default) for the handful of
+# tests in this file that build their OWN inline `env` dict (rather than
+# through `_main_env`, below) and expect `build_app()` to fail LATER, at
+# a check downstream of the slot-directory validation -- not explicitly
+# torn down, see `_main_env`'s own identical convention.
+_INLINE_ENV_SLOT_DIR = tempfile.mkdtemp(prefix="r2db-test-slots-inline-")
 
 
 def _admin_dsn() -> str:
@@ -204,6 +212,12 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         # fixture can seed that row below (F-15 is unconditional, like
         # F-3 for `surfaces`, since WP-6a).
         "0012_process_ceilings.sql",
+        # WP-2 (design D-3 (1), 監督裁定15): `r2db_api.main.build_app` now
+        # always wires the PostgreSQL-backed `requests_per_minute` rate
+        # row (`R2DB_SLOT_DIR`/`R2DB_WORKERS` are required env vars as of
+        # this WP) -- every real request through `main_module`'s own app
+        # needs this table/function to exist.
+        "0015_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = rewritten_dir / name
@@ -233,6 +247,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         # below for the `surfaces` row every fixture in this file needs).
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
+        _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(
@@ -633,33 +648,38 @@ def test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_recovers_o
         store.close()
 
 
-def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(
+def test_platform_pool_sized_to_thread_limit_avoids_premature_503(
     platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 10 WP-4e (supervisor ruling 2026-09-09): peer-local real-
-    PostgreSQL pin for the platform pool sizing fix `r2db_api.main.
-    build_app` and this adapter's own conformance composition now apply --
-    the SAME F-1 shape `r2db_api.limits.role_pool_size` already fixed for
-    the per-application role pools (`test_threadpool_offload.py::
-    test_role_pool_sized_to_declared_concurrency_avoids_premature_503`,
-    which uses a FAKE `_RolePool._connect` -- no live PostgreSQL needed).
-    This test exercises the same property one layer up, against a REAL
-    platform database: with `PostgresCredentialStore`'s own pool sized via
-    `role_pool_size` (the exact function `build_app` now calls),
-    `concurrency` genuinely concurrent `authenticate()` calls are all
-    served (0 x `AUTH_STATE_UNAVAILABLE`), even though each call holds its
-    checked-out connection for longer than the pool's own
-    `acquire_timeout`.
+    """Phase 10 WP-4e (supervisor ruling 2026-09-09), updated for WP-2
+    (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5), 監督裁定16):
+    peer-local real-PostgreSQL pin for the platform pool sizing fix
+    `r2db_api.main.build_app` and this adapter's own conformance
+    composition now apply -- the SAME F-1 shape `r2db_api.limits.role_
+    pool_size` already fixed for the per-application role pools
+    (`test_threadpool_offload.py::
+    test_role_pool_sized_to_thread_limit_avoids_premature_503`, which uses
+    a FAKE `_RolePool._connect` -- no live PostgreSQL needed). This test
+    exercises the same property one layer up, against a REAL platform
+    database: with `PostgresCredentialStore`'s own pool sized via `role_
+    pool_size(thread_limit)` (the exact function `build_app` now calls --
+    the real per-process simultaneous-borrow ceiling is `thread_limit`,
+    never the deployment-wide admission bound `concurrency`, as of this
+    WP), `thread_limit` genuinely concurrent `authenticate()` calls are
+    all served (0 x `AUTH_STATE_UNAVAILABLE`), even though each call holds
+    its checked-out connection for longer than the pool's own `acquire_
+    timeout`.
 
     `_execute` (this module's own single execution choke point) is
     monkeypatched to sleep for `hold_s` seconds AFTER the real query runs
     but BEFORE returning -- the sleep happens while `_fetch_or_503`'s own
     `with self._pool.connection()` block still holds the checked-out real
-    connection, so `concurrency` threads genuinely contend for the pool's
-    `maxconn` slots against a live PostgreSQL server, not a simulation.
+    connection, so `thread_limit` threads genuinely contend for the
+    pool's `maxconn` slots against a live PostgreSQL server, not a
+    simulation.
 
     Mutation: hardcoding `PostgresCredentialStore`'s own `pool_size=` back
-    to a fixed `2` (or `4`) regardless of the declared `concurrency=6`
+    to a fixed `2` (or `4`) regardless of the declared `thread_limit=6`
     this test configures turns this red -- the 3rd+ concurrent
     `authenticate()` call then waits past `acquire_timeout` for a
     connection none of the first two callers have released yet (still
@@ -672,10 +692,11 @@ def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(
     from r2db_api import credential_store as credential_store_module
     from r2db_api.limits import ResourceLimits, role_pool_size
 
-    concurrency = 6
+    thread_limit = 6
+    concurrency = thread_limit
     hold_s = 0.6
     resource_limits = ResourceLimits(concurrency=concurrency, requests_per_minute=100_000)
-    platform_pool_size = role_pool_size(resource_limits)
+    platform_pool_size = role_pool_size(thread_limit)
 
     slug = _fresh_slug("pp")
     _register_application(platform, slug)
@@ -1524,6 +1545,16 @@ def _set_surfaces_row(platform: types.SimpleNamespace, value: dict) -> None:
 
 
 def _main_env(platform: types.SimpleNamespace, app: types.SimpleNamespace) -> dict[str, str]:
+    # WP-2 (design D-1/D-3 (2'), 監督裁定 11/27): `R2DB_WORKERS`/`R2DB_
+    # SLOT_DIR` are now required for `build_app()` to start at all --
+    # every caller of this helper gets a fresh `mkdtemp` slot directory
+    # (mode 0700 by `mkdtemp`'s own default, satisfying `concurrency_
+    # slots.check_slot_directory`) and `workers=1`, mirroring a real
+    # single-process deployment. Not explicitly torn down -- this test
+    # module's own other `tempfile.mkdtemp` call sites (`test_ops_apply_
+    # platform_migration.py`/`test_ops_verify_declarations.py`) follow the
+    # same "leaked to the OS temp dir" convention.
+    slot_dir = tempfile.mkdtemp(prefix="r2db-test-slots-")
     return {
         "R2DB_CREDENTIAL_PEPPER": PEPPER,
         "R2DB_PLATFORM_DSN": platform.api_dsn,
@@ -1531,6 +1562,8 @@ def _main_env(platform: types.SimpleNamespace, app: types.SimpleNamespace) -> di
         "R2DB_SERVE_APPS": app.slug,
         f"R2DB_APP_{app.slug.upper()}_RUNTIME_DSN": app.runtime_dsn,
         f"R2DB_APP_{app.slug.upper()}_DEVELOPER_DSN": app.developer_dsn,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": slot_dir,
         # Q4 phase WP-1 (design D-2(f)): `R2DB_DATA_BASE_URL`/`R2DB_
         # CONTROL_BASE_URL` are REMOVED -- surfaces now come from the
         # `platform` fixture's own seeded `platform_declarations` row (see
@@ -1686,16 +1719,22 @@ def test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exc
     platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
 ) -> None:
     """R-91 (work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_
-    HEADROOM_CHECK_V1.md §1.2 D-3, completion condition 10): unlike F-16
-    (this file's own test just above), this new startup check is run
-    UNSCOPED -- `platform.api_role`'s own `CONNECTION LIMIT` is left
-    healthy (F-16 alone would pass), but the declared `process_ceilings`
-    (`{"data": 3, "control": 1}`, lower bound 3*(64+64)+1*16=400) exceeds
-    this throwaway cluster's own real headroom (297, §1.3 (8)) -- proving
-    a per-process role floor check alone (F-16) cannot catch a
-    cluster-wide overcommit a NARROWED check would miss. Mutation M9a
-    (dropping this startup call from `r2db_api.main.build_app`) turns this
-    red."""
+    HEADROOM_CHECK_V1.md §1.2 D-3, completion condition 10), numbers
+    updated for WP-2 (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3
+    (5), 監督裁定16: `role_pool_size(thread_limit)`, `main_module`'s own
+    `R2DB_THREAD_LIMIT` unset -> `DEFAULT_THREAD_LIMIT` 4, i.e. pool_size
+    6 -- never `ResourceLimits.concurrency` 32): unlike F-16 (this file's
+    own test just above), this new startup check is run UNSCOPED --
+    `data=1` keeps F-16's own now-ceiling-multiplied floor
+    (`main.py`'s own completion condition 72: `pool_size * process_
+    ceiling`, here 2*6*1=12) well under `platform.api_role`'s real
+    `CONNECTION LIMIT` (F-16 alone would pass), but `control=30` (the
+    declared `process_ceilings` `{"data": 1, "control": 30}`, lower bound
+    1*(12+12)+30*16=504) exceeds this throwaway cluster's own real
+    headroom (297, §1.3 (8)) -- proving a per-process role floor check
+    alone (F-16) cannot catch a cluster-wide overcommit a NARROWED check
+    would miss. Mutation M9a (dropping this startup call from `r2db_api.
+    main.build_app`) turns this red."""
     with psycopg.connect(platform.control_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1703,7 +1742,7 @@ def test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exc
                     "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
                     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
                 ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
-                [json.dumps({"data": 3, "control": 1})],
+                [json.dumps({"data": 1, "control": 30})],
             )
         conn.commit()
     try:
@@ -1747,6 +1786,8 @@ def test_build_app_missing_per_app_dsn_raises(platform: types.SimpleNamespace, m
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _INLINE_ENV_SLOT_DIR,
     }
     with pytest.raises(RuntimeError, match=f"R2DB_APP_{slug.upper()}_RUNTIME_DSN"):
         main_module.build_app(env=env)
@@ -1759,6 +1800,8 @@ def test_build_app_unregistered_slug_raises(platform: types.SimpleNamespace, mai
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _INLINE_ENV_SLOT_DIR,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
     }
@@ -1774,6 +1817,8 @@ def test_build_app_disabled_slug_raises(platform: types.SimpleNamespace, main_mo
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _INLINE_ENV_SLOT_DIR,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
     }
@@ -1794,6 +1839,8 @@ def test_build_app_registered_only_slug_raises(platform: types.SimpleNamespace, 
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": _INLINE_ENV_SLOT_DIR,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
     }
