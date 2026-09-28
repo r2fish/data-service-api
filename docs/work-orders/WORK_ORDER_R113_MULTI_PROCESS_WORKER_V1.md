@@ -406,6 +406,11 @@ peer-local のテストは小さい L を宣言した構成で駆動してよい
 16. `sweep_orphans` の `PermissionError` を pid 再利用として許容する (逸脱 8)。採るが、レビュー担当が (b) で「本当の残骸を見逃さない」ことを確かめる。許容は `os.getpgid(pid) == pid` の場合に限る現行の形を保つ。
 17. 完了条件 22 の赤リストは §3.2 の本文 (9・11・14〜17) が正で、発注プロンプトの「5・13」は誤り (実測は本文と一致)。
 
+**監督裁定 18〜19 (2026-09-28、WP-1 コードレビュー 1 回目 (18 件、全件「直す / 採る」。裁定表は監督保管 `r113_wp1_rework_1.md`) の帰結)**
+
+18. **訂正註: §3.2 の完了条件 14・17 と §3.3 の「429」は HTTP status ではなく error envelope の `code == "LIMIT_EXCEEDED"` かつ `details.limit_class` を指す** (契約は LIMIT_EXCEEDED の HTTP status を定めない。r2db は 429、MitateDB は 413)。本文は書き換えない。
+19. **WP-2 / WP-3 の完了条件に足す**: (i) control plane の `--preflight` entry は app を実際に構築して起動時の検査を走らせる (r2db の `control_main` は app を遅延構築するので、entry が構築を呼ばないと preflight が空振りする = レビュー F4)。(ii) `--preflight` entry を足した後も WP-1 の launcher を変えずに完了条件 5・13 と control の preflight 観測テストが緑であること (裁定 12 の再掲)。(iii) F-15 / F-16 の起動経路 (launcher) が渡す workers / slot の env を、`build_app()` の必須 env の集合と一致させる (レビュー F9)。
+
 ### 6.2 実施と受け入れ
 
 ## 7. WP-4 — `--real-server <peer> --workers N` (実装担当) と計測 (監督)
