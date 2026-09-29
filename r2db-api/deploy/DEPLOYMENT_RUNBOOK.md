@@ -73,7 +73,8 @@ re-verify them; it assumes they are already true.
    `r2dbsvc_api`/`r2dbsvc_controlplane`/every served application's own
    runtime/developer roles to their own real pool-composition floor;
    `POSTGRES_PROVISIONING_RUNBOOK.md` §4), unlike `0014`, **is required by
-   BOTH processes at the default declared `concurrency` (32)**: without
+   BOTH processes at the default thread limit** (F-16 floors,
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §20): without
    it, either process REFUSES TO START (F-16, `check_role_connection_
    limits` -- the same startup fail-fast `0008`/`0012` below trigger).
    `part1_provision_host_and_db.sh` now applies `0013` itself, right after
@@ -106,9 +107,9 @@ re-verify them; it assumes they are already true.
    (F-15). **Migration `0015_credential_request_rate.sql`**
    (`POSTGRES_PROVISIONING_RUNBOOK.md` §20 -- the credential-keyed
    `requests_per_minute` row every data-plane worker shares) is **required
-   by the application-plane process**: it does not gate startup, but
-   without it every authenticated data-plane request fails closed with the
-   same answer as any other platform-database failure. **The required order for an already-provisioned host is:
+   by the application-plane process**: on a platform database without its
+   rate function, the application-plane process and its preflight refuse
+   to start, naming the migration. **The required order for an already-provisioned host is:
    `0012` -> `ops declare-process-ceilings` -> restart both processes**
    (ledger LQ4-24; `POSTGRES_PROVISIONING_RUNBOOK.md` §18). Every
    application
@@ -374,8 +375,13 @@ configuration's own layout rather than assuming.)
       whichever values this deployment's own `EnvironmentFile`/derived
       default actually resolves to, and no more than the declared
       `concurrency` (32 by default), so that the host-shared slots (§8)
-      never answer `429` before the platform pool is reached -- e.g. 8 at
-      one worker and the default thread limit:
+      never answer `429` before the platform pool is reached. Every
+      data-plane handler takes its slot before it authenticates (`http.py`),
+      so a request beyond `concurrency` is answered `429` without reaching
+      the platform pool at all. When the lower figure exceeds `concurrency`
+      (at the default thread limit, `R2DB_WORKERS` of 5: 5 × 8 = 40 > 32),
+      send exactly `concurrency` requests -- the upper bound wins. E.g. 8
+      at one worker and the default thread limit:
       ```
       for i in $(seq 1 8); do
         curl -sk -o /dev/null -w '%{http_code} %{content_type}\n' \
@@ -719,8 +725,8 @@ variable contract.
 **Gap closed (R-66 WP-1 addendum, 2026-09-22).**
 `part1_provision_host_and_db.sh` previously never applied
 `0013_role_connection_limits.sql` at all -- left unapplied, a host it alone
-provisioned could not start EITHER process at the default declared
-`concurrency` (32): F-16 (`check_role_connection_limits`) is one of both
+provisioned could not start EITHER process at the default thread limit
+(F-16 floors, `POSTGRES_PROVISIONING_RUNBOOK.md` §20): F-16 (`check_role_connection_limits`) is one of both
 processes' own startup fail-fast checks, not merely a check `ops
 verify-declarations` reports on demand. The script now also runs
 `part1a_check_max_connections.sh` right after `0002` (reads `R2DBSVC_
@@ -933,9 +939,12 @@ The application only checks the directory (existence, owner = its own
 effective uid, mode `0700`, a working `flock`) and never creates it. Every
 in-flight request holds one of `concurrency` slot files under an exclusive
 `flock`, and every worker opens the same directory, so the declared
-`concurrency` bounds the whole host. Never point `R2DB_SLOT_DIR` anywhere
-else, never share the directory with another unit, and never create it by
-hand. The control unit uses no slot directory.
+`concurrency` bounds the whole host. The directory holds three kinds of
+file: `slot-<i>` (one per slot), `selfcheck` (the startup `flock`
+self-check) and `scan` (held briefly while a worker looks for a free
+slot). Never point `R2DB_SLOT_DIR` anywhere else, never share the
+directory with another unit, and never create it by hand. The control unit
+uses no slot directory.
 
 **Signals: never SIGTTIN, never SIGHUP.** SIGTTIN makes the uvicorn
 supervisor start one more worker while it runs -- beyond `R2DB_WORKERS`,
@@ -946,6 +955,12 @@ processes run for a while, again beyond that budget. Restart a unit with
 same: it stops before it starts); the units define no `ExecReload=`, and
 neither `systemctl reload` nor `kill -HUP`/`kill -TTIN` is ever the way to
 pick up a change.
+
+**Never stop a single worker.** Do not stop one worker with SIGSTOP or by
+attaching a debugger to it. A worker stopped in the middle of admitting a request holds up admission
+on the whole host: while it is stopped, every request can wait up to 1 s
+and then be answered `503`. To restart, use `systemctl stop` followed
+by `systemctl start`.
 
 **`verify-declarations` checks workers only by hand.** `python -m
 r2db_api.ops verify-declarations` compares `R2DB_WORKERS`/
@@ -1010,3 +1025,9 @@ after installation:
    fails in `ExecStartPre=`, the journal naming `R2DB_WORKERS` and
    `process_ceilings.data`, and no uvicorn process starts. Restore the
    value and start again.
+7. Measure how long each unit's preflight takes: in `journalctl -u
+   r2dbsvc-api.service` (and `-u r2dbsvc-control.service`), the time from
+   the start job to uvicorn's first line. Confirm it fits well inside the
+   unit's `TimeoutStartSec=` (15 s): systemd counts `ExecStartPre=` inside
+   that timeout, and a preflight that runs past it is killed and the unit
+   fails its start.

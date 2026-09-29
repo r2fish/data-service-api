@@ -47,8 +47,17 @@
 #                                    repository actually ships, so a unit
 #                                    whose ExecStart silently drifted to a
 #                                    renamed or deleted module would still
-#                                    pass check 1. This check always runs
-#                                    (no external tool dependency).
+#                                    pass check 1. The same check covers
+#                                    each unit's `ExecStartPre=` line: it
+#                                    must be a line of its own (anchored at
+#                                    the line start, so a comment cannot
+#                                    satisfy it) running `python -m
+#                                    <module> --preflight`, that module file
+#                                    must exist, and the module must itself
+#                                    interpret `--preflight` (the literal
+#                                    `"--preflight" in sys.argv`). This check
+#                                    always runs (no external tool
+#                                    dependency).
 #
 # --require-tools mode: without this flag, an absent `systemd-analyze` or
 # `nginx` (or `openssl`, needed to generate the throwaway cert/key for check
@@ -134,19 +143,21 @@ record_absent_tool() {
 if command -v systemd-analyze >/dev/null 2>&1; then
     unit_check_failed=0
 
-    # `systemd-analyze verify` stats the ExecStart= binary and the
-    # EnvironmentFile= path and hard-fails ("Command ... is not executable:
-    # No such file or directory") if either is absent -- both name the
-    # TARGET host's illustrative install layout (/opt/r2dbsvc/..., /etc/
-    # r2dbsvc/...), which does not and must not exist on whatever host runs
-    # this lint (including CI). Verify a scratch COPY of each unit instead,
-    # with ONLY those two paths substituted for lint-local stand-ins: the
-    # ExecStart binary for a trivial executable stub, EnvironmentFile for an
-    # empty file. No other directive is touched, so the hardening posture,
-    # unit shape, and every other value are still exercised byte-for-byte.
-    # Check 4 (ExecStart non-vacuity) below verifies the module target
-    # against the ORIGINAL, unmodified unit files -- this substitution is
-    # for check 1 only.
+    # `systemd-analyze verify` stats the binary of every ExecStartPre= and
+    # ExecStart= line and the EnvironmentFile= path, and hard-fails
+    # ("Command ... is not executable: No such file or directory") if any is
+    # absent -- all three paths name the TARGET host's illustrative install
+    # layout (/opt/r2dbsvc/..., /etc/r2dbsvc/...), which does not and must
+    # not exist on whatever host runs this lint (including CI). Verify a
+    # scratch COPY of each unit instead, with ONLY those three paths
+    # substituted for lint-local stand-ins: the ExecStart uvicorn binary and
+    # the ExecStartPre python binary for the same trivial executable stub,
+    # EnvironmentFile for an empty file. No other directive is touched, so
+    # the hardening posture, unit shape, and every other value are still
+    # exercised byte-for-byte. Check 4 (ExecStart non-vacuity) below
+    # verifies the module targets of ExecStart= and ExecStartPre= against
+    # the ORIGINAL, unmodified unit files -- this substitution is for check
+    # 1 only.
     verify_dir="$(mktemp -d)"
     cleanup_paths+=("$verify_dir")
 
@@ -162,12 +173,14 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     verify_unit_api="${verify_dir}/r2dbsvc-api.service"
     sed \
         -e "s#/opt/r2dbsvc/r2db-api/\.venv/bin/uvicorn#${verify_stub_bin}#" \
+        -e "s#/opt/r2dbsvc/r2db-api/\.venv/bin/python#${verify_stub_bin}#" \
         -e "s#/etc/r2dbsvc/api\.env#${verify_env_api}#" \
         "${DEPLOY_DIR}/systemd/r2dbsvc-api.service" >"$verify_unit_api"
 
     verify_unit_control="${verify_dir}/r2dbsvc-control.service"
     sed \
         -e "s#/opt/r2dbsvc/r2db-api/\.venv/bin/uvicorn#${verify_stub_bin}#" \
+        -e "s#/opt/r2dbsvc/r2db-api/\.venv/bin/python#${verify_stub_bin}#" \
         -e "s#/etc/r2dbsvc/control\.env#${verify_env_control}#" \
         "${DEPLOY_DIR}/systemd/r2dbsvc-control.service" >"$verify_unit_control"
 
@@ -311,7 +324,9 @@ fi
 # ---------------------------------------------------------------------------
 # 4. ExecStart non-vacuity -- each unit's ExecStart= must name the exact
 #    uvicorn module target this WP claims it does, and that module file
-#    must exist in this checkout. Always runs; no external tool.
+#    must exist in this checkout; each unit's ExecStartPre= must run that
+#    module's `--preflight`, and the module must interpret it. Always runs;
+#    no external tool.
 # ---------------------------------------------------------------------------
 execstart_check_failed=0
 
@@ -337,6 +352,34 @@ check_execstart \
 check_execstart \
     "${DEPLOY_DIR}/systemd/r2dbsvc-api.service" \
     'ExecStart=.*uvicorn r2db_api\.main:app' \
+    "${SRC_DIR}/main.py"
+
+check_execstartpre() {
+    # $1 = unit file, $2 = ERE the ExecStartPre line must match (anchored
+    # at the line start), $3 = module file that must exist and must itself
+    # interpret `--preflight`.
+    local unit_path="$1" pattern="$2" module_path="$3"
+    if ! grep -Eq "$pattern" "$unit_path"; then
+        printf 'ExecStartPre non-vacuity FAILED: %s does not match %s\n' "$unit_path" "$pattern" >&2
+        execstart_check_failed=1
+    fi
+    if [ ! -f "$module_path" ]; then
+        printf 'ExecStartPre non-vacuity FAILED: expected module file missing: %s\n' "$module_path" >&2
+        execstart_check_failed=1
+    elif ! grep -Fq '"--preflight" in sys.argv' "$module_path"; then
+        printf 'ExecStartPre non-vacuity FAILED: %s does not interpret --preflight\n' "$module_path" >&2
+        execstart_check_failed=1
+    fi
+}
+
+check_execstartpre \
+    "${DEPLOY_DIR}/systemd/r2dbsvc-control.service" \
+    '^ExecStartPre=.*/python -m r2db_api\.control_main --preflight$' \
+    "${SRC_DIR}/control_main.py"
+
+check_execstartpre \
+    "${DEPLOY_DIR}/systemd/r2dbsvc-api.service" \
+    '^ExecStartPre=.*/python -m r2db_api\.main --preflight$' \
     "${SRC_DIR}/main.py"
 
 if [ "$execstart_check_failed" -eq 0 ]; then

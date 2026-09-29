@@ -455,7 +455,7 @@ numbers -- design D-1, R-66 WP-1): `0005` (§9, credential store), `0006`
 LIMIT`s, Phase 10 WP-4f -- additive only, safe to apply by hand at any
 point after `0002`/`0005`/`0006`/`0007` exist on an already-running
 cluster; run by this script since R-66 WP-1 -- at the
-default declared `concurrency` (32), both processes now REFUSE TO START
+default thread limit (F-16 floors, §20), both processes now REFUSE TO START
 until it is applied, F-16 `check_role_connection_limits`;
 `part1a_check_max_connections.sh`, run right after `0002`, verifies this
 migration's own precondition -- `max_connections` re-checked against this
@@ -464,8 +464,9 @@ section's own worked example -- before this script ever applies it)**,
 process REFUSES TO START without it; `ops verify-declarations` reports
 `FAIL F-17` until it is applied and the control process restarted),
 `0015` (§20, the credential-keyed `requests_per_minute` row every
-data-plane worker shares -- no process refuses to start without it, but
-every authenticated data-plane request fails closed until it is applied),
+data-plane worker shares -- on a platform database without its rate
+function, the application-plane process and its preflight refuse to
+start, naming the migration),
 **`0008` (§16, platform declarations + writer-role timeouts, Q4 phase --
 both processes now REFUSE TO START until it is applied)**, and `0012`
 (process ceilings, Phase 10 WP-6a -- also required before either process
@@ -1443,10 +1444,13 @@ than_the_length_check`).
 **Multiply by M.** Coalescing counters and the buffer are **process-local**;
 nothing is shared between instances. So the deployment-wide ceilings are
 `2 x <keys> x <windows> x M` and `<buffer capacity> x M`, where **M is the
-maximum number of concurrent `r2db_api.main` instances** your deployment can
-run. On the VPS M is normally 1; on any autoscaled shape M is the scaler's
-own configured maximum, and that number -- not the per-process default -- is
-what belongs in the threshold arithmetic.
+number of `r2db_api.main` processes: `R2DB_WORKERS` on the one host**
+(`DEPLOYMENT_RUNBOOK.md` §8). The declared `process_ceilings.data` equals
+that same number (§18, §20), so **M is this deployment's own declared
+`process_ceilings.data`** -- that number, not the per-process default, is
+what belongs in the threshold arithmetic. With `R2DB_WORKERS=1` M is 1; a
+deployment that raises `R2DB_WORKERS` re-declares `process_ceilings.data`
+to match, and this arithmetic uses that number.
 
 A serviceable rate model for alerting:
 
@@ -1969,8 +1973,7 @@ steps, in this exact order, before restarting either process, or both will
 refuse to start (F-15) with no `process_ceilings` row to read yet):
 
 1. `python -m r2db_api.ops apply-platform-migration 0012_process_ceilings.sql --lock-timeout <value>`
-2. `python -m r2db_api.ops declare-process-ceilings --data 1 --control 1`
-   (or the deployment's real ceilings, if not the single-uvicorn default)
+2. `python -m r2db_api.ops declare-process-ceilings --data <R2DB_WORKERS> --control 1`
 3. Restart both `r2dbsvc-api.service` and `r2dbsvc-control.service` --
    **every declaration in this phase is a startup-time snapshot** (requester
    ruling U-3, unchanged from §16): nothing re-reads the table per request.
@@ -2111,10 +2114,10 @@ CASCADE`). Run it as `r2dbsvc_control` against `r2dbsvc_platform`, after
 python -m r2db_api.ops apply-platform-migration 0015_credential_request_rate.sql --lock-timeout <value>
 ```
 
-`part1_provision_host_and_db.sh` applies it on a host it provisions. No
-process refuses to start without it, but every authenticated data-plane
-request fails closed until it is applied -- apply it before starting a
-release that counts in it.
+`part1_provision_host_and_db.sh` applies it on a host it provisions. On a
+platform database without its rate function, the application-plane
+process and its preflight refuse to start, naming the migration -- apply
+it before starting a release that counts in it.
 
 **Window shape (disclosure).** The row keeps one count per integer second
 for the current second and the 60 before it (`int[61]`, a ring indexed by

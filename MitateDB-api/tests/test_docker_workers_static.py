@@ -9,13 +9,15 @@ What these tests pin, one property per test:
   container runs as, mode 0700, before switching to that user, and
   `MITATEDB_SLOT_DIR` names that directory;
 - the `data` branch of `CMD` passes `--workers "${MITATEDB_WORKERS}"`
-  and nowhere writes a literal worker count;
+  and nowhere writes a literal worker count or a default for the
+  variable (`ENV` / `ARG` in any stage, `${MITATEDB_WORKERS:-n}`);
 - the `data` branch reaches `exec uvicorn` only through `&&` after the
   preflight (or under `set -e`), never through `;`;
 - the `data` branch runs `python -m mitatedb_api.main --preflight`
   before `exec uvicorn`;
 - the `control` branch passes `--workers "${MITATEDB_CONTROL_WORKERS}"`
-  and nowhere writes a literal worker count;
+  and nowhere writes a literal worker count or a default for the
+  variable;
 - the `control` branch runs `python -m mitatedb_api.control_main
   --preflight` before `exec uvicorn`, and only through `&&` (or under
   `set -e`).
@@ -113,6 +115,26 @@ def _assert_workers_from_env(branch: str, variable: str) -> None:
     assert not _LITERAL_WORKERS_RE.search(branch), branch
 
 
+def _assert_no_worker_default(variable: str) -> None:
+    """The worker count has no default anywhere in the image: no `ENV` or
+    `ARG` of `variable` in any stage and no `${variable:-n}` /
+    `${variable-n}` fallback in `CMD`, so a deploy that does not set the
+    variable fails the preflight instead of starting a baked-in count."""
+    instructions = _instructions()
+    assert instructions, DOCKERFILE
+    for keyword, arguments in instructions:
+        if keyword not in ("ENV", "ARG"):
+            continue
+        tokens = shlex.split(arguments)
+        names = {token.partition("=")[0] for token in tokens if "=" in token}
+        if tokens and "=" not in tokens[0]:
+            names.add(tokens[0])  # `ENV NAME value` / `ARG NAME`
+        assert variable not in names, f"{keyword} {arguments}"
+    script = _cmd_script()
+    for fallback in ("${" + variable + ":", "${" + variable + "-"):
+        assert fallback not in script, script
+
+
 def _preflight_join(branch: str, module: str) -> str:
     """The separator between `python -m <module> --preflight` and
     `exec uvicorn <module>:app` in `branch` (`&&` or `;`)."""
@@ -150,6 +172,7 @@ def test_docker_image_creates_the_slot_directory_owned_by_user_mode_0700():
 def test_docker_cmd_data_branch_passes_workers_from_env_without_a_literal_count():
     _prefix, _control, data = _branches()
     _assert_workers_from_env(data, "MITATEDB_WORKERS")
+    _assert_no_worker_default("MITATEDB_WORKERS")
 
 
 def test_docker_cmd_data_branch_never_reaches_uvicorn_after_a_failed_preflight():
@@ -170,6 +193,7 @@ def test_docker_cmd_data_branch_runs_the_data_plane_preflight_before_uvicorn():
 def test_docker_cmd_control_branch_passes_control_workers_from_env_without_a_literal_count():
     _prefix, control, _data = _branches()
     _assert_workers_from_env(control, "MITATEDB_CONTROL_WORKERS")
+    _assert_no_worker_default("MITATEDB_CONTROL_WORKERS")
 
 
 def test_docker_cmd_control_branch_runs_the_control_plane_preflight_before_uvicorn():

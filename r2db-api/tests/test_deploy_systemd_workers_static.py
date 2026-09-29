@@ -6,7 +6,8 @@ under `r2db-api/deploy/`.
 What these tests pin, one property per test:
 
 - the application-plane unit passes `--workers` from `${R2DB_WORKERS}`
-  and nowhere writes a literal worker count;
+  and nowhere writes a literal worker count or a default for the
+  variable (`Environment=`, `${R2DB_WORKERS:-n}`);
 - it runs `python -m r2db_api.main --preflight` as an `ExecStartPre=`
   from the same virtualenv, under the same `EnvironmentFile=`, and a
   failing preflight stops the unit (no `-` prefix);
@@ -15,7 +16,8 @@ What these tests pin, one property per test:
 - `api.env.example` names `R2DB_WORKERS` and an `R2DB_SLOT_DIR` equal to
   the path that `RuntimeDirectory=` creates;
 - the control-plane unit passes `--workers` from
-  `${R2DB_CONTROL_WORKERS}` and runs `python -m r2db_api.control_main
+  `${R2DB_CONTROL_WORKERS}` (again with no default for the variable) and
+  runs `python -m r2db_api.control_main
   --preflight` the same way;
 - `control.env.example` sets `R2DB_CONTROL_WORKERS=1`.
 
@@ -92,6 +94,21 @@ def _assert_workers_from_env(unit: Path, variable: str) -> None:
         assert not _LITERAL_WORKERS_RE.search(value), f"{key}={value}"
 
 
+def _assert_no_worker_default(unit: Path, variable: str) -> None:
+    """The worker count has no default anywhere in the unit: no
+    `Environment=` assignment of `variable` and no `${variable:-n}` /
+    `${variable-n}` fallback, so an `EnvironmentFile` that lacks the
+    variable fails the preflight instead of starting a baked-in count."""
+    directives = _service_directives(unit)
+    assert directives, unit
+    for value in _values(unit, "Environment"):
+        for token in shlex.split(value):
+            assert token.partition("=")[0] != variable, f"Environment={value}"
+    for key, value in directives:
+        for fallback in ("${" + variable + ":", "${" + variable + "-"):
+            assert fallback not in value, f"{key}={value}"
+
+
 def _assert_preflight(unit: Path, module: str) -> None:
     exec_start = _single(_values(unit, "ExecStart"), f"ExecStart= in {unit.name}")
     pre = _values(unit, "ExecStartPre")
@@ -114,6 +131,7 @@ def _assert_preflight(unit: Path, module: str) -> None:
 
 def test_systemd_api_unit_passes_workers_from_env_without_a_literal_count():
     _assert_workers_from_env(API_UNIT, "R2DB_WORKERS")
+    _assert_no_worker_default(API_UNIT, "R2DB_WORKERS")
 
 
 def test_systemd_api_unit_runs_the_data_plane_preflight_before_uvicorn():
@@ -138,6 +156,7 @@ def test_env_example_api_names_workers_and_the_runtime_directory_slot_path():
 
 def test_systemd_control_unit_passes_control_workers_from_env_without_a_literal_count():
     _assert_workers_from_env(CONTROL_UNIT, "R2DB_CONTROL_WORKERS")
+    _assert_no_worker_default(CONTROL_UNIT, "R2DB_CONTROL_WORKERS")
 
 
 def test_systemd_control_unit_runs_the_control_plane_preflight_before_uvicorn():
