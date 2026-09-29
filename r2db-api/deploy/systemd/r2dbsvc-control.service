@@ -19,14 +19,15 @@
 # r2dbsvc-api.service are: this unit's own name/Description, its internal
 # port, its EnvironmentFile (control.env, never api.env -- see that file's
 # own header: "Never merge this file with the application plane's own
-# api.env"), and its ExecStart module target (control_main:app, not
-# main:app). User/Group/WorkingDirectory and every hardening directive below
-# are unchanged from r2dbsvc-api.service by design (completion condition:
-# the two units differ only in unit name/port/EnvironmentFile/ExecStart).
+# api.env"), its ExecStartPre/ExecStart module target (control_main, not
+# main) and --workers variable (R2DB_CONTROL_WORKERS, not R2DB_WORKERS),
+# and the absence of the slot RuntimeDirectory= (the control plane uses no
+# slot directory). User/Group/WorkingDirectory and every hardening
+# directive below are unchanged from r2dbsvc-api.service by design.
 #
 # PLACEHOLDERS TO REPLACE BEFORE INSTALLING (see DEPLOYMENT_RUNBOOK.md §7 and
 # deploy/scripts/part2_enable_units_and_nginx.sh):
-#   - WorkingDirectory / ExecStart paths (/opt/r2dbsvc/r2db-api below is
+#   - WorkingDirectory / ExecStartPre / ExecStart paths (/opt/r2dbsvc/r2db-api below is
 #     illustrative, identical to r2dbsvc-api.service's own install layout --
 #     both processes share one venv/checkout by default; see DEPLOYMENT_
 #     RUNBOOK.md §7's own "mirrors §2" framing)
@@ -88,7 +89,19 @@ EnvironmentFile=/etc/r2dbsvc/control.env
 # r2db_api.control_main) into the same installed package, not two different
 # packages -- see DEPLOYMENT_RUNBOOK.md §7's own "Process" paragraph.
 WorkingDirectory=/opt/r2dbsvc/r2db-api
-ExecStart=/opt/r2dbsvc/r2db-api/.venv/bin/uvicorn r2db_api.control_main:app --host 127.0.0.1 --port REPLACE_ME_CONTROL_PORT --no-server-header
+
+# Preflight (DEPLOYMENT_RUNBOOK.md §8): the same one-shot as
+# r2dbsvc-api.service's own ExecStartPre=, for this plane -- builds the
+# control-plane application once with control.env and this account, runs
+# every startup check (including R2DB_CONTROL_WORKERS <=
+# process_ceilings.control), and exits non-zero on the first failure, so
+# uvicorn below never starts on an unsound environment. No "-" prefix.
+ExecStartPre=/opt/r2dbsvc/r2db-api/.venv/bin/python -m r2db_api.control_main --preflight
+
+# --workers always comes from R2DB_CONTROL_WORKERS (required in control.env,
+# fixed at 1 -- DEPLOYMENT_RUNBOOK.md §8), never a number written here. This
+# plane uses no slot directory, so this unit has no RuntimeDirectory=.
+ExecStart=/opt/r2dbsvc/r2db-api/.venv/bin/uvicorn r2db_api.control_main:app --host 127.0.0.1 --port REPLACE_ME_CONTROL_PORT --workers ${R2DB_CONTROL_WORKERS} --no-server-header
 
 # REPLACE_ME_CONTROL_PORT is intentionally not a numeric placeholder, for
 # the SAME reason r2dbsvc-api.service's own REPLACE_ME_INTERNAL_PORT is not:

@@ -161,6 +161,13 @@ with what `PostgresCell` itself already believes.
 
 ## 4. Connection ceiling
 
+**Current pool sizing and the per-worker connection budget are in §20.**
+Every role pool and the platform pool of one data-plane worker are sized
+from that worker's own thread limit (`R2DB_THREAD_LIMIT` + 2), and the
+F-16/F-18 floors multiply by the declared `process_ceilings`; the figures
+below that size a pool from the declared `concurrency` describe the
+single-process sizing that §20 replaces.
+
 Historical note: before this section's current revision, every
 `PostgresCell` created its own two `_RolePool`s (`runtime`/`developer`) and
 held them forever once opened, lazily up to `pool_size` connections each.
@@ -441,14 +448,14 @@ re-run is a deliberate signal, not silently absorbed.
 
 **The platform migrations that come after `0002`** are each described in
 their own section, and are applied in the order `part1_provision_host_
-and_db.sh` actually runs them, not ascending file-number order (`0013`
-and `0014` both run before `0008`/`0012` despite their own HIGHER file
+and_db.sh` actually runs them, not ascending file-number order (`0013`,
+`0014` and `0015` all run before `0008`/`0012` despite their own HIGHER file
 numbers -- design D-1, R-66 WP-1): `0005` (§9, credential store), `0006`
 (§11, control-plane storage), `0007` (§15, audit sink), **`0013` (§4, role `CONNECTION
 LIMIT`s, Phase 10 WP-4f -- additive only, safe to apply by hand at any
 point after `0002`/`0005`/`0006`/`0007` exist on an already-running
 cluster; run by this script since R-66 WP-1 -- at the
-default declared `concurrency` (32), both processes now REFUSE TO START
+default thread limit (F-16 floors, §20), both processes now REFUSE TO START
 until it is applied, F-16 `check_role_connection_limits`;
 `part1a_check_max_connections.sh`, run right after `0002`, verifies this
 migration's own precondition -- `max_connections` re-checked against this
@@ -456,6 +463,10 @@ section's own worked example -- before this script ever applies it)**,
 `0014` (§19, auditreader `statement_timeout`, R-56 -- additive only, no
 process REFUSES TO START without it; `ops verify-declarations` reports
 `FAIL F-17` until it is applied and the control process restarted),
+`0015` (§20, the credential-keyed `requests_per_minute` row every
+data-plane worker shares -- on a platform database without its rate
+function, the application-plane process and its preflight refuse to
+start, naming the migration),
 **`0008` (§16, platform declarations + writer-role timeouts, Q4 phase --
 both processes now REFUSE TO START until it is applied)**, and `0012`
 (process ceilings, Phase 10 WP-6a -- also required before either process
@@ -1433,10 +1444,13 @@ than_the_length_check`).
 **Multiply by M.** Coalescing counters and the buffer are **process-local**;
 nothing is shared between instances. So the deployment-wide ceilings are
 `2 x <keys> x <windows> x M` and `<buffer capacity> x M`, where **M is the
-maximum number of concurrent `r2db_api.main` instances** your deployment can
-run. On the VPS M is normally 1; on any autoscaled shape M is the scaler's
-own configured maximum, and that number -- not the per-process default -- is
-what belongs in the threshold arithmetic.
+number of `r2db_api.main` processes: `R2DB_WORKERS` on the one host**
+(`DEPLOYMENT_RUNBOOK.md` §8). The declared `process_ceilings.data` equals
+that same number (§18, §20), so **M is this deployment's own declared
+`process_ceilings.data`** -- that number, not the per-process default, is
+what belongs in the threshold arithmetic. With `R2DB_WORKERS=1` M is 1; a
+deployment that raises `R2DB_WORKERS` re-declares `process_ceilings.data`
+to match, and this arithmetic uses that number.
 
 A serviceable rate model for alerting:
 
@@ -1942,12 +1956,14 @@ python -m r2db_api.ops declare-process-ceilings --data 1 --control 1
 
 `--data`/`--control` are each the maximum number of processes that may serve
 that plane's `surfaces` base URL at the same time, and must each be a
-positive integer. **This deployment's own systemd units each run exactly one
-uvicorn process** (no `--workers` flag anywhere in this script family), so
-`1`/`1` is the correct value here and is what `part1_provision_host_and_db.sh`
-declares. A deployment that later fronts more than one process behind the
-same base URL (a reverse-proxied pool, for example) must declare the real
-count -- see "What changes when you raise a ceiling above 1" below.
+positive integer. **`--data` is `api.env`'s `R2DB_WORKERS`** -- the number
+of uvicorn workers `r2dbsvc-api.service` starts (`--workers
+${R2DB_WORKERS}`) -- **and `--control` is 1** (`R2DB_CONTROL_WORKERS=1`,
+`DEPLOYMENT_RUNBOOK.md` §8). `part1_provision_host_and_db.sh` declares
+`1`/`1`, matching `R2DB_WORKERS=1`; re-declare `--data` whenever
+`R2DB_WORKERS` changes. Every process that serves a base URL runs on one
+host (`DEPLOYMENT_RUNBOOK.md` §8) -- see "What changes when you raise a
+ceiling above 1" below.
 
 **Required upgrade order for an EXISTING host** (ledger LQ4-24: the same gap
 `0008`+`ops declare-surfaces` closed for `surfaces` in §16 re-opens for
@@ -1957,8 +1973,7 @@ steps, in this exact order, before restarting either process, or both will
 refuse to start (F-15) with no `process_ceilings` row to read yet):
 
 1. `python -m r2db_api.ops apply-platform-migration 0012_process_ceilings.sql --lock-timeout <value>`
-2. `python -m r2db_api.ops declare-process-ceilings --data 1 --control 1`
-   (or the deployment's real ceilings, if not the single-uvicorn default)
+2. `python -m r2db_api.ops declare-process-ceilings --data <R2DB_WORKERS> --control 1`
 3. Restart both `r2dbsvc-api.service` and `r2dbsvc-control.service` --
    **every declaration in this phase is a startup-time snapshot** (requester
    ruling U-3, unchanged from §16): nothing re-reads the table per request.
@@ -1974,13 +1989,20 @@ command to run. `ops verify-declarations` reports this as `F-15`, exit code
 computed from the DECLARED ceiling, not from any live process count this
 deployment cannot observe from inside a single process:
 
-- `requests_per_minute`/`concurrency` (data-plane), `control_requests_per_
-  minute`/`audit_requests_per_minute` (control-plane) -- bound by
-  in-memory, per-process state: `enforced` while the relevant ceiling is
-  `1`, `deployment_required` once it is `2` or more (contract 1.8.0's own
-  enforcement-scope definition: a per-process bound is `enforced` for the
-  WHOLE deployment only while exactly one process may serve that plane's
-  base URL).
+- `requests_per_minute` (data-plane) -- counted in the platform-database
+  row every data-plane worker shares (`0015`, §20): `enforced` at any
+  declared ceiling.
+- `concurrency` (data-plane) -- held by the host-shared slot directory
+  (`R2DB_SLOT_DIR`, `DEPLOYMENT_RUNBOOK.md` §8): `enforced` only while
+  `process_ceilings.data` EQUALS `R2DB_WORKERS`; a larger ceiling is read
+  as processes on another host, whose slots are not shared, and answers
+  `deployment_required`. A ceiling below `R2DB_WORKERS` stops startup.
+- `control_requests_per_minute`/`audit_requests_per_minute`
+  (control-plane) -- in-memory, per-process windows: `enforced` while
+  `process_ceilings.control` is `1`, `deployment_required` once it is `2`
+  or more (contract 1.8.0's own enforcement-scope definition: a
+  per-process bound is `enforced` for the WHOLE deployment only while
+  exactly one process may serve that plane's base URL).
 - `applications`/`credentials_per_application` (control-plane) -- bound in
   PostgreSQL under a same-transaction table lock: `enforced` regardless of
   the declared ceiling. `idempotency_entries` (data-plane) is also bound
@@ -1999,15 +2021,16 @@ ceiling and the real process topology are an operator responsibility, kept
 in agreement by deployment discipline (runbook + a post-deploy check), not
 by anything either process can check from inside itself.
 
-**What changes when you raise a ceiling above 1.** Declaring `--data 2` (or
-higher) is honest, not silently unsafe: `limit_enforcement.requests_per_
-minute`/`.concurrency` immediately reports `deployment_required` instead of
-`enforced`, telling a client this deployment's own in-memory rate/
-concurrency bounds no longer hold across the whole deployment -- the
-deployer is expected to enforce them another way (a reverse proxy, a shared
-external limiter) if that class's bound still matters to them. Nothing in
-this package refuses to start or serve at a ceiling above 1; the honest
-declaration is the entire point.
+**What changes when you raise a ceiling above 1.** Declaring `--data` equal
+to a larger `R2DB_WORKERS` keeps both data-plane classes `enforced` and
+raises the F-16/F-18 floors with it (§20). Declaring `--data` ABOVE
+`R2DB_WORKERS` is honest, not silently unsafe:
+`limit_enforcement.concurrency` reports `deployment_required` instead of
+`enforced`, telling a client that the host-shared slots may not cover every
+process behind the base URL; `requests_per_minute` stays `enforced`.
+Declaring `--control 2` or higher makes the two control-plane windows
+report `deployment_required` and raises the control roles' F-16 floors
+(§20). The honest declaration is the entire point.
 
 ## 19. `r2dbsvc_auditreader`'s own `statement_timeout` (`0014_auditreader_statement_timeout.sql`, R-56)
 
@@ -2065,3 +2088,84 @@ creates that role. If a different role created it on this cluster, grant
 ADMIN OPTION explicitly first (`GRANT r2dbsvc_auditreader TO
 r2dbsvc_control WITH ADMIN OPTION`, run as a role that already holds it),
 or `0014` fails and rolls back entirely (its own `BEGIN`/`COMMIT`).
+
+## 20. Multi-process data plane: the shared rate row (`0015_credential_request_rate.sql`) and the connection budget
+
+Design `docs/design/MULTI_PROCESS_WORKER_V0_1.md` D-3 (1) and (5). The
+data plane runs `R2DB_WORKERS` uvicorn workers on one host
+(`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §8); this section covers what that
+means for the platform database.
+
+**`0015` -- the credential-keyed `requests_per_minute` row.** Creates
+`r2dbsvc_registry.credential_request_rate` (one row per credential) and the
+function `r2dbsvc_registry.credential_request_rate_admit`, and grants
+`r2dbsvc_api` `SELECT`/`INSERT`/`UPDATE` on the table and `EXECUTE` on the
+function -- nothing to any other role. Every data-plane worker counts an
+authenticated request with one autocommit statement on its own platform
+pool (the `r2dbsvc_api` role), after authentication, so every worker
+shares one count per credential; unauthenticated requests never reach the
+table. A database failure on that statement refuses the request, the same
+way as any other platform-database failure -- it never lets the request
+through uncounted. Rows go away with their credential (`ON DELETE
+CASCADE`). Run it as `r2dbsvc_control` against `r2dbsvc_platform`, after
+`0005` (it references `credentials`); idempotent, no `-v` variables:
+
+```
+python -m r2db_api.ops apply-platform-migration 0015_credential_request_rate.sql --lock-timeout <value>
+```
+
+`part1_provision_host_and_db.sh` applies it on a host it provisions. On a
+platform database without its rate function, the application-plane
+process and its preflight refuse to start, naming the migration -- apply
+it before starting a release that counts in it.
+
+**Window shape (disclosure).** The row keeps one count per integer second
+for the current second and the 60 before it (`int[61]`, a ring indexed by
+the second modulo 61), anchored to the database clock (`clock_timestamp()`),
+so the workers' own clocks never enter the window, and its base second only
+moves forward. At a window edge it may count up to one second more than
+60 s: it may refuse a request slightly early, and it never admits more than
+the declared `requests_per_minute`.
+
+**Connection budget -- counted from the thread limit.** One worker never
+has more requests using the database at once than its thread limit
+(`R2DB_THREAD_LIMIT`, default 4), so every pool of one worker is sized
+`p = R2DB_THREAD_LIMIT + 2` (`role_pool_size`; `p = 6` by default): the
+credential store and the durable audit sink (both `r2dbsvc_api`), and each
+served application's runtime and developer pool. The declared
+`concurrency` is not part of the budget -- a slot holds a file lock, not a
+connection. The control process computes the same data-plane terms for its
+own startup F-16/F-18 checks from `R2DB_THREAD_LIMIT` in `control.env`, so
+keep that value equal to `api.env`'s (both unset, the default 4, is equal).
+With `W = process_ceilings.data` (equal to `R2DB_WORKERS`) and
+`C = process_ceilings.control` (1):
+
+| Role | F-16 floor (startup and `verify-declarations`) | At `p = 6` | Limit this set ships (`0013`; auditreader `0007`) | Largest count that fits |
+| --- | --- | --- | --- | --- |
+| `r2dbsvc_api` | `2 × p × W` | `12 × W` | 68 | `W` ≤ 5 |
+| each `<slug>_runtime` / `<slug>_developer` | `p × W` | `6 × W` | 36 | `W` ≤ 6 |
+| `r2dbsvc_controlplane` | `16 × C` | `16 × C` | 20 | `C` = 1 |
+| `r2dbsvc_auditreader` | `4 × C` | `4 × C` | 5 | `C` = 1 |
+
+F-18 (startup and `verify-declarations`, cluster-wide) judges the lower
+bound `W × (2p + 2p) + C × 16` once at least one application is registered
+(`W × 2p + C × 16` with none) plus `superuser_reserved_connections` plus
+`reserved_connections` against `max_connections`. At `p = 6`: `24 × W + 16`
+(`12 × W + 16` with no application registered) -- 40 at `W = 1`, 112 at
+`W = 4` (64 with no application registered).
+
+So at the default thread limit, `R2DB_WORKERS` up to 5 fits the role limits
+`0013` sets. A larger count, or a raised `R2DB_THREAD_LIMIT`, needs a
+higher `CONNECTION LIMIT` than `0013` sets on the roles the table names --
+for a deployed platform, a new platform migration; F-16 stops startup
+naming the role, its current limit and the exact floor it needs. `0013` sets fixed values (`ALTER ROLE ... CONNECTION LIMIT`), so
+applying it again returns a raised limit to them. Every figure here
+assumes the unit is restarted with stop and start, never SIGHUP
+(`DEPLOYMENT_RUNBOOK.md` §8): SIGHUP runs `R2DB_WORKERS + 1` workers for a
+while, outside these floors.
+
+**`process_ceilings.control` of 2 or more** needs a `CONNECTION LIMIT` of at
+least `16 × process_ceilings.control` on `r2dbsvc_controlplane` and at
+least `4 × process_ceilings.control` on `r2dbsvc_auditreader`; F-16 reports
+the exact floor it needs, naming the role. `0013`'s 20 and `0007`'s 5 cover
+one control process only.

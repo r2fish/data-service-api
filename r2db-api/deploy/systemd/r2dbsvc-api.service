@@ -6,7 +6,7 @@
 # auth postures).
 #
 # Every path, internal port, and account name below that the operator must supply
-# (WorkingDirectory, ExecStart's paths, REPLACE_ME_INTERNAL_PORT) is a placeholder
+# (WorkingDirectory, ExecStartPre's and ExecStart's paths, REPLACE_ME_INTERNAL_PORT) is a placeholder
 # to substitute with the target's real values before installing -- this file itself
 # never names a real host, credential, or filesystem path. Note this is narrower
 # than "nothing here is real": this unit is a genuine, deliberately-chosen part of
@@ -16,7 +16,8 @@
 # to verify and replace before this unit is installed on the actual target.
 #
 # PLACEHOLDERS TO REPLACE BEFORE INSTALLING (see DEPLOYMENT_RUNBOOK.md §2):
-#   - WorkingDirectory / ExecStart paths (/opt/r2dbsvc/r2db-api below is illustrative)
+#   - WorkingDirectory / ExecStartPre / ExecStart paths (/opt/r2dbsvc/r2db-api below
+#     is illustrative)
 #   - REPLACE_ME_INTERNAL_PORT (uvicorn's --port; run the collision check in the
 #     runbook first -- do not guess a port that "should" be free)
 #
@@ -57,7 +58,30 @@ EnvironmentFile=/etc/r2dbsvc/api.env
 # existing VPS r2db-api implementation, which must keep its own separate venv,
 # secrets, and PostgreSQL targets -- see DEPLOYMENT_RUNBOOK.md §6).
 WorkingDirectory=/opt/r2dbsvc/r2db-api
-ExecStart=/opt/r2dbsvc/r2db-api/.venv/bin/uvicorn r2db_api.main:app --host 127.0.0.1 --port REPLACE_ME_INTERNAL_PORT --no-server-header
+
+# Preflight (DEPLOYMENT_RUNBOOK.md §8): builds the application once with this
+# unit's own EnvironmentFile and account -- every startup check, including
+# R2DB_WORKERS <= process_ceilings.data and the slot-directory checks -- and
+# exits non-zero on the first failure, so uvicorn below never starts on an
+# unsound environment. uvicorn's own worker supervisor cannot stop the unit
+# on a worker's startup failure: it replaces the failed worker and keeps
+# running. No "-" prefix: a failing preflight fails the unit.
+ExecStartPre=/opt/r2dbsvc/r2db-api/.venv/bin/python -m r2db_api.main --preflight
+
+# --workers always comes from R2DB_WORKERS (required in api.env, no default),
+# never a number written here -- the same value the preflight above checks
+# against the declared process_ceilings.data.
+ExecStart=/opt/r2dbsvc/r2db-api/.venv/bin/uvicorn r2db_api.main:app --host 127.0.0.1 --port REPLACE_ME_INTERNAL_PORT --workers ${R2DB_WORKERS} --no-server-header
+
+# Host-shared concurrency slots (DEPLOYMENT_RUNBOOK.md §8): systemd creates
+# /run/r2dbsvc-api/slots, owned by User=/Group= above, mode 0700, before the
+# preflight runs, and removes it when the unit stops. api.env's R2DB_SLOT_DIR
+# names this same path; the application only checks it (existence, owner,
+# mode 0700, working flock) and never creates it. systemd keeps a
+# RuntimeDirectory= writable under ProtectSystem=strict below; the directory
+# holds empty lock files only, never persistent state.
+RuntimeDirectory=r2dbsvc-api/slots
+RuntimeDirectoryMode=0700
 
 # REPLACE_ME_INTERNAL_PORT is intentionally not a numeric placeholder: uvicorn will
 # fail to parse it and the unit will fail loudly at start if an operator forgets to
