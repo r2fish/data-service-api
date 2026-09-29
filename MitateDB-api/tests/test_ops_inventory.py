@@ -2082,9 +2082,21 @@ def test_inventory_connection_headroom_app_role_overflow_with_named_values(monke
     """One old-basis process (`concurrency=32`) plus two
     new-basis processes (`thread_limit=4`, `role_pool_size` 6): the app
     role's own condition 1 floor is `32 + 2*6 = 44`, past the default
-    `0003` app-role `CONNECTION LIMIT` of 36 -- blocked."""
+    `0003` app-role `CONNECTION LIMIT` of 36 -- blocked. The API role's own
+    CONNECTION LIMIT is raised out of the way (100000) so only the app
+    role's own (default) CONNECTION LIMIT can explain a `blocked` result
+    (without this, `0012`'s own default of 68 for `mitatedbsvc_api` is
+    itself exceeded here -- `1*2*32 + 2*2*6 = 88` -- and a mutation that
+    drops only the app-role floor's own `* N` factor would stay `blocked`
+    regardless, via the API role, rework 1b finding)."""
     _declare_golden_path(monkeypatch, platform, data=2, control=1)
     _provision_app(platform, "app1")
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 100000").format(sql.Identifier(platform.api_role)))
+    finally:
+        admin.close()
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
