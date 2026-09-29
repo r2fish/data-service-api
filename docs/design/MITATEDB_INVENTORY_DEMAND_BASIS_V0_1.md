@@ -1,8 +1,8 @@
-# MitateDB の Gate-0 inventory 項目 (8) の需要の基準 設計メモ（v0.2 (監督裁定 1〜16 を §10 に追記。本文は書き換えず §10 が優先する)）
+# MitateDB の Gate-0 inventory 項目 (8) の需要の基準 設計メモ（v0.3 (監督裁定 1〜25 を §10 に追記。本文は書き換えず §10 が優先する。設計レビュー 1 回)）
 
 ## 0. 版数・位置づけ
 
-- **v0.2 (監督裁定 1〜16 を §10 に追記。本文は書き換えず §10 が優先する) (2026-09-29)** 起票。台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-113** (`RM`:533) の中の WP-7 (作業指示書 `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` の WP-7)。
+- **v0.3 (監督裁定 1〜25 を §10 に追記。本文は書き換えず §10 が優先する。設計レビュー 1 回) (2026-09-29)** 起票。台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-113** (`RM`:533) の中の WP-7 (作業指示書 `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` の WP-7)。
 - 依頼者裁定: 同作業指示書 §6.1 の「依頼者裁定 (2026-09-29) と監督裁定 51」(`WO113`:481-488)。逐語「(A)で進めてください」(`WO113`:485) は、R-113 の中で inventory の需要の算術を起動時の検査と同じ基準に揃えることを指す。再審議しない (`OC` §1.7 の 51)。依頼者判断待ちの選択肢は無い。
 - **行番号の木**: src と tests の `file:line` は、MitateDB の移植が入った木 (worktree `r113-wp3`、`c0abb3d`) のものである。「旧 code」の `file:line` は WP-7 の担当 worktree の基点 `bd961ac` の木 (移植前)、runbook の `file:line` は worktree `r113-wp5` (`9fb4920`) の木、設計文書と作業指示書の行は基点 `bd961ac` の木のものである。
 - 公開規律: 数値はすべて本リポジトリの現物から読んだ値と算式である。本番の値・DSN・ホスト名・project 識別子を含まない (`OC` §1.9)。
@@ -268,3 +268,15 @@ auditreader 需要         = control 合計 × 4              (同上。role が
 14. (疑義 14) 新しい引数の help と runbook の新しい段は実装担当が起草し、help は既存の help text のテストと同じ形で文字列を pin する。契約の文ではないので確定文ファイルは要らない。既存の確定文言の help は変えない。
 15. (疑義 15) `security/CONTROL_MAPPING.md` の SI-08 の MitateDB の写像の追随は、記録の WP (作業指示書 §9) で監督が行う。本 WP は同書が引く test 名を改名・削除しない。
 16. (D-3) 引数の形は (甲) を採る。既存の 7 つを保ち、`--thread-limit` と `--data-process-count-old-basis` を足す。新しい基準の process 数 = `--data-process-count-total` − 古い基準の process 数。古い基準の process 数の省略は `unknown` (0 は明示する)。
+
+### 10.1 監督裁定 17〜25 (v0.3、2026-09-29。設計レビュー 1 回 (監督保管 `r113_design_review_wp7.md`、指摘 8 件) への裁定。§10 の 1〜16 と食い違うときは本節が優先する)
+
+17. **(指摘 1、高) 裁定 3 を撤回する。** 条件 2 (合計) の application の項は、登録 application が複数のとき実需要を小さく数える。data process 1 つは、serve する application 1 つにつき runtime role と developer role の永続接続を 1 本ずつ持つ (process あたり 2K 本。K = role を持つ登録 application の数) のに、inventory は application の需要を process あたり 1 role 分・1 回しか足さない。thread limit 基準で process あたりの項が 32 から 6 に下がると、穴の現れる閾値が K ≥ 17 から K ≥ 4 に下がる。裁定 3 が根拠にした F-18 は自ら下限を名乗る検査で、条件 2 の担保にならない。**条件 2 の application の項を max(O × c + N × p, 2 × K × (O + N)) に改める** (O = 古い基準の data process 数、N = 新しい基準の data process 数、c = `--concurrency`、p = `role_pool_size(thread limit)`、K は inventory が `applications` の表から読む)。現行の項より小さくならず、実際の永続接続の数より小さくならない。K ≤ 3 (thread limit 4) では §5 の数は変わらない。inventory の設計の裁定 Z-27 の「共有する」は in-flight の要求の数についての文で、永続接続には当てはまらない旨を `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` に訂正註で記す。既存のテスト `test_inventory_connection_headroom_shared_application_role_budget_counts_once` は名を変えず、中身を新しい項に合わせる (裁定 15: `security/CONTROL_MAPPING.md` が引く test 名を改名・削除しない。同書の主張の追随は監督)。条件 1 (role ごと) の application の床は裁定 (D-6) のまま p (実需要 1 本より大きい。保守側)。
+18. **(指摘 2、中) (甲) を採る。** 古い基準の revision が `MITATEDB_THREAD_LIMIT` を env に持つか、その `concurrency` が 6 未満なら、runbook は (8) の入力を省かせ `unknown` とする (古い code の api role の実需要が 2 × c を超えうる構成)。既定の組 (c = 32、thread limit 4) では起きない。引数は足さない。
+19. **(指摘 3、中) D-4 を改める。** revision の基準は image digest と env の両方で決める: 新しい基準 = 新しい code の image digest で、かつ env に `MITATEDB_WORKERS` を持つ revision。それ以外は古い基準で数える。digest と env が食い違う revision (古い digest に `MITATEDB_WORKERS` が在る、新しい digest に無い) が数える対象に在れば、古い基準の process 数を省き `unknown` とする。digest は inventory の項目 (9) のために runbook が既に読んでいる値を使う。
+20. **(指摘 4、中) (甲) を採る。** env を変えられない稼働中の古い基準の revision が `MITATEDB_MAX_CONCURRENCY` を env に持たないとき、運用者は、その revision の image digest の元になった commit の code の既定値を、出所 (commit とファイルの行) を加数表に書いたうえで `--concurrency` に宣言してよい。inventory 自身は既定値で埋めない (条件 3 は inventory の入力の規則であり、運用者が出所付きで宣言する値は事実である)。新しい基準の revision の `--thread-limit` には適用しない (裁定 4 のまま、候補の deploy が env に明示する)。runbook §10 の受理のやり直しで依頼者が確かめる点として、引き継ぎ書に挙げる。
+21. **(指摘 5、中) 採る。** runbook の加数表に「基準」の列 (根拠 = image digest と `MITATEDB_WORKERS` の有無) を置き、古い基準の process 数を 2 回数えて一致させ、列が空の行があれば古い基準の process 数を省く。§10.4.3 に「inventory は古い基準の process 数の正しさを検査できない。誤った宣言は需要を小さく数える」の開示を置く。
+22. **(指摘 6、中) 採る。** 一致テストは 4 つの role class (api・application・controlplane・auditreader) に広げ、加えて `config._POOL_SIZE_HEADROOM`・`_API_ROLE_STORE_COUNT`・`_CONTROLPLANE_ROLE_POOL_FLOOR`・`_AUDITREADER_ROLE_POOL_FLOOR` をテストの中で差し替えても、F-16 が通す最小の上限と inventory が confirmed にする最小の上限が一緒に動くことを観測する (数値の書き写しが赤になる)。`main.py` が F-16 に渡す引数と inventory の引く値の一致は、この一致テストの範囲外であることを設計 §7 に開示する。
+23. **(指摘 7) 作業指示書の節の案の 11 件をすべて直す。** 9 の `MITATEDB_CONTROL_WORKERS` は許可表に行を足す。10 の「step 13 の deploy の env は `MITATEDB_THREAD_LIMIT` を含む」「古い基準の process 数が 0 のとき `--concurrency` を渡さない」を完了条件に足す。11 の指し先 (`docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` への訂正註 1 行と、作業指示書 §6.1 の監督裁定 51 への訂正註) は監督が記録の WP で書く。
+24. **(指摘 8、低) 採る。** 許可表の `MITATEDB_PLATFORM_POOL_SIZE` の行は値ではなく「在るか無いか」を読む行として書く。
+25. 検算 (§5) は設計レビューが再計算して全部一致した (W ≤ 5、V + W ≤ 11、control は 2 process まで、0014 の値と一致)。api role の新しい基準の床 2p は、現物から数えた 1 process の同時接続の上限 (pool の p + audit の per-call 接続 2t + 4 − p) とちょうど等しく、余りは 0 である。この事実を §5 に註として読む。
