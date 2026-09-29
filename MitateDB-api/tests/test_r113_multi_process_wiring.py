@@ -832,13 +832,23 @@ def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
     `mitatedb_api.cell` logger through the module's one
     `BackendFailureLog` (its clock replaced and moved on by one interval
     between the two points): the fixed prefix, the `SlotBackendError`
-    message naming the expired `scan` deadline, and a count of 0."""
+    message naming the expired `scan` deadline, and a count of 0. Before
+    the replacement, the production instance's own clock is the real
+    `time.monotonic` (mutation Ms9m: a `time.time` default leaves this
+    assertion alone). Calling the post-auth mapping point again with the
+    clock unmoved writes no further line, because the two mapping points
+    share the ONE module-level instance (mutation Ms9sh: the post-auth
+    point writing through a fresh instance of its own would not share
+    that suppression); the failure it did not log there surfaces with a
+    count of 1 once the pre-auth mapping point is called a further
+    interval later."""
     from mitatedb_api import cell as cell_module
 
     prefix = "mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE"
     assert cell_module._SLOT_FAILURE_LOG_PREFIX == prefix
     writer = cell_module._SLOT_FAILURE_LOG
     assert isinstance(writer, concurrency_slots.BackendFailureLog)
+    assert writer._clock is time.monotonic  # noqa: SLF001
     clock = [1000.0]
     monkeypatch.setattr(writer, "_clock", lambda: clock[0])
     monkeypatch.setattr(writer, "_last_line_at", None)
@@ -862,13 +872,29 @@ def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
         finished, direct, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
         threads.append(thread)
         assert finished, f"acquire() had not returned after {elapsed:.2f}s with scan held"
-        for label, entry in (("acquire_concurrency_slot", holder.acquire_concurrency_slot), ("concurrency_slot", holder.concurrency_slot)):
+        mapping_points = (("acquire_concurrency_slot", holder.acquire_concurrency_slot), ("concurrency_slot", holder.concurrency_slot))
+        for index, (label, entry) in enumerate(mapping_points):
             caplog.clear()
             finished, outcome, elapsed, thread = _call_bounded(_through(entry), 5.0)
             threads.append(thread)
             assert finished, f"{label} had not returned after {elapsed:.2f}s with scan held"
             results[label] = (outcome, [r for r in caplog.records if r.name == "mitatedb_api.cell"])
-            clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+            if index + 1 < len(mapping_points):
+                clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+        # the same instance backs both mapping points: calling the post-auth
+        # one again with the clock unmoved falls inside the interval its own
+        # previous call just started, so it writes no line of its own.
+        caplog.clear()
+        finished, repeat_outcome, elapsed, thread = _call_bounded(_through(holder.concurrency_slot), 5.0)
+        threads.append(thread)
+        assert finished, f"concurrency_slot had not returned after {elapsed:.2f}s with scan held (repeat)"
+        repeat_records = [r for r in caplog.records if r.name == "mitatedb_api.cell"]
+        clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+        caplog.clear()
+        finished, pre_auth_repeat, elapsed, thread = _call_bounded(_through(holder.acquire_concurrency_slot), 5.0)
+        threads.append(thread)
+        assert finished, f"acquire_concurrency_slot had not returned after {elapsed:.2f}s with scan held (repeat)"
+        pre_auth_repeat_records = [r for r in caplog.records if r.name == "mitatedb_api.cell"]
     finally:
         os.close(holder_fd)
         for thread in threads:
@@ -883,6 +909,13 @@ def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
         assert str(outcome[1]) == "the concurrency slot directory could not be used", (label, outcome[1])
         assert http_module._STATUS_BY_CODE[http_module._classify(outcome[1])] == 503, label
         assert [(r.levelno, r.getMessage()) for r in records] == [(logging.WARNING, expected_line)], (label, records)
+    assert repeat_records == [], repeat_records
+    assert repeat_outcome[0] == "raised" and isinstance(repeat_outcome[1], StorageConfigurationError), repeat_outcome
+    assert pre_auth_repeat[0] == "raised" and isinstance(pre_auth_repeat[1], StorageConfigurationError), pre_auth_repeat
+    suppressed_line = f"{prefix}: {backend_message} (1 more failures not logged since the previous line)"
+    assert [(r.levelno, r.getMessage()) for r in pre_auth_repeat_records] == [
+        (logging.WARNING, suppressed_line),
+    ], pre_auth_repeat_records
 
 
 def _failure_log_lines(caplog: pytest.LogCaptureFixture, logger_name: str) -> list[tuple[int, str]]:

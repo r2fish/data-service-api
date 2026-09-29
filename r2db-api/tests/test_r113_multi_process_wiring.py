@@ -1752,7 +1752,16 @@ def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
     through the module's one `BackendFailureLog` (its clock replaced and
     moved on by one interval between the two points): the fixed prefix,
     the `SlotBackendError` message naming the expired `scan` deadline,
-    and a count of 0. The caller's credential id is not in it."""
+    and a count of 0. The caller's credential id is not in it. Before
+    the replacement, the production instance's own clock is the real
+    `time.monotonic` (変異 Ms9m: a `time.time` default leaves this
+    assertion alone). Calling the post-auth mapping point again with the
+    clock unmoved writes no further line, because the two mapping points
+    share the ONE module-level instance (変異 Ms9sh: the post-auth point
+    writing through a fresh instance of its own would not share that
+    suppression); the failure it did not log there surfaces with a count
+    of 1 once the pre-auth mapping point is called a further interval
+    later."""
     from r2db_api import service as service_module
     from r2db_api.auth import AuthContext
     from r2db_api.service import DataService
@@ -1765,6 +1774,7 @@ def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
     assert service_module._SLOT_FAILURE_LOG_PREFIX == prefix
     writer = service_module._SLOT_FAILURE_LOG
     assert isinstance(writer, concurrency_slots.BackendFailureLog)
+    assert writer._clock is time.monotonic  # noqa: SLF001
     clock = [1000.0]
     monkeypatch.setattr(writer, "_clock", lambda: clock[0])
     monkeypatch.setattr(writer, "_last_line_at", None)
@@ -1796,13 +1806,29 @@ def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
         finished, direct, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
         threads.append(thread)
         assert finished, f"acquire() had not returned after {elapsed:.2f}s with scan held"
-        for label, fn in (("acquire_concurrency_slot", _pre_auth), ("_slot", _post_auth)):
+        mapping_points = (("acquire_concurrency_slot", _pre_auth), ("_slot", _post_auth))
+        for index, (label, fn) in enumerate(mapping_points):
             caplog.clear()
             finished, outcome, elapsed, thread = _call_bounded(fn, 5.0)
             threads.append(thread)
             assert finished, f"{label} had not returned after {elapsed:.2f}s with scan held"
             results[label] = (outcome, [r for r in caplog.records if r.name == "r2db_api.service"])
-            clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+            if index + 1 < len(mapping_points):
+                clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+        # the same instance backs both mapping points: calling the post-auth
+        # one again with the clock unmoved falls inside the interval its own
+        # previous call just started, so it writes no line of its own.
+        caplog.clear()
+        finished, repeat_outcome, elapsed, thread = _call_bounded(_post_auth, 5.0)
+        threads.append(thread)
+        assert finished, f"_slot had not returned after {elapsed:.2f}s with scan held (repeat)"
+        repeat_records = [r for r in caplog.records if r.name == "r2db_api.service"]
+        clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+        caplog.clear()
+        finished, pre_auth_repeat, elapsed, thread = _call_bounded(_pre_auth, 5.0)
+        threads.append(thread)
+        assert finished, f"acquire_concurrency_slot had not returned after {elapsed:.2f}s with scan held (repeat)"
+        pre_auth_repeat_records = [r for r in caplog.records if r.name == "r2db_api.service"]
     finally:
         os.close(holder_fd)
         for thread in threads:
@@ -1819,6 +1845,13 @@ def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
         ), (label, outcome[1])
         assert [(r.levelno, r.getMessage()) for r in records] == [(logging.WARNING, expected_line)], (label, records)
         assert credential_marker not in records[0].getMessage(), label
+    assert repeat_records == [], repeat_records
+    assert repeat_outcome[0] == "raised" and isinstance(repeat_outcome[1], FoundationError), repeat_outcome
+    assert pre_auth_repeat[0] == "raised" and isinstance(pre_auth_repeat[1], FoundationError), pre_auth_repeat
+    suppressed_line = f"{prefix}: {backend_message} (1 more failures not logged since the previous line)"
+    assert [(r.levelno, r.getMessage()) for r in pre_auth_repeat_records] == [
+        (logging.WARNING, suppressed_line),
+    ], pre_auth_repeat_records
 
 
 def _failure_log_lines(caplog: pytest.LogCaptureFixture, logger_name: str) -> list[tuple[int, str]]:

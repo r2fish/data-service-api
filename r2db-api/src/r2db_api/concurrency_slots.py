@@ -143,7 +143,9 @@ class BackendFailureLog:
     default; injectable so a test can move it). The decision and the
     count are taken under one lock, so failures noted from several
     threads at once write no second line inside one interval and lose no
-    count; the line itself is written after the lock is released.
+    count; the line itself is written after the lock is released. A
+    count held after the last written line is not written on its own; it
+    appears only with the next failure's line, whenever that comes.
 
     The failures that reach it without waiting (an errno other than
     `_HELD_ERRNOS`, a file that cannot be opened) are raised before
