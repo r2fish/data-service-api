@@ -1607,7 +1607,11 @@ Scale the data service by worker processes, never by instances.
   limit)`, the SAME per-process floor F-16 uses (the table below) -- an
   OLD-basis revision (one still running a `--concurrency`-sized pool
   instead) is counted separately, from its own declared `concurrency`
-  (§10.4.3).
+  (§10.4.3). On an existing deployment already carrying traffic, this
+  declare-and-redeploy is exactly §10.10.1 step 6's own arithmetic and,
+  where that arithmetic does not clear, its two-rollout path -- run it
+  through that gated procedure (section 10) against production, never by
+  itself.
 - The preflight and every worker refuse to start when `MITATEDB_WORKERS`
   exceeds `process_ceilings.data`. `limit_enforcement.concurrency` is
   `enforced` only while the two are EQUAL; a larger declaration is read as
@@ -1689,6 +1693,14 @@ bound `W × (2p + 2p) + C × 16` once at least one application is registered
 `reserved_connections` against `max_connections`. At `p = 6`: `24 × W + 16`
 (`12 × W + 16` with no application registered) -- 40 at `W = 1`, 112 at
 `W = 4` (64 with no application registered).
+
+**The "Largest count that fits" column above is `0014`'s own numbers.**
+During the window §10.10.1 step 7 opens, before `0014` itself has
+committed (step 6's own F-16 paragraph), the limits are still `0012`'s:
+68 on `mitatedbsvc_api` and 36 on each application role, which fit only
+`W` ≤ 5 (api: `12 × 6 = 72` exceeds 68) and `W` ≤ 6 (application:
+`6 × 7 = 42` exceeds 36) respectively -- the api role is the tighter of
+the two during that window.
 
 `0014` sizes its limits for two revisions serving side by side (the
 rollout overlap below): two revisions of `W` workers each need `2 × 12 × W`
@@ -2293,9 +2305,14 @@ partially written file:
 
 ```sh
 gcloud run revisions describe <revision> --project=<project> --region=<region> --quiet \
-  --format='json(metadata.name,metadata.creationTimestamp,metadata.annotations."autoscaling.knative.dev/maxScale",metadata.annotations."autoscaling.knative.dev/minScale",metadata.annotations."run.googleapis.com/cloudsql-instances",spec.serviceAccountName,spec.containers[].image,status.imageDigest)' \
+  --format='json(metadata.name,metadata.creationTimestamp,metadata.annotations."autoscaling.knative.dev/maxScale",metadata.annotations."autoscaling.knative.dev/minScale",metadata.annotations."run.googleapis.com/cloudsql-instances",spec.serviceAccountName,spec.containers[].image,spec.containers[].command,spec.containers[].args,status.imageDigest)' \
   > <evidence-dir>/<service-label>-<revision-label>.json
 ```
+
+`spec.containers[].command`/`spec.containers[].args` are projected too, read
+only for §10.4.3's own worst-case-total step 5 (whether either is non-empty
+on a counted revision) -- neither this projection nor anything else in this
+runbook reads what they actually pass.
 
 **Secret state** (the secret's name stays in a shell variable; the
 evidence keeps the env name and the state only):
@@ -2313,15 +2330,18 @@ gcloud run revisions list --service=<service> --project=<project> --region=<regi
 ```
 
 **Env-value allow-table** (non-secret numeric settings that are inputs to
-a judgment -- the value of an env name NOT in this table is never read):
+a judgment -- the value of an env name NOT in this table is never read).
+The NEW/OLD basis distinction the first two rows below read applies to
+Data only; Control carries no basis of its own (§10.4.3, D-5: its
+per-process demand is a fixed floor on either basis):
 
 | Env name | Item it feeds | When unset |
 |---|---|---|
-| `MITATEDB_WORKERS` | a revision's own worker count and NEW/OLD-basis status for item (8) (§10.4.3) | that revision's own worker count is 1; its basis is OLD-basis unless its image digest is a NEW-basis digest (in which case the digest and the `MITATEDB_WORKERS` presence disagree, and §10.4.3's own basis rule applies) |
+| `MITATEDB_WORKERS` | a revision's own worker count and NEW/OLD-basis status for item (8) (§10.4.3) | that revision's own worker count is `WEB_CONCURRENCY`'s own value (the next row), or 1 when it carries neither; its basis is OLD-basis unless its image digest is a NEW-basis digest (in which case the digest and the `MITATEDB_WORKERS` presence disagree, and §10.4.3's own basis rule applies) |
 | `WEB_CONCURRENCY` | an OLD-basis revision's own worker count for item (8), when it carries no `MITATEDB_WORKERS` (§10.4.3) | that revision's own worker count is 1 |
-| `MITATEDB_THREAD_LIMIT` | `inventory --thread-limit` for item (8)'s NEW-basis processes (§6.5) | item (8) is `unknown` for the parts that depend on it -- the code default is never substituted |
-| `MITATEDB_CONTROL_WORKERS` | Control's own process ceiling/total for item (8) (§10.4.3; always 1) | that revision's own Control process count cannot be established |
-| `MITATEDB_MAX_CONCURRENCY` | `inventory --concurrency` for item (8)'s OLD-basis processes only (§10.4.3) | item (8) is `unknown` for the parts that depend on it, unless §10.4.3's own declared-default exception applies (an OLD-basis revision counted toward item (8), including one that takes no traffic but has `minScale` 1 or more) -- the code default is never substituted for `--thread-limit` |
+| `MITATEDB_THREAD_LIMIT` | `inventory --thread-limit` for item (8)'s NEW-basis processes (§6.5), step 6's own F-18 arithmetic (§10.10.1) for every NEW-basis Data or Control revision, and step 6's own F-16 arithmetic for a NEW-basis Data revision's own api/application-role floors only -- Control's own controlplane/auditreader floors are a fixed `16 x C`/`4 x C` and never scale with this value, even though Control's own F-16 call also takes it as an argument (§6.5) | item (8) is `unknown` for the parts that depend on it -- the code default is never substituted |
+| `MITATEDB_CONTROL_WORKERS` | Control's own process ceiling/total for item (8) (§10.4.3; always 1 on a Control revision on a NEW-basis digest, §10.4.4 step 7, which requires this name) | on a Control revision on a NEW-basis digest, that revision's own Control process count cannot be established (the name is required to start); on a Control revision on a pre-existing digest, that revision's own worker count is `WEB_CONCURRENCY`'s own value, or 1 when it carries neither |
+| `MITATEDB_MAX_CONCURRENCY` | `inventory --concurrency` for item (8)'s OLD-basis Data processes (§10.4.3), and step 6's own F-18 arithmetic (§10.10.1) for every revision -- Data or Control -- whose own attested source ref is not a NEW-basis digest, and its F-16 arithmetic on such a Data revision (Control's F-16 floors are fixed, 16 and 4) | item (8) is `unknown` for the parts that depend on it, unless §10.4.3's own declared-default exception applies (an OLD-basis revision counted toward item (8), including one that takes no traffic but has `minScale` 1 or more) -- the code default is never substituted for `--thread-limit`; step 6's own F-18/F-16 arithmetic falls back to that same exception (§10.4.3), on the same two conditions |
 | `MITATEDB_PLATFORM_POOL_SIZE` | whether a revision counted toward item (8) forces `--thread-limit`/`--data-process-count-old-basis` both omitted for the whole read (§10.4.3) | no effect by itself -- only WHETHER the name is present is read, never its value (F-16 itself never reads it either, an existing gap this runbook does not close) |
 
 Note that §6.1's own deploy command does not set
@@ -2340,9 +2360,15 @@ depending on that revision is `unknown`):
 
 **What makes an item `unknown` (all items)**: a non-zero gcloud exit
 status; a projected field that comes back empty (an empty projection is
-never read as "absent"); an empty env-name list; a missing must-be-present
-env name; an unset allow-table env whose own "When unset" cell says the
-item is `unknown`.
+never read as "absent") -- except `autoscaling.knative.dev/minScale`,
+`spec.containers[].command` and `spec.containers[].args`, which are empty
+on a revision that sets none and are read as "not set" when empty,
+provided the same projection returned `metadata.name` non-empty (and
+`status.imageDigest` too, where it projects it; §10.4.3 step 2's own
+`minScale` projection does not project `status.imageDigest` at all, so
+only `metadata.name` non-empty is required there); an empty env-name
+list; a missing must-be-present env name; an unset allow-table env whose
+own "When unset" cell says the item is `unknown`.
 
 #### 10.4.1 Item (1) isolated/production pair
 
@@ -2401,19 +2427,25 @@ Env names in question: `MITATEDB_DATA_BASE_URL`,
 
 Read item (8)'s arguments as follows and pass them to §10.5. If any one of
 them is not established, omit that argument -- the part of item (8) that
-depends on it is then `unknown`. Note that `inventory` rejects three
-inconsistent shapes with exit status 1 rather than judging them: a total
-smaller than the per-revision ceiling; `--data-process-count-old-basis`
-greater than `--data-process-count-total`; and `--data-process-count-
-total` minus `--data-process-count-old-basis` less than `--data-process-
-ceiling` (the new-basis remainder must itself be at least the ceiling).
+depends on it is then `unknown`. Note that `inventory` rejects seven
+inconsistent input shapes with exit status 1, before opening a database
+connection, rather than judging them: `--control-not-deployed` given
+together with `--control-process-ceiling`; `--control-not-deployed` given
+together with `--control-process-count-total`; `--data-process-count-
+total` smaller than `--data-process-ceiling`; `--control-process-count-
+total` smaller than `--control-process-ceiling`; `--data-process-count-
+old-basis` greater than `--data-process-count-total`; `--data-process-
+count-total` minus `--data-process-count-old-basis` less than
+`--data-process-ceiling` (the new-basis remainder must itself be at least
+the ceiling); and `--concurrency` given while `--data-process-count-
+old-basis` is `0`.
 
 **A revision's basis** (NEW or OLD, design
 docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-4) is decided from
-TWO facts together: its image digest (§10.4.4's
-own digest read; a NEW-basis digest is one built from the code that
-declares `--thread-limit`/`--data-process-count-old-basis` below) and
-whether its env carries `MITATEDB_WORKERS` at all. A revision is NEW-basis
+TWO facts together: its image digest (§10.4.4 step 7's own digest read: a
+NEW-basis digest is one whose attested `main.py` calls `_workers_from_env`
+for `MITATEDB_WORKERS`) and whether its env carries `MITATEDB_WORKERS` at
+all. A revision is NEW-basis
 only when both agree (a NEW-basis digest that carries `MITATEDB_WORKERS`);
 it is OLD-basis only when both agree the other way (a pre-existing digest
 with no `MITATEDB_WORKERS`). **When a revision's digest and its
@@ -2426,7 +2458,7 @@ and guessing risks undercounting a real OLD-basis process's demand.
 |---|---|
 | `--thread-limit` | the `MITATEDB_THREAD_LIMIT` value carried by every NEW-basis revision counted below, INCLUDING one that cannot take traffic (that revision's own real demand does not depend on whether it currently serves), plus the candidate (whose value is the one step 13's own deploy command carries, §10.10.3). If they differ, use the largest. **Omit the argument when even one of those revisions has the name unset** -- an unset NEW-basis revision runs on the code's own default (`DEFAULT_THREAD_LIMIT`), which is not read from the platform |
 | `--data-process-count-old-basis` | the WORST-CASE OLD-basis Data process count (the total computed below) -- `0` when no OLD-basis revision is counted |
-| `--concurrency` | the `MITATEDB_MAX_CONCURRENCY` value carried by every OLD-basis revision counted in `--data-process-count-old-basis`, INCLUDING one that cannot take traffic (an OLD-basis process's own real demand does not depend on whether it currently serves). If they differ, use the largest. **Pass this only when `--data-process-count-old-basis` is 1 or more; omit it when that count is `0`, and also omit it (leaving that part of item (8) `unknown`) when it is 1 or more and even one of those revisions has the name unset.** **Exception**: when an OLD-basis revision counted toward item (8) (including one that takes no traffic but has `minScale` 1 or more) carries no `MITATEDB_MAX_CONCURRENCY` at all, its value may instead be declared from the code default in effect at the commit its own image digest was built from -- record that commit and the file/line the default came from in the evidence table's addend row for this value. This exception does not apply to `--thread-limit`: an unset `MITATEDB_THREAD_LIMIT` on a NEW-basis revision is never filled in, by declared default or otherwise |
+| `--concurrency` | the `MITATEDB_MAX_CONCURRENCY` value carried by every OLD-basis revision counted in `--data-process-count-old-basis`, INCLUDING one that cannot take traffic (an OLD-basis process's own real demand does not depend on whether it currently serves). If they differ, use the largest. **Pass this only when `--data-process-count-old-basis` is 1 or more; omit it when that count is `0`, and also omit it (leaving that part of item (8) `unknown`) when it is 1 or more and even one of those revisions has the name unset.** **Exception**: when an OLD-basis revision counted toward item (8) (including one that takes no traffic but has `minScale` 1 or more) carries no `MITATEDB_MAX_CONCURRENCY` at all, its value may instead be declared from the code default in effect at the commit its own image digest was built from -- record that commit and the file/line the default came from in the evidence table's addend row for this value. **The exception applies only when BOTH of the following are confirmed at that commit, and does not apply (the argument is omitted, `unknown`) when either one cannot be confirmed**: (i) that commit's own build input Dockerfile does not set `MITATEDB_MAX_CONCURRENCY`, `WEB_CONCURRENCY`, `MITATEDB_PLATFORM_POOL_SIZE` or `MITATEDB_THREAD_LIMIT` with an `ENV` instruction -- confirmed the way §10.4.4 step 7 confirms it, from the same source ref; (ii) that commit's own `config.py` carries a default value for `max_concurrency`. This same exception, on the same two conditions, is also what step 6 (§10.10.1) may use for `x` in its own F-18 AND F-16 arithmetic (the same `x`) on an OLD-basis ref that carries no `MITATEDB_MAX_CONCURRENCY` (including a Control revision's own env). Disclosure: a declared default that is wrong undercounts demand, and nothing this runbook runs checks a declared default against anything actually deployed. This exception does not apply to `--thread-limit`: an unset `MITATEDB_THREAD_LIMIT` on a NEW-basis revision is never filled in, by declared default or otherwise |
 | `--data-process-ceiling` | the NEW candidate Data revision's own process ceiling: its `--max-instances` (i.e. `autoscaling.knative.dev/maxScale` once deployed) times its `MITATEDB_WORKERS` (§6.5) -- this is the value compared against the `process_ceilings` declaration |
 | `--data-process-count-total` | the WORST-CASE Data process count across BOTH bases: the sum, over every revision (OLD-basis and NEW-basis alike) that can serve at the same time, of that revision's `autoscaling.knative.dev/maxScale` times its worker count, plus the candidate's own ceiling (the total computed below). **Never the number of instances or processes running at the moment of the read** -- that number is a snapshot, and passing it makes the demand arithmetic too small, so item (8) can come back confirmed on a database that PostgreSQL's own `CONNECTION LIMIT` refusal would hit under load |
 | `--control-process-ceiling` | the same as `--data-process-ceiling`, for Control, with `MITATEDB_CONTROL_WORKERS` (always 1) in place of `MITATEDB_WORKERS` |
@@ -2453,9 +2485,75 @@ depend on them):
   `concurrency` is below 6 (its real api-role demand can then exceed the
   `2 × concurrency` floor `ops inventory` assumes for an OLD-basis
   process),
+- a counted revision's own attested source ref's build-input Dockerfile
+  sets `WEB_CONCURRENCY`, `MITATEDB_THREAD_LIMIT` or
+  `MITATEDB_PLATFORM_POOL_SIZE` with an `ENV` instruction (confirmed the
+  way §10.4.4 step 7 confirms it, from the same ref) -- that image sizes
+  the process from a name §10.4's own env projection never shows, so the
+  revision's own env alone cannot be trusted for this,
 - a revision's digest and its `MITATEDB_WORKERS` presence disagree (the
   basis check above),
-- a NEW-basis revision does not carry `MITATEDB_THREAD_LIMIT`.
+- a NEW-basis revision does not carry `MITATEDB_THREAD_LIMIT`,
+- an OLD-basis revision counted toward item (8) has an attested source ref
+  that does not carry the pool-sizing shape the `2 x concurrency` floor
+  above assumes. **Confirm the ref exists first, the same way §10.4.4
+  step 7 does** (its own fenced existence-check command, against
+  `MitateDB-api/src/mitatedb_api/http.py`, `.../main.py` and
+  `.../config.py` for each path read below). **Only when that prints
+  `exit=0` does an empty output below mean what this bullet says**;
+  otherwise the shape is unconfirmed at that ref, the same as a ref that
+  fails one of the three reads below. Confirm all three of the following
+  at that ref, or omit `--data-process-count-old-basis` (and, with it,
+  `--concurrency`) for the whole read:
+  - `http.py`'s `create_app` defaults `thread_limit` to
+    `DEFAULT_THREAD_LIMIT` (4):
+
+    ```sh
+    git show <source-ref>:MitateDB-api/src/mitatedb_api/http.py | grep DEFAULT_THREAD_LIMIT
+    ```
+
+    includes, among its own output, both of the following two lines
+    (leading/trailing whitespace on each line not compared; any other
+    line in the output, such as a docstring mentioning the same name, is
+    not compared and does not disqualify the ref):
+
+    ```text
+    DEFAULT_THREAD_LIMIT = 4
+    thread_limit: int | None = DEFAULT_THREAD_LIMIT,
+    ```
+
+    (a ref too old to carry either line prints neither -- not compatible
+    with the shape);
+  - `main.py` builds the platform pool's own default size by calling
+    `config.role_pool_size`:
+
+    ```sh
+    git show <source-ref>:MitateDB-api/src/mitatedb_api/main.py | grep -cF 'default=role_pool_size(FoundationConfig(max_concurrency=_declared_concurrency))'
+    ```
+
+    prints exactly:
+
+    ```text
+    1
+    ```
+
+    (a ref that never calls it, or calls it with a different shape,
+    prints `0`);
+  - `role_pool_size` returns the declared `max_concurrency`:
+
+    ```sh
+    git show <source-ref>:MitateDB-api/src/mitatedb_api/config.py | awk '/^def role_pool_size/{p=1} p&&/^    return /{print; exit}'
+    ```
+
+    prints exactly (four leading spaces, then `return config.max_concurrency`):
+
+    ```text
+        return config.max_concurrency
+    ```
+
+    (a `grep -A3` of the same definition prints its docstring instead of
+    its `return` line on every ref this runbook has checked, and confirms
+    nothing).
 
 **Disclosure.** `ops inventory` cannot check that a declared OLD-basis
 process count is itself correct: a wrong, too-small declaration
@@ -2488,8 +2586,10 @@ blocked at `W = 6` (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md
 
 3. Decide each revision's own basis (above) for every revision from steps
    1-2, and for the candidate. **If any one revision's digest and
-   `MITATEDB_WORKERS` presence disagree, omit the OLD-basis total for the
-   whole service** (the argument table above).
+   `MITATEDB_WORKERS` presence disagree, omit `--data-process-count-old-
+   basis` (and, with it, `--concurrency`) for the whole read** (the
+   argument table above) -- Data is the only service that argument is
+   ever read for.
 4. Add the candidate, on the NEW basis: the `--max-instances` value of the
    deploy command §10.10 step 13 will run, times the `MITATEDB_WORKERS`
    value that command sets. Once the candidate is deployed, read its
@@ -2498,7 +2598,13 @@ blocked at `W = 6` (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md
 5. Read `autoscaling.knative.dev/maxScale` and the worker count (above)
    for each revision from steps 1-2. **If even one `maxScale` is empty or
    not a positive integer, omit the total** -- the Cloud Run default is
-   never substituted.
+   never substituted. **If even one revision from steps 1-2, or the
+   candidate, carries a non-empty container `command` or `args` (§10.4's
+   own projection), omit this service's own total.** `MITATEDB_WORKERS`/
+   `WEB_CONCURRENCY` is read from the env only; a container override
+   passing its own `--workers` (or, on an OLD-basis image, its own
+   `--concurrency`) is not read here at all, so the worker count computed
+   from the env can be smaller than what the container actually runs.
 6. `--data-process-count-old-basis` is the sum, over the OLD-basis
    revisions from steps 1-2 only, of `maxScale` times worker count (`0`
    when none). `--data-process-count-total` is that same sum PLUS the sum,
@@ -2530,11 +2636,13 @@ blocked at `W = 6` (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md
 1. **Digest reference**: every traffic-carrying revision and the candidate
    reference `spec.containers[].image` in `@sha256:` digest form. If even
    one container is referenced by tag, item (9) is `unknown`.
-2. **Provenance**: for each digest, read §10.4's build-provenance
-   projection and keep the source ref and the build input in the
-   evidence. If provenance is unreadable (empty, or no attestation), item
-   (9) is `unknown`. If two revisions on the same digest carry different
-   provenance, item (9) is `unknown`.
+2. **Provenance**: for each digest among the revisions counted toward item
+   (8) (§10.4.3 -- this includes a revision counted only through its own
+   `minScale`, not merely a traffic-carrying revision or the candidate),
+   read §10.4's build-provenance projection and keep the source ref and
+   the build input in the evidence. If provenance is unreadable (empty, or
+   no attestation), item (9) is `unknown`. If two revisions on the same
+   digest carry different provenance, item (9) is `unknown`.
 3. **Rollback revision**: the traffic-carrying revisions (and their
    allocation) at the time of the Gate-0 read are the rollback target.
    Every one of them must exist with Ready condition `True`. If one is
@@ -2546,6 +2654,77 @@ blocked at `W = 6` (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md
    `DISABLED`/`DESTROYED` entry makes it blocked.
 6. The service account (`spec.serviceAccountName`) goes into the evidence
    only.
+7. **Basis of the digest**: for each distinct digest among the revisions
+   counted toward item (8) (§10.4.3) that has not already been confirmed
+   this way, read `MitateDB-api/src/mitatedb_api/main.py` at the source
+   ref item (9)'s own provenance step attested for that digest.
+
+   **The source ref is the commit SHA the provenance attests, never a
+   branch or tag name.** Fetch it first, as §10.4.5 does (`git fetch
+   origin <source-ref>`), then confirm it exists, and confirm each path
+   read below exists at it, with:
+
+   ```sh
+   git cat-file -e '<source-ref>^{commit}' && git cat-file -e '<source-ref>:<path>'; echo "exit=$?"
+   ```
+
+   run once for each `<path>` (`MitateDB-api/src/mitatedb_api/main.py`,
+   `MitateDB-api/src/mitatedb_api/control_composition.py` for a Control
+   digest, and the Dockerfile the build input recorded in step 2 above
+   names). **Only when that prints `exit=0` does an empty output or a `0`
+   below mean what this step says**; otherwise the basis, the F-16/F-18
+   presence and condition (i) are all unconfirmed for that digest, and
+   item (9) is `unknown`.
+
+   ```sh
+   git show <source-ref>:MitateDB-api/src/mitatedb_api/main.py \
+     | grep -n '_workers_from_env(env, "MITATEDB_WORKERS")'
+   ```
+
+   That digest is a NEW-basis digest when the ref's own `main.py` calls
+   `_workers_from_env` for `MITATEDB_WORKERS` (the function that raises
+   when the name is unset, empty or not a positive integer) -- an OLD-basis
+   ref carries no such call at all. Record the result (digest, source ref,
+   NEW-basis or OLD-basis) in §10.4.3's own addend table, in its **basis**
+   column, for every revision on that digest. F-18 (§6.5, §10.10.1 step 6)
+   is present starting from the source ref that added it; on a ref older
+   than that, `main.py` carries no call to `check_max_connections_headroom`
+   at all (`git show <source-ref>:MitateDB-api/src/mitatedb_api/main.py |
+   grep -c check_max_connections_headroom` prints `0`), so step 6's own
+   F-18 arithmetic does not apply to a revision on such a ref. **F-16 is
+   present from an EARLIER source ref than F-18**: on the SAME file, also
+   take the count of `check_role_connection_limits(` (`git show
+   <source-ref>:MitateDB-api/src/mitatedb_api/main.py | grep -c
+   'check_role_connection_limits('`) -- step 6's own F-16 arithmetic does
+   not apply to a revision on such a ref only when THAT count is also
+   `0`. Record both counts. **For a Control digest, run both counts
+   against `control_composition.py` instead** (Control's own copy of
+   each call); both files carry each call from the same source ref
+   onward, so this is a precision, not a difference in practice on any
+   ref this runbook has checked.
+
+   **For the SAME digest, also confirm §10.4.3's own declared-default
+   exception's condition (i)** (its build input Dockerfile sets none of
+   the four pool-sizing env names), from the same source ref, at the path
+   step 2 above's own build-input record names (this repository's own
+   Dockerfile is at `MitateDB-api/docker/Dockerfile`; a different build
+   input names a different path):
+
+   ```sh
+   git show <source-ref>:<the Dockerfile path the build input names> \
+     | grep -nE 'MITATEDB_MAX_CONCURRENCY|WEB_CONCURRENCY|MITATEDB_PLATFORM_POOL_SIZE|MITATEDB_THREAD_LIMIT|MITATEDB_WORKERS'
+   ```
+
+   This is a plain text search of the whole file, not anchored to a line
+   starting with `ENV` -- the image's own `ENV` instruction sets more than
+   one name per instruction, over several lines joined by `\`, and an
+   anchored search would miss a name set on one of the continuation lines.
+   **When the recorded build input does not name a Dockerfile path at
+   all** (provenance without it, or a build input this runbook cannot
+   parse), condition (i) cannot be confirmed at that ref -- it is not the
+   same as an empty grep. Given a confirmed path, no output confirms
+   condition (i) at that ref; any output leaves condition (i) unconfirmed
+   there, and the exception does not apply to any revision on that digest.
 
 #### 10.4.5 Item (10) starting prefix N
 
@@ -2682,8 +2861,12 @@ is on the old basis:
 ### 10.6 Per-migration compatibility table (item (5))
 
 **This table is a draft. The compatibility judgments are not settled until
-the independent review in §10.8 accepts them.** Table version: **5**
-(2026-09-29: adds the `0016` row. Version 4, 2026-09-20, R-57 WP-3:
+the independent review in §10.8 accepts them.** Table version: **6**
+(2026-09-29: the `0016` row also states the referential-integrity trigger
+its foreign key adds on `credentials` and the cascade an application's own
+deprovision carries to `credential_request_rate`; the `0015` row's own
+static-read reference is an absolute commit, not a relative one. Version 5, 2026-09-29:
+adds the `0016` row. Version 4, 2026-09-20, R-57 WP-3:
 follows `apply-platform-migration` accepting a run of FILENAMEs and
 refusing a solo `0012`/`0013` application that has a later file
 redefining its own targets).
@@ -2722,12 +2905,12 @@ record goes back to "not accepted".
 | `0012_role_connection_limits.sql` | applied (platform). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it.** No `ops` subcommand prints those current values -- item (8)'s output carries judgment keys only, and `verify-declarations`'s F-16 names a value only inside its own failure message, for the first role that fails -- so read them with a catalog read over the provision DSN and record them before applying (§10.10 step 2). (2026-09-18: `0014_role_connection_limits_rollout.sql` now raises the same roles above these values, so re-applying `0012` ALONE after `0014` lowers `mitatedbsvc_api`, `mitatedbsvc_controlplane` and every EXISTING application's runtime and developer role back to 68 / 20 / 36, and drops `0013`'s `statement_timeout` line from every FUTURE application's roles; `mitatedbsvc_auditreader` is unaffected, because `0012` never alters it. Re-applying `0014` compensates. The set's own order is `0012` -> `0013` -> `0014` -- §10.10's numbered-set note and §10.10.1 step 7) `apply-platform-migration` refuses a lone `0012`; that call must also carry `0013` and `0014` in the same run, and a solo `0012` application is possible only outside the tool, applied directly with `psql`. | none; not reverted | **compatible**. Sets each role's `CONNECTION LIMIT` to a fixed value (68 / 20 / 36) and replaces `begin_provision_application` with the same signature and result columns (fact: `0002`'s and `0012`'s own definitions). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 68 / 20 / 36 -- compute it from that ref's own `config.py` |
 | `0013_role_statement_timeouts.sql` | applied (platform). `apply-platform-migration` refuses a lone `0013`; that call must also carry `0014` in the same run, and a solo `0013` application is possible only outside the tool, applied directly with `psql`. | none; not reverted | **compatible (inference)**. Adds a role-level `statement_timeout` (`5000ms`) to `mitatedbsvc_auditreader` and to every application's runtime/developer role, and replaces `begin_provision_application` so future roles get the same setting -- additive; it drops and revokes nothing (fact: the file's own header and statements). (2026-09-18: that still describes `0013` against `0012`, but it no longer holds for a re-application after `0014_role_connection_limits_rollout.sql`: `0013` alone afterwards lowers every FUTURE application's runtime and developer role to `CONNECTION LIMIT` 36 -- the value `0013` inherited from `0012` -- while every EXISTING role keeps its `0014` value and every future role still carries the `statement_timeout`. Re-applying `0014` compensates) A revision that lacks it passes its own per-request deadline with `SET LOCAL`, which overrides the role setting. R-87 (2026-09-23): the 8 developer-connection catalog reads (`schema_count`/`field_domains`/`field_types`/`all_field_types`/`field_constraints`/`field_types_and_constraints`/`all_field_constraints`/`schema_revision`) carry no per-request deadline, but each now issues its own per-transaction `SET LOCAL statement_timeout`/`lock_timeout` at the constructed `max_execution_ms` (the declared `execution_ms`) -- the role setting bites only on developer-connection statements that carry neither a deadline nor their own `SET LOCAL` (inference). Note: an audit query slower than the new bound is cancelled rather than running unbounded | fact + inference | a ref whose request paths set their own per-request deadline with `SET LOCAL statement_timeout`, or (R-87) whose own developer-connection catalog reads issue their own per-transaction `SET LOCAL` regardless of deadline. The note holds at every other ref: a path that carries neither a deadline nor a `SET LOCAL` of its own is bounded by the role setting |
 | `0014_role_connection_limits_rollout.sql` | applied (platform), last in the numbered set. It raises `mitatedbsvc_api` to `CONNECTION LIMIT` 132, `mitatedbsvc_controlplane` to 36, `mitatedbsvc_auditreader` to 12 and every application's runtime and developer role to 68 -- the demand of TWO revisions of the same process serving at once, which is what a rollout puts side by side (§10.10's precondition arithmetic). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it**, exactly as `0012`'s own row warns: this file SETs its four values rather than raising toward them. On a deployment carrying `0012`'s and `0013`'s own values it lowers nothing, but a limit raised by hand above 132 / 36 / 12 / 68 comes back down to it -- so read the current values with the catalog read and record them before applying, the same way `0012`'s row says to (§10.10 step 2). **Re-applying `0014` itself is idempotent, but the two files before it are not value-neutral after it**: `0012` alone afterwards lowers the api, controlplane and existing application roles back to 68 / 20 / 36 and drops `0013`'s `statement_timeout` from future application roles, and `0013` alone afterwards lowers future application roles to 36 while leaving every existing role as `0014` set it. Re-applying `0014` compensates for either. **The second case is caught by nothing this procedure runs until an application is provisioned after it** -- item (8) compares the roles that exist, and until the next provisioning call no role carries the lowered value (§10.10.1 step 7). `apply-platform-migration` enforces the order: it refuses `0012` or `0013` given without every one of its own later files in the same run, so a run that includes `0012` is always `0012` `0013` `0014`, a run that includes `0013` always carries `0014`, and `0014` can still be applied on its own | none; not reverted | **compatible**. Sets four `CONNECTION LIMIT`s to fixed values above `0012`'s and `0005`'s own (132 / 36 / 12 / 68), raising each of those and lowering only a limit already above its own new value, and drops and revokes nothing, and replaces `begin_provision_application` with the same signature and result columns, keeping `0013`'s `statement_timeout` lines (fact: the file's own header and statements). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 132 / 36 / 12 / 68 -- compute it from that ref's own `config.py`, the same way `0012`'s row does |
-| `0016_credential_request_rate.sql` | applied (platform), by §10.10.1 step 7a, after the numbered set's `0014` and before the candidate is deployed. **A candidate that counts in it cannot start without it**: on a platform database without its rate function, the data service and its preflight refuse to start, naming the migration. No later accepted file redefines its targets, so `apply-platform-migration` accepts it alone | none; not reverted | **compatible**. Creates a new table `mitatedb_registry.credential_request_rate` (with a foreign key to the EXISTING `mitatedb_registry.credentials`, `ON DELETE CASCADE`) and a new function `mitatedb_registry.credential_request_rate_admit`, revokes both from `PUBLIC` and grants them to `mitatedbsvc_api` only -- it names no existing object in any `ALTER`/`DROP` and narrows no existing grant (fact: the file's own statements). A revision that lacks it reads and writes none of the new objects | fact | a ref whose `MitateDB-api/src/` does not name `credential_request_rate` (confirm with `git grep` at that ref) |
+| `0016_credential_request_rate.sql` | applied (platform), by §10.10.1 step 7a, after the numbered set's `0014` and before the candidate is deployed. **A candidate that counts in it cannot start without it**: on a platform database without its rate function, the data service and its preflight refuse to start, naming the migration. No later accepted file redefines its targets, so `apply-platform-migration` accepts it alone | none; not reverted | **compatible**. Creates a new table `mitatedb_registry.credential_request_rate` (with a foreign key to the EXISTING `mitatedb_registry.credentials`, `ON DELETE CASCADE`) and a new function `mitatedb_registry.credential_request_rate_admit`, revokes both from `PUBLIC` and grants them to `mitatedbsvc_api` only -- it names no existing object in any `ALTER`/`DROP` and narrows no existing grant (fact: the file's own statements). A revision that lacks it reads and writes none of the new objects. That foreign key adds a referential-integrity trigger on the EXISTING `credentials` table, and an application's own deprovision (`0004`, `finish_deprovision_application`'s own `DELETE` from `credentials`) cascades to that application's own rows in `credential_request_rate` | fact | a ref whose `MitateDB-api/src/` does not name `credential_request_rate` (confirm with `git grep` at that ref) |
 | `0006_declared_field_types_upgrade.sql` (per-application) | applied by `upgrade-applications` to applications that have not recorded it | none | **compatible (inference)**. Adds a table and fills type rows from the existing columns. A pre-`0006` revision does not read that table | inference | a ref that does not read the declared-field-types table |
 | `0008_platform_upgrades_upgrade.sql` (per-application) | as above | none | **compatible**. Adds the ledger table. "Not yet applied" is decided by (numbers this revision ships) minus (numbers recorded), so extra recorded numbers are ignored (fact: `platform_upgrades.pending_upgrade_numbers`). A pre-`0008` revision does not read the ledger | fact | a ref whose own `pending_upgrade_numbers` computes (numbers it ships) minus (numbers recorded), and which does not read the ledger |
 | `0009_field_constraints_upgrade.sql` (per-application) | as above | none | **compatible (with a note)**. Adds columns that have defaults. A pre-`0009` revision's INSERT into `_mdb_field_types` names its columns explicitly (fact: that revision's own `backend_postgres.py`). Note: constraints the new revision declared (`enum_json`/`nullable`) are not enforced by the old revision (inference) | fact + inference | a ref whose `backend_postgres.py` names the columns explicitly in its INSERT into `_mdb_field_types` |
 | `0010_idempotency_records_upgrade.sql` (per-application) | as above | none | **compatible (with a note)**. Adds a table. Note: a pre-`0010` revision does not carry `_mdb_idempotency` among the names it excludes in `schema_count`, so it counts that application's tables one too high (fact: that revision's own `backend_postgres.py` `NOT IN` list of three names). Idempotency records written by the new revision are not used by the old one (inference) | fact + inference | a ref whose `schema_count` excludes exactly the three names its own `backend_postgres.py` `NOT IN` list carries |
-| `0015_row_order_column_upgrade.sql` (per-application) | applied by `upgrade-applications` to applications that have not recorded it | none; no down script is provided -- reverting, if ever needed, is a manual `ALTER TABLE ... DROP COLUMN _mdb_row` on every collection table of the affected application | **not compatible**. A pre-`0015` revision's own `cell.py::ApplicationCell._select_fields` (select-all) and `add_field`'s own field-count check both call `self._backend.field_domains(collection)` directly, with no exclusion of `_mdb_row` (fact, static read: `cell.py`:3109-3110/1583 at `HEAD~3`, unchanged by the two revisions between it and this one). Once the column physically exists on a collection table, that revision's own select-all response includes `_mdb_row` as if it were a declared field, and its own `add_field` field-count check (`current = ...field_domains(...); len(current) >= max_fields`) counts it too, refusing `add_field` on that collection one field earlier than the deployed `max_fields` actually allows | fact (static read; not executed against a real pre-`0015` revision) | a ref whose `cell.py` calls `self._backend.field_domains` with no `_mdb_row` exclusion (every ref before this revision) |
+| `0015_row_order_column_upgrade.sql` (per-application) | applied by `upgrade-applications` to applications that have not recorded it | none; no down script is provided -- reverting, if ever needed, is a manual `ALTER TABLE ... DROP COLUMN _mdb_row` on every collection table of the affected application | **not compatible**. A pre-`0015` revision's own `cell.py::ApplicationCell._select_fields` (select-all) and `add_field`'s own field-count check both call `self._backend.field_domains(collection)` directly, with no exclusion of `_mdb_row` (fact, static read: `cell.py`:3109-3110/1583 at `f3b10ca83302d83ec12052fd91d26b4672b295ac`, unchanged by the two revisions between it and this one). Once the column physically exists on a collection table, that revision's own select-all response includes `_mdb_row` as if it were a declared field, and its own `add_field` field-count check (`current = ...field_domains(...); len(current) >= max_fields`) counts it too, refusing `add_field` on that collection one field earlier than the deployed `max_fields` actually allows | fact (static read; not executed against a real pre-`0015` revision) | a ref whose `cell.py` calls `self._backend.field_domains` with no `_mdb_row` exclusion (every ref before this revision) |
 
 **If any migration turns out to be irreversible or to require downtime**,
 ask the requester for a separate decision covering backup/restore and the
@@ -2738,7 +2921,9 @@ its review.
 
 **This table is a draft. The stop-time limits and the `lock_timeout`
 values are not settled until the independent review in §10.8 accepts
-them.** Table version: **5** (2026-09-29: adds the `0016` row). Change
+them.** Table version: **6** (2026-09-29: the `0016` row's own "what waits
+on the locked object" column also names deprovision. Version 5,
+2026-09-29: adds the `0016` row). Change
 the table and the version goes up by one and §10.8's acceptance record
 goes back to "not accepted".
 
@@ -2773,7 +2958,7 @@ goes back to "not accepted".
 | `0012` section 3 | **outside the transaction** (two statements, each auto-committing) | `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference (function catalog row update; a call already running finishes on the pre-replacement definition) | provisioning running at the same time | the same (`3s`) | the same | not needed (draft); do not run it at the same time as provisioning |
 | `0013` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE mitatedbsvc_auditreader SET statement_timeout`: role catalog row update (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... SET` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing sessions keep their own settings; the new bound applies at the next login | not needed (draft); do not run it at the same time as provisioning |
 | `0014` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE ... CONNECTION LIMIT` x3 on the platform-plane roles (`mitatedbsvc_api`, `mitatedbsvc_controlplane`, `mitatedbsvc_auditreader`): role catalog row updates (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... CONNECTION LIMIT` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing connections are not dropped; the new limit applies to new connections | not needed (draft); do not run it at the same time as provisioning |
-| `0016` | **the whole file is one `BEGIN`/`COMMIT`** -- a failure anywhere rolls the whole run back and leaves nothing changed | `CREATE TABLE IF NOT EXISTS mitatedb_registry.credential_request_rate` with `REFERENCES mitatedb_registry.credentials`: on the first application, SHARE ROW EXCLUSIVE on `credentials` (inference: the documentation states that lock for adding a foreign key with `ALTER TABLE`, and a `REFERENCES` clause in `CREATE TABLE` creates the same constraint), held to the end of the transaction; a no-op if the table is present (inference). `REVOKE`/`GRANT ... ON` the new table: inference (ACL update). `CREATE OR REPLACE FUNCTION mitatedb_registry.credential_request_rate_admit` and `REVOKE`/`GRANT ... ON FUNCTION`: inference (function catalog) | on the first application, credential issue, revoke, enable and disable (their `INSERT`/`UPDATE` on `credentials` take ROW EXCLUSIVE, which conflicts with SHARE ROW EXCLUSIVE -- fact: documentation); authentication reads of `credentials` (ACCESS SHARE) do not conflict | `3s` | 3 seconds + hold time (one new empty table, one function). Running processes' reads are unaffected | not needed (draft) |
+| `0016` | **the whole file is one `BEGIN`/`COMMIT`** -- a failure anywhere rolls the whole run back and leaves nothing changed | `CREATE TABLE IF NOT EXISTS mitatedb_registry.credential_request_rate` with `REFERENCES mitatedb_registry.credentials`: on the first application, SHARE ROW EXCLUSIVE on `credentials` (inference: the documentation states that lock for adding a foreign key with `ALTER TABLE`, and a `REFERENCES` clause in `CREATE TABLE` creates the same constraint), held to the end of the transaction; a no-op if the table is present (inference). `REVOKE`/`GRANT ... ON` the new table: inference (ACL update). `CREATE OR REPLACE FUNCTION mitatedb_registry.credential_request_rate_admit` and `REVOKE`/`GRANT ... ON FUNCTION`: inference (function catalog) | on the first application, credential issue, revoke, enable and disable, and deprovision (`0004`'s own `finish_deprovision_application` `DELETE` from `credentials`) -- their `INSERT`/`UPDATE`/`DELETE` on `credentials` all take ROW EXCLUSIVE, which conflicts with SHARE ROW EXCLUSIVE (fact: documentation); authentication reads of `credentials` (ACCESS SHARE) do not conflict | `3s` | 3 seconds + hold time (one new empty table, one function). Running processes' reads are unaffected | not needed (draft) |
 | per-application upgrade (`0006`, `0008`, `0009`, `0010`, via `upgrade-applications`) | per application: `GRANT <developer_role> TO CURRENT_USER` (auto-commit) -> one `BEGIN`/`COMMIT` -> `REVOKE` (auto-commit). A failure leaves the temporary membership behind (§3.4b's cleanup) | `CREATE TABLE IF NOT EXISTS` (`0006`, `0008`, `0010`): inference (no heavy lock on an existing table). `INSERT`: ROW EXCLUSIVE (fact: documentation). `0006`'s read of `information_schema.columns`: ACCESS SHARE (fact: documentation). **`0009`'s `ALTER TABLE public._mdb_field_types ADD COLUMN IF NOT EXISTS` x2: ACCESS EXCLUSIVE** (fact: the documented default); the defaults are constants so no table rewrite happens (fact: documentation); the lock is still taken when the column already exists (inference). `GRANT`/`REVOKE` on roles, tables and the schema: inference | that application's own requests that read `_mdb_field_types` (during `0009`), and schema operations on that application | `2s` (`--lock-timeout 2s`) | 2 seconds + hold time per application (catalog-only changes). Other applications are unaffected | not needed (draft) |
 | deprovision (`0004`, via `deprovision`) | outside a transaction (`DROP DATABASE` cannot run inside one -- fact: documentation). **A failure after stage (3) (and after either `GRANT` that already succeeded -- a cancel on the first `GRANT` itself leaves nothing changed) leaves the temporary self-grant membership behind** (design §5.1 (i)), the same property the per-application upgrade row above records for its own temporary grant | `begin_deprovision_application` / `finish_deprovision_application`: registry row updates (inference: ROW EXCLUSIVE and row locks). `GRANT <role> TO CURRENT_USER WITH INHERIT TRUE, SET FALSE` (stage (3), when either role still exists): inference (`pg_auth_members` row). `ALTER DATABASE ... WITH ALLOW_CONNECTIONS false` (stage (4)): inference (`pg_database` row update). `pg_terminate_backend`: no lock. `DROP DATABASE`: fails while another connection exists (fact: documentation), lock type inference. `DROP ROLE`: inference | operations updating the same application's registry rows, plus, after stage (4), every new connection attempt to that application's database (refused, not queued); existing sessions are ended by stage (5)'s terminate, not by the `ALTER` | `5s` (`--lock-timeout 5s`) -- applied to the whole psql session, so it also bounds stage (3)'s `GRANT` and stage (4)'s `ALTER DATABASE`; a timeout at either leaves only the temporary self-grant standing while `ALLOW_CONNECTIONS` is still true (see §9 item 3's failure-state table for that state) | that application stops permanently (irreversible, §10.6). An operation touching the SAME application's registry rows waits at most 5 seconds + hold time; other applications are not affected. If the run stops at stage (4) or later, that application's database is left refusing new connections (`datallowconn=false`) until an operator re-runs `0004` or reverts it -- an unbounded stop, not a lock wait, plus fleet-command degradation (design §4.1 / F-3) | never run by an upgrade |
 
@@ -2809,9 +2994,9 @@ version counts as no record at all.**
 
 | Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
 |---|---|---|---|---|---|---|
-| §10.6 compatibility | 5 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
-| §10.7 lock / stop time / `lock_timeout` | 5 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` §5 | -- | -- |
-| §10.10 upgrade procedure (stages 2-4) | 8 | not accepted | 7 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
+| §10.6 compatibility | 6 | accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | 2026-09-30 | Fable (supervisor), on the requester's ruling of 2026-09-30 |
+| §10.7 lock / stop time / `lock_timeout` | 6 | accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | 2026-09-30 | Fable (supervisor), on the requester's ruling of 2026-09-30 |
+| §10.10 upgrade procedure (stages 2-4) | 9 | not accepted | 9 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 (three independent reviews of version 9, none accepting; acceptance follows ledger R-116) | -- | -- |
 
 ### 10.9 Gate-0 overall judgment and report
 
@@ -2890,7 +3075,30 @@ acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <
 
 ### 10.10 Platform upgrade procedure (stages 2-4)
 
-Procedure version: **8** (2026-09-29: adds step 7a for `0016`; counts a
+Procedure version: **9** (2026-09-29, described here by its final state,
+not as a diff from version 8). Before step 6 declares `process_ceilings`,
+it checks two startup checks on paper, against the values it is about to
+declare: F-18's own connection-headroom bound and F-16's own per-role
+floor (the latter also checked against the lowest value each role will
+carry until step 7 completes, not only against what `0014` will
+eventually set), for every Data and Control revision counted toward item
+(8), for the rollback target, and for the env-only revision step 10 will
+create -- not an OLD-basis Data process alone. Where the F-18 bound does
+not hold, a two-rollout path raises the worker count and the ceiling in
+two separate runs, each under its own full set of production conditions,
+instead of one; where the F-16 bound does not hold, step 6 stops before
+it and a separate decision is needed -- the two-rollout path does not
+resolve that. Item (8)'s worst-case totals are split by revision basis
+(NEW vs. OLD, §10.4.3): NEW-basis demand from `role_pool_size(--thread-
+limit)`, OLD-basis demand from the declared `concurrency`; both are
+confirmed against the counted revisions' own attested source refs and
+their own build-input Dockerfiles (§10.4.4 step 7), and a container
+`command`/`args` override or an image `ENV` line setting its own
+pool-sizing name each leave the total `unknown` rather than silently
+undercounted. Step 10 makes its env-only change only on a service whose
+current code does not itself require the legacy name being removed;
+where it does, stage 2 does not resolve item (7) for that service.
+Version 8, 2026-09-29: adds step 7a for `0016`; counts a
 revision's processes as `maxScale` times its worker count in step 6 and
 step 13; splits item (8)'s demand arithmetic by revision basis -- an
 OLD-basis process's own demand from its declared `concurrency`, a
@@ -2925,10 +3133,11 @@ the version goes up by one and §10.8's acceptance record goes back to
   concurrency this deployment declares, and the process counts a cutover
   puts side by side), so it is computed here rather than discovered in the
   second read, with production already changed. Take the inputs the second
-  read will pass (§10.4.3: the concurrency value, each service's own
-  worst-case process count total and the candidate's ceiling, the
-  reserved-connection count) and the limit each role will carry AT THE
-  SECOND READ: for a role `0012` names, that file's own value (it sets the
+  read will pass (§10.4.3: the concurrency value, the thread-limit value,
+  the worst-case OLD-basis and NEW-basis Data process counts and Data's own
+  candidate ceiling, Control's own worst-case process count total and
+  candidate ceiling, the reserved-connection count) and the limit each role
+  will carry AT THE SECOND READ: for a role `0012` names, that file's own value (it sets the
   limits it names to its own value, raising one below it and lowering one
   above it -- §10.6's `0012` row), and for every other role (the
   auditreader's own limit from `0005`, and any other role `0012` does not
@@ -2951,9 +3160,12 @@ the version goes up by one and §10.8's acceptance record goes back to
   auditreader role demand            = control total x 4
   each application's runtime role
   and developer role demand          = O x concurrency + N x role_pool_size(thread_limit)
-  application demand (condition 2)   = 0 when no application is registered,
-                                        else the LARGER of that per-role
-                                        demand and 2 x K x (O + N)
+  application demand (condition 2)   = 0 when K = 0 (no registered
+                                        application has a runtime/developer
+                                        role, even if registered-only
+                                        applications exist), else the
+                                        LARGER of that per-role demand and
+                                        2 x K x (O + N)
                                         (K = the number of registered
                                         applications with a role)
   total demand                       = api + controlplane + auditreader
@@ -2989,8 +3201,10 @@ the version goes up by one and §10.8's acceptance record goes back to
   (`role_pool_size` 6), at least one application registered, one OLD-basis
   process (`O = 1`) and `W` NEW-basis processes (`N = W`) -- the shape a
   rollout produces once the revision now serving and the candidate stand
-  side by side, with both worst-case control totals equal to 1 (design
-  docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md §5):
+  side by side, with the worst-case Control total equal to 1 (design
+  docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md §5) -- if Control's
+  own candidate is deployed alongside its own current revision, the same
+  way Data's is here, use `C = 2` in this arithmetic instead:
 
   ```text
   role                    limit   demand at W = 5              condition 1
@@ -3005,6 +3219,13 @@ the version goes up by one and §10.8's acceptance record goes back to
                                             condition 2 compares 208 + the
                                             reserve against max_connections)
   ```
+
+  **This `208` holds while the number of registered applications with a
+  role (K) is 1 through 5.** The application term inside it is the LARGER
+  of the per-role floor (`62` at `W = 5`) and `2 x K x (O + N)` (`12K` at
+  `O + N = 6`); `12K` stays at or below `62` only through `K = 5`
+  (`12 x 6 = 72` exceeds it), so at `K = 6` or more the application term is
+  `12K` instead of `62` and the total is correspondingly larger.
 
   **At `W = 6` the api role's own condition 1 fails**: the api demand is
   `2x32 + 2x6x6 = 136`, above 132, so the answer is
@@ -3050,6 +3271,17 @@ the version goes up by one and §10.8's acceptance record goes back to
   this means today is a FURTHER platform migration above `0014`'s own
   values). Record the arithmetic and its inputs in the evidence (§10.1)
   and compute it twice, the way §10.4.3 requires of the totals themselves.
+- **The declared `process_ceilings.data`/`.control` step 6 is about to
+  write is also checked on paper against every Data and Control revision
+  counted toward item (8), against the rollback target, and against the
+  env-only revision step 10 will create, before step 6 runs**: each one
+  runs its own F-18 AND F-16 startup checks against the SAME declaration
+  (each check only where its own attested source ref carries it, §10.4.4
+  step 7; F-16 also against the role limits it will actually carry until step 7
+  completes, not only against what `0014` will eventually set), both
+  older than and separate from the worker-count check step 6 describes
+  below, and refuses to start when either fails. Step 6 states each
+  check's own bound, and the way through a value that fails it, in full.
 - **Against production, three things are true before anything in §10.10.1
   or §10.10.3 runs: this whole procedure has been run against the isolated
   pair end to end, that evidence has passed an independent audit, and the
@@ -3266,17 +3498,17 @@ finding up here before starting:
 | (6) `ddl_lock` | `unknown`: a target role carries no role-level `statement_timeout` | step 4 (`0007`, for the api and controlplane roles) and step 7 (`0013`, for the auditreader and the application roles) |
 | (6) `ddl_lock` | `unknown`: a target role's `CONNECTION LIMIT` is `-1`, so no timeout value is read at all | step 7 (`0012` sets a finite limit), for a role `0012` itself names -- item (6) reads every target role it finds by grant, so a `-1` on `mitatedbsvc_auditreader` is not resolved by this table (2026-09-18: step 7 now ends with `0014`, which sets `mitatedbsvc_auditreader`'s own `CONNECTION LIMIT` as well, so a `-1` there IS resolved by this table; a `-1` on a role none of the files names still is not) |
 | (6) `ddl_lock` | blocked, reason `statement-timeout-unbounded`: a declared value is 0, negative, or unparseable | step 4 and step 7 -- both files set `5000ms` unconditionally. If the unbounded value was one this deployment had chosen on purpose (step 2's record), choose a POSITIVE replacement and pass it to `set-platform-timeouts` in step 4 instead |
-| (7) legacy base-URL env | confirmed + `remediation-required`: a legacy name is on the current revision or the current template | step 10 (the env-only change removes both names from the template) |
+| (7) legacy base-URL env | confirmed + `remediation-required`: a legacy name is on the current revision or the current template | step 10 (the env-only change removes both names from the template) -- **only when the check made before step 1 (this section's own opening, above the Steps) confirms neither service's current template code requires the name being removed; when either does, that check stops the whole stage before step 1 runs, and step 10 never runs** |
 | (7) legacy base-URL env | blocked: the deploy that will create the candidate carries the legacy names forward without removing them | step 10, plus step 13's own deploy, which must carry the removal flag §10.4.2 step 2 names |
 | (8) `connection_headroom` | `unknown`: `--concurrency` was omitted because `MITATEDB_MAX_CONCURRENCY` is not carried by every OLD-basis Data revision counted toward item (8) (§10.4.3), and §10.4.3's own declared-default exception does not apply | step 10 in full -- the env-only change declares the value, and on a service whose traffic is pinned to a revision it also moves the traffic onto the revision that carries it; step 13's own deploy carries the same value to the candidate. **A revision reachable only by a tag keeps its own env**, which a template change does not reach, so if one of those is missing the value this row does not resolve the finding: report and stop. The way out is to take the tag off that revision (`gcloud run services update-traffic <service> --remove-tags=<tag> --project=<project> --region=<region> --quiet`), which is itself a traffic-projection change and therefore carries the same three conditions as step 10's own move (the isolated proof, the independent audit and the requester's approval) -- otherwise it is a separate decision. **A counted revision that takes no traffic but has `minScale` 1 or more keeps its own env too**, the same way a tag-reachable revision does: the way out is its own `minScale` (§10.10's own worked example above, "the way back from a `W` that fails"), decided the same way as the tag removal above -- a template change does not reach it either |
 | (8) `connection_headroom` | `unknown`: `--thread-limit` was omitted because a NEW-basis Data revision counted toward item (8) does not carry `MITATEDB_THREAD_LIMIT` | step 10 in full, the same way as the `--concurrency` row above -- declare `MITATEDB_THREAD_LIMIT` on the env-only revision and on the candidate's own step 13 deploy. The same tag-reachable-revision and `minScale`-revision exceptions apply: report and stop if one is missing |
-| (8) `connection_headroom` | `unknown`: `--data-process-count-old-basis` (and, with it, `--concurrency`; and `--thread-limit` too for a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision) was omitted for one of §10.4.3's own reasons -- a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision among those counted, an OLD-basis revision carrying `MITATEDB_THREAD_LIMIT` or whose own `concurrency` is below 6, or a revision whose image digest and `MITATEDB_WORKERS` presence disagree | **not a finding this stage resolves.** None of these is a platform-state defect step 4-11 changes; each is a property of which revisions are currently deployed and what they carry, which only a further deployment decision (redeploying or retiring the revision in question) changes -- report `blocked—platform remediation required` and stop |
+| (8) `connection_headroom` | `unknown`: `--data-process-count-old-basis` (and, with it, `--concurrency`; and `--thread-limit` too for a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision) was omitted for one of §10.4.3's own reasons -- a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision among those counted, an OLD-basis revision carrying `MITATEDB_THREAD_LIMIT` or whose own `concurrency` is below 6, an OLD-basis revision whose own attested source ref does not carry the pool-sizing shape the `2 x concurrency` floor assumes, or a revision whose image digest and `MITATEDB_WORKERS` presence disagree | **not a finding this stage resolves.** None of these is a platform-state defect step 4-11 changes; each is a property of which revisions are currently deployed, what they carry and what their own source ref's code does, which only a further deployment decision (redeploying or retiring the revision in question) changes -- report `blocked—platform remediation required` and stop |
 | (8) `connection_headroom` | `unknown`: `--reserved-connections` was omitted because the reserve was not established | step 11 |
 | (8) `connection_headroom` | `unknown`: a role's `CONNECTION LIMIT` is `-1` | step 7 (`0012`), for a role `0012` itself names -- a `-1` on any other role is not resolved here (2026-09-18: step 7 now ends with `0014`, which names `mitatedbsvc_auditreader` too, so a `-1` on it is resolved here as well; a `-1` on a role none of the files names still is not) |
 | (8) `connection_headroom` | `unknown` + `remediation-required`: the `process_ceilings` declaration is absent | step 5 and step 6 |
 | (8) `connection_headroom` | blocked: the `process_ceilings` row exists but its value is malformed (a shape or value the declaration read rejects, rather than an absent row) | step 6 (`declare-process-ceilings` replaces the whole row with a valid pair) |
 | (8) `connection_headroom` | blocked: the declared `process_ceilings` value does not equal the candidate's own ceiling | step 6 (re-declare the ceilings the candidate will be deployed with) |
-| (8) `connection_headroom` | blocked: a role's `CONNECTION LIMIT` is below its own computed demand | **not a finding this stage resolves.** `0012` sets the limits of the roles it names to its own fixed value (68 for the api role, 20 for the controlplane role, 36 for each application's runtime and developer role), raising one below that value and lowering one above it, and it changes no other role's limit: `mitatedbsvc_auditreader`'s own limit stays as `0005` created it, and the provision role's is untouched as well. So a limit below its own demand is a platform-remediation item of its own: report `blocked—platform remediation required` and stop, because changing a `CONNECTION LIMIT` value takes a new platform migration. This is the condition §10.10's preconditions check on paper before anything is changed; step 7 raises the limits `0012` names, so what stops here is a limit still below its own demand once `0012`'s own value is substituted -- the auditreader's, or one `0012` lowers (this row itself names no step to re-run). (2026-09-18: step 7 now ends with `0014_role_connection_limits_rollout.sql`, which raises the api role to 132, the controlplane role to 36, `mitatedbsvc_auditreader` to 12 and each application's runtime and developer role to 68. Substitute THOSE values here: the auditreader is no longer outside the limits step 7 raises, and what stops here is a limit still below its own demand once `0014`'s own values are substituted. **So this row's "not a finding this stage resolves" is now the narrower one**: a first read of a deployment that has not had step 7 yet reports item (8) blocked on limits `0014` itself raises -- the api role's own 68 against a demand of 128 at a worst-case total of 2 is the ordinary case -- and step 7 resolves exactly those. What this row still does not resolve, and what still stops the procedure, is a limit that is below its own demand once `0014`'s own values have been substituted; raising one above them takes a further platform migration, and for that case this row names no step to re-run) |
+| (8) `connection_headroom` | blocked: a role's `CONNECTION LIMIT` is below its own computed demand | **not a finding this stage resolves.** `0012` sets the limits of the roles it names to its own fixed value (68 for the api role, 20 for the controlplane role, 36 for each application's runtime and developer role), raising one below that value and lowering one above it, and it changes no other role's limit: `mitatedbsvc_auditreader`'s own limit stays as `0005` created it, and the provision role's is untouched as well. So a limit below its own demand is a platform-remediation item of its own: report `blocked—platform remediation required` and stop, because changing a `CONNECTION LIMIT` value takes a new platform migration. This is the condition §10.10's preconditions check on paper before anything is changed; step 7 raises the limits `0012` names, so what stops here is a limit still below its own demand once `0012`'s own value is substituted -- the auditreader's, or one `0012` lowers (this row itself names no step to re-run). (2026-09-18: step 7 now ends with `0014_role_connection_limits_rollout.sql`, which raises the api role to 132, the controlplane role to 36, `mitatedbsvc_auditreader` to 12 and each application's runtime and developer role to 68. Substitute THOSE values here: the auditreader is no longer outside the limits step 7 raises, and what stops here is a limit still below its own demand once `0014`'s own values are substituted. **So this row's "not a finding this stage resolves" is now the narrower one**: a first read of a deployment that has not had step 7 yet reports item (8) blocked on limits `0014` itself raises -- the api role's own 68 against a demand of 76 with one OLD-basis process and the one-process candidate (O = 1, N = 1: `2 x 32 + 2 x 6`) is the ordinary case -- and step 7 resolves exactly those. What this row still does not resolve, and what still stops the procedure, is a limit that is below its own demand once `0014`'s own values have been substituted; raising one above them takes a further platform migration, and for that case this row names no step to re-run) |
 
 **A finding is resolved by this stage only when its row names a step.**
 The row for a role's `CONNECTION LIMIT` below its own demand names none,
@@ -3296,6 +3528,36 @@ state of a deployment that has not been remediated. The first sentence
 above is unchanged for every other entry: a finding whose row names no
 step is not resolved here.)
 
+**Confirm item (7)'s own remediation is possible for BOTH services
+before starting step 1.** For each service that carries either legacy
+name (`MITATEDB_DATA_BASE_URL` on Data, `MITATEDB_CONTROL_BASE_URL` on
+Control), confirm whether the code its current template runs requires
+the name step 10 would remove, at that template's own attested source
+ref (confirm the ref exists first, the same way §10.4.4 step 7 does):
+
+```sh
+git show <source-ref>:MitateDB-api/src/mitatedb_api/config.py | grep -c 'MITATEDB_DATA_BASE_URL is required'
+```
+
+for Data, and
+
+```sh
+git show <source-ref>:MitateDB-api/src/mitatedb_api/control_composition.py | grep -c '_require(env, "MITATEDB_CONTROL_BASE_URL")'
+```
+
+for Control. **When the existence check does not exit `0`, do not read
+the count: treat that service's code as requiring the name (the same
+outcome as a non-zero count) and stop, reporting it.** **If either
+service's count is non-zero, item (7)'s own remediation does not run on
+either service this stage: do not start step 1, report `blocked—platform
+remediation required` for item (7), and stop.** Checking this before
+step 1 runs, rather than inside step 10 itself, avoids changing
+production through steps 4-9 only to find step 10 blocked on a service
+whose code requires the name being removed. (Redeploying a service onto
+code that does not require the name is a separate decision, made through
+stage 4's own candidate deploy, not through this step.) Step 10 below
+does not repeat this check; it uses this result.
+
 **Steps** (run the whole sequence against the isolated pair first, then
 against production):
 
@@ -3305,8 +3567,15 @@ against production):
    they differ from the first read, redo the read. Then, for each §10.6
    row the rollback target does not contain, read the file named in that
    row's last column at the target's own attested source ref and confirm
-   the condition stated there. **If any condition cannot be confirmed at
-   that ref, item (5) is `unknown` and this stage does not start.**
+   the condition stated there. **Confirm the ref exists first, the same
+   way §10.4.4 step 7 does** (fetch it, then run its own fenced
+   existence-check command for each path read) -- a `git show` on a ref
+   this clone does not have, or a wrong path, prints nothing on stdout,
+   which reads the same as a condition phrased as absence (§10.6's
+   `0016` row, among others)
+   unless the ref is confirmed first. **If any condition cannot be
+   confirmed at that ref, item (5) is `unknown` and this stage does not
+   start.**
 2. **Record what the numbered set will overwrite.** Re-applying the set is
    idempotent but not value-neutral (§10.6/§10.7's `0007` and `0012`
    rows), so the current values are recorded first:
@@ -3465,6 +3734,141 @@ against production):
    stops a previous multi-process revision from starting at all. **This
    step does not cover the downward direction**: it needs a separate
    decision about the order or the value, so stop and ask for one.
+
+   **Every revision that can start while the declaration stands runs its
+   own `max_connections` headroom check (F-18, §6.5) at startup against
+   the SAME `process_ceilings` row, and refuses to start when it fails --
+   it never raises `deployment_required`.** Check it on paper, twice,
+   before this step runs, for every Data and Control revision counted
+   toward item (8) (§10.4.3), for the rollback target (§10.10.1 step 1),
+   and for the env-only revision step 10 will create, with the
+   `--data`/`--control` values (`D`, `C`) this step is about to declare:
+   the bound is `D x (2x + 2x) + C x 16` unless
+   `mitatedb_registry.applications` has no row at all -- a registered-only
+   row counts, unlike item (8)'s own `K` (read `SELECT count(*) FROM
+   mitatedb_registry.applications` with step 2's own read-only subshell
+   shape; with 0 rows the bound is `D x 2x + C x 16`, §6.5) -- plus
+   `superuser_reserved_connections` plus `reserved_connections` (step 11's
+   own read shape, run before this step, ahead of its place in the
+   numbered sequence, the same as §10.10's own preconditions already
+   compute it), and it must not exceed `max_connections`. `x` is, on a
+   revision whose
+   attested source ref is a NEW-basis digest (§10.4.4 step 7), that
+   revision's own `MITATEDB_THREAD_LIMIT + 2` (§6.5's F-18 paragraph); on
+   a revision whose ref is not, that revision's own declared `MITATEDB_
+   MAX_CONCURRENCY` when it carries a positive integer, or -- only where
+   §10.4.3's own declared-default exception applies -- the code default
+   that exception names (a Control revision computes the SAME bound, with
+   `D` and `C` unchanged, from Control's own `MITATEDB_MAX_CONCURRENCY`
+   the same way). For step 10's own env-only revision, apply the same
+   rule to the env step 10 will leave on it: on a NEW-basis template, the
+   `MITATEDB_THREAD_LIMIT` value step 10 declares plus 2; on Data's older
+   template, the `MITATEDB_MAX_CONCURRENCY` value step 10 declares; on
+   Control's own env-only revision (step 10 declares nothing on Control,
+   above), Control's own value by the rule above, unchanged by step 10.
+   **When `x` cannot be established for a revision by these rules, the
+   check does not hold for it** -- treat that exactly as a failing bound,
+   below. (A revision whose own attested source ref
+   predates F-18 entirely -- confirmed by the `check_max_connections_
+   headroom` count §10.4.4 step 7 also takes -- carries no such check and
+   is outside this paragraph.) If it does not hold for one of them,
+   declaring the raised ceiling here would let that revision refuse to
+   start on a cold start (a scale-out, a restart, or a rollback) before
+   traffic ever reaches the candidate -- **this step has no fix for
+   that**: the bound is compared against `max_connections`, so the levers
+   are the Cloud SQL instance's own `max_connections` flag (§3.2b; what
+   value it should carry is not settled here, a separate decision) or a
+   smaller declaration -- the two rollouts below; no `CONNECTION LIMIT`
+   change moves it.
+
+   **F-16 (§6.5) is the second startup check that reads this
+   declaration, checked at the SAME point as F-18 above -- but not
+   confined to the same revisions: it also covers a revision whose
+   attested source ref carries F-16 without yet carrying F-18** (a ref
+   whose `check_role_connection_limits(` count, §10.4.4 step 7, is not
+   `0` even where its `check_max_connections_headroom` count is). A
+   revision whose attested source ref is a NEW-basis digest requires, on
+   Data's own roles, `CONNECTION LIMIT` of at least `2 x x` times `D` on
+   the api role and `x` times `D` on each application role it serves;
+   and, on Control's own roles, at least `16` times `C` on the
+   controlplane role and `4` times `C` on the auditreader role when it
+   carries `MITATEDB_AUDIT_DSN` (`x` as defined just above; Control's own
+   `x` comes from Control's own env, confirmed the same way). A revision
+   on an older ref requires the same shape without the `D`/`C`
+   multiplier: `2 x x`, `x`, `16` and `4` (the same `x`, defined above for
+   either basis). **A role whose own `CONNECTION LIMIT` is `-1`
+   (unlimited) always passes F-16, whatever its floor.** At the default
+   `x` = 32 (the OLD-basis default `MITATEDB_MAX_CONCURRENCY`) an older
+   revision's role floors pass (`2 x 32` = 64 ≤ 68 on the api role, `32`
+   ≤ 36 on each application role); `x` ≥ 35 fails on the api role (`2 x
+   35` = 70 > 68). **Check it against the LOWEST value each role carries
+   from this step until step 7 has fully completed, never against what
+   `0014` will eventually set**: step 7 applies `0012` first, which sets
+   the api role to 68, the controlplane role to 20 and every existing
+   application role to 36, and holds them there until `0014` commits --
+   or, if the run stops after `0012`, until it is re-applied in full.
+   **If it does not hold for even one of them, this step stops before
+   it: do not declare here, do not go on to step 7, and get a separate
+   decision. The two rollouts below do not resolve this.**
+
+   **When the F-18 bound does not hold, decouple the worker-count raise
+   from the ceiling raise, with two separate rollouts, instead of forcing
+   both through together.**
+
+   **First rollout**: run this whole procedure -- §10.4's platform-layer
+   read through §10.9's judgment (the first read), §10.10's own
+   preconditions, and stages 2-4 -- with the candidate's own `MITATEDB_
+   WORKERS` set to `1` and its `--max-instances` chosen so `--max-
+   instances x 1` equals the `process_ceilings.data` value step 2's
+   `show-declarations` recorded (unchanged), and Control's own candidate
+   deployed at the SAME `process_ceilings.control` value recorded there,
+   so this step re-declares both values unchanged. With one OLD-basis
+   process (its own declared `concurrency`, default 32) and one NEW-basis
+   process (`MITATEDB_WORKERS` 1, default `MITATEDB_THREAD_LIMIT` 4) side
+   by side, the api role's own demand is `2 x 32 + 2 x 6 = 76` and each
+   application's own is `32 + 6 = 38`, both within `0014`'s own 132 and
+   68 -- so this first rollout needs no ceiling raise at all, and the F-18
+   check above holds for the OLD-basis processes it leaves running exactly
+   as it held before this rollout (the declared ceiling is unchanged).
+   **This also needs the F-18/F-16 check above for step 10's own
+   env-only revision (`x` = its own declared value, above) -- not merely
+   the two processes side by side described here.** On a deployment where
+   the recorded `process_ceilings.data` (`D`) is already above 1, the
+   candidate's own `--max-instances` set to that same `D` at
+   `MITATEDB_WORKERS` 1 conflicts with §6.5's own "one host"
+   (`--max-instances=1`); item (8)'s own worst-case totals (`O`, `N`) are
+   ordinarily already blocked on such a deployment for the same reason,
+   before this rollout is reached at all.
+
+   **Second rollout**: a further, separate run of the same whole
+   procedure, from its own first read, under the SAME three production
+   conditions §10.10's preconditions place on this whole stage (the
+   isolated proof, the independent audit and the requester's approval) --
+   started only once that first read's own addend table (§10.4.3, basis
+   column from §10.4.4 step 7) carries no OLD-basis row for Data, no
+   Control revision on a pre-existing digest, and the rollback target its
+   own step 1 fixes is on a NEW-basis digest (so every revision it counts
+   computes the F-18 bound above with `x` = its own `MITATEDB_
+   THREAD_LIMIT + 2` -- that check is still made, on paper and twice,
+   before this run's own step 6 raises the ceiling; likewise for F-16,
+   just above). Its own step 6 raises `process_ceilings.data` to the
+   candidate's `--max-instances x MITATEDB_WORKERS` (the intended
+   ceiling, at the intended worker count); `process_ceilings.control`
+   stays at the value already declared -- Control's own ceiling is `1`
+   throughout (§6.5's own "always `1`" rule for `MITATEDB_CONTROL_
+   WORKERS`/`process_ceilings.control`).
+
+   **After the second rollout, the revisions that served before the FIRST
+   rollout are no longer a way back**: they start only if the F-18 AND
+   F-16 checks above hold for them at the raised ceiling, the same as any
+   other revision on a pre-existing digest. Rollback's own target is the
+   revision the second rollout's own step 1 fixed -- the first rollout's
+   candidate (`MITATEDB_WORKERS` 1, NEW basis), not anything older: the
+   worker-count check never refuses it (`MITATEDB_WORKERS` 1 is never
+   above a declared ceiling of 1 or more), and it starts only when the
+   F-18 AND F-16 bounds above hold for it at the raised ceiling; once it does,
+   that target publishes `concurrency` as `deployment_required` rather
+   than `enforced` while it serves under the raised ceiling.
 7. **`0012`, `0013`, `0014`, as one run**: `apply-platform-migration
    0012_role_connection_limits.sql 0013_role_statement_timeouts.sql
    0014_role_connection_limits_rollout.sql --lock-timeout <the §10.7
@@ -3491,6 +3895,14 @@ against production):
    which did not run, and says to re-run the whole run from its first
    file because every file in it is idempotent; do exactly that.
 
+   **This same failure window also opens for F-16** (§6.5, step 6's own
+   paragraph above): on a deployment where `0014` had already applied
+   once before this run, a run that stops after `0012` also leaves
+   `mitatedbsvc_api`, `mitatedbsvc_controlplane` and every existing
+   application role at 68 / 20 / 36 until the run is re-applied in full,
+   and every revision whose F-16 floor exceeds those values cannot start
+   until then.
+
    **`apply-platform-migration` refuses `0012` or `0013` given without
    every one of its own later files in the same call, so a run that
    includes `0012` is always `0012` `0013` `0014`, a run that includes
@@ -3508,8 +3920,11 @@ against production):
    - `0013` alone leaves every EXISTING role as `0014` set it and lowers
      only every FUTURE application's runtime and developer role, to 36.
 
-   **The first case the next `inventory` reports as item (8) blocked at a
-   worst-case total of 2. The second one nothing reports at all until an
+   **The first case the next `inventory` reports as item (8) blocked**
+   (the same O = 1, N = 1 case §10.10.1's own item (8) table above works
+   out: `2 x 32 + 2 x 6 = 76` against the api role's own lowered 68).
+   **The second one nothing
+   reports at all until an
    application is provisioned after it**: item (8) compares the roles
    that exist, and until the next `begin_provision_application` call no
    role carries the lowered value, so no item of the read and no other
@@ -3550,8 +3965,9 @@ against production):
    **Skipping it stops the candidate**: on a platform database without its
    rate function, the candidate's data service and its preflight refuse
    to start, naming the migration, and the candidate never becomes ready
-   in step 13. It is idempotent. Credential issue and revoke wait
-   on it the first time it runs (§10.7's `0016` row).
+   in step 13. It is idempotent. Credential issue, revoke, enable and
+   disable, and deprovision all wait on it the first time it runs (§10.7's
+   `0016` row).
 8. **Per-application upgrade** (`--lock-timeout` is §10.7's
    per-application-upgrade value):
 
@@ -3570,12 +3986,31 @@ against production):
 9. **Declarations**: `declare-surfaces` REPLACES the shared row, so settle
    the values (the Data/Control base URLs; either `--control-base-url` or
    `--no-control`) before running it (§6.1; agreement with each service's
-   own `MITATEDB_CONTROL_PLANE_STATUS` is checked at startup). Run it
-   before step 10, so the surfaces are declared before the legacy env
-   names go away.
+   own `MITATEDB_CONTROL_PLANE_STATUS` is checked at startup). **On a
+   deployment that already carries a `surfaces` row** (step 2's own
+   `show-declarations` output already shows it), declare it here with
+   exactly the same values, unless this run is deliberately changing
+   them: adding or dropping the control base URL here fails, at its next
+   cold start, a Data revision whose `MITATEDB_CONTROL_PLANE_STATUS` no
+   longer agrees (F-6), and dropping it fails every Control revision
+   (F-3c); `MITATEDB_CONTROL_PLANE_STATUS`, which Data's F-6 reads, is
+   not on the env-value allow-table above, so this runbook has no way to
+   read it back and check it against what step 9 declares. Run it before
+   step 10, so the surfaces are declared before the legacy env names go
+   away.
 10. **The env-only change**: declare `MITATEDB_MAX_CONCURRENCY` and remove
     the legacy base-URL env names from the service's template, with no new
-    image:
+    image.
+
+    **This step runs at all only because the check before step 1 above
+    already confirmed, for BOTH services, that the code their current
+    templates run does not require the name being removed.** (Had either
+    required it, this whole stage would have stopped there, before step
+    1, and this step would never be reached; redeploying a service onto
+    code that does not require the name is a separate decision, made
+    through stage 4's own candidate deploy, not through this step.) Run
+    the env-only change on every service that carries either legacy
+    name:
 
     ```sh
     gcloud run services update <service> --project=<project> --region=<region> --quiet \
@@ -3602,9 +4037,17 @@ against production):
     revision as well, the traffic move below is made on that service too.
 
     **`MITATEDB_THREAD_LIMIT` is declared this same way, but only when the
-    env-only revision's own template is a NEW-basis image digest** --
-    add `--update-env-vars=MITATEDB_THREAD_LIMIT=<n>` to the command above
-    for that template, and carry the same value in step 13's own deploy.
+    env-only revision's own template is a NEW-basis image digest** -- for
+    that template, pass both names on the SAME `--update-env-vars=` flag
+    (`gcloud` reads one comma-separated list, not one flag per name):
+
+    ```sh
+    gcloud run services update <service> --project=<project> --region=<region> --quiet \
+      --update-env-vars=MITATEDB_MAX_CONCURRENCY=<n>,MITATEDB_THREAD_LIMIT=<n> \
+      --remove-env-vars=MITATEDB_DATA_BASE_URL,MITATEDB_CONTROL_BASE_URL
+    ```
+
+    and carry the same value in step 13's own deploy.
     **Never add `MITATEDB_THREAD_LIMIT` to an OLD-basis template**:
     §10.4.3's own list of cases that leave `--data-process-count-old-basis`
     omitted counts an OLD-basis revision carrying `MITATEDB_THREAD_LIMIT` as
@@ -3629,7 +4072,13 @@ against production):
       target -- the digest is unchanged, so item (9)'s attestation still
       covers it;
     - **on a service whose traffic is pinned to a revision, move the
-      traffic to this new revision here.** Until that happens the revision
+      traffic to this new revision here, only once its own Ready
+      condition reads `True`.** Read that first (§10.4's own
+      Ready-condition command, filtered on this new revision's own name);
+      do not move traffic while it is not `True` (whether Cloud Run
+      itself would refuse to route traffic to a not-Ready revision is not
+      confirmed here -- general knowledge says it refuses, but this
+      runbook does not rely on that). Until traffic moves, the revision
       carrying the traffic is still one without `MITATEDB_MAX_CONCURRENCY`,
       so §10.4.3's rule leaves `--concurrency` omitted and item (8)
       `unknown` through the second read, and this step has resolved
@@ -3637,7 +4086,8 @@ against production):
       the same three conditions §10.10's preconditions place on this whole
       stage** (the isolated proof, the independent audit and the
       requester's approval) -- it is not a step to take on Gate-0 ready.
-      Move it, then check health, and go back if health does not hold:
+      Move it, then check the rest of health, and go back if it does not
+      hold:
 
       ```sh
       gcloud run services update-traffic <service> --to-revisions=<env-only-revision>=100 \
@@ -3645,9 +4095,9 @@ against production):
       ```
 
       Health: the service's traffic projection shows that revision at
-      100%; its Ready condition is `True`; its env no longer carries
-      either legacy name; and an authenticated capabilities read against
-      the stable service URL succeeds (§6.3's shape, no business
+      100%; its Ready condition still reads `True`; its env no longer
+      carries either legacy name; and an authenticated capabilities read
+      against the stable service URL succeeds (§6.3's shape, no business
       reads/writes and no operation-depth probe). Back out by moving the
       traffic to the revision (and the allocation) step 1 recorded, with
       the same command shape -- the digest is unchanged and no schema or
@@ -3714,8 +4164,11 @@ Gate-0 ready (step 12) gates exactly this stage.
     attested, and it must not reintroduce the legacy env names
     (`MITATEDB_DATA_BASE_URL`, `MITATEDB_CONTROL_BASE_URL`): if the deploy
     carries env forward, pass the removal flag §10.4.2 step 2 names.
-    **The deploy's own env must include
-    `MITATEDB_MAX_CONCURRENCY=<the value step 10 declared>`**,
+    **The deploy's own env must include `MITATEDB_MAX_CONCURRENCY=<the
+    value step 10 declared, or, when step 10 did not run on this service
+    (a service with no legacy name to remove), the value the
+    traffic-carrying Data revision itself carries, or the declared
+    default §10.4.3's exception recorded for it>`**,
     `MITATEDB_THREAD_LIMIT=<the value used for item (8)'s own
     --thread-limit, §10.4.3>`, and `MITATEDB_WORKERS=<the worker count
     step 6's --data was computed from>` (§6.5: `MITATEDB_WORKERS` is
@@ -3731,14 +4184,22 @@ Gate-0 ready (step 12) gates exactly this stage.
     declaration is not inherited by a revision this command creates:
     leave a name out and the candidate runs on the code's own default for
     it instead of the declared value, which for `MITATEDB_THREAD_LIMIT`
-    is the role `CONNECTION LIMIT` demand `0014` exists to bound. Do not
+    is the role `CONNECTION LIMIT` demand `0014` exists to bound.
+    **On a deployment that runs Control, Control's own candidate deploy
+    carries `MITATEDB_CONTROL_WORKERS=1`** (§6.2: required, always 1) **and
+    the SAME `MITATEDB_THREAD_LIMIT` value as Data's own candidate**
+    (`control_composition.build_control_service` reads it from its own
+    process env the same way `main.build_app` does). Do not
     modify the rollback target revisions. After deploying, do §10.4.2
     step 3 and §10.4.3 step 3, and read the candidate's own
     `MITATEDB_MAX_CONCURRENCY`, `MITATEDB_THREAD_LIMIT` and
     `MITATEDB_WORKERS` back as well: if any of the three differs from the
     value the second read used, item (8) was judged on a value this
     deployment does not run, so redo the read -- the same rule §10.4.3
-    step 3 applies to a ceiling that reads back differently.
+    step 3 applies to a ceiling that reads back differently. On a
+    deployment that runs Control, read Control's own candidate
+    `MITATEDB_CONTROL_WORKERS` and `MITATEDB_THREAD_LIMIT` back the same
+    way; redo the read on the same disagreement.
 14. **Restart Data/Control**: declarations are read at startup, so the
     candidate's own start IS the restart, and it is where step 4's
     restored role settings reach the processes. When the change shortens a
@@ -3774,6 +4235,16 @@ Gate-0 ready (step 12) gates exactly this stage.
   split, restore the allocation that was fixed).
 - Schema and declarations are NOT reverted (§10.6's compatibility rows are
   what make that safe).
+- **The `process_ceilings` declaration stays at step 6's own value; it is
+  never moved back by this rollback.** The rollback target cold-starts
+  under that same declared ceiling, so it cold-starts only when step 6's
+  own F-18 AND F-16 arithmetic (above) both held for it before step 6 ran
+  -- a rollback target for which either did not hold cannot be brought
+  back this way at all, and that is checked before step 6 runs, not
+  discovered here. If step 7's own numbered-set run has stopped after
+  `0012`, the rollback target's F-16 check also runs against `0012`'s own
+  68 / 20 / 36 until the run is re-applied in full (step 7's own failure
+  window, above), whether or not that was true when step 6 ran.
 - **One part of that safety is unverified, and this is where it is felt.**
   §10.6's `0007` row is compatible by inference with one part left open:
   whether a pre-`0007` rollback target's other queries (registry reads and
