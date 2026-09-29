@@ -160,6 +160,9 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         # depends on this migration having been applied AND the row seeded
         # below, or it fails startup with F-15.
         "0011_process_ceilings.sql",
+        # design D-3 (1): the credential-keyed `requests_per_minute` rate
+        # table -- depends only on 0002.
+        "0016_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -193,6 +196,7 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
+        _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
         admin = psycopg.connect(dsn, autocommit=True)
         try:
             with admin.cursor() as cur:

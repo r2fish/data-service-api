@@ -1079,11 +1079,14 @@ def test_pool_acquire_is_thread_safe():
 # ---------------------------------------------------------------------------
 
 
-def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(platform, credential_app, monkeypatch):
-    """Real-PostgreSQL pin for WP-4e: with the platform pool sized via
-    `role_pool_size` (the exact function `main.build_app` now calls),
-    `max_concurrency` genuinely concurrent `authenticate()` calls against
-    ONE credential store are all served (0 x `AuthorizationStateUnavailable`
+def test_platform_pool_sized_to_thread_limit_avoids_premature_503(platform, credential_app, monkeypatch):
+    """Real-PostgreSQL pin for the platform pool's own F-1 shape: with the
+    platform pool sized via `role_pool_size(thread_limit)` (the exact
+    function `main.build_app` calls -- design docs/design/MULTI_PROCESS_
+    WORKER_V0_1.md D-3 (5): the real per-process simultaneous-borrow
+    ceiling is the thread limit, never the declared `max_concurrency`),
+    `thread_limit` genuinely concurrent `authenticate()` calls against ONE
+    credential store are all served (0 x `AuthorizationStateUnavailable`
     denials), even though each call is made to hold its checked-out
     connection for longer than the pool's own `acquire_timeout`.
 
@@ -1092,12 +1095,12 @@ def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(platfo
     point) is monkeypatched to sleep for `hold_s` seconds AFTER the real
     query runs but BEFORE returning, while `_borrow_connection`'s own
     `with` block still holds the checked-out real connection -- so
-    `concurrency` threads genuinely contend for the pool's `max_size`
+    `thread_limit` threads genuinely contend for the pool's `max_size`
     slots against a live PostgreSQL server, not a simulation.
 
     Mutation: hardcoding this test's own `pool` construction back to a
-    fixed `max_size=2` (or `pool.DEFAULT_MAX_SIZE`) regardless of the
-    declared `max_concurrency=6` this test configures turns this red --
+    fixed `max_size=2` regardless of the `thread_limit=6` this test
+    configures (or `role_pool_size` returning a fixed 4) turns this red --
     the 3rd+ concurrent `authenticate()` call then waits past `acquire_
     timeout` for a connection none of the first two callers have released
     yet (still sleeping), and raises `AuthorizationStateUnavailable`
@@ -1106,10 +1109,10 @@ def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(platfo
     import concurrent.futures
     import time
 
-    concurrency = 6
+    thread_limit = 6
+    concurrency = thread_limit
     hold_s = 0.6
-    config = FoundationConfig(max_concurrency=concurrency)
-    platform_pool_size = role_pool_size(config)
+    platform_pool_size = role_pool_size(thread_limit)
 
     pool = BoundedConnectionPool(platform.api_dsn, max_size=platform_pool_size, acquire_timeout=0.3)
     store = PostgresCredentialStore(
@@ -1473,3 +1476,69 @@ def test_thread_limit_bounds_synchronous_concurrency_while_slot_admission_stays_
     assert peak == 4, f"synchronous concurrency must be bounded to the thread limiter (4), observed peak={peak}"
     statuses = [r.status_code for r in responses]
     assert statuses.count(200) == concurrency, statuses
+
+
+# ---------------------------------------------------------------------------
+# design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5): `main.py`'s own
+# `_thread_limit_from_env` (a registered isomorphism target, kept as its
+# own body) and `config.thread_limit_from_env` (the reader `control_
+# composition.py`/`ops._declared_pool_size` use) agree on every input.
+# ---------------------------------------------------------------------------
+
+
+def _load_main_thread_limit_from_env():
+    """Loads `_thread_limit_from_env` from `mitatedb_api/main.py`'s own
+    source via AST + isolated exec -- never a plain `import mitatedb_api.
+    main`, which would run that module's own module-level `app =
+    build_app()` (needs real env vars and a live platform database). The
+    function references nothing else at module scope (a pure parse/raise),
+    so its own AST node exec'd in an isolated namespace is sufficient."""
+    import ast
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api" / "main.py"
+    tree = ast.parse(path.read_text())
+    func_node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_thread_limit_from_env")
+    isolated = ast.Module(body=[func_node], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+    namespace: dict = {}
+    exec(compile(isolated, str(path), "exec"), namespace)
+    return namespace["_thread_limit_from_env"]
+
+
+def test_thread_limit_from_env_agrees_with_the_shared_config_reader():
+    """Completion condition 128b: `main.py`'s own `_thread_limit_from_env`
+    and `config.thread_limit_from_env` read the SAME variable
+    (`MITATEDB_THREAD_LIMIT`) with the SAME discipline -- same return value
+    for unset, empty and a valid positive integer, and both raise
+    `ValueError` for `0`, a negative integer and a non-numeric value.
+
+    mutation M128b (`config.py`): `thread_limit_from_env`'s own `value <=
+    0` branch becomes `value < 0` -- `main.py`'s own copy still raises for
+    `"0"`, so the agreement check for that input goes red."""
+    from mitatedb_api.config import thread_limit_from_env as shared_thread_limit_from_env
+
+    main_thread_limit_from_env = _load_main_thread_limit_from_env()
+    checked = 0
+    for env in ({}, {"MITATEDB_THREAD_LIMIT": ""}, {"MITATEDB_THREAD_LIMIT": "6"}):
+        assert main_thread_limit_from_env(env, "MITATEDB_THREAD_LIMIT", 4) == shared_thread_limit_from_env(
+            env, "MITATEDB_THREAD_LIMIT", 4
+        )
+        checked += 1
+    for raw in ("0", "-3", "abc"):
+        env = {"MITATEDB_THREAD_LIMIT": raw}
+        main_exc = shared_exc = None
+        try:
+            main_thread_limit_from_env(env, "MITATEDB_THREAD_LIMIT", 4)
+        except ValueError as exc:
+            main_exc = exc
+        try:
+            shared_thread_limit_from_env(env, "MITATEDB_THREAD_LIMIT", 4)
+        except ValueError as exc:
+            shared_exc = exc
+        assert (main_exc is None) == (shared_exc is None), (
+            f"raw={raw!r}: main.py's own reader raised {main_exc!r}, config.thread_limit_from_env raised "
+            f"{shared_exc!r} -- disagreement"
+        )
+        checked += 1
+    assert checked == 6

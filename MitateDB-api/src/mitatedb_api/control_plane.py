@@ -52,6 +52,7 @@ import uuid
 import psycopg
 from psycopg import sql
 
+from .capabilities_document import resolve_limit_enforcement
 from .audit_query import (DECLARED_AUDIT_EVENT_CLASSES, DECLARED_AUDIT_OPERATIONS,
                           DECLARED_AUDIT_TARGET_KINDS, DEFAULT_COALESCING_WINDOW_MS,
                           AuditQueryReader, shape_audit_query_row, validate_audit_after,
@@ -67,6 +68,7 @@ from .errors import (AuthenticationError, AuthenticationRequiredError,
                      StorageConfigurationError, ValidationError, violation,
                      observed_type_of)
 from .identifiers import validate_identifier
+from .pool import _application_name_connect_kwargs
 
 DEFAULT_SCHEMA = "mitatedb_registry"
 
@@ -448,7 +450,7 @@ class _PostgresRegistryBase:
 
     def _connect(self) -> "psycopg.Connection":
         try:
-            return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+            return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False, **_application_name_connect_kwargs())
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
 
@@ -1067,7 +1069,7 @@ class PostgresControlBackend:
     @contextmanager
     def unit_of_work(self):
         try:
-            conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+            conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False, **_application_name_connect_kwargs())
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
         try:
@@ -1572,9 +1574,14 @@ class ControlPlaneService:
         # regardless of ceiling (see `applications_count_locked`/
         # `credentials_active_count_locked` below for what makes that
         # claim hold under concurrency).
-        if self._process_ceiling >= 2:
-            limit_enforcement["control_requests_per_minute"] = "deployment_required"
-            limit_enforcement["audit_requests_per_minute"] = "deployment_required"
+
+        # design D-3 (4): routed through the SAME 2-strategy helper the
+        # data plane's own `capabilities_document.py` uses --
+        # `configured=False` unconditionally (control's 2 region-(ii)
+        # classes stay in-process), so this reduces to the single-process
+        # `ceiling <= 1` rule.
+        for name in ("control_requests_per_minute", "audit_requests_per_minute"):
+            limit_enforcement[name] = resolve_limit_enforcement(configured=False, ceiling=self._process_ceiling)
         return {
             # Phase 4 WP-3(b) (P4-D4, contract `versioning.version_binding`),
             # flipped to 1.5.0 in Phase 5 WP-3 (design D-1, subordinate

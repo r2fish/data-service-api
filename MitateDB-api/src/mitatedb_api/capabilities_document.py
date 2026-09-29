@@ -30,18 +30,47 @@ def _operation_catalog_url_fragment(config):
     return {"operation_catalog_url": url} if url is not None else {}
 
 
-def build_capabilities_document(*, is_developer, role, application_id, cell_config, process_ceiling):
+def resolve_limit_enforcement(*, configured: bool, ceiling: int) -> str:
+    """The 2-strategy `limit_enforcement` mapping (design docs/design/
+    MULTI_PROCESS_WORKER_V0_1.md D-3 (4)) every region-(ii) class -- on
+    both planes -- runs through: a class bound by a mechanism actually
+    SHARED across every worker this supervisor runs (`configured=True`)
+    reads `enforced` whatever the declared `ceiling` is; a class still
+    bound by in-process state alone (`configured=False`) reads `enforced`
+    only while `ceiling <= 1` (the single-process rule).
+
+    `configured`'s own meaning is class-specific and is the caller's job
+    to compute, never this function's: `requests_per_minute` is
+    `configured` exactly when the PostgreSQL-backed rate row is wired
+    (`_LimitStateHolder`'s own `rate`), regardless of workers;
+    `concurrency` is `configured` only when the host-shared slot
+    directory is wired AND this supervisor's own worker count is at least
+    the declared ceiling (`mitatedb_api.main.build_app` computes it --
+    workers below the ceiling could mean a second host is also counted
+    toward it, where the slot directory is not shared). The control
+    plane's two region-(ii) classes (`control_requests_per_minute`/
+    `audit_requests_per_minute`) stay in-process -- `control_plane.py`
+    passes `configured=False`, which routes them through this same
+    function to the single-process rule."""
+    if configured:
+        return "enforced"
+    return "enforced" if ceiling <= 1 else "deployment_required"
+
+
+def build_capabilities_document(*, is_developer, role, application_id, cell_config, process_ceiling,
+                                rate_configured=False, concurrency_configured=False):
     config = cell_config
     # Phase 10 WP-6b (design D-5 (ii)): region (ii) of the 3-region
-    # map -- the two in-memory-per-process-bound classes below
-    # (`concurrency`/`requests_per_minute`, `_LimitStateHolder`'s own
-    # docstring: "process-wide (one per composition root)") degrade
-    # from `enforced` to `deployment_required` once more than one
-    # process may serve this deployment's data-plane base URL at the
-    # same time -- region (i) (every other class in `limit_
+    # map -- the two classes below whose mapping depends on how each is
+    # wired (`concurrency`/`requests_per_minute`, both admitted by
+    # `_LimitStateHolder`, one per composition root) each read
+    # `resolve_limit_enforcement` with their OWN `configured` boolean
+    # (`concurrency_configured`/`rate_configured`, keyword arguments
+    # defaulting to `False` -- a caller that wires neither shared
+    # mechanism keeps the single-process `ceiling <= 1` rule) --
+    # region (i) (every other class in `limit_
     # enforcement` below) is UNAFFECTED by ceiling (it is bound
     # per-request, not per-process).
-    _in_memory_enforcement = "enforced" if process_ceiling <= 1 else "deployment_required"
     return {
         # Phase 4 WP-3(b) (P4-D4, contract `versioning.version_
         # binding`), flipped to 1.5.0 in Phase 5 WP-3 (design D-1,
@@ -315,16 +344,21 @@ def build_capabilities_document(*, is_developer, role, application_id, cell_conf
             # `finally` on every exit path (success or exception).
             # Phase 10 WP-6b (design D-5 (ii)): that per-process bound
             # only describes the WHOLE deployment while exactly one
-            # process may serve this base URL -- `_in_memory_
-            # enforcement` (computed above from the deployer's own
-            # declared `process_ceilings.data`) degrades this to
-            # `deployment_required` once more than one process may.
-            "concurrency": _in_memory_enforcement,
+            # process may serve this base URL -- `resolve_limit_
+            # enforcement` keeps this `enforced` at any declared
+            # `process_ceilings.data` once `concurrency_configured` (the
+            # host-shared slot directory wired and this supervisor's own
+            # workers at the declared ceiling) is true, and otherwise
+            # degrades it to `deployment_required` once more than one
+            # process may.
+            "concurrency": resolve_limit_enforcement(configured=concurrency_configured, ceiling=process_ceiling),
             # Phase 8 WP-1a (design D-1): `_LimitStateHolder.
             # acquire_rate` now bounds a credential-keyed 60s sliding
             # window for real. Phase 10 WP-6b: same ceiling-dependent
-            # degradation as `concurrency` immediately above.
-            "requests_per_minute": _in_memory_enforcement,
+            # degradation as `concurrency` immediately above, unless
+            # `rate_configured` (the PostgreSQL-backed rate row wired)
+            # keeps it `enforced` at any ceiling.
+            "requests_per_minute": resolve_limit_enforcement(configured=rate_configured, ceiling=process_ceiling),
             # Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06):
             # `enforced` on BOTH surfaces -- `_check_operation_depth`
             # (module-level, above (in `request_limits.py`)) is wired into `_limit_gate`
