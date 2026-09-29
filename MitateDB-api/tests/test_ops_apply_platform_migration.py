@@ -1630,7 +1630,7 @@ def _platform_migration_targets_in_file(path: Path) -> "list[tuple[str, str]]":
 
 def _derive_platform_migration_target_map() -> "dict[tuple[str, str], tuple[str, ...]]":
     """D-3: `target -> the files (in `_PLATFORM_MIGRATION_FILENAMES`
-    order) that define it`, derived from the 6 accepted migration files
+    order) that define it`, derived from the 7 accepted migration files
     themselves -- this is the thing D-3 FIXES; `ops._PLATFORM_
     MIGRATION_SUPERSEDED_BY` is proved (below) to be exactly what this
     map derives at file granularity, never the other way around."""
