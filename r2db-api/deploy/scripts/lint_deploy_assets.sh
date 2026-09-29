@@ -374,12 +374,12 @@ check_execstartpre() {
 
 check_execstartpre \
     "${DEPLOY_DIR}/systemd/r2dbsvc-control.service" \
-    '^ExecStartPre=.*/python -m r2db_api\.control_main --preflight$' \
+    '^ExecStartPre=/[^[:space:]]*/python -m r2db_api\.control_main --preflight$' \
     "${SRC_DIR}/control_main.py"
 
 check_execstartpre \
     "${DEPLOY_DIR}/systemd/r2dbsvc-api.service" \
-    '^ExecStartPre=.*/python -m r2db_api\.main --preflight$' \
+    '^ExecStartPre=/[^[:space:]]*/python -m r2db_api\.main --preflight$' \
     "${SRC_DIR}/main.py"
 
 if [ "$execstart_check_failed" -eq 0 ]; then

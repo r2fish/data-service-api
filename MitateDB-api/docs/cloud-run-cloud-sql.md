@@ -1997,7 +1997,8 @@ absent).
 This is the operator procedure for the Gate-0 read (10 items) that runs
 BEFORE any platform upgrade of the Data/Control services, and for the
 upgrade itself (platform migrations
-`0005`/`0007`/`0011`/`0012`/`0013`/`0014`, per-application upgrades,
+`0005`/`0007`/`0011`/`0012`/`0013`/`0014`/`0016`, per-application
+upgrades,
 declarations, removal of the legacy base-URL env
 vars, restart, health, traffic, rollback). The judgment vocabulary
 (confirmed / blocked / unknown, plus the `remediation-required` note) and
