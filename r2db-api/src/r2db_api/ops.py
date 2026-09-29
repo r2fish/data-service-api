@@ -1783,7 +1783,7 @@ def cmd_upgrade_status(args: argparse.Namespace) -> int:
     return 4 if any_pending else 0
 
 
-# =========================================================================== `apply-platform-migration` re-applies one or more of the 4 known re-appliable platform migrations (0008/0012/0013/0014 -- never the bootstrap-only 0001/0002, never a per-application migration, never one of the password-carrying 0005/0006/0007) against a running cluster's own R2DB_CONTROL_DSN, the same DSN `upgrade-applications` above already uses (design docs/work-orders/WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md D-1/D-3). Call shape only, independent of MitateDB-api's own same-named subcommand (P-6: no code sharing between peers) -- 3 of the 4 helpers below are isomorphic to MitateDB-api's own same-named functions (`_ISOMORPHIC_TARGETS`, `tests/test_audit_query.py`) because their bodies are already peer-generic, not because either peer imports the other. ===========================================================================
+# =========================================================================== `apply-platform-migration` re-applies one or more of the 5 known re-appliable platform migrations (0008/0012/0013/0014/0015 -- never the bootstrap-only 0001/0002, never a per-application migration, never one of the password-carrying 0005/0006/0007) against a running cluster's own R2DB_CONTROL_DSN, the same DSN `upgrade-applications` above already uses (design docs/work-orders/WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md D-1/D-3). Call shape only, independent of MitateDB-api's own same-named subcommand (P-6: no code sharing between peers) -- 3 of the 4 helpers below are isomorphic to MitateDB-api's own same-named functions (`_ISOMORPHIC_TARGETS`, `tests/test_audit_query.py`) because their bodies are already peer-generic, not because either peer imports the other. ===========================================================================
 
 
 #: the platform migrations `apply-platform-migration` accepts -- every
@@ -1823,7 +1823,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
 #: (`_validate_platform_migration_run`). A file absent from this table
 #: (or mapped to an empty tuple) has no known successor and may always
 #: be applied alone. This table is proved equal to the "target ->
-#: defining files" map derived directly from the 4 accepted migration
+#: defining files" map derived directly from the 5 accepted migration
 #: files themselves, folded to file granularity, by a static test (work
 #: order WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md
 #: D-1, `test_ops_apply_platform_migration.py`) -- this table is the
@@ -2320,7 +2320,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "bootstrap-only 0001/0002 and the password-carrying 0005/0006/0007 are never accepted here). A "
         "file with a later file that redefines one of its own targets is refused unless every one of "
         "those later files is given too, in the same call. See POSTGRES_PROVISIONING_RUNBOOK.md section "
-        "16 (0008), section 18 (0012), section 4 (0013), and section 19 (0014). 0008/0013 re-applying is "
+        "16 (0008), section 18 (0012), section 4 (0013), section 19 (0014), and section 20 (0015). 0008/0013 re-applying is "
         "an ASSIGNMENT, not an increment -- it resets a hand-changed value back to the shipped default "
         "(0008's own role timeouts/audit_writer_roles row, 0013's own CONNECTION LIMITs); use "
         "`ops set-platform-timeouts` for a real, lasting timeout change instead of a re-apply"

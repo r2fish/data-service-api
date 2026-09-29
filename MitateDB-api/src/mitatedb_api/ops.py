@@ -2816,7 +2816,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
 #: file absent from this table (or with an empty tuple) has no known
 #: successor and may always be applied alone. This table is proved
 #: equal to the "target -> defining files" map derived directly from
-#: the 6 accepted migration files themselves, folded to file
+#: the 7 accepted migration files themselves, folded to file
 #: granularity, by a static test (design
 #: `docs/design/MITATEDB_PLATFORM_MIGRATION_RUN_V0_1.md` D-3,
 #: `test_ops_apply_platform_migration.py`) -- this table is the side
