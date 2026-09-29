@@ -493,6 +493,13 @@ peer-local のテストは小さい L を宣言した構成で駆動してよい
 53. WP-5 のコードレビュー 1 (F1〜F9) と再確認 1b (N1〜N6) の裁定 (裁定表は監督保管 `r113_wp5_rework_1.md`): **訂正註 (§8.1)** 触ってよいパスに `r2db-api/deploy/scripts/lint_deploy_assets.sh` を足す。MitateDB の 0016 は runbook §10 のゲート付き手順に入れ (§10.6・§10.7・§10.10.1 の step 7a)、表の版数は 5 / 5 / 8、§10.8 は「not accepted」。**完了条件を足す**: worker 数の変数の既定値が unit・Dockerfile・env の例のどこにも無い (変異 M155d・M159d・M163d・M166d)。N1 (統合の順) は WP-3 → WP-5 の順で統合し、両 peer の `main.py` に起動時の検査の呼び出しが在ることを確かめた。N3・N4 は監督が直した。
 54. **訂正註 (監督裁定 51、依頼者裁定 2026-09-29 の 2 件目)**: WP-7 の設計は `docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md` (別ファイル) に置いた。節は本書 §12。Sonnet の週次上限は、監督が 2026-09-29 にこのチャットのアカウントで確かめたところ成り立たない (Sonnet の起動は成功し、アカウントの利用状況に Sonnet の上限の表示が無い。前の引き継ぎ書の記述は別のアカウントの状態と見られる)。依頼者裁定の前提が成り立たないので、WP-3 の差し戻し 1d 以降の実装担当は `ROLES` の役割表どおり sonnet で起動する。それまでの実装担当 (WP-3 の再開〜差し戻し 1c、WP-4 の差し戻し 2、WP-5 の初回と差し戻し 1) は opus である。
 
+**依頼者裁定 (2026-09-29) と監督裁定 55 (§7.5 の計測と §10 の当てはめ)**
+
+- 依頼者裁定 (逐語): 「R-101は閉じない」
+- 依頼者の指示 (同日、逐語): 「孤児の nginx と uvicorn は止めてください」(2026-09-14・09-16 起動の conformance の socket harness の nginx 50 本と uvicorn 7 本。親が 1 のものだけに SIGTERM。2026-09-04 起動の常設のローカル MitateDB は対象外)。
+
+55. §7.5 の実測は設計 §7.4 の表 7-1・7-3・7-4・7-5 のとおり。§10.2 の照合: 1 (表 7-5 は直列の 1 文あたり 0.079〜0.083 ms で 0.2 ms の内側)、3 (表 7-3 で 4 worker すべてが受け、表 7-4 は捨てた run 0)、5 (規則の文言は §10.1 と同じ) は成立。2 は、正式の run (手順どおりの 1 回目) では両 peer とも K = 32 の 2 run の比が 8 以下 (r2db 6.78 / 7.24、MitateDB 7.60 / 7.40) だが、同じ手順の繰り返し 2 回では 8 を超える比が出た (最大 10.30) ので、依頼者裁定により **R-101 は閉じない**。R-101 の行には実測と「worker の外に直列の区間が残る」を【追記】する (§9 の 173)。4 (表 7-2、K = 1 の非退行) は完了ゲートの後に取る。計測の前に機械全体の負荷 (load average) を確かめる手順を §7.5 の 2 に読み足す (1 回目の 12 run は load average 12〜15 の下で取り、無効として捨てた)。§7.5 の 6 の「nginx の残存 0」は各 run の後に `ps -A` で確かめ、全 run で 0 だった (裁定 44)。C-32 (b) の 24 drive (裁定 50) は両 peer とも `other` = 0 (peer あたり 28800 要求)。
+
 ### 6.2 実施と受け入れ
 
 - **WP-4 (2026-09-29、worktree `r113-wp4`、WIP `8a54a74` → `2e0fec9` → `06f59ad`、r113 に merge `01d8a75`)**: 実装担当 opus (初回 + 差し戻し 1 / 2)、コードレビュー opus (1 回 + 再確認 1b / 1c、1c は「指摘なし」+ 観察 3)。監督裁定 43〜47 (§6.1)。最終 pt: `pt: 124 passed in 19.19s` (tools/tests/test_perf_baseline.py)、`pt: 4 failed, 661 passed in 74.95s (0:01:14)` (tools/tests。赤 = `concurrency_slots.py` の分類の共有 pin 4 件、WP-6 で監督が更新)。変異: `mutate: 14 mutations, 14 as expected, restores verified 1/1 files (sha256 x2), grep counts unchanged` (M146〜M150、M148b、M149b、M149c、M149d、M153、M153b、M153c、M153d、M153z。赤の理由は全件 assert の中身、再確認 1b が 10 件を再実行・1c が 14 件を log で照合)。監査照合: 151 = 基点 `18f9c0d` からの差分で `status != 200` を含む行 0 件、152 = `REALPERF` / `REALCPU` の書式と並びの差分 0 件・既存テスト緑。静的検査: `change_class` = B、`check_doc_refs OK`、`public_value_scan total_flagged=0`。`REALWORKERS` 行の形: `REALWORKERS peer= plug= workers= concurrency= pids= accepted_200= non_200= unclassified=`。
