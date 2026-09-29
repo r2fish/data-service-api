@@ -1956,7 +1956,8 @@ def _format_realworkers_row(
     none -- a `LIMIT_EXCEEDED` refusal is 429 on r2db-api and 413 on
     MitateDB-api) and how many of the window's access-log lines no status
     read returned (`unclassified=<n>`, always present, `0` when every line
-    was classified). `pids=` is the number of distinct pids that served a
+    was classified or when the status reads returned more lines than the
+    window held). `pids=` is the number of distinct pids that served a
     200. A record, never a judgement this tool makes (P-8)."""
     counts: "dict[int, int]" = {}
     for pid in accepted_pids:
@@ -1982,8 +1983,9 @@ def _access_log_non_200_counts(launcher: Any, since: int, accepted: int) -> "tup
     counted lines (`accepted` 200s plus every non-200 found so far) reach
     the number of lines appended after `since` -- a run with no non-200
     response asks for none. Lines still uncounted after status 599 are
-    `unclassified` (a line the launcher's reader does not parse). In a run
-    a 599 stopped (a request the client gave up on, a 30 s timeout for
+    `unclassified` (a line the launcher's reader does not parse); when the
+    reads return more lines than the window held, `unclassified` is 0. In a
+    run a 599 stopped (a request the client gave up on, a 30 s timeout for
     one), the server can still finish and log that request while these
     reads run, so the 200 count, the non-200 counts and `unclassified` are
     not read at one point in time and a repeat of the same run need not
