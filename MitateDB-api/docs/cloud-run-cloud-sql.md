@@ -2994,9 +2994,9 @@ version counts as no record at all.**
 
 | Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
 |---|---|---|---|---|---|---|
-| §10.6 compatibility | 6 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
-| §10.7 lock / stop time / `lock_timeout` | 6 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` §5 | -- | -- |
-| §10.10 upgrade procedure (stages 2-4) | 9 | not accepted | 7 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
+| §10.6 compatibility | 6 | accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | 2026-09-30 | Fable (supervisor), on the requester's ruling of 2026-09-30 |
+| §10.7 lock / stop time / `lock_timeout` | 6 | accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | 2026-09-30 | Fable (supervisor), on the requester's ruling of 2026-09-30 |
+| §10.10 upgrade procedure (stages 2-4) | 9 | not accepted | 9 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 (three independent reviews of version 9, none accepting; acceptance follows ledger R-116) | -- | -- |
 
 ### 10.9 Gate-0 overall judgment and report
 
