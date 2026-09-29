@@ -225,24 +225,38 @@ def test_0016_rate_row_cascades_on_credential_delete(platform, r113_app) -> None
     assert _rate_row_count(platform, credential_id) == 0
 
 
-def test_0016_api_role_has_select_insert_update_only_no_delete_or_truncate(platform) -> None:
+def test_0016_api_role_has_select_insert_update_only_no_delete_or_truncate(platform, r113_app, control_platform) -> None:
     """Completion condition 84 -- mutation M84 (grant DELETE to the api
     role): `<prefix>svc_api` holds exactly SELECT/INSERT/UPDATE on the
-    rate table, never DELETE/TRUNCATE, and the controlplane role holds
-    nothing on it."""
-    table = f"{platform.registry_schema}.{RATE_TABLE}"
-    with psycopg.connect(_platform_admin_dsn(platform)) as conn:
-        with conn.cursor() as cur:
-            def _priv(role: str, privilege: str) -> bool:
-                cur.execute("SELECT has_table_privilege(%s, %s, %s)", [role, table, privilege])
-                return bool(cur.fetchone()[0])
+    rate table, never DELETE/TRUNCATE, and every other role -- the
+    controlplane role, a provisioned application's own runtime and
+    developer roles, and (on `control_platform`, the fixture that
+    applies `0005`) the auditreader role -- holds nothing on it."""
+    all_privileges = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE")
 
-            granted = [p for p in ("SELECT", "INSERT", "UPDATE") if _priv(platform.api_role, p)]
-            assert granted == ["SELECT", "INSERT", "UPDATE"], granted
-            for privilege in ("DELETE", "TRUNCATE"):
-                assert not _priv(platform.api_role, privilege), f"{platform.api_role} unexpectedly has {privilege}"
-            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
-                assert not _priv(platform.controlplane_role, privilege), (platform.controlplane_role, privilege)
+    def _held(dsn: str, schema: str, role: str) -> list[str]:
+        table = f"{schema}.{RATE_TABLE}"
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                held = []
+                for privilege in all_privileges:
+                    cur.execute("SELECT has_table_privilege(%s, %s, %s)", [role, table, privilege])
+                    if cur.fetchone()[0]:
+                        held.append(privilege)
+        return held
+
+    assert _held(_platform_admin_dsn(platform), platform.registry_schema, platform.api_role) == [
+        "SELECT", "INSERT", "UPDATE",
+    ]
+    others = [
+        (_platform_admin_dsn(platform), platform.registry_schema, platform.controlplane_role),
+        (_platform_admin_dsn(platform), platform.registry_schema, r113_app.runtime_role),
+        (_platform_admin_dsn(platform), platform.registry_schema, r113_app.developer_role),
+        (control_platform.provision_dsn, control_platform.registry_schema, f"{control_platform.prefix}svc_auditreader"),
+    ]
+    for dsn, schema, role in others:
+        assert _held(dsn, schema, role) == [], role
+    assert len(others) == 4
 
 
 def test_ops_accepts_0016_as_a_known_platform_migration() -> None:
@@ -279,15 +293,34 @@ def test_0016_is_a_platform_single_shot_migration_never_an_upgrade_script() -> N
 
 def test_pg_rate_admits_up_to_limit_then_denies(platform, r113_app) -> None:
     """Completion condition 86 -- mutation M86 (the admit test becomes
-    "total <= L"): exactly L admissions succeed for one credential, the
-    L+1th is denied."""
+    "total <= L"): with the PostgreSQL rate wired into `_LimitStateHolder`,
+    exactly L admissions succeed for one credential and the L+1th raises
+    the SAME `ResourceLimitError` (message and `details`) the in-memory
+    window raises for its own L+1th request."""
+    from mitatedb_api.errors import ResourceLimitError
+
     credential_id, _bearer = _issue(platform, r113_app.app_id)
+    limit = 3
     store = _read_store(platform)
     try:
-        results = [store.record_rate_and_check(credential_id, 3) for _ in range(4)]
+        wired = _LimitStateHolder(rate=store)
+        for _ in range(limit):
+            wired.acquire_rate(credential_id, limit)
+        with pytest.raises(ResourceLimitError) as wired_denial:
+            wired.acquire_rate(credential_id, limit)
     finally:
         store.close()
-    assert results == [True, True, True, False], results
+    in_memory = _LimitStateHolder()
+    for _ in range(limit):
+        in_memory.acquire_rate(credential_id, limit)
+    with pytest.raises(ResourceLimitError) as in_memory_denial:
+        in_memory.acquire_rate(credential_id, limit)
+    assert wired_denial.value.details == {"limit_class": "requests_per_minute"}
+    assert (str(wired_denial.value), wired_denial.value.details) == (
+        str(in_memory_denial.value), in_memory_denial.value.details,
+    )
+    _base_s, counts = _read_rate_row(platform, credential_id)
+    assert sum(counts) == limit
 
 
 def test_pg_rate_db_failure_maps_to_503(platform, r113_app, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,8 +441,38 @@ def test_record_rate_and_check_borrows_and_executes_exactly_once() -> None:
     assert len(executes) == 1, len(executes)
 
 
+def test_denied_authentication_never_writes_a_rate_row(platform, r113_app) -> None:
+    """Completion condition 94 -- mutation M94 (`HttpService.authenticate`
+    counts the rate before the credential store authenticates): a bearer
+    naming a real, registered credential with the wrong secret is refused
+    with `AuthenticationError` and leaves no rate row for that credential.
+    Non-空振り: the SAME credential presented with its real secret, through
+    the SAME service, does get its row once it reaches a cell operation."""
+    from mitatedb_api.credential_wire import compose_bearer_locator
+    from mitatedb_api.http import HttpService
+
+    store = _read_store(platform)
+    try:
+        holder = _LimitStateHolder(rate=store)
+
+        def _cell_factory(application_id: str) -> ApplicationCell:
+            return ApplicationCell(application_id, FoundationConfig(), guard=store.assert_active, limit_holder=holder)
+
+        service = HttpService(store, _cell_factory, limit_holder=holder, max_concurrency=FoundationConfig().max_concurrency)
+        credential_id, bearer = _issue(platform, r113_app.app_id)
+        wrong = compose_bearer_locator(credential_id, "wrong" + secrets.token_hex(16))
+        with pytest.raises(AuthenticationError):
+            service.authenticate(wrong)
+        assert _rate_row_count(platform, credential_id) == 0
+
+        service.authenticate(bearer).capabilities()
+        assert _rate_row_count(platform, credential_id) == 1
+    finally:
+        store.close()
+
+
 def test_denied_session_recheck_of_a_revoked_credential_never_writes_a_rate_row(platform, r113_app) -> None:
-    """Completion condition 94 -- mutation M94 (the rate is counted before
+    """Completion condition 94 -- mutation M94b (the rate is counted before
     the session re-check): a real, registered credential authenticated
     once and then revoked is refused by `_require_data`'s own
     `assert_active` re-check before `_limit_gate` is ever reached, so no
@@ -682,7 +745,7 @@ def test_flock_unexpected_errno_maps_to_backend_error_not_admitted_or_denied(
 
 def test_slot_backend_error_maps_to_503_through_the_limit_state_holder() -> None:
     """Completion condition 103 (through `cell.py`) -- mutation M103b
-    (`concurrency_slot` drops its `SlotBackendError` mapping): a slot
+    (`acquire_concurrency_slot` drops its `SlotBackendError` mapping): a slot
     backend failure reaches `StorageConfigurationError` -- this peer's
     503 `SERVICE_UNAVAILABLE` -- through BOTH `acquire_concurrency_slot`
     (pre-authentication) and `concurrency_slot` (post-authentication,
@@ -912,6 +975,35 @@ def test_resolve_limit_enforcement_unconfigured_follows_the_single_process_rule(
     assert resolve_limit_enforcement(configured=False, ceiling=2) == "deployment_required"
 
 
+def test_build_app_concurrency_mapping_follows_workers_vs_ceiling_on_all_three_forms(platform, r113_app) -> None:
+    """Completion condition 114 -- mutation M114 (`main.py` drops the
+    `workers >= ceiling` condition): a REAL `build_app()` (slot directory
+    wired) serves `concurrency` `enforced` at (ceiling, workers) = (1, 1)
+    and (2, 2), and `deployment_required` at (2, 1) -- each read from the
+    capability document the built app serves to an authenticated
+    session."""
+    main_module = _main_module(platform, r113_app)
+    observed: dict[tuple[int, int], str] = {}
+    try:
+        for ceiling, workers in ((1, 1), (2, 2), (2, 1)):
+            _set_process_ceilings(platform, {"data": ceiling, "control": 1})
+            app = main_module.build_app(_main_env(platform, r113_app, workers=str(workers)))
+            try:
+                _credential_id, bearer = _issue(platform, r113_app.app_id)
+                document = app.app.state.service.authenticate(bearer).capabilities()
+                observed[(ceiling, workers)] = document["limit_enforcement"]["concurrency"]
+            finally:
+                _close_built_app(main_module, app)
+    finally:
+        _set_process_ceilings(platform, {"data": 1, "control": 1})
+        pool_module.set_connection_application_name(None)
+    assert observed == {
+        (1, 1): "enforced",
+        (2, 2): "enforced",
+        (2, 1): "deployment_required",
+    }, observed
+
+
 # ===========================================================================
 # completion conditions 116-120: workers env validation
 # ===========================================================================
@@ -1032,7 +1124,8 @@ def test_data_preflight_exits_0_on_a_sound_env(platform, r113_app) -> None:
 
 
 def test_data_preflight_exits_nonzero_with_f15_when_process_ceilings_missing(platform, r113_app) -> None:
-    """Completion condition 121 (F-15)."""
+    """Completion condition 121 (F-15) -- mutation M121b (a failing
+    module-level `build_app()` exits 0 under `--preflight`)."""
     _delete_process_ceilings(platform)
     try:
         result = _run_preflight_subprocess("mitatedb_api.main", _main_env(platform, r113_app))
@@ -1051,7 +1144,8 @@ def test_control_preflight_exits_0_on_a_sound_env(control_platform) -> None:
 
 
 def test_control_preflight_exits_nonzero_with_f15_when_process_ceilings_missing(control_platform) -> None:
-    """Completion condition 122 (F-15)."""
+    """Completion condition 122 (F-15) -- mutation M122b (a failing
+    module-level `build_control_app()` exits 0 under `--preflight`)."""
     _delete_process_ceilings(control_platform)
     try:
         result = _run_preflight_subprocess("mitatedb_api.control_main", _control_env(control_platform))
@@ -1059,6 +1153,18 @@ def test_control_preflight_exits_nonzero_with_f15_when_process_ceilings_missing(
         assert "F-15" in result.stderr, result.stderr
     finally:
         _set_process_ceilings(control_platform, {"data": 1, "control": 1})
+
+
+def test_control_preflight_exits_nonzero_when_control_workers_exceed_the_declared_ceiling(control_platform) -> None:
+    """Completion condition 122 (workers > ceiling): with `process_
+    ceilings.control` = 1 declared, `MITATEDB_CONTROL_WORKERS=2` makes
+    `python -m mitatedb_api.control_main --preflight` exit non-zero,
+    naming the variable on stderr."""
+    result = _run_preflight_subprocess(
+        "mitatedb_api.control_main", _control_env(control_platform, MITATEDB_CONTROL_WORKERS="2"),
+    )
+    assert result.returncode != 0
+    assert "MITATEDB_CONTROL_WORKERS" in result.stderr and "exceeds process_ceilings.control" in result.stderr, result.stderr
 
 
 class _FakeAsgiLifespanApp:
@@ -1360,6 +1466,60 @@ def _adapter_rate_rows(adapter_like, credential_id: str) -> int:
     return count
 
 
+def test_real_http_request_holds_the_shared_slot_and_writes_a_rate_row(platform, r113_app, monkeypatch) -> None:
+    """Completion condition 134a (composition-root companion of 134/135,
+    never a substitute for the adapter-session observation below) --
+    mutation M134a (`main.py` wires no slot directory into the limit
+    holder, `concurrency_configured=False`): a REAL `build_app()` serving
+    one real HTTP `GET /v1/capabilities`, stalled inside its own
+    synchronous section, holds exactly one `slot-*` file of its own
+    `MITATEDB_SLOT_DIR` for the stall's duration (a second, independent
+    `flock(LOCK_EX | LOCK_NB)` on it fails), that file is free again once
+    the request completes, and the authenticating credential has exactly
+    one rate row."""
+    from starlette.testclient import TestClient
+
+    import mitatedb_api.cell as cell_module
+
+    main_module = _main_module(platform, r113_app)
+    env = _main_env(platform, r113_app)
+    slot_dir = Path(env["MITATEDB_SLOT_DIR"])
+    credential_id, bearer = _issue(platform, r113_app.app_id)
+    entered = threading.Event()
+    release = threading.Event()
+    original = cell_module.build_capabilities_document
+
+    def _blocking_build_capabilities_document(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=_WAIT_S)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cell_module, "build_capabilities_document", _blocking_build_capabilities_document)
+    responses: list[object] = []
+    held: list[str] = []
+    app = main_module.build_app(env)
+    try:
+        with TestClient(app) as client:
+            def _hold() -> None:
+                responses.append(client.get("/v1/capabilities", headers={"authorization": f"Bearer {bearer}"}))
+
+            holder = threading.Thread(target=_hold)
+            holder.start()
+            try:
+                assert entered.wait(timeout=_WAIT_S), "the request never reached its own stalled synchronous section"
+                held = _held_slot_names(slot_dir)
+            finally:
+                release.set()
+                holder.join(timeout=_WAIT_S)
+    finally:
+        pool_module.set_connection_application_name(None)
+    assert held, "no slot file was exclusively held during the stalled request"
+    assert len(held) == 1, held
+    assert responses and responses[0].status_code == 200, responses
+    assert not _held_slot_names(slot_dir)
+    assert _rate_row_count(platform, credential_id) == 1
+
+
 def test_http_adapter_session_holds_the_shared_slot_and_writes_a_rate_row() -> None:
     """Completion conditions 134/135 -- the SAME session `conformance-tests`
     drives (`MitateDBHttpConformanceAdapter()`), through its own
@@ -1420,9 +1580,11 @@ def test_http_adapter_isolated_surface_wires_a_separate_slot_directory_and_still
     application_surface()` wires a DIFFERENT `mkdtemp` slot directory than
     the session's own, the held-request observation holds against it, and
     its own credential gets exactly one rate row. Mutation M143 (the
-    isolated surface is given the session's directory): the directory
-    inequality goes red. Mutation M135i (the isolated surface wires no PG
-    rate): the rate-row count goes red."""
+    isolated surface's slots are built on the session's directory) and
+    mutation M134i (the isolated surface wires no slot directory): no
+    `slot-*` file of the isolated surface's own directory is held.
+    Mutation M135i (the isolated surface wires no PG rate): the rate-row
+    count goes red."""
     adapter = _http_adapter_module.MitateDBHttpConformanceAdapter()
     try:
         with adapter.isolated_application_surface() as iso:
