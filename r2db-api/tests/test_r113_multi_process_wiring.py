@@ -15,7 +15,10 @@ duplicating that bootstrap -- the same import-for-fixture-reuse pattern
 from __future__ import annotations
 
 import contextlib
+import errno
+import fcntl
 import json
+import logging
 import os
 import secrets
 import stat
@@ -271,7 +274,10 @@ def test_pg_rate_concurrent_first_admissions_for_a_new_credential_never_race(pla
     open (uncommitted), a second connection's own call for the SAME
     credential blocks behind it rather than racing a duplicate `INSERT`
     into a unique-violation 503 (the M29b-reverted branch: both miss the
-    uncommitted row, both `INSERT`, the second fails its unique key)."""
+    uncommitted row, both `INSERT`, the second fails its unique key). The
+    first caller commits only once `pg_stat_activity` shows the second
+    caller's backend waiting on a lock (bounded), so the two calls always
+    overlap."""
     _register_application(platform, "r113r29race", enabled=True)
     credential_id = _issue_credential(platform, "r113r29race")
 
@@ -279,6 +285,8 @@ def test_pg_rate_concurrent_first_admissions_for_a_new_credential_never_race(pla
     conn_a.autocommit = False
     ready = threading.Event()
     hold_release = threading.Event()
+    b_connected = threading.Event()
+    b_pid: list[int] = []
     result_b: list[object] = []
 
     def _first_caller() -> None:
@@ -294,6 +302,8 @@ def test_pg_rate_concurrent_first_admissions_for_a_new_credential_never_race(pla
         try:
             with psycopg.connect(platform.api_dsn) as conn_b:
                 conn_b.autocommit = True
+                b_pid.append(conn_b.info.backend_pid)
+                b_connected.set()
                 with conn_b.cursor() as cur:
                     cur.execute(_rate_fn(platform.schema), [credential_id, 100])
                     (admitted,) = cur.fetchone()
@@ -306,8 +316,13 @@ def test_pg_rate_concurrent_first_admissions_for_a_new_credential_never_race(pla
     t1.start()
     assert ready.wait(timeout=5), "the first caller never reached its own uncommitted INSERT"
     t2.start()
-    time.sleep(0.2)  # let the second connection reach and block on the row-level conflict
-    hold_release.set()
+    try:
+        assert b_connected.wait(timeout=5), "the second caller never connected"
+        assert _wait_until_backend_waits_on_a_lock(_platform_dsn(platform), b_pid[0], 5.0), (
+            "the second caller never waited on the first caller's uncommitted row"
+        )
+    finally:
+        hold_release.set()
     t1.join(timeout=5)
     t2.join(timeout=5)
     conn_a.close()
@@ -316,6 +331,20 @@ def test_pg_rate_concurrent_first_admissions_for_a_new_credential_never_race(pla
     assert result_b[0] is True, f"second concurrent first-admission must be cleanly admitted, not an exception: {result_b[0]!r}"
     _base_after, counts_after = _read_rate_row(platform, credential_id)
     assert sum(counts_after) == 2, "both concurrent first admissions for this credential must be counted exactly once each"
+
+
+def _wait_until_backend_waits_on_a_lock(dsn: str, pid: int, timeout_s: float) -> bool:
+    """True once `pg_stat_activity` shows backend `pid` waiting on a
+    lock (`wait_event_type = 'Lock'`), False if `timeout_s` passes
+    first -- a bounded wait on the observed state, never a fixed pause."""
+    deadline = time.monotonic() + timeout_s
+    with psycopg.connect(dsn, autocommit=True) as observer:
+        while time.monotonic() < deadline:
+            row = observer.execute("SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s", [pid]).fetchone()
+            if row is not None and row[0] == "Lock":
+                return True
+            time.sleep(0.01)
+    return False
 
 
 def test_rate_call_is_lexically_outside_the_authentication_borrow() -> None:
@@ -423,7 +452,17 @@ def test_denied_authentication_of_a_revoked_registered_credential_never_writes_a
     reached). This uses a REAL, REGISTERED credential that has been
     revoked (the FK is satisfied; only `assert_active` denies it), so a
     successful INSERT is genuinely possible and its absence is what this
-    test observes."""
+    test observes.
+
+    変異 M35c (`assert_active` の借用の内側で rate を数える): `store` holds
+    ONE pooled connection (`pool_size=1`, acquire timeout 2 s), so the
+    authentication borrow and the rate borrow can only run one after the
+    other -- a rate call nested inside the authentication borrow waits
+    out the acquire timeout and the request fails with a 503 instead of
+    `AUTH_REVOKED`; the sibling
+    credential below is admitted through `DataService._slot` itself (the
+    real `_check` then `_acquire_rate` order) on that same single-
+    connection pool."""
     from r2db_api.auth import AuthContext
     from r2db_api.errors import FoundationError as _FE
     from r2db_api.service import DataService
@@ -441,9 +480,9 @@ def test_denied_authentication_of_a_revoked_registered_credential_never_writes_a
             revoker.set_state(revoked_credential_id, revoked=True, work=work)
     finally:
         revoker.close()
-    store = PostgresCredentialStore(platform.api_dsn, pepper=PEPPER, schema=platform.schema, pool_size=4)
+    store = PostgresCredentialStore(platform.api_dsn, pepper=PEPPER, schema=platform.schema, pool_size=1, acquire_timeout=2.0)
     try:
-        service = DataService(store, rate=store)
+        service = DataService(store, rate=store, initial_cells={"r113r36rev": object()})
         with pytest.raises(_FE) as excinfo:
             service.capabilities(AuthContext(revoked_credential_id, "r113r36rev", "runtime"))
         assert excinfo.value.code == "AUTH_REVOKED"
@@ -460,7 +499,16 @@ def test_denied_authentication_of_a_revoked_registered_credential_never_writes_a
         # genuinely IS rate-table-eligible -- the FK the first assertion
         # above relied on is real, not incidentally always-satisfiable.
         sibling_credential_id = _issue_credential(platform, "r113r36rev")
-        assert store.record_rate_and_check(sibling_credential_id, 100) is True
+        with service._slot(AuthContext(sibling_credential_id, "r113r36rev", "runtime")) as canonical:  # noqa: SLF001
+            assert canonical.credential_id == sibling_credential_id
+        with psycopg.connect(_platform_dsn(platform)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT count(*) FROM {} WHERE credential_id = %s").format(sql.Identifier(platform.schema, RATE_TABLE)),
+                    [sibling_credential_id],
+                )
+                (sibling_count,) = cur.fetchone()
+        assert sibling_count == 1
     finally:
         store.close()
 
@@ -748,48 +796,62 @@ def test_slot_file_created_with_mode_0600(tmp_path: Path) -> None:
 
 
 def test_slot_fd_is_close_on_exec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """完了条件 44 -- 変異 M44 (`O_CLOEXEC` を外す): the REAL fd `Host
+    """完了条件 44 -- 変異 M44 (`O_CLOEXEC` を外す) と 裁定 43 (s2c) -- 変異
+    Ms2c (`scan` の open だけから `O_CLOEXEC` を外す): the REAL fds `Host
     SharedConcurrencySlots.acquire()` opens (never a second, independent
-    `os.open()` call of this test's own) carries `O_CLOEXEC` -- a slot fd
-    held during a `with` block must not survive into a forked+exec'd
+    `os.open()` call of this test's own) for `slot-0` AND for `scan` both
+    carry `O_CLOEXEC` -- neither a slot fd held during a `with` block nor
+    the `scan` fd held during the search may survive into a forked+exec'd
     child. `os.open` is spied on (never replaced -- the real call still
-    runs) so this observes the ACTUAL flags `_OPEN_FLAGS` passes."""
+    runs) so this observes the ACTUAL flags each open passes; both opens
+    must be observed."""
     slot_dir = tmp_path / "slots"
     slot_dir.mkdir(mode=0o700)
     slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
-    captured_flags: list[int] = []
+    captured_flags: dict[str, list[int]] = {"slot-0": [], concurrency_slots.SCAN_FILENAME: []}
     original_open = os.open
 
     def _spy_open(path, flags, mode=0o777):
-        captured_flags.append(flags)
+        name = os.path.basename(path)
+        if name in captured_flags:
+            captured_flags[name].append(flags)
         return original_open(path, flags, mode)
 
     monkeypatch.setattr(concurrency_slots.os, "open", _spy_open)
     with slots.acquire(1):
         pass
-    assert captured_flags, "no os.open call observed (空振り)"
-    assert captured_flags[0] & os.O_CLOEXEC, f"slot fd was opened without O_CLOEXEC: {oct(captured_flags[0])}"
+    for name, flags_seen in captured_flags.items():
+        assert flags_seen, f"no os.open call of {name} observed (空振り)"
+        assert flags_seen[0] & os.O_CLOEXEC, f"{name} fd was opened without O_CLOEXEC: {oct(flags_seen[0])}"
 
 
 def test_flock_unexpected_errno_maps_to_backend_error_not_admitted_or_denied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """完了条件 45 -- 変異 M45 (どの errno も「塞がっている」と読む)."""
+    """完了条件 45 -- 変異 M45 (どの errno も「塞がっている」と読む): the
+    `slot-0` lock returns `EPERM` (injected; the `scan` lock runs for
+    real) -- `SlotBackendError` naming the slot file."""
     import errno as errno_module
     import fcntl
 
     slot_dir = tmp_path / "slots"
     slot_dir.mkdir(mode=0o700)
     slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    real_flock = fcntl.flock
+    slot_attempts: list[int] = []
 
     def _fake_flock(fd, op):
-        if op & fcntl.LOCK_NB:
+        slot_path = slot_dir / "slot-0"
+        if op & fcntl.LOCK_NB and slot_path.exists() and os.fstat(fd).st_ino == os.stat(slot_path).st_ino:
+            slot_attempts.append(op)
             raise OSError(errno_module.EPERM, "synthetic EPERM for M45")
+        return real_flock(fd, op)
 
     monkeypatch.setattr(concurrency_slots.fcntl, "flock", _fake_flock)
-    with pytest.raises(concurrency_slots.SlotBackendError):
+    with pytest.raises(concurrency_slots.SlotBackendError, match="slot file"):
         with slots.acquire(1):
             pass
+    assert slot_attempts, "no slot-0 lock attempt observed (空振り)"
 
 
 def test_selfcheck_detects_a_faked_flock_that_never_excludes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1028,6 +1090,593 @@ def test_slot_is_reacquirable_after_a_holding_child_process_is_sigkilled_and_aft
             proc.wait(timeout=10.0)
 
 
+# ===========================================================================
+# the `scan` lock that serialises every slot search on this host
+# (design 裁定 43)
+# ===========================================================================
+
+#: every wait in the `scan` tests below is bounded by this many seconds.
+_SCAN_WAIT_S = 10.0
+
+#: the slot count the paused-scan race below runs with (L = 2).
+_RACE_LIMIT = 2
+
+
+def _call_bounded(fn, timeout_s: float):
+    """Runs `fn()` on a daemon thread and waits for it at most `timeout_s`
+    seconds. Returns `(finished, outcome, elapsed, thread)`; `outcome` is
+    `("returned", value)` or `("raised", exc)`, or `None` if `fn` has not
+    finished. The caller joins `thread` (bounded) once whatever blocks it
+    has been released."""
+    outcome: list[tuple[str, object]] = []
+
+    def _run() -> None:
+        try:
+            outcome.append(("returned", fn()))
+        except BaseException as exc:  # handed back to the caller's own assertions
+            outcome.append(("raised", exc))
+
+    started = time.monotonic()
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+    elapsed = time.monotonic() - started
+    return (not thread.is_alive(), outcome[0] if outcome else None, elapsed, thread)
+
+
+def _acquire_one(slots: "concurrency_slots.HostSharedConcurrencySlots", limit: int = 1) -> str:
+    with slots.acquire(limit):
+        return "admitted"
+
+
+def _hold_scan_directly(slot_dir: Path) -> int:
+    """Another holder of `scan`: an fd of this test's own with `LOCK_EX`
+    on it, released by closing it."""
+    holder_fd = os.open(str(slot_dir / concurrency_slots.SCAN_FILENAME), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(holder_fd, fcntl.LOCK_EX)
+    return holder_fd
+
+
+@contextlib.contextmanager
+def _scan_paused_after_seeing_slot_0_held(slot_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespace]:
+    """X (this thread) holds `slot-0`; S (a thread of this process, its
+    search starting at `slot-0`) is stopped right after its own `flock`
+    finds `slot-0` held -- S holds `scan` at that point -- and X then
+    releases `slot-0`. Yields the control object: set `s_continue` to let
+    S finish its scan; `s_done` is set once S has a slot or has failed,
+    and `s_outcome` records which. A thread registered in `roles` as "Y"
+    sets `y_progressed` whenever its own `scan` lock attempt finds `scan`
+    held. `fcntl.flock` is wrapped (the real call always runs) only to
+    observe and to stop S; every wait is bounded by `_SCAN_WAIT_S`."""
+    scan_path = slot_dir / concurrency_slots.SCAN_FILENAME
+    real_flock = fcntl.flock
+    ctl = types.SimpleNamespace(
+        s_saw_held=threading.Event(), s_continue=threading.Event(), s_done=threading.Event(), s_outcome=[],
+        finish=threading.Event(), y_progressed=threading.Event(), roles={},
+    )
+
+    def _is_scan(fd: int) -> bool:
+        return os.fstat(fd).st_ino == os.stat(scan_path).st_ino
+
+    def _observing_flock(fd, operation):
+        role = ctl.roles.get(threading.get_ident())
+        try:
+            return real_flock(fd, operation)
+        except OSError as exc:
+            if exc.errno in concurrency_slots._HELD_ERRNOS:
+                if role == "S" and not _is_scan(fd) and not ctl.s_saw_held.is_set():
+                    ctl.s_saw_held.set()
+                    ctl.s_continue.wait(timeout=_SCAN_WAIT_S)
+                elif role == "Y" and _is_scan(fd):
+                    ctl.y_progressed.set()
+            raise
+
+    monkeypatch.setattr(concurrency_slots.fcntl, "flock", _observing_flock)
+    x_hold = concurrency_slots.HostSharedConcurrencySlots(slot_dir, random_below=lambda n: 0).acquire(_RACE_LIMIT)
+    x_hold.__enter__()
+    x_open = True
+
+    def _s() -> None:
+        ctl.roles[threading.get_ident()] = "S"
+        try:
+            with concurrency_slots.HostSharedConcurrencySlots(slot_dir, random_below=lambda n: 0).acquire(_RACE_LIMIT):
+                ctl.s_outcome.append("acquired")
+                ctl.s_done.set()
+                ctl.finish.wait(timeout=_SCAN_WAIT_S)
+        except concurrency_slots.LimitExceeded:
+            ctl.s_outcome.append("refused")
+        except Exception as exc:  # recorded for the caller's own assertion
+            ctl.s_outcome.append(repr(exc))
+        finally:
+            ctl.s_done.set()
+
+    s_thread = threading.Thread(target=_s, daemon=True)
+    s_thread.start()
+    try:
+        assert ctl.s_saw_held.wait(timeout=_SCAN_WAIT_S), "S never reached slot-0 while X held it (空振り)"
+        x_hold.__exit__(None, None, None)
+        x_open = False
+        yield ctl
+    finally:
+        ctl.s_continue.set()
+        ctl.finish.set()
+        if x_open:
+            x_hold.__exit__(None, None, None)
+        s_thread.join(timeout=_SCAN_WAIT_S)
+
+
+def _race_violations(s_outcome: list, y_during_scan: bool, y_after_scan: bool) -> list[str]:
+    violations: list[str] = []
+    if s_outcome != ["acquired"]:
+        violations.append(
+            f"S was not admitted ({s_outcome}) although at most 1 of the {_RACE_LIMIT} slots was held at any instant"
+        )
+    if y_during_scan:
+        violations.append("Y took a slot while S's scan was still in progress")
+    if not y_after_scan:
+        violations.append("Y never took a slot after S's scan ended")
+    return violations
+
+
+def test_scan_serialises_a_same_process_thread_behind_a_paused_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """裁定 43 (s1-a) -- 変異 Ms1 (`scan` の lock を外す) と Ms1f (`scan` の
+    fd を process で 1 本開いて使い回す): L = 2. X holds `slot-0`; S's scan
+    sees `slot-0` held and is stopped there; X releases `slot-0`; Y, a
+    second thread of THIS process whose search starts at `slot-1`, starts
+    acquiring. Y must not get a slot while S's scan is stopped (it waits
+    on `scan`); once S resumes, S is admitted (`slot-1`) -- never
+    `LimitExceeded`, since at most one slot was held at any instant -- and
+    Y is admitted after it (`slot-0`). Without the `scan` lock (Ms1), or
+    with one `scan` fd shared by every thread of the process (Ms1f, where
+    a second `LOCK_EX` on the same open file description succeeds), Y
+    takes `slot-1` during S's scan and S is refused."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", _SCAN_WAIT_S)
+    with _scan_paused_after_seeing_slot_0_held(slot_dir, monkeypatch) as ctl:
+        y_acquired = threading.Event()
+
+        y_outcome: list[str] = []
+
+        def _y() -> None:
+            ctl.roles[threading.get_ident()] = "Y"
+            try:
+                with concurrency_slots.HostSharedConcurrencySlots(slot_dir, random_below=lambda n: 1).acquire(_RACE_LIMIT):
+                    y_acquired.set()
+                    ctl.y_progressed.set()
+                    ctl.finish.wait(timeout=_SCAN_WAIT_S)
+                y_outcome.append("acquired")
+            except Exception as exc:  # recorded for the assertion below
+                y_outcome.append(repr(exc))
+            finally:
+                ctl.y_progressed.set()
+
+        y_thread = threading.Thread(target=_y, daemon=True)
+        y_thread.start()
+        try:
+            assert ctl.y_progressed.wait(timeout=_SCAN_WAIT_S), "Y never reached the scan lock nor a slot (空振り)"
+            y_during_scan = y_acquired.is_set()
+            ctl.s_continue.set()
+            assert ctl.s_done.wait(timeout=_SCAN_WAIT_S), "S never finished its scan"
+            y_after_scan = y_acquired.wait(timeout=_SCAN_WAIT_S)
+        finally:
+            ctl.finish.set()
+            y_thread.join(timeout=_SCAN_WAIT_S)
+    violations = _race_violations(ctl.s_outcome, y_during_scan, y_after_scan)
+    assert not violations, (violations, y_outcome)
+
+
+def test_scan_serialises_another_process_behind_a_paused_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """裁定 43 (s1-b) -- 変異 Ms1p (`scan` の file lock を process 内の
+    `threading.Lock` に置き換える): the same race as the test above, with
+    Y in a SECOND process (`multiprocessing` `spawn`; its progress and its
+    admission are `multiprocessing.Event`s). A process-local lock excludes
+    only this process' own threads, so under Ms1p Y takes `slot-1` during
+    S's stopped scan and S is refused. The child reports its own
+    `concurrency_slots.__file__`, checked equal to this process' own (the
+    child ran this tree's module)."""
+    import multiprocessing
+
+    import slot_scan_child
+
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", _SCAN_WAIT_S)
+    context = multiprocessing.get_context("spawn")
+    progressed, acquired, release = context.Event(), context.Event(), context.Event()
+    report = context.Queue()
+    messages: dict[str, str] = {}
+    with _scan_paused_after_seeing_slot_0_held(slot_dir, monkeypatch) as ctl:
+        proc = context.Process(
+            target=slot_scan_child.acquire_after_scan,
+            args=(str(slot_dir), _RACE_LIMIT, 1, _SCAN_WAIT_S, progressed, acquired, release, report),
+            daemon=True,
+        )
+        proc.start()
+        try:
+            assert progressed.wait(timeout=3 * _SCAN_WAIT_S), "the second process never reached the scan lock nor a slot (空振り)"
+            y_during_scan = acquired.is_set()
+            ctl.s_continue.set()
+            assert ctl.s_done.wait(timeout=_SCAN_WAIT_S), "S never finished its scan"
+            y_after_scan = acquired.wait(timeout=_SCAN_WAIT_S)
+            release.set()
+            for _ in range(2):
+                key, value = report.get(timeout=_SCAN_WAIT_S)
+                messages[key] = value
+        finally:
+            release.set()
+            proc.join(timeout=_SCAN_WAIT_S)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=_SCAN_WAIT_S)
+    assert messages.get("module") == os.path.realpath(concurrency_slots.__file__), messages
+    violations = _race_violations(ctl.s_outcome, y_during_scan, y_after_scan)
+    assert not violations, (violations, messages.get("outcome"))
+
+
+def test_scan_is_closed_before_the_with_body_so_another_acquisition_succeeds_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 43 (s7) -- 変異 Ms7 (`scan` の close を `yield` の後に移す):
+    while an acquisition holds its slot (inside its own `with` body),
+    another acquisition of the same directory succeeds in far less than
+    the `scan` deadline -- `scan` was already closed when the first
+    acquisition's body began. Under Ms7 the first acquisition still holds
+    `scan`, so the second waits out the (here 0.5 s) deadline and raises
+    `SlotBackendError`."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 0.5)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    with slots.acquire(2):
+        started = time.monotonic()
+        with slots.acquire(2):
+            elapsed = time.monotonic() - started
+    assert elapsed < 0.25, f"the second acquisition took {elapsed:.3f}s while the first one held its slot"
+
+
+def test_scan_held_past_its_deadline_raises_backend_error_and_the_caller_answers_503(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 43 (s2) -- 変異 Ms2 (期限切れを `LimitExceeded` にする) と Ms2n
+    (期限を無くす): another holder keeps `scan` for longer than the
+    deadline (set to 0.2 s here through the module constant). `acquire`
+    returns within a bounded wait, raising `SlotBackendError` whose message
+    names the expired `scan` deadline, after at least the deadline; the
+    same failure reaches `DataService.acquire_concurrency_slot()`'s own
+    caller as `SERVICE_UNAVAILABLE`/503 -- never `LIMIT_EXCEEDED`, never an
+    admission. Under Ms2n the call has not returned when the bounded wait
+    ends; the holder is released in `finally`, so the thread then ends."""
+    from r2db_api.errors import FoundationError as _FE
+    from r2db_api.service import DataService
+
+    class _FakeCredentials:
+        def assert_active(self, context):
+            return context
+
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 0.2)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    service = DataService(
+        _FakeCredentials(), limits=ResourceLimits(concurrency=1), initial_cells={"app": object()},
+        concurrency_slots=slots, concurrency_configured=True,
+    )
+
+    def _through_the_caller() -> str:
+        with service.acquire_concurrency_slot():
+            return "admitted"
+
+    holder_fd = _hold_scan_directly(slot_dir)
+    threads: list[threading.Thread] = []
+    results = []
+    try:
+        for fn in (lambda: _acquire_one(slots), _through_the_caller):
+            finished, outcome, elapsed, thread = _call_bounded(fn, 5.0)
+            threads.append(thread)
+            assert finished, f"acquire() had not returned after {elapsed:.2f}s with scan held -- the scan wait has no deadline"
+            results.append((outcome, elapsed))
+    finally:
+        os.close(holder_fd)
+        for thread in threads:
+            thread.join(timeout=_SCAN_WAIT_S)
+    (direct, direct_elapsed), (through_caller, _elapsed) = results
+    assert direct[0] == "raised" and isinstance(direct[1], concurrency_slots.SlotBackendError), direct
+    assert "scan" in str(direct[1]) and "deadline" in str(direct[1]), str(direct[1])
+    assert direct_elapsed >= 0.2, direct_elapsed
+    assert through_caller[0] == "raised" and isinstance(through_caller[1], _FE), through_caller
+    assert (through_caller[1].code, through_caller[1].status) == ("SERVICE_UNAVAILABLE", 503)
+
+
+def test_scan_flock_unexpected_errno_raises_backend_error_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 43 (s2e) -- 変異 Ms2e (他の errno も「握られている」と読んで
+    待つ): an injected `EPERM` from the `scan` lock (every `slot-<i>` lock
+    runs for real) raises `SlotBackendError` naming the errno within 1 s,
+    with the deadline set to 5 s -- never retried until the deadline."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 5.0)
+    scan_path = slot_dir / concurrency_slots.SCAN_FILENAME
+    real_flock = fcntl.flock
+    scan_attempts: list[int] = []
+
+    def _eperm_on_scan(fd, operation):
+        if os.fstat(fd).st_ino == os.stat(scan_path).st_ino:
+            scan_attempts.append(operation)
+            raise OSError(errno.EPERM, "synthetic EPERM on scan")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(concurrency_slots.fcntl, "flock", _eperm_on_scan)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    finished, outcome, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 2.0)
+    try:
+        assert finished, f"acquire() was still waiting after {elapsed:.2f}s on an EPERM from scan"
+    finally:
+        thread.join(timeout=_SCAN_WAIT_S)
+    assert scan_attempts, "no scan lock attempt observed (空振り)"
+    assert outcome[0] == "raised" and isinstance(outcome[1], concurrency_slots.SlotBackendError), outcome
+    assert f"errno {errno.EPERM}" in str(outcome[1]), str(outcome[1])
+    assert elapsed < 1.0, elapsed
+
+
+def test_scan_open_failure_raises_backend_error(tmp_path: Path) -> None:
+    """裁定 43 (s2e): `scan` cannot be opened (a directory planted under
+    its name) -- `SlotBackendError`, never an admission and never
+    `LimitExceeded`."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    (slot_dir / concurrency_slots.SCAN_FILENAME).mkdir()
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    with pytest.raises(concurrency_slots.SlotBackendError, match="could not open scan file"):
+        _acquire_one(slots)
+
+
+def test_scan_symlink_is_refused_at_open(tmp_path: Path) -> None:
+    """裁定 43 (s2e) -- 変異 Ms2s (`scan` の open から `O_NOFOLLOW` を外す):
+    `scan` planted as a symlink to a regular file elsewhere is refused at
+    open (`SlotBackendError`), never followed and locked."""
+    real_target = tmp_path / "elsewhere.txt"
+    real_target.write_text("")
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    (slot_dir / concurrency_slots.SCAN_FILENAME).symlink_to(real_target)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    with pytest.raises(concurrency_slots.SlotBackendError, match="could not open scan file"):
+        _acquire_one(slots)
+
+
+def test_scan_fd_is_closed_on_every_path_out_of_acquire(tmp_path: Path) -> None:
+    """裁定 43 (s3) -- 変異 Ms3 (拒否の経路の close を外す): the process'
+    own open-fd count does not grow across an admission, a `LimitExceeded`,
+    a `SlotBackendError` raised during the search (a `slot-0` symlink) and
+    an exception raised during the search (the injected random source) --
+    and inside an admission's `with` body exactly one fd more is open (the
+    held slot's; `scan` is already closed)."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+
+    def _assert_not_grown(path: str, before: int) -> None:
+        after = _open_fd_count()
+        assert after == before, f"open fd count grew from {before} to {after} on the {path} path"
+
+    before = _open_fd_count()
+    with slots.acquire(1):
+        during = _open_fd_count()
+    _assert_not_grown("admitted", before)
+    assert during == before + 1, (before, during)
+
+    holder = slots.acquire(1)
+    holder.__enter__()
+    try:
+        before = _open_fd_count()
+        with pytest.raises(concurrency_slots.LimitExceeded):
+            _acquire_one(slots)
+        _assert_not_grown("LimitExceeded", before)
+    finally:
+        holder.__exit__(None, None, None)
+
+    broken_dir = tmp_path / "broken"
+    broken_dir.mkdir(mode=0o700)
+    real_target = tmp_path / "elsewhere.txt"
+    real_target.write_text("")
+    (broken_dir / "slot-0").symlink_to(real_target)
+    before = _open_fd_count()
+    with pytest.raises(concurrency_slots.SlotBackendError, match="slot file"):
+        _acquire_one(concurrency_slots.HostSharedConcurrencySlots(broken_dir))
+    _assert_not_grown("SlotBackendError", before)
+
+    def _failing_random_source(n: int) -> int:
+        raise RuntimeError("synthetic failure inside the search")
+
+    before = _open_fd_count()
+    with pytest.raises(RuntimeError, match="synthetic failure inside the search"):
+        _acquire_one(concurrency_slots.HostSharedConcurrencySlots(slot_dir, random_below=_failing_random_source))
+    _assert_not_grown("exception", before)
+
+
+def test_scan_wait_interrupted_by_keyboard_interrupt_leaks_no_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """裁定 43 (s3b) -- 変異 Ms3b (`scan` の待ちの handler を `Exception`
+    だけに狭める) と Ms3bw (その handler の close を外す): another holder
+    keeps `scan`, and the waiting acquisition's second pause between two
+    attempts raises `KeyboardInterrupt` (this module's own `time.sleep`
+    replaced; the deadline is 5 s, so the interrupt, not the deadline,
+    ends the wait). The interrupt propagates out of `acquire`, and the
+    process' open-fd count is the same as before the call -- the waiting
+    `scan` fd was closed."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 5.0)
+    pauses: list[float] = []
+
+    def _interrupting_sleep(seconds: float) -> None:
+        pauses.append(seconds)
+        if len(pauses) == 2:
+            raise KeyboardInterrupt("synthetic interrupt during the scan wait")
+
+    monkeypatch.setattr(concurrency_slots, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=_interrupting_sleep))
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    holder_fd = _hold_scan_directly(slot_dir)
+    try:
+        before = _open_fd_count()
+        finished, outcome, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+        thread.join(timeout=_SCAN_WAIT_S)
+        after = _open_fd_count()
+    finally:
+        os.close(holder_fd)
+    assert finished, f"acquire() had not returned after {elapsed:.2f}s"
+    assert len(pauses) == 2, f"the interrupt was not raised inside the scan wait (空振り): {pauses}"
+    assert outcome[0] == "raised" and isinstance(outcome[1], KeyboardInterrupt), outcome
+    assert after == before, f"open fd count grew from {before} to {after} on the interrupted scan wait"
+
+
+def test_candidate_flock_interrupted_by_keyboard_interrupt_leaks_no_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 43 (s3b) -- 変異 Ms3bc (候補の fd の `BaseException` の handler
+    を外す): the `slot-0` candidate's own `flock()` raises
+    `KeyboardInterrupt` (injected; the `scan` lock runs for real). The
+    interrupt propagates out of `acquire`, and the process' open-fd count
+    is the same as before the call -- the candidate's fd and `scan` were
+    both closed."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    real_flock = fcntl.flock
+    slot_attempts: list[int] = []
+
+    def _interrupting_flock(fd, operation):
+        slot_path = slot_dir / "slot-0"
+        if slot_path.exists() and os.fstat(fd).st_ino == os.stat(slot_path).st_ino:
+            slot_attempts.append(operation)
+            raise KeyboardInterrupt("synthetic interrupt during a candidate's flock")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(concurrency_slots.fcntl, "flock", _interrupting_flock)
+    before = _open_fd_count()
+    finished, outcome, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+    thread.join(timeout=_SCAN_WAIT_S)
+    after = _open_fd_count()
+    assert finished, f"acquire() had not returned after {elapsed:.2f}s"
+    assert slot_attempts, "no slot-0 lock attempt observed (空振り)"
+    assert outcome[0] == "raised" and isinstance(outcome[1], KeyboardInterrupt), outcome
+    assert after == before, f"open fd count grew from {before} to {after} on the interrupted candidate flock"
+
+
+def test_held_slot_fd_is_closed_when_an_interrupt_follows_the_scan_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 43 (s3c) -- 変異 Ms3c (外側の handler の `os.close(held_fd)` を
+    外す): with `limit = 1` the search locks `slot-0`, and the `scan`
+    close right after the search raises `KeyboardInterrupt` once the real
+    close has run (this module's own `os` replaced by a namespace whose
+    `close` does that for the `scan` fd only). The interrupt propagates
+    out of `acquire`, the process' open-fd count is the same as before
+    the call, and `slot-0` is free -- a fresh fd takes `LOCK_EX |
+    LOCK_NB` on it."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    scan_path = slot_dir / concurrency_slots.SCAN_FILENAME
+    scan_closes: list[int] = []
+
+    def _interrupting_close(fd: int) -> None:
+        is_scan = scan_path.exists() and os.fstat(fd).st_ino == os.stat(scan_path).st_ino
+        os.close(fd)
+        if is_scan:
+            scan_closes.append(fd)
+            raise KeyboardInterrupt("synthetic interrupt right after the scan close")
+
+    patched_os = types.SimpleNamespace(**{name: getattr(os, name) for name in dir(os) if not name.startswith("__")})
+    patched_os.close = _interrupting_close
+    monkeypatch.setattr(concurrency_slots, "os", patched_os)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir, random_below=lambda n: 0)
+    before = _open_fd_count()
+    finished, outcome, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+    thread.join(timeout=_SCAN_WAIT_S)
+    after = _open_fd_count()
+    probe_fd = os.open(str(slot_dir / "slot-0"), os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            slot_0_free = False
+        else:
+            slot_0_free = True
+    finally:
+        os.close(probe_fd)
+    assert finished, f"acquire() had not returned after {elapsed:.2f}s"
+    assert len(scan_closes) == 1, f"the scan close was not observed (空振り): {scan_closes}"
+    assert outcome[0] == "raised" and isinstance(outcome[1], KeyboardInterrupt), outcome
+    assert (after, slot_0_free) == (before, True), (
+        f"open fd count went from {before} to {after} after the interrupted scan close; slot-0 free: {slot_0_free}"
+    )
+
+
+def test_scan_lock_held_by_a_sigkilled_child_process_is_released_by_the_kernel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 43 (s4, 監査照合 -- kernel の性質、変異なし): a CHILD process
+    holds the `scan` lock (opened with the module's own flags and mode)
+    and signals it; this process' acquisition then fails with the `scan`
+    deadline (0.3 s here) -- the child really holds it; after SIGKILL and
+    a bounded wait for the child, this process acquires."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    ready_path = tmp_path / "child_ready"
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 0.3)
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    child_src = (
+        "import fcntl, os, sys, time\n"
+        f"sys.path.insert(0, {src_dir!r})\n"
+        "from r2db_api import concurrency_slots\n"
+        f"fd = os.open(os.path.join({str(slot_dir)!r}, concurrency_slots.SCAN_FILENAME), "
+        "concurrency_slots._OPEN_FLAGS, concurrency_slots._FILE_MODE)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        f"open({str(ready_path)!r}, 'w').close()\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", child_src])
+    try:
+        deadline = time.monotonic() + _SCAN_WAIT_S
+        while not ready_path.exists():
+            assert time.monotonic() < deadline, "the child never signalled it holds scan"
+            assert proc.poll() is None, f"the child exited early ({proc.returncode})"
+            time.sleep(0.05)
+        slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+        with pytest.raises(concurrency_slots.SlotBackendError, match="deadline"):
+            _acquire_one(slots)
+        proc.kill()  # SIGKILL
+        proc.wait(timeout=_SCAN_WAIT_S)
+        assert _acquire_one(slots) == "admitted"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=_SCAN_WAIT_S)
+
+
+def test_scan_file_is_distinct_from_every_slot_file_and_never_counted_as_held(tmp_path: Path) -> None:
+    """裁定 43 (s5) -- 変異 Ms5 (`scan` の名を `slot-0` にする): with
+    `limit = 1`, one acquisition is admitted and, while it is held, the
+    held-slot probe (`_probe_slot_dir_held_names`, the same count the
+    adapter tests use) finds exactly `slot-0` held -- `scan` is closed and
+    is not a `slot-*` file -- and the directory holds exactly `scan` and
+    `slot-0`, `scan` with mode 0600. Named `slot-0`, `scan` would hold the
+    lock on the very slot it searches, so the acquisition is refused."""
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    with slots.acquire(1):
+        held = _probe_slot_dir_held_names(slot_dir)
+        names = sorted(entry.name for entry in slot_dir.iterdir())
+    assert held == ["slot-0"], held
+    assert names == sorted([concurrency_slots.SCAN_FILENAME, "slot-0"]), names
+    assert concurrency_slots.SCAN_FILENAME != concurrency_slots.SELFCHECK_FILENAME
+    assert not concurrency_slots.SCAN_FILENAME.startswith("slot-")
+    assert stat.S_IMODE((slot_dir / concurrency_slots.SCAN_FILENAME).stat().st_mode) == 0o600
+
+
 def test_data_service_rejects_concurrency_configured_true_without_slots() -> None:
     """完了条件 56 の補強 (訂正註 56b, F13) -- 変異なし (`concurrency_
     slots=None` かつ `concurrency_configured=True` を渡すと `DataService.
@@ -1088,6 +1737,218 @@ def test_slot_backend_error_maps_to_service_unavailable_through_data_service() -
             pass  # pragma: no cover -- acquire() raises before yielding
     assert excinfo_post_auth.value.code == "SERVICE_UNAVAILABLE"
     assert excinfo_post_auth.value.status == 503
+
+
+def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """裁定 43 (s9) -- 変異 Ms9a (`acquire_concurrency_slot()` の写像点が
+    log の部品を呼ばない) と Ms9s (`_slot()` の写像点が呼ばない): another
+    holder keeps `scan` past its deadline (0.2 s here). Each of
+    `DataService`'s two mapping points -- `acquire_concurrency_slot()`
+    (before authentication) and `_slot()` (after it, not precharged) --
+    answers `SERVICE_UNAVAILABLE`/503 with its unchanged message and
+    writes exactly one WARNING line to the `r2db_api.service` logger
+    through the module's one `BackendFailureLog` (its clock replaced and
+    moved on by one interval between the two points): the fixed prefix,
+    the `SlotBackendError` message naming the expired `scan` deadline,
+    and a count of 0. The caller's credential id is not in it. Before
+    the replacement, the production instance's own clock is the real
+    `time.monotonic` (変異 Ms9m: a `time.time` default leaves this
+    assertion alone). Calling the post-auth mapping point again with the
+    clock unmoved writes no further line, because the two mapping points
+    share the ONE module-level instance (変異 Ms9sh: the post-auth point
+    writing through a fresh instance of its own would not share that
+    suppression); the failure it did not log there surfaces with a count
+    of 1 once the pre-auth mapping point is called a further interval
+    later."""
+    from r2db_api import service as service_module
+    from r2db_api.auth import AuthContext
+    from r2db_api.service import DataService
+
+    class _FakeCredentials:
+        def assert_active(self, context):
+            return context
+
+    prefix = "r2db_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE"
+    assert service_module._SLOT_FAILURE_LOG_PREFIX == prefix
+    writer = service_module._SLOT_FAILURE_LOG
+    assert isinstance(writer, concurrency_slots.BackendFailureLog)
+    assert writer._clock is time.monotonic  # noqa: SLF001
+    clock = [1000.0]
+    monkeypatch.setattr(writer, "_clock", lambda: clock[0])
+    monkeypatch.setattr(writer, "_last_line_at", None)
+    monkeypatch.setattr(writer, "_not_logged", 0)
+    slot_dir = tmp_path / "slots"
+    slot_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 0.2)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    service = DataService(
+        _FakeCredentials(), limits=ResourceLimits(concurrency=1), initial_cells={"app": object()},
+        concurrency_slots=slots, concurrency_configured=True,
+    )
+    credential_marker = "crd_s9_marker_not_logged"
+    context = AuthContext(credential_marker, "app", "runtime")
+
+    def _pre_auth() -> str:
+        with service.acquire_concurrency_slot():
+            return "admitted"
+
+    def _post_auth() -> str:
+        with service._slot(context, concurrency_precharged=False):  # noqa: SLF001
+            return "admitted"
+
+    caplog.set_level(logging.WARNING, logger="r2db_api.service")
+    holder_fd = _hold_scan_directly(slot_dir)
+    threads: list[threading.Thread] = []
+    results: dict[str, tuple] = {}
+    try:
+        finished, direct, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+        threads.append(thread)
+        assert finished, f"acquire() had not returned after {elapsed:.2f}s with scan held"
+        mapping_points = (("acquire_concurrency_slot", _pre_auth), ("_slot", _post_auth))
+        for index, (label, fn) in enumerate(mapping_points):
+            caplog.clear()
+            finished, outcome, elapsed, thread = _call_bounded(fn, 5.0)
+            threads.append(thread)
+            assert finished, f"{label} had not returned after {elapsed:.2f}s with scan held"
+            results[label] = (outcome, [r for r in caplog.records if r.name == "r2db_api.service"])
+            if index + 1 < len(mapping_points):
+                clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+        # the same instance backs both mapping points: calling the post-auth
+        # one again with the clock unmoved falls inside the interval its own
+        # previous call just started, so it writes no line of its own.
+        caplog.clear()
+        finished, repeat_outcome, elapsed, thread = _call_bounded(_post_auth, 5.0)
+        threads.append(thread)
+        assert finished, f"_slot had not returned after {elapsed:.2f}s with scan held (repeat)"
+        repeat_records = [r for r in caplog.records if r.name == "r2db_api.service"]
+        clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
+        caplog.clear()
+        finished, pre_auth_repeat, elapsed, thread = _call_bounded(_pre_auth, 5.0)
+        threads.append(thread)
+        assert finished, f"acquire_concurrency_slot had not returned after {elapsed:.2f}s with scan held (repeat)"
+        pre_auth_repeat_records = [r for r in caplog.records if r.name == "r2db_api.service"]
+    finally:
+        os.close(holder_fd)
+        for thread in threads:
+            thread.join(timeout=_SCAN_WAIT_S)
+    assert direct[0] == "raised" and isinstance(direct[1], concurrency_slots.SlotBackendError), direct
+    backend_message = str(direct[1])
+    assert "scan" in backend_message and "deadline" in backend_message, backend_message
+    expected_line = f"{prefix}: {backend_message} (0 more failures not logged since the previous line)"
+    assert list(results) == ["acquire_concurrency_slot", "_slot"], results
+    for label, (outcome, records) in results.items():
+        assert outcome[0] == "raised" and isinstance(outcome[1], FoundationError), (label, outcome)
+        assert (outcome[1].code, outcome[1].status, outcome[1].message) == (
+            "SERVICE_UNAVAILABLE", 503, "The database could not complete the request.",
+        ), (label, outcome[1])
+        assert [(r.levelno, r.getMessage()) for r in records] == [(logging.WARNING, expected_line)], (label, records)
+        assert credential_marker not in records[0].getMessage(), label
+    assert repeat_records == [], repeat_records
+    assert repeat_outcome[0] == "raised" and isinstance(repeat_outcome[1], FoundationError), repeat_outcome
+    assert pre_auth_repeat[0] == "raised" and isinstance(pre_auth_repeat[1], FoundationError), pre_auth_repeat
+    suppressed_line = f"{prefix}: {backend_message} (1 more failures not logged since the previous line)"
+    assert [(r.levelno, r.getMessage()) for r in pre_auth_repeat_records] == [
+        (logging.WARNING, suppressed_line),
+    ], pre_auth_repeat_records
+
+
+def _failure_log_lines(caplog: pytest.LogCaptureFixture, logger_name: str) -> list[tuple[int, str]]:
+    return [(r.levelno, r.getMessage()) for r in caplog.records if r.name == logger_name]
+
+
+def test_backend_failure_log_writes_at_most_one_line_per_interval(caplog: pytest.LogCaptureFixture) -> None:
+    """裁定 43 (s9) -- 変異 Ms9i (間隔の抑制を外す): three
+    failures noted within one `_FAILURE_LOG_INTERVAL_S` (1 s) on the
+    replaced clock write one WARNING line -- the fixed prefix, the first
+    failure's message, and a count of 0 -- and the clock moving on with
+    no further failure writes nothing."""
+    assert concurrency_slots._FAILURE_LOG_INTERVAL_S == 1.0
+    logger_name = "r2db_api.test_backend_failure_log"
+    clock = [1000.0]
+    writer = concurrency_slots.BackendFailureLog(logging.getLogger(logger_name), "fixed prefix", clock=lambda: clock[0])
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    for offset, text in ((0.0, "first failure"), (0.5, "second failure"), (0.999, "third failure")):
+        clock[0] = 1000.0 + offset
+        writer.note(concurrency_slots.SlotBackendError(text))
+    clock[0] = 1005.0
+    assert _failure_log_lines(caplog, logger_name) == [
+        (logging.WARNING, "fixed prefix: first failure (0 more failures not logged since the previous line)"),
+    ]
+
+
+def test_backend_failure_log_counts_the_failures_it_did_not_log(caplog: pytest.LogCaptureFixture) -> None:
+    """裁定 43 (s9) -- 変異 Ms9c (抑えた件数を数えない): on the
+    replaced clock, the first failure writes a line; the three noted
+    within the next second write none and are counted; the first failure
+    at or after one interval writes a line with its own message and that
+    count (3); one more inside the interval and one after it give a
+    count of 1."""
+    logger_name = "r2db_api.test_backend_failure_log"
+    clock = [1000.0]
+    writer = concurrency_slots.BackendFailureLog(logging.getLogger(logger_name), "fixed prefix", clock=lambda: clock[0])
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    for now, text in (
+        (1000.0, "a"), (1000.2, "b"), (1000.4, "c"), (1000.6, "d"),
+        (1001.0, "e"), (1001.5, "f"),
+        (1002.0, "g"),
+    ):
+        clock[0] = now
+        writer.note(concurrency_slots.SlotBackendError(text))
+    suffix = "more failures not logged since the previous line"
+    assert _failure_log_lines(caplog, logger_name) == [
+        (logging.WARNING, f"fixed prefix: a (0 {suffix})"),
+        (logging.WARNING, f"fixed prefix: e (3 {suffix})"),
+        (logging.WARNING, f"fixed prefix: g (1 {suffix})"),
+    ]
+
+
+def test_backend_failure_log_from_two_threads_writes_one_line_and_keeps_the_count(caplog: pytest.LogCaptureFixture) -> None:
+    """裁定 43 (s9) -- 変異 Ms9l (lock を外す): the first
+    `note` stops inside the replaced clock (bounded, 1 s) and a second
+    `note` starts on another thread meanwhile; the second does not read
+    the clock until the first has decided (the lock), so one line is
+    written, and the second failure is counted in the next line (1)."""
+    logger_name = "r2db_api.test_backend_failure_log"
+    now = [1000.0]
+    guard = threading.Lock()
+    inside = [0]
+    first_inside = threading.Event()
+    overlap = threading.Event()
+
+    def _clock() -> float:
+        with guard:
+            inside[0] += 1
+            if inside[0] > 1:
+                overlap.set()
+            first = not first_inside.is_set()
+            if first:
+                first_inside.set()
+        if first:
+            overlap.wait(timeout=1.0)
+        with guard:
+            inside[0] -= 1
+        return now[0]
+
+    writer = concurrency_slots.BackendFailureLog(logging.getLogger(logger_name), "fixed prefix", clock=_clock)
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    first = threading.Thread(target=writer.note, args=(concurrency_slots.SlotBackendError("thread one"),), daemon=True)
+    first.start()
+    assert first_inside.wait(timeout=_SCAN_WAIT_S), "the first note never read the clock (空振り)"
+    second = threading.Thread(target=writer.note, args=(concurrency_slots.SlotBackendError("thread two"),), daemon=True)
+    second.start()
+    first.join(timeout=_SCAN_WAIT_S)
+    second.join(timeout=_SCAN_WAIT_S)
+    assert not first.is_alive() and not second.is_alive(), "a note had not returned"
+    assert not overlap.is_set(), "a second note read the clock while the first one was still deciding"
+    now[0] = 1001.0
+    writer.note(concurrency_slots.SlotBackendError("after the interval"))
+    suffix = "more failures not logged since the previous line"
+    assert _failure_log_lines(caplog, logger_name) == [
+        (logging.WARNING, f"fixed prefix: thread one (0 {suffix})"),
+        (logging.WARNING, f"fixed prefix: after the interval (1 {suffix})"),
+    ]
 
 
 def test_real_http_request_holds_the_shared_slot_and_writes_a_rate_row(
@@ -1536,6 +2397,77 @@ def test_data_preflight_exits_nonzero_with_f15_when_process_ceilings_missing(
                 )
             conn.commit()
 
+@contextlib.contextmanager
+def _rate_function_withheld(platform: types.SimpleNamespace) -> Iterator[None]:
+    """Renames the platform's own `credential_request_rate_admit(text,
+    integer)` for the duration of the block (as the admin role) and
+    renames it back in `finally` -- a platform the rate migration was
+    never applied to, as far as the startup check can see."""
+    signature = "(text, integer)"
+    with psycopg.connect(_platform_dsn(platform), autocommit=True) as conn:
+        conn.execute(
+            sql.SQL("ALTER FUNCTION {}" + signature + " RENAME TO credential_request_rate_admit_withheld").format(
+                sql.Identifier(platform.schema, "credential_request_rate_admit")
+            )
+        )
+    try:
+        yield
+    finally:
+        with psycopg.connect(_platform_dsn(platform), autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("ALTER FUNCTION {}" + signature + " RENAME TO credential_request_rate_admit").format(
+                    sql.Identifier(platform.schema, "credential_request_rate_admit_withheld")
+                )
+            )
+
+
+def test_build_app_and_preflight_fail_naming_the_rate_migration_when_the_rate_function_is_missing(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
+) -> None:
+    """F5 (m1) -- 変異 Mm1 (起動時の検査を外す): with the platform's own
+    rate function absent, `build_app()` and `python -m r2db_api.main
+    --preflight` both fail naming `0015_credential_request_rate.sql`,
+    instead of starting a data plane whose every request would be a 503.
+    Non-空振り: once the function is back, the same check passes on a
+    connection of the data plane's own role."""
+    from r2db_api import platform_declarations
+
+    migration = platform_declarations.REQUEST_RATE_MIGRATION_FILENAME
+    assert migration == "0015_credential_request_rate.sql"
+    with _rate_function_withheld(platform):
+        with pytest.raises(RuntimeError, match=migration):
+            main_module.build_app(env=_preflight_env(platform, provisioned_app))
+        result = _run_preflight_subprocess("r2db_api.main", _preflight_env(platform, provisioned_app))
+    assert result.returncode != 0
+    assert migration in result.stderr, result.stderr
+    with psycopg.connect(platform.api_dsn) as conn:
+        platform_declarations.check_request_rate_function(conn, schema=platform.schema, migration=migration)
+
+
+def test_build_app_fails_naming_the_rate_migration_when_the_data_plane_role_may_not_execute_the_rate_function(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
+) -> None:
+    """F5 (m2) -- 変異 Mm2 (権限の読み取りを外す): the rate function exists
+    but the data plane's own role (the `R2DB_PLATFORM_DSN` login role)
+    has lost EXECUTE on it -- `build_app()` fails naming
+    `0015_credential_request_rate.sql`. EXECUTE is granted back in
+    `finally`."""
+    from r2db_api import platform_declarations
+
+    with psycopg.connect(platform.api_dsn) as conn:
+        (api_role,) = conn.execute("SELECT current_user").fetchone()
+    function = sql.SQL("{}(text, integer)").format(sql.Identifier(platform.schema, "credential_request_rate_admit"))
+    with psycopg.connect(_platform_dsn(platform), autocommit=True) as conn:
+        conn.execute(sql.SQL("REVOKE EXECUTE ON FUNCTION {} FROM {}").format(function, sql.Identifier(api_role)))
+    try:
+        with pytest.raises(RuntimeError, match="may not EXECUTE") as excinfo:
+            main_module.build_app(env=_preflight_env(platform, provisioned_app))
+        assert platform_declarations.REQUEST_RATE_MIGRATION_FILENAME in str(excinfo.value)
+    finally:
+        with psycopg.connect(_platform_dsn(platform), autocommit=True) as conn:
+            conn.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {} TO {}").format(function, sql.Identifier(api_role)))
+
+
 
 def test_control_preflight_exits_0_on_a_sound_env(platform: types.SimpleNamespace) -> None:
     """完了条件 64 の監査照合 (レビュー F6 (j)): `python -m r2db_api.
@@ -1879,8 +2811,9 @@ def test_f16_startup_floor_scales_with_process_ceilings_data_times_pool_composit
     """完了条件 72 -- 変異 M72 (F-16 の床に `process_ceilings.data` を掛け
     ない): `r2dbsvc_api`'s own real `CONNECTION LIMIT` is a CLUSTER-WIDE
     cap every one of `process_ceilings.data` data-plane processes shares
-    -- `main.py`'s own F-16 call passes `pool_size=_role_pool_size *
-    process_ceiling` (never the un-multiplied per-process value alone).
+    -- `check_role_connection_limits` multiplies the `api` class's floor
+    by `process_ceilings.data` (`main.py`'s own F-16 call passes the
+    un-multiplied `_role_pool_size` alongside `process_ceilings`).
     With `process_ceilings.data=3` and the role's real limit lowered to a
     value BETWEEN the unscaled floor (2*6=12) and the scaled floor
     (2*6*3=36), `build_app()` fails fast (F-16); restoring the ceiling

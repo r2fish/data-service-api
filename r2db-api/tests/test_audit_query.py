@@ -2413,7 +2413,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_169_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_198_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2976,10 +2976,56 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # normalize-and-diff equal before adding both rows.
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f19_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_application_collations"),
+    # The multi-process worker helpers (design docs/design/MULTI_PROCESS_
+    # WORKER_V0_1.md D-1/D-3/D-4): `concurrency_slots.py`'s own 16
+    # symbols (the host-shared `concurrency` slot directory, its `scan`
+    # lock, and the interval-bounded writer of its failure line),
+    # `resolve_limit_enforcement` (the 2-strategy `limit_enforcement`
+    # mapping), the thread-limit pool sizing trio (`limits.py` on r2db-api,
+    # `config.py` on MitateDB-api), both composition roots' own
+    # `_workers_from_env`/`_require_slot_dir`/`_run_lifespan_once` (both
+    # peers' `main.py`, and `_workers_from_env`/`_run_lifespan_once` in
+    # both peers' `control_main.py`), the
+    # `application_name` toggle pair (`postgres.py` / `pool.py`),
+    # `ops._declared_pool_size` (the pool dimension `verify-declarations`
+    # checks F-16/F-18 against) and `platform_declarations.check_request_
+    # rate_function` (the startup check of the rate function) -- each
+    # verified normalize-and-diff equal before adding. `record_rate_and_
+    # check` keeps a peer-IDENTICAL name and a peer-SPECIFIC body (each
+    # store's own borrow and error mapping) and is NOT added.
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SELFCHECK_FILENAME"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SCAN_FILENAME"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_SCAN_LOCK_TIMEOUT_S"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_SCAN_LOCK_INTERVAL_S"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_FAILURE_LOG_INTERVAL_S"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_OPEN_FLAGS"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_FILE_MODE"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_HELD_ERRNOS"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SlotDirectoryError"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "LimitExceeded"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SlotBackendError"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "BackendFailureLog"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "check_slot_directory"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "selfcheck_slot_locking"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_slot_path"),
+    ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "HostSharedConcurrencySlots"),
+    ("src/r2db_api/capabilities_document.py", "src/mitatedb_api/capabilities_document.py", "resolve_limit_enforcement"),
+    ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "_POOL_SIZE_HEADROOM"),
+    ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "thread_limit_from_env"),
+    ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "role_pool_size"),
+    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_workers_from_env"),
+    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_require_slot_dir"),
+    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_run_lifespan_once"),
+    ("src/r2db_api/control_main.py", "src/mitatedb_api/control_main.py", "_run_lifespan_once"),
+    ("src/r2db_api/control_main.py", "src/mitatedb_api/control_main.py", "_workers_from_env"),
+    ("src/r2db_api/postgres.py", "src/mitatedb_api/pool.py", "set_connection_application_name"),
+    ("src/r2db_api/postgres.py", "src/mitatedb_api/pool.py", "_application_name_connect_kwargs"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_declared_pool_size"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_request_rate_function"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_169_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_198_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -3066,6 +3112,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_169_rows() -> None:
     parser (`_thread_limit_from_env`) replace it, all three verified
     normalize-and-diff equal before adding; `_perf_thread_limit_value`
     and `perf_thread_limit` keep their own rows, unchanged in name.
+    The last 29 rows are the multi-process worker helpers named in the
+    comment right above them in `_ISOMORPHIC_TARGETS`, each verified
+    normalize-and-diff equal before adding.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -3090,7 +3139,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_169_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_169_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_198_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3365,8 +3414,37 @@ def test_isomorphic_target_table_is_pinned_to_its_current_169_rows() -> None:
         ("tests/test_r79_prepared_stats.py", "tests/test_r79_prepared_stats.py", "_body_contains"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f19_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_application_collations"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SELFCHECK_FILENAME"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SCAN_FILENAME"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_SCAN_LOCK_TIMEOUT_S"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_SCAN_LOCK_INTERVAL_S"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_FAILURE_LOG_INTERVAL_S"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_OPEN_FLAGS"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_FILE_MODE"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_HELD_ERRNOS"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SlotDirectoryError"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "LimitExceeded"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "SlotBackendError"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "BackendFailureLog"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "check_slot_directory"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "selfcheck_slot_locking"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "_slot_path"),
+        ("src/r2db_api/concurrency_slots.py", "src/mitatedb_api/concurrency_slots.py", "HostSharedConcurrencySlots"),
+        ("src/r2db_api/capabilities_document.py", "src/mitatedb_api/capabilities_document.py", "resolve_limit_enforcement"),
+        ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "_POOL_SIZE_HEADROOM"),
+        ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "thread_limit_from_env"),
+        ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "role_pool_size"),
+        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_workers_from_env"),
+        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_require_slot_dir"),
+        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_run_lifespan_once"),
+        ("src/r2db_api/control_main.py", "src/mitatedb_api/control_main.py", "_run_lifespan_once"),
+        ("src/r2db_api/control_main.py", "src/mitatedb_api/control_main.py", "_workers_from_env"),
+        ("src/r2db_api/postgres.py", "src/mitatedb_api/pool.py", "set_connection_application_name"),
+        ("src/r2db_api/postgres.py", "src/mitatedb_api/pool.py", "_application_name_connect_kwargs"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_declared_pool_size"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_request_rate_function"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 169
+    assert len(_ISOMORPHIC_TARGETS) == 198
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}

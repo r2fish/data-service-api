@@ -31,6 +31,7 @@ from psycopg import sql
 
 from .errors import AuthorizationStateUnavailable, StorageConfigurationError
 from .identifiers import validate_identifier
+from .pool import _application_name_connect_kwargs
 
 # Contract `audit.fields` (spec/data-service-api.v1.json), verbatim order.
 #
@@ -211,7 +212,7 @@ def read_control_audit_events(dsn: str, schema: str = "mitatedb_registry", *,
         fields=sql.SQL(", ").join(sql.Identifier(f) for f in CONTROL_AUDIT_FIELDS),
         table=sql.Identifier(schema, "control_audit"),
     )
-    conn = psycopg.connect(dsn, connect_timeout=connect_timeout)
+    conn = psycopg.connect(dsn, connect_timeout=connect_timeout, **_application_name_connect_kwargs())
     try:
         with conn.cursor() as cur:
             cur.execute(statement)

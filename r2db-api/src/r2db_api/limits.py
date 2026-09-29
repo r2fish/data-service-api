@@ -137,7 +137,7 @@ def thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> in
     exec unit-test subject, `tests/test_threadpool_offload.py`) --
     `tests/test_threadpool_offload.py::test_thread_limit_from_env_agrees_
     with_the_shared_limits_reader` pins that the two bodies agree on
-    every input (completion condition 70b) rather than letting them
+    every input rather than letting them
     diverge silently. Unset or empty falls back to `default`; a non-empty
     value that is not a positive integer stops the caller (`ValueError`
     naming `name`) rather than silently degrading -- this sizes a

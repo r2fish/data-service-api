@@ -326,7 +326,7 @@ class PostgresCredentialStore:
         statement -- see below) -- never the credentials table itself,
         and never a second, dedicated pool. Called from `service.py`'s `_acquire_
         rate` AFTER the caller's own authentication borrow has already
-        returned its connection (completion condition 35) -- this
+        returned its connection -- this
         method's own borrow-execute-return is a single, separate unit of
         work, never nested inside another.
 
@@ -337,7 +337,7 @@ class PostgresCredentialStore:
         `False` to the SAME `LIMIT_EXCEEDED`/`requests_per_minute` denial
         the pre-existing in-memory window already raised. A PostgreSQL
         failure raises `FoundationError(SERVICE_UNAVAILABLE, 503)`
-        instead of returning either boolean (completion condition 34):
+        instead of returning either boolean:
         fail-closed, never silently admitted nor silently denied, mirroring
         every other write in this class (`add`/`set_state`/`rotate`).
         """

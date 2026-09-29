@@ -1185,8 +1185,8 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
         "F-19", "every registered application's own database was provisioned with a codepoint-order collation"
     )
 
-    # design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1
-    # (completion conditions 74/75): the startup-time `workers <=
+    # design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1: the
+    # startup-time `workers <=
     # process_ceilings.<plane>` check `build_app()`/`build_control_app()`
     # both run for real is ALSO offered here, as an out-of-band
     # operator diagnostic -- reads `R2DB_WORKERS`/`R2DB_CONTROL_WORKERS`

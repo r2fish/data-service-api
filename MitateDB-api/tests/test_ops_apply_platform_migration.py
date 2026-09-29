@@ -382,14 +382,17 @@ def test_apply_platform_migration_accepts_a_known_file_through_a_symlinked_migra
 
 
 def test_apply_platform_migration_accepted_filenames_are_pinned_and_exist_without_app_id():
-    """The accepted-file constant is pinned to the 6 named files;
-    each is real and references no `:app_id` psql variable; the
-    directory's own `:app_id`-free files differ from this set by exactly
-    the 2 bootstrap-only migrations."""
+    """The accepted-file constant is pinned to the 7 named files
+    (`0016_credential_request_rate.sql`, design docs/design/MULTI_
+    PROCESS_WORKER_V0_1.md D-3 (1), included -- a platform single-shot
+    migration); each is real and references no `:app_id` psql variable;
+    the directory's own `:app_id`-free files differ from this set by
+    exactly the 2 bootstrap-only migrations."""
     assert ops._PLATFORM_MIGRATION_FILENAMES == (
         "0005_application_audit.sql", "0007_platform_declarations.sql",
         "0011_process_ceilings.sql", "0012_role_connection_limits.sql",
         "0013_role_statement_timeouts.sql", "0014_role_connection_limits_rollout.sql",
+        "0016_credential_request_rate.sql",
     )
     no_app_id_files = set()
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):

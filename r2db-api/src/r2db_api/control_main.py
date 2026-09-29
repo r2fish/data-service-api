@@ -454,9 +454,9 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # design D-1: always explicit, always `1` in a real
     # deployment -- compared below, once `process_ceilings.control` is
     # known, against the declared ceiling (mirrors `r2db_api.main`'s own
-    # data-plane check, completion condition 61).
+    # data-plane check).
     workers = _workers_from_env(env, "R2DB_CONTROL_WORKERS")
-    # design D-4 (completion condition 69): every
+    # design D-4: every
     # connection this process opens from here on carries this
     # `application_name`.
     postgres.set_connection_application_name(f"r2db-api:control:{os.getpid()}")
@@ -565,7 +565,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # F-3c: unconditionally required for THIS process (unlike `r2db_api.
     # main`'s F-6, which is conditional on `R2DB_CONTROL_PLANE_STATUS`).
     require_control_surface_declared(declarations.surfaces, schema=schema, ops_module=platform_declarations.PEER_MODULE)
-    # design D-1 (completion condition 61): checked
+    # design D-1: checked
     # here, inside `build_control_app()` itself (never `verify-
     # declarations`, never `lifespan`), against the SAME
     # `process_ceilings.control` value `assemble_control_stack` below is

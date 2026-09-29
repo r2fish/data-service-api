@@ -199,6 +199,7 @@ def test_isolated_surface_repair_is_seen_by_parent(monkeypatch) -> None:
     adapter._application_config = FoundationConfig()  # noqa: SLF001
     adapter._gate = None  # noqa: SLF001 -- unused: HttpService is faked below
     adapter._audit_router = None  # noqa: SLF001 -- unused: HttpService is faked below
+    adapter._read_store = None  # noqa: SLF001 -- the isolated surface's own `rate`; unused: HttpService is faked below
 
     calls: list[tuple[str, str]] = []
 

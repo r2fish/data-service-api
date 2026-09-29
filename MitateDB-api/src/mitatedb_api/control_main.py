@@ -47,13 +47,37 @@ the application plane's own `request_bytes` enforcement).
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 from typing import Mapping
 
 from starlette.types import ASGIApp
 
 from .control_composition import build_control_service
 from .control_http import create_control_app
+from .pool import set_connection_application_name
+
+
+def _workers_from_env(env: Mapping[str, str], name: str) -> int:
+    """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1): identical
+    discipline to `mitatedb_api.main._workers_from_env` -- `name` must be
+    set, non-empty, and a positive integer; unset/empty/`0`/negative/
+    non-numeric all stop startup naming `name`. `MITATEDB_CONTROL_WORKERS`
+    is always `1` in a real deployment (this composition root never
+    serves more than one worker) -- checked here, and again against
+    `process_ceilings.control` inside `build_control_service`, rather than
+    assumed."""
+    raw = env.get(name)
+    if not raw:
+        raise RuntimeError(f"{name} is required to start mitatedb_api.control_main:build_control_app")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}")
+    return value
 
 
 def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
@@ -66,7 +90,17 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     import time, mirroring `main.build_app`'s own identical reason for
     factoring `build_app` out from its own module-level `app`)."""
     env = env if env is not None else os.environ
-    service = build_control_service(env)
+    # design D-1: always explicit, always `1` in a real deployment --
+    # `build_control_service` compares it against the declared
+    # `process_ceilings.control` once that is read.
+    workers = _workers_from_env(env, "MITATEDB_CONTROL_WORKERS")
+    # design D-4: every connection this control-plane process opens from
+    # here on carries this `application_name` (`pool.py`'s own
+    # module-level toggle) -- set here, in the real control-plane entry,
+    # never inside `build_control_service`, which a conformance adapter
+    # also calls inside a process that serves the data plane too.
+    set_connection_application_name(f"MitateDB-api:control:{os.getpid()}")
+    service = build_control_service(env, workers=workers)
     return create_control_app(service, request_bytes_limit=service.limits.request_bytes)
 
 
@@ -79,3 +113,43 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
 app = build_control_app()
 
 __all__ = ["build_control_app", "app"]
+
+
+# design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1: the `--preflight`
+# one-shot entry. `python -m mitatedb_api.control_main --preflight`
+# imports this module -- whose own module-level `app = build_control_
+# app()` above already runs every startup-time check (`build_control_
+# service`: F-1/F-2/F-8/F-3/F-3c/F-4/F-4b/F-5/F-13/F-7/F-9/F-10/F-11/
+# F-15/F-16/F-18 and the workers-vs-ceiling check) exactly once and
+# raises on an unsound environment -- Python's own unhandled-exception
+# exit (non-zero, traceback on stderr) is the outcome for that path. The
+# entry below reuses that same `app`, never building a second one.
+async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
+    """Identical to `mitatedb_api.main._run_lifespan_once` (own copy, no
+    code sharing between composition roots' own entry points): drives one
+    ASGI `lifespan` startup+shutdown cycle against `asgi_app` without ever
+    serving a request."""
+    to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+    from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+
+    async def receive() -> dict[str, str]:
+        return await to_app.get()
+
+    async def send(message: dict[str, str]) -> None:
+        await from_app.put(message)
+
+    task = asyncio.ensure_future(asgi_app({"type": "lifespan"}, receive, send))
+    await to_app.put({"type": "lifespan.startup"})
+    startup_result = await from_app.get()
+    if startup_result["type"] == "lifespan.startup.failed":
+        raise RuntimeError(startup_result.get("message") or "lifespan startup failed")
+    await to_app.put({"type": "lifespan.shutdown"})
+    shutdown_result = await from_app.get()
+    await task
+    if shutdown_result["type"] == "lifespan.shutdown.failed":
+        raise RuntimeError(shutdown_result.get("message") or "lifespan shutdown failed")
+
+
+if __name__ == "__main__" and "--preflight" in sys.argv:
+    asyncio.run(_run_lifespan_once(app))
+    sys.exit(0)

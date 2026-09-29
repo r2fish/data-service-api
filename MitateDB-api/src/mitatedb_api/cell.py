@@ -25,6 +25,7 @@ import contextvars
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import time
 import uuid
 from threading import Lock, RLock
@@ -36,13 +37,14 @@ from .auth import Principal, Role
 from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
 from .backend_sqlite import SQLiteBackend
 from .capabilities_document import build_capabilities_document
+from . import concurrency_slots
 from .config import FoundationConfig, narrow_limits_by_budget
 from .constraint_resolution import _resolve_field_constraints, _validate_enum_declaration_with_path
 from .delete_confirmation import _canonical_where_json, _delete_confirmation_phrase
 from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      ConflictError, DestructiveConfirmationRequired, NotFoundError,
-                     PreconditionFailedError, ResourceLimitError, ValidationError,
-                     observed_type_of, violation)
+                     PreconditionFailedError, ResourceLimitError, StorageConfigurationError,
+                     ValidationError, observed_type_of, violation)
 from .field_types import (
     FOUNDATION_TYPE_TO_CONTRACT_TYPE,
     check_declared_value,
@@ -63,6 +65,18 @@ from .request_vocabulary import (
     _TRANSACT_UPDATE_KEYS,
     _UNSUPPORTED_CONTRACT_OPERATORS,
 )
+
+_logger = logging.getLogger(__name__)
+
+#: the fixed start of the WARNING line written where a slot backend
+#: failure becomes a 503 (`_LimitStateHolder.concurrency_slot` and
+#: `_LimitStateHolder.acquire_concurrency_slot`).
+_SLOT_FAILURE_LOG_PREFIX = "mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE"
+
+#: this process' one writer of that line, shared by both of those
+#: mapping points -- at most one line per interval
+#: (`concurrency_slots.BackendFailureLog`).
+_SLOT_FAILURE_LOG = concurrency_slots.BackendFailureLog(_logger, _SLOT_FAILURE_LOG_PREFIX)
 
 
 def normalize_request_for_plan(request: dict[str, Any]) -> bytes:
@@ -326,15 +340,66 @@ class _LimitStateHolder:
     and injected into every `ApplicationCell` that instance constructs --
     the same one-per-process injection shape `audit_dispatch.AuditRouter`
     already established (`cell.py`'s own pre-existing `:308-318` comment,
-    `main.py`'s identical wiring)."""
+    `main.py`'s identical wiring).
 
-    def __init__(self):
+    Each of the two classes has two strategies (design docs/design/
+    MULTI_PROCESS_WORKER_V0_1.md D-3): `rate` (a `credential_store_
+    postgres.PostgresCredentialStore`-shaped object exposing
+    `record_rate_and_check(credential_id, limit) -> bool`) replaces the
+    in-memory window with the PostgreSQL-backed rate row every worker
+    process shares, and `concurrency_slots` (a `concurrency_slots.
+    HostSharedConcurrencySlots`) replaces the in-memory counter with the
+    host-shared slot directory. Both default to `None` -- this
+    repository's own unit tests, the in-process conformance adapter and
+    `service.py` pass neither and keep the in-memory state above.
+    `concurrency_configured` is a SEPARATE boolean, read only by the
+    capability document's `limit_enforcement` mapping: whether
+    `concurrency` may honestly read `enforced` also depends on this
+    supervisor's own workers vs. the declared ceiling, a comparison only
+    the composition root (`main.build_app`) can make. The wired mechanism
+    is enforced whenever it is given, regardless of this flag."""
+
+    def __init__(self, *, rate=None, concurrency_slots=None, concurrency_configured=False):
         self._rate_windows: dict = {}
         self._rate_lock = Lock()
         self._active = 0
         self._active_lock = Lock()
+        self._rate = rate
+        self._concurrency_slots = concurrency_slots
+        if concurrency_configured and concurrency_slots is None:
+            raise ValueError(
+                "concurrency_configured=True requires a concurrency_slots object -- "
+                "declaring the host-shared bound configured without wiring the mechanism "
+                "that shares it would let capabilities().limit_enforcement.concurrency read "
+                "\"enforced\" for a process-local counter no other worker shares"
+            )
+        self._concurrency_configured = concurrency_configured
+
+    @property
+    def rate_configured(self):
+        """`True` exactly when the PostgreSQL-backed rate row is wired
+        (`rate` given) -- the `requests_per_minute` input to
+        `capabilities_document.resolve_limit_enforcement`."""
+        return self._rate is not None
+
+    @property
+    def concurrency_configured(self):
+        """The composition root's own `concurrency` input to
+        `capabilities_document.resolve_limit_enforcement` (the slot
+        directory wired AND this supervisor's workers at the declared
+        ceiling)."""
+        return self._concurrency_configured
 
     def acquire_rate(self, credential_id, bound):
+        if self._rate is not None:
+            # design D-3 (1): every worker this deployment runs shares
+            # ONE credential-keyed count. Reached from `ApplicationCell.
+            # _limit_gate` after `_require_data`'s own `assert_active`
+            # borrow has returned its connection -- sequential, never
+            # nested.
+            if not self._rate.record_rate_and_check(credential_id, bound):
+                raise ResourceLimitError("request rate limit exceeded", limit_class="requests_per_minute")
+            return
         now = time.monotonic()
         with self._rate_lock:
             window = self._rate_windows.setdefault(credential_id, [])
@@ -359,6 +424,19 @@ class _LimitStateHolder:
         if _CONCURRENCY_RESERVED.get():
             yield
             return
+        # design D-3 (2): a wired host-shared slot directory admits this
+        # non-reserved caller through the SAME mechanism the pre-
+        # authentication entry below uses, never the in-memory counter.
+        if self._concurrency_slots is not None:
+            try:
+                with self._concurrency_slots.acquire(bound):
+                    yield
+                return
+            except concurrency_slots.LimitExceeded:
+                raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
+            except concurrency_slots.SlotBackendError as exc:
+                _SLOT_FAILURE_LOG.note(exc)
+                raise StorageConfigurationError("the concurrency slot directory could not be used")
         with self._active_lock:
             if self._active >= bound:
                 raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
@@ -394,6 +472,26 @@ class _LimitStateHolder:
         durable-audit call in between, so this denial is never durably
         audited (there is no authenticated principal to attribute it to
         yet, in any case)."""
+        # design D-3 (2): a wired host-shared slot directory holds ONE
+        # `slot-<i>` file for the whole request and sets the SAME
+        # `_CONCURRENCY_RESERVED` marker, so the nested `concurrency_slot`
+        # call never takes a second one. A slot backend failure maps to
+        # `StorageConfigurationError` (`SERVICE_UNAVAILABLE`, 503), never
+        # to a refusal and never to an admission.
+        if self._concurrency_slots is not None:
+            try:
+                with self._concurrency_slots.acquire(bound):
+                    token = _CONCURRENCY_RESERVED.set(True)
+                    try:
+                        yield
+                    finally:
+                        _CONCURRENCY_RESERVED.reset(token)
+                return
+            except concurrency_slots.LimitExceeded:
+                raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
+            except concurrency_slots.SlotBackendError as exc:
+                _SLOT_FAILURE_LOG.note(exc)
+                raise StorageConfigurationError("the concurrency slot directory could not be used")
         with self._active_lock:
             if self._active >= bound:
                 raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
@@ -611,6 +709,20 @@ class ApplicationCell:
         # process_ceiling`, exactly how it already reads `self.__cell.
         # config`.
         self.process_ceiling = process_ceiling
+
+    @property
+    def rate_configured(self):
+        """This cell's own limit-state holder's `rate_configured` -- read
+        by `ApplicationRuntime.__build_capabilities_document` alongside
+        `process_ceiling`."""
+        return self.__limit_holder.rate_configured
+
+    @property
+    def concurrency_configured(self):
+        """This cell's own limit-state holder's `concurrency_configured`
+        -- read by `ApplicationRuntime.__build_capabilities_document`
+        alongside `process_ceiling`."""
+        return self.__limit_holder.concurrency_configured
 
     def prepared_stats(self):
         """R-79 (WO §1.2 D-2, D-3; §2.1 起草時の裁定 4): read-only accessor
@@ -3977,6 +4089,8 @@ class ApplicationRuntime:
             application_id=principal.application_id,
             cell_config=self.__cell.config,
             process_ceiling=self.__cell.process_ceiling,
+            rate_configured=self.__cell.rate_configured,
+            concurrency_configured=self.__cell.concurrency_configured,
         )
 
 

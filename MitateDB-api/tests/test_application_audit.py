@@ -29,6 +29,7 @@ import os
 import secrets
 import json
 import subprocess
+import tempfile
 import threading
 import time
 import types
@@ -67,6 +68,11 @@ from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
+# `main.build_app` requires `MITATEDB_WORKERS`/`MITATEDB_SLOT_DIR`: one
+# shared, real slot directory (mode 0700, `mkdtemp`'s own default) for
+# every `build_app(env)` call in this module, mirroring a single-process
+# (`workers=1`) deployment.
+_SLOT_DIR = tempfile.mkdtemp(prefix="mitatedb-test-slots-application-audit-")
 
 _APP_PEPPER = "application-audit-postgres-app-pepper-x"
 # Phase 6 WP-3 (design D-2): `MITATEDB_DATA_BASE_URL`/`_CONTROL_BASE_URL`
@@ -114,6 +120,10 @@ MIGRATION_NAMES = (
     # 0005 (which creates that role), not right after 0012 like the
     # other migrations above.
     "0013_role_statement_timeouts.sql",
+    # design D-3 (1): `main.build_app` always wires the PostgreSQL-backed
+    # `requests_per_minute` rate row -- applied right after 0011, before
+    # the 0005 GRANT-invariance snapshot below.
+    "0016_credential_request_rate.sql",
 )
 
 
@@ -268,6 +278,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
+        _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
         surfaces_conn = psycopg.connect(provision_dsn, autocommit=True)
         try:
             with surfaces_conn.cursor() as cur:
@@ -874,6 +885,8 @@ def test_build_app_wires_the_real_writer_connection_to_the_declared_role_setting
             "MITATEDB_PLATFORM_DSN": platform.api_dsn,
             "MITATEDB_PLATFORM_SCHEMA": platform.schema,
             "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+            "MITATEDB_WORKERS": "1",
+            "MITATEDB_SLOT_DIR": _SLOT_DIR,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
             # Q4 phase: `platform`'s own seeded `surfaces` declaration
@@ -935,6 +948,8 @@ def test_build_app_rejects_the_removed_timeout_env_vars(
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.schema,
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
         removed_var: "",
@@ -964,6 +979,8 @@ def test_build_app_checks_the_env_mapping_argument_not_os_environ(
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.schema,
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
         "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
@@ -986,10 +1003,11 @@ def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_
     api_role`, the `mitatedbsvc_api`-class role identified here by its own
     real `INSERT` grant on `application_audit`, migration `0005` -- this
     file's own `platform` fixture, unlike `test_main.py`'s/`test_postgres.
-    py`'s, always applies it). Lowering it back below its own real floor
-    (2 stores x concurrency 32 = 64) -- exactly the pre-`0012_role_
-    connection_limits.sql` state every platform was in before Phase 10
-    WP-4f -- must raise, never silently start a process that can hit
+    py`'s, always applies it). Lowering it below its own real floor (2
+    stores x `role_pool_size(thread_limit)` 6 x `process_ceilings.data`
+    1 = 12, design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5), with
+    `MITATEDB_THREAD_LIMIT` unset -> `DEFAULT_THREAD_LIMIT` 4) -- here to
+    10 -- must raise, never silently start a process that can hit
     PostgreSQL's own hard 'too many connections for role' refusal under
     real concurrent traffic. Restores the migration-seeded limit (68) in a
     `finally` so this shared, module-scoped `platform` fixture is left
@@ -999,6 +1017,8 @@ def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.schema,
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
         # This file's own `platform` fixture seeds `surfaces` WITH a
@@ -1011,7 +1031,7 @@ def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_
     }
     with psycopg.connect(platform.admin_dsn) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 20").format(sql.Identifier(platform.api_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 10").format(sql.Identifier(platform.api_role)))
         conn.commit()
     try:
         with pytest.raises(RuntimeError, match="F-16|CONNECTION LIMIT"):
@@ -1040,10 +1060,14 @@ def test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exc
     with r2db-api's own same-numbered test): unlike F-16 (this file's own
     test just above), this new startup check is run UNSCOPED --
     `platform.api_role`'s own `CONNECTION LIMIT` is left healthy (F-16
-    alone would pass), but the declared `process_ceilings` (`{"data": 3,
-    "control": 1}`, lower bound 3*(64+64)+1*16=400, `timeout_probe_app`
-    guarantees at least one registered application) exceeds this
-    throwaway cluster's own real headroom (297, §1.3 (8)). Mutation M9c
+    alone would pass), but the declared `process_ceilings` (`{"data": 1,
+    "control": 30}`, lower bound 1*(12+12)+30*16=504 with `pool_size` 6
+    -- design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5):
+    `role_pool_size(thread_limit)`, never the declared `concurrency` --
+    `timeout_probe_app` guarantees at least one registered application)
+    exceeds this throwaway cluster's own real headroom (297, §1.3 (8));
+    `data` stays 1 so this startup's own `api`-scoped F-16 floor (12)
+    still passes. Mutation M9c
     (dropping this startup call from `mitatedb_api.main.build_app`) turns
     this red."""
     env = {
@@ -1051,6 +1075,8 @@ def test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exc
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.schema,
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
         "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
@@ -1062,7 +1088,7 @@ def test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exc
                     "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
                     "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
                 ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
-                [json.dumps({"data": 3, "control": 1})],
+                [json.dumps({"data": 1, "control": 30})],
             )
         conn.commit()
     try:
@@ -1155,6 +1181,8 @@ def test_main_wires_the_audit_router_into_both_the_credential_store_and_every_ce
             "MITATEDB_PLATFORM_DSN": platform.api_dsn,
             "MITATEDB_PLATFORM_SCHEMA": platform.schema,
             "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+            "MITATEDB_WORKERS": "1",
+            "MITATEDB_SLOT_DIR": _SLOT_DIR,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
             # Q4 phase: `platform`'s own seeded `surfaces` declaration
@@ -2416,6 +2444,8 @@ def test_http_response_request_id_matches_the_durable_audit_row(
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.schema,
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
         # Q4 phase: `platform`'s own seeded `surfaces` declaration
@@ -2487,6 +2517,8 @@ def test_http_service_durably_audits_a_nul_locator_as_auth_invalid_not_503(
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.schema,
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
         # Q4 phase: `platform`'s own seeded `surfaces` declaration
@@ -2812,6 +2844,8 @@ def test_http_buffer_class_event_request_id_matches_the_durable_audit_row(
         "MITATEDB_PLATFORM_DSN": platform.api_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.schema,
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        "MITATEDB_WORKERS": "1",
+        "MITATEDB_SLOT_DIR": _SLOT_DIR,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
         # Q4 phase: `platform`'s own seeded `surfaces` declaration

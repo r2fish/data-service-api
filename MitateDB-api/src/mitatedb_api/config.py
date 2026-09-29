@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, replace
 import os
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
 
 from .errors import ResourceLimitError, ValidationError
@@ -297,26 +297,77 @@ class FoundationConfig:
             raise ResourceLimitError("request size limit exceeded", limit_class="request_bytes")
 
 
-def role_pool_size(config: "FoundationConfig") -> int:
-    """Phase 10 WP-4e (supervisor ruling 2026-09-09, 同型 with r2db-api's
-    `r2db_api.limits.role_pool_size`): the platform pool's own floor
-    (`main.py`'s `pool.BoundedConnectionPool`, backing `PostgresCredential
-    Store`'s authentication reads) must be at least the declared `max_
-    concurrency` ceiling -- the SAME reasoning r2db-api's sibling function
-    already documents in full: once concurrent requests' authentication
-    reads can genuinely reach this pool at once (`http.py`'s own
-    `run_in_threadpool` delegation), a pool sized below the declared
-    bound times out waiting for a pooled connection and fails closed with
-    `AUTH_STATE_UNAVAILABLE` well under that bound, instead of a client
-    ever seeing the declared 429 `LIMIT_EXCEEDED` at the real ceiling.
+#: (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)): the
+#: constant `role_pool_size` below adds to the real effective thread
+#: limit -- the same value r2db-api's own `r2db_api.limits` adds (a
+#: registered isomorphism target).
+_POOL_SIZE_HEADROOM = 2
 
-    Unlike r2db-api, this peer's per-application data path is NOT pooled
-    at all (`backend_postgres.PostgresBackend`: two fixed, persistent
-    connections per served application, serialized by `cell.py`'s own
-    request-wide lock, WP-8b) -- there is no per-application counterpart
-    to this function on this peer, only this one platform-pool consumer.
+
+def thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
+    """(design D-3 (5)): the env-declared-thread-limit reader `mitatedb_
+    api.control_composition`'s own startup check and `mitatedb_api.ops`'s
+    own `verify-declarations` operator diagnostic both read `MITATEDB_
+    THREAD_LIMIT` through. `mitatedb_api.main`'s own startup keeps its OWN
+    body of the same reader (`_thread_limit_from_env`, a registered
+    isomorphism target and an AST-isolated-exec unit-test subject,
+    `tests/test_threadpool_offload.py`) -- `tests/test_threadpool_
+    offload.py::test_thread_limit_from_env_agrees_with_the_shared_config_
+    reader` pins that the two bodies agree on every input. Unset or empty
+    falls back to `default`; a non-empty value that is not a positive
+    integer stops the caller (`ValueError` naming `name`) rather than
+    silently degrading -- this sizes a worker-thread pool (`role_pool_
+    size`), a resource dimension a deployer's typo should never silently
+    mis-size.
     """
-    return config.max_concurrency
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def role_pool_size(thread_limit: int) -> int:
+    """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)): the
+    platform pool's own default size (`main.py`'s `pool.BoundedConnection
+    Pool`, backing `PostgresCredentialStore`'s authentication reads and
+    its `requests_per_minute` rate statement) derives from `thread_limit`
+    -- the effective, env-overridden `ThreadLimitMiddleware` value
+    (`http.py`'s own `create_app(..., thread_limit=)`).
+
+    Basis: once concurrent requests' authentication reads can genuinely
+    reach this pool at once (`http.py`'s own `run_in_threadpool`
+    delegation), a pool sized below the number of requests that can
+    borrow from it at once times out waiting for a pooled connection and
+    fails closed with `AUTH_STATE_UNAVAILABLE` well under the declared
+    bound, instead of a client ever seeing the declared `LIMIT_EXCEEDED`
+    at the real ceiling. The number of connections ONE process can
+    genuinely borrow at once is bounded by how many worker THREADS that
+    process' own event loop hands a synchronous request section to --
+    `thread_limit` -- never by `max_concurrency`, the deployment-wide
+    admission bound every worker process enforces TOGETHER (the
+    host-shared slot directory), which holds no connection of its own.
+    Every platform-pool borrower on this peer is such a request thread
+    (the authentication borrow is returned before the rate statement
+    borrows), so `thread_limit + 2` (`_POOL_SIZE_HEADROOM`) covers the
+    real simultaneous borrows with 2 to spare, and `process_ceilings.
+    data` processes share `max_connections` without the budget scaling
+    with the declared `concurrency` bound.
+
+    This peer's per-application data path is NOT pooled at all
+    (`backend_postgres.PostgresBackend`: two fixed, persistent connections
+    per served application per process, serialized by `cell.py`'s own
+    request-wide lock) -- there is no per-application counterpart to this
+    function on this peer, only this one platform-pool consumer.
+    """
+    if isinstance(thread_limit, bool) or not isinstance(thread_limit, int) or thread_limit < 1:
+        raise ValueError(f"thread_limit must be a positive integer, got {thread_limit!r}")
+    return thread_limit + _POOL_SIZE_HEADROOM
 
 
 # Phase 9 WP-3d (design D-6, 追補 R-g; 監督裁定集約 rulings-r5-r6.md B-1/
