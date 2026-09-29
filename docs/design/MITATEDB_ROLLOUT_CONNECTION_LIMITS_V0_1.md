@@ -132,3 +132,5 @@
   3. **WP-3**: `security/CONTROL_MAPPING.md` の該当行（§4 の追随一覧）。**前提条件: R-50 の統合後に着手する。** 監督裁定 (2026-09-18):「R-50 を先に解く。台帳の順を R-51 → R-50 → R-54 に入れ替え、WP-3 は R-50 の統合後に着手する。WP-1・WP-2 は R-50 に依存しない」。R-50 は SI-08 の MitateDB ブロックが 1 ブロックの上限 15,200 字に張り付いている件（`RM`:437、実測 15,194 字。上限は `conformance-tests/test_control_mapping_register.py`:88）。
   4. **WP-4**（最終）: runbook §10.8 の**再受理**。版が上がると受理は無効に戻る（runbook:2384-2385）ので、独立の設計レビュー → §10.6 / §10.7 / §10.10 の新しい版の記入（runbook:2277、2326、2469 の版数の行を含む）→ 設計メモ `docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` §12（現行の記録先は §12.6、同:689。新しい記録はその次の番号の節）への逐語記録、の順に行う。
 - Q-3 が「床を上げる」になった場合は、`platform_declarations.py` の床定数と peer 対称の pin を扱う WP を WP-1 とは別に立てる（両 peer に跨るため）。→ 依頼者裁定（§10.1）により Q-3 は「1 process 分のまま」で決着したので、この WP は起こさない。
+
+**【訂正註 2026-09-29】** `ops inventory` の項目 (8) の需要の基準は `docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md` (v0.3) で改めた: 需要は revision の基準ごとに数えて足し (古い code は `concurrency` 基準、新しい code は起動時の検査と同じ thread limit 基準)、合計の application の項は永続接続の数を下回らない。本メモ §3 の検算 (`concurrency` = 32 の 1 基準) は、全 revision が古い code の場合の値として読む。上限の値 (`0014`) は変えていない。
