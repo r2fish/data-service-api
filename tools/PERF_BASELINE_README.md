@@ -594,10 +594,46 @@ changes: the launcher is never even instantiated.
 ```
 REALPERF peer=<peer> plug=<peer>-real transport=real-server op=query concurrency=<K> client_processes=<N> n=<n> p50_ms=<x.xxx> p95_ms=<x.xxx>
 REALCPU peer=<peer> plug=<peer>-real op=query concurrency=<K> client_processes=<N> requests=<n * K> wall_ms=<x.xxx> cpu_client_ms=<x.xxx>
+REALWORKERS peer=<peer> plug=<peer>-real workers=<W> concurrency=<K> pids=<count> accepted_200=<pid>:<n>,... non_200=<status>:<n>,... unclassified=<n>
 ```
 
-Both lines print as one block, immediately after `PERFRUN`, with nothing
-else printed between or before them.
+`REALPERF` and `REALCPU` print as one block, immediately after `PERFRUN`,
+with nothing else printed between or before them. `REALWORKERS` follows
+`REALCPU`.
+
+**`--workers W` (default 1, `--real-server` only).** The launcher starts
+the data plane with `W` uvicorn workers and declares `process_ceilings`
+`data = W`, `control = 1`. `--workers` without `--real-server`, or a value
+below 1, is an argument error (exit code 2). The tool does not override
+the server's declared `concurrency`: a measurement runs against the
+default 32.
+
+**The `REALWORKERS` line.** One line per run, also on a run a non-200
+response stopped (such a run prints no `REALPERF`/`REALCPU`). It is read
+from the launcher's pid-tagged access log, over the lines written after
+the K=1 sanity check: `accepted_200=` is the number of 200 responses each
+worker pid served (ascending pid, `-` when none), `pids=` the number of
+distinct pids that served one, `non_200=` the number of responses per
+non-200 status (ascending status, `-` when none; a `LIMIT_EXCEEDED`
+refusal is 429 on r2db-api and 413 on MitateDB-api), and `unclassified=`
+the number of access-log lines no status read returned (`0` when every
+line was classified or when the reads returned more lines than the window
+held). On a run a client timeout stopped, the server can still log that
+request while the counts are read, so the counts are not one point in
+time. The access log lives in the launcher's own throwaway directory and
+is removed by `launcher.stop()`; the `REALWORKERS` line is the record
+that outlives the run. The line is a record, never a judgement this tool
+makes.
+
+**Process-group residue check.** After `launcher.stop()`, the tool reads
+the process table (`ps -A`) and waits up to 10 s for the launcher's
+process groups (the uvicorn supervisors and their workers) to be empty. A
+member still present is reported on stderr and the run exits 1; a zombie
+is reported as a count and is not counted as residue. When no launcher
+process group can be observed after `start()`, the run stops before
+measuring (exit 1): an unobservable group would make the residue check
+pass without looking at anything. The launcher's nginx is outside this
+check; the supervisor's measurement procedure confirms it separately.
 
 **Why no server-side `CPU`/`DBTIME` line.** The measured server is a
 separate OS process (in fact two: application and control), not this
@@ -651,8 +687,9 @@ supervisor from `REALPERF`'s own `p50_ms=` alone; `REALCPU` is recorded
 alongside it for context, never compared against a threshold by this tool
 itself.
 
-**Launcher start/stop and cleanup.** `launcher.start(ceilings={"data": 1,
-"control": 1})` runs once, at the top of a `--real-server` run;
+**Launcher start/stop and cleanup.** `launcher.start(ceilings={"data": W,
+"control": 1}, workers=W)` (`W` = `--workers`, default 1) runs once, at
+the top of a `--real-server` run;
 `launcher.stop()` runs exactly once, in a `finally`, whether the run
 succeeded, failed partway through the HTTP setup, or failed partway
 through measurement (a non-200 `query` response mid-run aborts the WHOLE

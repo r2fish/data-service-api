@@ -50,6 +50,71 @@ def _get_json(url: str, bearer: str) -> dict[str, Any]:
         return json.loads(response.read())
 
 
+#: design D-3 (4), 裁定 18/27: `concurrency`'s own mapping depends on
+#: workers vs. `process_ceilings` (`data_multi_process_mapping_
+#: configured`); `requests_per_minute`'s own mapping depends ONLY on
+#: whether the PostgreSQL-backed rate-row strategy is wired at all,
+#: regardless of workers/ceiling (`data_rate_row_configured`). Kept as an
+#: explicit table (rather than an `if/elif` buried in the cross-check
+#: function below) so a THIRD class arriving later fails loudly (`KeyError`)
+#: instead of silently reusing the wrong accessor.
+_ACCESSOR_FOR_LIMIT_CLASS: dict[str, str] = {
+    "concurrency": "data_multi_process_mapping_configured",
+    "requests_per_minute": "data_rate_row_configured",
+}
+
+
+def configured_for_limit_class(launcher: Any, limit_class: str) -> bool:
+    """Dispatches to the ONE accessor `limit_class`'s own `limit_
+    enforcement` mapping actually depends on (`_ACCESSOR_FOR_LIMIT_CLASS`
+    above) and calls it. Callers needing a POINT-IN-TIME snapshot (design
+    裁定27's `concurrency` condition changes across a `restart()`) call
+    this at the moment that matters, e.g. right after the relevant
+    `start()`/`restart()`; `requests_per_minute`'s own accessor is
+    constant for a real-server launcher (裁定18), so calling it at test
+    time is always safe."""
+    accessor_name = _ACCESSOR_FOR_LIMIT_CLASS[limit_class]
+    return getattr(launcher, accessor_name)()
+
+
+def cross_check_limit_enforcement_declaration(
+    value: str, *, configured: bool, limit_class: str, form_label: str,
+) -> bool:
+    """Design 裁定12: at ceiling >= 2, a peer may honestly declare either
+    `enforced` or `deployment_required` for `limit_class` -- `enforced`
+    binds the new shared-limit conditions (design D-4), a peer declaring
+    `deployment_required` stays conformant without them ("現行どおり適
+    合"). Cross-checked against `configured` (`configured_for_limit_
+    class()`'s own return value -- whichever of `data_multi_process_
+    mapping_configured()`/`data_rate_row_configured()` actually governs
+    `limit_class`, design 裁定18/27) so neither direction can pass
+    silently (`OPERATING_CONDITIONS.md` §1.5 の 32, no vacuous pass): a
+    peer declaring `enforced` while `configured` is `False`, or declaring
+    `deployment_required` while it is `True`, both fail here. Mirrors
+    `test_c30_keyset_paging.py`'s own `observed_branch` cross-check shape
+    (a real value compared against what the caller's own setup implies,
+    never accepted unconditionally either way). Returns `True` when the
+    caller should drive the shared-limit condition's own body (the
+    `enforced` branch), `False` when it should record the `deployment_
+    required` branch and pass without driving it."""
+    assert value in ("enforced", "deployment_required"), (
+        f"{form_label} {limit_class}: limit_enforcement was {value!r}, expected 'enforced' or 'deployment_required'"
+    )
+    if configured:
+        assert value == "enforced", (
+            f"{form_label} {limit_class}: this launcher configured the wiring its own mapping requires for "
+            f"'enforced' ({_ACCESSOR_FOR_LIMIT_CLASS[limit_class]}() == True), but the served document declares "
+            f"{value!r} instead"
+        )
+        return True
+    assert value == "deployment_required", (
+        f"{form_label} {limit_class}: this launcher did NOT configure the wiring its own mapping requires "
+        f"({_ACCESSOR_FOR_LIMIT_CLASS[limit_class]}() == False), but the served document declares {value!r} "
+        f"instead of 'deployment_required'"
+    )
+    return False
+
+
 def _run_deploy_smoke(*, data_base_url: str, bearer: str) -> subprocess.CompletedProcess:
     """Completion condition 3 (design D-1 (B) 3): `tools/deploy_smoke.py`
     run as a real, SEPARATE subprocess (never imported and called as a
@@ -94,6 +159,9 @@ def lifecycle(launcher_class: type) -> SimpleNamespace:
     launcher.start(ceilings={"data": 1, "control": 1})
     try:
         events_after_first_start = list(launcher.startup_events())
+        # Captured HERE, before `restart()` below overwrites `data_
+        # preflight_result` with its OWN preflight's result.
+        data_preflight_result_after_first_start = launcher.data_preflight_result
         data_doc_1 = _get_json(f"{launcher.data_base_url}/capabilities", launcher.runtime_bearer)
         control_doc_1 = _get_json(f"{launcher.control_base_url}/capabilities", launcher.control_bearer)
         smoke_result = _run_deploy_smoke(data_base_url=launcher.data_base_url, bearer=launcher.runtime_bearer)
@@ -105,6 +173,7 @@ def lifecycle(launcher_class: type) -> SimpleNamespace:
         yield SimpleNamespace(
             launcher=launcher,
             events=events_after_first_start,
+            data_preflight_result_after_first_start=data_preflight_result_after_first_start,
             data_base_url=launcher.data_base_url,
             control_base_url=launcher.control_base_url,
             data_doc_1=data_doc_1,
@@ -220,20 +289,246 @@ def test_c26_deploy_smoke_is_green(lifecycle: SimpleNamespace) -> None:
 def test_c26_ceiling_maps_to_limit_enforcement(lifecycle: SimpleNamespace) -> None:
     """`process_ceilings` declared as 1, then as 2 (one real restart in
     between -- design's own "宣言値 -> limit_enforcement の写像が実起動で
-    成立すること"), exhibits the mapping both planes' own `capability_
-    status.rules` promise: `enforced` at ceiling 1, `deployment_required`
-    at ceiling >= 2, for the in-memory-per-process-bound limit classes
-    (`requests_per_minute` on the data plane, `control_requests_per_
-    minute` on the control plane)."""
+    成立すること"). `control_requests_per_minute` (control plane, never
+    wired to a shared mechanism) keeps the single-process rule: `enforced`
+    at ceiling 1, `deployment_required` at ceiling >= 2. The data plane's
+    `requests_per_minute` mapping instead depends on whether THIS
+    launcher wires the PostgreSQL-backed rate row at all (design D-3 (4)
+    v0.4, 裁定 18, `data_rate_row_configured()`, WO 裁定 29): wired ->
+    `enforced` at both ceilings; unwired -> the single-process rule, same
+    as `control_requests_per_minute`."""
     data_1 = lifecycle.data_doc_1["limit_enforcement"]["requests_per_minute"]
     data_2 = lifecycle.data_doc_2["limit_enforcement"]["requests_per_minute"]
     control_1 = lifecycle.control_doc_1["limit_enforcement"]["control_requests_per_minute"]
     control_2 = lifecycle.control_doc_2["limit_enforcement"]["control_requests_per_minute"]
+    rate_wired = configured_for_limit_class(lifecycle.launcher, "requests_per_minute")
 
-    assert data_1 == "enforced", f"ceiling=1 data requests_per_minute was {data_1!r}, expected 'enforced'"
-    assert data_2 == "deployment_required", f"ceiling=2 data requests_per_minute was {data_2!r}, expected 'deployment_required'"
     assert control_1 == "enforced", f"ceiling=1 control_requests_per_minute was {control_1!r}, expected 'enforced'"
     assert control_2 == "deployment_required", f"ceiling=2 control_requests_per_minute was {control_2!r}, expected 'deployment_required'"
+    assert data_1 == "enforced", f"ceiling=1 data requests_per_minute was {data_1!r}, expected 'enforced'"
+    if rate_wired:
+        assert data_2 == "enforced", f"rate row wired: ceiling=2 data requests_per_minute was {data_2!r}, expected 'enforced'"
+    else:
+        assert data_2 == "deployment_required", f"rate row unwired: ceiling=2 data requests_per_minute was {data_2!r}, expected 'deployment_required'"
+
+
+# ---------------------------------------------------------------------------
+# design D-3 (4) (裁定 27/35): 3 real startup forms -- completion
+# conditions 8-12. Never shares a launcher instance with `lifecycle` above.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def multi_worker_ceiling_forms(launcher_class: type) -> SimpleNamespace:
+    """Drives ONE launcher instance through 3 real startup forms --
+    (ceiling=1, workers=1), (ceiling=2, workers=2), (ceiling=2, workers=1)
+    -- capturing each form's own served capabilities documents (裁定 35:
+    the 3 forms C-26 (4) now observes)."""
+    launcher = launcher_class()
+    launcher.start(ceilings={"data": 1, "control": 1}, workers=1)
+    try:
+        data_doc_ceiling1_workers1 = _get_json(f"{launcher.data_base_url}/capabilities", launcher.runtime_bearer)
+        control_doc_ceiling1_workers1 = _get_json(f"{launcher.control_base_url}/capabilities", launcher.control_bearer)
+        concurrency_configured_ceiling1_workers1 = configured_for_limit_class(launcher, "concurrency")
+
+        launcher.restart(ceilings={"data": 2, "control": 2}, workers=2)
+        data_doc_ceiling2_workers2 = _get_json(f"{launcher.data_base_url}/capabilities", launcher.runtime_bearer)
+        control_doc_ceiling2_workers2 = _get_json(f"{launcher.control_base_url}/capabilities", launcher.control_bearer)
+        # Captured HERE, before the next `restart()` below overwrites
+        # `data_preflight_result`/`data_multi_process_mapping_configured`
+        # with the workers=1 leg's own result. `requests_per_minute`'s own
+        # accessor (`data_rate_row_configured`) is constant for a real-
+        # server launcher (裁定18) so it needs no per-form snapshot at all
+        # -- only `concurrency`'s own (`data_multi_process_mapping_
+        # configured`, which tracks workers vs. ceiling) does.
+        data_preflight_result_workers2 = launcher.data_preflight_result
+        concurrency_configured_ceiling2_workers2 = configured_for_limit_class(launcher, "concurrency")
+
+        launcher.restart(ceilings={"data": 2, "control": 2}, workers=1)
+        data_doc_ceiling2_workers1 = _get_json(f"{launcher.data_base_url}/capabilities", launcher.runtime_bearer)
+        concurrency_configured_ceiling2_workers1 = configured_for_limit_class(launcher, "concurrency")
+
+        yield SimpleNamespace(
+            launcher=launcher,
+            data_doc_ceiling1_workers1=data_doc_ceiling1_workers1,
+            control_doc_ceiling1_workers1=control_doc_ceiling1_workers1,
+            concurrency_configured_ceiling1_workers1=concurrency_configured_ceiling1_workers1,
+            data_doc_ceiling2_workers2=data_doc_ceiling2_workers2,
+            control_doc_ceiling2_workers2=control_doc_ceiling2_workers2,
+            concurrency_configured_ceiling2_workers2=concurrency_configured_ceiling2_workers2,
+            data_doc_ceiling2_workers1=data_doc_ceiling2_workers1,
+            concurrency_configured_ceiling2_workers1=concurrency_configured_ceiling2_workers1,
+            data_preflight_result_workers2=data_preflight_result_workers2,
+        )
+    finally:
+        launcher.stop()
+
+
+def test_c26_ceiling1_workers1_all_classes_enforced(multi_worker_ceiling_forms: SimpleNamespace) -> None:
+    """Completion condition 8: ceiling=1/workers=1 -- data `concurrency`,
+    data `requests_per_minute`, and control `control_requests_per_minute`
+    are all `enforced`."""
+    data_doc = multi_worker_ceiling_forms.data_doc_ceiling1_workers1
+    control_doc = multi_worker_ceiling_forms.control_doc_ceiling1_workers1
+    concurrency = data_doc["limit_enforcement"]["concurrency"]
+    requests_per_minute = data_doc["limit_enforcement"]["requests_per_minute"]
+    control_requests_per_minute = control_doc["limit_enforcement"]["control_requests_per_minute"]
+    assert concurrency == "enforced", f"ceiling=1/workers=1 concurrency was {concurrency!r}, expected 'enforced'"
+    assert requests_per_minute == "enforced", (
+        f"ceiling=1/workers=1 requests_per_minute was {requests_per_minute!r}, expected 'enforced'"
+    )
+    assert control_requests_per_minute == "enforced", (
+        f"ceiling=1/workers=1 control_requests_per_minute was {control_requests_per_minute!r}, expected 'enforced'"
+    )
+
+
+def test_c26_ceiling2_workers2_concurrency_declaration_matches_wiring(multi_worker_ceiling_forms: SimpleNamespace) -> None:
+    """Completion condition 9 (design 裁定 12/27, slot directory wired to
+    workers=2): ceiling=2/workers=2 -- data `concurrency`'s own `enforced`/
+    `deployment_required` declaration is cross-checked against whether
+    this launcher actually configured the wiring 裁定27 requires, rather
+    than asserted unconditionally (裁定12: a peer honestly declaring
+    `deployment_required` at ceiling >= 2 stays conformant; this row's own
+    obligation, for such a peer, is only this mapping cross-check)."""
+    ns = multi_worker_ceiling_forms
+    value = ns.data_doc_ceiling2_workers2["limit_enforcement"]["concurrency"]
+    cross_check_limit_enforcement_declaration(
+        value, configured=ns.concurrency_configured_ceiling2_workers2,
+        limit_class="concurrency", form_label="ceiling=2/workers=2",
+    )
+
+
+def test_c26_ceiling2_workers1_concurrency_deployment_required(multi_worker_ceiling_forms: SimpleNamespace) -> None:
+    """Completion condition 10 (裁定 27, honest sub-declared workers):
+    ceiling=2/workers=1 -- data `concurrency` is `deployment_required`
+    (the ceiling exceeds this supervisor's own worker count -- a second
+    process could be on a DIFFERENT host, where the slot would not be
+    shared)."""
+    value = multi_worker_ceiling_forms.data_doc_ceiling2_workers1["limit_enforcement"]["concurrency"]
+    assert value == "deployment_required", f"ceiling=2/workers=1 concurrency was {value!r}, expected 'deployment_required'"
+
+
+def test_c26_ceiling2_requests_per_minute_declaration_matches_wiring_both_worker_forms(
+    multi_worker_ceiling_forms: SimpleNamespace,
+) -> None:
+    """Completion condition 11 (design D-3 (4), 裁定 12/18/27): at
+    ceiling=2, `requests_per_minute`'s own declaration is cross-checked on
+    BOTH worker forms (workers=2 and workers=1) -- never asserted
+    unconditionally (裁定12). Unlike `concurrency` (completion condition
+    9), `requests_per_minute`'s own mapping depends ONLY on whether the
+    PostgreSQL-backed rate-row strategy is wired (裁定18), never on
+    workers vs. ceiling -- so `configured_for_limit_class(launcher,
+    "requests_per_minute")` (constant `True` for this real-server
+    launcher, `data_rate_row_configured()`) is read fresh for BOTH forms,
+    never the workers-vs-ceiling-sensitive `concurrency` accessor."""
+    ns = multi_worker_ceiling_forms
+    rate_configured = configured_for_limit_class(ns.launcher, "requests_per_minute")
+    for label, doc in (
+        ("workers=2", ns.data_doc_ceiling2_workers2),
+        ("workers=1", ns.data_doc_ceiling2_workers1),
+    ):
+        value = doc["limit_enforcement"]["requests_per_minute"]
+        cross_check_limit_enforcement_declaration(
+            value, configured=rate_configured, limit_class="requests_per_minute", form_label=f"ceiling=2 ({label})",
+        )
+
+
+def test_c26_control_ceiling2_deployment_required(multi_worker_ceiling_forms: SimpleNamespace) -> None:
+    """Completion condition 12: control ceiling=2 (control workers always
+    1) -- `control_requests_per_minute` is `deployment_required` (control
+    plane's 2 classes stay in-memory, unchanged by this WP)."""
+    value = multi_worker_ceiling_forms.control_doc_ceiling2_workers2["limit_enforcement"]["control_requests_per_minute"]
+    assert value == "deployment_required", f"control ceiling=2 control_requests_per_minute was {value!r}, expected 'deployment_required'"
+
+
+def test_c26_slot_directory_is_per_instance_and_removed_on_stop(launcher_class: type) -> None:
+    """Completion condition 4 (design D-3 (2'), 裁定 27): two DIFFERENT
+    launcher instances, each started with ceiling=2/workers=2 (the ONLY
+    form the `concurrency` mapping declares `enforced` for, 裁定 27 --
+    ceiling=1/workers=2 would fail a future workers <= ceiling startup
+    check for an unrelated reason), get a DIFFERENT slot directory (mode
+    0700), and neither directory survives `stop()`. Self-contained -- its
+    own two launcher instances, never shared with `lifecycle`/`multi_
+    worker_ceiling_forms` above."""
+    launcher_a = launcher_class()
+    launcher_b = launcher_class()
+    launcher_a.start(ceilings={"data": 2, "control": 2}, workers=2)
+    try:
+        launcher_b.start(ceilings={"data": 2, "control": 2}, workers=2)
+        try:
+            slot_a = launcher_a._slot_dir  # noqa: SLF001 -- residue/identity observation only
+            slot_b = launcher_b._slot_dir  # noqa: SLF001
+            assert slot_a is not None and slot_b is not None
+            assert slot_a != slot_b, f"two launcher instances share the same slot directory: {slot_a!r}"
+            assert slot_a.exists() and slot_b.exists()
+            assert (slot_a.stat().st_mode & 0o777) == 0o700, (
+                f"{slot_a} mode is {oct(slot_a.stat().st_mode & 0o777)}, expected 0700"
+            )
+        finally:
+            launcher_b.stop()
+        assert not slot_b.exists(), f"{slot_b} still exists after stop()"
+    finally:
+        launcher_a.stop()
+    assert not slot_a.exists(), f"{slot_a} still exists after stop()"
+
+
+def test_c26_preflight_precedes_data_uvicorn_start(lifecycle: SimpleNamespace) -> None:
+    """Completion condition 5 (design 裁定 26): the preflight one-shot
+    ACTUALLY ran (its own real argv/returncode, not merely a recorded
+    event label) and precedes the data plane's own uvicorn start, in the
+    real recorded event order `lifecycle` already captures."""
+    events = lifecycle.events
+    assert "preflight_data" in events, f"'preflight_data' never recorded; events were {events!r}"
+    assert events.index("preflight_data") < events.index("uvicorn_data_start"), (
+        f"preflight_data did not precede uvicorn_data_start: {events!r}"
+    )
+    result = lifecycle.data_preflight_result_after_first_start
+    assert "--preflight" in result.args, f"preflight argv carries no --preflight: {result.args!r}"
+    assert any(arg.endswith(".main") for arg in result.args), (
+        f"preflight argv carries no '<package>.main' module argument: {result.args!r}"
+    )
+    assert result.returncode == 0, (
+        f"data plane preflight exited {result.returncode} (expected 0) on a normally-declared "
+        f"deployment: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_c26_preflight_precedes_data_uvicorn_start_with_workers_2(multi_worker_ceiling_forms: SimpleNamespace) -> None:
+    """Same observation as `test_c26_preflight_precedes_data_uvicorn_start`
+    above, on the `workers >= 2` startup form (`multi_worker_ceiling_
+    forms`'s own ceiling=2/workers=2 leg) -- preflight is not only a
+    workers=1 behavior."""
+    result = multi_worker_ceiling_forms.data_preflight_result_workers2
+    assert "--preflight" in result.args, f"preflight argv carries no --preflight: {result.args!r}"
+    assert any(arg.endswith(".main") for arg in result.args), (
+        f"preflight argv carries no '<package>.main' module argument: {result.args!r}"
+    )
+    assert result.returncode == 0, (
+        f"data plane preflight exited {result.returncode} (expected 0) on a normally-declared "
+        f"deployment: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_c26_access_log_pids_are_readable_for_200_responses(lifecycle: SimpleNamespace) -> None:
+    """Completion condition 6 (design 裁定 17): the data plane's own
+    pid-tagged access log is saved and readable, with a real pid attached
+    to at least one `200` response row (`lifecycle`'s own dials already
+    generate one)."""
+    pids = lifecycle.launcher.access_log_pids_for_status(200)
+    assert pids, "access_log_pids_for_status(200) observed 0 rows (空振り -- nothing was exercised)"
+
+
+def test_c26_retained_lock_hold_is_strictly_below_the_safe_bound(lifecycle: SimpleNamespace) -> None:
+    """Completion condition 7 (design 裁定 14): the launcher's own
+    retained-lock upper bound is strictly shorter than min(declared
+    `execution_ms`, the application role's own real `statement_timeout`)
+    -- a real margin, never equal to either."""
+    launcher = lifecycle.launcher
+    hold_s = launcher.retained_lock_hold_s()
+    execution_ms = lifecycle.data_doc_1["limits"]["execution_ms"]
+    statement_timeout_ms = launcher._application_role_statement_timeout_ms()  # noqa: SLF001
+    bound_s = min(execution_ms, statement_timeout_ms) / 1000.0
+    assert hold_s < bound_s, f"retained_lock_hold_s()={hold_s} is not strictly below the safe bound {bound_s}"
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +552,52 @@ def test_c26_missing_declaration_fails_fast(launcher_class: type) -> None:
     assert "F-15" in result.stderr, (
         f"expected an F-15 (contract 1.8.0's own process_ceilings fail-fast) message on stderr; "
         f"got returncode={result.returncode} stderr does not mention F-15"
+    )
+
+
+def test_c26_missing_declaration_fails_fast_multi_worker(launcher_class: type) -> None:
+    """Completion condition 13 (design D-1, 裁定 26): the `workers >= 2`
+    startup FORM (preflight -> supervisor) also fails fast on a missing
+    `process_ceilings` declaration -- the preflight one-shot itself fails,
+    and the supervisor never even starts (structurally: `attempt_start_
+    without_process_ceilings_multi_worker` never calls `start_uvicorn_
+    subprocess` at all on this path -- there is no `Popen`/pid to assert
+    "never started" against; the absence of that call IS the proof).
+    Self-contained, mirrors `test_c26_missing_declaration_fails_fast`
+    above."""
+    launcher = launcher_class()
+    result = launcher.attempt_start_without_process_ceilings_multi_worker(workers=2)
+    assert result.returncode != 0, (
+        f"a workers=2 composition root with no process_ceilings declaration started "
+        f"successfully (returncode 0) instead of failing fast: stdout={result.stdout!r}"
+    )
+    assert "F-15" in result.stderr, (
+        f"expected an F-15 (contract 1.8.0's own process_ceilings fail-fast) message on stderr; "
+        f"got returncode={result.returncode} stderr does not mention F-15: {result.stderr!r}"
+    )
+
+
+def test_c26_control_preflight_fails_fast_on_missing_declaration(launcher_class: type) -> None:
+    """The control plane's own preflight one-shot, run with no
+    `process_ceilings` row declared, fails fast (F-15) the same way the
+    data plane's own preflight already does. `RealServer*.attempt_control_
+    preflight_without_process_ceilings`'s own docstring states the
+    current per-peer split this observes directly: r2db's own control
+    plane builds `app` lazily (a module `__getattr__`, never triggered by
+    a bare import), so this call is currently a no-op that always exits 0
+    -- expected red on r2db until `control_main.py` gains a dedicated
+    `--preflight` entry that actually builds `app`. MitateDB's own control
+    plane builds `app` eagerly at import time already, so this call is
+    expected green there today."""
+    launcher = launcher_class()
+    result = launcher.attempt_control_preflight_without_process_ceilings()
+    assert result.returncode != 0, (
+        f"a control plane with no process_ceilings declaration exited 0 (preflight did not check anything) "
+        f"instead of failing fast: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "F-15" in result.stderr, (
+        f"expected an F-15 message on stderr; got returncode={result.returncode} stderr does not mention "
+        f"F-15: {result.stderr!r}"
     )
 
 
@@ -309,7 +650,11 @@ def test_c26_role_connection_limit_below_pool_floor_fails_fast(launcher_class: t
 
 def test_c26_no_residue_after_shutdown(launcher_class: type) -> None:
     """After `stop()`, neither uvicorn subprocess nor nginx is still
-    alive, and no port either of them held still has a listener. Self-
+    alive, no port either of them held still has a listener, and (review
+    finding N3, started at ceiling=2/workers=2 specifically for this) NOT
+    ANY of the data plane's own worker CHILDREN survive either -- the
+    data plane's own process GROUP (`_pids_with_pgid`, `socket_harness`)
+    has 0 live members, never just its recorded leader pid. Self-
     contained -- its own launcher instance, started and stopped entirely
     within this one test, never shared with `lifecycle` above (whose own
     teardown happens at MODULE end, too late for this test to observe
@@ -322,13 +667,25 @@ def test_c26_no_residue_after_shutdown(launcher_class: type) -> None:
     `stop()` is supposed to remove are just as much "residue" and were
     previously left to manual gate inspection only. This now observes
     both directly."""
+    import socket_harness as sh
+
     launcher = launcher_class()
-    launcher.start(ceilings={"data": 1, "control": 1})
+    launcher.start(ceilings={"data": 2, "control": 2}, workers=2)
 
     data_pid = launcher._data_handle.process.pid  # noqa: SLF001 -- residue observation only
     control_pid = launcher._control_handle.process.pid  # noqa: SLF001
     nginx_pid = launcher._nginx.process.pid  # noqa: SLF001
     ports = [launcher._data_handle.port, launcher._control_handle.port, launcher._listen_port]  # noqa: SLF001
+    # `data_pid` IS the data plane's own pgid (`start_new_session=True`,
+    # `socket_harness.start_uvicorn_subprocess`'s own docstring) -- checked
+    # non-vacuously BEFORE `stop()` (>= 2 members: the supervisor plus at
+    # least one real worker) so the post-stop 0-members assertion below is
+    # not vacuously true of a group that was never actually populated.
+    data_group_before = sh._pids_with_pgid(data_pid)  # noqa: SLF001
+    assert len(data_group_before) >= 2, (
+        f"data plane pgid {data_pid} had only {data_group_before!r} member(s) before stop() "
+        f"(空振り -- expected >= 2 at workers=2: the supervisor plus >= 1 worker)"
+    )
     # R-44 WP-3 (e): local references to the two OWNED `ReservedPort`
     # objects, kept alive independently of `launcher._data_reservation`/
     # `_control_reservation` (which `stop()` sets to `None`) -- `ReservedPort`
@@ -351,11 +708,15 @@ def test_c26_no_residue_after_shutdown(launcher_class: type) -> None:
 
     launcher.stop()
 
-    import socket_harness as sh
-
     for pid, label in ((data_pid, "data uvicorn"), (control_pid, "control uvicorn"), (nginx_pid, "nginx")):
         alive = _pid_alive(pid)
         assert not alive, f"{label} (pid {pid}) is still alive after stop()"
+
+    data_group_after = sh._pids_with_pgid(data_pid)  # noqa: SLF001
+    assert data_group_after == [], (
+        f"data plane pgid {data_pid} still has member(s) after stop() (nor any of its own workers): "
+        f"{data_group_after!r}"
+    )
 
     for port in ports:
         assert not sh._port_has_listener(port), f"port {port} still has a listener after stop()"  # noqa: SLF001

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator, Proto
 import uuid
 
 from .audit import ControlAuditSink
+from .capabilities_document import resolve_limit_enforcement
 from .audit_query import (
     DECLARED_AUDIT_EVENT_CLASSES,
     DECLARED_AUDIT_OPERATIONS,
@@ -623,8 +624,15 @@ class ControlPlaneService:
         limits = self._limits.as_dict()
         # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): region (ii) (`control_requests_per_minute`/`audit_requests_per_minute` -- bound by in-memory, per-process state, `self._rate_window`/`self._audit_rate_window`) reads `enforced` only while `self._process_ceiling == 1`, `deployment_required` once `>= 2`. Region (iii) (`applications`/`credentials_per_application` -- bound in PostgreSQL, under a same-transaction, table-scoped constant-key `pg_advisory_xact_lock`, `register_application`/`issue_credential` below) stays `enforced` regardless of `process_ceiling` -- the lock makes the bound hold across every process. `request_bytes` (region (i), request-scoped) is untouched here, overridden to `"unavailable"` below exactly as before this WP.
         # history: CH-0257
+
+        # design D-3 (4): routed through the SAME 2-strategy
+        # helper the data plane's own `capabilities_document.py` uses --
+        # `configured=False` unconditionally (control's 2 region-(ii)
+        # classes stay in-process on both peers), so this reduces to
+        # the single-process `ceiling <= 1` rule, never a second,
+        # hand-duplicated expression.
         limit_enforcement = {
-            name: ("enforced" if self._process_ceiling <= 1 else "deployment_required") if name in _IN_MEMORY_PROCESS_WIDE_CONTROL_LIMIT_CLASSES else "enforced"
+            name: resolve_limit_enforcement(configured=False, ceiling=self._process_ceiling) if name in _IN_MEMORY_PROCESS_WIDE_CONTROL_LIMIT_CLASSES else "enforced"
             for name in limits
         }
         # Phase 3.5 WP-4 (§4 "L4", MitateDB-parity two-layer form): this service alone cannot enforce a byte bound -- there is no HTTP boundary at this layer -- so the service-layer default is `"unavailable"`; `control_http.py`'s own handler overrides this one key to `"enforced"` once the real `RequestByteBoundMiddleware` is actually mounted in front of it (same single-source instance, see the `limits` property above).

@@ -58,16 +58,20 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import psycopg
 from psycopg import sql
@@ -190,6 +194,33 @@ def _dsn_with(base_dsn: str, **overrides: str) -> str:
     return make_conninfo(**params)
 
 
+# ---------------------------------------------------------------------------
+# design D-4 (裁定 14/23): a tiny stdlib-only HTTP client for the
+# real requests the new condition's own hold/probe methods below issue
+# against THIS launcher's own running composition root -- never `httpx`
+# (this file's own precedent, unlike the adapter's), mirroring `socket_
+# harness.wait_until_ready`'s own bare `urllib` use.
+# ---------------------------------------------------------------------------
+
+
+def _get_json(url: str, bearer: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"authorization": f"Bearer {bearer}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else {}
+
+
+def _post_json(url: str, bearer: str, body: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url, method="POST", data=data,
+        headers={"authorization": f"Bearer {bearer}", "content-type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else {}
+
+
 def _lock_path(prefix: str) -> Path:
     return _LOCK_DIR / f"{prefix}.lock"
 
@@ -256,6 +287,110 @@ def _run_ops(env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
         [sys.executable, "-m", "r2db_api.ops", *args],
         capture_output=True, text=True, env=full_env,
     )
+
+
+def _run_preflight(module: str, env: Mapping[str, str]) -> subprocess.CompletedProcess:
+    """Runs the documented composition root's own entry (`python -m
+    <module> --preflight`) as a real, separate, SHORT-LIVED subprocess --
+    the SAME env (scrubbed/PYTHONPATH-prepended the same way `_run_ops`
+    already does) the eventual long-lived uvicorn subprocess for that SAME
+    module gets, so a fail-fast (F-15/F-16/F-18/registry/pepper/the
+    workers-vs-ceiling check a future WP adds) is observed in exactly the
+    shape a real `ExecStartPre=`/CMD-prefixed deployment would hit it,
+    before any worker ever binds a socket. `--preflight` is accepted even
+    before `main.py`/`control_main.py` gain a dedicated CLI branch for it:
+    `sys.argv` today simply never reads it, never silently swallowed by an
+    existing argument parser that would otherwise reject an unknown flag.
+
+    What this actually checks TODAY differs by module: `r2db_api.main`
+    and `mitatedb_api.main`/`mitatedb_api.control_main` all build their own
+    `app` at IMPORT time (a bare module-level `app = build_app()`/`app =
+    build_control_app()`), so running any of those three directly already
+    exercises every startup-time check `build_app()`/`build_control_app()`
+    makes, exiting non-zero with the SAME `PlatformDeclarationError`/
+    `RuntimeError` a normal startup would raise (printed to stderr with
+    its own raising source line, including its own `code=\"F-15\"`/
+    `\"F-16\"` keyword argument text) on failure. `r2db_api.control_main`
+    is the ONE exception: its own `app` is built LAZILY, through a module
+    `__getattr__` a bare `python -m r2db_api.control_main` import never
+    triggers (no code anywhere in that module ever reads `.app` for its
+    own sake) -- this call therefore checks NOTHING for r2db's own control
+    plane today and exits 0 unconditionally, whatever `env` holds."""
+    full_env = _scrub_peer_env_prefixes(os.environ)
+    full_env.update(_with_pythonpath(dict(env)))
+    return subprocess.run(
+        [sys.executable, "-m", module, "--preflight"],
+        capture_output=True, text=True, env=full_env, timeout=60,
+    )
+
+
+def _write_access_log_config(config_path: Path, log_path: Path) -> None:
+    """design D-4 (裁定 17/32): a `logging.config.dictConfig`-
+    shaped JSON file that adds a `FileHandler` for uvicorn's own `uvicorn.
+    access` logger, formatted to carry `%(process)d` -- the responding
+    worker's own pid -- on every access-log line, and writes it to `log_
+    path` regardless of this subprocess' own stdout/stderr (`start_
+    uvicorn_subprocess` redirects both to `DEVNULL`). Handed to uvicorn via
+    the `UVICORN_LOG_CONFIG` ENV variable (click's own `auto_envvar_prefix
+    = \"UVICORN\"`, `uvicorn/main.py`), never a `--log-config` argv literal
+    this file's own touched-paths list never asked `socket_harness.start_
+    uvicorn_subprocess` to grow a passthrough for. Each worker under a
+    `--workers >= 2` supervisor re-applies this SAME config independently
+    (`Config.load()` runs once per worker process), so every worker's own
+    pid appears distinctly (measured directly, 監督実施 2026-09-28: `PID=
+    <pid> <host>:<port> - \"GET ...\"` lines, one worker per accepted
+    connection)."""
+    config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {"r113_pid_access": {"format": "PID=%(process)d %(message)s"}},
+        "handlers": {
+            "r113_access_file": {
+                "class": "logging.FileHandler",
+                "filename": str(log_path),
+                "formatter": "r113_pid_access",
+            },
+        },
+        "loggers": {
+            "uvicorn.access": {"handlers": ["r113_access_file"], "level": "INFO", "propagate": False},
+        },
+    }
+    config_path.write_text(json.dumps(config))
+
+
+_ACCESS_LOG_LINE_RE = re.compile(r"^PID=(\d+) .*\" (\d+)\s*$")
+
+
+def _access_log_line_count(log_path: Path) -> int:
+    """Current number of lines in `log_path` (0 when it does not exist
+    yet) -- a caller takes this BEFORE its own drive so it can later read
+    only the lines a specific drive itself appended (`since=`, below)."""
+    if not log_path.exists():
+        return 0
+    return len(log_path.read_text().splitlines())
+
+
+def _access_log_pids_for_status(log_path: Path, status: int, *, since: int = 0) -> list[int]:
+    """Reads back `log_path` (written by the `_write_access_log_config`
+    config above) and returns the responding worker's own pid for every
+    line, AFTER the first `since` lines, whose HTTP status matches
+    `status`, in file order (one entry per request, duplicates included --
+    the caller decides whether it cares about the SET of pids or the
+    COUNT of matching lines). `since` (default 0, the whole file) lets a
+    caller scope this to lines its OWN drive appended, excluding earlier
+    unrelated traffic (fixture setup, an earlier drive in the same
+    module)."""
+    pids: list[int] = []
+    if not log_path.exists():
+        return pids
+    for line in log_path.read_text().splitlines()[since:]:
+        match = _ACCESS_LOG_LINE_RE.match(line.strip())
+        if match is None:
+            continue
+        pid, status_text = int(match.group(1)), int(match.group(2))
+        if status_text == status:
+            pids.append(pid)
+    return pids
 
 
 def _sweep_prefix(admin_dsn: str, prefix: str) -> None:
@@ -352,6 +487,22 @@ class _AppInfo:
     developer_dsn: str
 
 
+@dataclass
+class _EntityLockHold:
+    """Handle returned by `RealServerR2db.hold_entity_storage_lock`
+    (design 裁定14) -- `hold_s` is the computed upper bound
+    (完了条件 7) the holder thread will release by itself if `release_
+    now()` is never called."""
+
+    hold_s: float
+    _thread: threading.Thread
+    _release_now: threading.Event
+
+    def release_now(self) -> None:
+        self._release_now.set()
+        self._thread.join(timeout=10.0)
+
+
 def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
     """Runs the real migrations `0001`..`0003`, `0005`..`0008`, `0012`,
     `0013` (with the literal token `r2dbsvc` textually replaced by
@@ -408,6 +559,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0008_platform_declarations_and_writer_timeouts.sql",
         "0012_process_ceilings.sql",
         "0013_role_connection_limits.sql",
+        # design D-3 (1): the credential-keyed
+        # `requests_per_minute` rate table -- depends only on 0005 above.
+        "0015_credential_request_rate.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -427,6 +581,23 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     )
     _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
+    _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+
+    # design D-3 (5): `check_role_connection_limits` (F-16) multiplies
+    # the controlplane/auditreader floors (`_CONTROLPLANE_ROLE_POOL_FLOOR`/
+    # `_AUDITREADER_ROLE_POOL_FLOOR`, 16/4) by `process_ceilings.control`;
+    # 0013's own CONNECTION LIMIT (20/5) covers a control ceiling of 1
+    # only. This launcher's conformance lifecycle declares a control
+    # ceiling of 2, so both roles are set here, once, up front, to values
+    # that meet the F-16 floors for 2 control processes (16*2=32,
+    # 4*2=8) -- the provisioning step any deployment declaring
+    # `process_ceilings.control` >= 2 needs (F-16 otherwise stops control
+    # startup and reports the exact floor).
+    with psycopg.connect(control_dsn) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 32").format(sql.Identifier(controlplane_role)))
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 8").format(sql.Identifier(auditreader_role)))
+        _conn.commit()
 
     return _Platform(
         prefix=prefix,
@@ -496,8 +667,34 @@ class RealServerR2db:
         self._control_credential_id: Optional[str] = None
         self._control_secret: Optional[str] = None
         self._runtime_secret: Optional[str] = None
+        # 完了条件 14/15: a developer credential, issued
+        # alongside the runtime one, so `create_probe_entity` can call the
+        # real `POST /v1/schema/operations` endpoint (schema operations
+        # require a developer credential, never runtime).
+        self._developer_secret: Optional[str] = None
         self._data_handle: Optional[sh.UvicornSubprocessHandle] = None
         self._control_handle: Optional[sh.UvicornSubprocessHandle] = None
+        # design D-3 (2') / 完了条件 4: an `mkdtemp`ed-per-
+        # `start()` directory (mode 0700 by `mkdtemp`'s own default),
+        # handed to the data plane via `R2DB_SLOT_DIR` -- design D-3 wires it
+        # into `concurrency`'s host-shared slot. `stop()` removes it.
+        self._slot_dir: Optional[Path] = None
+        # 完了条件 6: the data plane's own pid-tagged access
+        # log path (`_write_access_log_config`) -- `stop()` removes the
+        # small config file that names it (`_access_log_config_path`), the
+        # log itself lives in `_script_dir` and is swept with it.
+        self._access_log_path: Optional[Path] = None
+        self._access_log_config_path: Optional[Path] = None
+        # The data plane's own most recent preflight `CompletedProcess`
+        # (argv/returncode/stdout/stderr) -- `data_preflight_result`
+        # exposes it so a test can confirm the preflight one-shot itself
+        # actually ran (not merely that an event label was recorded).
+        self._data_preflight_result: Optional[subprocess.CompletedProcess] = None
+        # The data plane's own declared ceiling and worker count from the
+        # most recent `start()`/`restart()` call -- `data_multi_process_
+        # mapping_configured()` reads both.
+        self._last_data_ceiling: Optional[int] = None
+        self._last_data_workers: Optional[int] = None
         # R-44 WP-3 (e), W44-3-9: the data/control upstream port
         # reservations this launcher itself owns for its whole lifetime --
         # `start()` mints both and `restart()` hands the SAME two objects
@@ -528,6 +725,13 @@ class RealServerR2db:
         if issued.returncode != 0:
             raise LauncherStartupError(f"issue-credential failed:\n{issued.stdout}\n{issued.stderr}")
         self._runtime_secret = _parse_issued_secret(issued.stdout)
+        # 完了条件 14/15: a developer credential too --
+        # `create_probe_entity` needs one (schema operations are refused
+        # for a runtime credential, C-02/C-14).
+        issued_developer = _run_ops(_ops_env(self._platform), "issue-credential", self._app.slug, "developer")
+        if issued_developer.returncode != 0:
+            raise LauncherStartupError(f"issue-credential (developer) failed:\n{issued_developer.stdout}\n{issued_developer.stderr}")
+        self._developer_secret = _parse_issued_secret(issued_developer.stdout)
         bootstrapped = _run_ops(_ops_env(self._platform), "bootstrap")
         if bootstrapped.returncode != 0:
             raise LauncherStartupError(f"ops bootstrap failed:\n{bootstrapped.stdout}\n{bootstrapped.stderr}")
@@ -608,12 +812,33 @@ class RealServerR2db:
             raise LauncherStartupError("no 'surfaces' row found in platform_declarations")
         return row[0]
 
+    # -- per-start data-plane env (workers/slot directory/access log,
+    # design D-3 (2')/D-4 ----------------------------------------------
+
+    def _data_env(self, *, workers: int) -> dict[str, str]:
+        assert self._slot_dir is not None and self._access_log_config_path is not None
+        env = dict(self._app_env())
+        env["R2DB_WORKERS"] = str(workers)
+        env["R2DB_SLOT_DIR"] = str(self._slot_dir)
+        env["UVICORN_LOG_CONFIG"] = str(self._access_log_config_path)
+        return env
+
+    def _control_env_with_workers(self) -> dict[str, str]:
+        # 監督裁定 4 (§6.1): control plane also passes `--workers` from the
+        # SAME env-variable shape, always 1 (`R2DB_CONTROL_WORKERS`) --
+        # `--workers` is never lifted above 1 here.
+        env = dict(self._control_env())
+        env["R2DB_CONTROL_WORKERS"] = "1"
+        return env
+
     # -- start/restart/stop --------------------------------------------
 
-    def start(self, *, ceilings: Mapping[str, int]) -> None:
+    def start(self, *, ceilings: Mapping[str, int], workers: int = 1) -> None:
         if self._started:
             raise LauncherStartupError("start() called while already started -- call stop() or restart() first")
         self._events = []
+        self._last_data_ceiling = ceilings["data"]
+        self._last_data_workers = workers
         # F3 correction (WP-6c review 2026-09-09): the ENTIRE body below
         # -- `_ensure_provisioned()` (which can itself leave a throwaway
         # platform DB/role behind if it fails partway), the port
@@ -654,8 +879,39 @@ class RealServerR2db:
             self._record("declare_process_ceilings")
 
             assert self._script_dir is not None
+            # design D-3 (2') / 完了条件 4/6: a fresh slot directory
+            # (also re-minted on every `restart()`, below) and an
+            # access-log config that keeps naming the same log file for
+            # this instance's whole lifetime.
+            self._slot_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-slots-"))
+            self._access_log_path = self._script_dir / "uvicorn-data-access.log"
+            self._access_log_config_path = self._script_dir / "uvicorn-data-access-logconfig.json"
+            _write_access_log_config(self._access_log_config_path, self._access_log_path)
+
             pidfile_data = self._script_dir / "uvicorn-data.pid"
             pidfile_control = self._script_dir / "uvicorn-control.pid"
+
+            # design D-1 (裁定 26): a preflight one-shot for
+            # EACH plane, in the SAME env its own long-lived uvicorn
+            # subprocess below gets, before that subprocess ever starts --
+            # `build_app()`'s startup-time checks are observed here, not
+            # only inside the (harder to distinguish) supervisor.
+            data_env = self._data_env(workers=workers)
+            preflight_data = _run_preflight("r2db_api.main", data_env)
+            self._data_preflight_result = preflight_data
+            if preflight_data.returncode != 0:
+                raise LauncherStartupError(
+                    f"preflight (r2db_api.main) failed:\n{preflight_data.stdout}\n{preflight_data.stderr}"
+                )
+            self._record("preflight_data")
+            control_env = self._control_env_with_workers()
+            preflight_control = _run_preflight("r2db_api.control_main", control_env)
+            if preflight_control.returncode != 0:
+                raise LauncherStartupError(
+                    f"preflight (r2db_api.control_main) failed:\n{preflight_control.stdout}\n{preflight_control.stderr}"
+                )
+            self._record("preflight_control")
+
             # R-44 WP-3 (e): each upstream gets its OWN `reserve_port()`
             # reservation, held by THIS launcher (never the handle -- W44-
             # 3-5's own caller-owns-when-reserved-is-given rule) for as
@@ -666,14 +922,16 @@ class RealServerR2db:
             with _peer_env_prefixes_removed_from_os_environ():
                 self._data_handle = sh.start_uvicorn_subprocess(
                     "r2db_api.main:app", pidfile=pidfile_data,
-                    reserved=self._data_reservation, env=_with_pythonpath(self._app_env()),
+                    reserved=self._data_reservation, env=_with_pythonpath(data_env),
+                    workers=workers,
                 )
             self._record("uvicorn_data_start")
             self._control_reservation = sh.reserve_port()
             with _peer_env_prefixes_removed_from_os_environ():
                 self._control_handle = sh.start_uvicorn_subprocess(
                     "r2db_api.control_main:app", pidfile=pidfile_control,
-                    reserved=self._control_reservation, env=_with_pythonpath(self._control_env()),
+                    reserved=self._control_reservation, env=_with_pythonpath(control_env),
+                    workers=1,
                 )
             self._record("uvicorn_control_start")
 
@@ -708,7 +966,7 @@ class RealServerR2db:
 
         self._started = True
 
-    def restart(self, *, ceilings: Mapping[str, int]) -> None:
+    def restart(self, *, ceilings: Mapping[str, int], workers: int = 1) -> None:
         """Re-declares `process_ceilings` (real CLI), then stops and
         restarts ONLY the two uvicorn subprocesses, on the SAME ports --
         nginx (and therefore the already-declared `surfaces` URL) is left
@@ -717,11 +975,17 @@ class RealServerR2db:
         ceilings` is written to the REAL, DB-side table via the real CLI
         BEFORE either process restarts (design D-5 (ii): "起動時スナップ
         ショットのため" -- the new value only takes effect once both
-        processes come back up)."""
+        processes come back up). The slot directory is re-minted here too
+        (a fresh `mkdtemp`, the old one removed) -- both `start()` and
+        `restart()` are their own "起動", each with its own directory; the
+        access-log config keeps naming the SAME log file for this
+        instance's whole lifetime (`stop()` removes both)."""
         if not self._started:
             raise LauncherStartupError("restart() called before start()")
         assert self._platform is not None and self._app is not None
         assert self._data_handle is not None and self._control_handle is not None
+        self._last_data_ceiling = ceilings["data"]
+        self._last_data_workers = workers
 
         ceilings_result = _run_ops(
             _ops_env(self._platform), "declare-process-ceilings",
@@ -741,17 +1005,43 @@ class RealServerR2db:
         self._data_handle.stop()
         self._control_handle.stop()
 
+        # Both uvicorn subprocesses are down now -- safe to remove the
+        # OLD slot directory and mint a fresh one for this restart (裁定
+        # 27's own "起動ごとの mkdtemp" applies to `restart()` too, not
+        # only the launcher's first `start()`).
+        assert self._slot_dir is not None
+        shutil.rmtree(self._slot_dir, ignore_errors=True)
+        self._slot_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-slots-"))
+
         assert self._script_dir is not None
+        data_env = self._data_env(workers=workers)
+        preflight_data = _run_preflight("r2db_api.main", data_env)
+        self._data_preflight_result = preflight_data
+        if preflight_data.returncode != 0:
+            raise LauncherStartupError(
+                f"preflight (r2db_api.main, restart) failed:\n{preflight_data.stdout}\n{preflight_data.stderr}"
+            )
+        self._record("preflight_data_restart")
+        control_env = self._control_env_with_workers()
+        preflight_control = _run_preflight("r2db_api.control_main", control_env)
+        if preflight_control.returncode != 0:
+            raise LauncherStartupError(
+                f"preflight (r2db_api.control_main, restart) failed:\n{preflight_control.stdout}\n{preflight_control.stderr}"
+            )
+        self._record("preflight_control_restart")
+
         with _peer_env_prefixes_removed_from_os_environ():
             self._data_handle = sh.start_uvicorn_subprocess(
                 "r2db_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid",
-                reserved=self._data_reservation, env=_with_pythonpath(self._app_env()),
+                reserved=self._data_reservation, env=_with_pythonpath(data_env),
+                workers=workers,
             )
         self._record("uvicorn_data_restart")
         with _peer_env_prefixes_removed_from_os_environ():
             self._control_handle = sh.start_uvicorn_subprocess(
                 "r2db_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid",
-                reserved=self._control_reservation, env=_with_pythonpath(self._control_env()),
+                reserved=self._control_reservation, env=_with_pythonpath(control_env),
+                workers=1,
             )
         self._record("uvicorn_control_restart")
 
@@ -804,6 +1094,16 @@ class RealServerR2db:
         if self._nginx_prefix_dir is not None:
             shutil.rmtree(self._nginx_prefix_dir, ignore_errors=True)
             self._nginx_prefix_dir = None
+        # 完了条件 4: the per-instance slot directory never
+        # outlives this launcher instance.
+        if self._slot_dir is not None:
+            shutil.rmtree(self._slot_dir, ignore_errors=True)
+            self._slot_dir = None
+        self._access_log_path = None
+        self._access_log_config_path = None
+        self._data_preflight_result = None
+        self._last_data_ceiling = None
+        self._last_data_workers = None
         if self._prefix is not None:
             _sweep_prefix(_admin_dsn(), self._prefix)
             _release_prefix_lock(self._prefix, self._prefix_lock)
@@ -814,6 +1114,7 @@ class RealServerR2db:
             self._script_dir = None
         self._platform = None
         self._app = None
+        self._developer_secret = None
         self._started = False
         self._listen_port = None
 
@@ -834,6 +1135,19 @@ class RealServerR2db:
         assert self._runtime_secret is not None
         return self._runtime_secret
 
+    def issue_runtime_credential(self) -> str:
+        """Issues a NEW, independent runtime credential for the served
+        application and returns its bearer -- distinct from `runtime_
+        bearer` (the one `_ensure_provisioned` mints once). A caller
+        exercising a request-rate-scoped observation uses one of these,
+        never shared with any other observation, so two observations
+        never count against the same credential's own window."""
+        assert self._platform is not None and self._app is not None
+        issued = _run_ops(_ops_env(self._platform), "issue-credential", self._app.slug, "runtime")
+        if issued.returncode != 0:
+            raise LauncherStartupError(f"issue-credential (extra runtime) failed:\n{issued.stdout}\n{issued.stderr}")
+        return _parse_issued_secret(issued.stdout)
+
     @property
     def control_bearer(self) -> str:
         assert self._control_secret is not None
@@ -843,6 +1157,185 @@ class RealServerR2db:
     def control_credential_id(self) -> str:
         assert self._control_credential_id is not None
         return self._control_credential_id
+
+    @property
+    def developer_bearer(self) -> str:
+        assert self._developer_secret is not None
+        return self._developer_secret
+
+    @property
+    def data_preflight_result(self) -> subprocess.CompletedProcess:
+        """The data plane's own most recent preflight `CompletedProcess`
+        -- `.args` names the real argv (`--preflight`/`r2db_api.main`
+        included), `.returncode`/`.stdout`/`.stderr` are the real
+        subprocess result, so a caller can confirm the preflight one-shot
+        genuinely ran rather than merely trusting a recorded event
+        label."""
+        assert self._data_preflight_result is not None
+        return self._data_preflight_result
+
+    def data_multi_process_mapping_configured(self) -> bool:
+        """True exactly when the most recent `start()`/`restart()` call
+        configured the data plane the way design 裁定27 requires for its
+        `limit_enforcement` mapping to read `enforced`: the slot directory
+        conveyed (always true once this launcher has started at all) AND
+        this supervisor's own `workers` equal to the declared data-plane
+        `process_ceilings` value. Used to cross-check a served `enforced`/
+        `deployment_required` declaration against what THIS launcher
+        actually configured (design 裁定12: a peer may honestly declare
+        either at ceiling >= 2; `enforced` binds the new condition, `
+        deployment_required` does not) -- never trusted blindly either
+        way: a declared `enforced` while this returns `False`, or a
+        declared `deployment_required` while this returns `True`, are
+        both a mismatch a caller must treat as a failure, not a silent
+        skip."""
+        return (
+            self._slot_dir is not None
+            and self._last_data_ceiling is not None
+            and self._last_data_workers is not None
+            and self._last_data_workers == self._last_data_ceiling
+        )
+
+    def data_rate_row_configured(self) -> bool:
+        """design D-3 (4), 裁定 18/27: `requests_per_minute`'s own mapping
+        to `enforced` depends ONLY on whether the PostgreSQL-backed
+        rate-row strategy is wired at all -- never on `workers` vs.
+        `process_ceilings`, unlike `concurrency`'s own host-shared slot
+        (`data_multi_process_mapping_configured`). This class always
+        starts the documented, real production composition root, which
+        always wires that strategy once its own migration exists (there
+        is no env toggle that turns it off) -- this accessor is therefore
+        unconditionally `True` here. A FUTURE launcher kind that starts a
+        composition root known to keep the rate window in-memory (never
+        wiring the PostgreSQL-backed strategy) would return `False`
+        instead; nothing this class represents does that."""
+        return True
+
+    # -- pid-tagged data-plane access log --
+
+    def access_log_line_count(self) -> int:
+        """Current line count of the data plane's own access log -- a
+        caller takes this BEFORE its own drive so `access_log_pids_for_
+        status(..., since=...)` can later read only the lines that drive
+        itself appended."""
+        assert self._access_log_path is not None
+        return _access_log_line_count(self._access_log_path)
+
+    def access_log_pids_for_status(self, status: int, *, since: int = 0) -> list[int]:
+        assert self._access_log_path is not None
+        return _access_log_pids_for_status(self._access_log_path, status, since=since)
+
+    # -- new condition (a)/(b) support (design D-4) --
+
+    def create_probe_entity(self, entity_name: str, field_names: Sequence[str]) -> None:
+        """A real `POST /v1/schema/operations` call, under the developer
+        credential, creating `entity_name` with `field_names` (untyped --
+        `json`, contract default) -- so `hold_entity_storage_lock` below
+        has a REAL table to lock (a freshly provisioned application starts
+        with none)."""
+        _post_json(
+            f"{self.data_base_url}/schema/operations", self.developer_bearer,
+            {"operation": "create_entity", "entity": entity_name, "fields": list(field_names)},
+        )
+
+    def _locking_dsn(self) -> str:
+        assert self._platform is not None and self._app is not None
+        database = conninfo_to_dict(self._app.runtime_dsn)["dbname"]
+        return _dsn_with(self._platform.admin_dsn, dbname=database)
+
+    def _application_role_statement_timeout_ms(self) -> float:
+        assert self._app is not None
+        with psycopg.connect(self._app.runtime_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+                (value,) = cur.fetchone()
+        value_ms = int(value)
+        # `0` means "disabled" (no timeout), never "instant" -- excluded
+        # from the `min()` below via +inf, not treated as the tightest
+        # bound.
+        return float(value_ms) if value_ms > 0 else float("inf")
+
+    def _declared_execution_ms(self, *, bearer: Optional[str] = None) -> float:
+        doc = _get_json(f"{self.data_base_url}/capabilities", bearer or self.runtime_bearer)
+        return float(doc["limits"]["execution_ms"])
+
+    def retained_lock_hold_s(self, *, bearer: Optional[str] = None) -> float:
+        """完了条件 7: strictly shorter than min(declared `execution_ms`,
+        the application runtime role's own real `statement_timeout`) -- a
+        real margin (half), never equal to either. `bearer` (default the
+        launcher's own `runtime_bearer`) lets a caller read the document
+        under a credential OTHER than the shared default one, so this
+        call's own GET does not count against a rate observation another
+        caller is making with the default credential."""
+        bound_s = min(self._application_role_statement_timeout_ms(), self._declared_execution_ms(bearer=bearer)) / 1000.0
+        return bound_s * 0.5
+
+    def hold_entity_storage_lock(self, entity_name: str, *, bearer: Optional[str] = None) -> _EntityLockHold:
+        """Opens ITS OWN privileged connection (never the served
+        application's own runtime/developer role -- the admin DSN,
+        redirected at the application's own database) and holds `entity_
+        name`'s own table under `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE`
+        for up to `retained_lock_hold_s()` seconds (or until `.release_
+        now()` is called, whichever is first) in a background thread, so
+        the caller can drive concurrent requests against `entity_name`
+        WHILE the lock is held. `application_name` names this launcher's
+        own pid (`\"r2db:lockholder:<pid>\"`) -- distinct from either
+        plane's own served connections (`\"r2db:<plane>:<pid>\"`), so
+        `lock_waiter_application_names` below never counts the holder
+        itself as a waiter. `bearer` is forwarded to `retained_lock_hold_
+        s()` only (this method itself never authenticates as the served
+        application)."""
+        hold_s = self.retained_lock_hold_s(bearer=bearer)
+        started = threading.Event()
+        release_now = threading.Event()
+        error: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                conn = psycopg.connect(self._locking_dsn(), application_name=f"r2db:lockholder:{os.getpid()}")
+            except BaseException as exc:  # noqa: BLE001 -- reported to the caller via `error`, never raised here
+                error.append(exc)
+                started.set()
+                return
+            try:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(sql.Identifier(entity_name)))
+                except BaseException as exc:  # noqa: BLE001 -- reported to the caller via `error`, never raised here
+                    error.append(exc)
+                    return
+                started.set()
+                release_now.wait(timeout=hold_s)
+            finally:
+                if not started.is_set():
+                    started.set()
+                conn.rollback()
+                conn.close()
+
+        thread = threading.Thread(target=_worker, name="r2db-lockholder", daemon=True)
+        thread.start()
+        if not started.wait(timeout=10.0):
+            raise LauncherStartupError(f"hold_entity_storage_lock({entity_name!r}) never acquired its lock within 10s")
+        if error:
+            raise LauncherStartupError(f"hold_entity_storage_lock({entity_name!r}) failed: {error[0]!r}")
+        return _EntityLockHold(hold_s=hold_s, _thread=thread, _release_now=release_now)
+
+    def lock_waiter_application_names(self, entity_name: str) -> list[str]:
+        """The distinct `application_name` values of every session
+        currently WAITING to acquire a lock on `entity_name`'s own
+        relation (`pg_locks` joined to `pg_stat_activity`, `granted =
+        false`) -- read from the SAME privileged connection kind `hold_
+        entity_storage_lock` uses, a fresh one each call (never held
+        open)."""
+        with psycopg.connect(self._locking_dsn()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT a.application_name "
+                    "FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                    "WHERE l.relation = %s::regclass AND l.granted = false",
+                    [entity_name],
+                )
+                return [row[0] for row in cur.fetchall()]
 
     def attempt_start_without_process_ceilings(self) -> subprocess.CompletedProcess:
         """Design D-1 (B) 5 / completion condition 5: builds a SEPARATE,
@@ -867,37 +1360,132 @@ class RealServerR2db:
             if surfaces.returncode != 0:
                 raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
             slug_upper = app.slug.upper()
-            env = _scrub_peer_env_prefixes(os.environ)
-            env.update(_with_pythonpath({
-                "R2DB_CREDENTIAL_PEPPER": platform.app_pepper,
-                "R2DB_PLATFORM_DSN": platform.api_dsn,
-                "R2DB_PLATFORM_SCHEMA": platform.schema,
-                "R2DB_SERVE_APPS": app.slug,
-                f"R2DB_APP_{slug_upper}_RUNTIME_DSN": app.runtime_dsn,
-                f"R2DB_APP_{slug_upper}_DEVELOPER_DSN": app.developer_dsn,
-                "R2DB_CONTROL_PLANE_STATUS": "enabled",
-            }))
-            # `process_ceilings` is deliberately never declared above --
-            # `build_app()` must fail fast (F-15) at IMPORT time, which
-            # means the uvicorn *process itself* never reaches "serving"
-            # -- `subprocess.run` (not the harness' fire-and-forget
-            # `Popen`) is used here specifically so this call blocks until
-            # that failure actually happens and captures its real stderr.
-            # R-44 WP-3 (e), R-19: a `reserve_port()` reservation, handed
-            # to uvicorn via `--fd`/`pass_fds` (never a bare `--port`), so
-            # this fail-fast observation is never confused with a lost
-            # bind race against some concurrent xdist worker's own
-            # harness surface.
-            f15_reservation = sh.reserve_port()
+            f15_slot_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-f15-slots-"))
             try:
-                f15_fd = f15_reservation.sock.fileno()
-                result = subprocess.run(
-                    [sys.executable, "-m", "uvicorn", "r2db_api.main:app", "--host", "127.0.0.1", "--fd", str(f15_fd)],
-                    env=env, capture_output=True, text=True, timeout=30, pass_fds=(f15_fd,),
-                )
+                env = _scrub_peer_env_prefixes(os.environ)
+                env.update(_with_pythonpath({
+                    "R2DB_CREDENTIAL_PEPPER": platform.app_pepper,
+                    "R2DB_PLATFORM_DSN": platform.api_dsn,
+                    "R2DB_PLATFORM_SCHEMA": platform.schema,
+                    "R2DB_SERVE_APPS": app.slug,
+                    f"R2DB_APP_{slug_upper}_RUNTIME_DSN": app.runtime_dsn,
+                    f"R2DB_APP_{slug_upper}_DEVELOPER_DSN": app.developer_dsn,
+                    "R2DB_CONTROL_PLANE_STATUS": "enabled",
+                    "R2DB_WORKERS": "1",
+                    "R2DB_SLOT_DIR": str(f15_slot_dir),
+                }))
+                # `process_ceilings` is deliberately never declared above --
+                # `build_app()` must fail fast (F-15) at IMPORT time, which
+                # means the uvicorn *process itself* never reaches "serving"
+                # -- `subprocess.run` (not the harness' fire-and-forget
+                # `Popen`) is used here specifically so this call blocks until
+                # that failure actually happens and captures its real stderr.
+                # R-44 WP-3 (e), R-19: a `reserve_port()` reservation, handed
+                # to uvicorn via `--fd`/`pass_fds` (never a bare `--port`), so
+                # this fail-fast observation is never confused with a lost
+                # bind race against some concurrent xdist worker's own
+                # harness surface.
+                f15_reservation = sh.reserve_port()
+                try:
+                    f15_fd = f15_reservation.sock.fileno()
+                    result = subprocess.run(
+                        [sys.executable, "-m", "uvicorn", "r2db_api.main:app", "--host", "127.0.0.1", "--fd", str(f15_fd)],
+                        env=env, capture_output=True, text=True, timeout=30, pass_fds=(f15_fd,),
+                    )
+                finally:
+                    f15_reservation.close()
+                return result
             finally:
-                f15_reservation.close()
-            return result
+                shutil.rmtree(f15_slot_dir, ignore_errors=True)
+        finally:
+            _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
+            shutil.rmtree(script_dir, ignore_errors=True)
+
+    def attempt_start_without_process_ceilings_multi_worker(self, *, workers: int = 2) -> subprocess.CompletedProcess:
+        """C-26 (5)'s `workers >= 2` form (design D-1, 裁定 26, 完了条件
+        13): the SAME shape as `attempt_start_without_process_ceilings`
+        above (a separate, independent throwaway platform, `surfaces`
+        declared, `process_ceilings` deliberately never declared), but
+        this time via the `preflight` one-shot (`_run_preflight`) instead
+        of a direct `python -m uvicorn ...` run -- the workers >= 2
+        startup FORM is "preflight -> supervisor" (裁定 26), and this
+        method deliberately never reaches the second half: the supervisor
+        (`start_uvicorn_subprocess`) is structurally never even called
+        here, mirroring exactly what `start()`'s own preflight-failure
+        path does (raise before ever starting a supervisor)."""
+        script_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-f15w-"))
+        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f15w"
+        lock = _claim_prefix_lock(prefix)
+        try:
+            platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
+            app = _provision_app(platform, script_dir, "f15wapp")
+            surfaces = _run_ops(
+                _ops_env(platform), "declare-surfaces",
+                "--data-base-url", "http://127.0.0.1:1/v1",
+                "--control-base-url", "http://127.0.0.1:1/control/v1",
+            )
+            if surfaces.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
+            slug_upper = app.slug.upper()
+            slot_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-f15w-slots-"))
+            try:
+                env = {
+                    "R2DB_CREDENTIAL_PEPPER": platform.app_pepper,
+                    "R2DB_PLATFORM_DSN": platform.api_dsn,
+                    "R2DB_PLATFORM_SCHEMA": platform.schema,
+                    "R2DB_SERVE_APPS": app.slug,
+                    f"R2DB_APP_{slug_upper}_RUNTIME_DSN": app.runtime_dsn,
+                    f"R2DB_APP_{slug_upper}_DEVELOPER_DSN": app.developer_dsn,
+                    "R2DB_CONTROL_PLANE_STATUS": "enabled",
+                    "R2DB_WORKERS": str(workers),
+                    "R2DB_SLOT_DIR": str(slot_dir),
+                }
+                # `process_ceilings` is deliberately never declared above
+                # -- the preflight one-shot must fail fast (F-15) the
+                # SAME way a direct `python -m uvicorn ...` run does
+                # (`attempt_start_without_process_ceilings`'s own
+                # docstring): both paths hit the SAME `build_app()`.
+                return _run_preflight("r2db_api.main", env)
+            finally:
+                shutil.rmtree(slot_dir, ignore_errors=True)
+        finally:
+            _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
+            shutil.rmtree(script_dir, ignore_errors=True)
+
+    def attempt_control_preflight_without_process_ceilings(self) -> subprocess.CompletedProcess:
+        """The control plane's own preflight one-shot, run with NO
+        `process_ceilings` row declared -- the SAME shape as `attempt_
+        start_without_process_ceilings` above, but targets `r2db_api.
+        control_main` directly through `_run_preflight` (never a bare
+        `python -m uvicorn ...`, since what this observes is the
+        preflight ENTRY itself, not uvicorn's own import-time behavior).
+        `_run_preflight`'s own docstring states the current gap: r2db's
+        control plane builds `app` lazily, so this call is a no-op that
+        exits 0 regardless of `env` today -- this method makes that gap
+        directly observable by a test, not merely documented."""
+        script_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-f15c-"))
+        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f15c"
+        lock = _claim_prefix_lock(prefix)
+        try:
+            platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
+            surfaces = _run_ops(
+                _ops_env(platform), "declare-surfaces",
+                "--data-base-url", "http://127.0.0.1:1/v1",
+                "--control-base-url", "http://127.0.0.1:1/control/v1",
+            )
+            if surfaces.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
+            env = {
+                "R2DB_CREDENTIAL_PEPPER": platform.app_pepper,
+                "R2DB_CONTROL_CREDENTIAL_PEPPER": platform.control_pepper,
+                "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+                "R2DB_PLATFORM_SCHEMA": platform.schema,
+                "R2DB_CONTROL_WORKERS": "1",
+            }
+            # `process_ceilings` is deliberately never declared above.
+            return _run_preflight("r2db_api.control_main", env)
         finally:
             _sweep_prefix(_admin_dsn(), prefix)
             _release_prefix_lock(prefix, lock)
@@ -941,6 +1529,7 @@ class RealServerR2db:
         prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f16"
         lock = _claim_prefix_lock(prefix)
         restored_handle: Optional[sh.UvicornSubprocessHandle] = None
+        f16_slot_dir: Optional[Path] = None
         try:
             platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
             app = _provision_app(platform, script_dir, "f16app")
@@ -959,6 +1548,7 @@ class RealServerR2db:
 
             runtime_role = f"{prefix}_app_{app.slug}_runtime"
             slug_upper = app.slug.upper()
+            f16_slot_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-f16-slots-"))
             env = _scrub_peer_env_prefixes(os.environ)
             env.update(_with_pythonpath({
                 "R2DB_CREDENTIAL_PEPPER": platform.app_pepper,
@@ -968,6 +1558,8 @@ class RealServerR2db:
                 f"R2DB_APP_{slug_upper}_RUNTIME_DSN": app.runtime_dsn,
                 f"R2DB_APP_{slug_upper}_DEVELOPER_DSN": app.developer_dsn,
                 "R2DB_CONTROL_PLANE_STATUS": "enabled",
+                "R2DB_WORKERS": "1",
+                "R2DB_SLOT_DIR": str(f16_slot_dir),
             }))
 
             admin = psycopg.connect(_admin_dsn(), autocommit=True)
@@ -1017,6 +1609,8 @@ class RealServerR2db:
         finally:
             if restored_handle is not None:
                 restored_handle.stop()
+            if f16_slot_dir is not None:
+                shutil.rmtree(f16_slot_dir, ignore_errors=True)
             _sweep_prefix(_admin_dsn(), prefix)
             _release_prefix_lock(prefix, lock)
             shutil.rmtree(script_dir, ignore_errors=True)

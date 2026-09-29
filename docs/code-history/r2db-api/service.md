@@ -799,6 +799,20 @@ new:
 # this WP's.
 ```
 
+### correction: 2026-09-28
+
+- reason: design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (4) -- region (ii) (`requests_per_minute`/`concurrency`) no longer follows a single `process_ceiling`-only rule; `capabilities_document.resolve_limit_enforcement` reads `enforced` unconditionally once each class' own shared mechanism is configured across every worker, and falls back to the single-process rule only when it is not.
+
+old:
+```
+Region (ii) (`requests_per_minute`/`concurrency` -- bound by in-memory, per-process state, `self._rate_windows`/`self._active`) reads `enforced` only while `process_ceiling == 1` and `deployment_required` once it is `>= 2` (contract 1.8.0's own enforcement-scope definition: a per-process bound is `enforced` for the whole deployment only while exactly one process may serve this plane's base URL).
+```
+
+new:
+```
+Region (ii) (`requests_per_minute`/`concurrency`, each resolved by `capabilities_document.resolve_limit_enforcement`) reads `enforced` unconditionally once its own mechanism is configured across every worker this supervisor runs (the PostgreSQL-backed rate row for `requests_per_minute`; the host-shared slot directory, with this supervisor's workers at the declared ceiling, for `concurrency`) -- otherwise it keeps contract 1.8.0's own single-process enforcement-scope rule, `enforced` only while `process_ceiling == 1`.
+```
+
 ## CH-0138
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)
@@ -1781,6 +1795,20 @@ Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) --
 new:
 ```
 Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below) (in `service.py`), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`.
+```
+
+### correction: 2026-09-28
+
+- reason: design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (4) -- `_IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES` (the frozenset this comment described) is deleted; `capabilities_document.resolve_limit_enforcement` now decides region (ii) enforcement per class from how each is wired, not from a fixed in-memory-only set, so the note is reduced to what region (ii) still names, moved beside that function.
+
+old:
+```
+Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below) (in `service.py`), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`.
+```
+
+new:
+```
+design D-5(ii), contract 1.8.0: region (ii) is `requests_per_minute`/`concurrency` -- the two `ResourceLimits` classes `resolve_limit_enforcement` below governs (both admitted by `DataService` in `service.py`), the only ones whose `limit_enforcement` mapping depends on how each is wired rather than on `process_ceiling` alone.
 ```
 
 ## CH-0175

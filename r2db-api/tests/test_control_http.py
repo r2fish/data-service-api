@@ -714,6 +714,11 @@ _VALID_ENV = {
     "R2DB_CONTROLPLANE_DSN": "host=/tmp port=1 dbname=r2db_control_http_test_unreachable",
     "R2DB_CONTROL_CREDENTIAL_PEPPER": "control-main-test-control-pepper-0000",
     "R2DB_CREDENTIAL_PEPPER": "control-main-test-app-pepper-0000",
+    # WP-2 (design D-1, 監督裁定 4/11): required for `build_control_app()`
+    # to start at all -- read before the pepper-separation check below, so
+    # a test that only removes one of the OTHER 3 keys above still raises
+    # for that key's own reason.
+    "R2DB_CONTROL_WORKERS": "1",
     # Q4 phase WP-1 (design D-2(f)): `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_
     # BASE_URL` are REMOVED -- `build_control_app` rejects them outright
     # (F-2) if defined at all; neither is present here.

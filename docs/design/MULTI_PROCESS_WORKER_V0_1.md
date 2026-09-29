@@ -1,4 +1,4 @@
-# multi-process worker と in-memory の limit 状態の置き場 設計文書（v0.5）
+# multi-process worker と in-memory の limit 状態の置き場 設計文書（v0.6）
 
 ## 0. 版数・位置づけ
 
@@ -7,6 +7,8 @@
 - 基点: main `443a79a`。本書の file:line はこの木の現物である (uvicorn は開発機の venv の 0.52.4。両 peer の `pyproject.toml` は `uvicorn>=0.30`、`r2db-api/pyproject.toml`:33、`MitateDB-api/pyproject.toml`:30)。v0.3 で足した事実 (§1.4) と v0.4 で足した事実 (§1.4 の (6)) も同じ木で確かめた。
 - 契約: **1.11.0 不変** (§10 の裁定 10・13)。v0.2 の「Q-1 が (A)(C) なら 1.12.0」は裁定 10 で覆した。
 - クラス: **Class D** (§10 の裁定 22。§3 D-6)。
+- 行番号の註 (2026-09-29): 本書の `file:line` は起草時点 (基点 `e3b0f5a`) の位置である。本変更で runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` の行は動いた (Invariant 1 は同書 §6.2、provision DSN の段は同書 §7 の前後)。src の行も両 peer で動いている。位置は節名・関数名で引き直す。本文の行番号は書き換えない。
+- 改版 (v0.6、2026-09-29): 監督裁定 43 (slot の走査を `scan` の lock で host 内に直列化。走査の非原子性で同時保持が L 未満でも `concurrency` の拒否が出た) を §10.7 に逐語で追記。D-3 (2)(2') の本文は書き換えず、§10.7 が優先する。設計レビュー 1 回。契約 1.11.0 不変。
 - 改版: v0.1 (2026-09-28) 起草 (drafter)。v0.2 (2026-09-28) 監督裁定 1〜9 を §10 に追記 (起草の疑義への裁定。本文は書き換えず、§10 が優先する)。v0.3 (2026-09-28) 設計レビュー 1 回目 (13 件とクラスの引き上げ) への監督裁定 10〜22 と Q-1 の書き換えを §10 に逐語で追記し、本文 (§0、§1.2〜§1.4、D-1〜D-7、§4〜§9) を裁定に合わせて書き換えた。覆した判定は行を残し、覆した裁定の番号と日付を添えた (`OPERATING_CONDITIONS.md` §1.8 の 56)。v0.4 (2026-09-28) 設計レビュー 1 回目の再確認 (新 1〜8) への監督裁定 26〜33 を §10.4 に逐語で追記し、覆された旧裁定 (11 の事前検査の手段、17 の計測時 64、18 の `concurrency` の写像、24) の末尾に覆した裁定の番号を添えた。本文 (§0、D-1〜D-5、§4、§6、§7、§9) を裁定に合わせて書き換えた (事前検査を one-shot の `--preflight` entry に、`concurrency` の写像に workers の条件、slot の扱いの決定、rate 行を int[60] に、計測は既定 32)。
 - 出所の記法は `docs/work-orders/OPERATING_CONDITIONS.md` §0。キーの無いファイルは経路で書く。
 - 公開規律: 実 DSN・実ホスト名・作業機の絶対パスを置かない (`OPERATING_CONDITIONS.md` §1.9)。
@@ -565,16 +567,52 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 
 | peer | N | K=1 | K=32 (1 回目) | K=32 (2 回目) | 比 (1 回目) | 比 (2 回目) | ε | 判定 (N=4 のみ) |
 |---|---|---|---|---|---|---|---|---|
-| r2db-api | 1 | | | | | | | — |
-| r2db-api | 4 | | | | | | | |
-| MitateDB-api | 1 | | | | | | | — |
-| MitateDB-api | 4 | | | | | | | |
+| r2db-api | 1 | 3.617 | 39.499 | 38.908 | 10.92 | 10.76 | 1.5% | — |
+| r2db-api | 4 | 3.676 | 24.917 | 26.614 | 6.78 | 7.24 | 6.8% | 規則の文字どおりには 8 以下。再現せず (下の註)。R-101 は閉じない |
+| MitateDB-api | 1 | 2.140 | 38.907 | 39.000 | 18.18 | 18.22 | 0.2% | — |
+| MitateDB-api | 4 | 3.242 | 24.653 | 24.005 | 7.60 | 7.40 | 2.6% | 同上 |
+
+- 計測 2026-09-29、木 `17cc7fa` (統合 branch。WP-1〜WP-5 統合済み、WP-7 は inventory の CLI と runbook だけで data plane を変えない)、`tools/perf_baseline.py --real-server <peer> --workers N --warmup 3 --n 15 --concurrency K`、宣言値の `concurrency` は既定 32、thread limit 4、client process は min(8, K)。開始時の load average (1 分) 2.12、pytest 0 件、nginx の残存 0。全 run 終了コード 0、非 200 は 0 件、`unclassified=0`。`fseventsd` が 1 core を使い続けていた (開発機の常時の状態)。
+- **再現の確認 (規則の外。N = 4 だけ同じ手順を 2 回繰り返した)**: 2 回目は r2db K=1 3.766 / K=32 26.564・25.826 (比 7.05 / 6.86)、MitateDB K=1 2.976 / K=32 24.562・23.866 (比 **8.25 / 8.02**)。3 回目は r2db K=1 2.518 / K=32 25.414・25.924 (比 **10.09 / 10.30**)、MitateDB K=1 3.330 / K=32 23.465・27.738 (比 7.05 / **8.33**)。12 個の比のうち 8 以下は 7 個、8 超は 5 個。K=32 の p50 は 23.5〜27.7 ms で安定し、揺れているのは分母の K=1 (2.5〜3.8 ms、n = 15) である。
+- **同日の 1 回目の 12 run は無効として捨てた**: 開始時に機械全体の負荷を確かめておらず、load average が 12〜15 (このリポジトリの外のテストの実行) だった (`docs/work-orders/OPERATING_CONDITIONS.md` §2 の 19)。値は判定に使わない (N = 4 の比は r2db 12.7 / 10.6、MitateDB 22.0 / 23.8)。
+- **依頼者裁定 (2026-09-29、逐語)**: 「R-101は閉じない」。監督は、正式の run が規則を満たすこと、繰り返すと再現しないこと、(甲) 閉じない (監督の推奨) / (乙) 規則どおり閉じる、の両論を示した。
+- 読み: multi-process の効果は在る (K=32 の p50 が N = 1 の約 39 ms から N = 4 の約 25 ms)。4 倍にはならず、worker の外に直列の区間が残る。候補 (未計測): 同じ credential の rate の行の取り合い (表 7-5)、slot の走査を直列にする `scan` の lock (§10.7。host の全 worker で 1 本)、client 側の床、nginx。
 
 **表 7-2 K=1 の非退行 (`--warmup 20 --n 200`)**
 
-| plug | op | 基準 p50 | 後 p50 | 差 | 基準 p95 | 後 p95 | 差 | +40% / +50% 以内 |
-|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| plug | op | 基準 p50 | 後 p50 | 差 | 基準 p95 | 後 p95 | 差 | +40% / +50% 以内 | `backend_calls` (基準 → 後) |
+|---|---|---|---|---|---|---|---|---|---|
+| r2db-api | query | 0.116 | 0.117 | +0.9% | 0.125 | 0.122 | -2.4% | はい | 1 → 1 |
+| r2db-api | mutate | 0.216 | 0.218 | +0.9% | 0.305 | 0.292 | -4.3% | はい | 1 → 1 |
+| r2db-api | batch | 0.858 | 0.857 | -0.1% | 1.225 | 1.232 | +0.6% | はい | 1 → 1 |
+| MitateDB-api | query | 0.134 | 0.133 | -0.7% | 0.141 | 0.144 | +2.1% | はい | 11 → 11 |
+| MitateDB-api | mutate | 0.102 | 0.104 | +2.0% | 0.105 | 0.107 | +1.9% | はい | 7 → 7 |
+| MitateDB-api | batch | 0.171 | 0.169 | -1.2% | 0.184 | 0.177 | -3.8% | はい | 37 → 37 |
+| MitateDB-api | cross_entity | 0.131 | 0.130 | -0.8% | 0.135 | 0.136 | +0.7% | はい | 16 → 16 |
+| r2db-api-http | query | 1.349 | 1.482 | +9.9% | 1.430 | 1.616 | +13.0% | はい | 14 → 16 |
+| r2db-api-http | mutate | 1.413 | 1.547 | +9.5% | 1.491 | 1.653 | +10.9% | はい | 15 → 17 |
+| r2db-api-http | batch | 1.570 | 1.691 | +7.7% | 1.679 | 1.812 | +7.9% | はい | 19 → 21 |
+| MitateDB-api-http | query | 6.185 | 1.366 | -77.9% | 6.431 | 1.482 | -77.0% | はい | 21 → 22 |
+| MitateDB-api-http | mutate | 5.881 | 1.102 | -81.3% | 6.081 | 1.199 | -80.3% | はい | 13 → 14 |
+| MitateDB-api-http | batch | 7.137 | 2.330 | -67.4% | 7.344 | 2.452 | -66.6% | はい | 49 → 50 |
+| MitateDB-api-http | cross_entity | 6.234 | 1.416 | -77.3% | 6.437 | 1.524 | -76.3% | はい | 22 → 23 |
+| r2db-api-socket | query | 4.722 | 4.824 | +2.2% | 4.849 | 5.037 | +3.9% | はい | 14 → 16 |
+| r2db-api-socket | mutate | 4.809 | 4.898 | +1.9% | 5.312 | 5.100 | -4.0% | はい | 15 → 17 |
+| r2db-api-socket | batch | 4.984 | 5.058 | +1.5% | 5.136 | 5.256 | +2.3% | はい | 19 → 21 |
+| MitateDB-api-socket | query | 9.647 | 4.590 | -52.4% | 11.022 | 5.873 | -46.7% | はい | 21 → 22 |
+| MitateDB-api-socket | mutate | 9.345 | 4.310 | -53.9% | 10.691 | 5.644 | -47.2% | はい | 13 → 14 |
+| MitateDB-api-socket | batch | 10.669 | 5.556 | -47.9% | 11.974 | 6.868 | -42.6% | はい | 49 → 50 |
+| MitateDB-api-socket | cross_entity | 9.736 | 4.698 | -51.7% | 11.089 | 6.048 | -45.5% | はい | 22 → 23 |
+| r2db-api-real (N=1) | query | — | 3.617 | — | — | 4.551 | — | 基準値なし | — |
+| r2db-api-real (N=4) | query | — | 3.676 | — | — | 13.173 | — | 基準値なし | — |
+| MitateDB-api-real (N=1) | query | — | 2.140 | — | — | 3.160 | — | 基準値なし | — |
+| MitateDB-api-real (N=4) | query | — | 3.242 | — | — | 9.508 | — | 基準値なし | — |
+
+- 計測 2026-09-29、完了ゲートの後、木 `7407ddf`、`tools/perf_baseline.py --warmup 20 --n 200` (`PERFRUN host=Darwin/arm64 python=3.11.15 commit=7407ddf date=2026-09-29`)。開始時の load average (1 分) 1.63、pytest 0 件。終了コード 0、nginx の残存 0、共有 cluster の `pg_database` / `pg_roles` の数は前後とも 9 / 30。基準値は `docs/design/PHASE11_KEYSET_PAGING_V1.md` の「WP-7 実施記録 (2026-09-25)」(`commit=5d988c6`)。
+- 21 行とも +40% / +50% の内側 (`docs/design/ROADMAP_POST_PHASE7_V1.md` §0.1.4 の 1)。最大は r2db-api-http の `query` の p50 +9.9% / p95 +13.0%。
+- MitateDB の http / socket の −47〜−81% は、基準値の後に入った別の変更 (composition root の thread limit と MitateDB の http adapter の platform pool) の効果を含み、本変更だけの差ではない。
+- `backend_calls` の増分 (同 §0.1.4 の 4): http / socket の plug で r2db +2、MitateDB +1。`requests_per_minute` を PostgreSQL の行で数える文が要求ごとに足された (設計 D-3 (1))。in-process の plug は rate の行を配線しないので不変。r2db が +2 で MitateDB が +1 である内訳は切り分けていない。
+- real-server plug の 4 行は表 7-1 の K = 1 (`--warmup 3 --n 15`) の値で、`--warmup 20 --n 200` では取っていない。N = 4 の p95 (9.5〜13.2 ms) は N = 1 (3.2〜4.6 ms) より大きい。標本 15 の値であり、原因は切り分けていない。
 
 - 表 7-2 の行 (plug と op) と基準値の出所は作業指示書で固定する。real-server plug の N=1 / N=4 は同じ表に行を足す。
 
@@ -582,19 +620,32 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 
 | peer | run | worker 1 | worker 2 | worker 3 | worker 4 | 全 worker が受けたか |
 |---|---|---|---|---|---|---|
-| | | | | | | |
+| r2db-api | N=4 K=32 (1 回目) | 142 | 143 | 166 | 125 | はい (計 576) |
+| r2db-api | N=4 K=32 (2 回目) | 156 | 129 | 143 | 148 | はい (計 576) |
+| MitateDB-api | N=4 K=32 (1 回目) | 132 | 154 | 136 | 154 | はい (計 576) |
+| MitateDB-api | N=4 K=32 (2 回目) | 121 | 141 | 155 | 159 | はい (計 576) |
+
+- 出所は `REALWORKERS` 行の `accepted_200=`。N = 4 の K = 1 (18 要求) は 3 worker が受けた (r2db 3 / 14 / 1、MitateDB 12 / 3 / 3)。
 
 **表 7-4 捨てた run (429 が出た run、裁定 17)**
 
 | peer | N | K | run | 429 の件数 | 捨てた理由 |
 |---|---|---|---|---|---|
-| | | | | | |
+| — | — | — | — | 0 | `LIMIT_EXCEEDED` (r2db 429 / MitateDB 413) で止まった run は無い。宣言値 32 のまま K = 32 を全 run 完走 (`non_200=-`) |
 
 **表 7-5 rate の文の小実験 (32 並行の upsert、裁定 30)**
 
 | peer | 文の数 | p50 (ms/文) | p95 (ms/文) | 0.2 ms/文以内 |
 |---|---|---|---|---|
-| | | | | |
+| r2db-api (接続 1 本、対照) | 200 | 0.043 | 0.048 | — |
+| r2db-api (接続 32 本、1 回目) | 6400 | 1.536 | 5.878 | はい (直列の 1 文あたり 0.082) |
+| r2db-api (接続 32 本、2 回目) | 6400 | 1.553 | 5.845 | はい (同 0.083) |
+| MitateDB-api (接続 1 本、対照) | 200 | 0.043 | 0.057 | — |
+| MitateDB-api (接続 32 本、1 回目) | 6400 | 1.502 | 5.101 | はい (同 0.079) |
+| MitateDB-api (接続 32 本、2 回目) | 6400 | 1.553 | 5.992 | はい (同 0.083) |
+
+- 計測 2026-09-29 (表 7-1 と同じ条件、同じ時間帯)。使い捨て cluster に rate の migration (r2db 0015 / MitateDB 0016) まで当て、api role の接続 32 本 (thread) から同じ credential に `credential_request_rate_admit` を autocommit で流した (接続あたり 220 文、先頭 20 は集計から除く)。拒否は 0 件 (通す経路)。
+- **列の読み方**: p50 / p95 は文ごとの所要時間で、32 本が 1 行の lock を待ち合う時間を含む。§7.3 の 0.2 ms は「残りの余裕を 32 本の直列で割った値」なので、比べる量は**直列の 1 文あたりの時間 (全体の所要時間 ÷ 全文数 7040)** = 0.079〜0.083 ms であり、0.2 ms の内側である。
 
 ## 8. 記録 (統合時、監督)
 
@@ -814,3 +865,28 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 41. **(新 E、低) preflight entry は module の `app` (= `build_app()` の結果) を使い回し、二重に `build_app()` を呼ばない。MitateDB の CMD は `set -e` (または `&&`) で繋ぐ。起動時の検査は `build_app()` の中に置き、lifespan に置かない。** WP-2 / WP-3 / WP-5 の完了条件。
 42. **(新 F、低) int[61] は境目で最大 1 秒分を多めに数える (L を超えて通すことは無い)。** C-05 の honest limits と両 runbook に開示する。 **(n)**: `hold_in_flight` が pool の接続を持たずに止まることは r2db で現物確認済み (レビュー担当)、MitateDB は WP-3 の完了条件に置く。
 
+### 10.7 監督裁定 43 (v0.6、2026-09-29。WP-3 の実装で見つかった走査の非原子性への裁定。設計レビュー 1 回 (`r113_design_review_43.md`、指摘 8 件) を反映。逐語)
+
+**事実 (調査担当の診断と設計レビューの実測、2026-09-29。probe と log は監督保管)**
+
+- real-server plug (workers 2) の C-32 (b) で、client の同時送信が宣言値 L = 32 以下なのに `LIMIT_EXCEEDED` (`limit_class` = `concurrency`) が返る (3/14400)。
+- 原因: slot の走査が process 間で原子的でない。`acquire` は乱数始点から L 本を 1 本ずつ `LOCK_EX | LOCK_NB` で試す。走査の途中で別 process が「走査済みの slot を解放し、走査の先の空き slot を取る」と、どの瞬間も L 本は握られていないのに、試した各時点では全部握られていた、になる。
+- plain python の probe (同時保持を semaphore で厳密に上限付け、保持 0〜3 ms、各 20 s): L = 32・上限 32・2 process で 136/286503、4 process で 536/321380、上限 31 でも 2 process で 13/296495。1 process で直列なら 0/233667。
+- slot の解放は両 peer とも応答を作る前で、「解放が応答の送出より後」は成立しない。1 process の in-memory の counter は判定と加算が lock の中で原子的で、この窓を持たない。C-05 V2 と C-32 (a) は保持者を止めたまま送るので走査中に解放が起きず、この窓を観測しない。
+
+**裁定**
+
+43. **走査を host 内で直列化する。** slot directory に走査用のファイル `scan` を置く (`slot-<i>`・`selfcheck` と別名、開き方 (`O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC`) と mode 0600 は同じ)。`acquire(limit)` は、取得ごとに `scan` を新しく open し、その排他 lock を取ってから L 本を走査し、slot を 1 本握った直後、または全部塞がりを見た直後に `scan` の fd を close する (要求の処理の間は `scan` を持たない)。slot の解放は lock を取らない (fd の close)。
+    - **論証**: slot の取得はすべて `acquire` (= `scan` の lock の下) を通る。`scan` の lock の下では他の取得が起きないので、走査の間、slot は「握られている → 空き」の向きにしか動かない。走査が i 本目を「握られている」と見たなら、その slot は走査の開始時点でも握られていた。よって「全部塞がり」を見た走査の開始時点では L 本とも握られており、同時保持が L 未満のときの拒否は起きない。L を超えて通すことも無い (slot 1 本の排他は変わらない)。flock は open file description に付くので、取得ごとに open した `scan` は同じ process の別 thread どうしでも排他になる。テストが `slot-<i>` を直接 flock して保持を観測するのは、並行の取得が無い場面に限る。
+    - **実測**: 直列化した probe は 2 process で 0/248144、4 process で 0/260741、1 process 64 thread と 2 process × 32 thread でも 0 (同じ process 内の直列化を外すと 2477/235070)。
+    - **`scan` の lock の取り方 = 期限付き**: `LOCK_EX | LOCK_NB` を 200 µs の間隔で試し、1 s の期限までに取れなければ `SlotBackendError` (fail-closed、既存の 503 の写像)。「握られている」の errno は `_HELD_ERRNOS` だけで、他の errno と `scan` の open の失敗は待たずに `SlotBackendError`。
+      - 却下案: blocking の `LOCK_EX`。待ちは短い (満杯時の flood で最大 2.8 ms) が期限を持てず、`scan` を持った process が凍結 (SIGSTOP、cgroup freezer、debugger) すると host の全 worker の event loop が無期限に止まる。process の死は kernel が解放するが、凍結は解放しない。
+      - 待ちの実測 (darwin、10 core。待ちは FIFO ではないので上限ではない): 最大は 4 process で 5.9 ms、12 process (CPU の取り合いあり) で 20.4 ms、満杯時の未認証 flood で 63 ms。期限 1 s はその 16 倍以上。probe で期限切れは 0 件、飢餓は観測されない。
+      - 期限の値の両論: 1 s は通常の負荷で誤った 503 を出しにくいが、凍結の間は要求ごとに event loop が 1 s 止まってから 503 になる。100 ms は止まる時間が短いが実測の最大 63 ms に近い。通常時に誤った 503 を出さない方を採り 1 s とする。
+    - **凍結した process**: slot を握ったまま凍結した process が失わせるのは自分の in-flight の分だけである。`scan` を握ったまま凍結した process は host 全体の取得を止めるので、期限で守る。凍結の間、各要求は最大 1 s 待ってから 503 になる。runbook に「単独の worker を SIGSTOP・debugger で止めない (再起動は stop / start)」を書く。
+    - **費用 (実測)**: 取得 1 回に open / flock / close が 1 組増える (全部塞がりのとき 3L + 3 回の syscall)。K = 1 の取得の p50 は 14 µs → 26 µs。4 process で GIL を握る保持者がいる形では取得数 −3.7%、待ちの p99 0.52 ms。満杯時の未認証 flood の拒否の処理数は 53435 → 29243 / 10 s (4 process、503 は 0 件)。§7.3 の算術に「32 本同時の到着で `scan` の保持 p50 0.04〜0.06 ms × 32 ≈ 1.3〜1.9 ms」を足す。
+    - **却下した他の形**: 有限回の再走査 (拒否を減らすが無くす保証が無い。1 回で 1/284119・3/316556)、blocking flock で空きを待つ形 (「L 本のどれか」を待てず、本当の超過の拒否が遅れて C-32 (a) に反する)、byte-range lock (`lockf` は process 単位で process 内の 2 要求を分けられない。range を 1 本ずつ試すなら走査のまま)、POSIX named semaphore (stdlib に名前で開く API が無く、crash で単位が戻らない)、共有 / 排他の 2 段 (成功する走査は並列に残るが、満杯時に排他が飢えて 429 が 503 になりうる)、lock の外で 1 本だけ試す近道 (論証を壊す)、fd を開いたまま持つ process 内の空き表 (裁定 29 で却下済み)。
+    - **起動時の自己検査**: `scan` は同じ directory・同じ開き方・同じ `flock` なので `selfcheck` の確かめる範囲に入る。別の検査は足さない。
+    - **範囲**: 両 peer の `concurrency_slots.py` の `HostSharedConcurrencySlots.acquire` と、その docstring。呼び出し側・宣言の写像・起動時の検査・conformance・契約は変えない。契約 1.11.0 不変。
+    - **文言の訂正**: D-3 (2') の「拒否経路の費用」と helper の docstring の「never a wait」は「slot の空きは待たない。`scan` の待ちは期限付き」に読み替える。作業指示書の完了条件 52 の「待たずに 429」は「slot の空きを待たずに 429 (`scan` の待ちは期限内)」に読み替える。
+    - **期限切れの 503 の見分け**: 応答は既存の 503 のまま。`SlotBackendError` の message が `scan` の期限切れを名指しする。

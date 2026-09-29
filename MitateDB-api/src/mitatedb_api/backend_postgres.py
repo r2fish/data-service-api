@@ -102,6 +102,7 @@ from . import platform_upgrades
 # byte-identical to `r2db_api.psycopg_counting` (a same-named test in
 # `tests/` pins the sha256 match; rework 指摘 3 moved the
 # probe itself there so it is not duplicated per peer).
+from .pool import _application_name_connect_kwargs
 from .psycopg_counting import CountingConnection, prepared_stats_skeleton, probe_prepared_statements
 # `_INT_DOMAIN_RANGES`/`_check_domain` are re-exported for facade
 # compatibility (design D-2); not referenced elsewhere in this module.
@@ -290,8 +291,8 @@ class PostgresBackend:
     """
 
     def __init__(self, runtime_dsn, developer_dsn, *, application_id=None, max_execution_ms: int | None = None):
-        self._runtime = CountingConnection.connect(runtime_dsn, autocommit=False)
-        self._developer = CountingConnection.connect(developer_dsn, autocommit=False)
+        self._runtime = CountingConnection.connect(runtime_dsn, autocommit=False, **_application_name_connect_kwargs())
+        self._developer = CountingConnection.connect(developer_dsn, autocommit=False, **_application_name_connect_kwargs())
         # R-87: the constructed upper bound the developer-connection
         # catalog reads below (`schema_count`/`field_domains`/`field_
         # types`/`all_field_types`/`field_constraints`/`field_types_and_

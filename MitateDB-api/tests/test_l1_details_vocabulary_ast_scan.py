@@ -333,31 +333,36 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: sites from `create_collection` onward). Neither edit changed a single
 #: site's own identity or the entry count (still 20). Re-verified via
 #: `_fail_call_sites`, not hand-shifted.
-    ("backend_postgres.py", 433),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 494),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 547),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 578),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 639),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 701),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 730),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 911),   # generic driver-exception translation
-    ("backend_postgres.py", 932),   # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1074),  # generic driver-exception translation
-    ("backend_postgres.py", 1232),  # generic driver-exception translation
-    ("backend_postgres.py", 1305),  # generic driver-exception translation
-    ("backend_postgres.py", 1358),  # generic driver-exception translation
-    ("backend_postgres.py", 1391),  # generic driver-exception translation
-    ("backend_postgres.py", 1417),  # generic driver-exception translation
+#: The `application_name` toggle's own import line in `backend_postgres.
+#: py` (`from .pool import _application_name_connect_kwargs`, design
+#: docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4) sits above every site
+#: below, one line each -- re-verified via `_fail_call_sites`. Entry count
+#: and site identity unchanged (20).
+    ("backend_postgres.py", 434),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 495),   # field_domains: generic driver-exception translation
+    ("backend_postgres.py", 548),   # field_types: generic driver-exception translation
+    ("backend_postgres.py", 579),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 640),   # field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 702),   # field_types_and_constraints: generic driver-exception translation
+    ("backend_postgres.py", 731),   # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 912),   # generic driver-exception translation
+    ("backend_postgres.py", 933),   # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1075),  # generic driver-exception translation
+    ("backend_postgres.py", 1233),  # generic driver-exception translation
+    ("backend_postgres.py", 1306),  # generic driver-exception translation
+    ("backend_postgres.py", 1359),  # generic driver-exception translation
+    ("backend_postgres.py", 1392),  # generic driver-exception translation
+    ("backend_postgres.py", 1418),  # generic driver-exception translation
     # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2a/D-3 (4): `read`'s
     # own keyset-predicate/NULLS-clause assembly (`_keyset_predicate_sql`,
     # `_NULLS_SQL`) added 16 lines before this site and every one below it
     # in this file (1484 -> 1500, 1512 -> 1528, 1553 -> 1569, 1822 -> 1838,
     # 1891 -> 1907) -- re-verified via `_fail_call_sites`, not hand-shifted.
-    ("backend_postgres.py", 1500),  # generic driver-exception translation
-    ("backend_postgres.py", 1528),  # generic driver-exception translation
-    ("backend_postgres.py", 1569),  # generic driver-exception translation
-    ("backend_postgres.py", 1838),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1907),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1501),  # generic driver-exception translation
+    ("backend_postgres.py", 1529),  # generic driver-exception translation
+    ("backend_postgres.py", 1570),  # generic driver-exception translation
+    ("backend_postgres.py", 1839),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1908),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --

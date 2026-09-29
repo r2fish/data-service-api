@@ -296,6 +296,9 @@ def _real_control_env(platform: types.SimpleNamespace) -> dict[str, str]:
         "R2DB_CONTROL_CREDENTIAL_PEPPER": "r2db-surfaces-test-real-ctl-pepper",
         "R2DB_CREDENTIAL_PEPPER": PEPPER,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
+        # WP-2 (design D-1, 監督裁定 4/11): required for `build_control_app()`
+        # to start at all -- always `1` in a real deployment.
+        "R2DB_CONTROL_WORKERS": "1",
     }
 
 
@@ -428,11 +431,31 @@ def test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_b
                 [json.dumps({"data": 1, "control": 20})],
             )
         conn.commit()
+    # F-16 multiplies controlplane's own floor by `process_ceilings.
+    # control` (20): 16*20=320 is above the role's CONNECTION LIMIT (20
+    # from 0013), so the limit is lifted to -1 here for F-18 to be the
+    # check that fires, and put back to the value read below in `finally`
+    # (the module-scoped `platform` is shared by later tests).
+    controlplane_role = f"{platform.prefix}_controlplane"
+    with psycopg.connect(platform.admin_dsn) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname = %s", [controlplane_role])
+            (original_connlimit,) = _cur.fetchone()
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(sql.Identifier(controlplane_role)))
+        _conn.commit()
     try:
         with pytest.raises(RuntimeError) as excinfo:
             module.build_control_app(env=_real_control_env(platform))
         assert excinfo.value.code == "F-18"
     finally:
+        with psycopg.connect(platform.admin_dsn) as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    sql.SQL("ALTER ROLE {} CONNECTION LIMIT {}").format(
+                        sql.Identifier(controlplane_role), sql.Literal(int(original_connlimit))
+                    )
+                )
+            _conn.commit()
         with psycopg.connect(platform.control_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -453,6 +476,81 @@ def test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_b
                 pass
         finally:
             _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+
+
+def test_build_control_app_f18_uses_thread_limit_pool_size_not_resource_limits_concurrency(
+    platform: types.SimpleNamespace,
+) -> None:
+    """design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5) -- 変異
+    M71c (control の `pool_size` を `ResourceLimits().concurrency` (32)
+    に戻す): with `R2DB_THREAD_LIMIT` unset (default 4, `role_pool_size`
+    -> 6), F-18's own lower bound is `data * per_data(6) + control * 16`
+    (`headroom_lower_bound`: per data process 2 platform stores of
+    `pool_size`, plus one runtime/developer pair of `pool_size` each when
+    at least one application is registered; per control process the
+    constant `_CONTROLPLANE_ROLE_POOL_FLOOR` 16). The test reads this
+    cluster's own `max_connections`/reserved settings and registered-
+    application count, and declares the LARGEST `data` ceiling whose
+    bound with `pool_size` 6 still fits the headroom -- so a REAL
+    `build_control_app()` succeeds -- while the same `data` ceiling with
+    `pool_size` 32 does not fit (asserted below), so the mutation raises
+    F-18 instead."""
+    import psycopg
+    from psycopg import sql
+
+    from r2db_api.platform_declarations import headroom_lower_bound
+
+    module = _control_main_module()
+    _set_surfaces_row(platform, {"data": {"base_url": _GOOD_DATA_BASE_URL}, "control": {"base_url": _GOOD_CONTROL_BASE_URL}})
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, setting FROM pg_settings WHERE name = ANY(%s)",
+                [["max_connections", "superuser_reserved_connections", "reserved_connections"]],
+            )
+            settings = {name: int(value) for name, value in cur.fetchall()}
+            cur.execute(sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(platform.schema, "applications")))
+            (registered_applications,) = cur.fetchone()
+    headroom = settings["max_connections"] - settings["superuser_reserved_connections"] - settings["reserved_connections"]
+
+    def _bound(data: int, pool_size: int) -> int:
+        return headroom_lower_bound(
+            data_processes=data, control_processes=1, platform_pool_floor=2 * pool_size,
+            application_pair_floor=2 * pool_size, control_plane_floor=16,
+            registered_applications=registered_applications,
+        )
+
+    data_ceiling = 0
+    while _bound(data_ceiling + 1, 6) <= headroom:
+        data_ceiling += 1
+    assert data_ceiling >= 1, f"headroom {headroom} fits no data process at pool_size 6 (空振り)"
+    assert _bound(data_ceiling, 32) > headroom, (data_ceiling, headroom)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps({"data": data_ceiling, "control": 1})],
+            )
+        conn.commit()
+    try:
+        asgi_app = module.build_control_app(env=_real_control_env(platform))
+        with TestClient(asgi_app):
+            pass
+    finally:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps({"data": 1, "control": 1})],
+                )
+            conn.commit()
+        _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
 
 
 def test_build_control_app_rejects_missing_surfaces_row(platform: types.SimpleNamespace) -> None:

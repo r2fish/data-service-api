@@ -162,11 +162,12 @@ from . import platform_declarations
 from . import platform_upgrades
 from .control_audit import insert_control_audit_row, read_control_audit_events
 from .control_composition import build_control_service
+from .http import DEFAULT_THREAD_LIMIT
 from .control_credential_store_postgres import DEFAULT_SCHEMA, PostgresControlCredentialStore
 from .control_plane import (_APPLICATION_ID_PATTERN, PostgresApplicationRegistry,
                             bootstrap_control_credential, issue_audit_credential_ceremony,
                             reset_control_credentials)
-from .config import FoundationConfig
+from .config import FoundationConfig, role_pool_size, thread_limit_from_env
 from .credential_store_postgres import assert_pepper_separation
 from .errors import (AuthenticationError, AuthorizationError, AuthorizationStateUnavailable,
                      CapabilityError, ConflictError, DestructiveConfirmationRequired,
@@ -1287,6 +1288,13 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     "F-17": 16,
     "F-18": 17,
     "F-19": 18,
+    # design D-1: `MITATEDB_WORKERS`/`MITATEDB_CONTROL_WORKERS`
+    # (this CLI invocation's own process env) exceed their declared
+    # process_ceilings -- the next unused exit code. Documented here for
+    # completeness; `_verify_declarations_checks` returns this literal
+    # directly (there is no `PlatformDeclarationError` to route through
+    # `_verify_declarations_fail` for this operator-only diagnostic).
+    "F-20": 19,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1396,14 +1404,14 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     # never a schema/role-name string-rewrite convention -- see `check_
     # role_connection_limits`'s own docstring) must have a CONNECTION
     # LIMIT of -1 or at least its own real pool-composition floor.
-    # `_declared_concurrency()` is peer-local -- this function's own call
+    # `_declared_pool_size()` is peer-local -- this function's own call
     # site stays textually isomorphic across peers; see that helper's own
     # docstring for the peer-specific body it hides. Run unconditionally
     # like the writer-role/F-14 checks above.
     try:
         platform_declarations.check_role_connection_limits(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            concurrency=_declared_concurrency(),
+            pool_size=_declared_pool_size(), process_ceilings=declarations.process_ceilings,
         )
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
@@ -1418,14 +1426,14 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     # R-91 (work order §1.2 D-1/D-2): the declared process_ceilings' own
     # lower-bound connection count (never the upper bound, §1.1 (c′)) fits
     # under max_connections once both reserved-connection GUCs are added.
-    # `_declared_concurrency()` is peer-local -- this function's own call
+    # `_declared_pool_size()` is peer-local -- this function's own call
     # site stays textually isomorphic across peers; see that helper's own
     # docstring for the peer-specific body it hides. Run unconditionally
     # like the F-16/F-17 checks above.
     try:
         headroom = platform_declarations.check_max_connections_headroom(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            process_ceilings=declarations.process_ceilings, concurrency=_declared_concurrency(),
+            process_ceilings=declarations.process_ceilings, pool_size=_declared_pool_size(),
         )
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
@@ -1443,23 +1451,72 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     _verify_declarations_ok(
         "F-19", "every registered application's own database was provisioned with a codepoint-order collation"
     )
+
+    # design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1: the
+    # startup-time `workers <=
+    # process_ceilings.<plane>` check `build_app()`/`build_control_app()`
+    # both run for real is ALSO offered here, as an out-of-band
+    # operator diagnostic -- reads `MITATEDB_WORKERS`/`MITATEDB_CONTROL_WORKERS`
+    # from THIS CLI invocation's OWN process env (never the real running
+    # api/controlplane process' own env, which this command has no way to
+    # observe): a disclosed limitation identical to `_declared_pool_size`'s
+    # own (above) and to `control_plane_status`'s own `MITATEDB_CONTROL_PLANE_
+    # STATUS` cross-check earlier in this function. Optional -- an
+    # operator who ran this command without either variable set (this
+    # command's own default invocation) sees neither line at all, never a
+    # spurious FAIL for a variable they deliberately did not pass.
+    data_workers_raw = os.environ.get("MITATEDB_WORKERS")
+    control_workers_raw = os.environ.get("MITATEDB_CONTROL_WORKERS")
+    if data_workers_raw is not None or control_workers_raw is not None:
+        problems: list[str] = []
+        if data_workers_raw is not None:
+            try:
+                data_workers = int(data_workers_raw)
+            except ValueError:
+                data_workers = -1
+            if data_workers < 1 or data_workers > declarations.process_ceilings.data:
+                problems.append(
+                    f"MITATEDB_WORKERS={data_workers_raw!r} exceeds process_ceilings.data={declarations.process_ceilings.data}"
+                )
+        if control_workers_raw is not None:
+            try:
+                control_workers = int(control_workers_raw)
+            except ValueError:
+                control_workers = -1
+            if control_workers < 1 or control_workers > declarations.process_ceilings.control:
+                problems.append(
+                    f"MITATEDB_CONTROL_WORKERS={control_workers_raw!r} exceeds process_ceilings.control={declarations.process_ceilings.control}"
+                )
+        if problems:
+            print("FAIL F-20  " + "; ".join(problems) + " (read from this CLI invocation's own process env)")
+            return 19
+        _verify_declarations_ok(
+            "F-20", "MITATEDB_WORKERS/MITATEDB_CONTROL_WORKERS (this CLI invocation's own process env) do not exceed their declared process_ceilings"
+        )
     return 0
 
 
-def _declared_concurrency() -> int:
-    """Same lenient-degrade discipline as `main._optional_int`/`config.
-    FoundationConfig.max_concurrency`'s own default: an unset or
-    unparsable `MITATEDB_MAX_CONCURRENCY` silently falls back to the
-    dataclass default rather than raising here -- this is only a
-    verification-time floor computation, not the real composition root's
-    own strict parse."""
-    raw = os.environ.get("MITATEDB_MAX_CONCURRENCY")
-    if not raw:
-        return FoundationConfig.max_concurrency
-    try:
-        return int(raw)
-    except ValueError:
-        return FoundationConfig.max_concurrency
+def _declared_pool_size() -> int:
+    """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)): this
+    peer's own per-process pool ceiling, consulted by `_verify_
+    declarations_checks`'s own F-16/F-18 checks. Reads `MITATEDB_THREAD_
+    LIMIT` from THIS CLI invocation's own process env through `config.
+    thread_limit_from_env` -- the SAME reader `control_composition.py`'s
+    own startup check uses, and the same rules `main.py`'s own `_thread_
+    limit_from_env` applies (`tests/test_threadpool_offload.py::test_
+    thread_limit_from_env_agrees_with_the_shared_config_reader` pins the
+    two equal on every input): unset/empty falls back to `DEFAULT_THREAD_
+    LIMIT`, a non-empty value that is not a positive integer raises
+    `ValueError` naming the variable -- and derives the floor via
+    `config.role_pool_size`, the SAME function `main.py`'s own startup
+    check uses. Named identically to r2db-api's own `_declared_pool_size`
+    (peer-IDENTICAL name, peer-SPECIFIC body) so `_verify_declarations_
+    checks`'s own call site stays textually isomorphic across peers. The
+    value this CLI invocation's own shell has set for `MITATEDB_THREAD_
+    LIMIT` may not match the REAL running `mitatedb_api.main`/`mitatedb_
+    api.control_main` process' own env -- this check only verifies
+    agreement with whatever value this one invocation was run under."""
+    return role_pool_size(thread_limit_from_env(os.environ, "MITATEDB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT))
 
 
 def _served_capabilities_document() -> dict:
@@ -1583,7 +1640,16 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     output line, printed for every code `_verify_declarations_checks`
     returns (0 through 15 alike -- F-14's own exit code (contract 1.7.0),
     F-15's own (Phase 10 WP-6a, contract 1.8.0), and F-16's own (Phase 10
-    WP-4f) included), never only on the 0 path."""
+    WP-4f) included), never only on the 0 path.
+
+    design docs/design/MULTI_PROCESS_WORKER_V0_1.md §9 (c): the F-20
+    workers-vs-ceiling check and F-16/F-18's own `_declared_pool_size()`
+    both read `MITATEDB_THREAD_LIMIT`/`MITATEDB_WORKERS`/`MITATEDB_
+    CONTROL_WORKERS` from THIS CLI invocation's own process env -- never
+    the real running `mitatedb_api.main`/`mitatedb_api.control_main`
+    process' own env, which this command has no way to observe. A value
+    this shell happens to have set may not match what the real process
+    was started with."""
     schema = _schema()
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:
@@ -2108,7 +2174,7 @@ _INVENTORY_UNJUDGED_ITEMS: tuple[dict, ...] = (
 def _inventory_positive_int(value: str) -> int:
     """`argparse` `type=` for `--concurrency`/`--data-process-ceiling`/
     `--data-process-count-total`/`--control-process-ceiling`/`--control-
-    process-count-total` -- 0 and negative values are usage errors
+    process-count-total`/`--thread-limit` -- 0 and negative values are usage errors
     (argparse's own fixed, templated message via `parser.error()`),
     never silently accepted as if they meant "no input" the way omitting
     the argument entirely does. `inventory`'s own subparser remaps this
@@ -2125,10 +2191,11 @@ def _inventory_positive_int(value: str) -> int:
 
 
 def _inventory_nonnegative_int(value: str) -> int:
-    """`argparse` `type=` for `--reserved-connections` only -- unlike
-    `inventory`'s other numeric arguments (which use `_inventory_
-    positive_int`), `0` is a genuine value here ("no reserve"), so only
-    negative values (and non-integer text) are usage errors."""
+    """`argparse` `type=` for `--reserved-connections` and `--data-
+    process-count-old-basis` -- unlike `inventory`'s other numeric
+    arguments (which use `_inventory_positive_int`), `0` is a genuine
+    value for both of these ("no reserve", "no old-basis process"), so
+    only negative values (and non-integer text) are usage errors."""
     try:
         parsed = int(value)
     except ValueError:
@@ -2485,9 +2552,7 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
     (the actual combined process count across however many revisions are
     concurrently serving traffic, the number role-connection demand is
     computed from). Neither pair fills in for the other: a caller
-    that omits one of the four leaves this `unknown`
-    (`ops verify-declarations`'s own F-16 check is a DIFFERENT, single-
-    process floor check and is never consulted here). `--control-not-
+    that omits one of the four leaves this `unknown`. `--control-not-
     deployed` is the only way Control's own process arguments may be
     absent: it declares, out loud, that no Control-plane process is
     deployed yet, so Control's own role classes (`control_roles`/
@@ -2501,8 +2566,38 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
     composition.build_control_service` ever pools a connection against
     it, `mitatedb_api.main.build_app` never does). This item's own output
     always carries `control_deployed`: `true` unless `--control-
-    not-deployed` was given."""
+    not-deployed` was given.
+
+    Data-plane demand is counted per revision BASIS rather than from one
+    shared number (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md
+    D-2), so the same revision's own actual per-process demand is never
+    counted smaller than it really is while an old-basis and a new-basis
+    revision serve traffic side by side. `--data-process-count-old-basis`
+    (O) is the caller's own declared count of Data-plane processes still
+    running the old, `--concurrency`-sized connection pool; the remainder
+    of `--data-process-count-total` (N) is the new-basis count, sized by
+    `role_pool_size(--thread-limit)` -- the SAME function and the SAME
+    `platform_declarations` floor constants `ops verify-declarations`'s
+    own F-16 check (`platform_declarations.check_role_connection_limits`)
+    uses, so this item's own floor and F-16's own floor never drift apart
+    for a process on the new basis. `--concurrency` is only meaningful
+    (and only required) while at least one old-basis process is declared;
+    `--thread-limit` is always required, since `--data-process-count-
+    total` can never be entirely old-basis (`--data-process-count-old-
+    basis` must leave at least `--data-process-ceiling` worth of new-
+    basis processes -- `_inventory_validate_headroom_inputs`). Every
+    provisioned application's own shared runtime/developer floor
+    (condition 1) is `O * concurrency + N * role_pool_size(thread_limit)`,
+    same as a platform-plane role's own new-basis term; the AGGREGATE
+    (condition 2) contribution from that shared budget is instead the
+    LARGER of that floor and `2 * K * (O + N)` (K = the number of
+    registered applications with a runtime/developer role), since K
+    applications each hold two persistent connections (one per role) on
+    every Data-plane process at once -- a floor that is only ever
+    RAISED by K, never displaced by it."""
     concurrency = args.concurrency
+    thread_limit = args.thread_limit
+    old_basis = args.data_process_count_old_basis
     data_process_ceiling = args.data_process_ceiling
     data_process_count_total = args.data_process_count_total
     control_not_deployed = args.control_not_deployed
@@ -2514,12 +2609,19 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
     def _result(judgment: str, *, remediation_required: bool = False) -> dict:
         return {"judgment": judgment, "remediation_required": remediation_required, "control_deployed": control_deployed}
 
-    if concurrency is None:
+    if old_basis is None:
+        return _result("unknown")
+    if thread_limit is None:
         return _result("unknown")
     if data_process_ceiling is None or data_process_count_total is None:
         return _result("unknown")
+    if old_basis >= 1 and concurrency is None:
+        return _result("unknown")
     if not control_not_deployed and (control_process_ceiling is None or control_process_count_total is None):
         return _result("unknown")
+
+    new_basis_count = data_process_count_total - old_basis
+    pool_size = role_pool_size(thread_limit)
 
     try:
         with conn.cursor() as cur:
@@ -2567,11 +2669,15 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
     if any(limits.get(name) == -1 for name in role_names):
         return _result("unknown")
 
-    api_floor = platform_declarations._API_ROLE_STORE_COUNT * concurrency
+    api_store_count = platform_declarations._API_ROLE_STORE_COUNT
     controlplane_floor = platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR
     auditreader_floor = platform_declarations._AUDITREADER_ROLE_POOL_FLOOR
 
-    api_demand = data_process_count_total * api_floor
+    # Each per-process term is 0 for the basis with no processes on it --
+    # `old_basis == 0` never multiplies a possibly-`None` `concurrency`.
+    old_api_term = old_basis * api_store_count * concurrency if old_basis else 0
+    new_api_term = new_basis_count * api_store_count * pool_size
+    api_demand = old_api_term + new_api_term
     if control_not_deployed:
         controlplane_demand = 0
         auditreader_demand = 0
@@ -2590,9 +2696,10 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
         for role in auditreader_roles:
             if limits.get(role, 0) < auditreader_demand:
                 condition_1_ok = False
-    app_role_demand = data_process_count_total * concurrency
+    old_app_term = old_basis * concurrency if old_basis else 0
+    app_role_floor = old_app_term + new_basis_count * pool_size
     for runtime_role, developer_role in app_roles:
-        if limits.get(runtime_role, 0) < app_role_demand or limits.get(developer_role, 0) < app_role_demand:
+        if limits.get(runtime_role, 0) < app_role_floor or limits.get(developer_role, 0) < app_role_floor:
             condition_1_ok = False
 
     try:
@@ -2623,7 +2730,18 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
     if not condition_1_ok:
         return _result("blocked")
 
-    app_shared_demand = app_role_demand if app_roles else 0
+    # The aggregate's own shared-application-role term is the LARGER of
+    # condition 1's per-role floor and `2 * K * (O + N)` (K registered
+    # applications each hold two persistent connections -- one per role
+    # -- on every Data-plane process at once): never smaller than either
+    # the per-role floor already enforced above or the real worst-case
+    # persistent-connection count, only ever raised by K, never
+    # displaced by it (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-2).
+    application_count = len(app_roles)
+    if application_count:
+        app_shared_demand = max(app_role_floor, 2 * application_count * data_process_count_total)
+    else:
+        app_shared_demand = 0
     total_demand = api_demand + controlplane_demand + auditreader_demand + app_shared_demand + _INVENTORY_MAX_CONCURRENT_CONNECTIONS
 
     if reserved_connections is None:
@@ -2670,6 +2788,7 @@ _PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
     "0012_role_connection_limits.sql",
     "0013_role_statement_timeouts.sql",
     "0014_role_connection_limits_rollout.sql",
+    "0016_credential_request_rate.sql",
 )
 
 #: the psql `-v NAME=VALUE` variables each file above references,
@@ -2685,6 +2804,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
     "0012_role_connection_limits.sql": (),
     "0013_role_statement_timeouts.sql": (),
     "0014_role_connection_limits_rollout.sql": (),
+    "0016_credential_request_rate.sql": (),
 }
 
 #: design D-2: `file -> the LATER accepted files that redefine at least
@@ -2696,7 +2816,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
 #: file absent from this table (or with an empty tuple) has no known
 #: successor and may always be applied alone. This table is proved
 #: equal to the "target -> defining files" map derived directly from
-#: the 6 accepted migration files themselves, folded to file
+#: the 7 accepted migration files themselves, folded to file
 #: granularity, by a static test (design
 #: `docs/design/MITATEDB_PLATFORM_MIGRATION_RUN_V0_1.md` D-3,
 #: `test_ops_apply_platform_migration.py`) -- this table is the side
@@ -2899,7 +3019,12 @@ def _inventory_validate_headroom_inputs(args: argparse.Namespace) -> None:
     """Item (8)'s input-shape checks that need BOTH halves of an
     argument pair already parsed, so they cannot live in `argparse`
     `type=` alone: run before any database connection
-    opens."""
+    opens. The three checks at the end read `--data-process-count-old-
+    basis` (the old-basis revision's own share of `--data-process-count-
+    total`, design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md
+    D-2/D-3) -- each is skipped outright when that argument is omitted
+    (`None`), the same way every other pairwise check here is skipped
+    when either half of its own pair is missing."""
     if args.control_not_deployed and args.control_process_ceiling is not None:
         _inventory_input_reject("--control-not-deployed and --control-process-ceiling are mutually exclusive")
     if args.control_not_deployed and args.control_process_count_total is not None:
@@ -2914,6 +3039,22 @@ def _inventory_validate_headroom_inputs(args: argparse.Namespace) -> None:
         and args.control_process_count_total < args.control_process_ceiling
     ):
         _inventory_input_reject("--control-process-count-total must not be less than --control-process-ceiling")
+    old_basis = args.data_process_count_old_basis
+    if (
+        old_basis is not None and args.data_process_count_total is not None
+        and old_basis > args.data_process_count_total
+    ):
+        _inventory_input_reject("--data-process-count-old-basis must not exceed --data-process-count-total")
+    if (
+        old_basis is not None and args.data_process_count_total is not None and args.data_process_ceiling is not None
+        and (args.data_process_count_total - old_basis) < args.data_process_ceiling
+    ):
+        _inventory_input_reject(
+            "--data-process-count-total minus --data-process-count-old-basis must not be less than "
+            "--data-process-ceiling"
+        )
+    if old_basis == 0 and args.concurrency is not None:
+        _inventory_input_reject("--concurrency must be omitted when --data-process-count-old-basis is 0")
 
 
 def cmd_inventory(args: argparse.Namespace) -> int:
@@ -3243,8 +3384,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--concurrency", type=_inventory_positive_int, default=None, metavar="N",
-        help="the platform's declared MITATEDB_MAX_CONCURRENCY value (a positive integer) -- omit to leave "
-             "item (8) unknown",
+        help="the OLD-basis revision's own declared MITATEDB_MAX_CONCURRENCY value (a positive integer) -- "
+             "meaningful, and required, only while --data-process-count-old-basis declares 1 or more "
+             "processes still on the old basis (omitting it there leaves item (8) unknown); must itself be "
+             "omitted when --data-process-count-old-basis is 0",
     )
     p.add_argument(
         "--data-process-ceiling", type=_inventory_positive_int, default=None, metavar="N",
@@ -3281,6 +3424,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reserved-connections", type=_inventory_nonnegative_int, default=None, metavar="N",
         help="platform-layer connection reserve (superuser_reserved_connections plus any Cloud SQL reserve; "
              "a non-negative integer -- 0 means no reserve) -- omit to leave item (8)'s aggregate check unknown",
+    )
+    p.add_argument(
+        "--thread-limit", type=_inventory_positive_int, default=None, metavar="N",
+        help="the NEW-basis revision's own declared MITATEDB_THREAD_LIMIT value (a positive integer) -- "
+             "always required for item (8) (--data-process-count-total can never be entirely old-basis); "
+             "omit to leave item (8) unknown",
+    )
+    p.add_argument(
+        "--data-process-count-old-basis", type=_inventory_nonnegative_int, default=None, metavar="N",
+        help="the count, within --data-process-count-total, of Data-plane processes still on the OLD basis "
+             "(sized by --concurrency rather than by --thread-limit's own role_pool_size) -- 0 declares none "
+             "are; omit to leave item (8) unknown",
     )
     p.set_defaults(func=cmd_inventory)
 

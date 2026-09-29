@@ -119,11 +119,14 @@ loud "refuse to start" -- there is no partial-startup mode.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
+import sys
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Mapping
 
 import psycopg
@@ -137,6 +140,7 @@ from .audit import AuditSink
 from .audit_dispatch import AuditRouter
 from .backend_postgres import PostgresBackend
 from .cell import ApplicationCell, _LimitStateHolder
+from . import concurrency_slots
 from .config import FoundationConfig, role_pool_size
 from .credential_store_postgres import DEFAULT_SCHEMA, PostgresCredentialStore
 from .http import DEFAULT_THREAD_LIMIT, HttpService, create_app
@@ -147,7 +151,8 @@ from .platform_declarations import (check_control_surface_consistency,
                                     check_role_connection_limits,
                                     check_writer_role_timeouts, read_platform_declarations,
                                     reject_removed_surface_env, reject_removed_timeout_env)
-from .pool import BoundedConnectionPool, pool_size_from_env
+from .pool import (BoundedConnectionPool, _application_name_connect_kwargs, pool_size_from_env,
+                   set_connection_application_name)
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
 
@@ -226,6 +231,36 @@ def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> i
     return value
 
 
+def _workers_from_env(env: Mapping[str, str], name: str) -> int:
+    """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1): `name` must
+    be set, non-empty, and a positive integer -- unset, empty, `0`,
+    negative, or non-numeric all stop startup with a message naming
+    `name`. Unlike `_thread_limit_from_env`/`_optional_int` above, there
+    is no default to degrade to: `--workers` is always explicit."""
+    raw = env.get(name)
+    if not raw:
+        raise RuntimeError(f"{name} is required to start mitatedb_api.main:app")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def _require_slot_dir(env: Mapping[str, str], name: str) -> Path:
+    """(design D-3 (2')): `name` must be set and non-empty -- unset or
+    empty stops startup with a message naming `name`. The path itself is
+    checked separately (`concurrency_slots.check_slot_directory`/
+    `selfcheck_slot_locking`, both called right after this in
+    `build_app`)."""
+    raw = env.get(name)
+    if not raw:
+        raise RuntimeError(f"{name} is required to start mitatedb_api.main:app")
+    return Path(raw)
+
+
 def _parse_served_apps(raw: str) -> list[str]:
     ids = [item.strip() for item in raw.split(",")]
     ids = [item for item in ids if item]
@@ -253,7 +288,7 @@ def _load_registry_rows(platform_dsn: str, schema: str, ids: list[str]) -> dict[
         "SELECT application_id, enabled, database_name FROM {table} WHERE application_id = ANY(%s)"
     ).format(table=sql.Identifier(schema, "applications"))
     try:
-        conn = psycopg.connect(platform_dsn, connect_timeout=_PLATFORM_CONNECT_TIMEOUT_S)
+        conn = psycopg.connect(platform_dsn, connect_timeout=_PLATFORM_CONNECT_TIMEOUT_S, **_application_name_connect_kwargs())
     except psycopg.Error as exc:
         raise RuntimeError(f"could not connect to MITATEDB_PLATFORM_DSN to validate MITATEDB_SERVE_APPS: {exc}") from exc
     try:
@@ -302,6 +337,25 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
 
     platform_dsn = _require(env, "MITATEDB_PLATFORM_DSN")
     ids = _parse_served_apps(_require(env, "MITATEDB_SERVE_APPS"))
+    # design D-1: `--workers` is always explicit (env required, no
+    # default) -- closes the `WEB_CONCURRENCY` entry point uvicorn's own
+    # config would otherwise read. Compared below, once `process_
+    # ceilings.data` is known, against the declared ceiling.
+    workers = _workers_from_env(env, "MITATEDB_WORKERS")
+    # design D-3 (2'): `build_app()` only CHECKS the slot directory
+    # (existence/owner/mode 0700) and self-checks real mutual exclusion on
+    # it -- it never creates the directory itself (the deployer's own
+    # image/runtime-directory mechanism does, so every worker this
+    # supervisor starts always opens the SAME directory).
+    slot_dir = _require_slot_dir(env, "MITATEDB_SLOT_DIR")
+    concurrency_slots.check_slot_directory(slot_dir)
+    concurrency_slots.selfcheck_slot_locking(slot_dir)
+    # design D-4: every connection this process opens from here on (the
+    # platform pool, every served application's two persistent
+    # connections, the durable audit sink's per-write connections, the
+    # startup reads below) carries this `application_name` (`pool.py`'s
+    # own module-level toggle).
+    set_connection_application_name(f"MitateDB-api:data:{os.getpid()}")
 
     app_dsns: dict[str, tuple[str, str]] = {}
     for application_id in ids:
@@ -322,30 +376,17 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         if not row["provisioned"]:
             raise RuntimeError(f"application {application_id!r} named in MITATEDB_SERVE_APPS is registered but not yet provisioned (migrations/0003_provision_application.sql)")
 
-    # Phase 10 WP-4e (supervisor ruling 2026-09-09): the default used to be
-    # a fixed `pool.DEFAULT_MAX_SIZE` (20), entirely disconnected from the
-    # declared `max_concurrency` ceiling -- the same F-1 shape r2db-api's
-    # `role_pool_size` already fixed for its own per-application role
-    # pools (this peer has no per-application pool to match -- see `config.
-    # role_pool_size`'s own docstring). `FoundationConfig.from_env(env)`
-    # cannot be called this early -- it unconditionally requires
-    # `data_base_url` (raises `ValidationError` otherwise), which comes
-    # from `declarations`, read further below via `durable_audit.
-    # _connect()` -- so this reads `MITATEDB_MAX_CONCURRENCY` directly,
-    # the SAME lenient-degrade discipline `_optional_int` documents (an
-    # unset/unparsable value silently keeps the dataclass default, rather
-    # than raising here for what is only a pool-sizing floor; a genuinely
-    # invalid value still fails loudly later, when the REAL `config` below
-    # is built from this same `env` via `from_env`'s own strict parse).
-    # Routed through `role_pool_size` (not just `max_concurrency` inline)
-    # so the derivation itself, not merely the number, matches r2db-api's
-    # sibling. `MITATEDB_PLATFORM_POOL_SIZE` still wins outright when set
-    # explicitly (`pool_size_from_env`'s own `default=` is only the
-    # fallback).
-    _declared_concurrency = _optional_int(env, "MITATEDB_MAX_CONCURRENCY", FoundationConfig.max_concurrency)
-    pool_size = pool_size_from_env(
-        env.get("MITATEDB_PLATFORM_POOL_SIZE"), default=role_pool_size(FoundationConfig(max_concurrency=_declared_concurrency)),
-    )
+    # design D-3 (5): the platform pool's own default size is
+    # `role_pool_size(thread_limit)` -- the real per-process simultaneous-
+    # borrow ceiling (`config.role_pool_size`'s own docstring), never the
+    # declared `max_concurrency` (`MITATEDB_MAX_CONCURRENCY`), which is the
+    # deployment-wide admission bound the host-shared slot directory
+    # enforces and holds no connection. `MITATEDB_PLATFORM_POOL_SIZE` wins
+    # outright when set explicitly (`pool_size_from_env`'s own `default=`
+    # is only the fallback). `_role_pool_size` is also the per-process
+    # figure the F-16/F-18 checks below are given.
+    _role_pool_size = role_pool_size(thread_limit)
+    pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"), default=_role_pool_size)
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
 
     # Q4 phase (design D-1(b), §3.7 data-plane steps 4-6): the single
@@ -379,6 +420,27 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
             migration=platform_declarations.MIGRATION_NUMBER,
         )
+        # design D-1: checked here, inside `build_app()` itself (never
+        # `verify-declarations`, never `lifespan`), against the SAME
+        # `process_ceilings.data` value every cell below is given.
+        # `--workers` above the declared ceiling means this supervisor
+        # alone already exceeds the deployer's own stated maximum -- a
+        # startup failure, not merely a `deployment_required` declaration.
+        process_ceiling = declarations.process_ceilings.data
+        if workers > process_ceiling:
+            raise RuntimeError(
+                f"MITATEDB_WORKERS ({workers}) exceeds process_ceilings.data ({process_ceiling}) -- "
+                f"declare a higher process_ceilings.data (python -m mitatedb_api.ops declare-process-ceilings) "
+                f"or lower MITATEDB_WORKERS"
+            )
+        # design D-3 (4): the `concurrency` mapping's own extra condition
+        # -- `enforced` only when this supervisor's own worker count is AT
+        # LEAST the declared ceiling (workers <= ceiling always holds by
+        # this point, so this is `workers == process_ceiling` in
+        # practice); a ceiling ABOVE workers means a second host could be
+        # counted toward the same declared total, where this host's own
+        # slot directory is not shared.
+        concurrency_configured = workers >= process_ceiling
         # WP-4 design instruction #6 (the control HTTP mount is a single
         # later commit, WP-5): this function's own source must never spell
         # out a certain lowercase, underscore-joined two-word substring
@@ -408,14 +470,32 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # but served by some OTHER process. Run on this same connection
         # (login role = the real `mitatedbsvc_api` writer role), right
         # after the writer-role dual check above.
+
+        # design D-3 (5): `mitatedbsvc_api`'s own real CONNECTION LIMIT is
+        # a CLUSTER-WIDE cap shared by every one of `process_ceilings.
+        # data` data-plane processes -- `check_role_connection_limits`
+        # multiplies `pool_size` by `process_ceilings.data` internally for
+        # the `api` class and the served applications' roles, so this
+        # call passes its own plain, un-multiplied `_role_pool_size`
+        # alongside the SAME `declarations.process_ceilings` `check_max_
+        # connections_headroom` right below reads.
         check_role_connection_limits(
             declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            concurrency=_declared_concurrency,
+            pool_size=_role_pool_size, process_ceilings=declarations.process_ceilings,
             role_classes=frozenset({"api"}), application_ids=ids,
         )
         check_max_connections_headroom(
             declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            process_ceilings=declarations.process_ceilings, concurrency=_declared_concurrency,
+            process_ceilings=declarations.process_ceilings, pool_size=_role_pool_size,
+        )
+        # The `requests_per_minute` rate function every request runs
+        # through the platform pool (the same `mitatedbsvc_api` login role
+        # as this connection) must exist and be executable by that role,
+        # checked read-only here so a platform missing its migration stops
+        # startup (and `--preflight`) instead of answering every request
+        # with 503.
+        platform_declarations.check_request_rate_function(
+            declarations_conn, schema=schema, migration=platform_declarations.REQUEST_RATE_MIGRATION_FILENAME,
         )
     finally:
         declarations_conn.close()
@@ -474,7 +554,21 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # Handed to every `ApplicationCell` this loop builds below, so
     # `requests_per_minute`/`concurrency` are bounded across this
     # deployment's WHOLE served application set, never per-application.
-    limit_holder = _LimitStateHolder()
+
+    # design D-3 (1)/(2): `rate` is `credentials` itself --
+    # `PostgresCredentialStore.record_rate_and_check` runs on the SAME
+    # platform pool/role this store's own read path already uses (no
+    # separate pool exists for counting). `concurrency_slots` is always
+    # wired here (`MITATEDB_SLOT_DIR` is a required env var, checked
+    # above); `concurrency_configured` is the separate declaration-only
+    # boolean (workers vs. ceiling, computed above) -- the mechanism
+    # itself stays active regardless of what this deployment honestly
+    # declares.
+    limit_holder = _LimitStateHolder(
+        rate=credentials,
+        concurrency_slots=concurrency_slots.HostSharedConcurrencySlots(slot_dir),
+        concurrency_configured=concurrency_configured,
+    )
 
     cells: dict[str, ApplicationCell] = {}
     for application_id in ids:
@@ -637,3 +731,49 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
 from .control_composition import build_control_service  # noqa: E402,F401
 
 app = build_app()
+
+
+# design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1: the `--preflight`
+# one-shot entry. `python -m mitatedb_api.main --preflight` imports this
+# module -- which, by the line right above, already calls `build_app()`
+# exactly once and raises whatever `build_app()` raises (F-13/F-15/F-16/
+# F-18/registry/pepper/the workers-vs-ceiling check/the slot-directory
+# checks, all inside `build_app()` itself, never `--preflight`-specific
+# code) if this deployment's own environment is not sound -- Python's own
+# unhandled-exception exit (non-zero, traceback on stderr, the raising
+# `PlatformDeclarationError`'s own `code="F-15"` text included) is the
+# outcome for that path, with nothing below this point ever executing.
+# Reached only once `app` above has been built successfully.
+async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
+    """Drives exactly one ASGI `lifespan` startup+shutdown cycle against
+    `asgi_app` (the already-built module-level `app` above -- `build_
+    app()` is never called a second time) -- the standard ASGI lifespan
+    scope protocol, driven directly rather than through a real server.
+    `build_app()`'s own `_lifespan` hook is what closes every connection
+    this process opened (`credentials.close()` -- the platform pool --
+    and every served application's own two persistent connections,
+    `cell._backend.close()`) -- reused here rather than duplicated."""
+    to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+    from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+
+    async def receive() -> dict[str, str]:
+        return await to_app.get()
+
+    async def send(message: dict[str, str]) -> None:
+        await from_app.put(message)
+
+    task = asyncio.ensure_future(asgi_app({"type": "lifespan"}, receive, send))
+    await to_app.put({"type": "lifespan.startup"})
+    startup_result = await from_app.get()
+    if startup_result["type"] == "lifespan.startup.failed":
+        raise RuntimeError(startup_result.get("message") or "lifespan startup failed")
+    await to_app.put({"type": "lifespan.shutdown"})
+    shutdown_result = await from_app.get()
+    await task
+    if shutdown_result["type"] == "lifespan.shutdown.failed":
+        raise RuntimeError(shutdown_result.get("message") or "lifespan shutdown failed")
+
+
+if __name__ == "__main__" and "--preflight" in sys.argv:
+    asyncio.run(_run_lifespan_once(app))
+    sys.exit(0)

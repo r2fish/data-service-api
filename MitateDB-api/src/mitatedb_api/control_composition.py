@@ -28,7 +28,8 @@ from urllib.parse import urlsplit
 import psycopg
 
 from .audit_query import PostgresAuditQueryStore
-from .config import FoundationConfig
+from .config import role_pool_size, thread_limit_from_env
+from .http import DEFAULT_THREAD_LIMIT
 from . import operation_catalog
 from .control_credential_store_postgres import PostgresControlCredentialStore
 from .control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
@@ -41,6 +42,7 @@ from .platform_declarations import (check_max_connections_headroom,
                                     read_declared_role_timeouts, read_platform_declarations,
                                     reject_removed_surface_env, reject_removed_timeout_env,
                                     require_control_surface_declared)
+from .pool import _application_name_connect_kwargs
 from .surfaces import build_surfaces
 
 
@@ -70,7 +72,7 @@ def _operation_catalog_url(env: Mapping[str, str], *, default: str) -> str:
     return raw
 
 
-def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneService:
+def build_control_service(env: Mapping[str, str] | None = None, *, workers: Optional[int] = None) -> ControlPlaneService:
     """WP-4/WP-5 (design v1.2 §3 WP-4 row, §5 flip): assembles a real,
     working `control_plane.ControlPlaneService` against PostgreSQL.
 
@@ -112,6 +114,15 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
                                              route still exists and still
                                              authenticates, answering
                                              `CAPABILITY_UNSUPPORTED`).
+
+    `workers` (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-1): the
+    real control-plane entry (`control_main.build_control_app`) passes
+    this process' own `MITATEDB_CONTROL_WORKERS`, and this function then
+    refuses to build when it exceeds the declared `process_ceilings.
+    control` -- checked right after the declarations read, inside this
+    build (never `lifespan`). `None` (every other caller: the `ops` CLI's
+    one-shot operator commands and the conformance adapters, none of
+    which serve the control plane from a worker pool) skips that check.
     """
     env = env if env is not None else os.environ
 
@@ -142,7 +153,7 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
     # check (F-13/F-7/F-9/F-10/F-11), since it IS the connection this
     # process' own `control_audit` writes go through (`backend`'s own
     # `dsn=controlplane_dsn` below).
-    conn = psycopg.connect(controlplane_dsn, connect_timeout=5, autocommit=False)
+    conn = psycopg.connect(controlplane_dsn, connect_timeout=5, autocommit=False, **_application_name_connect_kwargs())
     try:
         declarations = read_platform_declarations(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
@@ -155,6 +166,16 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
         # CONTROL_PLANE_STATUS`). `check_control_surface_consistency`
         # (F-6) is never called here -- it is a data-plane-only check.
         require_control_surface_declared(declarations.surfaces, schema=schema, ops_module=platform_declarations.PEER_MODULE)
+        # design D-1: checked here, inside the composition root's own
+        # build (never `verify-declarations`, never `lifespan`), against
+        # the SAME `process_ceilings.control` value the service below is
+        # given.
+        if workers is not None and workers > declarations.process_ceilings.control:
+            raise RuntimeError(
+                f"MITATEDB_CONTROL_WORKERS ({workers}) exceeds process_ceilings.control "
+                f"({declarations.process_ceilings.control}) -- declare a higher process_ceilings.control "
+                f"(python -m mitatedb_api.ops declare-process-ceilings) or lower MITATEDB_CONTROL_WORKERS"
+            )
         # This process' OWN writer role's self-inclusion (F-13) + dual
         # check (F-7/F-9/F-10/F-11) -- `controlplane_dsn`'s login role IS
         # `mitatedbsvc_controlplane`, the role that writes `control_audit`.
@@ -187,27 +208,30 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
         # application's runtime/developer role (`application_ids=()`:
         # this process serves no application at all). Run on this same
         # connection (login role = the real `mitatedbsvc_controlplane`
-        # writer role). `_declared_concurrency` mirrors `main.build_app`'s
-        # own lenient-degrade `MITATEDB_MAX_CONCURRENCY` read (an unset or
-        # unparsable value silently keeps `FoundationConfig`'s own
-        # default) -- this is only a verification-time floor computation,
-        # like `ops.py`'s own same-named helper.
+        # writer role).
         _own_role_classes = {"controlplane"}
         if env.get("MITATEDB_AUDIT_DSN"):
             _own_role_classes.add("auditreader")
-        _raw_declared_concurrency = env.get("MITATEDB_MAX_CONCURRENCY")
-        try:
-            _declared_concurrency = int(_raw_declared_concurrency) if _raw_declared_concurrency else FoundationConfig.max_concurrency
-        except ValueError:
-            _declared_concurrency = FoundationConfig.max_concurrency
+
+        # design D-3 (5): control's own F-16/F-18 basis is
+        # `role_pool_size` of the thread limit -- the same function
+        # `main.py`'s own startup and `ops verify-declarations` use --
+        # read from THIS process' own env (`MITATEDB_THREAD_LIMIT`,
+        # through `config.thread_limit_from_env`), never the declared
+        # `max_concurrency`, which sizes no pool.
+        # `check_role_connection_limits` multiplies the controlplane/
+        # auditreader floors by `process_ceilings.control` itself.
+        _control_role_pool_size = role_pool_size(
+            thread_limit_from_env(env, "MITATEDB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT)
+        )
         check_role_connection_limits(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            concurrency=_declared_concurrency,
+            pool_size=_control_role_pool_size, process_ceilings=declarations.process_ceilings,
             role_classes=frozenset(_own_role_classes), application_ids=(),
         )
         check_max_connections_headroom(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            process_ceilings=declarations.process_ceilings, concurrency=_declared_concurrency,
+            process_ceilings=declarations.process_ceilings, pool_size=_control_role_pool_size,
         )
     finally:
         conn.close()

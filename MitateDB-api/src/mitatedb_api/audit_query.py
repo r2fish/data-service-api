@@ -39,6 +39,7 @@ from .control_audit import CONTROL_AUDIT_FIELDS
 from .errors import (AuditReaderUnavailable, StorageConfigurationError, ValidationError,
                      violation, observed_type_of)
 from .identifiers import validate_identifier
+from .pool import _application_name_connect_kwargs
 
 DEFAULT_SCHEMA = "mitatedb_registry"
 
@@ -404,7 +405,7 @@ class PostgresAuditQueryStore:
         statement = sql.SQL(_AUDIT_QUERY_UNION_SQL).format(
             control_table=self._control_table, application_table=self._application_table)
         try:
-            conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout)
+            conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, **_application_name_connect_kwargs())
             try:
                 with conn.cursor() as cur:
                     cur.execute(statement, params)

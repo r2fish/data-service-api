@@ -380,7 +380,7 @@ def test_apply_platform_migration_rejects_duplicate_filename_in_run(platform, mo
 
 
 # ===========================================================================
-# completion conditions 4/4b -- superseded-by, derived from the 4 real
+# completion conditions 4/4b -- superseded-by, derived from the 5 real
 # migration files (and, separately, from a synthetic pair)
 # ===========================================================================
 
@@ -420,7 +420,7 @@ def _platform_migration_targets_in_text(text: str) -> "list[tuple[str, str]]":
     `:"controlplane_role"` and 0013's own `r2dbsvc_controlplane`, the
     SAME real role once `0008` is actually invoked with the production
     value) are matched as two DIFFERENT targets here, never folded
-    together. This is safe for the 4 CURRENTLY accepted files only
+    together. This is safe for the 5 CURRENTLY accepted files only
     because none of them redefines the SAME KIND of target (the same
     `SET <param>`, or `CONNECTION LIMIT`) for that role under two
     different spellings -- a RESIDUAL GAP: a future migration that
@@ -495,7 +495,7 @@ def _derive_platform_migration_target_map() -> "dict[tuple[str, str], tuple[str,
 
 def test_platform_migration_superseded_by_equals_the_target_map_folded_to_file_level():
     """Completion condition 4: `ops._PLATFORM_MIGRATION_SUPERSEDED_BY`
-    is exactly what the target-level map, derived directly from the 4
+    is exactly what the target-level map, derived directly from the 5
     accepted migration files' own real text, derives at file
     granularity. Non-vacuous: the derived table is non-empty (`{0008:
     (0012,)}`, design D-1 monitor ruling R1-5, criterion (iii) -- the
@@ -512,7 +512,7 @@ def test_platform_migration_target_map_derivation_exercises_all_3_criteria_on_sy
     always returns an empty map would still pass condition 4 by
     accident if `_PLATFORM_MIGRATION_SUPERSEDED_BY` itself were ever
     emptied in lockstep -- this test exercises the derivation directly,
-    independent of the 4 real files, with a minimal synthetic pair where
+    independent of the 5 real files, with a minimal synthetic pair where
     EACH of the 3 criteria fires exactly once: (i) the same function
     name `CREATE OR REPLACE FUNCTION`d in both; (ii) the same role's own
     `ALTER ROLE ... SET statement_timeout` in both; (iii) the same table
@@ -592,7 +592,7 @@ def test_apply_platform_migration_run_of_0008_0012_succeeds_in_one_call(platform
 
 def test_platform_migration_variable_table_matches_each_files_own_real_references():
     """Completion condition 6: `ops._PLATFORM_MIGRATION_VARIABLE_TABLE`
-    equals, for each of the 4 accepted files, that file's own real
+    equals, for each of the 5 accepted files, that file's own real
     `:name` references (never a `--` comment, never a `::` type cast)."""
     for name in ops._PLATFORM_MIGRATION_FILENAMES:
         text = (MIGRATIONS_DIR / name).read_text()

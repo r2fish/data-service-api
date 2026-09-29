@@ -196,7 +196,9 @@ History: CH-0504
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -217,8 +219,10 @@ from .credential_store import (
     PostgresCredentialStore,
     validate_control_pepper_separation,
 )
-from .limits import ControlPlaneLimits, ResourceLimits
+from .http import DEFAULT_THREAD_LIMIT
+from .limits import ControlPlaneLimits, role_pool_size, thread_limit_from_env
 from . import platform_declarations
+from . import postgres
 from .platform_declarations import (
     check_max_connections_headroom,
     check_role_connection_limits,
@@ -255,6 +259,26 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _workers_from_env(env: Mapping[str, str], name: str) -> int:
+    """design D-1: identical discipline to `r2db_api.
+    main._workers_from_env` -- `name` must be set, non-empty, and a
+    positive integer; unset/empty/`0`/negative/non-numeric all stop
+    startup naming `name`. `R2DB_CONTROL_WORKERS` is always `1` in a real
+    deployment (this composition root never serves more than one worker)
+    -- checked here, and again against `process_ceilings.control` below,
+    rather than assumed."""
+    raw = env.get(name)
+    if not raw:
+        raise RuntimeError(f"{name} is required to start r2db_api.control_main:build_control_app")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer, got {raw!r}")
+    return value
 
 
 def assemble_control_stack(
@@ -427,6 +451,15 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # N-7) rather than this module's `DEFAULT_SCHEMA` -- zero-network, so
     # moving it earlier changes nothing about the startup-sequence design.
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
+    # design D-1: always explicit, always `1` in a real
+    # deployment -- compared below, once `process_ceilings.control` is
+    # known, against the declared ceiling (mirrors `r2db_api.main`'s own
+    # data-plane check).
+    workers = _workers_from_env(env, "R2DB_CONTROL_WORKERS")
+    # design D-4: every
+    # connection this process opens from here on carries this
+    # `application_name`.
+    postgres.set_connection_application_name(f"r2db-api:control:{os.getpid()}")
 
     # Step 2 (F-1/F-2): a deployer who left one of these four defined must
     # find out immediately.
@@ -532,6 +565,17 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # F-3c: unconditionally required for THIS process (unlike `r2db_api.
     # main`'s F-6, which is conditional on `R2DB_CONTROL_PLANE_STATUS`).
     require_control_surface_declared(declarations.surfaces, schema=schema, ops_module=platform_declarations.PEER_MODULE)
+    # design D-1: checked
+    # here, inside `build_control_app()` itself (never `verify-
+    # declarations`, never `lifespan`), against the SAME
+    # `process_ceilings.control` value `assemble_control_stack` below is
+    # given.
+    if workers > declarations.process_ceilings.control:
+        raise RuntimeError(
+            f"R2DB_CONTROL_WORKERS ({workers}) exceeds process_ceilings.control ({declarations.process_ceilings.control}) -- "
+            f"declare a higher process_ceilings.control (python -m r2db_api.ops declare-process-ceilings) "
+            f"or lower R2DB_CONTROL_WORKERS"
+        )
 
     surfaces: dict[str, Any] = {
         "data": {"base_url": declarations.surfaces.data_base_url},
@@ -598,14 +642,21 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         _own_role_classes = {"controlplane"}
         if audit_dsn:
             _own_role_classes.add("auditreader")
+        # design D-3 (5): control's own F-16/F-18 basis is
+        # `role_pool_size` of the thread limit -- the same function
+        # `main.py`'s own startup and `ops verify-declarations` use -- read
+        # from THIS process' own env (`R2DB_THREAD_LIMIT`, through
+        # `r2db_api.limits.thread_limit_from_env`), never
+        # `ResourceLimits().concurrency`, which sizes no pool.
+        _control_role_pool_size = role_pool_size(thread_limit_from_env(env, "R2DB_THREAD_LIMIT", DEFAULT_THREAD_LIMIT))
         check_role_connection_limits(
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            concurrency=ResourceLimits().concurrency,
+            pool_size=_control_role_pool_size, process_ceilings=declarations.process_ceilings,
             role_classes=frozenset(_own_role_classes), application_slugs=(),
         )
         check_max_connections_headroom(
             _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
-            process_ceilings=declarations.process_ceilings, concurrency=ResourceLimits().concurrency,
+            process_ceilings=declarations.process_ceilings, pool_size=_control_role_pool_size,
         )
 
     # Step 6: assemble the rest of the stack -- `surfaces`/`audit_
@@ -696,3 +747,50 @@ def __getattr__(name: str) -> Any:
         globals()["app"] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# design D-1 v0.4: the `--preflight` one-shot
+# entry. `r2db_api.main`'s own equivalent reuses the module-level `app`
+# an EAGER `app = build_app()` already built at plain import time -- this
+# module has no such eager assignment (`app` above is built LAZILY,
+# through `__getattr__`, never triggered by a bare `python -m r2db_api.
+# control_main` import, this module's own header): a preflight run that
+# relied on the module-level `app` attribute here would therefore check
+# NOTHING. This entry calls `build_control_
+# app()` directly instead -- exactly once, the only `build_control_app()`
+# call this whole preflight run ever makes -- and drives its own real
+# startup-time checks (F-1/F-2/F-8/F-3/F-3c/F-4/F-4b/F-5/F-13/F-7/F-9/
+# F-10/F-11/F-15/F-16/F-18, all already inside `build_control_app()`
+# itself) the same way a normal import-and-serve would.
+async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
+    """Identical to `r2db_api.main._run_lifespan_once` (own copy, not a
+    shared import -- P-6, no code sharing between composition roots'
+    own entry points): drives one ASGI `lifespan` startup+shutdown cycle
+    against `asgi_app`, closing every pool `build_control_app()` opened
+    (this module's own `_lifespan` hook, above) without ever serving a
+    request."""
+    to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+    from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
+
+    async def receive() -> dict[str, str]:
+        return await to_app.get()
+
+    async def send(message: dict[str, str]) -> None:
+        await from_app.put(message)
+
+    task = asyncio.ensure_future(asgi_app({"type": "lifespan"}, receive, send))
+    await to_app.put({"type": "lifespan.startup"})
+    startup_result = await from_app.get()
+    if startup_result["type"] == "lifespan.startup.failed":
+        raise RuntimeError(startup_result.get("message") or "lifespan startup failed")
+    await to_app.put({"type": "lifespan.shutdown"})
+    shutdown_result = await from_app.get()
+    await task
+    if shutdown_result["type"] == "lifespan.shutdown.failed":
+        raise RuntimeError(shutdown_result.get("message") or "lifespan shutdown failed")
+
+
+if __name__ == "__main__" and "--preflight" in sys.argv:
+    _preflight_app = build_control_app()
+    asyncio.run(_run_lifespan_once(_preflight_app))
+    sys.exit(0)

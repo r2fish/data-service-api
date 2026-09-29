@@ -67,6 +67,7 @@ import json
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import types
 from pathlib import Path
@@ -127,6 +128,9 @@ MIGRATION_NAMES = (
     "0013_role_connection_limits.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
     "0012_process_ceilings.sql",
+    # WP-2 (design D-3 (1), 監督裁定15): `r2db_api.main.build_app` now
+    # always wires the PostgreSQL-backed `requests_per_minute` rate row.
+    "0015_credential_request_rate.sql",
 )
 
 _DATA_URL = "https://r2db-process-ceilings-test.example.invalid/v1"
@@ -246,6 +250,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
+        _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(
@@ -329,11 +334,18 @@ def app_a(platform: types.SimpleNamespace) -> Iterator[types.SimpleNamespace]:
 
 
 def _main_env(platform: types.SimpleNamespace, app: types.SimpleNamespace) -> dict[str, str]:
+    # WP-2 (design D-1/D-3 (2'), 監督裁定 11/27): a fresh slot directory
+    # per call, `workers=1` -- every ceiling this file declares (1 or 2)
+    # accepts `workers=1` at startup (only `workers > ceiling` fails), so
+    # this is safe for every scenario this module drives.
+    slot_dir = tempfile.mkdtemp(prefix="r2db-test-slots-process-ceilings-")
     return {
         "R2DB_CREDENTIAL_PEPPER": PEPPER,
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": app.slug,
+        "R2DB_WORKERS": "1",
+        "R2DB_SLOT_DIR": slot_dir,
         f"R2DB_APP_{app.slug.upper()}_RUNTIME_DSN": app.runtime_dsn,
         f"R2DB_APP_{app.slug.upper()}_DEVELOPER_DSN": app.developer_dsn,
         # This file's own `platform` fixture seeds `surfaces` WITH a
@@ -535,10 +547,18 @@ def test_ceiling_two_maps_in_memory_classes_to_deployment_required(
     platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Completion condition 2 (ceiling 2 half) + completion condition 3
-    (region (i)/(iii) unaffected), data plane. A mutation that hardcodes
-    the mapping to always `enforced` (design D-5(ii)'s own "壊すとどう見え
-    るか": "写像を『常に enforced』に固定する") turns the `deployment_
-    required` assertions below red; a mutation that includes region (i)/
+    (region (i)/(iii) unaffected), data plane, updated for WP-2 (design
+    docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (4), 監督裁定18/27):
+    `r2db_api.main.build_app` now always wires the PostgreSQL-backed
+    `requests_per_minute` rate row (`_main_env`'s own `R2DB_WORKERS`/
+    `R2DB_SLOT_DIR`), so `requests_per_minute` reads `enforced`
+    unconditionally, regardless of `process_ceilings.data` (裁定18) --
+    only `concurrency` still depends on the ceiling-vs-workers comparison
+    (`_main_env`'s own `workers=1` < this test's own declared ceiling 2 ->
+    `deployment_required`, 裁定27). A mutation that hardcodes the
+    `concurrency` mapping to always `enforced` (design's own "壊すとどう見
+    えるか": "写像を『常に enforced』に固定する") turns the `deployment_
+    required` assertion below red; a mutation that includes region (i)/
     (iii) classes in the ceiling-dependent set turns the unaffected
     assertions red."""
     _set_row(platform, "process_ceilings", {"data": 2, "control": 1})
@@ -557,7 +577,7 @@ def test_ceiling_two_maps_in_memory_classes_to_deployment_required(
             caps = service.capabilities(context)
             enforcement = caps["limit_enforcement"]
 
-            assert enforcement["requests_per_minute"] == "deployment_required"
+            assert enforcement["requests_per_minute"] == "enforced"
             assert enforcement["concurrency"] == "deployment_required"
 
             for class_name in _DATA_PLANE_REQUEST_SCOPED_CLASSES:
@@ -687,6 +707,18 @@ def test_control_plane_ceiling_mapping_reads_control_not_data_through_build_cont
 
     credential_id: str | None = None
     _set_row(platform, "process_ceilings", {"data": 1, "control": 2})
+    # F-16 multiplies controlplane's own floor by `process_ceilings.
+    # control` (2): 16*2=32 is above the role's CONNECTION LIMIT (20 from
+    # 0013), so the limit is raised to 32 here for this test's own
+    # control-plane ceiling-mapping assertion to be reached, and put back
+    # to the value read below in `finally` (the `platform` fixture is
+    # shared by later tests).
+    with psycopg.connect(platform.admin_dsn) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute("SELECT rolconnlimit FROM pg_roles WHERE rolname = %s", [platform.controlplane_role])
+            (original_connlimit,) = _cur.fetchone()
+            _cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 32").format(sql.Identifier(platform.controlplane_role)))
+        _conn.commit()
     try:
         import r2db_api.control_main as control_main_module
 
@@ -695,6 +727,7 @@ def test_control_plane_ceiling_mapping_reads_control_not_data_through_build_cont
             "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
             "R2DB_CREDENTIAL_PEPPER": PEPPER,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
+            "R2DB_CONTROL_WORKERS": "1",
         }
         control_app = control_main_module.build_control_app(env=control_env)
 
@@ -728,6 +761,14 @@ def test_control_plane_ceiling_mapping_reads_control_not_data_through_build_cont
                 with conn.cursor() as cur:
                     cur.execute(sql.SQL("DELETE FROM {table} WHERE credential_id = %s").format(table=sql.Identifier(platform.schema, "control_credentials")), [credential_id])
                 conn.commit()
+        with psycopg.connect(platform.admin_dsn) as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    sql.SQL("ALTER ROLE {} CONNECTION LIMIT {}").format(
+                        sql.Identifier(platform.controlplane_role), sql.Literal(int(original_connlimit))
+                    )
+                )
+            _conn.commit()
         _restore_default_ceilings(platform)
 
 
@@ -819,8 +860,17 @@ def test_declaration_table_is_the_only_source_no_env_fallback(
             # disagreeing with the env fallback's data=1) means
             # deployment_required, never enforced -- an env fallback
             # reading the bogus env var above (data=1) would report
-            # enforced instead.
-            assert enforcement["requests_per_minute"] == "deployment_required"
+            # enforced instead. WP-2 (design D-3 (4), 監督裁定18): checked
+            # on `concurrency` now, never `requests_per_minute` --
+            # `build_app` always wires the PostgreSQL-backed rate row as
+            # of this WP, so `requests_per_minute` reads `enforced`
+            # unconditionally and is no longer ceiling-sensitive at all;
+            # `concurrency`'s own mapping still depends on `process_
+            # ceilings.data` vs. this supervisor's own workers (`_main_
+            # env`'s `R2DB_WORKERS=1`) -- TABLE data=2 > workers=1 ->
+            # `deployment_required`; the env fallback's bogus data=1 ==
+            # workers=1 would instead report `enforced`.
+            assert enforcement["concurrency"] == "deployment_required"
         finally:
             app.app.state.service._durable_audit.close()  # noqa: SLF001
             app.app.state.service._credentials.close()  # noqa: SLF001

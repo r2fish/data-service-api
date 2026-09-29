@@ -7,9 +7,40 @@ from __future__ import annotations
 
 from typing import Any
 
-# Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below) (in `service.py`), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`. Every other `ResourceLimits` class is either region (i) (request-scoped, unaffected regardless of process count) or region (iii) (`idempotency_entries`, bound in PostgreSQL -- `enforced` regardless of `process_ceiling`, design; the count lock itself is scope, not this WP's).
+# design D-5(ii), contract 1.8.0: region (ii) is `requests_per_minute`/
+# `concurrency` -- the two `ResourceLimits` classes
+# `resolve_limit_enforcement` below governs (both admitted by
+# `DataService` in `service.py`), the only ones whose
+# `limit_enforcement` mapping depends on how each is wired rather than
+# on `process_ceiling` alone.
 # history: CH-0174
-_IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES = frozenset({"requests_per_minute", "concurrency"})
+
+
+def resolve_limit_enforcement(*, configured: bool, ceiling: int) -> str:
+    """The 2-strategy `limit_enforcement` mapping (design D-3 (4)) every
+    region-(ii) class -- on both planes -- runs through: a class bound by
+    a mechanism actually SHARED across every worker this supervisor runs
+    (`configured=True`) reads `enforced` unconditionally, whatever the
+    declared `ceiling` is; a class still bound by in-process state alone
+    (`configured=False`) reads `enforced` only while `ceiling <= 1`
+    (the single-process rule).
+
+    `configured`'s own meaning is class-specific and is the caller's job
+    to compute, never this function's: `requests_per_minute` is
+    `configured` exactly when the PostgreSQL-backed rate row is wired,
+    regardless of workers; `concurrency` is `configured` only when the
+    host-shared slot directory is wired AND this supervisor's own worker
+    count is at least the declared ceiling (workers below the ceiling
+    could mean a second, unrelated host is also counted toward it, where
+    the slot directory is not shared). The control plane's two region-(ii)
+    classes (`control_requests_per_minute`/`audit_requests_per_minute`)
+    stay in-process on both peers -- their own caller always passes
+    `configured=False`, which routes them through this same function to
+    the single-process rule rather than a second, hand-duplicated
+    expression."""
+    if configured:
+        return "enforced"
+    return "enforced" if ceiling <= 1 else "deployment_required"
 
 
 def build_capabilities_document(
@@ -21,6 +52,8 @@ def build_capabilities_document(
     process_ceiling: int,
     surfaces: dict[str, Any] | None,
     operation_catalog_url: str | None = None,
+    rate_configured: bool = False,
+    concurrency_configured: bool = False,
 ) -> dict[str, Any]:
     # CCR-13 WP-5b: the WP-2-through-WP-5 provisional gate (design
     # R2DB_CCR13_STORAGE_V1.md §3) is removed in this same commit
@@ -112,23 +145,35 @@ def build_capabilities_document(
         # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): three regions, not two. Region (i) (request-scoped: every class
         # below not named in the other two sets) is unaffected by
         # `process_ceiling` -- unchanged from before this WP.
-        # Region (ii) (`requests_per_minute`/`concurrency` --
-        # bound by in-memory, per-process state, `self._rate_
-        # windows`/`self._active`) reads `enforced` only while
-        # `process_ceiling == 1` and `deployment_required` once it
-        # is `>= 2` (contract 1.8.0's own enforcement-scope
-        # definition: a per-process bound is `enforced` for the
-        # whole deployment only while exactly one process may
-        # serve this plane's base URL). Region (iii)
+        # Region (ii) (`requests_per_minute`/`concurrency`,
+        # each resolved by `capabilities_document.resolve_
+        # limit_enforcement`) reads `enforced` unconditionally
+        # once its own mechanism is configured across every
+        # worker this supervisor runs (the PostgreSQL-backed
+        # rate row for `requests_per_minute`; the host-shared
+        # slot directory, with this supervisor's workers at the
+        # declared ceiling, for `concurrency`) -- otherwise it
+        # keeps contract 1.8.0's own single-process enforcement-
+        # scope rule, `enforced` only while `process_ceiling ==
+        # 1`. Region (iii)
         # (`idempotency_entries` -- bound in PostgreSQL,
         # `postgres.py`'s own `_idempotency_reserve`) stays
         # `enforced` regardless of `process_ceiling` -- this class
         # does not resolve within one request.
         # history: CH-0137
+
+        # design D-3 (4): `requests_per_minute`/
+        # `concurrency` each read `resolve_limit_enforcement` with
+        # their OWN `configured` boolean (`rate_configured`/
+        # `concurrency_configured`, both constructor-injected,
+        # echo-only, default `False` -- every caller that never
+        # wires either mechanism keeps the single-process
+        # `ceiling <= 1` rule this dict already had).
         "limit_enforcement": {
             name: (
                 "reference_wall_clock" if name in ("execution_ms", "idempotency_retention_ms")
-                else ("enforced" if process_ceiling <= 1 else "deployment_required") if name in _IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES
+                else resolve_limit_enforcement(configured=rate_configured, ceiling=process_ceiling) if name == "requests_per_minute"
+                else resolve_limit_enforcement(configured=concurrency_configured, ceiling=process_ceiling) if name == "concurrency"
                 else "enforced"
             )
             for name in limits.as_dict()

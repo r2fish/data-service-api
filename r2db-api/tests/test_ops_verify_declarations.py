@@ -275,6 +275,21 @@ def _set_row(platform: types.SimpleNamespace, key: str, value: object) -> None:
         conn.commit()
 
 
+def _raise_connection_limit(platform: types.SimpleNamespace, role: str, limit: int) -> None:
+    """design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)/裁定 28 (i):
+    `check_role_connection_limits`'s own controlplane/auditreader (and, in
+    the aggregate `ops verify-declarations` call, api) floors now scale
+    with `process_ceilings.<plane>` -- a fixture that declares a
+    `process_ceilings` value above 1 for the plane a role belongs to must
+    raise that role's own real `CONNECTION LIMIT` to match, the same way a
+    real deployment would, or F-16 fires before the F-18/F-19 check under
+    test ever runs."""
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT {}").format(sql.Identifier(role), sql.Literal(limit)))
+        conn.commit()
+
+
 def _delete_row(platform: types.SimpleNamespace, key: str) -> None:
     with psycopg.connect(platform.control_dsn) as conn:
         with conn.cursor() as cur:
@@ -769,11 +784,15 @@ def test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_b
     """The real mutation this check exists to catch: an operator (or a
     future migration regression) lowers `r2dbsvc_api`'s own CONNECTION
     LIMIT back below its own real pool-composition floor (2 stores x
-    concurrency 32 = 64) -- here, back to `0005_credential_store.sql`'s own
-    pre-WP-4f value (10), simulating exactly the state every platform was
-    in before migration 0013 existed. `ops verify-declarations` must exit
-    non-zero (F-16's own exit code, 15) and name the role, its current
-    limit, and the required floor -- never a silent `OK F-16`."""
+    pool_size 6 = 12 -- WP-2, design D-3 (5)/監督裁定16: `_declared_pool_
+    size()`, this CLI's own env, derives the floor from `R2DB_THREAD_
+    LIMIT` [unset here -> `DEFAULT_THREAD_LIMIT` 4] via `role_pool_size`,
+    never `ResourceLimits.concurrency` 32) -- here, back to `0005_
+    credential_store.sql`'s own pre-WP-4f value (10), simulating exactly
+    the state every platform was in before migration 0013 existed. `ops
+    verify-declarations` must exit non-zero (F-16's own exit code, 15) and
+    name the role, its current limit, and the required floor -- never a
+    silent `OK F-16`."""
     _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
     _declare_control_role_as_the_writer(platform)
     _provision_app_for_verify(platform, "verifyf16bad")
@@ -787,7 +806,7 @@ def test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_b
     assert "FAIL F-16" in out, out
     assert platform.api_role in out, out
     assert "CONNECTION LIMIT 10" in out, out
-    assert "64" in out, out
+    assert "12" in out, out
 
 
 def test_f16_floor_for_a_role_matching_multiple_classes_is_the_max_not_the_last_assigned(
@@ -822,7 +841,7 @@ def test_f16_floor_for_a_role_matching_multiple_classes_is_the_max_not_the_last_
     try:
         with psycopg.connect(platform.control_dsn) as conn:
             with pytest.raises(PlatformDeclarationError) as excinfo:
-                check_role_connection_limits(conn, schema=platform.schema, ops_module="test", concurrency=32, application_slugs=())
+                check_role_connection_limits(conn, schema=platform.schema, ops_module="test", pool_size=32, process_ceilings=ProcessCeilings(data=1, control=1), application_slugs=())
         assert excinfo.value.code == "F-16"
         message = str(excinfo.value)
         assert role in message, message
@@ -863,12 +882,64 @@ def test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_ever
         conn.commit()
     try:
         with psycopg.connect(platform.control_dsn) as conn:
-            check_role_connection_limits(conn, schema=platform.schema, ops_module="test", concurrency=32, application_slugs=())
+            check_role_connection_limits(conn, schema=platform.schema, ops_module="test", pool_size=32, process_ceilings=ProcessCeilings(data=1, control=1), application_slugs=())
     finally:
         with psycopg.connect(platform.admin_dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 5").format(sql.Identifier(platform.control_role)))
             conn.commit()
+
+
+def test_f16_controlplane_floor_scales_with_process_ceilings_control(
+    platform: types.SimpleNamespace,
+) -> None:
+    """design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)/裁定 28
+    (i) -- 変異 M72c (関数内で control の倍率を掛けない): the controlplane
+    class' own floor (`_CONTROLPLANE_ROLE_POOL_FLOOR` = 16) is now
+    `16 * process_ceilings.control`, not the bare constant. At
+    `process_ceilings.control` = 1 the role's own default `CONNECTION
+    LIMIT` (20, `0013`) still clears the floor (16); at `control` = 2 the
+    SAME role's SAME real `CONNECTION LIMIT` no longer clears the floor
+    (32), and `check_role_connection_limits` raises F-16 naming 32.
+    M72c collapses both floors back to 16, and this second call would
+    incorrectly pass."""
+    with psycopg.connect(platform.control_dsn) as conn:
+        check_role_connection_limits(
+            conn, schema=platform.schema, ops_module="test", pool_size=6,
+            process_ceilings=ProcessCeilings(data=1, control=1),
+            role_classes=frozenset({"controlplane"}), application_slugs=(),
+        )
+    with psycopg.connect(platform.control_dsn) as conn:
+        with pytest.raises(PlatformDeclarationError) as excinfo:
+            check_role_connection_limits(
+                conn, schema=platform.schema, ops_module="test", pool_size=6,
+                process_ceilings=ProcessCeilings(data=1, control=2),
+                role_classes=frozenset({"controlplane"}), application_slugs=(),
+            )
+    assert excinfo.value.code == "F-16"
+    assert "32" in str(excinfo.value), str(excinfo.value)
+
+
+def test_f16_aggregate_ops_call_scales_controlplane_floor_by_declared_process_ceilings(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)/裁定 28
+    (i) -- 変異 M74b (`ops verify-declarations` の F-16 aggregate 呼び出し
+    に `process_ceilings` の代わりに 1/1 を渡す): `_verify_declarations_
+    checks`'s own unscoped F-16 call passes the REAL declared
+    `process_ceilings` (never a fixed 1/1) into `check_role_connection_
+    limits`, so at `control` = 2 the auditreader role's own real
+    `CONNECTION LIMIT` (5) no longer clears its own floor (4 * 2 = 8, the
+    first role this deterministic role order reaches), and `ops verify-
+    declarations` itself FAILs F-16."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    _set_row(platform, "process_ceilings", {"data": 1, "control": 2})
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 15, out
+    assert "FAIL F-16" in out, out
+    assert _auditreader_role(platform) in out and "8" in out, out
 
 
 # ===========================================================================
@@ -959,18 +1030,18 @@ def test_f18_check_max_connections_headroom_boundary_allows_equal_and_rejects_on
     ceilings = ProcessCeilings(data=1, control=0)
     exact = check_max_connections_headroom(
         _FakeHeadroomConn(application_count=1, max_connections=131, superuser_reserved=3, reserved=0),
-        schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+        schema="s", ops_module="test", process_ceilings=ceilings, pool_size=32,
     )
     assert exact.lower_bound == 128
     one_more = check_max_connections_headroom(
         _FakeHeadroomConn(application_count=1, max_connections=132, superuser_reserved=3, reserved=0),
-        schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+        schema="s", ops_module="test", process_ceilings=ceilings, pool_size=32,
     )
     assert one_more.lower_bound == 128
     with pytest.raises(PlatformDeclarationError) as excinfo:
         check_max_connections_headroom(
             _FakeHeadroomConn(application_count=1, max_connections=130, superuser_reserved=3, reserved=0),
-            schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+            schema="s", ops_module="test", process_ceilings=ceilings, pool_size=32,
         )
     assert excinfo.value.code == "F-18"
 
@@ -985,7 +1056,7 @@ def test_f18_judgment_uses_the_lower_bound_never_the_upper_bound() -> None:
     ceilings = ProcessCeilings(data=1, control=1)
     report = check_max_connections_headroom(
         _FakeHeadroomConn(application_count=3, max_connections=200, superuser_reserved=0, reserved=0),
-        schema="s", ops_module="test", process_ceilings=ceilings, concurrency=32,
+        schema="s", ops_module="test", process_ceilings=ceilings, pool_size=32,
     )
     assert report.lower_bound == 144
     assert report.upper_bound == 276
@@ -1043,36 +1114,61 @@ def test_f18_process_ceilings_row_absent_returns_f15_and_never_prints_f18(
 def test_verify_declarations_f18_fails_when_the_declared_lower_bound_exceeds_max_connections(
     platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Completion conditions 5 and 9 (R1-1): a throwaway cluster's own
-    real `max_connections` is 300, `superuser_reserved_connections`
-    defaults to 3, `reserved_connections` defaults to 0 -- 297 real
-    headroom (§1.3 (8)). One registered application (so the
-    application-pair floor is added once) plus a declared
-    `process_ceilings = {"data": 3, "control": 1}` -> lower bound
-    3*(64+64) + 1*16 = 400, over 297 -- `FAIL F-18`, exit code 17, and the
-    message names the lower bound, the upper bound, both reserved-
-    connection settings, `max_connections`, and the shortfall (400+3+0-
-    300=103). Only the DECLARATION changes here, never the number of
-    provisioned applications (§1.1 (a)). Mutation M5a (dropping the
+    """Completion conditions 5 and 9 (R1-1), numbers updated for WP-2
+    (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5), 監督裁定16:
+    `_declared_pool_size()`, this CLI's own env, now derives the floor
+    from `R2DB_THREAD_LIMIT` (unset here -> `DEFAULT_THREAD_LIMIT` 4) via
+    `role_pool_size`, i.e. pool_size 6 -- never `ResourceLimits.
+    concurrency` 32): a throwaway cluster's own real `max_connections` is
+    300, `superuser_reserved_connections` defaults to 3, `reserved_
+    connections` defaults to 0 -- 297 real headroom (§1.3 (8)). One
+    registered application (so the application-pair floor is added once)
+    plus a declared `process_ceilings = {"data": 13, "control": 1}` ->
+    lower bound 13*(12+12) + 1*16 = 328, over 297 -- `FAIL F-18`, exit
+    code 17, and the message names the lower bound, the upper bound, both
+    reserved-connection settings, `max_connections`, and the shortfall
+    (328+3+0-300=31). Only the DECLARATION changes here, never the number
+    of provisioned applications (§1.1 (a)). Mutation M5a (dropping the
     shortfall number from `_f18_message`) and mutation M8 (the `ops`
     layer passing a fixed `{1, 1}` instead of the declared
-    `process_ceilings`, which would compute a lower bound of 144 and
+    `process_ceilings`, which would compute a lower bound of 24 and
     pass) both turn this red."""
     _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
     _declare_control_role_as_the_writer(platform)
     _provision_app_for_verify(platform, "verifyf18bad")
-    _set_row(platform, "process_ceilings", {"data": 3, "control": 1})
+    _set_row(platform, "process_ceilings", {"data": 13, "control": 1})
+    # 裁定 28 (i): the aggregate F-16 check's own api-class floor is now
+    # `_API_ROLE_STORE_COUNT * pool_size * process_ceilings.data`
+    # (2 * 6 * 13 = 156) -- raise the api role's real CONNECTION LIMIT
+    # (68 by 0013) so F-16 does not fire before this test's own F-18
+    # check runs.
+    _raise_connection_limit(platform, platform.api_role, 156)
+    # 裁定 28 (i) also scales the registered application's own runtime/
+    # developer role floors by `process_ceilings.data` (6 * 13 = 78,
+    # over 0013's own 36) -- raise both to -1 (unlimited) so neither
+    # fires F-16 before this test's own F-18 check runs.
+    with psycopg.connect(platform.control_dsn) as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute(
+                sql.SQL("SELECT runtime_role, developer_role FROM {table} WHERE application_slug = %s").format(
+                    table=sql.Identifier(platform.schema, "applications")
+                ),
+                ("verifyf18bad",),
+            )
+            _runtime_role, _developer_role = _cur.fetchone()
+    _raise_connection_limit(platform, _runtime_role, -1)
+    _raise_connection_limit(platform, _developer_role, -1)
     rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
     out = capsys.readouterr().out
-    assert rc == 17
+    assert rc == 17, out
     assert "FAIL F-18" in out, out
     f18_line = next(line for line in out.splitlines() if "FAIL F-18" in line)
-    assert "lower bound 400" in f18_line, f18_line
-    assert "upper bound 404" in f18_line, f18_line
+    assert "lower bound 328" in f18_line, f18_line
+    assert "upper bound 332" in f18_line, f18_line
     assert "superuser_reserved_connections 3" in f18_line, f18_line
     assert "reserved_connections 0" in f18_line, f18_line
     assert "max_connections 300" in f18_line, f18_line
-    assert "by 103" in f18_line, f18_line
+    assert "by 31" in f18_line, f18_line
 
 
 def test_verify_declarations_f18_passes_when_the_declared_lower_bound_fits(
@@ -1080,21 +1176,28 @@ def test_verify_declarations_f18_passes_when_the_declared_lower_bound_fits(
 ) -> None:
     """Non-空振り positive control for the FAIL test immediately
     above: the SAME registered application, `process_ceilings` lowered to
-    `{"data": 2, "control": 2}` (lower bound 288, under 297) -- `OK
-    F-18`, and the OK line carries all four numbers (completion condition
-    4's own disclosure requirement): the lower bound, the upper bound,
-    both reserved-connection settings, and `max_connections`."""
+    `{"data": 2, "control": 2}` (lower bound 80, under 297, pool_size 6 --
+    WP-2, see the FAIL test's own docstring) -- `OK F-18`, and the OK line
+    carries all four numbers (completion condition 4's own disclosure
+    requirement): the lower bound, the upper bound, both reserved-
+    connection settings, and `max_connections`."""
     _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
     _declare_control_role_as_the_writer(platform)
     _provision_app_for_verify(platform, "verifyf18ok")
     _set_row(platform, "process_ceilings", {"data": 2, "control": 2})
+    # 裁定 28 (i): controlplane/auditreader floors are now * `process_
+    # ceilings.control` (2) -- 16*2=32, 4*2=8 -- raise both roles' own
+    # real CONNECTION LIMIT (20/5 by 0007/0013) so F-16 does not fire
+    # before this test's own F-18 check runs.
+    _raise_connection_limit(platform, platform.controlplane_role, 32)
+    _raise_connection_limit(platform, _auditreader_role(platform), 8)
     rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
     out = capsys.readouterr().out
     assert rc == 0, out
     f18_line = next(line for line in out.splitlines() if "F-18" in line)
     assert f18_line.startswith("OK   F-18"), out
-    assert "lower_bound=288" in f18_line, out
-    assert "upper_bound=296" in f18_line, out
+    assert "lower_bound=80" in f18_line, out
+    assert "upper_bound=88" in f18_line, out
     assert "superuser_reserved_connections=3" in f18_line, out
     assert "reserved_connections=0" in f18_line, out
     assert "max_connections=300" in f18_line, out
@@ -1361,6 +1464,9 @@ def test_verify_declarations_f19_fails_when_an_application_database_collation_is
     _declare_control_role_as_the_writer(platform)
     app = _provision_app_for_verify_without_collation_c(platform, "verifyf19bad")
     _set_row(platform, "process_ceilings", {"data": 2, "control": 2})
+    # 裁定 28 (i): see the F-18 tests' own comment above.
+    _raise_connection_limit(platform, platform.controlplane_role, 32)
+    _raise_connection_limit(platform, _auditreader_role(platform), 8)
     rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
     out = capsys.readouterr().out
     assert rc == 18
@@ -1386,6 +1492,9 @@ def test_verify_declarations_f19_passes_after_provisioning_with_0003(
     _declare_control_role_as_the_writer(platform)
     _provision_app_for_verify(platform, "verifyf19ok")
     _set_row(platform, "process_ceilings", {"data": 2, "control": 2})
+    # 裁定 28 (i): see the F-18 tests' own comment above.
+    _raise_connection_limit(platform, platform.controlplane_role, 32)
+    _raise_connection_limit(platform, _auditreader_role(platform), 8)
     with psycopg.connect(platform.control_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(sql.SQL("SELECT count(*) FROM {table}").format(table=sql.Identifier(platform.schema, "applications")))

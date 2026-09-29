@@ -126,7 +126,7 @@ from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import (AuthenticationError, AuthorizationStateUnavailable,
                      NotFoundError, StorageConfigurationError)
 from .identifiers import validate_identifier
-from .pool import BoundedConnectionPool
+from .pool import BoundedConnectionPool, _application_name_connect_kwargs
 from .psycopg_counting import CountingConnection
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -247,6 +247,7 @@ class PostgresCredentialStore:
         self._connect_timeout = connect_timeout
         self._credentials_table = sql.Identifier(schema, "credentials")
         self._applications_table = sql.Identifier(schema, "applications")
+        self._rate_admit_function = sql.Identifier(schema, "credential_request_rate_admit")
         # WP-3 (design v1.2 R-8 ledger / WP-2 review N-1): an optional
         # bounded pool (`pool.BoundedConnectionPool`) replacing the
         # per-call `psycopg.connect()`/`close()` WP-2 deliberately chose.
@@ -323,7 +324,9 @@ class PostgresCredentialStore:
         """
         connect_start = time.monotonic()
         try:
-            conn = CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+            conn = CountingConnection.connect(
+                self._dsn, connect_timeout=self._connect_timeout, autocommit=False, **_application_name_connect_kwargs(),
+            )
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
         connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
@@ -595,6 +598,59 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
         return (row[0], row[1]) if row is not None else None
+
+    # ---- region (ii), wired `requests_per_minute` (design D-3 (1)) ------
+
+    def record_rate_and_check(self, credential_id, limit) -> bool:
+        """(design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (1)): one
+        round trip against migration `0016`'s own `credential_request_
+        rate_admit` function, through THIS store's own `_borrow_connection`
+        (the platform pool, `mitatedbsvc_api` -- the same connection
+        `authenticate`/`assert_active` already read through, toggled to
+        autocommit for this one statement) -- never a second, dedicated
+        pool. `cell.py`'s `_LimitStateHolder.acquire_rate` calls this from
+        `ApplicationCell._limit_gate`, after `_require_data`'s own
+        `assert_active` borrow has already returned its connection -- this
+        method's own borrow-execute-return is a single, separate unit of
+        work, never nested inside another.
+
+        Returns `True` when the request is admitted (this credential's own
+        `requests_per_minute` window, shared by every worker process this
+        deployment runs, was strictly under `limit` before this call),
+        `False` when it is not -- the caller maps `False` to the SAME
+        `ResourceLimitError(limit_class="requests_per_minute")` the
+        in-memory window raises. A PostgreSQL failure raises instead of
+        returning either boolean, through the SAME mapping every read in
+        this class uses: `InsufficientPrivilege` ->
+        `StorageConfigurationError` (`SERVICE_UNAVAILABLE`, 503), any other
+        `psycopg.Error` -> `AuthorizationStateUnavailable` (`AUTH_STATE_
+        UNAVAILABLE`, 503) -- fail-closed, never silently admitted nor
+        silently denied."""
+        statement = sql.SQL("SELECT {function}({credential_id}, {limit})").format(
+            function=self._rate_admit_function, credential_id=sql.Placeholder(), limit=sql.Placeholder(),
+        )
+        with self._borrow_connection() as conn:
+            try:
+                # Every connection this store borrows runs with
+                # `autocommit=False` (the pool's own general-purpose
+                # default). The rate count is one statement that must
+                # commit on its own, never joining another transaction, so
+                # this one call runs in autocommit and restores `False`
+                # before the connection goes back to the pool.
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        _execute(cur, statement, [credential_id, limit])
+                        (admitted,) = cur.fetchone()
+                finally:
+                    conn.autocommit = False
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError(
+                    "the storage backend refused this read due to a privilege/configuration defect"
+                ) from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        return bool(admitted)
 
     # ---- write path (provisioning/control-plane tooling only) ---------
 

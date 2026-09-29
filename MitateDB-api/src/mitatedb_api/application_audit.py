@@ -38,6 +38,7 @@ import uuid
 import psycopg
 from psycopg import sql
 
+from .pool import _application_name_connect_kwargs
 from .psycopg_counting import CountingConnection
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -349,7 +350,9 @@ class PostgresApplicationAuditSink:
         `db_wall_ms`/`txn_count` can be folded into this sink's platform
         totals right before it closes."""
         connect_start = time.monotonic()
-        conn = CountingConnection.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        conn = CountingConnection.connect(
+            self._dsn, connect_timeout=self._connect_timeout, autocommit=False, **_application_name_connect_kwargs(),
+        )
         connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
         with self._platform_stats_lock:
             self._sessions += 1
