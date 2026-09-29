@@ -308,6 +308,47 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*r2db-api Control claim, the ceiling rule over the per-process in-memory classes, superseded 2026-09-29 (Version 3.7, R-113 -- data-plane `requests_per_minute` moved to a PostgreSQL row per credential and data-plane `concurrency` to host-shared slots, so neither is an in-memory class any more and each reads `enforced` above ceiling 1 once its mechanism is wired; withdrawn control), verbatim:*
+
+- that row is what decides `limit_enforcement`: ceiling 1 publishes the per-process in-memory classes as `enforced`, ceiling >= 2 publishes exactly those as `deployment_required` -- `r2db-api/src/r2db_api/capabilities_document.py:121`.
+- the in-memory classes are `requests_per_minute`/`concurrency` on the data plane and `control_requests_per_minute`/`audit_requests_per_minute` on the control plane -- `r2db-api/src/r2db_api/capabilities_document.py:121`.
+
+---
+
+*r2db-api Control claim, pool size derived from the declared `concurrency`, superseded 2026-09-29 (Version 3.7, R-113 -- `role_pool_size` now takes the thread limit plus 2 and one platform pool, so the pools and the F-16 floors built on them no longer follow `concurrency`; withdrawn control, and a lowered floor), verbatim:*
+
+- `role_pool_size(limits) == limits.concurrency` sizes every served application's runtime/developer pool and both platform pools, so connection capacity is derived from the declared `concurrency` -- `r2db-api/src/r2db_api/limits.py`.
+
+---
+
+*r2db-api Evidence claim, the F-16 floors at `concurrency` 32, superseded 2026-09-29 (Version 3.7, R-113 -- the floors now follow the thread limit, so the api role's floor at the default is 12 rather than 64; lowered floor), verbatim:*
+
+- at `concurrency` 32 the floors are 32/32, 64 and 16, above what `0002`/`0005`/`0006` create (20/10, 10, 10) -- `r2db-api/tests/test_credential_persistence.py::test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_below_the_pool_composition_floor`.
+
+---
+
+*MitateDB-api Control claim, the in-process limiter enforcing `requests_per_minute` and `concurrency`, superseded 2026-09-29 (Version 3.7, R-113 -- `_LimitStateHolder` now bounds them through the PostgreSQL rate row and the host-shared slots, and `enforced` holds only once those are wired; withdrawn control), verbatim:*
+
+- **Application-plane resource bounds**: `requests_per_minute` and `concurrency` are `enforced` by `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py:305`, `:336`, `:346`).
+
+---
+
+*MitateDB-api Control claim, `ops inventory` item (8)'s demand, required inputs and rollout arithmetic, superseded 2026-09-29 (Version 3.7, R-113 -- item (8) now counts Data demand per revision basis, `--concurrency` is required only with old-basis processes, and the blocking point moved from a TOTAL of 3 to W = 6 new-basis processes; weakened limit), verbatim:*
+
+- item (8) adds every application's own runtime/developer role, whose demand scales with the Data TOTAL and never with `concurrency` alone -- `MitateDB-api/src/mitatedb_api/ops.py:2477`.
+- `concurrency` and `--reserved-connections` (0 meaning no reserve) are required too, and omitting any of them leaves item (8) unknown; `--control-not-deployed` substitutes Control's pair -- `MitateDB-api/src/mitatedb_api/ops.py:2898`.
+- **Rollout arithmetic against the ceilings `0014` sets**: at `concurrency=32` with a process TOTAL of 2 on each plane, condition 1 holds for every role class and item (8) is confirmed -- `MitateDB-api/src/mitatedb_api/ops.py:2627`.
+- a TOTAL of 3 blocks on `mitatedbsvc_api`, whose demand of 3 x 2 x 32 = 192 exceeds its own ceiling of 132 -- `MitateDB-api/src/mitatedb_api/ops.py:2627`.
+
+---
+
+*MitateDB-api Control claim, the per-plane ceiling mapping and the platform pool derived from `max_concurrency`, superseded 2026-09-29 (Version 3.7, R-113 -- `resolve_limit_enforcement` reads data-plane `requests_per_minute` `enforced` at every ceiling once wired, and the platform pool's default is the thread limit plus 2; withdrawn control, and a lowered floor), verbatim:*
+
+- the same `limit_enforcement` mapping applies per plane -- ceiling 1 to `enforced`, ceiling >= 2 to `deployment_required` -- with request-scoped and DB-side-bound classes unaffected -- `MitateDB-api/src/mitatedb_api/capabilities_document.py:112`.
+- `role_pool_size(config) == config.max_concurrency` is the platform pool's default in `main.build_app` -- `MitateDB-api/src/mitatedb_api/config.py`.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -455,6 +496,14 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 - destructive misuse tests;
 
+
+---
+
+*MitateDB-api Evidence claims, section 10's subjects accepted at 10.6 = 4, 10.7 = 4 and 10.10 = 7, superseded 2026-09-29 (Version 3.7, R-113 -- adding `0016` moved the three subjects to versions 5, 5 and 8, so section 10.8 no longer records them as accepted; the acceptance falls to Status), verbatim:*
+
+- runbook section 10's accepted versions are the 10.6 table at 4, the 10.7 table at 4 and the 10.10 procedure at 7, read from the single acceptance row in section 10.8 -- `MitateDB-api/docs/cloud-run-cloud-sql.md:2486`.
+- sections 10.6 and 10.10 moved to versions 4 and 7 in this change set and were accepted at those versions by an independent review of 2026-09-20 -- `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` section 5.
+- section 10.7 is unchanged at version 4, its own collation record being `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` section 5, named by the matching row of section 10.8.
 
 ---
 
