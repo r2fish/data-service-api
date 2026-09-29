@@ -819,18 +819,30 @@ def test_slot_backend_error_maps_to_503_through_the_limit_state_holder() -> None
     assert outcomes == [503, 503], outcomes
 
 
-def test_slot_backend_failure_is_logged_once_as_a_warning_at_both_503_mapping_points(
+def test_slot_backend_failure_is_logged_as_a_warning_at_both_503_mapping_points(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Ruling 43 (s9) -- mutations Ms9a (`acquire_concurrency_slot` writes
-    no log line) and Ms9s (`concurrency_slot` writes no log line): another
-    holder keeps `scan` past its deadline (0.2 s here). Each of
-    `_LimitStateHolder`'s two mapping points -- `acquire_concurrency_slot`
-    (before authentication) and `concurrency_slot` (after it, never
+    """Ruling 43 (s9) -- mutations Ms9a (`acquire_concurrency_slot` does
+    not call the log writer) and Ms9s (`concurrency_slot` does not call
+    it): another holder keeps `scan` past its deadline (0.2 s here). Each
+    of `_LimitStateHolder`'s two mapping points -- `acquire_concurrency_
+    slot` (before authentication) and `concurrency_slot` (after it, never
     reserved) -- raises its unchanged `StorageConfigurationError` (this
     peer's 503) and writes exactly one WARNING line to the
-    `mitatedb_api.cell` logger: the fixed prefix followed by the
-    `SlotBackendError` message, which names the expired `scan` deadline."""
+    `mitatedb_api.cell` logger through the module's one
+    `BackendFailureLog` (its clock replaced and moved on by one interval
+    between the two points): the fixed prefix, the `SlotBackendError`
+    message naming the expired `scan` deadline, and a count of 0."""
+    from mitatedb_api import cell as cell_module
+
+    prefix = "mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE"
+    assert cell_module._SLOT_FAILURE_LOG_PREFIX == prefix
+    writer = cell_module._SLOT_FAILURE_LOG
+    assert isinstance(writer, concurrency_slots.BackendFailureLog)
+    clock = [1000.0]
+    monkeypatch.setattr(writer, "_clock", lambda: clock[0])
+    monkeypatch.setattr(writer, "_last_line_at", None)
+    monkeypatch.setattr(writer, "_not_logged", 0)
     slot_dir = _slot_dir(tmp_path)
     monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 0.2)
     slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
@@ -856,6 +868,7 @@ def test_slot_backend_failure_is_logged_once_as_a_warning_at_both_503_mapping_po
             threads.append(thread)
             assert finished, f"{label} had not returned after {elapsed:.2f}s with scan held"
             results[label] = (outcome, [r for r in caplog.records if r.name == "mitatedb_api.cell"])
+            clock[0] += concurrency_slots._FAILURE_LOG_INTERVAL_S
     finally:
         os.close(holder_fd)
         for thread in threads:
@@ -863,12 +876,111 @@ def test_slot_backend_failure_is_logged_once_as_a_warning_at_both_503_mapping_po
     assert direct[0] == "raised" and isinstance(direct[1], concurrency_slots.SlotBackendError), direct
     backend_message = str(direct[1])
     assert "scan" in backend_message and "deadline" in backend_message, backend_message
-    expected_line = f"mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: {backend_message}"
+    expected_line = f"{prefix}: {backend_message} (0 more failures not logged since the previous line)"
+    assert list(results) == ["acquire_concurrency_slot", "concurrency_slot"], results
     for label, (outcome, records) in results.items():
         assert outcome[0] == "raised" and isinstance(outcome[1], StorageConfigurationError), (label, outcome)
         assert str(outcome[1]) == "the concurrency slot directory could not be used", (label, outcome[1])
         assert http_module._STATUS_BY_CODE[http_module._classify(outcome[1])] == 503, label
         assert [(r.levelno, r.getMessage()) for r in records] == [(logging.WARNING, expected_line)], (label, records)
+
+
+def _failure_log_lines(caplog: pytest.LogCaptureFixture, logger_name: str) -> list[tuple[int, str]]:
+    return [(r.levelno, r.getMessage()) for r in caplog.records if r.name == logger_name]
+
+
+def test_backend_failure_log_writes_at_most_one_line_per_interval(caplog: pytest.LogCaptureFixture) -> None:
+    """Ruling 43 (s9) -- mutation Ms9i (the interval bound
+    dropped): three failures noted within one `_FAILURE_LOG_INTERVAL_S`
+    (1 s) on the replaced clock write one WARNING line -- the fixed
+    prefix, the first failure's message, and a count of 0 -- and the
+    clock moving on with no further failure writes nothing."""
+    assert concurrency_slots._FAILURE_LOG_INTERVAL_S == 1.0
+    logger_name = "mitatedb_api.test_backend_failure_log"
+    clock = [1000.0]
+    writer = concurrency_slots.BackendFailureLog(logging.getLogger(logger_name), "fixed prefix", clock=lambda: clock[0])
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    for offset, text in ((0.0, "first failure"), (0.5, "second failure"), (0.999, "third failure")):
+        clock[0] = 1000.0 + offset
+        writer.note(concurrency_slots.SlotBackendError(text))
+    clock[0] = 1005.0
+    assert _failure_log_lines(caplog, logger_name) == [
+        (logging.WARNING, "fixed prefix: first failure (0 more failures not logged since the previous line)"),
+    ]
+
+
+def test_backend_failure_log_counts_the_failures_it_did_not_log(caplog: pytest.LogCaptureFixture) -> None:
+    """Ruling 43 (s9) -- mutation Ms9c (the failures not logged
+    are not counted): on the replaced clock, the first failure writes a
+    line; the three noted within the next second write none and are
+    counted; the first failure at or after one interval writes a line
+    with its own message and that count (3); one more inside the
+    interval and one after it give a count of 1."""
+    logger_name = "mitatedb_api.test_backend_failure_log"
+    clock = [1000.0]
+    writer = concurrency_slots.BackendFailureLog(logging.getLogger(logger_name), "fixed prefix", clock=lambda: clock[0])
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    for now, text in (
+        (1000.0, "a"), (1000.2, "b"), (1000.4, "c"), (1000.6, "d"),
+        (1001.0, "e"), (1001.5, "f"),
+        (1002.0, "g"),
+    ):
+        clock[0] = now
+        writer.note(concurrency_slots.SlotBackendError(text))
+    suffix = "more failures not logged since the previous line"
+    assert _failure_log_lines(caplog, logger_name) == [
+        (logging.WARNING, f"fixed prefix: a (0 {suffix})"),
+        (logging.WARNING, f"fixed prefix: e (3 {suffix})"),
+        (logging.WARNING, f"fixed prefix: g (1 {suffix})"),
+    ]
+
+
+def test_backend_failure_log_from_two_threads_writes_one_line_and_keeps_the_count(caplog: pytest.LogCaptureFixture) -> None:
+    """Ruling 43 (s9) -- mutation Ms9l (the lock dropped): the
+    first `note` stops inside the replaced clock (bounded, 1 s) and a
+    second `note` starts on another thread meanwhile; the second does
+    not read the clock until the first has decided (the lock), so one
+    line is written, and the second failure is counted in the next line
+    (1)."""
+    logger_name = "mitatedb_api.test_backend_failure_log"
+    now = [1000.0]
+    guard = threading.Lock()
+    inside = [0]
+    first_inside = threading.Event()
+    overlap = threading.Event()
+
+    def _clock() -> float:
+        with guard:
+            inside[0] += 1
+            if inside[0] > 1:
+                overlap.set()
+            first = not first_inside.is_set()
+            if first:
+                first_inside.set()
+        if first:
+            overlap.wait(timeout=1.0)
+        with guard:
+            inside[0] -= 1
+        return now[0]
+
+    writer = concurrency_slots.BackendFailureLog(logging.getLogger(logger_name), "fixed prefix", clock=_clock)
+    caplog.set_level(logging.WARNING, logger=logger_name)
+    first = threading.Thread(target=writer.note, args=(concurrency_slots.SlotBackendError("thread one"),), daemon=True)
+    first.start()
+    assert first_inside.wait(timeout=_WAIT_S), "the first note never read the clock (空振り)"
+    second = threading.Thread(target=writer.note, args=(concurrency_slots.SlotBackendError("thread two"),), daemon=True)
+    second.start()
+    first.join(timeout=_WAIT_S)
+    second.join(timeout=_WAIT_S)
+    assert not first.is_alive() and not second.is_alive(), "a note had not returned"
+    assert not overlap.is_set(), "a second note read the clock while the first one was still deciding"
+    now[0] = 1001.0
+    writer.note(concurrency_slots.SlotBackendError("after the interval"))
+    suffix = "more failures not logged since the previous line"
+    assert _failure_log_lines(caplog, logger_name) == [
+        (logging.WARNING, f"fixed prefix: thread one (0 {suffix})"),
+        (logging.WARNING, f"fixed prefix: after the interval (1 {suffix})"),
+    ]
 
 
 def test_selfcheck_detects_a_faked_flock_that_never_excludes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1508,6 +1620,54 @@ def test_candidate_flock_interrupted_by_keyboard_interrupt_leaks_no_fd(
     assert slot_attempts, "no slot-0 lock attempt observed (空振り)"
     assert outcome[0] == "raised" and isinstance(outcome[1], KeyboardInterrupt), outcome
     assert after == before, f"open fd count grew from {before} to {after} on the interrupted candidate flock"
+
+
+def test_held_slot_fd_is_closed_when_an_interrupt_follows_the_scan_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ruling 43 (s3c) -- mutation Ms3c (the outer handler's
+    `os.close(held_fd)` dropped): with `limit = 1` the search locks
+    `slot-0`, and the `scan` close right after the search raises
+    `KeyboardInterrupt` once the real close has run (this module's own
+    `os` replaced by a namespace whose `close` does that for the `scan`
+    fd only). The interrupt propagates out of `acquire`, the process'
+    open-fd count is the same as before the call, and `slot-0` is free
+    -- a fresh fd takes `LOCK_EX | LOCK_NB` on it."""
+    slot_dir = _slot_dir(tmp_path)
+    scan_path = slot_dir / concurrency_slots.SCAN_FILENAME
+    scan_closes: list[int] = []
+
+    def _interrupting_close(fd: int) -> None:
+        is_scan = scan_path.exists() and os.fstat(fd).st_ino == os.stat(scan_path).st_ino
+        os.close(fd)
+        if is_scan:
+            scan_closes.append(fd)
+            raise KeyboardInterrupt("synthetic interrupt right after the scan close")
+
+    patched_os = types.SimpleNamespace(**{name: getattr(os, name) for name in dir(os) if not name.startswith("__")})
+    patched_os.close = _interrupting_close
+    monkeypatch.setattr(concurrency_slots, "os", patched_os)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir, random_below=lambda n: 0)
+    before = _open_fd_count()
+    finished, outcome, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+    thread.join(timeout=_WAIT_S)
+    after = _open_fd_count()
+    probe_fd = os.open(str(slot_dir / "slot-0"), os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            slot_0_free = False
+        else:
+            slot_0_free = True
+    finally:
+        os.close(probe_fd)
+    assert finished, f"acquire() had not returned after {elapsed:.2f}s"
+    assert len(scan_closes) == 1, f"the scan close was not observed (空振り): {scan_closes}"
+    assert outcome[0] == "raised" and isinstance(outcome[1], KeyboardInterrupt), outcome
+    assert (after, slot_0_free) == (before, True), (
+        f"open fd count went from {before} to {after} after the interrupted scan close; slot-0 free: {slot_0_free}"
+    )
 
 
 def test_scan_lock_held_by_a_sigkilled_child_process_is_released_by_the_kernel(

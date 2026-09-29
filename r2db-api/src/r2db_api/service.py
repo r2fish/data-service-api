@@ -26,6 +26,16 @@ from .topology import AuthorityTopology
 
 _logger = logging.getLogger(__name__)
 
+#: the fixed start of the WARNING line written where a slot backend
+#: failure becomes a 503 (`DataService._slot` and `DataService.
+#: acquire_concurrency_slot`).
+_SLOT_FAILURE_LOG_PREFIX = "r2db_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE"
+
+#: this process' one writer of that line, shared by both of those
+#: mapping points -- at most one line per interval
+#: (`concurrency_slots.BackendFailureLog`).
+_SLOT_FAILURE_LOG = concurrency_slots.BackendFailureLog(_logger, _SLOT_FAILURE_LOG_PREFIX)
+
 # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-3; WP-2(a) review J-2,
 # supervisor ruling 2026-09-02): an INCLUSION set -- only a denial whose
 # reason_code is one of these 6 (D-3's own range table, SI-14's minimal
@@ -1091,7 +1101,7 @@ class DataService:
             except concurrency_slots.LimitExceeded:
                 fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
             except concurrency_slots.SlotBackendError as exc:
-                _logger.warning("r2db_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
+                _SLOT_FAILURE_LOG.note(exc)
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         with self._active_lock:
             if self._active >= self.limits.concurrency:
@@ -1143,7 +1153,7 @@ class DataService:
             except concurrency_slots.LimitExceeded:
                 fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
             except concurrency_slots.SlotBackendError as exc:
-                _logger.warning("r2db_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
+                _SLOT_FAILURE_LOG.note(exc)
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         with self._active_lock:
             if self._active >= self.limits.concurrency:

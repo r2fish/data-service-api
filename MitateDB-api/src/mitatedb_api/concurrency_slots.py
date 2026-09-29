@@ -52,9 +52,11 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import logging
 import os
 import secrets
 import stat
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -79,6 +81,10 @@ _SCAN_LOCK_TIMEOUT_S = 1.0
 
 #: the pause between two attempts at the `scan` lock, in seconds.
 _SCAN_LOCK_INTERVAL_S = 0.0002
+
+#: the shortest time between two lines one `BackendFailureLog` writes,
+#: in seconds.
+_FAILURE_LOG_INTERVAL_S = 1.0
 
 #: `open()`'s own flag set for the self-check file, the `scan` file and
 #: every `slot-<i>` file: `O_NOFOLLOW` refuses a symlink planted in the
@@ -122,6 +128,48 @@ class SlotBackendError(RuntimeError):
     maps this to the SAME 503 SERVICE_UNAVAILABLE an
     existing PostgreSQL backend failure already produces, never silently
     treated as either 'admitted' or 'held'."""
+
+
+class BackendFailureLog:
+    """The WARNING line a caller writes where a `SlotBackendError` becomes
+    its 503: at most one line per `_FAILURE_LOG_INTERVAL_S` for each
+    instance (a caller keeps one instance per process). `note(exc)` is
+    called on the failure path only -- an admission, a refusal and every
+    success path call nothing -- so while nothing fails nothing is
+    written. A line is the caller's fixed `prefix`, the message of the
+    failure being noted, and how many failures were noted without a line
+    since the previous line; each failure inside the interval only adds
+    one to that count. The interval is measured on `clock` (monotonic by
+    default; injectable so a test can move it). The decision and the
+    count are taken under one lock, so failures noted from several
+    threads at once write no second line inside one interval and lose no
+    count; the line itself is written after the lock is released.
+
+    The failures that reach it without waiting (an errno other than
+    `_HELD_ERRNOS`, a file that cannot be opened) are raised before
+    authentication, at the pace requests arrive -- this bound keeps a
+    client that cannot authenticate from setting the pace of this line."""
+
+    def __init__(self, logger: logging.Logger, prefix: str, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._logger = logger
+        self._prefix = prefix
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._last_line_at: float | None = None
+        self._not_logged = 0
+
+    def note(self, exc: BaseException) -> None:
+        with self._lock:
+            now = self._clock()
+            if self._last_line_at is not None and now - self._last_line_at < _FAILURE_LOG_INTERVAL_S:
+                self._not_logged += 1
+                return
+            not_logged = self._not_logged
+            self._not_logged = 0
+            self._last_line_at = now
+        self._logger.warning(
+            "%s: %s (%d more failures not logged since the previous line)", self._prefix, exc, not_logged
+        )
 
 
 def check_slot_directory(path: Path) -> None:
@@ -258,39 +306,47 @@ class HostSharedConcurrencySlots:
         across rejections), a candidate's fd is also closed when its own
         `flock()` raises anything else (a `KeyboardInterrupt` included),
         the `scan` fd is closed on every path out of the search, and the
-        held slot's own fd is closed in `finally` -- on the happy path and
-        on an exception raised inside the `with` block. An exception
-        delivered asynchronously (a signal handler's `KeyboardInterrupt`)
-        in the instant between an `open()` or a successful `flock()`
-        returning and the `try` that owns its fd still leaks that fd --
-        Python gives no way to close that window."""
+        held slot's own fd is closed when anything is raised between its
+        lock being taken and the `with` body starting (a
+        `KeyboardInterrupt` right after the `scan` close included) and in
+        `finally` -- on the happy path and on an exception raised inside
+        the `with` block. An exception delivered asynchronously (a signal
+        handler's `KeyboardInterrupt`) leaks an fd only in the instant
+        between an `open()` returning and its fd being assigned -- an fd
+        that holds no lock yet; Python gives no way to close that
+        window."""
         if limit < 1:
             raise ValueError(f"limit must be a positive integer, got {limit!r}")
         scan_fd = self._lock_scan_file()
         held_fd: int | None = None
         try:
-            start = self._random_below(limit)
-            for offset in range(limit):
-                index = (start + offset) % limit
-                path = _slot_path(self._directory, index)
-                try:
-                    candidate_fd = os.open(str(path), _OPEN_FLAGS, _FILE_MODE)
-                except OSError as exc:
-                    raise SlotBackendError(f"could not open slot file {path}: {exc}") from exc
-                try:
-                    fcntl.flock(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError as exc:
-                    os.close(candidate_fd)
-                    if exc.errno in _HELD_ERRNOS:
-                        continue
-                    raise SlotBackendError(f"unexpected errno {exc.errno} from slot file {path}") from exc
-                except BaseException:
-                    os.close(candidate_fd)
-                    raise
-                held_fd = candidate_fd
-                break
-        finally:
-            os.close(scan_fd)
+            try:
+                start = self._random_below(limit)
+                for offset in range(limit):
+                    index = (start + offset) % limit
+                    path = _slot_path(self._directory, index)
+                    try:
+                        candidate_fd = os.open(str(path), _OPEN_FLAGS, _FILE_MODE)
+                    except OSError as exc:
+                        raise SlotBackendError(f"could not open slot file {path}: {exc}") from exc
+                    try:
+                        fcntl.flock(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError as exc:
+                        os.close(candidate_fd)
+                        if exc.errno in _HELD_ERRNOS:
+                            continue
+                        raise SlotBackendError(f"unexpected errno {exc.errno} from slot file {path}") from exc
+                    except BaseException:
+                        os.close(candidate_fd)
+                        raise
+                    held_fd = candidate_fd
+                    break
+            finally:
+                os.close(scan_fd)
+        except BaseException:
+            if held_fd is not None:
+                os.close(held_fd)
+            raise
         if held_fd is None:
             raise LimitExceeded(f"no slot available among {limit} in {self._directory}")
         try:

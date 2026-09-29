@@ -68,6 +68,16 @@ from .request_vocabulary import (
 
 _logger = logging.getLogger(__name__)
 
+#: the fixed start of the WARNING line written where a slot backend
+#: failure becomes a 503 (`_LimitStateHolder.concurrency_slot` and
+#: `_LimitStateHolder.acquire_concurrency_slot`).
+_SLOT_FAILURE_LOG_PREFIX = "mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE"
+
+#: this process' one writer of that line, shared by both of those
+#: mapping points -- at most one line per interval
+#: (`concurrency_slots.BackendFailureLog`).
+_SLOT_FAILURE_LOG = concurrency_slots.BackendFailureLog(_logger, _SLOT_FAILURE_LOG_PREFIX)
+
 
 def normalize_request_for_plan(request: dict[str, Any]) -> bytes:
     """Phase 9 WP-3b closure (design docs/design/
@@ -425,7 +435,7 @@ class _LimitStateHolder:
             except concurrency_slots.LimitExceeded:
                 raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
             except concurrency_slots.SlotBackendError as exc:
-                _logger.warning("mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
+                _SLOT_FAILURE_LOG.note(exc)
                 raise StorageConfigurationError("the concurrency slot directory could not be used")
         with self._active_lock:
             if self._active >= bound:
@@ -480,7 +490,7 @@ class _LimitStateHolder:
             except concurrency_slots.LimitExceeded:
                 raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
             except concurrency_slots.SlotBackendError as exc:
-                _logger.warning("mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
+                _SLOT_FAILURE_LOG.note(exc)
                 raise StorageConfigurationError("the concurrency slot directory could not be used")
         with self._active_lock:
             if self._active >= bound:
