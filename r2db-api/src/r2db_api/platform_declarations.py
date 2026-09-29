@@ -1379,8 +1379,8 @@ def check_max_connections_headroom(
 
     design D-3 (5): every caller passes
     `r2db_api.limits.role_pool_size(thread_limit)`; see `check_role_
-    connection_limits`'s own docstring for the full rationale. Completion
-    condition 71: with `process_ceilings.data` = 4, `thread_limit` = 4,
+    connection_limits`'s own docstring for the full rationale. With
+    `process_ceilings.data` = 4, `thread_limit` = 4,
     `c` = 2 (`pool_size` = 6), the lower bound this function judges does
     not scale with the declared `concurrency` bound at all."""
     registered_applications = _count_registered_applications(conn, schema)

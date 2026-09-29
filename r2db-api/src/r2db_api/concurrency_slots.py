@@ -116,7 +116,9 @@ class LimitExceeded(Exception):
 
 class SlotBackendError(RuntimeError):
     """`HostSharedConcurrencySlots.acquire` raises this for any errno
-    other than the `_HELD_ERRNOS` set above -- fail-closed: the caller
+    other than the `_HELD_ERRNOS` set above, for a file it cannot open,
+    and when the `scan` lock is not obtained within
+    `_SCAN_LOCK_TIMEOUT_S` -- fail-closed: the caller
     maps this to the SAME 503 SERVICE_UNAVAILABLE an
     existing PostgreSQL backend failure already produces, never silently
     treated as either 'admitted' or 'held'."""
@@ -212,29 +214,33 @@ class HostSharedConcurrencySlots:
         the open fails (a symlink planted as `scan` included), at once on
         any other errno, and when `_SCAN_LOCK_TIMEOUT_S` passes with
         `scan` still held elsewhere -- that message names the expired
-        `scan` deadline."""
+        `scan` deadline. Any other exception raised while it waits (a
+        `KeyboardInterrupt` raised during the pause between two attempts
+        included) also closes the fd before it propagates."""
         path = self._directory / SCAN_FILENAME
         try:
             scan_fd = os.open(str(path), _OPEN_FLAGS, _FILE_MODE)
         except OSError as exc:
             raise SlotBackendError(f"could not open scan file {path}: {exc}") from exc
-        deadline = time.monotonic() + _SCAN_LOCK_TIMEOUT_S
-        while True:
-            try:
-                fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                if exc.errno not in _HELD_ERRNOS:
-                    os.close(scan_fd)
-                    raise SlotBackendError(f"unexpected errno {exc.errno} from scan file {path}") from exc
-                if time.monotonic() >= deadline:
-                    os.close(scan_fd)
-                    raise SlotBackendError(
-                        f"scan file {path}: lock deadline of {_SCAN_LOCK_TIMEOUT_S}s expired while another "
-                        f"acquisition held it"
-                    ) from exc
-                time.sleep(_SCAN_LOCK_INTERVAL_S)
-                continue
-            return scan_fd
+        try:
+            deadline = time.monotonic() + _SCAN_LOCK_TIMEOUT_S
+            while True:
+                try:
+                    fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    if exc.errno not in _HELD_ERRNOS:
+                        raise SlotBackendError(f"unexpected errno {exc.errno} from scan file {path}") from exc
+                    if time.monotonic() >= deadline:
+                        raise SlotBackendError(
+                            f"scan file {path}: lock deadline of {_SCAN_LOCK_TIMEOUT_S}s expired while another "
+                            f"acquisition held it"
+                        ) from exc
+                    time.sleep(_SCAN_LOCK_INTERVAL_S)
+                    continue
+                return scan_fd
+        except BaseException:
+            os.close(scan_fd)
+            raise
 
     @contextmanager
     def acquire(self, limit: int) -> Iterator[None]:
@@ -249,10 +255,15 @@ class HostSharedConcurrencySlots:
         failure, a `scan` lock not obtained within its deadline included.
         Every fd is opened fresh for this call: each REJECTED candidate's
         fd is closed before the next one is tried (no open fd accumulates
-        across rejections), the `scan` fd is closed on every path out of
-        the search, and the held slot's own fd is closed in `finally` --
-        on the happy path and on an exception raised inside the `with`
-        block."""
+        across rejections), a candidate's fd is also closed when its own
+        `flock()` raises anything else (a `KeyboardInterrupt` included),
+        the `scan` fd is closed on every path out of the search, and the
+        held slot's own fd is closed in `finally` -- on the happy path and
+        on an exception raised inside the `with` block. An exception
+        delivered asynchronously (a signal handler's `KeyboardInterrupt`)
+        in the instant between an `open()` or a successful `flock()`
+        returning and the `try` that owns its fd still leaks that fd --
+        Python gives no way to close that window."""
         if limit < 1:
             raise ValueError(f"limit must be a positive integer, got {limit!r}")
         scan_fd = self._lock_scan_file()
@@ -273,6 +284,9 @@ class HostSharedConcurrencySlots:
                     if exc.errno in _HELD_ERRNOS:
                         continue
                     raise SlotBackendError(f"unexpected errno {exc.errno} from slot file {path}") from exc
+                except BaseException:
+                    os.close(candidate_fd)
+                    raise
                 held_fd = candidate_fd
                 break
         finally:

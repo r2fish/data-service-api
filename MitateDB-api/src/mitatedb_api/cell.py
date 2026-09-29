@@ -25,6 +25,7 @@ import contextvars
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import time
 import uuid
 from threading import Lock, RLock
@@ -64,6 +65,8 @@ from .request_vocabulary import (
     _TRANSACT_UPDATE_KEYS,
     _UNSUPPORTED_CONTRACT_OPERATORS,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def normalize_request_for_plan(request: dict[str, Any]) -> bytes:
@@ -421,7 +424,8 @@ class _LimitStateHolder:
                 return
             except concurrency_slots.LimitExceeded:
                 raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
-            except concurrency_slots.SlotBackendError:
+            except concurrency_slots.SlotBackendError as exc:
+                _logger.warning("mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
                 raise StorageConfigurationError("the concurrency slot directory could not be used")
         with self._active_lock:
             if self._active >= bound:
@@ -475,7 +479,8 @@ class _LimitStateHolder:
                 return
             except concurrency_slots.LimitExceeded:
                 raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
-            except concurrency_slots.SlotBackendError:
+            except concurrency_slots.SlotBackendError as exc:
+                _logger.warning("mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
                 raise StorageConfigurationError("the concurrency slot directory could not be used")
         with self._active_lock:
             if self._active >= bound:

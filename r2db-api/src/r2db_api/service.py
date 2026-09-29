@@ -1090,7 +1090,8 @@ class DataService:
                 return
             except concurrency_slots.LimitExceeded:
                 fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
-            except concurrency_slots.SlotBackendError:
+            except concurrency_slots.SlotBackendError as exc:
+                _logger.warning("r2db_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         with self._active_lock:
             if self._active >= self.limits.concurrency:
@@ -1141,7 +1142,8 @@ class DataService:
                 return
             except concurrency_slots.LimitExceeded:
                 fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
-            except concurrency_slots.SlotBackendError:
+            except concurrency_slots.SlotBackendError as exc:
+                _logger.warning("r2db_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: %s", exc)
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         with self._active_lock:
             if self._active >= self.limits.concurrency:
@@ -1170,8 +1172,7 @@ class DataService:
         # each keeping its own in-memory window below. Called AFTER
         # `_check`'s own authentication borrow has already returned its
         # connection (`_slot`'s own `canonical = self._check(context);
-        # self._acquire_rate(canonical)`, sequential, never nested) --
-        # completion condition 35.
+        # self._acquire_rate(canonical)`, sequential, never nested).
         if self._rate is not None:
             admitted = self._rate.record_rate_and_check(context.credential_id, self.limits.requests_per_minute)
             if not admitted:

@@ -239,8 +239,8 @@ def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, param
     cursor.execute(statement, list(params))
 
 
-# design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4
-# (completion conditions 68/69): the `application_name` every
+# design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4: the
+# `application_name` every
 # connection this module opens carries, process-wide. `None` (the
 # default -- this repository's own tests and both conformance adapters
 # never set it) omits the parameter entirely, leaving libpq's own

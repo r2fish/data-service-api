@@ -21,6 +21,7 @@ import contextlib
 import errno
 import fcntl
 import json
+import logging
 import os
 import re
 import secrets
@@ -746,24 +747,28 @@ def test_slot_file_created_with_mode_0600(tmp_path: Path) -> None:
 
 
 def test_slot_fd_is_close_on_exec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Completion condition 102 -- mutation M102 (drop `O_CLOEXEC`): the
-    REAL fd `acquire()` opens carries `O_CLOEXEC` (`os.open` is spied on,
-    never replaced)."""
+    """Completion condition 102 -- mutation M102 (drop `O_CLOEXEC`) -- and
+    ruling 43 (s2c) -- mutation Ms2c (drop `O_CLOEXEC` from the `scan`
+    open only): the REAL fds `acquire()` opens for `slot-0` AND for `scan`
+    both carry `O_CLOEXEC` (`os.open` is spied on, never replaced); both
+    opens must be observed."""
     slot_dir = _slot_dir(tmp_path)
     slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
-    captured_flags: list[int] = []
+    captured_flags: dict[str, list[int]] = {"slot-0": [], concurrency_slots.SCAN_FILENAME: []}
     original_open = os.open
 
     def _spy_open(path, flags, mode=0o777):
-        if os.path.basename(path) == "slot-0":
-            captured_flags.append(flags)
+        name = os.path.basename(path)
+        if name in captured_flags:
+            captured_flags[name].append(flags)
         return original_open(path, flags, mode)
 
     monkeypatch.setattr(concurrency_slots.os, "open", _spy_open)
     with slots.acquire(1):
         pass
-    assert captured_flags, "no os.open call of slot-0 observed (空振り)"
-    assert captured_flags[0] & os.O_CLOEXEC, oct(captured_flags[0])
+    for name, flags_seen in captured_flags.items():
+        assert flags_seen, f"no os.open call of {name} observed (空振り)"
+        assert flags_seen[0] & os.O_CLOEXEC, (name, oct(flags_seen[0]))
 
 
 def test_flock_unexpected_errno_maps_to_backend_error_not_admitted_or_denied(
@@ -812,6 +817,58 @@ def test_slot_backend_error_maps_to_503_through_the_limit_state_holder() -> None
                 pass  # pragma: no cover
         outcomes.append(http_module._STATUS_BY_CODE[http_module._classify(excinfo.value)])
     assert outcomes == [503, 503], outcomes
+
+
+def test_slot_backend_failure_is_logged_once_as_a_warning_at_both_503_mapping_points(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ruling 43 (s9) -- mutations Ms9a (`acquire_concurrency_slot` writes
+    no log line) and Ms9s (`concurrency_slot` writes no log line): another
+    holder keeps `scan` past its deadline (0.2 s here). Each of
+    `_LimitStateHolder`'s two mapping points -- `acquire_concurrency_slot`
+    (before authentication) and `concurrency_slot` (after it, never
+    reserved) -- raises its unchanged `StorageConfigurationError` (this
+    peer's 503) and writes exactly one WARNING line to the
+    `mitatedb_api.cell` logger: the fixed prefix followed by the
+    `SlotBackendError` message, which names the expired `scan` deadline."""
+    slot_dir = _slot_dir(tmp_path)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 0.2)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    holder = _LimitStateHolder(concurrency_slots=slots, concurrency_configured=True)
+
+    def _through(entry):
+        def _call() -> str:
+            with entry(1):
+                return "admitted"
+        return _call
+
+    caplog.set_level(logging.WARNING, logger="mitatedb_api.cell")
+    holder_fd = _hold_scan_directly(slot_dir)
+    threads: list[threading.Thread] = []
+    results: dict[str, tuple] = {}
+    try:
+        finished, direct, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+        threads.append(thread)
+        assert finished, f"acquire() had not returned after {elapsed:.2f}s with scan held"
+        for label, entry in (("acquire_concurrency_slot", holder.acquire_concurrency_slot), ("concurrency_slot", holder.concurrency_slot)):
+            caplog.clear()
+            finished, outcome, elapsed, thread = _call_bounded(_through(entry), 5.0)
+            threads.append(thread)
+            assert finished, f"{label} had not returned after {elapsed:.2f}s with scan held"
+            results[label] = (outcome, [r for r in caplog.records if r.name == "mitatedb_api.cell"])
+    finally:
+        os.close(holder_fd)
+        for thread in threads:
+            thread.join(timeout=_WAIT_S)
+    assert direct[0] == "raised" and isinstance(direct[1], concurrency_slots.SlotBackendError), direct
+    backend_message = str(direct[1])
+    assert "scan" in backend_message and "deadline" in backend_message, backend_message
+    expected_line = f"mitatedb_api: concurrency slot backend failed, answering SERVICE_UNAVAILABLE: {backend_message}"
+    for label, (outcome, records) in results.items():
+        assert outcome[0] == "raised" and isinstance(outcome[1], StorageConfigurationError), (label, outcome)
+        assert str(outcome[1]) == "the concurrency slot directory could not be used", (label, outcome[1])
+        assert http_module._STATUS_BY_CODE[http_module._classify(outcome[1])] == 503, label
+        assert [(r.levelno, r.getMessage()) for r in records] == [(logging.WARNING, expected_line)], (label, records)
 
 
 def test_selfcheck_detects_a_faked_flock_that_never_excludes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1385,6 +1442,72 @@ def test_scan_fd_is_closed_on_every_path_out_of_acquire(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="synthetic failure inside the search"):
         _acquire_one(concurrency_slots.HostSharedConcurrencySlots(slot_dir, random_below=_failing_random_source))
     _assert_not_grown("exception", before)
+
+
+def test_scan_wait_interrupted_by_keyboard_interrupt_leaks_no_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ruling 43 (s3b) -- mutations Ms3b (the `scan` wait's handler
+    narrowed to `Exception`) and Ms3bw (that handler's close dropped):
+    another holder keeps `scan`, and the waiting acquisition's second
+    pause between two attempts raises `KeyboardInterrupt` (this module's
+    own `time.sleep` replaced; the deadline is 5 s, so the interrupt, not
+    the deadline, ends the wait). The interrupt propagates out of
+    `acquire`, and the process' open-fd count is the same as before the
+    call -- the waiting `scan` fd was closed."""
+    slot_dir = _slot_dir(tmp_path)
+    monkeypatch.setattr(concurrency_slots, "_SCAN_LOCK_TIMEOUT_S", 5.0)
+    pauses: list[float] = []
+
+    def _interrupting_sleep(seconds: float) -> None:
+        pauses.append(seconds)
+        if len(pauses) == 2:
+            raise KeyboardInterrupt("synthetic interrupt during the scan wait")
+
+    monkeypatch.setattr(concurrency_slots, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=_interrupting_sleep))
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    holder_fd = _hold_scan_directly(slot_dir)
+    try:
+        before = _open_fd_count()
+        finished, outcome, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+        thread.join(timeout=_WAIT_S)
+        after = _open_fd_count()
+    finally:
+        os.close(holder_fd)
+    assert finished, f"acquire() had not returned after {elapsed:.2f}s"
+    assert len(pauses) == 2, f"the interrupt was not raised inside the scan wait (空振り): {pauses}"
+    assert outcome[0] == "raised" and isinstance(outcome[1], KeyboardInterrupt), outcome
+    assert after == before, f"open fd count grew from {before} to {after} on the interrupted scan wait"
+
+
+def test_candidate_flock_interrupted_by_keyboard_interrupt_leaks_no_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ruling 43 (s3b) -- mutation Ms3bc (the candidate fd's
+    `BaseException` handler dropped): the `slot-0` candidate's own
+    `flock()` raises `KeyboardInterrupt` (injected; the `scan` lock runs
+    for real). The interrupt propagates out of `acquire`, and the
+    process' open-fd count is the same as before the call -- the
+    candidate's fd and `scan` were both closed."""
+    slot_dir = _slot_dir(tmp_path)
+    slots = concurrency_slots.HostSharedConcurrencySlots(slot_dir)
+    real_flock = fcntl.flock
+    slot_attempts: list[int] = []
+
+    def _interrupting_flock(fd, operation):
+        slot_path = slot_dir / "slot-0"
+        if slot_path.exists() and os.fstat(fd).st_ino == os.stat(slot_path).st_ino:
+            slot_attempts.append(operation)
+            raise KeyboardInterrupt("synthetic interrupt during a candidate's flock")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(concurrency_slots.fcntl, "flock", _interrupting_flock)
+    before = _open_fd_count()
+    finished, outcome, elapsed, thread = _call_bounded(lambda: _acquire_one(slots), 5.0)
+    thread.join(timeout=_WAIT_S)
+    after = _open_fd_count()
+    assert finished, f"acquire() had not returned after {elapsed:.2f}s"
+    assert slot_attempts, "no slot-0 lock attempt observed (空振り)"
+    assert outcome[0] == "raised" and isinstance(outcome[1], KeyboardInterrupt), outcome
+    assert after == before, f"open fd count grew from {before} to {after} on the interrupted candidate flock"
 
 
 def test_scan_lock_held_by_a_sigkilled_child_process_is_released_by_the_kernel(

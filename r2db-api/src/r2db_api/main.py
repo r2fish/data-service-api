@@ -318,7 +318,7 @@ def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
 def _workers_from_env(env: Mapping[str, str], name: str) -> int:
     """design D-1: `name` must be set, non-empty, and a
     positive integer -- unset, empty, `0`, negative, or non-numeric all
-    stop startup with a message naming `name` (completion condition 58).
+    stop startup with a message naming `name`.
     Unlike `_thread_limit_from_env`/`_optional_int` above, there is no
     default to degrade to: `--workers` is always explicit."""
     raw = env.get(name)
@@ -334,7 +334,7 @@ def _workers_from_env(env: Mapping[str, str], name: str) -> int:
 
 
 def _require_slot_dir(env: Mapping[str, str], name: str) -> Path:
-    """(design D-3 (2'), completion condition 38): `name`
+    """(design D-3 (2')): `name`
     must be set and non-empty -- unset or empty stops startup with a
     message naming `name`. The path itself is checked separately
     (`concurrency_slots.check_slot_directory`/`selfcheck_slot_locking`,
@@ -429,8 +429,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # design D-1: `--workers` is always explicit (env
     # required, no default) -- closes the `WEB_CONCURRENCY` entry point
     # uvicorn's own config would otherwise read. Compared below, once
-    # `process_ceilings.data` is known, against the declared ceiling
-    # (completion condition 60).
+    # `process_ceilings.data` is known, against the declared ceiling.
     workers = _workers_from_env(env, "R2DB_WORKERS")
     # design D-3 (2'): `build_app()` only CHECKS the
     # slot directory (existence/owner/mode 0700) and self-checks real
@@ -518,7 +517,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # `concurrency`): `enforced` while this reads `1`, `deployment_required`
     # once it reads `>= 2`.
     process_ceiling = declarations.process_ceilings.data
-    # design D-1 (completion condition 60): checked
+    # design D-1: checked
     # here, inside `build_app()` itself (never `verify-declarations`,
     # never `lifespan`), against the SAME `process_ceilings.
     # data` value the mapping below reads. `--workers` above the declared
@@ -552,8 +551,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     resource_limits = ResourceLimits()
     # design D-3 (5): derived from `thread_limit`
     # (the real per-process simultaneous-borrow ceiling, `role_pool_size`'s
-    # own docstring) rather than from `resource_limits.concurrency` --
-    # completion condition 70.
+    # own docstring) rather than from `resource_limits.concurrency`.
     _role_pool_size = role_pool_size(thread_limit)
 
     # Computed from `env` (this function's own parameter), and always
@@ -615,7 +613,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # borrowed connection (login role = the real `r2dbsvc_api` writer
         # role, D-1(c)), right after the writer-role dual check above.
 
-        # design D-3 (5), completion condition 72:
+        # design D-3 (5):
         # `r2dbsvc_api`'s own real CONNECTION LIMIT is a CLUSTER-WIDE cap
         # shared by every one of `process_ceilings.data` data-plane
         # processes this deployment runs, each with its own `_role_pool_
@@ -828,13 +826,12 @@ app = build_app()
 async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
     """Drives exactly one ASGI `lifespan` startup+shutdown cycle against
     `asgi_app` (the ALREADY-BUILT module-level `app` above -- `build_app()`
-    is never called a second time, completion condition 65) -- the
+    is never called a second time) -- the
     standard ASGI lifespan scope protocol, driven directly rather than
     through a real server. `build_app()`'s own `_lifespan` hook is what
     actually closes every pool this process opened (`default_pool_
     manager.dispose_all()`/`credentials.close()`/`durable_audit.close()`,
-    above) -- reused here rather than duplicated (completion condition
-    66)."""
+    above) -- reused here rather than duplicated."""
     to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
     from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
 
