@@ -20,11 +20,33 @@ automatically if the holding process dies (crash safety) -- unlike
 a row held in PostgreSQL, which a crashed connection's own server-side
 cleanup must first notice.
 
+Every acquisition scans the `slot-<i>` files while it holds an exclusive
+`flock()` on one more file in the same directory, `scan` (a name no
+`slot-<i>` file and not `selfcheck` share, opened with the same flags
+and mode). Every `slot-<i>` lock is taken by `HostSharedConcurrencySlots.
+acquire` alone, and only under `scan`, so while one scan runs no other
+acquisition takes a slot: a slot the scan sees held was already held
+when the scan started, and "every slot held" is never reported while
+fewer than `limit` requests hold one. `scan` is closed right after the
+scan -- as soon as one slot is taken or every slot is seen held -- so no
+request holds `scan` while it runs, and releasing a slot takes no lock
+at all (a plain `close()`). A direct `flock()` probe of a `slot-<i>`
+file from outside this module (a test observing which slots are held)
+bypasses `scan`, so it is sound only while no acquisition runs
+concurrently with it.
+
 Stdlib only. Every syscall in this module runs on the event-loop thread
-(design §9 (i)): a rejected candidate costs one `open`/`flock`/`close`
-triple, and the worst case (every slot already held) costs `limit` such
-triples -- L = 32 is 96 syscalls, all non-blocking (`LOCK_NB`), never a
-wait.
+(design §9 (i)). A free slot is never waited for: a directory whose
+slots are all held is refused at once with `LimitExceeded`. `scan` is
+waited for, with a deadline -- `LOCK_EX | LOCK_NB` is retried every
+`_SCAN_LOCK_INTERVAL_S` until `_SCAN_LOCK_TIMEOUT_S` has passed, then
+`SlotBackendError` (fail-closed, the caller's existing 503) -- and the
+event loop is blocked for that wait, so a process frozen while it holds
+`scan` (SIGSTOP, a debugger) stalls every other acquisition on this host
+for at most that deadline each, never indefinitely. With `scan`
+uncontended, an acquisition that finds every slot held costs `3 * limit
++ 3` syscalls -- one `open`/`flock`/`close` triple for `scan` and one for
+each rejected `slot-<i>` candidate (L = 32 is 99).
 """
 from __future__ import annotations
 
@@ -33,6 +55,7 @@ import fcntl
 import os
 import secrets
 import stat
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
@@ -44,11 +67,24 @@ from typing import Callable, Iterator
 #: 開かない").
 SELFCHECK_FILENAME = "selfcheck"
 
-#: `open()`'s own flag set for both the self-check file and every
-#: `slot-<i>` file: `O_NOFOLLOW` refuses a symlink planted in the slot
-#: directory, `O_CLOEXEC` keeps a held slot's own fd from
-#: leaking into a child process this one might spawn later (completion
-#: condition 44), `O_CREAT | O_RDWR` opens-or-creates the file this
+#: the one file `HostSharedConcurrencySlots.acquire` holds an exclusive
+#: lock on while it scans the `slot-<i>` files -- a name distinct from
+#: every `slot-<i>` file and from `SELFCHECK_FILENAME`, so holding it is
+#: never counted as holding a slot.
+SCAN_FILENAME = "scan"
+
+#: how long `acquire` keeps retrying the `scan` lock before it fails
+#: closed with `SlotBackendError`, in seconds.
+_SCAN_LOCK_TIMEOUT_S = 1.0
+
+#: the pause between two attempts at the `scan` lock, in seconds.
+_SCAN_LOCK_INTERVAL_S = 0.0002
+
+#: `open()`'s own flag set for the self-check file, the `scan` file and
+#: every `slot-<i>` file: `O_NOFOLLOW` refuses a symlink planted in the
+#: slot directory, `O_CLOEXEC` keeps a held slot's own fd from
+#: leaking into a child process this one might spawn later,
+#: `O_CREAT | O_RDWR` opens-or-creates the file this
 #: process itself owns (mode 0600, passed to `os.open` separately below).
 _OPEN_FLAGS = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -161,43 +197,86 @@ class HostSharedConcurrencySlots:
 
     def __init__(self, directory: Path, *, random_below: Callable[[int], int] = secrets.randbelow) -> None:
         self._directory = directory
-        # completion condition 51: the search start point follows a
-        # random source -- injectable so a test can observe it, never
-        # hardcoded to 0.
+        # the search start point follows a random source -- injectable
+        # so a test can observe it, never hardcoded to 0.
         self._random_below = random_below
+
+    def _lock_scan_file(self) -> int:
+        """Opens `scan` fresh for this one call -- never an fd shared with
+        another call, so two threads of this same process exclude each
+        other exactly as two processes do (a `flock()` lock belongs to the
+        open file description) -- and takes its exclusive lock, retrying
+        `LOCK_EX | LOCK_NB` every `_SCAN_LOCK_INTERVAL_S` while the errno
+        is one of `_HELD_ERRNOS`. Returns the locked fd; the caller closes
+        it. Raises `SlotBackendError`, with the fd already closed, when
+        the open fails (a symlink planted as `scan` included), at once on
+        any other errno, and when `_SCAN_LOCK_TIMEOUT_S` passes with
+        `scan` still held elsewhere -- that message names the expired
+        `scan` deadline."""
+        path = self._directory / SCAN_FILENAME
+        try:
+            scan_fd = os.open(str(path), _OPEN_FLAGS, _FILE_MODE)
+        except OSError as exc:
+            raise SlotBackendError(f"could not open scan file {path}: {exc}") from exc
+        deadline = time.monotonic() + _SCAN_LOCK_TIMEOUT_S
+        while True:
+            try:
+                fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in _HELD_ERRNOS:
+                    os.close(scan_fd)
+                    raise SlotBackendError(f"unexpected errno {exc.errno} from scan file {path}") from exc
+                if time.monotonic() >= deadline:
+                    os.close(scan_fd)
+                    raise SlotBackendError(
+                        f"scan file {path}: lock deadline of {_SCAN_LOCK_TIMEOUT_S}s expired while another "
+                        f"acquisition held it"
+                    ) from exc
+                time.sleep(_SCAN_LOCK_INTERVAL_S)
+                continue
+            return scan_fd
 
     @contextmanager
     def acquire(self, limit: int) -> Iterator[None]:
         """Holds exactly one of `slot-0` .. `slot-<limit - 1>` for the
-        duration of the `with` block, starting the search at a random
-        index and trying each of the `limit` slots at most once.
-        Raises `LimitExceeded` if every slot is already held,
-        `SlotBackendError` on any other failure. The held slot's own fd is
-        opened fresh for this call and closed in `finally` -- on the
-        happy path, on an exception raised inside the `with` block
-        (completion condition 49), and for every REJECTED candidate
-        before the next one is tried (completion condition 50: no open fd
-        accumulates across rejections)."""
+        duration of the `with` block. Takes the `scan` lock first
+        (`_lock_scan_file`), then starts the search at a random index and
+        tries each of the `limit` slots at most once with `LOCK_EX |
+        LOCK_NB`; `scan` is closed right after that search, before the
+        `with` body runs, whether a slot was taken or not. Raises
+        `LimitExceeded` if every slot is already held -- without waiting
+        for one to become free -- and `SlotBackendError` on any other
+        failure, a `scan` lock not obtained within its deadline included.
+        Every fd is opened fresh for this call: each REJECTED candidate's
+        fd is closed before the next one is tried (no open fd accumulates
+        across rejections), the `scan` fd is closed on every path out of
+        the search, and the held slot's own fd is closed in `finally` --
+        on the happy path and on an exception raised inside the `with`
+        block."""
         if limit < 1:
             raise ValueError(f"limit must be a positive integer, got {limit!r}")
-        start = self._random_below(limit)
+        scan_fd = self._lock_scan_file()
         held_fd: int | None = None
-        for offset in range(limit):
-            index = (start + offset) % limit
-            path = _slot_path(self._directory, index)
-            try:
-                candidate_fd = os.open(str(path), _OPEN_FLAGS, _FILE_MODE)
-            except OSError as exc:
-                raise SlotBackendError(f"could not open slot file {path}: {exc}") from exc
-            try:
-                fcntl.flock(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                os.close(candidate_fd)
-                if exc.errno in _HELD_ERRNOS:
-                    continue
-                raise SlotBackendError(f"unexpected errno {exc.errno} from slot file {path}") from exc
-            held_fd = candidate_fd
-            break
+        try:
+            start = self._random_below(limit)
+            for offset in range(limit):
+                index = (start + offset) % limit
+                path = _slot_path(self._directory, index)
+                try:
+                    candidate_fd = os.open(str(path), _OPEN_FLAGS, _FILE_MODE)
+                except OSError as exc:
+                    raise SlotBackendError(f"could not open slot file {path}: {exc}") from exc
+                try:
+                    fcntl.flock(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    os.close(candidate_fd)
+                    if exc.errno in _HELD_ERRNOS:
+                        continue
+                    raise SlotBackendError(f"unexpected errno {exc.errno} from slot file {path}") from exc
+                held_fd = candidate_fd
+                break
+        finally:
+            os.close(scan_fd)
         if held_fd is None:
             raise LimitExceeded(f"no slot available among {limit} in {self._directory}")
         try:

@@ -83,6 +83,11 @@ MIGRATION_FILENAME = "0007_platform_declarations.sql"
 PROCESS_CEILINGS_MIGRATION_NUMBER = "0011"
 PROCESS_CEILINGS_MIGRATION_FILENAME = "0011_process_ceilings.sql"
 
+#: the platform single-shot migration that creates the `requests_per_minute`
+#: rate function `check_request_rate_function` looks for -- named in
+#: that check's own failure message.
+REQUEST_RATE_MIGRATION_FILENAME = "0016_credential_request_rate.sql"
+
 #: `<peer>` in every fail-fast message's "next ops command" (design
 #: §3.8).
 PEER_MODULE = "mitatedb_api"
@@ -1474,6 +1479,38 @@ def check_application_collations(conn: "psycopg.Connection", *, schema: str) -> 
                 raise PlatformDeclarationError(_f19_message(database_name, reason="ctype"), code="F-19")
             if checks_provider and row[2] != "c":
                 raise PlatformDeclarationError(_f19_message(database_name, reason="provider"), code="F-19")
+
+
+def check_request_rate_function(conn: "psycopg.Connection", *, schema: str, migration: str) -> None:
+    """Startup-time and read-only: `schema` carries the `credential_
+    request_rate_admit(text, integer)` function every request's
+    `requests_per_minute` count runs through, and this connection's own
+    login role -- the data plane's own role, the one that function runs
+    as for every request -- may EXECUTE it. Raises `RuntimeError` naming
+    `migration` otherwise, so a data plane started against a platform
+    that migration was never applied to stops in `build_app()` (and so in
+    `--preflight`) instead of answering every request with a 503. Reads
+    `to_regprocedure` and `has_function_privilege` only. The control
+    plane never calls the function and never runs this check."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT to_regprocedure(quote_ident(%s) || '.credential_request_rate_admit(text, integer)')::oid",
+            [schema],
+        )
+        (function_oid,) = cur.fetchone()
+        if function_oid is None:
+            raise RuntimeError(
+                f"{schema}.credential_request_rate_admit(text, integer) does not exist -- apply the platform "
+                f"migration {migration} before starting the data plane"
+            )
+        cur.execute("SELECT has_function_privilege(%s::oid, 'EXECUTE')", [function_oid])
+        (executable,) = cur.fetchone()
+        if not executable:
+            raise RuntimeError(
+                f"this data-plane role may not EXECUTE {schema}.credential_request_rate_admit(text, integer) -- "
+                f"apply the platform migration {migration} (it grants EXECUTE to the data-plane role) before "
+                f"starting the data plane"
+            )
 
 
 def ops_module_hint() -> str:

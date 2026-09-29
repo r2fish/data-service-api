@@ -488,6 +488,15 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
             process_ceilings=declarations.process_ceilings, pool_size=_role_pool_size,
         )
+        # The `requests_per_minute` rate function every request runs
+        # through the platform pool (the same `mitatedbsvc_api` login role
+        # as this connection) must exist and be executable by that role,
+        # checked read-only here so a platform missing its migration stops
+        # startup (and `--preflight`) instead of answering every request
+        # with 503.
+        platform_declarations.check_request_rate_function(
+            declarations_conn, schema=schema, migration=platform_declarations.REQUEST_RATE_MIGRATION_FILENAME,
+        )
     finally:
         declarations_conn.close()
 
