@@ -7,6 +7,7 @@
 - 基点: main `443a79a`。本書の file:line はこの木の現物である (uvicorn は開発機の venv の 0.52.4。両 peer の `pyproject.toml` は `uvicorn>=0.30`、`r2db-api/pyproject.toml`:33、`MitateDB-api/pyproject.toml`:30)。v0.3 で足した事実 (§1.4) と v0.4 で足した事実 (§1.4 の (6)) も同じ木で確かめた。
 - 契約: **1.11.0 不変** (§10 の裁定 10・13)。v0.2 の「Q-1 が (A)(C) なら 1.12.0」は裁定 10 で覆した。
 - クラス: **Class D** (§10 の裁定 22。§3 D-6)。
+- 改版 (v0.6、2026-09-29): 監督裁定 43 (slot の走査を `scan` の lock で host 内に直列化。走査の非原子性で同時保持が L 未満でも `concurrency` の拒否が出た) を §10.7 に逐語で追記。D-3 (2)(2') の本文は書き換えず、§10.7 が優先する。設計レビュー 1 回。契約 1.11.0 不変。
 - 改版: v0.1 (2026-09-28) 起草 (drafter)。v0.2 (2026-09-28) 監督裁定 1〜9 を §10 に追記 (起草の疑義への裁定。本文は書き換えず、§10 が優先する)。v0.3 (2026-09-28) 設計レビュー 1 回目 (13 件とクラスの引き上げ) への監督裁定 10〜22 と Q-1 の書き換えを §10 に逐語で追記し、本文 (§0、§1.2〜§1.4、D-1〜D-7、§4〜§9) を裁定に合わせて書き換えた。覆した判定は行を残し、覆した裁定の番号と日付を添えた (`OPERATING_CONDITIONS.md` §1.8 の 56)。v0.4 (2026-09-28) 設計レビュー 1 回目の再確認 (新 1〜8) への監督裁定 26〜33 を §10.4 に逐語で追記し、覆された旧裁定 (11 の事前検査の手段、17 の計測時 64、18 の `concurrency` の写像、24) の末尾に覆した裁定の番号を添えた。本文 (§0、D-1〜D-5、§4、§6、§7、§9) を裁定に合わせて書き換えた (事前検査を one-shot の `--preflight` entry に、`concurrency` の写像に workers の条件、slot の扱いの決定、rate 行を int[60] に、計測は既定 32)。
 - 出所の記法は `docs/work-orders/OPERATING_CONDITIONS.md` §0。キーの無いファイルは経路で書く。
 - 公開規律: 実 DSN・実ホスト名・作業機の絶対パスを置かない (`OPERATING_CONDITIONS.md` §1.9)。
@@ -814,3 +815,28 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 41. **(新 E、低) preflight entry は module の `app` (= `build_app()` の結果) を使い回し、二重に `build_app()` を呼ばない。MitateDB の CMD は `set -e` (または `&&`) で繋ぐ。起動時の検査は `build_app()` の中に置き、lifespan に置かない。** WP-2 / WP-3 / WP-5 の完了条件。
 42. **(新 F、低) int[61] は境目で最大 1 秒分を多めに数える (L を超えて通すことは無い)。** C-05 の honest limits と両 runbook に開示する。 **(n)**: `hold_in_flight` が pool の接続を持たずに止まることは r2db で現物確認済み (レビュー担当)、MitateDB は WP-3 の完了条件に置く。
 
+### 10.7 監督裁定 43 (v0.6、2026-09-29。WP-3 の実装で見つかった走査の非原子性への裁定。設計レビュー 1 回 (`r113_design_review_43.md`、指摘 8 件) を反映。逐語)
+
+**事実 (調査担当の診断と設計レビューの実測、2026-09-29。probe と log は監督保管)**
+
+- real-server plug (workers 2) の C-32 (b) で、client の同時送信が宣言値 L = 32 以下なのに `LIMIT_EXCEEDED` (`limit_class` = `concurrency`) が返る (3/14400)。
+- 原因: slot の走査が process 間で原子的でない。`acquire` は乱数始点から L 本を 1 本ずつ `LOCK_EX | LOCK_NB` で試す。走査の途中で別 process が「走査済みの slot を解放し、走査の先の空き slot を取る」と、どの瞬間も L 本は握られていないのに、試した各時点では全部握られていた、になる。
+- plain python の probe (同時保持を semaphore で厳密に上限付け、保持 0〜3 ms、各 20 s): L = 32・上限 32・2 process で 136/286503、4 process で 536/321380、上限 31 でも 2 process で 13/296495。1 process で直列なら 0/233667。
+- slot の解放は両 peer とも応答を作る前で、「解放が応答の送出より後」は成立しない。1 process の in-memory の counter は判定と加算が lock の中で原子的で、この窓を持たない。C-05 V2 と C-32 (a) は保持者を止めたまま送るので走査中に解放が起きず、この窓を観測しない。
+
+**裁定**
+
+43. **走査を host 内で直列化する。** slot directory に走査用のファイル `scan` を置く (`slot-<i>`・`selfcheck` と別名、開き方 (`O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC`) と mode 0600 は同じ)。`acquire(limit)` は、取得ごとに `scan` を新しく open し、その排他 lock を取ってから L 本を走査し、slot を 1 本握った直後、または全部塞がりを見た直後に `scan` の fd を close する (要求の処理の間は `scan` を持たない)。slot の解放は lock を取らない (fd の close)。
+    - **論証**: slot の取得はすべて `acquire` (= `scan` の lock の下) を通る。`scan` の lock の下では他の取得が起きないので、走査の間、slot は「握られている → 空き」の向きにしか動かない。走査が i 本目を「握られている」と見たなら、その slot は走査の開始時点でも握られていた。よって「全部塞がり」を見た走査の開始時点では L 本とも握られており、同時保持が L 未満のときの拒否は起きない。L を超えて通すことも無い (slot 1 本の排他は変わらない)。flock は open file description に付くので、取得ごとに open した `scan` は同じ process の別 thread どうしでも排他になる。テストが `slot-<i>` を直接 flock して保持を観測するのは、並行の取得が無い場面に限る。
+    - **実測**: 直列化した probe は 2 process で 0/248144、4 process で 0/260741、1 process 64 thread と 2 process × 32 thread でも 0 (同じ process 内の直列化を外すと 2477/235070)。
+    - **`scan` の lock の取り方 = 期限付き**: `LOCK_EX | LOCK_NB` を 200 µs の間隔で試し、1 s の期限までに取れなければ `SlotBackendError` (fail-closed、既存の 503 の写像)。「握られている」の errno は `_HELD_ERRNOS` だけで、他の errno と `scan` の open の失敗は待たずに `SlotBackendError`。
+      - 却下案: blocking の `LOCK_EX`。待ちは短い (満杯時の flood で最大 2.8 ms) が期限を持てず、`scan` を持った process が凍結 (SIGSTOP、cgroup freezer、debugger) すると host の全 worker の event loop が無期限に止まる。process の死は kernel が解放するが、凍結は解放しない。
+      - 待ちの実測 (darwin、10 core。待ちは FIFO ではないので上限ではない): 最大は 4 process で 5.9 ms、12 process (CPU の取り合いあり) で 20.4 ms、満杯時の未認証 flood で 63 ms。期限 1 s はその 16 倍以上。probe で期限切れは 0 件、飢餓は観測されない。
+      - 期限の値の両論: 1 s は通常の負荷で誤った 503 を出しにくいが、凍結の間は要求ごとに event loop が 1 s 止まってから 503 になる。100 ms は止まる時間が短いが実測の最大 63 ms に近い。通常時に誤った 503 を出さない方を採り 1 s とする。
+    - **凍結した process**: slot を握ったまま凍結した process が失わせるのは自分の in-flight の分だけである。`scan` を握ったまま凍結した process は host 全体の取得を止めるので、期限で守る。凍結の間、各要求は最大 1 s 待ってから 503 になる。runbook に「単独の worker を SIGSTOP・debugger で止めない (再起動は stop / start)」を書く。
+    - **費用 (実測)**: 取得 1 回に open / flock / close が 1 組増える (全部塞がりのとき 3L + 3 回の syscall)。K = 1 の取得の p50 は 14 µs → 26 µs。4 process で GIL を握る保持者がいる形では取得数 −3.7%、待ちの p99 0.52 ms。満杯時の未認証 flood の拒否の処理数は 53435 → 29243 / 10 s (4 process、503 は 0 件)。§7.3 の算術に「32 本同時の到着で `scan` の保持 p50 0.04〜0.06 ms × 32 ≈ 1.3〜1.9 ms」を足す。
+    - **却下した他の形**: 有限回の再走査 (拒否を減らすが無くす保証が無い。1 回で 1/284119・3/316556)、blocking flock で空きを待つ形 (「L 本のどれか」を待てず、本当の超過の拒否が遅れて C-32 (a) に反する)、byte-range lock (`lockf` は process 単位で process 内の 2 要求を分けられない。range を 1 本ずつ試すなら走査のまま)、POSIX named semaphore (stdlib に名前で開く API が無く、crash で単位が戻らない)、共有 / 排他の 2 段 (成功する走査は並列に残るが、満杯時に排他が飢えて 429 が 503 になりうる)、lock の外で 1 本だけ試す近道 (論証を壊す)、fd を開いたまま持つ process 内の空き表 (裁定 29 で却下済み)。
+    - **起動時の自己検査**: `scan` は同じ directory・同じ開き方・同じ `flock` なので `selfcheck` の確かめる範囲に入る。別の検査は足さない。
+    - **範囲**: 両 peer の `concurrency_slots.py` の `HostSharedConcurrencySlots.acquire` と、その docstring。呼び出し側・宣言の写像・起動時の検査・conformance・契約は変えない。契約 1.11.0 不変。
+    - **文言の訂正**: D-3 (2') の「拒否経路の費用」と helper の docstring の「never a wait」は「slot の空きは待たない。`scan` の待ちは期限付き」に読み替える。作業指示書の完了条件 52 の「待たずに 429」は「slot の空きを待たずに 429 (`scan` の待ちは期限内)」に読み替える。
+    - **期限切れの 503 の見分け**: 応答は既存の 503 のまま。`SlotBackendError` の message が `scan` の期限切れを名指しする。
