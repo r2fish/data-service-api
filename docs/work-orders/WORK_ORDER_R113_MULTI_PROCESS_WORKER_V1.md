@@ -487,6 +487,12 @@ peer-local のテストは小さい L を宣言した構成で駆動してよい
 
 51. inventory の修正は **WP-7** として本書に足す (設計は `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` の追補、設計レビュー 1 回、実装担当、コードレビュー、Class D)。順は WP-3 の統合の後。§11 の「R-52 (rollout の重なり) は範囲外」は保つ: WP-7 が変えるのは inventory の需要の算術の基準と入力だけで、rollout の重なりで保つもの・保たないものの規律は変えない。runbook §10 の再受理は依頼者が行う (§10.8 は「not accepted」のまま統合する)。
 
+**監督裁定 52〜54 (2026-09-29、WP-3 の再確認 1b / 1c / 1d、WP-5 のコードレビュー 1 / 1b、WP-7 の設計、実装担当のモデル)**
+
+52. WP-3 の再確認 1b (指摘 6 件)・1c (2 件)・1d (1 件) はすべて「直す」(裁定表は監督保管 `r113_wp3_rework_1b.md`・`r113_wp3_rework_1c.md`・`r113_wp3_rework_1d.md`): `scan` の open の close-on-exec を固定するテスト (s2c)、`scan` の待ちと候補の区間の割り込みで fd を閉じる (s3b)、保持が決まった slot の fd を `scan` の close の後の例外で閉じる (s3c)、slot の backend の失敗の log は process ごとに間隔 1 s あたり高々 1 行で抑えた件数を載せる (s9。裁定 50 と設計 裁定 43 の「message が名指しする」は、この log の行で運用者に届く)、既定の時計と実体の共有の固定、完了条件 72 のテストの docstring、src に残る作業指示書の番号 (R-113 の追加行だけ)。同型登録の件数 pin は 198。差し戻し 1d (テスト 2 本と docstring の 1 文) は監督が差分と変異の log を照合して閉じた。
+53. WP-5 のコードレビュー 1 (F1〜F9) と再確認 1b (N1〜N6) の裁定 (裁定表は監督保管 `r113_wp5_rework_1.md`): **訂正註 (§8.1)** 触ってよいパスに `r2db-api/deploy/scripts/lint_deploy_assets.sh` を足す。MitateDB の 0016 は runbook §10 のゲート付き手順に入れ (§10.6・§10.7・§10.10.1 の step 7a)、表の版数は 5 / 5 / 8、§10.8 は「not accepted」。**完了条件を足す**: worker 数の変数の既定値が unit・Dockerfile・env の例のどこにも無い (変異 M155d・M159d・M163d・M166d)。N1 (統合の順) は WP-3 → WP-5 の順で統合し、両 peer の `main.py` に起動時の検査の呼び出しが在ることを確かめた。N3・N4 は監督が直した。
+54. **訂正註 (監督裁定 51、依頼者裁定 2026-09-29 の 2 件目)**: WP-7 の設計は `docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md` (別ファイル) に置いた。節は本書 §12。Sonnet の週次上限は、監督が 2026-09-29 にこのチャットのアカウントで確かめたところ成り立たない (Sonnet の起動は成功し、アカウントの利用状況に Sonnet の上限の表示が無い。前の引き継ぎ書の記述は別のアカウントの状態と見られる)。依頼者裁定の前提が成り立たないので、WP-3 の差し戻し 1d 以降の実装担当は `ROLES` の役割表どおり sonnet で起動する。それまでの実装担当 (WP-3 の再開〜差し戻し 1c、WP-4 の差し戻し 2、WP-5 の初回と差し戻し 1) は opus である。
+
 ### 6.2 実施と受け入れ
 
 - **WP-4 (2026-09-29、worktree `r113-wp4`、WIP `8a54a74` → `2e0fec9` → `06f59ad`、r113 に merge `01d8a75`)**: 実装担当 opus (初回 + 差し戻し 1 / 2)、コードレビュー opus (1 回 + 再確認 1b / 1c、1c は「指摘なし」+ 観察 3)。監督裁定 43〜47 (§6.1)。最終 pt: `pt: 124 passed in 19.19s` (tools/tests/test_perf_baseline.py)、`pt: 4 failed, 661 passed in 74.95s (0:01:14)` (tools/tests。赤 = `concurrency_slots.py` の分類の共有 pin 4 件、WP-6 で監督が更新)。変異: `mutate: 14 mutations, 14 as expected, restores verified 1/1 files (sha256 x2), grep counts unchanged` (M146〜M150、M148b、M149b、M149c、M149d、M153、M153b、M153c、M153d、M153z。赤の理由は全件 assert の中身、再確認 1b が 10 件を再実行・1c が 14 件を log で照合)。監査照合: 151 = 基点 `18f9c0d` からの差分で `status != 200` を含む行 0 件、152 = `REALPERF` / `REALCPU` の書式と並びの差分 0 件・既存テスト緑。静的検査: `change_class` = B、`check_doc_refs OK`、`public_value_scan total_flagged=0`。`REALWORKERS` 行の形: `REALWORKERS peer= plug= workers= concurrency= pids= accepted_200= non_200= unclassified=`。
@@ -640,3 +646,159 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 - **R-52** (rollout の重なり)。本件で保つもの・保たないものは WP-5 の runbook に開示し、Cloud Run の revision の重なりで 2 host になる間の slot の非共有は R-52 の射程 (裁定 25・33、R-52 行の v1.130 の【追記】)。
 - **R-114** (`spec/data-service-api.v1.json`:925 の "fixed window" と実装の sliding の食い違い)。直さない (裁定 13)。
 - **複数 host の共有 limiter**。slot の射程は 1 host (設計 D-3 (2)、裁定 10)。複数 host は `deployment_required` の宣言か、R-18 (c) の続きとして別に起票する。
+
+## 12. WP-7 — MitateDB の Gate-0 inventory 項目 (8) の需要の基準 (実装担当。WP-3 と WP-5 の統合の後)
+
+**目的**: inventory の項目 (8) の接続の需要を、起動時の検査 (F-16 / F-18) と同じ thread limit 基準に揃える。rollout で古い code の revision と新しい code の revision が並ぶ間は、需要を revision の基準ごとに数えて足す。runbook §10 をこの算術と入力に合わせる。
+
+**読むべき正本**: 設計メモ `docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md` v0.3 (以下「WP-7 設計」) の §1・§2 (問題と条件)、§4 (決定)、§5 (検算)、§7 (壊すとどう見えるか)。**WP-7 設計の §10 (監督裁定 1〜16) と §10.1 (監督裁定 17〜25) が本文 (§4 の決定、§9 の疑義) より優先し、§10.1 が §10 より優先する。** 却下案は WP-7 設計 §6 と裁定 1 (蒸し返さない)。本書 §6.1 の「依頼者裁定 (2026-09-29) と監督裁定 51」。接続予算の倍率は設計 §10 の裁定 16 と本書 §6.1 の監督裁定 28。runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` の §6.5 (接続予算)、§10.4 (env の値の許可表)、§10.4.3、§10.5、§10.8、§10.9、§10.10 (前提条件)、§10.10.1 (項目 (8) の行)、§10.10.3 の step 13。
+
+**クラス**: 宣言は D (R-113 全体。本書 §0)。`tools/change_class.py` の判定を報告に記す。**テンプレート**: `ROLES` の 2。**設計レビュー**: WP-7 設計に対して 1 回、済 (裁定は WP-7 設計 §10.1)。**コードレビュー**: `ROLES` の 5 で 1 回 (本書 §2.2)。
+
+**順**: WP-3 → WP-5 → WP-7 の直列 (WP-7 設計の裁定 13)。runbook を WP-5 と共に触るので並行しない (`OC` §1.2 の 16)。担当 worktree は、統合 branch r113 に WP-3 と WP-5 を統合した後の木から監督が作る (本節では `$WT`、その基点を `<WP-7 の基点>`)。依頼者判断待ちの選択肢は無い。
+
+**監督が行い、実装担当が触らないもの**: `security/CONTROL_MAPPING.md` の SI-08 の MitateDB の写像の追随 (WP-7 設計の裁定 15。本書 §9)、`docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` への指し先の訂正註 (裁定 11)、本書 §6.1 の監督裁定 51 への訂正註 (裁定 11)、`docs/design/MITATEDB_PLATFORM_READONLY_INVENTORY_V0_1.md` への訂正註 (裁定 17 の Z-27 の読み方)。
+
+**記号** (WP-7 設計 §4 D-2 と裁定 17): O = 古い基準の data process 数 (`--data-process-count-old-basis`)、N = `--data-process-count-total` − O (新しい基準の data process 数)、c = `--concurrency`、t = `--thread-limit`、p = `config.role_pool_size(t)`、A = `platform_declarations._API_ROLE_STORE_COUNT`、K = inventory が `applications` の表から読む、role を持つ登録 application の数。境の上限はテストの中で `ALTER ROLE ... CONNECTION LIMIT` で置く。
+
+### 12.1 触ってよいパス
+
+| パス | 範囲 |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/ops.py` | inventory の項目 (8) (`_inventory_connection_headroom` と、それが呼ぶ ops.py 内の helper)、入力の検査 (`_inventory_validate_headroom_inputs`)、`_build_parser` の inventory の節 (引数と help)、`_inventory_positive_int` / `_inventory_nonnegative_int` の docstring の引数一覧。ops.py の他の関数・他のサブコマンドは触らない |
+| `MitateDB-api/tests/test_ops_inventory.py` | 項目 (8) のテスト、入力の既定 `_HEADROOM_OK`、引数の dest の集合のテスト |
+| `MitateDB-api/tests/test_ops_help_text.py` | 新しい 2 引数の help のテスト (既存のテストは変えない) |
+| `MitateDB-api/docs/cloud-run-cloud-sql.md` | §10 の該当箇所 (§10.4 の許可表、§10.4.3、§10.5、§10.8 の §10.10 の行、§10.9 の項目 (8) の文、§10.10 の版の行と前提条件、§10.10.1 の項目 (8) の行、step 13) と、§10 の外で同じ事実を述べる文 (§6.5 の「`ops inventory` は `concurrency` から数える」の文など) |
+| `docs/code-history/MitateDB-api/` | 登録済みの塊を変えたときの訂正記録だけ |
+
+**これ以外は 0 件。** `platform_declarations.py`・`config.py`・`main.py`・migration・`security/`・`conformance-tests/`・`spec/`・r2db-api・上の「監督が行うもの」の 4 文書は触らない (WP-7 設計 §2 の 5・7、裁定 2)。触ってよいパスの外の赤は直さず報告する。設計に無い検査・機構は実装前に報告する (`OC` §1.5 の 37)。
+
+### 12.2 完了条件 (181〜228)
+
+| # | 完了条件 |
+|---|---|
+| 181 | `--thread-limit` は正の整数だけを受け、0・負・非整数は inventory の usage error (終了コード 1) |
+| 182 | `--data-process-count-old-basis` は 0 を受ける (0 は「古い基準の process は無い」の明示) |
+| 183 | `--data-process-count-old-basis` は負・非整数を終了コード 1 で拒む |
+| 184 | O > `--data-process-count-total` は固定文言で終了コード 1。入力値を出力しない。テストは文言を逐語で assert する (O > 合計 は N < ceiling の検査にも掛かるので、終了コードだけでは見分けられない) |
+| 185 | N < `--data-process-ceiling` は固定文言で終了コード 1 (WP-7 設計の裁定 5)。テストは合計 ≥ ceiling かつ O ≥ 1 の入力で観測する (既存の「合計 < ceiling」の検査に吸われない形) |
+| 186 | O = 0 を明示し `--concurrency` も与えた入力は固定文言で終了コード 1 (裁定 6)。O の省略はこの検査に掛からない |
+| 187 | 184〜186 の検査は DB 接続の前に行う。テストは `MITATEDB_PROVISION_DSN` をテストの platform に向けたうえで、接続の factory (か `psycopg.connect`) の spy が 0 回であることを観測する |
+| 188 | O の省略は項目 (8) を `unknown` にする (0 で埋めない)。テストは O = 0 なら `confirmed` になる入力で観測する |
+| 189 | O ≥ 1 で `--concurrency` を省くと `unknown` (既定値で埋めない)。赤にするテストは既存の `test_inventory_connection_headroom_concurrency_missing_is_unknown` を名を変えず O ≥ 1 の入力に直したもの。既定値で埋めれば `confirmed` になる入力にする |
+| 190 | O = 0 で `--concurrency` が無い入力は、他の入力が揃えば判定する (`confirmed` を観測) |
+| 191 | `--thread-limit` の省略は `unknown` (`DEFAULT_THREAD_LIMIT` で埋めない)。テストは t = `DEFAULT_THREAD_LIMIT` なら `confirmed` になる入力で観測する |
+| 192 | **一致 (api)**: O = 0、N = 合計 = ceiling = n、同じ t で、F-16 (`platform_declarations.check_role_connection_limits`、`pool_size=config.role_pool_size(t)`、`process_ceilings.data = n`、`role_classes={"api"}`) が通す最小の上限 L と、inventory が `confirmed` にする最小の上限が等しい。L で両方が通り、L − 1 で両方が止まる (WP-7 設計の裁定 2・22、条件 4)。他の role の上限と条件 2 は判定を左右しない入力にする |
+| 193 | **一致 (application)**: 192 と同じ形で、1 つの application の runtime / developer role (`application_ids` をその application に絞る) |
+| 194 | **一致 (controlplane)**: 192 と同じ形で、`role_classes={"controlplane"}`、`process_ceilings.control` = control の合計 = ceiling |
+| 195 | **一致 (auditreader)**: 194 と同じ形で、`role_classes={"auditreader"}` |
+| 196 | **定数の差し替え (pool)**: テストの中で `config._POOL_SIZE_HEADROOM` を元と違う値に差し替えても、F-16 が通す最小の上限と inventory が `confirmed` にする最小の上限が一緒に動く (裁定 22。差し替えは module 属性に対して行い、inventory は呼び出しの時点で引く) |
+| 197 | **定数の差し替え (api)**: 196 と同じ形で `platform_declarations._API_ROLE_STORE_COUNT` |
+| 198 | **定数の差し替え (controlplane)**: 196 と同じ形で `platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR` |
+| 199 | **定数の差し替え (auditreader)**: 196 と同じ形で `platform_declarations._AUDITREADER_ROLE_POOL_FLOOR` |
+| 200 | **混在 (api、条件 1)**: O ≥ 1、N ≥ 1、c ≠ p の入力で、api role の上限 = O × A × c + N × A × p で `confirmed`、1 引いて `blocked` (WP-7 設計 D-2) |
+| 201 | **混在 (application、条件 1)**: 200 と同じ形で、application role の上限 = O × c + N × p |
+| 202 | 古い基準の api の process あたりの床は A × c。赤にするテストは既存の `test_inventory_connection_headroom_role_coefficient_is_two_times_concurrency_for_api` を名を変えず O ≥ 1 の入力に直したもの |
+| 203 | control の需要は t にも c にも依らない: O ≥ 1 で c を与え、t と c を変えても controlplane と auditreader の境の判定が動かない (WP-7 設計 D-5) |
+| 204 | **条件 2 (第 1 項)**: O ≥ 1、K = 1 で O × c + N × p > 2 × K × (O + N) の入力で、`--reserved-connections` = `max_connections` − 合計需要 で `confirmed`、1 足して `blocked`。合計需要の application の項は max(O × c + N × p, 2 × K × (O + N)) (裁定 17) |
+| 205 | **条件 2 (第 2 項)**: 2 × K × (O + N) > O × c + N × p の入力 (例: O = 0、t = 4、K ≥ 4) で、204 と同じ境の両側を観測する (裁定 17)。登録 application が 0 のときの項は WP-7 設計 §5.2 のとおり |
+| 206 | 条件 1 の application の床は K に依らず O × c + N × p (裁定 17 の末尾、WP-7 設計 D-6)。テストは K ≥ 4 の入力で、上限 = 条件 1 の床 で `confirmed` を観測する |
+| 207 | 項目 (8) の出力は `judgment`・`remediation_required`・`control_deployed` の 3 key のまま (既存の `test_inventory_top_level_and_item_keys_are_pinned` が緑) |
+| 208 | inventory の引数の dest の集合 (`test_inventory_does_not_accept_a_dsn_argument`) が、既存の集合に `thread_limit` と `data_process_count_old_basis` を足した集合と一致する |
+| 209 | `--thread-limit` の help は実装担当が起草し、`MitateDB-api/tests/test_ops_help_text.py` の既存の help のテストと同じ形で文字列を逐語で pin する (裁定 14。確定文ファイルは要らない) |
+| 210 | `--data-process-count-old-basis` の help を 209 と同じ形で pin する |
+| 211 | **監査照合**: `--concurrency` の help が「古い基準の revision の値で、O ≥ 1 のときだけ要る」ことを述べ、「省けば項目 (8) は `unknown`」を O ≥ 1 に限った形になっている。改めた help の逐語を報告に置く |
+| 212 | **監査照合**: 既存の確定文言の help (`--data-process-count-total` / `--control-process-count-total`) と、それを pin する `MitateDB-api/tests/test_ops_help_text.py` の 2 テストの差分が 0 (`git diff <WP-7 の基点>` の該当部分の逐語を報告に置く) |
+| 213 | `security/CONTROL_MAPPING.md` が引く `MitateDB-api/tests/test_ops_inventory.py` の test 名を改名・削除しない (`conformance-tests/test_control_mapping_register.py` が緑。裁定 15) |
+| 214 | **監査照合**: 既存の項目 (8) のテスト — `_HEADROOM_OK` は O と t を持ち 184〜186 の検査に掛からない入力である。`concurrency` 基準の算術を証するテストは O ≥ 1 の入力で意味を保つ (O = 合計 は 185 で拒まれる)。`test_inventory_connection_headroom_shared_application_role_budget_counts_once` は名を変えず中身を裁定 17 の項に合わせる。`test_inventory_connection_headroom*` の件数は基点の件数以上。基点との差分で、各テストの入力と期待の変更を表にして報告に置く |
+| 215 | **監査照合**: runbook §10.4.3 — revision の基準は image digest と `MITATEDB_WORKERS` の有無の両方で決め、両者が食い違う revision が数える対象に在れば古い基準の process 数を省く (裁定 19)。加数表に「基準」の列 (根拠 = digest と `MITATEDB_WORKERS` の有無) を置き、古い基準の process 数を合計と同じく 2 回数えて一致させ、列が空の行が在れば古い基準の process 数を省く (裁定 21)。古い基準の revision の worker 数は `WEB_CONCURRENCY`、無ければ 1 (裁定 7) |
+| 216 | **監査照合**: runbook §10.4.3 の引数の表 — `--thread-limit` の行 (新しい基準の revision の `MITATEDB_THREAD_LIMIT`。値が違えば最大値、1 つでも無ければ省く。裁定 4)、`--data-process-count-old-basis` の行、`--concurrency` の行を「数える対象の古い基準の revision すべて (traffic を取れない revision を含む) の最大値、O ≥ 1 のときだけ」に改める (裁定 9。現行の「値が揃わなければ省く」と「traffic を取れない revision は比べない」を置き換える)。env を変えられない古い基準の revision が `MITATEDB_MAX_CONCURRENCY` を持たないとき、commit の既定値を出所 (commit とファイルの行) を加数表に書いて宣言してよいこと、`--thread-limit` には適用しないこと (裁定 20) |
+| 217 | **監査照合**: runbook §10.4.3 に項目 (8) の入力を省かせる場合の列挙 — `MITATEDB_PLATFORM_POOL_SIZE` を持つ revision が数える対象に在る (裁定 8)、古い基準の revision が `MITATEDB_THREAD_LIMIT` を持つかその `concurrency` が 6 未満 (裁定 18)、digest と env の食い違い (裁定 19)、新しい基準の revision が `MITATEDB_THREAD_LIMIT` を持たない (裁定 4)。限界の開示の文「inventory は古い基準の process 数の正しさを検査できない。誤った宣言は需要を小さく数える」(裁定 21) |
+| 218 | **監査照合**: runbook の「Demand is still counted from `concurrency`」の段を、基準ごとの需要 (WP-7 設計 D-2 と裁定 17) の段に置き換える。§10 の外で同じ事実を述べる文 (§6.5 の `ops inventory` の文、§10.9 の最初の読み取りの項目 (8) の文ほか) も同じ事実に揃え、「項目 (8) は `concurrency` から数える」と述べる文が古い基準の revision についての文のほかに残っていない (該当の grep の出力を報告に置く) |
+| 219 | **監査照合**: runbook §10.4 の env の値の許可表に `MITATEDB_WORKERS`・`WEB_CONCURRENCY`・`MITATEDB_THREAD_LIMIT`・`MITATEDB_CONTROL_WORKERS` の行 (裁定 10・23) と、値ではなく「在るか無いか」を読む `MITATEDB_PLATFORM_POOL_SIZE` の行 (裁定 24)。`MITATEDB_MAX_CONCURRENCY` の行と表の後の文を古い基準の revision の入力として読める形に改める |
+| 220 | **監査照合**: runbook §10.5 の inventory の呼び出しの script に新しい 2 引数の行 (空なら渡さない、既存の行と同じ形) と、変数の数の文の追随。O = 0 のとき `--concurrency` を渡さない旨を script の側に明記する (裁定 6・23)。script の後の箇条書き (受ける値、両立しない組) を新しい引数と検査に揃える |
+| 221 | **監査照合**: runbook §10.10 の前提条件の算術を WP-7 設計 D-2 の式と裁定 17 の application の項に、worked example を WP-7 設計 §5 の値 (古い 1 process + 新しい W で W ≤ 5、条件 2 の 98 + 18W + 20C、新しい code どうしで V + W ≤ 11) に改める。「At a worst-case total of 3」の段と「application の需要は登録数に依らず 1 回」の段を、基準ごとの算術と裁定 17 で書き直す |
+| 222 | **監査照合**: runbook §10.10.1 の項目 (8) の `unknown` の行に、`--thread-limit` と古い基準の process 数の省略の原因 (217 の列挙を含む) を足す。解き方が WP-7 設計 (§10・§10.1 を含む) に無い原因は、同節の既存の規則のとおり stage 2 では解けない (報告して止まる) と書く |
+| 223 | **監査照合**: step 13 — deploy の env は `MITATEDB_THREAD_LIMIT=<--thread-limit に使った値>` を含む。deploy の後に候補の `MITATEDB_THREAD_LIMIT` を読み返し、第 2 の読み取りが使った値と違えば読み直す (既存の読み返しの規則と同じ形)。`MITATEDB_MAX_CONCURRENCY` の必須は残し、項目 (8) の判定の値としての説明は古い基準の revision に限る形に改める (裁定 23 が採った設計レビュー指摘 7 の 10) |
+| 224 | **監査照合**: runbook §10.10 の版の行を上げ、変更の内容を日付付きで記す。§10.8 の §10.10 の行の Current version を同じ値に上げ、Conclusion は `not accepted` のまま、Version reviewed は変えない (WP-7 設計 D-8、本書 §6.1 の監督裁定 51) |
+| 225 | **監査照合**: runbook の rollout の重なり (`RM` の R-52) の段 (保つもの・保たないもの) の意味を変えていない (該当行の差分の逐語を報告に置く。WP-7 設計 §2 の 6) |
+| 226 | **監査照合**: `git diff --stat <WP-7 の基点>` が §12.1 のパスだけ。`spec/`・`conformance-tests/`・`security/`・r2db-api・`platform_declarations.py`・`config.py`・`main.py`・migration と、「監督が行うもの」の 4 文書の差分が 0 |
+| 227 | **監査照合**: 静的検査の出力行 (`check_comment_provenance.py --base <WP-7 の基点>` と `--register`、`change_class.py`、`check_doc_refs.py`、`public_value_scan.py`) を報告に置く |
+| 228 | **監査照合**: §12.3 で変異も監査照合も持たない行が 0 件 |
+
+### 12.3 完了条件 → 変異 (`expect=red`。run = MitateDB。213 だけ run = conformance)
+
+変異は各完了条件の機構だけを外す。赤の理由は assert の中身であること (例外による赤は数えない)。
+
+| 完了条件 | 変異 | 赤にするテスト (1 件) |
+|---|---|---|
+| 181 | **M181**: `--thread-limit` の `type=` を `int` にする | 0 を渡して終了コード 1 を期待するテスト |
+| 182 | **M182**: `--data-process-count-old-basis` の `type=` を `_inventory_positive_int` にする | 0 を受けるテスト |
+| 183 | **M183**: `--data-process-count-old-basis` の `type=` を `int` にする | −1 を渡して終了コード 1 を期待するテスト |
+| 184 | **M184**: O > 合計 の検査を外す | 184 の固定文言を逐語で見るテスト |
+| 185 | **M185**: N < ceiling の検査を外す | 185 のテスト |
+| 186 | **M186**: O = 0 と `--concurrency` の組の検査を外す | 186 のテスト |
+| 187 | **M187**: 184〜186 の検査を `_inventory_validate_headroom_inputs` から `_inventory_connection_headroom` の先頭 (接続の後) へ移す | 187 の spy のテスト |
+| 188 | **M188**: O の省略を 0 で埋める | 188 のテスト |
+| 189 | **M189**: O ≥ 1 のときの `--concurrency` の省略の検査を外し、code の `concurrency` の既定値で埋める | `test_inventory_connection_headroom_concurrency_missing_is_unknown` |
+| 190 | **M190**: `--concurrency` の省略を O に依らず `unknown` にする (O ≥ 1 の条件を外す) | 190 のテスト |
+| 191 | **M191**: `--thread-limit` の省略を `DEFAULT_THREAD_LIMIT` で埋める | 191 のテスト |
+| 192 | **M192**: 新しい基準の api の process あたりの床から A を外す (p だけにする) | 192 の一致のテスト |
+| 193 | **M193**: 新しい基準の application の process あたりの床を `role_pool_size(t)` から t にする (headroom を外す) | 193 の一致のテスト |
+| 194 | **M194**: controlplane の process あたりの床を `_CONTROLPLANE_ROLE_POOL_FLOOR` から p にする (WP-7 設計 D-5 を外す) | 194 の一致のテスト |
+| 195 | **M195**: auditreader の process あたりの床を `_AUDITREADER_ROLE_POOL_FLOOR` から p にする | 195 の一致のテスト |
+| 196 | **M196**: inventory の `role_pool_size(t)` を `t + 2` の直書きにする (差し替えの無い既定では同じ値) | 196 の差し替えのテスト |
+| 197 | **M197**: inventory の `platform_declarations._API_ROLE_STORE_COUNT` を `2` の直書きにする | 197 の差し替えのテスト |
+| 198 | **M198**: inventory の `_CONTROLPLANE_ROLE_POOL_FLOOR` を `16` の直書きにする | 198 の差し替えのテスト |
+| 199 | **M199**: inventory の `_AUDITREADER_ROLE_POOL_FLOOR` を `4` の直書きにする | 199 の差し替えのテスト |
+| 200 | **M200**: api の需要の古い基準の項を外す (全 process を新しい基準 (O + N) × A × p で数える) | 200 の境のテスト |
+| 201 | **M201**: application の需要の古い基準の項を外す (条件 1 の床を (O + N) × p にする) | 201 の境のテスト |
+| 202 | **M202**: 古い基準の api の process あたりの床から A を外す (c だけにする) | `test_inventory_connection_headroom_role_coefficient_is_two_times_concurrency_for_api` |
+| 203 | **M203**: O ≥ 1 のとき controlplane の process あたりの床を c にする | 203 のテスト |
+| 204 | **M204**: 条件 2 の application の項の第 1 項から O × c を外す (N × p だけ。条件 1 は変えない) | 204 の境のテスト |
+| 205 | **M205**: 条件 2 の application の項から第 2 項 2 × K × (O + N) を外す | 205 の境のテスト |
+| 206 | **M206**: 条件 1 の application の床を条件 2 の項 (max の形) にする | 206 のテスト |
+| 207 | **M207**: 項目 (8) の `_result` に key を 1 つ足す | `test_inventory_top_level_and_item_keys_are_pinned` |
+| 208 | **M208**: inventory に `--provision-dsn` 引数を足す | `test_inventory_does_not_accept_a_dsn_argument` |
+| 209 | **M209**: `--thread-limit` の help の 1 語を変える | 209 の help のテスト |
+| 210 | **M210**: `--data-process-count-old-basis` の help の 1 語を変える | 210 の help のテスト |
+| 213 | **M213**: `security/CONTROL_MAPPING.md` が引く test を 1 つ改名する (テストファイル側) | `conformance-tests/test_control_mapping_register.py::test_control_mapping_md_every_test_name_reference_resolves` |
+| 211、212、214〜228 | **監査照合** (照合対象の逐語を報告に残す。`OC` §1.5 の 40) | — |
+
+- 変異は 31 件 (M181〜M210 の 30 件は run = MitateDB、M213 は run = conformance)。
+- M196〜M199 は差し替えの無い既定では値が同じなので、一致のテスト (192〜195) では赤にならない。赤にするのは差し替えのテストだけである。
+- M200 と M204、M201 と M206 は同じ数行に掛かりうるが、赤にするテストが違うので別の変異として走らせる (本書 §2.3)。
+- 192〜199 のテストは F-16 の関数をテストの中で直接呼ぶ。製品の `platform_declarations.py` は触らない。`main.py` が F-16 に渡す引数と inventory の引く値の一致は、これらのテストの範囲外である (裁定 22)。
+
+### 12.4 道具の引数
+
+本書 §2.3 の形で:
+
+```bash
+export SP=<scratchpad>
+tools/dev/pt.py --wait 1800 -C $WT -- MitateDB-api/tests/test_ops_inventory.py MitateDB-api/tests/test_ops_help_text.py -q
+tools/dev/pt.py --wait 1800 -C $WT -- conformance-tests/test_control_mapping_register.py -q
+tools/dev/mutate.py "$SP/r113-wp7-mutations.json" -C $WT --wait 1800        (M181〜M210。pytest は 1 行目のパス)
+tools/dev/mutate.py "$SP/r113-wp7-mutations-conf.json" -C $WT --wait 1800   (M213。pytest は 2 行目のパス)
+```
+
+worktree を cwd にして:
+
+```bash
+python3 tools/check_comment_provenance.py --base <WP-7 の基点> MitateDB-api/src/mitatedb_api/ops.py
+python3 tools/check_comment_provenance.py --register
+python3 tools/change_class.py <触った全パス>
+python3 tools/check_doc_refs.py
+python3 tools/public_value_scan.py <触った全パス>
+```
+
+- 報告は `$SP/r113-wp7-report.md`。変異の `old` / `new` の具体と赤の理由 (assert の中身) を表で残す。
+
+### 12.5 レビューの観点
+
+- 条件 2 (小さく数えない): WP-7 設計 D-2 の式と裁定 17 の application の項が、古い code の実需要と登録 K 個の永続接続を小さく数える経路を持たないか。境のテスト (192〜206) が境の両側を観測しているか (空振り、`OC` §1.5 の 32)。
+- 条件 4: 192〜195 が F-16 と同じ cluster・同じ入力で 4 つの role class の一致を観測しているか。196〜199 の差し替えが F-16 と inventory の両方に届いているか (inventory が定数を名前で束縛して差し替えを素通りしていないか)。数値の一致だけを見る代理になっていないか (`OC` §1.7 の 52)。
+- 条件 3: 省略の規則 (188・189・191) が既定値で埋めていないか。入力の形の誤り (184〜186) が DB 接続の前に止まるか (187)。
+- 既存のテストの意味の保存 (202・214): `concurrency` 基準の証拠が O ≥ 1 の入力で残っているか。`security/CONTROL_MAPPING.md` が引く test 名が残っているか (213)。確定文言の help が変わっていないか (212)。
+- runbook: WP-7 設計 §5 の数値の再計算。基準の見分け (215) と step 13 の env・読み返し (223) の対称。`unknown` にする場合の列挙 (217) が裁定 4・8・18・19 と一致するか。rollout の重なりの段の意味が変わっていないか (225)。§10.8 が `not accepted` のままか (224)。
+- 新規のコメント・docstring が現在形で、経緯語 (フェーズ・WP・R-番号・裁定の番号) を持たないか (本書 §2.2)。
