@@ -10,13 +10,13 @@
 - **worktree `r113`** (branch `r113`) は WIP `74d90f3` = `WO` v1.0 (§6.1 `WO` 裁定 1〜21、§6.2 WP-1 の記録) + WP-1 の merge (`060a5d8`、worktree `r113-wp1` の `8a0327d`)。
 - **WP-1 (conformance) は完了、レビュー全件閉止。** 中身: 新条件 (`conformance-tests/test_c32_shared_limits.py`。番号は `r113` の木の `conformance-tests/CONDITIONS.md` で採番済み)、C-26 (4) の 3 通り・(5) の workers ≥ 2、launcher の workers / pgid / mkdtemp の slot directory / preflight / pid 付き access log / `LOCK TABLE` の保持、宣言分岐 + launcher の配線 accessor 2 本。
 - **WP-2 (r2db 実装) は実装中。** worktree `r113-wp2` (branch `r113-wp2`、基点 `74d90f3`) で実装担当 (sonnet) が作業中。本書起草時点で src 10 ファイル・tests 7 ファイル・migration 0015・`r2db-api/src/r2db_api/concurrency_slots.py` の差分が未 commit。変異 run は進行中 (M62 付近 / 54 件)。
-- **WP-2 の実装報告は未着。** 報告書の予定の置き場は本チャットの scratchpad (`r113-wp2-report-1.md`)。新チャットは旧 scratchpad を読めないので、監督が差分と報告を `.claude/worktrees/r113/.r113-handoff/` に写す (未追跡、commit しない)。
+- **WP-2 の実装報告は未着。** 報告書の予定の置き場は本チャットの scratchpad (`r113-wp2-report-1.md`)。新チャットは旧 scratchpad を読めないので、監督が差分と報告を `.claude/worktrees/r113-handoff/` に写す (未追跡、commit しない)。
 - **WP-2 の途中経過 (監督の観察)**: 変異 M52 (`LOCK_NB` を外す) の下で `test_full_slots_refuse_immediately_never_blocking` が時間の上限無しに 1 時間 42 分 hang した。監督が pytest の子だけを SIGTERM し、実装担当に「取得を別 thread + `join(timeout)` で上限付きにして M52 を回し直す」と指示済み (未完)。
 - **Class D**、契約 **1.11.0 不変**、規模 **L**。
 - push は停止中 (GitHub 課金上限)。ローカル commit のみ。
 - 役割とモデル: drafter = opus (`claude-opus-5-5`)、reviewer = opus、implementer = sonnet、explorer = sonnet ×3。
 
-- **追記 (チャット終了直前)**: WP-2 の実装担当が完了を報告した。差分は `r113-wp2` に WIP commit **`934554c`** (28 ファイル、+2828 / −208。新規 `r2db-api/migrations/0015_credential_request_rate.sql`、`r2db-api/src/r2db_api/concurrency_slots.py`、`r2db-api/tests/test_r113_multi_process_wiring.py` (62 テスト))。実測: `pt: 1 failed, 1596 passed in 115.68s` (赤 1 = 同型性テスト、完了条件 78 の想定内)、conformance の r2db subset `1 failed, 66 passed` (赤は WP-1 由来の既知)、`mutate: 47 mutations, 47 as expected, restores verified 13/13 files`、hang した M52 / M63 / M64 は上限付きに直して再実行 `6 mutations, 6 as expected`。**コードレビューは未実施** (新チャットの最初の一手)。実装担当の逸脱で監督裁定が要るもの: (a) 0015 の rate 加算を「1 文 SQL」でなく PL/pgSQL 関数で実装、(b) F-16 の倍率修正は data 面の `main.py` のみ (`control_main.py` は §4.1 の範囲外)、(c) 自作の provenance 一括 regex が範囲外の docstring 74 行を書き換えたのを全復元 (レビューで差分の外側を確かめる)、(d) `credential_store.py` の新 method が既存の History ID を流用していたバグを削除、(e) `ops.py` の `_declared_pool_size` (旧 `_declared_concurrency`、CH-0322) は全文置換 1 件で §9.3 訂正記録 (文単位の粒度と違う可能性 = 裁定要)。`check_comment_provenance.py --base 74d90f3` は §4.1 (5)(3) は 0 件、(1)(2) は道具の Known gaps 相当として打ち切り (レビューで確かめる)。実装報告の全文は `.claude/worktrees/r113/.r113-handoff/r113-wp2-report-1.md` (未追跡)。
+- **追記 (チャット終了直前)**: WP-2 の実装担当が完了を報告した。差分は `r113-wp2` に WIP commit **`934554c`** (28 ファイル、+2828 / −208。新規 `r2db-api/migrations/0015_credential_request_rate.sql`、`r2db-api/src/r2db_api/concurrency_slots.py`、`r2db-api/tests/test_r113_multi_process_wiring.py` (62 テスト))。実測: `pt: 1 failed, 1596 passed in 115.68s` (赤 1 = 同型性テスト、完了条件 78 の想定内)、conformance の r2db subset `1 failed, 66 passed` (赤は WP-1 由来の既知)、`mutate: 47 mutations, 47 as expected, restores verified 13/13 files`、hang した M52 / M63 / M64 は上限付きに直して再実行 `6 mutations, 6 as expected`。**コードレビューは未実施** (新チャットの最初の一手)。実装担当の逸脱で監督裁定が要るもの: (a) 0015 の rate 加算を「1 文 SQL」でなく PL/pgSQL 関数で実装、(b) F-16 の倍率修正は data 面の `main.py` のみ (`control_main.py` は §4.1 の範囲外)、(c) 自作の provenance 一括 regex が範囲外の docstring 74 行を書き換えたのを全復元 (レビューで差分の外側を確かめる)、(d) `credential_store.py` の新 method が既存の History ID を流用していたバグを削除、(e) `ops.py` の `_declared_pool_size` (旧 `_declared_concurrency`、CH-0322) は全文置換 1 件で §9.3 訂正記録 (文単位の粒度と違う可能性 = 裁定要)。`check_comment_provenance.py --base 74d90f3` は §4.1 (5)(3) は 0 件、(1)(2) は道具の Known gaps 相当として打ち切り (レビューで確かめる)。実装報告の全文は `.claude/worktrees/r113-handoff/r113-wp2-report-1.md` (未追跡)。
 - r113 は main `22a37b3` を merge 済み (`a24ece9`)。
 
 ## 2. 本チャットで閉じたもの
@@ -32,7 +32,7 @@
 
 ## 3. 次の一手
 
-1. **WP-2 の完了。** 新チャットは実装担当を新規起動し、`r113-wp2` の未 commit 差分と `.claude/worktrees/r113/.r113-handoff/` の報告から続ける。残り: M52 のテストに時間の上限、変異 54 件、同型性テストの赤は完了条件 78 の監査照合、provenance は `--base 74d90f3`。→ コードレビュー (opus、`docs/work-orders/ROLE_PROMPT_TEMPLATES.md` の 5) → `r113` に merge。
+1. **WP-2 の完了。** 新チャットは実装担当を新規起動し、`r113-wp2` の未 commit 差分と `.claude/worktrees/r113-handoff/` の報告から続ける。残り: M52 のテストに時間の上限、変異 54 件、同型性テストの赤は完了条件 78 の監査照合、provenance は `--base 74d90f3`。→ コードレビュー (opus、`docs/work-orders/ROLE_PROMPT_TEMPLATES.md` の 5) → `r113` に merge。
 2. **WP-3 (MitateDB)。** 同型移植。`_ISOMORPHIC_TARGETS` の登録と件数 pin は WP-3 だけが触る。control の preflight entry。
 3. **WP-4 (計測)。** `tools/perf_baseline.py --real-server <peer> --workers N`。rate 文の小実験 (0.2 ms/文)、N=1 / N=4、K=1 / K=32 × 2 run、pid 付き access log、D-16 の逐語 = 設計 §7.1、既定 concurrency 32。R-101 の閉止の判定は Q-5 のとおり本変更セットの結果で行う。
 4. **WP-5 (配備)。** systemd の `ExecStartPre` の preflight・`RuntimeDirectory` 0700・env 必須・`--workers ${R2DB_WORKERS}` の静的 pin、Dockerfile CMD の `set -e`、runbook (1 host・max-instances=1・`--cpu ≥ workers`・SIGHUP 禁止・int[61] の開示)。
