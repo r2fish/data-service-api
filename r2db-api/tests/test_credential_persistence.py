@@ -1681,8 +1681,8 @@ def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_
     exactly the role THIS process' own pool composition uses
     (`platform.api_role`, the `r2dbsvc_api`-class role `main_module`'s own
     `credentials`/`durable_audit` stores both pool connections against).
-    Lowering it back below its own real floor (2 stores x concurrency 32 =
-    64) -- exactly the pre-`0013_role_connection_limits.sql` state every
+    Lowering it back below its own real floor (2 stores x pool size 6 =
+    12 at the default thread limit 4) -- exactly the pre-`0013_role_connection_limits.sql` state every
     platform was in before Phase 10 WP-4f -- must raise, never silently
     start a process that can hit PostgreSQL's own hard 'too many
     connections for role' refusal under real concurrent traffic. Restores

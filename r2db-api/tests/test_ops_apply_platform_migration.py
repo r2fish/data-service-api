@@ -380,7 +380,7 @@ def test_apply_platform_migration_rejects_duplicate_filename_in_run(platform, mo
 
 
 # ===========================================================================
-# completion conditions 4/4b -- superseded-by, derived from the 4 real
+# completion conditions 4/4b -- superseded-by, derived from the 5 real
 # migration files (and, separately, from a synthetic pair)
 # ===========================================================================
 
