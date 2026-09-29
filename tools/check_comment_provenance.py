@@ -104,6 +104,16 @@ through the completion gate is recorded here and not filed in the ledger):
        it), never the root checkout's copy with worktree-relative
        arguments (accepted; no cross-checkout resolution is
        implemented).
+    7. not detected: that a CH-ID-less block under a renamed `def` /
+       `class` is the same block it was under the old name -- `--base`
+       reports it as a section 4.1 (2) red on both names (`old 1, new 0`
+       under the old name, `old 0, new 1` under the new one).
+       why: the section 4.1 (2) block key carries the enclosing scope's
+       name, and a rename changes that key; no rename detection is
+       implemented.
+       caught by: a human reading the pair of reds and classifying it as
+       a rename of the scope (accepted; the alternative, keeping a name
+       that no longer matches what the function does, is worse).
 """
 from __future__ import annotations
 
