@@ -1838,7 +1838,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # the 6 registered conformance plugs -- `None` (default) keeps every
     # existing run exactly as it was. `--concurrency`/`--n`/`--warmup`
     # above are shared with this path unchanged; `--client-processes`
-    # below is the one flag this path alone reads.
+    # and `--workers` below are the flags this path alone reads.
     parser.add_argument(
         "--real-server", type=str, default=None, metavar="PEER",
         help=(
@@ -1853,6 +1853,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "OS client processes --real-server dispatches --concurrency K requests across "
             "(default 8); the actual count used is min(N, K)"
+        ),
+    )
+    # `None` when omitted, so `main()` can tell an explicit `--workers`
+    # without `--real-server` (an argument error) from the omitted
+    # default; `_real_server_workers` resolves the omitted value to 1.
+    parser.add_argument(
+        "--workers", type=int, default=None, metavar="N",
+        help=(
+            "--real-server only: uvicorn worker processes the launcher starts the data plane "
+            "with (default 1); the declared process ceilings are data=N, control=1"
         ),
     )
     return parser
@@ -1909,6 +1919,159 @@ def _warm_forkserver() -> None:
     warmup_process.start()
     warmup_process.join()
     _real_server_forkserver_warmed = True
+
+
+def _real_server_workers(args: argparse.Namespace) -> int:
+    """The data plane's own uvicorn worker count for one `--real-server`
+    run: `--workers N` when given, 1 when omitted. The launcher is started
+    with this many workers and the matching declared ceilings
+    (`_real_server_ceilings`)."""
+    return 1 if args.workers is None else args.workers
+
+
+def _real_server_ceilings(workers: int) -> "dict[str, int]":
+    """The declared process ceilings a `--real-server` run starts the
+    launcher with: data = the data plane's own worker count, control = 1
+    (the launcher always starts exactly one control-plane process)."""
+    return {"data": workers, "control": 1}
+
+
+def _format_realworkers_row(
+    peer: str,
+    workers: int,
+    concurrency: int,
+    accepted_pids: "list[int]",
+    non_200_counts: "dict[int, int]",
+    unclassified: int,
+) -> str:
+    """One line per `--real-server` run: the data plane's own worker count
+    (`workers=`, so runs at different worker counts are distinguishable
+    from the output alone), the run's K (`concurrency=`, also on a run a
+    non-200 response stopped, which prints no `REALPERF`) and, from the
+    launcher's pid-tagged access log over the run's warmup and measured
+    groups, how many 200 responses each responding worker pid served
+    (`accepted_200=<pid>:<count>,...`, ascending pid; `-` when there were
+    none), how many responses each non-200 status had
+    (`non_200=<status>:<count>,...`, ascending status; `-` when there were
+    none -- a `LIMIT_EXCEEDED` refusal is 429 on r2db-api and 413 on
+    MitateDB-api) and how many of the window's access-log lines no status
+    read returned (`unclassified=<n>`, always present, `0` when every line
+    was classified or when the status reads returned more lines than the
+    window held). `pids=` is the number of distinct pids that served a
+    200. A record, never a judgement this tool makes (P-8)."""
+    counts: "dict[int, int]" = {}
+    for pid in accepted_pids:
+        counts[pid] = counts.get(pid, 0) + 1
+    by_pid = ",".join(f"{pid}:{counts[pid]}" for pid in sorted(counts)) or "-"
+    by_status = ",".join(
+        f"{status}:{non_200_counts[status]}" for status in sorted(non_200_counts) if non_200_counts[status]
+    ) or "-"
+    return (
+        f"REALWORKERS peer={peer} plug={peer}-real workers={workers} "
+        f"concurrency={concurrency} "
+        f"pids={len(counts)} accepted_200={by_pid} non_200={by_status} "
+        f"unclassified={unclassified}"
+    )
+
+
+def _access_log_non_200_counts(launcher: Any, since: int, accepted: int) -> "tuple[dict[int, int], int]":
+    """`(counts, unclassified)`: per-status counts of the non-200 lines the
+    launcher's access log gained after its first `since` lines, and how
+    many of those lines no status read returned. The launcher reads its
+    access log one status at a time (`access_log_pids_for_status`), so this
+    asks each HTTP status from 100 to 599 in turn and stops as soon as the
+    counted lines (`accepted` 200s plus every non-200 found so far) reach
+    the number of lines appended after `since` -- a run with no non-200
+    response asks for none. Lines still uncounted after status 599 are
+    `unclassified` (a line the launcher's reader does not parse); when the
+    reads return more lines than the window held, `unclassified` is 0. In a
+    run a 599 stopped (a request the client gave up on, a 30 s timeout for
+    one), the server can still finish and log that request while these
+    reads run, so the 200 count, the non-200 counts and `unclassified` are
+    not read at one point in time and a repeat of the same run need not
+    reproduce them."""
+    remaining = launcher.access_log_line_count() - since - accepted
+    counts: "dict[int, int]" = {}
+    for status in range(100, 600):
+        if remaining <= 0:
+            break
+        if status == 200:
+            continue
+        found = len(launcher.access_log_pids_for_status(status, since=since))
+        if found:
+            counts[status] = found
+            remaining -= found
+    return counts, max(remaining, 0)
+
+
+_PROCESS_GROUP_DRAIN_TIMEOUT_S = 10.0
+
+
+def _process_table() -> "list[tuple[int, int, int, bool]]":
+    """`(pid, ppid, pgid, is_zombie)` for every process in the table, read
+    with `ps -A` (`-A`, never `-e`: under macOS's legacy `ps` mode `-e`
+    means "show the environment" and lists only processes with a
+    controlling terminal, which leaves out every new-session uvicorn
+    supervisor and worker). `is_zombie` is `stat` starting with `Z`. An
+    unreadable table is a `RealServerMeasurementFailure`: the residue
+    check below cannot claim 0 processes from a table it never read."""
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="], capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RealServerMeasurementFailure(f"could not read the process table: {exc}") from exc
+    rows: "list[tuple[int, int, int, bool]]" = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3].startswith("Z")))
+        except ValueError:
+            continue
+    return rows
+
+
+def _own_process_group_leaders() -> "set[int]":
+    """Pids of this process' own direct children that lead their own
+    process group (pid == pgid), zombies included. The launcher runs in
+    this process and starts each uvicorn plane as such a child (a new
+    session, so the supervisor and every worker it forks share the
+    supervisor's pid as their pgid); `_run_real_server` takes this set
+    before and after `launcher.start()`, and the difference is the
+    launcher's own process groups. A supervisor that exits during
+    `start()` stays in this set as an unreaped zombie, so the workers it
+    leaves behind in its group are still checked after `stop()`."""
+    me = os.getpid()
+    return {pid for pid, ppid, pgid, _zombie in _process_table() if ppid == me and pgid == pid}
+
+
+def _process_group_members(pgids: "set[int]") -> "tuple[list[int], list[int]]":
+    """`(members, zombies)`: the non-zombie pids and the zombie pids whose
+    process group is one of `pgids`, each ascending."""
+    members: "list[int]" = []
+    zombies: "list[int]" = []
+    for pid, _ppid, pgid, zombie in _process_table():
+        if pgid in pgids:
+            (zombies if zombie else members).append(pid)
+    return sorted(members), sorted(zombies)
+
+
+def _wait_for_empty_process_groups(pgids: "set[int]") -> "tuple[list[int], list[int]]":
+    """Polls until no process at all belongs to any of `pgids`, for at
+    most `_PROCESS_GROUP_DRAIN_TIMEOUT_S` (worker processes orphaned by a
+    stopped supervisor are reaped asynchronously). Returns `(residue,
+    zombies)` as of the last read: `residue` is the non-zombie members --
+    `[]` when every group drained -- and `zombies` the members that have
+    exited but are not reaped yet. A zombie holds no port and no file
+    descriptor, so it is never residue."""
+    deadline = time.monotonic() + _PROCESS_GROUP_DRAIN_TIMEOUT_S
+    while True:
+        members, zombies = _process_group_members(pgids)
+        if (not members and not zombies) or time.monotonic() >= deadline:
+            return members, zombies
+        time.sleep(0.1)
 
 
 def _num_real_server_clients(client_processes: int, concurrency: int) -> int:
@@ -2305,7 +2468,7 @@ def _measure_real_server(
     }
 
 
-def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace) -> None:
+def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace, window: "dict | None" = None) -> None:
     """The work order's D-15's own full sequence, in order: rotate the launcher's own
     control credential (it starts `must_rotate=true`, and no other control-plane
     call succeeds until this runs) -> resolve `application_id` -> issue a
@@ -2327,6 +2490,11 @@ def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace) -> No
     n_children = _num_real_server_clients(args.client_processes, args.concurrency)
     counts = _distribute_group_counts(args.concurrency, n_children)
     query_url = f"{launcher.data_base_url}/data/{_REAL_SERVER_ENTITY}/query"
+    if window is not None:
+        # The access log's own line count just before the first warmup
+        # group: `_run_real_server` counts only the lines appended after
+        # it, so setup traffic above never enters the per-worker counts.
+        window["access_log_since"] = launcher.access_log_line_count()
     result = _measure_real_server(
         query_url=query_url, bearer=launcher.runtime_bearer, field=_REAL_SERVER_FIELD,
         warmup=args.warmup, n=args.n, concurrency=args.concurrency, n_children=n_children, counts=counts,
@@ -2338,8 +2506,10 @@ def _measure_real_server_and_emit(launcher: Any, args: argparse.Namespace) -> No
 def _run_real_server(args: argparse.Namespace) -> int:
     """The work order's D-15: `--real-server`'s own entry point, called by `main()` in
     place of `_run` -- never both (its completion condition 144). Discovers
-    and starts the launcher (`ceilings={"data": 1, "control": 1}`,
-    its completion condition 128); a failure discovering/starting it (a
+    and starts the launcher with `workers=` the data plane's own worker
+    count (`_real_server_workers`: `--workers N`, 1 when omitted) and the
+    matching declared ceilings (`_real_server_ceilings`: data = that
+    count, control = 1); a failure discovering/starting it (a
     registry lookup miss, for instance) is reported and returns 1, the
     same as a measurement failure below, never an uncaught traceback out
     of `main()`. Once started, `launcher.stop()` is ALWAYS called exactly
@@ -2347,23 +2517,75 @@ def _run_real_server(args: argparse.Namespace) -> int:
     the second `try`, which wraps only the post-`start()` work, so a
     `start()` failure (which every launcher's own `start()` already
     resolves with its own internal `stop()` before re-raising) is never
-    double-stopped."""
+    double-stopped.
+
+    No environment variable is set for the launcher here: the declared
+    `concurrency` stays the peer's own default. Once the measurement has
+    reached its first warmup group, one `REALWORKERS` line
+    (`_format_realworkers_row`) follows `REALPERF`/`REALCPU` -- also for a
+    run a non-200 response stopped, so a stopped run still shows its
+    worker count, K, per-worker 200 counts, per-status non-200 counts and
+    unclassified access-log lines.
+    Every process group the launcher started (`_own_process_group_leaders`,
+    taken before and after `start()`) is observed: a start after which no
+    such group is observed is refused (returns 1, nothing measured), and
+    after `stop()` every such group must have 0 processes, the data
+    plane's workers included; otherwise the run reports the remaining
+    pids and returns 1. Zombies (exited, not yet reaped) are not residue:
+    their count is reported on stderr and leaves the exit code as is."""
     _warm_forkserver()
+    workers = _real_server_workers(args)
     try:
         launcher_cls = _load_composition_root_class(args.registry, args.real_server)
         launcher = launcher_cls()
-        launcher.start(ceilings={"data": 1, "control": 1})
+        leaders_before = _own_process_group_leaders()
+        launcher.start(ceilings=_real_server_ceilings(workers), workers=workers)
     except RealServerMeasurementFailure as exc:
         print(f"perf_baseline: {exc}", file=sys.stderr)
         return 1
+    exit_code = 0
+    launcher_groups: "set[int] | None" = None
+    window: dict = {}
     try:
-        _measure_real_server_and_emit(launcher, args)
-    except RealServerMeasurementFailure as exc:
-        print(f"perf_baseline: {exc}", file=sys.stderr)
-        return 1
+        try:
+            launcher_groups = _own_process_group_leaders() - leaders_before
+            if not launcher_groups:
+                raise RealServerMeasurementFailure(
+                    "could not observe any launcher process group after start() -- "
+                    "refusing to measure a run whose residue check would observe nothing"
+                )
+            _measure_real_server_and_emit(launcher, args, window)
+        except RealServerMeasurementFailure as exc:
+            print(f"perf_baseline: {exc}", file=sys.stderr)
+            exit_code = 1
+        if "access_log_since" in window:
+            since = window["access_log_since"]
+            accepted = launcher.access_log_pids_for_status(200, since=since)
+            non_200, unclassified = _access_log_non_200_counts(launcher, since, len(accepted))
+            print(_format_realworkers_row(args.real_server, workers, args.concurrency, accepted, non_200, unclassified))
     finally:
         launcher.stop()
-    return 0
+    if launcher_groups is None:
+        return exit_code
+    try:
+        residue, zombies = _wait_for_empty_process_groups(launcher_groups)
+    except RealServerMeasurementFailure as exc:
+        print(f"perf_baseline: {exc}", file=sys.stderr)
+        return 1
+    if zombies:
+        print(
+            f"perf_baseline: launcher process group(s) {sorted(launcher_groups)} have "
+            f"{len(zombies)} zombie process(es) after stop() (reaped-pending, not residue): {zombies}",
+            file=sys.stderr,
+        )
+    if residue:
+        print(
+            f"perf_baseline: launcher process group(s) {sorted(launcher_groups)} still have "
+            f"process(es) after stop(): {residue}",
+            file=sys.stderr,
+        )
+        return 1
+    return exit_code
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -2411,6 +2633,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--concurrency must be >= 1")
     if args.client_processes < 1:
         parser.error("--client-processes must be >= 1")
+    if args.workers is not None and not args.real_server:
+        parser.error("--workers requires --real-server")
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be >= 1")
     if args.real_server and args.n < 1:
         # The work order's D-15 measures MEASURED groups only; at
         # `--n 0` `_measure_real_server`'s own `client_processes` is
