@@ -1844,7 +1844,7 @@ def test_cpu_total_ms_includes_both_ru_utime_and_ru_stime(monkeypatch):
 # the HTTP stub).
 # ---------------------------------------------------------------------
 
-_REALSERVER_STUB_SERVER_SCRIPT = 'import http.server\nimport json\nimport os\nimport sys\nimport threading\nimport time\n\nconfig = json.loads(open(sys.argv[1], "r", encoding="utf-8").read())\nlog_path = sys.argv[2]\n_log_lock = threading.Lock()\n_counters_lock = threading.Lock()\n_counters = {"query_calls": 0}\n_rotation_lock = threading.Lock()\n_rotation_state = {"rotated": False, "new_control_secret": None}\n\n\ndef _append_log(entry):\n    with _log_lock:\n        with open(log_path, "a", encoding="utf-8") as f:\n            f.write(json.dumps(entry) + "\\n")\n\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    server_version = "realserverstub/1.0"\n    protocol_version = "HTTP/1.1"\n\n    def log_message(self, fmt, *args):\n        pass\n\n    def _read_body(self):\n        length = int(self.headers.get("Content-Length", 0))\n        raw = self.rfile.read(length) if length else b""\n        return json.loads(raw) if raw else {}\n\n    def _send(self, status, obj):\n        body = json.dumps(obj).encode("utf-8")\n        self.send_response(status)\n        self.send_header("Content-Type", "application/json")\n        self.send_header("Content-Length", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def do_GET(self):\n        start = time.time()\n        if self.path == "/v1/capabilities":\n            self._send(200, {\n                "application_scope": config.get("application_id", "perfapp"),\n                "contract_version": "1.11.0", "capabilities": {}, "limits": {},\n                "limit_enforcement": {}, "authorization_propagation_bound_ms": 0,\n            })\n        else:\n            self._send(404, {})\n        _append_log({\n            "path": self.path, "method": "GET",\n            "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n    def do_POST(self):\n        body = self._read_body()\n        path = self.path\n        start = time.time()\n        if path.startswith("/control/v1/credentials/") and path.endswith("/rotate"):\n            target_id = path[len("/control/v1/credentials/"):-len("/rotate")]\n            expected_id = config.get("control_credential_id", "ctl1")\n            new_secret = config.get("new_control_secret", "rotated-control-secret")\n            if target_id == expected_id:\n                with _rotation_lock:\n                    _rotation_state["rotated"] = True\n                    _rotation_state["new_control_secret"] = new_secret\n                self._send(200, {"credential_id": target_id, "secret": new_secret})\n            else:\n                self._send(403, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/control/v1/credentials":\n            auth = self.headers.get("Authorization", "")\n            bearer = auth[len("Bearer "):] if auth.startswith("Bearer ") else auth\n            with _rotation_lock:\n                rotated = _rotation_state["rotated"]\n                new_secret = _rotation_state["new_control_secret"]\n            if not rotated or bearer != new_secret:\n                self._send(403, {"error": "must_rotate"})\n            else:\n                status = config.get("credential_status", 200)\n                if status == 200:\n                    self._send(200, {\n                        "credential_id": "cred1", "application_id": body.get("application_id"),\n                        "role": body.get("role"), "secret": "dev-secret-xyz",\n                    })\n                else:\n                    self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/v1/schema/operations":\n            status = config.get("schema_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "revision": "1", "request_id": "r1"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/mutations"):\n            status = config.get("mutation_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "affected": 1, "request_id": "r2"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/query"):\n            with _counters_lock:\n                idx = _counters["query_calls"]\n                _counters["query_calls"] += 1\n            status = config.get("query_status_override", {}).get(str(idx), config.get("query_status", 200))\n            rows = config.get("query_rows_override", {}).get(str(idx), config.get("query_rows", 1))\n            delay_ms = config.get("query_delay_override", {}).get(str(idx), config.get("query_delay_ms", 0))\n            if delay_ms:\n                time.sleep(delay_ms / 1000.0)\n            if config.get("drop_at_index") == idx:\n                _append_log({\n                    "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                    "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n                    "call_index": idx, "dropped": True,\n                })\n                self.close_connection = True\n                return\n            if status == 200:\n                self._send(200, {"items": [{"label": "x"} for _ in range(rows)], "request_id": "r3"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(), "call_index": idx,\n            })\n            return\n        self._send(404, {})\n        _append_log({\n            "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n\nhttpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)\nprint(httpd.server_port, flush=True)\nhttpd.serve_forever()\n'
+_REALSERVER_STUB_SERVER_SCRIPT = 'import http.server\nimport json\nimport os\nimport sys\nimport threading\nimport time\n\nconfig = json.loads(open(sys.argv[1], "r", encoding="utf-8").read())\nlog_path = sys.argv[2]\n_log_lock = threading.Lock()\n_counters_lock = threading.Lock()\n_counters = {"query_calls": 0}\n_rotation_lock = threading.Lock()\n_rotation_state = {"rotated": False, "new_control_secret": None}\n\n\ndef _append_log(entry):\n    with _log_lock:\n        with open(log_path, "a", encoding="utf-8") as f:\n            f.write(json.dumps(entry) + "\\n")\n\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    server_version = "realserverstub/1.0"\n    protocol_version = "HTTP/1.1"\n\n    def log_message(self, fmt, *args):\n        pass\n\n    def _read_body(self):\n        length = int(self.headers.get("Content-Length", 0))\n        raw = self.rfile.read(length) if length else b""\n        return json.loads(raw) if raw else {}\n\n    def _send(self, status, obj):\n        body = json.dumps(obj).encode("utf-8")\n        self.send_response(status)\n        self.send_header("Content-Type", "application/json")\n        self.send_header("Content-Length", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def do_GET(self):\n        start = time.time()\n        if self.path == "/v1/capabilities":\n            self._send(200, {\n                "application_scope": config.get("application_id", "perfapp"),\n                "contract_version": "1.11.0", "capabilities": {}, "limits": {},\n                "limit_enforcement": {}, "authorization_propagation_bound_ms": 0,\n            })\n        else:\n            self._send(404, {})\n        _append_log({\n            "path": self.path, "method": "GET",\n            "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n    def do_POST(self):\n        body = self._read_body()\n        path = self.path\n        start = time.time()\n        if path.startswith("/control/v1/credentials/") and path.endswith("/rotate"):\n            target_id = path[len("/control/v1/credentials/"):-len("/rotate")]\n            expected_id = config.get("control_credential_id", "ctl1")\n            new_secret = config.get("new_control_secret", "rotated-control-secret")\n            if target_id == expected_id:\n                with _rotation_lock:\n                    _rotation_state["rotated"] = True\n                    _rotation_state["new_control_secret"] = new_secret\n                self._send(200, {"credential_id": target_id, "secret": new_secret})\n            else:\n                self._send(403, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/control/v1/credentials":\n            auth = self.headers.get("Authorization", "")\n            bearer = auth[len("Bearer "):] if auth.startswith("Bearer ") else auth\n            with _rotation_lock:\n                rotated = _rotation_state["rotated"]\n                new_secret = _rotation_state["new_control_secret"]\n            if not rotated or bearer != new_secret:\n                self._send(403, {"error": "must_rotate"})\n            else:\n                status = config.get("credential_status", 200)\n                if status == 200:\n                    self._send(200, {\n                        "credential_id": "cred1", "application_id": body.get("application_id"),\n                        "role": body.get("role"), "secret": "dev-secret-xyz",\n                    })\n                else:\n                    self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path == "/v1/schema/operations":\n            status = config.get("schema_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "revision": "1", "request_id": "r1"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/mutations"):\n            status = config.get("mutation_status", 200)\n            if status == 200:\n                self._send(200, {"committed": True, "affected": 1, "request_id": "r2"})\n            else:\n                self._send(status, {"error": "denied"})\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "body": body, "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n            })\n            return\n        if path.endswith("/query"):\n            with _counters_lock:\n                idx = _counters["query_calls"]\n                _counters["query_calls"] += 1\n            status = config.get("query_status_override", {}).get(str(idx), config.get("query_status", 200))\n            rows = config.get("query_rows_override", {}).get(str(idx), config.get("query_rows", 1))\n            delay_ms = config.get("query_delay_override", {}).get(str(idx), config.get("query_delay_ms", 0))\n            if delay_ms:\n                time.sleep(delay_ms / 1000.0)\n            if config.get("drop_at_index") == idx:\n                _append_log({\n                    "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                    "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n                    "call_index": idx, "dropped": True,\n                })\n                self.close_connection = True\n                return\n            if status == 200:\n                self._send(200, {"items": [{"label": "x"} for _ in range(rows)], "request_id": "r3"})\n            else:\n                self._send(status, {"error": "denied"})\n            if idx in config.get("unparseable_log_indices", []):\n                with _log_lock:\n                    with open(log_path, "a", encoding="utf-8") as f:\n                        f.write("unparseable access line\\n")\n                return\n            _append_log({\n                "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n                "start_ts": start, "end_ts": time.time(), "pid": os.getpid(), "call_index": idx,\n                "status": status,\n            })\n            return\n        self._send(404, {})\n        _append_log({\n            "path": path, "method": "POST", "authorization": self.headers.get("Authorization"),\n            "start_ts": start, "end_ts": time.time(), "pid": os.getpid(),\n        })\n\n\nhttpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)\nprint(httpd.server_port, flush=True)\nhttpd.serve_forever()\n'
 
 _REALSERVER_STUB_LAUNCHER_TEMPLATE = 'import os\nimport signal\nimport subprocess\nimport sys\n\n\nclass StubLauncher:\n    name = {peer!r}\n    START_CALLS = []\n    START_WORKERS = []\n    STOP_CALLS = []\n\n    def __init__(self):\n        self._group_leader = None\n\n    def start(self, *, ceilings, workers=1):\n        type(self).START_CALLS.append(dict(ceilings))\n        type(self).START_WORKERS.append(workers)\n        self._group_leader = subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(300)\"], start_new_session=True)\n\n    def stop(self):\n        type(self).STOP_CALLS.append(True)\n        if self._group_leader is not None:\n            try:\n                os.killpg(self._group_leader.pid, signal.SIGKILL)\n            except ProcessLookupError:\n                pass\n            self._group_leader.wait(timeout=30)\n            self._group_leader = None\n\n    def access_log_line_count(self):\n        return 0\n\n    def access_log_pids_for_status(self, status, *, since=0):\n        return []\n\n    @property\n    def data_base_url(self):\n        return {data_base_url!r}\n\n    @property\n    def control_base_url(self):\n        return {control_base_url!r}\n\n    @property\n    def runtime_bearer(self):\n        return {runtime_bearer!r}\n\n    @property\n    def control_bearer(self):\n        return {control_bearer!r}\n\n    @property\n    def control_credential_id(self):\n        return {control_credential_id!r}\n'
 
@@ -2889,8 +2889,10 @@ def test_real_server_n_must_be_at_least_one(capsys):
 # group on `start()`: a supervisor in its own session that forks
 # `workers` children, the same shape a uvicorn `--workers N` supervisor
 # has, and stops it with `os.killpg` on `stop()`. Its access-log methods
-# read the stub HTTP server's own JSONL log, so the per-worker counts come
-# from a real responding pid.
+# read the stub HTTP server's own JSONL log -- each line's pid and the
+# status the server recorded as sent -- so the per-worker counts come
+# from a real responding pid; a line that is not JSON is never returned
+# for any status.
 # ---------------------------------------------------------------------
 
 _REALSERVER_GROUP_STUB_LAUNCHER_TEMPLATE = '''
@@ -2927,6 +2929,18 @@ _SUPERVISOR = (
     "    time.sleep(60)\\n"
 )
 
+# A supervisor that forks its workers into its own group and then exits:
+# the workers keep the group, the supervisor stays an unreaped zombie
+# child of the process that started it.
+_EXITING_SUPERVISOR = (
+    "import os, sys, time\\n"
+    "for _ in range(int(sys.argv[1])):\\n"
+    "    if os.fork() == 0:\\n"
+    "        while True:\\n"
+    "            time.sleep(60)\\n"
+    "os._exit(0)\\n"
+)
+
 
 def _group_members(pgid):
     out = subprocess.run(["ps", "-A", "-o", "pid=,pgid="], capture_output=True, text=True).stdout
@@ -2936,6 +2950,11 @@ def _group_members(pgid):
         if len(parts) == 2 and int(parts[1]) == pgid:
             members.append(int(parts[0]))
     return members
+
+
+def _is_zombie(pid):
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=30).stdout
+    return out.strip().startswith("Z")
 
 
 _LAST_STABLE = {{}}
@@ -2971,9 +2990,10 @@ class StubLauncher:
     GROUP_MEMBERS_AT_START = []
     SUPERVISORS = []
     STOP_CALLS = []
+    EXITED_LEADER_GROUPS = []
     LEAVE_GROUP_RUNNING = {leave_group_running!r}
     ZOMBIE_ON_STOP = {zombie_on_stop!r}
-    QUERY_STATUS_OVERRIDE = {query_status_override!r}
+    LEADER_EXITS_DURING_START = {leader_exits_during_start!r}
 
     def __init__(self):
         self._supervisor = None
@@ -2995,6 +3015,19 @@ class StubLauncher:
                 break
             time.sleep(0.05)
         cls.GROUP_MEMBERS_AT_START.append(len(members))
+        if cls.LEADER_EXITS_DURING_START:
+            # A second group whose leader exits before start() returns;
+            # stop() below never signals it.
+            exiting = subprocess.Popen(
+                [sys.executable, "-c", _EXITING_SUPERVISOR, str(workers)], start_new_session=True,
+            )
+            cls.SUPERVISORS.append(exiting)
+            cls.EXITED_LEADER_GROUPS.append(exiting.pid)
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if _is_zombie(exiting.pid) and len(_group_members(exiting.pid)) >= workers + 1:
+                    break
+                time.sleep(0.05)
 
     def stop(self):
         type(self).STOP_CALLS.append(True)
@@ -3020,11 +3053,13 @@ class StubLauncher:
     def access_log_pids_for_status(self, status, *, since=0):
         pids = []
         for line in _stable_log_lines({server_log!r})[since:]:
-            entry = json.loads(line)
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
             if entry.get("dropped"):
                 continue
-            entry_status = type(self).QUERY_STATUS_OVERRIDE.get(str(entry.get("call_index")), 200)
-            if entry_status == status:
+            if entry.get("status") == status:
                 pids.append(entry["pid"])
         return pids
 
@@ -3050,7 +3085,10 @@ class StubLauncher:
 '''
 
 
-def _realserver_group_setup(tmp_path, config=None, *, peer="stubpeer", leave_group_running=False, zombie_on_stop=False):
+def _realserver_group_setup(
+    tmp_path, config=None, *, peer="stubpeer", leave_group_running=False, zombie_on_stop=False,
+    leader_exits_during_start=False,
+):
     config = config or {}
     base_url, log_path, proc = _start_realserver_stub_server(tmp_path, config)
     idx = next(_realserver_module_counter)
@@ -3059,7 +3097,7 @@ def _realserver_group_setup(tmp_path, config=None, *, peer="stubpeer", leave_gro
     stub_dir.mkdir(exist_ok=True)
     module_src = _REALSERVER_GROUP_STUB_LAUNCHER_TEMPLATE.format(
         peer=peer, leave_group_running=leave_group_running, zombie_on_stop=zombie_on_stop,
-        query_status_override=dict(config.get("query_status_override", {})), server_log=str(log_path),
+        leader_exits_during_start=leader_exits_during_start, server_log=str(log_path),
         data_base_url=f"{base_url}/v1", control_base_url=f"{base_url}/control/v1",
     )
     (stub_dir / f"{module_name}.py").write_text(module_src, encoding="utf-8")
@@ -3196,7 +3234,8 @@ def test_real_server_prints_per_worker_200_counts_after_the_run(tmp_path, capsys
         realcpu_idx = next(i for i, line in enumerate(lines) if line.startswith("REALCPU "))
         assert realworkers[0] == realcpu_idx + 1
         assert lines[realworkers[0]] == (
-            f"REALWORKERS peer=stubpeer plug=stubpeer-real workers=2 pids=1 accepted_200={proc.pid}:6 non_200=-"
+            f"REALWORKERS peer=stubpeer plug=stubpeer-real workers=2 concurrency=2 pids=1 "
+            f"accepted_200={proc.pid}:6 non_200=- unclassified=0"
         )
     finally:
         _kill_stub_groups(launcher_cls)
@@ -3226,13 +3265,15 @@ def test_real_server_stopped_run_still_prints_its_worker_line(tmp_path, capsys):
 def test_format_realworkers_row_is_stable():
     """`REALWORKERS`'s own column names, order and formatting: counts per
     pid in ascending pid order and per non-200 status in ascending status
-    order, `-` for either when there is none."""
-    assert pb._format_realworkers_row("r2db-api", 4, [12, 11, 12, 13], {429: 2, 404: 1}) == (
-        "REALWORKERS peer=r2db-api plug=r2db-api-real workers=4 pids=3 accepted_200=11:1,12:2,13:1 "
-        "non_200=404:1,429:2"
+    order, `-` for either when there is none, `unclassified=` always
+    last."""
+    assert pb._format_realworkers_row("r2db-api", 4, 8, [12, 11, 12, 13], {429: 2, 404: 1}, 0) == (
+        "REALWORKERS peer=r2db-api plug=r2db-api-real workers=4 concurrency=8 pids=3 "
+        "accepted_200=11:1,12:2,13:1 non_200=404:1,429:2 unclassified=0"
     )
-    assert pb._format_realworkers_row("MitateDB-api", 1, [], {}) == (
-        "REALWORKERS peer=MitateDB-api plug=MitateDB-api-real workers=1 pids=0 accepted_200=- non_200=-"
+    assert pb._format_realworkers_row("MitateDB-api", 1, 1, [], {}, 3) == (
+        "REALWORKERS peer=MitateDB-api plug=MitateDB-api-real workers=1 concurrency=1 pids=0 "
+        "accepted_200=- non_200=- unclassified=3"
     )
 
 
@@ -3338,7 +3379,7 @@ def test_real_server_prints_per_status_non_200_counts_after_the_run(tmp_path, ca
     `REALWORKERS` line carries `non_200=429:2` and no 200 at all.
 
     mutation M149b (`tools/perf_baseline.py`): never count non-200
-    statuses (`_access_log_non_200_counts` returns `{}`) -- red because
+    statuses (`_access_log_non_200_counts` counts nothing) -- red because
     the line then carries `non_200=-`."""
     config = {"query_status_override": {"1": 429, "2": 429}}
     log_path, proc, registry_path, launcher_cls = _realserver_group_setup(tmp_path, config)
@@ -3347,7 +3388,10 @@ def test_real_server_prints_per_status_non_200_counts_after_the_run(tmp_path, ca
         code = pb._run_real_server(args)
         assert code == 1
         lines = _realworkers_lines(capsys.readouterr().out)
-        assert lines == ["REALWORKERS peer=stubpeer plug=stubpeer-real workers=2 pids=0 accepted_200=- non_200=429:2"]
+        assert lines == [
+            "REALWORKERS peer=stubpeer plug=stubpeer-real workers=2 concurrency=2 pids=0 accepted_200=- "
+            "non_200=429:2 unclassified=0"
+        ]
     finally:
         _kill_stub_groups(launcher_cls)
         _stop_realserver_stub_server(proc)
@@ -3400,6 +3444,103 @@ def test_real_server_reports_zombies_without_counting_them_as_residue(tmp_path, 
         assert stat.startswith("Z"), stat
         assert f"launcher process group(s) [{pgid}] have 1 zombie process(es) after stop() (reaped-pending" in err
         assert code == 0
+    finally:
+        _kill_stub_groups(launcher_cls)
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_counts_every_non_200_status_of_a_run(tmp_path, capsys):
+    """Every non-200 status of a run is counted, the last one read
+    included: the one measured group (K=3) answers 429, 429 and 500, so
+    the `REALWORKERS` line carries `non_200=429:2,500:1`.
+
+    mutation M149c (`tools/perf_baseline.py`): stop the status reads one
+    line early (`if remaining <= 1:`) -- red because the 500 is then
+    never read and the line carries `non_200=429:2 unclassified=1`."""
+    config = {"query_status_override": {"1": 429, "2": 429, "3": 500}}
+    log_path, proc, registry_path, launcher_cls = _realserver_group_setup(tmp_path, config)
+    try:
+        args = _realserver_workers_args(pb, registry_path=registry_path, workers=2, concurrency=3, n=1)
+        code = pb._run_real_server(args)
+        assert code == 1
+        lines = _realworkers_lines(capsys.readouterr().out)
+        assert lines == [
+            "REALWORKERS peer=stubpeer plug=stubpeer-real workers=2 concurrency=3 pids=0 accepted_200=- "
+            "non_200=429:2,500:1 unclassified=0"
+        ]
+    finally:
+        _kill_stub_groups(launcher_cls)
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_reports_access_log_lines_no_status_read_returned(tmp_path, capsys):
+    """An access-log line of the run that no status read returns is
+    counted as `unclassified=`: of the one measured group's 3 requests
+    (K=3, all 200), the server writes 1 line that is not parseable, so the
+    `REALWORKERS` line carries 2 accepted 200s and `unclassified=1`.
+
+    mutation M149d (`tools/perf_baseline.py`): always print
+    `unclassified=0` -- red because the line then carries
+    `unclassified=0`."""
+    config = {"unparseable_log_indices": [2]}
+    log_path, proc, registry_path, launcher_cls = _realserver_group_setup(tmp_path, config)
+    try:
+        args = _realserver_workers_args(pb, registry_path=registry_path, workers=2, concurrency=3, n=1)
+        code = pb._run_real_server(args)
+        assert code == 0
+        lines = _realworkers_lines(capsys.readouterr().out)
+        assert lines == [
+            f"REALWORKERS peer=stubpeer plug=stubpeer-real workers=2 concurrency=3 pids=1 "
+            f"accepted_200={proc.pid}:2 non_200=- unclassified=1"
+        ]
+    finally:
+        _kill_stub_groups(launcher_cls)
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_stopped_run_prints_its_concurrency(tmp_path, capsys):
+    """A run a non-200 response stops prints no `REALPERF`, and its
+    `REALWORKERS` line still carries the run's K (`concurrency=3`).
+
+    mutation M148b (`tools/perf_baseline.py`): drop `concurrency=` from
+    the `REALWORKERS` line -- red because the line then has no
+    ` concurrency=3 `."""
+    config = {"query_status_override": {"1": 429}}
+    base_url, log_path, proc, registry_path, launcher_cls = _realserver_setup(tmp_path, config)
+    try:
+        args = _realserver_workers_args(pb, registry_path=registry_path, workers=2, concurrency=3)
+        code = pb._run_real_server(args)
+        assert code != 0
+        captured = capsys.readouterr()
+        assert "REALPERF" not in captured.out
+        lines = _realworkers_lines(captured.out)
+        assert len(lines) == 1
+        assert " workers=2 concurrency=3 " in lines[0]
+    finally:
+        _stop_realserver_stub_server(proc)
+
+
+def test_real_server_reports_workers_left_by_a_supervisor_that_exited_during_start(tmp_path, capsys, monkeypatch):
+    """A launcher process group whose leader exits during `start()` (an
+    unreaped zombie child of this process) while its workers keep running
+    is still checked after `stop()`: with a `stop()` that never signals
+    that group, the run returns 1 and names the workers on stderr.
+
+    mutation M153d (`tools/perf_baseline.py`): leave zombie leaders out of
+    the launcher's process groups (`and not zombie`) -- red because the
+    group is then never checked and the run returns 0."""
+    monkeypatch.setattr(pb, "_PROCESS_GROUP_DRAIN_TIMEOUT_S", 0.5)
+    log_path, proc, registry_path, launcher_cls = _realserver_group_setup(tmp_path, leader_exits_during_start=True)
+    try:
+        args = _realserver_workers_args(pb, registry_path=registry_path, workers=2)
+        code = pb._run_real_server(args)
+        err = capsys.readouterr().err
+        assert len(launcher_cls.EXITED_LEADER_GROUPS) == 1
+        pgid = launcher_cls.EXITED_LEADER_GROUPS[0]
+        left = [pid for pid in _stub_group_members(pgid) if pid != pgid]
+        assert len(left) == 2
+        assert code == 1
+        assert f"process(es) after stop(): {sorted(left)}" in err
     finally:
         _kill_stub_groups(launcher_cls)
         _stop_realserver_stub_server(proc)

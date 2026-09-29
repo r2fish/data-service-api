@@ -1937,19 +1937,27 @@ def _real_server_ceilings(workers: int) -> "dict[str, int]":
 
 
 def _format_realworkers_row(
-    peer: str, workers: int, accepted_pids: "list[int]", non_200_counts: "dict[int, int]",
+    peer: str,
+    workers: int,
+    concurrency: int,
+    accepted_pids: "list[int]",
+    non_200_counts: "dict[int, int]",
+    unclassified: int,
 ) -> str:
     """One line per `--real-server` run: the data plane's own worker count
     (`workers=`, so runs at different worker counts are distinguishable
-    from the output alone) and, from the launcher's pid-tagged access log
-    over the run's warmup and measured groups, how many 200 responses each
-    responding worker pid served (`accepted_200=<pid>:<count>,...`,
-    ascending pid; `-` when there were none) and how many responses each
-    non-200 status had (`non_200=<status>:<count>,...`, ascending status;
-    `-` when there were none -- a `LIMIT_EXCEEDED` refusal is 429 on
-    r2db-api and 413 on MitateDB-api). `pids=` is the number of distinct
-    pids that served a 200. A record, never a judgement this tool makes
-    (P-8)."""
+    from the output alone), the run's K (`concurrency=`, also on a run a
+    non-200 response stopped, which prints no `REALPERF`) and, from the
+    launcher's pid-tagged access log over the run's warmup and measured
+    groups, how many 200 responses each responding worker pid served
+    (`accepted_200=<pid>:<count>,...`, ascending pid; `-` when there were
+    none), how many responses each non-200 status had
+    (`non_200=<status>:<count>,...`, ascending status; `-` when there were
+    none -- a `LIMIT_EXCEEDED` refusal is 429 on r2db-api and 413 on
+    MitateDB-api) and how many of the window's access-log lines no status
+    read returned (`unclassified=<n>`, always present, `0` when every line
+    was classified). `pids=` is the number of distinct pids that served a
+    200. A record, never a judgement this tool makes (P-8)."""
     counts: "dict[int, int]" = {}
     for pid in accepted_pids:
         counts[pid] = counts.get(pid, 0) + 1
@@ -1959,18 +1967,27 @@ def _format_realworkers_row(
     ) or "-"
     return (
         f"REALWORKERS peer={peer} plug={peer}-real workers={workers} "
-        f"pids={len(counts)} accepted_200={by_pid} non_200={by_status}"
+        f"concurrency={concurrency} "
+        f"pids={len(counts)} accepted_200={by_pid} non_200={by_status} "
+        f"unclassified={unclassified}"
     )
 
 
-def _access_log_non_200_counts(launcher: Any, since: int, accepted: int) -> "dict[int, int]":
-    """Per-status counts of the non-200 lines the launcher's access log
-    gained after its first `since` lines. The launcher reads its access
-    log one status at a time (`access_log_pids_for_status`), so this asks
-    each HTTP status from 100 to 599 in turn and stops as soon as the
+def _access_log_non_200_counts(launcher: Any, since: int, accepted: int) -> "tuple[dict[int, int], int]":
+    """`(counts, unclassified)`: per-status counts of the non-200 lines the
+    launcher's access log gained after its first `since` lines, and how
+    many of those lines no status read returned. The launcher reads its
+    access log one status at a time (`access_log_pids_for_status`), so this
+    asks each HTTP status from 100 to 599 in turn and stops as soon as the
     counted lines (`accepted` 200s plus every non-200 found so far) reach
     the number of lines appended after `since` -- a run with no non-200
-    response asks for none."""
+    response asks for none. Lines still uncounted after status 599 are
+    `unclassified` (a line the launcher's reader does not parse). In a run
+    a 599 stopped (a request the client gave up on, a 30 s timeout for
+    one), the server can still finish and log that request while these
+    reads run, so the 200 count, the non-200 counts and `unclassified` are
+    not read at one point in time and a repeat of the same run need not
+    reproduce them."""
     remaining = launcher.access_log_line_count() - since - accepted
     counts: "dict[int, int]" = {}
     for status in range(100, 600):
@@ -1982,7 +1999,7 @@ def _access_log_non_200_counts(launcher: Any, since: int, accepted: int) -> "dic
         if found:
             counts[status] = found
             remaining -= found
-    return counts
+    return counts, max(remaining, 0)
 
 
 _PROCESS_GROUP_DRAIN_TIMEOUT_S = 10.0
@@ -2015,15 +2032,17 @@ def _process_table() -> "list[tuple[int, int, int, bool]]":
 
 
 def _own_process_group_leaders() -> "set[int]":
-    """Pids of this process' own direct, non-zombie children that lead
-    their own process group (pid == pgid). The launcher runs in this
-    process and starts each uvicorn plane as such a child (a new session,
-    so the supervisor and every worker it forks share the supervisor's
-    pid as their pgid); `_run_real_server` takes this set before and after
-    `launcher.start()`, and the difference is the launcher's own process
-    groups."""
+    """Pids of this process' own direct children that lead their own
+    process group (pid == pgid), zombies included. The launcher runs in
+    this process and starts each uvicorn plane as such a child (a new
+    session, so the supervisor and every worker it forks share the
+    supervisor's pid as their pgid); `_run_real_server` takes this set
+    before and after `launcher.start()`, and the difference is the
+    launcher's own process groups. A supervisor that exits during
+    `start()` stays in this set as an unreaped zombie, so the workers it
+    leaves behind in its group are still checked after `stop()`."""
     me = os.getpid()
-    return {pid for pid, ppid, pgid, zombie in _process_table() if ppid == me and pgid == pid and not zombie}
+    return {pid for pid, ppid, pgid, _zombie in _process_table() if ppid == me and pgid == pid}
 
 
 def _process_group_members(pgids: "set[int]") -> "tuple[list[int], list[int]]":
@@ -2503,7 +2522,8 @@ def _run_real_server(args: argparse.Namespace) -> int:
     reached its first warmup group, one `REALWORKERS` line
     (`_format_realworkers_row`) follows `REALPERF`/`REALCPU` -- also for a
     run a non-200 response stopped, so a stopped run still shows its
-    worker count, per-worker 200 counts and per-status non-200 counts.
+    worker count, K, per-worker 200 counts, per-status non-200 counts and
+    unclassified access-log lines.
     Every process group the launcher started (`_own_process_group_leaders`,
     taken before and after `start()`) is observed: a start after which no
     such group is observed is refused (returns 1, nothing measured), and
@@ -2539,8 +2559,8 @@ def _run_real_server(args: argparse.Namespace) -> int:
         if "access_log_since" in window:
             since = window["access_log_since"]
             accepted = launcher.access_log_pids_for_status(200, since=since)
-            non_200 = _access_log_non_200_counts(launcher, since, len(accepted))
-            print(_format_realworkers_row(args.real_server, workers, accepted, non_200))
+            non_200, unclassified = _access_log_non_200_counts(launcher, since, len(accepted))
+            print(_format_realworkers_row(args.real_server, workers, args.concurrency, accepted, non_200, unclassified))
     finally:
         launcher.stop()
     if launcher_groups is None:
