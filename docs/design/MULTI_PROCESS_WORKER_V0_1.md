@@ -580,9 +580,39 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 
 **表 7-2 K=1 の非退行 (`--warmup 20 --n 200`)**
 
-| plug | op | 基準 p50 | 後 p50 | 差 | 基準 p95 | 後 p95 | 差 | +40% / +50% 以内 |
-|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| plug | op | 基準 p50 | 後 p50 | 差 | 基準 p95 | 後 p95 | 差 | +40% / +50% 以内 | `backend_calls` (基準 → 後) |
+|---|---|---|---|---|---|---|---|---|---|
+| r2db-api | query | 0.116 | 0.117 | +0.9% | 0.125 | 0.122 | -2.4% | はい | 1 → 1 |
+| r2db-api | mutate | 0.216 | 0.218 | +0.9% | 0.305 | 0.292 | -4.3% | はい | 1 → 1 |
+| r2db-api | batch | 0.858 | 0.857 | -0.1% | 1.225 | 1.232 | +0.6% | はい | 1 → 1 |
+| MitateDB-api | query | 0.134 | 0.133 | -0.7% | 0.141 | 0.144 | +2.1% | はい | 11 → 11 |
+| MitateDB-api | mutate | 0.102 | 0.104 | +2.0% | 0.105 | 0.107 | +1.9% | はい | 7 → 7 |
+| MitateDB-api | batch | 0.171 | 0.169 | -1.2% | 0.184 | 0.177 | -3.8% | はい | 37 → 37 |
+| MitateDB-api | cross_entity | 0.131 | 0.130 | -0.8% | 0.135 | 0.136 | +0.7% | はい | 16 → 16 |
+| r2db-api-http | query | 1.349 | 1.482 | +9.9% | 1.430 | 1.616 | +13.0% | はい | 14 → 16 |
+| r2db-api-http | mutate | 1.413 | 1.547 | +9.5% | 1.491 | 1.653 | +10.9% | はい | 15 → 17 |
+| r2db-api-http | batch | 1.570 | 1.691 | +7.7% | 1.679 | 1.812 | +7.9% | はい | 19 → 21 |
+| MitateDB-api-http | query | 6.185 | 1.366 | -77.9% | 6.431 | 1.482 | -77.0% | はい | 21 → 22 |
+| MitateDB-api-http | mutate | 5.881 | 1.102 | -81.3% | 6.081 | 1.199 | -80.3% | はい | 13 → 14 |
+| MitateDB-api-http | batch | 7.137 | 2.330 | -67.4% | 7.344 | 2.452 | -66.6% | はい | 49 → 50 |
+| MitateDB-api-http | cross_entity | 6.234 | 1.416 | -77.3% | 6.437 | 1.524 | -76.3% | はい | 22 → 23 |
+| r2db-api-socket | query | 4.722 | 4.824 | +2.2% | 4.849 | 5.037 | +3.9% | はい | 14 → 16 |
+| r2db-api-socket | mutate | 4.809 | 4.898 | +1.9% | 5.312 | 5.100 | -4.0% | はい | 15 → 17 |
+| r2db-api-socket | batch | 4.984 | 5.058 | +1.5% | 5.136 | 5.256 | +2.3% | はい | 19 → 21 |
+| MitateDB-api-socket | query | 9.647 | 4.590 | -52.4% | 11.022 | 5.873 | -46.7% | はい | 21 → 22 |
+| MitateDB-api-socket | mutate | 9.345 | 4.310 | -53.9% | 10.691 | 5.644 | -47.2% | はい | 13 → 14 |
+| MitateDB-api-socket | batch | 10.669 | 5.556 | -47.9% | 11.974 | 6.868 | -42.6% | はい | 49 → 50 |
+| MitateDB-api-socket | cross_entity | 9.736 | 4.698 | -51.7% | 11.089 | 6.048 | -45.5% | はい | 22 → 23 |
+| r2db-api-real (N=1) | query | — | 3.617 | — | — | 4.551 | — | 基準値なし | — |
+| r2db-api-real (N=4) | query | — | 3.676 | — | — | 13.173 | — | 基準値なし | — |
+| MitateDB-api-real (N=1) | query | — | 2.140 | — | — | 3.160 | — | 基準値なし | — |
+| MitateDB-api-real (N=4) | query | — | 3.242 | — | — | 9.508 | — | 基準値なし | — |
+
+- 計測 2026-09-29、完了ゲートの後、木 `7407ddf`、`tools/perf_baseline.py --warmup 20 --n 200` (`PERFRUN host=Darwin/arm64 python=3.11.15 commit=7407ddf date=2026-09-29`)。開始時の load average (1 分) 1.63、pytest 0 件。終了コード 0、nginx の残存 0、共有 cluster の `pg_database` / `pg_roles` の数は前後とも 9 / 30。基準値は `docs/design/PHASE11_KEYSET_PAGING_V1.md` の「WP-7 実施記録 (2026-09-25)」(`commit=5d988c6`)。
+- 21 行とも +40% / +50% の内側 (`docs/design/ROADMAP_POST_PHASE7_V1.md` §0.1.4 の 1)。最大は r2db-api-http の `query` の p50 +9.9% / p95 +13.0%。
+- MitateDB の http / socket の −47〜−81% は、基準値の後に入った別の変更 (composition root の thread limit と MitateDB の http adapter の platform pool) の効果を含み、本変更だけの差ではない。
+- `backend_calls` の増分 (同 §0.1.4 の 4): http / socket の plug で r2db +2、MitateDB +1。`requests_per_minute` を PostgreSQL の行で数える文が要求ごとに足された (設計 D-3 (1))。in-process の plug は rate の行を配線しないので不変。r2db が +2 で MitateDB が +1 である内訳は切り分けていない。
+- real-server plug の 4 行は表 7-1 の K = 1 (`--warmup 3 --n 15`) の値で、`--warmup 20 --n 200` では取っていない。N = 4 の p95 (9.5〜13.2 ms) は N = 1 (3.2〜4.6 ms) より大きい。標本 15 の値であり、原因は切り分けていない。
 
 - 表 7-2 の行 (plug と op) と基準値の出所は作業指示書で固定する。real-server plug の N=1 / N=4 は同じ表に行を足す。
 
