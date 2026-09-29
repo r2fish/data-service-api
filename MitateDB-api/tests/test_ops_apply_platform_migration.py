@@ -8,8 +8,8 @@ Covers: filename validation (enumeration, path separators, directory
 containment, no value echoed on rejection, a symlinked migrations
 directory), the psql-variable table, DSN-via-environment-only
 (design Z-8/D-10), connection-value redaction, the required `--lock-
-timeout`, `ON_ERROR_STOP`, psql 16+, drift-then-restore for 5 of the 6
-accepted files (0005/0007/0011/0012/0013; 0014 has none), and the
+timeout`, `ON_ERROR_STOP`, psql 16+, drift-then-restore for 5 of the 7
+accepted files (0005/0007/0011/0012/0013; 0014 and 0016 have none), and the
 AST-derived "flows DDL" subcommand set.
 
 Test infrastructure: own fixtures, duplicated bootstrap shape from
@@ -1417,7 +1417,7 @@ def test_apply_platform_migration_variables_are_referenced_only_in_quoted_form()
     """psql's own quoted interpolation
     (`:"name"`/`:'name'`) is what makes a role-name argument safe to
     substitute into DDL -- no value validation is layered on top of it.
-    Each of the 5 accepted platform migration files
+    Each of the 7 accepted platform migration files
     references its own psql variables only through that quoted form; a
     bare `:name` reference is never present. 0007 has at least one
     quoted reference (non-vacuous)."""
@@ -1510,7 +1510,7 @@ def test_apply_platform_migration_run_unexpected_variable_message_names_no_file(
 # kind) per design R-10: a literal role name, a psql `:"name"`
 # variable's own NAME, or a plpgsql expression's own source text (e.g.
 # `app.runtime_role`) as identifier; `CONNECTION LIMIT`, `SET <param>`,
-# or `function body` as kind. This machinery reads the 6 accepted
+# or `function body` as kind. This machinery reads the 7 accepted
 # migration files directly -- it is test-only static analysis, never
 # part of `ops.py`'s own runtime surface.
 # ===========================================================================
@@ -1588,7 +1588,7 @@ def _strip_if_not_exists_guarded_blocks(text: str) -> str:
     untouched (design D-3's "走査の規則"). LIMITATION (R-57 WP-1 code
     review, 低 6, 裁定): a guard with a NESTED `IF`/`END IF;` closes on
     the INNER `END IF;` (`.*?` is non-greedy) rather than its own outer
-    one -- none of the 6 accepted migration files has this shape today,
+    one -- none of the 7 accepted migration files has this shape today,
     and the failure mode is over-detection (an extra target, a red
     test), never a silently missed one, so this is accepted rather than
     fixed."""
