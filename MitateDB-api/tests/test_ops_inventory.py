@@ -1751,10 +1751,14 @@ def test_inventory_connection_headroom_minus_one_on_an_unrelated_role_is_not_unk
 def test_inventory_connection_headroom_catches_0012_reapplied_alone_after_0014(monkeypatch, platform):
     """S-1: a stray `0012` re-application rolls every existing
     platform-plane and application role back to 0012's own values (68/20/
-    36) -- item (8), read at one old-basis process (`concurrency=32`)
+    36) -- item (8), read at one old-basis process (`concurrency=6`)
     plus one new-basis process (`thread_limit=4`, control total 2),
-    catches this via condition 1 on `mitatedbsvc_controlplane` (demand
-    32 > 20)."""
+    catches this via condition 1 on `mitatedbsvc_controlplane` ALONE
+    (demand 32 > 20); the api role's own demand (24) stays under its
+    68, the app role's own demand (12) stays under its 36, and the
+    auditreader role's own demand (8) stays under its untouched 12, so
+    no other role's condition 1 check can explain the `blocked` result
+    here."""
     _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
     _provision_app(platform, "w17a")
     _run_psql(platform.provision_dsn, platform.migrations_dir / "0012_role_connection_limits.sql")
@@ -1764,7 +1768,7 @@ def test_inventory_connection_headroom_catches_0012_reapplied_alone_after_0014(m
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                data_process_count_old_basis=1, concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                data_process_count_old_basis=1, concurrency=6, data_process_ceiling=1, data_process_count_total=2,
                 control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
     finally:
         conn.close()
@@ -2041,8 +2045,8 @@ def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_
     (thread_limit)` (all-new-basis here, `N=3`, `role_pool_size(4)=6`),
     never `role_pool_size` alone -- the app role's own `CONNECTION LIMIT`
     (17) sits strictly between the per-process floor (6) and the
-    N-scaled floor (18), so a mutation that drops the `* N` factor (review
-    finding 4a) would wrongly read `confirmed` here. Isolated from the
+    N-scaled floor (18), so a mutation that drops the `* N` factor
+    would wrongly read `confirmed` here. Isolated from the
     platform-plane roles' own checks by keeping THEIR demand well under
     their real `CONNECTION LIMIT` (68/20/5) while only the app role's own
     (lowered) limit is exceeded."""
@@ -2079,16 +2083,18 @@ def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_
 
 
 def test_inventory_connection_headroom_app_role_overflow_with_named_values(monkeypatch, platform):
-    """One old-basis process (`concurrency=32`) plus two
+    """One old-basis process (`concurrency=28`) plus two
     new-basis processes (`thread_limit=4`, `role_pool_size` 6): the app
-    role's own condition 1 floor is `32 + 2*6 = 44`, past the default
+    role's own condition 1 floor is `28 + 2*6 = 40`, past the default
     `0003` app-role `CONNECTION LIMIT` of 36 -- blocked. The API role's own
     CONNECTION LIMIT is raised out of the way (100000) so only the app
     role's own (default) CONNECTION LIMIT can explain a `blocked` result
     (without this, `0012`'s own default of 68 for `mitatedbsvc_api` is
-    itself exceeded here -- `1*2*32 + 2*2*6 = 88` -- and a mutation that
-    drops only the app-role floor's own `* N` factor would stay `blocked`
-    regardless, via the API role, rework 1b finding)."""
+    itself exceeded here -- `1*2*28 + 2*2*6 = 80`). This floor catches
+    two distinct mutations, each of which reads `confirmed` here instead
+    of `blocked`: dropping the app-role floor's own `* N` factor
+    (`28 + 6 = 34`) and counting the old-basis process at
+    `role_pool_size` instead of `concurrency` (`(1+2)*6 = 18`)."""
     _declare_golden_path(monkeypatch, platform, data=2, control=1)
     _provision_app(platform, "app1")
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
@@ -2102,7 +2108,7 @@ def test_inventory_connection_headroom_app_role_overflow_with_named_values(monke
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                data_process_count_old_basis=1, concurrency=32, data_process_ceiling=2, data_process_count_total=3,
+                data_process_count_old_basis=1, concurrency=28, data_process_ceiling=2, data_process_count_total=3,
                 control_process_ceiling=1, control_process_count_total=1,
             ))
     finally:
@@ -2383,7 +2389,11 @@ def test_inventory_connection_headroom_app_role_demand_uses_the_total_not_the_ce
     computed from `--data-process-count-total`, never from `--data-
     process-ceiling` -- the API role's own CONNECTION LIMIT is raised
     out of the way so only the app role's own (default) CONNECTION
-    LIMIT (36) can explain a `blocked` result."""
+    LIMIT (36) can explain a `blocked` result: with `N=10` the app
+    role's own demand is 60 (over 36), while condition 2's own
+    TOTAL-based aggregate demand (202) stays at or under
+    `max_connections`, so condition 2 cannot explain the `blocked`
+    result instead."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     _provision_app(platform, "app1")
     platform_conn = psycopg.connect(platform.provision_dsn, autocommit=True)
@@ -2401,14 +2411,29 @@ def test_inventory_connection_headroom_app_role_demand_uses_the_total_not_the_ce
     try:
         with admin.cursor() as cur:
             cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 100000").format(sql.Identifier(platform.api_role)))
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
     finally:
         admin.close()
+    max_connections = int(max_connections_text)
+    data_process_count_total = 10
+    pool_size = config.role_pool_size(ops.DEFAULT_THREAD_LIMIT)
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * data_process_count_total * pool_size  # 120
+    app_role_floor = data_process_count_total * pool_size  # 60
+    app_shared_demand = max(app_role_floor, 2 * 1 * data_process_count_total)  # 60
+    controlplane_demand = platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR  # 16
+    auditreader_demand = platform_declarations._AUDITREADER_ROLE_POOL_FLOOR  # 4
+    condition_2_demand = (
+        api_demand + controlplane_demand + auditreader_demand + app_shared_demand
+        + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+    )  # 202
+    assert condition_2_demand <= max_connections
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                data_process_ceiling=1, data_process_count_total=19,
+                data_process_ceiling=1, data_process_count_total=data_process_count_total,
                 control_process_ceiling=1, control_process_count_total=1, reserved_connections=0,
             ))
     finally:
@@ -2444,7 +2469,7 @@ def test_inventory_connection_headroom_app_shared_demand_in_the_aggregate_uses_t
     (thread_limit)`, all-new-basis here), never re-derived from the
     ceiling -- every per-role CONNECTION LIMIT is raised at least to
     condition 1's own demand (`api >= 2 * pool_size * N`, `app >=
-    pool_size * N`, review finding 4b) so condition 1 alone cannot explain
+    pool_size * N`) so condition 1 alone cannot explain
     a `blocked` result, Control's own ceiling (1) and total (2)
     deliberately differ, and `--reserved-connections` is set so only the
     TOTAL-based aggregate demand overflows `max_connections` (a mutation
@@ -2828,7 +2853,7 @@ def test_inventory_connection_headroom_matches_f16_minimum_limit_for_api(monkeyp
     both fail one below it. `thread_limit=7` (never `DEFAULT_THREAD_LIMIT`
     4) and `n=2` (never 1): a mutation that reads item (8)'s NEW-basis
     pool size from `DEFAULT_THREAD_LIMIT` instead of the declared
-    `--thread-limit` (review finding 1) moves item (8)'s own minimum away
+    `--thread-limit` moves item (8)'s own minimum away
     from F-16's, per new-basis process, and this boundary catches it."""
     _declare_golden_path(monkeypatch, platform, data=2, control=1)
     thread_limit, n = 7, 2
@@ -2853,7 +2878,7 @@ def test_inventory_connection_headroom_matches_f16_minimum_limit_for_application
     (excluding the platform-plane classes) is compared against item (8)'s
     own application-role floor. `thread_limit=7`/`n=2` (never the
     default/1) so a mutation that ignores the declared `--thread-limit`
-    (review finding 1) is caught here too."""
+    is caught here too."""
     _declare_golden_path(monkeypatch, platform, data=2, control=1)
     _provision_app(platform, "app1")
     conn0 = psycopg.connect(platform.provision_dsn, autocommit=True)
@@ -2928,8 +2953,8 @@ def test_inventory_connection_headroom_pool_size_headroom_constant_moves_both(mo
     CONNECTION LIMIT and item (8)'s own `confirmed` minimum together --
     item (8) reads the constant by name rather than baking today's value
     into its own arithmetic. `thread_limit=7`/`n=2` (never the default/1)
-    so a mutation that ignores the declared `--thread-limit` (review
-    finding 1) is caught here too."""
+    so a mutation that ignores the declared `--thread-limit`
+    is caught here too."""
     _declare_golden_path(monkeypatch, platform, data=2, control=1)
     monkeypatch.setattr(config, "_POOL_SIZE_HEADROOM", 9)
     thread_limit, n = 7, 2
@@ -3210,7 +3235,7 @@ def test_inventory_connection_headroom_aggregate_application_term_registration_c
     """205's own property (registration
     count wins), with an old-basis process present (`O=1`): 204's own
     input keeps `O` in the per-role floor's dominant term, so it never
-    exercises `2*K*(O+N)`'s own `O` addend (review finding 5). Here
+    exercises `2*K*(O+N)`'s own `O` addend. Here
     `O=1`, `concurrency=6`, one new-basis process (`thread_limit=4`,
     `role_pool_size` 6), and `K=4` registered applications: the per-role
     floor is `O*c + N*p = 6 + 6 = 12`, but `2*K*(O+N) = 2*4*2 = 16`

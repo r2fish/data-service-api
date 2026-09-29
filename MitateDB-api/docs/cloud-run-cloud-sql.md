@@ -2321,7 +2321,7 @@ a judgment -- the value of an env name NOT in this table is never read):
 | `WEB_CONCURRENCY` | an OLD-basis revision's own worker count for item (8), when it carries no `MITATEDB_WORKERS` (§10.4.3) | that revision's own worker count is 1 |
 | `MITATEDB_THREAD_LIMIT` | `inventory --thread-limit` for item (8)'s NEW-basis processes (§6.5) | item (8) is `unknown` for the parts that depend on it -- the code default is never substituted |
 | `MITATEDB_CONTROL_WORKERS` | Control's own process ceiling/total for item (8) (§10.4.3; always 1) | that revision's own Control process count cannot be established |
-| `MITATEDB_MAX_CONCURRENCY` | `inventory --concurrency` for item (8)'s OLD-basis processes only (§10.4.3) | item (8) is `unknown` for the parts that depend on it, unless §10.4.3's own declared-default exception applies (a currently-serving OLD-basis revision whose env cannot be changed) -- the code default is never substituted for `--thread-limit` |
+| `MITATEDB_MAX_CONCURRENCY` | `inventory --concurrency` for item (8)'s OLD-basis processes only (§10.4.3) | item (8) is `unknown` for the parts that depend on it, unless §10.4.3's own declared-default exception applies (an OLD-basis revision counted toward item (8), including one that takes no traffic but has `minScale` 1 or more) -- the code default is never substituted for `--thread-limit` |
 | `MITATEDB_PLATFORM_POOL_SIZE` | whether a revision counted toward item (8) forces `--thread-limit`/`--data-process-count-old-basis` both omitted for the whole read (§10.4.3) | no effect by itself -- only WHETHER the name is present is read, never its value (F-16 itself never reads it either, an existing gap this runbook does not close) |
 
 Note that §6.1's own deploy command does not set
@@ -2341,7 +2341,8 @@ depending on that revision is `unknown`):
 **What makes an item `unknown` (all items)**: a non-zero gcloud exit
 status; a projected field that comes back empty (an empty projection is
 never read as "absent"); an empty env-name list; a missing must-be-present
-env name; an unset allow-table env.
+env name; an unset allow-table env whose own "When unset" cell says the
+item is `unknown`.
 
 #### 10.4.1 Item (1) isolated/production pair
 
@@ -2425,7 +2426,7 @@ and guessing risks undercounting a real OLD-basis process's demand.
 |---|---|
 | `--thread-limit` | the `MITATEDB_THREAD_LIMIT` value carried by every NEW-basis revision counted below, INCLUDING one that cannot take traffic (that revision's own real demand does not depend on whether it currently serves), plus the candidate (whose value is the one step 13's own deploy command carries, §10.10.3). If they differ, use the largest. **Omit the argument when even one of those revisions has the name unset** -- an unset NEW-basis revision runs on the code's own default (`DEFAULT_THREAD_LIMIT`), which is not read from the platform |
 | `--data-process-count-old-basis` | the WORST-CASE OLD-basis Data process count (the total computed below) -- `0` when no OLD-basis revision is counted |
-| `--concurrency` | the `MITATEDB_MAX_CONCURRENCY` value carried by every OLD-basis revision counted in `--data-process-count-old-basis`, INCLUDING one that cannot take traffic (an OLD-basis process's own real demand does not depend on whether it currently serves). If they differ, use the largest. **Pass this only when `--data-process-count-old-basis` is 1 or more; omit it when that count is `0`, and also omit it (leaving that part of item (8) `unknown`) when it is 1 or more and even one of those revisions has the name unset.** **Exception**: when a currently-serving OLD-basis revision whose env cannot be changed carries no `MITATEDB_MAX_CONCURRENCY` at all, its value may instead be declared from the code default in effect at the commit its own image digest was built from -- record that commit and the file/line the default came from in the evidence table's addend row for this value. This exception does not apply to `--thread-limit`: an unset `MITATEDB_THREAD_LIMIT` on a NEW-basis revision is never filled in, by declared default or otherwise |
+| `--concurrency` | the `MITATEDB_MAX_CONCURRENCY` value carried by every OLD-basis revision counted in `--data-process-count-old-basis`, INCLUDING one that cannot take traffic (an OLD-basis process's own real demand does not depend on whether it currently serves). If they differ, use the largest. **Pass this only when `--data-process-count-old-basis` is 1 or more; omit it when that count is `0`, and also omit it (leaving that part of item (8) `unknown`) when it is 1 or more and even one of those revisions has the name unset.** **Exception**: when an OLD-basis revision counted toward item (8) (including one that takes no traffic but has `minScale` 1 or more) carries no `MITATEDB_MAX_CONCURRENCY` at all, its value may instead be declared from the code default in effect at the commit its own image digest was built from -- record that commit and the file/line the default came from in the evidence table's addend row for this value. This exception does not apply to `--thread-limit`: an unset `MITATEDB_THREAD_LIMIT` on a NEW-basis revision is never filled in, by declared default or otherwise |
 | `--data-process-ceiling` | the NEW candidate Data revision's own process ceiling: its `--max-instances` (i.e. `autoscaling.knative.dev/maxScale` once deployed) times its `MITATEDB_WORKERS` (§6.5) -- this is the value compared against the `process_ceilings` declaration |
 | `--data-process-count-total` | the WORST-CASE Data process count across BOTH bases: the sum, over every revision (OLD-basis and NEW-basis alike) that can serve at the same time, of that revision's `autoscaling.knative.dev/maxScale` times its worker count, plus the candidate's own ceiling (the total computed below). **Never the number of instances or processes running at the moment of the read** -- that number is a snapshot, and passing it makes the demand arithmetic too small, so item (8) can come back confirmed on a database that PostgreSQL's own `CONNECTION LIMIT` refusal would hit under load |
 | `--control-process-ceiling` | the same as `--data-process-ceiling`, for Control, with `MITATEDB_CONTROL_WORKERS` (always 1) in place of `MITATEDB_WORKERS` |
@@ -2810,7 +2811,7 @@ version counts as no record at all.**
 |---|---|---|---|---|---|---|
 | §10.6 compatibility | 5 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
 | §10.7 lock / stop time / `lock_timeout` | 5 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` §5 | -- | -- |
-| §10.10 upgrade procedure (stages 2-4) | 10 | not accepted | 7 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
+| §10.10 upgrade procedure (stages 2-4) | 8 | not accepted | 7 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
 
 ### 10.9 Gate-0 overall judgment and report
 
@@ -2889,30 +2890,26 @@ acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <
 
 ### 10.10 Platform upgrade procedure (stages 2-4)
 
-Procedure version: **10** (2026-09-29: §10.4.3's own `--thread-limit`
-row and its finding row in §10.10.1 no longer restrict the NEW-basis
-revisions counted to ones that can take traffic (a non-serving NEW-basis
-revision's own demand does not depend on whether it currently serves,
-the same rationale already applied to `--concurrency`); the stale "do not
-all carry the same value" clause is removed from both `--concurrency`'s
-and `--thread-limit`'s own finding rows (superseded by "use the largest");
-`--concurrency`'s own row gains an exception letting a currently-serving
-OLD-basis revision whose env cannot be changed declare its value from the
-commit-and-file-line default that built its image, an exception that does
-not extend to `--thread-limit`; `MITATEDB_PLATFORM_POOL_SIZE` moves from
-prose into the env-value allow-table as a presence-only row; and §10.4.3's
-own intro and §10.5's own bullet each name the two rejections `inventory`
-already raises for `--data-process-count-old-basis` (exceeding the total;
-leaving less than the ceiling on the new basis). Version 9, 2026-09-29:
-splits item (8)'s demand
-arithmetic by revision basis -- an OLD-basis process's own demand from
-its declared `concurrency`, a NEW-basis process's from `role_pool_size
-(--thread-limit)`, the same floor the startup connection-limit check
-uses -- and updates the worked example accordingly; §10.4.3's own
-argument table gains `--thread-limit`/`--data-process-count-old-basis`.
-Version 8, 2026-09-29: adds step 7a for `0016`, counts a
+Procedure version: **8** (2026-09-29: adds step 7a for `0016`; counts a
 revision's processes as `maxScale` times its worker count in step 6 and
-step 13. Version 7, 2026-09-20, R-57 WP-3: follows
+step 13; splits item (8)'s demand arithmetic by revision basis -- an
+OLD-basis process's own demand from its declared `concurrency`, a
+NEW-basis process's from `role_pool_size(--thread-limit)`, the same floor
+the startup connection-limit check uses -- with the worked example to
+match; §10.4.3's own argument table gains `--thread-limit` and
+`--data-process-count-old-basis`, the two rejections `inventory` raises
+for the latter, and the rule that `--concurrency` and `--thread-limit`
+each take the largest value over every revision counted toward item (8),
+including one that cannot take traffic; an OLD-basis revision counted
+toward item (8) may declare its `concurrency` from the commit-and-file-line
+default that built its image, an exception that does not extend to
+`--thread-limit`; the env-value allow-table gains the worker, thread-limit
+and presence-only `MITATEDB_PLATFORM_POOL_SIZE` rows, and an item is
+`unknown` for an unset name only where that row's own "When unset" cell
+says so; §10.10.1's item (8) findings name `minScale` as the way out for a
+counted revision that takes no traffic; and step 10's env-only change
+declares `MITATEDB_THREAD_LIMIT` only on a NEW-basis template, step 13
+always). Version 7, 2026-09-20, R-57 WP-3: follows
 `apply-platform-migration` accepting a run and refusing a solo file with
 a later file that redefines its own targets). Change the procedure and
 the version goes up by one and §10.8's acceptance record goes back to
@@ -3025,7 +3022,8 @@ the version goes up by one and §10.8's acceptance record goes back to
   conditions as step 10's own move (the isolated proof, the independent
   audit and the requester's approval) -- otherwise it is a separate
   decision". Changing a `minScale` is a deployment change of the same
-  kind, so it is decided the same way.
+  kind (§10.10.1's own item (8) `unknown` rows name it too), so it is
+  decided the same way.
 
   **`0014` does not move condition 2.** It raises the per-role limits
   condition 1 compares, while condition 2 compares a sum built out of the
@@ -3270,9 +3268,9 @@ finding up here before starting:
 | (6) `ddl_lock` | blocked, reason `statement-timeout-unbounded`: a declared value is 0, negative, or unparseable | step 4 and step 7 -- both files set `5000ms` unconditionally. If the unbounded value was one this deployment had chosen on purpose (step 2's record), choose a POSITIVE replacement and pass it to `set-platform-timeouts` in step 4 instead |
 | (7) legacy base-URL env | confirmed + `remediation-required`: a legacy name is on the current revision or the current template | step 10 (the env-only change removes both names from the template) |
 | (7) legacy base-URL env | blocked: the deploy that will create the candidate carries the legacy names forward without removing them | step 10, plus step 13's own deploy, which must carry the removal flag §10.4.2 step 2 names |
-| (8) `connection_headroom` | `unknown`: `--concurrency` was omitted because `MITATEDB_MAX_CONCURRENCY` is not carried by every OLD-basis Data revision counted toward item (8) (§10.4.3), and §10.4.3's own declared-default exception does not apply | step 10 in full -- the env-only change declares the value, and on a service whose traffic is pinned to a revision it also moves the traffic onto the revision that carries it; step 13's own deploy carries the same value to the candidate. **A revision reachable only by a tag keeps its own env**, which a template change does not reach, so if one of those is missing the value this row does not resolve the finding: report and stop. The way out is to take the tag off that revision (`gcloud run services update-traffic <service> --remove-tags=<tag> --project=<project> --region=<region> --quiet`), which is itself a traffic-projection change and therefore carries the same three conditions as step 10's own move (the isolated proof, the independent audit and the requester's approval) -- otherwise it is a separate decision |
-| (8) `connection_headroom` | `unknown`: `--thread-limit` was omitted because a NEW-basis Data revision counted toward item (8) does not carry `MITATEDB_THREAD_LIMIT` | step 10 in full, the same way as the `--concurrency` row above -- declare `MITATEDB_THREAD_LIMIT` on the env-only revision and on the candidate's own step 13 deploy. The same tag-reachable-revision exception applies: report and stop if one is missing |
-| (8) `connection_headroom` | `unknown`: `--data-process-count-old-basis` (and, with it, `--concurrency`) was omitted for one of §10.4.3's own reasons -- a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision among those counted, an OLD-basis revision carrying `MITATEDB_THREAD_LIMIT` or whose own `concurrency` is below 6, or a revision whose image digest and `MITATEDB_WORKERS` presence disagree | **not a finding this stage resolves.** None of these is a platform-state defect step 4-11 changes; each is a property of which revisions are currently deployed and what they carry, which only a further deployment decision (redeploying or retiring the revision in question) changes -- report `blocked—platform remediation required` and stop |
+| (8) `connection_headroom` | `unknown`: `--concurrency` was omitted because `MITATEDB_MAX_CONCURRENCY` is not carried by every OLD-basis Data revision counted toward item (8) (§10.4.3), and §10.4.3's own declared-default exception does not apply | step 10 in full -- the env-only change declares the value, and on a service whose traffic is pinned to a revision it also moves the traffic onto the revision that carries it; step 13's own deploy carries the same value to the candidate. **A revision reachable only by a tag keeps its own env**, which a template change does not reach, so if one of those is missing the value this row does not resolve the finding: report and stop. The way out is to take the tag off that revision (`gcloud run services update-traffic <service> --remove-tags=<tag> --project=<project> --region=<region> --quiet`), which is itself a traffic-projection change and therefore carries the same three conditions as step 10's own move (the isolated proof, the independent audit and the requester's approval) -- otherwise it is a separate decision. **A counted revision that takes no traffic but has `minScale` 1 or more keeps its own env too**, the same way a tag-reachable revision does: the way out is its own `minScale` (§10.10's own worked example above, "the way back from a `W` that fails"), decided the same way as the tag removal above -- a template change does not reach it either |
+| (8) `connection_headroom` | `unknown`: `--thread-limit` was omitted because a NEW-basis Data revision counted toward item (8) does not carry `MITATEDB_THREAD_LIMIT` | step 10 in full, the same way as the `--concurrency` row above -- declare `MITATEDB_THREAD_LIMIT` on the env-only revision and on the candidate's own step 13 deploy. The same tag-reachable-revision and `minScale`-revision exceptions apply: report and stop if one is missing |
+| (8) `connection_headroom` | `unknown`: `--data-process-count-old-basis` (and, with it, `--concurrency`; and `--thread-limit` too for a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision) was omitted for one of §10.4.3's own reasons -- a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision among those counted, an OLD-basis revision carrying `MITATEDB_THREAD_LIMIT` or whose own `concurrency` is below 6, or a revision whose image digest and `MITATEDB_WORKERS` presence disagree | **not a finding this stage resolves.** None of these is a platform-state defect step 4-11 changes; each is a property of which revisions are currently deployed and what they carry, which only a further deployment decision (redeploying or retiring the revision in question) changes -- report `blocked—platform remediation required` and stop |
 | (8) `connection_headroom` | `unknown`: `--reserved-connections` was omitted because the reserve was not established | step 11 |
 | (8) `connection_headroom` | `unknown`: a role's `CONNECTION LIMIT` is `-1` | step 7 (`0012`), for a role `0012` itself names -- a `-1` on any other role is not resolved here (2026-09-18: step 7 now ends with `0014`, which names `mitatedbsvc_auditreader` too, so a `-1` on it is resolved here as well; a `-1` on a role none of the files names still is not) |
 | (8) `connection_headroom` | `unknown` + `remediation-required`: the `process_ceilings` declaration is absent | step 5 and step 6 |
@@ -3602,6 +3600,16 @@ against production):
     `MITATEDB_MAX_CONCURRENCY` on Data, whose revisions are the ones
     §10.4.3 reads that value from. If Control's traffic is pinned to a
     revision as well, the traffic move below is made on that service too.
+
+    **`MITATEDB_THREAD_LIMIT` is declared this same way, but only when the
+    env-only revision's own template is a NEW-basis image digest** --
+    add `--update-env-vars=MITATEDB_THREAD_LIMIT=<n>` to the command above
+    for that template, and carry the same value in step 13's own deploy.
+    **Never add `MITATEDB_THREAD_LIMIT` to an OLD-basis template**:
+    §10.4.3's own list of cases that leave `--data-process-count-old-basis`
+    omitted counts an OLD-basis revision carrying `MITATEDB_THREAD_LIMIT` as
+    itself a reason for `unknown`, so adding it there trades one `unknown`
+    for another.
 
     Then handle four consequences:
 
