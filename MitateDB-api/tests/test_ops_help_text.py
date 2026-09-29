@@ -98,6 +98,40 @@ def test_control_process_count_total_help_is_the_confirmed_worst_case_text():
     )
 
 
+def test_thread_limit_help_is_pinned():
+    """`--thread-limit`'s own help text, pinned verbatim."""
+    help_text = _inventory_argument_help(ops._build_parser(), "thread_limit")
+    assert help_text == (
+        "the NEW-basis revision's own declared MITATEDB_THREAD_LIMIT value (a positive "
+        "integer) -- always required for item (8) (--data-process-count-total can never be "
+        "entirely old-basis); omit to leave item (8) unknown"
+    )
+
+
+def test_data_process_count_old_basis_help_is_pinned():
+    """`--data-process-count-old-basis`'s own help text, pinned verbatim."""
+    help_text = _inventory_argument_help(ops._build_parser(), "data_process_count_old_basis")
+    assert help_text == (
+        "the count, within --data-process-count-total, of Data-plane processes still on the "
+        "OLD basis (sized by --concurrency rather than by --thread-limit's own "
+        "role_pool_size) -- 0 declares none are; omit to leave item (8) unknown"
+    )
+
+
+def test_concurrency_help_names_the_old_basis_condition():
+    """`--concurrency`'s own help text names
+    the old-basis revision explicitly, ties its requirement to
+    `--data-process-count-old-basis` being 1 or more, and limits the
+    `unknown`-on-omission claim to that same condition."""
+    help_text = _inventory_argument_help(ops._build_parser(), "concurrency")
+    assert help_text == (
+        "the OLD-basis revision's own declared MITATEDB_MAX_CONCURRENCY value (a positive "
+        "integer) -- meaningful, and required, only while --data-process-count-old-basis "
+        "declares 1 or more processes still on the old basis (omitting it there leaves item "
+        "(8) unknown); must itself be omitted when --data-process-count-old-basis is 0"
+    )
+
+
 # ---------------------------------------------------------------------------
 # R-55 work order section 1: the same instruction in `ops.py`'s own text.
 # ---------------------------------------------------------------------------

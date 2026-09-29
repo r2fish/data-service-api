@@ -32,7 +32,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Json
 
 import mitatedb_api.ops as ops
-from mitatedb_api import platform_declarations, platform_upgrades
+from mitatedb_api import config, platform_declarations, platform_upgrades
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
@@ -251,6 +251,15 @@ def _set_role_statement_timeout(admin_dsn: str, role: str, value: str) -> None:
         admin.close()
 
 
+def _set_connection_limit(admin_dsn: str, role: str, limit: int) -> None:
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT {}").format(sql.Identifier(role), sql.Literal(limit)))
+    finally:
+        admin.close()
+
+
 def _provision_app(platform: types.SimpleNamespace, app_id: str, *, script: "Path | None" = None) -> str:
     runtime_password = secrets.token_urlsafe(24)
     developer_password = secrets.token_urlsafe(24)
@@ -285,9 +294,15 @@ def _run_inventory(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtur
 #: reserve" is a genuine value, not a usage error). Ceiling and total
 #: are the SAME value here (no mid-migration revision overlap in
 #: these golden-path tests), and Control is declared deployed
-#: (`control_not_deployed=False`, omitted from argv).
+#: (`control_not_deployed=False`, omitted from argv). All 1 Data-plane
+#: process is on the NEW basis (`data_process_count_old_basis=0`) --
+#: `--data-process-count-old-basis` at 0 means `--concurrency` must be
+#: omitted (`_inventory_validate_headroom_inputs`), so `concurrency` is
+#: `None` here; `thread_limit` (`DEFAULT_THREAD_LIMIT`) sizes the one
+#: new-basis process instead.
 _HEADROOM_OK = dict(
-    concurrency=2, data_process_ceiling=1, data_process_count_total=1,
+    concurrency=None, thread_limit=ops.DEFAULT_THREAD_LIMIT, data_process_count_old_basis=0,
+    data_process_ceiling=1, data_process_count_total=1,
     control_process_ceiling=1, control_process_count_total=1,
     control_not_deployed=False, reserved_connections=0,
 )
@@ -485,22 +500,23 @@ def test_inventory_does_not_accept_a_dsn_argument(monkeypatch, capsys, platform)
         "help", "cloud_sql_connection_name", "concurrency",
         "data_process_ceiling", "data_process_count_total",
         "control_process_ceiling", "control_process_count_total", "control_not_deployed",
-        "reserved_connections",
+        "reserved_connections", "thread_limit", "data_process_count_old_basis",
     }
 
 
 def test_inventory_numeric_arguments_reject_zero_and_negative(capsys):
     """`--concurrency`/`--data-process-ceiling`/
     `--data-process-count-total`/`--control-process-ceiling`/`--control-
-    process-count-total` accept only a positive integer (0 refused too --
-    `--reserved-connections`'s own 0-vs-negative behavior has its own
-    separate test below). `inventory`'s own subparser remaps this usage
-    error's exit code to 1, never argparse's default 2 (which this
-    subcommand reserves for a completed item judgment)."""
+    process-count-total`/`--thread-limit` accept only a positive integer
+    (0 refused too -- `--reserved-connections`'s/`--data-process-count-
+    old-basis`'s own 0-vs-negative behavior has its own separate test
+    below). `inventory`'s own subparser remaps this usage error's exit
+    code to 1, never argparse's default 2 (which this subcommand
+    reserves for a completed item judgment)."""
     parser = ops._build_parser()
     for flag in (
         "--concurrency", "--data-process-ceiling", "--data-process-count-total",
-        "--control-process-ceiling", "--control-process-count-total",
+        "--control-process-ceiling", "--control-process-count-total", "--thread-limit",
     ):
         for bad_value in ("0", "-1", "not-a-number"):
             with pytest.raises(SystemExit) as excinfo:
@@ -549,6 +565,25 @@ def test_inventory_reserved_connections_accepts_zero_but_rejects_negative(capsys
     for bad_value in ("-1", "not-a-number"):
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(["inventory", "--reserved-connections", bad_value])
+        assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "non-negative integer" in captured.err
+
+
+def test_inventory_old_basis_accepts_zero_but_rejects_negative(capsys):
+    """182/183: `--data-process-count-old-basis`
+    accepts `0` ("no old-basis process is declared") -- only a negative
+    value (or non-integer text) is a usage error -- exit code 1, not
+    argparse's default 2."""
+    parser = ops._build_parser()
+    try:
+        ns = parser.parse_args(["inventory", "--data-process-count-old-basis", "0"])
+    except SystemExit as exc:
+        assert False, f"0 must be accepted for --data-process-count-old-basis, got SystemExit({exc.code})"
+    assert ns.data_process_count_old_basis == 0
+    for bad_value in ("-1", "not-a-number"):
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(["inventory", "--data-process-count-old-basis", bad_value])
         assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert "non-negative integer" in captured.err
@@ -1551,10 +1586,75 @@ def test_inventory_credentials_lock_timeout_exceeded_is_unknown(monkeypatch, cap
 
 
 def test_inventory_connection_headroom_concurrency_missing_is_unknown(monkeypatch, platform):
-    """29b."""
+    """29b/189: while
+    `--data-process-count-old-basis` declares 1 or more old-basis
+    processes, omitting `--concurrency` leaves item (8) unknown -- the
+    code never fills it in with a default. A `--data-process-count-old-
+    basis=1`/`--data-process-count-total=2` shape with the declaration
+    already in place (`_declare_golden_path`) is `confirmed` once
+    `--concurrency` IS supplied (filling the default-filled value 32 makes
+    the api-role demand 76, under `0014`'s 132 -- `0012`'s own default
+    bootstrap limit, 68, would wrongly stay `blocked` here), isolating the
+    omission itself from any other reason item (8) could stay
+    `unknown`."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
-        report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args(concurrency=None))
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                data_process_count_old_basis=1, concurrency=None,
+                data_process_ceiling=1, data_process_count_total=2,
+            ))
+    finally:
+        conn.close()
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
+
+
+def test_inventory_connection_headroom_old_basis_missing_is_unknown(monkeypatch, platform):
+    """188: omitting `--data-process-count-old-basis`
+    entirely leaves item (8) unknown -- it is never filled in with `0`
+    (the value that would otherwise make this input `confirmed`,
+    `_HEADROOM_OK`'s own golden path, once the declaration
+    (`_declare_golden_path`) is in place)."""
+    _declare_golden_path(monkeypatch, platform)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema, _headroom_args(data_process_count_old_basis=None))
+    finally:
+        conn.close()
+    assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
+
+
+def test_inventory_connection_headroom_old_basis_zero_without_concurrency_is_judged(monkeypatch, platform):
+    """190: `--data-process-count-old-basis 0` with
+    `--concurrency` omitted (the only combination that input-shape
+    validation accepts for old-basis 0) still reaches a judgment once the
+    rest of the input is present -- never stuck at `unknown` merely
+    because `--concurrency` is absent when old-basis is 0."""
+    _declare_golden_path(monkeypatch, platform)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(data_process_count_old_basis=0, concurrency=None))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
+
+
+def test_inventory_connection_headroom_thread_limit_missing_is_unknown(monkeypatch, platform):
+    """191: omitting `--thread-limit` leaves item (8)
+    unknown -- it is never filled in with `DEFAULT_THREAD_LIMIT` (the
+    value `_HEADROOM_OK`'s own golden path uses, which would otherwise
+    make this `confirmed` once the declaration (`_declare_golden_path`) is
+    in place)."""
+    _declare_golden_path(monkeypatch, platform)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args(thread_limit=None))
     finally:
         conn.close()
     assert report == {"judgment": "unknown", "remediation_required": False, "control_deployed": True}
@@ -1651,9 +1751,14 @@ def test_inventory_connection_headroom_minus_one_on_an_unrelated_role_is_not_unk
 def test_inventory_connection_headroom_catches_0012_reapplied_alone_after_0014(monkeypatch, platform):
     """S-1: a stray `0012` re-application rolls every existing
     platform-plane and application role back to 0012's own values (68/20/
-    36) -- item (8), read at `concurrency=32`/process 合計 2 (the rollout
-    shape design §3.2 uses), catches this via condition 1 on
-    `mitatedbsvc_api` (demand 128 > 68)."""
+    36) -- item (8), read at one old-basis process (`concurrency=6`)
+    plus one new-basis process (`thread_limit=4`, control total 2),
+    catches this via condition 1 on `mitatedbsvc_controlplane` ALONE
+    (demand 32 > 20); the api role's own demand (24) stays under its
+    68, the app role's own demand (12) stays under its 36, and the
+    auditreader role's own demand (8) stays under its untouched 12, so
+    no other role's condition 1 check can explain the `blocked` result
+    here."""
     _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
     _provision_app(platform, "w17a")
     _run_psql(platform.provision_dsn, platform.migrations_dir / "0012_role_connection_limits.sql")
@@ -1663,7 +1768,7 @@ def test_inventory_connection_headroom_catches_0012_reapplied_alone_after_0014(m
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                data_process_count_old_basis=1, concurrency=6, data_process_ceiling=1, data_process_count_total=2,
                 control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
     finally:
         conn.close()
@@ -1688,7 +1793,7 @@ def test_inventory_connection_headroom_catches_0013_reapplied_alone_after_0014_w
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                data_process_count_old_basis=1, concurrency=32, data_process_ceiling=1, data_process_count_total=2,
                 control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
     finally:
         conn.close()
@@ -1714,7 +1819,7 @@ def test_inventory_connection_headroom_misses_0013_reapplied_alone_after_0014_wi
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
+                data_process_count_old_basis=1, concurrency=32, data_process_ceiling=1, data_process_count_total=2,
                 control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
     finally:
         conn.close()
@@ -1722,13 +1827,12 @@ def test_inventory_connection_headroom_misses_0013_reapplied_alone_after_0014_wi
 
 
 def test_inventory_connection_headroom_data_process_count_overflow_is_blocked(monkeypatch, capsys, platform):
-    """s 33a (all-revision process count, not just
-    one) and 34 (condition 1's own role-vs-limit comparison). W1-9/S-2
-    (design `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §4,
-    2026-09-18 supervisor ruling): 0014 raises `mitatedbsvc_api`'s
-    CONNECTION LIMIT to 132, so the data=20/concurrency=2 input this test
-    originally used (api demand 80) no longer overflows it -- revised to
-    data=35 (api demand 140 > 132, still blocked)."""
+    """33a (all-revision process count, not just
+    one) and 34 (condition 1's own role-vs-limit comparison). 0014 raises
+    `mitatedbsvc_api`'s CONNECTION LIMIT to 132; at 35 new-basis
+    processes (the golden-path `_HEADROOM_OK` basis) and the default
+    `thread_limit` (4, `role_pool_size` 6), the api role's own demand is
+    `2 * 35 * 6 = 420`, still well past 132 -- blocked."""
     _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
     _declare_golden_path(monkeypatch, platform, data=35, control=1)
     conn = ops._inventory_connect(platform.provision_dsn)
@@ -1775,32 +1879,38 @@ def test_inventory_connection_headroom_control_process_count_mismatch_is_blocked
 
 
 def test_inventory_connection_headroom_role_coefficient_is_two_times_concurrency_for_api(monkeypatch, platform):
-    """34a. W1-9/S-2 (design `docs/design/
-    MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §4, 2026-09-18 supervisor
-    ruling): 0014 raises `mitatedbsvc_api`'s CONNECTION LIMIT to 132, so
-    the concurrency=35/data=1 input this test originally used (api
-    demand 70) no longer overflows it -- revised to concurrency=67 (api
-    demand 134 > 132, still blocked)."""
+    """34a/202: the OLD-basis api demand term is
+    `_API_ROLE_STORE_COUNT * concurrency` PER old-basis process (never a
+    hardcoded `1`, and never folded into the new-basis `role_pool_size`
+    term). 0014 raises `mitatedbsvc_api`'s CONNECTION LIMIT to 132; with
+    one old-basis process (`concurrency=67`) and one new-basis process
+    (`thread_limit=4`, `role_pool_size` 6), demand is
+    `2*67 + 2*6 = 146`, past 132 -- blocked."""
     _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
-            _headroom_args(concurrency=67, data_process_ceiling=1, data_process_count_total=1, control_process_ceiling=1, control_process_count_total=1))
+            _headroom_args(
+                data_process_count_old_basis=1, concurrency=67, data_process_ceiling=1, data_process_count_total=2,
+                control_process_ceiling=1, control_process_count_total=1))
     finally:
         conn.close()
     assert report["judgment"] == "blocked"
 
 
 def test_inventory_connection_headroom_rollout_two_processes_confirmed_three_processes_blocked(monkeypatch, platform):
-    """W1-10 (rollout の検算、R-52 の解消そのもの、design
-    `docs/design/MITATEDB_ROLLOUT_CONNECTION_LIMITS_V0_1.md` §3.2): 0014
-    適用後の上限 132/36/68/12 のクラスタで、`concurrency=32`・process 合計
-    2 (2 revision が並走) のとき条件 1 を全 role class が満たし
-    confirmed、合計 3 のとき `mitatedbsvc_api` の需要 (3*2*32=192) が上限
-    132 を超え blocked。declared process ceiling はどちらも 1 のまま
-    (合計は並走 process 数であって、ceiling ではない)。"""
+    """the rollout worked example (design
+    docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md §5.1 (i)): one
+    OLD-basis process (`concurrency=32`) plus W NEW-basis processes
+    (`thread_limit=4`, `role_pool_size` 6) on a 0014-applied cluster
+    (`mitatedbsvc_api` CONNECTION LIMIT 132). api demand is
+    `2*32 + 2*6*W = 64 + 12W`: at W=5 (`data_process_count_total=6`) it
+    is 124, confirmed; at W=6 (`data_process_count_total=7`) it is 136,
+    past 132 -- blocked. The app role's own floor (`32 + 6W`) stays
+    within its own CONNECTION LIMIT (68) at both W, isolating the api
+    role as the one that blocks at W=6."""
     _run_psql(platform.provision_dsn, platform.migrations_dir / "0014_role_connection_limits_rollout.sql")
     _provision_app(platform, "w110")
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
@@ -1810,8 +1920,8 @@ def test_inventory_connection_headroom_rollout_two_processes_confirmed_three_pro
         confirmed_report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=32, data_process_ceiling=1, data_process_count_total=2,
-                control_process_ceiling=1, control_process_count_total=2, reserved_connections=0))
+                data_process_count_old_basis=1, concurrency=32, data_process_ceiling=1, data_process_count_total=6,
+                control_process_ceiling=1, control_process_count_total=1, reserved_connections=0))
     finally:
         conn.close()
     assert confirmed_report["judgment"] == "confirmed"
@@ -1821,15 +1931,24 @@ def test_inventory_connection_headroom_rollout_two_processes_confirmed_three_pro
         blocked_report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=32, data_process_ceiling=1, data_process_count_total=3,
-                control_process_ceiling=1, control_process_count_total=3, reserved_connections=0))
+                data_process_count_old_basis=1, concurrency=32, data_process_ceiling=1, data_process_count_total=7,
+                control_process_ceiling=1, control_process_count_total=1, reserved_connections=0))
     finally:
         conn.close()
     assert blocked_report["judgment"] == "blocked"
 
 
 def test_inventory_connection_headroom_shared_application_role_budget_counts_once(monkeypatch, platform):
-    """34b."""
+    """34b: the aggregate's
+    own shared-application-role term (condition 2) is the LARGER of
+    condition 1's per-role floor and `2 * K * (O + N)` (K registered
+    applications, each with two persistent connections -- one per role --
+    per Data-plane process), never the per-role floor multiplied by K (a
+    per-role floor that then "counts once" no matter how many
+    applications share it, as long as `2 * K * (O + N)` stays below it).
+    With K=2 applications, one new-basis process (`thread_limit=4`,
+    `role_pool_size` 6), and no old-basis process, the per-role floor (6)
+    exceeds `2*2*1=4`, so it is the term that is used."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     _provision_app(platform, "app1")
     _provision_app(platform, "app2")
@@ -1841,31 +1960,53 @@ def test_inventory_connection_headroom_shared_application_role_budget_counts_onc
     finally:
         admin.close()
     max_connections = int(max_connections_text)
-    concurrency = 2
-    api_demand = 2 * concurrency
+    thread_limit = 4
+    pool_size = config.role_pool_size(thread_limit)
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * pool_size
     controlplane_demand = 16
     auditreader_demand = 4
-    correct_total = api_demand + controlplane_demand + auditreader_demand + concurrency + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
-    reserved = max_connections - correct_total
+    app_shared_demand = max(pool_size, 2 * 2 * 1)  # K=2, O+N=1
+    correct_total = (
+        api_demand + controlplane_demand + auditreader_demand + app_shared_demand
+        + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+    )
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=concurrency, data_process_ceiling=1, data_process_count_total=1,
-                control_process_ceiling=1, control_process_count_total=1, reserved_connections=reserved,
+                thread_limit=thread_limit, data_process_ceiling=1, data_process_count_total=1,
+                control_process_ceiling=1, control_process_count_total=1,
+                reserved_connections=max_connections - correct_total,
             ),
         )
     finally:
         conn.close()
     assert report["judgment"] == "confirmed"
 
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                thread_limit=thread_limit, data_process_ceiling=1, data_process_count_total=1,
+                control_process_ceiling=1, control_process_count_total=1,
+                reserved_connections=max_connections - correct_total + 1,
+            ),
+        )
+    finally:
+        conn.close()
+    assert report["judgment"] == "blocked"
+
 
 def test_inventory_connection_headroom_app_role_condition1_uses_concurrency_not_one(monkeypatch, platform):
-    """Condition 1's own app-role
-    threshold is `concurrency`, never a hardcoded `1` -- an app role whose
-    `CONNECTION LIMIT` sits strictly between `1` and `concurrency` must
-    still be `blocked`."""
+    """Condition 1's own OLD-basis app-role
+    term is `concurrency`, never a hardcoded `1` -- with one old-basis
+    process (`concurrency=2`) and one new-basis process (`thread_limit=4`,
+    `role_pool_size` 6), the floor is `2 + 6 = 8`; a hardcoded `1` in
+    place of `concurrency` would instead give `1 + 6 = 7`. An app role
+    `CONNECTION LIMIT` of 7 must still be `blocked` (7 < 8), which a
+    hardcoded-`1` floor (7 == 7) would wrongly confirm."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     _provision_app(platform, "app1")
     platform_conn = psycopg.connect(platform.provision_dsn, autocommit=True)
@@ -1882,7 +2023,7 @@ def test_inventory_connection_headroom_app_role_condition1_uses_concurrency_not_
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
-            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 1").format(sql.Identifier(runtime_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 7").format(sql.Identifier(runtime_role)))
     finally:
         admin.close()
     conn = ops._inventory_connect(platform.provision_dsn)
@@ -1890,7 +2031,7 @@ def test_inventory_connection_headroom_app_role_condition1_uses_concurrency_not_
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=2, data_process_ceiling=1, data_process_count_total=1,
+                data_process_count_old_basis=1, concurrency=2, data_process_ceiling=1, data_process_count_total=2,
                 control_process_ceiling=1, control_process_count_total=1,
             ))
     finally:
@@ -1900,11 +2041,15 @@ def test_inventory_connection_headroom_app_role_condition1_uses_concurrency_not_
 
 def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_count(monkeypatch, platform):
     """Condition 1's own
-    app-role threshold is `data_process_count_total * concurrency`, never
-    `concurrency` alone -- isolated from the platform-plane roles' own
-    checks by keeping THEIR demand well under their real `CONNECTION
-    LIMIT` (68/20/5) while only the app role's own (lowered) limit is
-    exceeded."""
+    app-role threshold is `data_process_count_total * role_pool_size
+    (thread_limit)` (all-new-basis here, `N=3`, `role_pool_size(4)=6`),
+    never `role_pool_size` alone -- the app role's own `CONNECTION LIMIT`
+    (17) sits strictly between the per-process floor (6) and the
+    N-scaled floor (18), so a mutation that drops the `* N` factor
+    would wrongly read `confirmed` here. Isolated from the
+    platform-plane roles' own checks by keeping THEIR demand well under
+    their real `CONNECTION LIMIT` (68/20/5) while only the app role's own
+    (lowered) limit is exceeded."""
     _declare_golden_path(monkeypatch, platform, data=3, control=1)
     database_name = _provision_app(platform, "app1")
     platform_conn = psycopg.connect(platform.provision_dsn, autocommit=True)
@@ -1921,7 +2066,7 @@ def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
-            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 4").format(sql.Identifier(runtime_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 17").format(sql.Identifier(runtime_role)))
     finally:
         admin.close()
     conn = ops._inventory_connect(platform.provision_dsn)
@@ -1929,7 +2074,7 @@ def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=2, data_process_ceiling=3, data_process_count_total=3,
+                data_process_ceiling=3, data_process_count_total=3,
                 control_process_ceiling=1, control_process_count_total=1,
             ))
     finally:
@@ -1938,16 +2083,32 @@ def test_inventory_connection_headroom_app_role_demand_scales_with_data_process_
 
 
 def test_inventory_connection_headroom_app_role_overflow_with_named_values(monkeypatch, platform):
-    """data_process_count_total=2, concurrency=32, against the default
-    `0003` app-role `CONNECTION LIMIT` of 36 -- blocked."""
+    """One old-basis process (`concurrency=28`) plus two
+    new-basis processes (`thread_limit=4`, `role_pool_size` 6): the app
+    role's own condition 1 floor is `28 + 2*6 = 40`, past the default
+    `0003` app-role `CONNECTION LIMIT` of 36 -- blocked. The API role's own
+    CONNECTION LIMIT is raised out of the way (100000) so only the app
+    role's own (default) CONNECTION LIMIT can explain a `blocked` result
+    (without this, `0012`'s own default of 68 for `mitatedbsvc_api` is
+    itself exceeded here -- `1*2*28 + 2*2*6 = 80`). This floor catches
+    two distinct mutations, each of which reads `confirmed` here instead
+    of `blocked`: dropping the app-role floor's own `* N` factor
+    (`28 + 6 = 34`) and counting the old-basis process at
+    `role_pool_size` instead of `concurrency` (`(1+2)*6 = 18`)."""
     _declare_golden_path(monkeypatch, platform, data=2, control=1)
     _provision_app(platform, "app1")
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 100000").format(sql.Identifier(platform.api_role)))
+    finally:
+        admin.close()
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=32, data_process_ceiling=2, data_process_count_total=2,
+                data_process_count_old_basis=1, concurrency=28, data_process_ceiling=2, data_process_count_total=3,
                 control_process_ceiling=1, control_process_count_total=1,
             ))
     finally:
@@ -2131,7 +2292,7 @@ def test_inventory_connection_headroom_auditreader_counted_under_control_only(mo
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=2, data_process_ceiling=2, data_process_count_total=2,
+                data_process_ceiling=2, data_process_count_total=2,
                 control_process_ceiling=1, control_process_count_total=1,
             ))
     finally:
@@ -2155,7 +2316,7 @@ def test_inventory_connection_headroom_total_may_exceed_ceiling_without_a_declar
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=2, data_process_ceiling=1, data_process_count_total=5,
+                data_process_ceiling=1, data_process_count_total=5,
                 control_process_ceiling=1, control_process_count_total=1,
             ))
     finally:
@@ -2175,7 +2336,7 @@ def test_inventory_connection_headroom_condition1_demand_uses_the_total_not_the_
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=2, data_process_ceiling=1, data_process_count_total=20,
+                data_process_ceiling=1, data_process_count_total=20,
                 control_process_ceiling=1, control_process_count_total=1, reserved_connections=0,
             ))
     finally:
@@ -2189,7 +2350,10 @@ def test_inventory_connection_headroom_condition2_demand_uses_the_total_not_the_
     from the ceilings -- every per-role CONNECTION LIMIT is left with
     ample headroom (so condition 1 alone cannot explain a `blocked`
     result), and `--reserved-connections` is set so only the TOTAL-based
-    aggregate demand overflows `max_connections`."""
+    aggregate demand overflows `max_connections`. 16 old-basis processes
+    (`concurrency=1`) plus 1 new-basis process (`thread_limit=4`,
+    `role_pool_size` 6) give a total of 17, far above the declared
+    ceiling of 1."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
@@ -2199,8 +2363,9 @@ def test_inventory_connection_headroom_condition2_demand_uses_the_total_not_the_
     finally:
         admin.close()
     max_connections = int(max_connections_text)
-    concurrency = 2
-    api_demand = 17 * (2 * concurrency)  # 68, exactly the API role's own CONNECTION LIMIT
+    old_basis, concurrency, thread_limit = 16, 1, 4
+    pool_size = config.role_pool_size(thread_limit)
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * (old_basis * concurrency + 1 * pool_size)  # 44
     controlplane_demand = 16
     auditreader_demand = 4
     total_demand = api_demand + controlplane_demand + auditreader_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
@@ -2210,7 +2375,8 @@ def test_inventory_connection_headroom_condition2_demand_uses_the_total_not_the_
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=concurrency, data_process_ceiling=1, data_process_count_total=17,
+                data_process_count_old_basis=old_basis, concurrency=concurrency, thread_limit=thread_limit,
+                data_process_ceiling=1, data_process_count_total=17,
                 control_process_ceiling=1, control_process_count_total=1, reserved_connections=reserved,
             ))
     finally:
@@ -2223,7 +2389,11 @@ def test_inventory_connection_headroom_app_role_demand_uses_the_total_not_the_ce
     computed from `--data-process-count-total`, never from `--data-
     process-ceiling` -- the API role's own CONNECTION LIMIT is raised
     out of the way so only the app role's own (default) CONNECTION
-    LIMIT (36) can explain a `blocked` result."""
+    LIMIT (36) can explain a `blocked` result: with `N=10` the app
+    role's own demand is 60 (over 36), while condition 2's own
+    TOTAL-based aggregate demand (202) stays at or under
+    `max_connections`, so condition 2 cannot explain the `blocked`
+    result instead."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     _provision_app(platform, "app1")
     platform_conn = psycopg.connect(platform.provision_dsn, autocommit=True)
@@ -2241,14 +2411,29 @@ def test_inventory_connection_headroom_app_role_demand_uses_the_total_not_the_ce
     try:
         with admin.cursor() as cur:
             cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 100000").format(sql.Identifier(platform.api_role)))
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
     finally:
         admin.close()
+    max_connections = int(max_connections_text)
+    data_process_count_total = 10
+    pool_size = config.role_pool_size(ops.DEFAULT_THREAD_LIMIT)
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * data_process_count_total * pool_size  # 120
+    app_role_floor = data_process_count_total * pool_size  # 60
+    app_shared_demand = max(app_role_floor, 2 * 1 * data_process_count_total)  # 60
+    controlplane_demand = platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR  # 16
+    auditreader_demand = platform_declarations._AUDITREADER_ROLE_POOL_FLOOR  # 4
+    condition_2_demand = (
+        api_demand + controlplane_demand + auditreader_demand + app_shared_demand
+        + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+    )  # 202
+    assert condition_2_demand <= max_connections
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=2, data_process_ceiling=1, data_process_count_total=19,
+                data_process_ceiling=1, data_process_count_total=data_process_count_total,
                 control_process_ceiling=1, control_process_count_total=1, reserved_connections=0,
             ))
     finally:
@@ -2269,7 +2454,7 @@ def test_inventory_connection_headroom_control_demand_uses_the_total_not_the_cei
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=2, data_process_ceiling=1, data_process_count_total=1,
+                data_process_ceiling=1, data_process_count_total=1,
                 control_process_ceiling=1, control_process_count_total=4, reserved_connections=0,
             ))
     finally:
@@ -2280,11 +2465,16 @@ def test_inventory_connection_headroom_control_demand_uses_the_total_not_the_cei
 def test_inventory_connection_headroom_app_shared_demand_in_the_aggregate_uses_the_total_not_the_ceiling(monkeypatch, platform):
     """The aggregate (condition 2)'s own
     contribution from the shared application-role budget is computed
-    from the TOTAL-based `app_role_demand`, never re-derived from the
-    ceiling -- every per-role CONNECTION LIMIT is raised out of the way
-    (so condition 1 alone cannot explain a `blocked` result), Control's
-    own ceiling (1) and total (2) deliberately differ, and only the
-    TOTAL-based aggregate demand overflows `max_connections`."""
+    from the TOTAL-based `app_role_floor` (`N * role_pool_size
+    (thread_limit)`, all-new-basis here), never re-derived from the
+    ceiling -- every per-role CONNECTION LIMIT is raised at least to
+    condition 1's own demand (`api >= 2 * pool_size * N`, `app >=
+    pool_size * N`) so condition 1 alone cannot explain
+    a `blocked` result, Control's own ceiling (1) and total (2)
+    deliberately differ, and `--reserved-connections` is set so only the
+    TOTAL-based aggregate demand overflows `max_connections` (a mutation
+    that zeroes condition 2's own application term would instead read
+    `confirmed`)."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     _provision_app(platform, "app1")
     platform_conn = psycopg.connect(platform.provision_dsn, autocommit=True)
@@ -2307,15 +2497,33 @@ def test_inventory_connection_headroom_app_shared_demand_in_the_aggregate_uses_t
                 sql.Identifier(f"{platform.prefix}svc_auditreader")))
             for role in (runtime_role, developer_role):
                 cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 150").format(sql.Identifier(role)))
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
     finally:
         admin.close()
+    max_connections = int(max_connections_text)
+    thread_limit, data_process_count_total = 4, 10
+    pool_size = config.role_pool_size(thread_limit)
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * pool_size * data_process_count_total
+    assert api_demand == 120 and 300 >= api_demand
+    app_role_floor = pool_size * data_process_count_total
+    assert app_role_floor == 60 and 150 >= app_role_floor
+    controlplane_demand = 2 * 16
+    auditreader_demand = 2 * 4
+    app_shared_demand = max(app_role_floor, 2 * 1 * data_process_count_total)
+    assert app_shared_demand == app_role_floor
+    total_demand = (
+        api_demand + controlplane_demand + auditreader_demand + app_shared_demand
+        + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+    )
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
         report = ops._inventory_connection_headroom(
             conn, platform.schema,
             _headroom_args(
-                concurrency=1, data_process_ceiling=1, data_process_count_total=100,
-                control_process_ceiling=1, control_process_count_total=2, reserved_connections=0,
+                data_process_ceiling=1, data_process_count_total=data_process_count_total,
+                control_process_ceiling=1, control_process_count_total=2,
+                reserved_connections=max_connections - total_demand + 1,
             ))
     finally:
         conn.close()
@@ -2380,6 +2588,94 @@ def test_inventory_control_not_deployed_with_total_is_rejected_with_exit_code_1(
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert captured.err.strip() == "error: --control-not-deployed and --control-process-count-total are mutually exclusive"
+
+
+def test_inventory_old_basis_exceeding_total_is_rejected_with_exit_code_1(capsys):
+    """184: `--data-process-count-old-basis` greater than
+    `--data-process-count-total` is a contradictory input, refused with a
+    fixed message and exit code 1 (never blocked/2) -- the rejected
+    values are never echoed. Both the total (2) and the ceiling (1) here
+    already satisfy the existing total-vs-ceiling check, isolating this
+    one."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--data-process-count-old-basis", "3", "--concurrency", "2",
+            "--data-process-ceiling", "1", "--data-process-count-total", "2",
+            "--control-process-ceiling", "1", "--control-process-count-total", "1",
+            "--reserved-connections", "0",
+        ])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "error: --data-process-count-old-basis must not exceed --data-process-count-total"
+    assert "3" not in captured.err and "2" not in captured.err
+
+
+def test_inventory_new_basis_count_below_ceiling_is_rejected_with_exit_code_1(capsys):
+    """185: `--data-process-count-total` minus
+    `--data-process-count-old-basis` (the new-basis count) less than
+    `--data-process-ceiling` is a contradictory input (the new candidate
+    revision itself must be present at least `--data-process-ceiling`
+    times) -- refused before any database connection, exit code 1. The
+    total (3) is not itself below the ceiling (2) -- only the NEW-basis
+    remainder (1) is -- so the existing total-vs-ceiling check alone
+    would not catch this."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--data-process-count-old-basis", "2", "--concurrency", "2",
+            "--data-process-ceiling", "2", "--data-process-count-total", "3",
+            "--control-process-ceiling", "1", "--control-process-count-total", "1",
+            "--reserved-connections", "0",
+        ])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == (
+        "error: --data-process-count-total minus --data-process-count-old-basis must not be less than "
+        "--data-process-ceiling"
+    )
+
+
+def test_inventory_old_basis_zero_with_concurrency_is_rejected_with_exit_code_1(capsys):
+    """186: declaring `--data-process-count-old-basis 0`
+    (no process on the old basis) together with `--concurrency` (a value
+    that would then read nothing) is refused before any database
+    connection, exit code 1 -- omitting `--data-process-count-old-basis`
+    entirely never trips this check (188's own `unknown`, not a usage
+    error)."""
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--data-process-count-old-basis", "0", "--concurrency", "2",
+            "--data-process-ceiling", "1", "--data-process-count-total", "1",
+            "--control-process-ceiling", "1", "--control-process-count-total", "1",
+            "--reserved-connections", "0",
+        ])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "error: --concurrency must be omitted when --data-process-count-old-basis is 0"
+
+
+def test_inventory_old_basis_shape_checks_run_before_any_connection(monkeypatch, capsys):
+    """187: 184's own input-shape rejection happens before
+    `cmd_inventory` ever opens a connection -- `MITATEDB_PROVISION_DSN`
+    is set to a real, reachable DSN, and the connection factory
+    (`psycopg.connect`) is spied to prove it is never called."""
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", _admin_dsn())
+    calls = {"count": 0}
+    original_connect = psycopg.connect
+
+    def _spy_connect(*args, **kwargs):
+        calls["count"] += 1
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(psycopg, "connect", _spy_connect)
+    with pytest.raises(SystemExit) as excinfo:
+        ops.main([
+            "inventory", "--data-process-count-old-basis", "3", "--concurrency", "2",
+            "--data-process-ceiling", "1", "--data-process-count-total", "2",
+            "--control-process-ceiling", "1", "--control-process-count-total", "1",
+            "--reserved-connections", "0",
+        ])
+    assert excinfo.value.code == 1
+    assert calls["count"] == 0
 
 
 def test_inventory_connection_headroom_control_not_deployed_computes_with_control_zeroed(monkeypatch, platform):
@@ -2497,6 +2793,527 @@ def test_inventory_connection_headroom_control_deployed_is_true_when_flag_absent
     finally:
         conn.close()
     assert report["control_deployed"] is True
+
+
+# ===========================================================================
+# item (8) matches F-16's own thread-limit-basis floors (design
+# docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-1) -- one shared
+# boundary probe for the four role classes and the four floor constants,
+# then the mixed-basis and aggregate boundaries.
+# ===========================================================================
+
+
+def _f16_and_inventory_agree_at_boundary(
+    platform: types.SimpleNamespace, *, roles: "tuple[str, ...]", pool_size: int,
+    process_ceilings: "platform_declarations.ProcessCeilings", role_classes: "frozenset[str]",
+    application_ids: "tuple[str, ...]", headroom_kwargs: dict, minimum: int,
+) -> None:
+    """Shared boundary probe for the 一致/定数の差し替え tests: asserts
+    F-16 (`platform_declarations.check_role_connection_limits`) and item
+    (8) (`ops._inventory_connection_headroom`) both pass at `minimum` and
+    both fail at `minimum - 1`, for the SAME role(s), pool size, and
+    process count."""
+    def _set(limit: int) -> None:
+        for role in roles:
+            _set_connection_limit(platform.admin_dsn, role, limit)
+
+    def _f16_passes(limit: int) -> bool:
+        _set(limit)
+        conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+        try:
+            try:
+                platform_declarations.check_role_connection_limits(
+                    conn, schema=platform.schema, ops_module=platform_declarations.PEER_MODULE,
+                    pool_size=pool_size, process_ceilings=process_ceilings,
+                    role_classes=role_classes, application_ids=application_ids,
+                )
+                return True
+            except platform_declarations.PlatformDeclarationError:
+                return False
+        finally:
+            conn.close()
+
+    def _inventory_confirms(limit: int) -> bool:
+        _set(limit)
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(conn, platform.schema, _headroom_args(**headroom_kwargs))
+        finally:
+            conn.close()
+        return report["judgment"] == "confirmed"
+
+    assert _f16_passes(minimum) and _inventory_confirms(minimum)
+    assert not _f16_passes(minimum - 1) and not _inventory_confirms(minimum - 1)
+
+
+def test_inventory_connection_headroom_matches_f16_minimum_limit_for_api(monkeypatch, platform):
+    """192 (一致, api): the same thread-limit/process-count
+    input makes F-16 and item (8) agree on the minimum `mitatedbsvc_api`
+    CONNECTION LIMIT that passes -- both pass at the computed minimum and
+    both fail one below it. `thread_limit=7` (never `DEFAULT_THREAD_LIMIT`
+    4) and `n=2` (never 1): a mutation that reads item (8)'s NEW-basis
+    pool size from `DEFAULT_THREAD_LIMIT` instead of the declared
+    `--thread-limit` moves item (8)'s own minimum away
+    from F-16's, per new-basis process, and this boundary catches it."""
+    _declare_golden_path(monkeypatch, platform, data=2, control=1)
+    thread_limit, n = 7, 2
+    pool_size = config.role_pool_size(thread_limit)
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(platform.api_role,), pool_size=pool_size,
+        process_ceilings=platform_declarations.ProcessCeilings(data=n, control=1),
+        role_classes=frozenset({"api"}), application_ids=(),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=thread_limit,
+            data_process_ceiling=n, data_process_count_total=n,
+            control_process_ceiling=1, control_process_count_total=1,
+        ),
+        minimum=platform_declarations._API_ROLE_STORE_COUNT * pool_size * n,
+    )
+
+
+def test_inventory_connection_headroom_matches_f16_minimum_limit_for_application(monkeypatch, platform):
+    """193 (一致, application): 192's own property,
+    for one application's runtime/developer roles -- F-16 narrowed to
+    `application_ids=("app1",)` with `role_classes=frozenset()`
+    (excluding the platform-plane classes) is compared against item (8)'s
+    own application-role floor. `thread_limit=7`/`n=2` (never the
+    default/1) so a mutation that ignores the declared `--thread-limit`
+    is caught here too."""
+    _declare_golden_path(monkeypatch, platform, data=2, control=1)
+    _provision_app(platform, "app1")
+    conn0 = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn0.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT runtime_role, developer_role FROM {} WHERE application_id = 'app1'").format(
+                    sql.Identifier(platform.schema, "applications")))
+            (runtime_role, developer_role) = cur.fetchone()
+    finally:
+        conn0.close()
+    thread_limit, n = 7, 2
+    pool_size = config.role_pool_size(thread_limit)
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(runtime_role, developer_role), pool_size=pool_size,
+        process_ceilings=platform_declarations.ProcessCeilings(data=n, control=1),
+        role_classes=frozenset(), application_ids=("app1",),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=thread_limit,
+            data_process_ceiling=n, data_process_count_total=n,
+            control_process_ceiling=1, control_process_count_total=1,
+        ),
+        minimum=pool_size * n,
+    )
+
+
+def test_inventory_connection_headroom_matches_f16_minimum_limit_for_controlplane(monkeypatch, platform):
+    """194 (一致, controlplane): 192's own
+    property, for `mitatedbsvc_controlplane` -- F-16 narrowed to
+    `role_classes={"controlplane"}` (excluding the application floor via
+    `application_ids=()`) is compared against item (8)'s own controlplane
+    demand (D-5: independent of thread_limit/concurrency)."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    n = 1
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(platform.controlplane_role,), pool_size=config.role_pool_size(4),
+        process_ceilings=platform_declarations.ProcessCeilings(data=1, control=n),
+        role_classes=frozenset({"controlplane"}), application_ids=(),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=4,
+            data_process_ceiling=1, data_process_count_total=1,
+            control_process_ceiling=n, control_process_count_total=n,
+        ),
+        minimum=platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR * n,
+    )
+
+
+def test_inventory_connection_headroom_matches_f16_minimum_limit_for_auditreader(monkeypatch, platform):
+    """195 (一致, auditreader): 194's own
+    property, for `mitatedbsvc_auditreader` (`role_classes=
+    {"auditreader"}`)."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    n = 1
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(auditreader_role,), pool_size=config.role_pool_size(4),
+        process_ceilings=platform_declarations.ProcessCeilings(data=1, control=n),
+        role_classes=frozenset({"auditreader"}), application_ids=(),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=4,
+            data_process_ceiling=1, data_process_count_total=1,
+            control_process_ceiling=n, control_process_count_total=n,
+        ),
+        minimum=platform_declarations._AUDITREADER_ROLE_POOL_FLOOR * n,
+    )
+
+
+def test_inventory_connection_headroom_pool_size_headroom_constant_moves_both(monkeypatch, platform):
+    """196 (定数の差し替え, pool): patching
+    `config._POOL_SIZE_HEADROOM` (a module attribute `config.
+    role_pool_size` reads at call time) moves F-16's own minimum
+    CONNECTION LIMIT and item (8)'s own `confirmed` minimum together --
+    item (8) reads the constant by name rather than baking today's value
+    into its own arithmetic. `thread_limit=7`/`n=2` (never the default/1)
+    so a mutation that ignores the declared `--thread-limit`
+    is caught here too."""
+    _declare_golden_path(monkeypatch, platform, data=2, control=1)
+    monkeypatch.setattr(config, "_POOL_SIZE_HEADROOM", 9)
+    thread_limit, n = 7, 2
+    pool_size = config.role_pool_size(thread_limit)
+    assert pool_size == thread_limit + 9
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(platform.api_role,), pool_size=pool_size,
+        process_ceilings=platform_declarations.ProcessCeilings(data=n, control=1),
+        role_classes=frozenset({"api"}), application_ids=(),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=thread_limit,
+            data_process_ceiling=n, data_process_count_total=n,
+            control_process_ceiling=1, control_process_count_total=1,
+        ),
+        minimum=platform_declarations._API_ROLE_STORE_COUNT * pool_size * n,
+    )
+
+
+def test_inventory_connection_headroom_api_role_store_count_constant_moves_both(monkeypatch, platform):
+    """197 (定数の差し替え, api): patching
+    `platform_declarations._API_ROLE_STORE_COUNT` moves both minimums
+    together."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    monkeypatch.setattr(platform_declarations, "_API_ROLE_STORE_COUNT", 5)
+    thread_limit, n = 4, 1
+    pool_size = config.role_pool_size(thread_limit)
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(platform.api_role,), pool_size=pool_size,
+        process_ceilings=platform_declarations.ProcessCeilings(data=n, control=1),
+        role_classes=frozenset({"api"}), application_ids=(),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=thread_limit,
+            data_process_ceiling=n, data_process_count_total=n,
+            control_process_ceiling=1, control_process_count_total=1,
+        ),
+        minimum=5 * pool_size * n,
+    )
+
+
+def test_inventory_connection_headroom_controlplane_floor_constant_moves_both(monkeypatch, platform):
+    """198 (定数の差し替え, controlplane): patching
+    `platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR` moves both
+    minimums together."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    monkeypatch.setattr(platform_declarations, "_CONTROLPLANE_ROLE_POOL_FLOOR", 21)
+    n = 1
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(platform.controlplane_role,), pool_size=config.role_pool_size(4),
+        process_ceilings=platform_declarations.ProcessCeilings(data=1, control=n),
+        role_classes=frozenset({"controlplane"}), application_ids=(),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=4,
+            data_process_ceiling=1, data_process_count_total=1,
+            control_process_ceiling=n, control_process_count_total=n,
+        ),
+        minimum=21 * n,
+    )
+
+
+def test_inventory_connection_headroom_auditreader_floor_constant_moves_both(monkeypatch, platform):
+    """199 (定数の差し替え, auditreader): patching
+    `platform_declarations._AUDITREADER_ROLE_POOL_FLOOR` moves both
+    minimums together."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    monkeypatch.setattr(platform_declarations, "_AUDITREADER_ROLE_POOL_FLOOR", 9)
+    n = 1
+    auditreader_role = f"{platform.prefix}svc_auditreader"
+    _f16_and_inventory_agree_at_boundary(
+        platform, roles=(auditreader_role,), pool_size=config.role_pool_size(4),
+        process_ceilings=platform_declarations.ProcessCeilings(data=1, control=n),
+        role_classes=frozenset({"auditreader"}), application_ids=(),
+        headroom_kwargs=dict(
+            data_process_count_old_basis=0, thread_limit=4,
+            data_process_ceiling=1, data_process_count_total=1,
+            control_process_ceiling=n, control_process_count_total=n,
+        ),
+        minimum=9 * n,
+    )
+
+
+def test_inventory_connection_headroom_mixed_basis_condition1_boundary_for_api(monkeypatch, platform):
+    """200 (混在, api, 条件1): with one
+    old-basis process (`concurrency=10`) and one new-basis process
+    (`thread_limit=4`, `role_pool_size` 6, deliberately `!= concurrency`),
+    the api role's own condition 1 floor is `2*(10 + 6) = 32` -- confirmed
+    at 32, blocked at 31."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    thread_limit, concurrency = 4, 10
+    pool_size = config.role_pool_size(thread_limit)
+    minimum = platform_declarations._API_ROLE_STORE_COUNT * (1 * concurrency + 1 * pool_size)
+    assert minimum == 32
+
+    def _judge(limit: int) -> str:
+        _set_connection_limit(platform.admin_dsn, platform.api_role, limit)
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(
+                conn, platform.schema,
+                _headroom_args(
+                    data_process_count_old_basis=1, concurrency=concurrency, thread_limit=thread_limit,
+                    data_process_ceiling=1, data_process_count_total=2, control_not_deployed=True,
+                    control_process_ceiling=None, control_process_count_total=None,
+                ))
+        finally:
+            conn.close()
+        return report["judgment"]
+
+    assert _judge(minimum) == "confirmed"
+    assert _judge(minimum - 1) == "blocked"
+
+
+def test_inventory_connection_headroom_mixed_basis_condition1_boundary_for_application(monkeypatch, platform):
+    """201 (混在, application, 条件1): the
+    application role's own condition 1 floor is `O*c + N*p` (200's own
+    property, without the api role's own store-count multiplier) --
+    `10 + 6 = 16`, confirmed at 16 on both the runtime and developer
+    role, blocked at 15."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    _provision_app(platform, "app1")
+    conn0 = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn0.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT runtime_role, developer_role FROM {} WHERE application_id = 'app1'").format(
+                    sql.Identifier(platform.schema, "applications")))
+            (runtime_role, developer_role) = cur.fetchone()
+    finally:
+        conn0.close()
+    thread_limit, concurrency = 4, 10
+    pool_size = config.role_pool_size(thread_limit)
+    minimum = 1 * concurrency + 1 * pool_size
+    assert minimum == 16
+
+    def _judge(limit: int) -> str:
+        _set_connection_limit(platform.admin_dsn, runtime_role, limit)
+        _set_connection_limit(platform.admin_dsn, developer_role, limit)
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(
+                conn, platform.schema,
+                _headroom_args(
+                    data_process_count_old_basis=1, concurrency=concurrency, thread_limit=thread_limit,
+                    data_process_ceiling=1, data_process_count_total=2, control_not_deployed=True,
+                    control_process_ceiling=None, control_process_count_total=None,
+                ))
+        finally:
+            conn.close()
+        return report["judgment"]
+
+    assert _judge(minimum) == "confirmed"
+    assert _judge(minimum - 1) == "blocked"
+
+
+def test_inventory_connection_headroom_control_demand_independent_of_thread_limit_and_concurrency(monkeypatch, platform):
+    """203: Control's own demand (D-5) depends
+    only on `--control-process-count-total`, never on `--thread-limit`/
+    `--concurrency` -- the controlplane boundary (16 per process) stays
+    fixed across two very different (concurrency, thread_limit) pairs."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+
+    def _judge(limit: int, *, concurrency: int, thread_limit: int) -> str:
+        _set_connection_limit(platform.admin_dsn, platform.controlplane_role, limit)
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(
+                conn, platform.schema,
+                _headroom_args(
+                    data_process_count_old_basis=1, concurrency=concurrency, thread_limit=thread_limit,
+                    data_process_ceiling=1, data_process_count_total=2,
+                    control_process_ceiling=1, control_process_count_total=1,
+                ))
+        finally:
+            conn.close()
+        return report["judgment"]
+
+    for concurrency, thread_limit in ((2, 1), (20, 4)):
+        assert _judge(16, concurrency=concurrency, thread_limit=thread_limit) == "confirmed"
+        assert _judge(15, concurrency=concurrency, thread_limit=thread_limit) == "blocked"
+
+
+def test_inventory_connection_headroom_aggregate_application_term_uses_the_per_role_floor_when_larger(monkeypatch, platform):
+    """204 (条件2 第1項): with K=1 registered
+    application, the per-role floor (`O*c + N*p = 50 + 6 = 56`) exceeds
+    `2*K*(O+N) = 2*1*2 = 4` -- the aggregate's own application term is
+    56, never the smaller `2*K*(O+N)`. Every per-role CONNECTION LIMIT is
+    raised out of the way so condition 1 alone cannot explain a `blocked`
+    result; `--reserved-connections` isolates the aggregate boundary."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    database_name = _provision_app(platform, "app1")
+    _set_connection_limit(platform.admin_dsn, platform.api_role, 100000)
+    _set_connection_limit(platform.admin_dsn, f"{database_name}_rt", 100000)
+    _set_connection_limit(platform.admin_dsn, f"{database_name}_dv", 100000)
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
+    finally:
+        admin.close()
+    max_connections = int(max_connections_text)
+
+    old_basis, concurrency, thread_limit = 1, 50, 4
+    pool_size = config.role_pool_size(thread_limit)
+    app_role_floor = old_basis * concurrency + 1 * pool_size
+    assert app_role_floor == 56
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * (old_basis * concurrency + 1 * pool_size)
+    app_shared_demand = max(app_role_floor, 2 * 1 * 2)
+    assert app_shared_demand == app_role_floor
+    total_demand = api_demand + app_shared_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+
+    def _judge(reserved: int) -> str:
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(
+                conn, platform.schema,
+                _headroom_args(
+                    data_process_count_old_basis=old_basis, concurrency=concurrency, thread_limit=thread_limit,
+                    data_process_ceiling=1, data_process_count_total=2, control_not_deployed=True,
+                    control_process_ceiling=None, control_process_count_total=None,
+                    reserved_connections=reserved,
+                ))
+        finally:
+            conn.close()
+        return report["judgment"]
+
+    assert _judge(max_connections - total_demand) == "confirmed"
+    assert _judge(max_connections - total_demand + 1) == "blocked"
+
+
+def test_inventory_connection_headroom_aggregate_application_term_uses_the_registration_count_when_larger(monkeypatch, platform):
+    """205 (条件2 第2項): with K=4 registered
+    applications and only one new-basis process (`thread_limit=4`,
+    `role_pool_size` 6, no old-basis process), `2*K*(O+N) = 2*4*1 = 8`
+    exceeds the per-role floor (6) -- the aggregate's own application
+    term is 8, never the smaller per-role floor."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    for app_id in ("app1", "app2", "app3", "app4"):
+        _provision_app(platform, app_id)
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
+    finally:
+        admin.close()
+    max_connections = int(max_connections_text)
+
+    thread_limit = 4
+    pool_size = config.role_pool_size(thread_limit)
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * pool_size
+    app_role_floor = pool_size
+    app_shared_demand = max(app_role_floor, 2 * 4 * 1)
+    assert app_shared_demand == 8
+    total_demand = api_demand + app_shared_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+
+    def _judge(reserved: int) -> str:
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(
+                conn, platform.schema,
+                _headroom_args(
+                    data_process_count_old_basis=0, thread_limit=thread_limit,
+                    data_process_ceiling=1, data_process_count_total=1, control_not_deployed=True,
+                    control_process_ceiling=None, control_process_count_total=None,
+                    reserved_connections=reserved,
+                ))
+        finally:
+            conn.close()
+        return report["judgment"]
+
+    assert _judge(max_connections - total_demand) == "confirmed"
+    assert _judge(max_connections - total_demand + 1) == "blocked"
+
+
+def test_inventory_connection_headroom_aggregate_application_term_registration_count_wins_with_an_old_basis_process(monkeypatch, platform):
+    """205's own property (registration
+    count wins), with an old-basis process present (`O=1`): 204's own
+    input keeps `O` in the per-role floor's dominant term, so it never
+    exercises `2*K*(O+N)`'s own `O` addend. Here
+    `O=1`, `concurrency=6`, one new-basis process (`thread_limit=4`,
+    `role_pool_size` 6), and `K=4` registered applications: the per-role
+    floor is `O*c + N*p = 6 + 6 = 12`, but `2*K*(O+N) = 2*4*2 = 16`
+    exceeds it -- the aggregate's own application term is 16, never the
+    smaller per-role floor. A mutation that drops `O` from this term
+    (`2*K*N = 2*4*1 = 8`) would read 12 (the per-role floor) instead,
+    under-counting by 4."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    for app_id in ("app1", "app2", "app3", "app4"):
+        database_name = _provision_app(platform, app_id)
+        _set_connection_limit(platform.admin_dsn, f"{database_name}_rt", 100000)
+        _set_connection_limit(platform.admin_dsn, f"{database_name}_dv", 100000)
+    _set_connection_limit(platform.admin_dsn, platform.api_role, 100000)
+
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute("SHOW max_connections")
+            (max_connections_text,) = cur.fetchone()
+    finally:
+        admin.close()
+    max_connections = int(max_connections_text)
+
+    old_basis, concurrency, thread_limit = 1, 6, 4
+    pool_size = config.role_pool_size(thread_limit)
+    app_role_floor = old_basis * concurrency + 1 * pool_size
+    assert app_role_floor == 12
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * (old_basis * concurrency + 1 * pool_size)
+    app_shared_demand = max(app_role_floor, 2 * 4 * 2)
+    assert app_shared_demand == 16
+    total_demand = api_demand + app_shared_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
+
+    def _judge(reserved: int) -> str:
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(
+                conn, platform.schema,
+                _headroom_args(
+                    data_process_count_old_basis=old_basis, concurrency=concurrency, thread_limit=thread_limit,
+                    data_process_ceiling=1, data_process_count_total=2, control_not_deployed=True,
+                    control_process_ceiling=None, control_process_count_total=None,
+                    reserved_connections=reserved,
+                ))
+        finally:
+            conn.close()
+        return report["judgment"]
+
+    assert _judge(max_connections - total_demand) == "confirmed"
+    assert _judge(max_connections - total_demand + 1) == "blocked"
+
+
+def test_inventory_connection_headroom_condition1_application_floor_independent_of_registration_count(monkeypatch, platform):
+    """206: condition 1's own per-role floor for
+    an application's runtime/developer role is `O*c + N*p` alone, never
+    `2*K*(O+N)` -- with K=4 registered applications and every runtime/
+    developer role's own CONNECTION LIMIT set to EXACTLY the per-role
+    floor (6, not the larger `2*4*1=8`), item (8) still reads `confirmed`
+    (the aggregate's own larger `2*K*(O+N)` term still fits comfortably
+    under `max_connections`)."""
+    _declare_golden_path(monkeypatch, platform, data=1, control=1)
+    thread_limit = 4
+    pool_size = config.role_pool_size(thread_limit)
+    for app_id in ("app1", "app2", "app3", "app4"):
+        database_name = _provision_app(platform, app_id)
+        _set_connection_limit(platform.admin_dsn, f"{database_name}_rt", pool_size)
+        _set_connection_limit(platform.admin_dsn, f"{database_name}_dv", pool_size)
+    conn = ops._inventory_connect(platform.provision_dsn)
+    try:
+        report = ops._inventory_connection_headroom(
+            conn, platform.schema,
+            _headroom_args(
+                data_process_count_old_basis=0, thread_limit=thread_limit,
+                data_process_ceiling=1, data_process_count_total=1,
+                control_process_ceiling=1, control_process_count_total=1,
+            ))
+    finally:
+        conn.close()
+    assert report["judgment"] == "confirmed"
 
 
 def test_inventory_ddl_lock_control_not_deployed_does_not_exclude_controlplane_role(monkeypatch, platform):
