@@ -419,9 +419,9 @@ PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBS
 python -m mitatedb_api.ops declare-process-ceilings --data 1 --control 1
 ```
 
-`--data`/`--control` must match this deployment's own `--max-instances`
-for `mitatedb-data`/`mitatedb-ctrl` respectively (Invariant 1, generalized
-§6.2) -- see that section for the full correctness argument and §6.1 for
+`--data` must equal `mitatedb-data`'s own `MITATEDB_WORKERS` (its
+`--max-instances` stays 1) and `--control` must be 1 (Invariant 1, §6.2;
+§6.5) -- see those sections for the full correctness argument and §6.1 for
 the upgrade order on an EXISTING deployment (migration → declare →
 restart, never the reverse; LQ4-24).
 
@@ -462,6 +462,17 @@ PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBS
   -f MitateDB-api/migrations/0014_role_connection_limits_rollout.sql
 ```
 
+The data service also needs the credential-keyed `requests_per_minute`
+row every data-plane worker shares (`0016`, §6.5), applied the same way,
+after `0002` (order relative to `0005`/`0007`/`0011`-`0014` does not
+matter):
+
+```sh
+PGDATABASE=mitatedb_platform PGUSER=mitatedbsvc_provision PGPASSWORD="$MITATEDBSVC_PROVISION_PASSWORD" \
+  psql \
+  -f MitateDB-api/migrations/0016_credential_request_rate.sql
+```
+
 (2026-09-18: the block above used to stop at `0012`. Two files after it
 touch the same subject, so all three run here, and always in the order
 `0012` -> `0013` -> `0014`: each of the two earlier files replaces
@@ -472,6 +483,13 @@ so running one of them alone after `0014` lowers a limit again.
 where `0005` has not run -- unlike `0012`, whose own order relative to
 `0007`/`0011` stays irrelevant. §10.10's numbered-set note and §10.10.1
 step 7 carry the same order for an existing deployment.)
+
+**Current pool sizing and the per-worker connection budget are in §6.5.**
+Every pool of one data-plane worker is sized from that worker's own thread
+limit (`MITATEDB_THREAD_LIMIT` + 2), and the F-16/F-18 floors multiply by
+the declared `process_ceilings`; the table below, which sizes a pool from
+the declared `concurrency`, describes the single-process sizing that §6.5
+replaces.
 
 Role floor arithmetic (formula: worst-case pool composition + 4 fixed
 operator-headroom connections):
@@ -511,7 +529,7 @@ max_connections >= real simultaneous connections this deployment can produce at 
 least its own real pool-composition floor above, run unconditionally
 alongside every other check that command already runs.
 
-`python -m mitatedb_api.ops verify-declarations` also checks a cluster-wide necessary condition (new check `F-18`): the connection count the declared `process_ceilings` guarantees this deployment opens -- one platform pool per data process, one runtime/developer pair per data process once at least one application is registered, one control-plane pool per control process -- plus `superuser_reserved_connections` plus `reserved_connections`, must stay at or under `max_connections`; both `mitatedb-app` and `mitatedb-ctrl` fail the same unscoped check at their own startup, `verify-declarations` itself exiting 17. Unlike Gate-0 item (8) (§10.10), F-18 never takes an operator-supplied process count or reserved-connection value -- it reads `process_ceilings` directly -- and it counts only ONE registered application's own runtime/developer pair toward the judged lower bound, never the full registered-application count (that full count feeds only a reported, unjudged upper bound). It is a necessary condition only, never counting an interactive/diagnostic `psql` session nor its own connection; the `mitatedb-ctrl` startup judgment reads the declared `concurrency` from its own environment (`MITATEDB_MAX_CONCURRENCY`, exactly as its F-16 call does), so keep that value equal to the data service's; if the open rollout-overlap question (R-52) is resolved by declaring the overlap's own process count in `process_ceilings`, that declared count is exactly what F-18's lower bound already counts. Evidence: `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f18_fails_when_the_declared_lower_bound_exceeds_max_connections`, `::test_verify_declarations_f18_passes_when_the_declared_lower_bound_fits`, `MitateDB-api/tests/test_application_audit.py::test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections`, `MitateDB-api/tests/test_control_main.py::test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections`.
+`python -m mitatedb_api.ops verify-declarations` also checks a cluster-wide necessary condition (new check `F-18`): the connection count the declared `process_ceilings` guarantees this deployment opens -- one platform pool per data process, one runtime/developer pair per data process once at least one application is registered, one control-plane pool per control process -- plus `superuser_reserved_connections` plus `reserved_connections`, must stay at or under `max_connections`; both `mitatedb-app` and `mitatedb-ctrl` fail the same unscoped check at their own startup, `verify-declarations` itself exiting 17. Unlike Gate-0 item (8) (§10.10), F-18 never takes an operator-supplied process count or reserved-connection value -- it reads `process_ceilings` directly -- and it counts only ONE registered application's own runtime/developer pair toward the judged lower bound, never the full registered-application count (that full count feeds only a reported, unjudged upper bound). It is a necessary condition only, never counting an interactive/diagnostic `psql` session nor its own connection; the `mitatedb-ctrl` startup judgment sizes the data-plane pools from its own environment's thread limit (`MITATEDB_THREAD_LIMIT`, exactly as its F-16 call does, §6.5), so keep that value equal to the data service's; if the open rollout-overlap question (R-52) is resolved by declaring the overlap's own process count in `process_ceilings`, that declared count is exactly what F-18's lower bound already counts. Evidence: `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f18_fails_when_the_declared_lower_bound_exceeds_max_connections`, `::test_verify_declarations_f18_passes_when_the_declared_lower_bound_fits`, `MitateDB-api/tests/test_application_audit.py::test_build_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections`, `MitateDB-api/tests/test_control_main.py::test_build_control_app_fails_fast_when_the_declared_process_ceilings_lower_bound_exceeds_max_connections`.
 
 `verify-declarations` also checks the collation every registered, provisioned application's own database was provisioned with (new check `F-19`, `verify-declarations` itself exiting 18): `pg_database.datcollate` must be `'C'` (codepoint-order string comparison, matching this peer's SQLite backend), `datctype` must stay this cluster's own UTF-8 locale (never `'C'`), and, on a server that can report it (`pg_database.datlocprovider`, PostgreSQL 15 and later), the locale provider must be libc, never ICU (an ICU database's own `LC_COLLATE` string does not govern its ordering, so datcollate `'C'` there would be a false green). A Cloud SQL instance itself provisioned with a `C`/`POSIX` locale fails F-19 too, and correctly so: this cluster's own `template0` would then hand every new application database `datctype = 'C'`, breaking non-ASCII case folding and pattern matching -- provision the instance with a real UTF-8 locale, the same one `tools/testpg/dsa_testpg.py` uses for every throwaway test cluster. The only remedy for an application database that fails F-19 for the `collate`/`ctype`/`missing` reasons is re-provisioning it (`0003_provision_application.sql`); an existing database's own collation cannot be changed in place. A database that fails F-19 for the `provider` reason (ICU) cannot be fixed by re-running the current `0003` against an instance whose own `template0` was itself provisioned with an ICU provider -- `CREATE DATABASE` inherits the template's provider -- re-provision it against an instance using the libc locale provider instead. A database missing from `pg_database` (the `missing` reason) may also be one `0004_deprovision_application.sql` left mid-way (dropped, but its own `applications` row not yet cleared) -- completing that deprovision, rather than re-provisioning, is the correct remedy there. Evidence: `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f19_fails_when_an_application_database_collation_is_not_c`, `::test_verify_declarations_f19_passes_after_provisioning_with_0003`, `MitateDB-api/tests/test_postgres.py::test_application_database_collation_is_c`, `::test_application_database_collation_keeps_the_cluster_ctype` (5 passed under `-k "collation or parity_order"`).
 
@@ -681,18 +699,16 @@ a_value_longer_than_the_length_check`).
 
 **Multiply by M.** Coalescing counters and the buffer are **process-local**,
 so deployment-wide the ceilings are `2 x <keys> x <windows> x M` and
-`<buffer capacity> x M`, where **M is `mitatedb-data`'s own
-`--max-instances`**. Since Invariant 1 (§6.2, generalized Phase 10 WP-6b)
-pins `--max-instances` on EITHER Cloud Run service to equal the declared
-`process_ceilings` value for that plane, **M here is this deployment's own
-declared `process_ceilings.data` (`ops declare-process-ceilings`'s own
-`--data` value), the SAME number `mitatedb-data`'s `--max-instances` must
-already equal** -- never a scaler maximum picked independently of that
-declaration. This peer currently ships with `process_ceilings: {1, 1}` and
-`--max-instances=1` on both services (§6.2), so M defaults to 1; a future
-deployment running `mitatedb-data` with more than one instance must
-re-declare `process_ceilings.data` to match (Invariant 1), and this
-arithmetic must use the re-declared number, not the per-process default.
+`<buffer capacity> x M`, where **M is the number of `mitatedb-data`
+processes: its `MITATEDB_WORKERS` on its one instance** (`--max-instances=1`,
+Invariant 1, §6.2). Invariant 1 also pins the declared `process_ceilings.
+data` (`ops declare-process-ceilings`'s own `--data` value) to that same
+number, so **M is this deployment's own declared `process_ceilings.data`**
+-- never a scaler maximum picked independently of that declaration. With
+`MITATEDB_WORKERS=1` and `process_ceilings: {1, 1}` (§6.1), M is 1; a
+deployment that raises `MITATEDB_WORKERS` re-declares
+`process_ceilings.data` to match (§6.5), and this arithmetic uses that
+number.
 
 ```
 bytes/hour  ~=  2 KiB * M * ( <ops/hour>
@@ -1184,15 +1200,20 @@ gcloud run deploy mitatedb-data \
   --service-account=mitatedb-data-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --max-instances=1 \
+  --cpu=1 \
   --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_PLATFORM_DSN=mitatedb-platform-dsn:latest \
-  --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled
+  --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled,MITATEDB_WORKERS=1
 # ... plus one --set-secrets pair per onboarded application's own
 # MITATEDB_APP_<ID_UPPER>_{RUNTIME,DEVELOPER}_DSN.
 ```
 
-**`--max-instances=1` here matches the `process_ceilings.data = 1` this
-deployment declares below (Phase 10 WP-6b, design D-5 (ii)/(iii)) --
-see Invariant 1 in §6.2, generalized to both services.**
+**`--max-instances=1` with `MITATEDB_WORKERS=1` here matches the
+`process_ceilings.data = 1` this deployment declares below -- see
+Invariant 1 in §6.2: one instance, `process_ceilings.data` equal to
+`MITATEDB_WORKERS`, and `--cpu` at least `MITATEDB_WORKERS`.** To serve
+with more worker processes, raise `MITATEDB_WORKERS` and `--cpu` together
+and keep `--max-instances=1` (§6.5). The image sets `MITATEDB_SLOT_DIR`
+itself (§6.5); never override it here.
 
 **Q4 phase (design D-2) supersedes `MITATEDB_DATA_BASE_URL`/
 `MITATEDB_CONTROL_BASE_URL` as env vars** -- they are now **removed**
@@ -1243,13 +1264,14 @@ service URLs (`gcloud run services describe ... --format='value
 (status.url)'`) before going live, then restart BOTH services (design
 U-3: startup snapshot).
 
-`MITATEDB_THREAD_LIMIT` (optional, data service only -- the control
-service's own composition root/ASGI app is untouched): `run_in_
-threadpool`'s own worker-thread limiter for this process' event loop
-(`http.py`'s `create_app(..., thread_limit=)`). Unset or empty defaults
-to `DEFAULT_THREAD_LIMIT` (4). A positive integer raises or lowers it;
-zero, negative, or non-numeric is a startup failure naming this
-variable.
+`MITATEDB_THREAD_LIMIT` (optional): on the data service, `run_in_
+threadpool`'s own worker-thread limiter for each worker process' event
+loop (`http.py`'s `create_app(..., thread_limit=)`), and the basis every
+pool of that worker is sized from (§6.5); the control service reads it
+only for its own startup connection checks (F-16/F-18), so set the SAME
+value on both services. Unset or empty defaults to
+`DEFAULT_THREAD_LIMIT` (4). A positive integer raises or lowers it; zero,
+negative, or non-numeric is a startup failure naming this variable.
 
 **Phase 10 WP-6b (design D-5 (ii)): `process_ceilings` is declared the
 same way, and is REQUIRED (F-15) alongside `surfaces` before either
@@ -1260,11 +1282,12 @@ python -m mitatedb_api.ops declare-process-ceilings --data 1 --control 1
 ```
 
 `--data`/`--control` are how many processes may serve each plane's own
-base URL at the same time -- **this value must match the `--max-
-instances` this deployment actually passes to `gcloud run deploy` for
-`mitatedb-data`/`mitatedb-ctrl` respectively** (Invariant 1, generalized
-in §6.2 below); the app itself cannot verify the Cloud Run side of that
-match (the same limitation as the `MITATEDB_PLATFORM_DSN`/`MITATEDB_
+base URL at the same time -- **`--data` must equal `mitatedb-data`'s own
+`MITATEDB_WORKERS` on its one instance, and `--control` must be 1
+(`MITATEDB_CONTROL_WORKERS=1` on one `mitatedb-ctrl` instance)**
+(Invariant 1, §6.2 below; §6.5); the app itself checks that
+`MITATEDB_WORKERS` does not exceed `--data` at startup, but it cannot
+verify the Cloud Run side (`--max-instances`) of that match (the same limitation as the `MITATEDB_PLATFORM_DSN`/`MITATEDB_
 CONTROLPLANE_DSN` pairing two paragraphs above, and the same limitation
 LQ4-15 already names for a different pair of values) -- keeping the two
 in agreement is a runbook/deployer discipline, checked post-deploy the
@@ -1303,8 +1326,11 @@ gcloud run deploy mitatedb-ctrl \
   --service-account=mitatedb-ctrl-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --max-instances=1 \
-  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest,MITATEDB_AUDIT_DSN=mitatedb-audit-dsn:latest
+  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest,MITATEDB_AUDIT_DSN=mitatedb-audit-dsn:latest \
+  --set-env-vars=MITATEDB_CONTROL_WORKERS=1
 ```
+
+`MITATEDB_CONTROL_WORKERS` is required and always 1 (§6.5).
 
 No `surfaces`-related env var on this command either (Q4 phase, design
 D-2) -- `control_composition.build_control_service` reads the SAME
@@ -1324,39 +1350,36 @@ of the pair it applies to).
 `--set-secrets` entry entirely to leave `audit_query` declared
 `unavailable` on this deployment.
 
-**Invariant 1 (design R-6 second-round M-7, D-K; generalized Phase 10
-WP-6b, design D-5 (ii)/(iii)): `--max-instances` on EITHER Cloud Run
-service must equal the `process_ceilings` value THIS deployment declares
-for that plane (`data` for `mitatedb-data`, `control` for `mitatedb-
-ctrl`, §6.1 above) -- it is not a scaling convenience, it is a
-correctness requirement.** `ControlPlaneService`'s own `control_requests_
-per_minute`/`audit_requests_per_minute` rate limiters (and, symmetrically
-on the data service, `ApplicationCell`'s own `requests_per_minute`/
-`concurrency`) are in-process windows -- with more than one instance of
-either service, each instance would enforce its own bound independently,
-so the deployment as a whole would no longer bound the class the
-served `limit_enforcement` document claims. Contract 1.8.0 makes this
-precise: an `enforced` declaration for one of these classes describes
-the WHOLE deployment reachable at the declared surfaces base URL, never
-one process, and is only honest while the declared `process_ceilings`
-ceiling for that plane is 1; a deployer who declares 2 or more gets
-`deployment_required` back from `/capabilities`/`control_capabilities`
-instead (Phase 10 WP-6b), an accurate statement rather than a false
-`enforced` one. **This peer currently ships with `process_ceilings: {1,
-1}` on both planes and `--max-instances=1` on both services** -- a
-future change to run either plane with more than one instance (a shared
-window: Redis, Cloud SQL-backed, or an accepted `deployment_required`
-declaration) is out of this WP's scope (design §7/§9 future-work ledger,
-D-K); until then, raising `--max-instances` on either service WITHOUT
-also re-declaring that plane's own `process_ceilings` (`ops
-declare-process-ceilings`, restarting both processes) is a silent
-regression to a false `enforced` claim, not merely a capacity change.
-**The app cannot verify the Cloud Run side of this match** (`gcloud run
-services describe ... --format='value(spec.template.spec.
-containerConcurrency)'`-style inspection is outside either composition
-root's own reach) -- topology and declaration agreement is a runbook
-discipline, verified post-deploy (§6.3), the same limitation LQ4-15
-already names for surfaces/DSN pairing.
+**Invariant 1 -- one host per plane: `--max-instances=1` on EITHER Cloud
+Run service, and each plane's declared `process_ceilings` equal to the
+worker processes on that one instance** (`process_ceilings.data` =
+`MITATEDB_WORKERS` for `mitatedb-data`, `process_ceilings.control` = 1 =
+`MITATEDB_CONTROL_WORKERS` for `mitatedb-ctrl`, §6.1 above). **It is not a
+scaling convenience, it is a correctness requirement.** The data service
+scales by running more uvicorn worker processes on its one instance --
+raise `MITATEDB_WORKERS` and `--cpu` together, `--cpu` at least
+`MITATEDB_WORKERS` -- never by raising `--max-instances` (§6.5). The
+reason: the data service's `concurrency` bound is held by file locks in
+the instance's own slot directory, which every worker on that instance
+shares and no other instance sees, and the control service's
+`control_requests_per_minute`/`audit_requests_per_minute` windows are
+in-process counters. Contract 1.8.0 makes this precise: an `enforced`
+declaration for one of these classes describes the WHOLE deployment
+reachable at the declared surfaces base URL, never one process or one
+instance. `concurrency` is declared `enforced` only while
+`process_ceilings.data` equals `MITATEDB_WORKERS` (a larger declaration is
+read as processes on another instance and answers `deployment_required`);
+`requests_per_minute` is counted in one platform-database row per
+credential (`0016`, §6.5) and stays `enforced` at any declared ceiling;
+the control windows are `enforced` only while `process_ceilings.control`
+is 1. So raising `--max-instances` on either service is a silent
+regression to a false `enforced` claim for the host-held classes, not
+merely a capacity change. **The app cannot verify the Cloud Run side of
+this match** (`--max-instances` and `--cpu` are outside either composition
+root's own reach; the app itself checks only that the worker count does not
+exceed the declared ceiling) -- topology and declaration agreement is a
+runbook discipline, verified post-deploy (§6.3, §6.5), the same limitation
+LQ4-15 already names for surfaces/DSN pairing.
 
 Invoker binding: operators only (a Google group, never `allUsers`, never
 the broad application service account):
@@ -1549,6 +1572,175 @@ own credential-format change, which is entirely internal to this peer's
 issuance responses -- the RECEIVING side, `http.py::_split_bearer`/
 `control_http.py::_bearer_pair`, is unchanged by this WP, so an already-
 issued credential keeps authenticating exactly as before).
+
+### 6.5 Worker processes on one instance
+
+Companion to `docs/design/MULTI_PROCESS_WORKER_V0_1.md` (D-1, D-3) and
+Invariant 1 (§6.2). The data service serves with several uvicorn worker
+processes on its ONE instance; this section is what that asks of a
+deployment.
+
+**One host.** Each base URL is served by one Cloud Run instance
+(`--max-instances=1` on both services). The data service's worker
+processes on that instance share one slot directory, which no other
+instance sees, and `process_ceilings` counts processes, not instances.
+Scale the data service by worker processes, never by instances.
+
+**Workers and the declaration.**
+
+- `MITATEDB_WORKERS` (`mitatedb-data`) is required: a positive integer, no
+  default, set with `--set-env-vars` (§6.1). The image's `CMD` passes it as
+  `--workers "${MITATEDB_WORKERS}"`, so uvicorn never falls back to
+  `WEB_CONCURRENCY`.
+- `--cpu` is at least `MITATEDB_WORKERS`: every worker is a separate Python
+  process, and fewer vCPUs than workers leaves workers waiting for CPU.
+  Every worker holds its own copy of the application, so size `--memory`
+  for `MITATEDB_WORKERS` copies too.
+- Declare `process_ceilings.data` equal to `MITATEDB_WORKERS`:
+  `python -m mitatedb_api.ops declare-process-ceilings --data <MITATEDB_WORKERS> --control 1`,
+  then deploy both services again (both read the declaration once, at
+  startup). A revision's process ceiling is its `--max-instances` (1) times
+  its `MITATEDB_WORKERS`; that product is what `process_ceilings.data` and
+  every other process count in this runbook mean.
+- The preflight and every worker refuse to start when `MITATEDB_WORKERS`
+  exceeds `process_ceilings.data`. `limit_enforcement.concurrency` is
+  `enforced` only while the two are EQUAL; a larger declaration is read as
+  processes on another instance and answers `deployment_required`.
+  `requests_per_minute` is counted in one platform-database row per
+  credential (`0016`, below) and stays `enforced` at any declared ceiling.
+- `MITATEDB_CONTROL_WORKERS` (`mitatedb-ctrl`) is required and always `1`,
+  with `process_ceilings.control = 1`: the control service's
+  `control_requests_per_minute`/`audit_requests_per_minute` windows are
+  per process. Its preflight refuses a value above
+  `process_ceilings.control`.
+
+**Slot directory.** The image creates `/var/lib/mitatedb/slots`, owned by
+the image's `USER` (`mitatedb`), mode `0700`, and sets `MITATEDB_SLOT_DIR`
+to it (`docker/Dockerfile`). The data service only checks the directory --
+existence, owner = its own effective uid, mode `0700`, and a `flock`
+self-check that a second lock on one file is refused -- and never creates
+it. Every in-flight request holds one of `concurrency` slot files under an
+exclusive `flock`, so the declared `concurrency` bounds every worker on the
+instance together. Never override `MITATEDB_SLOT_DIR` and never run the
+container as another user; either stops startup. The control service uses
+no slot directory.
+
+**Preflight in `CMD`.** Each branch of the image's `CMD` runs the service's
+own preflight -- `python -m mitatedb_api.main --preflight` for `data`,
+`python -m mitatedb_api.control_main --preflight` for `control` -- joined
+to `exec uvicorn` with `&&`. The preflight builds the application once
+with the container's own environment -- every startup check: F-13, F-15,
+F-16, F-18, the served-application registry, the pepper separation, the
+worker count against `process_ceilings`, and on `data` the slot-directory
+checks -- and exits non-zero on the first failure; the container then ends
+with that status and the revision never becomes ready. uvicorn's own
+worker supervisor cannot do this: it replaces a worker that failed at
+startup and itself keeps running. The preflight closes its own
+connections before uvicorn starts.
+
+**Signals: never SIGTTIN, never SIGHUP.** Never send either to the uvicorn
+supervisor (from a debugging shell, for example). SIGTTIN starts one more
+worker while it runs -- beyond `MITATEDB_WORKERS`, the declared
+`process_ceilings.data`, and the connection budget below. SIGHUP replaces
+the workers one at a time, so `MITATEDB_WORKERS + 1` processes run for a
+while, again beyond that budget. To pick up a change, deploy a new
+revision: its instance stops the old process group and starts a new one.
+
+**Cloud Run and `--max-instances`.** Inference (推測; not verified against
+Cloud Run itself): Cloud Run may run more instances than `--max-instances`
+for a short time; while it does, two instances' workers do not share slots,
+so in-flight requests may reach up to twice the declared `concurrency`.
+
+**Connection budget -- counted from the thread limit.** One worker never
+has more requests using the database at once than its thread limit
+(`MITATEDB_THREAD_LIMIT`, default 4), so every pool of one worker is sized
+`p = MITATEDB_THREAD_LIMIT + 2` (`role_pool_size`; `p = 6` by default).
+Each worker also holds one persistent connection per served application
+for each of its runtime and developer roles, so `W` workers hold `W` such
+connections per role. The declared `concurrency` is not part of the
+budget -- a slot holds a file lock, not a connection. With
+`W = process_ceilings.data` (equal to `MITATEDB_WORKERS`) and
+`C = process_ceilings.control` (1):
+
+| Role | F-16 floor (startup and `verify-declarations`) | At `p = 6` | Limit `0014` sets | Largest count that fits |
+| --- | --- | --- | --- | --- |
+| `mitatedbsvc_api` | `2 × p × W` | `12 × W` | 132 | `W` ≤ 11 |
+| each `<app>_rt` / `<app>_dv` | `p × W` (the persistent connections are `W`; the floor keeps the pool formula) | `6 × W` | 68 | `W` ≤ 11 |
+| `mitatedbsvc_controlplane` | `16 × C` | `16 × C` | 36 | `C` ≤ 2 |
+| `mitatedbsvc_auditreader` | `4 × C` | `4 × C` | 12 | `C` ≤ 3 |
+
+F-18 (startup and `verify-declarations`, cluster-wide) judges the lower
+bound `W × (2p + 2p) + C × 16` once at least one application is registered
+(`W × 2p + C × 16` with none) plus `superuser_reserved_connections` plus
+`reserved_connections` against `max_connections`. At `p = 6`: `24 × W + 16`
+(`12 × W + 16` with no application registered) -- 40 at `W = 1`, 112 at
+`W = 4` (64 with no application registered).
+
+`0014` sizes its limits for two revisions serving side by side (the
+rollout overlap below): two revisions of `W` workers each need `2 × 12 × W`
+on `mitatedbsvc_api` and `2 × 6 × W` on each application role, so
+`MITATEDB_WORKERS` up to 5 keeps that margin at the default thread limit.
+A larger count, or a raised `MITATEDB_THREAD_LIMIT`, needs a higher
+`CONNECTION LIMIT` than `0014` sets -- a new platform migration; F-16 stops
+startup naming the role, its current limit and the exact floor it needs.
+Every figure here assumes SIGHUP is never sent (above).
+
+**`process_ceilings.control` of 2 or more** needs a `CONNECTION LIMIT` of at
+least `16 × process_ceilings.control` on `mitatedbsvc_controlplane` and at
+least `4 × process_ceilings.control` on `mitatedbsvc_auditreader`; F-16
+reports the exact floor it needs, naming the role.
+
+**`0016` -- the credential-keyed `requests_per_minute` row.** Creates
+`mitatedb_registry.credential_request_rate` (one row per credential) and
+the function `mitatedb_registry.credential_request_rate_admit`, and grants
+`mitatedbsvc_api` access to them -- nothing to any other role. Every
+data-plane worker counts an authenticated request with one autocommit
+statement on its own platform pool (the `mitatedbsvc_api` role), after
+authentication, so every worker shares one count per credential;
+unauthenticated requests never reach the table. A database failure on that
+statement refuses the request, the same way as any other platform-database
+failure -- it never lets the request through uncounted. Rows go away with
+their credential (`ON DELETE CASCADE`). A new platform applies it in §3
+with the other platform migrations; on an existing deployment, apply it
+from a source checkout (§7) with the provision DSN before deploying a
+revision that counts in it (idempotent, no `-v` variables):
+
+```sh
+python -m mitatedb_api.ops apply-platform-migration 0016_credential_request_rate.sql --lock-timeout <value>
+```
+
+No service refuses to start without it, but every authenticated data-plane
+request fails closed until it is applied.
+
+**Window shape (disclosure).** The row keeps one count per integer second
+for the current second and the 60 before it (`int[61]`, a ring indexed by
+the second modulo 61), anchored to the database clock (`clock_timestamp()`),
+so the workers' own clocks never enter the window, and its base second only
+moves forward. At a window edge it may count up to one second more than
+60 s: it may refuse a request slightly early, and it never admits more than
+the declared `requests_per_minute`.
+
+**Rollout overlap: what holds and what does not.** While a new revision
+takes over, old and new revisions may serve at the same time on two
+instances:
+
+- `requests_per_minute` holds -- one shared row per credential.
+- `concurrency` does not: the two instances' slot directories are not
+  shared, so in-flight requests may reach up to twice the declared bound.
+- The control service's two windows are per process, so overlapping control
+  revisions allow up to twice each declared bound.
+- Both revisions' connections count at once: `0014`'s limits are sized
+  for that (above), while F-16/F-18 count only the declared
+  `process_ceilings` unless it declares the overlap's own process count.
+
+**Confirming on the deployed revision.** This repository's development
+machine has no container runtime, so the image's behavior is confirmed on
+Cloud Run after deployment: the revision becomes ready (a failing preflight
+ends the container with a non-zero status, the revision never becomes
+ready, and its log carries the preflight's traceback naming the failing
+check), and with `process_ceilings.data` equal to `MITATEDB_WORKERS`,
+`GET /v1/capabilities` reports `limit_enforcement.concurrency` and
+`limit_enforcement.requests_per_minute` as `enforced`.
 
 ## 7. Break-glass CLI (`python -m mitatedb_api.ops`, WP-6)
 

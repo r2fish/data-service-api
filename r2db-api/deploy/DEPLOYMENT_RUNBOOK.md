@@ -99,10 +99,16 @@ re-verify them; it assumes they are already true.
    `POSTGRES_PROVISIONING_RUNBOOK.md` §18) is likewise **required by BOTH
    processes unconditionally**, and, like `0008`/`surfaces` above, must be
    followed by declaring this deployment's own ceilings once --
-   `python -m r2db_api.ops declare-process-ceilings --data 1 --control 1`
-   (single-uvicorn systemd units; §18) -- since `0012` also deliberately
+   `python -m r2db_api.ops declare-process-ceilings --data <R2DB_WORKERS>
+   --control 1` (`--data` equal to `api.env`'s `R2DB_WORKERS`, §8 below;
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §18) -- since `0012` also deliberately
    seeds no `process_ceilings` row and neither process starts without one
-   (F-15). **The required order for an already-provisioned host is:
+   (F-15). **Migration `0015_credential_request_rate.sql`**
+   (`POSTGRES_PROVISIONING_RUNBOOK.md` §20 -- the credential-keyed
+   `requests_per_minute` row every data-plane worker shares) is **required
+   by the application-plane process**: it does not gate startup, but
+   without it every authenticated data-plane request fails closed with the
+   same answer as any other platform-database failure. **The required order for an already-provisioned host is:
    `0012` -> `ops declare-process-ceilings` -> restart both processes**
    (ledger LQ4-24; `POSTGRES_PROVISIONING_RUNBOOK.md` §18). Every
    application
@@ -292,7 +298,9 @@ sudo systemctl status r2dbsvc-api.service
 ```
 
 If the unit fails to start, check `journalctl -u r2dbsvc-api.service -e`
-first. A missing/misnamed required environment variable (P2-D5: pepper,
+first. A failure in the unit's `ExecStartPre=` line is the preflight
+(§8): it runs every startup check once, before uvicorn, and its own
+traceback names the failing check. A missing/misnamed required environment variable (P2-D5: pepper,
 platform DSN, `R2DB_SERVE_APPS`, or any served slug's DSN pair) fails
 import with a clear exception naming the missing variable -- this is the
 composition root's intended "fail loudly at startup" behavior, not a bug to
@@ -356,18 +364,20 @@ configuration's own layout rather than assuming.)
       this host (e.g. a firewall rule blocking the platform DB's
       port/socket -- whichever is less disruptive to anything else sharing
       that cluster).
-   2. Send more requests than the platform pool can serve concurrently:
-      `R2DB_PLATFORM_POOL_SIZE` (Phase 10 WP-4e) no longer defaults to a
-      fixed `4` -- unset, it derives from the declared `ResourceLimits.
-      concurrency` ceiling instead (default `32`, `role_pool_size`; both
-      the credential-store and durable-audit-sink platform pools share
-      this same value, `POSTGRES_PROVISIONING_RUNBOOK.md` §4's "+
-      platform pool" note). Send at least `R2DB_PLATFORM_POOL_SIZE + 2`
-      requests against whichever value this deployment's own
-      `EnvironmentFile`/derived default actually resolves to, e.g. (34 at
-      the shipped default of 32):
+   2. Send more requests than the platform pools can serve concurrently:
+      unset, `R2DB_PLATFORM_POOL_SIZE` derives from each worker's own
+      thread limit (`R2DB_THREAD_LIMIT` + 2, `role_pool_size`; 6 at the
+      default thread limit of 4; both the credential-store and
+      durable-audit-sink platform pools share this same value,
+      `POSTGRES_PROVISIONING_RUNBOOK.md` §20). Send at least
+      `R2DB_WORKERS × (R2DB_PLATFORM_POOL_SIZE + 2)` requests against
+      whichever values this deployment's own `EnvironmentFile`/derived
+      default actually resolves to, and no more than the declared
+      `concurrency` (32 by default), so that the host-shared slots (§8)
+      never answer `429` before the platform pool is reached -- e.g. 8 at
+      one worker and the default thread limit:
       ```
-      for i in $(seq 1 34); do
+      for i in $(seq 1 8); do
         curl -sk -o /dev/null -w '%{http_code} %{content_type}\n' \
           -H "Authorization: Bearer <issued secret>" \
           https://data.example.invalid:8443/v1/capabilities &
@@ -856,3 +866,147 @@ optional `R2DBSVC_EXPECTED_PEAK_CONNECTIONS` override), then applies
 Q-1 WP-4; see that playbook's own step 1 and `POSTGRES_PROVISIONING_
 RUNBOOK.md` §12) is the recovery step from a lost, leaked, or misused
 control credential.
+
+## 8. Multi-process data plane on one host
+
+Companion to `docs/design/MULTI_PROCESS_WORKER_V0_1.md` (D-1, D-3) and
+`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §18 (`process_ceilings`)
+and §20 (the shared rate row and the connection budget).
+
+**One host.** Every process that serves this deployment's data base URL
+runs on one host, as a worker of the one `r2dbsvc-api.service` supervisor
+(`uvicorn --workers ${R2DB_WORKERS}`); the control base URL is served by
+the one `r2dbsvc-control.service` process on the same host. Never run a
+copy of either unit on a second host behind the same base URL: the
+`concurrency` bound is held by file locks in one host's slot directory,
+which another host's processes never see, and `process_ceilings` counts
+processes, not hosts.
+
+**Workers and the declaration.**
+
+- `R2DB_WORKERS` (`api.env`) is required: a positive integer, no default.
+  The unit passes it as `--workers ${R2DB_WORKERS}` on every start, so
+  uvicorn never falls back to `WEB_CONCURRENCY`.
+- Declare `process_ceilings.data` equal to it:
+  `python -m r2db_api.ops declare-process-ceilings --data <R2DB_WORKERS> --control 1`
+  (on `R2DB_CONTROL_DSN`), then stop and start both units -- both read the
+  declaration once, at startup.
+- The preflight and every worker refuse to start when `R2DB_WORKERS`
+  exceeds `process_ceilings.data`.
+- `limit_enforcement.concurrency` is `enforced` only while
+  `process_ceilings.data` EQUALS `R2DB_WORKERS`. A larger declaration is
+  read as "processes on another host may serve this base URL" and answers
+  `deployment_required`. `requests_per_minute` is `enforced` at any
+  declared ceiling: every worker counts it in the same platform-database
+  row per credential (`0015`, `POSTGRES_PROVISIONING_RUNBOOK.md` §20).
+- To change the worker count: re-declare `--data`, change `R2DB_WORKERS`
+  in `api.env`, check the connection budget for the new count
+  (`POSTGRES_PROVISIONING_RUNBOOK.md` §20), then stop and start both units.
+
+**Control plane: one process.** `R2DB_CONTROL_WORKERS=1` in `control.env`
+(required, no default) and `process_ceilings.control = 1`. The control
+plane's `control_requests_per_minute`/`audit_requests_per_minute` windows
+are per process, so this plane runs exactly one process; its preflight
+refuses `R2DB_CONTROL_WORKERS` above `process_ceilings.control`.
+
+**Preflight in both units.** Each unit runs `python -m r2db_api.main
+--preflight` / `python -m r2db_api.control_main --preflight` as its
+`ExecStartPre=`, from the same virtualenv, as the same account, with the
+same `EnvironmentFile=` as its `ExecStart=`. The preflight builds the
+application once -- every startup check: F-13, F-15, F-16, F-18, workers
+against `process_ceilings`; on the data plane the served-application
+registry and the slot directory's existence, owner, mode and a `flock`
+self-check; on the control plane the pepper separation -- and exits non-zero on the first
+failure, which fails the unit before uvicorn starts. uvicorn's own worker
+supervisor cannot do this: it replaces a worker that failed at startup and
+itself keeps running, so without the preflight a broken environment would
+show up only as a restart loop in the journal. The preflight closes its own
+connections before uvicorn starts, so it adds nothing to the connection
+budget while the workers serve.
+
+**Slot directory.** `r2dbsvc-api.service` carries
+`RuntimeDirectory=r2dbsvc-api/slots` and `RuntimeDirectoryMode=0700`:
+systemd creates `/run/r2dbsvc-api/slots`, owned by the service account,
+mode `0700`, before the preflight runs, and removes it when the unit stops.
+`api.env` names the same path in `R2DB_SLOT_DIR` (required, no default).
+The application only checks the directory (existence, owner = its own
+effective uid, mode `0700`, a working `flock`) and never creates it. Every
+in-flight request holds one of `concurrency` slot files under an exclusive
+`flock`, and every worker opens the same directory, so the declared
+`concurrency` bounds the whole host. Never point `R2DB_SLOT_DIR` anywhere
+else, never share the directory with another unit, and never create it by
+hand. The control unit uses no slot directory.
+
+**Signals: never SIGTTIN, never SIGHUP.** SIGTTIN makes the uvicorn
+supervisor start one more worker while it runs -- beyond `R2DB_WORKERS`,
+the declared `process_ceilings.data`, and the connection budget F-16/F-18
+counted. SIGHUP replaces the workers one at a time, so `R2DB_WORKERS + 1`
+processes run for a while, again beyond that budget. Restart a unit with
+`systemctl stop` followed by `systemctl start` (`systemctl restart` does the
+same: it stops before it starts); the units define no `ExecReload=`, and
+neither `systemctl reload` nor `kill -HUP`/`kill -TTIN` is ever the way to
+pick up a change.
+
+**`verify-declarations` checks workers only by hand.** `python -m
+r2db_api.ops verify-declarations` compares `R2DB_WORKERS`/
+`R2DB_CONTROL_WORKERS` against `process_ceilings` (check `F-20`, exit code
+`19`), but it reads both variables from its OWN shell environment, never
+from the running units: export the same values `api.env`/`control.env`
+carry before running it. With neither variable set it prints no `F-20`
+line. It is an operator cross-check; the check that stops a service is the
+preflight's.
+
+**Connection budget.** Counted from the thread limit, never from the
+declared `concurrency` (a slot holds a file lock, not a connection):
+`POSTGRES_PROVISIONING_RUNBOOK.md` §20 has the per-role floors, the
+cluster-wide lower bound, and the largest `R2DB_WORKERS` that `0013`'s
+role limits admit (5 at the default thread limit).
+
+**Rate row.** `requests_per_minute` is counted per credential in the
+platform database (`0015`); at a window edge it may count up to one second
+more than 60 s, so it may refuse slightly early and never admits more than
+the declared bound (`POSTGRES_PROVISIONING_RUNBOOK.md` §20).
+
+**Rollout overlap: what holds and what does not.** Stopping and starting
+`r2dbsvc-api.service` stops every old worker before any new one starts
+(`Type=simple`: stop, then start -- an inference from systemd's documented
+ordering, not observed on the target), so a restart puts no old and new
+process side by side. If old and new processes ever do serve the same base
+URL at once:
+
+- `requests_per_minute` holds -- one shared row per credential.
+- `concurrency` holds only while both groups use the same slot directory
+  on the same host; another directory or another host allows up to twice
+  the declared bound.
+- The control plane's two windows are per process, so two overlapping
+  control processes allow up to twice each declared bound.
+- The overlapping processes' connections are outside F-16/F-18 unless
+  `process_ceilings` declares the overlap's own process count.
+
+**Confirming on the target.** This repository's development machine has no
+systemd, so the unit behavior below is confirmed on the deployment target
+after installation:
+
+1. `sudo systemctl start r2dbsvc-api.service`, then
+   `systemctl status r2dbsvc-api.service`: the `ExecStartPre=` line reads
+   `code=exited, status=0/SUCCESS` (the preflight's checks, the `flock`
+   self-check included, passed), and the unit's cgroup lists
+   `R2DB_WORKERS` uvicorn worker processes under the uvicorn supervisor
+   (with `R2DB_WORKERS=1`, uvicorn runs a single process and no
+   supervisor).
+2. `sudo ls -ld /run/r2dbsvc-api/slots` shows `drwx------` owned by the
+   service account.
+3. With `process_ceilings.data` equal to `R2DB_WORKERS`,
+   `GET /v1/capabilities` (§2 step 6) reports `limit_enforcement.
+   concurrency` and `limit_enforcement.requests_per_minute` as `enforced`.
+4. `sudo systemctl stop r2dbsvc-api.service`, then
+   `test ! -e /run/r2dbsvc-api/slots && echo removed` prints `removed`
+   (systemd removed the runtime directory with the unit). Start the unit
+   again.
+5. `systemctl status r2dbsvc-control.service`: its own `ExecStartPre=` line
+   reads `status=0/SUCCESS`, and its cgroup lists one uvicorn process.
+6. Optional, before the unit takes traffic only: set `R2DB_WORKERS` one
+   above `process_ceilings.data` in `api.env` and start the unit -- it
+   fails in `ExecStartPre=`, the journal naming `R2DB_WORKERS` and
+   `process_ceilings.data`, and no uvicorn process starts. Restore the
+   value and start again.

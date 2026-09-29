@@ -84,10 +84,22 @@ FROM python:3.11-slim AS runtime
 
 # Non-root (R-9's own "非 root" instruction): a dedicated, unprivileged
 # system user/group with no login shell and no home-directory writes
-# expected -- this process never writes to its own container filesystem
-# (all state is PostgreSQL; the only writes are stdout/stderr logs, which
-# Cloud Run captures from the container's own streams regardless of UID).
+# expected -- all state is PostgreSQL; the only writes are stdout/stderr
+# logs, which Cloud Run captures from the container's own streams
+# regardless of UID, and the empty lock files in the slot directory below.
 RUN groupadd --system mitatedb && useradd --system --gid mitatedb --no-create-home --shell /usr/sbin/nologin mitatedb
+
+# Host-shared concurrency slots (`cloud-run-cloud-sql.md` §6.5): one
+# directory every uvicorn worker of the data service opens, created here
+# (the application only checks it -- existence, owner = its own effective
+# uid, mode 0700, a working `flock` -- and never creates it), owned by the
+# `USER` below, mode 0700. `MITATEDB_SLOT_DIR` names it; the control
+# service uses no slot directory and ignores the variable. It holds empty
+# lock files only, never persistent state.
+RUN mkdir -p /var/lib/mitatedb/slots \
+    && chown mitatedb:mitatedb /var/lib/mitatedb/slots \
+    && chmod 0700 /var/lib/mitatedb/slots
+ENV MITATEDB_SLOT_DIR=/var/lib/mitatedb/slots
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" \
@@ -142,7 +154,21 @@ WORKDIR /home/mitatedb
 # (`RuntimeError`, both composition roots' own documented policy) if a
 # required variable is missing -- there is no partial-startup mode to mask
 # a missing secret.
-CMD ["sh", "-c", "if [ \"$SERVICE\" = \"control\" ]; then exec uvicorn mitatedb_api.control_main:app --host 0.0.0.0 --port \"$PORT\"; else exec uvicorn mitatedb_api.main:app --host 0.0.0.0 --port \"$PORT\"; fi"]
+#
+# Each branch runs the service's own preflight first (`python -m
+# mitatedb_api.main --preflight` / `python -m mitatedb_api.control_main
+# --preflight`: builds the application once with this container's own
+# environment -- every startup check, including the workers-vs-
+# `process_ceilings` check and, for `data`, the slot-directory checks --
+# and exits non-zero on the first failure), joined to `exec uvicorn` with
+# `&&`, so a failing preflight ends the container with that non-zero status
+# and uvicorn never starts. uvicorn's own worker supervisor cannot do this:
+# it replaces a worker that fails at startup and keeps running.
+# `--workers` always comes from the environment -- `MITATEDB_WORKERS` for
+# `data`, `MITATEDB_CONTROL_WORKERS` (always 1) for `control`, both
+# required and without a default (`cloud-run-cloud-sql.md` §6.5) -- never
+# a number written here.
+CMD ["sh", "-c", "if [ \"$SERVICE\" = \"control\" ]; then python -m mitatedb_api.control_main --preflight && exec uvicorn mitatedb_api.control_main:app --host 0.0.0.0 --port \"$PORT\" --workers \"${MITATEDB_CONTROL_WORKERS}\"; else python -m mitatedb_api.main --preflight && exec uvicorn mitatedb_api.main:app --host 0.0.0.0 --port \"$PORT\" --workers \"${MITATEDB_WORKERS}\"; fi"]
 
 # `migrations/` and the break-glass/ceremony CLI (`python -m mitatedb_api.
 # ops ...`) are intentionally NOT this image's job to run automatically:
