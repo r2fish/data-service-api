@@ -1602,10 +1602,12 @@ Scale the data service by worker processes, never by instances.
   then deploy both services again (both read the declaration once, at
   startup). A revision's process ceiling is its `--max-instances` (1) times
   its `MITATEDB_WORKERS`; that product is what `process_ceilings.data` and
-  every other process count in this runbook mean. `ops inventory` counts
-  connection demand from the declared `concurrency`, so at the default
-  `concurrency` a Gate-0 rollout with `MITATEDB_WORKERS` of 2 or more
-  reads item (8) as blocked (§10.4.3).
+  every other process count in this runbook mean. `ops inventory` counts a
+  NEW-basis revision's connection demand from `role_pool_size(--thread-
+  limit)`, the SAME per-process floor F-16 uses (the table below) -- an
+  OLD-basis revision (one still running a `--concurrency`-sized pool
+  instead) is counted separately, from its own declared `concurrency`
+  (§10.4.3).
 - The preflight and every worker refuse to start when `MITATEDB_WORKERS`
   exceeds `process_ceilings.data`. `limit_enforcement.concurrency` is
   `enforced` only while the two are EQUAL; a larger declaration is read as
@@ -2315,11 +2317,22 @@ a judgment -- the value of an env name NOT in this table is never read):
 
 | Env name | Item it feeds | When unset |
 |---|---|---|
-| `MITATEDB_MAX_CONCURRENCY` | `inventory --concurrency` for item (8) | item (8) is `unknown` -- the code default is never substituted |
+| `MITATEDB_WORKERS` | a revision's own worker count and NEW/OLD-basis status for item (8) (§10.4.3) | that revision's own worker count and basis cannot be established |
+| `WEB_CONCURRENCY` | an OLD-basis revision's own worker count for item (8), when it carries no `MITATEDB_WORKERS` (§10.4.3) | that revision's own worker count is 1 |
+| `MITATEDB_THREAD_LIMIT` | `inventory --thread-limit` for item (8)'s NEW-basis processes (§6.5) | item (8) is `unknown` for the parts that depend on it -- the code default is never substituted |
+| `MITATEDB_CONTROL_WORKERS` | Control's own process ceiling/total for item (8) (§10.4.3; always 1) | that revision's own Control process count cannot be established |
+| `MITATEDB_MAX_CONCURRENCY` | `inventory --concurrency` for item (8)'s OLD-basis processes only (§10.4.3) | item (8) is `unknown` for the parts that depend on it -- the code default is never substituted |
+
+Read only WHETHER `MITATEDB_PLATFORM_POOL_SIZE` is present on a revision,
+never its value: when present on any revision counted toward item (8),
+`--thread-limit` and `--data-process-count-old-basis` are both omitted
+(§10.4.3) -- that env overrides the pool size F-16 itself never reads
+either, an existing gap this runbook does not close.
 
 Note that §6.1's own deploy command does not set
-`MITATEDB_MAX_CONCURRENCY`; on a deployment that leaves it unset, item (8)
-stays `unknown` until the deployment declares it explicitly.
+`MITATEDB_MAX_CONCURRENCY`, since it deploys the current, NEW-basis code;
+`MITATEDB_MAX_CONCURRENCY` is only ever read from an OLD-basis revision
+still running the pre-existing, `--concurrency`-sized pool.
 
 **Env names that must be present** (if the env-name list for a revision
 does not contain these, the projection is not being read and every item
@@ -2396,32 +2409,69 @@ depends on it is then `unknown`. Note that `inventory` rejects an
 inconsistent pair (a total smaller than the per-revision ceiling) with
 exit status 1 rather than judging it.
 
+**A revision's basis** (NEW or OLD, design
+docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-4) is decided from
+TWO facts together: its image digest (§10.4.4's
+own digest read; a NEW-basis digest is one built from the code that
+declares `--thread-limit`/`--data-process-count-old-basis` below) and
+whether its env carries `MITATEDB_WORKERS` at all. A revision is NEW-basis
+only when both agree (a NEW-basis digest that carries `MITATEDB_WORKERS`);
+it is OLD-basis only when both agree the other way (a pre-existing digest
+with no `MITATEDB_WORKERS`). **When a revision's digest and its
+`MITATEDB_WORKERS` presence disagree, omit `--data-process-count-old-
+basis` (and, with it, `--concurrency`) for the whole read** -- this
+runbook cannot tell that revision's own basis from the evidence it reads,
+and guessing risks undercounting a real OLD-basis process's demand.
+
 | Argument | How it is read |
 |---|---|
-| `--concurrency` | the `MITATEDB_MAX_CONCURRENCY` value carried by the Data revisions that can take traffic: the revisions with traffic percent greater than 0, the revisions reachable by a tag URL, and the candidate (whose value is the one step 13's own deploy command carries, §10.10.3). **Omit the argument when those values are not all the same, and when even one of those revisions has the name unset** -- an unset name means that revision runs on the code's own default, which is not read from the platform and is not what item (8) would then be judging. A revision that is counted in the worst-case total but cannot take traffic (`minScale` 1 or more, percent 0 and no tag) is outside this agreement: it still counts toward the process total below, and the value it carries is not compared |
+| `--thread-limit` | the `MITATEDB_THREAD_LIMIT` value carried by every NEW-basis revision counted below that can take traffic, plus the candidate (whose value is the one step 13's own deploy command carries, §10.10.3). If they differ, use the largest. **Omit the argument when even one of those revisions has the name unset** -- an unset NEW-basis revision runs on the code's own default (`DEFAULT_THREAD_LIMIT`), which is not read from the platform |
+| `--data-process-count-old-basis` | the WORST-CASE OLD-basis Data process count (the total computed below) -- `0` when no OLD-basis revision is counted |
+| `--concurrency` | the `MITATEDB_MAX_CONCURRENCY` value carried by every OLD-basis revision counted in `--data-process-count-old-basis`, INCLUDING one that cannot take traffic (an OLD-basis process's own real demand does not depend on whether it currently serves). If they differ, use the largest. **Pass this only when `--data-process-count-old-basis` is 1 or more; omit it when that count is `0`, and also omit it (leaving that part of item (8) `unknown`) when it is 1 or more and those values are not all the same or even one is unset** |
 | `--data-process-ceiling` | the NEW candidate Data revision's own process ceiling: its `--max-instances` (i.e. `autoscaling.knative.dev/maxScale` once deployed) times its `MITATEDB_WORKERS` (§6.5) -- this is the value compared against the `process_ceilings` declaration |
-| `--data-process-count-total` | the WORST-CASE Data process count: the sum, over every revision that can serve at the same time, of that revision's `autoscaling.knative.dev/maxScale` times its worker count, plus the candidate's own ceiling (the total computed below). **Never the number of instances or processes running at the moment of the read** -- that number is a snapshot, and passing it makes the demand arithmetic too small, so item (8) can come back confirmed on a database that PostgreSQL's own `CONNECTION LIMIT` refusal would hit under load |
+| `--data-process-count-total` | the WORST-CASE Data process count across BOTH bases: the sum, over every revision (OLD-basis and NEW-basis alike) that can serve at the same time, of that revision's `autoscaling.knative.dev/maxScale` times its worker count, plus the candidate's own ceiling (the total computed below). **Never the number of instances or processes running at the moment of the read** -- that number is a snapshot, and passing it makes the demand arithmetic too small, so item (8) can come back confirmed on a database that PostgreSQL's own `CONNECTION LIMIT` refusal would hit under load |
 | `--control-process-ceiling` | the same as `--data-process-ceiling`, for Control, with `MITATEDB_CONTROL_WORKERS` (always 1) in place of `MITATEDB_WORKERS` |
 | `--control-process-count-total` | the same as `--data-process-count-total`, for Control |
 | `--control-not-deployed` | pass this INSTEAD of both Control arguments, and only when no Control process is deployed at all. It is the only way to omit them; it excludes Control's own roles from item (8)'s `CONNECTION LIMIT = -1` check, from the demand arithmetic, and from the declaration comparison, and puts `control_deployed: false` in the output |
 | `--reserved-connections` | `superuser_reserved_connections` plus `reserved_connections` plus whatever Cloud SQL itself reserves. Omit until the source (value and document) for the Cloud SQL reserve is established |
 
-**A revision's worker count** is the `MITATEDB_WORKERS` value it carries
-(`MITATEDB_CONTROL_WORKERS` on Control), read from the revision's env the
-same way as `MITATEDB_MAX_CONCURRENCY` above. When it does not carry that
-name, it is the revision's `WEB_CONCURRENCY` (uvicorn's `--workers` falls
-back to it on an image whose `CMD` does not pass `--workers`), and when it
-carries neither, 1. If the value read is not a positive integer, omit the
+**A NEW-basis revision's worker count** is the `MITATEDB_WORKERS` value it
+carries (`MITATEDB_CONTROL_WORKERS` on Control), read from the revision's
+env the same way as `MITATEDB_MAX_CONCURRENCY`. **An OLD-basis revision's
+worker count** is its `WEB_CONCURRENCY` value (uvicorn's `--workers` falls
+back to it on an image whose `CMD` does not pass `--workers`), or `1` when
+it carries neither. If the value read is not a positive integer, omit the
 total.
 
-**Demand is still counted from `concurrency`.** `ops inventory` counts each
-role's connection demand from the declared `concurrency` (§10.10's
-preconditions), not from the thread limit §6.5's connection budget uses.
-So at the default `concurrency` (32) a rollout whose candidate runs
-`MITATEDB_WORKERS` of 2 or more reads item (8) as blocked: the smallest
-such Data total is 3 (the serving revision's one process and the
-candidate's two), and the api demand 3 x 2 x 32 = 192 is above `0014`'s
-132.
+**Cases that leave `--data-process-count-old-basis`/`--concurrency`/
+`--thread-limit` omitted** (item (8) then `unknown` for the parts that
+depend on them):
+
+- a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision is among those
+  counted (that env overrides the pool size F-16 itself never reads
+  either -- an existing gap this runbook does not close),
+- an OLD-basis revision carries `MITATEDB_THREAD_LIMIT`, or its own
+  `concurrency` is below 6 (its real api-role demand can then exceed the
+  `2 × concurrency` floor `ops inventory` assumes for an OLD-basis
+  process),
+- a revision's digest and its `MITATEDB_WORKERS` presence disagree (the
+  basis check above),
+- a NEW-basis revision does not carry `MITATEDB_THREAD_LIMIT`.
+
+**Disclosure.** `ops inventory` cannot check that a declared OLD-basis
+process count is itself correct: a wrong, too-small declaration
+undercounts demand.
+
+**Demand is counted per basis.** `ops inventory` counts a NEW-basis
+process's connection demand from `role_pool_size(--thread-limit)` -- the
+SAME per-process floor F-16 uses (§6.5) -- and an OLD-basis process's
+demand from its own declared `--concurrency`, adding the two together
+(design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-2). At the
+default thread limit (4) and the default OLD-basis `concurrency` (32), a
+rollout of one OLD-basis process plus `W` NEW-basis processes has an api
+demand of `64 + 12W`: confirmed against `0014`'s 132 through `W = 5`,
+blocked at `W = 6` (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md
+§5.1).
 
 **How the worst-case total is computed** (per service):
 
@@ -2437,27 +2487,40 @@ candidate's two), and the api demand 3 x 2 x 32 = 192 is above `0014`'s
      --format='value(metadata.name,metadata.annotations."autoscaling.knative.dev/minScale")'
    ```
 
-3. Add the candidate: the `--max-instances` value of the deploy command
-   §10.10 step 13 will run, times the `MITATEDB_WORKERS` value that
-   command sets. Once the candidate is deployed, read its
+3. Decide each revision's own basis (above) for every revision from steps
+   1-2, and for the candidate. **If any one revision's digest and
+   `MITATEDB_WORKERS` presence disagree, omit the OLD-basis total for the
+   whole service** (the argument table above).
+4. Add the candidate, on the NEW basis: the `--max-instances` value of the
+   deploy command §10.10 step 13 will run, times the `MITATEDB_WORKERS`
+   value that command sets. Once the candidate is deployed, read its
    `autoscaling.knative.dev/maxScale` and its `MITATEDB_WORKERS` back; if
    either differs from the command's value, redo the Gate-0 read.
-4. Read `autoscaling.knative.dev/maxScale` and the worker count (above)
+5. Read `autoscaling.knative.dev/maxScale` and the worker count (above)
    for each revision from steps 1-2. **If even one `maxScale` is empty or
    not a positive integer, omit the total** -- the Cloud Run default is
    never substituted.
-5. The total is the sum over steps 1-3 of `maxScale` times the worker
-   count.
+6. `--data-process-count-old-basis` is the sum, over the OLD-basis
+   revisions from steps 1-2 only, of `maxScale` times worker count (`0`
+   when none). `--data-process-count-total` is that same sum PLUS the sum,
+   over the NEW-basis revisions from steps 1-2 and the candidate, of the
+   same product.
 
 **How the total is checked**:
 
 - The traffic percentages sum to 100 (if not, the projection is not being
   read, so omit the total).
 - Keep the addend table in the evidence (the revision's evidence label,
-  which step counted it, its `maxScale`, its worker count and their
-  product) and confirm its row count equals
-  (number of step-1 revisions) + (number of step-2 revisions) + 1 for the
-  candidate.
+  which step counted it, its own **basis** column from step 3, its
+  `maxScale`, its worker count and their product) and confirm its row
+  count equals (number of step-1 revisions) + (number of step-2
+  revisions) + 1 for the candidate. **A row whose basis column is left
+  empty (the digest/`MITATEDB_WORKERS` mismatch above) means the whole
+  total is omitted, not merely that row.** Sum the OLD-basis rows' own
+  product TWICE -- once summing the addend table's own basis column by
+  hand, once against the `--data-process-count-old-basis` value itself --
+  and confirm the two agree, the same way the grand total is checked
+  below.
 - Compute the total twice and get the same answer (shell arithmetic, and
   either a hand re-read of the addend table or a second operator).
 - If the two disagree, or the addend table and the traffic projection
@@ -2519,11 +2582,15 @@ own repository-side evidence.
 ### 10.5 DB-layer read (`ops inventory`)
 
 Run it in §10.3's subshell, with §10.4's values as arguments (a shape that
-works under bash 3.2 too). **Set the eight variables below in the parent
+works under bash 3.2 too). **Set the ten variables below in the parent
 shell first, from §10.4's own reads** (`CONNECTION_NAME` from §10.4.1, the
-seven others from §10.4.3); leave a variable unset for every argument
+nine others from §10.4.3); leave a variable unset for every argument
 §10.4 told you to omit, and set `CONTROL_NOT_DEPLOYED` to any non-empty
-value only in the case §10.4.3's table describes:
+value only in the case §10.4.3's table describes. **Leave `CONCURRENCY`
+unset when `DATA_PROCESS_COUNT_OLD_BASIS` is `0`** (§10.4.3: `inventory`
+rejects the pair otherwise) -- set `DATA_PROCESS_COUNT_OLD_BASIS` itself
+to `0` explicitly (never leave it unset) to declare that no Data process
+is on the old basis:
 
 ```sh
 (
@@ -2533,7 +2600,9 @@ value only in the case §10.4.3's table describes:
   export MITATEDB_PROVISION_DSN
   set --
   [ -n "$CONNECTION_NAME" ]             && set -- "$@" --cloud-sql-connection-name "$CONNECTION_NAME"
-  [ -n "$CONCURRENCY" ]                 && set -- "$@" --concurrency "$CONCURRENCY"
+  [ -n "$THREAD_LIMIT" ]                && set -- "$@" --thread-limit "$THREAD_LIMIT"
+  [ -n "$DATA_PROCESS_COUNT_OLD_BASIS" ] && set -- "$@" --data-process-count-old-basis "$DATA_PROCESS_COUNT_OLD_BASIS"
+  [ "$DATA_PROCESS_COUNT_OLD_BASIS" != "0" ] && [ -n "$CONCURRENCY" ] && set -- "$@" --concurrency "$CONCURRENCY"
   [ -n "$DATA_PROCESS_CEILING" ]        && set -- "$@" --data-process-ceiling "$DATA_PROCESS_CEILING"
   [ -n "$DATA_PROCESS_COUNT_TOTAL" ]    && set -- "$@" --data-process-count-total "$DATA_PROCESS_COUNT_TOTAL"
   [ -n "$CONTROL_PROCESS_CEILING" ]     && set -- "$@" --control-process-ceiling "$CONTROL_PROCESS_CEILING"
@@ -2548,9 +2617,11 @@ value only in the case §10.4.3's table describes:
 
 - An omitted argument leaves the part that depends on it `unknown`. The
   numeric arguments accept positive integers only
-  (`--reserved-connections` accepts 0 as well).
-  `--control-not-deployed` is mutually exclusive with both Control
-  arguments.
+  (`--reserved-connections` and `--data-process-count-old-basis` accept 0
+  as well). `--control-not-deployed` is mutually exclusive with both
+  Control arguments, and `--concurrency` is mutually exclusive with
+  `--data-process-count-old-basis 0` (leave `CONCURRENCY` unset in that
+  case, above).
 - The output is one JSON line on stdout. Keys against Gate-0 items:
   `connection` -> item (1)'s DB side, `declarations` -> (2), `migrations`
   -> (3), `credentials` -> (4), `ddl_lock` -> (6)'s runtime-settings half,
@@ -2737,7 +2808,7 @@ version counts as no record at all.**
 |---|---|---|---|---|---|---|
 | §10.6 compatibility | 5 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
 | §10.7 lock / stop time / `lock_timeout` | 5 | not accepted | 4 | `docs/work-orders/WORK_ORDER_R54_DEPROVISION_LIVE_CONNECTIONS_V1.md` §5 | -- | -- |
-| §10.10 upgrade procedure (stages 2-4) | 8 | not accepted | 7 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
+| §10.10 upgrade procedure (stages 2-4) | 9 | not accepted | 7 | `docs/work-orders/WORK_ORDER_R57_PLATFORM_MIGRATION_RUN_V1.md` §5 | -- | -- |
 
 ### 10.9 Gate-0 overall judgment and report
 
@@ -2771,8 +2842,9 @@ same run and reported together):
 - **In the FIRST read, "not ready" is the normal starting state of a
   deployment that has not had the platform remediation yet** -- a
   deployment where `0013` has not run reports item (6) `unknown`, one
-  where `MITATEDB_MAX_CONCURRENCY` is not declared reports item (8)
-  `unknown`, and so on. Report it (below), then look the finding up in
+  where `--thread-limit`/`--data-process-count-old-basis` cannot yet be
+  established (§10.4.3) reports item (8) `unknown`, and so on. Report it
+  (below), then look the finding up in
   §10.10.1's table of findings that stage 2 resolves. **A finding that is
   not in that table is not resolved by stage 2: stop there.**
 - **In the SECOND read (stage 3), any item that is still not confirmed
@@ -2815,7 +2887,13 @@ acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <
 
 ### 10.10 Platform upgrade procedure (stages 2-4)
 
-Procedure version: **8** (2026-09-29: adds step 7a for `0016`, counts a
+Procedure version: **9** (2026-09-29: splits item (8)'s demand
+arithmetic by revision basis -- an OLD-basis process's own demand from
+its declared `concurrency`, a NEW-basis process's from `role_pool_size
+(--thread-limit)`, the same floor the startup connection-limit check
+uses -- and updates the worked example accordingly; §10.4.3's own
+argument table gains `--thread-limit`/`--data-process-count-old-basis`.
+Version 8, 2026-09-29: adds step 7a for `0016`, counts a
 revision's processes as `maxScale` times its worker count in step 6 and
 step 13. Version 7, 2026-09-20, R-57 WP-3: follows
 `apply-platform-migration` accepting a run and refusing a solo file with
@@ -2853,26 +2931,33 @@ the version goes up by one and §10.8's acceptance record goes back to
   exactly what the tool computes:
 
   ```text
-  api role demand                    = data total x 2 x concurrency
+  api role demand                    = O x 2 x concurrency
+                                       + N x 2 x role_pool_size(thread_limit)
   controlplane role demand           = control total x 16
   auditreader role demand            = control total x 4
   each application's runtime role
-  and developer role demand          = data total x concurrency
+  and developer role demand          = O x concurrency + N x role_pool_size(thread_limit)
+  application demand (condition 2)   = 0 when no application is registered,
+                                        else the LARGER of that per-role
+                                        demand and 2 x K x (O + N)
+                                        (K = the number of registered
+                                        applications with a role)
   total demand                       = api + controlplane + auditreader
-                                       + the application demand (counted
-                                         once when at least one
-                                         application is registered, and
-                                         not at all when none is)
+                                       + the application demand (condition 2)
                                        + 2
   ```
 
-  The factor `2` in the api demand is the number of connection stores that
-  role carries, the `16` and the `4` are fixed floors, and the trailing
-  `+ 2` is the read's own connections. The auditreader demand is `0` unless
-  a role actually carries `0005`'s own auditreader grant shape. With
-  `--control-not-deployed` the controlplane and auditreader demands are
-  `0` and those roles are left out of both conditions below. The two
-  conditions item (8) then applies are:
+  (`O` = the worst-case OLD-basis Data process count, `N` = the worst-case
+  NEW-basis Data process count, `role_pool_size(thread_limit) = thread_limit
+  + 2` -- design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-2.)
+  The factor `2` in the api demand is the number of
+  connection stores that role carries per process, on either basis; the
+  `16` and the `4` are fixed floors that do not depend on either basis
+  (§6.5); and the trailing `+ 2` is the read's own connections. The
+  auditreader demand is `0` unless a role actually carries `0005`'s own
+  auditreader grant shape. With `--control-not-deployed` the controlplane
+  and auditreader demands are `0` and those roles are left out of both
+  conditions below. The two conditions item (8) then applies are:
 
   1. every one of those roles' own `CONNECTION LIMIT` is greater than or
      equal to its own demand above (and none of them is `-1`, which is
@@ -2886,30 +2971,38 @@ the version goes up by one and §10.8's acceptance record goes back to
      to `max_connections`.
 
   **Worked example** -- the limits step 7 leaves once `0014` has been
-  applied, a declared concurrency of 32, at least one application
-  registered, and both worst-case process totals equal to 2, which is the
-  smallest total a rollout produces (the revision now serving and the
-  candidate stand side by side):
+  applied, a declared OLD-basis `concurrency` of 32, a `thread_limit` of 4
+  (`role_pool_size` 6), at least one application registered, one OLD-basis
+  process (`O = 1`) and `W` NEW-basis processes (`N = W`) -- the shape a
+  rollout produces once the revision now serving and the candidate stand
+  side by side, with both worst-case control totals equal to 1 (design
+  docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md §5):
 
   ```text
-  role                    limit   demand at a total of 2   condition 1
-  api                       132   2 x 2 x 32 = 128         128 <= 132 ok
-  controlplane               36   2 x 16     =  32          32 <=  36 ok
-  auditreader                12   2 x 4      =   8           8 <=  12 ok
+  role                    limit   demand at W = 5              condition 1
+  api                       132   2x32 + 2x6x5 = 124           124 <= 132 ok
+  controlplane               36   16                            16 <=  36 ok
+  auditreader                12    4                             4 <=  12 ok
   each application's
-  runtime / developer        68   2 x 32     =  64          64 <=  68 ok
+  runtime / developer        68   32 + 6x5 = 62                 62 <=  68 ok
 
-  total demand   = 128 + 32 + 8 + 64 + 2 = 234   (condition 2 compares
-                                                  234 + the reserve
-                                                  against max_connections)
+  total demand   = 98 + 18x5 + 20 = 208   (98 + 18W + 20C is the general
+                                            form at C = 1 control process;
+                                            condition 2 compares 208 + the
+                                            reserve against max_connections)
   ```
 
-  **At a worst-case total of 3 those same limits do not hold**: the api
-  demand is 3 x 2 x 32 = 192, above 132, so condition 1 fails and the
-  answer is `blocked—platform remediation required`. The way back to a
-  total of 2 is the total's own inputs (§10.4.3): the tag on a revision
-  that is kept only for reachability, and a `minScale` of 1 or more on a
-  revision that is not serving. Taking a tag off is the way out
+  **At `W = 6` the api role's own condition 1 fails**: the api demand is
+  `2x32 + 2x6x6 = 136`, above 132, so the answer is
+  `blocked—platform remediation required`. `W <= 5` is therefore the
+  largest NEW-basis worker count this one-OLD-basis-process rollout
+  supports without a further platform migration; once every counted
+  revision is on the NEW basis (`O = 0`), the same limits instead support
+  `V + W <= 11` total NEW-basis processes across the two revisions (§6.5's
+  own table), since the OLD-basis term drops out entirely. The way back
+  from a `W` that fails is the total's own inputs (§10.4.3): the tag on a
+  revision that is kept only for reachability, and a `minScale` of 1 or
+  more on a revision that is not serving. Taking a tag off is the way out
   §10.10.1's own item (8) `unknown` row already names, and it "is itself
   a traffic-projection change and therefore carries the same three
   conditions as step 10's own move (the isolated proof, the independent
@@ -2921,15 +3014,17 @@ the version goes up by one and §10.8's acceptance record goes back to
   condition 1 compares, while condition 2 compares a sum built out of the
   demands, the reserve and `max_connections` -- none of which a
   `CONNECTION LIMIT` change touches -- so that sum is the same before and
-  after step 7. Read the sum for what it is: the application demand enters
-  it ONCE however many applications are registered, so it is the number
-  this procedure compares rather than the number of connections the
-  cluster could physically be asked for, which grows with the count of
-  registered applications and counts each application's runtime and
-  developer role separately. When it is condition 2 that fails, the lever
-  is the Cloud SQL instance's own `max_connections` flag (§3.2b names it)
-  rather than any migration -- what value it should carry is not settled
-  here.
+  after step 7. **The application term in that sum is the LARGER of the
+  per-role demand above and `2 x K x (O + N)`** (K = the number of
+  registered applications with a role): each of the
+  K applications holds a persistent connection on each of its own two
+  roles per Data process at once, so a once-per-process count alone would
+  undercount once `K` reaches 4 at the default thread limit. Read the sum
+  for what it is: the number this procedure compares, never smaller than
+  the real worst-case persistent-connection count. When it is condition 2
+  that fails, the lever is the Cloud SQL instance's own `max_connections`
+  flag (§3.2b names it) rather than any migration -- what value it should
+  carry is not settled here.
 
   **If even one of them does not hold, stage 2 does not start**: report
   `blocked—platform remediation required` with which role or which sum
@@ -3158,7 +3253,9 @@ finding up here before starting:
 | (6) `ddl_lock` | blocked, reason `statement-timeout-unbounded`: a declared value is 0, negative, or unparseable | step 4 and step 7 -- both files set `5000ms` unconditionally. If the unbounded value was one this deployment had chosen on purpose (step 2's record), choose a POSITIVE replacement and pass it to `set-platform-timeouts` in step 4 instead |
 | (7) legacy base-URL env | confirmed + `remediation-required`: a legacy name is on the current revision or the current template | step 10 (the env-only change removes both names from the template) |
 | (7) legacy base-URL env | blocked: the deploy that will create the candidate carries the legacy names forward without removing them | step 10, plus step 13's own deploy, which must carry the removal flag §10.4.2 step 2 names |
-| (8) `connection_headroom` | `unknown`: `--concurrency` was omitted because `MITATEDB_MAX_CONCURRENCY` is not carried by every Data revision that can take traffic (§10.4.3), or because those revisions do not all carry the same value | step 10 in full -- the env-only change declares the value, and on a service whose traffic is pinned to a revision it also moves the traffic onto the revision that carries it; step 13's own deploy carries the same value to the candidate. **A revision reachable only by a tag keeps its own env**, which a template change does not reach, so if one of those is missing the value this row does not resolve the finding: report and stop. The way out is to take the tag off that revision (`gcloud run services update-traffic <service> --remove-tags=<tag> --project=<project> --region=<region> --quiet`), which is itself a traffic-projection change and therefore carries the same three conditions as step 10's own move (the isolated proof, the independent audit and the requester's approval) -- otherwise it is a separate decision |
+| (8) `connection_headroom` | `unknown`: `--concurrency` was omitted because `MITATEDB_MAX_CONCURRENCY` is not carried by every OLD-basis Data revision that can take traffic (§10.4.3), or because those revisions do not all carry the same value | step 10 in full -- the env-only change declares the value, and on a service whose traffic is pinned to a revision it also moves the traffic onto the revision that carries it; step 13's own deploy carries the same value to the candidate. **A revision reachable only by a tag keeps its own env**, which a template change does not reach, so if one of those is missing the value this row does not resolve the finding: report and stop. The way out is to take the tag off that revision (`gcloud run services update-traffic <service> --remove-tags=<tag> --project=<project> --region=<region> --quiet`), which is itself a traffic-projection change and therefore carries the same three conditions as step 10's own move (the isolated proof, the independent audit and the requester's approval) -- otherwise it is a separate decision |
+| (8) `connection_headroom` | `unknown`: `--thread-limit` was omitted because a NEW-basis Data revision that can take traffic does not carry `MITATEDB_THREAD_LIMIT`, or those revisions do not all carry the same value | step 10 in full, the same way as the `--concurrency` row above -- declare `MITATEDB_THREAD_LIMIT` on the env-only revision and on the candidate's own step 13 deploy. The same tag-reachable-revision exception applies: report and stop if one is missing |
+| (8) `connection_headroom` | `unknown`: `--data-process-count-old-basis` (and, with it, `--concurrency`) was omitted for one of §10.4.3's own reasons -- a `MITATEDB_PLATFORM_POOL_SIZE`-carrying revision among those counted, an OLD-basis revision carrying `MITATEDB_THREAD_LIMIT` or whose own `concurrency` is below 6, a revision whose image digest and `MITATEDB_WORKERS` presence disagree, or a NEW-basis revision missing `MITATEDB_THREAD_LIMIT` | **not a finding this stage resolves.** None of these is a platform-state defect step 4-11 changes; each is a property of which revisions are currently deployed and what they carry, which only a further deployment decision (redeploying or retiring the revision in question) changes -- report `blocked—platform remediation required` and stop |
 | (8) `connection_headroom` | `unknown`: `--reserved-connections` was omitted because the reserve was not established | step 11 |
 | (8) `connection_headroom` | `unknown`: a role's `CONNECTION LIMIT` is `-1` | step 7 (`0012`), for a role `0012` itself names -- a `-1` on any other role is not resolved here (2026-09-18: step 7 now ends with `0014`, which names `mitatedbsvc_auditreader` too, so a `-1` on it is resolved here as well; a `-1` on a role none of the files names still is not) |
 | (8) `connection_headroom` | `unknown` + `remediation-required`: the `process_ceilings` declaration is absent | step 5 and step 6 |
@@ -3593,23 +3690,28 @@ Gate-0 ready (step 12) gates exactly this stage.
     (`MITATEDB_DATA_BASE_URL`, `MITATEDB_CONTROL_BASE_URL`): if the deploy
     carries env forward, pass the removal flag §10.4.2 step 2 names.
     **The deploy's own env must include
-    `MITATEDB_MAX_CONCURRENCY=<the value step 10 declared>`**, and
-    `MITATEDB_WORKERS=<the worker count step 6's --data was computed
-    from>` (§6.5: the variable is required and has no default). §6.1/§6.2's
-    deploy sets the env with `--set-env-vars`, which replaces it wholesale,
-    so step 10's declaration is not inherited by a revision this command
-    creates: leave the name out and the candidate runs on the code's own
-    default instead of the value item (8) was judged with, which is the
-    role `CONNECTION LIMIT` demand `0012` exists to bound (2026-09-18:
-    and `0014` after it, which is the file that carries the limits a
-    rollout's own two concurrent revisions need). Do not modify
-    the rollback target revisions. After deploying, do §10.4.2 step 3 and
-    §10.4.3 step 3, and read the candidate's own
-    `MITATEDB_MAX_CONCURRENCY` and `MITATEDB_WORKERS` back as well: if
-    either differs from the value the second read used, item (8) was
-    judged on a value this deployment does not run, so redo the read --
-    the same rule §10.4.3 step 3 applies to a ceiling that reads back
-    differently.
+    `MITATEDB_MAX_CONCURRENCY=<the value step 10 declared>`**,
+    `MITATEDB_THREAD_LIMIT=<the value used for item (8)'s own
+    --thread-limit, §10.4.3>`, and `MITATEDB_WORKERS=<the worker count
+    step 6's --data was computed from>` (§6.5: the latter two are
+    required and have no default). `MITATEDB_MAX_CONCURRENCY` is required
+    here for its own admission-slot bound (§6.5's `concurrency` slot
+    directory), on the candidate exactly as on every other revision --
+    item (8) reads it as a judging value only from an OLD-basis revision
+    (§10.4.3); the candidate itself, being NEW-basis, is judged from
+    `MITATEDB_THREAD_LIMIT` instead. §6.1/§6.2's deploy sets the env with
+    `--set-env-vars`, which replaces it wholesale, so step 10's
+    declaration is not inherited by a revision this command creates:
+    leave a name out and the candidate runs on the code's own default for
+    it instead of the declared value, which for `MITATEDB_THREAD_LIMIT`
+    is the role `CONNECTION LIMIT` demand `0014` exists to bound. Do not
+    modify the rollback target revisions. After deploying, do §10.4.2
+    step 3 and §10.4.3 step 3, and read the candidate's own
+    `MITATEDB_MAX_CONCURRENCY`, `MITATEDB_THREAD_LIMIT` and
+    `MITATEDB_WORKERS` back as well: if any of the three differs from the
+    value the second read used, item (8) was judged on a value this
+    deployment does not run, so redo the read -- the same rule §10.4.3
+    step 3 applies to a ceiling that reads back differently.
 14. **Restart Data/Control**: declarations are read at startup, so the
     candidate's own start IS the restart, and it is where step 4's
     restored role settings reach the processes. When the change shortens a
