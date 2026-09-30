@@ -97,6 +97,7 @@ from adapter import (  # noqa: E402
     IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
+    PlanVerificationHold,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
@@ -885,6 +886,63 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     finally:
         release.set()
         setattr(cell_obj, "_idempotency_check", original_check)
+
+
+# port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
+# section 9's `conformance-tests/` paragraph, Q-5): `hold_after_plan_
+# verification` realization for this HTTP plug (the same running
+# process's cell, reached the same way `_hold_after_idempotency_check`
+# above reaches it). A schema operation
+# on `ApplicationCell` (`create_collection` / `add_field` / `alter_field`,
+# `cell.py`) checks its `plan` against the Application's current revision
+# in the cell (`check_plan_precondition`), and only then calls the
+# backend's DDL-carrying method -- `create_collection` / `add_field` /
+# `alter_field_constraints` -- which is the first thing that changes the
+# schema. The stall point is the ENTRY of that backend call, on the
+# Application's own backend instance: after the plan check (and after
+# every lock the cell took for it), before the first DDL statement. One
+# armed hold claims the first call that reaches it (a `threading.Lock`
+# nobody releases) and lets every later call through, so exactly ONE
+# schema operation is held. Data operations never reach these three
+# methods.
+
+
+@contextmanager
+def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerificationHold]:
+    backend = cell_obj._backend  # noqa: SLF001 -- adapter-internal plumbing, same convention `_hold_after_idempotency_check` above uses.
+    names = ("create_collection", "add_field", "alter_field_constraints")
+    originals = {name: getattr(backend, name) for name in names}
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+
+    def _stalling(original):
+        def _stalled(*args, **kwargs):
+            if claimed.acquire(blocking=False):
+                entered.release()
+                release.wait()
+            return original(*args, **kwargs)
+
+        return _stalled
+
+    for name, original in originals.items():
+        setattr(backend, name, _stalling(original))
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_plan_verification: no schema operation reached the entry of the backend's "
+                f"DDL-carrying method within {timeout_s}s (expected the next schema operation on this "
+                "Application to stall there -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield PlanVerificationHold(_wait_until_held)
+    finally:
+        release.set()
+        for name, original in originals.items():
+            setattr(backend, name, original)
 
 
 class _AuthGate:
@@ -2212,6 +2270,20 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         cell = self._cells[session.application_id]
         return _hold_after_idempotency_check(cell, idempotency_key)
+
+    # port v1.20: wraps this Application's own backend's DDL-carrying
+    # methods -- see `_hold_after_plan_verification`'s own module comment
+    # for why the stall point sits at their entry and what a concurrent
+    # second schema operation waits on.
+    def hold_after_plan_verification(self, session):
+        """See `ConformanceAdapter.hold_after_plan_verification`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_plan_verification` and the comment immediately above
+        it."""
+        assert isinstance(session, _Session)
+        cell = self._cells[session.application_id]
+        return _hold_after_plan_verification(cell)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
