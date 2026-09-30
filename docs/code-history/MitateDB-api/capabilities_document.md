@@ -110,3 +110,17 @@ new:
 ```
 This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names -- a select entry names its own index (select/<i>), matching where/order_by/mutation-where, and a mutation's values key names itself (operations/<i>/values/<name>) -- each refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
 ```
+
+### correction: 2026-09-30
+
+- reason: roadmap R-115 (contract 1.13.0, subordinate ruling 18) -- this host declares 1.13.0 in the same commit as its own audit durability behavior
+
+old:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names -- a select entry names its own index (select/<i>), matching where/order_by/mutation-where, and a mutation's values key names itself (operations/<i>/values/<name>) -- each refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
+```
+
+new:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names -- a select entry names its own index (select/<i>), matching where/order_by/mutation-where, and a mutation's values key names itself (operations/<i>/values/<name>) -- each refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window. This host also declares contract 1.13.0 in the same commit as its own audit durability behavior -- a service process that stops without completing a graceful shutdown loses neither the audit event of an operation whose response was already returned nor the count of any denial occurrence whose response was already returned -- 1.13.0's own unconditional obligation, never ahead of the behavior it declares.
+```

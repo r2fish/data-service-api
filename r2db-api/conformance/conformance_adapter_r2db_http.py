@@ -384,6 +384,10 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         # adapter's own control stack never reads the DB-side `platform_
         # declarations` table at all (same reasoning as 0013/0014 above).
         "0015_credential_request_rate.sql",
+        # the refusal-window counter and its function -- depends on 0007
+        # above (`application_audit`, the `auditreader` role), which this
+        # adapter's data plane writes every refusal count through.
+        "0016_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -398,6 +402,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
     _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+    _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
     controlplane_dsn = _dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db)
     auditreader_dsn = _dsn_with(admin_dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db)
@@ -1286,7 +1291,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # audit` writer -- the SAME `<prefix>_api` role/DSN `self.
             # _credentials` above already connects with (migration 0007
             # grants it INSERT-only on this table). Without this, this
-            # adapter's own fail-closed/buffer-class application-plane
+            # adapter's own durable application-plane
             # events would stay in-memory only, and C-09 vector 1
             # (observing a destructive delete through `audit_query`) could
             # never see them for THIS (HTTP) adapter -- only for the in-
@@ -2672,22 +2677,6 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # work order's own explicit instruction for this WP; both paths
         # resolve to the identical handler once a peer implements D-5.
         return self._control_send("POST", "/v1/audit/query", actor, json_body=dict(request))
-
-    # port v1.8
-    def flush_audit_buffer(self) -> None:
-        if self._audit_query_status() not in ("enabled", "partial"):
-            raise self._audit_surface_absent(
-                "flush_audit_buffer",
-                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
-                "deployment's own declared posture",
-            )
-        # Phase 4 WP-2(b): identical rationale to `conformance_adapter_
-        # r2db.py`'s own `flush_audit_buffer` -- `self._service` (this
-        # adapter's own real, Postgres-backed `DataService`) owns D-4's
-        # bounded buffer and D-3's denial-coalescing windows; there is no
-        # separate HTTP endpoint for this (an adapter-privileged test
-        # hook, not a contract operation, design §8.3).
-        self._service.flush_audit_buffer()
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:

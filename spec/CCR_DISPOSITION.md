@@ -310,6 +310,36 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     **版数の扱い**: 義務を足さず、どの実装の挙動も変えない記述の変更であるため minor 版 (1.12.0) とする。`versioning.compatibility` の「removal or semantic change requires a new major version」には当たらないと判断した: client が計画に使える保証 (どの 1 窓でも宣言値を超えて通さない、`control_requests_per_minute` とは別の窓) は変わらず、1.4.0 は窓の起点を定めていなかったので境目を当てにした計画は元から成り立たず、両 peer は 1.4.0 の実装の当初から sliding で数えている。両 peer の `contract_version` は契約の文言と同一コミットで動かす。
 
+18. **契約 1.13.0 (service process の突然死で audit の証拠を失わない) への裁定 (2026-09-30、依頼者裁定、監督起票 R-115)。** 新規 CCR ではなく、共通の安全の結果 1 件を契約に足す。無条件の義務 1 件を `versioning.obligations` に足す。規模 M・変更クラス D。設計は `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` (v0.5)、作業指示書は `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md`。
+
+    **発端**: `audit.sink_failure_policy` は、通常の data 操作の event の欠落を、explicit operational alert を出す bounded buffer に限って許す。service process が graceful shutdown を完了できずに止まる (OOM kill、supervisor の SIGKILL など) と、buffer の中の event と、まだ書かれていない拒否の件数は、alert を出せないまま消える。攻撃者は、worker を healthcheck に応答できないほど忙しくして supervisor に kill させれば、自分の操作の証拠を消せる (`security/THREAT_MODEL_V1.md` T-14)。この許容を改めるため、共通の結果として契約に書く。実現手段 (同期の書き込みか、共有の行への加算か) は契約に書かない。host / instance の消失 (電源断、instance の破棄) は文に含めない。共通の条件では再現できないからである。
+
+    **本文 — 1.13.0 の `audit.process_loss_policy` の全文**:
+
+    > An implementation declaring 1.13.0 or higher loses, when a service process stops without completing a graceful shutdown, neither the audit event of an operation whose response the service had already returned nor the count of any denial occurrence whose response the service had already returned. A buffer that such a stop can empty is therefore not the bounded buffer sink_failure_policy permits.
+
+    **`versioning.version_binding` に足す 1 段落** (1.12.0 の文の後、version-flip の文の前):
+
+    > Only an implementation declaring 1.13.0 or higher additionally claims conformance to the obligation 1.13.0 introduced (subordinate ruling 18), unconditional in the same sense as every unconditional obligation enumerated above: audit.process_loss_policy -- a service process that stops without completing a graceful shutdown loses neither the audit event of an operation whose response the service had already returned nor the count of any denial occurrence whose response the service had already returned. An implementation still declaring 1.12.0 is not held to any 1.13.0-only obligation retroactively.
+
+    **`versioning.obligations` に足す entry** (末尾。無条件 1 件、条件付き 0 件):
+
+    > {"version": "1.13.0", "subordinate_ruling": 18, "unconditional": ["audit_evidence_of_answered_requests_survives_abrupt_process_stop"], "conditional": []}
+
+    `audit.sink_failure_policy` は変えない。上の文の「1.13.0 or higher」の限定により、1.12.0 以下を宣言する実装に対して `sink_failure_policy` の bounded buffer の許容は遡って狭まらない。書き込み側の性質なので、`audit_query` を提供しない実装にも掛かる (無条件)。応答を返していない in-flight の要求は対象外である。
+
+    **依頼者裁定 (逐語)**:
+
+    > 1は(i)、2は着手、Dで進めてください、別セッションで。
+
+    監督の問い 2「R-115 に着手するか。着手する場合、Class D の見込みで進めてよいか」への回答である。「1は(i)」は別件 R-114 (従属判断 17) への回答で、本裁定には当たらない。
+
+    > すべて監督案どおりで進めてください
+
+    監督が Q-1 / Q-2 (event の扱い)、Q-3 (拒否の件数)、Q-4 (契約)、Q-5 (範囲) をそれぞれ監督案付きで問うたのへの回答である (設計 §10)。確定は Q-1 = 1-A、Q-2 = (i)、Q-3 = 2-A、Q-4 = 契約に足す (設計 §6 の文案を確定文言とする。版は merge 時の main の次の版。host / instance の消失は文に含めない)、Q-5 = 設計 §2 の 11 と 12 の 2 件を同じ変更セットに含める。上の 3 つの本文のうち `audit.process_loss_policy` の文は依頼者が確定した文言であり、`versioning.version_binding` の段落と `versioning.obligations` の entry は、その文から機械的に導いた監督確定である (作業指示書 §11 の訂正註 1)。
+
+    **版数の扱い**: 契約 1.12.0 の次の minor 版 (1.13.0) とする。この従属判断は実挙動を伴う (両 peer が worker process の突然死で audit の証拠を失わない実装を入れる) ので、両 peer の `contract_version` は、実挙動を入れる commit で動かす (`versioning.version_binding` の "must land in the same commit as the real behavior change it claims")。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**

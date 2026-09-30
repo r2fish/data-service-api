@@ -570,6 +570,20 @@ new:
 This control-plane document also flips to 1.11.0 in the same commit as the data-plane flip in `capabilities_document.py` (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.11.0's own obligation governs the data surface's select/where/order_by/mutation-values operations only. This control-plane document declares 1.12.0 in the same commit as the data-plane document, with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window, which this service counts as a sliding one.
 ```
 
+### correction: 2026-09-30
+
+- reason: roadmap R-115 (contract 1.13.0, subordinate ruling 18) -- this control-plane document declares 1.13.0 in the same commit as the data-plane document
+
+old:
+```
+This control-plane document also flips to 1.11.0 in the same commit as the data-plane flip in `capabilities_document.py` (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.11.0's own obligation governs the data surface's select/where/order_by/mutation-values operations only. This control-plane document declares 1.12.0 in the same commit as the data-plane document, with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window, which this service counts as a sliding one.
+```
+
+new:
+```
+This control-plane document also flips to 1.11.0 in the same commit as the data-plane flip in `capabilities_document.py` (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.11.0's own obligation governs the data surface's select/where/order_by/mutation-values operations only. This control-plane document declares 1.12.0 in the same commit as the data-plane document, with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window, which this service counts as a sliding one. This control-plane document declares 1.13.0 in the same commit as the data-plane document (C-19's cross-plane version-match assert).
+```
+
 ## CH-0261
 
 - moved from: `src/r2db_api/control_plane.py` (`<module>`)
@@ -621,6 +635,20 @@ request.
 # present" as "this row alone represents 2+ occurrences" being
 # the ONLY way to represent 2+; it is, but the converse
 # (absent implies exactly 1) is what this note pins down.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer (with its overflow drop) is removed; only a denial-coalescing window can still represent exactly one occurrence
+
+old:
+```
+A denial-coalescing window or a buffer-overflow drop that ends up representing exactly one occurrence is written
+```
+
+new:
+```
+A denial-coalescing window that ends up representing exactly one occurrence is written
 ```
 
 ## CH-0264

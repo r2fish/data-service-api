@@ -22,7 +22,13 @@ health-check ping loop) -- it is scoped exactly to what the platform
 registry's own read-heavy, short-statement workload needs: reuse a
 recently-used, still-open connection where possible, create a new one
 under the configured cap otherwise, and fail closed (never fail open) when
-the cap is exhausted and no connection is returned in time. Consistent
+the cap is exhausted and no connection is returned in time. A connection
+that sat idle longer than `IDLE_PING_THRESHOLD_S` is checked with one
+round trip before it is handed out (`BoundedConnectionPool._ping`), so a
+server-side end of a long-idle session (a database restart, a failover, an
+idle disconnect on the route) is found by the pool and not by the caller's
+own first statement; a connection returned within the threshold is handed
+out unchecked, so a pool under load adds no round trip. Consistent
 with this whole package's own "no code sharing between peers" principle
 (R-2's closing paragraph): this is an independent implementation, not a
 port of any pooling library or of r2db-api's own pooling module.
@@ -51,6 +57,11 @@ from .psycopg_counting import CountingConnection
 # but this default keeps a single process' own contribution bounded to
 # exactly the server-side grant).
 DEFAULT_MAX_SIZE = 20
+
+# A connection idle in the pool for longer than this many seconds is
+# checked with one round trip (`BoundedConnectionPool._ping`) before it is
+# handed out again; one returned within this window is not.
+IDLE_PING_THRESHOLD_S = 1.0
 
 
 # design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4: the
@@ -268,6 +279,41 @@ class BoundedConnectionPool:
         with self._lock:
             self._created = max(0, self._created - 1)
 
+    def _ping(self, conn: "psycopg.Connection") -> bool:
+        """One round trip on an idle connection: a plain `SELECT 1` sent
+        through libpq directly, outside any transaction (the connection is
+        idle here, and psycopg opens its own transaction only lazily before
+        a statement of its own), so the connection goes back out neither
+        inside a transaction nor with a statement counted in its own
+        `execute_count`. `True` only when the server answered with a
+        result; any error, or a connection that psycopg now reports as
+        closed, is `False`."""
+        try:
+            result = conn.pgconn.exec_(b"SELECT 1")
+        except Exception:
+            return False
+        return result.status == psycopg.pq.ExecStatus.TUPLES_OK and not conn.closed
+
+    def _is_dead(self, conn: "psycopg.Connection") -> bool:
+        """`True` when `conn` must not be handed out: psycopg already knows
+        it is closed, or it sat idle in this pool longer than
+        `IDLE_PING_THRESHOLD_S` (measured from its last `release()`) and the
+        `_ping` round trip failed. A connection with no release time (one
+        this pool never saw returned) and one returned within the threshold
+        are not pinged."""
+        if conn.closed:
+            return True
+        returned_at = getattr(conn, "_pool_returned_at", None)
+        if returned_at is None or time.monotonic() - returned_at <= IDLE_PING_THRESHOLD_S:
+            return False
+        if self._ping(conn):
+            return False
+        try:
+            conn.close()
+        except psycopg.Error:
+            pass
+        return True
+
     def acquire(self) -> "psycopg.Connection":
         """Return a connection, reusing an idle one when possible.
 
@@ -279,13 +325,14 @@ class BoundedConnectionPool:
         """
         # 1) Reuse an idle connection, discarding any that turned out to be
         # dead (closed by the server, or left in an unrecoverable state) in
-        # the meantime.
+        # the meantime -- one that sat idle past `IDLE_PING_THRESHOLD_S` is
+        # asked with one round trip first (`_is_dead`).
         while True:
             try:
                 conn = self._idle.get_nowait()
             except queue.Empty:
                 break
-            if conn.closed:
+            if self._is_dead(conn):
                 self._fold_closed_connection_stats(conn)
                 self._forget_one()
                 continue
@@ -323,7 +370,7 @@ class BoundedConnectionPool:
                 conn = self._idle.get(timeout=min(0.05, remaining))
             except queue.Empty:
                 continue
-            if conn.closed:
+            if self._is_dead(conn):
                 self._fold_closed_connection_stats(conn)
                 self._forget_one()
                 continue
@@ -337,6 +384,7 @@ class BoundedConnectionPool:
         if conn.closed:
             self._forget_one()
             return
+        conn._pool_returned_at = time.monotonic()  # noqa: SLF001 -- read back by `_is_dead`
         self._idle.put(conn)
 
     def discard(self, conn: "psycopg.Connection") -> None:

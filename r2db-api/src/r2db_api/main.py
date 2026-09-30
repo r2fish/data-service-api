@@ -96,18 +96,6 @@ Environment variable contract (P2-D5, updated Q4 WP-1):
                                           control` declaration -- see
                                           `platform_declarations.require_
                                           control_status_matches_surfaces`.
-    R2DB_AUDIT_BUFFER_CAPACITY            optional, default 1000 -- D-4's
-                                          bounded in-memory buffer capacity
-                                          for ordinary (buffer-class)
-                                          data-operation success events,
-                                          per process.
-    R2DB_AUDIT_FLUSH_INTERVAL_S           optional, default 2.0 -- how
-                                          often the composition root's own
-                                          background thread calls
-                                          `DataService.flush_audit_buffer()`
-                                          (D-4's periodic flush trigger); a
-                                          latency knob only, never a
-                                          correctness one.
     R2DB_THREAD_LIMIT                     optional, unset or empty defaults
                                           to `DEFAULT_THREAD_LIMIT` (4) --
                                           `run_in_threadpool`'s own worker-
@@ -141,10 +129,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import os
 import sys
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping
@@ -176,7 +162,7 @@ from .errors import FoundationError
 from .limits import ResourceLimits, role_pool_size
 from . import postgres
 from .postgres import PostgresCell, _RefusingPlatformUpgradeCell, default_pool_manager
-from .service import _DEFAULT_AUDIT_FLUSH_INTERVAL_S, ControlAuthority, DataService
+from .service import ControlAuthority, DataService
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
 
@@ -262,7 +248,7 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
 
 
 def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
-    """Same fail-loud discipline as `_optional_float`, for a positive int:
+    """Fail-loud discipline for a positive int:
     unset or empty falls back to `default`, but a non-empty value that is
     not a positive integer stops startup (`ValueError` naming the
     variable) rather than silently degrading -- this sizes a worker-
@@ -287,31 +273,6 @@ def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> i
         raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer, got {raw!r}")
-    return value
-
-
-def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
-    """Phase 6 WP-0 (design D-4(a)): unlike `_optional_int`, this
-    function's only consumer is the audit-buffer flush interval, and a
-    misconfigured value there does not degrade gracefully --
-    `threading.Event.wait(0)`, `.wait(-1)`, and `.wait(float("nan"))` all
-    return immediately (`False`), so a value that is unset or empty is
-    fine (falls back to `default`, same discipline as `_optional_int`),
-    but a *non-empty* value that is not a finite, positive float turns the
-    flush thread into a silent hot loop -- something a deployer who
-    mistyped the variable would never notice, since nothing about a hot
-    flush loop looks alarming on its own. So this fails loudly at startup
-    instead (`ValueError` naming the variable), the same discipline this
-    module's own other env-var validity checks already use."""
-    raw = env.get(name)
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}") from None
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}")
     return value
 
 
@@ -639,9 +600,18 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         platform_declarations.check_request_rate_function(
             _writer_conn, schema=schema, migration=platform_declarations.REQUEST_RATE_MIGRATION_FILENAME,
         )
-
-    audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
-    audit_flush_interval_s = _optional_float(env, "R2DB_AUDIT_FLUSH_INTERVAL_S", _DEFAULT_AUDIT_FLUSH_INTERVAL_S)
+        # The refusal-window function every refusal's count runs through
+        # (as this same login role) must exist, be executable by it, and be
+        # in the state its migration leaves it in -- pinned `search_path`,
+        # no PUBLIC EXECUTE, owned by the schema's owner. Checked here so a
+        # platform missing the migration, or holding a function that is not
+        # safe to run as its owner, stops startup (and `--preflight`)
+        # instead of answering every refusal with a 503 or running an
+        # unsafe definer function.
+        platform_declarations.check_denial_window_function(
+            _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.DENIAL_WINDOW_MIGRATION_FILENAME,
+        )
 
     # `resource_limits`/`_role_pool_size` (per-application role pool sizing)
     # are now computed earlier, above the platform pool sizing (WP-4e) --
@@ -700,7 +670,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
 
     service = DataService(
         credentials, limits=resource_limits, cell_factory=_cell_factory, control_plane_status=control_plane_status,
-        durable_audit=durable_audit, audit_buffer_capacity=audit_buffer_capacity,
+        durable_audit=durable_audit,
         surfaces=surfaces,
         # Step 8 (Q4 D-2(e)): the DB-declared coalescing window, ms ->
         # seconds -- replaces the pre-Q4 hardcoded default (`DataService`'s
@@ -709,12 +679,6 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # audit_query.DECLARED_COALESCING_WINDOW_MS`, but no longer read
         # directly by this composition root).
         denial_coalesce_window_s=coalescing_window_ms / 1000.0,
-        # WP-2(a) fix round 2 review N-2: the alert-row rate floor tracks
-        # the ACTUAL configured flush interval (which `R2DB_AUDIT_FLUSH_
-        # INTERVAL_S` may have overridden away from the default), not a
-        # second, independently-defaulted value that could silently stop
-        # matching it.
-        audit_alert_min_interval_s=audit_flush_interval_s,
         process_ceiling=process_ceiling,
         operation_catalog_url=operation_catalog_url,
         # design D-3 (1)/(2): `rate` is `credentials`
@@ -734,65 +698,14 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     for slug in slugs:
         control.register_application(slug)
 
-    # Phase 4 (design D-4, "実装裁量" -- periodic flush trigger): a daemon
-    # thread that calls `service.flush_audit_buffer()` on a fixed interval
-    # for the lifetime of this process, so buffered/coalesced evidence does
-    # not sit un-durable indefinitely on a served application that happens
-    # to receive no further traffic. Purely a latency knob (see this
-    # module's own `_DEFAULT_AUDIT_FLUSH_INTERVAL_S` comment) -- correctness
-    # of D-3/D-4's own bounds does not depend on this thread running at all.
-    #
-    # WP-2(a) review M-3: both the stop `Event` and the `Thread` are now
-    # created FRESH inside `_lifespan`, on every entry, rather than once at
-    # `build_app()` call time -- `threading.Thread.start()` may only be
-    # called once per `Thread` object ("threads can only be started once");
-    # constructing them once outside `_lifespan` meant a second ASGI
-    # startup against the same built app (this repository's own tests, or
-    # any host that re-enters lifespan on the same app object) would raise
-    # on the second `start()`. A fresh pair per entry has no such limit.
+    # Every audit event and every refusal count is durable before its
+    # response is returned, so nothing runs in the background and nothing
+    # is flushed at shutdown; the lifespan only releases the pools.
     @asynccontextmanager
     async def _lifespan(_app: Any):
-        audit_flush_stop = threading.Event()
-
-        def _audit_flush_loop() -> None:
-            while not audit_flush_stop.wait(audit_flush_interval_s):
-                try:
-                    service.flush_audit_buffer()
-                except Exception:
-                    # A flush failure must never kill this thread (there
-                    # would then be nothing left to retry the next
-                    # interval) -- D-4's own sticky/backoff retry logic
-                    # already lives inside `flush_audit_buffer()`; this is
-                    # only a defensive backstop against a truly unexpected
-                    # exception escaping it.
-                    pass
-
-        audit_flush_thread = threading.Thread(target=_audit_flush_loop, name="r2db-audit-flush", daemon=True)
-        audit_flush_thread.start()
         try:
             yield
         finally:
-            audit_flush_stop.set()
-            audit_flush_thread.join(timeout=5.0)
-            # WP-2(a) review M-3/N-4: one final synchronous flush before
-            # the sink's pool closes below -- without this, up to
-            # `capacity` buffered events and every still-open denial-
-            # coalescing window's accumulated repeat count are silently
-            # discarded on a graceful shutdown (the periodic thread has
-            # just stopped, and nothing else will ever call this again for
-            # this process). `force_expire_denial_windows=True` (N-4): a
-            # window that has not YET reached its own `window_s` at this
-            # exact moment still gets its repeat-summary row written here
-            # -- shutdown is not a crash, so D-3's "crash loses only the
-            # in-progress window's count" allowance does not apply; an
-            # orderly stop must not discard it.
-            try:
-                service.flush_audit_buffer(force_expire_denial_windows=True)
-            except Exception:
-                # Best-effort, like every other flush attempt -- shutdown
-                # must still complete and release connections below even
-                # if the sink happens to be down at this exact moment.
-                pass
             # P2-D5: release every PostgreSQL connection this process holds
             # on shutdown -- the per-application pools shared through
             # `default_pool_manager` (`PostgresCell`'s own pooling) and the

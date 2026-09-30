@@ -39,7 +39,7 @@ from .service import _DENIAL_COALESCE_WINDOW_S
 # D-7: the vocabulary this peer's `audit_query` reader can ever surface,
 # across BOTH `control_audit` (control_plane.py's own `_deny`/
 # `_write_state_audit` call sites) and `application_audit` (service.py's
-# `_event`/`_denial_event`/`_AuditBuffer` overflow-alert call sites) --
+# `_event`/`_denial_event` call sites) --
 # `capabilities().audit_query.event_classes` publishes exactly this set
 # (`control_plane.py`), and `r2db-api/tests/test_audit_query.py::
 # test_declared_event_classes_cover_every_emittable_class` fixes it against
@@ -47,9 +47,8 @@ from .service import _DENIAL_COALESCE_WINDOW_S
 # call site with an unlisted class is caught here, not silently under-
 # declared. "authentication" (successful auth, `service.py`'s `_event`
 # call at "authentication") is deliberately EXCLUDED: it never reaches the
-# durable/buffered sink at all (`_event`'s own comment: "no durable/
-# buffered record at all"), so it can never actually appear through
-# `audit_query`.
+# durable sink at all (`_event`'s own comment: "no durable record at
+# all"), so it can never actually appear through `audit_query`.
 DECLARED_AUDIT_EVENT_CLASSES = frozenset(
     {
         # application-plane (service.py) -- durable-eligible only.
@@ -61,7 +60,7 @@ DECLARED_AUDIT_EVENT_CLASSES = frozenset(
         "authentication_denial",
         "security_control_failure",
         # control-plane (control_plane.py) -- every `control_audit` row is
-        # durable by construction (no buffer/coalescing on this plane).
+        # durable by construction (no coalescing on this plane).
         "application_lifecycle",
         "capability_denial",
         "control_credential_lifecycle",
@@ -110,7 +109,7 @@ DECLARED_AUDIT_EVENT_CLASSES = frozenset(
 # event_class="authentication")`) is indeed non-durable-only, but its
 # FAILURE path (`except FoundationError`, `_denial_event(event_class=
 # "authentication_denial", operation="authenticate", ...)`) durably routes
-# through the coalescing denial router whenever `exc.code` is one of
+# through the refusal-window count whenever `exc.code` is one of
 # `_DURABLE_DENIAL_CODES` (`AUTH_REQUIRED`/`AUTH_INVALID`/`AUTH_REVOKED`
 # among them) -- an actually-observed durable row is what caught this
 # during WP-2 (`conformance-tests/test_c09_audit_evidence.py`'s own
@@ -249,6 +248,18 @@ class AuditQueryReader(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+def _summary_dict(event: Any, window_end: datetime) -> dict[str, Any]:
+    """A refusal-window summary event as the plain-dict shape
+    `InMemoryAuditQueryStore.query` returns: `recorded_at` is the end of
+    the window the summary stands for, not the event's own `occurred_at`
+    (the first refusal's), so the summary sorts where the closed window
+    ends."""
+    row = _event_dict(event, plane="application")
+    assert row is not None  # the sink's own `occurred_at` is always ISO-8601
+    row["recorded_at"] = _to_utc(window_end)
+    return row
+
+
 def _event_dict(event: Any, *, plane: str) -> dict[str, Any] | None:
     """Reads an `audit.AuditEvent` dataclass instance's fields into the
     plain-dict shape `InMemoryAuditQueryStore.query` returns -- `occurred_at`
@@ -286,7 +297,10 @@ class InMemoryAuditQueryStore:
     half (`audit.ControlAuditSink`) and `application_audit`'s in-memory
     half (`audit.ApplicationAuditSink`), applying the identical
     `(recorded_at, plane, event_id)` order, opaque-cursor paging, and
-    visibility-lag filtering `PostgresAuditQueryStore` applies via SQL.
+    visibility-lag filtering `PostgresAuditQueryStore` applies via SQL. The
+    application plane's refusal-window summary events come from the sink's
+    own tally table (`ApplicationAuditSink.denial_window_summaries`), where
+    the Postgres reader reads the counter table.
 
     Constructed once by both the in-process conformance adapter (WP-1's
     own `conformance_adapter_r2db.py`, wired this WP) and (only for the
@@ -326,6 +340,17 @@ class InMemoryAuditQueryStore:
                 if after is not None and (row["recorded_at"], row["plane"], row["event_id"]) <= after:
                     continue
                 rows.append(row)
+        # The summary events of the application plane's closed refusal
+        # windows: read from the sink's own table of window tallies, the
+        # in-memory counterpart of the counter table the Postgres reader
+        # adds to its UNION.
+        for summary, window_end in self._application_audit.denial_window_summaries(closed_before=threshold):
+            row = _summary_dict(summary, window_end)
+            if class_filter is not None and row["event_class"] not in class_filter:
+                continue
+            if after is not None and (row["recorded_at"], row["plane"], row["event_id"]) <= after:
+                continue
+            rows.append(row)
         rows.sort(key=lambda row: (row["recorded_at"], row["plane"], row["event_id"]))
         return rows[:limit]
 

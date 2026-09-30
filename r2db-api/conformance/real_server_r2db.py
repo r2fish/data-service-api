@@ -61,6 +61,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -474,6 +475,7 @@ class _Platform:
     control_dsn: str
     api_dsn: str
     controlplane_dsn: str
+    auditreader_dsn: str
     schema: str
     platform_db: str
     app_pepper: str
@@ -562,6 +564,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         # design D-3 (1): the credential-keyed
         # `requests_per_minute` rate table -- depends only on 0005 above.
         "0015_credential_request_rate.sql",
+        # the refusal-window counter and its function -- depends on 0007
+        # above (`application_audit`, the `auditreader` role).
+        "0016_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -582,6 +587,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
     _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+    _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
 
     # design D-3 (5): `check_role_connection_limits` (F-16) multiplies
     # the controlplane/auditreader floors (`_CONTROLPLANE_ROLE_POOL_FLOOR`/
@@ -605,6 +611,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         control_dsn=control_dsn,
         api_dsn=_dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db),
         controlplane_dsn=_dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db),
+        auditreader_dsn=_dsn_with(admin_dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db),
         schema=schema,
         platform_db=platform_db,
         app_pepper=f"launcher-app-pepper-{secrets.token_hex(8)}",
@@ -695,6 +702,10 @@ class RealServerR2db:
         # mapping_configured()` reads both.
         self._last_data_ceiling: Optional[int] = None
         self._last_data_workers: Optional[int] = None
+        # The coalescing window (ms) the most recent `start()` declared
+        # through `ops declare-coalescing-window`; `None` when that call
+        # was not asked for one (the platform's own default then applies).
+        self._declared_coalescing_window_ms: Optional[int] = None
         # R-44 WP-3 (e), W44-3-9: the data/control upstream port
         # reservations this launcher itself owns for its whole lifetime --
         # `start()` mints both and `restart()` hands the SAME two objects
@@ -782,6 +793,7 @@ class RealServerR2db:
             "R2DB_CONTROL_CREDENTIAL_PEPPER": self._platform.control_pepper,
             "R2DB_CONTROLPLANE_DSN": self._platform.controlplane_dsn,
             "R2DB_PLATFORM_SCHEMA": self._platform.schema,
+            "R2DB_AUDIT_DSN": self._platform.auditreader_dsn,
         }
 
     # -- SQL read-back of what was actually declared (F1, WP-6c review
@@ -833,12 +845,25 @@ class RealServerR2db:
 
     # -- start/restart/stop --------------------------------------------
 
-    def start(self, *, ceilings: Mapping[str, int], workers: int = 1) -> None:
+    def start(
+        self, *, ceilings: Mapping[str, int], workers: int = 1,
+        coalescing_window_ms: Optional[int] = None,
+        audit_writer_timeouts_ms: Optional[tuple[int, int]] = None,
+    ) -> None:
+        """`coalescing_window_ms` (declared through the real `ops
+        declare-coalescing-window`) and `audit_writer_timeouts_ms` (a
+        `(statement, idle)` pair declared through the real `ops
+        set-platform-timeouts`, which is what the served `visibility_lag_ms`
+        derives from) are the two knobs a condition that reads audit
+        evidence back through `audit_query` turns to keep its own poll
+        short; both default to `None`, which leaves the platform's own
+        declarations untouched."""
         if self._started:
             raise LauncherStartupError("start() called while already started -- call stop() or restart() first")
         self._events = []
         self._last_data_ceiling = ceilings["data"]
         self._last_data_workers = workers
+        self._declared_coalescing_window_ms = coalescing_window_ms
         # F3 correction (WP-6c review 2026-09-09): the ENTIRE body below
         # -- `_ensure_provisioned()` (which can itself leave a throwaway
         # platform DB/role behind if it fails partway), the port
@@ -877,6 +902,26 @@ class RealServerR2db:
             if ceilings_result.returncode != 0:
                 raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings_result.stdout}\n{ceilings_result.stderr}")
             self._record("declare_process_ceilings")
+
+            if coalescing_window_ms is not None:
+                window_result = _run_ops(
+                    _ops_env(self._platform), "declare-coalescing-window", "--ms", str(coalescing_window_ms),
+                )
+                if window_result.returncode != 0:
+                    raise LauncherStartupError(
+                        f"declare-coalescing-window failed:\n{window_result.stdout}\n{window_result.stderr}"
+                    )
+                self._record("declare_coalescing_window")
+            if audit_writer_timeouts_ms is not None:
+                timeouts_result = _run_ops(
+                    _ops_env(self._platform), "set-platform-timeouts",
+                    "--statement-ms", str(audit_writer_timeouts_ms[0]), "--idle-ms", str(audit_writer_timeouts_ms[1]),
+                )
+                if timeouts_result.returncode != 0:
+                    raise LauncherStartupError(
+                        f"set-platform-timeouts failed:\n{timeouts_result.stdout}\n{timeouts_result.stderr}"
+                    )
+                self._record("set_platform_timeouts")
 
             assert self._script_dir is not None
             # design D-3 (2') / 完了条件 4/6: a fresh slot directory
@@ -1104,6 +1149,7 @@ class RealServerR2db:
         self._data_preflight_result = None
         self._last_data_ceiling = None
         self._last_data_workers = None
+        self._declared_coalescing_window_ms = None
         if self._prefix is not None:
             _sweep_prefix(_admin_dsn(), self._prefix)
             _release_prefix_lock(self._prefix, self._prefix_lock)
@@ -1146,6 +1192,30 @@ class RealServerR2db:
         issued = _run_ops(_ops_env(self._platform), "issue-credential", self._app.slug, "runtime")
         if issued.returncode != 0:
             raise LauncherStartupError(f"issue-credential (extra runtime) failed:\n{issued.stdout}\n{issued.stderr}")
+        return _parse_issued_secret(issued.stdout)
+
+    def issue_runtime_credential_with_id(self) -> tuple[str, str]:
+        """Like `issue_runtime_credential`, but also returns the new
+        credential's own id -- `(credential_id, bearer)` -- which is the
+        `actor_id` every audit event that credential produces carries."""
+        assert self._platform is not None and self._app is not None
+        issued = _run_ops(_ops_env(self._platform), "issue-credential", self._app.slug, "runtime")
+        if issued.returncode != 0:
+            raise LauncherStartupError(f"issue-credential (extra runtime) failed:\n{issued.stdout}\n{issued.stderr}")
+        for line in issued.stdout.splitlines():
+            if line.startswith("credential_id: "):
+                return line[len("credential_id: "):], _parse_issued_secret(issued.stdout)
+        raise LauncherStartupError(f"could not find a 'credential_id: ' line in ops output:\n{issued.stdout}")
+
+    def issue_audit_credential(self) -> str:
+        """Issues a NEW `role=audit` control-plane credential (out of
+        band, `ops issue-audit-credential`) and returns its bearer -- the
+        only kind of control credential `audit_query` answers to without a
+        rotation first."""
+        assert self._platform is not None
+        issued = _run_ops(_ops_env(self._platform), "issue-audit-credential")
+        if issued.returncode != 0:
+            raise LauncherStartupError(f"issue-audit-credential failed:\n{issued.stdout}\n{issued.stderr}")
         return _parse_issued_secret(issued.stdout)
 
     @property
@@ -1210,6 +1280,65 @@ class RealServerR2db:
         wiring the PostgreSQL-backed strategy) would return `False`
         instead; nothing this class represents does that."""
         return True
+
+    def coalescing_window_ms(self) -> int:
+        """The coalescing window (ms) the most recent `start()` declared;
+        `start()` must have been given one."""
+        assert self._declared_coalescing_window_ms is not None, "start() was not given a coalescing_window_ms"
+        return self._declared_coalescing_window_ms
+
+    # -- worker processes of the data plane (uvicorn `--workers >= 2`) --
+
+    def worker_pids(self) -> list[int]:
+        """The pids of the data plane's worker processes, sorted: every
+        live member of the supervisor's own process group except the
+        supervisor itself and the `multiprocessing` resource tracker the
+        supervisor starts for its spawned workers (measured: a
+        `--workers 2` group holds the supervisor, that tracker and the two
+        workers, all under the one pgid)."""
+        assert self._data_handle is not None
+        supervisor_pid = self._data_handle.process.pid
+        members = sh._pids_with_pgid(supervisor_pid)
+        excluded = {supervisor_pid}
+        excluded.update(pid for pid in members if "multiprocessing.resource_tracker" in sh._process_cmdline(pid))
+        return sorted(pid for pid in members if pid not in excluded)
+
+    def kill_workers(self, pids: Sequence[int], *, timeout_s: float = 60.0) -> list[int]:
+        """SIGKILLs each pid in `pids` (each must be a member of the data
+        plane's process group other than the supervisor), then waits until
+        each is gone (`os.kill(pid, 0)` raises `ProcessLookupError`: the
+        supervisor has reaped it) and until the supervisor has started
+        replacements, i.e. `worker_pids()` again lists as many workers as
+        the last `start()`/`restart()` asked for and none of the killed
+        ones. Returns the replacement pids, sorted. A replacement is listed
+        as soon as its process exists, before it serves. The signal goes out
+        before any wait, so the gap between a caller's last response and
+        the kill stays short."""
+        assert self._data_handle is not None and self._last_data_workers is not None
+        supervisor_pid = self._data_handle.process.pid
+        members = set(sh._pids_with_pgid(supervisor_pid))
+        refused = [pid for pid in pids if pid == supervisor_pid or pid not in members]
+        if refused:
+            raise LauncherStartupError(f"kill_workers: {refused!r} are not workers of this launcher's data plane")
+        for pid in pids:
+            os.kill(pid, signal.SIGKILL)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            gone = []
+            for pid in pids:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    gone.append(pid)
+            current = self.worker_pids()
+            if len(gone) == len(pids) and len(current) == self._last_data_workers and not set(current) & set(pids):
+                return [pid for pid in current if pid not in members]
+            if time.monotonic() >= deadline:
+                raise LauncherStartupError(
+                    f"kill_workers: after {timeout_s}s {len(pids) - len(gone)} killed worker(s) were still present "
+                    f"or the supervisor had not restored {self._last_data_workers} workers (now {current!r})"
+                )
+            time.sleep(0.2)
 
     # -- pid-tagged data-plane access log --
 

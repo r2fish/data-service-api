@@ -180,6 +180,9 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         "0002_registry_and_functions.sql",
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
+        # `application_audit` and the `auditreader` role: the refusal-window
+        # counter migration below references both.
+        "0005_application_audit.sql",
         # Phase 10 WP-4g (supervisor ruling 2026-09-09): `mitatedb_api.
         # main.build_app`/`mitatedb_api.control_composition.build_control_
         # service` now run F-16 (this process' own role CONNECTION LIMIT)
@@ -191,7 +194,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         # floor and fails startup for every consumer, not just the ones
         # actually about F-16.
         "0012_role_connection_limits.sql",
-        # 0013 is intentionally absent: this fixture never applies 0005, so it has no `mitatedbsvc_auditreader` role for 0013's own `ALTER ROLE` to target.
+        # 0013 is intentionally absent: no test through this fixture depends on the role-level statement timeouts it sets.
         # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
         # declarations table + the two service writer roles' timeout role
         # settings -- every test in this repository that calls `main.
@@ -210,6 +213,9 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         # backed `requests_per_minute` rate row -- every real request
         # through a `build_app()` app needs this table/function.
         "0016_credential_request_rate.sql",
+        # every refusal's count is written through this migration's
+        # function (`build_app` also checks it at startup).
+        "0017_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -226,6 +232,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         _run_psql(admin_dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
         provision_dsn = _dsn_with(admin_dsn, user=provision_role, password=provision_password, dbname=platform_db)
         _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
+        _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
         admin = psycopg.connect(admin_dsn, autocommit=True)
         try:
             # `ALTER ROLE ... PASSWORD` does not accept a server-side bind
@@ -244,6 +251,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
+        _run_psql(provision_dsn, rewritten["0017_denial_window_counter.sql"])
         # Q4 phase (design D-2(c)): synthetic example.invalid `surfaces` --
         # a real deployment declares this with `ops declare-surfaces`.
         # DATA ONLY (no `control` key) -- this shared fixture's own
@@ -1338,61 +1346,23 @@ def test_postgres_only_value_domain_denials_reachable_from_a_normal_client_reque
         close_cell(cell)
 
 
-def test_backend_defense_in_depth_recovers_the_connection_after_an_unanticipated_postgres_error(app_a) -> None:
-    """B-1 (ii): calling `PostgresBackend.insert()` directly (bypassing
-    `cell.py`'s own domain pre-check entirely, simulating a defect or a
-    case layer (i) does not cover) with a value PostgreSQL itself rejects
-    still (a) raises a classified `ValidationError` carrying the
-    layer-(ii) BACKSTOP's own distinct message ("storage backend rejected
-    the request" -- m-8 (ii), never the layer-(i) "does not match"/"is out
-    of range" wording, since layer (i) was never even consulted here),
-    never a raw `psycopg.Error`, and (b) leaves the connection usable for
-    the very next call -- proving the broad `except psycopg.Error:
-    rollback()` backstop in `insert()` works even when the seam's own
-    pre-check is bypassed."""
-    cell = make_cell(app_a)
-    developer, runtime = sessions_for(cell, app_a.app_id)
-    try:
-        developer.create_collection("raw_backend_probe", {"n": "integer"})
-        with pytest.raises(ValidationError, match="storage backend rejected the request"):
-            cell._backend.insert("raw_backend_probe", ["n"], [10 ** 30])
-        # The connection must not be poisoned by the direct call above.
-        runtime.insert("raw_backend_probe", {"n": 1})
-        assert runtime.read("raw_backend_probe")[0]["n"] == 1
-    finally:
-        close_cell(cell)
-
-
-def test_backend_defense_in_depth_recovers_the_connection_for_update_delete_and_read(app_a) -> None:
-    """m-8 (iii, independent review round 2): the SAME defense-in-depth
-    property as the `insert()` test above, generalized to the other three
-    DML methods -- the reviewer's own mutation (D) removed the generic
-    `except psycopg.Error` backstop specifically from `read`/`update`/
-    `delete` (leaving only their narrower `UndefinedTable` handler), which
-    the pre-round-2 test suite never caught because nothing exercised
-    those three methods' OWN backstop directly.
-
-    `update`'s own trigger is the same out-of-bigint-range ASSIGNMENT the
-    `insert` test above uses (confirmed empirically: `UPDATE ... SET n =
-    10**30` forces a hard coercion into the `bigint` column and fails;
-    unlike an assignment, a plain WHERE-clause COMPARISON against an
-    out-of-range value does NOT error at all -- PostgreSQL compares
-    cross-type instead of coercing, confirmed empirically, so `delete`/
-    `read` need a DIFFERENT trigger). `delete`/`read`'s own trigger is a
-    `Filter` naming a column that does not exist (bypassing `cell.py`'s
-    own field-existence check, `_bind_filters`'s `field_domains` call) --
-    a real `psycopg.errors.UndefinedColumn`, confirmed empirically NOT
-    to be `UndefinedTable` (the only other handler these two methods
-    have), so it is only ever caught by the generic backstop."""
+def test_backend_defense_in_depth_recovers_the_connection_for_delete_and_read(app_a) -> None:
+    """m-8 (iii, independent review round 2): calling `PostgresBackend`'s
+    `delete`/`read` directly, bypassing `cell.py`'s own checks, with a
+    `Filter` naming a column that does not exist (a real
+    `psycopg.errors.UndefinedColumn`, confirmed empirically NOT to be
+    `UndefinedTable`, the only other handler these two methods have) still
+    raises a classified `ValidationError` carrying the layer-(ii)
+    BACKSTOP's own distinct message ("storage backend rejected the
+    request"), never a raw `psycopg.Error`, and leaves the connection
+    usable for the very next call -- so it is only ever caught by the
+    generic `except psycopg.Error` backstop."""
     cell = make_cell(app_a)
     developer, runtime = sessions_for(cell, app_a.app_id)
     try:
         developer.create_collection("raw_backend_probe2", {"n": "integer"})
         runtime.insert("raw_backend_probe2", {"n": 1})
-
-        with pytest.raises(ValidationError, match="storage backend rejected the request"):
-            cell._backend.update("raw_backend_probe2", ["n"], [10 ** 30], [])
-        runtime.insert("raw_backend_probe2", {"n": 2})  # connection must still work
+        runtime.insert("raw_backend_probe2", {"n": 2})
 
         with pytest.raises(ValidationError, match="storage backend rejected the request"):
             cell._backend.delete("raw_backend_probe2", [Filter("no_such_column", "eq", 1)])

@@ -126,3 +126,18 @@ unchanged. Existence-checked the same way both are.
 # left the whole HTTP mutation surface unable to ever observe a
 # real `LIMIT_EXCEEDED`/`execution_ms` denial (review finding 2).
 ```
+
+### correction: 2026-10-01
+
+- reason: R-115 -- the single-statement `insert()` / `update()` backend methods are removed (no product path called them and they committed without the audit hook); this comment no longer refers to them
+
+old:
+```
+the SAME `execution_ms` mapping `insert()` above already has -- not rolled back here either (same B-1 (ii) reasoning
+```
+
+new:
+```
+the `execution_ms` mapping -- not rolled back here (same B-1 (ii) reasoning
+```
+

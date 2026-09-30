@@ -507,6 +507,12 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api -- platform upgrade Status claim, section 10's subjects accepted at 10.6 = 6, 10.7 = 6 and 10.10 = 10, superseded 2026-10-01 (Version 3.12, R-115 -- adding `0017` moved the three subjects to versions 7, 7 and 11, so section 10.8 no longer records them as accepted and Gate-0 is not ready), verbatim:*
+
+- **Section 10.8 names 10.6 / 10.7 / 10.10 accepted at versions 6 / 6 / 10** (requester 2026-09-30; 10.10's review: `docs/work-orders/WORK_ORDER_R116_STARTUP_CHECK_TOOL_V1.md` section 6.1), so Gate-0 readiness rests on the 10 items alone -- `MitateDB-api/docs/cloud-run-cloud-sql.md:2997-2999`.
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -712,6 +718,10 @@ the data-plane host declares `audit_query` `unavailable` and carries neither key
 
 - audit evidence tests;
 
+
+---
+
+*R-115 (2026-10-01, Version 3.12): the SI-14 claims on the bounded buffer, its overflow alert and flush, and the process-local denial windows were replaced by the claims on synchronous durable events and the platform refusal-window counter table (a stronger claim, not a weakened one; the old text is in git).*
 
 ---
 

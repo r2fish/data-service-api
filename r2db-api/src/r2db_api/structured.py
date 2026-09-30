@@ -1129,8 +1129,8 @@ class ApplicationCell:
             affected = 0
             assigned_addresses: list[dict[str, Any]] = []
             # Phase 4 (design D-2): whether this batch passed through the
-            # DESTRUCTIVE_CONFIRMATION_V1 choke -- the fail-closed/
-            # buffer-class dispatch point. Tracked here (not re-derived
+            # DESTRUCTIVE_CONFIRMATION_V1 choke -- what
+            # `MutationOutcome.destructive` reports. Tracked here (not re-derived
             # from `operations` after the fact) because it is `_apply`'s
             # own successful pass through `require_destructive_
             # confirmation` that establishes it, not merely the presence
@@ -1184,7 +1184,8 @@ class ApplicationCell:
                     affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
                     committed=False, plan=expected_plan, request_id=request_id,
                 )
-            # Phase 4 (design D-2/D-10): the pre-commit hook is the LAST
+            # Phase 4 (design D-2/D-10): the pre-commit hook is called for
+            # every real batch, not only a destructive one, as the LAST
             # thing this method does before its own commit point (here:
             # returning normally -- this in-memory backend has no separate
             # commit step that could itself fail once this call returns,
@@ -1193,7 +1194,7 @@ class ApplicationCell:
             # caught by the `except Exception` below, exactly like any
             # other mid-batch failure -- restoring `before` and propagating
             # (fail-closed by construction, no special-casing needed).
-            if destructive and audit_hook is not None:
+            if audit_hook is not None:
                 audit_hook.pre_commit()
             # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded
             # in the SAME critical section as the commit above -- this

@@ -92,16 +92,15 @@ class StorageBackend(Protocol):
         operation failing rolls back the whole batch.
 
         Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-10):
-        `audit_hook`, when given, is called exactly once -- as the LAST
-        thing this method does before its own commit point -- IF AND ONLY
-        IF this batch passed through the `DESTRUCTIVE_CONFIRMATION_V1`
-        choke (i.e. a `delete` operation's `require_destructive_
-        confirmation` call did not raise): the confirmation choke, not
-        `event_class`, is the fail-closed/buffer-class dispatch point
-        (D-2's normative rule). `MutationOutcome.destructive` reports which
-        branch this call took, so the caller (`DataService`) can skip the
-        buffer-class enqueue for a batch this method already durably
-        recorded (D-10: at most one durable row per operation). See
+        `audit_hook`, when given, is called exactly once for every real
+        batch (a `dry_run` never reaches it) -- as the LAST thing this
+        method does before its own commit point, whether or not the batch
+        passed through the `DESTRUCTIVE_CONFIRMATION_V1` choke.
+        `MutationOutcome.destructive` still reports whether it did (a
+        `delete` operation's `require_destructive_confirmation` call did
+        not raise), and the hook's own `fired` flag tells the caller
+        (`DataService`) that this method already durably recorded the batch
+        (D-10: at most one durable row per operation). See
         `audit_hook.py` for the full call contract (`pre_commit`/`commit_
         failed`, rollback-on-raise, error-row rule).
 

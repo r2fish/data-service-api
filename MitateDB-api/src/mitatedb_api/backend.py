@@ -331,10 +331,6 @@ class StorageBackend:
         exercising this mechanism in isolation)."""
         raise NotImplementedError
 
-    def insert(self, collection, fields, params):
-        """Returns ``{"rowid": <backend-assigned row identifier>}``."""
-        raise NotImplementedError
-
     def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None):
         """``filters``: list of already-bound ``cell.Filter`` (field
         verified to exist, operator verified supported, value already
@@ -350,10 +346,6 @@ class StorageBackend:
         builds from it AND-ed onto ``filters``' own WHERE clause, replacing
         the old OFFSET. ``None`` (the default) means "no cursor position",
         matching this method's own pre-D-2b external behavior."""
-        raise NotImplementedError
-
-    def update(self, collection, fields, params, filters):
-        """Returns ``{"updated": <row count>}``."""
         raise NotImplementedError
 
     def delete(self, collection, filters, audit_hook=None):
@@ -378,16 +370,17 @@ class StorageBackend:
         raise NotImplementedError
 
     def insert_in_transaction(self, collection, fields, params):
-        """Same contract as ``insert`` but executes inside the
-        transaction opened by ``begin()`` (no implicit commit)."""
+        """Inserts one row inside the transaction opened by ``begin()``
+        (no implicit commit). Returns ``{"rowid": <backend-assigned row
+        identifier>}``."""
         raise NotImplementedError
 
     def update_in_transaction(self, collection, fields, params, filters):
         """P3-D2 (docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
-        R-5, WP-1.5): same contract as ``update`` but executes inside the
-        transaction ``begin()`` already opened (no implicit commit) --
-        the ``transact()`` batch dispatcher's own update branch, mirroring
-        ``insert_in_transaction``'s own split from ``insert``."""
+        R-5, WP-1.5): updates rows inside the transaction ``begin()``
+        already opened (no implicit commit) -- the ``transact()`` batch
+        dispatcher's own update branch. Returns ``{"updated": <row
+        count>}``."""
         raise NotImplementedError
 
     def delete_in_transaction(self, collection, filters):

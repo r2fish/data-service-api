@@ -28,17 +28,19 @@ guard this WP's own completion conditions name).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import json
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import uuid
 
 import psycopg
 from psycopg import sql
 
-from .pool import _application_name_connect_kwargs
+from .pool import BoundedConnectionPool, _application_name_connect_kwargs
 from .psycopg_counting import CountingConnection
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -56,14 +58,6 @@ DEFAULT_SCHEMA = "mitatedb_registry"
 # concern, depends on both processes agreeing on these two values).
 DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS = 5000
 DEFAULT_AUDIT_IDLE_TIMEOUT_MS = 5000
-
-# Phase 4 (design §7.3/§7.4; WP-2(a) parity): the bounded buffer's default
-# capacity (implementation discretion per the design -- "既定 1000、実装
-# 裁量で設定可"), and the default periodic buffer-flush interval / minimum
-# interval between overflow-alert-row attempts -- ONE constant serving
-# both roles, matching r2db-api's own `_DEFAULT_AUDIT_FLUSH_INTERVAL_S`.
-DEFAULT_AUDIT_BUFFER_CAPACITY = 1000
-DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 
 # Phase 4 (design D-3, P4-D3): the coalescing window.
 DEFAULT_DENIAL_COALESCE_WINDOW_S = 60.0
@@ -91,10 +85,10 @@ DEFAULT_DENIAL_COALESCE_WINDOW_S = 60.0
 #                                  fail-closed (D-2 item 1: the
 #                                  confirmation choke). Reuses this peer's
 #                                  own pre-existing 6-field sink name.
-#   data_operation              -- query / insert / update success (P4-D5:
-#                                  a NEW emit site this WP introduces --
-#                                  this peer recorded none of these
-#                                  before). Buffer-class (D-4). Matches
+#   data_operation              -- query / insert / update / transact
+#                                  success, written before the response
+#                                  (a write's row before its data
+#                                  commit). Matches
 #                                  r2db-api's own identical term for the
 #                                  identical conceptual event, deliberately
 #                                  -- an AI-agent consumer of both peers'
@@ -111,9 +105,12 @@ DEFAULT_DENIAL_COALESCE_WINDOW_S = 60.0
 #                                  (developer authority required).
 #                                  Reuses this peer's own pre-existing
 #                                  6-field sink name.
-#   security_control_failure    -- D-4's buffer-overflow alert row. The
-#                                  design's own §7.4 names this class
-#                                  literally; not a peer-specific choice.
+#   security_control_failure    -- declared, no longer emitted: the
+#                                  bounded buffer whose overflow alert
+#                                  wrote it is gone, and rows already
+#                                  written are still returned by
+#                                  `audit_query`, so the word stays in
+#                                  the declaration.
 DECLARED_AUDIT_EVENT_CLASSES = frozenset({
     "schema_change",
     "destructive_data_operation",
@@ -143,6 +140,8 @@ DECLARED_AUDIT_OPERATIONS = frozenset({
     # write, same commit as the capability flip.
     "alter_field",
     "assert_active",
+    # declared, no longer emitted (the bounded buffer's overflow alert);
+    # rows already written are still returned by `audit_query`.
     "audit_buffer",
     "authenticate",
     "create_collection",
@@ -157,6 +156,8 @@ DECLARED_AUDIT_OPERATIONS = frozenset({
 # Phase 5 WP-3 (same design/ruling as `DECLARED_AUDIT_OPERATIONS` above):
 # this peer's application-plane half of the `target_kind` vocabulary.
 DECLARED_AUDIT_TARGET_KINDS = frozenset({
+    # declared, no longer emitted (the bounded buffer's overflow alert);
+    # rows already written are still returned by `audit_query`.
     "audit_sink",
     "collection",
     "credential",
@@ -167,8 +168,8 @@ DECLARED_AUDIT_TARGET_KINDS = frozenset({
 # `audit_query.DECLARED_AUDIT_OUTCOMES` one-for-one (`allow`/`deny`/
 # `error`, this module's own pre-existing literals at every `.append(...)`
 # call site, plus `replayed`, new as of this closure: an idempotency
-# REPLAY's own durable row, `audit_dispatch.AuditRouter.push_buffer_event`/
-# `.write_replayed_fail_closed_event`). `test_application_audit.py`'s own
+# REPLAY's own durable row, `audit_dispatch.AuditRouter.
+# write_replayed_fail_closed_event`). `test_application_audit.py`'s own
 # `test_declared_audit_outcomes_cover_every_emitted_outcome` fixes every
 # `outcome=`/`outcome="..."` literal this peer's durable emit sites
 # construct against this set, the same AST-scan shape `test_declared_
@@ -183,8 +184,8 @@ DECLARED_AUDIT_OUTCOMES = frozenset({
 
 # Contract `audit.fields`, verbatim order (matches `control_audit.
 # CONTROL_AUDIT_FIELDS`) plus the 14th, durable-schema-only `count` column
-# (D-3's coalesced-denial summary row / D-4's buffer-overflow alert row;
-# every other event leaves it `None` -- see migration `0005_application_
+# (D-3's coalesced-denial summary row; every other event leaves it `None`
+# -- see migration `0005_application_
 # audit.sql`'s own header for why this column is not added to
 # `control_audit`).
 APPLICATION_AUDIT_FIELDS = (
@@ -200,12 +201,11 @@ def coalesced_count(occurrences: int) -> Optional[int]:
     WP-2(a)/(b) review rulings from the outset): the durable `count`
     column's own semantics -- "the number of occurrences this ONE row
     represents; when that number is 1, the column is absent (NULL)"
-    (contract `audit.query_event_fields_note`: "never zero or one"). Both
-    call sites that can ever pass a real integer here -- `audit_dispatch.
-    _DenialCoalescer`'s aggregate (repeat-count) row and `audit_dispatch.
-    _AuditBuffer`'s overflow-alert row -- route the raw tally through this
-    one function instead of writing it verbatim, so "exactly one repeat/
-    one drop" always renders as an ordinary NULL-count row.
+    (contract `audit.query_event_fields_note`: "never zero or one"). The one
+    call site that can ever pass a real integer here -- the in-memory
+    sink's refusal-window summary event -- routes the raw tally through this
+    one function instead of writing it verbatim, so "exactly one repeat"
+    always renders as an ordinary NULL-count event.
     """
     return occurrences if occurrences >= 2 else None
 
@@ -232,15 +232,31 @@ class ApplicationAuditSink:
     """The durable application-plane audit trail's in-memory half
     (D-1/D-10) -- mirrors `control_audit.ControlAuditSink`'s shape and
     `inject_fault`/fault-injection mechanism one-for-one, extended with
-    `append_many` for D-4's buffer flush (a single batch write, never one
-    `append()` per buffered event -- `ControlAuditSink` has no equivalent
-    because control-plane events are never buffered, every `control_audit`
-    row is written synchronously).
+    `append_many` (a multi-row batch write kept in step with
+    `PostgresApplicationAuditSink.append_many`; `audit_dispatch` writes
+    each event with `append`, before its response is returned --
+    `ControlAuditSink` has no equivalent because every `control_audit`
+    row is written synchronously, one event at a time).
+
+    `record_denial` is this class's counterpart of the refusal-window
+    counter `PostgresApplicationAuditSink.record_denial` keeps in the
+    platform database: the first refusal of a (key, window) pair is
+    recorded as an ordinary event, and every later one adds one to that
+    window's tally in a process-local table instead of writing a row. The
+    window is aligned to the sink's own clock. `denial_window_summaries`
+    returns the summary event of every closed window that held repeats,
+    which `audit_query.InMemoryAuditQueryStore` reads. The table lives in
+    this process only, which is exactly what an in-process plug is: the
+    durability a service process needs against its own sudden death is the
+    Postgres sink's property.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Optional[Callable[[], datetime]] = None) -> None:
         self._events: list[ApplicationAuditEvent] = []
         self._fault: Optional[BaseException] = None
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._denial_lock = threading.Lock()
+        self._denial_windows: dict[tuple[str, int], dict[str, Any]] = {}
 
     def inject_fault(self, exc: Optional[BaseException]) -> None:
         """Test-only fault injection: when `exc` is not `None`, every
@@ -267,8 +283,63 @@ class ApplicationAuditSink:
         self._events.append(event)
         return event
 
+    def record_denial(
+        self, *, window_ms: int, event_class: str, request_id: Optional[str], application_id: Optional[str],
+        actor_type: Optional[str], actor_id: Optional[str], role: Optional[str], operation: str,
+        target_kind: Optional[str], reason_code: Optional[str] = None, target_id: Optional[str] = None,
+    ) -> None:
+        """Counts one refusal. The first refusal of a (key, window) pair --
+        key = application, actor (`unknown` when there is none),
+        operation, reason code; window = the sink's clock truncated to a
+        multiple of `window_ms` -- is appended as an ordinary `deny`
+        event; every later one only adds one to that window's tally. A
+        `window_ms` of 0 declares no coalescing: every refusal is appended.
+        Raises the injected fault, like every other write."""
+        if self._fault is not None:
+            raise self._fault
+        fields: dict[str, Any] = dict(
+            event_class=event_class, request_id=request_id, application_id=application_id, actor_type=actor_type,
+            actor_id=actor_id, role=role, operation=operation, target_kind=target_kind, outcome="deny",
+            reason_code=reason_code, target_id=target_id,
+        )
+        if window_ms <= 0:
+            self.append(**fields)
+            return
+        now_ms = int(self._clock().timestamp() * 1000)
+        start_ms = now_ms - now_ms % window_ms
+        key = (json.dumps([window_ms, application_id, actor_id or "unknown", operation, reason_code]), start_ms)
+        with self._denial_lock:
+            window = self._denial_windows.get(key)
+            if window is not None:
+                window["occurrences"] += 1
+                return
+            first = self.append(**fields)
+            self._denial_windows[key] = {
+                "occurrences": 1,
+                "summary_event_id": uuid.uuid4().hex,
+                "window_end": datetime.fromtimestamp((start_ms + window_ms) / 1000, tz=timezone.utc),
+                "first": first,
+            }
+
+    def denial_window_summaries(self, *, closed_before: datetime) -> "list[tuple[ApplicationAuditEvent, datetime]]":
+        """The summary event of every window that ended before
+        `closed_before` and held repeats, each with its window's end: the
+        first refusal's fields, its own stable `event_id`, and `count`
+        set to the repeats (absent when there was exactly one). A window
+        that held one refusal has no summary."""
+        summaries: list[tuple[ApplicationAuditEvent, datetime]] = []
+        with self._denial_lock:
+            windows = list(self._denial_windows.values())
+        for window in windows:
+            if window["occurrences"] < 2 or window["window_end"] >= closed_before:
+                continue
+            first = window["first"]
+            summary = replace(first, event_id=window["summary_event_id"], count=coalesced_count(window["occurrences"] - 1))
+            summaries.append((summary, window["window_end"]))
+        return summaries
+
     def append_many(self, events: "list[ApplicationAuditEvent]") -> None:
-        """D-4's buffer-flush batch write -- either every event in
+        """Batch write -- either every event in
         `events` is recorded, or (on injected/simulated failure) none is,
         mirroring `PostgresApplicationAuditSink.append_many`'s all-or-
         nothing real multi-row `INSERT`."""
@@ -292,20 +363,39 @@ class PostgresApplicationAuditSink:
     (D-1/D-10) -- writes to `mitatedb_registry.application_audit`
     (migration `0005_application_audit.sql`).
 
-    No pooling, one connection per call (mirrors this peer's own
-    established `credential_store_postgres.py`/`control_plane.
-    PostgresControlBackend` precedent, not r2db-api's own pooled
-    `_RolePool` -- R-2's closing paragraph: no code sharing between
-    peers, and this peer's OWN existing audit-writer precedent
-    (`control_plane.PostgresControlBackend.unit_of_work`) already opens a
-    fresh connection per call). Every call -- the D-2 pre-commit
-    fail-closed write, the D-3 coalesced-denial first-occurrence write,
-    the D-2 commit-failure `error` row, the D-4 buffer flush -- opens (and
-    commits, or rolls back on failure) its own single connection/
-    transaction, which is exactly what makes D-4's "buffer flush never
-    shares a transaction with a fail-closed write" requirement automatic
-    rather than something a caller has to arrange: two calls to this class
-    are, structurally, always two different connections.
+    Connections come from one of two places. Given a `pool` (the HTTP
+    composition root always gives one), every call borrows a connection
+    from that `pool.BoundedConnectionPool`, so the number of connections
+    this sink holds against `mitatedbsvc_api` is capped at the pool's
+    `max_size` however many request threads write at once, and a call
+    that finds every connection borrowed waits (bounded by the pool's own
+    acquire timeout) rather than dropping its event. Without a `pool` (the
+    default -- this repository's own tests and the in-process conformance
+    adapter), every call opens, and closes, a connection of its own, the
+    same shape this peer's `credential_store_postgres.py` keeps for its
+    own no-pool default.
+
+    Either way every call -- the D-2 pre-commit fail-closed write, the D-2
+    commit-failure `error` row, the synchronous write of an ordinary event
+    -- runs in a transaction of its own that it commits itself (or, on
+    failure, never commits); `record_denial` is the one call that runs in
+    autocommit instead. A pooled connection is held by exactly one call at a time,
+    so two calls in flight at once are on two different connections and
+    never share a transaction; that is what makes "an event write never
+    shares a transaction with the data change it describes" structural
+    rather than something a caller has to arrange. A connection that raised while borrowed is
+    closed and forgotten; one that returned normally is rolled back once
+    more (a no-op after the call's own commit, but it ends the transaction
+    a read-only `events()` leaves open) before it goes back to the pool.
+    A restarted database or a server-side idle disconnect is recovered
+    from by the pool, not by this sink: a connection that sat idle longer
+    than `pool.IDLE_PING_THRESHOLD_S` is checked with one round trip when
+    it is borrowed and replaced if it is dead, so no write fails on it.
+    A connection the server ended within that window of its last use is
+    handed out unchecked, and the one write that borrows it fails (the
+    sink does not retry); the next call opens a fresh connection. A `pool`
+    this sink was given is owned by it: `close()` releases every idle
+    connection in it.
 
     Never accepts a `work` handle unlike `control_audit.
     insert_control_audit_row` -- there is no cross-database unit-of-work
@@ -314,7 +404,10 @@ class PostgresApplicationAuditSink:
     database alongside `control_audit`).
     """
 
-    def __init__(self, dsn: str, *, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5) -> None:
+    def __init__(
+        self, dsn: str, *, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5,
+        pool: Optional[BoundedConnectionPool] = None,
+    ) -> None:
         # Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B): the two
         # writer timeouts are no longer this constructor's own concern --
         # this peer's former `SET SESSION` (removed here) is superseded by
@@ -327,15 +420,19 @@ class PostgresApplicationAuditSink:
         # instead of this class setting it per connection.
         self._dsn = dsn
         self._connect_timeout = connect_timeout
+        self._schema = schema
         self._table = sql.Identifier(schema, "application_audit")
+        self._pool = pool
         # Platform DB-time accounting for this sink's own per-call
-        # connections (mirrors `credential_store_postgres.py`'s identical
-        # shape): a dedicated `threading.Lock` guards five running totals
-        # that only ever grow -- `_sessions`/`_connect_wall_ms` in
-        # `_connect` right after the connect returns, `_platform_db_wall_
-        # ms`/`_platform_txn_count`/`_platform_db_calls` folded in by
-        # `_fold_closed_connection_stats` right before each connection
-        # closes.
+        # connections, the ones `_connect` opens when there is no pool
+        # (mirrors `credential_store_postgres.py`'s identical shape): a
+        # dedicated `threading.Lock` guards five running totals that only
+        # ever grow -- `_sessions`/`_connect_wall_ms` in `_connect` right
+        # after the connect returns, `_platform_db_wall_ms`/`_platform_
+        # txn_count`/`_platform_db_calls` folded in by `_fold_closed_
+        # connection_stats` right before each such connection closes. The
+        # connections a `pool` opens are counted by that pool, and
+        # `platform_stats` adds its totals in.
         self._platform_stats_lock = threading.Lock()
         self._sessions = 0
         self._connect_wall_ms = 0.0
@@ -344,11 +441,15 @@ class PostgresApplicationAuditSink:
         self._platform_db_calls = 0
 
     def _connect(self) -> "psycopg.Connection":
-        """Opens a `psycopg_counting.CountingConnection` (a `psycopg.
-        Connection` subclass), timed into `_connect_wall_ms`/`_sessions`
-        under `self._platform_stats_lock`, so this connection's own later
-        `db_wall_ms`/`txn_count` can be folded into this sink's platform
-        totals right before it closes."""
+        """Opens a fresh `psycopg_counting.CountingConnection` (a `psycopg.
+        Connection` subclass) that this sink itself closes, timed into
+        `_connect_wall_ms`/`_sessions` under `self._platform_stats_lock`,
+        so this connection's own later `db_wall_ms`/`txn_count` can be
+        folded into this sink's platform totals right before it closes.
+        Every call opens one when there is no pool; with a pool it is never
+        called -- a pooled connection is opened by the pool
+        (`BoundedConnectionPool._new_connection`), with the same DSN and
+        arguments."""
         connect_start = time.monotonic()
         conn = CountingConnection.connect(
             self._dsn, connect_timeout=self._connect_timeout, autocommit=False, **_application_name_connect_kwargs(),
@@ -360,11 +461,12 @@ class PostgresApplicationAuditSink:
         return conn
 
     def _fold_closed_connection_stats(self, conn: "psycopg.Connection") -> None:
-        """Called right before every `conn.close()` below: adds this one
-        connection's own `db_wall_ms`/`txn_count`/`execute_count +
-        executemany_count` into this sink's own running totals, under
-        `self._platform_stats_lock`, so closing a connection never loses
-        time, transactions, or statements it already spent."""
+        """Called right before a connection `_connect` opened is closed
+        (`_borrow`'s no-pool branch, below): adds this one connection's
+        own `db_wall_ms`/`txn_count`/`execute_count + executemany_count`
+        into this sink's own running totals, under `self.
+        _platform_stats_lock`, so closing a connection never loses time,
+        transactions, or statements it already spent."""
         db_wall_ms = getattr(conn, "db_wall_ms", 0.0)
         txn_count = getattr(conn, "txn_count", 0)
         db_calls = getattr(conn, "execute_count", 0) + getattr(conn, "executemany_count", 0)
@@ -378,17 +480,65 @@ class PostgresApplicationAuditSink:
         (same shape as `credential_store_postgres.PostgresCredentialStore.
         platform_stats`): `sessions`/`connect_wall_ms` from every
         `_connect` call, `db_wall_ms`/`txn_count`/`db_calls` folded in
-        from every connection this sink has already closed. No DB round
-        trip: every value read here is a plain Python attribute, under
-        `self._platform_stats_lock`."""
+        from every connection this sink has already closed, plus -- when
+        this sink has a pool -- that pool's own `platform_stats()` for the
+        connections it opened. No DB round trip: every value read here is
+        a plain Python attribute, under `self._platform_stats_lock`."""
         with self._platform_stats_lock:
-            return {
+            own = {
                 "sessions": self._sessions,
                 "connect_wall_ms": self._connect_wall_ms,
                 "db_wall_ms": self._platform_db_wall_ms,
                 "txn_count": self._platform_txn_count,
                 "db_calls": self._platform_db_calls,
             }
+        if self._pool is None:
+            return own
+        pooled = self._pool.platform_stats()
+        return {name: value + pooled[name] for name, value in own.items()}
+
+    @contextmanager
+    def _borrow(self):
+        """The one place every read and write below gets its connection.
+        With a pool, the connection is borrowed for exactly the duration
+        of the `with` block, so no other call can use it meanwhile; one
+        that raised inside the block is discarded (closed, never
+        returned), and one that did not is rolled back and returned -- a
+        rollback that itself fails discards it too. Without a pool, the
+        connection is a fresh one closed at the end of the block."""
+        if self._pool is None:
+            conn = self._connect()
+            try:
+                yield conn
+            finally:
+                self._fold_closed_connection_stats(conn)
+                conn.close()
+            return
+        conn = self._pool.acquire()
+        healthy = True
+        try:
+            yield conn
+        except BaseException:
+            healthy = False
+            raise
+        finally:
+            if healthy:
+                try:
+                    conn.rollback()
+                except Exception:
+                    healthy = False
+            if healthy:
+                self._pool.release(conn)
+            else:
+                self._pool.discard(conn)
+
+    def close(self) -> None:
+        """Releases every idle connection of the pool this sink was given
+        (the lifespan shutdown calls it once the last request has finished). A
+        no-op without a pool: every call already closed its own
+        connection."""
+        if self._pool is not None:
+            self._pool.closeall()
 
     def append(
         self, *, event_class: str, request_id: Optional[str], application_id: Optional[str],
@@ -396,12 +546,15 @@ class PostgresApplicationAuditSink:
         target_kind: Optional[str], outcome: str, reason_code: Optional[str] = None,
         target_id: Optional[str] = None, count: Optional[int] = None,
     ) -> None:
-        """Synchronous durable INSERT + commit, on this call's own fresh
-        connection/transaction. A `psycopg.Error` here propagates to the
-        caller unchanged (never mapped to `errors.FoundationError` at this
-        layer) -- `audit_dispatch.py`'s pre-commit-hook/denial/alert
-        closures are the layer that decides how a failure here becomes
-        `errors.AuditSinkUnavailable`."""
+        """Synchronous durable INSERT + commit, in a transaction of this
+        call's own on a connection no other call holds meanwhile. A
+        failure here propagates to the caller unchanged (a `psycopg.Error`
+        from the statement or the connect, or -- with a pool -- the pool's
+        `errors.AuthorizationStateUnavailable` when it cannot connect or
+        stays exhausted past its acquire timeout; never mapped to
+        `errors.AuditSinkUnavailable` at this layer) -- `audit_dispatch.
+        py`'s pre-commit-hook/denial/alert closures are the layer that
+        decides how a failure here becomes `errors.AuditSinkUnavailable`."""
         event_id = uuid.uuid4().hex
         occurred_at = datetime.now(timezone.utc)
         placeholders = {f"ph{i}": sql.Placeholder() for i in range(14)}
@@ -410,21 +563,51 @@ class PostgresApplicationAuditSink:
             event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id,
             role, operation, target_kind, outcome, reason_code, target_id, count,
         ]
-        conn = self._connect()
-        try:
+        with self._borrow() as conn:
             with conn.cursor() as cur:
                 cur.execute(statement, params)
             conn.commit()
-        finally:
-            self._fold_closed_connection_stats(conn)
-            conn.close()
+
+    def record_denial(
+        self, *, window_ms: int, event_class: str, request_id: Optional[str], application_id: Optional[str],
+        actor_type: Optional[str], actor_id: Optional[str], role: Optional[str], operation: str,
+        target_kind: Optional[str], reason_code: Optional[str] = None, target_id: Optional[str] = None,
+    ) -> None:
+        """Counts one refusal in the platform database, in one statement
+        (`denial_window_record`, migration `0017_denial_window_counter.
+        sql`), in autocommit on a connection no other call holds meanwhile:
+        the first refusal of a (key, window) pair writes the window's
+        counter row and that refusal's own audit row together, and every
+        later one adds one to the counter row. The statement has committed
+        when this method returns, so a refusal whose response the service
+        then returns has already been counted. A failure propagates to the
+        caller unchanged, like `append`; `audit_dispatch.AuditRouter` turns
+        it into `errors.AuditSinkUnavailable`."""
+        statement = sql.SQL("SELECT {function}(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)").format(
+            function=sql.Identifier(self._schema, "denial_window_record")
+        )
+        params = [
+            window_ms, event_class, datetime.now(timezone.utc), request_id, application_id, actor_type, actor_id,
+            role, operation, target_kind, reason_code, target_id,
+        ]
+        with self._borrow() as conn:
+            # Connections open with `autocommit=False`; this one statement
+            # runs in autocommit, restored before the connection goes back
+            # to the pool (the same toggle `credential_store_postgres.
+            # PostgresCredentialStore.record_rate_and_check` uses).
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(statement, params)
+            finally:
+                conn.autocommit = False
 
     def append_many(self, events: "list[ApplicationAuditEvent]") -> None:
-        """D-4's buffer flush: every buffered `ApplicationAuditEvent` in
-        `events` is written as one multi-row `INSERT` on one connection/
-        transaction -- either the whole batch commits or (on failure) none
-        of it does, mirroring `ApplicationAuditSink.append_many`'s
-        in-memory all-or-nothing behaviour (D-10 parity)."""
+        """Batch write: every `ApplicationAuditEvent` in
+        `events` is written as one multi-row `INSERT` in one transaction --
+        either the whole batch commits or (on failure) none of it does,
+        mirroring `ApplicationAuditSink.append_many`'s in-memory all-or-
+        nothing behaviour (D-10 parity)."""
         if not events:
             return
         placeholders = {f"ph{i}": sql.Placeholder() for i in range(14)}
@@ -441,14 +624,10 @@ class PostgresApplicationAuditSink:
                 event.actor_type, event.actor_id, event.role, event.operation, event.target_kind,
                 event.outcome, event.reason_code, event.target_id, event.count,
             ])
-        conn = self._connect()
-        try:
+        with self._borrow() as conn:
             with conn.cursor() as cur:
                 cur.execute(statement, params)
             conn.commit()
-        finally:
-            self._fold_closed_connection_stats(conn)
-            conn.close()
 
     def events(self) -> "list[tuple[Any, ...]]":
         """Read surface for tests/tooling connected with sufficient
@@ -460,22 +639,16 @@ class PostgresApplicationAuditSink:
         statement = sql.SQL("SELECT {columns} FROM {table} ORDER BY recorded_at, event_id").format(
             columns=sql.SQL(", ").join(sql.Identifier(name) for name in APPLICATION_AUDIT_FIELDS), table=self._table
         )
-        conn = self._connect()
-        try:
+        with self._borrow() as conn:
             with conn.cursor() as cur:
                 cur.execute(statement)
                 return cur.fetchall()
-        finally:
-            self._fold_closed_connection_stats(conn)
-            conn.close()
 
 
 __all__ = [
     "DEFAULT_SCHEMA",
     "DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS",
     "DEFAULT_AUDIT_IDLE_TIMEOUT_MS",
-    "DEFAULT_AUDIT_BUFFER_CAPACITY",
-    "DEFAULT_AUDIT_FLUSH_INTERVAL_S",
     "DEFAULT_DENIAL_COALESCE_WINDOW_S",
     "DECLARED_AUDIT_EVENT_CLASSES",
     "DECLARED_AUDIT_OPERATIONS",

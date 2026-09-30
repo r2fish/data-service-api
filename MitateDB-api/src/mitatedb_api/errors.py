@@ -236,7 +236,7 @@ class AuditSinkUnavailable(FoundationError):
     `application_audit.ApplicationAuditSink` for the in-memory/test
     configuration) could not durably record a fail-closed-class event --
     a pre-commit write ahead of a schema change or a confirmed-destructive
-    delete, a coalesced denial's first-occurrence write, or the
+    delete, a refusal's window count, or the
     commit-failure `outcome="error"` row D-2 requires. The operation or
     denial this event would have accompanied is refused rather than
     proceeding (or being reported as denied) un-audited -- fail-closed by

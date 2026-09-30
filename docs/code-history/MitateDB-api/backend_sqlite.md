@@ -619,6 +619,34 @@ backend.
 # (R-3).
 ```
 
+### correction: 2026-10-01
+
+- reason: R-115 -- the single-statement `insert()` / `update()` backend methods are removed (no product path called them and they committed without the audit hook); this comment no longer refers to them
+
+old:
+```
+No commit/rollback here (unlike `insert` above): this runs inside a transaction
+```
+
+new:
+```
+No commit/rollback here: this runs inside a transaction
+```
+
+### correction: 2026-10-01
+
+- reason: R-115 -- the single-statement `insert()` / `update()` backend methods are removed (no product path called them and they committed without the audit hook); this comment no longer refers to them
+
+old:
+```
+vocabulary here (mirroring `insert()`'s own translation) so `cell.py`'s `transact()`
+```
+
+new:
+```
+vocabulary here so `cell.py`'s `transact()`
+```
+
 ## CH-0369
 
 - moved from: `src/mitatedb_api/backend_sqlite.py` (`SQLiteBackend.update_in_transaction`)
@@ -631,6 +659,20 @@ backend.
 # inside the transaction `transact()` already opened via
 # `begin()` and will `commit()`/`rollback()` once, after every
 # operation in the batch.
+```
+
+### correction: 2026-10-01
+
+- reason: R-115 -- the single-statement `insert()` / `update()` backend methods are removed (no product path called them and they committed without the audit hook); this comment no longer refers to them
+
+old:
+```
+no commit/rollback here (unlike `update` above) -- mirrors
+```
+
+new:
+```
+no commit/rollback here -- mirrors
 ```
 
 ## CH-0370

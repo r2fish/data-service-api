@@ -384,6 +384,10 @@ def _bootstrap_platform(
         # applied right after 0002/0005 below, independent of the
         # declarations-table migrations.
         "0016_credential_request_rate.sql",
+        # the refusal-window counter and its function -- depends on 0005
+        # below (`application_audit`, the `auditreader` role), which this
+        # adapter's data plane writes every refusal count through.
+        "0017_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -405,6 +409,7 @@ def _bootstrap_platform(
     # header) -- runs as the SAME `provision_dsn` 0002 already ran as.
     _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
     _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
+    _run_psql(provision_dsn, rewritten["0017_denial_window_counter.sql"])
     # Phase 10 WP-4f: unconditional, like 0002/0005 above -- depends only
     # on those two, so it always runs here regardless of the declarations-
     # table migrations below.
@@ -1130,8 +1135,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # `ALTER ROLE` -- R-105 -- rather than the shipped 5000ms/
             # 5000ms default `main.build_app` relies on), applied
             # automatically at login.
+            # The sink borrows from a pool of its own, the way `main.
+            # build_app` wires it (`audit_pool`, sized `role_pool_size(
+            # thread_limit)` like the credential pool below): every
+            # ordinary event is written before the response, so a sink that
+            # opened a connection per event would charge every measured
+            # request a connection handshake the composition root never
+            # pays.
+            self._audit_pool = BoundedConnectionPool(
+                self._platform.api_dsn,
+                max_size=role_pool_size(DEFAULT_THREAD_LIMIT),
+            )
             self._application_durable_audit = PostgresApplicationAuditSink(
-                self._platform.api_dsn, schema=self._platform.schema,
+                self._platform.api_dsn, schema=self._platform.schema, pool=self._audit_pool,
             )
             self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
 
@@ -2236,21 +2252,6 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # audit/query alias against the control base URL, matching
         # conformance_adapter_r2db_http.py's own identical choice.
         return self._control_send("POST", "/v1/audit/query", actor, json_body=dict(request))
-
-    # port v1.8
-    def flush_audit_buffer(self) -> None:
-        if self._audit_query_status() not in ("enabled", "partial"):
-            raise self._audit_surface_absent(
-                "flush_audit_buffer",
-                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
-                "deployment's own declared posture",
-            )
-        # Privileged, out-of-band hook -- calls the real, shared `Audit
-        # Router` DIRECTLY (never a wire call: there is no HTTP endpoint
-        # for this on either host, by design). `force_expire_denial_
-        # windows=True`: flushes every currently-open denial-coalescing
-        # window too, not only expired ones.
-        self._audit_router.flush(force_expire_denial_windows=True)
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:
@@ -3421,9 +3422,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         opens its own per-call connections (`_borrow_connection`'s pool
         branch); `self._read_store`'s own no-pool accumulators stay at
         zero, and the pool is where the real traffic lands.
-        `self._application_durable_audit` stays unpooled (matches `main.
-        py`'s own audit sink), and `self._write_store` is provisioning-
-        only, never touched by a measured request. Read-only: every value
+        `self._application_durable_audit` borrows from `self._audit_pool`
+        (matches `main.py`'s own audit sink) and its `platform_stats()`
+        folds that pool's own accounting in; `self._write_store` is
+        provisioning-only, never touched by a measured request. Read-only: every value
         read here is a plain accumulated attribute, no new connection
         opens."""
         credentials_stats = self._read_pool.platform_stats()

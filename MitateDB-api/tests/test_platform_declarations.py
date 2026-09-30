@@ -119,7 +119,7 @@ def test_fail_fast_messages_name_the_next_ops_command() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad_value", ["not-an-int", -5, 1.5, True])
+@pytest.mark.parametrize("bad_value", ["not-an-int", -5, 1.5, True, 2147483648])
 def test_validate_coalescing_window_value_rejects(bad_value) -> None:
     with pytest.raises(PlatformDeclarationError, match="audit_coalescing_window_ms"):
         validate_coalescing_window_value(bad_value, schema=DEFAULT_SCHEMA, ops_module=PEER_MODULE)
@@ -132,6 +132,16 @@ def test_validate_coalescing_window_value_accepts_zero() -> None:
 
 def test_validate_coalescing_window_value_accepts_a_positive_int() -> None:
     assert validate_coalescing_window_value(60000, schema=DEFAULT_SCHEMA, ops_module=PEER_MODULE) == 60000
+
+
+def test_validate_coalescing_window_value_accepts_exactly_the_largest_value_the_counter_function_takes() -> None:
+    """`denial_window_record` takes the window length as a 32-bit integer of
+    milliseconds: the declaration accepts that bound and not one more, so a
+    length the function cannot take never starts a process."""
+    assert validate_coalescing_window_value(2147483647, schema=DEFAULT_SCHEMA, ops_module=PEER_MODULE) == 2147483647
+    with pytest.raises(PlatformDeclarationError) as exc:
+        validate_coalescing_window_value(2147483648, schema=DEFAULT_SCHEMA, ops_module=PEER_MODULE)
+    assert exc.value.code == "F-4b"
 
 
 def test_f4b_message_names_the_next_ops_command() -> None:
@@ -563,6 +573,38 @@ def test_read_platform_declarations_rejects_a_hand_edited_bad_window_value(contr
                 "WHERE key = 'audit_coalescing_window_ms'")
         conn = psycopg.connect(control_platform.api_dsn)
         try:
+            with pytest.raises(PlatformDeclarationError, match="audit_coalescing_window_ms"):
+                read_platform_declarations(
+                    conn, schema=control_platform.registry_schema, ops_module=PEER_MODULE, migration=MIGRATION_NUMBER)
+        finally:
+            conn.close()
+    finally:
+        with admin.cursor() as cur:
+            cur.execute(
+                f"UPDATE {control_platform.registry_schema}.platform_declarations SET value = to_jsonb(60000) "
+                "WHERE key = 'audit_coalescing_window_ms'")
+        admin.close()
+
+
+def test_read_platform_declarations_reads_the_largest_window_and_rejects_one_more(control_platform) -> None:
+    """The startup read path: a window of exactly 2147483647 ms is read, one
+    more is refused (the counter function's own argument cannot carry it)."""
+    admin = psycopg.connect(control_platform.provision_dsn, autocommit=True)
+    try:
+        conn = psycopg.connect(control_platform.api_dsn)
+        try:
+            with admin.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {control_platform.registry_schema}.platform_declarations SET value = to_jsonb(2147483647::bigint) "
+                    "WHERE key = 'audit_coalescing_window_ms'")
+            declarations = read_platform_declarations(
+                conn, schema=control_platform.registry_schema, ops_module=PEER_MODULE, migration=MIGRATION_NUMBER)
+            assert declarations.audit_coalescing_window_ms == 2147483647
+            conn.rollback()
+            with admin.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {control_platform.registry_schema}.platform_declarations SET value = to_jsonb(2147483648::bigint) "
+                    "WHERE key = 'audit_coalescing_window_ms'")
             with pytest.raises(PlatformDeclarationError, match="audit_coalescing_window_ms"):
                 read_platform_declarations(
                     conn, schema=control_platform.registry_schema, ops_module=PEER_MODULE, migration=MIGRATION_NUMBER)
@@ -1260,8 +1302,8 @@ def test_f4b_window_message_is_verbatim() -> None:
         validate_coalescing_window_value(-1, schema=DEFAULT_SCHEMA, ops_module=PEER_MODULE)
     assert str(exc.value) == (
         f"'audit_coalescing_window_ms' in {DEFAULT_SCHEMA}.platform_declarations must be a non-negative "
-        "integer (0 means no coalescing), got '-1'. This table can be edited by hand, so the value is "
-        "validated on every read as well as on write. Re-set it with 'python -m mitatedb_api.ops "
+        "integer no larger than 2147483647 (0 means no coalescing), got '-1'. This table can be edited by "
+        "hand, so the value is validated on every read as well as on write. Re-set it with 'python -m mitatedb_api.ops "
         "declare-coalescing-window --ms <N>', then restart both processes."
     )
 

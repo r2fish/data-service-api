@@ -67,36 +67,6 @@ exactly as it already is everywhere else (`self._service._credentials`
 is never type-narrowed in this class).
 ```
 
-## CH-0106
-
-- moved from: `src/r2db_api/service.py` (`DataService.flush_audit_buffer`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Phase 4 (design D-4/§7.3/§7.4): synchronously drains the
-bounded buffer (writing it as one batch), retries the sticky
-overflow-alert row if one is pending and due, and sweeps
-denial-coalescing windows (writing their repeat-count summary row,
-D-3). Called on demand by this repository's own tests and by a
-composition root's periodic timer alike -- there is nothing
-time-sensitive about calling this more or less often beyond how
-promptly buffered/coalesced evidence becomes durable (D-4's own
-"periodic or threshold" flush-trigger latitude).
-
-`force_expire_denial_windows=True` (WP-2(a) fix round 2, review
-N-4): flushes EVERY currently-open denial-coalescing window,
-expired or not, instead of only expired ones -- used exactly once,
-by a composition root's graceful-shutdown path. Without this, a
-window still short of its own `window_s` at the moment the process
-stops loses its accumulated repeat count entirely (D-3 only
-sanctions losing counts to an actual crash, not to an orderly
-stop); the default (periodic timer, explicit test calls) stays
-`False` -- an in-progress window still has a legitimate future to
-expire into naturally and must not be cut short just because
-something else happened to call this method.
-```
-
 ## CH-0107
 
 - moved from: `src/r2db_api/service.py` (`DataService._make_audit_hook`)
@@ -161,6 +131,90 @@ applies Phase 4's durable-recording dispatch (design D-2/D-3/D-4):
   always reach here (they never pass through the confirmation
   choke), and `mutate` reaches here only when its batch did NOT
   (`already_durable=False`).
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the `allow` bullet no longer describes a buffer
+
+old:
+```
+`outcome == "allow"`: buffer-class
+```
+
+new:
+```
+`outcome == "allow"` (`data_operation` only) or `"replayed"` (any class): written synchronously to the durable sink before the caller's response is returned
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a replay of any class is durable, and a sink failure is fail-closed
+
+old:
+```
+`query`/`catalog` always reach here (they never pass through the confirmation choke), and `mutate` reaches here only when its batch did NOT (`already_durable=False`).
+```
+
+new:
+```
+`query`/`catalog`, a `mutate` whose backend did not already record it (`already_durable=False`), and every replay. A sink failure raises `SERVICE_UNAVAILABLE` (fail-closed), so a response is only ever returned for an operation whose event is durable.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; no buffered record exists any more
+
+old:
+```
+without any durable/buffered record at all;
+```
+
+new:
+```
+without any durable record at all;
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4b -- an `allow` of any class but `authentication` is written by `_event` unless the backend hook already recorded it; a schema operation no longer passes a constant for "already recorded"
+
+old:
+```
+`outcome == "allow"` (`data_operation` only) or `"replayed"` (any class)
+```
+
+new:
+```
+`outcome == "allow"` (any class but `authentication`) or `"replayed"` (any class)
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-5a -- the process-local coalescing router is removed; a fail-closed-class refusal is counted in the platform database's refusal window before its response is returned
+
+old:
+```
+goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
+```
+
+new:
+```
+is counted in the durable refusal window before its response is returned (a count that cannot be recorded raises `SERVICE_UNAVAILABLE`).
+```
+
+### correction: 2026-10-01
+
+- reason: R-115 -- the coalescing denial router and its first-insert write are gone; a refusal is counted in the platform database's refusal window before its response
+
+old:
+```
+a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write
+```
+
+new:
+```
+a refusal-window count that could not be recorded) -- counting it in the refusal window again would be a second (or third) durable write
 ```
 
 ## CH-0110
@@ -304,6 +358,20 @@ never wrote a durable row before this WP either).
 ```
 # Phase 4 (design D-2 §7.3): `catalog` never passes through
 # the confirmation choke -- always buffer-class.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a catalog read's event is written before its result is returned
+
+old:
+```
+`catalog` never passes through the confirmation choke -- always buffer-class.
+```
+
+new:
+```
+`catalog` writes its event synchronously, before the result is returned.
 ```
 
 ## CH-0115
@@ -453,6 +521,48 @@ Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`; `tests
 # hook already wrote one for its own.
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; no buffer-class event exists
+
+old:
+```
+(buffer-class OR the legacy in-memory sink `_event` itself unconditionally appends to)
+```
+
+new:
+```
+(durable OR the legacy in-memory sink `_event` itself unconditionally appends to)
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the already-durable signal is the hook's own `fired` flag, and `_event` writes the row itself when the backend did not
+
+old:
+```
+`outcome.destructive` reports whether the backend's pre-commit hook already durably recorded this batch -- `already_durable` tells `_event` to skip the buffer-class enqueue in that case (at most one durable row per operation).
+```
+
+new:
+```
+`hook.fired` reports whether the backend's pre-commit hook already durably recorded this batch -- `already_durable` tells `_event` to skip its own synchronous write in that case (at most one durable row per operation); a backend that never called the hook leaves the row to `_event`, which writes it before the response.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a fresh commit's hook is no longer destructive-only
+
+old:
+```
+THIS event the way a genuinely destructive fresh commit's hook already wrote one for its own.
+```
+
+new:
+```
+THIS event the way a fresh commit's hook already wrote one for its own.
+```
+
 ## CH-0122
 
 - moved from: `src/r2db_api/service.py` (`DataService._mutate_outcome`)
@@ -472,6 +582,20 @@ Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`; `tests
 # one that is never called -- so no audit line can ever be
 # written for it, by construction (U-2 = (A): "監査行を一切
 # 書かない", not "書くが呼ばない").
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the backend calls the hook for every real batch
+
+old:
+```
+the hook is only ever USED by the backend when this batch turns out to pass through the confirmation choke (a confirmed `delete`) -- building it unconditionally here is cheap (no I/O happens until/unless `pre_commit()` is actually called) and keeps this call site identical regardless of what the batch turns out to contain, matching `schema`'s own unconditional hook below.
+```
+
+new:
+```
+the backend calls the hook as the last statement of every real (non-`dry_run`) batch, so the `allow` row is durable before the data commit -- the same path `schema`'s own hook below takes.
 ```
 
 ## CH-0123
@@ -644,6 +768,20 @@ this return type). `mutate_result` below is the richer shape
 ```
 # Phase 4 (design D-2 §7.3): `query` never passes through
 # the confirmation choke -- always buffer-class.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a query's event is written before its result is returned
+
+old:
+```
+`query` never passes through the confirmation choke -- always buffer-class.
+```
+
+new:
+```
+`query` writes its event synchronously, before the result is returned.
 ```
 
 ## CH-0132
@@ -1026,6 +1164,20 @@ new:
 This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
 ```
 
+### correction: 2026-09-30
+
+- reason: roadmap R-115 (contract 1.13.0, subordinate ruling 18) -- this host declares 1.13.0 in the same commit as its own audit durability behavior
+
+old:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
+```
+
+new:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window. This host also declares contract 1.13.0 in the same commit as its own audit durability behavior -- a service process that stops without completing a graceful shutdown loses neither the audit event of an operation whose response was already returned nor the count of any denial occurrence whose response was already returned -- 1.13.0's own unconditional obligation, never ahead of the behavior it declares.
+```
+
 ## CH-0143
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)
@@ -1166,446 +1318,6 @@ CCR-13 WP-5b: the WP-2-through-WP-5 provisional gate (design R2DB_CCR13_STORAGE_
 # value.
 ```
 
-## CH-0149
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._flush_keys`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Review D-1: never silently drop this repeat count
-# -- put it back where a future attempt (this same
-# sweep's own next pass, a later explicit/periodic
-# flush, or the next `route()` call for this key)
-# will retry it. Safe specifically because this
-# happens under THIS key's own lock (no concurrent
-# `route()`/sweep call for the SAME key can be
-# touching `self._windows[key]` right now).
-```
-
-## CH-0150
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer.flush_all`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-WP-2(a) fix round 2, review N-4: force EVERY currently-open
-window to be flushed, expired or not -- used only at graceful
-shutdown. Once this process is about to stop, there is no "wait
-for the window to naturally expire" future left; treating every
-window as due now is what keeps a shutdown from silently
-discarding an in-progress window's accumulated repeat count (D-3
-only ever sanctions losing counts to an actual crash, never to an
-orderly stop).
-```
-
-## CH-0151
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._note_aggregate_write_result`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Review D-1: fixed-message `logging.error`, only on a failing<->
-healthy state TRANSITION (N-2's own established discipline) -- not
-once per attempt, which would reproduce the exact logging-DoS risk
-N-2 already closed for the buffer-overflow alert path.
-```
-
-## CH-0152
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._requeue_failed_aggregate`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-WP-2(a) fix round 3, review D-1: called only while holding this
-KEY's OWN `key_lock` (both call sites below), right after its
-aggregate-row write attempt raised -- puts `state["repeat_count"]`
-back where a future flush (periodic, explicit, shutdown, or the
-very next `route()` call for this same key) will retry it, instead
-of discarding it. Two cases, both safe specifically BECAUSE the
-caller holds this key's lock (no concurrent `route()`/sweep call
-for the SAME key can be observing or mutating `self._windows[key]`
-at this exact moment -- see class docstring):
-
-- A fresh window has already been opened for this key by a
-  concurrent `route()` call in the meantime (its own first-
-  occurrence row is already durable) -- merge the failed repeat
-  count into it rather than overwriting.
-- No window exists for this key right now -- re-register one
-  carrying just the failed repeat count, with the SAME (already
-  past) `window_start` it had, so it reads as immediately "due"
-  again for both a future sweep and the next `route()` call for
-  this key (which flushes an expired window inline before opening
-  a fresh one, the same code path that calls this method).
-```
-
-## CH-0153
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._release_key_lock_ref`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Review D-2: only prunes `self._key_locks[key]` when this is the
-LAST outstanding reference (refcount reaches 0) AND no window
-remains for the key -- see class docstring for why both conditions
-are required for this to be safe.
-```
-
-## CH-0154
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer.__init__`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Review D-1: tracks whether the MOST RECENT aggregate-row write
-# attempt (from any key) failed -- a single, process-wide flag,
-# deliberately mirroring `_AuditBuffer`'s own N-2 state-transition
-# logging discipline (log only on failing<->healthy transitions,
-# never once per attempt).
-```
-
-## CH-0155
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Phase 4 (design D-3/P4-D3): the coalescing state for fail-closed-
-class denials. Process-local (review N-4: a shared store is never
-consulted, so the same key can legitimately produce one row per
-process/instance, not one row per deployment).
-
-Keyed by `(application_id, actor_id or "unknown", operation,
-reason_code)`, window `W` seconds: the first occurrence of a new key
-writes a durable row synchronously (fail-closed -- `route()` raises
-`SERVICE_UNAVAILABLE` if that write fails); every occurrence after that,
-within the same window, only increments an in-memory counter. When the
-window is later found expired (lazily, on the next `route()` call for
-THAT key, or explicitly via `flush_expired()`/`flush_all()`), a second
-row -- carrying the repeat count in `count` -- is written for that key,
-if there were any repeats at all; zero-repeat windows are simply
-dropped with no second write.
-
-WP-2(a) review B-2 (fail-closed correctness): a same-key concurrent
-`route()` call must never observe "a window already exists" (and take
-the fast `repeat_count += 1` path) before the FIRST occurrence's own
-durable INSERT has actually resolved -- otherwise a fail-closed denial
-flood racing a sink outage could return an ordinary-looking denial
-response, never even attempting its own durable write, while the
-window's supposed first row was never actually recorded (§9.2 property
-1's fail-closed guarantee would then hold only single-threaded).
-
-WP-2(a) fix round 2, supervisor ruling on review m-2: PER-KEY locking,
-not a single process-wide lock held across I/O. `self._lock` (process-
-wide) protects ONLY `self._windows`/`self._key_locks`/`self._key_lock_
-refcount` dict structure -- it is acquired only for brief, non-blocking
-dict reads/writes, NEVER across a durable INSERT. Each coalescing key
-gets its own `threading.Lock` (`self._key_locks`, created on first use),
-held across that ONE key's own first-occurrence INSERT (and its own
-expired-window aggregate flush, if one is due) -- this is what still
-gives B-2 its correctness guarantee (a same-key concurrent caller
-blocks on that key's own lock until the in-flight attempt resolves)
-WITHOUT serializing unrelated keys against each other. The periodic
-sweep (`flush_expired()`/`flush_all()`) collects expired keys/state
-under the process lock and performs each one's INSERT under that SAME
-key's own per-key lock (never the process lock) -- this is what lets a
-concurrent `route()` call for that key correctly serialize against the
-sweep too (WP-2(a) fix round 3, review D-1 -- see `_requeue_failed_
-aggregate`'s own docstring for why this matters).
-
-WP-2(a) fix round 3, review D-1 (major): a failed aggregate-row write
-(the repeat-count summary row for an expired window) must never
-silently discard that repeat count -- see `_requeue_failed_aggregate`.
-A round-2 revision deleted the due window from `self._windows` before
-attempting its write and simply dropped it on failure (`except:
-continue`/`pass`), reasoning that re-inserting after releasing the
-process lock would race a concurrent `route()` for the same key; that
-race is real, but per-key locking (already required for B-2/m-2) is
-exactly what closes it -- the requeue now happens under the SAME key's
-lock the write attempt itself ran under, so no concurrent `route()`
-call for that key can be in flight at that moment.
-
-Review D-2 (minor): `self._key_locks` entries are pruned via reference
-counting (`_acquire_key_lock`/`_release_key_lock_ref`) once a key has
-no outstanding lock user AND no window left for it -- never while a
-lock might still be in use (which would let a fresh `route()` call
-silently start using a NEW, different `Lock` object for the same key,
-defeating serialization entirely).
-```
-
-## CH-0156
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer._retry_alert`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# N-2: the backoff is keyed to whether the BUFFER FLUSH is
-# currently failing, not to whether this alert row's own
-# INSERT just succeeded. If the flush is still failing (more
-# evictions can still be coming), keep backing off -- exactly
-# like an alert-write failure would -- so a healthy alert path
-# cannot be used to re-trigger a fresh attempt every single
-# `_alert_min_interval_s` for as long as the underlying sink
-# stays broken. Only reset to the floor once the flush itself
-# is observed healthy.
-```
-
-## CH-0157
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer._retry_alert`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# §7.4/review m-4: this branch is only ever reached once the
-# backoff interval has already elapsed (the early return above
-# enforces that), so logging unconditionally here already
-# matches "first attempt, then once per backoff interval" --
-# no separate first-attempt bookkeeping is needed.
-```
-
-## CH-0158
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer.flush`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# P4-D15 (WP-B2): `_flush_currently_failing` clears
-# unconditionally on ANY successful `append_many` --
-# not gated on `self._events` being empty. Under
-# sustained push load the buffer is rarely empty even
-# once the sink has genuinely recovered (M-2's
-# threshold flush keeps refilling it), so the prior
-# "only when empty" gate left the flag -- and the
-# alert backoff it feeds, see `_retry_alert` below --
-# stuck at the sink-broken state long after recovery.
-#
-# Completion-order semantics absorb the WP-3(a) review
-# m-1 race this replaces: a DIFFERENT, still-failing
-# concurrent flush (disjoint batch, per the B-2 swap
-# above) sets this back to True in its own failure
-# branch whenever IT completes -- whichever flush
-# completes LAST wins, exactly as with any other
-# unsynchronized shared-state update. A brief window
-# where this reads False while that concurrent failure
-# is still in flight does not weaken the alert-rate
-# guarantee: `_retry_alert`'s own `alert_min_interval_s`
-# floor on `alert_next_retry_at` still bounds attempts
-# to at most one per flush interval regardless of how
-# many times this flag flips in between (§7.4's "at
-# most 1 alert row per flush interval" is enforced by
-# that floor, not by this flag).
-#
-# Accepted tradeoff (P4-D15): if the sink is FLAPPING
-# (success and failure completing alternately), the
-# backoff resets to the floor on every success, so the
-# observed alert-row rate can rise from "stuck at the
-# 60s backoff cap" up to "one per alert_min_interval_s"
-# (2.0s by default). This is intentional -- evidence
-# (`count`) reaches the durable table sooner from a
-# partially-working sink, and the declared bound itself
-# (at most 1 row per flush interval) still holds; only
-# the realized rate moves toward that bound instead of
-# sitting far under it.
-```
-
-## CH-0159
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer.flush`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# B-1: re-impose the capacity bound `push()` could not
-# enforce while this batch was held outside
-# `self._events` -- drop the oldest overflow, exactly
-# the FIFO discipline `push()`'s own eviction branch
-# uses, and count ONLY this genuine, irrevocable loss
-# (the rest is still a retained retry, not a drop).
-```
-
-## CH-0160
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer.flush`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# N-1/N-2: put the un-written batch back rather than
-# discarding it -- it is retried by the next flush, not
-# counted in `_dropped_total` (nothing has actually been
-# lost) and nothing new to alert or log about on this
-# path alone. Prepended ahead of anything a concurrent
-# `push()` added to `self._events` while this I/O was in
-# flight, so flush order still matches arrival order.
-```
-
-## CH-0161
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer.flush`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-D-4/§7.3: called on demand (tests, the adapter privilege hook),
-periodically (composition root), and now also from `push()` at the
-threshold (M-2). Writes the current buffer contents as one batch,
-then attempts the sticky overflow-alert retry -- always in that
-order, always on a connection/transaction of its own. A failed
-batch write leaves the events in place for the next attempt
-(retained, not counted as dropped -- N-1) rather than discarding
-them or alerting on its own.
-
-WP-3(a) review B-2 (reentrancy): the periodic-flush thread
-(composition root) and a request-path threshold flush (`push()`,
-M-2 above) can call this method concurrently on the SAME buffer.
-`pending` is therefore SWAPPED OUT of `self._events` under a
-single lock acquisition (not merely copied) -- this, not a
-separate "flush in progress" flag, is what makes two concurrent
-`flush()` calls durably write disjoint (usually one full, one
-empty) sets of events instead of both durably writing the SAME
-events (the double-row bug this review found, reproduced verbatim
-by `test_concurrent_periodic_and_threshold_flush_never_double_
-writes_pending_events`). A concurrent call that finds `self.
-_events` already emptied by the swap simply has nothing to flush
-and returns without ever touching the sink -- it is not blocked or
-serialized behind the in-flight I/O, so this stays lock-free
-across the network round trip exactly as before.
-
-A failed `append_many` puts `pending` BACK -- prepended, so it
-precedes (in flush order) anything pushed while this I/O was in
-flight -- preserving N-1's retain discipline (retained events are
-never counted as dropped) and `_dropped_total`'s accuracy (a
-retained batch is not itself a loss) exactly as the prior
-read-then-delete version did.
-
-WP-3(a) review B-1 (blocker, on the B-2 fix above): while this
-method holds `pending` outside `self._events`, `push()` sees an
-empty (or merely in-flight-refilled) buffer and does not evict --
-capacity is enforced only against whatever is currently sitting in
-`self._events`. A naive unconditional `pending + self._events`
-restore on failure can therefore exceed `_capacity` (up to
-`len(pending)` extra), and because the surviving overflow is never
-itself re-evicted by a later `push()` (each `push()` only ever
-evicts ONE item, the one IT just added), a sink outage would let
-the buffer grow WITHOUT BOUND across repeated failed flushes --
-breaking D-4's "bounded in-memory buffer" and D-1 review M-5's
-capacity-side availability argument, and doing so *silently*: no
-`push()` eviction fires during this growth, so `_dropped_total`
-never increments and the overflow alert (D-4) never appears even
-though evidence is unboundedly accumulating in memory. So the
-restore truncates back down to `_capacity`, dropping from the
-FRONT (oldest first, matching `push()`'s own `pop(0)` FIFO
-discipline) -- and, exactly like a genuine `push()`-path eviction,
-counts only what was ACTUALLY, irrevocably discarded here (never
-the merely-retried remainder) in `_dropped_total`, sets
-`_alert_pending`, and logs the same fixed overflow message.
-```
-
-## CH-0162
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer.push`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# M-2: threshold flush -- see class docstring. Outside the lock
-# (already released above), on the calling thread.
-```
-
-## CH-0163
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer.__init__`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# N-2: tracks whether the most recent `flush()` attempt's own
-# `append_many` succeeded or failed -- independent of the alert
-# row's own write outcome, and read by `_retry_alert` to decide
-# whether the backoff may reset.
-```
-
-## CH-0164
-
-- moved from: `src/r2db_api/service.py` (`_AuditBuffer`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Phase 4 (design D-4/§7.3/§7.4): the bounded in-memory buffer for
-ordinary (buffer-class) data-operation success events, plus the
-overflow-alert sticky-retry state. Owns its own lock; the durable I/O
-`flush()` performs happens on the calling thread using `sink.append`/
-`append_many`, each of which opens its own connection/transaction (D-1's
-`PostgresApplicationAuditSink` docstring) -- this is what makes "a
-flush never shares a transaction with a fail-closed write" (D-4)
-automatic rather than something this class has to arrange.
-
-Process-local (review N-4): capacity is per-process, not per-deployment
--- a multi-instance deployment's real bound is `capacity * <max
-instances>`, which is runbook (§9.3), not code, territory.
-
-WP-2(a) review M-2: §7.3 names TWO flush triggers, "periodic" and
-"threshold" -- a prior revision implemented only the periodic one (the
-composition root's background timer). `push()` now also triggers a
-flush, synchronously, in the caller's own thread, the moment the buffer
-reaches `_FLUSH_THRESHOLD_FRACTION` of capacity -- "その場で" (right
-there), the simpler of the two options §7.3's own review text
-sanctioned. Under a healthy sink this keeps the buffer far below
-capacity, so overflow becomes a genuine signal that the sink cannot
-keep up, not an artifact of the periodic timer's own interval.
-
-`flush()` does not unconditionally empty `self._events` before
-attempting the write -- a FAILED `append_many` leaves those events in
-place (retried by the next flush) instead of discarding them outright,
-so a transient I/O failure does not permanently destroy buffered
-evidence a later retry might still durably record.
-
-WP-2(a) fix round 2 review (N-1/N-2): a RETAINED event is, by
-definition, NOT lost -- it is still sitting in `self._events`, waiting
-for the next flush attempt. Counting it in `_dropped_total` (a prior
-revision did, via `+= len(pending)` on every failed `append_many`) both
-mislabels "not yet flushed" as "dropped" (N-1: the same event, retried
-and failing repeatedly, gets counted again and again) AND -- combined
-with a failed flush marking the alert pending -- lets a single
-threshold-triggered flush failure emit its own alert-row *attempt* on
-every subsequent buffer-class request (N-2: a `push()` on every
-request, no bound on request rate). `_dropped_total` now increments
-ONLY where an event is actually, irrevocably discarded: `push()`'s own
-eviction branch (capacity reached, oldest event evicted to make room).
-A failed `append_many` retains its batch and adjusts NEITHER
-`_dropped_total` NOR `_alert_pending` on its own -- there is nothing
-new to alert about merely because a retry is still pending, and the
-ALREADY-pending alert (if any, from a genuine eviction) is independently
-rate-limited below regardless of how often `flush()` itself is retried.
-
-Alert-row EMISSION RATE is bounded independently of eviction/flush-retry
-rate (N-2): `_alert_min_interval_s` (constructor parameter, matching the
-composition root's own periodic-flush interval, default 2.0s) is a
-hard floor under `_alert_backoff_s` -- no two alert attempts are ever
-less than `_alert_min_interval_s` apart, "1 alert row attempt per flush
-interval per process" even while eviction is ongoing. The backoff is
-keyed to whether the underlying buffer FLUSH is currently succeeding
-(`_flush_currently_failing`, updated by every `flush()` call), not to
-whether the alert row's own INSERT succeeded: an alert row can itself
-write successfully while the buffer flush keeps failing (evidence keeps
-being evicted) -- in that case the backoff still grows, so a healthy
-alert-write path does not let a broken buffer-flush path re-trigger a
-fresh alert attempt every `_alert_min_interval_s` forever at the
-fastest allowed rate; it backs off further, same as an outright alert
-failure. The backoff only resets to the floor once the buffer flush
-itself is observed healthy again.
-```
-
 ## CH-0165
 
 - moved from: `src/r2db_api/service.py` (`_PreCommitHook.commit_failed`)
@@ -1637,6 +1349,20 @@ is already bound here at construction time -- the backend itself
 supplies none of it, only the fail-closed/buffer-class decision (D-2's
 normative rule: the confirmation choke for `transact`, unconditional
 for `apply_schema`).
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the hook fires for every real `transact` batch, not only a confirmed delete
+
+old:
+```
+supplies none of it, only the fail-closed/buffer-class decision (D-2's normative rule: the confirmation choke for `transact`, unconditional for `apply_schema`).
+```
+
+new:
+```
+supplies none of it, only the moment (every real batch for `transact`, unconditional for `apply_schema`).
 ```
 
 ## CH-0167
@@ -1748,37 +1474,6 @@ is the opaque cursor for the next page (`QueryOutcome.next_cursor`,
 # either backend leaking into this facade).
 ```
 
-## CH-0172
-
-- moved from: `src/r2db_api/service.py` (`<module>`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Phase 4 (design §7.4, review m-4): exponential backoff for the sticky
-# overflow-alert retry, capped at 60s -- an unbounded equal-interval retry
-# against a durably-failing sink would itself become a logging DoS (the
-# same flow problem D-3 bounds for denials, recurring on the alert path).
-# The FLOOR for this backoff is `_DEFAULT_AUDIT_FLUSH_INTERVAL_S`
-# (`_AuditBuffer`'s own `alert_min_interval_s`, WP-2(a) fix round 2 review
-# N-2), not a separate, smaller initial value -- no alert attempt is ever
-# spaced closer together than the composition root's own flush cadence.
-```
-
-## CH-0173
-
-- moved from: `src/r2db_api/service.py` (`<module>`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Phase 4 (WP-2(a) fix round 3, review D-1): fixed, no-interpolation log
-# messages for the denial-coalescer's own aggregate (repeat-count summary)
-# row write path -- mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_
-# WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline
-# (N-2), applied to `_DenialCoalescer._note_aggregate_write_result`.
-```
-
 ## CH-0174
 
 - moved from: `src/r2db_api/service.py` (`<module>`)
@@ -1825,17 +1520,6 @@ new:
 design D-5(ii), contract 1.8.0: region (ii) is `requests_per_minute`/`concurrency` -- the two `ResourceLimits` classes `resolve_limit_enforcement` below governs (both admitted by `DataService` in `service.py`), the only ones whose `limit_enforcement` mapping depends on how each is wired rather than on `process_ceiling` alone.
 ```
 
-## CH-0175
-
-- moved from: `src/r2db_api/service.py` (`<module>`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Phase 4 (design D-4): the bounded buffer's default capacity (implementation
-# discretion per the design -- "既定 1000、実装裁量で設定可").
-```
-
 ## CH-0176
 
 - moved from: `src/r2db_api/service.py` (`<module>`)
@@ -1864,6 +1548,20 @@ design D-5(ii), contract 1.8.0: region (ii) is `requests_per_minute`/`concurrenc
 # denial needing its own durable write, producing a second (or third)
 # durable row for what D-10 requires stays at most one (+ the D-2 error-row
 # exception).
+```
+
+### correction: 2026-10-01
+
+- reason: R-115 -- the coalescing denial router and its first-insert write are gone; a refusal is counted in the platform database's refusal window before its response, and the marker keeps a failed count from being counted again
+
+old:
+```
+a coalesced-denial first-insert failure). `_event`'s own deny-dispatch checks this marker and skips routing such a denial through `_route_denial` again
+```
+
+new:
+```
+a refusal-window count that could not be recorded). `_event`'s own deny-dispatch checks this marker and skips counting such a denial in the refusal window again
 ```
 
 ## CH-0178
@@ -1895,13 +1593,17 @@ design D-5(ii), contract 1.8.0: region (ii) is `requests_per_minute`/`concurrenc
 # name.
 ```
 
-## CH-0179
+### correction: 2026-09-30
 
-- moved from: `src/r2db_api/service.py` (`<module>`)
-- parent commit: `3a4c018`
-- kind: comment
+- reason: R-115 WP-4b -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; no buffered record exists any more
 
+old:
 ```
-# `_coalesced_count`'s own comment (Phase 4 WP-2(b) review B-1) moved with
-# it to `audit_counts.py` when that helper was extracted.
+Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable/buffered recording (review N-2: buffering them would just let the flow problem D-3 exists to bound come back through the buffer instead).
 ```
+
+new:
+```
+Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable recording (N-2: recording them would just let the flow problem exists to bound come back).
+```
+

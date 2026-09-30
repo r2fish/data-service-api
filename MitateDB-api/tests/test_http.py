@@ -125,11 +125,9 @@ def app_a_stack_with_audit(platform, app_a):
     the durable application-plane audit row a real HTTP call produces,
     mirroring `test_application_audit.py`'s own `make_router`/`router.
     durable_sink.events()` pattern rather than a second, independently
-    maintained PostgreSQL-backed audit reader. `stack.router.flush()`
-    drains the buffer-class events `cell.py::ApplicationCell._push_data_
-    operation_event` (query/insert/update) queues before they reach
-    `durable_sink` -- called by every test below immediately after its own
-    HTTP call, before reading `events()`."""
+    maintained PostgreSQL-backed audit reader. Every event is written to
+    `durable_sink` before its response is returned, so a test reads
+    `events()` right after its own HTTP call, with no flush in between."""
     read_store = PostgresCredentialStore(
         platform.api_dsn, pepper="synthetic-test-pepper-mitatedb-http-audit-0000", schema=platform.registry_schema,
     )
@@ -392,7 +390,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
     # commit as this host's own `process_ceilings` mapping (design D-5
     # (v)).
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 
@@ -1218,6 +1216,49 @@ def test_runtime_credential_forbidden_from_schema_operations(app_a_stack):
     assert response.json()["code"] == "FORBIDDEN"
 
 
+def _schema_refusals(stack):
+    """The `FORBIDDEN` refusals the durable sink knows about, as rows plus
+    the window summaries of every window (the far future closes them all)."""
+    from datetime import datetime, timedelta, timezone
+
+    sink = stack.router.durable_sink
+    rows = [e for e in sink.events() if e.outcome == "deny" and e.reason_code == "FORBIDDEN" and e.operation == "schema"]
+    summaries = [s for s, _end in sink.denial_window_summaries(closed_before=datetime.now(timezone.utc) + timedelta(days=3650))]
+    return rows, [s for s in summaries if s.operation == "schema"]
+
+
+def test_runtime_credential_forbidden_from_schema_operations_is_counted_in_the_durable_refusal_window(app_a_stack_with_audit):
+    """The HTTP schema endpoint refuses a runtime credential before any
+    schema method runs; the refusal is a durable one like the in-process
+    schema calls': the first is a row, the second is counted, each answered
+    only after it was recorded."""
+    stack = app_a_stack_with_audit
+    for _ in range(2):
+        response = _post(
+            stack, "/v1/schema/operations", bearer=stack.runtime_bearer,
+            json_body={"operation": "create_entity", "entity": "should_not_be_created"},
+        )
+        assert response.status_code == 403 and response.json()["code"] == "FORBIDDEN"
+    rows, summaries = _schema_refusals(stack)
+    assert len(rows) == 1, rows
+    assert rows[0].actor_type == "application_credential" and rows[0].role == "runtime"
+    assert len(summaries) == 1, "the second refusal was not counted in the window"
+
+
+def test_runtime_credential_forbidden_from_schema_operations_is_service_unavailable_when_the_count_cannot_be_recorded(app_a_stack_with_audit):
+    stack = app_a_stack_with_audit
+    stack.router.durable_sink.inject_fault(RuntimeError("sink down"))
+    try:
+        response = _post(
+            stack, "/v1/schema/operations", bearer=stack.runtime_bearer,
+            json_body={"operation": "create_entity", "entity": "should_not_be_created"},
+        )
+    finally:
+        stack.router.durable_sink.inject_fault(None)
+    assert response.status_code == 503, response.text
+    assert response.json()["code"] == "SERVICE_UNAVAILABLE"
+
+
 def test_cross_entity_mutation_endpoint_route_resolves_distinctly(app_a_stack):
     """`POST /v1/data/mutations` and `POST /v1/data/{entity}/mutations`
     must never collide at the routing level -- an entity literally named
@@ -1741,10 +1782,9 @@ def test_cross_entity_mutation_delete_declare_and_echo_per_entity_wrong_entity_p
 
 def _latest_audit_event_for(router: AuditRouter, request_id: str):
     """The durable row(s) whose own `request_id` column equals `request_
-    id` -- `router.flush()` must already have been called by the time this
-    runs (buffer-class events, `cell.py::ApplicationCell._push_data_
-    operation_event`, are not visible on `durable_sink` before that).
-    Asserts exactly one such row rather than silently taking `[0]`, so a
+    id` -- no `router.flush()` first: every event is written to the
+    `durable_sink` before its response is returned, so a request whose row
+    is not there yet fails loudly here. Asserts exactly one such row rather than silently taking `[0]`, so a
     request that (by an unrelated bug) left NO durable row, or more than
     one, fails loudly here instead of masquerading as a pass."""
     matches = [event for event in router.durable_sink.events() if event.request_id == request_id]
@@ -1761,7 +1801,6 @@ def test_request_id_is_pinned_through_query_response_and_audit_row(app_a_stack_w
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
     event = _latest_audit_event_for(stack.router, body_request_id)
     assert event.operation == "query"
 
@@ -1778,13 +1817,11 @@ def test_request_id_is_pinned_through_mutate_response_and_audit_row(app_a_stack_
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
-    # A non-destructive `transact` batch is ONE buffer-class row for the
-    # WHOLE batch (`cell.py::ApplicationCell.transact`'s own D-4/P4-D5
-    # comment: "exactly ONE `data_operation` event...operation='transact'"
-    # -- single-entity `/mutations` reaches the SAME `transact` path
-    # cross-entity `/v1/data/mutations` does, never a separate per-
-    # operation "insert" event).
+    # A non-destructive `transact` batch is ONE `data_operation` row for
+    # the WHOLE batch (`operation='transact'` -- single-entity
+    # `/mutations` reaches the SAME `transact` path cross-entity
+    # `/v1/data/mutations` does, never a separate per-operation "insert"
+    # event).
     event = _latest_audit_event_for(stack.router, body_request_id)
     assert event.operation == "transact"
 
@@ -1806,7 +1843,6 @@ def test_request_id_is_pinned_through_cross_entity_mutate_response_and_audit_row
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
     # Both operations share the ONE request-level `request_id` -- at least
     # one durable row for it is enough to prove the pin (unlike `_latest_
     # audit_event_for`'s single-entity siblings, this call legitimately
@@ -1822,7 +1858,6 @@ def test_request_id_is_pinned_through_schema_response_and_audit_row(app_a_stack_
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
     event = _latest_audit_event_for(stack.router, body_request_id)
     assert event.event_class == "schema_change"
 

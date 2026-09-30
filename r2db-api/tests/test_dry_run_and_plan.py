@@ -657,21 +657,19 @@ def test_service_dry_run_capability_is_enabled_and_gate_is_removed() -> None:
 
 def test_service_dry_run_mutation_writes_no_audit_event_at_all() -> None:
     """Completion condition 3 (audit half, U-2 = (A)): a real insert
-    writes a buffer-class event once flushed; a dry-run insert writes
-    NONE -- neither buffered nor legacy."""
+    writes its durable event before it returns; a dry-run insert writes
+    NONE -- neither durable nor legacy."""
     durable = ApplicationAuditSink()
     service, _control = build_service(durable_audit=durable)
     runtime = runtime_context(service)
     service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "real"}}])
-    service.flush_audit_buffer()
     count_after_real = len(durable_events(durable))
     assert count_after_real > 0
 
     service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "dry"}}], dry_run=True)
-    service.flush_audit_buffer()
     assert len(durable_events(durable)) == count_after_real
     # The legacy in-memory sink (`ControlAuthority`/tests' own back door)
-    # is also unaffected -- not merely the durable/buffered one.
+    # is also unaffected -- not merely the durable one.
     legacy_count_before = len(service._audit.events())
     service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "dry2"}}], dry_run=True)
     assert len(service._audit.events()) == legacy_count_before

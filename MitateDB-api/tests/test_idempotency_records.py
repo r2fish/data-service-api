@@ -113,6 +113,9 @@ class IdempotencyRecordsTests(unittest.TestCase):
                      "filters": [Filter("id", "eq", 1)], "idempotency_key": key}
         with self.assertRaises(AuditSinkUnavailable):
             runtime.transact([delete_op])
+        # A read writes its own event before it answers, so the sink is
+        # healthy again before the row count is read back.
+        sink.inject_fault(None)
         # The backend write (`delete_in_transaction`) already ran, on the
         # SAME connection/transaction the failed pre-commit hook aborted
         # -- rolled back together, so the row is still there...
@@ -478,11 +481,9 @@ class IdempotencyRecordsTests(unittest.TestCase):
                      "filters": [Filter("id", "eq", 1)], "idempotency_key": key}
 
         first = runtime.transact([delete_op], request_id="rid-original")
-        router.flush()
         before = len(sink.events())
 
         second = runtime.transact([delete_op], request_id="rid-replay")
-        router.flush()
         after = sink.events()
         self.assertEqual(len(after), before + 1, "the destructive replay must add EXACTLY one durable audit row")
         self.assertEqual(first, second)
@@ -636,7 +637,11 @@ class IdempotencyRecordsTests(unittest.TestCase):
 
         backend.commit = failing_commit
         try:
-            with self.assertRaises(RuntimeError):
+            from mitatedb_api.errors import AuditSinkUnavailable
+            # the batch's `allow` row is already durable when the commit
+            # fails, so the failure surfaces as the audit sink's own (the
+            # `error` row is written for the same request)
+            with self.assertRaises(AuditSinkUnavailable):
                 runtime.transact(
                     [{"type": "insert", "collection": "notes", "values": {"title": "k5"},
                       "idempotency_key": "k5-key"}])
@@ -659,8 +664,10 @@ def test_declared_audit_outcomes_include_replayed():
     `"replayed"` -- fixed against every real `outcome=`/`"outcome":`
     literal the DURABLE application-audit trail's own dispatch module
     (`audit_dispatch.py` -- the ONLY module that ever calls `Application
-    AuditSink.append`/`.push_buffer_event`/`.write_replayed_fail_closed_
-    event`) constructs, using the SAME generalized AST scanner `test_
+    AuditSink.append`, through `.write_event`/`.write_replayed_fail_closed_
+    event`) and the sink's own refusal-count entry point (`application_
+    audit.py`'s `record_denial`, the one place a refusal's `deny` outcome
+    is spelled) construct, using the SAME generalized AST scanner `test_
     audit_query.py`'s own `DECLARED_AUDIT_OPERATIONS`/`_TARGET_KINDS`/
     `_EVENT_CLASSES` tests use -- restricted to THIS one file, not
     `src/mitatedb_api/` as a whole, because `audit.py`'s unrelated,
@@ -674,12 +681,18 @@ def test_declared_audit_outcomes_include_replayed():
     left undeclared here is still caught, not silently permitted."""
     from mitatedb_api.application_audit import DECLARED_AUDIT_OUTCOMES
 
-    from .test_audit_query import _SRC_DIR, _field_literal_union
+    from .test_audit_query import _SRC_DIR, _field_literal_union, _literal_leaves, _scan_file_field_sites
 
     assert "replayed" in DECLARED_AUDIT_OUTCOMES
-    dispatch_file = [_SRC_DIR / "audit_dispatch.py"]
+    dispatch_file = [_SRC_DIR / "audit_dispatch.py", _SRC_DIR / "application_audit.py"]
     emitted = _field_literal_union(dispatch_file, "outcome")
     assert emitted, "the AST scanner found zero outcome literals -- it is itself broken"
+    # a dict literal could also carry an `outcome` (the keyword/assignment
+    # union above does not read those)
+    for source_file in dispatch_file:
+        _keyword_sites, dict_sites, _assignment_sites = _scan_file_field_sites(source_file, "outcome")
+        for _lineno, _kind, value, _ok in dict_sites:
+            emitted |= _literal_leaves(value)
     assert emitted == DECLARED_AUDIT_OUTCOMES, (
         f"emittable-vs-declared mismatch: emitted but not declared: {emitted - DECLARED_AUDIT_OUTCOMES!r}; "
         f"declared but never actually emitted: {DECLARED_AUDIT_OUTCOMES - emitted!r}"
