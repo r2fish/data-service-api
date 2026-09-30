@@ -292,6 +292,7 @@ _EXPECTED_DISCOVERED_MODULES: dict[str, frozenset[str]] = {
         "request_traversal.py",
         "request_vocabulary.py",
         "service.py",
+        "startup_checks.py",
         "surfaces.py",
     }),
 }

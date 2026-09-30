@@ -16,7 +16,7 @@ independent parts:
 `os.environ.get(ADMIN_DSN_ENV, "")` -- `psycopg.connect("")` still falls
 back to the shared cluster via libpq's own defaults, silently, past every
 other check in this repository. `test_admin_dsn_env_definitions_are_
-pinned_to_31_files` and `test_every_admin_dsn_reader_raises_when_the_
+pinned_to_33_files` and `test_every_admin_dsn_reader_raises_when_the_
 environment_variable_is_unset` read the AST of every module-level
 `ADMIN_DSN_ENV` definition's own reader function(s) directly, not a
 string search (§1.7 の 52 -- a check must read the property a function
@@ -262,8 +262,8 @@ def test_scan_covers_at_least_one_file() -> None:
     assert len(files) >= 1, "git ls-files -- '*.py' returned no files"
 
 
-def test_admin_dsn_env_definitions_are_pinned_to_32_files() -> None:
-    """Completion condition 5 (R-2): exactly 32 tracked .py files define
+def test_admin_dsn_env_definitions_are_pinned_to_33_files() -> None:
+    """Completion condition 5 (R-2): exactly 33 tracked .py files define
     `ADMIN_DSN_ENV` at module level (work order §4.2 (a)). The 28th is
     `r2db-api/tests/test_ops_apply_platform_migration.py` (R-90; pinned in
     a follow-up correction), the 29th `r2db-api/tests/test_r78_pool_wait_
@@ -272,17 +272,19 @@ def test_admin_dsn_env_definitions_are_pinned_to_32_files() -> None:
     (R-79 WP-1, docs/work-orders/WORK_ORDER_R79_PREPARED_STATEMENT_
     MEASUREMENT_V1.md §2.2 の完了条件 24); the 32nd is `MitateDB-api/tests/
     test_row_order_column.py` (the internal row-order column `_mdb_row`,
-    design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2); all five follow
-    the same convention. This pin counts tracked files only, so a change
+    design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2); the 33rd is
+    `MitateDB-api/tests/test_ops_startup_checks.py` (the `ops startup-checks`
+    subcommand's tests, design docs/design/MITATEDB_STARTUP_CHECK_TOOL_V0_1.md
+    D-10); all six follow the same convention. This pin counts tracked files only, so a change
     set that adds such a file must re-measure it with the new file
     tracked (`git add -N`) before its own `tools/tests` run."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
-    assert len(files) == 32, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
+    assert len(files) == 33, sorted(str(p.relative_to(_REPO_ROOT)) for p in files)
 
 
 def test_every_admin_dsn_reader_raises_when_the_environment_variable_is_unset() -> None:
-    """Completion condition 6 (R-2): every one of the (currently 32,
-    R-79 WP-1) files' own `ADMIN_DSN_ENV` reader function(s) has a falsy
+    """Completion condition 6 (R-2): every one of the (currently 33,
+    R-116) files' own `ADMIN_DSN_ENV` reader function(s) has a falsy
     check + `raise` (AST, not string search -- §1.7 の 52)."""
     files = [p for p in _tracked_py_files() if _defines_admin_dsn_env_at_module_level(_parse(p))]
     assert files, "expected at least one ADMIN_DSN_ENV definition to check"

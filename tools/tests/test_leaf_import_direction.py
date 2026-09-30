@@ -195,6 +195,7 @@ NON_LEAF_MODULE_ENTRIES: dict[str, list[tuple[str, str]]] = {
         ("pool.py", "bounded connection pool: connection ownership (design §3.2)"),
         ("psycopg_counting.py", "unregistered; import-shape only, eligibility not assessed (design §3.1)"),
         ("service.py", "control-plane/application service composition (upper layers)"),
+        ("startup_checks.py", "imports .config and .platform_declarations (upper layers); reads git objects via subprocess (I/O)"),
         ("surfaces.py", "unregistered; import-shape only, eligibility not assessed (design §3.1)"),
     ],
 }
