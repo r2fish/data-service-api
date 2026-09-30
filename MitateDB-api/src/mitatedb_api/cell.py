@@ -2408,7 +2408,7 @@ class ApplicationCell:
                 with self._lock:
                     rows = self._backend.read(collection, read_columns, bound_filters, order_spec, limit + 1,
                                               cursor_values=cursor_values, deadline=deadline)
-        rows = self._decode_rows(collection, rows)
+                rows = self._decode_rows(collection, rows)  # a catalog read: stays under the lock and the gate
         has_more = len(rows) > limit
         page_rows = rows[:limit]
         items = [{field_name: row[field_name] for field_name in selected} for row in page_rows]
