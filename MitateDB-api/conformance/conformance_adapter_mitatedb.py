@@ -564,47 +564,69 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
 # port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
 # section 9's `conformance-tests/` paragraph, Q-5): `hold_after_plan_
 # verification` realization for this in-process plug. A schema operation
-# on `ApplicationCell` (`create_collection` / `add_field` / `alter_field`,
-# `cell.py`) checks its `plan` against the Application's current revision
-# in the cell (`check_plan_precondition`), and only then calls the
-# backend's DDL-carrying method -- `create_collection` / `add_field` /
+# on `ApplicationCell` (`create_entity` / `add_field` / `alter_field`,
+# `cell.py`) that presents a `plan` or `dry_run` reads the Application's
+# current revision and checks its `plan` against it in the cell
+# (`check_plan_precondition`), and only then calls the backend's
+# DDL-carrying method -- `create_collection` / `add_field` /
 # `alter_field_constraints` -- which is the first thing that changes the
 # schema. The stall point is the ENTRY of that backend call, on the
-# Application's own backend instance: after the plan check (and after
-# every lock the cell took for it), before the first DDL statement. One
-# armed hold claims the first call that reaches it (a `threading.Lock`
-# nobody releases) and lets every later call through, so exactly ONE
-# schema operation is held. Data operations never reach these three
-# methods.
+# Application's own backend instance: after the revision read and the
+# plan check (and after every lock the cell took for them), before the
+# first DDL statement. The cell's own `create_collection` / `create_entity`
+# / `add_field` / `alter_field` are wrapped only to mark the calling
+# thread while a call that presents a `plan` or `dry_run` is in progress;
+# a schema operation presenting neither passes through, unmarked. One
+# armed hold claims the first marked call that reaches the stall point (a
+# `threading.Lock` nobody releases) and lets every later call through, so
+# exactly ONE schema operation is held. Data operations never reach the
+# three backend methods. The adapter replaces these product methods on
+# the instance and restores them on exit; no product source changes.
 
 
 @contextmanager
 def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerificationHold]:
     backend = cell_obj._backend  # noqa: SLF001 -- adapter-internal plumbing, same convention `_hold_after_idempotency_check` above uses.
-    names = ("create_collection", "add_field", "alter_field_constraints")
-    originals = {name: getattr(backend, name) for name in names}
+    backend_names = ("create_collection", "add_field", "alter_field_constraints")
+    cell_names = ("create_collection", "create_entity", "add_field", "alter_field")
+    backend_originals = {name: getattr(backend, name) for name in backend_names}
+    cell_originals = {name: getattr(cell_obj, name) for name in cell_names}
     claimed = threading.Lock()
     entered = threading.Semaphore(0)
     release = threading.Event()
+    marked = threading.local()
+
+    def _marking(original):
+        def _marked(*args, **kwargs):
+            previous = getattr(marked, "presents_plan_or_dry_run", False)
+            marked.presents_plan_or_dry_run = previous or kwargs.get("plan") is not None or bool(kwargs.get("dry_run"))
+            try:
+                return original(*args, **kwargs)
+            finally:
+                marked.presents_plan_or_dry_run = previous
+
+        return _marked
 
     def _stalling(original):
         def _stalled(*args, **kwargs):
-            if claimed.acquire(blocking=False):
+            if getattr(marked, "presents_plan_or_dry_run", False) and claimed.acquire(blocking=False):
                 entered.release()
                 release.wait()
             return original(*args, **kwargs)
 
         return _stalled
 
-    for name, original in originals.items():
+    for name, original in cell_originals.items():
+        setattr(cell_obj, name, _marking(original))
+    for name, original in backend_originals.items():
         setattr(backend, name, _stalling(original))
 
     def _wait_until_held(timeout_s: float) -> int:
         if not entered.acquire(timeout=timeout_s):
             raise AssertionError(
                 f"hold_after_plan_verification: no schema operation reached the entry of the backend's "
-                f"DDL-carrying method within {timeout_s}s (expected the next schema operation on this "
-                "Application to stall there -- see this helper's own module comment)"
+                f"DDL-carrying method within {timeout_s}s (expected the next schema operation presenting a "
+                "plan or dry_run on this Application to stall there -- see this helper's own module comment)"
             )
         return 1
 
@@ -612,8 +634,10 @@ def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerification
         yield PlanVerificationHold(_wait_until_held)
     finally:
         release.set()
-        for name, original in originals.items():
+        for name, original in backend_originals.items():
             setattr(backend, name, original)
+        for name, original in cell_originals.items():
+            setattr(cell_obj, name, original)
 
 
 class MitateDBConformanceAdapter(ConformanceAdapter):

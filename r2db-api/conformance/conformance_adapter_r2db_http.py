@@ -923,20 +923,21 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
 # `_read_schema_revision`, inside its transaction and before any DDL
 # statement (`postgres.py`, the `revision_before` read; the `plan`
 # comparison itself follows the DDL, against the token built from that
-# read). The stall point is the return of that first `_read_schema_
-# revision` call made inside a schema operation: after the revision read
-# and after every lock the operation has taken by then, before the first
-# DDL statement. `PostgresCell` has no in-process cell lock, so what a
-# second schema operation ("B") waits on while the first ("A") is held is
-# whatever the database-level serialization of schema operations takes --
-# with none, B runs straight through while A is held. The wrap is gated
-# on a thread-local mark only this cell's own `apply_schema` wrapper sets
-# and on a claim the first caller takes, so `_read_schema_revision` calls
-# made by a data operation's delete confirmation, a later call and another
-# cell pass straight through and exactly ONE schema operation is held. A
-# schema operation that neither carries a `plan` nor is a `dry_run`, and
-# confirms no destructive operation, never reads the revision before its
-# DDL and is therefore not held by this realization.
+# read). The stall point is the return of that `_read_schema_revision`
+# call made inside a schema operation presenting a `plan` or `dry_run`:
+# after the revision read and after every lock the operation has taken by
+# then, before the first DDL statement. `PostgresCell` has no in-process
+# cell lock, so what a second schema operation ("B") waits on while the
+# first ("A") is held is whatever the database-level serialization of
+# schema operations takes -- with none, B runs straight through while A
+# is held. The wrap replaces two product methods on the cell instance and
+# restores them on exit; no product source changes. It is gated on a
+# thread-local mark only this cell's own `apply_schema` wrapper sets, and
+# only for a call presenting a `plan` or `dry_run`, and on a claim the
+# first caller takes, so `_read_schema_revision` calls made by a data
+# operation's delete confirmation, by a schema operation presenting
+# neither `plan` nor `dry_run`, a later call and another cell pass
+# straight through and exactly ONE schema operation is held.
 
 
 @contextmanager
@@ -949,7 +950,7 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
     marked = threading.local()
 
     def _apply_schema(*args: Any, **kwargs: Any):
-        marked.schema_operation = True
+        marked.schema_operation = kwargs.get("plan") is not None or bool(kwargs.get("dry_run"))
         try:
             return original_apply_schema(*args, **kwargs)
         finally:

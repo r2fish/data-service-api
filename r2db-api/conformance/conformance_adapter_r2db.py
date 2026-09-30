@@ -373,16 +373,19 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
 # `structured.compute_plan_token` inside A's `_apply_schema_locked`: the
 # point where A has read the revision its `plan` is checked against
 # (`before_revision`) and built the token for it, before `_apply_schema_
-# locked` makes any change to the cell's schema state. `compute_plan_
+# locked` makes any change to the cell's schema state. The `plan`
+# comparison itself is the operation's exit point, after its tentative
+# changes; the stall point is where the comparison's input is fixed, which
+# is what a concurrent schema operation could invalidate. `compute_plan_
 # token` is a module function, not a cell method, so the wrap is a
-# module-attribute replacement; it is gated on a thread-local mark that
-# only this cell's own `apply_schema` wrapper sets, and on a claim the
-# first caller to reach it takes, so a data operation (`transact` also
-# calls `compute_plan_token`), another cell's schema operation and every
-# later call pass straight through and exactly ONE schema operation is
-# held. A schema operation that carries neither `plan` nor `dry_run`
-# never calls `compute_plan_token` (it reads `self.schema_revision`
-# directly) and is therefore not held by this realization.
+# module-attribute replacement (restored on exit; no product source
+# changes). It is gated on a thread-local mark that only this cell's own
+# `apply_schema` wrapper sets, and only for a call presenting a `plan` or
+# `dry_run`, and on a claim the first caller to reach it takes, so a data
+# operation (`transact` also calls `compute_plan_token`), another cell's
+# schema operation, a schema operation presenting neither `plan` nor
+# `dry_run` (it never calls `compute_plan_token`) and every later call
+# pass straight through and exactly ONE schema operation is held.
 
 
 @contextmanager
@@ -397,7 +400,7 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
     marked = threading.local()
 
     def _apply_schema(*args: Any, **kwargs: Any):
-        marked.schema_operation = True
+        marked.schema_operation = kwargs.get("plan") is not None or bool(kwargs.get("dry_run"))
         try:
             return original_apply_schema(*args, **kwargs)
         finally:
