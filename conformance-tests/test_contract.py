@@ -75,18 +75,17 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_12_0():
-    # CCR_DISPOSITION.md subordinate ruling 17: the version bump itself,
+def test_contract_declares_1_13_0():
+    # CCR_DISPOSITION.md subordinate ruling 18: the version bump itself,
     # pinned so a future revert of just this one line is caught here rather
     # than only by whichever other test happens to touch contract_version.
     # This file carries one "declares" pin, for the version the contract
     # declares today; an implementation still declaring an earlier version
-    # is exercised by version_binding's own retroactivity rule. 1.12.0
-    # changes no behavior, so both peers' own runtime declaration
-    # (`capabilities_document.py`/`control_plane.py`) moves in the same
-    # commit as the contract text.
+    # is exercised by version_binding's own retroactivity rule. Both
+    # peers' own runtime declaration (`capabilities_document.py`/
+    # `control_plane.py`) moves in the same commit as the contract text.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.12.0"
+    assert contract["contract_version"] == "1.13.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1167,21 +1166,111 @@ def test_contract_pins_the_1_12_0_audit_window_note_verbatim():
 def test_contract_pins_the_1_12_0_version_binding_sentence_verbatim():
     """The 1.12.0 sentence occupies EXACTLY the text between the
     1.10.0-declaring retroactive-denial sentence that ends the 1.11.0
-    paragraph and the version-flip sentence, and 1.12.0 adds no
-    `versioning.obligations` entry (it introduces no obligation)."""
+    paragraph and the start of the 1.13.0 paragraph, and 1.12.0 adds no
+    `versioning.obligations` entry (it introduces no obligation). Right
+    edge follows contract 1.13.0 (subordinate ruling 18): its paragraph
+    sits between the 1.12.0 sentence and the version-flip sentence; the
+    1.12.0 sentence's own text is unchanged."""
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
     version_binding = contract["versioning"]["version_binding"]
     anchor = "An implementation still declaring 1.10.0 is not held to any 1.11.0-only obligation retroactively."
     idx_anchor_end = version_binding.index(anchor) + len(anchor)
-    idx_version_flip = version_binding.index("A peer's version-flip")
-    between = version_binding[idx_anchor_end:idx_version_flip]
+    idx_1_13_0_paragraph = version_binding.index("Only an implementation declaring 1.13.0 or higher")
+    between = version_binding[idx_anchor_end:idx_1_13_0_paragraph]
     assert between == " " + PIN_1_12_0_VERSION_BINDING_SENTENCE + " ", (
-        "the text between the 1.10.0-declaring retroactive row and the version-flip sentence is not exactly "
+        "the text between the 1.10.0-declaring retroactive row and the start of the 1.13.0 paragraph is not exactly "
         f"the 1.12.0 sentence (surrounded by one space on each side): {between!r}"
     )
     versions = [entry["version"] for entry in contract["versioning"]["obligations"]]
     assert "1.12.0" not in versions
-    assert versions[-1] == "1.11.0"
+    assert versions[9] == "1.11.0"
+    assert versions[10] == "1.13.0"
+
+
+# Contract 1.13.0 (CCR_DISPOSITION.md subordinate ruling 18): a service
+# process that stops without completing a graceful shutdown loses neither
+# the audit event of an answered operation nor the count of an answered
+# denial occurrence. The three texts are copied verbatim from the
+# confirmed-text file (OPERATING_CONDITIONS.md section 1.5 items 35/36) --
+# never paraphrased. The one obligation is unconditional (it does not
+# depend on any capability's own status).
+PIN_1_13_0_PROCESS_LOSS_POLICY = (
+    "An implementation declaring 1.13.0 or higher loses, when a service process stops without completing "
+    "a graceful shutdown, neither the audit event of an operation whose response the service had already "
+    "returned nor the count of any denial occurrence whose response the service had already returned. A "
+    "buffer that such a stop can empty is therefore not the bounded buffer sink_failure_policy permits."
+)
+
+PIN_1_13_0_VERSION_BINDING_PARAGRAPH = (
+    "Only an implementation declaring 1.13.0 or higher additionally claims conformance to the obligation "
+    "1.13.0 introduced (subordinate ruling 18), unconditional in the same sense as every unconditional "
+    "obligation enumerated above: audit.process_loss_policy -- a service process that stops without "
+    "completing a graceful shutdown loses neither the audit event of an operation whose response the "
+    "service had already returned nor the count of any denial occurrence whose response the service had "
+    "already returned. An implementation still declaring 1.12.0 is not held to any 1.13.0-only "
+    "obligation retroactively."
+)
+
+FIXED_1_13_0_OBLIGATIONS_ENTRY = {
+    "version": "1.13.0",
+    "subordinate_ruling": 18,
+    "unconditional": ["audit_evidence_of_answered_requests_survives_abrupt_process_stop"],
+    "conditional": [],
+}
+
+
+def test_contract_pins_the_1_13_0_process_loss_policy_verbatim():
+    """`audit.process_loss_policy` byte-matches the confirmed text, sits
+    right after `audit.sink_failure_policy`, and leaves
+    `sink_failure_policy` itself untouched (the 1.13.0-or-higher
+    qualifier is what keeps a 1.12.0-or-lower implementation's bounded
+    buffer permitted)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    audit = contract["audit"]
+    assert audit["process_loss_policy"] == PIN_1_13_0_PROCESS_LOSS_POLICY, (
+        f"audit.process_loss_policy does not byte-match the confirmed text: {audit['process_loss_policy']!r}"
+    )
+    keys = list(audit)
+    assert keys.index("process_loss_policy") == keys.index("sink_failure_policy") + 1
+    assert "An implementation declaring 1.13.0 or higher" in audit["process_loss_policy"]
+    assert "bounded buffer" in audit["sink_failure_policy"]
+
+
+def test_contract_pins_the_1_13_0_obligations_entry_verbatim():
+    """`versioning.obligations` ends with the 1.13.0 entry, byte-matching
+    the confirmed entry -- 1 unconditional obligation, 0 conditional."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    obligations = contract["versioning"]["obligations"]
+    # Pinned by an index fixed to its 1.13.0-era position (obligations[10],
+    # after 1.11.0's own entry at [9]; 1.12.0 adds none) -- the same form
+    # the earlier entries' pins use, so a later version appending its own
+    # entry leaves this pin untouched.
+    assert obligations[10] == FIXED_1_13_0_OBLIGATIONS_ENTRY, (
+        f"versioning.obligations[10] does not byte-match the confirmed 1.13.0 entry: {obligations[10]!r}"
+    )
+    assert set(obligations[10].keys()) == {"version", "subordinate_ruling", "unconditional", "conditional"}
+    assert len(obligations[10]["unconditional"]) == 1
+
+
+def test_contract_pins_the_1_13_0_version_binding_paragraph_verbatim():
+    """The confirmed 1.13.0 paragraph -- including its own trailing
+    1.12.0-declaring retroactive-denial sentence -- occupies EXACTLY the
+    text between the 1.12.0 sentence and the version-flip sentence (an
+    equality check, not a containment check, so a further sentence
+    slipped in on either side is caught here too)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = contract["versioning"]["version_binding"]
+    assert PIN_1_13_0_VERSION_BINDING_PARAGRAPH in version_binding, (
+        "versioning.version_binding no longer contains the confirmed 1.13.0 paragraph verbatim"
+    )
+    idx_1_12_0_end = version_binding.index(PIN_1_12_0_VERSION_BINDING_SENTENCE) + len(PIN_1_12_0_VERSION_BINDING_SENTENCE)
+    idx_version_flip = version_binding.index("A peer's version-flip")
+    between = version_binding[idx_1_12_0_end:idx_version_flip]
+    assert between == " " + PIN_1_13_0_VERSION_BINDING_PARAGRAPH + " ", (
+        "the text between the 1.12.0 sentence and the version-flip sentence is not exactly "
+        f"the confirmed 1.13.0 paragraph (surrounded by one space on each side): {between!r}"
+    )
+    assert "An implementation still declaring 1.12.0 is not held to any 1.13.0-only obligation retroactively." in between
 
 
 def test_audit_requests_per_minute_is_a_declared_limit_class():

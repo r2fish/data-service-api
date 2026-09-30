@@ -1026,6 +1026,20 @@ new:
 This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
 ```
 
+### correction: 2026-09-30
+
+- reason: roadmap R-115 (contract 1.13.0, subordinate ruling 18) -- this host declares 1.13.0 in the same commit as its own audit durability behavior
+
+old:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
+```
+
+new:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window. This host also declares contract 1.13.0 in the same commit as its own audit durability behavior -- a service process that stops without completing a graceful shutdown loses neither the audit event of an operation whose response was already returned nor the count of any denial occurrence whose response was already returned -- 1.13.0's own unconditional obligation, never ahead of the behavior it declares.
+```
+
 ## CH-0143
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)

@@ -1706,7 +1706,7 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
         cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     secret = bearer
     document = service.control_capabilities(secret)  # must NOT raise -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -1736,7 +1736,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     regardless of role, and this omission does not weaken the proof."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
 
     fresh_backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with fresh_backend.unit_of_work() as work:
@@ -1748,7 +1748,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     fresh_secret = fresh_bearer
     fresh_service = ControlPlaneService(fresh_backend, limits=_GENEROUS_LIMITS)
     fresh_document = fresh_service.control_capabilities(fresh_secret)  # must_rotate=True path
-    assert fresh_document["contract_version"] == "1.12.0"
+    assert fresh_document["contract_version"] == "1.13.0"
 
     durable_operations = {event.operation for event in h.control_audit.snapshot()}
     durable_operations |= {event.operation for event in fresh_backend.audit_sink.snapshot()}
@@ -3750,7 +3750,7 @@ def test_control_capabilities_declares_contract_version_1_5_0() -> None:
     own re-flipped pins."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
 
 
 # ---------------------------------------------------------------------------
