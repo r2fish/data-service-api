@@ -426,7 +426,10 @@ class BoundedConnectionPool:
         `acquire_timeout` the pool was constructed with. A given `timeout`
         also bounds the connect of a connection this call opens: the
         constructed `connect_timeout`, or `timeout` rounded up to whole
-        seconds (at least 1) when that is smaller.
+        seconds (at least 1) when that is smaller. psycopg itself treats a
+        `connect_timeout` below 2 as 2, so the effective floor of that
+        connect is two seconds, and a value of 0 would mean psycopg's own
+        default (130 s) rather than "no time left" -- hence the floor.
 
         Fail-closed on both real failure modes: a connection attempt that
         raises (`psycopg.Error`) raises `PoolConnectFailed`, and a pool
