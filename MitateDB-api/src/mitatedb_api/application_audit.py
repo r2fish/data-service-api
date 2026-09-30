@@ -534,7 +534,7 @@ class PostgresApplicationAuditSink:
 
     def close(self) -> None:
         """Releases every idle connection of the pool this sink was given
-        (the lifespan shutdown calls it once the last flush is done). A
+        (the lifespan shutdown calls it once the last request has finished). A
         no-op without a pool: every call already closed its own
         connection."""
         if self._pool is not None:

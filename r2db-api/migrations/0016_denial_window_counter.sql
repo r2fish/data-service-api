@@ -63,8 +63,12 @@
 -- are owned by the schema's owner role (`r2dbsvc_control`), never by the
 -- role that happens to run this file: the ownership is set explicitly below,
 -- so a run as a more privileged administrative role leaves the definer
--- function owned by the least-privileged role that can insert into
--- `application_audit`.
+-- function owned by the schema's owner. That role owns the schema and
+-- `application_audit` and is the role that runs this file on a platform
+-- provisioned by 0001/0002. It holds more privilege than the runtime role
+-- `r2dbsvc_api` (it can create roles and databases), so the function body is
+-- static SQL with `search_path` pinned and every object schema-qualified: a
+-- caller passes values only, never a name the function resolves.
 --
 -- SECURITY DEFINER hygiene: `search_path` is pinned to `pg_catalog, pg_temp`
 -- on the function and every object it names is schema-qualified, so a

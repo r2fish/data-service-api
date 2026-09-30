@@ -316,6 +316,35 @@ def _require_provided(adapter, actor, request: Mapping[str, Any]) -> Mapping[str
     return outcome
 
 
+def _walk_audit_events(adapter, actor, page_limit: int = 1000, max_pages: int = 500) -> Mapping[str, Any]:
+    """Reads `audit_query` to its last page: each page's last event's
+    `cursor` is the next request's `after`, and the walk ends on an empty
+    page (or an event without a cursor). Returns `{"events": [every event
+    in order]}`. A single `{"limit": 1000}` read sees only the OLDEST 1000
+    events, so once a platform holds more than that the newest events sit
+    outside the page and a test looking for one of them fails for a reason
+    that has nothing to do with the peer. `max_pages` only stops a cursor
+    that never advances from looping forever."""
+    events: list[Any] = []
+    after = None
+    for _ in range(max_pages):
+        request: dict[str, Any] = {"limit": page_limit}
+        if after is not None:
+            request["after"] = after
+        page = _require_provided(adapter, actor, request)["events"]
+        if not page:
+            return {"events": events}
+        events.extend(page)
+        cursor = page[-1].get("cursor") if isinstance(page[-1], Mapping) else None
+        if cursor is None:
+            return {"events": events}
+        after = cursor
+    raise AssertionError(
+        f"{adapter.name}: audit_query still returned events after {max_pages} pages of {page_limit} -- "
+        "the cursor does not advance the read"
+    )
+
+
 def _dispatch_audit_query_on_data_plane_host(adapter, actor, request: Mapping[str, Any]):
     """Twin of `_dispatch_audit_query` for port v1.9's `audit_query_on_
     data_plane_host` (D-2, CCR_DISPOSITION.md subordinate ruling 10 item
@@ -382,7 +411,7 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
     marker = fresh_identifier("c09v1")
     adapter.insert(session, entity, {"item_key": 1, "label": "c09v1", "probe_key": marker, "probe_value": marker})
 
-    baseline = _require_provided(adapter, control_actor, {"limit": 1000})
+    baseline = _walk_audit_events(adapter, control_actor)
     baseline_ids = {_event_identity(event) for event in baseline["events"] if isinstance(event, Mapping)}
 
     adapter.delete(session, entity, "probe_key", marker, destructive=True, confirmation=VALID_CONFIRMATION)
@@ -391,7 +420,7 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
     # so visibility lag alone -- never a fixed sleep -- makes the delete
     # above observable.
     time.sleep(adapter.audit_visibility_lag_ms() / 1000)
-    result = _require_provided(adapter, control_actor, {"limit": 1000})
+    result = _walk_audit_events(adapter, control_actor)
     events = result["events"]
     new_events = [
         event for event in events
@@ -472,7 +501,7 @@ def test_c09_v2_no_forbidden_field_key_or_reusable_secret_value_appears(adapter,
     # scanning only pre-existing events.
     application_credential = adapter.issue_credential(fx.app_a, "runtime")
     time.sleep(adapter.audit_visibility_lag_ms() / 1000)
-    result = _require_provided(adapter, control_actor, {"limit": 1000})
+    result = _walk_audit_events(adapter, control_actor)
 
     events = result["events"]
     for event in events:
@@ -742,6 +771,7 @@ def _require_nonvacuous_provided(adapter, control_actor, request: Mapping[str, A
         while True:
             result = _require_provided(adapter, control_actor, request)
             if result.get("events"):
+                result = _walk_audit_events(adapter, control_actor, int(request.get("limit", 1000)))
                 break
             if waited_ms >= deadline_ms:
                 break
@@ -1004,6 +1034,38 @@ def test_c09_declared_enabled_audit_query_actually_answers(adapter):
         )
         return
     assert isinstance(result, Mapping) and "events" in result
+
+
+def test_c09_audit_walk_follows_the_cursor_through_every_page(adapter):
+    """`_walk_audit_events` reads every page: with pages of half the events
+    (so three control requests, well inside a plug's control rate bound) it
+    returns every event a page of 1000 returns. A walk that stopped after
+    the first page would return half of them and fail here. The platform
+    holds at least the two events this test's own probe application's
+    register / deprovision produce, so the read is never vacuous."""
+    _, status = _audit_query_declaration(adapter)
+    if status not in ("enabled", "partial"):
+        return
+    control_actor = adapter.control_credential()
+    probe_app_id = fresh_identifier("c09walk")
+    adapter.register_application_inband(control_actor, probe_app_id)
+    try:
+        time.sleep(adapter.audit_visibility_lag_ms() / 1000)
+    finally:
+        adapter.deprovision_application(probe_app_id)
+    by_thousand = _walk_audit_events(adapter, control_actor, page_limit=1000)["events"]
+    assert len(by_thousand) >= 2, (
+        f"{adapter.name}: the platform shows {len(by_thousand)} event(s) after this test's own probe "
+        "application was registered -- the paged read below would be vacuous"
+    )
+    page_limit = (len(by_thousand) + 1) // 2
+    by_halves = _walk_audit_events(adapter, control_actor, page_limit=page_limit)["events"]
+    identities = {_event_identity(event) for event in by_halves}
+    assert len(identities) == len(by_halves), f"{adapter.name}: the paged walk returned an event twice"
+    assert {_event_identity(event) for event in by_thousand} <= identities, (
+        f"{adapter.name}: the walk in pages of {page_limit} missed {len(by_thousand) - len(identities & {_event_identity(e) for e in by_thousand})} "
+        f"of the {len(by_thousand)} events a page of 1000 returns"
+    )
 
 
 # --- vacuity guards -------------------------------------------------------

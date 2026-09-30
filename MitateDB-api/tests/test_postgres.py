@@ -1346,61 +1346,23 @@ def test_postgres_only_value_domain_denials_reachable_from_a_normal_client_reque
         close_cell(cell)
 
 
-def test_backend_defense_in_depth_recovers_the_connection_after_an_unanticipated_postgres_error(app_a) -> None:
-    """B-1 (ii): calling `PostgresBackend.insert()` directly (bypassing
-    `cell.py`'s own domain pre-check entirely, simulating a defect or a
-    case layer (i) does not cover) with a value PostgreSQL itself rejects
-    still (a) raises a classified `ValidationError` carrying the
-    layer-(ii) BACKSTOP's own distinct message ("storage backend rejected
-    the request" -- m-8 (ii), never the layer-(i) "does not match"/"is out
-    of range" wording, since layer (i) was never even consulted here),
-    never a raw `psycopg.Error`, and (b) leaves the connection usable for
-    the very next call -- proving the broad `except psycopg.Error:
-    rollback()` backstop in `insert()` works even when the seam's own
-    pre-check is bypassed."""
-    cell = make_cell(app_a)
-    developer, runtime = sessions_for(cell, app_a.app_id)
-    try:
-        developer.create_collection("raw_backend_probe", {"n": "integer"})
-        with pytest.raises(ValidationError, match="storage backend rejected the request"):
-            cell._backend.insert("raw_backend_probe", ["n"], [10 ** 30])
-        # The connection must not be poisoned by the direct call above.
-        runtime.insert("raw_backend_probe", {"n": 1})
-        assert runtime.read("raw_backend_probe")[0]["n"] == 1
-    finally:
-        close_cell(cell)
-
-
-def test_backend_defense_in_depth_recovers_the_connection_for_update_delete_and_read(app_a) -> None:
-    """m-8 (iii, independent review round 2): the SAME defense-in-depth
-    property as the `insert()` test above, generalized to the other three
-    DML methods -- the reviewer's own mutation (D) removed the generic
-    `except psycopg.Error` backstop specifically from `read`/`update`/
-    `delete` (leaving only their narrower `UndefinedTable` handler), which
-    the pre-round-2 test suite never caught because nothing exercised
-    those three methods' OWN backstop directly.
-
-    `update`'s own trigger is the same out-of-bigint-range ASSIGNMENT the
-    `insert` test above uses (confirmed empirically: `UPDATE ... SET n =
-    10**30` forces a hard coercion into the `bigint` column and fails;
-    unlike an assignment, a plain WHERE-clause COMPARISON against an
-    out-of-range value does NOT error at all -- PostgreSQL compares
-    cross-type instead of coercing, confirmed empirically, so `delete`/
-    `read` need a DIFFERENT trigger). `delete`/`read`'s own trigger is a
-    `Filter` naming a column that does not exist (bypassing `cell.py`'s
-    own field-existence check, `_bind_filters`'s `field_domains` call) --
-    a real `psycopg.errors.UndefinedColumn`, confirmed empirically NOT
-    to be `UndefinedTable` (the only other handler these two methods
-    have), so it is only ever caught by the generic backstop."""
+def test_backend_defense_in_depth_recovers_the_connection_for_delete_and_read(app_a) -> None:
+    """m-8 (iii, independent review round 2): calling `PostgresBackend`'s
+    `delete`/`read` directly, bypassing `cell.py`'s own checks, with a
+    `Filter` naming a column that does not exist (a real
+    `psycopg.errors.UndefinedColumn`, confirmed empirically NOT to be
+    `UndefinedTable`, the only other handler these two methods have) still
+    raises a classified `ValidationError` carrying the layer-(ii)
+    BACKSTOP's own distinct message ("storage backend rejected the
+    request"), never a raw `psycopg.Error`, and leaves the connection
+    usable for the very next call -- so it is only ever caught by the
+    generic `except psycopg.Error` backstop."""
     cell = make_cell(app_a)
     developer, runtime = sessions_for(cell, app_a.app_id)
     try:
         developer.create_collection("raw_backend_probe2", {"n": "integer"})
         runtime.insert("raw_backend_probe2", {"n": 1})
-
-        with pytest.raises(ValidationError, match="storage backend rejected the request"):
-            cell._backend.update("raw_backend_probe2", ["n"], [10 ** 30], [])
-        runtime.insert("raw_backend_probe2", {"n": 2})  # connection must still work
+        runtime.insert("raw_backend_probe2", {"n": 2})
 
         with pytest.raises(ValidationError, match="storage backend rejected the request"):
             cell._backend.delete("raw_backend_probe2", [Filter("no_such_column", "eq", 1)])

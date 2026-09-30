@@ -344,7 +344,7 @@ def test_the_check_run_as_a_role_other_than_the_runtime_role_names_a_runtime_rol
     _check(platform, as_admin=True)
 
 
-@pytest.mark.parametrize("privilege", ["SELECT", "INSERT", "UPDATE", "DELETE"])
+@pytest.mark.parametrize("privilege", ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"])
 def test_the_check_names_a_direct_privilege_a_runtime_role_holds_on_the_counter_table(
     platform: types.SimpleNamespace, privilege: str,
 ) -> None:
@@ -365,6 +365,42 @@ def test_the_check_names_a_direct_privilege_a_runtime_role_holds_on_the_counter_
     finally:
         _admin(platform, f"REVOKE {privilege} ON TABLE {table} FROM {platform.api_role}")
     _check(platform, as_admin=True)
+
+
+def test_the_check_passes_when_the_schema_owner_holds_an_explicit_grant_on_application_audit(
+    platform: types.SimpleNamespace,
+) -> None:
+    """A platform whose `application_audit` was made by another role (an
+    administrative one) carries an explicit grant to the schema's owner,
+    which owns the counter table and so holds every privilege on it. The
+    schema's owner is never a runtime role: the check stays green."""
+    table = f"{platform.schema}.application_audit"
+    schema_owner = _admin(
+        platform, "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = %s", [platform.schema],
+    )[0][0]
+    other_owner = f"{platform.prefix}_controlplane"
+    _admin(platform, f"ALTER TABLE {table} OWNER TO {other_owner}")
+    try:
+        _admin(platform, f"GRANT INSERT ON TABLE {table} TO {schema_owner}")
+        _check(platform, as_admin=True)
+        _check(platform)
+    finally:
+        _admin(platform, f"REVOKE INSERT ON TABLE {table} FROM {schema_owner}")
+        _admin(platform, f"ALTER TABLE {table} OWNER TO {schema_owner}")
+    _check(platform, as_admin=True)
+
+
+def test_the_check_names_a_connection_role_that_cannot_execute_the_function(platform: types.SimpleNamespace) -> None:
+    """The data plane's own connection role must be able to call the
+    function even when it writes `application_audit` by no grant the check
+    reads by name (here: a connection made as a role that holds no EXECUTE)."""
+    with psycopg.connect(platform.controlplane_dsn) as conn:
+        with pytest.raises(PlatformDeclarationError) as excinfo:
+            platform_declarations.check_denial_window_function(
+                conn, schema=platform.schema, ops_module=platform_declarations.PEER_MODULE, migration=_MIGRATION,
+            )
+    assert excinfo.value.code == "F-21"
+    assert "this connection's role may not EXECUTE it" in str(excinfo.value), str(excinfo.value)
 
 
 def test_the_check_names_an_auditreader_that_cannot_select_the_counter_table(platform: types.SimpleNamespace) -> None:

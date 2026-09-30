@@ -1540,7 +1540,7 @@ def _f21_message(problems: "list[str]", *, schema: str, migration: str, ops_modu
 
 
 def _f21_acl_holders(cur: "psycopg.Cursor", schema: str, table: str, privilege: str) -> "list[str]":
-    """The roles (never the table's owner, never PUBLIC) whose ACL entry on
+    """The roles (never the table's owner, the schema's owner or PUBLIC) whose ACL entry on
     `<schema>.<table>` carries `privilege`, read from `pg_class.relacl` --
     readable by every login role, unlike `information_schema.
     role_table_grants`, which shows a role only the grants it is a party
@@ -1549,6 +1549,7 @@ def _f21_acl_holders(cur: "psycopg.Cursor", schema: str, table: str, privilege: 
         "SELECT DISTINCT pg_get_userbyid(a.grantee) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
         "CROSS JOIN LATERAL aclexplode(c.relacl) a "
         "WHERE n.nspname = %s AND c.relname = %s AND a.privilege_type = %s AND a.grantee <> 0 AND a.grantee <> c.relowner "
+        "AND a.grantee <> n.nspowner "
         "ORDER BY 1",
         [schema, table, privilege],
     )
@@ -1567,9 +1568,12 @@ def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops
     way the grants can be wrong, by role name (so a run as the schema's
     owner, which may do everything, still sees them): a role that writes
     `application_audit` -- the data plane's runtime role -- may not EXECUTE
-    the function; a runtime role (that one, or any role holding EXECUTE)
-    holds a direct SELECT, INSERT, UPDATE or DELETE privilege on the table,
-    which is a count it can reach without the function and so lower; a role
+    the function, or this connection's own role may not (a role that reaches
+    the function only through a group); a runtime role (that one, or any role holding EXECUTE)
+    holds any privilege at all on the table (SELECT, INSERT, UPDATE,
+    DELETE, TRUNCATE, REFERENCES or TRIGGER), which is a count it can reach
+    without the function and so lower or erase; the schema's own owner
+    role is never counted as one (it owns the objects); a role
     that reads both audit tables may not SELECT the table, so `audit_query`
     fails. Reads `pg_proc`, `pg_class`, `pg_namespace`, `has_function_
     privilege` and `has_table_privilege` only. Raises
@@ -1601,7 +1605,7 @@ def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops
                 "(p.proacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a "
                 "WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')), "
                 "ARRAY(SELECT pg_get_userbyid(a.grantee) FROM aclexplode(p.proacl) a "
-                "WHERE a.privilege_type = 'EXECUTE' AND a.grantee <> 0 AND a.grantee <> p.proowner ORDER BY 1) "
+                "WHERE a.privilege_type = 'EXECUTE' AND a.grantee <> 0 AND a.grantee <> p.proowner AND a.grantee <> n.nspowner ORDER BY 1) "
                 "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = %s::oid",
                 [function_oid],
             )
@@ -1622,14 +1626,19 @@ def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops
                     cannot_execute.append(role)
             if cannot_execute:
                 problems.append("a role that writes application_audit may not EXECUTE it: " + ", ".join(cannot_execute))
+            cur.execute("SELECT has_function_privilege(current_user, %s::oid, 'EXECUTE')", [function_oid])
+            if not cur.fetchone()[0]:
+                problems.append("this connection's role may not EXECUTE it")
             if table_row is not None:
                 holders = []
                 for role in sorted(set(writers) | set(executors)):
-                    for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
-                        cur.execute("SELECT has_table_privilege(%s::name, %s::oid, %s)", [role, table_row[0], privilege])
-                        if cur.fetchone()[0]:
-                            holders.append(role)
-                            break
+                    cur.execute(
+                        "SELECT has_table_privilege(%s::name, %s::oid, "
+                        "'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
+                        [role, table_row[0]],
+                    )
+                    if cur.fetchone()[0]:
+                        holders.append(role)
                 if holders:
                     problems.append("a runtime role holds a direct privilege on the counter table: " + ", ".join(holders))
         if table_row is None:

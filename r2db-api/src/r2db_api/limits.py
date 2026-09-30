@@ -121,9 +121,9 @@ class ResourceLimits:
 #: (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5)):
 #: the constant added to the real effective thread limit --
 #: `role_pool_size`'s own docstring below spells out what the 2 extra
-#: connections are for (the audit flush thread and this process' own
-#: platform rate statement, `credential_store.PostgresCredentialStore.
-#: record_rate_and_check`).
+#: connections are for (this process' own platform rate statement,
+#: `credential_store.PostgresCredentialStore.record_rate_and_check`, and one
+#: spare).
 _POOL_SIZE_HEADROOM = 2
 
 
@@ -172,8 +172,8 @@ def role_pool_size(thread_limit: int) -> int:
     admission bound every worker process enforces TOGETHER (the host-
     shared slot directory), never a per-process connection ceiling, so
     it is not the basis this function reads. `thread_limit + 2` (the
-    `+ 2` headroom below: the audit-flush thread's own occasional
-    connection, and this process' own platform rate statement) lets
+    `+ 2` headroom below: this process' own platform rate statement,
+    and one spare connection) lets
     `process_ceilings.data` processes share `max_connections` without
     the connection-budget arithmetic scaling with the declared
     `concurrency` bound (design's own "宣言値 L は接続予算に入らない

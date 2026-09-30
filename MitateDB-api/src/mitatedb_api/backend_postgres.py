@@ -73,7 +73,7 @@ serializes every operation through ``cell.ApplicationCell``'s own lock
 already, so a single persistent connection per role is sufficient for this
 WP; connection pooling/limits are future-work, design v1.1 §7), no row
 addressability (``row_addressability`` stays declared ``unavailable`` --
-see ``insert``'s own docstring for why its ``rowid`` return value uses
+see ``insert_in_transaction``'s own comment for why its ``rowid`` return value uses
 PostgreSQL's ``ctid`` rather than a stable published address), and no Row
 Level Security (this foundation's primary isolation wall is
 database-per-application, R-1 -- RLS as an additional layer is future-work,
@@ -1258,69 +1258,32 @@ class PostgresBackend:
     _where_sql = staticmethod(_where_sql)
 
     @_guard_pending_platform_upgrades
-    def insert(self, collection, fields, params, *, deadline=None):
-        # PostgreSQL 12+ has no per-row OID by default and this
-        # foundation's own entity tables carry no server-assigned primary
-        # key/serial column of any kind (unlike r2db-api's own `address`
-        # concept -- this foundation declares `row_addressability:
-        # unavailable`, and nothing in this return value is part of that
-        # capability's own public surface: `conformance/
-        # conformance_adapter_mitatedb.py::attempt_mutation_with_addresses`
-        # already documents that this foundation's `insert()` return shape
-        # carries nothing address-shaped and always reports `None`).
-        # `ctid` is PostgreSQL's own always-present physical row locator
-        # system column -- an opaque `(block,offset)` pair, returned here
-        # as its string form purely as an "insert succeeded, here is SOME
-        # backend-native handle" value. Unlike SQLite's own `rowid`
-        # (stable across an `UPDATE`), PostgreSQL's `ctid` changes on
-        # `UPDATE`/`VACUUM` -- a real, deliberate asymmetry between the
-        # two backends' own `rowid` values, harmless here because no
-        # caller (this test suite included) treats the returned value as
-        # a stable long-term identity.
-        columns = sql.SQL(", ").join(sql.Identifier(f) for f in fields)
-        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fields)
-        statement = sql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING ctid").format(
-            sql.Identifier(collection), columns, placeholders
-        )
-        timeout_ms = self._timeout_ms(deadline)
-        try:
-            with self._runtime.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
-                _execute(cur, statement, params)
-                rowid = str(cur.fetchone()[0])
-        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._runtime.rollback()
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
-        except psycopg.errors.UniqueViolation:
-            self._runtime.rollback()
-            raise ConflictError("write conflicts with a constraint")
-        except psycopg.errors.UndefinedTable:
-            self._runtime.rollback()
-            raise NotFoundError("collection not found")
-        except psycopg.Error as exc:
-            # B-1 (ii): defensive backstop -- see this module's own
-            # top-of-file docstring. Guarantees `self._runtime` is never
-            # left aborted for the next call on this cell.
-            self._runtime.rollback()
-            raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._runtime.commit()
-        return {"rowid": rowid}
-
-    @_guard_pending_platform_upgrades
     def insert_in_transaction(self, collection, fields, params):
-        # No commit/rollback here (unlike `insert` above): this runs
-        # inside a transaction the seam's own `transact()` already opened
-        # via `begin()` and will `commit()`/`rollback()` once, after every
-        # operation in the batch (`cell.py::transact`'s own `except`
-        # clause calls `self._backend.rollback()`, which is sufficient to
-        # clear a psycopg connection's own aborted-transaction state after
-        # an exception raised here). Low-level driver errors are still
+        # No commit/rollback here: this runs inside a transaction the
+        # seam's own `transact()` already opened via `begin()` and will
+        # `commit()`/`rollback()` once, after every operation in the batch
+        # (`cell.py::transact`'s own `except` clause calls
+        # `self._backend.rollback()`, which is sufficient to clear a
+        # psycopg connection's own aborted-transaction state after an
+        # exception raised here). Low-level driver errors are still
         # translated to this shared `errors.FoundationError` vocabulary
-        # here (mirroring `insert()`'s own translation) so `cell.py`'s
-        # `transact()` never needs to name a backend-native exception type
-        # (R-3).
+        # here so `cell.py`'s `transact()` never needs to name a
+        # backend-native exception type (R-3).
+        #
+        # The returned `rowid` is PostgreSQL's own `ctid` (an opaque
+        # `(block,offset)` pair, as its string form): purely an "insert
+        # succeeded, here is SOME backend-native handle" value. This
+        # foundation's own entity tables carry no server-assigned primary
+        # key/serial column, and it declares `row_addressability:
+        # unavailable` -- nothing in this return value is part of that
+        # capability's own public surface (`conformance/
+        # conformance_adapter_mitatedb.py::attempt_mutation_with_addresses`
+        # already documents that the return shape carries nothing
+        # address-shaped and always reports `None`). Unlike SQLite's own
+        # `rowid` (stable across an `UPDATE`), `ctid` changes on
+        # `UPDATE`/`VACUUM` -- a deliberate asymmetry between the two
+        # backends, harmless because no caller treats the returned value
+        # as a stable long-term identity.
         columns = sql.SQL(", ").join(sql.Identifier(f) for f in fields)
         placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fields)
         statement = sql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING ctid").format(
@@ -1330,9 +1293,8 @@ class PostgresBackend:
             with self._runtime.cursor() as cur:
                 _execute(cur, statement, params)
                 rowid = str(cur.fetchone()[0])
-        # Phase 8 WP-1a rework 1 (裁定 2): the SAME
-        # `execution_ms` mapping `insert()` above already has -- not rolled
-        # back here either (same B-1 (ii) reasoning as every other
+        # Phase 8 WP-1a rework 1 (裁定 2): the `execution_ms` mapping --
+        # not rolled back here (same B-1 (ii) reasoning as every other
         # `except` clause in this method: the OUTER `transact()`
         # (`cell.py`) is the single rollback point for the whole batch).
         # `begin()`'s own `SET LOCAL statement_timeout`/`lock_timeout`
@@ -1361,7 +1323,7 @@ class PostgresBackend:
 
     @_guard_pending_platform_upgrades
     def update_in_transaction(self, collection, fields, params, filters):
-        # P3-D2 (WP-1.5): no commit/rollback here (unlike `update` below)
+        # P3-D2 (WP-1.5): no commit/rollback here
         # -- mirrors `insert_in_transaction`'s own reasoning above. Runs
         # inside the transaction the seam's own `transact()` already
         # opened via `begin()` and will `commit()`/`rollback()` once,
@@ -1379,8 +1341,7 @@ class PostgresBackend:
         # Phase 8 WP-1a rework 1 (裁定 2): see `insert_in_transaction`'s own
         # identical `except` clause immediately above for why this mapping
         # (not rolled back here -- the outer `transact()` is the single
-        # rollback point) is required on every `..._in_transaction` method,
-        # not only the standalone `update()`.
+        # rollback point) is required on every `..._in_transaction` method.
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
@@ -1502,34 +1463,6 @@ class PostgresBackend:
         else:
             self._runtime.commit()
         return rows
-
-    @_guard_pending_platform_upgrades
-    def update(self, collection, fields, params, filters, *, deadline=None):
-        assignments = sql.SQL(", ").join(
-            sql.SQL("{} = %s").format(sql.Identifier(f)) for f in fields
-        )
-        statement = sql.SQL("UPDATE {} SET {}").format(sql.Identifier(collection), assignments)
-        where, where_params = self._where_sql(filters)
-        statement = statement + where
-        timeout_ms = self._timeout_ms(deadline)
-        try:
-            with self._runtime.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
-                _execute(cur, statement, list(params) + where_params)
-                updated = cur.rowcount
-        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._runtime.rollback()
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
-        except psycopg.errors.UndefinedTable:
-            self._runtime.rollback()
-            raise NotFoundError("collection not found")
-        except psycopg.Error as exc:
-            self._runtime.rollback()
-            raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._runtime.commit()
-        return {"updated": updated}
 
     @_guard_pending_platform_upgrades
     def delete(self, collection, filters, audit_hook=None, *, deadline=None):
@@ -1716,8 +1649,9 @@ class PostgresBackend:
         A timed-out lock wait raises `psycopg.errors.LockNotAvailable`/
         `QueryCanceled`, mapped below to `ResourceLimitError(limit_class=
         "execution_ms")` -- the SAME error class every other lock/
-        statement-timeout site on this backend already maps to (`insert`/
-        `update`/`delete_in_transaction` etc.), not a hang.
+        statement-timeout site on this backend already maps to
+        (`insert_in_transaction`/`update_in_transaction`/`delete_in_transaction`
+        etc.), not a hang.
 
         M-1 (WP-6d, MitateDB-specific realization of U-7 -- CLAUDE.md
         "platform-specific controls may differ...when they provide the
@@ -1828,7 +1762,7 @@ class PostgresBackend:
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             # Code-review fix F2: the SAME mapping every other lock/
             # statement-timeout site on this backend already uses
-            # (`insert`/`update`/`delete_in_transaction` etc.) -- a
+            # (`insert_in_transaction`/`update_in_transaction`/`delete_in_transaction` etc.) -- a
             # bounded wait for a same-key advisory lock that expires
             # surfaces as a real, classified `LIMIT_EXCEEDED` refusal,
             # never an unbounded hang.

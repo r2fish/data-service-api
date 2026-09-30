@@ -32,8 +32,9 @@ parity):
   by the closure `audit_dispatch.AuditRouter` builds, so a caller's own
   `except psycopg.Error`/`except sqlite3.DatabaseError` clauses never
   mistake an audit-sink failure for a data-connection failure. The order
-  differs by call site: `transact` and the single-row write record their
-  idempotency entry first and call `pre_commit()` last; the schema
+  differs by call site: `transact` records its idempotency entry first and
+  calls `pre_commit()` last, the single-row write (which has no idempotency
+  entry) calls `pre_commit()` last after its statement; the schema
   operations `create_collection`/`add_field`/`alter_field_constraints`
   call `pre_commit()` first and record the idempotency entry after it, so
   a failure of that record write comes after the `allow` row and is

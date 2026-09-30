@@ -484,9 +484,10 @@ _DENIAL_WINDOW_SIGNATURE = "denial_window_record(integer, text, timestamptz, tex
         ("ALTER FUNCTION {fn} OWNER TO {api_role}", "ALTER FUNCTION {fn} OWNER TO {control_role}", "owned by the schema's owner role"),
         ("REVOKE EXECUTE ON FUNCTION {fn} FROM {api_role}", "GRANT EXECUTE ON FUNCTION {fn} TO {api_role}", "a role that writes application_audit may not EXECUTE it"),
         ("GRANT UPDATE ON TABLE {table} TO {api_role}", "REVOKE UPDATE ON TABLE {table} FROM {api_role}", "a runtime role holds a direct privilege on the counter table"),
+        ("GRANT TRUNCATE ON TABLE {table} TO {api_role}", "REVOKE TRUNCATE ON TABLE {table} FROM {api_role}", "a runtime role holds a direct privilege on the counter table"),
         ("REVOKE SELECT ON TABLE {table} FROM {auditreader_role}", "GRANT SELECT ON TABLE {table} TO {auditreader_role}", "a role that reads both audit tables may not SELECT the counter table"),
     ],
-    ids=["security_invoker", "search_path_unpinned", "public_execute", "function_owner", "runtime_without_execute", "runtime_direct_grant", "auditreader_without_select"],
+    ids=["security_invoker", "search_path_unpinned", "public_execute", "function_owner", "runtime_without_execute", "runtime_direct_grant", "runtime_direct_truncate", "auditreader_without_select"],
 )
 def test_verify_declarations_f21_when_the_refusal_window_function_is_not_safe_to_run_as_its_owner(
     platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],

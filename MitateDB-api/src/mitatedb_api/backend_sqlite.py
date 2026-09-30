@@ -529,22 +529,8 @@ class SQLiteBackend:
             )
         return value
 
-    def insert(self, collection, fields, params, *, deadline=None):
-        _check_deadline(deadline)
-        table = quote_identifier(collection)
-        columns = ", ".join(quote_identifier(field) for field in fields)
-        marks = ", ".join("?" for _ in fields)
-        try:
-            cursor = self._db.execute("INSERT INTO " + table + " (" + columns + ") VALUES (" + marks + ")", params)
-            self._db.commit()
-        except sqlite3.IntegrityError:
-            raise ConflictError("write conflicts with a constraint")
-        except sqlite3.DatabaseError:
-            raise NotFoundError("collection not found")
-        return {"rowid": cursor.lastrowid}
-
     def insert_in_transaction(self, collection, fields, params):
-        # No commit/rollback here (unlike `insert` above): this runs inside a transaction the seam's own `transact()` already opened via `begin()` and will `commit()`/`rollback()` once, after every operation in the batch. Low-level driver errors are still translated to this shared `errors.FoundationError` vocabulary here (mirroring `insert()`'s own translation) so `cell.py`'s `transact()` never needs to name a backend-native exception type.
+        # No commit/rollback here: this runs inside a transaction the seam's own `transact()` already opened via `begin()` and will `commit()`/`rollback()` once, after every operation in the batch. Low-level driver errors are still translated to this shared `errors.FoundationError` vocabulary here so `cell.py`'s `transact()` never needs to name a backend-native exception type.
         # history: CH-0368
         table = quote_identifier(collection)
         statement = "INSERT INTO " + table + " (" + ", ".join(
@@ -559,7 +545,7 @@ class SQLiteBackend:
         return {"rowid": cursor.lastrowid}
 
     def update_in_transaction(self, collection, fields, params, filters):
-        # no commit/rollback here (unlike `update` above) -- mirrors `insert_in_transaction`'s own reasoning above. Runs inside the transaction `transact()` already opened via `begin()` and will `commit()`/`rollback()` once, after every operation in the batch.
+        # no commit/rollback here -- mirrors `insert_in_transaction`'s own reasoning above. Runs inside the transaction `transact()` already opened via `begin()` and will `commit()`/`rollback()` once, after every operation in the batch.
         # history: CH-0369
         table = quote_identifier(collection)
         where, where_params = self._where_sql(filters)
@@ -677,19 +663,6 @@ class SQLiteBackend:
         except sqlite3.DatabaseError:
             raise NotFoundError("collection not found")
         return [dict(row) for row in rows]
-
-    def update(self, collection, fields, params, filters, *, deadline=None):
-        _check_deadline(deadline)
-        table = quote_identifier(collection)
-        where, where_params = self._where_sql(filters)
-        statement = "UPDATE " + table + " SET " + ", ".join(
-            quote_identifier(field) + " = ?" for field in fields) + where
-        try:
-            cursor = self._db.execute(statement, list(params) + where_params)
-            self._db.commit()
-        except sqlite3.DatabaseError:
-            raise NotFoundError("collection not found")
-        return {"updated": cursor.rowcount}
 
     def delete(self, collection, filters, audit_hook=None, *, deadline=None):
         _check_deadline(deadline)

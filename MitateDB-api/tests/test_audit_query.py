@@ -2164,9 +2164,9 @@ def test_audit_query_declares_operations_and_target_kinds_over_http() -> None:
 # Phase 6 WP-0 (design D-4(c), L5-5/L5-6): the single-file/named-tuple
 # mechanism this section describes is generalized below into the
 # `_ISOMORPHIC_TARGETS` (r2db relative path, MitateDB relative path,
-# symbol name) table, which now also covers `src/mitatedb_api/main.py::
-# _optional_float` and `tests/test_http.py`'s byte-identical-contract test
-# function, not only this file's own 11 scanner-support helpers -- see
+# symbol name) table, which now also covers `tests/test_http.py`'s
+# byte-identical-contract test function, not only this file's own 11
+# scanner-support helpers -- see
 # that table's own comment for the full rationale.
 #
 # Phase 6 WP-3 追補 (isomorphism table extension, supervisor ruling
@@ -2191,8 +2191,8 @@ def test_audit_query_declares_operations_and_target_kinds_over_http() -> None:
 # generalized below into a table -- the row form is the object that now
 # defines the full set of peer-local symbols this repository pins
 # isomorphic, rather than one hardcoded sibling file. The 11 rows below
-# are the WP-2/WP-3 helpers, carried over UNCHANGED (not one dropped); 4
-# rows are the Phase 6 WP-0 additions (`main.py::_optional_float`, `tests/
+# are the WP-2/WP-3 helpers, carried over UNCHANGED (not one dropped); 3
+# rows are the Phase 6 WP-0 additions (`tests/
 # test_http.py`'s byte-identical-contract test function, plus the
 # mechanism's OWN two pieces of test-support code -- `_isomorphic_symbol_
 # source`, the row resolver below, and this table's own pin test -- added
