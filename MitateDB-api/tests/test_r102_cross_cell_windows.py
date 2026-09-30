@@ -23,12 +23,18 @@ V0_1.md section 2.5):
   `create_collection` lands in between and the count exceeds the bound.
 
 Stop technique: no hook exists in product code. A test-local `_Stall`
-wraps one named method (or one statement of the module-level `_execute`)
-and, for ONE armed thread only (thread A), pauses inside the wrapper on a
-`threading.Event` until the test releases it. The wait for A to arrive is
-bounded and fails with an `AssertionError` naming the wrap point; B's
-not-having-completed is observed through a bounded window (`_B_WINDOW_S`),
-the only fixed-length wait in this file.
+wraps the module-level `backend_postgres._execute` and, for ONE armed
+thread only (thread A), pauses inside the wrapper on a `threading.Event`
+when the statement about to run is the one named by the test (the DDL or
+DML statement itself, or `LOCK TABLE` for window 2). Whatever lock, plan
+check or validation a request takes or does, it does before that
+statement, so the stop point does not depend on how the request is built.
+The wait for A to arrive is bounded and fails with an `AssertionError`
+naming the wrap point. B's not-having-completed is observed through a
+bounded window (`_B_WINDOW_S`) and then confirmed by finding a backend of
+the application database waiting on a PostgreSQL lock
+(`pg_stat_activity.wait_event_type = 'Lock'`, bounded wait); a B that is
+neither finished nor lock-waiting fails the test.
 
 Every test asserts the same two-branch shape. If B completed while A was
 stopped, A must have been refused and must have done nothing (or the
@@ -40,6 +46,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any, Callable
 
 import psycopg
@@ -48,7 +55,6 @@ import pytest
 import mitatedb_api.backend_postgres as backend_postgres_module
 from mitatedb_api import FoundationConfig, Role
 from mitatedb_api.auth import Principal
-from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.cell import ApplicationDeveloper, ApplicationRuntime
 from mitatedb_api.errors import ConflictError, FoundationError, PreconditionFailedError, ResourceLimitError
 
@@ -91,9 +97,9 @@ class _Stall:
         self._used = False
 
     def install(self, monkeypatch: pytest.MonkeyPatch, owner: Any, name: str, *,
-                when: Callable[[tuple, dict], bool] | None = None) -> None:
+                when: Callable[[tuple, dict], bool] | None = None, statement: str = "") -> None:
         original = getattr(owner, name)
-        self.point = f"{getattr(owner, '__name__', repr(owner))}.{name}"
+        self.point = f"{getattr(owner, '__name__', repr(owner))}.{name}" + (f" at its {statement} statement" if statement else "")
         stall = self
 
         def _wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -114,9 +120,24 @@ class _Outcome:
         self.b_done_while_a_stopped = False
 
 
-def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], Any]) -> _Outcome:
-    """Runs A until it stops at the wrap point, then runs B, observes B
-    for `_B_WINDOW_S`, releases A and joins both."""
+def _lock_waiters(admin_dsn: str, database: str) -> int:
+    """Backends of `database` currently waiting on a PostgreSQL lock,
+    counted over a separate superuser connection (outside every product
+    path)."""
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND wait_event_type = 'Lock' "
+                "AND pid <> pg_backend_pid()", [database])
+            return cur.fetchone()[0]
+
+
+def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], Any], *,
+                admin_dsn: str, database: str) -> _Outcome:
+    """Runs A until it stops at the wrap point, then runs B. B is given
+    `_B_WINDOW_S`; if it has not finished by then it must be seen waiting
+    on a PostgreSQL lock (bounded by `_LOCK_TIMEOUT_S`; a B that finishes
+    during that wait counts as finished). Then releases A and joins both."""
     outcome = _Outcome()
     done = {"A": threading.Event(), "B": threading.Event()}
 
@@ -138,6 +159,12 @@ def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], A
         threads.append(thread_b)
         thread_b.start()
         outcome.b_done_while_a_stopped = done["B"].wait(timeout=_B_WINDOW_S)
+        if not outcome.b_done_while_a_stopped:
+            give_up_at = time.monotonic() + _LOCK_TIMEOUT_S
+            while not outcome.b_done_while_a_stopped and not _lock_waiters(admin_dsn, database):
+                assert time.monotonic() < give_up_at, (
+                    f"B neither completed nor is waiting on a PostgreSQL lock while A is stopped at {stall.point}")
+                outcome.b_done_while_a_stopped = done["B"].wait(timeout=0.05)
     finally:
         stall.release.set()
         for thread in threads:
@@ -170,16 +197,22 @@ def _schema_object_count(app) -> int:
         [r"\_mdb\_%"])[0][0]
 
 
-def _is_lock_table_statement(args: tuple, kwargs: dict) -> bool:
-    cursor, statement = args[0], args[1]
-    text = statement if isinstance(statement, str) else statement.as_string(cursor)
-    return text.lstrip().upper().startswith("LOCK TABLE")
+def _statement_starts_with(prefix: str, *, containing: str = "") -> Callable[[tuple, dict], bool]:
+    """A `_Stall.install` filter for `backend_postgres._execute(cursor,
+    statement, ...)`: the rendered statement starts with `prefix` and
+    contains `containing` (used to pick one table's quoted name)."""
+    def _when(args: tuple, kwargs: dict) -> bool:
+        cursor, statement = args[0], args[1]
+        text = statement if isinstance(statement, str) else statement.as_string(cursor)
+        text = text.lstrip()
+        return text.upper().startswith(prefix) and containing in text
+    return _when
 
 
-def test_window1_plan_is_checked_against_the_revision_inside_the_ddl_serialization(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+def test_window1_plan_is_checked_against_the_revision_inside_the_ddl_serialization(platform, app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """Window 1. A: `add_field` on entity e1 carrying a dry-run plan,
-    stopped at the entry of `PostgresBackend.add_field` -- after the cell
-    checked the plan against the current revision, before any DDL. B:
+    stopped at its `ALTER TABLE ... ADD COLUMN` statement -- after the plan
+    was checked against the current revision, before the DDL runs. B:
     `add_field` on a DIFFERENT entity e2 (no plan), which advances the
     revision by one. B is a different entity so only an application-wide
     schema serialization (not a per-entity one) can close this window."""
@@ -193,11 +226,14 @@ def test_window1_plan_is_checked_against_the_revision_inside_the_ddl_serializati
         assert _revision(app_a) == revision_0, "a dry run must not advance the revision"
 
         stall = _Stall()
-        stall.install(monkeypatch, PostgresBackend, "add_field")
+        stall.install(monkeypatch, backend_postgres_module, "_execute",
+                      when=_statement_starts_with("ALTER TABLE", containing='"e1" ADD COLUMN'),
+                      statement="ALTER TABLE e1 ADD COLUMN")
         outcome = _run_window(
             stall,
             lambda: dev_a.add_field("e1", "extra", "text", plan=plan),
             lambda: dev_b.add_field("e2", "other", "text"),
+            admin_dsn=platform.admin_dsn, database=app_a.database,
         )
 
         assert "B" in outcome.results, f"B must succeed in either branch: {outcome.errors}"
@@ -219,7 +255,7 @@ def test_window1_plan_is_checked_against_the_revision_inside_the_ddl_serializati
         close_cell(cell_b)
 
 
-def test_window2_concurrent_alter_field_calls_do_not_lose_each_others_update(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+def test_window2_concurrent_alter_field_calls_do_not_lose_each_others_update(platform, app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """Window 2. A: `alter_field(e, f, enum=[x, y])`, stopped at the
     `LOCK TABLE` statement of `backend_postgres._execute` -- after the
     registry row was read, before the UPDATE. B: `alter_field(e, f,
@@ -230,11 +266,12 @@ def test_window2_concurrent_alter_field_calls_do_not_lose_each_others_update(app
         dev_a.create_collection("e", {"f": "text"})
 
         stall = _Stall()
-        stall.install(monkeypatch, backend_postgres_module, "_execute", when=_is_lock_table_statement)
+        stall.install(monkeypatch, backend_postgres_module, "_execute", when=_statement_starts_with("LOCK TABLE"), statement="LOCK TABLE")
         outcome = _run_window(
             stall,
             lambda: dev_a.alter_field("e", "f", enum=["x", "y"]),
             lambda: dev_b.alter_field("e", "f", nullable=False),
+            admin_dsn=platform.admin_dsn, database=app_a.database,
         )
 
         assert not outcome.errors, f"both alters are valid and must succeed: {outcome.errors}"
@@ -252,10 +289,10 @@ def test_window2_concurrent_alter_field_calls_do_not_lose_each_others_update(app
         close_cell(cell_b)
 
 
-def test_window3_data_write_validated_before_an_alter_is_not_committed_against_the_new_constraint(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+def test_window3_data_write_validated_before_an_alter_is_not_committed_against_the_new_constraint(platform, app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """Window 3. A: `transact([insert title=v])` on `notes` (`title` has
-    enum [v, w]), stopped at the entry of `PostgresBackend.begin` -- pass 1
-    validated `v` against the old enum, pass 2 not yet started. B:
+    enum [v, w]), stopped at its `INSERT INTO notes` statement -- the
+    request was validated against the old enum, the row is not yet written. B:
     `alter_field(notes, title, enum=[w])`, which removes `v`."""
     cell_a, cell_b, dev_a, dev_b, rt_a = _pair(app_a)
     try:
@@ -263,11 +300,14 @@ def test_window3_data_write_validated_before_an_alter_is_not_committed_against_t
         dev_a.alter_field("notes", "title", enum=["v", "w"])
 
         stall = _Stall()
-        stall.install(monkeypatch, PostgresBackend, "begin")
+        stall.install(monkeypatch, backend_postgres_module, "_execute",
+                      when=_statement_starts_with("INSERT INTO", containing='"notes"'),
+                      statement="INSERT INTO notes")
         outcome = _run_window(
             stall,
             lambda: rt_a.transact([{"type": "insert", "collection": "notes", "values": {"title": "v"}}]),
             lambda: dev_b.alter_field("notes", "title", enum=["w"]),
+            admin_dsn=platform.admin_dsn, database=app_a.database,
         )
 
         titles = [row[0] for row in _raw(app_a, "SELECT title FROM notes")]
@@ -293,11 +333,10 @@ def test_window3_data_write_validated_before_an_alter_is_not_committed_against_t
         close_cell(cell_b)
 
 
-def test_window4_concurrent_create_collection_cannot_exceed_max_schema_objects(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+def test_window4_concurrent_create_collection_cannot_exceed_max_schema_objects(platform, app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """Window 4. `max_schema_objects` is the current table count plus one.
-    A: `create_collection(e1)`, stopped at the entry of
-    `PostgresBackend.create_collection` -- after the limit check, before
-    the DDL. B: `create_collection(e2)`. Exactly one of the two may
+    A: `create_collection(e1)`, stopped at its
+    `CREATE TABLE e1` statement -- after the limit check, before the DDL. B: `create_collection(e2)`. Exactly one of the two may
     succeed and the other must be `LIMIT_EXCEEDED` (`schema_objects`)."""
     current = _schema_object_count(app_a)
     assert current == 0, "a freshly provisioned application holds no entity table"
@@ -306,17 +345,21 @@ def test_window4_concurrent_create_collection_cannot_exceed_max_schema_objects(a
     cell_a, cell_b, dev_a, dev_b, _ = _pair(app_a, config)
     try:
         stall = _Stall()
-        stall.install(monkeypatch, PostgresBackend, "create_collection")
+        stall.install(monkeypatch, backend_postgres_module, "_execute",
+                      when=_statement_starts_with("CREATE TABLE", containing='"e1"'),
+                      statement="CREATE TABLE e1")
         outcome = _run_window(
             stall,
             lambda: dev_a.create_collection("e1", {"title": "text"}),
             lambda: dev_b.create_collection("e2", {"title": "text"}),
+            admin_dsn=platform.admin_dsn, database=app_a.database,
         )
 
         limit_errors = [name for name, error in outcome.errors.items() if isinstance(error, ResourceLimitError)]
         assert len(outcome.results) == 1 and len(limit_errors) == 1, (
             f"exactly one create must succeed and one be LIMIT_EXCEEDED: results={sorted(outcome.results)} "
-            f"errors={ {name: repr(error) for name, error in outcome.errors.items()} }")
+            f"errors={ {name: repr(error) for name, error in outcome.errors.items()} } "
+            f"(B completed while A stopped: {outcome.b_done_while_a_stopped})")
         assert outcome.errors[limit_errors[0]].details == {"limit_class": "schema_objects"}
         assert _schema_object_count(app_a) <= limit, (
             f"schema objects exceeded the bound {limit}: {_schema_object_count(app_a)} "
