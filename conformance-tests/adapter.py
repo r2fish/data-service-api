@@ -1919,12 +1919,13 @@ class ConformanceAdapter(ABC):
 
     @abstractmethod
     def hold_after_plan_verification(self, session) -> AbstractContextManager["PlanVerificationHold"]:
-        """`session` 上で次に到着する schema 操作を 1 件だけ、その要求自身が plan token を現在の revision と照合し終え (plan を提示しない要求では、自分が進める revision を読み終え)、その照合が取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。`with` を抜けると先着は解放される。
+        """`session` 上で次に到着する、`plan` または `dry_run` を提示する schema 操作を 1 件だけ、その要求自身が plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。`with` を抜けると先着は解放される。
 
-        Verbatim above (word-for-word from work order docs/work-orders/
-        WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md M-13, which quotes
-        design docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
-        section 9's `conformance-tests/` paragraph and section 11.1 Q-5).
+        Verbatim above (word-for-word from the supervisor's ruling M-13
+        in work order docs/work-orders/
+        WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md; the design's own section 9
+        `conformance-tests/` paragraph and section 11.1 Q-5 decide only
+        that the condition and the hook exist).
 
         port v1.20: condition C-34's own driving primitive -- a `plan`'s
         precondition under a concurrent schema operation against the same
@@ -1948,13 +1949,10 @@ class ConformanceAdapter(ABC):
         `with` block without having called `wait_until_held` has verified
         nothing about non-vacuity.
 
-        The arming is for the ONE next schema operation that reaches the
-        stall point; a schema operation that does not carry a `plan` is
-        held only where the plug has a point between its revision read
-        and its first DDL statement (see each plug's own implementation
-        comment for exactly which operations it holds and why). Every
-        other request -- a data operation, a second schema operation, or
-        one arriving after the hold was taken -- passes through
+        The arming is for the ONE next schema operation that presents a
+        `plan` or `dry_run`; a schema operation presenting neither passes
+        through, like every other request -- a data operation, a second
+        schema operation, or one arriving after the hold was taken --
         undisturbed. A second schema operation that B issues against a
         DIFFERENT entity of the same Application is what C-34 observes,
         because the Application's revision, plan token and schema object

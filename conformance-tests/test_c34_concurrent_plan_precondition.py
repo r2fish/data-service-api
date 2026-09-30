@@ -20,8 +20,8 @@ One observation, driven against a fresh `isolated_application_surface()`
 (C-05's own V2 driver convention):
 
   * A is `add_field` on entity E1 carrying the `plan` a dry run of that
-    same request returned at revision R, held after its plan has been
-    checked against the Application's current revision and before it has
+    same request returned at revision R, held after it has read the
+    Application's current revision for its plan check and before it has
     executed any DDL.
   * B is a schema operation on a DIFFERENT entity E2 of the same
     Application, issued while A is held. Different, because the
@@ -31,7 +31,8 @@ One observation, driven against a fresh `isolated_application_surface()`
     A's check and A's DDL.
   * After the hold is released, exactly one of two outcomes is accepted.
     Serialized: B had not completed while A was held, A and B both
-    succeed, the revision advanced by two (R + 2) and both fields exist.
+    succeed, A commits revision R + 1 and B, answering only after A,
+    commits R + 2, and both fields exist.
     Refused: A is refused `PRECONDITION_FAILED` naming `plan`, adds
     nothing to E1, and B's field exists (R + 1). Anything else -- in
     particular B completing while A was held and A then succeeding -- is
@@ -45,11 +46,10 @@ plug's own current declaration, never from its name.
 guard: on every registered plug the gate resolves to `drive` AND the
 plug's hook is realized (arming it yields a handle).
 
-Plugs that do not hold a schema operation without a `plan`: the two r2db
-realizations stall where the operation has read the revision its `plan` is
-checked against, which a schema operation carrying neither `plan` nor
-`dry_run` never does before its DDL. This file therefore always issues A
-with a `plan`.
+The hook holds only a schema operation that presents a `plan` or
+`dry_run`; one presenting neither passes through. This file therefore
+always issues A with a `plan` (taken from a dry run of the same request),
+and B, the operation that must wait or be overtaken, presents neither.
 """
 from __future__ import annotations
 
@@ -237,13 +237,14 @@ def test_c34_concurrent_schema_operation_keeps_plan_precondition(adapter: Confor
         assert a_result is not None
         assert not b_completed_while_a_held, (
             f"{adapter.name}: a schema operation against another entity of the same Application completed "
-            "while the first was held after its plan had been checked and before any DDL, and the first then "
-            "succeeded -- its plan was honored against a revision other than the one it was checked against"
+            "while the first was held after it had read the revision for its plan check and before any DDL, and "
+            "the first then succeeded -- its plan was honored against a revision other than the one it was "
+            "checked against"
         )
         assert field_a in fields_a, f"{adapter.name}: A reported success but its field is missing -- {a_result!r}"
-        assert sorted((_revision(a_result), _revision(b_result))) == [revision_r + 1, revision_r + 2], (
-            f"{adapter.name}: expected the two schema operations to advance the revision from {revision_r} to "
-            f"{revision_r + 2} one by one, got A={_revision(a_result)} B={_revision(b_result)}"
+        assert _revision(a_result) == revision_r + 1 and _revision(b_result) == revision_r + 2, (
+            f"{adapter.name}: B answered before A committed -- expected A to commit revision {revision_r + 1} "
+            f"and B, answering only after A, {revision_r + 2}, got A={_revision(a_result)} B={_revision(b_result)}"
         )
         assert final == revision_r + 2, (
             f"{adapter.name}: the revision after both operations is {final}, expected {revision_r + 2}"
