@@ -405,6 +405,20 @@ needs the table and is left to fail closed (`SERVICE_UNAVAILABLE`,
 # a caller having gotten the ordering right).
 ```
 
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- `apply_schema` takes the application-wide schema serialization lock before it loads the catalog, so the idempotency lookup, which has no use for the catalog, now runs before `_load_catalog` instead of right after it
+
+old:
+```
+right after `catalog` but before any operation-specific work in `apply_schema`
+```
+
+new:
+```
+before `catalog` and before any operation-specific work in `apply_schema`
+```
+
 ## CH-0016
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell._idempotency_key_lock`)
@@ -1260,6 +1274,20 @@ them) read `.revision` off the result.
 # `ApplicationCell.apply_schema`'s identical comment).
 # `dry_run` never consults/writes a record (ruling
 # I-7/D-4).
+```
+
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- the idempotency lookup now precedes `_load_catalog` in `apply_schema` (the catalog is read only after the schema serialization lock, which a replay never reaches)
+
+old:
+```
+as early as possible after loading the catalog, before ANY
+```
+
+new:
+```
+as early as possible, before the catalog is loaded, before ANY
 ```
 
 ## CH-0061
