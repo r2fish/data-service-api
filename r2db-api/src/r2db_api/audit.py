@@ -3,9 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
+import threading
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Callable
 import uuid
+
+from .audit_counts import _coalesced_count
 
 
 FORBIDDEN = ("credential", "token", "password", "secret", "private_key", "sql", "row_value")
@@ -181,11 +185,26 @@ class ApplicationAuditSink:
     `inject_fault`/`work` mirror `ControlAuditSink`'s identical mechanisms
     one-for-one; see that class's docstring for the full rationale, which
     applies here unchanged.
+
+    `record_denial` is this class's counterpart of the refusal-window
+    counter `PostgresApplicationAuditSink.record_denial` keeps in the
+    platform database: the first refusal of a (key, window) pair is
+    recorded as an ordinary event, and every later one adds one to that
+    window's tally in a process-local table instead of writing a row. The
+    window is aligned to the sink's own clock. `denial_window_summaries`
+    returns the summary event of every closed window that held repeats,
+    which `audit_query.InMemoryAuditQueryStore` reads. The table lives in
+    this process only, which is exactly what an in-process plug is: the
+    durability a service process needs against its own sudden death is the
+    Postgres sink's property.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._events: list[AuditEvent] = []
         self._fault: Exception | None = None
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._denial_lock = threading.Lock()
+        self._denial_windows: dict[tuple[str, int], dict[str, Any]] = {}
 
     def inject_fault(self, exc: Exception | None) -> None:
         """Test-only fault injection (Phase 4 mutation coverage, the
@@ -218,6 +237,75 @@ class ApplicationAuditSink:
         event = AuditEvent(str(uuid.uuid4()), event_class, datetime.now(timezone.utc).isoformat(), request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id, count)
         self._events.append(event)
         return event
+
+    def record_denial(
+        self,
+        *,
+        window_ms: int,
+        event_class: str,
+        request_id: str,
+        application_id: str | None,
+        actor_type: str,
+        actor_id: str | None,
+        role: str | None,
+        operation: str,
+        target_kind: str | None,
+        reason_code: str | None = None,
+        target_id: str | None = None,
+    ) -> None:
+        """Counts one refusal. The first refusal of a (key, window) pair --
+        key = application, actor (`unknown` when there is none),
+        operation, reason code; window = the sink's clock truncated to a
+        multiple of `window_ms` -- is appended as an ordinary `deny`
+        event; every later one only adds one to that window's tally. A
+        `window_ms` of 0 declares no coalescing: every refusal is appended.
+        Raises the injected fault, like every other write."""
+        if self._fault is not None:
+            raise self._fault
+        fields: dict[str, Any] = dict(
+            event_class=event_class, request_id=request_id, application_id=application_id, actor_type=actor_type,
+            actor_id=actor_id, role=role, operation=operation, target_kind=target_kind, outcome="deny",
+            reason_code=reason_code, target_id=target_id,
+        )
+        if window_ms <= 0:
+            self.append(**fields)
+            return
+        now_ms = int(self._clock().timestamp() * 1000)
+        start_ms = now_ms - now_ms % window_ms
+        key = (json.dumps([application_id, actor_id or "unknown", operation, reason_code]), start_ms)
+        with self._denial_lock:
+            window = self._denial_windows.get(key)
+            if window is not None:
+                window["occurrences"] += 1
+                return
+            first = self.append(**fields)
+            self._denial_windows[key] = {
+                "occurrences": 1,
+                "summary_event_id": str(uuid.uuid4()),
+                "window_end": datetime.fromtimestamp((start_ms + window_ms) / 1000, tz=timezone.utc),
+                "first": first,
+            }
+
+    def denial_window_summaries(self, *, closed_before: datetime) -> "list[tuple[AuditEvent, datetime]]":
+        """The summary event of every window that ended before
+        `closed_before` and held repeats, each with its window's end: the
+        first refusal's fields, its own stable `event_id`, and `count`
+        set to the repeats (absent when there was exactly one). A window
+        that held one refusal has no summary."""
+        summaries: list[tuple[AuditEvent, datetime]] = []
+        with self._denial_lock:
+            windows = list(self._denial_windows.values())
+        for window in windows:
+            if window["occurrences"] < 2 or window["window_end"] >= closed_before:
+                continue
+            first = window["first"]
+            summary = AuditEvent(
+                window["summary_event_id"], first.event_class, first.occurred_at, first.request_id, first.application_id,
+                first.actor_type, first.actor_id, first.role, first.operation, first.target_kind, first.outcome,
+                first.reason_code, first.target_id, _coalesced_count(window["occurrences"] - 1),
+            )
+            summaries.append((summary, window["window_end"]))
+        return summaries
 
     def append_many(self, events: "list[AuditEvent]") -> None:
         """Batch write -- either every event in `events`

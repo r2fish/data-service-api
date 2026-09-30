@@ -969,18 +969,10 @@ class R2DBConformanceAdapter(ConformanceAdapter):
                 "audit_query is not declared enabled/partial -- there is nothing to make visible on this "
                 "deployment's own declared posture",
             )
-        # Ordinary data-operation events are written before their response
-        # is returned, so they are already visible. What can still wait is a
-        # denial-coalescing window's repeat-count summary row, which lives on
-        # `self._service` (`DataService.flush_audit_buffer`, service.py) --
-        # the SAME method the real composition root's periodic background
-        # thread calls (`r2db_api.main.build_app`'s own `_audit_flush_loop`).
-        # `force_expire_denial_windows` stays at its own default (False):
-        # this hook exists so a test can make a just-coalesced event visible
-        # without waiting, not to force-flush an UNEXPIRED denial window
-        # early (a different, narrower concern that default already serves
-        # correctly).
-        self._call(lambda: self._service.flush_audit_buffer())
+        # A no-op: every event and every refusal count is written before
+        # its response is returned, and a refusal window's summary event
+        # becomes readable when the window closes plus the declared
+        # visibility lag -- there is no buffer or sweep to trigger.
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:

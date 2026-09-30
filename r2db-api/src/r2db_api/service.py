@@ -9,7 +9,6 @@ from typing import Any, Callable, Iterator
 import uuid
 
 from .audit import ApplicationAuditSink, AuditSink
-from .audit_counts import _coalesced_count
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
 from .capabilities_document import build_capabilities_document
@@ -63,21 +62,6 @@ _AUDIT_SINK_ORIGIN = "audit_sink"
 # the coalescing window (D-3/P4-D3, confirmed value).
 # history: CH-0176
 _DENIAL_COALESCE_WINDOW_S = 60.0
-
-# The default interval of the composition root's periodic sweep of the
-# denial-coalescing windows (`DataService.flush_audit_buffer`); a latency
-# knob only -- it decides how soon an expired window's repeat-count
-# summary row is written, never whether a denial is recorded.
-_DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
-
-# `_coalesced_count`'s own comment (Phase 4 WP-2(b) review B-1) moved with
-# it to `audit_counts.py` when that helper was extracted.
-# history: CH-0179
-
-# fixed, no-interpolation log messages for the denial-coalescer's own aggregate (repeat-count summary) row write path -- follows a state-transition-only discipline (logged on failing<->healthy transitions, never once per attempt), applied to `_DenialCoalescer._note_aggregate_write_result`.
-# history: CH-0173
-_COALESCE_AGGREGATE_WRITE_FAILED_LOG_MESSAGE = "application_audit coalesced-denial summary row could not be written; retrying"
-_COALESCE_AGGREGATE_WRITE_RECOVERED_LOG_MESSAGE = "application_audit coalesced-denial summary row recorded; retry cleared"
 
 # Default cell factory (design step 2): builds the existing in-memory `ApplicationCell`, unchanged, so every caller that does not pass `cell_factory` gets exactly today's behavior. A deployment that wants
 # `PostgresCell` (or any other `StorageBackend`) instead passes its own
@@ -133,232 +117,6 @@ class _PreCommitHook:
             pass
 
 
-class _DenialCoalescer:
-    """Phase 4 (design D-3/P4-D3): the coalescing state for fail-closed-
-    class denials. a shared store is never consulted, so the same key can legitimately produce one row per process/instance, not one row per deployment).
-
-    Keyed by `(application_id, actor_id or "unknown", operation,
-    reason_code)`, window `W` seconds: the first occurrence of a new key
-    writes a durable row synchronously (fail-closed -- `route()` raises
-    `SERVICE_UNAVAILABLE` if that write fails); every occurrence after that,
-    within the same window, only increments an in-memory counter. When the
-    window is later found expired (lazily, on the next `route()` call for
-    THAT key, or explicitly via `flush_expired()`/`flush_all()`), a second
-    row -- carrying the repeat count in `count` -- is written for that key,
-    if there were any repeats at all; zero-repeat windows are simply
-    dropped with no second write.
-
-    a same-key concurrent `route()` call must never observe "a window already exists" (and take the fast `repeat_count += 1` path) before the FIRST occurrence's own durable INSERT has actually resolved -- otherwise a fail-closed denial flood racing a sink outage could return an ordinary-looking denial response, never even attempting its own durable write, while the window's supposed first row was never actually recorded (§9.2 property 1's fail-closed guarantee would then hold only single-threaded).
-
-    WP-2(a) fix round 2, supervisor ruling on review m-2: PER-KEY locking,
-    not a single process-wide lock held across I/O. `self._lock` (process-
-    wide) protects ONLY `self._windows`/`self._key_locks`/`self._key_lock_
-    refcount` dict structure -- it is acquired only for brief, non-blocking
-    dict reads/writes, NEVER across a durable INSERT. Each coalescing key
-    gets its own `threading.Lock` (`self._key_locks`, created on first use),
-    held across that ONE key's own first-occurrence INSERT (and its own
-    expired-window aggregate flush, if one is due) -- this is what still
-    gives B-2 its correctness guarantee (a same-key concurrent caller
-    blocks on that key's own lock until the in-flight attempt resolves)
-    WITHOUT serializing unrelated keys against each other. The periodic
-    sweep (`flush_expired()`/`flush_all()`) collects expired keys/state
-    under the process lock and performs each one's INSERT under that SAME
-    key's own per-key lock (never the process lock) -- this is what lets a
-    concurrent `route()` call for that key correctly serialize against the
-    sweep too (WP-2(a) fix round 3, review D-1 -- see `_requeue_failed_
-    aggregate`'s own docstring for why this matters).
-
-    a failed aggregate-row write (the repeat-count summary row for an expired window) must never silently discard that repeat count -- see `_requeue_failed_aggregate`.
-    A round-2 revision deleted the due window from `self._windows` before
-    attempting its write and simply dropped it on failure (`except:
-    continue`/`pass`), reasoning that re-inserting after releasing the
-    process lock would race a concurrent `route()` for the same key; that
-    race is real, but per-key locking (already required for B-2/m-2) is
-    exactly what closes it -- the requeue now happens under the SAME key's
-    lock the write attempt itself ran under, so no concurrent `route()`
-    call for that key can be in flight at that moment.
-
-    `self._key_locks` entries are pruned via reference counting (`_acquire_key_lock`/`_release_key_lock_ref`) once a key has no outstanding lock user AND no window left for it -- never while a lock might still be in use (which would let a fresh `route()` call silently start using a NEW, different `Lock` object for the same key, defeating serialization entirely).
-
-    History: CH-0155
-    """
-
-    def __init__(self, sink: Any, *, window_s: float, clock: Callable[[], float]) -> None:
-        self._sink = sink
-        self._window_s = window_s
-        self._clock = clock
-        self._lock = threading.Lock()
-        self._windows: dict[tuple[Any, ...], dict[str, Any]] = {}
-        self._key_locks: dict[tuple[Any, ...], threading.Lock] = {}
-        self._key_lock_refcount: dict[tuple[Any, ...], int] = {}
-        # tracks whether the MOST RECENT aggregate-row write attempt (from any key) failed -- a single, process-wide flag, logging only on failing<->healthy transitions, never once per attempt.
-        # history: CH-0154
-        self._aggregate_write_failing = False
-
-    def _acquire_key_lock(self, key: tuple[Any, ...]) -> threading.Lock:
-        with self._lock:
-            lock = self._key_locks.setdefault(key, threading.Lock())
-            self._key_lock_refcount[key] = self._key_lock_refcount.get(key, 0) + 1
-            return lock
-
-    def _release_key_lock_ref(self, key: tuple[Any, ...]) -> None:
-        """only prunes `self._key_locks[key]` when this is the LAST outstanding reference (refcount reaches 0) AND no window remains for the key -- see class docstring for why both conditions are required for this to be safe.
-
-        History: CH-0153
-        """
-        with self._lock:
-            remaining = self._key_lock_refcount.get(key, 1) - 1
-            if remaining <= 0:
-                self._key_lock_refcount.pop(key, None)
-                if key not in self._windows:
-                    self._key_locks.pop(key, None)
-            else:
-                self._key_lock_refcount[key] = remaining
-
-    def _requeue_failed_aggregate(self, key: tuple[Any, ...], state: dict[str, Any]) -> None:
-        """called only while holding this KEY's OWN `key_lock` (both call sites below), right after its aggregate-row write attempt raised -- puts `state["repeat_count"]` back where a future flush (periodic, explicit, shutdown, or the very next `route()` call for this same key) will retry it, instead of discarding it. Two cases, both safe specifically BECAUSE the
-        caller holds this key's lock (no concurrent `route()`/sweep call
-        for the SAME key can be observing or mutating `self._windows[key]`
-        at this exact moment -- see class docstring):
-
-        - A fresh window has already been opened for this key by a
-          concurrent `route()` call in the meantime (its own first-
-          occurrence row is already durable) -- merge the failed repeat
-          count into it rather than overwriting.
-        - No window exists for this key right now -- re-register one
-          carrying just the failed repeat count, with the SAME (already
-          past) `window_start` it had, so it reads as immediately "due"
-          again for both a future sweep and the next `route()` call for
-          this key (which flushes an expired window inline before opening
-          a fresh one, the same code path that calls this method).
-
-        History: CH-0152
-        """
-        with self._lock:
-            existing = self._windows.get(key)
-            if existing is not None:
-                existing["repeat_count"] += state["repeat_count"]
-            else:
-                self._windows[key] = state
-
-    def _note_aggregate_write_result(self, succeeded: bool) -> None:
-        """fixed-message `logging.error`, only on a failing<-> healthy state TRANSITION (N-2's own established discipline) -- not once per attempt, which would let a persistently failing sink flood the log.
-
-        History: CH-0151
-        """
-        log_message: str | None = None
-        with self._lock:
-            if succeeded:
-                if self._aggregate_write_failing:
-                    self._aggregate_write_failing = False
-                    log_message = _COALESCE_AGGREGATE_WRITE_RECOVERED_LOG_MESSAGE
-            else:
-                if not self._aggregate_write_failing:
-                    self._aggregate_write_failing = True
-                    log_message = _COALESCE_AGGREGATE_WRITE_FAILED_LOG_MESSAGE
-        if log_message is not None:
-            _logger.error(log_message)
-
-    def route(self, *, key: tuple[Any, ...], fields: dict[str, Any]) -> None:
-        now = self._clock()
-        key_lock = self._acquire_key_lock(key)
-        try:
-            with key_lock:
-                with self._lock:
-                    state = self._windows.get(key)
-                    if state is not None and now - state["window_start"] < self._window_s:
-                        state["repeat_count"] += 1
-                        return
-                    expired_state = state
-                    if expired_state is not None:
-                        del self._windows[key]
-                if expired_state is not None and expired_state["repeat_count"] > 0:
-                    # This key's own window had already expired (nobody had
-                    # routed it since) -- flush its repeat-summary row
-                    # first, still under this key's own lock.
-                    try:
-                        self._sink.append(count=_coalesced_count(expired_state["repeat_count"]), **expired_state["fields"])
-                    except Exception:
-                        self._requeue_failed_aggregate(key, expired_state)
-                        self._note_aggregate_write_result(False)
-                    else:
-                        self._note_aggregate_write_result(True)
-                # New (or freshly-expired-and-reopened) window: the
-                # synchronous, fail-closed first-occurrence INSERT.
-                try:
-                    self._sink.append(count=None, **fields)
-                except Exception:
-                    fail(
-                        "SERVICE_UNAVAILABLE",
-                        "The durable audit sink could not record this denial; it was refused.",
-                        status=503,
-                        details={"origin": _AUDIT_SINK_ORIGIN},
-                    )
-                with self._lock:
-                    # WP-2(a) fix round 4 (spot-check, major): if the
-                    # inline expired-window flush just above failed, it
-                    # already requeued the still-unwritten repeat count
-                    # into `self._windows[key]` (via `_requeue_failed_
-                    # aggregate`, under this SAME key_lock -- no other
-                    # thread can have touched this key's entry since). A
-                    # prior revision overwrote that unconditionally here,
-                    # silently discarding the requeued count the moment the
-                    # aggregate write failed but the very next first-
-                    # occurrence write succeeded. Merge instead: carry the
-                    # requeued `repeat_count` forward into the fresh
-                    # window rather than resetting it to 0.
-                    requeued = self._windows.get(key)
-                    carried_repeat_count = requeued["repeat_count"] if requeued is not None else 0
-                    self._windows[key] = {"window_start": now, "repeat_count": carried_repeat_count, "fields": fields}
-        finally:
-            self._release_key_lock_ref(key)
-
-    def flush_expired(self) -> None:
-        """Periodic/explicit sweep: only windows whose `window_s` has
-        actually elapsed. Collects them under the process lock (a brief,
-        non-blocking dict operation), then performs each key's own INSERT
-        under that SAME key's own per-key lock (m-2/D-1) -- never the
-        process lock, and never unprotected against a concurrent `route()`
-        call for the same key."""
-        now = self._clock()
-        self._flush_keys(lambda key, state: now - state["window_start"] >= self._window_s)
-
-    def flush_all(self) -> None:
-        """force EVERY currently-open window to be flushed, expired or not -- used only at graceful shutdown. Once this process is about to stop, there is no "wait for the window to naturally expire" future left; treating every window as due now is what keeps a shutdown from silently discarding an in-progress window's accumulated repeat count (only ever sanctions losing counts to an actual crash, never to an orderly stop).
-
-        History: CH-0150
-        """
-        self._flush_keys(lambda key, state: True)
-
-    def _flush_keys(self, is_due: "Callable[[tuple[Any, ...], dict[str, Any]], bool]") -> None:
-        due: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-        with self._lock:
-            for key in list(self._windows.keys()):
-                state = self._windows[key]
-                if is_due(key, state):
-                    due.append((key, state))
-                    del self._windows[key]
-        for key, state in due:
-            if state["repeat_count"] <= 0:
-                continue
-            key_lock = self._acquire_key_lock(key)
-            try:
-                with key_lock:
-                    try:
-                        self._sink.append(count=_coalesced_count(state["repeat_count"]), **state["fields"])
-                    except Exception:
-                        # never silently drop this repeat count -- put it back where a future attempt (this same sweep's own next pass, a later explicit/periodic flush, or the next `route()` call for this key) will retry it. Safe specifically because this
-                        # happens under THIS key's own lock (no concurrent
-                        # `route()`/sweep call for the SAME key can be
-                        # touching `self._windows[key]` right now).
-                        # history: CH-0149
-                        self._requeue_failed_aggregate(key, state)
-                        self._note_aggregate_write_result(False)
-                    else:
-                        self._note_aggregate_write_result(True)
-            finally:
-                self._release_key_lock_ref(key)
-
 class DataService:
     """Public application facade; control state is deliberately private."""
 
@@ -407,7 +165,7 @@ class DataService:
         # `main.py`'s composition root). `self._audit` above is untouched and stays the sole recorder for D-3's non-durable denial classes (everything outside `_DURABLE_DENIAL_CODES`'s inclusion list -- D-10's own instruction) -- this is a SEPARATE sink, not a replacement.
         # history: CH-0145
         self._durable_audit = durable_audit if durable_audit is not None else ApplicationAuditSink()
-        self._denial_coalescer = _DenialCoalescer(self._durable_audit, window_s=denial_coalesce_window_s, clock=clock or time.monotonic)
+        self._denial_window_ms = int(round(denial_coalesce_window_s * 1000))
         self._cell_factory: CellFactory = cell_factory or _default_cell_factory
         self._cells: dict[str, StorageBackend] = dict(initial_cells or {})
         self._disabled_apps: set[str] = set()
@@ -917,7 +675,7 @@ class DataService:
           above, when the backend's own pre-commit hook already durably
           recorded this exact event): return immediately. D-10's "at most
           one durable row per operation" rule.
-        - `outcome == "deny"`: `details["origin"] == "audit_sink"` means this denial's `SERVICE_UNAVAILABLE` was produced by the audit pipeline itself already failing to record this very operation (a pre-commit sink failure, a commit-failure error-row write, a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write for what is still logically one operation, so this returns without doing anything further. Otherwise, any reason code outside D-3's durable-code inclusion list (`_DURABLE_DENIAL_CODES` -- not merely the 4 originally named) returns without any durable record at all; every other reason code is fail-closed-class and goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
+        - `outcome == "deny"`: `details["origin"] == "audit_sink"` means this denial's `SERVICE_UNAVAILABLE` was produced by the audit pipeline itself already failing to record this very operation (a pre-commit sink failure, a commit-failure error-row write, a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write for what is still logically one operation, so this returns without doing anything further. Otherwise, any reason code outside D-3's durable-code inclusion list (`_DURABLE_DENIAL_CODES` -- not merely the 4 originally named) returns without any durable record at all; every other reason code is fail-closed-class and is counted in the durable refusal window before its response is returned (a count that cannot be recorded raises `SERVICE_UNAVAILABLE`).
         - `outcome == "allow"` (any class but `authentication`) or `"replayed"` (any class): written synchronously to the durable sink before the caller's response is returned -- `query`/`catalog`, a `mutate` whose backend did not already record it (`already_durable=False`), and every replay. A sink failure raises `SERVICE_UNAVAILABLE` (fail-closed), so a response is only ever returned for an operation whose event is durable.
 
         History: CH-0109
@@ -974,13 +732,20 @@ class DataService:
             return
         if reason_code not in _DURABLE_DENIAL_CODES:
             return
-        key = (application_id, actor_id or "unknown", operation, reason_code)
         fields = {
             "event_class": event_class, "request_id": request_id, "application_id": application_id,
             "actor_type": actor_type, "actor_id": actor_id, "role": role, "operation": operation,
-            "target_kind": target_kind, "outcome": "deny", "reason_code": reason_code, "target_id": target_id,
+            "target_kind": target_kind, "reason_code": reason_code, "target_id": target_id,
         }
-        self._denial_coalescer.route(key=key, fields=fields)
+        try:
+            self._durable_audit.record_denial(window_ms=self._denial_window_ms, **fields)
+        except Exception:
+            fail(
+                "SERVICE_UNAVAILABLE",
+                "The durable audit sink could not record this denial; it was refused.",
+                status=503,
+                details={"origin": _AUDIT_SINK_ORIGIN},
+            )
 
     def _make_audit_hook(self, canonical: AuthContext, *, event_class: str, operation: str, target_kind: str, request_id: str) -> _PreCommitHook:
         """builds the `ApplicationAuditHook` passed to `StorageBackend.transact`/`apply_schema` as `audit_hook` -- every field the durable row needs is already resolved here (this is `DataService`'s own job; the backend has no identity/request context of its own beyond what it is given).
@@ -993,21 +758,6 @@ class DataService:
             "operation": operation, "target_kind": target_kind, "target_id": None,
         }
         return _PreCommitHook(self._durable_audit, fields)
-
-    def flush_audit_buffer(self, *, force_expire_denial_windows: bool = False) -> None:
-        """Phase 4 (design D-4/§7.3/§7.4): sweeps denial-coalescing windows (writing their repeat-count summary row). Ordinary events are written before their response is returned, so no buffer is left to drain here. Called on demand by this repository's own tests and by a
-        composition root's periodic timer alike -- there is nothing
-        time-sensitive about calling this more or less often beyond how
-        promptly a window's repeat count becomes durable.
-
-        flushes EVERY currently-open denial-coalescing window, expired or not, instead of only expired ones -- used exactly once, by a composition root's graceful-shutdown path. Without this, a window still short of its own `window_s` at the moment the process stops loses its accumulated repeat count entirely (only sanctions losing counts to an actual crash, not to an orderly stop); the default (periodic timer, explicit test calls) stays `False` -- an in-progress window still has a legitimate future to expire into naturally and must not be cut short just because something else happened to call this method.
-
-        History: CH-0106
-        """
-        if force_expire_denial_windows:
-            self._denial_coalescer.flush_all()
-        else:
-            self._denial_coalescer.flush_expired()
 
     def _register_application(self, application_id: str, entities: dict[str, list[dict[str, Any]]] | None = None) -> None:
         if application_id in self._cells:

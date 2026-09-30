@@ -105,6 +105,12 @@ PROCESS_CEILINGS_MIGRATION_FILENAME = "0012_process_ceilings.sql"
 #: that check's own failure message.
 REQUEST_RATE_MIGRATION_FILENAME = "0015_credential_request_rate.sql"
 
+#: the platform single-shot migration that creates the refusal-window
+#: counter table and the `denial_window_record` function every refused
+#: request's count runs through -- named in `check_denial_window_function`'s
+#: failure message.
+DENIAL_WINDOW_MIGRATION_FILENAME = "0016_denial_window_counter.sql"
+
 #: The provision-DSN env var name this peer's own `ops.py` reads (named in
 #: F-8's remedy text).
 PROVISION_DSN_ENV = "R2DB_CONTROL_DSN"
@@ -1537,6 +1543,85 @@ def check_request_rate_function(conn: "psycopg.Connection", *, schema: str, migr
             )
 
 
+#: the refusal-window function and table (migration
+#: `DENIAL_WINDOW_MIGRATION_FILENAME`) and the `search_path` the function is
+#: pinned to; `check_denial_window_function` compares the catalog against
+#: these.
+_DENIAL_WINDOW_FUNCTION_SIGNATURE = (
+    "denial_window_record(integer, text, timestamptz, text, text, text, text, text, text, text, text, text)"
+)
+_DENIAL_WINDOW_TABLE = "denial_window_counter"
+_DENIAL_WINDOW_SEARCH_PATH = "search_path=pg_catalog,pg_temp"
+
+
+def _f21_message(problems: "list[str]", *, schema: str, migration: str, ops_module: str) -> str:
+    return (
+        f"{schema}.denial_window_record is not in the state migration {migration} leaves it in: "
+        + "; ".join(problems)
+        + f". Apply that migration as the schema's owner role ('python -m {ops_module}.ops "
+        f"apply-platform-migration {migration} --lock-timeout <value>'), then restart the data plane."
+    )
+
+
+def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops_module: str, migration: str) -> None:
+    """F-21: read-only. `schema` carries the `denial_window_record`
+    function and the `denial_window_counter` table that hold the count of
+    refused requests, in the state migration `migration` leaves them in,
+    and this connection's own login role may EXECUTE the function. The
+    function runs as its owner and is the only way the data plane reaches
+    the table, so the check names each way it can fail to be safe: not
+    `SECURITY DEFINER`, a `search_path` that is not pinned to `pg_catalog,
+    pg_temp`, EXECUTE held by PUBLIC, or the function or the table owned by
+    a role other than the schema's owner. Reads `pg_proc`, `pg_class`,
+    `pg_namespace` and `has_function_privilege` only. Raises
+    `PlatformDeclarationError` (code `F-21`) listing every failed
+    property."""
+    problems: list[str] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT to_regprocedure(quote_ident(%s) || '.' || %s)::oid",
+            [schema, _DENIAL_WINDOW_FUNCTION_SIGNATURE],
+        )
+        (function_oid,) = cur.fetchone()
+        cur.execute(
+            "SELECT c.relowner = n.nspowner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = %s AND c.relname = %s",
+            [schema, _DENIAL_WINDOW_TABLE],
+        )
+        table_row = cur.fetchone()
+        if function_oid is None:
+            problems.append("the function does not exist")
+        else:
+            cur.execute(
+                "SELECT p.prosecdef, p.proconfig, p.proowner = n.nspowner, "
+                "(p.proacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a "
+                "WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')), "
+                "has_function_privilege(p.oid, 'EXECUTE') "
+                "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = %s::oid",
+                [function_oid],
+            )
+            security_definer, config, owned_by_schema_owner, public_executes, may_execute = cur.fetchone()
+            if not security_definer:
+                problems.append("it is not SECURITY DEFINER")
+            pinned = [entry.replace(" ", "") for entry in (config or []) if entry.startswith("search_path=")]
+            if pinned != [_DENIAL_WINDOW_SEARCH_PATH]:
+                problems.append("its search_path is not pinned to pg_catalog, pg_temp")
+            if public_executes:
+                problems.append("PUBLIC may EXECUTE it")
+            if not owned_by_schema_owner:
+                problems.append("it is not owned by the schema's owner role")
+            if not may_execute:
+                problems.append("this connection's role may not EXECUTE it")
+        if table_row is None:
+            problems.append("the denial_window_counter table does not exist")
+        elif not table_row[0]:
+            problems.append("the denial_window_counter table is not owned by the schema's owner role")
+    if problems:
+        raise PlatformDeclarationError(
+            _f21_message(problems, schema=schema, migration=migration, ops_module=ops_module), code="F-21"
+        )
+
+
 def ops_module_hint() -> str:
     """`PEER_MODULE`, named through a function (not referenced directly by
     `check_contract_170_declarations`'s own f-strings) so this check's
@@ -1570,6 +1655,7 @@ __all__ = [
     "check_auditreader_statement_timeout",
     "check_contract_170_declarations",
     "check_control_surface_consistency",
+    "check_denial_window_function",
     "check_max_connections_headroom",
     "check_role_connection_limits",
     "check_writer_role_timeouts",

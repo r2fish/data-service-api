@@ -67,78 +67,6 @@ exactly as it already is everywhere else (`self._service._credentials`
 is never type-narrowed in this class).
 ```
 
-## CH-0106
-
-- moved from: `src/r2db_api/service.py` (`DataService.flush_audit_buffer`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Phase 4 (design D-4/§7.3/§7.4): synchronously drains the
-bounded buffer (writing it as one batch), retries the sticky
-overflow-alert row if one is pending and due, and sweeps
-denial-coalescing windows (writing their repeat-count summary row,
-D-3). Called on demand by this repository's own tests and by a
-composition root's periodic timer alike -- there is nothing
-time-sensitive about calling this more or less often beyond how
-promptly buffered/coalesced evidence becomes durable (D-4's own
-"periodic or threshold" flush-trigger latitude).
-
-`force_expire_denial_windows=True` (WP-2(a) fix round 2, review
-N-4): flushes EVERY currently-open denial-coalescing window,
-expired or not, instead of only expired ones -- used exactly once,
-by a composition root's graceful-shutdown path. Without this, a
-window still short of its own `window_s` at the moment the process
-stops loses its accumulated repeat count entirely (D-3 only
-sanctions losing counts to an actual crash, not to an orderly
-stop); the default (periodic timer, explicit test calls) stays
-`False` -- an in-progress window still has a legitimate future to
-expire into naturally and must not be cut short just because
-something else happened to call this method.
-```
-
-### correction: 2026-09-30
-
-- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the method no longer drains a buffer
-
-old:
-```
-synchronously drains the bounded buffer (writing it as one batch), retries the sticky overflow-alert row if one is pending and due, and sweeps denial-coalescing windows (writing their repeat-count summary row
-```
-
-new:
-```
-sweeps denial-coalescing windows (writing their repeat-count summary row
-```
-
-### correction: 2026-09-30
-
-- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; states why the historical method name has no buffer to drain
-
-old:
-```
-Called on demand by this repository's own tests and by a composition root's periodic timer alike
-```
-
-new:
-```
-Ordinary events are written before their response is returned, so no buffer is left to drain here. Called on demand by this repository's own tests and by a composition root's periodic timer alike
-```
-
-### correction: 2026-09-30
-
-- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; only coalescing windows are left to become durable later
-
-old:
-```
-promptly buffered/coalesced evidence becomes durable (D-4's own "periodic or threshold" flush-trigger latitude)
-```
-
-new:
-```
-promptly a window's repeat count becomes durable
-```
-
 ## CH-0107
 
 - moved from: `src/r2db_api/service.py` (`DataService._make_audit_hook`)
@@ -259,6 +187,20 @@ old:
 new:
 ```
 `outcome == "allow"` (any class but `authentication`) or `"replayed"` (any class)
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-5a -- the process-local coalescing router is removed; a fail-closed-class refusal is counted in the platform database's refusal window before its response is returned
+
+old:
+```
+goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
+```
+
+new:
+```
+is counted in the durable refusal window before its response is returned (a count that cannot be recorded raises `SERVICE_UNAVAILABLE`).
 ```
 
 ## CH-0110
@@ -1208,6 +1150,20 @@ new:
 This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
 ```
 
+### correction: 2026-09-30
+
+- reason: roadmap R-115 (contract 1.13.0, subordinate ruling 18) -- this host declares 1.13.0 in the same commit as its own audit durability behavior
+
+old:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
+```
+
+new:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment -- a select entry, a where predicate's field, an order_by entry's field, or a mutation's values key that names a field this entity does not declare is refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window. This host also declares contract 1.13.0 in the same commit as its own audit durability behavior -- a service process that stops without completing a graceful shutdown loses neither the audit event of an operation whose response was already returned nor the count of any denial occurrence whose response was already returned -- 1.13.0's own unconditional obligation, never ahead of the behavior it declares.
+```
+
 ## CH-0143
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)
@@ -1346,207 +1302,6 @@ CCR-13 WP-5b: the WP-2-through-WP-5 provisional gate (design R2DB_CCR13_STORAGE_
 # adapter) gets the same fail-loud guard against a typo'd status
 # string, rather than silently publishing an invalid capability
 # value.
-```
-
-## CH-0149
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._flush_keys`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Review D-1: never silently drop this repeat count
-# -- put it back where a future attempt (this same
-# sweep's own next pass, a later explicit/periodic
-# flush, or the next `route()` call for this key)
-# will retry it. Safe specifically because this
-# happens under THIS key's own lock (no concurrent
-# `route()`/sweep call for the SAME key can be
-# touching `self._windows[key]` right now).
-```
-
-## CH-0150
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer.flush_all`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-WP-2(a) fix round 2, review N-4: force EVERY currently-open
-window to be flushed, expired or not -- used only at graceful
-shutdown. Once this process is about to stop, there is no "wait
-for the window to naturally expire" future left; treating every
-window as due now is what keeps a shutdown from silently
-discarding an in-progress window's accumulated repeat count (D-3
-only ever sanctions losing counts to an actual crash, never to an
-orderly stop).
-```
-
-## CH-0151
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._note_aggregate_write_result`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Review D-1: fixed-message `logging.error`, only on a failing<->
-healthy state TRANSITION (N-2's own established discipline) -- not
-once per attempt, which would reproduce the exact logging-DoS risk
-N-2 already closed for the buffer-overflow alert path.
-```
-
-### correction: 2026-09-30
-
-- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the buffer-overflow alert path is removed
-
-old:
-```
-which would reproduce the exact logging-DoS risk N-2 already closed for the buffer-overflow alert path.
-```
-
-new:
-```
-which would let a persistently failing sink flood the log.
-```
-
-## CH-0152
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._requeue_failed_aggregate`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-WP-2(a) fix round 3, review D-1: called only while holding this
-KEY's OWN `key_lock` (both call sites below), right after its
-aggregate-row write attempt raised -- puts `state["repeat_count"]`
-back where a future flush (periodic, explicit, shutdown, or the
-very next `route()` call for this same key) will retry it, instead
-of discarding it. Two cases, both safe specifically BECAUSE the
-caller holds this key's lock (no concurrent `route()`/sweep call
-for the SAME key can be observing or mutating `self._windows[key]`
-at this exact moment -- see class docstring):
-
-- A fresh window has already been opened for this key by a
-  concurrent `route()` call in the meantime (its own first-
-  occurrence row is already durable) -- merge the failed repeat
-  count into it rather than overwriting.
-- No window exists for this key right now -- re-register one
-  carrying just the failed repeat count, with the SAME (already
-  past) `window_start` it had, so it reads as immediately "due"
-  again for both a future sweep and the next `route()` call for
-  this key (which flushes an expired window inline before opening
-  a fresh one, the same code path that calls this method).
-```
-
-## CH-0153
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer._release_key_lock_ref`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Review D-2: only prunes `self._key_locks[key]` when this is the
-LAST outstanding reference (refcount reaches 0) AND no window
-remains for the key -- see class docstring for why both conditions
-are required for this to be safe.
-```
-
-## CH-0154
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer.__init__`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Review D-1: tracks whether the MOST RECENT aggregate-row write
-# attempt (from any key) failed -- a single, process-wide flag,
-# deliberately mirroring `_AuditBuffer`'s own N-2 state-transition
-# logging discipline (log only on failing<->healthy transitions,
-# never once per attempt).
-```
-
-### correction: 2026-09-30
-
-- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the buffer whose discipline this mirrored is removed
-
-old:
-```
-a single, process-wide flag, deliberately mirroring `_AuditBuffer`'s own N-2 state-transition logging discipline (log only on failing<->healthy transitions, never once per attempt).
-```
-
-new:
-```
-a single, process-wide flag, logging only on failing<->healthy transitions, never once per attempt.
-```
-
-## CH-0155
-
-- moved from: `src/r2db_api/service.py` (`_DenialCoalescer`)
-- parent commit: `3a4c018`
-- kind: docstring
-
-```
-Phase 4 (design D-3/P4-D3): the coalescing state for fail-closed-
-class denials. Process-local (review N-4: a shared store is never
-consulted, so the same key can legitimately produce one row per
-process/instance, not one row per deployment).
-
-Keyed by `(application_id, actor_id or "unknown", operation,
-reason_code)`, window `W` seconds: the first occurrence of a new key
-writes a durable row synchronously (fail-closed -- `route()` raises
-`SERVICE_UNAVAILABLE` if that write fails); every occurrence after that,
-within the same window, only increments an in-memory counter. When the
-window is later found expired (lazily, on the next `route()` call for
-THAT key, or explicitly via `flush_expired()`/`flush_all()`), a second
-row -- carrying the repeat count in `count` -- is written for that key,
-if there were any repeats at all; zero-repeat windows are simply
-dropped with no second write.
-
-WP-2(a) review B-2 (fail-closed correctness): a same-key concurrent
-`route()` call must never observe "a window already exists" (and take
-the fast `repeat_count += 1` path) before the FIRST occurrence's own
-durable INSERT has actually resolved -- otherwise a fail-closed denial
-flood racing a sink outage could return an ordinary-looking denial
-response, never even attempting its own durable write, while the
-window's supposed first row was never actually recorded (§9.2 property
-1's fail-closed guarantee would then hold only single-threaded).
-
-WP-2(a) fix round 2, supervisor ruling on review m-2: PER-KEY locking,
-not a single process-wide lock held across I/O. `self._lock` (process-
-wide) protects ONLY `self._windows`/`self._key_locks`/`self._key_lock_
-refcount` dict structure -- it is acquired only for brief, non-blocking
-dict reads/writes, NEVER across a durable INSERT. Each coalescing key
-gets its own `threading.Lock` (`self._key_locks`, created on first use),
-held across that ONE key's own first-occurrence INSERT (and its own
-expired-window aggregate flush, if one is due) -- this is what still
-gives B-2 its correctness guarantee (a same-key concurrent caller
-blocks on that key's own lock until the in-flight attempt resolves)
-WITHOUT serializing unrelated keys against each other. The periodic
-sweep (`flush_expired()`/`flush_all()`) collects expired keys/state
-under the process lock and performs each one's INSERT under that SAME
-key's own per-key lock (never the process lock) -- this is what lets a
-concurrent `route()` call for that key correctly serialize against the
-sweep too (WP-2(a) fix round 3, review D-1 -- see `_requeue_failed_
-aggregate`'s own docstring for why this matters).
-
-WP-2(a) fix round 3, review D-1 (major): a failed aggregate-row write
-(the repeat-count summary row for an expired window) must never
-silently discard that repeat count -- see `_requeue_failed_aggregate`.
-A round-2 revision deleted the due window from `self._windows` before
-attempting its write and simply dropped it on failure (`except:
-continue`/`pass`), reasoning that re-inserting after releasing the
-process lock would race a concurrent `route()` for the same key; that
-race is real, but per-key locking (already required for B-2/m-2) is
-exactly what closes it -- the requeue now happens under the SAME key's
-lock the write attempt itself ran under, so no concurrent `route()`
-call for that key can be in flight at that moment.
-
-Review D-2 (minor): `self._key_locks` entries are pruned via reference
-counting (`_acquire_key_lock`/`_release_key_lock_ref`) once a key has
-no outstanding lock user AND no window left for it -- never while a
-lock might still be in use (which would let a fresh `route()` call
-silently start using a NEW, different `Lock` object for the same key,
-defeating serialization entirely).
 ```
 
 ## CH-0165
@@ -1705,34 +1460,6 @@ is the opaque cursor for the next page (`QueryOutcome.next_cursor`,
 # either backend leaking into this facade).
 ```
 
-## CH-0173
-
-- moved from: `src/r2db_api/service.py` (`<module>`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# Phase 4 (WP-2(a) fix round 3, review D-1): fixed, no-interpolation log
-# messages for the denial-coalescer's own aggregate (repeat-count summary)
-# row write path -- mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_
-# WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline
-# (N-2), applied to `_DenialCoalescer._note_aggregate_write_result`.
-```
-
-### correction: 2026-09-30
-
-- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the alert messages this mirrored are removed
-
-old:
-```
-mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline
-```
-
-new:
-```
-follows a state-transition-only discipline (logged on failing<->healthy transitions, never once per attempt)
-```
-
 ## CH-0174
 
 - moved from: `src/r2db_api/service.py` (`<module>`)
@@ -1852,13 +1579,3 @@ new:
 Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable recording (N-2: recording them would just let the flow problem exists to bound come back).
 ```
 
-## CH-0179
-
-- moved from: `src/r2db_api/service.py` (`<module>`)
-- parent commit: `3a4c018`
-- kind: comment
-
-```
-# `_coalesced_count`'s own comment (Phase 4 WP-2(b) review B-1) moved with
-# it to `audit_counts.py` when that helper was extracted.
-```

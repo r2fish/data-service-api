@@ -32,6 +32,7 @@ import time
 import types
 import uuid
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
@@ -43,7 +44,8 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from starlette.testclient import TestClient
 
 import r2db_api.ops as ops
-from r2db_api.audit import ApplicationAuditSink, AuditEvent
+from r2db_api.audit import ApplicationAuditSink, AuditEvent, ControlAuditSink
+from r2db_api.audit_query import InMemoryAuditQueryStore
 from r2db_api.audit_hook import ApplicationAuditHook
 from r2db_api.auth import CredentialStore, compose_bearer_locator
 from r2db_api.credential_store import PostgresApplicationAuditSink, PostgresControlAuditSink
@@ -95,6 +97,9 @@ MIGRATION_NAMES = (
     # WP-2 (design D-3 (1), 監督裁定15): `r2db_api.main.build_app` now
     # always wires the PostgreSQL-backed `requests_per_minute` rate row.
     "0015_credential_request_rate.sql",
+    # every refusal's count is written through this migration's function,
+    # and `audit_query` reads its counter table.
+    "0016_denial_window_counter.sql",
     # Q4 rework (supervisor ruling 2026-09-05, H-1 test (ii)): rewritten
     # (its own literal `r2dbsvc_registry` textually replaced by this
     # module's own throwaway prefix, same as every other migration file
@@ -234,6 +239,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
         _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+        _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(
@@ -1372,17 +1378,6 @@ def test_control_visibility_lag_ms_reflects_the_sibling_roles_catalog_not_only_i
 # ===========================================================================
 
 
-class _FakeClock:
-    def __init__(self, start: float = 1_000_000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-
-
 class _SelectiveFaultSink:
     """Wraps a real `ApplicationAuditSink`, failing only `append` calls
     whose `event_class` is in `fail_event_classes` -- lets a test target
@@ -2094,481 +2089,198 @@ def test_a_deferred_constraint_failing_at_the_schema_commit_writes_an_error_row_
 
 
 # ===========================================================================
-# Section 6: D-3 coalescing (§9.2 property 10(ii)) and the durable denial
-# code vocabulary (§9.2 property 10, D-3's range table, J-2 inclusion list).
+# Section 6: the refusal-window count (in-memory sink) and the durable
+# denial code vocabulary (D-3's range table, J-2 inclusion list). The
+# Postgres counter is exercised in `test_denial_window_counter.py`.
 # ===========================================================================
 
 
-def test_concurrent_same_key_denials_are_both_fail_closed_when_the_sink_is_down() -> None:
-    """WP-2(a) review B-2 (major): a prior revision of `_DenialCoalescer.
-    route` released its lock BEFORE the first-occurrence durable INSERT, so
-    a second, concurrent denial for the SAME key could observe "a window
-    already exists" (`repeat_count += 1`, an ordinary-looking response)
-    while that INSERT was still in flight -- or had already failed -- never
-    attempting its own durable write at all. Under a sink outage during a
-    denial flood (exactly the scenario D-3's coalescing exists for), this
-    let §9.2 property 1's fail-closed guarantee hold only single-threaded:
-    a concurrent caller could get a normal 401 instead of 503 while the
-    window's own first row was never durably recorded.
+class _SinkClock:
+    """The in-memory sink's own clock: a `datetime` a test moves by hand.
+    Starts on a whole minute in 2001 UTC, so every window a test opens
+    closes long before the wall clock the reader compares against."""
 
-    Reproduced deterministically with a blocking sink (no timing luck): a
-    first caller is let INTO `sink.append()` and held there; a second,
-    concurrent same-key caller is then started and given every reasonable
-    chance to resolve early. The fixed `route()` holds the coalescer's lock
-    for the whole first-occurrence INSERT, so the second caller cannot even
-    acquire the lock -- let alone resolve -- until the first has fully
-    failed; both callers then attempt (and fail) their own INSERT and both
-    fail closed.
-    """
-    call_started = threading.Event()
-    release = threading.Event()
-    call_count = 0
-    call_count_lock = threading.Lock()
+    def __init__(self) -> None:
+        self.now = datetime(2001, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
-    class _BlockingThenFailingSink:
-        def append(self, **kwargs: Any) -> None:
-            nonlocal call_count
-            with call_count_lock:
-                call_count += 1
-                is_first = call_count == 1
-            if is_first:
-                call_started.set()
-                assert release.wait(timeout=5), "test did not release the blocked first call in time"
-            raise RuntimeError("simulated sink outage")
+    def __call__(self) -> datetime:
+        return self.now
 
-        def append_many(self, events: list[Any]) -> None:  # pragma: no cover - unused here
-            raise RuntimeError("simulated sink outage")
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
 
-        def events(self) -> tuple:
-            return ()
 
-    service, _control = build_service(durable_audit=_BlockingThenFailingSink())
-    results: list[str] = []
-    results_lock = threading.Lock()
+def _summaries_closed_by(durable: ApplicationAuditSink, closed_before: datetime) -> list[dict]:
+    """The summary events of every window that ended before `closed_before`,
+    as dicts."""
+    return [dict(event.as_dict()) for event, _window_end in durable.denial_window_summaries(closed_before=closed_before)]
 
-    def _attempt() -> None:
-        try:
-            service.authenticate("bogus-secret-race")
-        except FoundationError as exc:
-            with results_lock:
-                results.append(exc.code)
 
-    thread_a = threading.Thread(target=_attempt)
-    thread_a.start()
-    assert call_started.wait(timeout=5), "the first occurrence's sink.append() was never reached"
+def test_the_service_keeps_no_denial_window_of_its_own() -> None:
+    """The coalescing state is not held in the service process: neither the
+    coalescer class nor the sweep that drained it exists, and a service
+    built with a sink holds no per-key table."""
+    import r2db_api.service as service_module
 
-    # Thread A is now blocked INSIDE sink.append() for the key's first
-    # occurrence, holding `_DenialCoalescer._lock` (the B-2 fix). Start a
-    # second, concurrent same-key denial and give it every chance to
-    # (wrongly) resolve before thread A's own attempt has even failed.
-    thread_b = threading.Thread(target=_attempt)
-    thread_b.start()
-    time.sleep(0.2)
-    with results_lock:
-        assert results == [], (
-            "a concurrent same-key denial resolved WHILE the first occurrence's own "
-            f"insert was still in flight -- the lock was not held across the I/O: {results!r}"
-        )
+    assert not hasattr(service_module, "_DenialCoalescer")
+    service, _control = build_service(durable_audit=ApplicationAuditSink())
+    assert not hasattr(service, "_denial_coalescer")
+    assert not hasattr(service, "flush_audit_buffer")
 
-    release.set()
-    thread_a.join(timeout=5)
-    thread_b.join(timeout=5)
 
-    assert sorted(results) == ["SERVICE_UNAVAILABLE", "SERVICE_UNAVAILABLE"], (
-        f"both concurrent same-key denials against a down sink must fail closed, never a silent ordinary denial: {results!r}"
-    )
-
-
-def test_different_key_denials_do_not_wait_on_each_other() -> None:
-    """WP-2(a) fix round 2, supervisor ruling on review m-2: per-KEY
-    locking (not a single process-wide lock held across I/O) means a
-    DIFFERENT coalescing key's `route()` call must never block on another
-    key's in-flight first-occurrence INSERT -- only SAME-key callers
-    serialize (B-2, the test immediately above). Key A (an
-    `authentication_denial`, `AUTH_INVALID`) is held blocked inside its own
-    first-occurrence INSERT; a concurrent DIFFERENT-key denial (`FORBIDDEN`
-    from a runtime credential attempting a developer-only schema
-    operation) must resolve promptly regardless -- run on its own thread
-    with a bounded join timeout, so a regression to process-wide
-    serialization fails this test promptly instead of hanging it forever.
-    """
-    call_started = threading.Event()
-    release = threading.Event()
-
-    class _BlockingForKeyASink:
-        def append(self, **kwargs: Any) -> None:
-            if kwargs.get("reason_code") == "AUTH_INVALID" and not call_started.is_set():
-                call_started.set()
-                assert release.wait(timeout=5), "test did not release the blocked key-A call in time"
-            # Every call (key A's own eventual proceed, and key B's own
-            # first occurrence) otherwise just "succeeds" trivially.
-
-        def append_many(self, events: list[Any]) -> None:  # pragma: no cover - unused here
-            pass
-
-        def events(self) -> tuple:
-            return ()
-
-    service, _control = build_service(durable_audit=_BlockingForKeyASink())
-
-    def _attempt_key_a() -> None:
-        with pytest.raises(FoundationError):
-            service.authenticate("bogus-secret-key-a")
-
-    thread_a = threading.Thread(target=_attempt_key_a)
-    thread_a.start()
-    assert call_started.wait(timeout=5), "key A's first-occurrence sink.append() was never reached"
-
-    # Key A is now blocked inside its own first-occurrence INSERT, holding
-    # ONLY its own per-key lock. A DIFFERENT key (FORBIDDEN, not
-    # AUTH_INVALID) must resolve promptly -- run on its own thread with a
-    # bounded join so an accidental regression to process-wide locking
-    # fails this test with a clear assertion, not an indefinite hang.
-    ctx = runtime_context(service)
-    results: dict[str, str] = {}
-
-    def _attempt_key_b() -> None:
-        try:
-            service.schema(ctx, {"operation": "create_entity", "entity": "widgets_m2_different_key_test"})
-        except FoundationError as exc:
-            results["code"] = exc.code
-
-    thread_b = threading.Thread(target=_attempt_key_b)
-    thread_b.start()
-    thread_b.join(timeout=2.0)
-    assert not thread_b.is_alive(), (
-        "a DIFFERENT-key denial did not resolve within 2s -- looks serialized behind an unrelated "
-        "key's in-flight INSERT (process-wide locking regression)"
-    )
-    assert results.get("code") == "FORBIDDEN"
-
-    release.set()
-    thread_a.join(timeout=5)
-
-
-def test_failed_aggregate_write_retains_the_repeat_count_and_recovers(caplog: pytest.LogCaptureFixture) -> None:
-    """WP-2(a) fix round 3 review D-1 (major): a sink that fails ONLY the
-    coalesced-denial summary (aggregate) row -- the first-occurrence row
-    itself succeeds -- must not lose the accumulated repeat count when the
-    window expires and that summary write fails. A round-2 revision
-    deleted the due window before attempting the write and simply dropped
-    it on failure; this closes that gap: the count is retained and
-    retried on every subsequent flush, and once the sink recovers, exactly
-    one summary row is written carrying the FULL accumulated total (never
-    split, never lost). `logging.error` fires exactly once while the
-    failure persists (state-transition discipline, not once per attempt),
-    matching N-2's own established pattern for the overflow-alert path.
-    """
-    inner = ApplicationAuditSink()
-
-    class _AggregateOnlyFailingSink:
-        def __init__(self) -> None:
-            self.fail_aggregate = True
-
-        def append(self, **kwargs: Any) -> None:
-            if kwargs.get("count") is not None and self.fail_aggregate:
-                raise RuntimeError("simulated aggregate-write failure")
-            return inner.append(**kwargs)
-
-        def append_many(self, events: list[Any]) -> None:
-            inner.append_many(events)
-
-        def events(self) -> tuple:
-            return inner.events()
-
-    faulty = _AggregateOnlyFailingSink()
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=faulty, clock=clock)
-
-    n_repeats = 5
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-d1")
-    for _ in range(n_repeats):
-        with pytest.raises(FoundationError):
-            service.authenticate("bogus-secret-d1")
-
-    # Window still open -- only the first-occurrence row exists so far.
-    assert len(durable_events(inner)) == 1
-
-    clock.advance(61.0)
-    with caplog.at_level(logging.ERROR, logger="r2db_api.service"):
-        service.flush_audit_buffer()
-
-    # The aggregate write failed -- the repeat count is RETAINED, not lost.
-    assert len(durable_events(inner)) == 1
-    failed_logs = [r for r in caplog.records if "coalesced-denial summary row could not be written" in r.message]
-    assert len(failed_logs) == 1
-
-    # A second attempt while still failing adds no additional log line --
-    # the failure STATE has not changed, only the same ongoing failure.
-    caplog.clear()
-    with caplog.at_level(logging.ERROR, logger="r2db_api.service"):
-        service.flush_audit_buffer()
-    assert not [r for r in caplog.records if "coalesced-denial summary row could not be written" in r.message]
-    assert len(durable_events(inner)) == 1  # still retained, still not lost
-
-    # The sink recovers -- the next flush writes EXACTLY ONE summary row
-    # carrying the full accumulated repeat count, and a recovery log fires.
-    faulty.fail_aggregate = False
-    caplog.clear()
-    with caplog.at_level(logging.ERROR, logger="r2db_api.service"):
-        service.flush_audit_buffer()
-    recovered_logs = [r for r in caplog.records if "coalesced-denial summary row recorded" in r.message]
-    assert len(recovered_logs) == 1
-
-    events = durable_events(inner)
-    assert len(events) == 2
-    summary_row = events[1]
-    assert summary_row["reason_code"] == "AUTH_INVALID"
-    assert summary_row["count"] == n_repeats
-
-
-def test_route_and_flush_racing_on_the_same_key_preserves_the_total_repeat_count() -> None:
-    """WP-2(a) fix round 3 review D-1 regression guard: a flush sweep's
-    aggregate-row write for an expired window and a concurrent `route()`
-    call for the SAME key must never lose or double-count repeats.
-    Reproduced deterministically with a blocking sink (barrier), not
-    timing luck: the sweep is let INTO its aggregate-row write and held
-    there; a concurrent same-key denial is then started and given every
-    reasonable chance to resolve early (it must not, until the sweep's
-    write has fully resolved -- the per-key lock the D-1 fix depends on).
-    """
-    inner = ApplicationAuditSink()
-    release = threading.Event()
-    call_started = threading.Event()
-
-    class _BlockingOnAggregateSink:
-        def append(self, **kwargs: Any) -> None:
-            if kwargs.get("count") is not None and not call_started.is_set():
-                call_started.set()
-                assert release.wait(timeout=5), "test did not release the blocked aggregate write in time"
-            return inner.append(**kwargs)
-
-        def append_many(self, events: list[Any]) -> None:  # pragma: no cover - unused here
-            inner.append_many(events)
-
-        def events(self) -> tuple:
-            return inner.events()
-
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=_BlockingOnAggregateSink(), clock=clock)
-
-    # Seed an already-expired window with a known repeat count directly
-    # (bypassing `route()`, matching this file's own established internal-
-    # state-seeding pattern) so the race is deterministic and does not
-    # depend on first driving a real window to expiry.
-    key = (None, "unknown", "authenticate", "AUTH_INVALID")
-    seed_fields = {
-        "event_class": "authentication_denial", "request_id": "r-seed", "application_id": None,
-        "actor_type": "unknown", "actor_id": None, "role": None, "operation": "authenticate",
-        "target_kind": "application", "outcome": "deny", "reason_code": "AUTH_INVALID", "target_id": None,
-    }
-    seeded_repeat_count = 5
-    service._denial_coalescer._windows[key] = {"window_start": clock() - 1000.0, "repeat_count": seeded_repeat_count, "fields": seed_fields}
-
-    thread_a = threading.Thread(target=service.flush_audit_buffer)
-    thread_a.start()
-    assert call_started.wait(timeout=5), "the sweep's aggregate-row write was never reached"
-
-    # Thread A is now blocked inside the aggregate write, holding this
-    # key's OWN lock. A concurrent `route()` call for the SAME key must
-    # wait for it.
-    results: list[str] = []
-    results_lock = threading.Lock()
-
-    def _attempt_same_key() -> None:
-        try:
-            service.authenticate("bogus-secret-d1-race")
-        except FoundationError as exc:
-            with results_lock:
-                results.append(exc.code)
-
-    thread_b = threading.Thread(target=_attempt_same_key)
-    thread_b.start()
-    time.sleep(0.2)
-    with results_lock:
-        assert results == [], "a same-key route() call resolved WHILE the sweep's aggregate write for that key was still in flight"
-
-    release.set()
-    thread_a.join(timeout=5)
-    thread_b.join(timeout=5)
-
-    assert results == ["AUTH_INVALID"]
-
-    # No count lost: the aggregate row for the seeded window plus thread
-    # B's own first-occurrence row together must account for every
-    # occurrence (5 seeded repeats + 1 for thread B's own denial) -- never
-    # more, never less.
-    events = durable_events(inner)
-    aggregate_rows = [e for e in events if e.get("count") is not None]
-    first_occurrence_rows = [e for e in events if e.get("count") is None]
-    assert sum(r["count"] for r in aggregate_rows) + len(first_occurrence_rows) == seeded_repeat_count + 1
-
-
-def test_failed_aggregate_write_via_inline_route_expiry_retains_the_repeat_count() -> None:
-    """WP-2(a) fix round 4 (spot-check, major): same property as `test_
-    failed_aggregate_write_retains_the_repeat_count_and_recovers` above,
-    but reached through `route()`'s OWN inline expired-window flush (a
-    fresh `route()` call for the SAME key, arriving after the window has
-    expired) rather than `_flush_keys`'s sweep -- the exact path the
-    round-4 bug lived in: `route()`'s own final `self._windows[key] = ...`
-    assignment used to unconditionally OVERWRITE whatever `_requeue_
-    failed_aggregate` had just put back moments earlier in the SAME call,
-    silently discarding the retained repeat count the instant the very
-    next (fresh) first-occurrence write happened to succeed. The existing
-    round-3 test never reaches this branch at all (it drives expiry only
-    through `flush_audit_buffer()`, never a second `route()` call for the
-    same, already-expired key).
-    """
-    inner = ApplicationAuditSink()
-
-    class _AggregateOnlyFailingSink:
-        def __init__(self) -> None:
-            self.fail_aggregate = True
-
-        def append(self, **kwargs: Any) -> None:
-            if kwargs.get("count") is not None and self.fail_aggregate:
-                raise RuntimeError("simulated aggregate-write failure")
-            return inner.append(**kwargs)
-
-        def append_many(self, events: list[Any]) -> None:
-            inner.append_many(events)
-
-        def events(self) -> tuple:
-            return inner.events()
-
-    faulty = _AggregateOnlyFailingSink()
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=faulty, clock=clock)
-    key = (None, "unknown", "authenticate", "AUTH_INVALID")
-
-    n_repeats = 5
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-d1-inline")  # first occurrence -- durable row #1
-    for _ in range(n_repeats):
-        with pytest.raises(FoundationError):
-            service.authenticate("bogus-secret-d1-inline")  # in-memory repeats only, window still open
-
-    assert len(durable_events(inner)) == 1
-
-    # Expire the window, then route a FRESH occurrence for the SAME key --
-    # this is what drives `route()`'s own inline expiry-flush branch (as
-    # opposed to `flush_audit_buffer()`, which goes through `_flush_keys`
-    # instead). The aggregate write for the just-expired window fails
-    # (requeued); the fresh call's own first-occurrence write succeeds
-    # right after it, in the SAME `route()` call.
-    clock.advance(61.0)
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-d1-inline")
-
-    # The fresh call's own first-occurrence row IS durable (a genuinely
-    # new occurrence) -- but the requeued repeat count from the EXPIRED
-    # window must still be present too, not silently discarded by the
-    # fresh window's own creation.
-    assert len(durable_events(inner)) == 2
-    assert service._denial_coalescer._windows[key]["repeat_count"] == n_repeats, (
-        "the requeued repeat count was lost when route() opened its fresh window"
-    )
-
-    # Recover the sink and force this (now also expired) window to flush
-    # -- the aggregate row must carry the FULL original count.
-    faulty.fail_aggregate = False
-    clock.advance(61.0)
-    service.flush_audit_buffer(force_expire_denial_windows=True)
-
-    events = durable_events(inner)
-    assert len(events) == 3
-    summary_row = events[2]
-    assert summary_row["reason_code"] == "AUTH_INVALID"
-    assert summary_row["count"] == n_repeats
-
-
-def test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n() -> None:
-    durable = ApplicationAuditSink()
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=durable, clock=clock)
+def test_repeated_invalid_secret_counts_n_repeats_once_in_the_windows_summary() -> None:
+    sink_clock = _SinkClock()
+    durable = ApplicationAuditSink(clock=sink_clock)
+    service, _control = build_service(durable_audit=durable)
 
     n_repeats = 7
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-x")
-    for _ in range(n_repeats):
+    for _ in range(1 + n_repeats):
         with pytest.raises(FoundationError):
             service.authenticate("bogus-secret-x")
 
-    # Still inside the coalescing window: exactly the first-occurrence row.
+    # Only the first refusal is a row; the repeats are counted, not written.
     events = durable_events(durable)
     assert len(events) == 1
     assert events[0]["reason_code"] == "AUTH_INVALID"
-    assert "count" not in events[0]  # NULL/1
+    assert "count" not in events[0]
 
-    # Advance past the window and force the sweep.
-    clock.advance(61.0)
-    service.flush_audit_buffer()
-
-    events = durable_events(durable)
-    assert len(events) == 2, f"expected the window's repeat-summary row too, got {events!r}"
-    summary = events[1]
-    assert summary["count"] == n_repeats
-    assert summary["reason_code"] == "AUTH_INVALID"
-
-
-def test_coalesced_count_leaf_preserves_the_service_facade() -> None:
-    from r2db_api.audit_counts import _coalesced_count as leaf_coalesced_count
-    from r2db_api.service import _coalesced_count
-
-    assert _coalesced_count is leaf_coalesced_count
-    assert _coalesced_count(0) is None
-    assert _coalesced_count(1) is None
-    assert _coalesced_count(2) == 2
-    assert _coalesced_count(7) == 7
+    # While the window is open it has no summary; once it has closed it has
+    # exactly one, with one identity across reads.
+    assert _summaries_closed_by(durable, sink_clock.now) == []
+    sink_clock.advance(61.0)
+    summaries = _summaries_closed_by(durable, sink_clock.now)
+    assert len(summaries) == 1, f"expected the closed window's one summary event, got {summaries!r}"
+    assert summaries[0]["count"] == n_repeats
+    assert summaries[0]["reason_code"] == "AUTH_INVALID"
+    assert [s["event_id"] for s in _summaries_closed_by(durable, sink_clock.now)] == [summaries[0]["event_id"]]
+    # The first row and the summary account for every occurrence.
+    assert len(events) + summaries[0]["count"] == 1 + n_repeats
 
 
-def test_coalesced_summary_row_with_exactly_one_repeat_writes_no_literal_count_of_one() -> None:
-    """WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): a window
-    with exactly ONE repeat (2 total occurrences: the first-occurrence row
-    plus one more) must still write its summary row with `count` ABSENT
-    (NULL) -- never the literal `1` (contract `audit.query_event_fields_
-    note`: "never zero or one"). The general-N test just above uses
-    `n_repeats=7` and never exercises this boundary; this test exercises
-    it directly with `repeat_count == 1` at flush time.
-    """
-    durable = ApplicationAuditSink()
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=durable, clock=clock)
+def test_a_window_with_one_repeat_has_a_summary_without_a_count_and_a_lone_refusal_has_none() -> None:
+    sink_clock = _SinkClock()
+    durable = ApplicationAuditSink(clock=sink_clock)
+    service, _control = build_service(durable_audit=durable)
 
+    # n = 1: one refusal, no summary at all, even once its window has closed.
+    with pytest.raises(FoundationError):
+        service.authenticate("bogus-secret-lone")
+    sink_clock.advance(61.0)
+    assert _summaries_closed_by(durable, sink_clock.now) == []
+
+    # n = 2: one repeat -> a summary event that carries no `count`
+    # (contract: never zero or one), so the first row and the summary make 2.
     with pytest.raises(FoundationError):
         service.authenticate("bogus-secret-boundary")
     with pytest.raises(FoundationError):
         service.authenticate("bogus-secret-boundary")
-
-    clock.advance(61.0)
-    service.flush_audit_buffer()
-
-    events = durable_events(durable)
-    assert len(events) == 2, f"expected exactly the first-occurrence row + one summary row, got {events!r}"
-    summary = events[1]
-    assert "count" not in summary, f"a window representing exactly 2 total occurrences must never write count=1 -- got {summary!r}"
+    sink_clock.advance(61.0)
+    summaries = _summaries_closed_by(durable, sink_clock.now)
+    assert len(summaries) == 1, f"expected exactly one summary (the n=2 window; the n=1 window has none), got {summaries!r}"
+    assert "count" not in summaries[0], f"a window with exactly one repeat must never carry count=1 -- got {summaries[0]!r}"
 
 
-def test_different_denial_keys_do_not_coalesce_together() -> None:
-    durable = ApplicationAuditSink()
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=durable, clock=clock)
+def test_the_window_follows_the_clock_so_refusals_across_a_boundary_are_two_first_rows() -> None:
+    sink_clock = _SinkClock()
+    durable = ApplicationAuditSink(clock=sink_clock)
+    service, _control = build_service(durable_audit=durable)
+
+    sink_clock.advance(59.0)
+    with pytest.raises(FoundationError):
+        service.authenticate("bogus-secret-edge")
+    sink_clock.advance(2.0)  # 61 s past the aligned start: the next 60 s window
+    with pytest.raises(FoundationError):
+        service.authenticate("bogus-secret-edge")
+
+    assert len(durable_events(durable)) == 2
+    sink_clock.advance(120.0)
+    assert _summaries_closed_by(durable, sink_clock.now) == []
+
+
+def test_different_denial_keys_do_not_share_a_window() -> None:
+    sink_clock = _SinkClock()
+    durable = ApplicationAuditSink(clock=sink_clock)
+    service, _control = build_service(durable_audit=durable)
+    ctx = runtime_context(service)
 
     with pytest.raises(FoundationError):
         service.authenticate("bogus-secret-a")
     with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-b")
+        service.authenticate("bogus-secret-b")  # same key: AUTH_INVALID, no actor
+    with pytest.raises(FoundationError) as exc:
+        service.schema(ctx, {"operation": "create_entity", "entity": "widgets_key_test"})  # FORBIDDEN, actor cred-a
+    assert exc.value.code == "FORBIDDEN"
 
-    # Two DIFFERENT invalid secrets both resolve to `actor_id=None` ->
-    # "unknown" in the coalescing key, but their VALUES differ only in the
-    # secret text, which is not part of the key at all (application_id,
-    # actor_id, operation, reason_code) -- so they coalesce into the SAME
-    # window (both AUTH_INVALID, both "unknown" actor). This is a
-    # deliberate consequence of the key's own shape, not a bug: the key
-    # exists to bound row *count*, not to distinguish every possible
-    # secret value an attacker could try.
-    assert len(durable_events(durable)) == 1
+    # Two secrets that fail the same way share a key (the secret is not part
+    # of it: the key bounds the row count, not the attacker's choices); the
+    # FORBIDDEN refusal is a different key with its own first row.
+    assert sorted(e["reason_code"] for e in durable_events(durable)) == ["AUTH_INVALID", "FORBIDDEN"]
+    sink_clock.advance(61.0)
+    summaries = _summaries_closed_by(durable, sink_clock.now)
+    assert [(s["reason_code"], "count" in s) for s in summaries] == [("AUTH_INVALID", False)]
+
+
+def test_a_window_length_of_zero_writes_every_refusal_as_a_row() -> None:
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable, denial_coalesce_window_s=0.0)
+    for _ in range(3):
+        with pytest.raises(FoundationError):
+            service.authenticate("bogus-secret-zero")
+    assert len(durable_events(durable)) == 3
+    assert _summaries_closed_by(durable, datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+def test_every_refusal_of_a_window_is_fail_closed_not_only_the_first() -> None:
+    """A refusal that is only counted (the window's first row is already
+    written) still fails closed when the count cannot be recorded: the
+    response is 503, never an ordinary refusal for an uncounted request."""
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable)
+
+    with pytest.raises(FoundationError) as first:
+        service.authenticate("bogus-secret-repeat-fault")
+    assert first.value.code == "AUTH_INVALID"
+    durable.inject_fault(RuntimeError("simulated durable-sink failure"))
+    with pytest.raises(FoundationError) as second:
+        service.authenticate("bogus-secret-repeat-fault")
+    assert (second.value.code, second.value.status) == ("SERVICE_UNAVAILABLE", 503)
+
+
+def test_the_reader_returns_a_closed_windows_summary_and_not_an_open_one() -> None:
+    sink_clock = _SinkClock()
+    durable = ApplicationAuditSink(clock=sink_clock)
+    service, _control = build_service(durable_audit=durable)
+    reader = InMemoryAuditQueryStore(ControlAuditSink(), durable)
+
+    for _ in range(4):
+        with pytest.raises(FoundationError):
+            service.authenticate("bogus-secret-reader")
+    sink_clock.advance(61.0)
+
+    rows = reader.query(event_classes=None, after=None, limit=100, visibility_lag_ms=0)
+    summaries = [row for row in rows if row["outcome"] == "deny" and row["count"] is not None]
+    assert len(summaries) == 1, f"expected exactly one summary row, got {rows!r}"
+    summary = summaries[0]
+    assert summary["plane"] == "application"
+    assert summary["count"] == 3
+    assert summary["recorded_at"] == datetime(2001, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+
+    # A window that has not closed contributes nothing.
+    with pytest.raises(FoundationError):
+        service.authenticate("bogus-secret-reader-open")
+    with pytest.raises(FoundationError):
+        service.authenticate("bogus-secret-reader-open")
+    again = reader.query(event_classes=None, after=None, limit=100, visibility_lag_ms=0)
+    assert [row["event_id"] for row in again if row["count"] is not None] == [summary["event_id"]]
+
+
+def test_coalesced_count_leaf_semantics() -> None:
+    from r2db_api.audit_counts import _coalesced_count
+
+    assert _coalesced_count(0) is None
+    assert _coalesced_count(1) is None
+    assert _coalesced_count(2) == 2
+    assert _coalesced_count(7) == 7
 
 
 def test_validation_failed_denials_add_no_durable_row() -> None:
@@ -2597,49 +2309,6 @@ def test_capability_unsupported_and_not_found_denials_add_no_durable_row() -> No
     assert exc.value.code == "NOT_FOUND"
 
     assert durable_events(durable) == []
-
-
-def test_force_expire_denial_windows_flushes_an_unexpired_window_too() -> None:
-    """WP-2(a) fix round 2 review N-4: `flush_audit_buffer(force_expire_
-    denial_windows=True)` (only ever called by a composition root's
-    graceful-shutdown path) flushes EVERY currently-open denial-coalescing
-    window, not only ones whose own `window_s` has already elapsed --
-    otherwise a window still short of expiry at the moment the process
-    stops loses its accumulated repeat count entirely, which D-3 only ever
-    sanctions for an actual crash, not an orderly stop. The plain
-    (default) `flush_audit_buffer()` -- no different from before -- must
-    NOT flush an unexpired window at all.
-    """
-    durable = ApplicationAuditSink()
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=durable, clock=clock)
-
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-shutdown")
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-shutdown")  # repeat -- window still open, well inside 60s
-
-    events_before = durable_events(durable)
-    assert len(events_before) == 1  # only the first-occurrence row so far
-
-    # The default (periodic-timer-shaped) flush must NOT touch the
-    # still-open window.
-    service.flush_audit_buffer()
-    assert durable_events(durable) == events_before
-
-    # The shutdown-shaped flush forces it out anyway, with the repeat
-    # count (1 repeat) it had accumulated so far. WP-2(b) review B-1
-    # (supervisor ruling 2026-09-03): a summary row representing exactly
-    # 1 repeat (2 total occurrences) writes `count` ABSENT (NULL), never
-    # the literal `1` -- see `test_coalesced_summary_row_with_exactly_
-    # one_repeat_writes_no_literal_count_of_one` for the dedicated
-    # boundary test; this assertion is updated to match, not weakened.
-    service.flush_audit_buffer(force_expire_denial_windows=True)
-    events_after = durable_events(durable)
-    assert len(events_after) == 2
-    summary_row = events_after[1]
-    assert summary_row["reason_code"] == "AUTH_INVALID"
-    assert "count" not in summary_row
 
 
 # ===========================================================================

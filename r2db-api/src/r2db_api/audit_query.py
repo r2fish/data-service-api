@@ -248,6 +248,18 @@ class AuditQueryReader(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+def _summary_dict(event: Any, window_end: datetime) -> dict[str, Any]:
+    """A refusal-window summary event as the plain-dict shape
+    `InMemoryAuditQueryStore.query` returns: `recorded_at` is the end of
+    the window the summary stands for, not the event's own `occurred_at`
+    (the first refusal's), so the summary sorts where the closed window
+    ends."""
+    row = _event_dict(event, plane="application")
+    assert row is not None  # the sink's own `occurred_at` is always ISO-8601
+    row["recorded_at"] = _to_utc(window_end)
+    return row
+
+
 def _event_dict(event: Any, *, plane: str) -> dict[str, Any] | None:
     """Reads an `audit.AuditEvent` dataclass instance's fields into the
     plain-dict shape `InMemoryAuditQueryStore.query` returns -- `occurred_at`
@@ -285,7 +297,10 @@ class InMemoryAuditQueryStore:
     half (`audit.ControlAuditSink`) and `application_audit`'s in-memory
     half (`audit.ApplicationAuditSink`), applying the identical
     `(recorded_at, plane, event_id)` order, opaque-cursor paging, and
-    visibility-lag filtering `PostgresAuditQueryStore` applies via SQL.
+    visibility-lag filtering `PostgresAuditQueryStore` applies via SQL. The
+    application plane's refusal-window summary events come from the sink's
+    own tally table (`ApplicationAuditSink.denial_window_summaries`), where
+    the Postgres reader reads the counter table.
 
     Constructed once by both the in-process conformance adapter (WP-1's
     own `conformance_adapter_r2db.py`, wired this WP) and (only for the
@@ -325,6 +340,17 @@ class InMemoryAuditQueryStore:
                 if after is not None and (row["recorded_at"], row["plane"], row["event_id"]) <= after:
                     continue
                 rows.append(row)
+        # The summary events of the application plane's closed refusal
+        # windows: read from the sink's own table of window tallies, the
+        # in-memory counterpart of the counter table the Postgres reader
+        # adds to its UNION.
+        for summary, window_end in self._application_audit.denial_window_summaries(closed_before=threshold):
+            row = _summary_dict(summary, window_end)
+            if class_filter is not None and row["event_class"] not in class_filter:
+                continue
+            if after is not None and (row["recorded_at"], row["plane"], row["event_id"]) <= after:
+                continue
+            rows.append(row)
         rows.sort(key=lambda row: (row["recorded_at"], row["plane"], row["event_id"]))
         return rows[:limit]
 

@@ -1538,10 +1538,9 @@ class PostgresApplicationAuditSink:
     join (design §1.3/D-1: application data lives in a *different*
     database entirely, one per application; `application_audit` lives in
     the platform database alongside `control_audit`). Every call -- the
-    D-2 pre-commit fail-closed write, the D-3 coalesced-denial first-
-    occurrence write, the D-2 commit-failure `error` row, the synchronous
-    write of an ordinary event -- opens (and commits, or rolls back on
-    failure) its own single
+    D-2 pre-commit fail-closed write, the D-2 commit-failure `error` row,
+    the synchronous write of an ordinary event -- opens (and commits, or
+    rolls back on failure) its own single
     connection/transaction from this sink's own pool, which is exactly
     what makes "an event write never shares a transaction with the data
     change it describes" automatic rather than something a caller has to
@@ -1634,6 +1633,49 @@ class PostgresApplicationAuditSink:
             with conn.cursor() as cur:
                 _execute(cur, statement, params)
             conn.commit()
+
+    def record_denial(
+        self,
+        *,
+        window_ms: int,
+        event_class: str,
+        request_id: str,
+        application_id: str | None,
+        actor_type: str,
+        actor_id: str | None,
+        role: str | None,
+        operation: str,
+        target_kind: str | None,
+        reason_code: str | None = None,
+        target_id: str | None = None,
+    ) -> None:
+        """Counts one refusal in the platform database, in one statement
+        (`denial_window_record`, migration `0016_denial_window_counter.
+        sql`), on this sink's own pool, in autocommit: the first refusal of
+        a (key, window) pair writes the window's counter row and that
+        refusal's own audit row together, and every later one adds one to
+        the counter row. The statement has committed when this method
+        returns, so a refusal whose response the service then returns has
+        already been counted. A `psycopg.Error` propagates unchanged; the
+        caller (`service.py`) turns it into `SERVICE_UNAVAILABLE`."""
+        statement = sql.SQL("SELECT {function}(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)").format(
+            function=sql.Identifier(self._schema, "denial_window_record")
+        )
+        params = [
+            window_ms, event_class, datetime.now(timezone.utc), request_id, application_id, actor_type, actor_id,
+            role, operation, target_kind, reason_code, target_id,
+        ]
+        with self._pool.connection() as conn:
+            # `_RolePool` opens connections with `autocommit=False`; this
+            # one statement runs in autocommit, restored before the
+            # connection returns to the pool (the same toggle
+            # `PostgresCredentialStore.record_rate_and_check` uses).
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, params)
+            finally:
+                conn.autocommit = False
 
     def append_many(self, events: "list[Any]") -> None:
         """every `audit.AuditEvent` in `events` is written as one
@@ -1750,6 +1792,20 @@ WITH filtered AS (
         OR ROW(recorded_at, 'application'::text, event_id::text)
            > ROW(%(after_recorded_at)s::timestamptz, %(after_plane)s::text, %(after_event_id)s::text)
       )
+    UNION ALL
+    SELECT summary_event_id::text AS event_id, event_class, occurred_at, request_id, application_id,
+           actor_type, actor_id, role, operation, target_kind, 'deny'::text AS outcome, reason_code, target_id,
+           CASE WHEN occurrences = 2 THEN NULL ELSE occurrences - 1 END AS count,
+           window_end AS recorded_at, 'application'::text AS plane
+    FROM {denial_window_table}
+    WHERE occurrences >= 2
+      AND window_end < %(threshold)s
+      AND (%(classes)s::text[] IS NULL OR event_class = ANY(%(classes)s::text[]))
+      AND (
+        %(after_recorded_at)s::timestamptz IS NULL
+        OR ROW(window_end, 'application'::text, summary_event_id::text)
+           > ROW(%(after_recorded_at)s::timestamptz, %(after_plane)s::text, %(after_event_id)s::text)
+      )
 )
 SELECT event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role,
        operation, target_kind, outcome, reason_code, target_id, count, recorded_at, plane
@@ -1801,6 +1857,7 @@ class PostgresAuditQueryStore:
         self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
         self._control_table = sql.Identifier(schema, "control_audit")
         self._application_table = sql.Identifier(schema, "application_audit")
+        self._denial_window_table = sql.Identifier(schema, "denial_window_counter")
 
     def close(self) -> None:
         self._pool.close_all()
@@ -1822,7 +1879,10 @@ class PostgresAuditQueryStore:
             "after_event_id": after[2] if after is not None else None,
             "row_limit": limit,
         }
-        statement = sql.SQL(_AUDIT_QUERY_UNION_SQL).format(control_table=self._control_table, application_table=self._application_table)
+        statement = sql.SQL(_AUDIT_QUERY_UNION_SQL).format(
+            control_table=self._control_table, application_table=self._application_table,
+            denial_window_table=self._denial_window_table,
+        )
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:

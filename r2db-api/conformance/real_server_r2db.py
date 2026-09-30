@@ -564,6 +564,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         # design D-3 (1): the credential-keyed
         # `requests_per_minute` rate table -- depends only on 0005 above.
         "0015_credential_request_rate.sql",
+        # the refusal-window counter and its function -- depends on 0007
+        # above (`application_audit`, the `auditreader` role).
+        "0016_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -584,6 +587,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
     _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+    _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
 
     # design D-3 (5): `check_role_connection_limits` (F-16) multiplies
     # the controlplane/auditreader floors (`_CONTROLPLANE_ROLE_POOL_FLOOR`/

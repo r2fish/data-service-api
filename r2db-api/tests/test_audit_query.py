@@ -99,6 +99,9 @@ MIGRATION_NAMES = (
     # `platform` fixture can seed that row below (F-15 is unconditional,
     # like F-3 for `surfaces`, since WP-6a).
     "0012_process_ceilings.sql",
+    # every refusal's count is written through this migration's function,
+    # and `audit_query` reads its counter table.
+    "0016_denial_window_counter.sql",
 )
 
 # Q4 phase WP-1 (design D-2(c)): this file's own `platform` fixture seeds a
@@ -231,6 +234,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
+        _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(
@@ -1984,7 +1988,7 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
     with control_credentials.unit_of_work() as work:
         control_credentials.add(credential_id, secret, work=work)  # must_rotate=True by construction; deliberately never rotated
     document = service.capabilities(compose_bearer_locator(credential_id, secret))  # must NOT raise FORBIDDEN -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -2064,7 +2068,6 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
         with pytest.raises(FoundationError):
             h.data_service.authenticate("wrong-" + secret)  # -> D-word "authenticate" via authentication_denial (durable)
 
-        h.data_service.flush_audit_buffer()
         _wait_for_visibility(h)
 
         # ---- Read back through the DURABLE surface every other test in
@@ -4020,7 +4023,7 @@ def test_control_capabilities_declares_contract_version_1_5_0(kind, platform):
     h = _build_harness(kind, platform)
     try:
         document = h.service.capabilities(h.control_credential_secret)
-        assert document["contract_version"] == "1.12.0"
+        assert document["contract_version"] == "1.13.0"
     finally:
         h.cleanup()
 
@@ -4054,7 +4057,7 @@ def test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query
     authority.register_application(application_id)
     context, _secret = _seed_application_credential(credentials, application_id, "runtime")
     document = service.capabilities(context)
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
     assert document["capabilities"]["audit_query"] == {"status": "unavailable", "authority": "control_or_audit"}
 
 
