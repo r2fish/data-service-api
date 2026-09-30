@@ -7,7 +7,7 @@ completion conditions 5, 6, 11).
 No real PostgreSQL: `BoundedConnectionPool` here uses the same fake-
 connection substitution `test_threadpool_offload.py`'s own thread-safety
 test already established (`pool._new_connection = ...`, a plain object
-with `closed`/`close()`) -- this file is entirely about pool/lock
+with `closed`/`close()`/`info`) -- this file is entirely about pool/lock
 bookkeeping, never about a real connection's own behaviour.
 `ApplicationCell` uses its default in-memory `SQLiteBackend`.
 
@@ -25,13 +25,15 @@ import threading
 import time
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 
 from mitatedb_api.cell import ApplicationCell, _CountingRLock
 from mitatedb_api.config import FoundationConfig, role_pool_size
+from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import AuthorizationStateUnavailable
 from mitatedb_api.http import DEFAULT_THREAD_LIMIT
-from mitatedb_api.pool import BoundedConnectionPool
+from mitatedb_api.pool import BoundedConnectionPool, PoolExhausted
 
 _CONFORMANCE_DIR = os.path.join(os.path.dirname(__file__), "..", "conformance")
 if _CONFORMANCE_DIR not in sys.path:
@@ -42,10 +44,12 @@ import conformance_adapter_mitatedb_http as _http_module  # noqa: E402
 class _FakeConnection:
     """Same shape `test_threadpool_offload.py`'s own thread-safety test
     substitutes for a real `psycopg.Connection` -- only `closed`/`close()`
-    are ever touched by `BoundedConnectionPool` itself."""
+    and `info.transaction_status` (idle, so `release()` has nothing to roll
+    back) are ever touched by `BoundedConnectionPool` itself."""
 
     def __init__(self) -> None:
         self.closed = False
+        self.info = SimpleNamespace(transaction_status=psycopg.pq.TransactionStatus.IDLE)
 
     def close(self) -> None:
         self.closed = True
@@ -115,19 +119,25 @@ def test_bounded_connection_pool_wait_stats_and_key_set():
 
 def test_bounded_connection_pool_wait_on_timeout_and_unavailable_message_unchanged():
     """Completion condition 5: the TIMEOUT path (stage (3)'s deadline
-    elapsing with nothing returned) also counts as a wait, and
-    `AuthorizationStateUnavailable`'s firing condition/message text stay
-    exactly what they were before this WP (this WP only observes the wait
-    around them, never changes them)."""
+    elapsing with nothing returned) also counts as a wait. The pool itself
+    raises `PoolExhausted`; the credential store borrowing from it answers
+    `AuthorizationStateUnavailable` with the message text it always had."""
     pool = _fake_pool(max_size=1, acquire_timeout=0.2)
+    store = PostgresCredentialStore(
+        "dsn-unused-fake-pool-r78-test.invalid", pepper="synthetic-test-pepper-wp4e-platform-pool-0000",
+        pool=pool,
+    )
     try:
         held = pool.acquire()
         try:
-            with pytest.raises(AuthorizationStateUnavailable) as excinfo:
+            with pytest.raises(PoolExhausted):
                 pool.acquire()
+            with pytest.raises(AuthorizationStateUnavailable) as excinfo:
+                with store._borrow_connection():  # noqa: SLF001 -- the one choke point every store method borrows through
+                    pass
             assert str(excinfo.value) == "platform registry connection pool exhausted (max_size reached)"
             stats = pool.stats()
-            assert stats["wait_count"] == 1
+            assert stats["wait_count"] == 2  # the direct `acquire()` and the store's
             assert stats["wait_max_ms"] > 0.0
         finally:
             pool.release(held)
