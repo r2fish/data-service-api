@@ -41,14 +41,26 @@ Exit code: 0 if no rule flags anything, 1 otherwise.
 Known gaps (recorded per docs/work-orders/OPERATING_CONDITIONS.md 1.12-71:
 a gap that cannot let a contract violation or a Security Invariant breach
 through the completion gate is recorded here and not filed in the ledger):
-    1. not detected: a deny-suffix host that sits INSIDE another URL's
-       query string.
-       why: `R2_URL_RE` matches a URL greedily up to whitespace or a
-       delimiter, so a nested `https://...` inside a query string is
-       part of ONE match and only the outer host is ever classified
-       against the allow/deny sets.
-       caught by: ledger R-46 (OPEN, not accepted): fix before the
-       public flip; until then human review of URLs in query strings.
+    1. not detected: a `cloudfunctions.net` host, or a host whose TLD is
+       outside `R2_FQDN_TLDS`, in a URL that R2_url never matches -- a
+       scheme other than http(s) (`postgresql://` and the like), a
+       JSON-escaped URL (`https:\\/\\/...`), a backslash or HTML-entity
+       spelling of the two slashes; the same two host kinds with no
+       scheme at all outside any URL; and, inside an http(s) URL, a
+       scheme-less host WITHOUT a deny suffix that is not in the
+       authority (a `host=` query value, a protocol-relative `//host`).
+       why: `R2_URL_RE` requires a literal `http(s)://`, and within a
+       match only the authority parts of scheme URLs and deny-suffix
+       host tokens are judged (judging every dotted token there would
+       flag file names and version numbers). Everything else is seen by
+       R2_fqdn alone, whose deny set is `run.app`/`gserviceaccount.com`
+       (design D-2) and whose TLD set is narrow (item 3).
+       caught by: R2_fqdn for a `run.app` host and for the listed TLDs;
+       human review before publication for the rest (accepted). Ledger
+       R-46 removed the earlier gap: every host one http(s) URL match
+       carries -- nested in path, query or fragment, percent-encoded,
+       in any `@`- or `:`-separated piece of the authority -- is now
+       judged.
     2. not detected: personal names (R7) -- see the R7 paragraph above.
        why: same paragraph (not expressible as a reliable regex).
        caught by: human review, as that paragraph states.
@@ -82,9 +94,18 @@ through the completion gate is recorded here and not filed in the ledger):
        `mutate.py` log filename into a tracked document; human review
        for the rare document that does (a log-name reference is not
        itself a public-value violation).
+    6. over-detected, not under-detected: a dotted userinfo piece of an
+       http(s) URL (`first.last@` before an allowed host) is flagged by
+       R2_url as an unlisted host.
+       why: every `@`- or `:`-separated piece of the authority is judged
+       as a host (see `_r2_url_hosts`); a dotted user name and a host
+       are the same shape.
+       caught by: nothing needed -- fail-closed; write a synthetic URL
+       with a dot-free user, or a placeholder, instead.
 """
 from __future__ import annotations
 
+import codecs
 import re
 import subprocess
 import sys
@@ -277,12 +298,17 @@ def r1_domain_allowed(domain: str, placeholder_removed: bool = False) -> bool:
 #        MitateDB-api/src/mitatedb_api/backend_sqlite.py)
 # ---------------------------------------------------------------------------
 R2_URL_RE = re.compile(r"https?://[^\s\"'`<>()\[\]{}]+", re.IGNORECASE)
-# IGNORECASE here too: if this failed to match an uppercase-scheme URL
-# already matched by R2_URL_RE above, host extraction would silently fail
-# (host="") and the URL would never reach the host-based rules below --
-# defeating the point of making R2_URL_RE itself case-insensitive (rework
-# item 5).
-R2_URL_HOST_RE = re.compile(r"^https?://([^/:\s]+)", re.IGNORECASE)
+# One R2_URL_RE match can carry more than one host: the match runs to the
+# next whitespace or delimiter, so a second URL in its path, query or
+# fragment, a percent-encoded URL, and a userinfo part are all inside it.
+# Every host the match carries is judged, not only the first one (ledger
+# R-46). IGNORECASE here too: an uppercase-scheme URL matched by R2_URL_RE
+# must also reach host extraction (rework item 5).
+R2_URL_SCHEME_RE = re.compile(r"https?://", re.IGNORECASE)
+# The authority ends at the first `/`, `?`, `#` or `\` (RFC 3986 3.2;
+# browsers read `\` as `/` in an http URL), or at a delimiter R2_URL_RE
+# itself stops at (a decoded form can contain one).
+R2_URL_AUTHORITY_RE = re.compile(r"[^\s\"'`<>()\[\]{}/?#\\]*")
 
 R2_ALLOW_HOST_EXACT = {"localhost", "127.0.0.1"}
 R2_URL_ALLOW_HOST_EXACT = {
@@ -341,6 +367,111 @@ def _last_label_cannot_be_a_tld(host: str) -> bool:
     never waves a deny-suffix host through."""
     last = host.lower().rstrip(".").rsplit(".", 1)[-1]
     return "-" in last and not last.startswith("xn--")
+
+
+_R2_URL_PCT_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+
+
+def _pct_decode_once(text: str, spans: "list[tuple[int, int]]") -> "tuple[str, list[tuple[int, int]]]":
+    """One percent-decoding step over `text` (the same result as
+    `urllib.parse.unquote`), carrying positions: `spans[k]` is the span in
+    the match as written that character `k` of `text` came from, and the
+    returned list says the same for the decoded string: each decoded
+    character maps to the escapes of the bytes that produced it."""
+    out: list[str] = []
+    out_spans: list[tuple[int, int]] = []
+    pos = 0
+    for m in _R2_URL_PCT_RUN_RE.finditer(text):
+        out.append(text[pos:m.start()])
+        out_spans.extend(spans[pos:m.start()])
+        raw = bytes.fromhex(m.group(0).replace("%", ""))
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending = m.start()  # first escape not yet turned into a character
+        for k in range(len(raw) + 1):
+            final = k == len(raw)
+            chars = decoder.decode(b"" if final else raw[k:k + 1], final)
+            if not chars:
+                continue
+            last = m.end() if final else m.start() + 3 * (k + 1)
+            out.append(chars)
+            # An invalid sequence can be reported one byte late, after
+            # `pending` has already moved past it: fall back to the last
+            # escape consumed.
+            first = min(pending, last - 3)
+            out_spans.extend([(spans[first][0], spans[last - 1][1])] * len(chars))
+            pending = last
+        pos = m.end()
+    out.append(text[pos:])
+    out_spans.extend(spans[pos:])
+    return "".join(out), out_spans
+
+
+def _r2_url_forms(url: str):
+    """Yield `(form, spans)`: `url` as written, then each further
+    percent-decoded form until decoding changes nothing (a step that changes
+    the string shortens it, so the loop ends). `spans` is as in
+    `_pct_decode_once`."""
+    form = url
+    spans = [(k, k + 1) for k in range(len(url))]
+    while True:
+        yield form, spans
+        decoded, decoded_spans = _pct_decode_once(form, spans)
+        if decoded == form:
+            return
+        form, spans = decoded, decoded_spans
+
+
+def _r2_url_hosts(form: str) -> "list[tuple[str, int, int]]":
+    """Every `(host, start, end)` named by a scheme URL anywhere in `form`:
+    the text after each `http(s)://` up to the end of the authority, split
+    at every `@` and `:`. One piece is the host; the others are the userinfo
+    (user, password) and the port, and are judged as hosts too, because a
+    host-shaped value there is a value all the same and parsers disagree on
+    which `@` ends the userinfo. `start`/`end` span the piece inside
+    `form`."""
+    hosts = []
+    for m in R2_URL_SCHEME_RE.finditer(form):
+        authority = R2_URL_AUTHORITY_RE.match(form, m.end())
+        pos = authority.start()
+        for piece in re.split(r"[@:]", authority.group(0)):
+            hosts.append((piece, pos, pos + len(piece)))
+            pos += len(piece) + 1
+    return hosts
+
+
+def r2_url_match_flag(url: str, offset: int = 0, cuts: "list[int] | None" = None) -> bool:
+    """Judge one R2_URL_RE match (`url`, found at `offset` in the residual
+    line whose placeholder cut points are `cuts`). Flagged when any of the
+    following is flagged by `r2_url_flag`, in the match as written or in any
+    percent-decoded form of it:
+      (1) each host `_r2_url_hosts` returns -- the outer URL's and those of
+          any URL nested in its path, query or fragment;
+      (2) any host-shaped token with a deny suffix, scheme or not (a
+          `host=` query value).
+    `placeholder_removed` is judged on the token's own span in the match as
+    written; a token of a decoded form is traced back to the span it was
+    decoded from."""
+    cuts = cuts or []
+    for form, spans in _r2_url_forms(url):
+        def removed(start: int, end: int) -> bool:
+            origin = spans[start:end]
+            if not origin:
+                return False
+            return _span_touches_cut(
+                cuts,
+                offset + min(s for s, _e in origin),
+                offset + max(e for _s, e in origin),
+            )
+
+        for host, start, end in _r2_url_hosts(form):
+            if r2_url_flag(host, removed(start, end)):
+                return True
+        for m in R2_FQDN_RE.finditer(form):
+            if _host_suffix_match(m.group(0), R2_URL_DENY_HOST_SUFFIXES) and r2_url_flag(
+                m.group(0), removed(m.start(), m.end())
+            ):
+                return True
+    return False
 
 
 def r2_url_flag(host: str, placeholder_removed: bool = False) -> bool:
@@ -650,10 +781,7 @@ class Scanner:
         for m in R2_URL_RE.finditer(residual_line):
             val = m.group(0)
             self.counts["R2_url:total"] += 1
-            host_m = R2_URL_HOST_RE.match(val)
-            host = host_m.group(1) if host_m else ""
-            placeholder_removed = _span_touches_cut(cuts, m.start(), m.end())
-            if r2_url_flag(host, placeholder_removed):
+            if r2_url_match_flag(val, m.start(), cuts):
                 self._flag(path, lineno, "R2_url", val)
             else:
                 self.counts["R2_url:excluded"] += 1
