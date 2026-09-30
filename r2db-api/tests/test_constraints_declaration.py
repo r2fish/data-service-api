@@ -22,10 +22,12 @@ directory that needs real PostgreSQL already pays independently.
 from __future__ import annotations
 
 import threading
+import time
 import types
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 
 import httpx
@@ -1253,7 +1255,19 @@ def test_pg_alter_field_locks_the_table_in_share_mode_before_scanning(app_a: typ
 # ---- R-35: the M-1/M-6 lock must not deadlock two concurrent schema ops --
 
 
-def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+def _advisory_lock_waiters(admin_dsn: str, database: str) -> int:
+    """Backends of `database` currently waiting on an advisory lock,
+    counted over a separate superuser connection (outside every product
+    path)."""
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND wait_event_type = 'Lock' "
+                "AND wait_event = 'advisory' AND pid <> pg_backend_pid()", [database])
+            return cur.fetchone()[0]
+
+
+def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     """R-35 (Phase 10, WP-6d-i review): plain `LOCK TABLE ... IN SHARE
     MODE` does not conflict with itself, so two concurrent `add_field`
     calls declaring `nullable: false` on the SAME entity could both
@@ -1262,6 +1276,10 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
     wait resolved only by PostgreSQL's deadlock detector aborting one
     side with an error. `SHARE ROW EXCLUSIVE` (self-conflicting) instead
     makes the second caller wait AT `LOCK TABLE` until the first commits.
+    Every schema operation of one application now also serializes on the
+    application-wide schema lock taken before the catalog is read, so the
+    second caller waits on that advisory lock (seen in `pg_stat_activity`)
+    and does not reach its own `LOCK TABLE` until the first commits.
 
     Verified against a REAL two-connection race, never merely at the SQL-
     text level (contrast the M-1 test above, whose own docstring
@@ -1273,8 +1291,10 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
     SAME entity -- if the two locks conflict, B's own `LOCK TABLE`
     blocks INSIDE `cursor.execute` itself and never reaches the line
     that would record it as returned, so it must not do so within a
-    short window. Releasing A lets both complete, in sequence, with no
-    deadlock error, and the final catalog carries both new fields."""
+    short window. With the schema lock B is seen waiting on an advisory
+    lock instead, and has not issued its `LOCK TABLE` at all. Releasing
+    A lets both complete, in sequence, with no deadlock error, and the
+    final catalog carries both new fields."""
     import r2db_api.postgres as postgres_module
 
     cell = make_cell(app_a, pool_size=2)
@@ -1347,11 +1367,15 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
             thread_b = threading.Thread(target=_add_field_b)
             thread_b.start()
             try:
-                assert b_lock_started.wait(timeout=10), "thread B never reached its own LOCK TABLE"
-                assert not b_lock_returned.wait(timeout=0.5), (
-                    "thread B's LOCK TABLE returned while thread A still holds the lock -- "
-                    "the two locks did not conflict (R-35 regression)"
+                give_up_at = time.monotonic() + 10
+                while not b_lock_started.is_set() and not _advisory_lock_waiters(platform.admin_dsn, app_a.database):
+                    assert time.monotonic() < give_up_at, "thread B neither reached its own LOCK TABLE nor waits on an advisory lock"
+                    time.sleep(0.05)
+                assert not b_lock_started.is_set(), (
+                    "thread B reached its own LOCK TABLE while thread A still holds its schema transaction -- "
+                    "two schema operations of one application must serialize before any table lock"
                 )
+                assert not b_lock_returned.is_set()
             finally:
                 release_a.set()
                 thread_b.join(timeout=10)

@@ -207,6 +207,8 @@ _IDEMPOTENCY_KEY_LOCK_NAMESPACE = 20261007
 # table-level (not per-key) advisory lock serializing `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys -- same family as `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (a single, fixed 64-bit `pg_advisory_xact_lock` key), a DIFFERENT constant from it (that lock guards bootstrap/reset ritual ordering; this one guards `idempotency_entries` capacity accounting -- two independent serialization points that must never share one lock id).
 # history: CH-0004
 _IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 1414142
+# the single-argument `pg_advisory_xact_lock(bigint)` key that serializes every SCHEMA operation of one application (see `_schema_serialization_lock` below). Each application has a database of its own, so one fixed key is per-application. A third constant in the family above, distinct from `_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY` and `ops.py::_RITUAL_ADVISORY_LOCK_KEY`: the three guard three independent serialization points and must never share a lock id.
+_SCHEMA_SERIALIZATION_ADVISORY_LOCK_KEY = 761761763
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
 # `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
@@ -1336,7 +1338,7 @@ class PostgresCell:
     #
     # Read (`_idempotency_lookup`) fails CLOSED on a missing table (ruling audit) -- an application that has never run upgrade 11 gets `SERVICE_UNAVAILABLE` right here, before target-existence/execution, exactly like the WRITE (`_idempotency_store`) already did: `UndefinedTable` is left to propagate to `transact`/`apply_schema`'s own `except psycopg.Error` clause, rolling back the (as yet empty) transaction and touching no row. This method runs FIRST on the
     # idempotent path (before `catalog`/target-existence in `transact`;
-    # right after `catalog` but before any operation-specific work in
+    # before `catalog` and before any operation-specific work in
     # `apply_schema`), so nothing has executed yet when it raises.
     # `_idempotency_reserve` (below) can therefore no longer actually
     # observe `UndefinedTable` in practice: on this same path it always
@@ -1399,6 +1401,18 @@ class PostgresCell:
         """
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
+
+    def _schema_serialization_lock(self, conn: "psycopg.Connection[Any]") -> None:
+        """Transaction-scoped, exclusive advisory lock that serializes every schema operation of this application (one database per application, so the fixed key is per-application) -- taken directly in `apply_schema`'s OUTER transaction, before `_load_catalog` and `_read_schema_revision`, and released only by that transaction's commit or rollback.
+
+        Without it two schema operations read the catalog and the revision before either one's DDL commits (READ COMMITTED gives each statement a fresh snapshot, but the read and the DDL are separate statements): both pass the same `plan` token, a destructive confirmation phrase computed from a revision the other has already advanced is still accepted, and the `schema_objects` count is taken from a catalog a concurrent `create_entity` is about to change.
+
+        `apply_schema` takes it after the per-key lock, the idempotency lookup (a replay answers before it and never waits here) and the count lock, and before anything reads the catalog: the order every request follows is per-key lock, count lock, this lock.
+
+        Only schema operations take it. A data operation (`transact`) and a `query` never do, so this lock is only ever contended by other schema operations; a holder of this lock never takes the per-key or count lock afterwards. The wait is bounded by the `lock_timeout` `_set_timeouts` set at the start of the transaction.
+        """
+        with conn.cursor() as cur:
+            _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_SCHEMA_SERIALIZATION_ADVISORY_LOCK_KEY])
 
     def _idempotency_lookup(self, conn: "psycopg.Connection[Any]", key: str) -> tuple[str, str, dict[str, Any]] | None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
@@ -2103,10 +2117,9 @@ class PostgresCell:
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
-                    catalog = self._load_catalog(conn)
                     # Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling
                     # I-3, WP-2c): the idempotency lookup -- as early as
-                    # possible after loading the catalog, before ANY
+                    # possible, before the catalog is loaded, before ANY
                     # operation-specific accounting or target-dependent
                     # computation (including the `schema_objects`
                     # projection below, which for `drop_entity`/`add_
@@ -2145,6 +2158,8 @@ class PostgresCell:
                         # history: CH-0065
                         self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
+                    self._schema_serialization_lock(conn)
+                    catalog = self._load_catalog(conn)
                     # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): read ONCE, before any DDL/registry write this transaction is about to (tentatively) make -- "the revision as it stood when the request was decided", the SAME value a dry run's own `revision` reports (S-j) and a real apply's `plan` verification is checked against. read only when actually needed -- `dry_run` always needs it for `outcome_revision` below (S-j), and a caller-presented `plan` needs it to verify; an ordinary apply (neither) needs neither, and skips this extra round trip entirely (`plan_request` is otherwise built unconditionally by `service.py`, so gating on `plan_request is not None` alone would not have helped).
                     # history: CH-0066
                     revision_before = self._read_schema_revision(conn) if dry_run or plan is not None else None
