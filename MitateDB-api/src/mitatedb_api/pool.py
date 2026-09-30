@@ -15,7 +15,9 @@ service itself is healthy. This module is the fix: a small, bounded,
 thread-safe connection pool the HTTP composition root constructs once and
 hands to `PostgresCredentialStore`, so the platform-registry connection
 count this process holds open is capped at `max_size` regardless of how
-many concurrent requests are in flight.
+many concurrent requests are in flight. The same class also pools the
+application-audit sink's connections (`application_audit.
+PostgresApplicationAuditSink`).
 
 This is NOT a general-purpose connection pool (no reaping thread or timer,
 no health-check ping loop) -- it is scoped exactly to what its callers'
@@ -24,7 +26,10 @@ connection where possible, create a new one under the configured cap
 otherwise, and fail closed (never fail open) when the cap is exhausted and
 no connection is returned in time. The pool raises its own neutral
 exceptions (`PoolError` and the two classes under it); each caller maps
-them to its own error type. A connection
+them to its own error type. A connection that stays idle longer than
+`IDLE_CLOSE_THRESHOLD_S` is closed by a sweep that an `acquire()` of any
+pool in this process starts, at most once per second in the whole process
+(`BoundedConnectionPool._close_stale_idle_in_every_pool`). A connection
 that sat idle longer than `IDLE_PING_THRESHOLD_S` is checked with one
 round trip before it is handed out (`BoundedConnectionPool._ping`), so a
 server-side end of a long-idle session (a database restart, a failover, an
@@ -37,6 +42,7 @@ port of any pooling library or of r2db-api's own pooling module.
 """
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -66,8 +72,9 @@ DEFAULT_MAX_SIZE = 20
 IDLE_PING_THRESHOLD_S = 1.0
 
 # A connection idle in its pool for longer than this many seconds is closed
-# by the next `acquire()` of any pool in this process
-# (`BoundedConnectionPool._close_stale_idle_in_every_pool`).
+# by the next sweep, which an `acquire()` of any pool in this process starts
+# (`BoundedConnectionPool._close_stale_idle_in_every_pool`, at most once per
+# `_IDLE_SWEEP_MIN_INTERVAL_S` in the whole process).
 IDLE_CLOSE_THRESHOLD_S = 300.0
 
 # The process-wide sweep of idle connections runs at most once per this many
@@ -199,8 +206,8 @@ class BoundedConnectionPool:
         # db_wall_ms`/`_closed_txn_count`/`_closed_db_calls` receive a
         # connection's own `CountingConnection.db_wall_ms`/`txn_count`/
         # `execute_count + executemany_count` folded in right before that
-        # connection is discarded (`discard`, `closeall`, and the dead-
-        # connection branches of `acquire()`) -- so a discarded
+        # connection is discarded (`discard`, `closeall`, `_close_stale_
+        # idle`, and the dead-connection branches of `acquire()`) -- so a discarded
         # connection's own totals are never lost, only moved from "on the
         # connection" to "on this pool". Same shape as `r2db_api.postgres.
         # _RolePool`'s identical accounting.
@@ -245,7 +252,7 @@ class BoundedConnectionPool:
                 "in_use_peak": self._in_use_peak,
             }
 
-    def _new_connection(self) -> "psycopg.Connection":
+    def _new_connection(self, connect_timeout: Optional[int] = None) -> "psycopg.Connection":
         # R-79 (WO §2.1 D-1): `CountingConnection.connect` in place of
         # plain `psycopg.connect` -- same classmethod, same signature
         # (`psycopg.connect` is itself `Connection.connect`, `psycopg/
@@ -256,10 +263,13 @@ class BoundedConnectionPool:
         # The connect call itself is timed into `_connect_wall_ms`/
         # `_sessions` under `self._stats_lock`, mirroring `r2db_api.
         # postgres._RolePool._connect`. A failed connect raises before
-        # either counter is touched.
+        # either counter is touched. `connect_timeout` (whole seconds) is
+        # how long this one connect may take; `None` uses the value the
+        # pool was constructed with.
         connect_start = time.monotonic()
         conn = CountingConnection.connect(
-            self._dsn, connect_timeout=self._connect_timeout, autocommit=False,
+            self._dsn, connect_timeout=self._connect_timeout if connect_timeout is None else connect_timeout,
+            autocommit=False,
             **_application_name_connect_kwargs(),
         )
         connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
@@ -270,8 +280,8 @@ class BoundedConnectionPool:
 
     def _fold_closed_connection_stats(self, conn: "psycopg.Connection") -> None:
         """Called right before every connection this pool discards leaves
-        this pool for good (`discard`, `closeall`, and the dead-connection
-        branches of `acquire()` below): adds this one connection's own
+        this pool for good (`discard`, `closeall`, `_close_stale_idle`, and
+        the dead-connection branches of `acquire()` below): adds this one connection's own
         `db_wall_ms`/`txn_count`/`execute_count + executemany_count` (from
         `psycopg_counting.CountingConnection`) into this pool's own running
         totals, under `self._stats_lock`, so discarding a connection never
@@ -365,25 +375,22 @@ class BoundedConnectionPool:
         `release()` was more than `IDLE_CLOSE_THRESHOLD_S` seconds before
         `now` (a `time.monotonic()` reading), folding its statistics first.
         Only connections in the idle queue are examined, so a connection
-        a caller has checked out is never touched. The idle queue is
-        drained and the fresh connections put back in their former order
-        (oldest first), so the LIFO order is unchanged."""
-        drained: "list[psycopg.Connection]" = []
-        while True:
-            try:
-                drained.append(self._idle.get_nowait())
-            except queue.Empty:
-                break
+        a caller has checked out is never touched. The stale ones are
+        removed from the queue's own list under the queue's mutex, so a
+        concurrent `acquire()` never sees the fresh ones missing and their
+        LIFO order is unchanged; they are closed after the mutex is
+        released."""
         stale: "list[psycopg.Connection]" = []
-        kept: "list[psycopg.Connection]" = []
-        for conn in drained:
-            returned_at = getattr(conn, "_pool_returned_at", None)
-            if returned_at is not None and now - returned_at > IDLE_CLOSE_THRESHOLD_S:
-                stale.append(conn)
-            else:
-                kept.append(conn)
-        for conn in reversed(kept):
-            self._idle.put_nowait(conn)
+        with self._idle.mutex:
+            kept: "list[psycopg.Connection]" = []
+            for conn in self._idle.queue:
+                returned_at = getattr(conn, "_pool_returned_at", None)
+                if returned_at is not None and now - returned_at > IDLE_CLOSE_THRESHOLD_S:
+                    stale.append(conn)
+                else:
+                    kept.append(conn)
+            if stale:
+                self._idle.queue[:] = kept
         for conn in stale:
             self._fold_closed_connection_stats(conn)
             try:
@@ -416,7 +423,10 @@ class BoundedConnectionPool:
 
         `timeout` is how many seconds this call waits for a returned
         connection when the pool is at `max_size`; `None` uses the
-        `acquire_timeout` the pool was constructed with.
+        `acquire_timeout` the pool was constructed with. A given `timeout`
+        also bounds the connect of a connection this call opens: the
+        constructed `connect_timeout`, or `timeout` rounded up to whole
+        seconds (at least 1) when that is smaller.
 
         Fail-closed on both real failure modes: a connection attempt that
         raises (`psycopg.Error`) raises `PoolConnectFailed`, and a pool
@@ -451,7 +461,12 @@ class BoundedConnectionPool:
                 under_budget = False
         if under_budget:
             try:
-                conn = self._new_connection()
+                if timeout is None:
+                    conn = self._new_connection()
+                else:
+                    conn = self._new_connection(
+                        connect_timeout=min(self._connect_timeout, max(1, math.ceil(timeout)))
+                    )
             except psycopg.Error as exc:
                 self._forget_one()
                 raise PoolConnectFailed("connection to the database could not be opened") from exc

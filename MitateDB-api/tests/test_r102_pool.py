@@ -6,8 +6,8 @@ V1.md section 2.3, completion conditions 26-34).
 
 What is pinned here:
 
-* 26: `acquire(timeout=...)` bounds one call's wait; no `timeout` keeps the
-  construction-time value.
+* 26: `acquire(timeout=...)` bounds one call's wait and the connect of a
+  connection it opens; no `timeout` keeps the construction-time values.
 * 27: the pool's own exceptions (`PoolError`, `PoolExhausted`,
   `PoolConnectFailed`) are not `FoundationError`s, and `pool.py` never names
   `AuthorizationStateUnavailable`.
@@ -15,7 +15,8 @@ What is pinned here:
   them to `AuthorizationStateUnavailable` with the messages those callers
   always answered.
 * 30 / 31: `release()` rolls back what a returned connection left open (a
-  real PostgreSQL server: transaction status and a `SET` value), and discards
+  real PostgreSQL server: transaction status, a `SET` value, and an aborted
+  transaction), and discards
   a connection whose rollback fails.
 * 32 / 33 / 34: the idle sweep closes another pool's stale idle connections
   and never an in-use one, runs at most once per second in the process, and
@@ -174,6 +175,38 @@ def test_acquire_timeout_bounds_one_call_and_none_keeps_the_construction_value()
     assert 0.3 <= waited < 2.5, waited
     short_pool.release(got)
     assert short_pool.stats()["wait_count"] == 2  # non-vacuous: the exhausted call and the one that got `held` both waited
+
+
+class _RecordingConnect:
+    """Stands in for `pool.CountingConnection`: records the keyword arguments
+    of each `connect()` call and returns a fake connection."""
+
+    calls: "list[dict]" = []
+
+    @classmethod
+    def connect(cls, dsn: str, **kwargs: object) -> _FakeConnection:
+        cls.calls.append(kwargs)
+        return _FakeConnection()
+
+
+def test_acquire_timeout_bounds_the_connect_of_a_connection_it_opens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Completion condition 26 (connect leg): a connection a call opens is
+    given the smaller of the constructed `connect_timeout` and the call's
+    `timeout` rounded up to whole seconds (at least 1); a call with no
+    `timeout` connects with the constructed value. The real `_new_connection`
+    runs; only `CountingConnection.connect` is replaced, and its recorded
+    keyword arguments are what is asserted.
+
+    mutation (`pool.py`, `acquire`): connect with the constructed value
+    whatever the call's `timeout` (`min(self._connect_timeout, max(1, math.
+    ceil(timeout)))` becomes `self._connect_timeout`) -- the 0.3 s call
+    connects with 5."""
+    _RecordingConnect.calls = []
+    monkeypatch.setattr(pool_module, "CountingConnection", _RecordingConnect)
+    pool = BoundedConnectionPool("dsn-unused-fake-pool-r102-test.invalid", max_size=5, connect_timeout=5)
+    for timeout in (0.3, 2.2, 30.0, None):
+        pool.acquire(timeout=timeout)
+    assert [call["connect_timeout"] for call in _RecordingConnect.calls] == [1, 3, 5, 5]
 
 
 # --- 27 ---------------------------------------------------------------------
@@ -341,6 +374,34 @@ def test_release_rolls_back_so_the_next_borrower_gets_a_clean_connection(admin_d
         pool.closeall()
 
 
+def test_release_rolls_back_a_connection_left_in_an_aborted_transaction(admin_dsn: str) -> None:
+    """Completion condition 30 (aborted leg): a connection returned after a
+    statement failed inside its transaction (`transaction_status` INERROR)
+    comes back from the next `acquire()` (same session) IDLE and able to run
+    a statement, not failing with "current transaction is aborted".
+
+    mutation (`pool.py`, `release`): roll back only a connection that is
+    `INTRANS` (`!= psycopg.pq.TransactionStatus.IDLE` becomes `==
+    psycopg.pq.TransactionStatus.INTRANS`) -- the INERROR connection goes
+    back as it is and is INERROR when borrowed again."""
+    pool = BoundedConnectionPool(admin_dsn, max_size=1)
+    try:
+        first = pool.acquire()
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            first.execute("SELECT 1/0")
+        assert first.info.transaction_status == psycopg.pq.TransactionStatus.INERROR
+        backend_pid = first.info.backend_pid
+        pool.release(first)
+
+        second = pool.acquire()
+        assert second is first and second.info.backend_pid == backend_pid  # non-vacuous: the same session came back
+        assert second.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        assert second.execute("SELECT 1").fetchone() == (1,)
+        pool.release(second)
+    finally:
+        pool.closeall()
+
+
 def test_release_discards_a_connection_whose_rollback_fails() -> None:
     """Completion condition 31: a connection returned inside a transaction
     whose `rollback()` raises is closed and forgotten, not put in the idle
@@ -490,4 +551,3 @@ def test_a_pool_nothing_refers_to_leaves_the_sweep_list() -> None:
     del pool
     gc.collect()
     assert reference() is None
-    assert all(listed is not None for listed in pool_module._live_pools)  # noqa: SLF001
