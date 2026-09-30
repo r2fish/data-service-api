@@ -1934,7 +1934,8 @@ class ConformanceAdapter(ABC):
         primitive, never a test-only hook on product code" discipline
         `hold_in_flight` and `hold_after_idempotency_lookup` above already
         establish, applied to the window between a schema operation's
-        `plan` verification and its first DDL statement.
+        read of the revision its `plan` is checked against and its first
+        DDL statement.
 
         Structural difference from `hold_in_flight` (the same one
         `hold_after_idempotency_lookup` has): this primitive never issues

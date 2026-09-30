@@ -420,7 +420,7 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
         if not entered.acquire(timeout=timeout_s):
             raise AssertionError(
                 f"hold_after_plan_verification: no schema operation reached the plan-token computation "
-                f"within {timeout_s}s (expected the next plan-carrying schema operation on this "
+                f"within {timeout_s}s (expected the next schema operation presenting a plan or dry_run on this "
                 "Application to stall right after compute_plan_token returns -- see this helper's own "
                 "module comment)"
             )
