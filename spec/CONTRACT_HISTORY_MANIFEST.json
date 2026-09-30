@@ -74,7 +74,11 @@
   },
   "limits.audit_requests_per_minute_note": {
     "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 8, conditional on audit_query being provided -- versioning.version_binding). ",
-    "unstripped": false
+    "unstripped": false,
+    "rewrite": {
+      "from": "A pre-authentication fixed window governing the audit_query endpoint specifically (both its canonical and alias paths, control_endpoints.audit_query/endpoints.audit_query.deprecation_note), separate from control_requests_per_minute: an implementation publishing this class enforces it as audit_query's own window and does not also charge audit_query requests against control_requests_per_minute, so that a high-frequency audit_query poller cannot exhaust the same window a break-glass control-plane operation (e.g. revoke_credential) depends on.",
+      "to": "A pre-authentication window governing the audit_query endpoint specifically (both its canonical and alias paths, control_endpoints.audit_query/endpoints.audit_query.deprecation_note), separate from control_requests_per_minute: an implementation publishing this class enforces it as audit_query's own window and does not also charge audit_query requests against control_requests_per_minute, so that a high-frequency audit_query poller cannot exhaust the same window a break-glass control-plane operation (e.g. revoke_credential) depends on. This contract does not define the shape of that window: an implementation may count over a sliding 60-second window or over fixed 60-second windows, and in either case it admits no more than the declared number of audit_query requests within any one window it counts over. A client does not rely on where a window begins or ends."
+    }
   },
   "schemas.AuditResult.properties.events.items.description": {
     "stripped_prefix": "Deliberately left open (subordinate ruling 7(A)): ",

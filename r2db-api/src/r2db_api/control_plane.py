@@ -638,7 +638,7 @@ class ControlPlaneService:
         # Phase 3.5 WP-4 (§4 "L4", MitateDB-parity two-layer form): this service alone cannot enforce a byte bound -- there is no HTTP boundary at this layer -- so the service-layer default is `"unavailable"`; `control_http.py`'s own handler overrides this one key to `"enforced"` once the real `RequestByteBoundMiddleware` is actually mounted in front of it (same single-source instance, see the `limits` property above).
         # history: CH-0258
         limit_enforcement["request_bytes"] = "unavailable"
-        # Phase 4 WP-2(b) (design D-5, contract 1.4.0 subordinate ruling 9): `audit_requests_per_minute` is a pre-auth fixed window that always exists once this process is running (the route is always registered) -- "enforced" regardless of whether `audit_query` itself is `enabled`, exactly like every other `ControlPlaneLimits` field the generic comprehension above already marks "enforced".
+        # Phase 4 WP-2(b) (design D-5, contract 1.4.0 subordinate ruling 9): `audit_requests_per_minute` is a pre-auth window that always exists once this process is running (the route is always registered) -- "enforced" regardless of whether `audit_query` itself is `enabled`, exactly like every other `ControlPlaneLimits` field the generic comprehension above already marks "enforced".
         # history: CH-0259
         document: dict[str, Any] = {
             # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.version_binding`), flipped to 1.5.0 in phase 5 WP-3, flipped to 1.6.0 in phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md, subordinate ruling 11): the flip lands in the SAME commit as the real `audit_query`/locator-credential/`surfaces` behavior -- unconditional (every instance of this service declares 1.6.0 now, whether or not `audit_query` itself is `enabled` on this deployment; the 1.4.0 obligations that are conditional on `audit_query` being provided stay conditional per version_binding's own text).
@@ -651,9 +651,9 @@ class ControlPlaneService:
             #
             # This control-plane document also flips to 1.10.0 in the same commit as the data-plane flip in `capabilities_document.py` (the declaration `service.py` serves; C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.10.0's own obligations govern the data surface's structured-query operations only.
             #
-            # This control-plane document also flips to 1.11.0 in the same commit as the data-plane flip in `capabilities_document.py` (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.11.0's own obligation governs the data surface's select/where/order_by/mutation-values operations only.
+            # This control-plane document also flips to 1.11.0 in the same commit as the data-plane flip in `capabilities_document.py` (C-19's cross-plane version-match assert). The control surface's own `capabilities` (`control_plane`/`audit_query`) are unaffected -- 1.11.0's own obligation governs the data surface's select/where/order_by/mutation-values operations only. This control-plane document declares 1.12.0 in the same commit as the data-plane document, with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window, which this service counts as a sliding one.
             # history: CH-0260
-            "contract_version": "1.11.0",
+            "contract_version": "1.12.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),

@@ -75,22 +75,18 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_11_0():
-    # CCR_DISPOSITION.md subordinate ruling 16: the version bump itself,
+def test_contract_declares_1_12_0():
+    # CCR_DISPOSITION.md subordinate ruling 17: the version bump itself,
     # pinned so a future revert of just this one line is caught here rather
     # than only by whichever other test happens to touch contract_version.
-    # Supersedes the 1.10.0 pin this test itself carried before -- 1.10.0 is
-    # already published, so this file never re-adds a standalone
-    # "declares 1.10.0" test: any implementation still declaring 1.10.0 or
-    # earlier is exercised by version_binding's own retroactivity rule, not
-    # by a dedicated pin here for a version this document no longer
-    # declares. Unlike the 1.9.0 and 1.10.0 bumps, both peers' own runtime
-    # declaration (`capabilities_document.py`/`control_plane.py`) moves in
-    # the same commit as this one (the refusal-code behavior change and the
-    # declaration land together, per version_binding's own version-flip
-    # discipline).
+    # This file carries one "declares" pin, for the version the contract
+    # declares today; an implementation still declaring an earlier version
+    # is exercised by version_binding's own retroactivity rule. 1.12.0
+    # changes no behavior, so both peers' own runtime declaration
+    # (`capabilities_document.py`/`control_plane.py`) moves in the same
+    # commit as the contract text.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.11.0"
+    assert contract["contract_version"] == "1.12.0"
 
 
 # ---------------------------------------------------------------------------
@@ -747,10 +743,12 @@ def test_contract_pins_the_1_11_0_version_binding_paragraph_verbatim():
     including its own trailing 1.10.0-declaring retroactive-denial sentence
     -- is present verbatim in versioning.version_binding, and occupies
     EXACTLY the text between the 1.9.0-declaring retroactive-denial
-    sentence that ends the 1.10.0 paragraph and the version-flip sentence
-    (an equality check, not a mere containment check, so a further,
-    unaccounted-for sentence slipped in between the two anchors is caught
-    here too)."""
+    sentence that ends the 1.10.0 paragraph and the start of the 1.12.0
+    sentence (an equality check, not a mere containment check, so a
+    further, unaccounted-for sentence slipped in between the two anchors is
+    caught here too). Right edge follows contract 1.12.0 (subordinate
+    ruling 17): its one sentence sits between the 1.11.0 paragraph and the
+    version-flip sentence; the 1.11.0 paragraph's own text is unchanged."""
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
     version_binding = contract["versioning"]["version_binding"]
 
@@ -763,10 +761,10 @@ def test_contract_pins_the_1_11_0_version_binding_paragraph_verbatim():
 
     anchor_1_9_0_retroactive = "An implementation still declaring 1.9.0 is not held to any 1.10.0-only obligation retroactively."
     idx_1_9_0_retroactive_end = version_binding.index(anchor_1_9_0_retroactive) + len(anchor_1_9_0_retroactive)
-    idx_version_flip = version_binding.index("A peer's version-flip")
-    between = version_binding[idx_1_9_0_retroactive_end:idx_version_flip]
+    idx_1_12_0_sentence = version_binding.index("1.12.0 introduces no obligation")
+    between = version_binding[idx_1_9_0_retroactive_end:idx_1_12_0_sentence]
     assert between == " " + PIN_1_11_0_VERSION_BINDING_PARAGRAPH + " ", (
-        "the text between the 1.9.0-declaring retroactive row and the version-flip sentence is not exactly "
+        "the text between the 1.9.0-declaring retroactive row and the start of the 1.12.0 sentence is not exactly "
         f"the monitor-finalized 1.11.0 paragraph (surrounded by one space on each side): {between!r}"
     )
 
@@ -1128,6 +1126,62 @@ def test_audit_query_endpoint_classification_moved_to_control_endpoints_with_an_
     assert legacy_audit_query["response"] == "AuditResult"
     assert "alias" in legacy_audit_query["deprecation_note"]
     assert "one further minor version" in legacy_audit_query["deprecation_note"]
+
+
+# Contract 1.12.0 (CCR_DISPOSITION.md subordinate ruling 17): the contract no
+# longer names the shape of the audit_requests_per_minute window. Both texts
+# are copied verbatim from the ruling's own record.
+PIN_1_12_0_AUDIT_WINDOW_NOTE = (
+    "A pre-authentication window governing the audit_query endpoint specifically (both its canonical and "
+    "alias paths, control_endpoints.audit_query/endpoints.audit_query.deprecation_note), separate from "
+    "control_requests_per_minute: an implementation publishing this class enforces it as audit_query's "
+    "own window and does not also charge audit_query requests against control_requests_per_minute, so "
+    "that a high-frequency audit_query poller cannot exhaust the same window a break-glass control-plane "
+    "operation (e.g. revoke_credential) depends on. This contract does not define the shape of that "
+    "window: an implementation may count over a sliding 60-second window or over fixed 60-second windows,"
+    " and in either case it admits no more than the declared number of audit_query requests within any "
+    "one window it counts over. A client does not rely on where a window begins or ends."
+)
+
+PIN_1_12_0_VERSION_BINDING_SENTENCE = (
+    "1.12.0 introduces no obligation (subordinate ruling 17): it withdraws the word fixed from "
+    "limits.audit_requests_per_minute_note, so that this contract no longer defines the shape of the "
+    "audit_requests_per_minute window, and an implementation conforming to 1.11.0 conforms to 1.12.0 "
+    "without a behavior change."
+)
+
+
+def test_contract_pins_the_1_12_0_audit_window_note_verbatim():
+    """`limits.audit_requests_per_minute_note` byte-matches the 1.12.0
+    text: it states no window shape, keeps the bound a client plans on (no
+    more than the declared number within any one window the implementation
+    counts over) and keeps the window separate from
+    control_requests_per_minute."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    note = contract["limits"]["audit_requests_per_minute_note"]
+    assert note == PIN_1_12_0_AUDIT_WINDOW_NOTE
+    assert "fixed window " not in note
+    assert "does not define the shape of that window" in note
+
+
+def test_contract_pins_the_1_12_0_version_binding_sentence_verbatim():
+    """The 1.12.0 sentence occupies EXACTLY the text between the
+    1.10.0-declaring retroactive-denial sentence that ends the 1.11.0
+    paragraph and the version-flip sentence, and 1.12.0 adds no
+    `versioning.obligations` entry (it introduces no obligation)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = contract["versioning"]["version_binding"]
+    anchor = "An implementation still declaring 1.10.0 is not held to any 1.11.0-only obligation retroactively."
+    idx_anchor_end = version_binding.index(anchor) + len(anchor)
+    idx_version_flip = version_binding.index("A peer's version-flip")
+    between = version_binding[idx_anchor_end:idx_version_flip]
+    assert between == " " + PIN_1_12_0_VERSION_BINDING_SENTENCE + " ", (
+        "the text between the 1.10.0-declaring retroactive row and the version-flip sentence is not exactly "
+        f"the 1.12.0 sentence (surrounded by one space on each side): {between!r}"
+    )
+    versions = [entry["version"] for entry in contract["versioning"]["obligations"]]
+    assert "1.12.0" not in versions
+    assert versions[-1] == "1.11.0"
 
 
 def test_audit_requests_per_minute_is_a_declared_limit_class():

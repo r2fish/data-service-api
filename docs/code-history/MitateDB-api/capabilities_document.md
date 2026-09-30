@@ -96,3 +96,17 @@ This host also declares contract 1.10.0 in the same commit as its own keyset pag
 
 This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names -- a select entry names its own index (select/<i>), matching where/order_by/mutation-where, and a mutation's values key names itself (operations/<i>/values/<name>) -- each refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares.
 ```
+
+### correction: 2026-09-30
+
+- reason: roadmap R-114 (contract 1.12.0, subordinate ruling 17) -- this host declares 1.12.0 in the same commit as the contract text; no behavior change
+
+old:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names -- a select entry names its own index (select/<i>), matching where/order_by/mutation-where, and a mutation's values key names itself (operations/<i>/values/<name>) -- each refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares.
+```
+
+new:
+```
+This host also declares contract 1.11.0 in the same commit as its own undeclared-field refusal alignment across all five positions the contract names -- a select entry names its own index (select/<i>), matching where/order_by/mutation-where, and a mutation's values key names itself (operations/<i>/values/<name>) -- each refused with VALIDATION_FAILED, violated_declaration request_schema and field naming the position -- 1.11.0's own unconditional obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
+```

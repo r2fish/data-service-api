@@ -447,7 +447,7 @@ async def post_enable_credential(request: Request) -> Response:
 
 def _precharge_audit(request: Request) -> None:
     """`audit_requests_per_minute` -- its OWN window, charged before
-    ANYTHING else (D-5: "両パス専用の pre-auth 固定窓"), never `_precharge`
+    ANYTHING else (design D-5 asked for a pre-auth window of its own; it is counted as a sliding one), never `_precharge`
     (`control_requests_per_minute` is a DIFFERENT counter this handler must
     never touch -- design M-8 / P4-D4 item 8: a high-frequency audit
     poller must not be able to exhaust the window a break-glass `revoke_
