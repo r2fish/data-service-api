@@ -9,3 +9,4 @@
 - **検査器の扱い**: `tools/check_doc_refs.py` の**参照走査**と `tools/check_comment_provenance.py` は本ディレクトリを走査しない。`tools/change_class.py` は本ディレクトリ配下を**拡張子を問わず Class A** とする。
 - **公開ゲートは変わらない**: 空 `.md` ガード (`check_doc_refs.py` の `git ls-files` 側) と `tools/public_value_scan.py` (pre-commit) は本ディレクトリにも掛かる。実 credential・実ホスト名・実ドメイン・実 DSN・作業機の絶対パスを置かないという条件は、置き場が変わっても 1 つも緩まない (`CLAUDE.md` Public Repository Security Gate 節、`OPERATING_CONDITIONS.md` §1.9)。
 - **回転**: 新しい引き継ぎ書を commit する変更セットで最新 2 通から外れる引き継ぎ書を、台帳の版上げの変更セットで 6 版目の行を、それぞれ同時にここへ移す。新しく書く文書が**前々書以前**を指すときは、はじめから archive 側の path で書く。
+- **台帳の閉止行**: `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の閉止・却下の行の全文は `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__LEDGER_CLOSED.md` の `## R-N` 節にある (本体の §8.2 は索引)。「`RM` §8 の R-N 行」という既存の参照は書き換えず、ここで読む。後からの【追記】は当該節の末尾に 1 行足す (既存の行は変えない。版数ログに行を足すのと同じ扱い)。規律は `OPERATING_CONDITIONS.md` §1.16 の 79。

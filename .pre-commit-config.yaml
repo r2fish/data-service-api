@@ -24,3 +24,14 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: ledger-check
+        name: ledger fixed-field check (section 8 tables and the closed-row archive agree)
+        description: >-
+          Machine enforcement of docs/design/LEDGER_FIXED_FIELDS_V1.md D-8.
+          Standard-library-only script (tools/dev/ledger.py --check);
+          whole-repo, so it does not take per-file arguments from pre-commit.
+        entry: python3 tools/dev/ledger.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
