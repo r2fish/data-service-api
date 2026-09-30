@@ -2,7 +2,7 @@
 
 ## 0. 位置づけと依頼者裁定
 
-- 版: v0.1 (2026-09-30) 起草 (drafter)、監督が起草の指摘を反映。**v0.2 (2026-09-30)**: 設計レビュー 1 回目 (指摘 F1〜F11、§12) を反映。v0.2 の監督案は 1-A (i) + 2-B + M だった。**v0.3 (2026-09-30)**: 設計レビュー 2 回目 (指摘 G1〜G11、§12) を反映。M (印) と 2-B を監督案から外し、監督案の組を **1-A (i) + 2-A** (2-A は sweep・DELETE を要しない形に改めた) とした。**v0.4 (2026-09-30)**: v0.3 の再確認 (指摘 H1〜H11、§12) を反映 (2-A の形の確定、実測の読みの訂正、契約文案の前提)。**v0.5 (2026-09-30)**: 依頼者裁定 (Q-1〜Q-5、すべて監督案) を §10 に逐語で記録。以後この設計が確定である。
+- 版: v0.1 (2026-09-30) 起草 (drafter)、監督が起草の指摘を反映。**v0.2 (2026-09-30)**: 設計レビュー 1 回目 (指摘 F1〜F11、§12) を反映。v0.2 の監督案は 1-A (i) + 2-B + M だった。**v0.3 (2026-09-30)**: 設計レビュー 2 回目 (指摘 G1〜G11、§12) を反映。M (印) と 2-B を監督案から外し、監督案の組を **1-A (i) + 2-A** (2-A は sweep・DELETE を要しない形に改めた) とした。**v0.4 (2026-09-30)**: v0.3 の再確認 (指摘 H1〜H11、§12) を反映 (2-A の形の確定、実測の読みの訂正、契約文案の前提)。**v0.5 (2026-09-30)**: 依頼者裁定 (Q-1〜Q-5、すべて監督案) を §10 に逐語で記録。以後この設計が確定である。 **v0.5 + 註 (2026-10-01)**: §11 の 4 に、依頼者裁定 (作業指示書の訂正註 6) で runbook §10 を改版し再受理を求める形に改めた旨の註を足した。版は v0.5 のまま、本文は書き換えていない。
 - 台帳: 計画文書 `RM` §8 の **R-115** (規模 M)。
 - 変更クラス: **D** (監督の実測。`tools/change_class.py` に見込みの path を渡して class=D、conformance_required=true。`security/CONTROL_MAPPING.md` が D、`spec/`・`conformance-tests/` が C)。契約に触れる案を採るなら設計レビューは 2 回 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.7 の 50)。
 - 基点: main `b2be64d` (v0.1 の起草時は `f7dc503`。R-114・R-116 の閉止を取り込んだ後も、本書が引く `file:line` は変わっていないことを確かめた)。uvicorn は開発機の 0.52.4。契約は現行 1.12.0 (R-114)、`security/CONTROL_MAPPING.md` は 3.10 (R-116)。
@@ -186,7 +186,7 @@ commit `f7dc503`、Darwin/arm64、load average 2.1〜3.0 / 10 core、pytest 0 �
 1. 性能: 開発機の local PG でのみ測った。本番 (Cloud SQL / VPS) の往復の費用は未実測 (§3)。
 2. MitateDB の pool で r2db と同水準になるかは未実測の推測 (§3)。pool の本数分を F-16 の床に足す。
 3. 2-A の下での未認証 flood と正規 tenant の 429 率は real-server で未実測 (§8 で測る)。counter table の膨張 (dead tuple) の運用 (autovacuum の設定、古い窓の行の保持期間) は配備手順に書く — 行は audit の証拠なので runtime role は消せず、保持は audit table と同じ扱いにする。
-4. 並行作業: R-114 (契約 1.12.0) と R-116 (`security/CONTROL_MAPPING.md` 3.10) は main に入った。版は merge 時に main の最新に合わせて振る。runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` §10.6・§10.7・§10.10 は受理済みで、変えない。
+4. 並行作業: R-114 (契約 1.12.0) と R-116 (`security/CONTROL_MAPPING.md` 3.10) は main に入った。版は merge 時に main の最新に合わせて振る。runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` §10.6・§10.7・§10.10 は受理済みで、変えない。 **【註 2026-10-01】** 依頼者裁定 2026-09-30 (作業指示書 `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 の訂正註 6) により、runbook §10 は変えないのではなく、§10.6・§10.7・§10.10 を改版して新しい migration の行と適用の段だけを足し、依頼者の再受理を求める形に改めた (受理までは Gate-0 は未準備)。本項の逐語は書き換えない。
 5. 本番には何も適用しない。監督案では両 peer に migration が 1 本ずつ増え、配備手順に適用の段が要る。容量の算式の行 (r2db `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15.1、MitateDB `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2d。どちらも §10 の外) は buffer と process-local の項が消えるので、追記が要る。
 6. 応答を返す前に死んだ in-flight の要求の event と件数は対象外である (最大で同時実行数)。pre_commit の allow 行が残り data が commit されなかった場合の読みは既存の `outcome_note` のとおり。
 

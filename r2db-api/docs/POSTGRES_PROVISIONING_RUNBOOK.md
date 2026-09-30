@@ -449,7 +449,7 @@ re-run is a deliberate signal, not silently absorbed.
 **The platform migrations that come after `0002`** are each described in
 their own section, and are applied in the order `part1_provision_host_
 and_db.sh` actually runs them, not ascending file-number order (`0013`,
-`0014` and `0015` all run before `0008`/`0012` despite their own HIGHER file
+`0014`, `0015` and `0016` all run before `0008`/`0012` despite their own HIGHER file
 numbers -- design D-1, R-66 WP-1): `0005` (§9, credential store), `0006`
 (§11, control-plane storage), `0007` (§15, audit sink), **`0013` (§4, role `CONNECTION
 LIMIT`s, Phase 10 WP-4f -- additive only, safe to apply by hand at any
@@ -467,6 +467,10 @@ process REFUSES TO START without it; `ops verify-declarations` reports
 data-plane worker shares -- on a platform database without its rate
 function, the application-plane process and its preflight refuse to
 start, naming the migration),
+`0016` (§21, the refusal-window counter every data-plane worker adds to --
+on a platform database without its function, or with one not in the state
+the file leaves it in, the application-plane process and its preflight
+refuse to start, naming the migration),
 **`0008` (§16, platform declarations + writer-role timeouts, Q4 phase --
 both processes now REFUSE TO START until it is applied)**, and `0012`
 (process ceilings, Phase 10 WP-6a -- also required before either process
@@ -1247,8 +1251,8 @@ anywhere in the cluster once it is gone:
 Companion to `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (D-1/D-5/D-6).
 Applying `0007`, configuring the reader DSN, the relationship between the two
 audit-writer timeouts and the `audit_query` visibility lag, and then, in
-§15.1-§15.5, the operational parts: platform-DB capacity thresholds, the
-five fixed alert messages, manual retention/pruning, reading evidence during
+§15.1-§15.5, the operational parts: platform-DB capacity thresholds,
+logs-based alerting, manual retention/pruning, reading evidence during
 a platform-DB outage, and the paths the control host's edge policy must
 cover.
 
@@ -1315,7 +1319,11 @@ startup, so the data-plane's actual `DataService(denial_coalesce_window_s=
 ...)` and the published declaration come from one row rather than from a
 constant on one side and a constructor argument on the other. Change it with
 `python -m r2db_api.ops declare-coalescing-window --ms <N>` and restart both
-processes -- never by editing a constant in either process' source.
+processes -- never by editing a constant in either process' source. The
+window's counts are not held in any process: every data-plane worker adds
+to the same counter row in the platform database (`0016`, §21). The window
+length is part of that row's key, so workers restarted one by one across a
+length change never add to each other's rows.
 
 **Anything that changes either timeout still changes a published
 declaration** -- that has not changed, only the place you change it (`ops`,
@@ -1416,7 +1424,7 @@ it resumes exactly where it stopped. In every case a break-glass
 `control_requests_per_minute` (`r2db-api/tests/test_audit_query.py::test_
 audit_query_does_not_consume_the_control_requests_per_minute_window`).
 
-### 15.1 Platform-DB capacity thresholds (row size x row count x M)
+### 15.1 Platform-DB capacity thresholds (row size x row count)
 
 The design bounds audit growth in three layers (D-1's own capacity
 argument): bounded row SIZE, bounded row COUNT per operation, and this
@@ -1432,41 +1440,45 @@ exceed it -- the CHECK rejects the INSERT, which is itself verified
 (`test_application_audit.py::test_api_role_cannot_insert_a_value_longer_
 than_the_length_check`).
 
-**Row count per process.** Per interval, one instance can add at most:
+**Counter row size (`0016`, §21).** The ten bounded text columns of
+`denial_window_counter` cap at `64 + 256 + 256 + 64 + 256 + 64 + 64 + 64 +
+128 + 256 = 1472` characters. `denial_key` has no CHECK of its own: it is
+the JSON text of the window length and four of those columns, measured at
+4252 bytes with each of the four at its limit and made of characters JSON
+escapes as `\u00XX`. **Budget 6 KiB per counter row.**
 
-| source | bound per instance |
+**Row count, whole deployment.** Nothing is counted per process: every
+event is written before its response, and every data-plane worker adds to
+the same counter row (§21). Per interval the deployment adds at most:
+
+| source | bound (all processes together) |
 |---|---|
-| fail-closed operations | 1 row per user operation (+1 `error` row if the data commit fails) |
-| coalesced denials | **2** rows per coalescing key per 60s window -- the first synchronous row plus the window-end aggregate row (supervisor ruling J-1); never 1 |
-| buffered ordinary successes | at most `R2DB_AUDIT_BUFFER_CAPACITY` (default 1000) in flight, flushed on threshold/interval |
-| buffer-overflow alerts | at most 1 row per flush interval (`R2DB_AUDIT_FLUSH_INTERVAL_S`) |
+| operations | 1 `application_audit` row per user operation (+1 `error` row if the data commit fails) |
+| coalesced denials | per key and window: 1 `application_audit` row (the first refusal) + 1 `denial_window_counter` row (each later refusal adds 1 to it). The window length is part of the key. With `audit_coalescing_window_ms` 0, every refusal is its own `application_audit` row and no counter row is written |
 
-**Multiply by M.** Coalescing counters and the buffer are **process-local**;
-nothing is shared between instances. So the deployment-wide ceilings are
-`2 x <keys> x <windows> x M` and `<buffer capacity> x M`, where **M is the
-number of `r2db_api.main` processes: `R2DB_WORKERS` on the one host**
-(`DEPLOYMENT_RUNBOOK.md` §8). The declared `process_ceilings.data` equals
-that same number (§18, §20), so **M is this deployment's own declared
-`process_ceilings.data`** -- that number, not the per-process default, is
-what belongs in the threshold arithmetic. With `R2DB_WORKERS=1` M is 1; a
-deployment that raises `R2DB_WORKERS` re-declares `process_ceilings.data`
-to match, and this arithmetic uses that number.
+Counter rows are audit evidence. `r2dbsvc_api` holds no privilege on the
+table (it reaches it only through the function), so no process can lower or
+delete a count. Retention is §15.3's procedure with `window_end` in place of
+`recorded_at`; vacuum is left to autovacuum, as for `application_audit`.
+Unlike that INSERT-only table, each later refusal UPDATEs its counter row
+and leaves one dead tuple until autovacuum reclaims it.
 
-A serviceable rate model for alerting:
+A serviceable rate model for alerting, with `W = 3600000 /
+audit_coalescing_window_ms` windows per hour (60 at the shipped 60000):
 
 ```
-bytes/hour  ~=  2 KiB * M * ( <ops/hour>
-                            + 2 * <distinct denial keys> * 60
-                            + 3600 / <flush interval seconds> )
+bytes/hour  ~=  2 KiB * ( <ops/hour> + <distinct denial keys> * W )
+              + 6 KiB * <distinct denial keys> * W
 ```
 
-Alert on the **growth rate** of the table, not an absolute size (an absolute
+Alert on the **growth rate** of the tables, not an absolute size (an absolute
 size is a retention decision, §15.3):
 
 ```sql
 -- as r2dbsvc_control (schema owner); sample periodically and alert on delta
-SELECT pg_total_relation_size('r2dbsvc_registry.application_audit') AS application_audit_bytes,
-       pg_total_relation_size('r2dbsvc_registry.control_audit')     AS control_audit_bytes;
+SELECT pg_total_relation_size('r2dbsvc_registry.application_audit')     AS application_audit_bytes,
+       pg_total_relation_size('r2dbsvc_registry.control_audit')         AS control_audit_bytes,
+       pg_total_relation_size('r2dbsvc_registry.denial_window_counter') AS denial_window_counter_bytes;
 ```
 
 Why this matters beyond housekeeping: the platform database also holds the
@@ -1474,49 +1486,15 @@ credential store for **every** application, so filling its disk stops
 authentication platform-wide. That is the availability side of SI-00, and it
 is the reason the row-size and row-count bounds above exist at all.
 
-### 15.2 Logs-based alerting: the five fixed messages
+### 15.2 Logs-based alerting
 
-The audit pipeline emits exactly five `logging.error` messages, all fixed
-strings with **no interpolation** (deliberate -- no client-supplied value can
-ever reach the process log through them). They are defined in one place,
-`src/r2db_api/service.py` (the three buffer/alert messages at L101-103, the
-two coalescing messages at L110-111, emitted from `_DenialCoalescer._note_
-aggregate_write_result`, L655). Configure a logs-based alert on exact-string
-match for **each of the five** -- they are two independent evidence-loss
-channels, and alerting on only the first three leaves the coalescing channel
-silent:
-
-| message (exact) | meaning |
-|---|---|
-| `application_audit buffer overflow: events were dropped` | evidence loss has ALREADY happened: the bounded buffer evicted its oldest events |
-| `application_audit overflow-alert row could not be written; retrying with backoff` | the in-band alert row itself cannot be written -- both the durable channel and the in-band alert are failing at once; retry is sticky with exponential backoff to a 60s ceiling |
-| `application_audit overflow-alert row recorded; pending overflow cleared` | recovery of the pair above: the alert row landed and the accumulated drop count was reported in its `count` |
-| `application_audit coalesced-denial summary row could not be written; retrying` | the window-end aggregate row of a coalesced denial is not landing. The first, synchronous row of that window IS durable, but the **repeat count is stranded in memory** -- and because the writer holds INSERT only, that first row's `count` can never be amended later (§15.1, design P4-D6). This is the only carrier of "how many times", so a stuck aggregate row is evidence loss even though nothing is refused |
-| `application_audit coalesced-denial summary row recorded; retry cleared` | recovery of the pair above: the aggregate row landed and the stranded repeat count is now in its `count` |
-
-Both retrying/recovered pairs fire only on a failing<->healthy **state
-transition** (never once per attempt), the same logging-DoS discipline the
-overflow alert uses.
-
-**Known sharpness, both peers (P4-D15, WP-B2, 2026-09-03)**: the flush
-"failing" flag clears on ANY successful flush, regardless of how much the
-buffer still holds -- it is not gated on the buffer fully draining, as an
-earlier revision had it. Completion-order semantics govern concurrent
-flushes (periodic, threshold, and explicit can all race on the same buffer):
-whichever attempt COMPLETES LAST decides the flag's value, so a still-failing
-concurrent flush that completes after a successful one sets the flag back to
-failing. If the sink is FLAPPING (success and failure completing
-alternately), the alert re-fire interval can rise from the 60s backoff
-ceiling up to one row per flush interval (this peer's default: 2s) -- this is
-an accepted tradeoff, not a defect: the declared bound of at most one alert
-row per flush interval still holds regardless (the `alert_min_interval_s`
-floor rate-limits every attempt independently of this flag), evidence reaches
-the durable table sooner from a partially-working sink, and no evidence is
-ever lost either way -- the drop counter keeps accumulating and is reported
-in the eventual alert row's `count`. As before, **do not read a gap between
-messages as recovery**; read the recovery message of the pair concerned (the
-third message for the buffer/overflow channel, the fifth for the coalescing
-one).
+The audit pipeline emits no log message of its own. The five fixed
+`logging.error` messages earlier releases emitted (buffer overflow, the
+overflow-alert row, the coalesced-denial summary row) left `src/` with the
+buffer and the in-process refusal window: every event and every refusal
+count is written before its response, and a write that fails answers the
+request `SERVICE_UNAVAILABLE` (503) instead of waiting in memory (contract
+`audit.process_loss_policy`). An alert on those strings no longer fires.
 
 ### 15.3 Retention and pruning (manual, external, deliberately unautomated)
 
@@ -1585,6 +1563,19 @@ SELECT recorded_at, event_class, request_id, application_id, actor_id,
   FROM r2dbsvc_registry.application_audit
  WHERE recorded_at >= now() - interval '1 hour'
  ORDER BY recorded_at, event_id;
+```
+
+Repeated refusals are counted in `denial_window_counter` (§21), not in
+`application_audit`: each row is one key's window, `occurrences` counts
+every refusal of it including the first (whose own row is in
+`application_audit`), and a window is closed once `window_end` has passed:
+
+```sql
+SELECT window_start, window_end, occurrences, event_class, application_id,
+       actor_id, operation, reason_code
+  FROM r2dbsvc_registry.denial_window_counter
+ WHERE window_end >= now() - interval '1 hour'
+ ORDER BY window_end, denial_key;
 ```
 
 All of these -- the CLI included -- still need the platform database itself
@@ -2060,8 +2051,8 @@ life of the process and never re-reads role settings on one already open.
    process that opens connections with this role's DSN
    (`R2DB_AUDIT_DSN`) -- so every open reader connection is replaced by
    one that actually carries the new value.
-3. Run `python -m r2db_api.ops verify-declarations` (as `r2dbsvc_control`,
-   against `R2DB_CONTROL_DSN`) and read the `F-17` line.
+3. Run `python -m r2db_api.ops verify-declarations` with `R2DB_CONTROL_DSN` set
+   to `r2dbsvc_api`'s DSN (a declared writer role; as `r2dbsvc_control` the run stops at `FAIL F-13` first, §21) and read the `F-17` line.
 
 **On an existing deployment, `ops verify-declarations` reports `FAIL F-17`
 (exit code 16) until `0014` has been applied.** This is the intended
@@ -2169,3 +2160,51 @@ least `16 × process_ceilings.control` on `r2dbsvc_controlplane` and at
 least `4 × process_ceilings.control` on `r2dbsvc_auditreader`; F-16 reports
 the exact floor it needs, naming the role. `0013`'s 20 and `0007`'s 5 cover
 one control process only.
+
+## 21. Refusal-window counter (`0016_denial_window_counter.sql`)
+
+Design `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §5. Creates
+`r2dbsvc_registry.denial_window_counter` (one row per refusal key and
+window) and the function `r2dbsvc_registry.denial_window_record`, which runs
+as its owner (`SECURITY DEFINER`, `search_path` pinned). `r2dbsvc_api` gets
+`EXECUTE` on the function and nothing on the table, `r2dbsvc_auditreader`
+gets `SELECT` on the table, and `PUBLIC` gets neither. Both objects are owned
+by the schema's owner role (`r2dbsvc_control`) whichever role runs the file.
+Every data-plane worker counts a refusal with one autocommit call on its own
+platform pool before the refusal's response is returned; if that call
+fails, the refusal is answered `SERVICE_UNAVAILABLE` instead. `audit_query`
+reads the counter rows of closed windows as summary events. Capacity:
+§15.1.
+
+Run it as `r2dbsvc_control` against `r2dbsvc_platform`, after `0007` (it
+references `application_audit` and `r2dbsvc_auditreader`); idempotent, no
+`-v` variables:
+
+```
+python -m r2db_api.ops apply-platform-migration 0016_denial_window_counter.sql --lock-timeout <value>
+```
+
+`part1_provision_host_and_db.sh` applies it on a host it provisions, right
+after `0015`. On a platform database without the function, or with one not
+in the state the file leaves it in, the application-plane process and its
+preflight refuse to start, naming the migration (F-21) -- apply it before
+starting a release that counts in it. The file adds new objects only and
+changes no existing one, so a release that predates it keeps running on the
+migrated database.
+
+**Check it with `ops verify-declarations` and read the `F-21` line.** The
+command reaches F-21 only over the DSN of a declared audit writer role; run
+as `r2dbsvc_control` it stops earlier, at `FAIL F-13` (exit 11). Pass
+`r2dbsvc_api`'s DSN for this one invocation:
+
+```
+R2DB_CONTROL_DSN=<DSN of r2dbsvc_api> python -m r2db_api.ops verify-declarations
+```
+
+Before the migration the run ends `FAIL F-21` (exit 20), naming the
+migration; after it, `OK F-21` and exit 0. F-21 checks the state the file
+leaves: the function is `SECURITY DEFINER` with `search_path` pinned and not
+executable by `PUBLIC`, it and the table are owned by the schema's owner,
+every role that writes `application_audit` may `EXECUTE` it, no runtime role
+holds a direct privilege on the table, and every role that reads both audit
+tables may `SELECT` it.

@@ -1,4 +1,4 @@
-# multi-process worker と in-memory の limit 状態の置き場 設計文書（v0.6）
+# multi-process worker と in-memory の limit 状態の置き場 設計文書（v0.7）
 
 ## 0. 版数・位置づけ
 
@@ -9,7 +9,7 @@
 - クラス: **Class D** (§10 の裁定 22。§3 D-6)。
 - 行番号の註 (2026-09-29): 本書の `file:line` は起草時点 (基点 `e3b0f5a`) の位置である。本変更で runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` の行は動いた (Invariant 1 は同書 §6.2、provision DSN の段は同書 §7 の前後)。src の行も両 peer で動いている。位置は節名・関数名で引き直す。本文の行番号は書き換えない。
 - 改版 (v0.6、2026-09-29): 監督裁定 43 (slot の走査を `scan` の lock で host 内に直列化。走査の非原子性で同時保持が L 未満でも `concurrency` の拒否が出た) を §10.7 に逐語で追記。D-3 (2)(2') の本文は書き換えず、§10.7 が優先する。設計レビュー 1 回。契約 1.11.0 不変。
-- 改版: v0.1 (2026-09-28) 起草 (drafter)。v0.2 (2026-09-28) 監督裁定 1〜9 を §10 に追記 (起草の疑義への裁定。本文は書き換えず、§10 が優先する)。v0.3 (2026-09-28) 設計レビュー 1 回目 (13 件とクラスの引き上げ) への監督裁定 10〜22 と Q-1 の書き換えを §10 に逐語で追記し、本文 (§0、§1.2〜§1.4、D-1〜D-7、§4〜§9) を裁定に合わせて書き換えた。覆した判定は行を残し、覆した裁定の番号と日付を添えた (`OPERATING_CONDITIONS.md` §1.8 の 56)。v0.4 (2026-09-28) 設計レビュー 1 回目の再確認 (新 1〜8) への監督裁定 26〜33 を §10.4 に逐語で追記し、覆された旧裁定 (11 の事前検査の手段、17 の計測時 64、18 の `concurrency` の写像、24) の末尾に覆した裁定の番号を添えた。本文 (§0、D-1〜D-5、§4、§6、§7、§9) を裁定に合わせて書き換えた (事前検査を one-shot の `--preflight` entry に、`concurrency` の写像に workers の条件、slot の扱いの決定、rate 行を int[60] に、計測は既定 32)。
+- 改版: v0.1 (2026-09-28) 起草 (drafter)。v0.2 (2026-09-28) 監督裁定 1〜9 を §10 に追記 (起草の疑義への裁定。本文は書き換えず、§10 が優先する)。v0.3 (2026-09-28) 設計レビュー 1 回目 (13 件とクラスの引き上げ) への監督裁定 10〜22 と Q-1 の書き換えを §10 に逐語で追記し、本文 (§0、§1.2〜§1.4、D-1〜D-7、§4〜§9) を裁定に合わせて書き換えた。覆した判定は行を残し、覆した裁定の番号と日付を添えた (`OPERATING_CONDITIONS.md` §1.8 の 56)。v0.4 (2026-09-28) 設計レビュー 1 回目の再確認 (新 1〜8) への監督裁定 26〜33 を §10.4 に逐語で追記し、覆された旧裁定 (11 の事前検査の手段、17 の計測時 64、18 の `concurrency` の写像、24) の末尾に覆した裁定の番号を添えた。本文 (§0、D-1〜D-5、§4、§6、§7、§9) を裁定に合わせて書き換えた (事前検査を one-shot の `--preflight` entry に、`concurrency` の写像に workers の条件、slot の扱いの決定、rate 行を int[60] に、計測は既定 32)。 v0.7 (2026-10-01): D-2 の表の #10 / #11 と §10 の裁定 21 に、R-115 による覆しの【追記】を足した (行は消さない。`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 56)。
 - 出所の記法は `docs/work-orders/OPERATING_CONDITIONS.md` §0。キーの無いファイルは経路で書く。
 - 公開規律: 実 DSN・実ホスト名・作業機の絶対パスを置かない (`OPERATING_CONDITIONS.md` §1.9)。
 - 本書の D-N / Q-N / WP-N は本書ローカルの ID である。他文書の同形 ID には文書名を添える (§1.8 の 59)。新しい共通条件は番号を確定する WP まで「新条件」と呼ぶ (§3 D-4)。台帳に新しく起こす行は番号を確定するまで「(次番)」と呼ぶ (§8)。
@@ -192,7 +192,7 @@ D-2 **`build_app()` は worker ごとに走る**。startup の副作用 (registr
 | 7 | `DataService` の構築 | :600-617 | process 内状態 | limit 状態・audit buffer・denial coalescer はこの process のもの |
 | 8 | `ControlAuthority.register_application` の loop | :620-622 | process 内の登録と in-memory `_audit` への append (`service.py`:1322-1324) | DB に書かない。in-memory の記録が process ごとに 1 件 |
 | 9 | lifespan の audit flush thread | :641-694 (thread :657) | process 内 thread | この process の buffer だけを flush する |
-| 10 | (経路) supervisor が子を SIGKILL したとき | uvicorn `supervisors/multiprocess.py`:218-223。最終 flush は :661-681 | 失うもの | lifespan の最終 flush が走らず、audit buffer と開いている denial 窓が失われる。1 process には無い経路である。起こりにくさは両論: pong thread は GIL の下でも通常は応答する / 長い C 呼び出しで GIL を握る要求があれば起こりうる (裁定 21) |
+| 10 | (経路) supervisor が子を SIGKILL したとき | uvicorn `supervisors/multiprocess.py`:218-223。最終 flush は :661-681 | 失うもの | lifespan の最終 flush が走らず、audit buffer と開いている denial 窓が失われる。1 process には無い経路である。起こりにくさは両論: pong thread は GIL の下でも通常は応答する / 長い C 呼び出しで GIL を握る要求があれば起こりうる (裁定 21) **【追記 2026-10-01 (R-115)】** R-115 (`docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) により audit buffer と process 内の denial 窓は無くなった (通常の event は応答の前に同期で書き、拒否の件数は platform DB の counter に応答の前に加算する)。この経路で失う audit は無い (共通条件 C-33)。 |
 | 11 | **【v0.4】** workers ≤ ceiling の検査 (裁定 27) | 新規 (`build_app()` 内、#3 の宣言の読み取りの後) | env と #3 の値の比較 | 外部状態を書かない |
 | 12 | **【v0.4】** slot directory の検査と自己検査 (裁定 27・28) | 新規 (`build_app()` 内) | directory の stat と、slot directory 内のファイル 1 つの open 2 回・flock・close | directory は作らない (配備側が作る)。ファイルは `O_CREAT` で作りうるが中身を持たず、lock は検査の間だけで close で外れる。検査の間は 1 本の lock を瞬間的に握る (どのファイルを使うかは §9 (r)) |
 | 13 | **【v0.4】** (経路) preflight の one-shot (裁定 26) | 新しい entry `python -m r2db_api.main --preflight` | #1〜#8、#11、#12 を 1 回余分に走らせ、開いた cell を閉じて終わる | 下の「preflight が 1 回余分に走ること」 |
@@ -211,7 +211,7 @@ D-2 **`build_app()` は worker ごとに走る**。startup の副作用 (registr
 | 8 | `_LimitStateHolder()` | :477 | process 内状態 | D-3 で区分 (ii) の置き場が変わる対象 |
 | 9 | served application の `PostgresBackend` を eager に構築 | :480-519 (:495、cell :510) | process 内の永続接続 (`MitateDB-api/src/mitatedb_api/backend_postgres.py`:294) | 接続は process ごと (接続予算は §9 (e)) |
 | 10 | lifespan の audit flush thread | :571-621 (thread :587) | process 内 thread | この process の buffer だけ |
-| 11 | (経路) supervisor が子を SIGKILL したとき | uvicorn `supervisors/multiprocess.py`:218-223。最終 flush は :571-621 (:606) | 失うもの | r2db の #10 と同じ (裁定 21) |
+| 11 | (経路) supervisor が子を SIGKILL したとき | uvicorn `supervisors/multiprocess.py`:218-223。最終 flush は :571-621 (:606) | 失うもの | r2db の #10 と同じ (裁定 21) **【追記 2026-10-01 (R-115)】** MitateDB も R-115 (`docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) で #10 と同じになり、この経路で失う audit は無い (C-33)。 |
 | 12 | **【v0.4】** workers ≤ ceiling の検査 (裁定 27) | 新規 (`build_app()` 内、#6 の宣言の読み取りの後) | env と #6 の値の比較 | 外部状態を書かない |
 | 13 | **【v0.4】** slot directory の検査と自己検査 (裁定 27・28) | 新規 (`build_app()` 内) | r2db の #12 と同じ | r2db の #12 と同じ |
 | 14 | **【v0.4】** (経路) preflight の one-shot (裁定 26) | 新しい entry `python -m mitatedb_api.main --preflight` | #1〜#9、#12、#13 を 1 回余分に走らせ、開いた backend / cell を閉じて終わる | 下の「preflight が 1 回余分に走ること」 |
@@ -822,7 +822,7 @@ D-16 閉止の判定規則 (計測前に固定): real-server plug で K=1 と K=
 
 ## 裁定 20 (指摘 10・Q-4) Q-4 の監督案を「(B) instance は 1 のまま `--workers` と `--cpu` で伸ばす」に改める。(C) の側に autoscaling の算術 (縮退時に宣言値に届かない) と `--cpu ≥ workers` を書く。依頼者判断のまま置く。
 
-## 裁定 21 (指摘 12・13) D-2 の表に「supervisor の SIGKILL 経路では lifespan の最終 flush が走らない (1 process には無い経路。起こりにくい: 両論)」を足す。出所の行番号を訂正 (CONTROL_MAPPING :711-712 / :903 / :989)。`verify-declarations` の L_c は自 process の env を読む限界を §9 (c) に開示。§4 の nginx の却下理由に pre-auth 3 class 分を足す。 【v0.4、2026-09-28】本裁定の行番号 (:903 / :989) はレビュー担当の誤りで、本文の :904 / :988 が正しい (裁定 33 の註。逐語は書き換えない)。
+## 裁定 21 (指摘 12・13) D-2 の表に「supervisor の SIGKILL 経路では lifespan の最終 flush が走らない (1 process には無い経路。起こりにくい: 両論)」を足す。出所の行番号を訂正 (CONTROL_MAPPING :711-712 / :903 / :989)。`verify-declarations` の L_c は自 process の env を読む限界を §9 (c) に開示。§4 の nginx の却下理由に pre-auth 3 class 分を足す。 【v0.4、2026-09-28】本裁定の行番号 (:903 / :989) はレビュー担当の誤りで、本文の :904 / :988 が正しい (裁定 33 の註。逐語は書き換えない)。 **【追記 2026-10-01 (R-115)】** D-2 の #10 / #11 の「失うもの」は R-115 (`docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) で無くなった。本裁定の逐語は書き換えない。
 
 ## 裁定 22 (クラス) Class **D** (`security/CONTROL_MAPPING.md` の SI-08 の主張を改める、`_ISOMORPHIC_TARGETS` の増減)。契約不変なので設計レビューは 1 回 + 本裁定の反映の再確認 (同じレビュー担当)。D-6 と §0 を改める。依頼者裁定 (Q-1〜Q-5) は逐語で §5 に記録する。
 
