@@ -27,17 +27,19 @@ The drive (`process_loss_drive`, one per launcher):
   3. reads the control plane's `audit_query` under a fresh `role=audit`
      credential, narrowing to this drive's `actor_id` on the client side,
      and polls until the evidence is complete or a bound derived from the
-     declared window plus the declared `visibility_lag_ms` plus a margin
-     runs out. There is no fixed sleep between the kill and the read.
+     window and the audit writer timeouts the launcher was started with,
+     plus a margin, runs out. There is no fixed sleep between the kill and
+     the read.
 
 The observations are separate tests on purpose, so one run shows each of
 them on its own:
 
   - the drive's preconditions (`M` is at least `workers + 1` and some worker
     handled two refusals; every request got the answer the drive counts on;
-    the kill followed the last response by well under the period of the
-    periodic flush an implementation may still run) and the kill itself
-    (every worker killed, gone, replaced, and a replacement serving) are
+    the call of the kill helper followed the last response by well under
+    the period of the periodic flush an implementation may still run) and
+    the kill itself (every worker killed, gone, replaced, and a replacement
+    serving; the helper's signal is SIGKILL, read from its source) are
     green whatever the implementation does with audit evidence;
   - the two tests on the evidence (every returned success has its event,
     with the `request_id` the response carried; the refusal count read back
@@ -51,6 +53,8 @@ saw two.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
 import subprocess
@@ -59,6 +63,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -84,13 +89,17 @@ _WRITER_TIMEOUTS_MS = (1000, 2000)
 _SUCCESSES = 6
 _DENIALS = 6
 
-#: Longest allowed gap between the last response and the SIGKILL. The
+#: Longest allowed gap between the last response and the call of the kill
+#: helper (the helper lists the process group once before it signals). The
 #: periodic flush an implementation may run has a 2 s period; a gap this
 #: small keeps that flush from rescuing evidence the kill was meant to take.
 _MAX_LAST_RESPONSE_TO_KILL_S = 1.0
 
-#: Poll bound: window + `visibility_lag_ms` + this margin. The interval is
-#: at least `60 / audit_requests_per_minute` seconds (both peers declare 60).
+#: Poll bound: the window plus the two audit writer timeouts the launcher
+#: was started with plus this margin (which also covers the clock-skew
+#: margin a peer adds to the writer timeouts when it derives its
+#: `visibility_lag_ms`). The interval is at least
+#: `60 / audit_requests_per_minute` seconds (both peers declare 60).
 _POLL_MARGIN_S = 5.0
 _POLL_INTERVAL_S = 1.2
 
@@ -224,14 +233,13 @@ def process_loss_drive(process_loss_deployment: SimpleNamespace) -> SimpleNamesp
     denial_pids = [
         pid for status in denial_statuses for pid in launcher.access_log_pids_for_status(status, since=since)
     ]
+    success_pids = launcher.access_log_pids_for_status(200, since=since)
     kill_started_at = time.monotonic()
     replacements = launcher.kill_workers(workers_before)
     kill_returned_at = time.monotonic()
 
     sent_request_ids = [body.get("request_id") for status, body in successes if status == 200]
-    poll_bound_s = (
-        launcher.coalescing_window_ms() / 1000.0 + audit_capability["visibility_lag_ms"] / 1000.0 + _POLL_MARGIN_S
-    )
+    poll_bound_s = launcher.coalescing_window_ms() / 1000.0 + sum(_WRITER_TIMEOUTS_MS) / 1000.0 + _POLL_MARGIN_S
     page_limit = min(1000, audit_capability.get("max_limit", 1000))
     poll_started_at = time.monotonic()
     polls = 0
@@ -249,6 +257,7 @@ def process_loss_drive(process_loss_deployment: SimpleNamespace) -> SimpleNamesp
         launcher=launcher, actor_id=actor_id,
         requests_per_minute=deployment.data_document["limits"]["requests_per_minute"],
         successes=successes, denials=denials, denial_statuses=denial_statuses, denial_pids=denial_pids,
+        success_pids=success_pids,
         workers_before=workers_before, replacements=replacements,
         response_to_kill_s=kill_started_at - last_response_at,
         kill_and_replace_s=kill_returned_at - kill_started_at,
@@ -309,6 +318,33 @@ def test_c33_kill_helper_returns_only_after_the_supervisor_replaced_the_worker(p
     assert served, f"the replacement {replacements!r} never answered a request within {_SERVE_DEADLINE_S}s"
 
 
+def test_c33_kill_helper_sends_sigkill(launcher_class: type) -> None:
+    """The launcher's `kill_workers` stops a worker with `SIGKILL`: every
+    `os.kill(pid, signal)` in its body other than the existence probe
+    (`signal` 0) names `signal.SIGKILL`, and at least one exists. Read from
+    the launcher's source, class located through the registry: a graceful
+    stop (`SIGTERM`, `Process.terminate()`) lets a worker run its shutdown
+    flush, after which the condition's two evidence observations pass on an
+    implementation that keeps events in process memory, and neither the
+    replacement observations nor the drive's preconditions can tell."""
+    source_path = inspect.getsourcefile(launcher_class)
+    assert source_path is not None
+    tree = ast.parse(Path(source_path).read_text(encoding="utf-8"))
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == launcher_class.__name__]
+    assert len(classes) == 1, f"class {launcher_class.__name__} found {len(classes)} times in the launcher source"
+    methods = [node for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name == "kill_workers"]
+    assert len(methods) == 1, "the launcher has no `kill_workers` method (空振り)"
+    signals = []
+    for node in ast.walk(methods[0]):
+        if not (isinstance(node, ast.Call) and ast.unparse(node.func) == "os.kill" and len(node.args) == 2):
+            continue
+        if isinstance(node.args[1], ast.Constant) and node.args[1].value == 0:
+            continue
+        signals.append(ast.unparse(node.args[1]))
+    assert signals, "`kill_workers` sends no signal through `os.kill` (空振り)"
+    assert set(signals) == {"signal.SIGKILL"}, f"`kill_workers` sends {signals!r}, expected only signal.SIGKILL"
+
+
 def test_c33_short_window_start_serves_the_window_it_was_given(process_loss_deployment: SimpleNamespace) -> None:
     """The coalescing window served in the control plane's own
     `audit_query` capability is the value `start()` was given, and the
@@ -329,8 +365,9 @@ def test_c33_drive_stays_inside_the_rate_bound_and_one_worker_handles_two_refusa
     shows a worker that handled two or more refusals; every success is a
     200 with its own `request_id` and every refusal the one denial (the
     contract fixes no status for it, so the access-log lines are read at the
-    status the responses carried); the
-    kill followed the last response by less than
+    status the responses carried); the workers that answered the successes
+    and the refusals are among the workers the kill is handed; the call of
+    the kill helper followed the last response by less than
     `_MAX_LAST_RESPONSE_TO_KILL_S`."""
     drive = process_loss_drive
     workers = len(drive.workers_before)
@@ -355,8 +392,14 @@ def test_c33_drive_stays_inside_the_rate_bound_and_one_worker_handles_two_refusa
     assert set(per_worker) <= set(drive.workers_before), (
         f"refusals were answered by {sorted(set(per_worker) - set(drive.workers_before))!r}, not among the workers {drive.workers_before!r}"
     )
+    assert len(drive.success_pids) == len(drive.successes), (
+        f"the access log holds {len(drive.success_pids)} success lines for {len(drive.successes)} successes (空振り)"
+    )
+    assert set(drive.success_pids) <= set(drive.workers_before), (
+        f"successes were answered by {sorted(set(drive.success_pids) - set(drive.workers_before))!r}, not among the workers {drive.workers_before!r}"
+    )
     assert drive.response_to_kill_s < _MAX_LAST_RESPONSE_TO_KILL_S, (
-        f"the kill followed the last response by {drive.response_to_kill_s:.2f}s, "
+        f"the call of the kill helper followed the last response by {drive.response_to_kill_s:.2f}s, "
         f"limit {_MAX_LAST_RESPONSE_TO_KILL_S}s"
     )
 
