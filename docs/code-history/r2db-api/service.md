@@ -247,6 +247,20 @@ new:
 without any durable record at all;
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4b -- an `allow` of any class but `authentication` is written by `_event` unless the backend hook already recorded it; a schema operation no longer passes a constant for "already recorded"
+
+old:
+```
+`outcome == "allow"` (`data_operation` only) or `"replayed"` (any class)
+```
+
+new:
+```
+`outcome == "allow"` (any class but `authentication`) or `"replayed"` (any class)
+```
+
 ## CH-0110
 
 - moved from: `src/r2db_api/service.py` (`DataService.acquire_concurrency_slot`)
@@ -1822,6 +1836,20 @@ design D-5(ii), contract 1.8.0: region (ii) is `requests_per_minute`/`concurrenc
 # begin with). `test_durable_denial_codes_match_the_design_d3_table`
 # (`tests/test_application_audit.py`) fixes this set against D-3's table by
 # name.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4b -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; no buffered record exists any more
+
+old:
+```
+Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable/buffered recording (review N-2: buffering them would just let the flow problem D-3 exists to bound come back through the buffer instead).
+```
+
+new:
+```
+Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable recording (N-2: recording them would just let the flow problem exists to bound come back).
 ```
 
 ## CH-0179

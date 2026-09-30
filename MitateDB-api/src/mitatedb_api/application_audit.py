@@ -58,12 +58,11 @@ DEFAULT_SCHEMA = "mitatedb_registry"
 DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS = 5000
 DEFAULT_AUDIT_IDLE_TIMEOUT_MS = 5000
 
-# Phase 4 (design §7.3/§7.4; WP-2(a) parity): the bounded buffer's default
-# capacity (implementation discretion per the design -- "既定 1000、実装
-# 裁量で設定可"), and the default periodic buffer-flush interval / minimum
-# interval between overflow-alert-row attempts -- ONE constant serving
-# both roles, matching r2db-api's own `_DEFAULT_AUDIT_FLUSH_INTERVAL_S`.
-DEFAULT_AUDIT_BUFFER_CAPACITY = 1000
+# The default interval of the composition root's periodic sweep of the
+# denial-coalescing windows (`audit_dispatch.AuditRouter.flush`), matching
+# r2db-api's own `_DEFAULT_AUDIT_FLUSH_INTERVAL_S`; a latency knob only --
+# it decides how soon an expired window's repeat-count summary row is
+# written, never whether a denial is recorded.
 DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 
 # Phase 4 (design D-3, P4-D3): the coalescing window.
@@ -92,10 +91,10 @@ DEFAULT_DENIAL_COALESCE_WINDOW_S = 60.0
 #                                  fail-closed (D-2 item 1: the
 #                                  confirmation choke). Reuses this peer's
 #                                  own pre-existing 6-field sink name.
-#   data_operation              -- query / insert / update success (P4-D5:
-#                                  a NEW emit site this WP introduces --
-#                                  this peer recorded none of these
-#                                  before). Buffer-class (D-4). Matches
+#   data_operation              -- query / insert / update / transact
+#                                  success, written before the response
+#                                  (a write's row before its data
+#                                  commit). Matches
 #                                  r2db-api's own identical term for the
 #                                  identical conceptual event, deliberately
 #                                  -- an AI-agent consumer of both peers'
@@ -112,9 +111,12 @@ DEFAULT_DENIAL_COALESCE_WINDOW_S = 60.0
 #                                  (developer authority required).
 #                                  Reuses this peer's own pre-existing
 #                                  6-field sink name.
-#   security_control_failure    -- D-4's buffer-overflow alert row. The
-#                                  design's own §7.4 names this class
-#                                  literally; not a peer-specific choice.
+#   security_control_failure    -- declared, no longer emitted: the
+#                                  bounded buffer whose overflow alert
+#                                  wrote it is gone, and rows already
+#                                  written are still returned by
+#                                  `audit_query`, so the word stays in
+#                                  the declaration.
 DECLARED_AUDIT_EVENT_CLASSES = frozenset({
     "schema_change",
     "destructive_data_operation",
@@ -144,6 +146,8 @@ DECLARED_AUDIT_OPERATIONS = frozenset({
     # write, same commit as the capability flip.
     "alter_field",
     "assert_active",
+    # declared, no longer emitted (the bounded buffer's overflow alert);
+    # rows already written are still returned by `audit_query`.
     "audit_buffer",
     "authenticate",
     "create_collection",
@@ -158,6 +162,8 @@ DECLARED_AUDIT_OPERATIONS = frozenset({
 # Phase 5 WP-3 (same design/ruling as `DECLARED_AUDIT_OPERATIONS` above):
 # this peer's application-plane half of the `target_kind` vocabulary.
 DECLARED_AUDIT_TARGET_KINDS = frozenset({
+    # declared, no longer emitted (the bounded buffer's overflow alert);
+    # rows already written are still returned by `audit_query`.
     "audit_sink",
     "collection",
     "credential",
@@ -168,8 +174,8 @@ DECLARED_AUDIT_TARGET_KINDS = frozenset({
 # `audit_query.DECLARED_AUDIT_OUTCOMES` one-for-one (`allow`/`deny`/
 # `error`, this module's own pre-existing literals at every `.append(...)`
 # call site, plus `replayed`, new as of this closure: an idempotency
-# REPLAY's own durable row, `audit_dispatch.AuditRouter.push_buffer_event`/
-# `.write_replayed_fail_closed_event`). `test_application_audit.py`'s own
+# REPLAY's own durable row, `audit_dispatch.AuditRouter.
+# write_replayed_fail_closed_event`). `test_application_audit.py`'s own
 # `test_declared_audit_outcomes_cover_every_emitted_outcome` fixes every
 # `outcome=`/`outcome="..."` literal this peer's durable emit sites
 # construct against this set, the same AST-scan shape `test_declared_
@@ -184,8 +190,8 @@ DECLARED_AUDIT_OUTCOMES = frozenset({
 
 # Contract `audit.fields`, verbatim order (matches `control_audit.
 # CONTROL_AUDIT_FIELDS`) plus the 14th, durable-schema-only `count` column
-# (D-3's coalesced-denial summary row / D-4's buffer-overflow alert row;
-# every other event leaves it `None` -- see migration `0005_application_
+# (D-3's coalesced-denial summary row; every other event leaves it `None`
+# -- see migration `0005_application_
 # audit.sql`'s own header for why this column is not added to
 # `control_audit`).
 APPLICATION_AUDIT_FIELDS = (
@@ -202,11 +208,10 @@ def coalesced_count(occurrences: int) -> Optional[int]:
     column's own semantics -- "the number of occurrences this ONE row
     represents; when that number is 1, the column is absent (NULL)"
     (contract `audit.query_event_fields_note`: "never zero or one"). Both
-    call sites that can ever pass a real integer here -- `audit_dispatch.
-    _DenialCoalescer`'s aggregate (repeat-count) row and `audit_dispatch.
-    _AuditBuffer`'s overflow-alert row -- route the raw tally through this
-    one function instead of writing it verbatim, so "exactly one repeat/
-    one drop" always renders as an ordinary NULL-count row.
+    call site that can ever pass a real integer here -- `audit_dispatch.
+    _DenialCoalescer`'s aggregate (repeat-count) row -- routes the raw
+    tally through this one function instead of writing it verbatim, so
+    "exactly one repeat" always renders as an ordinary NULL-count row.
     """
     return occurrences if occurrences >= 2 else None
 
@@ -233,10 +238,11 @@ class ApplicationAuditSink:
     """The durable application-plane audit trail's in-memory half
     (D-1/D-10) -- mirrors `control_audit.ControlAuditSink`'s shape and
     `inject_fault`/fault-injection mechanism one-for-one, extended with
-    `append_many` for D-4's buffer flush (a single batch write, never one
-    `append()` per buffered event -- `ControlAuditSink` has no equivalent
-    because control-plane events are never buffered, every `control_audit`
-    row is written synchronously).
+    `append_many` (a multi-row batch write kept in step with
+    `PostgresApplicationAuditSink.append_many`; `audit_dispatch` writes
+    each event with `append`, before its response is returned --
+    `ControlAuditSink` has no equivalent because every `control_audit`
+    row is written synchronously, one event at a time).
     """
 
     def __init__(self) -> None:
@@ -269,7 +275,7 @@ class ApplicationAuditSink:
         return event
 
     def append_many(self, events: "list[ApplicationAuditEvent]") -> None:
-        """D-4's buffer-flush batch write -- either every event in
+        """Batch write -- either every event in
         `events` is recorded, or (on injected/simulated failure) none is,
         mirroring `PostgresApplicationAuditSink.append_many`'s all-or-
         nothing real multi-row `INSERT`."""
@@ -307,13 +313,13 @@ class PostgresApplicationAuditSink:
 
     Either way every call -- the D-2 pre-commit fail-closed write, the D-3
     coalesced-denial first-occurrence write, the D-2 commit-failure `error`
-    row, the D-4 buffer flush -- runs in a transaction of its own that it
-    commits itself (or, on failure, never commits). A pooled connection is
-    held by exactly one call at a time, so two calls in flight at once are
-    on two different connections and never share a transaction; that is
-    what makes D-4's "buffer flush never shares a transaction with a
-    fail-closed write" requirement structural rather than something a
-    caller has to arrange. A connection that raised while borrowed is
+    row, the synchronous write of an ordinary event -- runs in a
+    transaction of its own that it commits itself (or, on failure, never
+    commits). A pooled connection is held by exactly one call at a time,
+    so two calls in flight at once are on two different connections and
+    never share a transaction; that is what makes "an event write never
+    shares a transaction with the data change it describes" structural
+    rather than something a caller has to arrange. A connection that raised while borrowed is
     closed and forgotten; one that returned normally is rolled back once
     more (a no-op after the call's own commit, but it ends the transaction
     a read-only `events()` leaves open) before it goes back to the pool.
@@ -498,7 +504,7 @@ class PostgresApplicationAuditSink:
             conn.commit()
 
     def append_many(self, events: "list[ApplicationAuditEvent]") -> None:
-        """D-4's buffer flush: every buffered `ApplicationAuditEvent` in
+        """Batch write: every `ApplicationAuditEvent` in
         `events` is written as one multi-row `INSERT` in one transaction --
         either the whole batch commits or (on failure) none of it does,
         mirroring `ApplicationAuditSink.append_many`'s in-memory all-or-
@@ -544,7 +550,6 @@ __all__ = [
     "DEFAULT_SCHEMA",
     "DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS",
     "DEFAULT_AUDIT_IDLE_TIMEOUT_MS",
-    "DEFAULT_AUDIT_BUFFER_CAPACITY",
     "DEFAULT_AUDIT_FLUSH_INTERVAL_S",
     "DEFAULT_DENIAL_COALESCE_WINDOW_S",
     "DECLARED_AUDIT_EVENT_CLASSES",

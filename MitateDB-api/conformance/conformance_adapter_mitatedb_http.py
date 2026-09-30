@@ -2242,9 +2242,12 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         if self._audit_query_status() not in ("enabled", "partial"):
             raise self._audit_surface_absent(
                 "flush_audit_buffer",
-                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
+                "audit_query is not declared enabled/partial -- there is nothing to make visible on this "
                 "deployment's own declared posture",
             )
+        # Ordinary data-operation events are written before their response
+        # is returned, so they are already visible; what can still wait is
+        # a denial-coalescing window's repeat-count summary row.
         # Privileged, out-of-band hook -- calls the real, shared `Audit
         # Router` DIRECTLY (never a wire call: there is no HTTP endpoint
         # for this on either host, by design). `force_expire_denial_

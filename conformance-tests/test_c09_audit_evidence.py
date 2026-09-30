@@ -39,9 +39,10 @@ The 4 vectors (design §8.1 / §9.2 property 4):
 1. **Observability**: a destructive operation performed through the
    ordinary application plane becomes visible through `audit_query`.
    Scoped to fail-closed-class events only (design §8.1 vector 1's own
-   scoping) -- these are never buffered (D-2/D-3), so visibility lag alone
-   (`audit_visibility_lag_ms()`, never a fixed `sleep`) makes them
-   observable, with no `flush_audit_buffer()` needed.
+   scoping) -- these are written to the durable sink before the response
+   (D-2/D-3), so visibility lag alone (`audit_visibility_lag_ms()`, never a
+   fixed `sleep`) makes them observable, with no `flush_audit_buffer()`
+   needed.
 2. **Secret absence**: no `audit.forbidden_fields` member appears as an
    event KEY, and no reusable secret/verifier value appears as an event
    VALUE. `actor_id`/`target_id`/`application_id`/`request_id`/`event_id`
@@ -366,8 +367,8 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
         )
 
     # PROVIDED. Review F-1: the row inserted below is set up BEFORE the
-    # baseline snapshot, so the insert's own event (a buffer-class,
-    # non-fail-closed event, design §7.3) is never counted as "new" below
+    # baseline snapshot, so the insert's own event (a non-destructive
+    # `data_operation` event, design §7.3) is never counted as "new" below
     # -- only the DESTRUCTIVE DELETE that follows the baseline snapshot
     # can be. The new event is identified by EVENT_ID SET DIFFERENCE
     # against that baseline (the "time window" the review's own "あるべき
@@ -386,9 +387,9 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
 
     adapter.delete(session, entity, "probe_key", marker, destructive=True, confirmation=VALID_CONFIRMATION)
 
-    # Fail-closed events are written durably before commit and are never
-    # buffered (design D-2/D-3), so visibility lag alone -- never a fixed
-    # sleep -- makes the delete above observable.
+    # The delete's event is written durably before commit (design D-2/D-3),
+    # so visibility lag alone -- never a fixed sleep -- makes the delete
+    # above observable.
     time.sleep(adapter.audit_visibility_lag_ms() / 1000)
     result = _require_provided(adapter, control_actor, {"limit": 1000})
     events = result["events"]
@@ -678,7 +679,7 @@ def test_c09_v4_no_audit_mutation_or_deletion_surface_exists(adapter):
 # Each vector below now (a) generates a KNOWN durable event via a real
 # in-band `register_application_inband` call (`application_lifecycle`
 # class -- durable by construction on both peers' control planes, no
-# buffer/coalescing there, confirmed by source: r2db-api's
+# coalescing there, confirmed by source: r2db-api's
 # `control_plane.py::ControlPlaneService.register_application` and
 # MitateDB-api's `control_plane.py`'s own `register_application` both
 # emit `event_class="application_lifecycle"`/`operation=

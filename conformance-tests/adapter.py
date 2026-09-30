@@ -1965,21 +1965,25 @@ class ConformanceAdapter(ABC):
     @abstractmethod
     def flush_audit_buffer(self) -> None:
         """Adapter-privileged hook (peer-side, same category as `control_
-        audit_events()` above) that forces the peer's own bounded
-        data-operation-event buffer (design D-4) to flush synchronously,
-        so a test can observe a just-buffered event through `audit_query`
-        without waiting on the buffer's own real flush timer. Follows the
-        same declare-first dispatch `audit_query` documents above --
-        `SurfaceAbsent` under the same extended meaning when the audit
-        surface is not provided at all (there is nothing to flush into
-        anywhere the peer has declared it will answer for), never a
-        `ConformanceDenial` for that case. A peer with a real, `enabled`
-        audit surface but no separate buffer-flush mechanism of its own
-        (buffer-class events become visible on their own after `audit_
-        visibility_lag_ms()` regardless) may implement this as a real no-op
-        rather than raising -- this method's contract is "make buffered
-        events visible now if that is not already true", not "a buffer
-        must exist as a distinct mechanism".
+        audit_events()` above) that makes every event the peer has recorded
+        so far readable through `audit_query` now, so a test can observe it
+        without waiting on a timer. Neither peer holds an ordinary data-
+        operation event in memory any more -- each is written to the
+        durable sink before its response is returned, so for those events
+        this hook has nothing to do. What it still does is sweep the peer's
+        denial-coalescing windows, writing the repeat-count summary row of
+        a window that has expired (an adapter may also force every open
+        window), so a test can observe that row without waiting out the
+        real window. Follows the same declare-first dispatch `audit_query`
+        documents above -- `SurfaceAbsent` under the same extended meaning
+        when the audit surface is not provided at all (there is nothing to
+        make visible anywhere the peer has declared it will answer for),
+        never a `ConformanceDenial` for that case. A peer with a real,
+        `enabled` audit surface and no such window sweep of its own may
+        implement this as a real no-op rather than raising -- this method's
+        contract is "make recorded events visible now if that is not
+        already true", not "a buffer or a window must exist as a distinct
+        mechanism".
         """
 
     @abstractmethod

@@ -716,8 +716,9 @@ class ControlPlaneService:
                 "outcome=allow means the operation was authorized and submitted; a later outcome=error "
                 "row sharing the same request_id means it did not commit. An allow row with no "
                 "corresponding error row usually means the operation committed, but -- if the process "
-                "was lost between recording allow and committing -- can also mean it did not; the audit "
-                "trail alone cannot distinguish the two in that one case."
+                "was lost between recording allow and committing, or if the error row itself could not "
+                "be recorded -- can also mean it did not; the audit trail alone cannot distinguish the "
+                "two in those cases."
             ),
             # WP-2(b) review B-1: the durable `count` column's real semantics, matching contract `audit.query_event_fields_note` verbatim ("present only on an event representing more than one coalesced occurrence, absent -- never zero or one -- otherwise"). A denial-coalescing window that ends up representing exactly one occurrence is written as an ordinary row with count absent, not count=1 -- a consumer must never read "count is present" as "this row alone represents 2+ occurrences" being the ONLY way to represent 2+; it is, but the converse (absent implies exactly 1) is what this note pins down.
             # history: CH-0263

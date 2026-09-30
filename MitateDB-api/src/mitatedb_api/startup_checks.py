@@ -1200,4 +1200,11 @@ KNOWN_FINGERPRINTS: tuple = (
         default_thread_limit=_DEFAULT_THREAD_LIMIT_DIGEST,
         checker_references=_REFERENCES_G2_G3,
     )),
+    KnownFingerprint("data", "G3", None, Fingerprint(
+        platform_declarations="fe0df5c27cfd9ad4a136f91e20238bad7591cec4",
+        config="f75dbeef3f21eac41c8d91823c452055e253ca34",
+        startup_module="8d0226ca24c000fc23dcd409cccfc7152deea16a",
+        default_thread_limit=_DEFAULT_THREAD_LIMIT_DIGEST,
+        checker_references=_REFERENCES_G2_G3,
+    )),
 )

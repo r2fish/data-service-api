@@ -9,7 +9,6 @@ from typing import Any, Callable, Iterator
 import uuid
 
 from .audit import ApplicationAuditSink, AuditSink
-from .audit_hook import ApplicationAuditHook
 from .audit_counts import _coalesced_count
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
@@ -39,7 +38,7 @@ _SLOT_FAILURE_LOG = concurrency_slots.BackendFailureLog(_logger, _SLOT_FAILURE_L
 # supervisor ruling 2026-09-02): an INCLUSION set -- only a denial whose
 # reason_code is one of these 6 (D-3's own range table, SI-14's minimal
 # event class: authentication/authorization denial) is fail-closed/
-# coalesced-durable. Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable/buffered recording (N-2: buffering them would just let the flow problem exists to bound come back through the buffer instead). An exclusion-list reading
+# coalesced-durable. Every other reason_code -- D-3's originally-named 4 non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_UNAVAILABLE`, ...) -- is out of scope for durable recording (N-2: recording them would just let the flow problem exists to bound come back). An exclusion-list reading
 # (only the named 4 are non-durable, everything else durable) was this
 # module's first implementation; the review's B-1 finding showed it lets a
 # `SERVICE_UNAVAILABLE` produced by the audit pipeline's OWN failure re-enter
@@ -715,15 +714,15 @@ class DataService:
                 # "replayed"` line -- see `_mutate_outcome`'s identical
                 # comment (a resent `drop_entity` must not return
                 # `committed: true` with zero evidence of its own). Unlike
-                # a genuine schema commit (`already_durable=True` -- the
-                # pre-commit hook already wrote the durable row
-                # synchronously), a replay never invoked that hook at all,
-                # so `already_durable=False` here.
+                # a genuine schema commit (whose pre-commit hook already
+                # wrote the durable row synchronously, `hook.fired`), a
+                # replay never invoked that hook at all, so
+                # `already_durable=False` here.
                 if not dry_run:
                     if outcome.replayed:
                         self._event(canonical, operation="schema", outcome="replayed", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=False)
                     else:
-                        self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
+                        self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=hook is not None and hook.fired)
                 return outcome
         except FoundationError as exc:
             self._event(context, operation="schema", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="privilege_denial", request_id=rid, details=exc.details)
@@ -919,7 +918,7 @@ class DataService:
           recorded this exact event): return immediately. D-10's "at most
           one durable row per operation" rule.
         - `outcome == "deny"`: `details["origin"] == "audit_sink"` means this denial's `SERVICE_UNAVAILABLE` was produced by the audit pipeline itself already failing to record this very operation (a pre-commit sink failure, a commit-failure error-row write, a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write for what is still logically one operation, so this returns without doing anything further. Otherwise, any reason code outside D-3's durable-code inclusion list (`_DURABLE_DENIAL_CODES` -- not merely the 4 originally named) returns without any durable record at all; every other reason code is fail-closed-class and goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
-        - `outcome == "allow"` (`data_operation` only) or `"replayed"` (any class): written synchronously to the durable sink before the caller's response is returned -- `query`/`catalog`, a `mutate` whose backend did not already record it (`already_durable=False`), and every replay. A sink failure raises `SERVICE_UNAVAILABLE` (fail-closed), so a response is only ever returned for an operation whose event is durable.
+        - `outcome == "allow"` (any class but `authentication`) or `"replayed"` (any class): written synchronously to the durable sink before the caller's response is returned -- `query`/`catalog`, a `mutate` whose backend did not already record it (`already_durable=False`), and every replay. A sink failure raises `SERVICE_UNAVAILABLE` (fail-closed), so a response is only ever returned for an operation whose event is durable.
 
         History: CH-0109
         """
@@ -946,9 +945,10 @@ class DataService:
         # `authenticate`'s own success (`event_class="authentication"`) is not a
         # data operation, and no rule names it fail-closed either, so it stays
         # in the legacy in-memory sink only (already appended above), with no
-        # durable record at all. Every other `allow` here is a `data_operation`;
-        # a `replayed` line is durable for every class.
-        if outcome == "allow" and event_class != "data_operation":
+        # durable record at all. Every other `allow` reaches the durable sink
+        # here unless its backend's pre-commit hook already wrote it
+        # (`already_durable`); a `replayed` line is durable for every class.
+        if outcome == "allow" and event_class == "authentication":
             return
         try:
             self._durable_audit.append(

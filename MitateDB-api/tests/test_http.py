@@ -125,11 +125,9 @@ def app_a_stack_with_audit(platform, app_a):
     the durable application-plane audit row a real HTTP call produces,
     mirroring `test_application_audit.py`'s own `make_router`/`router.
     durable_sink.events()` pattern rather than a second, independently
-    maintained PostgreSQL-backed audit reader. `stack.router.flush()`
-    drains the buffer-class events `cell.py::ApplicationCell._push_data_
-    operation_event` (query/insert/update) queues before they reach
-    `durable_sink` -- called by every test below immediately after its own
-    HTTP call, before reading `events()`."""
+    maintained PostgreSQL-backed audit reader. Every event is written to
+    `durable_sink` before its response is returned, so a test reads
+    `events()` right after its own HTTP call, with no flush in between."""
     read_store = PostgresCredentialStore(
         platform.api_dsn, pepper="synthetic-test-pepper-mitatedb-http-audit-0000", schema=platform.registry_schema,
     )
@@ -1741,10 +1739,9 @@ def test_cross_entity_mutation_delete_declare_and_echo_per_entity_wrong_entity_p
 
 def _latest_audit_event_for(router: AuditRouter, request_id: str):
     """The durable row(s) whose own `request_id` column equals `request_
-    id` -- `router.flush()` must already have been called by the time this
-    runs (buffer-class events, `cell.py::ApplicationCell._push_data_
-    operation_event`, are not visible on `durable_sink` before that).
-    Asserts exactly one such row rather than silently taking `[0]`, so a
+    id` -- no `router.flush()` first: every event is written to the
+    `durable_sink` before its response is returned, so a request whose row
+    is not there yet fails loudly here. Asserts exactly one such row rather than silently taking `[0]`, so a
     request that (by an unrelated bug) left NO durable row, or more than
     one, fails loudly here instead of masquerading as a pass."""
     matches = [event for event in router.durable_sink.events() if event.request_id == request_id]
@@ -1761,7 +1758,6 @@ def test_request_id_is_pinned_through_query_response_and_audit_row(app_a_stack_w
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
     event = _latest_audit_event_for(stack.router, body_request_id)
     assert event.operation == "query"
 
@@ -1778,13 +1774,11 @@ def test_request_id_is_pinned_through_mutate_response_and_audit_row(app_a_stack_
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
-    # A non-destructive `transact` batch is ONE buffer-class row for the
-    # WHOLE batch (`cell.py::ApplicationCell.transact`'s own D-4/P4-D5
-    # comment: "exactly ONE `data_operation` event...operation='transact'"
-    # -- single-entity `/mutations` reaches the SAME `transact` path
-    # cross-entity `/v1/data/mutations` does, never a separate per-
-    # operation "insert" event).
+    # A non-destructive `transact` batch is ONE `data_operation` row for
+    # the WHOLE batch (`operation='transact'` -- single-entity
+    # `/mutations` reaches the SAME `transact` path cross-entity
+    # `/v1/data/mutations` does, never a separate per-operation "insert"
+    # event).
     event = _latest_audit_event_for(stack.router, body_request_id)
     assert event.operation == "transact"
 
@@ -1806,7 +1800,6 @@ def test_request_id_is_pinned_through_cross_entity_mutate_response_and_audit_row
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
     # Both operations share the ONE request-level `request_id` -- at least
     # one durable row for it is enough to prove the pin (unlike `_latest_
     # audit_event_for`'s single-entity siblings, this call legitimately
@@ -1822,7 +1815,6 @@ def test_request_id_is_pinned_through_schema_response_and_audit_row(app_a_stack_
     header_request_id = response.headers["x-request-id"]
     body_request_id = response.json()["request_id"]
     assert header_request_id == body_request_id
-    stack.router.flush()
     event = _latest_audit_event_for(stack.router, body_request_id)
     assert event.event_class == "schema_change"
 

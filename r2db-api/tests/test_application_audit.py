@@ -2017,6 +2017,82 @@ def test_schema_commit_waiting_on_a_lock_past_the_execution_budget_writes_an_err
         cell.close()
 
 
+@pytest.mark.parametrize(("errcode", "expected_code", "expected_status"), [("23505", "CONFLICT", 409), ("22003", "VALIDATION_FAILED", 400)])
+def test_a_deferred_constraint_failing_at_commit_writes_an_error_row_and_keeps_the_response(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, errcode: str, expected_code: str, expected_status: int,
+) -> None:
+    """A deferred trigger's own failure surfaces from the COMMIT, after the
+    `allow` row is durable: a unique violation (409) or a data error (400)
+    leaves the row that says the data did not commit, like every other
+    failure of that COMMIT, and the response class does not change.
+
+    mutation (`postgres.py`, `transact`): drop the `commit_failed()` call
+    from the `UniqueViolation` branch (or the `DataError` one) -- only the
+    `allow` row is there."""
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    admin_dsn = _dsn_with(platform.admin_dsn, dbname=app_a.database)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                f"CREATE FUNCTION public.r2db_test_commit_reject() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'rejected at commit' USING ERRCODE = '{errcode}'; END $$"
+            )
+            admin.execute(
+                "CREATE CONSTRAINT TRIGGER r2db_test_commit_reject AFTER INSERT ON public.notes "
+                "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.r2db_test_commit_reject()"
+            )
+        request_id = f"r-commit-reject-{errcode}-{uuid.uuid4()}"
+        from r2db_api.service import _PreCommitHook
+
+        fields = {
+            "event_class": "data_operation", "request_id": request_id, "application_id": app_a.slug,
+            "actor_type": "application_credential", "actor_id": "cred-fake", "role": "runtime",
+            "operation": "mutate", "target_kind": "entity", "target_id": None,
+        }
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "insert", "values": {"body": "b"}}], LIMITS, audit_hook=_PreCommitHook(sink, fields))
+        assert (exc.value.code, exc.value.status) == (expected_code, expected_status)
+
+        matching = [r for r in _application_audit_rows(platform) if r[1] == request_id]
+        assert sorted(r[8] for r in matching) == ["allow", "error"], f"expected an allow row then an error row for {request_id!r}, got {matching!r}"
+        assert cell.query("notes", select=["id"], where=[], page_size=10, limits=LIMITS).items == []
+    finally:
+        sink.close()
+        cell.close()
+
+
+@pytest.mark.parametrize(("errcode", "expected_code", "expected_status"), [("23505", "CONFLICT", 409), ("22003", "VALIDATION_FAILED", 400)])
+def test_a_deferred_constraint_failing_at_the_schema_commit_writes_an_error_row_and_keeps_the_response(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, errcode: str, expected_code: str, expected_status: int,
+) -> None:
+    """The schema transaction's COMMIT can fail a deferred check too (a
+    unique violation, a data error): the `error` row is written and the
+    response class is unchanged.
+
+    mutation (`postgres.py`, `apply_schema`): drop the `commit_failed()` call
+    from the `UniqueViolation` branch (or the `DataError` one) -- only the
+    `allow` row is there."""
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    try:
+        _install_schema_commit_trigger(platform, app_a, f"RAISE EXCEPTION 'rejected at commit' USING ERRCODE = '{errcode}';")
+        request_id = f"r-schema-commit-reject-{errcode}-{uuid.uuid4()}"
+        from r2db_api.service import _PreCommitHook
+
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema(
+                {"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS,
+                audit_hook=_PreCommitHook(sink, _schema_hook_fields(app_a, request_id)),
+            )
+        assert (exc.value.code, exc.value.status) == (expected_code, expected_status)
+        matching = [r for r in _application_audit_rows(platform) if r[1] == request_id]
+        assert sorted(r[8] for r in matching) == ["allow", "error"], f"expected an allow row then an error row for {request_id!r}, got {matching!r}"
+    finally:
+        sink.close()
+        cell.close()
+
+
 # ===========================================================================
 # Section 6: D-3 coalescing (§9.2 property 10(ii)) and the durable denial
 # code vocabulary (§9.2 property 10, D-3's range table, J-2 inclusion list).
@@ -2631,6 +2707,39 @@ def test_schema_replay_event_is_durable_before_the_result_is_returned() -> None:
     assert [(r["event_class"], r["operation"], r["outcome"]) for r in rows] == [("privilege_sensitive", "schema", "replayed")]
 
 
+class _NeverCallsTheHookCell(ApplicationCell):
+    """A backend that runs a schema operation but never calls the pre-commit hook it is given."""
+
+    def apply_schema(self, operation: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        kwargs["audit_hook"] = None
+        return super().apply_schema(operation, *args, **kwargs)
+
+
+def test_a_schema_operation_whose_backend_never_calls_the_hook_is_still_durable_before_the_response() -> None:
+    """The service writes a schema operation's `allow` row itself when the
+    backend's pre-commit hook did not (`hook.fired`), instead of trusting a
+    constant: a backend that never calls the hook must not leave a
+    committed schema change with no durable row.
+
+    mutation (`service.py`, `schema`): pass `already_durable=True` for a
+    non-replayed operation again -- no row is written for it."""
+    durable = ApplicationAuditSink()
+    credentials = CredentialStore(pepper="test-pepper-application-audit")
+    with credentials.unit_of_work() as work:
+        credentials.add("dev-a", "app-a", "developer", "dev-secret-a", work=work)
+    service = DataService(
+        credentials, limits=LIMITS, durable_audit=durable,
+        cell_factory=lambda application_id, entities: _NeverCallsTheHookCell(application_id=application_id, entities=entities),
+    )
+    ControlAuthority(service).register_application("app-a", entities={"notes": [{"body": "a"}]})
+    dev = developer_context(service)
+
+    service.schema(dev, {"operation": "create_entity", "entity": "widgets_no_hook"}, request_id="r-schema-no-hook")
+
+    rows = _events_for(durable, "r-schema-no-hook")
+    assert [(r["event_class"], r["operation"], r["outcome"]) for r in rows] == [("privilege_sensitive", "schema", "allow")]
+
+
 @pytest.mark.parametrize("kind", ["query", "catalog", "insert", "mutate_replay", "schema_replay"])
 def test_a_sink_failure_makes_an_ordinary_operation_service_unavailable_and_keeps_no_event(kind: str) -> None:
     durable = ApplicationAuditSink()
@@ -2662,6 +2771,9 @@ def test_a_sink_failure_makes_an_ordinary_operation_service_unavailable_and_keep
 
     durable.inject_fault(None)
     assert len(durable_events(durable)) == events_before  # the failed write kept no event, and no denial row was made up for it
+    if kind == "insert":
+        # the pre-commit write failed before the batch was kept: the seeded row is still the only one
+        assert [row["body"] for row in service.query(ctx, "notes", select=["body"])] == ["a"]
 
 
 def test_authenticate_success_stays_out_of_the_durable_sink() -> None:

@@ -1670,8 +1670,9 @@ class ControlPlaneService:
                 "outcome=allow means the operation was authorized and submitted; a later outcome=error "
                 "row sharing the same request_id means it did not commit. An allow row with no "
                 "corresponding error row usually means the operation committed, but -- if the process "
-                "was lost between recording allow and committing -- can also mean it did not; the audit "
-                "trail alone cannot distinguish the two in that one case."
+                "was lost between recording allow and committing, or if the error row itself could not "
+                "be recorded -- can also mean it did not; the audit trail alone cannot distinguish the "
+                "two in those cases."
             ),
             # Contract `audit.query_event_fields_note` verbatim ("present
             # only on an event representing more than one coalesced

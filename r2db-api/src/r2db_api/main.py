@@ -287,7 +287,7 @@ def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> i
 
 def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
     """Phase 6 WP-0 (design D-4(a)): unlike `_optional_int`, this
-    function's only consumer is the audit-buffer flush interval, and a
+    function's only consumer is the denial-window sweep interval, and a
     misconfigured value there does not degrade gracefully --
     `threading.Event.wait(0)`, `.wait(-1)`, and `.wait(float("nan"))` all
     return immediately (`False`), so a value that is unset or empty is

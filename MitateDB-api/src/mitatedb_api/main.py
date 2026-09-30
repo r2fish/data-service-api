@@ -92,17 +92,12 @@ Environment variable contract:
                                            Change with `python -m
                                            mitatedb_api.ops
                                            declare-surfaces`.
-    MITATEDB_AUDIT_BUFFER_CAPACITY        optional, default 1000 -- D-4's
-                                           bounded in-memory buffer
-                                           capacity for ordinary
-                                           (buffer-class) data-operation
-                                           success events, per process.
     MITATEDB_AUDIT_FLUSH_INTERVAL_S       optional, default 2.0 -- how
                                            often this process' own
-                                           background thread calls
-                                           `audit_dispatch.AuditRouter.
-                                           flush()` (D-4's periodic flush
-                                           trigger); a latency knob only,
+                                           background thread sweeps the
+                                           denial-coalescing windows
+                                           (`audit_dispatch.AuditRouter.
+                                           flush()`); a latency knob only,
                                            never a correctness one.
     MITATEDB_THREAD_LIMIT                 optional, unset or empty
                                            defaults to `DEFAULT_THREAD_
@@ -135,8 +130,7 @@ import psycopg
 from psycopg import sql
 from starlette.types import ASGIApp
 
-from .application_audit import (DEFAULT_AUDIT_BUFFER_CAPACITY,
-                                DEFAULT_AUDIT_FLUSH_INTERVAL_S,
+from .application_audit import (DEFAULT_AUDIT_FLUSH_INTERVAL_S,
                                 PostgresApplicationAuditSink)
 from .audit import AuditSink
 from .audit_dispatch import AuditRouter
@@ -190,7 +184,7 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
 
 def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
     """Phase 6 WP-0 (design D-4(a)): unlike `_optional_int`, this
-    function's only consumer is the audit-buffer flush interval, and a
+    function's only consumer is the denial-window sweep interval, and a
     misconfigured value there does not degrade gracefully --
     `threading.Event.wait(0)`, `.wait(-1)`, and `.wait(float("nan"))` all
     return immediately (`False`), so a value that is unset or empty is
@@ -508,7 +502,6 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # automatically. `durable_audit` itself was already constructed above
     # (N-2, before the dual check) so that check's own connection could be
     # opened via this sink's `_connect()` -- not reconstructed here.
-    audit_buffer_capacity = _optional_int(env, "MITATEDB_AUDIT_BUFFER_CAPACITY", DEFAULT_AUDIT_BUFFER_CAPACITY)
     audit_flush_interval_s = _optional_float(env, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", DEFAULT_AUDIT_FLUSH_INTERVAL_S)
     # Q4 phase (design D-2(e)): `denial_coalesce_window_s` now comes from
     # the SAME single-source declaration `audit_query`'s own control-plane
@@ -516,13 +509,12 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # not a peer-local constant -- both processes describe the same
     # window (§1.2's own former "別プロセスだから読めない" drift this
     # phase closes).
-    # ONE shared router (design D-3/D-4's own "process-local" scoping) --
+    # ONE shared router (design D-3's own "process-local" scoping) --
     # handed to `credentials` below AND to every `ApplicationCell` this
-    # process builds, so denial coalescing and the buffer are shared
-    # process-wide, not duplicated per credential store/cell.
+    # process builds, so denial coalescing is shared process-wide, not
+    # duplicated per credential store/cell.
     audit_router = AuditRouter(
-        durable_audit, buffer_capacity=audit_buffer_capacity, alert_min_interval_s=audit_flush_interval_s,
-        denial_coalesce_window_s=declarations.audit_coalescing_window_ms / 1000,
+        durable_audit, denial_coalesce_window_s=declarations.audit_coalescing_window_ms / 1000,
     )
 
     credentials = PostgresCredentialStore(
@@ -644,13 +636,15 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # bounded by this deployment's own declared `concurrency` class.
     service = HttpService(credentials, _cell_factory, audit_router=audit_router, limit_holder=limit_holder, max_concurrency=config.max_concurrency)
 
-    # Phase 4 (design D-4, "実装裁量" -- periodic flush trigger): a daemon
-    # thread that calls `audit_router.flush()` on a fixed interval for
-    # the lifetime of this process, so buffered/coalesced evidence does
-    # not sit un-durable indefinitely on a served application that
-    # happens to receive no further traffic. Purely a latency knob --
-    # correctness of D-3/D-4's own bounds does not depend on this thread
-    # running at all. The stop `Event` and `Thread` are created FRESH
+    # A daemon thread that calls `audit_router.flush()` on a fixed
+    # interval for the lifetime of this process, so an expired denial-
+    # coalescing window's repeat-count summary row does not wait for the
+    # next denial of the same key on a served application that happens to
+    # receive no further traffic. Purely a latency knob (see
+    # `MITATEDB_AUDIT_FLUSH_INTERVAL_S` in this module's own docstring) --
+    # ordinary events are already durable before their response is
+    # returned, so nothing else depends on this thread running. The stop
+    # `Event` and `Thread` are created FRESH
     # inside `_lifespan` on every entry (mirroring r2db-api's own
     # `main.py::_lifespan` identical reasoning, independently arrived at
     # here): `threading.Thread.start()` may only be called once per
@@ -666,11 +660,11 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
                 try:
                     audit_router.flush()
                 except Exception:
-                    # A flush failure must never kill this thread (there
+                    # A sweep failure must never kill this thread (there
                     # would then be nothing left to retry the next
-                    # interval) -- D-4's own sticky/backoff retry logic
-                    # already lives inside `AuditRouter.flush()`; this is
-                    # only a defensive backstop against a truly
+                    # interval) -- a window whose summary row could not be
+                    # written is already re-queued inside the coalescer;
+                    # this is only a defensive backstop against a truly
                     # unexpected exception escaping it.
                     pass
 
@@ -681,21 +675,21 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         finally:
             audit_flush_stop.set()
             audit_flush_thread.join(timeout=5.0)
-            # One final synchronous flush before this process stops --
-            # without this, up to `buffer_capacity` buffered events and
-            # every still-open denial-coalescing window's accumulated
-            # repeat count are silently discarded on a graceful shutdown
-            # (the periodic thread has just stopped, and nothing else
-            # will ever call this again for this process).
+            # One final synchronous sweep before this process stops --
+            # without this, every still-open denial-coalescing window's
+            # accumulated repeat count is silently discarded on a graceful
+            # shutdown (the periodic thread has just stopped, and nothing
+            # else will ever call this again for this process).
             # `force_expire_denial_windows=True`: a window that has not
             # YET reached its own window_s at this exact moment still
             # gets its repeat-summary row written here -- shutdown is not
-            # a crash, so D-3 only sanctions losing counts to an actual
-            # crash, never to an orderly stop.
+            # a crash, so the allowance for losing only the in-progress
+            # window's count on a crash does not apply; an orderly stop
+            # must not discard it.
             try:
                 audit_router.flush(force_expire_denial_windows=True)
             except Exception:
-                # Best-effort, like every other flush attempt -- shutdown
+                # Best-effort, like every other sweep attempt -- shutdown
                 # must still complete and release connections below even
                 # if the sink happens to be down at this exact moment.
                 pass

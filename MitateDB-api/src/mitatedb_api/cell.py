@@ -625,8 +625,8 @@ class ApplicationCell:
         # D-1/D-10): the durable-audit dispatch router -- a caller-shared
         # `audit_dispatch.AuditRouter` (`main.build_app` constructs exactly
         # ONE per process and hands it to every `ApplicationCell` AND
-        # every credential store it builds, so denial coalescing and the
-        # buffer are shared process-wide, not duplicated per cell) or a
+        # every credential store it builds, so denial coalescing is shared
+        # process-wide, not duplicated per cell) or a
         # private default (in-memory, unshared -- every pre-Phase-4 caller
         # of this constructor that does not pass this parameter gets a
         # working, isolated durable trail nobody else observes, exactly
@@ -845,7 +845,7 @@ class ApplicationCell:
         a backend method (or `transact` below) calls itself, immediately
         before its own commit point. Every field the durable row needs is
         already resolved here -- the backend/batch loop supplies none of
-        it, only the fail-closed/buffer-class decision itself."""
+        it, only the moment."""
         return self.__audit_router.make_pre_commit_hook(
             event_class=event_class, request_id=request_id, application_id=self.application_id,
             actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
@@ -870,40 +870,86 @@ class ApplicationCell:
             target_kind="collection", target_id=collection,
         )
 
-    def _push_data_operation_event(self, principal, *, operation, target_id=None, request_id=None):
-        """Phase 4 (design D-4/P4-D5): buffer-class emit for an ordinary
-        (successful) data operation -- query/insert/update. Unlike
-        r2db-api, this peer recorded NONE of these before Phase 4 (design
-        §7.3: "現状は未記録"); this is the new emit site P4-D5 requires so
-        both peers record the identical event stream."""
-        self.__audit_router.push_buffer_event(
+    def _write_data_operation_event(self, principal, *, operation, target_id=None, request_id=None):
+        """Writes the durable `data_operation` row of a successful read
+        (`query`) synchronously, before the response is returned: a read
+        whose event cannot be recorded is not answered
+        (`errors.AuditSinkUnavailable`). A write has a data commit of its
+        own to order against and goes through `_make_audit_hook` instead."""
+        self.__audit_router.write_event(
             event_class="data_operation", request_id=request_id, application_id=self.application_id,
             actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
             role=getattr(getattr(principal, "role", None), "value", None), operation=operation,
             target_kind="collection", target_id=target_id,
         )
 
-    def _push_replayed_data_operation_event(self, principal, *, operation, target_id=None, request_id=None):
-        """Phase 9 WP-3cd closure (design D-5 (1)(v), 監督裁定集約
-        rulings-r5-r6.md J-4/SI-14): `transact`'s own idempotency-REPLAY
-        counterpart of `_push_data_operation_event` immediately above --
-        SAME `event_class="data_operation"` (buffer-class), mirroring
-        r2db-api's own uniform `outcome.replayed` -> `event_class=
-        "data_operation"` choice (a mutate replay is never MORE durable
-        than a fresh non-destructive success would have been, even when
-        the replayed batch was itself destructive -- SI-14's own concern
-        is that a resend leaves SOME evidence, not that it must match the
-        original commit's own fail-closed class). `request_id` is THIS
+    def _write_replayed_data_operation_event(self, principal, *, operation, target_id=None, request_id=None):
+        """`transact`'s own idempotency-REPLAY counterpart of the row a
+        fresh batch writes: the SAME `event_class="data_operation"`
+        (a mutate replay is never LESS durable than a fresh success --
+        even when the replayed batch was itself destructive, a resend must
+        leave SOME evidence, not necessarily the original commit's own
+        class), written synchronously before the replayed response is
+        returned (`errors.AuditSinkUnavailable` when the sink cannot
+        record it -- the replay is not answered). `request_id` is THIS
         replay request's own id (never the original's -- correlation with
         the original is the RESPONSE's own `request_id`, contract
         `idempotency.correlation`). `outcome="replayed"` -- never `key`,
         which never reaches this call at all (I-11)."""
-        self.__audit_router.push_buffer_event(
+        self.__audit_router.write_replayed_fail_closed_event(
             event_class="data_operation", request_id=request_id, application_id=self.application_id,
             actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
             role=getattr(getattr(principal, "role", None), "value", None), operation=operation,
-            target_kind="collection", target_id=target_id, outcome="replayed",
+            target_kind="collection", target_id=target_id,
         )
+
+    @staticmethod
+    @contextmanager
+    def _error_row_once_fired(hook):
+        """Guarantees the `error` row of D-2's rule for a backend method
+        that takes the hook itself (`create_collection`/`add_field`/
+        `alter_field_constraints`/`delete`): once `hook.pre_commit()` has
+        recorded the `allow` row, EVERY failure that leaves the method
+        without committing writes the `error` row -- a cancelled or
+        lock-timed-out COMMIT and a failure of the idempotency record
+        included, whichever branch of the backend's own handling they
+        pass through. The response and its class are unchanged (the
+        original exception propagates); a backend that already wrote the
+        row itself does not write a second (`commit_failed()` records at
+        most once per hook)."""
+        try:
+            yield
+        except Exception:
+            if hook is not None and getattr(hook, "fired", False):
+                hook.commit_failed()
+            raise
+
+    def _write_row_before_commit(self, principal, *, operation, collection, request_id, deadline, write):
+        """The single-row `insert`/`update` counterpart of `transact`'s
+        pre-commit path: `write()` runs inside one backend transaction, the
+        `allow` row is recorded durably as the LAST statement before the
+        data commit, and a failure of the recording rolls the write back
+        (`errors.AuditSinkUnavailable`, the write is not submitted). A
+        failure after the row was recorded (the commit itself) writes the
+        `error` row for the same request id. Caller holds `self._lock`."""
+        hook = self._make_audit_hook(
+            principal, event_class="data_operation", operation=operation,
+            target_kind="collection", target_id=collection, request_id=request_id,
+        )
+        self._backend.begin(deadline=deadline)
+        try:
+            result = write()
+            hook.pre_commit()
+            self._backend.commit()
+        except Exception as exc:
+            self._backend.rollback()
+            if hook.fired:
+                hook.commit_failed()
+                raise AuditSinkUnavailable(
+                    "the durable audit sink recorded this operation but the data commit failed"
+                ) from exc
+            raise
+        return result
 
     def _write_replayed_schema_event(self, principal, *, operation, target_id=None, request_id=None):
         """Phase 9 WP-3cd closure (design D-5 (1)(v), 監督裁定集約
@@ -1503,7 +1549,7 @@ class ApplicationCell:
                         (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
                         if idempotency_key is not None and not dry_run else None
                     )
-                    with self._lock:
+                    with self._lock, self._error_row_once_fired(hook):
                         revision, descriptor = self._backend.create_collection(
                             name, validated_fields, field_types=declared_types,
                             field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline,
@@ -1799,7 +1845,7 @@ class ApplicationCell:
                         if idempotency_key is not None and not dry_run else None
                     )
                     # ConflictError if `field` already exists
-                    with self._lock:
+                    with self._lock, self._error_row_once_fired(hook):
                         revision, descriptor = self._backend.add_field(
                             collection, field, field_type, contract_type=declared_type,
                             enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline,
@@ -2062,7 +2108,7 @@ class ApplicationCell:
                     # SAME refusal a dry run reaches too (the existing-row
                     # scan below always runs for real, dry_run or not; only
                     # the registry write/revision bump/commit are skipped).
-                    with self._lock:
+                    with self._lock, self._error_row_once_fired(hook):
                         revision, descriptor = self._backend.alter_field_constraints(
                             collection, field, enum=validated_enum, nullable=nullable, audit_hook=hook,
                             deadline=deadline, dry_run=dry_run, idempotency_record=idempotency_record)
@@ -2236,11 +2282,10 @@ class ApplicationCell:
                 collection, fields, params = self._prepare_values(
                     collection, values, path_prefix="operations/0/values", prefetched=prefetched)
                 with self._lock:
-                    result = self._backend.insert(collection, fields, params, deadline=deadline)
-        # Phase 4 (design D-4/P4-D5): buffer-class success emit -- a NEW
-        # emit site (this peer recorded no query/insert/update success
-        # before Phase 4).
-        self._push_data_operation_event(principal, operation="insert", target_id=collection, request_id=request_id)
+                    result = self._write_row_before_commit(
+                        principal, operation="insert", collection=collection, request_id=request_id,
+                        deadline=deadline,
+                        write=lambda: self._backend.insert_in_transaction(collection, fields, params))
         return result
 
     #: Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.2/D-3 (8): the
@@ -2365,13 +2410,12 @@ class ApplicationCell:
             # tie-break included), never a count or an offset.
             cursor_position = [page_rows[-1][field_name] for field_name, _direction in order_spec]
             next_page = paging.encode_page_cursor(cursor_position, binding)
-        # Phase 4 (design D-4/P4-D5): buffer-class success emit -- "query"
-        # is this peer's own contract-vocabulary operation name for this
-        # method (`read`, internally; read_page since design docs/design/
-        # PHASE11_KEYSET_PAGING_V1.md D-2b.4 -- `read` delegates here),
-        # matching r2db-api's identical `operation="query"` durable-row
-        # value for the same conceptual event.
-        self._push_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
+        # The `data_operation` row is written before the rows are returned:
+        # "query" is this peer's own contract-vocabulary operation name for
+        # this method (`read`, internally; `read_page` since `read`
+        # delegates here), matching r2db-api's identical `operation="query"`
+        # durable-row value for the same conceptual event.
+        self._write_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
         return items, next_page
 
     def _decode_and_check_page_cursor(self, collection, cursor, binding, order_spec):
@@ -2500,9 +2544,11 @@ class ApplicationCell:
                 collection, fields, values_params, bound_filters = self._validate_update(
                     collection, values, filters, path_prefix="operations/0/values")
                 with self._lock:
-                    result = self._backend.update(collection, fields, values_params, bound_filters, deadline=deadline)
-        # Phase 4 (design D-4/P4-D5): buffer-class success emit.
-        self._push_data_operation_event(principal, operation="update", target_id=collection, request_id=request_id)
+                    result = self._write_row_before_commit(
+                        principal, operation="update", collection=collection, request_id=request_id,
+                        deadline=deadline,
+                        write=lambda: self._backend.update_in_transaction(
+                            collection, fields, values_params, bound_filters))
         return result
 
     def _validate_delete_confirmation(self, collection, filters, destructive, confirm, limits=None,
@@ -2661,7 +2707,7 @@ class ApplicationCell:
                     principal, event_class="destructive_data_operation", operation="delete",
                     target_kind="collection", target_id=collection, request_id=request_id,
                 )
-                with self._lock:
+                with self._lock, self._error_row_once_fired(hook):
                     result = self._backend.delete(collection, bound_filters, audit_hook=hook, deadline=deadline)
         self.__record("destructive_data_operation", self.application_id,
                       principal.credential_id, detail="delete_rows")
@@ -3053,7 +3099,7 @@ class ApplicationCell:
                             # delete's own resend would return `committed: true`
                             # while leaving zero evidence this Application was
                             # touched at time T (WP-2cd/WP-3cd audit N-5).
-                            self._push_replayed_data_operation_event(
+                            self._write_replayed_data_operation_event(
                                 principal, operation="transact", target_id=None, request_id=request_id)
                             return replay
 
@@ -3081,13 +3127,13 @@ class ApplicationCell:
                             self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
                             raise
 
-                    # Phase 4 (design D-2's normative rule): the confirmation choke,
-                    # not `event_class`, is the fail-closed/buffer-class dispatch
-                    # point -- a batch containing at least one "delete" kind is
-                    # fail-closed class for the WHOLE batch (D-10: at most one durable
-                    # row per operation, so the batch gets exactly one pre-commit row,
-                    # never one per individual delete inside it); a batch with none is
-                    # buffer-class (P4-D5's new emit site).
+                    # The confirmation choke decides the event class -- a batch
+                    # containing at least one "delete" kind is a
+                    # `destructive_data_operation` for the WHOLE batch (D-10: at most
+                    # one durable row per operation, so the batch gets exactly one
+                    # pre-commit row, never one per individual delete inside it); a
+                    # batch with none is a `data_operation`. Either way the row is
+                    # recorded before the data commit.
                     destructive = any(kind == "delete" for kind, _ in execution_plan)
                     # Phase 9 WP-3b (design D-4 (2)/(7), destructive_confirmation.
                     # evaluation_order): the plan precondition is checked HERE --
@@ -3121,10 +3167,12 @@ class ApplicationCell:
                     hook = None
                     # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): not built at
                     # all for a dry run -- no audit hook, no audit event.
-                    if destructive and not dry_run:
+                    if not dry_run:
                         hook = self._make_audit_hook(
-                            principal, event_class="destructive_data_operation", operation="transact",
-                            target_kind="collection", target_id=None, request_id=request_id,
+                            principal,
+                            event_class="destructive_data_operation" if destructive else "data_operation",
+                            operation="transact", target_kind="collection", target_id=None,
+                            request_id=request_id,
                         )
 
                     with self._lock:
@@ -3174,9 +3222,6 @@ class ApplicationCell:
                             if dry_run:
                                 self._backend.rollback()
                             else:
-                                if destructive and hook is not None:
-                                    hook.pre_commit()
-                                    hook_fired = True
                                 # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-4):
                                 # `request_id` is folded INTO the last operation's
                                 # own per-item result dict, IN PLACE -- never
@@ -3220,6 +3265,15 @@ class ApplicationCell:
                                 if idempotency_key is not None:
                                     self._backend.record_idempotency(
                                         idempotency_key, idempotency_response_digest, json.dumps(results), now_ms)
+                                # The pre-commit row is the last statement before the
+                                # data commit, after the idempotency record: a
+                                # failure of the record write (or of anything above)
+                                # therefore leaves no `allow` row behind for data that
+                                # never committed, and everything that can still fail
+                                # after this point is the commit itself.
+                                if hook is not None:
+                                    hook.pre_commit()
+                                    hook_fired = True
                                 self._backend.commit()
                         except Exception as exc:
                             # Independent review B-2 (WP-2 follow-up -- the
@@ -3336,14 +3390,6 @@ class ApplicationCell:
                         if destructive:
                             self.__record("destructive_data_operation", self.application_id,
                                           principal.credential_id, detail="delete_rows")
-                        else:
-                            # Phase 4 (design D-4/P4-D5): a non-destructive batch
-                            # (insert/update only) is buffer-class -- exactly ONE
-                            # `data_operation` event for the whole batch (D-10: at
-                            # most one durable row per operation), mirroring
-                            # r2db-api's own identical "one row per mutate batch"
-                            # rule.
-                            self._push_data_operation_event(principal, operation="transact", target_id=None, request_id=request_id)
                         return results
 
     def _select_fields(self, collection, requested):

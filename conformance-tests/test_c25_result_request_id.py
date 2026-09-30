@@ -331,7 +331,9 @@ def test_c25_result_request_id(adapter: ConformanceAdapter, isolated, request: p
     audit_expected_branch = "correlated" if audit_driven else "not_driven"
     audit_observed_branch = "not_driven"
     if audit_driven:
-        iso.flush_audit_buffer()
+        # No `flush_audit_buffer()` first: the mutation's own event is
+        # written to the durable sink before its response, so it must be
+        # readable on visibility lag alone.
         # Wait up to audit_visibility_lag_ms() + 2000ms (capped 30000ms)
         # once caught up to the live edge of the log, mirroring test_c09_
         # audit_evidence.py's own `_require_nonvacuous_provided` idiom
@@ -341,7 +343,7 @@ def test_c25_result_request_id(adapter: ConformanceAdapter, isolated, request: p
         # in-process peers declare `visibility_lag_ms` 0, and BOTH http
         # plugs declare 11000 on this deployment -- the lag is a property
         # of the http adapter (network + buffering), not of either peer,
-        # so a row `flush_audit_buffer()` just made durable can still be
+        # so a row that is already durable can still be
         # excluded from `audit_query` for that long on the http plugs
         # (the completeness_note's own "rows within visibility_lag_ms of
         # the current time are not yet returned").

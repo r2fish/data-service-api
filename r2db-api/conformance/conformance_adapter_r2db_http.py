@@ -1286,7 +1286,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # audit` writer -- the SAME `<prefix>_api` role/DSN `self.
             # _credentials` above already connects with (migration 0007
             # grants it INSERT-only on this table). Without this, this
-            # adapter's own fail-closed/buffer-class application-plane
+            # adapter's own durable application-plane
             # events would stay in-memory only, and C-09 vector 1
             # (observing a destructive delete through `audit_query`) could
             # never see them for THIS (HTTP) adapter -- only for the in-

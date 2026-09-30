@@ -3874,6 +3874,33 @@ def test_declared_coalescing_window_ms_matches_the_design_value(kind, platform):
         h.cleanup()
 
 
+_EXPECTED_OUTCOME_NOTE = (
+    "outcome=allow means the operation was authorized and submitted; a later outcome=error "
+    "row sharing the same request_id means it did not commit. An allow row with no "
+    "corresponding error row usually means the operation committed, but -- if the process "
+    "was lost between recording allow and committing, or if the error row itself could not "
+    "be recorded -- can also mean it did not; the audit trail alone cannot distinguish the "
+    "two in those cases."
+)
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_declared_outcome_note_names_both_ways_an_allow_row_can_be_uncommitted(kind, platform):
+    """An `allow` row with no `error` row is uncommitted in two cases only --
+    the process was lost between recording it and committing, or the `error`
+    row itself could not be recorded -- and the declaration says exactly
+    that, in the same words on both peers.
+
+    mutation (`control_plane.py`, `audit_query` declaration): put back the
+    sentence that names the process loss as the only case."""
+    h = _build_harness(kind, platform)
+    try:
+        document = h.service.capabilities(h.control_credential_secret)
+        assert document["capabilities"]["audit_query"]["outcome_note"] == _EXPECTED_OUTCOME_NOTE
+    finally:
+        h.cleanup()
+
+
 @pytest.mark.parametrize("kind", BACKENDS)
 def test_declared_count_note_documents_the_never_zero_or_one_rule(kind, platform):
     """WP-2(b) review B-1 (supervisor ruling): the declaration itself

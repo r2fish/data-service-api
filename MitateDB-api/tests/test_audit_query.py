@@ -1662,6 +1662,24 @@ _NON_DURABLE_OPERATIONS: frozenset[str] = frozenset(
 _NON_DURABLE_TARGET_KINDS: frozenset[str] = frozenset()
 
 
+# Words the peer still DECLARES (a past row can carry one, and `audit_query`
+# must keep returning it -- contract 1.5.0's superset obligation) but no
+# source line emits any more. They belong to D, not N: N is for words that
+# are emitted but never reach a durable table. Each set below is part of the
+# equality checked by the three `test_declared_*_cover_every_emittable_*`
+# tests: `emitted == (D | N) - G`, with G a subset of D that no source line
+# emits. An entry here therefore fails as soon as a line emits the word
+# again, and a word that stops being emitted without being listed here
+# fails too.
+#
+# The application-plane events of a buffer that no longer exists: its
+# overflow-alert row (`event_class="security_control_failure"`,
+# `operation="audit_buffer"`, `target_kind="audit_sink"`).
+_DECLARED_BUT_NOT_EMITTED_EVENT_CLASSES: frozenset[str] = frozenset({"security_control_failure"})
+_DECLARED_BUT_NOT_EMITTED_OPERATIONS: frozenset[str] = frozenset({"audit_buffer"})
+_DECLARED_BUT_NOT_EMITTED_TARGET_KINDS: frozenset[str] = frozenset({"audit_sink"})
+
+
 def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
     """WP-3 対称 (r2db-api WP-2 fix-round M-1): `operation=
     "control_capabilities"` is in `_NON_DURABLE_OPERATIONS` for a
@@ -1940,11 +1958,14 @@ def test_declared_event_classes_cover_every_emittable_class() -> None:
 
     d = DECLARED_AUDIT_EVENT_CLASSES
     n = _NON_DURABLE_EVENT_CLASSES
+    g = _DECLARED_BUT_NOT_EMITTED_EVENT_CLASSES
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-    assert emitted == d | n, (
-        f"emittable-vs-(declared|N) mismatch: "
+    assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+    assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+    assert emitted == (d | n) - g, (
+        f"emittable-vs-((declared|N) minus G) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-        f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
     )
 
     from mitatedb_api.application_audit import DECLARED_AUDIT_EVENT_CLASSES as APP_CLASSES
@@ -1976,11 +1997,14 @@ def test_declared_operations_cover_every_emittable_operation() -> None:
 
     d = DECLARED_AUDIT_OPERATIONS
     n = _NON_DURABLE_OPERATIONS
+    g = _DECLARED_BUT_NOT_EMITTED_OPERATIONS
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-    assert emitted == d | n, (
-        f"emittable-vs-(declared|N) mismatch: "
+    assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+    assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+    assert emitted == (d | n) - g, (
+        f"emittable-vs-((declared|N) minus G) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-        f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
     )
 
 
@@ -1996,11 +2020,14 @@ def test_declared_target_kinds_cover_every_emittable_target_kind() -> None:
 
     d = DECLARED_AUDIT_TARGET_KINDS
     n = _NON_DURABLE_TARGET_KINDS
+    g = _DECLARED_BUT_NOT_EMITTED_TARGET_KINDS
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-    assert emitted == d | n, (
-        f"emittable-vs-(declared|N) mismatch: "
+    assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+    assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+    assert emitted == (d | n) - g, (
+        f"emittable-vs-((declared|N) minus G) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-        f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
     )
 
 
@@ -2050,9 +2077,11 @@ def test_declared_audit_operations_change_only_deliberately() -> None:
     OPERATIONS`) currently holds exactly these 30 words (Phase 9 WP-3a
     adds `alter_field`, design docs/design/
     PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)) --
-    the full emitted union U (31 words, `_field_literal_union`) minus N's
+    the full emitted union U (30 words, `_field_literal_union`) minus N's
     1 word (`_NON_DURABLE_OPERATIONS`: `control_capabilities`,
-    structurally deny-unreachable). Pins the UNION, not either half alone
+    structurally deny-unreachable), plus `audit_buffer`, declared but no
+    longer emitted (`_DECLARED_BUT_NOT_EMITTED_OPERATIONS`). Pins the
+    UNION, not either half alone
     (mutation 13 must go red whichever half loses a word)."""
     assert DECLARED_AUDIT_OPERATIONS == frozenset(
         {
@@ -3624,6 +3653,29 @@ def test_declared_coalescing_window_ms_matches_the_single_source_constant() -> N
     document = h.service.control_capabilities(h.control_credential_secret)
     assert document["capabilities"]["audit_query"]["coalescing_window_ms"] == int(DEFAULT_DENIAL_COALESCE_WINDOW_S * 1000)
     assert DEFAULT_COALESCING_WINDOW_MS == int(DEFAULT_DENIAL_COALESCE_WINDOW_S * 1000)
+
+
+_EXPECTED_OUTCOME_NOTE = (
+    "outcome=allow means the operation was authorized and submitted; a later outcome=error "
+    "row sharing the same request_id means it did not commit. An allow row with no "
+    "corresponding error row usually means the operation committed, but -- if the process "
+    "was lost between recording allow and committing, or if the error row itself could not "
+    "be recorded -- can also mean it did not; the audit trail alone cannot distinguish the "
+    "two in those cases."
+)
+
+
+def test_declared_outcome_note_names_both_ways_an_allow_row_can_be_uncommitted() -> None:
+    """An `allow` row with no `error` row is uncommitted in two cases only --
+    the process was lost between recording it and committing, or the `error`
+    row itself could not be recorded -- and the declaration says exactly
+    that, in the same words on both peers.
+
+    mutation (`control_plane.py`, `audit_query` declaration): put back the
+    sentence that names the process loss as the only case."""
+    h = _memory_harness()
+    document = h.service.control_capabilities(h.control_credential_secret)
+    assert document["capabilities"]["audit_query"]["outcome_note"] == _EXPECTED_OUTCOME_NOTE
 
 
 def test_coalesced_and_alert_rows_never_carry_a_literal_count_of_0_or_1() -> None:

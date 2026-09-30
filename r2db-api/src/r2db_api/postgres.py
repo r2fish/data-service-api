@@ -1584,7 +1584,7 @@ class PostgresCell:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> MutationOutcome:
-        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4): the single tx-exit point sits right before the pre-commit hook, inside the SAME `with conn.transaction():` block every operation already writes its (uncommitted) row changes in. A `dry_run`
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4): the single tx-exit point sits before the idempotency record and the pre-commit hook, inside the SAME `with conn.transaction():` block every operation already writes its (uncommitted) row changes in. A `dry_run`
         forces a real ROLLBACK via `psycopg.Rollback` (caught and
         swallowed by `conn.transaction()`'s own `__exit__`, never
         surfacing as an error -- `ApplicationCell.transact`'s in-memory
@@ -1729,8 +1729,14 @@ class PostgresCell:
                     audit_hook.commit_failed()
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.UniqueViolation as exc:
+                # a deferred unique constraint is checked at COMMIT, after the pre-commit row is durable: the error row is owed here too.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 self._fail_unique_conflict(entity, exc)
             except psycopg.errors.DataError:
+                # same as the branch above: a deferred check can reject a value at COMMIT.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 self._fail_client_value()
             except psycopg.Error:
                 # `hook_fired` is only `True` once the durable pre-commit row has already committed on its own (separate) connection -- so an exception reaching here after that point can only be this method's own data commit failing. Record the durable
@@ -2421,8 +2427,13 @@ class PostgresCell:
             except psycopg.errors.UniqueViolation as exc:
                 # `create_index(unique=True)` against data that already violates the requested uniqueness.
                 # history: CH-0074
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 self._fail_unique_conflict(bound.entity, exc)
             except psycopg.errors.DataError:
+                # see `transact`'s identical branch.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 self._fail_client_value()
             except psycopg.Error:
                 # see `transact`'s identical comment.
