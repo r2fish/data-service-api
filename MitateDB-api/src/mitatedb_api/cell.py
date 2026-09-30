@@ -625,8 +625,8 @@ class ApplicationCell:
         # D-1/D-10): the durable-audit dispatch router -- a caller-shared
         # `audit_dispatch.AuditRouter` (`main.build_app` constructs exactly
         # ONE per process and hands it to every `ApplicationCell` AND
-        # every credential store it builds, so denial coalescing is shared
-        # process-wide, not duplicated per cell) or a
+        # every credential store it builds, so one sink and one refusal-
+        # window length serve them all) or a
         # private default (in-memory, unshared -- every pre-Phase-4 caller
         # of this constructor that does not pass this parameter gets a
         # working, isolated durable trail nobody else observes, exactly
@@ -942,7 +942,16 @@ class ApplicationCell:
             hook.pre_commit()
             self._backend.commit()
         except Exception as exc:
-            self._backend.rollback()
+            try:
+                self._backend.rollback()
+            except Exception:
+                # A rollback that itself fails (the connection was lost
+                # during the commit) still owes the `error` row: the
+                # `allow` row is recorded and the commit did not complete
+                # as far as this service saw.
+                if hook.fired:
+                    hook.commit_failed()
+                raise
             if hook.fired:
                 hook.commit_failed()
                 raise AuditSinkUnavailable(
@@ -3329,7 +3338,15 @@ class ApplicationCell:
                             # B-2(ii)) rolls back and re-raises unclassified, exactly
                             # as before -- this method itself never reclassifies an
                             # exception type, only guarantees rollback runs first.
-                            self._backend.rollback()
+                            try:
+                                self._backend.rollback()
+                            except Exception:
+                                # A rollback that itself fails (the connection
+                                # was lost during the commit) still owes the
+                                # `error` row once the `allow` row is recorded.
+                                if hook_fired:
+                                    hook.commit_failed()
+                                raise
                             # Phase 9 WP-3cd closure (K-5, N-8): undoes a `record_
                             # idempotency` write that turned out NOT to share the
                             # data's own fate -- e.g. `record_idempotency` itself
@@ -3945,6 +3962,16 @@ class ApplicationRuntime:
     @property
     def principal(self):
         return self.__principal
+
+    def _require_developer_authority(self, *, request_id=None):
+        """Refuses a session that does not hold developer authority the way
+        every schema call does (`ApplicationCell._require_developer`): the
+        `FORBIDDEN` refusal is counted in the durable refusal window before
+        `errors.AuthorizationError` is raised, and a count that cannot be
+        recorded raises `errors.AuditSinkUnavailable` instead. Returns
+        normally for a developer session. The HTTP schema endpoint calls
+        this for a session that has no schema method of its own."""
+        self.__cell._require_developer(self.__principal, request_id=request_id)  # noqa: SLF001
 
     def __authorize(self, *, request_id=None):
         if self.__guard is not None:

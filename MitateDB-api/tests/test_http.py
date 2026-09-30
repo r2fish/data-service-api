@@ -390,7 +390,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
     # commit as this host's own `process_ceilings` mapping (design D-5
     # (v)).
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 
@@ -1214,6 +1214,49 @@ def test_runtime_credential_forbidden_from_schema_operations(app_a_stack):
     )
     assert response.status_code == 403
     assert response.json()["code"] == "FORBIDDEN"
+
+
+def _schema_refusals(stack):
+    """The `FORBIDDEN` refusals the durable sink knows about, as rows plus
+    the window summaries of every window (the far future closes them all)."""
+    from datetime import datetime, timedelta, timezone
+
+    sink = stack.router.durable_sink
+    rows = [e for e in sink.events() if e.outcome == "deny" and e.reason_code == "FORBIDDEN" and e.operation == "schema"]
+    summaries = [s for s, _end in sink.denial_window_summaries(closed_before=datetime.now(timezone.utc) + timedelta(days=3650))]
+    return rows, [s for s in summaries if s.operation == "schema"]
+
+
+def test_runtime_credential_forbidden_from_schema_operations_is_counted_in_the_durable_refusal_window(app_a_stack_with_audit):
+    """The HTTP schema endpoint refuses a runtime credential before any
+    schema method runs; the refusal is a durable one like the in-process
+    schema calls': the first is a row, the second is counted, each answered
+    only after it was recorded."""
+    stack = app_a_stack_with_audit
+    for _ in range(2):
+        response = _post(
+            stack, "/v1/schema/operations", bearer=stack.runtime_bearer,
+            json_body={"operation": "create_entity", "entity": "should_not_be_created"},
+        )
+        assert response.status_code == 403 and response.json()["code"] == "FORBIDDEN"
+    rows, summaries = _schema_refusals(stack)
+    assert len(rows) == 1, rows
+    assert rows[0].actor_type == "application_credential" and rows[0].role == "runtime"
+    assert len(summaries) == 1, "the second refusal was not counted in the window"
+
+
+def test_runtime_credential_forbidden_from_schema_operations_is_service_unavailable_when_the_count_cannot_be_recorded(app_a_stack_with_audit):
+    stack = app_a_stack_with_audit
+    stack.router.durable_sink.inject_fault(RuntimeError("sink down"))
+    try:
+        response = _post(
+            stack, "/v1/schema/operations", bearer=stack.runtime_bearer,
+            json_body={"operation": "create_entity", "entity": "should_not_be_created"},
+        )
+    finally:
+        stack.router.durable_sink.inject_fault(None)
+    assert response.status_code == 503, response.text
+    assert response.json()["code"] == "SERVICE_UNAVAILABLE"
 
 
 def test_cross_entity_mutation_endpoint_route_resolves_distinctly(app_a_stack):

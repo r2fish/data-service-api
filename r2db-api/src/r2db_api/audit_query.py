@@ -109,7 +109,7 @@ DECLARED_AUDIT_EVENT_CLASSES = frozenset(
 # event_class="authentication")`) is indeed non-durable-only, but its
 # FAILURE path (`except FoundationError`, `_denial_event(event_class=
 # "authentication_denial", operation="authenticate", ...)`) durably routes
-# through the coalescing denial router whenever `exc.code` is one of
+# through the refusal-window count whenever `exc.code` is one of
 # `_DURABLE_DENIAL_CODES` (`AUTH_REQUIRED`/`AUTH_INVALID`/`AUTH_REVOKED`
 # among them) -- an actually-observed durable row is what caught this
 # during WP-2 (`conformance-tests/test_c09_audit_evidence.py`'s own

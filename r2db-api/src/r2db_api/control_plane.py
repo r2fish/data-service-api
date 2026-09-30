@@ -714,7 +714,9 @@ class ControlPlaneService:
             ),
             "outcome_note": (
                 "outcome=allow means the operation was authorized and submitted; a later outcome=error "
-                "row sharing the same request_id means it did not commit. An allow row with no "
+                "row sharing the same request_id means the service did not see it commit: either it did "
+                "not commit, or the connection was lost during the commit itself and its outcome is "
+                "unknown. An allow row with no "
                 "corresponding error row usually means the operation committed, but -- if the process "
                 "was lost between recording allow and committing, or if the error row itself could not "
                 "be recorded -- can also mean it did not; the audit trail alone cannot distinguish the "

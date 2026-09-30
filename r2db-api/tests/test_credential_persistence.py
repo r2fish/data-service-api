@@ -1872,16 +1872,6 @@ def test_build_app_starts_no_background_audit_thread_and_reads_no_flush_interval
         assert "r2db-audit-flush" not in names, names
 
 
-def test_optional_float_default_path_is_not_regressed(main_module: types.ModuleType) -> None:
-    """WP-0 completion condition 2: an unset OR empty-string
-    `R2DB_AUDIT_FLUSH_INTERVAL_S` must still fall back to `default` -- the
-    "空なら既定値" half that must stay green while mutation 2 (dropping the
-    `if not raw: return default` early return) turns it red. A direct call
-    is sufficient here: the helper is exercised in isolation."""
-    assert main_module._optional_float({}, "R2DB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
-    assert main_module._optional_float({"R2DB_AUDIT_FLUSH_INTERVAL_S": ""}, "R2DB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
-
-
 def test_build_app_default_control_plane_status_is_unavailable(
     platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType
 ) -> None:

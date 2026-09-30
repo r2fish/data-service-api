@@ -129,7 +129,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -249,7 +248,7 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
 
 
 def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
-    """Same fail-loud discipline as `_optional_float`, for a positive int:
+    """Fail-loud discipline for a positive int:
     unset or empty falls back to `default`, but a non-empty value that is
     not a positive integer stops startup (`ValueError` naming the
     variable) rather than silently degrading -- this sizes a worker-
@@ -274,31 +273,6 @@ def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> i
         raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer, got {raw!r}")
-    return value
-
-
-def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
-    """Phase 6 WP-0 (design D-4(a)): unlike `_optional_int`, this
-    function's only consumer is the denial-window sweep interval, and a
-    misconfigured value there does not degrade gracefully --
-    `threading.Event.wait(0)`, `.wait(-1)`, and `.wait(float("nan"))` all
-    return immediately (`False`), so a value that is unset or empty is
-    fine (falls back to `default`, same discipline as `_optional_int`),
-    but a *non-empty* value that is not a finite, positive float turns the
-    flush thread into a silent hot loop -- something a deployer who
-    mistyped the variable would never notice, since nothing about a hot
-    flush loop looks alarming on its own. So this fails loudly at startup
-    instead (`ValueError` naming the variable), the same discipline this
-    module's own other env-var validity checks already use."""
-    raw = env.get(name)
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}") from None
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}")
     return value
 
 

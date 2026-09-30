@@ -23,12 +23,16 @@
 -- BEFORE its response is returned.
 --
 --   1. `r2dbsvc_registry.denial_window_counter` -- one row per (composite
---      key, window). The composite key `denial_key` folds the four key
---      parts into one text value: a JSON array of the application id (a
---      refusal with no application folds to JSON null, distinct from every
---      real id), the actor id (no actor folds to the text `unknown`), the
---      operation and the reason code. `window_start` is the wall-clock
---      instant the window began, aligned to the window length (the
+--      key, window). The composite key `denial_key` folds the key parts
+--      into one text value: a JSON array of the window length in
+--      milliseconds, the application id (a refusal with no application
+--      folds to JSON null, distinct from every real id), the actor id (no
+--      actor folds to the text `unknown`), the operation and the reason
+--      code. The window length is part of the key, so two processes that
+--      run with different declared window lengths (a length changed while
+--      processes restart one by one) never share a counter row: a row is
+--      only ever added to by callers that agree on when it ends.
+--      `window_start` is the wall-clock instant the window began, aligned to the window length (the
 --      database's `clock_timestamp()` truncated to a multiple of the
 --      length), `window_end` the instant it ends. `occurrences` counts every
 --      refusal of the window including the first. The row also stores the
@@ -43,7 +47,8 @@
 --      The function is one statement for the caller, run in autocommit:
 --      the first refusal of a window creates the counter row and writes
 --      that refusal's own `application_audit` row in the same statement;
---      every later one adds one to `occurrences`. The primary key
+--      every later one adds one to `occurrences`, and raises (the caller's
+--      refusal becomes a 503) if that row is gone. The primary key
 --      `(denial_key, window_start)` serializes two concurrent first
 --      refusals of one key, so a window holds exactly one counter row and
 --      one first-refusal row however many callers race.
@@ -166,7 +171,7 @@ BEGIN
         v_now_ms := floor(extract(epoch FROM v_now) * 1000)::bigint;
         v_start_ms := v_now_ms - (v_now_ms % p_window_ms);
         v_window_start := timestamptz 'epoch' + (v_start_ms * interval '1 millisecond');
-        v_key := jsonb_build_array(p_application_id, coalesce(p_actor_id, 'unknown'), p_operation, p_reason_code)::text;
+        v_key := jsonb_build_array(p_window_ms, p_application_id, coalesce(p_actor_id, 'unknown'), p_operation, p_reason_code)::text;
 
         INSERT INTO r2dbsvc_registry.denial_window_counter (
             denial_key, window_start, window_end, occurrences, summary_event_id,
@@ -185,6 +190,9 @@ BEGIN
                SET occurrences = occurrences + 1
              WHERE denial_key = v_key
                AND window_start = v_window_start;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'denial_window_record: the counter row of the window is gone, the refusal was not counted';
+            END IF;
             RETURN;
         END IF;
     END IF;

@@ -24,7 +24,6 @@ territory and are not exercised here.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import secrets
 import json
@@ -34,7 +33,7 @@ import threading
 import time
 import types
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
@@ -127,6 +126,10 @@ MIGRATION_NAMES = (
     # `requests_per_minute` rate row -- applied right after 0011, before
     # the 0005 GRANT-invariance snapshot below.
     "0016_credential_request_rate.sql",
+    # the refusal-window counter and its function: every refusal's count is
+    # written through it. Depends on 0005 (`application_audit`, the
+    # `auditreader` role), so the fixture applies it right after 0005.
+    "0017_denial_window_counter.sql",
 )
 
 
@@ -312,6 +315,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         finally:
             admin.close()
         _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
+        _run_psql(provision_dsn, rewritten["0017_denial_window_counter.sql"])
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -418,6 +422,7 @@ def clean_application_audit(platform: types.SimpleNamespace) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(platform.schema, "application_audit")))
+            cur.execute(sql.SQL("DELETE FROM {}").format(sql.Identifier(platform.schema, "denial_window_counter")))
     finally:
         conn.close()
 
@@ -532,6 +537,11 @@ def test_migration_0005_applies_after_0004_and_changes_no_existing_grant(platfor
         # `control_audit` table -- never any other existing table, and
         # never any other role gaining anything on `control_audit`.
         if table.endswith(".application_audit"):
+            continue
+        # The refusal-window counter's migration runs after 0005 (it needs
+        # `application_audit` and the reader role): its one new table is
+        # held by its owner and readable by the reader, nobody else.
+        if table.endswith(".denial_window_counter") and grantee in (platform.provision_role, platform.auditreader_role):
             continue
         assert table.endswith(".control_audit") and grantee == platform.auditreader_role, (grantee, table)
 
@@ -1272,15 +1282,36 @@ def test_declared_event_class_values_are_disjoint_from_the_six_field_sink_roundi
 # ===========================================================================
 
 
-class _FakeClock:
-    def __init__(self, start: float = 0.0) -> None:
-        self.now = start
+class _SinkClock:
+    """The in-memory sink's clock, as a `datetime` a test moves by hand.
+    Starts on a whole minute in 2001 UTC, so every window a test opens
+    closes long before the wall clock the reader compares against."""
 
-    def __call__(self) -> float:
+    def __init__(self) -> None:
+        self.now = datetime(2001, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
         return self.now
 
     def advance(self, seconds: float) -> None:
-        self.now += seconds
+        self.now += timedelta(seconds=seconds)
+
+
+def _refuse(router: AuditRouter, **overrides: Any) -> None:
+    """One durable refusal (`AUTH_INVALID`, no application, no actor) through
+    the router, the way a credential store routes it."""
+    fields: dict[str, Any] = dict(
+        reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=None,
+        application_id=None, actor_type="unknown", actor_id=None, role=None,
+        operation="authenticate", target_kind="credential", target_id=None,
+    )
+    fields.update(overrides)
+    router.route_denial(**fields)
+
+
+def _summaries_closed_by(sink: ApplicationAuditSink, closed_before: datetime) -> "list[ApplicationAuditEvent]":
+    """The summary event of every window that ended before `closed_before`."""
+    return [event for event, _window_end in sink.denial_window_summaries(closed_before=closed_before)]
 
 
 def test_dispatch_point_is_the_destructive_confirmation_choke() -> None:
@@ -1297,37 +1328,186 @@ def test_dispatch_point_is_the_destructive_confirmation_choke() -> None:
     assert source.count("self._validate_delete_confirmation(") == 2  # delete() and _plan_operation()
 
 
-def test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n() -> None:
-    clock = _FakeClock()
-    router = make_router(clock=clock)
-    for _ in range(50):
-        router.route_denial(
-            reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=None,
-            application_id=None, actor_type="unknown", actor_id="leaked-cred", role=None,
-            operation="authenticate", target_kind="credential", target_id="leaked-cred",
-        )
-    clock.advance(61)
-    router.flush()
-    events = router.durable_sink.events()
-    assert len(events) == 2  # first-occurrence row + one coalesced summary row
+def test_the_router_keeps_no_denial_window_of_its_own() -> None:
+    """The counting state is not held in the service process: neither the
+    coalescer class nor the sweep that drained it exists, and a router built
+    with a sink holds no per-key table."""
+    import mitatedb_api.audit_dispatch as dispatch_module
+
+    assert not hasattr(dispatch_module, "_DenialCoalescer")
+    router = make_router()
+    assert not hasattr(router, "_coalescer")
+    assert not hasattr(router, "flush")
+
+
+def test_repeated_invalid_secret_counts_n_repeats_once_in_the_windows_summary() -> None:
+    clock = _SinkClock()
+    sink = ApplicationAuditSink(clock=clock)
+    router = make_router(sink)
+    n_repeats = 49
+    for _ in range(1 + n_repeats):
+        _refuse(router, actor_id="leaked-cred", target_id="leaked-cred")
+
+    # Only the first refusal is a row; the repeats are counted, not written.
+    events = sink.events()
+    assert len(events) == 1
     assert events[0].count is None
-    assert events[1].count == 49
+
+    # While the window is open it has no summary; once it has closed it has
+    # exactly one, with one identity across reads.
+    assert _summaries_closed_by(sink, clock.now) == []
+    clock.advance(61.0)
+    summaries = _summaries_closed_by(sink, clock.now)
+    assert len(summaries) == 1, f"expected the closed window's one summary event, got {summaries!r}"
+    assert summaries[0].count == n_repeats
+    assert [e.event_id for e in _summaries_closed_by(sink, clock.now)] == [summaries[0].event_id]
+    # The first row and the summary account for every occurrence.
+    assert len(events) + summaries[0].count == 1 + n_repeats
 
 
-def test_coalesced_summary_row_with_exactly_one_repeat_writes_no_literal_count_of_one() -> None:
-    clock = _FakeClock()
-    router = make_router(clock=clock)
+def test_a_window_with_one_repeat_has_a_summary_without_a_count_and_a_lone_refusal_has_none() -> None:
+    clock = _SinkClock()
+    sink = ApplicationAuditSink(clock=clock)
+    router = make_router(sink)
+
+    # n = 1: one refusal, no summary at all, even once its window has closed.
+    _refuse(router, actor_id="lone")
+    clock.advance(61.0)
+    assert _summaries_closed_by(sink, clock.now) == []
+
+    # n = 2: one repeat -> a summary event that carries no `count`
+    # (contract: never zero or one), so the first row and the summary make 2.
     for _ in range(2):
-        router.route_denial(
-            reason_code="FORBIDDEN", event_class="authorization_denied", request_id=None,
-            application_id="a", actor_type="application_credential", actor_id="c1", role="runtime",
-            operation="schema", target_kind="collection", target_id=None,
+        _refuse(router, actor_id="boundary", reason_code="FORBIDDEN", event_class="authorization_denied",
+                application_id="a", actor_type="application_credential", role="runtime", operation="schema",
+                target_kind="collection")
+    clock.advance(61.0)
+    summaries = _summaries_closed_by(sink, clock.now)
+    assert len(summaries) == 1, f"expected exactly one summary (the n=2 window; the n=1 window has none), got {summaries!r}"
+    assert summaries[0].count is None, f"a window with exactly one repeat must never carry count=1 -- got {summaries[0]!r}"
+
+
+def test_the_window_follows_the_clock_so_refusals_across_a_boundary_are_two_first_rows() -> None:
+    clock = _SinkClock()
+    sink = ApplicationAuditSink(clock=clock)
+    router = make_router(sink)
+
+    clock.advance(59.0)
+    _refuse(router, actor_id="edge")
+    clock.advance(2.0)  # 61 s past the aligned start: the next 60 s window
+    _refuse(router, actor_id="edge")
+
+    assert len(sink.events()) == 2
+    clock.advance(120.0)
+    assert _summaries_closed_by(sink, clock.now) == []
+
+
+def test_a_window_length_of_zero_writes_every_refusal_as_a_row() -> None:
+    sink = ApplicationAuditSink()
+    router = make_router(sink, denial_coalesce_window_s=0.0)
+    for _ in range(3):
+        _refuse(router, actor_id="zero")
+    assert len(sink.events()) == 3
+    assert _summaries_closed_by(sink, datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+def test_every_refusal_of_a_window_is_fail_closed_not_only_the_first() -> None:
+    """A refusal that is only counted (the window's first row is already
+    written) still fails closed when the count cannot be recorded: the
+    response is `AuditSinkUnavailable`, never an ordinary refusal for an
+    uncounted request."""
+    sink = ApplicationAuditSink()
+    router = make_router(sink)
+    _refuse(router, actor_id="repeat-fault")
+    sink.inject_fault(RuntimeError("simulated durable-sink failure"))
+    with pytest.raises(AuditSinkUnavailable):
+        _refuse(router, actor_id="repeat-fault")
+
+
+def test_the_reader_returns_a_closed_windows_summary_and_not_an_open_one() -> None:
+    from mitatedb_api.audit_query import InMemoryAuditQueryStore
+    from mitatedb_api.control_audit import ControlAuditSink
+
+    clock = _SinkClock()
+    sink = ApplicationAuditSink(clock=clock)
+    router = make_router(sink)
+    reader = InMemoryAuditQueryStore(ControlAuditSink(), sink)
+
+    for _ in range(4):
+        _refuse(router, actor_id="reader")
+    clock.advance(61.0)
+
+    rows = reader.query(event_classes=None, after=None, limit=100, visibility_lag_ms=0)
+    summaries = [row for row in rows if row["outcome"] == "deny" and row["count"] is not None]
+    assert len(summaries) == 1, f"expected exactly one summary row, got {rows!r}"
+    summary = summaries[0]
+    assert summary["plane"] == "application"
+    assert summary["count"] == 3
+    assert summary["recorded_at"] == datetime(2001, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+
+    # A window that has not closed contributes nothing. The sink's clock now
+    # stands well ahead of the reader's, so the new window ends after the
+    # reader's cutoff; three refusals make a summary whose count is 2, which
+    # the reader would return if it did not leave open windows out.
+    clock.now = datetime.now(timezone.utc) + timedelta(days=30)
+    for _ in range(3):
+        _refuse(router, actor_id="reader-open")
+    again = reader.query(event_classes=None, after=None, limit=100, visibility_lag_ms=0)
+    assert [row["event_id"] for row in again if row["count"] is not None] == [summary["event_id"]]
+
+
+def test_two_window_lengths_never_share_a_window_in_memory() -> None:
+    """The window length is part of the key: a refusal counted under one
+    length is not added to a window another length opened."""
+    clock = _SinkClock()
+    sink = ApplicationAuditSink(clock=clock)
+    for window_ms in (60_000, 3_600_000, 60_000):
+        sink.record_denial(
+            window_ms=window_ms, event_class="authorization_denied", request_id="req-len", application_id="app-len",
+            actor_type="application_credential", actor_id="cred-len", role="runtime", operation="op_len",
+            target_kind="collection", reason_code="FORBIDDEN",
         )
-    clock.advance(61)
-    router.flush()
-    events = router.durable_sink.events()
-    assert len(events) == 2
-    assert events[1].count is None  # exactly one repeat -> NULL, never a literal 1
+    assert len(sink.events()) == 2, "each length opened its own window and wrote its own first row"
+    clock.advance(3_601.0)
+    summaries = _summaries_closed_by(sink, clock.now)
+    assert [(s.operation, s.count) for s in summaries] == [("op_len", None)], summaries
+
+
+def test_the_memory_reader_pages_through_summary_events_and_filters_them_by_class() -> None:
+    from mitatedb_api.audit_query import InMemoryAuditQueryStore
+    from mitatedb_api.control_audit import ControlAuditSink
+
+    clock = _SinkClock()
+    sink = ApplicationAuditSink(clock=clock)
+    reader = InMemoryAuditQueryStore(ControlAuditSink(), sink)
+    for operation, event_class in (("op_a", "authorization_denied"), ("op_b", "authorization_denied"), ("op_c", "authentication_denied")):
+        for _ in range(3):
+            sink.record_denial(
+                window_ms=60_000, event_class=event_class, request_id="req-mem", application_id="app-mem",
+                actor_type="application_credential", actor_id="cred-mem", role="runtime", operation=operation,
+                target_kind="collection", reason_code="FORBIDDEN",
+            )
+    clock.advance(61.0)
+    expected = {summary.event_id for summary in _summaries_closed_by(sink, clock.now)}
+    assert len(expected) == 3
+
+    seen: list[str] = []
+    after = None
+    for _ in range(200):  # the walk ends long before this; a cursor-blind branch never would
+        page = reader.query(event_classes=None, after=after, limit=1, visibility_lag_ms=0)
+        if not page:
+            break
+        row = page[0]
+        seen.append(row["event_id"])
+        after = (row["recorded_at"], row["plane"], row["event_id"])
+    else:
+        pytest.fail("the walk did not end: the summary branch ignores the cursor")
+    assert len(seen) == len(set(seen)), "a row was returned twice in one walk"
+    assert expected <= set(seen), "a summary event was missing from the walk"
+
+    only_authentication = reader.query(event_classes=["authentication_denied"], after=None, limit=100, visibility_lag_ms=0)
+    assert {row["operation"] for row in only_authentication} == {"op_c"}, only_authentication
+    assert sum(1 for row in only_authentication if row["count"] is not None) == 1
 
 
 def test_different_denial_keys_do_not_coalesce_together() -> None:
@@ -1392,151 +1572,6 @@ def test_concurrent_same_key_denials_are_both_fail_closed_when_the_sink_is_down(
     assert len(errors) == 4  # every concurrent caller for the SAME key fails closed
 
 
-def test_different_key_denials_do_not_wait_on_each_other() -> None:
-    """A slow-appending sink for ONE key must not block a DIFFERENT key's
-    own route() call (per-key locking, not a process-wide lock held
-    across I/O)."""
-    release = threading.Event()
-    started = threading.Event()
-
-    class _SlowSink(ApplicationAuditSink):
-        def append(self, **kwargs):
-            if kwargs.get("actor_id") == "slow":
-                started.set()
-                release.wait(timeout=2.0)
-            return super().append(**kwargs)
-
-    router = make_router(_SlowSink())
-    slow_thread = threading.Thread(target=lambda: router.route_denial(
-        reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=None, application_id=None,
-        actor_type="unknown", actor_id="slow", role=None, operation="authenticate", target_kind="credential", target_id="slow",
-    ))
-    slow_thread.start()
-    assert started.wait(timeout=2.0)
-    fast_start = time.monotonic()
-    router.route_denial(
-        reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=None, application_id=None,
-        actor_type="unknown", actor_id="fast", role=None, operation="authenticate", target_kind="credential", target_id="fast",
-    )
-    fast_elapsed = time.monotonic() - fast_start
-    assert fast_elapsed < 1.0
-    release.set()
-    slow_thread.join(timeout=2.0)
-
-
-def test_force_expire_denial_windows_flushes_an_unexpired_window_too() -> None:
-    clock = _FakeClock()
-    router = make_router(clock=clock)
-    router.route_denial(
-        reason_code="FORBIDDEN", event_class="authorization_denied", request_id=None, application_id="a",
-        actor_type="application_credential", actor_id="c1", role="runtime", operation="schema",
-        target_kind="collection", target_id=None,
-    )
-    router.route_denial(
-        reason_code="FORBIDDEN", event_class="authorization_denied", request_id=None, application_id="a",
-        actor_type="application_credential", actor_id="c1", role="runtime", operation="schema",
-        target_kind="collection", target_id=None,
-    )
-    router.flush()  # window not yet expired -- ordinary flush leaves it open
-    assert len(router.durable_sink.events()) == 1
-    router.flush(force_expire_denial_windows=True)
-    assert len(router.durable_sink.events()) == 2
-
-
-class _AggregateOnlyFailingSink(ApplicationAuditSink):
-    """A durable sink that fails ONLY a coalesced-denial summary
-    (aggregate) row -- identified by carrying a non-`None` `count` -- and
-    otherwise behaves normally (first-occurrence rows succeed).
-    `fail_aggregate` is toggled by the test to simulate recovery."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.fail_aggregate = True
-
-    def append(self, **kwargs):
-        if kwargs.get("count") is not None and self.fail_aggregate:
-            raise RuntimeError("simulated aggregate-write failure")
-        return super().append(**kwargs)
-
-
-def test_failed_aggregate_write_retains_the_repeat_count_and_recovers(caplog: pytest.LogCaptureFixture) -> None:
-    """A failed coalesced-denial summary write (reached via the periodic/
-    explicit sweep, `flush_expired`) must not lose the accumulated repeat
-    count -- it is retained and retried on every subsequent flush; once
-    the sink recovers, exactly one summary row carries the FULL
-    accumulated total."""
-    sink = _AggregateOnlyFailingSink()
-    clock = _FakeClock()
-    router = make_router(sink, clock=clock)
-    n_repeats = 5
-    for _ in range(1 + n_repeats):
-        router.route_denial(
-            reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=None, application_id=None,
-            actor_type="unknown", actor_id="leaked", role=None, operation="authenticate",
-            target_kind="credential", target_id="leaked",
-        )
-    assert len(sink.events()) == 1  # only the first-occurrence row so far
-
-    clock.advance(61.0)
-    with caplog.at_level(logging.ERROR):
-        router.flush()
-    assert len(sink.events()) == 1  # aggregate write failed -- retained, not lost
-    assert len([r for r in caplog.records if "could not be written" in r.message]) == 1
-
-    caplog.clear()
-    with caplog.at_level(logging.ERROR):
-        router.flush()  # still failing -- no additional log line (state unchanged)
-    assert not [r for r in caplog.records if "could not be written" in r.message]
-    assert len(sink.events()) == 1
-
-    sink.fail_aggregate = False
-    caplog.clear()
-    with caplog.at_level(logging.ERROR):
-        router.flush()
-    assert len([r for r in caplog.records if "recorded; retry cleared" in r.message]) == 1
-    events = sink.events()
-    assert len(events) == 2
-    assert events[1].count == n_repeats
-
-
-def test_failed_aggregate_write_via_inline_route_expiry_retains_the_repeat_count() -> None:
-    """Same property as the sweep-path test above, reached instead through
-    `route()`'s OWN inline expired-window flush (a fresh `route()` call
-    for the SAME key, arriving after the window has already expired)."""
-    sink = _AggregateOnlyFailingSink()
-    clock = _FakeClock()
-    router = make_router(sink, clock=clock)
-    kwargs = dict(
-        reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=None, application_id=None,
-        actor_type="unknown", actor_id="leaked2", role=None, operation="authenticate",
-        target_kind="credential", target_id="leaked2",
-    )
-    router.route_denial(**kwargs)  # first occurrence -- durable row #1
-    n_repeats = 5
-    for _ in range(n_repeats):
-        router.route_denial(**kwargs)
-
-    clock.advance(61.0)
-    # Inline expiry: a FRESH route() call for the same (now-expired) key
-    # -- not the sweep -- must attempt (and fail to write) the aggregate
-    # row for the OLD window, then open a fresh window carrying THIS new
-    # occurrence as its own synchronous first-occurrence row (route()'s
-    # own normative behaviour: the aggregate-flush attempt and the fresh
-    # window's own first-occurrence INSERT are two independent effects of
-    # one route() call).
-    router.route_denial(**kwargs)
-    events_after_inline_expiry = sink.events()
-    assert len(events_after_inline_expiry) == 2  # original first-occurrence + the fresh window's own
-    assert events_after_inline_expiry[1].count is None  # the fresh window's first row, not a summary
-
-    sink.fail_aggregate = False
-    clock.advance(61.0)
-    router.flush()  # the fresh window's own summary row -- carrying the RETAINED 5, not lost
-    events = sink.events()
-    assert len(events) == 3
-    assert events[2].count == n_repeats  # the requeued 5 repeats, merged into the fresh window -- never lost
-
-
 # ===========================================================================
 # Fail-closed by construction (§9.2 property 1) -- pure in-memory backend
 # (SQLite) with an injected-fault durable sink, exercised through the
@@ -1576,6 +1611,57 @@ def test_destructive_delete_is_service_unavailable_when_the_durable_sink_fails_s
     sink.inject_fault(None)  # a read writes its own event before it answers
     rows = runtime.read("things")
     assert len(rows) == 1  # data unchanged
+
+
+def _lose_the_connection_during_commit(backend: Any) -> "tuple[Any, Any]":
+    """Makes the backend's commit fail as a lost connection does and its
+    rollback fail too (a closed connection cannot roll back); returns the
+    two real methods for the caller to put back."""
+    real_commit, real_rollback = backend.commit, backend.rollback
+
+    def _lost_commit() -> None:
+        raise psycopg.OperationalError("the connection was lost during the commit")
+
+    def _closed_rollback() -> None:
+        raise psycopg.OperationalError("the connection is closed")
+
+    backend.commit, backend.rollback = _lost_commit, _closed_rollback
+    return real_commit, real_rollback
+
+
+def test_a_batch_whose_commit_loses_the_connection_still_writes_the_error_row() -> None:
+    """The commit's outcome is unknown when the connection is lost during
+    it, and the rollback that follows fails on the closed connection. The
+    `allow` row is already recorded, so the `error` row for the same
+    request must be written all the same -- the rollback's failure does not
+    skip it."""
+    sink = ApplicationAuditSink()
+    cell = _sqlite_cell(make_router(sink))
+    make_developer(cell, "appone").create_collection("things", {"id": "integer"})
+    runtime = make_runtime(cell, "appone")
+    real_commit, real_rollback = _lose_the_connection_during_commit(cell._backend)
+    try:
+        with pytest.raises(psycopg.OperationalError):
+            runtime.transact([{"type": "insert", "collection": "things", "values": {"id": 1}}], request_id="req-lost-batch")
+    finally:
+        cell._backend.commit, cell._backend.rollback = real_commit, real_rollback
+    rows = [(e.outcome, e.request_id) for e in sink.events() if e.operation == "transact"]
+    assert sorted(rows) == [("allow", "req-lost-batch"), ("error", "req-lost-batch")], rows
+
+
+def test_a_single_write_whose_commit_loses_the_connection_still_writes_the_error_row() -> None:
+    sink = ApplicationAuditSink()
+    cell = _sqlite_cell(make_router(sink))
+    make_developer(cell, "appone").create_collection("things", {"id": "integer"})
+    runtime = make_runtime(cell, "appone")
+    real_commit, real_rollback = _lose_the_connection_during_commit(cell._backend)
+    try:
+        with pytest.raises(psycopg.OperationalError):
+            runtime.insert("things", {"id": 1}, request_id="req-lost-insert")
+    finally:
+        cell._backend.commit, cell._backend.rollback = real_commit, real_rollback
+    rows = [(e.outcome, e.request_id) for e in sink.events() if e.operation == "insert"]
+    assert sorted(rows) == [("allow", "req-lost-insert"), ("error", "req-lost-insert")], rows
 
 
 def test_denial_response_is_service_unavailable_when_the_first_coalesced_insert_fails_sqlite() -> None:

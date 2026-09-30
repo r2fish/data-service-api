@@ -2679,20 +2679,6 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         return self._control_send("POST", "/v1/audit/query", actor, json_body=dict(request))
 
     # port v1.8
-    def flush_audit_buffer(self) -> None:
-        if self._audit_query_status() not in ("enabled", "partial"):
-            raise self._audit_surface_absent(
-                "flush_audit_buffer",
-                "audit_query is not declared enabled/partial -- there is nothing to make visible on this "
-                "deployment's own declared posture",
-            )
-        # A no-op, like `conformance_adapter_r2db.py`'s own: every event
-        # and every refusal count is written before its response is
-        # returned, so there is nothing to make visible beyond the declared
-        # visibility lag (an adapter-privileged test hook, not a contract
-        # operation, design §8.3).
-
-    # port v1.8
     def audit_visibility_lag_ms(self) -> int:
         control_actor = self.control_credential()
         document = self.control_capabilities(control_actor)

@@ -163,6 +163,9 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         # design D-3 (1): the credential-keyed `requests_per_minute` rate
         # table -- depends only on 0002.
         "0016_credential_request_rate.sql",
+        # the refusal-window counter and its function -- depends on 0005
+        # (`application_audit`, the `auditreader` role), applied below.
+        "0017_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -197,6 +200,7 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
+        _run_psql(provision_dsn, rewritten["0017_denial_window_counter.sql"])
         admin = psycopg.connect(dsn, autocommit=True)
         try:
             with admin.cursor() as cur:

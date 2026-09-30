@@ -665,7 +665,9 @@ def test_declared_audit_outcomes_include_replayed():
     literal the DURABLE application-audit trail's own dispatch module
     (`audit_dispatch.py` -- the ONLY module that ever calls `Application
     AuditSink.append`, through `.write_event`/`.write_replayed_fail_closed_
-    event`) constructs, using the SAME generalized AST scanner `test_
+    event`) and the sink's own refusal-count entry point (`application_
+    audit.py`'s `record_denial`, the one place a refusal's `deny` outcome
+    is spelled) construct, using the SAME generalized AST scanner `test_
     audit_query.py`'s own `DECLARED_AUDIT_OPERATIONS`/`_TARGET_KINDS`/
     `_EVENT_CLASSES` tests use -- restricted to THIS one file, not
     `src/mitatedb_api/` as a whole, because `audit.py`'s unrelated,
@@ -682,14 +684,15 @@ def test_declared_audit_outcomes_include_replayed():
     from .test_audit_query import _SRC_DIR, _field_literal_union, _literal_leaves, _scan_file_field_sites
 
     assert "replayed" in DECLARED_AUDIT_OUTCOMES
-    dispatch_file = [_SRC_DIR / "audit_dispatch.py"]
+    dispatch_file = [_SRC_DIR / "audit_dispatch.py", _SRC_DIR / "application_audit.py"]
     emitted = _field_literal_union(dispatch_file, "outcome")
     assert emitted, "the AST scanner found zero outcome literals -- it is itself broken"
-    # a denial's row takes its `outcome` from a dict literal (`route_denial`'s
-    # `fields`), which the keyword/assignment union above does not read
-    _keyword_sites, dict_sites, _assignment_sites = _scan_file_field_sites(dispatch_file[0], "outcome")
-    for _lineno, _kind, value, _ok in dict_sites:
-        emitted |= _literal_leaves(value)
+    # a dict literal could also carry an `outcome` (the keyword/assignment
+    # union above does not read those)
+    for source_file in dispatch_file:
+        _keyword_sites, dict_sites, _assignment_sites = _scan_file_field_sites(source_file, "outcome")
+        for _lineno, _kind, value, _ok in dict_sites:
+            emitted |= _literal_leaves(value)
     assert emitted == DECLARED_AUDIT_OUTCOMES, (
         f"emittable-vs-declared mismatch: emitted but not declared: {emitted - DECLARED_AUDIT_OUTCOMES!r}; "
         f"declared but never actually emitted: {DECLARED_AUDIT_OUTCOMES - emitted!r}"

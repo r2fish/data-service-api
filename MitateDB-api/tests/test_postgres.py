@@ -180,6 +180,9 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         "0002_registry_and_functions.sql",
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
+        # `application_audit` and the `auditreader` role: the refusal-window
+        # counter migration below references both.
+        "0005_application_audit.sql",
         # Phase 10 WP-4g (supervisor ruling 2026-09-09): `mitatedb_api.
         # main.build_app`/`mitatedb_api.control_composition.build_control_
         # service` now run F-16 (this process' own role CONNECTION LIMIT)
@@ -191,7 +194,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         # floor and fails startup for every consumer, not just the ones
         # actually about F-16.
         "0012_role_connection_limits.sql",
-        # 0013 is intentionally absent: this fixture never applies 0005, so it has no `mitatedbsvc_auditreader` role for 0013's own `ALTER ROLE` to target.
+        # 0013 is intentionally absent: no test through this fixture depends on the role-level statement timeouts it sets.
         # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
         # declarations table + the two service writer roles' timeout role
         # settings -- every test in this repository that calls `main.
@@ -210,6 +213,9 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         # backed `requests_per_minute` rate row -- every real request
         # through a `build_app()` app needs this table/function.
         "0016_credential_request_rate.sql",
+        # every refusal's count is written through this migration's
+        # function (`build_app` also checks it at startup).
+        "0017_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -226,6 +232,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         _run_psql(admin_dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
         provision_dsn = _dsn_with(admin_dsn, user=provision_role, password=provision_password, dbname=platform_db)
         _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
+        _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
         admin = psycopg.connect(admin_dsn, autocommit=True)
         try:
             # `ALTER ROLE ... PASSWORD` does not accept a server-side bind
@@ -244,6 +251,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
+        _run_psql(provision_dsn, rewritten["0017_denial_window_counter.sql"])
         # Q4 phase (design D-2(c)): synthetic example.invalid `surfaces` --
         # a real deployment declares this with `ops declare-surfaces`.
         # DATA ONLY (no `control` key) -- this shared fixture's own

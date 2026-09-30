@@ -203,6 +203,20 @@ new:
 is counted in the durable refusal window before its response is returned (a count that cannot be recorded raises `SERVICE_UNAVAILABLE`).
 ```
 
+### correction: 2026-10-01
+
+- reason: R-115 -- the coalescing denial router and its first-insert write are gone; a refusal is counted in the platform database's refusal window before its response
+
+old:
+```
+a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write
+```
+
+new:
+```
+a refusal-window count that could not be recorded) -- counting it in the refusal window again would be a second (or third) durable write
+```
+
 ## CH-0110
 
 - moved from: `src/r2db_api/service.py` (`DataService.acquire_concurrency_slot`)
@@ -1534,6 +1548,20 @@ design D-5(ii), contract 1.8.0: region (ii) is `requests_per_minute`/`concurrenc
 # denial needing its own durable write, producing a second (or third)
 # durable row for what D-10 requires stays at most one (+ the D-2 error-row
 # exception).
+```
+
+### correction: 2026-10-01
+
+- reason: R-115 -- the coalescing denial router and its first-insert write are gone; a refusal is counted in the platform database's refusal window before its response, and the marker keeps a failed count from being counted again
+
+old:
+```
+a coalesced-denial first-insert failure). `_event`'s own deny-dispatch checks this marker and skips routing such a denial through `_route_denial` again
+```
+
+new:
+```
+a refusal-window count that could not be recorded). `_event`'s own deny-dispatch checks this marker and skips counting such a denial in the refusal window again
 ```
 
 ## CH-0178

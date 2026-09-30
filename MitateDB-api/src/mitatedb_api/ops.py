@@ -1296,6 +1296,9 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     # directly (there is no `PlatformDeclarationError` to route through
     # `_verify_declarations_fail` for this operator-only diagnostic).
     "F-20": 19,
+    # the refusal-window function and table are in the state their
+    # migration leaves them in -- the next unused exit code.
+    "F-21": 20,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1494,6 +1497,20 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
         _verify_declarations_ok(
             "F-20", "MITATEDB_WORKERS/MITATEDB_CONTROL_WORKERS (this CLI invocation's own process env) do not exceed their declared process_ceilings"
         )
+
+    try:
+        platform_declarations.check_denial_window_function(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.DENIAL_WINDOW_MIGRATION_FILENAME)
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok(
+        "F-21",
+        "the refusal-window function is SECURITY DEFINER with a pinned search_path, not executable by PUBLIC, "
+        "it and its counter table are owned by the schema's owner role, every role that writes application_audit "
+        "may EXECUTE it, no runtime role holds a direct privilege on the counter table, and every role that reads "
+        "both audit tables may SELECT it",
+    )
     return 0
 
 
@@ -2790,6 +2807,7 @@ _PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
     "0013_role_statement_timeouts.sql",
     "0014_role_connection_limits_rollout.sql",
     "0016_credential_request_rate.sql",
+    "0017_denial_window_counter.sql",
 )
 
 #: the psql `-v NAME=VALUE` variables each file above references,
@@ -2806,6 +2824,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
     "0013_role_statement_timeouts.sql": (),
     "0014_role_connection_limits_rollout.sql": (),
     "0016_credential_request_rate.sql": (),
+    "0017_denial_window_counter.sql": (),
 }
 
 #: design D-2: `file -> the LATER accepted files that redefine at least
@@ -2817,7 +2836,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
 #: file absent from this table (or with an empty tuple) has no known
 #: successor and may always be applied alone. This table is proved
 #: equal to the "target -> defining files" map derived directly from
-#: the 7 accepted migration files themselves, folded to file
+#: the 8 accepted migration files themselves, folded to file
 #: granularity, by a static test (design
 #: `docs/design/MITATEDB_PLATFORM_MIGRATION_RUN_V0_1.md` D-3,
 #: `test_ops_apply_platform_migration.py`) -- this table is the side

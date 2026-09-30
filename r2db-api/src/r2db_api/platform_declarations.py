@@ -300,8 +300,9 @@ def _f4_message(schema: str, *, ops_module: str, migration: str) -> str:
 
 def _f4b_window_message(schema: str, value: Any, *, ops_module: str) -> str:
     return (
-        f"'audit_coalescing_window_ms' in {schema}.platform_declarations must be a non-negative integer (0 "
-        f"means no coalescing), got '{value}'. This table can be edited by hand, so the value is validated "
+        f"'audit_coalescing_window_ms' in {schema}.platform_declarations must be a non-negative integer no "
+        f"larger than 2147483647 (0 means no coalescing), got '{value}'. This table can be edited by hand, so "
+        f"the value is validated "
         f"on every read as well as on write. Re-set it with 'python -m {ops_module}.ops "
         f"declare-coalescing-window --ms <N>', then restart both processes."
     )
@@ -389,7 +390,7 @@ def validate_coalescing_window_value(value: object, *, schema: str, ops_module: 
     explicitly -- a jsonb `true`/`false` must never silently read back as
     `1`/`0`), and non-negative (`0` means "no coalescing", a valid,
     documented value, design D-2(c))."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 2147483647:
         raise PlatformDeclarationError(_f4b_window_message(schema, value, ops_module=ops_module), code="F-4b")
     return value
 
@@ -1563,17 +1564,40 @@ def _f21_message(problems: "list[str]", *, schema: str, migration: str, ops_modu
     )
 
 
+def _f21_acl_holders(cur: "psycopg.Cursor", schema: str, table: str, privilege: str) -> "list[str]":
+    """The roles (never the table's owner, never PUBLIC) whose ACL entry on
+    `<schema>.<table>` carries `privilege`, read from `pg_class.relacl` --
+    readable by every login role, unlike `information_schema.
+    role_table_grants`, which shows a role only the grants it is a party
+    to. A table with no ACL, or no table, has no holders."""
+    cur.execute(
+        "SELECT DISTINCT pg_get_userbyid(a.grantee) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "CROSS JOIN LATERAL aclexplode(c.relacl) a "
+        "WHERE n.nspname = %s AND c.relname = %s AND a.privilege_type = %s AND a.grantee <> 0 AND a.grantee <> c.relowner "
+        "ORDER BY 1",
+        [schema, table, privilege],
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
 def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops_module: str, migration: str) -> None:
     """F-21: read-only. `schema` carries the `denial_window_record`
     function and the `denial_window_counter` table that hold the count of
-    refused requests, in the state migration `migration` leaves them in,
-    and this connection's own login role may EXECUTE the function. The
-    function runs as its owner and is the only way the data plane reaches
-    the table, so the check names each way it can fail to be safe: not
-    `SECURITY DEFINER`, a `search_path` that is not pinned to `pg_catalog,
-    pg_temp`, EXECUTE held by PUBLIC, or the function or the table owned by
-    a role other than the schema's owner. Reads `pg_proc`, `pg_class`,
-    `pg_namespace` and `has_function_privilege` only. Raises
+    refused requests, in the state migration `migration` leaves them in.
+    The function runs as its owner and is the only way the data plane
+    reaches the table, so the check names each way it can fail to be safe:
+    not `SECURITY DEFINER`, a `search_path` that is not pinned to
+    `pg_catalog, pg_temp`, EXECUTE held by PUBLIC, or the function or the
+    table owned by a role other than the schema's owner. It also names each
+    way the grants can be wrong, by role name (so a run as the schema's
+    owner, which may do everything, still sees them): a role that writes
+    `application_audit` -- the data plane's runtime role -- may not EXECUTE
+    the function; a runtime role (that one, or any role holding EXECUTE)
+    holds a direct SELECT, INSERT, UPDATE or DELETE privilege on the table,
+    which is a count it can reach without the function and so lower; a role
+    that reads both audit tables may not SELECT the table, so `audit_query`
+    fails. Reads `pg_proc`, `pg_class`, `pg_namespace`, `has_function_
+    privilege` and `has_table_privilege` only. Raises
     `PlatformDeclarationError` (code `F-21`) listing every failed
     property."""
     problems: list[str] = []
@@ -1584,11 +1608,16 @@ def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops
         )
         (function_oid,) = cur.fetchone()
         cur.execute(
-            "SELECT c.relowner = n.nspowner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "SELECT c.oid, c.relowner = n.nspowner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = %s AND c.relname = %s",
             [schema, _DENIAL_WINDOW_TABLE],
         )
         table_row = cur.fetchone()
+        writers = _f21_acl_holders(cur, schema, "application_audit", "INSERT")
+        readers = sorted(
+            set(_f21_acl_holders(cur, schema, "application_audit", "SELECT"))
+            & set(_f21_acl_holders(cur, schema, "control_audit", "SELECT"))
+        )
         if function_oid is None:
             problems.append("the function does not exist")
         else:
@@ -1596,11 +1625,12 @@ def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops
                 "SELECT p.prosecdef, p.proconfig, p.proowner = n.nspowner, "
                 "(p.proacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a "
                 "WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')), "
-                "has_function_privilege(p.oid, 'EXECUTE') "
+                "ARRAY(SELECT pg_get_userbyid(a.grantee) FROM aclexplode(p.proacl) a "
+                "WHERE a.privilege_type = 'EXECUTE' AND a.grantee <> 0 AND a.grantee <> p.proowner ORDER BY 1) "
                 "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = %s::oid",
                 [function_oid],
             )
-            security_definer, config, owned_by_schema_owner, public_executes, may_execute = cur.fetchone()
+            security_definer, config, owned_by_schema_owner, public_executes, executors = cur.fetchone()
             if not security_definer:
                 problems.append("it is not SECURITY DEFINER")
             pinned = [entry.replace(" ", "") for entry in (config or []) if entry.startswith("search_path=")]
@@ -1610,12 +1640,35 @@ def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops
                 problems.append("PUBLIC may EXECUTE it")
             if not owned_by_schema_owner:
                 problems.append("it is not owned by the schema's owner role")
-            if not may_execute:
-                problems.append("this connection's role may not EXECUTE it")
+            cannot_execute = []
+            for role in writers:
+                cur.execute("SELECT has_function_privilege(%s::name, %s::oid, 'EXECUTE')", [role, function_oid])
+                if not cur.fetchone()[0]:
+                    cannot_execute.append(role)
+            if cannot_execute:
+                problems.append("a role that writes application_audit may not EXECUTE it: " + ", ".join(cannot_execute))
+            if table_row is not None:
+                holders = []
+                for role in sorted(set(writers) | set(executors)):
+                    for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                        cur.execute("SELECT has_table_privilege(%s::name, %s::oid, %s)", [role, table_row[0], privilege])
+                        if cur.fetchone()[0]:
+                            holders.append(role)
+                            break
+                if holders:
+                    problems.append("a runtime role holds a direct privilege on the counter table: " + ", ".join(holders))
         if table_row is None:
             problems.append("the denial_window_counter table does not exist")
-        elif not table_row[0]:
-            problems.append("the denial_window_counter table is not owned by the schema's owner role")
+        else:
+            if not table_row[1]:
+                problems.append("the denial_window_counter table is not owned by the schema's owner role")
+            cannot_read = []
+            for role in readers:
+                cur.execute("SELECT has_table_privilege(%s::name, %s::oid, 'SELECT')", [role, table_row[0]])
+                if not cur.fetchone()[0]:
+                    cannot_read.append(role)
+            if cannot_read:
+                problems.append("a role that reads both audit tables may not SELECT the counter table: " + ", ".join(cannot_read))
     if problems:
         raise PlatformDeclarationError(
             _f21_message(problems, schema=schema, migration=migration, ops_module=ops_module), code="F-21"

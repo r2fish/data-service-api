@@ -29,11 +29,12 @@ guard this WP's own completion conditions name).
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import json
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import uuid
 
 import psycopg
@@ -57,13 +58,6 @@ DEFAULT_SCHEMA = "mitatedb_registry"
 # concern, depends on both processes agreeing on these two values).
 DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS = 5000
 DEFAULT_AUDIT_IDLE_TIMEOUT_MS = 5000
-
-# The default interval of the composition root's periodic sweep of the
-# denial-coalescing windows (`audit_dispatch.AuditRouter.flush`), matching
-# r2db-api's own `_DEFAULT_AUDIT_FLUSH_INTERVAL_S`; a latency knob only --
-# it decides how soon an expired window's repeat-count summary row is
-# written, never whether a denial is recorded.
-DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 
 # Phase 4 (design D-3, P4-D3): the coalescing window.
 DEFAULT_DENIAL_COALESCE_WINDOW_S = 60.0
@@ -207,11 +201,11 @@ def coalesced_count(occurrences: int) -> Optional[int]:
     WP-2(a)/(b) review rulings from the outset): the durable `count`
     column's own semantics -- "the number of occurrences this ONE row
     represents; when that number is 1, the column is absent (NULL)"
-    (contract `audit.query_event_fields_note`: "never zero or one"). Both
-    call site that can ever pass a real integer here -- `audit_dispatch.
-    _DenialCoalescer`'s aggregate (repeat-count) row -- routes the raw
-    tally through this one function instead of writing it verbatim, so
-    "exactly one repeat" always renders as an ordinary NULL-count row.
+    (contract `audit.query_event_fields_note`: "never zero or one"). The one
+    call site that can ever pass a real integer here -- the in-memory
+    sink's refusal-window summary event -- routes the raw tally through this
+    one function instead of writing it verbatim, so "exactly one repeat"
+    always renders as an ordinary NULL-count event.
     """
     return occurrences if occurrences >= 2 else None
 
@@ -243,11 +237,26 @@ class ApplicationAuditSink:
     each event with `append`, before its response is returned --
     `ControlAuditSink` has no equivalent because every `control_audit`
     row is written synchronously, one event at a time).
+
+    `record_denial` is this class's counterpart of the refusal-window
+    counter `PostgresApplicationAuditSink.record_denial` keeps in the
+    platform database: the first refusal of a (key, window) pair is
+    recorded as an ordinary event, and every later one adds one to that
+    window's tally in a process-local table instead of writing a row. The
+    window is aligned to the sink's own clock. `denial_window_summaries`
+    returns the summary event of every closed window that held repeats,
+    which `audit_query.InMemoryAuditQueryStore` reads. The table lives in
+    this process only, which is exactly what an in-process plug is: the
+    durability a service process needs against its own sudden death is the
+    Postgres sink's property.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Optional[Callable[[], datetime]] = None) -> None:
         self._events: list[ApplicationAuditEvent] = []
         self._fault: Optional[BaseException] = None
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._denial_lock = threading.Lock()
+        self._denial_windows: dict[tuple[str, int], dict[str, Any]] = {}
 
     def inject_fault(self, exc: Optional[BaseException]) -> None:
         """Test-only fault injection: when `exc` is not `None`, every
@@ -273,6 +282,61 @@ class ApplicationAuditSink:
         )
         self._events.append(event)
         return event
+
+    def record_denial(
+        self, *, window_ms: int, event_class: str, request_id: Optional[str], application_id: Optional[str],
+        actor_type: Optional[str], actor_id: Optional[str], role: Optional[str], operation: str,
+        target_kind: Optional[str], reason_code: Optional[str] = None, target_id: Optional[str] = None,
+    ) -> None:
+        """Counts one refusal. The first refusal of a (key, window) pair --
+        key = application, actor (`unknown` when there is none),
+        operation, reason code; window = the sink's clock truncated to a
+        multiple of `window_ms` -- is appended as an ordinary `deny`
+        event; every later one only adds one to that window's tally. A
+        `window_ms` of 0 declares no coalescing: every refusal is appended.
+        Raises the injected fault, like every other write."""
+        if self._fault is not None:
+            raise self._fault
+        fields: dict[str, Any] = dict(
+            event_class=event_class, request_id=request_id, application_id=application_id, actor_type=actor_type,
+            actor_id=actor_id, role=role, operation=operation, target_kind=target_kind, outcome="deny",
+            reason_code=reason_code, target_id=target_id,
+        )
+        if window_ms <= 0:
+            self.append(**fields)
+            return
+        now_ms = int(self._clock().timestamp() * 1000)
+        start_ms = now_ms - now_ms % window_ms
+        key = (json.dumps([window_ms, application_id, actor_id or "unknown", operation, reason_code]), start_ms)
+        with self._denial_lock:
+            window = self._denial_windows.get(key)
+            if window is not None:
+                window["occurrences"] += 1
+                return
+            first = self.append(**fields)
+            self._denial_windows[key] = {
+                "occurrences": 1,
+                "summary_event_id": uuid.uuid4().hex,
+                "window_end": datetime.fromtimestamp((start_ms + window_ms) / 1000, tz=timezone.utc),
+                "first": first,
+            }
+
+    def denial_window_summaries(self, *, closed_before: datetime) -> "list[tuple[ApplicationAuditEvent, datetime]]":
+        """The summary event of every window that ended before
+        `closed_before` and held repeats, each with its window's end: the
+        first refusal's fields, its own stable `event_id`, and `count`
+        set to the repeats (absent when there was exactly one). A window
+        that held one refusal has no summary."""
+        summaries: list[tuple[ApplicationAuditEvent, datetime]] = []
+        with self._denial_lock:
+            windows = list(self._denial_windows.values())
+        for window in windows:
+            if window["occurrences"] < 2 or window["window_end"] >= closed_before:
+                continue
+            first = window["first"]
+            summary = replace(first, event_id=window["summary_event_id"], count=coalesced_count(window["occurrences"] - 1))
+            summaries.append((summary, window["window_end"]))
+        return summaries
 
     def append_many(self, events: "list[ApplicationAuditEvent]") -> None:
         """Batch write -- either every event in
@@ -311,11 +375,11 @@ class PostgresApplicationAuditSink:
     same shape this peer's `credential_store_postgres.py` keeps for its
     own no-pool default.
 
-    Either way every call -- the D-2 pre-commit fail-closed write, the D-3
-    coalesced-denial first-occurrence write, the D-2 commit-failure `error`
-    row, the synchronous write of an ordinary event -- runs in a
-    transaction of its own that it commits itself (or, on failure, never
-    commits). A pooled connection is held by exactly one call at a time,
+    Either way every call -- the D-2 pre-commit fail-closed write, the D-2
+    commit-failure `error` row, the synchronous write of an ordinary event
+    -- runs in a transaction of its own that it commits itself (or, on
+    failure, never commits); `record_denial` is the one call that runs in
+    autocommit instead. A pooled connection is held by exactly one call at a time,
     so two calls in flight at once are on two different connections and
     never share a transaction; that is what makes "an event write never
     shares a transaction with the data change it describes" structural
@@ -356,6 +420,7 @@ class PostgresApplicationAuditSink:
         # instead of this class setting it per connection.
         self._dsn = dsn
         self._connect_timeout = connect_timeout
+        self._schema = schema
         self._table = sql.Identifier(schema, "application_audit")
         self._pool = pool
         # Platform DB-time accounting for this sink's own per-call
@@ -503,6 +568,40 @@ class PostgresApplicationAuditSink:
                 cur.execute(statement, params)
             conn.commit()
 
+    def record_denial(
+        self, *, window_ms: int, event_class: str, request_id: Optional[str], application_id: Optional[str],
+        actor_type: Optional[str], actor_id: Optional[str], role: Optional[str], operation: str,
+        target_kind: Optional[str], reason_code: Optional[str] = None, target_id: Optional[str] = None,
+    ) -> None:
+        """Counts one refusal in the platform database, in one statement
+        (`denial_window_record`, migration `0017_denial_window_counter.
+        sql`), in autocommit on a connection no other call holds meanwhile:
+        the first refusal of a (key, window) pair writes the window's
+        counter row and that refusal's own audit row together, and every
+        later one adds one to the counter row. The statement has committed
+        when this method returns, so a refusal whose response the service
+        then returns has already been counted. A failure propagates to the
+        caller unchanged, like `append`; `audit_dispatch.AuditRouter` turns
+        it into `errors.AuditSinkUnavailable`."""
+        statement = sql.SQL("SELECT {function}(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)").format(
+            function=sql.Identifier(self._schema, "denial_window_record")
+        )
+        params = [
+            window_ms, event_class, datetime.now(timezone.utc), request_id, application_id, actor_type, actor_id,
+            role, operation, target_kind, reason_code, target_id,
+        ]
+        with self._borrow() as conn:
+            # Connections open with `autocommit=False`; this one statement
+            # runs in autocommit, restored before the connection goes back
+            # to the pool (the same toggle `credential_store_postgres.
+            # PostgresCredentialStore.record_rate_and_check` uses).
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(statement, params)
+            finally:
+                conn.autocommit = False
+
     def append_many(self, events: "list[ApplicationAuditEvent]") -> None:
         """Batch write: every `ApplicationAuditEvent` in
         `events` is written as one multi-row `INSERT` in one transaction --
@@ -550,7 +649,6 @@ __all__ = [
     "DEFAULT_SCHEMA",
     "DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS",
     "DEFAULT_AUDIT_IDLE_TIMEOUT_MS",
-    "DEFAULT_AUDIT_FLUSH_INTERVAL_S",
     "DEFAULT_DENIAL_COALESCE_WINDOW_S",
     "DECLARED_AUDIT_EVENT_CLASSES",
     "DECLARED_AUDIT_OPERATIONS",

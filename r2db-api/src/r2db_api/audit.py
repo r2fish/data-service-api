@@ -272,7 +272,7 @@ class ApplicationAuditSink:
             return
         now_ms = int(self._clock().timestamp() * 1000)
         start_ms = now_ms - now_ms % window_ms
-        key = (json.dumps([application_id, actor_id or "unknown", operation, reason_code]), start_ms)
+        key = (json.dumps([window_ms, application_id, actor_id or "unknown", operation, reason_code]), start_ms)
         with self._denial_lock:
             window = self._denial_windows.get(key)
             if window is not None:

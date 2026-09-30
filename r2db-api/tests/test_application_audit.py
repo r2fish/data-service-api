@@ -931,7 +931,7 @@ def test_build_app_checks_the_env_mapping_argument_not_os_environ(
         module.default_pool_manager.dispose_all()
 
 
-@pytest.mark.parametrize("bad_value", ["60000", -1, 60000.5])
+@pytest.mark.parametrize("bad_value", ["60000", -1, 60000.5, 2147483648])
 def test_build_app_rejects_a_hand_edited_coalescing_window_value(
     platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, bad_value,
 ) -> None:
@@ -2265,13 +2265,69 @@ def test_the_reader_returns_a_closed_windows_summary_and_not_an_open_one() -> No
     assert summary["count"] == 3
     assert summary["recorded_at"] == datetime(2001, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
 
-    # A window that has not closed contributes nothing.
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-reader-open")
-    with pytest.raises(FoundationError):
-        service.authenticate("bogus-secret-reader-open")
+    # A window that has not closed contributes nothing. The sink's clock now
+    # stands well ahead of the reader's, so the new window ends after the
+    # reader's cutoff; three refusals make a summary whose count is 2, which
+    # the reader would return if it did not leave open windows out.
+    sink_clock.now = datetime.now(timezone.utc) + timedelta(days=30)
+    for _ in range(3):
+        with pytest.raises(FoundationError):
+            service.authenticate("bogus-secret-reader-open")
     again = reader.query(event_classes=None, after=None, limit=100, visibility_lag_ms=0)
     assert [row["event_id"] for row in again if row["count"] is not None] == [summary["event_id"]]
+
+
+def test_two_window_lengths_never_share_a_window_in_memory() -> None:
+    """The window length is part of the key: a refusal counted under one
+    length is not added to a window another length opened."""
+    sink_clock = _SinkClock()
+    durable = ApplicationAuditSink(clock=sink_clock)
+    for window_ms in (60_000, 3_600_000, 60_000):
+        durable.record_denial(
+            window_ms=window_ms, event_class="authorization_denial", request_id="req-len", application_id="app-len",
+            actor_type="application_credential", actor_id="cred-len", role="runtime", operation="op_len",
+            target_kind="entity", reason_code="FORBIDDEN",
+        )
+    assert len(durable_events(durable)) == 2, "each length opened its own window and wrote its own first row"
+    sink_clock.advance(3_601.0)
+    summaries = _summaries_closed_by(durable, sink_clock.now)
+    assert [(s["operation"], s.get("count")) for s in summaries] == [("op_len", None)], summaries
+
+
+def test_the_memory_reader_pages_through_summary_events_and_filters_them_by_class() -> None:
+    sink_clock = _SinkClock()
+    durable = ApplicationAuditSink(clock=sink_clock)
+    reader = InMemoryAuditQueryStore(ControlAuditSink(), durable)
+    for operation, event_class in (("op_a", "authorization_denial"), ("op_b", "authorization_denial"), ("op_c", "authentication_denial")):
+        for _ in range(3):
+            durable.record_denial(
+                window_ms=60_000, event_class=event_class, request_id="req-mem", application_id="app-mem",
+                actor_type="application_credential", actor_id="cred-mem", role="runtime", operation=operation,
+                target_kind="entity", reason_code="FORBIDDEN",
+            )
+    sink_clock.advance(61.0)
+    expected = {
+        summary.event_id for summary, _end in durable.denial_window_summaries(closed_before=sink_clock.now)
+    }
+    assert len(expected) == 3
+
+    seen: list[str] = []
+    after = None
+    for _ in range(200):  # the walk ends long before this; a cursor-blind branch never would
+        page = reader.query(event_classes=None, after=after, limit=1, visibility_lag_ms=0)
+        if not page:
+            break
+        row = page[0]
+        seen.append(row["event_id"])
+        after = (row["recorded_at"], row["plane"], row["event_id"])
+    else:
+        pytest.fail("the walk did not end: the summary branch ignores the cursor")
+    assert len(seen) == len(set(seen)), "a row was returned twice in one walk"
+    assert expected <= set(seen), "a summary event was missing from the walk"
+
+    only_authentication = reader.query(event_classes=["authentication_denial"], after=None, limit=100, visibility_lag_ms=0)
+    assert {row["operation"] for row in only_authentication} == {"op_c"}, only_authentication
+    assert sum(1 for row in only_authentication if row["count"] is not None) == 1
 
 
 def test_coalesced_count_leaf_semantics() -> None:

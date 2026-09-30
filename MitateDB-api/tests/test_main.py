@@ -650,8 +650,7 @@ def test_build_app_rejects_invalid_control_plane_status_value(main_module, platf
 def test_thread_limit_from_env_unit_contract(main_module) -> None:
     """Completion conditions 97/153: unset or empty falls back to
     `default`; a positive integer is returned as-is -- the function
-    itself, in isolation (mirrors `test_optional_float_default_path_is_
-    not_regressed` immediately below).
+    itself, in isolation.
 
     mutation M191 (`mitatedb_api/main.py`): treat an empty string as if
     it were a valid override -- this test's own second assertion (`""`
@@ -725,44 +724,23 @@ def test_build_app_rejects_invalid_thread_limit_env(main_module, platform, probe
             main_module.build_app(env)
 
 
-_INVALID_AUDIT_FLUSH_INTERVAL_VALUES = ["0", "-1", "nan", "inf", "not-a-number"]
+def test_build_app_starts_no_background_audit_thread_and_reads_no_flush_interval(main_module, platform, probe_app):
+    """Every audit event and every refusal count is durable before its
+    response is returned, so the composition root runs no periodic sweep:
+    the lifespan starts no `mitatedb-audit-flush` thread, and a stale
+    `MITATEDB_AUDIT_FLUSH_INTERVAL_S` in the environment -- once a startup
+    failure when malformed -- is not read at all."""
+    import threading
 
+    from starlette.testclient import TestClient
 
-@pytest.mark.parametrize("bad_value", _INVALID_AUDIT_FLUSH_INTERVAL_VALUES)
-def test_build_app_fails_fast_on_invalid_audit_flush_interval(main_module, platform, probe_app, bad_value):
-    """Phase 6 WP-0 (design D-4(a)): `MITATEDB_AUDIT_FLUSH_INTERVAL_S` is
-    the interval `main.py`'s own flush thread passes straight to
-    `threading.Event.wait` (`main.py:350`) -- `wait(0)`/`wait(-1)`/
-    `wait(float("nan"))` all return immediately (`False`), turning that
-    daemon thread into a silent hot loop nothing about which would look
-    alarming to an operator who mistyped this variable. `_optional_float`
-    must now refuse every non-empty value that is not a finite, positive
-    float at startup (`ValueError` naming the variable) -- exercised here
-    through the REAL `build_app` path (not a direct call to
-    `_optional_float`), so this is the actual startup-failure consumer
-    wiring, not merely the helper function in isolation. Each of the 5
-    forms (zero / negative / NaN / infinity / unparsable text) is its own
-    parametrize case, per WP-0 completion condition 1 ("5 形すべてを個別
-    ケースで観測する")."""
     env = _base_env(platform, probe_app)
-    env["MITATEDB_AUDIT_FLUSH_INTERVAL_S"] = bad_value
-    with pytest.raises(ValueError, match="MITATEDB_AUDIT_FLUSH_INTERVAL_S"):
-        main_module.build_app(env)
-
-
-def test_optional_float_default_path_is_not_regressed(main_module) -> None:
-    """WP-0 completion condition 2: an unset OR empty-string
-    `MITATEDB_AUDIT_FLUSH_INTERVAL_S` must still fall back to `default` --
-    the "空なら既定値" half that must stay green while mutation 2 (dropping
-    the `if not raw: return default` early return) turns it red. A direct
-    call is sufficient here (unlike the fail-fast cases above): the real-
-    startup wiring for this same function/variable pair is already
-    established by `test_build_app_fails_fast_on_invalid_audit_flush_
-    interval` and by `_optional_float` having exactly one caller in
-    `main.py` (the flush-interval assignment feeding `threading.Event.
-    wait`)."""
-    assert main_module._optional_float({}, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
-    assert main_module._optional_float({"MITATEDB_AUDIT_FLUSH_INTERVAL_S": ""}, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
+    env["MITATEDB_AUDIT_FLUSH_INTERVAL_S"] = "not-a-number"
+    asgi_app = main_module.build_app(env)
+    with TestClient(asgi_app) as client:
+        assert client.get("/v1/capabilities").status_code == 401  # the app is up and answering
+        names = [thread.name for thread in threading.enumerate()]
+        assert "mitatedb-audit-flush" not in names, names
 
 
 def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(main_module, platform):

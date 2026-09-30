@@ -117,6 +117,14 @@ def _wait_for_room_in_window(window_ms: int, need_ms: int) -> None:
         time.sleep((remaining + 50) / 1000)
 
 
+def _wait_for_the_start_of_an_even_second() -> None:
+    """Sleeps until the clock is within 300 ms after the start of an even
+    second, where a window of 1 s and one of 2 s begin on the same instant."""
+    elapsed = int(time.time() * 1000) % 2000
+    if elapsed > 300:
+        time.sleep((2000 - elapsed + 20) / 1000)
+
+
 def _sleep_until_window_closes(window_ms: int) -> None:
     remaining = window_ms - int(time.time() * 1000) % window_ms
     time.sleep((remaining + 150) / 1000)
@@ -258,8 +266,12 @@ def test_migration_run_by_another_role_leaves_the_function_and_table_owned_by_th
 # ===========================================================================
 
 
-def _check(platform: types.SimpleNamespace) -> None:
-    with psycopg.connect(platform.api_dsn) as conn:
+def _check(platform: types.SimpleNamespace, *, as_admin: bool = False) -> None:
+    """Runs the check on the data plane's own connection, or -- `as_admin`
+    -- on the connection `verify-declarations` uses, one that is never the
+    runtime role."""
+    dsn = _platform_dsn(platform) if as_admin else platform.api_dsn
+    with psycopg.connect(dsn) as conn:
         platform_declarations.check_denial_window_function(
             conn, schema=platform.schema, ops_module=platform_declarations.PEER_MODULE, migration=_MIGRATION,
         )
@@ -267,6 +279,7 @@ def _check(platform: types.SimpleNamespace) -> None:
 
 def test_the_check_passes_on_the_migrated_platform(platform: types.SimpleNamespace) -> None:
     _check(platform)
+    _check(platform, as_admin=True)
 
 
 @pytest.mark.parametrize(
@@ -309,6 +322,68 @@ def test_the_check_names_a_missing_function(platform: types.SimpleNamespace) -> 
             )
     assert excinfo.value.code == "F-21"
     assert "does not exist" in str(excinfo.value)
+
+
+def test_the_check_run_as_a_role_other_than_the_runtime_role_names_a_runtime_role_without_execute(
+    platform: types.SimpleNamespace,
+) -> None:
+    """`verify-declarations` connects as the schema owner, which may EXECUTE
+    everything, so the check names the runtime role -- the role that writes
+    `application_audit` -- and asks about that role's own EXECUTE."""
+    fn = _fn(platform).as_string()
+    _check(platform, as_admin=True)
+    _admin(platform, f"REVOKE EXECUTE ON FUNCTION {fn} FROM {platform.api_role}")
+    try:
+        with pytest.raises(PlatformDeclarationError) as excinfo:
+            _check(platform, as_admin=True)
+        assert excinfo.value.code == "F-21"
+        assert "a role that writes application_audit may not EXECUTE it" in str(excinfo.value), str(excinfo.value)
+        assert platform.api_role in str(excinfo.value)
+    finally:
+        _admin(platform, f"GRANT EXECUTE ON FUNCTION {fn} TO {platform.api_role}")
+    _check(platform, as_admin=True)
+
+
+@pytest.mark.parametrize("privilege", ["SELECT", "INSERT", "UPDATE", "DELETE"])
+def test_the_check_names_a_direct_privilege_a_runtime_role_holds_on_the_counter_table(
+    platform: types.SimpleNamespace, privilege: str,
+) -> None:
+    """A hand-made `GRANT` of any of the four direct privileges to the
+    runtime role is a count that role can reach without the function; the
+    check sees it from the data plane's own connection and from the
+    schema owner's."""
+    table = f"{platform.schema}.denial_window_counter"
+    _check(platform, as_admin=True)
+    _admin(platform, f"GRANT {privilege} ON TABLE {table} TO {platform.api_role}")
+    try:
+        for as_admin in (False, True):
+            with pytest.raises(PlatformDeclarationError) as excinfo:
+                _check(platform, as_admin=as_admin)
+            assert excinfo.value.code == "F-21"
+            assert "a runtime role holds a direct privilege on the counter table" in str(excinfo.value), str(excinfo.value)
+            assert platform.api_role in str(excinfo.value)
+    finally:
+        _admin(platform, f"REVOKE {privilege} ON TABLE {table} FROM {platform.api_role}")
+    _check(platform, as_admin=True)
+
+
+def test_the_check_names_an_auditreader_that_cannot_select_the_counter_table(platform: types.SimpleNamespace) -> None:
+    """Without SELECT the reader's `audit_query` fails on every call; the
+    check names the role that reads both audit tables."""
+    table = f"{platform.schema}.denial_window_counter"
+    auditreader_role = f"{platform.prefix}_auditreader"
+    _check(platform, as_admin=True)
+    _admin(platform, f"REVOKE SELECT ON TABLE {table} FROM {auditreader_role}")
+    try:
+        for as_admin in (False, True):
+            with pytest.raises(PlatformDeclarationError) as excinfo:
+                _check(platform, as_admin=as_admin)
+            assert excinfo.value.code == "F-21"
+            assert "a role that reads both audit tables may not SELECT the counter table" in str(excinfo.value), str(excinfo.value)
+            assert auditreader_role in str(excinfo.value)
+    finally:
+        _admin(platform, f"GRANT SELECT ON TABLE {table} TO {auditreader_role}")
+    _check(platform, as_admin=True)
 
 
 # ===========================================================================
@@ -375,6 +450,57 @@ def test_the_window_is_aligned_to_the_clock_and_null_application_folds_to_one_ke
         sink.close()
     assert _counter_rows(platform, zero_operation) == []
     assert len(_audit_rows(platform, zero_operation)) == 2
+
+
+def test_two_window_lengths_never_share_a_counter_row(platform: types.SimpleNamespace) -> None:
+    """Processes run with different declared window lengths while a length
+    is being changed. A window of one length starts on the same instant as
+    a window of another (both are aligned to the epoch; here a 1 s and a 2 s
+    window that begin together on an even second), but the two are different
+    windows: they keep separate counter rows, so a row is never added to
+    past the `window_end` its own length gave it -- which the reader may
+    already have read."""
+    operation = _new_operation()
+    short_ms, long_ms = 1000, 2000
+    _wait_for_the_start_of_an_even_second()
+    sink = _sink(platform)
+    try:
+        sink.record_denial(window_ms=short_ms, **_fields(operation))
+        for _ in range(3):
+            sink.record_denial(window_ms=long_ms, **_fields(operation))
+    finally:
+        sink.close()
+    counters = _counter_rows(platform, operation)
+    assert len(counters) == 2, f"two lengths, two rows -- got {counters!r}"
+    by_length = {int((end - start).total_seconds() * 1000): occurrences for start, end, occurrences, *_rest in counters}
+    assert by_length == {short_ms: 1, long_ms: 3}, by_length
+    assert len(_audit_rows(platform, operation)) == 2, "each window writes its own first row"
+
+
+def test_a_count_that_cannot_be_added_is_an_error_not_a_silent_loss(platform: types.SimpleNamespace) -> None:
+    """The window's counter row is gone between the conflict and the add
+    (simulated with a trigger that swallows the update): the call raises,
+    so the refusal is answered `SERVICE_UNAVAILABLE` instead of an ordinary
+    refusal whose count was dropped."""
+    operation = _new_operation()
+    _wait_for_room_in_window(_HOUR_MS, 10_000)
+    sink = _sink(platform)
+    trigger_function = sql.SQL("{}.dw_swallow_update").format(sql.Identifier(platform.schema))
+    try:
+        sink.record_denial(window_ms=_HOUR_MS, **_fields(operation))
+        _admin(platform, sql.SQL("CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").format(trigger_function))
+        _admin(platform, sql.SQL("CREATE TRIGGER dw_swallow BEFORE UPDATE ON {} FOR EACH ROW EXECUTE FUNCTION {}()").format(_table(platform), trigger_function))
+        try:
+            with pytest.raises(psycopg.errors.RaiseException):
+                sink.record_denial(window_ms=_HOUR_MS, **_fields(operation))
+        finally:
+            _admin(platform, sql.SQL("DROP TRIGGER dw_swallow ON {}").format(_table(platform)))
+            _admin(platform, sql.SQL("DROP FUNCTION {}()").format(trigger_function))
+        assert _counter_rows(platform, operation)[0][2] == 1
+        sink.record_denial(window_ms=_HOUR_MS, **_fields(operation))  # the count works again once the row can be updated
+        assert _counter_rows(platform, operation)[0][2] == 2
+    finally:
+        sink.close()
 
 
 # ===========================================================================
@@ -483,6 +609,66 @@ def test_audit_query_returns_only_closed_windows_as_application_plane_events_end
     assert [row for row in _summaries(platform, open_operation) if row["count"] is not None] == []
     # ... and neither does a closed one until the visibility lag has passed.
     assert [row for row in _summaries(platform, operation, visibility_lag_ms=_HOUR_MS) if row["count"] is not None] == []
+
+
+def _read(platform: types.SimpleNamespace, **kwargs: Any) -> "list[dict[str, Any]]":
+    arguments: dict[str, Any] = dict(event_classes=None, after=None, limit=1000, visibility_lag_ms=0)
+    arguments.update(kwargs)
+    reader = _reader(platform)
+    try:
+        return reader.query(**arguments)
+    finally:
+        reader.close()
+
+
+def test_a_walk_through_the_cursor_returns_every_summary_event_exactly_once(platform: types.SimpleNamespace) -> None:
+    """Paging one row at a time through summary events: the summary branch
+    honours the cursor, so the walk advances past a summary it has returned
+    and ends, each summary appearing once."""
+    operations = [_new_operation() for _ in range(3)]
+    window_ms = 1000
+    _wait_for_room_in_window(window_ms, 800)
+    sink = _sink(platform)
+    try:
+        for operation in operations:
+            for _ in range(3):
+                sink.record_denial(window_ms=window_ms, **_fields(operation))
+    finally:
+        sink.close()
+    _sleep_until_window_closes(window_ms)
+    expected = {row[3] for operation in operations for row in _counter_rows(platform, operation)}
+    assert len(expected) == 3
+    seen: list[str] = []
+    after = None
+    for _ in range(2000):  # the walk ends long before this; a cursor-blind branch never would
+        page = _read(platform, limit=1, after=after)
+        if not page:
+            break
+        row = page[0]
+        seen.append(row["event_id"])
+        after = (row["recorded_at"], row["plane"], row["event_id"])
+    else:
+        pytest.fail("the walk did not end: the summary branch ignores the cursor")
+    assert len(seen) == len(set(seen)), "a row was returned twice in one walk"
+    assert expected <= set(seen), "a summary event was missing from the walk"
+
+
+def test_the_event_class_filter_applies_to_summary_events(platform: types.SimpleNamespace) -> None:
+    operation = _new_operation()
+    window_ms = 1000
+    _wait_for_room_in_window(window_ms, 800)
+    sink = _sink(platform)
+    try:
+        for _ in range(3):
+            sink.record_denial(window_ms=window_ms, **_fields(operation, event_class="authorization_denial"))
+    finally:
+        sink.close()
+    _sleep_until_window_closes(window_ms)
+    summary_id = _counter_rows(platform, operation)[0][3]
+    with_class = _read(platform, event_classes=["authorization_denial"])
+    assert summary_id in {row["event_id"] for row in with_class}
+    other_class = _read(platform, event_classes=["authentication_denial"])
+    assert summary_id not in {row["event_id"] for row in other_class}, "a summary event of another class came through the filter"
 
 
 def test_a_service_over_the_postgres_sink_counts_refusals_and_a_failed_count_is_a_503(platform: types.SimpleNamespace) -> None:

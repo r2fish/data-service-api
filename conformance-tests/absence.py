@@ -43,7 +43,7 @@ word (design principle 4: uncertainty must not silently become permission).
 **`audit_query`'s declare-first form is NOT the two-form model above (port
 v1.8, phase 4 WP-1, design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
 §8.4, work order supplementary ruling 1)**: `ConformanceAdapter.
-audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms` collapse form
+audit_query`/`audit_visibility_lag_ms` collapse form
 (b) into form (a) for this one capability specifically -- an `audit_query`
 declared anything other than `enabled`/`partial` (most commonly
 `unavailable`) raises `SurfaceAbsent`, WITHOUT presenting any request to

@@ -2439,13 +2439,12 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
     # Phase 6 WP-0 additions (design D-4(a)/(b)):
-    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
     ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
     # Phase 6 WP-0 additions, round 2 (supervisor review ruling
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_203_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_205_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2547,6 +2546,9 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_acl_holders"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_denial_window_function"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
@@ -3066,7 +3068,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_203_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_205_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -3186,10 +3188,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_203_rows() -> None:
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_field_definitions"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
-        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_203_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_205_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3239,6 +3240,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_203_rows() -> None:
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_acl_holders"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_denial_window_function"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
@@ -3499,7 +3503,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_203_rows() -> None:
         ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "coalescing_window_ms"),
         ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "issue_audit_credential"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 203
+    assert len(_ISOMORPHIC_TARGETS) == 205
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}
@@ -3879,7 +3883,9 @@ def test_declared_coalescing_window_ms_matches_the_design_value(kind, platform):
 
 _EXPECTED_OUTCOME_NOTE = (
     "outcome=allow means the operation was authorized and submitted; a later outcome=error "
-    "row sharing the same request_id means it did not commit. An allow row with no "
+    "row sharing the same request_id means the service did not see it commit: either it did "
+    "not commit, or the connection was lost during the commit itself and its outcome is "
+    "unknown. An allow row with no "
     "corresponding error row usually means the operation committed, but -- if the process "
     "was lost between recording allow and committing, or if the error row itself could not "
     "be recorded -- can also mean it did not; the audit trail alone cannot distinguish the "

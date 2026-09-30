@@ -481,6 +481,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         # design D-3 (1): the credential-keyed `requests_per_minute` rate
         # table -- depends only on 0002 above.
         "0016_credential_request_rate.sql",
+        # the refusal-window counter and its function -- depends on 0005
+        # above (`application_audit`, the `auditreader` role).
+        "0017_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -503,6 +506,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
     _run_psql(provision_dsn, rewritten["0013_role_statement_timeouts.sql"])
     _run_psql(provision_dsn, rewritten["0016_credential_request_rate.sql"])
+    _run_psql(provision_dsn, rewritten["0017_denial_window_counter.sql"])
 
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:

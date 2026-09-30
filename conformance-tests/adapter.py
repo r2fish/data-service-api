@@ -266,8 +266,8 @@ class SurfaceAbsent(Exception):
     ruling 1 item 1):** every use of this exception above this note means
     "no Python callable on this peer's public surface could structurally
     receive this request at all", proven by source inspection, never
-    assumed. `ConformanceAdapter.audit_query`/`flush_audit_buffer`/
-    `audit_visibility_lag_ms` (below) ALSO raise this exception for a
+    assumed. `ConformanceAdapter.audit_query`/`audit_visibility_lag_ms`
+    (below) ALSO raise this exception for a
     second, narrower reason: "this deployment's own capability declaration
     says it does not provide the audit surface" (undeclared, or declared
     anything other than `enabled`/`partial`) -- a claim about the peer's
@@ -1962,30 +1962,11 @@ class ConformanceAdapter(ABC):
         above.
         """
 
-    @abstractmethod
-    def flush_audit_buffer(self) -> None:
-        """Adapter-privileged hook (peer-side, same category as `control_
-        audit_events()` above) that makes every event the peer has recorded
-        so far readable through `audit_query` now, so a test can observe it
-        without waiting on a timer. Neither peer holds an ordinary data-
-        operation event in memory any more -- each is written to the
-        durable sink before its response is returned, so for those events
-        this hook has nothing to do. What it still does is sweep the peer's
-        denial-coalescing windows, writing the repeat-count summary row of
-        a window that has expired (an adapter may also force every open
-        window), so a test can observe that row without waiting out the
-        real window. Follows the same declare-first dispatch `audit_query`
-        documents above -- `SurfaceAbsent` under the same extended meaning
-        when the audit surface is not provided at all (there is nothing to
-        make visible anywhere the peer has declared it will answer for),
-        never a `ConformanceDenial` for that case. A peer with a real,
-        `enabled` audit surface and no such window sweep of its own may
-        implement this as a real no-op rather than raising -- this method's
-        contract is "make recorded events visible now if that is not
-        already true", not "a buffer or a window must exist as a distinct
-        mechanism".
-        """
-
+    # port v1.19: there is no `flush_audit_buffer`. Every event and every
+    # refusal count is written before its response is returned, so a peer
+    # holds nothing a test could make visible sooner; a test waits the
+    # declared `audit_visibility_lag_ms` (and, for a refusal window's
+    # summary event, the window's own end) and polls.
     @abstractmethod
     def audit_visibility_lag_ms(self) -> int:
         """Reads the peer's own declared `visibility_lag_ms` (design D-6:

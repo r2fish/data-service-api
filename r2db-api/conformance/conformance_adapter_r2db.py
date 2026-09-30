@@ -962,19 +962,6 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         return self._call(lambda: self._control_service.audit_query(self._actor_secret(actor), dict(request)))
 
     # port v1.8
-    def flush_audit_buffer(self) -> None:
-        if self._audit_query_status() not in ("enabled", "partial"):
-            raise self._audit_surface_absent(
-                "flush_audit_buffer",
-                "audit_query is not declared enabled/partial -- there is nothing to make visible on this "
-                "deployment's own declared posture",
-            )
-        # A no-op: every event and every refusal count is written before
-        # its response is returned, and a refusal window's summary event
-        # becomes readable when the window closes plus the declared
-        # visibility lag -- there is no buffer or sweep to trigger.
-
-    # port v1.8
     def audit_visibility_lag_ms(self) -> int:
         control_actor = self.control_credential()
         document = self._call(lambda: self._control_service.capabilities(self._actor_secret(control_actor)))

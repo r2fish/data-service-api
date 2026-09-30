@@ -41,8 +41,7 @@ The 4 vectors (design §8.1 / §9.2 property 4):
    Scoped to fail-closed-class events only (design §8.1 vector 1's own
    scoping) -- these are written to the durable sink before the response
    (D-2/D-3), so visibility lag alone (`audit_visibility_lag_ms()`, never a
-   fixed `sleep`) makes them observable, with no `flush_audit_buffer()`
-   needed.
+   fixed `sleep`) makes them observable.
 2. **Secret absence**: no `audit.forbidden_fields` member appears as an
    event KEY, and no reusable secret/verifier value appears as an event
    VALUE. `actor_id`/`target_id`/`application_id`/`request_id`/`event_id`
@@ -52,9 +51,10 @@ The 4 vectors (design §8.1 / §9.2 property 4):
 3. **Authority separation**: an application credential is refused
    `FORBIDDEN` on the control host's `audit_query`. The common port has no
    distinct "present this same request against the data-plane host"
-   operation (port v1.8 adds exactly the 3 methods the work order names,
+   operation (port v1.8 added exactly the 3 methods the work order named,
    `audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`, none of
-   which parametrize over host) -- the data-plane host's own
+   which parametrized over host; `flush_audit_buffer` is gone since port
+   v1.19) -- the data-plane host's own
    `CAPABILITY_UNSUPPORTED` reply to the identical path string (design
    §7.5/§8.1 vector 3: two hosts answering differently is not a
    contradiction, since each is stating a true fact about itself) is

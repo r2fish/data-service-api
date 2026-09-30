@@ -331,9 +331,8 @@ def test_c25_result_request_id(adapter: ConformanceAdapter, isolated, request: p
     audit_expected_branch = "correlated" if audit_driven else "not_driven"
     audit_observed_branch = "not_driven"
     if audit_driven:
-        # No `flush_audit_buffer()` first: the mutation's own event is
-        # written to the durable sink before its response, so it must be
-        # readable on visibility lag alone.
+        # The mutation's own event is written to the durable sink before
+        # its response, so it must be readable on visibility lag alone.
         # Wait up to audit_visibility_lag_ms() + 2000ms (capped 30000ms)
         # once caught up to the live edge of the log, mirroring test_c09_
         # audit_evidence.py's own `_require_nonvacuous_provided` idiom

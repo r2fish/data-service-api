@@ -1239,7 +1239,9 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     _verify_declarations_ok(
         "F-21",
         "the refusal-window function is SECURITY DEFINER with a pinned search_path, not executable by PUBLIC, "
-        "and it and its counter table are owned by the schema's owner role",
+        "it and its counter table are owned by the schema's owner role, every role that writes application_audit "
+        "may EXECUTE it, no runtime role holds a direct privilege on the counter table, and every role that reads "
+        "both audit tables may SELECT it",
     )
     return 0
 

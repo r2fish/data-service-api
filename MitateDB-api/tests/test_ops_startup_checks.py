@@ -1105,7 +1105,7 @@ def test_a_renamed_check_that_raises_the_code_label_is_not_generation_zero(tmp_p
 
 
 def test_the_known_table_has_one_row_per_plane_and_fingerprint():
-    """Data has 15 rows (G1 7, G2 4, G3 4), control 13 (G1 6, G2 4, G3 3), and no
+    """Data has 13 rows (G1 7, G2 4, G3 2), control 12 (G1 6, G2 4, G3 2), and no
     fingerprint is in the table twice. The last G3 row of each plane is the one
     the working tree carries (`_current_row`); the G3 rows after the first have no
     representative ref yet."""
@@ -1113,8 +1113,8 @@ def test_the_known_table_has_one_row_per_plane_and_fingerprint():
     counts = {}
     for row in rows:
         counts[(row.plane, row.generation)] = counts.get((row.plane, row.generation), 0) + 1
-    assert counts == {("data", "G1"): 7, ("data", "G2"): 4, ("data", "G3"): 4,
-                      ("control", "G1"): 6, ("control", "G2"): 4, ("control", "G3"): 3}
+    assert counts == {("data", "G1"): 7, ("data", "G2"): 4, ("data", "G3"): 2,
+                      ("control", "G1"): 6, ("control", "G2"): 4, ("control", "G3"): 2}
     assert len({(row.plane, row.fingerprint) for row in rows}) == len(rows)
 
 
