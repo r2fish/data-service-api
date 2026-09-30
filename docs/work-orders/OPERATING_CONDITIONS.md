@@ -148,6 +148,7 @@
     - 監督のコミットと main へのマージ: `tools/dev/finalize.py` (変更ごとに `finalize_*.sh` を書かない)
     - 長い文書から節を取り出す: `tools/dev/section.py`
     - 統合済みの worktree とローカルブランチを畳む (§1.2 の 18): `tools/dev/fold.py` (既定は dry-run。`--apply` は監督だけが、対象の一覧を dry-run で見てから行う)
+    - 台帳 §8 の残件の一覧と固定欄の検査 (§1.16 の 79): `tools/dev/ledger.py`
 **【訂正註 2026-09-16 (R-44 WP-2)】** gate-hold flag と `--hold` 引数、`ps` による「他の pytest が 0 件」の確認は **R-44 WP-2 で廃止した**。排他は `tools/testpg/dsa_testpg.py` の `suite_lock()` (gate と性能計測が排他、通常の pytest は共有) が担い、待ち合わせは道具が自動で行う。**§1.3 の 23 の「`pg_database` の差分 0」は、WP-1 の統合 (main `41e1beb`) 以降、共有クラスタについては残骸なしの証拠ではない** — テストは実行ごとの使い捨てクラスタを使うので、共有クラスタの差分は当然 0 になる。WP-2 以降、判定はその実行のクラスタの差分で行い、共有クラスタの差分は情報として表示する。本節と §1.3 の 19〜21・23、§1.5 の 39 の正式な改訂は R-44 WP-4 で行う。設計は `docs/design/TEST_POSTGRES_ISOLATION_V0_1.md` v0.2、作業は `docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md` §3。
 
 65. subagent への発注では、手順を文章で書き下さず、道具名と引数を渡す。報告には道具の出力行 (集計行・変異表・`log=` のパス) をそのまま貼る。(依頼者指示 2026-09-15)
@@ -189,6 +190,7 @@
 ### 1.16 記録の置き場
 
 78. 記録 (時点付きの履歴: 引き継ぎ書のうち最新 2 通以外、台帳の版数ログのうち最新 5 版以外、以後の段で定める改版履歴・更新層) は `docs/archive/<元 path>` に `git mv` で置き、検査器 (`tools/check_doc_refs.py` の参照走査、`tools/check_comment_provenance.py`) は走査しない。`tools/change_class.py` は `docs/archive/` 配下を Class A とする。空 `.md` ガードと公開値スキャンは archive にも掛かる。正本から記録へは「記録: `docs/archive/...`」の 1 行で指す。新しい引き継ぎ書を commit する変更セットで最新 2 通から外れる引き継ぎ書を、台帳の版上げの変更セットで 6 版目の行を、それぞれ同時に移す。既存文書の path 参照は書き換えない (解決規則は `docs/archive/README.md`)。設計 `docs/design/DOC_ARCHIVE_SPLIT_V1.md`。(依頼者指示 2026-09-23)
+79. 台帳 (`RM` §8) の行は固定欄を持ち、未着手・進行中・常設の行は §8.1 (`| ID | 状態 | 規模 | 印 | 着手条件 | 件名 | 内容 | 行き先 |`)、閉止・却下の行は §8.2 の索引 (`| ID | 状態 | 閉止日 | 件名 |`) に置く。語彙は設計 `docs/design/LEDGER_FIXED_FIELDS_V1.md` D-2 の閉じた集合であり、固定欄が正、内容の欄の前置きは経緯である。§1.13 の 73 の「行の冒頭に記す」は「規模の欄に記す (理由は内容の欄)」と読む。行を閉じる変更セットで、その行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__LEDGER_CLOSED.md` の末尾へ逐語で移し、§8.2 に索引行を残す。閉止行への後からの【追記】は記録ファイルの当該節の末尾に 1 行足す。検査は `tools/dev/ledger.py --check` (pre-commit と `tools/tests`)、残件の一覧は `tools/dev/ledger.py --open` で取る。(依頼者裁定 2026-09-30、設計 `docs/design/LEDGER_FIXED_FIELDS_V1.md`)
 
 ---
 
@@ -281,6 +283,7 @@
 | §1.14-76 | 依頼者 2026-09-23 (改版履歴の同日の行) | `RM` §0.1、§9 の 13 |
 | §1.15-77 | 依頼者 2026-09-23 (改版履歴の同日の行) | `ROLES` 共通運用ルールの 12 / 同書「7. 引き継ぎ書の節構成」 / `.claude/agents/reviewer.md`・`evidence-auditor.md` の報告形式 / `RM` §9 の 14 |
 | §1.16-78 | 依頼者指示 2026-09-23 (改版履歴の同日の行)、設計 `docs/design/DOC_ARCHIVE_SPLIT_V1.md` §4.1 | `docs/archive/README.md` / `RM` v1.111 の版数ログ先頭行と §9 の 8 の A 行 / `tools/check_doc_refs.py`・`tools/change_class.py`・`tools/check_comment_provenance.py` の docstring |
+| §1.16-79 | 依頼者裁定 2026-09-30 (改版履歴の同日の行)、設計 `docs/design/LEDGER_FIXED_FIELDS_V1.md` §5.1 | `docs/archive/README.md` / `RM` v1.133 の版数行、§8 冒頭の 2 行、§9 の 12 / `tools/dev/ledger.py` の docstring / `PRECOMMIT` の `ledger-check` |
 | §2-3 | `H0904F2`:65 | `H0905F`:110 / `H0906F`:122 / `H0907F`:25 / `WO-P8`:48、:1101 |
 | §2-6 | `H0906F`:116 | `H0904F2`:103 / `H0905F`:115 / `WO-P8`:48、:1143 / `PRECOMMIT`:11-13 |
 | §2-10 | `H0904F2`:121 | `H0905F`:113 / `H0906F`:129 / `WO-P8`:48 |
@@ -298,6 +301,7 @@
 
 | 日付 | 変更 | 根拠 |
 |---|---|---|
+| 2026-09-30 | **§1.16 (79)** を足した (台帳 §8 の固定欄 = §8.1 の 8 列と §8.2 の索引 4 列、語彙は設計 D-2 / 閉止の変更セットで行を記録ファイルへ逐語で移し索引行を残す / 閉止行への追記は記録ファイルの当該節の末尾 / 検査は `tools/dev/ledger.py --check`、残件の一覧は `--open` / §1.13 の 73 の読み替え)。§1.10 の 64 に 1 行、§5 に対応行を足した。**§1 の他の条項は変えていない** (73 の本文も変えていない)。同じ変更セットで `RM` §8 を 2 表に作り替え、閉止・却下の行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__LEDGER_CLOSED.md` へ逐語で移した。 | 依頼者裁定 2026-09-30 (逐語は設計 `docs/design/LEDGER_FIXED_FIELDS_V1.md` 冒頭)。台帳 R-117。同日の `RM` v1.133 |
 | 2026-09-30 | **§1.7 に 50a・50b** を足した (規模 L の設計レビューとコードレビューは各回の 1 巡目を担当観点 A / B に分けた `reviewer` 2 起動の並列で行い、2 起動を 1 回と数える。並列の 2 起動は `mutate.py` を実行せず、変異は spec を scratchpad のファイルに書き、2 起動の完了後に監督が実行する。再確認は担当観点を指定しない 1 起動で、50 の回数に数えない / レビュー担当は規模を問わず報告に「確認した観点」「確認していない観点」を書く)。§1.13 の 74 の表の L の行に 50a への参照を足し、§5 に対応行を足した。**§1 の他の条項は変えていない (50 の回数、証拠、§1.15 の 77 の裁定は同じ)。** `.claude/agents/reviewer.md` と `ROLES` のテンプレ 4・5 に反映した。 | 依頼者指示 2026-09-30 (規模 L で時間を使うのは起草・実装 → レビュー → 差し戻しの往復であり、2 巡目以降にも実質の発見が出る (runbook `MitateDB-api/docs/cloud-run-cloud-sql.md` §10 の再受理は設計レビュー 3 回と確認レビュー 1 回)。発見は減らさず前の巡へ移す: 1 起動のレビューは着眼が起動ごとに違い、網羅した範囲が報告から読めない)。依頼者確認 2026-09-30 (§1 の変更、`RM` §9 の 8) は同指示をもって充足。巡数と時間への効果は未実測 |
 | 2026-09-24 | **§1.6-44a** を足した (遅いテスト一覧の常設 = 完了ゲート log の `slowest 25 durations` 節。台帳 R-86)。 | 依頼者 2026-09-24 |
 | 2026-09-23 | **§1.16 (78)** を足した (記録 = 時点付きの履歴は `docs/archive/<元 path>` に `git mv` で置き、`check_doc_refs` の参照走査と `check_comment_provenance` は走査しない / `change_class` は `docs/archive/` 配下を Class A / 空 `.md` ガードと公開値スキャンは archive にも掛かる / 正本から記録へは「記録: `docs/archive/...`」の 1 行 / 回転規則 / 既存文書の path 参照は書き換えない)。§0 に引き継ぎ書の解決先の注記 1 行、§5 に対応行を足した。**§1 の他の条項は変えていない。** 同じ変更セットで引き継ぎ書 38 通 (最新 2 通 `HANDOVER_20260923_FABLE5.md`・`_FABLE4.md` 以外) を `docs/archive/docs/work-orders/` へ、`RM` の版数ログの v1.104 以前を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__VERSION_LOG.md` へ移した。 | 依頼者指示 2026-09-23 (正本と記録を分け、記録を検査器の走査対象から外して面積を減らす)。設計 `docs/design/DOC_ARCHIVE_SPLIT_V1.md` v1.1 (設計レビュー 1 回、監督裁定 10 件)、作業指示書 `docs/work-orders/WORK_ORDER_DOC_ARCHIVE_SPLIT_V1.md`。依頼者確認 2026-09-23 (§1 の変更、`RM` §9 の 8) は同指示をもって充足。同日の `RM` v1.111 (v1.110 は別チャットの R-79 閉止) |
