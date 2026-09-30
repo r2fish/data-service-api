@@ -752,7 +752,7 @@ def _with_lock_timeout_option(existing_pgoptions: "str | None", lock_timeout: st
 
 
 def _run_deprovision_script(dsn: str, application_id: str, lock_timeout: str) -> None:
-    script = _migrations_dir() / "0004_deprovision_application.sql"
+    script = _resolve_contained_migration_path(_migrations_dir() / "0004_deprovision_application.sql", "deprovision")
     if not script.exists():
         _die(f"deprovision script not found at {script} (set MITATEDB_MIGRATIONS_DIR to override)")
     _require_psql_16_or_newer()
@@ -1964,7 +1964,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
     """
     provision_dsn = _provision_dsn()
     schema = _schema()
-    migrations_by_number = platform_upgrades.discover_upgrade_scripts(_migrations_dir())
+    migrations_by_number = {number: _resolve_contained_migration_path(path, "upgrade-applications") for number, path in platform_upgrades.discover_upgrade_scripts(_migrations_dir()).items()}
     # M-2(b)/(c) fix (supervisor ruling 2026-09-05, review): an explicit
     # `--script <N>` naming a number with no corresponding file under
     # `_migrations_dir()` is a USAGE error (mirrors r2db-api's own
@@ -2860,6 +2860,22 @@ def _extract_psql_variables(text: str) -> "set[str]":
     return found
 
 
+def _resolve_contained_migration_path(path: Path, command: str) -> Path:
+    """Returns `path` resolved (symlinks followed), provided the resolved
+    path lies inside `_migrations_dir()` resolved the same way -- so a
+    migrations directory that is itself a symlink still accepts its own
+    files, while a path that resolves outside the directory is refused
+    with a fixed message prefixed by `command`; the refused value is never
+    echoed. Existence is not checked here."""
+    directory = _migrations_dir().resolve()
+    candidate = path.resolve()
+    try:
+        candidate.relative_to(directory)
+    except ValueError:
+        _die(f"{command}: resolved migration file path is outside the migrations directory")
+    return candidate
+
+
 def _resolve_platform_migration_file(filename: str) -> Path:
     """`filename` must be a bare name (no path separator), a
     member of `_PLATFORM_MIGRATION_FILENAMES`, and resolve to a real
@@ -2874,12 +2890,7 @@ def _resolve_platform_migration_file(filename: str) -> Path:
         _die("apply-platform-migration: FILENAME must not contain a path separator")
     if filename not in _PLATFORM_MIGRATION_FILENAMES:
         _die("apply-platform-migration: FILENAME must be one of the known platform migration files")
-    directory = _migrations_dir().resolve()
-    candidate = (directory / filename).resolve()
-    try:
-        candidate.relative_to(directory)
-    except ValueError:
-        _die("apply-platform-migration: resolved migration file path is outside the migrations directory")
+    candidate = _resolve_contained_migration_path(_migrations_dir() / filename, "apply-platform-migration")
     if not candidate.is_file():
         _die("apply-platform-migration: migration file not found")
     return candidate
