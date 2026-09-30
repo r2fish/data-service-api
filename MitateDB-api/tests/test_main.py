@@ -481,10 +481,11 @@ def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_a
 
 def test_build_app_writer_role_dual_check_connects_via_the_sinks_own_connect_method(main_module, platform, probe_app, monkeypatch):
     """N-2 (monitor ruling 2026-09-05, delta review §4): `check_writer_
-    role_timeouts`'s own connection must be opened via THE SAME METHOD
-    `PostgresApplicationAuditSink` uses to open every connection it ever
-    writes through (`_connect`) -- never a separately-written `psycopg.
-    connect(...)` call that merely happens to match its arguments today.
+    role_timeouts`'s own connection must be opened via the sink's own
+    method for opening a connection (`PostgresApplicationAuditSink.
+    _connect`, which the sink's writes use when it has no pool) -- never a
+    separately-written `psycopg.connect(...)` call that merely happens to
+    match its arguments today.
     Patches `_connect` to record every call; `build_app` makes no HTTP
     request of its own, so a call recorded here can only have happened
     during the startup dual-check step itself. Would go RED under the
@@ -502,6 +503,87 @@ def test_build_app_writer_role_dual_check_connects_via_the_sinks_own_connect_met
     main_module.build_app(env)
     assert len(calls) >= 1
     assert all(isinstance(c, PostgresApplicationAuditSink) for c in calls)
+
+
+def _record_built_pools_and_sinks(main_module, monkeypatch) -> "tuple[list, list]":
+    """Makes `main.build_app` record every `BoundedConnectionPool` and every
+    `PostgresApplicationAuditSink` it constructs (both real, subclassed)."""
+    pools: list = []
+    sinks: list = []
+    real_pool = main_module.BoundedConnectionPool
+    real_sink = main_module.PostgresApplicationAuditSink
+
+    class _RecordingPool(real_pool):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            pools.append(self)
+
+    class _RecordingSink(real_sink):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sinks.append(self)
+
+    monkeypatch.setattr(main_module, "BoundedConnectionPool", _RecordingPool)
+    monkeypatch.setattr(main_module, "PostgresApplicationAuditSink", _RecordingSink)
+    return pools, sinks
+
+
+def test_build_app_sizes_the_audit_sinks_pool_from_the_value_f16_counts_per_api_store(main_module, platform, probe_app, monkeypatch) -> None:
+    """Completion condition 28: F-16's floor for the `mitatedbsvc_api`
+    role counts `platform_declarations._API_ROLE_STORE_COUNT` stores of
+    `role_pool_size(thread_limit)` connections each, per process. The
+    pools `build_app` builds against that role are exactly that many, each
+    of that size (a thread limit of 3 makes it 5), and the audit sink
+    writes through the last of them rather than sharing the credential
+    store's, so the sink cannot hold more connections than the floor
+    counted for it.
+
+    mutation (`main.py`): build the sink's pool twice as large as the
+    platform pool (`max_size=pool_size` becomes `max_size=pool_size * 2`
+    on `audit_pool`) -- the two sizes then sum to 15 where the floor
+    counts 10."""
+    from mitatedb_api import platform_declarations
+    from mitatedb_api.config import role_pool_size
+
+    pools, sinks = _record_built_pools_and_sinks(main_module, monkeypatch)
+    env = _base_env(platform, probe_app)
+    env["MITATEDB_THREAD_LIMIT"] = "3"
+    main_module.build_app(env)
+    per_store = role_pool_size(3)
+    assert per_store == 5
+    assert len(sinks) == 1
+    assert len(pools) == platform_declarations._API_ROLE_STORE_COUNT
+    assert sinks[0]._pool is pools[-1] and pools[-1] is not pools[0]
+    assert [pool.stats()["size"] for pool in pools] == [per_store] * platform_declarations._API_ROLE_STORE_COUNT
+    assert sum(pool.stats()["size"] for pool in pools) == platform_declarations._API_ROLE_STORE_COUNT * per_store
+
+
+def test_build_app_lifespan_shutdown_closes_the_audit_sinks_pooled_connections(main_module, platform, probe_app, monkeypatch) -> None:
+    """The lifespan shutdown closes the connections the audit sink's pool
+    holds: with a connection idle in that pool, running the app's lifespan
+    startup and shutdown ends its server session.
+
+    mutation (`main.py`): drop the `durable_audit.close()` call from the
+    lifespan shutdown -- the pooled session is still on the server."""
+    _pools, sinks = _record_built_pools_and_sinks(main_module, monkeypatch)
+    app = main_module.build_app(_base_env(platform, probe_app))
+    sink = sinks[0]
+    conn = sink._pool.acquire()  # the pool opens a connection and, released, keeps it idle
+    backend_pid = conn.info.backend_pid
+    sink._pool.release(conn)
+
+    def _session_present() -> bool:
+        admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+        try:
+            with admin.cursor() as cur:
+                cur.execute("SELECT count(*) FROM pg_stat_activity WHERE pid = %s", [backend_pid])
+                return cur.fetchone()[0] == 1
+        finally:
+            admin.close()
+
+    assert _session_present()
+    asyncio.run(main_module._run_lifespan_once(app))
+    assert not _session_present()
 
 
 def test_build_app_rejects_invalid_control_plane_status_value(main_module, platform, probe_app):

@@ -352,8 +352,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     concurrency_slots.selfcheck_slot_locking(slot_dir)
     # design D-4: every connection this process opens from here on (the
     # platform pool, every served application's two persistent
-    # connections, the durable audit sink's per-write connections, the
-    # startup reads below) carries this `application_name` (`pool.py`'s
+    # connections, the durable audit sink's pool, the startup reads
+    # below) carries this `application_name` (`pool.py`'s
     # own module-level toggle).
     set_connection_application_name(f"MitateDB-api:data:{os.getpid()}")
 
@@ -388,6 +388,12 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     _role_pool_size = role_pool_size(thread_limit)
     pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"), default=_role_pool_size)
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
+    # The durable audit sink's own pool, against the same `mitatedbsvc_api`
+    # login role and sized to the same `pool_size` as `platform_pool`:
+    # `platform_declarations._API_ROLE_STORE_COUNT` (2) is the number of
+    # pools of this size the F-16 floor counts for that role, and these
+    # two are them.
+    audit_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
 
     # Q4 phase (design D-1(b), §3.7 data-plane steps 4-6): the single
     # source of `surfaces`/`audit_coalescing_window_ms` (read + validated,
@@ -400,20 +406,21 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # N-2 (monitor ruling 2026-09-05, delta review §4): the durable sink is
     # constructed HERE (before the dual check, not after it) so this
     # connection can be opened via `durable_audit._connect()` itself --
-    # THE SAME METHOD the sink's own `append`/`append_many` calls use to
-    # open every connection it ever writes through -- rather than a
-    # separately-written `psycopg.connect(...)` call that merely happened
-    # to match its arguments. A future change to `_connect` (e.g. an
-    # `options=` override or a DSN transformation) now automatically
-    # applies here too, instead of silently going unobserved by F-9 the
-    # way two independently-maintained call sites would risk (delta
-    # review N-2: "`_connect` が将来...を持てば F-9 が実際の書き手接続を
-    # 観測しなくなる (無音)"). `PostgresApplicationAuditSink.__init__`
-    # itself opens no connection (Q4 D-1(b)), so moving its construction
-    # earlier changes nothing about WHEN this process first touches the
-    # network. Closed again immediately after -- the sink opens its own
-    # connections per write, it never receives this one.
-    durable_audit = PostgresApplicationAuditSink(platform_dsn, schema=schema)
+    # the sink's own method for opening a connection, which its `append`/
+    # `append_many` calls use whenever the sink has no pool -- rather than
+    # a separately-written `psycopg.connect(...)` call that merely
+    # happened to match its arguments. `audit_pool` opens the connections
+    # this process' real writes borrow (`pool.BoundedConnectionPool.
+    # _new_connection`) with the same DSN, connect timeout and
+    # `application_name`, but through its own code, so a future change to
+    # `_connect` alone (e.g. an `options=` override or a DSN
+    # transformation) would not reach them: it must be made in both
+    # places. `PostgresApplicationAuditSink.__init__` itself opens no
+    # connection (Q4 D-1(b)), so moving its construction earlier changes
+    # nothing about WHEN this process first touches the network. This
+    # connection is closed again immediately after; the sink's writes
+    # never receive it.
+    durable_audit = PostgresApplicationAuditSink(platform_dsn, schema=schema, pool=audit_pool)
     declarations_conn = durable_audit._connect()  # noqa: SLF001 -- same-module-family reach-in, deliberate (see comment above)
     try:
         declarations = read_platform_declarations(
@@ -704,12 +711,12 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
                 # if the sink happens to be down at this exact moment.
                 pass
             # Release every connection this process holds on shutdown: the
-            # platform registry's bounded pool, and every served
-            # application's own two persistent PostgreSQL connections.
-            # `durable_audit` opens a fresh connection per call (no pool
-            # of its own -- `application_audit.PostgresApplicationAuditSink`'s
-            # own docstring) and so needs no explicit close here.
+            # platform registry's bounded pool, the durable audit sink's
+            # pool (after the last flush above has written), and every
+            # served application's own two persistent PostgreSQL
+            # connections.
             credentials.close()
+            durable_audit.close()
             for cell in cells.values():
                 cell._backend.close()
 

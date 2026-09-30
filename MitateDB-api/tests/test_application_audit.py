@@ -34,6 +34,7 @@ import threading
 import time
 import types
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
@@ -65,6 +66,7 @@ from mitatedb_api.errors import (AuditSinkUnavailable, AuthenticationError,
                                  AuthorizationError, DestructiveConfirmationRequired,
                                  FoundationError)
 from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text
+from mitatedb_api.pool import BoundedConnectionPool
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
@@ -2991,4 +2993,182 @@ def test_backend_commit_failure_is_classified_and_produces_an_error_row(
         assert error_rows[0].reason_code == "commit_failed"
     finally:
         backend.close()
+        clean_application_audit(platform)
+
+
+# ===========================================================================
+# The durable sink's connection pool: every write borrows a connection from
+# a `pool.BoundedConnectionPool` instead of opening one of its own.
+# ===========================================================================
+
+
+def _pooled_sink(platform: types.SimpleNamespace, *, size: int) -> "tuple[PostgresApplicationAuditSink, BoundedConnectionPool]":
+    pool = BoundedConnectionPool(platform.api_dsn, max_size=size)
+    return PostgresApplicationAuditSink(platform.api_dsn, schema=platform.schema, pool=pool), pool
+
+
+def _pooled_append(sink: PostgresApplicationAuditSink, target_id: str) -> None:
+    sink.append(
+        event_class="schema_change", request_id="r1", application_id="a", actor_type="application_credential",
+        actor_id="c1", role="developer", operation="create_collection", target_kind="collection",
+        outcome="allow", reason_code=None, target_id=target_id,
+    )
+
+
+def _landed_target_ids(platform: types.SimpleNamespace) -> "list[str]":
+    """`target_id` of every row in `application_audit`, read with the schema
+    owner's own privilege (the writer role has no SELECT), sorted."""
+    reader = PostgresApplicationAuditSink(platform.provision_dsn, schema=platform.schema)
+    index = APPLICATION_AUDIT_FIELDS.index("target_id")
+    return sorted(row[index] for row in reader.events())
+
+
+def test_pooled_sink_reuses_one_connection_for_consecutive_writes(platform: types.SimpleNamespace) -> None:
+    """Completion condition 26: consecutive writes -- `append` and the D-4
+    batch `append_many` alike -- run on the pool's one connection, and no
+    write opens a connection of its own.
+
+    mutation (`application_audit.py`, `_borrow`): take the no-pool branch
+    even when a pool is given (`if self._pool is None:` becomes `if True:`),
+    the shape this sink had before it had a pool -- every write opens its
+    own connection, the pool opens none, and the pool's `sessions` reads 0
+    instead of 1."""
+    clean_application_audit(platform)
+    sink, pool = _pooled_sink(platform, size=3)
+    try:
+        for index in range(4):
+            _pooled_append(sink, f"seq-{index}")
+        batch_event = ApplicationAuditEvent(
+            event_id=uuid.uuid4().hex, event_class="schema_change", occurred_at=datetime.now(timezone.utc).isoformat(),
+            request_id="r1", application_id="a", actor_type="application_credential", actor_id="c1", role="developer",
+            operation="create_collection", target_kind="collection", outcome="allow", reason_code=None, target_id="seq-batch",
+        )
+        sink.append_many([batch_event])
+        assert _landed_target_ids(platform) == ["seq-0", "seq-1", "seq-2", "seq-3", "seq-batch"]
+        assert pool.platform_stats()["sessions"] == 1
+        assert sink.platform_stats()["sessions"] == 1  # the sink's own view adds the pool's, and has none of its own
+    finally:
+        sink.close()
+        clean_application_audit(platform)
+
+
+def test_pooled_sink_writes_beyond_the_pool_size_wait_and_every_row_lands(platform: types.SimpleNamespace) -> None:
+    """Completion condition 27: with every pooled connection borrowed,
+    writes that arrive wait for one -- none fails and none is dropped -- and
+    the sink never holds more connections than the pool's size while they
+    do. The test borrows both connections itself, starts six writers, and
+    returns the connections only afterwards, so every writer is provably in
+    the pool's wait.
+
+    mutation (`pool.py`, `acquire` stage 3): stop waiting for a returned
+    connection (`if remaining <= 0:` becomes `if True:`), so a write that
+    finds the pool exhausted raises at once and its event is lost -- the
+    writers' errors list is no longer empty and fewer than six rows
+    land."""
+    clean_application_audit(platform)
+    size, writers = 2, 6
+    sink, pool = _pooled_sink(platform, size=size)
+    errors: list[BaseException] = []
+
+    def _writer(index: int) -> None:
+        try:
+            _pooled_append(sink, f"wait-{index}")
+        except BaseException as exc:  # noqa: BLE001 -- the assertion below reports whatever a writer raised
+            errors.append(exc)
+
+    held = [pool.acquire() for _ in range(size)]
+    threads = [threading.Thread(target=_writer, args=(index,)) for index in range(writers)]
+    try:
+        for thread in threads:
+            thread.start()
+        time.sleep(0.5)  # every writer is now inside the pool's wait (each has 5 s)
+        for conn in held:
+            pool.release(conn)
+        held = []
+        for thread in threads:
+            thread.join(timeout=20)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert _landed_target_ids(platform) == sorted(f"wait-{index}" for index in range(writers))
+        stats = pool.stats()
+        assert stats["wait_count"] == writers  # non-vacuous: all six really waited
+        assert stats["in_use_peak"] <= size
+        assert pool.platform_stats()["sessions"] <= size
+    finally:
+        for conn in held:
+            pool.release(conn)
+        sink.close()
+        clean_application_audit(platform)
+
+
+def test_pooled_writes_in_flight_together_never_share_a_transaction(platform: types.SimpleNamespace) -> None:
+    """Completion condition 30: a write whose INSERT has run but not
+    committed, and a second write that commits meanwhile, are on different
+    connections -- the second commit does not commit the first write's
+    row, and when the first write then fails, only the second row exists.
+    This is the pre_commit / `error` row / first-occurrence write versus
+    buffer-flush independence D-4 requires, with the connections now
+    pooled.
+
+    mutation (`application_audit.py`, `_borrow`): hand every borrower the
+    same connection (`conn = self._pool.acquire()` becomes a per-sink
+    cached one), so the second write's commit also commits the first
+    write's INSERT -- `held-first` is then among the rows."""
+    clean_application_audit(platform)
+    sink, _pool = _pooled_sink(platform, size=2)
+    table = sql.Identifier(platform.schema, "application_audit")
+    try:
+        with pytest.raises(RuntimeError, match="first write fails"):
+            with sink._borrow() as first:  # noqa: SLF001 -- a write in flight, held open on purpose
+                with first.cursor() as cur:
+                    cur.execute(
+                        sql.SQL("INSERT INTO {} (event_id, event_class, occurred_at, operation, outcome, target_id) "
+                                "VALUES (%s, 'schema_change', now(), 'create_collection', 'allow', 'held-first')").format(table),
+                        [uuid.uuid4().hex],
+                    )
+                _pooled_append(sink, "committed-second")
+                raise RuntimeError("first write fails")
+        assert _landed_target_ids(platform) == ["committed-second"]
+    finally:
+        sink.close()
+        clean_application_audit(platform)
+
+
+def test_pooled_sink_recovers_when_its_connection_is_lost(platform: types.SimpleNamespace) -> None:
+    """A pooled connection the server ended (a database restart, an idle
+    disconnect) costs at most the one write that found it dead: that write
+    either raises or lands -- never reports success without a row -- and
+    the next write lands on a fresh connection. The pool has one slot, so
+    a connection the sink failed to give back would leave the next write
+    waiting out the pool's acquire timeout and failing.
+
+    mutation (`application_audit.py`, `_borrow`): neither return nor
+    discard a connection that raised (`self._pool.discard(conn)` becomes
+    `pass`), leaking the pool's only slot -- the last write then raises
+    `AuthorizationStateUnavailable` after the 5 s wait."""
+    clean_application_audit(platform)
+    sink, pool = _pooled_sink(platform, size=1)
+    try:
+        _pooled_append(sink, "before-loss")
+        conn = pool.acquire()
+        backend_pid = conn.info.backend_pid
+        pool.release(conn)
+        admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+        try:
+            with admin.cursor() as cur:
+                cur.execute("SELECT pg_terminate_backend(%s)", [backend_pid])
+                assert cur.fetchone() == (True,)
+        finally:
+            admin.close()
+        lost = False
+        try:
+            _pooled_append(sink, "on-dead-connection")
+        except psycopg.Error:
+            lost = True
+        _pooled_append(sink, "after-loss")
+        landed = _landed_target_ids(platform)
+        assert landed == sorted(["before-loss", "after-loss"] if lost else ["before-loss", "on-dead-connection", "after-loss"])
+        assert pool.platform_stats()["sessions"] == 2
+    finally:
+        sink.close()
         clean_application_audit(platform)

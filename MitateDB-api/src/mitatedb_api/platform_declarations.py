@@ -916,10 +916,10 @@ _CONTRACT_170_LIMIT_CLASSES: tuple = ("enum_members", "idempotency_entries", "id
 #: `mitatedb_api.main`'s own platform pool (`PostgresCredentialStore`'s
 #: `BoundedConnectionPool`, pool-sized to `config.role_pool_size(thread_
 #: limit)` unless `MITATEDB_PLATFORM_POOL_SIZE` overrides it) PLUS
-#: `PostgresApplicationAuditSink`'s own per-write transient connections
-#: against the SAME role (worst case, one per worker thread plus the audit
-#: flush thread, also within `role_pool_size(thread_limit)`) -- both
-#: against `mitatedbsvc_api`. Identified by `INSERT` on `application_audit`.
+#: `PostgresApplicationAuditSink`'s own `BoundedConnectionPool` against
+#: the SAME role, built by `main.build_app` with the same size as the
+#: platform pool -- both against `mitatedbsvc_api`. Identified by `INSERT`
+#: on `application_audit`.
 _API_ROLE_STORE_COUNT = 2
 
 #: `mitatedb_api.control_composition`'s own 4 platform-plane stores

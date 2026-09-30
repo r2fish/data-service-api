@@ -959,8 +959,8 @@ def test_every_row_with_a_representative_ref_is_recomputed_from_that_ref():
 
 def _current_row(plane: str) -> "startup_checks.KnownFingerprint":
     rows = [row for row in startup_checks.KNOWN_FINGERPRINTS if row.plane == plane and row.generation == "G3"]
-    assert len(rows) == 1
-    return rows[0]
+    assert rows
+    return rows[-1]  # the newest row: a change that keeps the formula appends a row of the same generation
 
 
 def test_working_tree_data_fingerprint_is_the_current_generation_row():
@@ -1105,14 +1105,15 @@ def test_a_renamed_check_that_raises_the_code_label_is_not_generation_zero(tmp_p
 
 
 def test_the_known_table_has_one_row_per_plane_and_fingerprint():
-    """Data has 12 rows (G1 7, G2 4, G3 1), control 11 (G1 6, G2 4, G3 1), and no
-    fingerprint is in the table twice."""
+    """Data has 13 rows (G1 7, G2 4, G3 2), control 12 (G1 6, G2 4, G3 2), and no
+    fingerprint is in the table twice. The second G3 row of each plane is the one
+    the working tree carries (`_current_row`); it has no representative ref yet."""
     rows = startup_checks.KNOWN_FINGERPRINTS
     counts = {}
     for row in rows:
         counts[(row.plane, row.generation)] = counts.get((row.plane, row.generation), 0) + 1
-    assert counts == {("data", "G1"): 7, ("data", "G2"): 4, ("data", "G3"): 1,
-                      ("control", "G1"): 6, ("control", "G2"): 4, ("control", "G3"): 1}
+    assert counts == {("data", "G1"): 7, ("data", "G2"): 4, ("data", "G3"): 2,
+                      ("control", "G1"): 6, ("control", "G2"): 4, ("control", "G3"): 2}
     assert len({(row.plane, row.fingerprint) for row in rows}) == len(rows)
 
 
