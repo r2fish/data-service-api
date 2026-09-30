@@ -388,7 +388,7 @@ class ControlPlaneLimits:
     # request_bytes` field).
     request_bytes: int = 1_048_576
     # Phase 4 WP-2(b) (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-5, work
-    # order WP-2(b) / P4-D4 item 8): `audit_query`'s own pre-auth fixed
+    # order WP-2(b) / P4-D4 item 8): `audit_query`'s own pre-auth
     # window -- a SEPARATE counter from `control_requests_per_minute`
     # above, never sharing its bucket (`ControlPlaneService.
     # check_audit_rate`/`_check_audit_rate`, `control_plane.py`). Default

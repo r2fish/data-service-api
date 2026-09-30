@@ -288,6 +288,28 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     **版数の扱い**: 契約 1.10.0 は既に main へ公開済みであるため、この裁定を単独の 1.11.0 として出荷する。**実施記録 (契約公開・両 peer の拒否・宣言、WP-1)**: 契約 1.11.0 は作業指示書 `docs/work-orders/WORK_ORDER_R110_UNDECLARED_FIELD_REFUSAL_V1.md` WP-1 で公開する。**この WP は両 peer の `contract_version` を同一コミットで動かす** (4 位置の拒否コードの実装と `select`/`where`/`order_by`/`values` の path 統一が実挙動として揃うため、契約の文言化・実装・宣言 flip を 1 commit に収める — 従属判断 9〜15 が契約文と実装 flip を別 WP に分けたのとは異なる)。
 
+17. **契約 1.12.0 (`audit_requests_per_minute` の窓の形を契約が定めない) への裁定 (2026-09-30、依頼者裁定、監督起票 R-114)。** 新規 CCR ではなく、契約の記述 1 文を実装の現物に合わせる文言変更として採用する。義務は足さない。規模 S のため作業指示書は無く、台帳 (`docs/design/ROADMAP_POST_PHASE7_V1.md`) の R-114 行が指示書である。
+
+    **発端**: 契約 1.4.0 (従属判断 9 の項目 8) は `limits.audit_requests_per_minute_note` で `audit_requests_per_minute` を "A pre-authentication fixed window" と書いたが、両 peer は実装の当初から sliding window で数えている。sliding は窓の境目で宣言値の 2 倍を通すことが無い。その代わり、fixed window なら境目を越えた直後に通るはずの要求を、sliding は拒否しうる。契約の語を読んで窓の境目を当てにした client は計画を誤る。
+
+    **本文 — 1.12.0 の `limits.audit_requests_per_minute_note` の全文**:
+
+    > A pre-authentication window governing the audit_query endpoint specifically (both its canonical and alias paths, control_endpoints.audit_query/endpoints.audit_query.deprecation_note), separate from control_requests_per_minute: an implementation publishing this class enforces it as audit_query's own window and does not also charge audit_query requests against control_requests_per_minute, so that a high-frequency audit_query poller cannot exhaust the same window a break-glass control-plane operation (e.g. revoke_credential) depends on. This contract does not define the shape of that window: an implementation may count over a sliding 60-second window or over fixed 60-second windows, and in either case it admits no more than the declared number of audit_query requests within any one window it counts over. A client does not rely on where a window begins or ends.
+
+    **`versioning.version_binding` に足す 1 文**:
+
+    > 1.12.0 introduces no obligation (subordinate ruling 17): it withdraws the word fixed from limits.audit_requests_per_minute_note, so that this contract no longer defines the shape of the audit_requests_per_minute window, and an implementation conforming to 1.11.0 conforms to 1.12.0 without a behavior change.
+
+    `versioning.obligations` に 1.12.0 の entry は足さない (義務が無い)。`audit_requests_per_minute` が `audit_query` 専用の窓であり `control_requests_per_minute` に課金しないという 1.4.0 の義務は変えない。他の limit class の記述に窓の形を定める語は無い (実測: 契約 JSON の "window" は本値と `rotate_credential` の "no overlap window" のみ)。
+
+    **依頼者裁定 (逐語)**:
+
+    > 1は(i)、2は着手、Dで進めてください、別セッションで。
+
+    監督の問い 1「R-114 の直し方: (i) でよいか」への回答が「1は(i)」であり、(i) は「契約の文言を『窓の形は定めない (sliding も fixed も可)』に改める (契約の版上げ)」案を指す。(ii) 実装を fixed window に変える案は採らない。「2」と「D」は別件 (R-115) への回答であり、本裁定には当たらない。
+
+    **版数の扱い**: 義務を足さず、どの実装の挙動も変えない記述の変更であるため minor 版 (1.12.0) とする。`versioning.compatibility` の「removal or semantic change requires a new major version」には当たらないと判断した: client が計画に使える保証 (どの 1 窓でも宣言値を超えて通さない、`control_requests_per_minute` とは別の窓) は変わらず、1.4.0 は窓の起点を定めていなかったので境目を当てにした計画は元から成り立たず、両 peer は 1.4.0 の実装の当初から sliding で数えている。両 peer の `contract_version` は契約の文言と同一コミットで動かす。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**

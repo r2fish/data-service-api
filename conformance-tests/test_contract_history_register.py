@@ -14,7 +14,7 @@ prefix/insert from 26 of those 29 values (`spec/CONTRACT_HISTORY_MANIFEST.
 json`), leaving `CONTRACT_HISTORY.md`'s own quotes holding the PRE-strip
 text. Every scan and every quote comparison below is therefore now done
 against the REVERSE-APPLIED value -- the manifest's `stripped_prefix` /
-`stripped_insert` (and, for the one entry that has one, `rewrite`) restored
+`stripped_insert` (and, for the entries that have one, `rewrite`) restored
 onto today's live contract value at that path -- not the raw live value.
 For the 3 `unstripped: true` manifest entries, reverse-apply is a no-op, so
 this is unchanged behavior for them.

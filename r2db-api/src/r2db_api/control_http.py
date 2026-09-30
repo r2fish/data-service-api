@@ -407,7 +407,7 @@ async def post_enable_credential(request: Request) -> Response:
 async def post_audit_query(request: Request) -> Response:
     service: ControlPlaneService = request.app.state.control_service
     # `audit_requests_per_minute` -- its OWN window, charged before ANYTHING
-    # else (D-5: "両パス専用の pre-auth 固定窓"), never `check_rate()`
+    # else (design D-5 asked for a pre-auth window of its own; it is counted as a sliding one), never `check_rate()`
     # (`control_requests_per_minute` is a DIFFERENT counter this handler
     # must never touch -- design M-8 / P4-D4 item 8: a high-frequency
     # audit poller must not be able to exhaust the window a break-glass

@@ -571,7 +571,7 @@ def test_control_capabilities_result_matches_schema_exactly_and_declares_request
     # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
     # commit as this host's own `process_ceilings` mapping (design D-5
     # (v)).
-    assert result["contract_version"] == "1.11.0"
+    assert result["contract_version"] == "1.12.0"
     assert result["role"] == "control"
 
 

@@ -140,9 +140,9 @@ def build_capabilities_document(*, is_developer, role, application_id, cell_conf
         # (operations/<i>/values/<name>) -- each refused with
         # VALIDATION_FAILED, violated_declaration request_schema and
         # field naming the position -- 1.11.0's own unconditional
-        # obligation, never ahead of the behavior it declares.
+        # obligation, never ahead of the behavior it declares. This host declares contract 1.12.0 with no behavior change: 1.12.0 only withdraws the contract's own word for the shape of the `audit_requests_per_minute` window.
         # history: CH-0542
-        "contract_version": "1.11.0",
+        "contract_version": "1.12.0",
         "capabilities": {
             "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},

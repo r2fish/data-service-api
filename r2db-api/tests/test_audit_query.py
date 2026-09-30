@@ -1965,7 +1965,7 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
     with control_credentials.unit_of_work() as work:
         control_credentials.add(credential_id, secret, work=work)  # must_rotate=True by construction; deliberately never rotated
     document = service.capabilities(compose_bearer_locator(credential_id, secret))  # must NOT raise FORBIDDEN -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.11.0"
+    assert document["contract_version"] == "1.12.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -3941,7 +3941,7 @@ def test_control_capabilities_declares_contract_version_1_5_0(kind, platform):
     h = _build_harness(kind, platform)
     try:
         document = h.service.capabilities(h.control_credential_secret)
-        assert document["contract_version"] == "1.11.0"
+        assert document["contract_version"] == "1.12.0"
     finally:
         h.cleanup()
 
@@ -3975,7 +3975,7 @@ def test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query
     authority.register_application(application_id)
     context, _secret = _seed_application_credential(credentials, application_id, "runtime")
     document = service.capabilities(context)
-    assert document["contract_version"] == "1.11.0"
+    assert document["contract_version"] == "1.12.0"
     assert document["capabilities"]["audit_query"] == {"status": "unavailable", "authority": "control_or_audit"}
 
 
