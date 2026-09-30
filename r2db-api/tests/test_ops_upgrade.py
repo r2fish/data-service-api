@@ -821,7 +821,7 @@ def test_cmd_upgrade_applications_redacts_connection_values_from_a_failed_psql_o
     monkeypatch.setattr(ops, "_read_ledger_applied", lambda app_dsn: frozenset())
     monkeypatch.setattr(
         ops.platform_upgrades, "discover_upgrade_scripts",
-        lambda migrations_dir: {9: Path("/nonexistent/0009_does_not_matter.sql")},
+        lambda migrations_dir: {9: migrations_dir / "0009_does_not_matter.sql"},
     )
 
     def _fake_run_upgrade_script(app_dsn, script, app_slug, lock_timeout):  # noqa: ANN001
