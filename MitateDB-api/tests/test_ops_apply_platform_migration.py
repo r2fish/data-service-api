@@ -26,8 +26,6 @@ import os
 import re
 import secrets
 import subprocess
-import shutil
-import tempfile
 import types
 from pathlib import Path
 from typing import Iterator
@@ -127,8 +125,10 @@ _PLATFORM_MIGRATION_NAMES = (
 )
 
 
-def _bootstrap(prefix: str, *, apply_0013: bool = True) -> types.SimpleNamespace:
-    """`apply_0013=False` stops right after `0012` -- used by the one test
+def _bootstrap(prefix: str, rewritten_dir: Path, *, apply_0013: bool = True) -> types.SimpleNamespace:
+    """`rewritten_dir` is the directory that receives the rewritten migration
+    files (created here; the caller owns its removal -- every call passes a
+    directory under `tmp_path`). `apply_0013=False` stops right after `0012` -- used by the one test
     that observes 0013's own per-application loop (section 2) declaring
     `statement_timeout` retroactively on roles provisioned before 0013
     first ran. 0014 is only copied into the rewritten temp dir here; it
@@ -141,7 +141,7 @@ def _bootstrap(prefix: str, *, apply_0013: bool = True) -> types.SimpleNamespace
     schema = f"{prefix}_registry"
     provision_password = secrets.token_urlsafe(24)
 
-    rewritten_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_"))
+    rewritten_dir.mkdir()
     rewritten: "dict[str, Path]" = {}
     for name in _PLATFORM_MIGRATION_NAMES:
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
@@ -206,7 +206,7 @@ def _clear_ambient_pg_connection_env_vars(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.fixture()
-def platform() -> Iterator[types.SimpleNamespace]:
+def platform(tmp_path: Path) -> Iterator[types.SimpleNamespace]:
     """A fresh, throwaway platform through 0001/0002/0005/0007/0011/0012/
     0013 -- one per test, never shared (several tests drift role settings,
     constraints, ACLs, and function bodies). Does NOT clear the ambient
@@ -218,7 +218,7 @@ def platform() -> Iterator[types.SimpleNamespace]:
     prefix = f"r45wpeapm{secrets.token_hex(4)}"
     admin_dsn = _admin_dsn()
     try:
-        info = _bootstrap(prefix)
+        info = _bootstrap(prefix, tmp_path / "migrations")
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -226,7 +226,6 @@ def platform() -> Iterator[types.SimpleNamespace]:
         yield info
     finally:
         _sweep_prefix(admin_dsn, prefix)
-        shutil.rmtree(info.migrations_dir, ignore_errors=True)
 
 
 def _run_apply(
@@ -305,11 +304,12 @@ def test_apply_platform_migration_rejects_a_path_separator(monkeypatch, capsys, 
     assert captured.err.strip() == "error: apply-platform-migration: FILENAME must not contain a path separator"
 
 
-def test_apply_platform_migration_rejects_a_symlink_escaping_the_directory(monkeypatch, capsys, platform):
+def test_apply_platform_migration_rejects_a_symlink_escaping_the_directory(monkeypatch, capsys, tmp_path, platform):
     """A known filename that is ITSELF a symlink resolving
     outside the migrations directory is refused -- no psql subprocess
     starts, the resolved path is never echoed."""
-    outside_target = Path(tempfile.mkdtemp(prefix="mitatedb_apm_outside_")) / "evil.sql"
+    (tmp_path / "outside").mkdir()
+    outside_target = tmp_path / "outside" / "evil.sql"
     outside_target.write_text("-- not a real migration\n")
     (platform.migrations_dir / "0011_process_ceilings.sql").unlink()
     (platform.migrations_dir / "0011_process_ceilings.sql").symlink_to(outside_target)
@@ -362,11 +362,12 @@ def test_apply_platform_migration_run_variable_mismatch_is_rejected_before_any_p
     assert calls == []
 
 
-def test_apply_platform_migration_accepts_a_known_file_through_a_symlinked_migrations_directory(monkeypatch, platform):
+def test_apply_platform_migration_accepts_a_known_file_through_a_symlinked_migrations_directory(monkeypatch, tmp_path, platform):
     """Resolving BOTH the directory and the candidate file
     (never the file alone) means a migrations directory that is itself a
     symlink still accepts a known file."""
-    symlinked_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_parent_")) / "migrations_link"
+    (tmp_path / "parent").mkdir()
+    symlinked_dir = tmp_path / "parent" / "migrations_link"
     symlinked_dir.symlink_to(platform.migrations_dir, target_is_directory=True)
     monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
     monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(symlinked_dir))
@@ -552,14 +553,15 @@ def test_apply_platform_migration_redacts_connection_values_on_failure(monkeypat
 # ===========================================================================
 
 
-def test_apply_platform_migration_fails_by_exit_code_when_its_dependency_is_missing(monkeypatch):
+def test_apply_platform_migration_fails_by_exit_code_when_its_dependency_is_missing(monkeypatch, tmp_path):
     """0011 depends on 0007's own table -- applying it against a
     platform that never applied 0007 fails (non-zero), never silently
     succeeds."""
     prefix = f"r45wpeapmdep{secrets.token_hex(4)}"
     admin_dsn = _admin_dsn()
     provision_password = secrets.token_urlsafe(24)
-    rewritten_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_dep_"))
+    rewritten_dir = tmp_path / "migrations"
+    rewritten_dir.mkdir()
     rewritten = {}
     for name in ("0001_bootstrap_platform.sql", "0002_registry_and_functions.sql", "0011_process_ceilings.sql"):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
@@ -780,7 +782,7 @@ def test_apply_platform_migration_0013_sets_statement_timeout_on_auditreader_dat
     assert _role_setting(platform.provision_dsn, auditreader_role) == ["statement_timeout=5000ms"]
 
 
-def test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_application_roles():
+def test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_application_roles(tmp_path):
     """0013's own per-application loop (section 2) retroactively
     declares `statement_timeout` on BOTH the runtime and developer role
     of every application already provisioned BEFORE 0013 first ran,
@@ -794,7 +796,7 @@ def test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_ap
     admin_dsn = _admin_dsn()
     prefix = f"r45wpef102{secrets.token_hex(4)}"
     try:
-        platform = _bootstrap(prefix, apply_0013=False)
+        platform = _bootstrap(prefix, tmp_path / "migrations", apply_0013=False)
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -1118,7 +1120,7 @@ def test_apply_platform_migration_0013_skips_a_registry_row_with_no_matching_rol
     assert _role_setting(platform.provision_dsn, ghost_runtime) is None
 
 
-def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_different_role():
+def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_different_role(tmp_path):
     """A cluster where `mitatedbsvc_auditreader` was
     created by the cluster admin role directly (never by the applying
     provision role, so CREATEROLE's own implicit ADMIN OPTION never
@@ -1139,7 +1141,8 @@ def test_apply_platform_migration_0013_fails_when_auditreader_was_created_by_a_d
     provision_password = secrets.token_urlsafe(24)
     auditreader_role = f"{prefix}svc_auditreader"
 
-    rewritten_dir = Path(tempfile.mkdtemp(prefix="mitatedb_apm_f118_"))
+    rewritten_dir = tmp_path / "migrations"
+    rewritten_dir.mkdir()
     rewritten: "dict[str, Path]" = {}
     for name in (
         "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
@@ -2196,3 +2199,88 @@ def test_psql_launching_functions_all_apply_the_lock_timeout_option():
     assert set(bodies) == derived
     for name, calls in bodies.items():
         assert "_with_lock_timeout_option" in calls, (name, calls)
+
+
+# ===========================================================================
+# this file leaves no temporary directory behind (no `tempfile`; `_bootstrap` under `tmp_path`)
+# ===========================================================================
+
+
+def _bootstrap_directory_argument(call: ast.Call) -> "ast.expr | None":
+    if len(call.args) >= 2:
+        return call.args[1]
+    for keyword in call.keywords:
+        if keyword.arg == "rewritten_dir":
+            return keyword.value
+    return None
+
+
+def _is_tmp_path_expression(expression: "ast.expr | None") -> bool:
+    """`tmp_path` itself, or `tmp_path / <anything>` (a path built by
+    joining onto it) -- the argument's own shape, not merely a `tmp_path`
+    name somewhere inside it."""
+    if isinstance(expression, ast.Name):
+        return expression.id == "tmp_path"
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Div):
+        return _is_tmp_path_expression(expression.left)
+    return False
+
+
+def _bootstrap_call_sites(tree: ast.Module) -> "list[tuple[str, ast.Call]]":
+    """Every call of `_bootstrap` -- a bare name or an attribute -- with
+    the name of its innermost enclosing function (`<module>` when it is at
+    module level)."""
+    sites: "list[tuple[str, ast.Call]]" = []
+
+    def visit(node: ast.AST, enclosing: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else enclosing
+            if isinstance(child, ast.Call):
+                callee = child.func
+                called = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", None)
+                if called == "_bootstrap":
+                    sites.append((enclosing, child))
+            visit(child, inner)
+
+    visit(tree, "<module>")
+    return sites
+
+
+def test_this_file_does_not_import_tempfile():
+    """The file makes no directory of its own: `tempfile` is not imported
+    in any form (`import tempfile`, `import tempfile as ...`, `from
+    tempfile import ...`), so `mkdtemp`, `mkstemp`, `TemporaryDirectory`,
+    `NamedTemporaryFile` and `gettempdir` are all out of reach."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"), filename=__file__)
+    imported = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported += [alias.name for alias in node.names if alias.name.split(".")[0] == "tempfile"]
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "tempfile":
+            imported.append(node.module)
+    assert imported == []
+
+
+def test_bootstrap_is_only_called_with_a_directory_under_tmp_path():
+    """`_bootstrap` writes the rewritten migration files into the directory
+    it is handed, so every call -- by bare name or through an attribute, in
+    a function or at module level -- is made from one of the two functions
+    that take `tmp_path` (the `platform` fixture and the one direct test),
+    and its directory argument is `tmp_path` or `tmp_path / ...` itself.
+    The rewritten files are then removed with pytest's own per-test
+    directory. Derived from this file's own AST."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"), filename=__file__)
+    sites = _bootstrap_call_sites(tree)
+    assert {caller for caller, _ in sites} == {
+        "platform",
+        "test_apply_platform_migration_0013_sets_statement_timeout_on_pre_existing_application_roles",
+    }
+    assert len(sites) == 2
+    for caller, call in sites:
+        assert _is_tmp_path_expression(_bootstrap_directory_argument(call)), (caller, call.lineno)
+    references = [
+        node for node in ast.walk(tree)
+        if (isinstance(node, ast.Name) and node.id == "_bootstrap")
+        or (isinstance(node, ast.Attribute) and node.attr == "_bootstrap")
+    ]
+    assert len(references) == len(sites)

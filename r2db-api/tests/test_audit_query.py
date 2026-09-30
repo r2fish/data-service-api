@@ -2413,7 +2413,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_202_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_203_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2919,6 +2919,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_validate_lock_timeout_value"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_with_lock_timeout_option"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_resolve_platform_migration_file"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_resolve_contained_migration_path"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_validate_platform_migration_run"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_platform_migration_variables"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_deprovision_confirmation_phrase"),
@@ -3033,7 +3034,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_202_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_203_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -3120,6 +3121,12 @@ def test_isomorphic_target_table_is_pinned_to_its_current_202_rows() -> None:
     parser (`_thread_limit_from_env`) replace it, all three verified
     normalize-and-diff equal before adding; `_perf_thread_limit_value`
     and `perf_thread_limit` keep their own rows, unchanged in name.
+    Widened an eighteenth time by R-97/R-99: `_resolve_contained_migration_path`
+    (the containment check the `-f` script paths of `apply-platform-migration`,
+    `deprovision` and `upgrade-applications` all pass through, moved out of
+    `_resolve_platform_migration_file`) is registered, verified normalize-
+    and-diff equal before adding, so dropping the `directory.resolve()` on
+    one peer only is caught here.
     The last 29 rows are the multi-process worker helpers named in the
     comment right above them in `_ISOMORPHIC_TARGETS`, each verified
     normalize-and-diff equal before adding.
@@ -3150,7 +3157,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_202_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_202_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_203_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3391,6 +3398,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_202_rows() -> None:
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_validate_lock_timeout_value"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_with_lock_timeout_option"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_resolve_platform_migration_file"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_resolve_contained_migration_path"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_validate_platform_migration_run"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_platform_migration_variables"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_deprovision_confirmation_phrase"),
@@ -3459,7 +3467,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_202_rows() -> None:
         ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "coalescing_window_ms"),
         ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "issue_audit_credential"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 202
+    assert len(_ISOMORPHIC_TARGETS) == 203
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}

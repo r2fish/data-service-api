@@ -1651,7 +1651,7 @@ def cmd_upgrade_applications(args: argparse.Namespace) -> int:
     History: CH-0329
     """
     provision_dsn = _control_dsn()
-    scripts = platform_upgrades.discover_upgrade_scripts(_migrations_dir())
+    scripts = {number: _resolve_contained_migration_path(path, "upgrade-applications") for number, path in platform_upgrades.discover_upgrade_scripts(_migrations_dir()).items()}
     if args.script is not None and not args.dry_run and args.script not in scripts:
         _die(f"no per-application upgrade script found for upgrade number {args.script} under {_migrations_dir()}")
     lock_timeout = _validate_lock_timeout_value(args.lock_timeout)
@@ -1868,6 +1868,22 @@ def _extract_psql_variables(text: str) -> "set[str]":
     return found
 
 
+def _resolve_contained_migration_path(path: Path, command: str) -> Path:
+    """Returns `path` resolved (symlinks followed), provided the resolved
+    path lies inside `_migrations_dir()` resolved the same way -- so a
+    migrations directory that is itself a symlink still accepts its own
+    files, while a path that resolves outside the directory is refused
+    with a fixed message prefixed by `command`; the refused value is never
+    echoed. Existence is not checked here."""
+    directory = _migrations_dir().resolve()
+    candidate = path.resolve()
+    try:
+        candidate.relative_to(directory)
+    except ValueError:
+        _die(f"{command}: resolved migration file path is outside the migrations directory")
+    return candidate
+
+
 def _resolve_platform_migration_file(filename: str) -> Path:
     """`filename` must be a bare name (no path separator), a member of
     `_PLATFORM_MIGRATION_FILENAMES`, and resolve to a real file INSIDE
@@ -1882,12 +1898,7 @@ def _resolve_platform_migration_file(filename: str) -> Path:
         _die("apply-platform-migration: FILENAME must not contain a path separator")
     if filename not in _PLATFORM_MIGRATION_FILENAMES:
         _die("apply-platform-migration: FILENAME must be one of the known platform migration files")
-    directory = _migrations_dir().resolve()
-    candidate = (directory / filename).resolve()
-    try:
-        candidate.relative_to(directory)
-    except ValueError:
-        _die("apply-platform-migration: resolved migration file path is outside the migrations directory")
+    candidate = _resolve_contained_migration_path(_migrations_dir() / filename, "apply-platform-migration")
     if not candidate.is_file():
         _die("apply-platform-migration: migration file not found")
     return candidate
@@ -2070,7 +2081,7 @@ def _run_deprovision_script(dsn: str, application_slug: str, lock_timeout: str) 
     uses `app_id` instead). `_require_psql_16_or_newer`/`_psql_
     connection_env`/`_with_lock_timeout_option` are the SAME helpers
     `cmd_apply_platform_migration` above already uses."""
-    script = _migrations_dir() / "0004_deprovision_application.sql"
+    script = _resolve_contained_migration_path(_migrations_dir() / "0004_deprovision_application.sql", "deprovision")
     _require_psql_16_or_newer()
     env = _psql_connection_env(dsn)
     env["PGOPTIONS"] = _with_lock_timeout_option(env.get("PGOPTIONS"), lock_timeout)

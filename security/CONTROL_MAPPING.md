@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **3.10** (2026-09-30; R-116 (ii) -- the requester accepted runbook section 10.10 version 10 (2026-09-30), so section 10.8 now names versions 6 / 6 / 10 all accepted and SI-09 says Gate-0 readiness depends on the 10 items alone; no new invariant)
+Version: **3.11** (2026-09-30; R-97 -- both peers' ops modules gained one containment helper for every psql `-f` path, so the line references into those modules after it moved by 11 and were followed (a MitateDB short-form reference that pointed one line above its function, and an r2db reference that pointed four lines past the ascending-order check, are corrected with them); no claim's wording changed; no new invariant)
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -664,12 +664,12 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `PostgresCell`'s four client-reachable operations -- `query`, `transact`, `apply_schema` and `catalog` -- issue that call inside their own transaction -- `r2db-api/src/r2db_api/postgres.py` `:1108-1124`.
 - `catalog` takes its bound from the `ResourceLimits` it is passed and falls back to the default `ResourceLimits()` when called without one, so the bound never depends on the caller -- `r2db-api/src/r2db_api/postgres.py` `:1108-1124`.
 - `catalog` maps a cancelled statement or a lock timeout to the same `LIMIT_EXCEEDED` the other three operations return -- `r2db-api/src/r2db_api/postgres.py` `:1108-1124`.
-- `ops upgrade-applications` requires `--lock-timeout` with no default, `--dry-run` included -- `r2db-api/src/r2db_api/ops.py:2382`.
+- `ops upgrade-applications` requires `--lock-timeout` with no default, `--dry-run` included -- `r2db-api/src/r2db_api/ops.py:2393`.
 - `_validate_lock_timeout_value` validates that value before any connection is opened -- a positive integer with an optional `ms`/`s`/`min`, so `0` is refused and the refused value is never echoed -- `r2db-api/src/r2db_api/ops.py:1484`.
 - `_run_upgrade_script` hands the value to each `psql` child as `-c lock_timeout=<value>` appended to `PGOPTIONS`, alongside any `options` the DSN itself carried -- `r2db-api/src/r2db_api/ops.py:1600`.
 - those three helpers are same-named copies of MitateDB-api's own, held identical by the isomorphism table -- `r2db-api/src/r2db_api/ops.py:1600`.
-- all three subcommands that apply a migration file against a running cluster -- `apply-platform-migration`, `upgrade-applications`, `deprovision` -- require `--lock-timeout` with no default (R-90) -- `r2db-api/src/r2db_api/ops.py:2338`.
-- the set of subcommand handlers reaching a psql/migrations-directory sink equals the set whose own `--lock-timeout` is required with no default -- `r2db-api/src/r2db_api/ops.py:2365`.
+- all three subcommands that apply a migration file against a running cluster -- `apply-platform-migration`, `upgrade-applications`, `deprovision` -- require `--lock-timeout` with no default (R-90) -- `r2db-api/src/r2db_api/ops.py:2349`.
+- the set of subcommand handlers reaching a psql/migrations-directory sink equals the set whose own `--lock-timeout` is required with no default -- `r2db-api/src/r2db_api/ops.py:2376`.
 
 #### Evidence
 
@@ -864,7 +864,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the same `batch_entities` boundary holds over real HTTP -- `test_cross_entity_mutation_batch_entities_boundary`.
 - F-17 -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_passes_from_migration_0013`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_zero`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_reset`.
 - F-17 -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_fails_when_a_per_database_override_exists`, `::test_verify_declarations_f17_passes_when_auditreader_role_is_absent`, `::test_f17_the_schema_owning_role_is_never_flagged_despite_an_explicit_select_grant`.
-- the isomorphic target -- `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_198_rows`.
+- the isomorphic target -- `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_203_rows`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r71_catalog_read_cancel_mapping.py::test_catalog_read_cancel_synthetic_injection_maps_to_resource_limit_error`, `::test_get_catalog_returns_limit_exceeded_not_validation_failed_when_the_read_is_canceled`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_blocked_catalog_read_is_bounded_by_the_constructed_value_not_the_role_value`, `::test_catalog_reads_use_the_constructed_statement_and_lock_timeout_inside_their_own_transaction`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_bare_construction_uses_the_foundation_config_default_execution_ms`, `::test_build_app_passes_the_declared_execution_ms_to_the_constructed_backend`.
@@ -897,10 +897,10 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `--control-not-deployed` zeroes Control's own demand and role checks -- `MitateDB-api/src/mitatedb_api/ops.py:2545`.
 - only `control_composition.build_control_service` pools a connection against `mitatedbsvc_auditreader`, on `MITATEDB_AUDIT_DSN`, so that demand counts only under the Control process count -- `MitateDB-api/src/mitatedb_api/ops.py:2545`.
 - `main.build_app` never pools such a connection -- `MitateDB-api/src/mitatedb_api/main.py:303`.
-- each plane's own CEILING (against the declared `process_ceilings`) and TOTAL (the actual count, which feeds demand) are SEPARATE positive-integer arguments -- `MitateDB-api/src/mitatedb_api/ops.py:3019`.
+- each plane's own CEILING (against the declared `process_ceilings`) and TOTAL (the actual count, which feeds demand) are SEPARATE positive-integer arguments -- `MitateDB-api/src/mitatedb_api/ops.py:3030`.
 - each ceiling and total, `--thread-limit`, `--data-process-count-old-basis` and `--reserved-connections` are required, `--concurrency` only with old-basis processes; one omitted leaves item (8) unknown -- `MitateDB-api/src/mitatedb_api/ops.py:2613`.
 - `--control-not-deployed` stands in for Control's own ceiling and total -- `MitateDB-api/src/mitatedb_api/ops.py:2613`.
-- an old-basis count above the total, a new-basis count below `--data-process-ceiling`, or `--concurrency` with an old-basis count of 0 is refused, exit code 1, before any connection -- `MitateDB-api/src/mitatedb_api/ops.py:3019`.
+- an old-basis count above the total, a new-basis count below `--data-process-ceiling`, or `--concurrency` with an old-basis count of 0 is refused, exit code 1, before any connection -- `MitateDB-api/src/mitatedb_api/ops.py:3030`.
 - `CONNECTION LIMIT = -1` is unknown, but only for a role INSIDE item (8)'s own target role set, so an unrelated role carrying `-1` never rounds the item to unknown -- `MitateDB-api/src/mitatedb_api/ops.py:2281`.
 - a declaration read that finds the row absent is unknown and remediation-required, a row that fails validation is blocked, and a plain connection failure is unknown -- `MitateDB-api/src/mitatedb_api/ops.py:2321`.
 - a declared/actual CEILING mismatch on EITHER plane is blocked, and Control is never compared once `--control-not-deployed` is given -- `MitateDB-api/src/mitatedb_api/ops.py:2545`.
@@ -1117,33 +1117,33 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1799`.
 - `structured.py` defines phrase construction exactly once for 4 of the 5 gated surfaces, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- `r2db-api/src/r2db_api/structured.py:22`.
 - the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1771`.
-- the 5th gated surface, the ritual CLI's `deprovision`, keeps its own phrase (`_deprovision_confirmation_phrase`, `ops.py`) beside its caller -- `r2db-api/src/r2db_api/ops.py:2026`.
-- `_deprovision_confirmation_phrase`'s material (`r2dbsvc_registry.applications.provisioned_at`) is a registry value `structured.py`'s own cell-layer phrase functions never read -- `r2db-api/src/r2db_api/ops.py:2026`.
-- `_deprovision_confirmation_phrase` is held isomorphic to MitateDB-api's own same-named function by `_ISOMORPHIC_TARGETS` -- `r2db-api/src/r2db_api/ops.py:2026`.
+- the 5th gated surface, the ritual CLI's `deprovision`, keeps its own phrase (`_deprovision_confirmation_phrase`, `ops.py`) beside its caller -- `r2db-api/src/r2db_api/ops.py:2037`.
+- `_deprovision_confirmation_phrase`'s material (`r2dbsvc_registry.applications.provisioned_at`) is a registry value `structured.py`'s own cell-layer phrase functions never read -- `r2db-api/src/r2db_api/ops.py:2037`.
+- `_deprovision_confirmation_phrase` is held isomorphic to MitateDB-api's own same-named function by `_ISOMORPHIC_TARGETS` -- `r2db-api/src/r2db_api/ops.py:2037`.
 - all 6 data/schema call sites declare the same 4 machine-readable keys through `require_destructive_confirmation`'s `details` synthesis -- `r2db-api/src/r2db_api/delete_confirmation.py:248`.
 - `ControlPlaneService.revoke_credential` determines the sole-remaining-enabled-control-credential judgment and performs the state change together, inside the SAME transaction under a row-locked scan -- `r2db-api/src/r2db_api/control_plane.py:926`.
 - that same-transaction ordering closes the TOCTOU window a judgment made outside the open transaction would leave open -- `control_plane.py`.
 - the ritual CLI's `reset` and `delete-credential` gate on the identical declare-and-echo protocol before any store or DSN is constructed, so a wrong `--confirm` never touches the database -- `r2db-api/src/r2db_api/ops.py:327`.
-- `deprovision`'s registry read sits at contract `destructive_confirmation`'s own `evaluation_order` position for target-existence, before precondition evaluation -- `r2db-api/src/r2db_api/ops.py:2083`.
+- `deprovision`'s registry read sits at contract `destructive_confirmation`'s own `evaluation_order` position for target-existence, before precondition evaluation -- `r2db-api/src/r2db_api/ops.py:2094`.
 - `destructive`/`confirm(ation)` are type-checked at all 4 gated surfaces, including over the real HTTP wire -- `r2db-api/src/r2db_api/delete_confirmation.py:248`.
 - a non-`bool` or non-`str` value there is refused `VALIDATION_FAILED` before the confirmation check itself, never truthy-accepted -- `r2db-api/src/r2db_api/delete_confirmation.py:248`.
-- **`apply-platform-migration`** applies a RUN of one or more of the 5 known re-appliable platform migrations (0008/0012/0013/0014/0015), in ascending order, against `R2DB_CONTROL_DSN` -- `r2db-api/src/r2db_api/ops.py:1795`, `:1974`.
+- **`apply-platform-migration`** applies a RUN of one or more of the 5 known re-appliable platform migrations (0008/0012/0013/0014/0015), in ascending order, against `R2DB_CONTROL_DSN` -- `r2db-api/src/r2db_api/ops.py:1795`, `:1985`.
 - that enumeration never includes the bootstrap-only `0001`/`0002` or the password-carrying `0005`/`0006`/`0007` -- `r2db-api/src/r2db_api/ops.py:1839`.
-- `apply-platform-migration` refuses a FILENAME outside the enumeration, carrying a path separator, or resolving outside the migrations directory with symlinks followed, before any psql subprocess starts -- `r2db-api/src/r2db_api/ops.py:1974`.
-- the rejected filename value is never echoed -- `r2db-api/src/r2db_api/ops.py:1974`.
-- a run is refused, with no psql subprocess started, unless every FILENAME is strictly ascending with no repeat -- `r2db-api/src/r2db_api/ops.py:1920`.
+- `apply-platform-migration` refuses a FILENAME outside the enumeration, carrying a path separator, or resolving outside the migrations directory with symlinks followed, before any psql subprocess starts -- `r2db-api/src/r2db_api/ops.py:1985`.
+- the rejected filename value is never echoed -- `r2db-api/src/r2db_api/ops.py:1985`.
+- a run is refused, with no psql subprocess started, unless every FILENAME is strictly ascending with no repeat -- `r2db-api/src/r2db_api/ops.py:1927`.
 - `0008`'s own required successor `0012` must be present later in the same call, the only closure entry of `_PLATFORM_MIGRATION_SUPERSEDED_BY` -- `r2db-api/src/r2db_api/ops.py:1839`.
 - that map is derived statically from the 5 accepted files' own targets, whose one redefinition is `0012` re-adding `0008`'s `platform_declarations_key_check` constraint, and proved equal to it -- `r2db-api/src/r2db_api/ops.py:1839`.
-- the DSN is environment-only (`R2DB_CONTROL_DSN`, no CLI argument) -- `r2db-api/src/r2db_api/ops.py:1974`.
-- a required no-default `--lock-timeout` reaches psql via `PGOPTIONS` without discarding a DSN-supplied `options` value -- `r2db-api/src/r2db_api/ops.py:2338`.
-- a failed file's own output is redacted before reaching stderr, and that file is excluded from both `applied` and `not run` -- `r2db-api/src/r2db_api/ops.py:1974`.
-- **`deprovision`** permanently removes an application's database, both its login roles and its registry row via `0004_deprovision_application.sql`, gated by `_require_cli_confirmation` -- `r2db-api/src/r2db_api/ops.py:2083`.
+- the DSN is environment-only (`R2DB_CONTROL_DSN`, no CLI argument) -- `r2db-api/src/r2db_api/ops.py:1985`.
+- a required no-default `--lock-timeout` reaches psql via `PGOPTIONS` without discarding a DSN-supplied `options` value -- `r2db-api/src/r2db_api/ops.py:2349`.
+- a failed file's own output is redacted before reaching stderr, and that file is excluded from both `applied` and `not run` -- `r2db-api/src/r2db_api/ops.py:1985`.
+- **`deprovision`** permanently removes an application's database, both its login roles and its registry row via `0004_deprovision_application.sql`, gated by `_require_cli_confirmation` -- `r2db-api/src/r2db_api/ops.py:2094`.
 - `deprovision`'s gate is the SAME declare-and-echo `--confirm` protocol as `reset`/`delete-credential` -- `r2db-api/src/r2db_api/ops.py:327`.
-- the slug's format is validated before any database access, and an unregistered or never-provisioned slug is refused before any phrase is computed -- `r2db-api/src/r2db_api/ops.py:2083`.
-- a mismatched `--confirm` is a JSON denial that writes nothing and starts no psql subprocess -- `r2db-api/src/r2db_api/ops.py:2083`.
-- the confirmation phrase is fingerprinted on `r2dbsvc_registry.applications.provisioned_at`, peer-isomorphic to MitateDB-api's own phrase fingerprinted on `registered_at` -- `r2db-api/src/r2db_api/ops.py:2026`.
-- deprovisioning a slug and re-provisioning it changes `provisioned_at`, so a stale echoed phrase is refused -- `r2db-api/src/r2db_api/ops.py:2026`.
-- the AST-derived set of subcommands that flow a migration file through psql is exactly the set whose own `--lock-timeout` is required with no default -- `r2db-api/src/r2db_api/ops.py:2365`.
+- the slug's format is validated before any database access, and an unregistered or never-provisioned slug is refused before any phrase is computed -- `r2db-api/src/r2db_api/ops.py:2094`.
+- a mismatched `--confirm` is a JSON denial that writes nothing and starts no psql subprocess -- `r2db-api/src/r2db_api/ops.py:2094`.
+- the confirmation phrase is fingerprinted on `r2dbsvc_registry.applications.provisioned_at`, peer-isomorphic to MitateDB-api's own phrase fingerprinted on `registered_at` -- `r2db-api/src/r2db_api/ops.py:2037`.
+- deprovisioning a slug and re-provisioning it changes `provisioned_at`, so a stale echoed phrase is refused -- `r2db-api/src/r2db_api/ops.py:2037`.
+- the AST-derived set of subcommands that flow a migration file through psql is exactly the set whose own `--lock-timeout` is required with no default -- `r2db-api/src/r2db_api/ops.py:2376`.
 
 #### Evidence
 
@@ -1188,7 +1188,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - item (3)'s ledger read runs with `autocommit=True`, never inside an open transaction a rollback could unwind -- `MitateDB-api/src/mitatedb_api/ops.py:2209`.
 - each connection also carries a fixed `lock_timeout`/`statement_timeout` of 3000ms/5000ms, so a read cannot queue behind, or itself prolong, a concurrent migration or upgrade -- `MitateDB-api/src/mitatedb_api/ops.py:2209`.
 - a read that exceeds either timeout leaves its own item unknown, never confirmed -- `MitateDB-api/src/mitatedb_api/ops.py:2448`.
-- `cmd_inventory`'s own read-only readback gates the whole run: a false readback fails the subcommand closed and never proceeds to build a report -- `MitateDB-api/src/mitatedb_api/ops.py:3061`.
+- `cmd_inventory`'s own read-only readback gates the whole run: a false readback fails the subcommand closed and never proceeds to build a report -- `MitateDB-api/src/mitatedb_api/ops.py:3072`.
 - item (3)'s own per-application connections are read-only the same way the platform connection is, confirmed by the SAME readback on each one -- `MitateDB-api/src/mitatedb_api/ops.py:2236`.
 - if any of `_inventory_connect`'s own three `SET` statements fails, the connection is closed before the exception propagates, never leaked half-configured -- `MitateDB-api/src/mitatedb_api/ops.py:2209`.
 
@@ -1211,28 +1211,28 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- **`apply-platform-migration`** applies one or more platform migration files in the fixed pinned order (0005/0007/0011/0012/0013/0014/0016 only) against `MITATEDB_PROVISION_DSN` -- `MitateDB-api/src/mitatedb_api/ops.py:2785`, `:2968`.
+- **`apply-platform-migration`** applies one or more platform migration files in the fixed pinned order (0005/0007/0011/0012/0013/0014/0016 only) against `MITATEDB_PROVISION_DSN` -- `MitateDB-api/src/mitatedb_api/ops.py:2785`, `:2980`.
 - that enumeration never includes the bootstrap-only 0001/0002 or a file taking `:app_id` -- `MitateDB-api/src/mitatedb_api/ops.py:2785`.
-- each FILENAME is a bare name with no path separator, matched against that pinned enumeration -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
-- `apply-platform-migration` resolves both the migrations directory and the candidate file with symlinks followed, to confirm the file stays inside that directory before any psql subprocess starts -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
-- a rejected filename value is never echoed -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
-- a run is refused, with no psql subprocess started, unless every given FILENAME is strictly ascending in that pinned order with no repeat -- `MitateDB-api/src/mitatedb_api/ops.py:2909`.
+- each FILENAME is a bare name with no path separator, matched against that pinned enumeration -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
+- `apply-platform-migration` resolves both the migrations directory and the candidate file with symlinks followed, to confirm the file stays inside that directory before any psql subprocess starts -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
+- a rejected filename value is never echoed -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
+- a run is refused, with no psql subprocess started, unless every given FILENAME is strictly ascending in that pinned order with no repeat -- `MitateDB-api/src/mitatedb_api/ops.py:2920`.
 - for every file that has a later-accepted file redefining one of its own targets, every one of those later files must be present too, later in the same call -- `MitateDB-api/src/mitatedb_api/ops.py:2825`.
 - a target is a role or function's own `CONNECTION LIMIT`, a role-level `SET` parameter, or a `CREATE OR REPLACE FUNCTION` body -- `MitateDB-api/src/mitatedb_api/ops.py:2825`.
 - the target-level map is derived statically from the 7 accepted files themselves and proved equal, folded to file granularity, to the constant this check reads -- `MitateDB-api/src/mitatedb_api/ops.py:2825`.
-- the rejection names the required run, never the operator's own given values -- `MitateDB-api/src/mitatedb_api/ops.py:2913`.
-- only the FILENAMEs the operator explicitly listed are ever started, an omitted successor never being added automatically -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
-- each accepted file runs through its own separate psql invocation, in the given order, so a mid-run psql failure stops before any later file starts -- `MitateDB-api/src/mitatedb_api/ops.py:2989`.
-- that failure reports which files applied, which did not run, and that the whole run must be re-run from its first file, never the failed file alone -- `MitateDB-api/src/mitatedb_api/ops.py:2989`.
-- the DSN is environment-only, with no CLI argument (design Z-8/D-10), and psql runs under `ON_ERROR_STOP=1` -- `MitateDB-api/src/mitatedb_api/ops.py:2989`.
+- the rejection names the required run, never the operator's own given values -- `MitateDB-api/src/mitatedb_api/ops.py:2924`.
+- only the FILENAMEs the operator explicitly listed are ever started, an omitted successor never being added automatically -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
+- each accepted file runs through its own separate psql invocation, in the given order, so a mid-run psql failure stops before any later file starts -- `MitateDB-api/src/mitatedb_api/ops.py:3000`.
+- that failure reports which files applied, which did not run, and that the whole run must be re-run from its first file, never the failed file alone -- `MitateDB-api/src/mitatedb_api/ops.py:3000`.
+- the DSN is environment-only, with no CLI argument (design Z-8/D-10), and psql runs under `ON_ERROR_STOP=1` -- `MitateDB-api/src/mitatedb_api/ops.py:3000`.
 - a required no-default `--lock-timeout` reaches psql via `PGOPTIONS` through `_with_lock_timeout_option`, the SAME helper `upgrade-applications`/`deprovision` use -- `MitateDB-api/src/mitatedb_api/ops.py:742`.
-- psql's own captured output is redacted before any failure message reaches stderr -- `MitateDB-api/src/mitatedb_api/ops.py:2989`.
-- per-file psql variables (`0007`'s own `:api_role`/`:controlplane_role`) are a static table matched against each file's own real references, excluding comments and casts -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
-- `apply-platform-migration` refuses a table entry the operator omits, or an argument the table does not list, before any subprocess starts -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
-- the AST-derived set of subcommands that flow a migration file through psql is exactly the set whose own `--lock-timeout` is required with no default -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
-- `set-platform-timeouts` and the `declare-*` subcommands, which are psycopg-only configuration writes, are never in that set -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
+- psql's own captured output is redacted before any failure message reaches stderr -- `MitateDB-api/src/mitatedb_api/ops.py:3000`.
+- per-file psql variables (`0007`'s own `:api_role`/`:controlplane_role`) are a static table matched against each file's own real references, excluding comments and casts -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
+- `apply-platform-migration` refuses a table entry the operator omits, or an argument the table does not list, before any subprocess starts -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
+- the AST-derived set of subcommands that flow a migration file through psql is exactly the set whose own `--lock-timeout` is required with no default -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
+- `set-platform-timeouts` and the `declare-*` subcommands, which are psycopg-only configuration writes, are never in that set -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
 - against production, `apply-platform-migration` is run only through the runbook's gated procedure, whose stage 2 preconditions the Platform-upgrade runbook claims below state -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
-- the subcommand names that same section in its own help text, section-heading comment and docstring -- `MitateDB-api/src/mitatedb_api/ops.py:2969`.
+- the subcommand names that same section in its own help text, section-heading comment and docstring -- `MitateDB-api/src/mitatedb_api/ops.py:2980`.
 - **`0013_role_statement_timeouts.sql`** sets a role-level `statement_timeout` on `mitatedbsvc_auditreader` and on every application's own runtime/developer role -- `MitateDB-api/migrations/0013_role_statement_timeouts.sql`.
 - it does so retroactively for already-provisioned roles, inside one transaction, so a permission failure partway rolls the whole file back with no half-applied state -- `MitateDB-api/migrations/0013_role_statement_timeouts.sql`.
 - it does so going forward through `begin_provision_application`'s own `CREATE OR REPLACE`, in both the `CREATE ROLE` branch and its `duplicate_object` fallback -- `MitateDB-api/migrations/0013_role_statement_timeouts.sql`.
@@ -1333,7 +1333,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **F-12** alone is raised at cell-open time and becomes an API response, `PostgresCell.verify_platform_upgrades_applied` re-raising `platform_upgrades.PlatformUpgradeError` as a `FoundationError` -- `r2db-api/src/r2db_api/postgres.py:1024`.
 - `platform_upgrades._f12_message` is built from the missing upgrade numbers, the application id and the `ops upgrade-applications` command only -- no DSN, credential or hostname -- `r2db-api/src/r2db_api/platform_upgrades.py:167`.
 - the out-of-band `ops` CLI's `cmd_verify_declarations` never prints a raw exception string on a connection or database failure, only the caught exception's own type name plus a fixed message -- `r2db-api/src/r2db_api/ops.py:1300`.
-- the CLI's top-level `main()` applies the same rule -- `r2db-api/src/r2db_api/ops.py:2398`.
+- the CLI's top-level `main()` applies the same rule -- `r2db-api/src/r2db_api/ops.py:2409`.
 - `cmd_upgrade_applications`'s own `failure_detail` has every DSN element redacted via `_redact_connection_values` -- `r2db-api/src/r2db_api/ops.py:1642`.
 - the redacted elements are `user`/`password`/`host`/`hostaddr`/`port`/`dbname`, with `host`/`hostaddr`/`port` split on `,` first for a multi-host DSN -- `r2db-api/src/r2db_api/ops.py:1546`.
 - that redaction is one regular expression, longest value first, in a single pass, so a shorter value that is a literal prefix of a longer one cannot leave the longer value's own tail exposed -- `r2db-api/src/r2db_api/ops.py:1546`.
@@ -1376,7 +1376,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - that subclass keeps the carve-out from silently widening to a future error site -- `MitateDB-api/src/mitatedb_api/errors.py:205`.
 - the surfaced text is the same fixed **F-12** message -- the missing upgrade numbers plus the `ops upgrade-applications` command, nothing else -- `MitateDB-api/src/mitatedb_api/platform_upgrades.py`.
 - the out-of-band `ops` CLI's `cmd_verify_declarations` never prints a raw exception string on a connection or database failure, only the type name plus a fixed message -- `MitateDB-api/src/mitatedb_api/ops.py:1607`.
-- the CLI's top-level `main()` applies the same rule -- `MitateDB-api/src/mitatedb_api/ops.py:3551`.
+- the CLI's top-level `main()` applies the same rule -- `MitateDB-api/src/mitatedb_api/ops.py:3562`.
 - `_upgrade_one_application` and `_run_deprovision_script` redact every DSN element from their own `failure_detail` and `_die` message via `_redact_connection_values` -- `MitateDB-api/src/mitatedb_api/ops.py:1785`.
 - the redacted elements are `user`/`password`/`host`/`hostaddr`/`port`/`dbname`, with `host`/`hostaddr`/`port` split on `,` first for a multi-host DSN -- `MitateDB-api/src/mitatedb_api/ops.py:700`.
 - that redaction is one regular expression, longest value first, in a single pass, so a shorter value that is a literal prefix of a longer one cannot leave the longer value's tail exposed -- `MitateDB-api/src/mitatedb_api/ops.py:700`.
@@ -1386,8 +1386,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the run is fail-closed on a connection-setting variable the parent still carries but the DSN never overrides, including `PGSERVICEFILE`/`PGSYSCONFDIR` -- `MitateDB-api/src/mitatedb_api/ops.py:651`.
 - `_die` names that variable, never its value, rather than let the psql child silently inherit a setting from this process' own environment -- `MitateDB-api/src/mitatedb_api/ops.py:651`.
 - `_require_psql_16_or_newer` precedes every psql subprocess invocation and `_die`s with fixed text on an unstartable binary, a major version below 16, or unparseable output -- `MitateDB-api/src/mitatedb_api/ops.py:615`.
-- **`ops inventory`** never formats an exception's own text into its output: every failure path returns a fixed judgment word, a closed-vocabulary reason word, or `match`/`mismatch`, never `str(exc)` -- `MitateDB-api/src/mitatedb_api/ops.py:3061`.
-- a connection failure before any item can be read propagates uncaught to `main`'s own top-level handler, which prints a type name and fixed text only -- `MitateDB-api/src/mitatedb_api/ops.py:3551`.
+- **`ops inventory`** never formats an exception's own text into its output: every failure path returns a fixed judgment word, a closed-vocabulary reason word, or `match`/`mismatch`, never `str(exc)` -- `MitateDB-api/src/mitatedb_api/ops.py:3072`.
+- a connection failure before any item can be read propagates uncaught to `main`'s own top-level handler, which prints a type name and fixed text only -- `MitateDB-api/src/mitatedb_api/ops.py:3562`.
 - item (2)'s declaration read distinguishes an ABSENT declaration (confirmed plus remediation-required) from a PRESENT but hand-corrupted one (blocked with the fixed reason `declaration-invalid`) -- `MitateDB-api/src/mitatedb_api/ops.py:2321`.
 - it never treats a corrupt value as equivalent to an absent one -- `MitateDB-api/src/mitatedb_api/ops.py:2321`.
 - item (4)'s credential-registry projection is an explicit column allow-list (`role`/`enabled`/`revoked`/`must_rotate`), so `credential_id` and `digest` are never in the SELECT list -- `MitateDB-api/src/mitatedb_api/ops.py:2418`.
@@ -1399,7 +1399,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `ops inventory` closes the judgment, comparison, reason and part vocabularies alike -- `MitateDB-api/src/mitatedb_api/ops.py:2157`.
 - `--concurrency`, `--thread-limit` and the process ceiling and total arguments accept only a positive integer, 0 refused -- `MitateDB-api/src/mitatedb_api/ops.py:2175`.
 - `--reserved-connections` and `--data-process-count-old-basis` accept a non-negative integer, 0 meaning no reserve or no old-basis process, only a negative value refused -- `MitateDB-api/src/mitatedb_api/ops.py:2194`.
-- both forms are a usage error, in argparse's own fixed templated message, before any connection opens -- `MitateDB-api/src/mitatedb_api/ops.py:3019`.
+- both forms are a usage error, in argparse's own fixed templated message, before any connection opens -- `MitateDB-api/src/mitatedb_api/ops.py:3030`.
 
 #### Evidence
 

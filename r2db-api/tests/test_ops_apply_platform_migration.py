@@ -1409,12 +1409,11 @@ def test_deprovision_argv_and_pgoptions_shape(platform, monkeypatch):
     assert rc == 0
     assert len(captured) == 1
     argv, env = captured[0]
-    # `_run_deprovision_script` never resolves this path (design D-2:
-    # `0004` is a single FIXED file, not an operator-supplied FILENAME --
-    # unlike `_resolve_platform_migration_file`, there is no containment
-    # check here to need a resolved path for).
-    unresolved = str(platform.migrations_dir / "0004_deprovision_application.sql")
-    assert argv == ["psql", "-v", "ON_ERROR_STOP=1", "-v", "app_slug=argvcheck", "-f", unresolved]
+    # `-f` receives the resolved path: `_run_deprovision_script` passes
+    # `0004` through the same containment check every other psql `-f`
+    # path in this module goes through.
+    resolved = str((platform.migrations_dir / "0004_deprovision_application.sql").resolve())
+    assert argv == ["psql", "-v", "ON_ERROR_STOP=1", "-v", "app_slug=argvcheck", "-f", resolved]
     assert f"-c lock_timeout={_TEST_LOCK_TIMEOUT}" in env["PGOPTIONS"]
 
 
