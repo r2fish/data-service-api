@@ -83,7 +83,10 @@ def test_contract_declares_1_13_0():
     # declares today; an implementation still declaring an earlier version
     # is exercised by version_binding's own retroactivity rule. Both
     # peers' own runtime declaration (`capabilities_document.py`/
-    # `control_plane.py`) moves in the same commit as the contract text.
+    # `control_plane.py`) moves in the commit that lands the real behavior,
+    # not in the commit that changes the contract text
+    # (`versioning.version_binding`: a version-flip "must land in the same
+    # commit as the real behavior change it claims").
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
     assert contract["contract_version"] == "1.13.0"
 
@@ -1187,18 +1190,29 @@ def test_contract_pins_the_1_12_0_version_binding_sentence_verbatim():
     assert versions[10] == "1.13.0"
 
 
-# Contract 1.13.0 (CCR_DISPOSITION.md subordinate ruling 18): a service
-# process that stops without completing a graceful shutdown loses neither
-# the audit event of an answered operation nor the count of an answered
-# denial occurrence. The three texts are copied verbatim from the
-# confirmed-text file (OPERATING_CONDITIONS.md section 1.5 items 35/36) --
-# never paraphrased. The one obligation is unconditional (it does not
-# depend on any capability's own status).
+# Contract 1.13.0 (CCR_DISPOSITION.md subordinate ruling 18). Summary (not
+# the confirmed text; the confirmed text is PIN_1_13_0_PROCESS_LOSS_POLICY
+# below): a service process that stops without completing a graceful
+# shutdown loses neither the audit event of an answered operation nor the
+# count of an answered denial occurrence. The three texts are copied
+# verbatim from the confirmed-text file (OPERATING_CONDITIONS.md section
+# 1.5 items 35/36) -- never paraphrased. The one obligation is
+# unconditional (it does not depend on any capability's own status).
 PIN_1_13_0_PROCESS_LOSS_POLICY = (
     "An implementation declaring 1.13.0 or higher loses, when a service process stops without completing "
     "a graceful shutdown, neither the audit event of an operation whose response the service had already "
     "returned nor the count of any denial occurrence whose response the service had already returned. A "
     "buffer that such a stop can empty is therefore not the bounded buffer sink_failure_policy permits."
+)
+
+# `audit.sink_failure_policy` as the contract declared it at 1.12.0 (the
+# value at the base of the contract 1.13.0 change set); 1.13.0 leaves it
+# byte-identical.
+PIN_SINK_FAILURE_POLICY_AS_OF_1_12_0 = (
+    "Failure to durably record an authentication/authorization denial, a credential or Application lifecycle "
+    "change, a destructive or privilege-sensitive operation, or a security-control failure fails the operation "
+    "closed. Failure to record an ordinary data-operation event may be absorbed by a bounded buffer that raises "
+    "an explicit operational alert; it must not silently discard events without that alert."
 )
 
 PIN_1_13_0_VERSION_BINDING_PARAGRAPH = (
@@ -1233,7 +1247,9 @@ def test_contract_pins_the_1_13_0_process_loss_policy_verbatim():
     keys = list(audit)
     assert keys.index("process_loss_policy") == keys.index("sink_failure_policy") + 1
     assert "An implementation declaring 1.13.0 or higher" in audit["process_loss_policy"]
-    assert "bounded buffer" in audit["sink_failure_policy"]
+    assert audit["sink_failure_policy"] == PIN_SINK_FAILURE_POLICY_AS_OF_1_12_0, (
+        f"audit.sink_failure_policy changed from its 1.12.0 text: {audit['sink_failure_policy']!r}"
+    )
 
 
 def test_contract_pins_the_1_13_0_obligations_entry_verbatim():

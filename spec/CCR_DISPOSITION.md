@@ -338,7 +338,7 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     監督が Q-1 / Q-2 (event の扱い)、Q-3 (拒否の件数)、Q-4 (契約)、Q-5 (範囲) をそれぞれ監督案付きで問うたのへの回答である (設計 §10)。確定は Q-1 = 1-A、Q-2 = (i)、Q-3 = 2-A、Q-4 = 契約に足す (設計 §6 の文案を確定文言とする。版は merge 時の main の次の版。host / instance の消失は文に含めない)、Q-5 = 設計 §2 の 11 と 12 の 2 件を同じ変更セットに含める。上の 3 つの本文のうち `audit.process_loss_policy` の文は依頼者が確定した文言であり、`versioning.version_binding` の段落と `versioning.obligations` の entry は、その文から機械的に導いた監督確定である (作業指示書 §11 の訂正註 1)。
 
-    **版数の扱い**: 契約 1.12.0 の次の minor 版 (1.13.0) とする。この従属判断は実挙動を伴う (両 peer が worker process の突然死で audit の証拠を失わない実装を入れる) ので、両 peer の `contract_version` は実挙動と同じ変更セットの merge で動かす (`versioning.version_binding` の version-flip の規律)。
+    **版数の扱い**: 契約 1.12.0 の次の minor 版 (1.13.0) とする。この従属判断は実挙動を伴う (両 peer が worker process の突然死で audit の証拠を失わない実装を入れる) ので、両 peer の `contract_version` は、実挙動を入れる commit で動かす (`versioning.version_binding` の "must land in the same commit as the real behavior change it claims")。
 
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 

@@ -292,7 +292,7 @@ def test_perf_thread_limit_env_reader_and_accessor_are_registered_isomorphic():
         "ThreadLimitMiddleware", "DEFAULT_THREAD_LIMIT", "_thread_limit_from_env",
     } <= names
     assert "_PerfThreadLimitWrapper" not in names
-    assert len(test_audit_query._ISOMORPHIC_TARGETS) == 198
+    assert len(test_audit_query._ISOMORPHIC_TARGETS) == 202
 
 
 # ---------------------------------------------------------------------

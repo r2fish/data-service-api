@@ -511,7 +511,7 @@ def test_contract_version_is_1_7_0_on_data_plane(service, runtime):
     ships -- function name kept, same precedent as `test_foundation.py`'s
     own re-flipped pin."""
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.13.0"
+    assert document["contract_version"] == "1.12.0"
 
 
 # ---------------------------------------------------------------------------
