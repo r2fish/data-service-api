@@ -200,13 +200,15 @@ def test_acquire_timeout_bounds_the_connect_of_a_connection_it_opens(monkeypatch
     mutation (`pool.py`, `acquire`): connect with the constructed value
     whatever the call's `timeout` (`min(self._connect_timeout, max(1, math.
     ceil(timeout)))` becomes `self._connect_timeout`) -- the 0.3 s call
-    connects with 5."""
+    connects with 5. Second mutation: drop the `max(1, ...)` floor -- the
+    0.0 s call then connects with 0, which psycopg reads as its own
+    default of 130 s, not as "no time left"."""
     _RecordingConnect.calls = []
     monkeypatch.setattr(pool_module, "CountingConnection", _RecordingConnect)
     pool = BoundedConnectionPool("dsn-unused-fake-pool-r102-test.invalid", max_size=5, connect_timeout=5)
-    for timeout in (0.3, 2.2, 30.0, None):
+    for timeout in (0.0, 0.3, 2.2, 30.0, None):
         pool.acquire(timeout=timeout)
-    assert [call["connect_timeout"] for call in _RecordingConnect.calls] == [1, 3, 5, 5]
+    assert [call["connect_timeout"] for call in _RecordingConnect.calls] == [1, 1, 3, 5, 5]
 
 
 # --- 27 ---------------------------------------------------------------------
