@@ -4,6 +4,14 @@ Platform-independent PostgreSQL REST Data Service API project.
 
 The repository exists to make the same core Data Service API usable by AI agents across different deployment platforms. An AI agent should be able to operate either implementation from the common API specification plus a base URL and API key.
 
+## Relation to the Mitate product
+
+This Data Service is also the persistence layer of the Mitate product, which is made of four repositories: `Mitate` (product source of truth and the Agent–Application API contract), `mitate-agent`, `mitate-application`, and this one. `mitate-application` integrates only through the public common API in `spec/`; it never imports either implementation or depends on SQL, physical tables, migrations or database credentials.
+
+That rule sets the direction of dependency. It does not put this repository outside the product: when Mitate is read, evaluated or audited as a product, this repository is in scope, and the persistence-safety claims are verified here (`security/`, `spec/`, `conformance-tests/`). The table that maps the product's claims to their evidence is in the `Mitate` repository's `README.md`.
+
+The common contract is owned by neither Mitate nor either implementation, and the Data Service stays usable without Mitate.
+
 ## Repository model
 
 ```text
