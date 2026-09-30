@@ -1135,8 +1135,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # `ALTER ROLE` -- R-105 -- rather than the shipped 5000ms/
             # 5000ms default `main.build_app` relies on), applied
             # automatically at login.
+            # The sink borrows from a pool of its own, the way `main.
+            # build_app` wires it (`audit_pool`, sized `role_pool_size(
+            # thread_limit)` like the credential pool below): every
+            # ordinary event is written before the response, so a sink that
+            # opened a connection per event would charge every measured
+            # request a connection handshake the composition root never
+            # pays.
+            self._audit_pool = BoundedConnectionPool(
+                self._platform.api_dsn,
+                max_size=role_pool_size(DEFAULT_THREAD_LIMIT),
+            )
             self._application_durable_audit = PostgresApplicationAuditSink(
-                self._platform.api_dsn, schema=self._platform.schema,
+                self._platform.api_dsn, schema=self._platform.schema, pool=self._audit_pool,
             )
             self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
 
@@ -3411,9 +3422,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         opens its own per-call connections (`_borrow_connection`'s pool
         branch); `self._read_store`'s own no-pool accumulators stay at
         zero, and the pool is where the real traffic lands.
-        `self._application_durable_audit` stays unpooled (matches `main.
-        py`'s own audit sink), and `self._write_store` is provisioning-
-        only, never touched by a measured request. Read-only: every value
+        `self._application_durable_audit` borrows from `self._audit_pool`
+        (matches `main.py`'s own audit sink) and its `platform_stats()`
+        folds that pool's own accounting in; `self._write_store` is
+        provisioning-only, never touched by a measured request. Read-only: every value
         read here is a plain accumulated attribute, no new connection
         opens."""
         credentials_stats = self._read_pool.platform_stats()

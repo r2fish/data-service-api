@@ -296,6 +296,35 @@ sed -n "${c},\$p" $f | shasum -a 256
 
 ## 10. 記録 (統合時に監督が埋める)
 
+### 10.1 commit (branch `r115-cont`、main へは merge 候補 `r115-merge` 経由で 1 回)
+
+WP-1 `95f6906`・`8f8e849`、WP-2 `6f49408`・`a9c59af`、WP-3 `e1d021a`・`d8bcf6c`、WP-4a `0359c51`、WP-4b `9ae742d`、WP-5a `4584457`、WP-5b `cca7286`、WP-5 レビュー後続 `c196bd9`、main `b346af2` 取り込み `d0a8864`、WP-6 `0cb591a`・`38a197e`。merge 候補 `b799a5a` (main `b346af2` + branch、`--no-ff`)、`COLLECTION_FLOOR` 4697 → 4854 `d419f23`、以後の記録・adapter の pool は候補の上の commit。
+
+### 10.2 完了ゲート (監督、merge 候補 `b799a5a` の上)
+
+`gate: 4854 passed, 2 subtests passed in 655.90s (0:10:55)` / `gate: judge=PASS` / `gate: pg_database/pg_roles diff 0` (gate.py の log、label r115、2026-10-01 03:22)。`tools/tests`: `pt: 781 passed in 201.36s`。branch の先頭 (`38a197e`) では `test_every_first_parent_fingerprint_is_in_the_table` だけが赤 (訂正註 13 (6))。最終の候補の上で再実行する (§10.5)。
+
+### 10.3 性能 (監督。head = branch の最終 tree、main = `b346af2`。交互 3 巡、load average 2.5〜3.1、`$SP/perf-r115-final.txt`・`perf-r115-summary-final.txt`。閾値 `RM` §0.1.4 の 1 = p50 +40% / p95 +50%)
+
+| 計測 | 形 | r2db-api p50 / p95 | MitateDB-api p50 / p95 |
+|---|---|---|---|
+| K=1 query | `tools/perf_baseline.py --real-server <peer> --warmup 20 --n 200` | 2.382 → 2.496 ms (+4.8%) / +1.4% | 2.161 → 2.290 ms (+6.0%) / +2.2% |
+| K=1 query / mutate | scratch driver (`$SP/rs_driver.py qm1`。同じ launcher、httpx 直列、warmup 20、n 200) | query +6.3% / +6.1%、mutate 1.888 → 2.019 ms (+6.9%) / +3.6% | query +6.9% / +7.1%、mutate 1.505 → 1.454 ms (−3.4%) / +5.1% |
+| K=4 keyed mutate (idempotency_key 付き、4 client thread、n 50 群) | scratch driver `km4` | 1 要求 5.850 → 6.272 ms (+7.2%) / +4.8% | 4.768 → 4.976 ms (+4.4%) / +7.2% |
+| 未認証 flood (bearer 無し、K=32、別 process) 下の正規 tenant の K=1 query | scratch driver `flood` (flood の 64 応答目を待ってから計測) | 2.030 → 2.232 ms (+9.9%) / +9.8%、429 / 503 は 0、flood は 401 のみ 約 300〜325 rps (両 tree 同じ) | 1.720 → 1.844 ms (+7.2%) / +10.5%、同左 |
+| 6 plug K=1 `--warmup 20 --n 200` (2 巡、`$SP/perf-r115-k1plugs-summary.txt`) | `tools/perf_baseline.py` | 全 op が p50 −2.5〜+5.6%、p95 −5.2〜+6.6% | 全 op が p50 −5.1〜+5.7%、p95 −7.6〜+5.5% (adapter の audit sink に pool を足した後の値、§10.4) |
+| MitateDB K=4 cell lock (`--concurrency 4`、`$SP/perf-r115-k4lock-final.txt`) | `tools/perf_baseline.py` | — | waits/acquire 329/887 = 37.1%、head・main とも同じ (閾値 10% は R-101 の未達のまま、本件で変化なし)。wait_total は mutate 群で 0.8 → 2.5 s (adapter の pool を足す前の値、§10.4) |
+
+判定: すべて閾値の内側。依頼者へ上げる事象なし。無効とした計測: 1 回目の取り直し (`perf-r115-after-wp5.txt`) の 2 巡目以降と `perf-r115-k4lock-2.txt` は他チャットの pytest と別プロジェクトの vitest で load average が 13〜33 に上がり無効。WP-4b 時点の計測 (`perf-r115-before-wp5.txt`、head `9ae742d`) は K=1 で +4〜6%、K=4 keyed mutate で r2db +10% / MitateDB +3%。
+
+### 10.4 conformance の in-process の MitateDB plug の audit sink
+
+`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py` の http / socket plug は sink に pool を持たず event ごとに接続を開いていた (`main.build_app` は `audit_pool` を持つ)。event が同期になったので K=4 の plug 計測で mutate が 3.7 → 14.2 ms (+280%) に見えた。composition root と同じ `role_pool_size(DEFAULT_THREAD_LIMIT)` の pool を足した (WP-3 のレビューの観察「in-process adapter は pool 無し」の解消)。足した後の 6 plug K=1 は上表のとおり。
+
+### 10.5 受け入れ監査と閉止
+
+監査パケット `$SP/acceptance-packet.md`: 76 件中 充足 42 / 未充足 3 (本書 訂正註 15 で解消) / 証拠不足 31 (前チャットの変異の逐語 27 件、性能 4 件 = §10.3)。閉止の後に残るもの: MitateDB runbook §10 の 7 / 7 / 11 版の依頼者による再受理、依頼者の一括確認 (訂正註 13・14)。
+
 ## 11. 訂正註 (本文は書き換えない。`OC` §1.8 の 57)
 
 1. **訂正註 (監督裁定 1、2026-09-30、§1.3 の 1)**: 契約 1.13.0 の確定文は `$SP/confirmed-contract-1130.txt` の 3 節 (`audit.process_loss_policy` = 依頼者確定、`versioning.version_binding` の 1.13.0 の文と `versioning.obligations` の項目 = 確定文から機械的に導いた監督確定。subordinate ruling は 18)。`spec/CCR_DISPOSITION.md` の ruling 18 の段は、ruling 17 の段と同じ形で、同ファイルの `version_binding` の文を引用して書く。WP-1 はこのファイルから複製し、言い換えない。
@@ -311,3 +340,5 @@ sed -n "${c},\$p" $f | shasum -a 256
 11. **訂正註 (監督裁定 9、2026-09-30、WP-4b のコードレビュー)**: (1) 完了条件 40 のうち周期の thread・lifespan の最終 sweep・`*_AUDIT_FLUSH_INTERVAL_S` の knob と env 例の行、および完了条件 46 の port `flush_audit_buffer` の no-op 化は、拒否の窓が process 内に残る間は拒否の窓の sweep だけを担うので WP-4 では残し、WP-5 (拒否の窓が DB に移る段) の完了条件として読む。(2) 完了条件 36 の「catalog の event」は r2db にだけ当たる。MitateDB の `catalog` は基点でも audit event を出さず、宣言する operation の語彙にも無い (`MitateDB-api/src/mitatedb_api/application_audit.py` の宣言)。出していない event は失われないので契約 `audit.process_loss_policy` には反しない。peer 間の非対称は本件の範囲に含めない (観察)。(3) COMMIT の途中で接続が切れ commit の成否が分からない場合は、両 peer の全経路で error 行を書く側に揃え、`outcome_note` に「error 行は commit しなかったこと、または commit の成否を service が知り得なかったことを表す」旨を両 peer 同一の文で足す (WP-5b)。(4) MitateDB の backend の単発 `insert()` / `update()` は呼び出し元が 0 件になったので削除する (hook を通らずに commit する経路を残さない。WP-5b)。(5) `MitateDB-api/src/mitatedb_api/audit_hook.py` の docstring を実挙動に合わせる (schema 操作 3 種が idempotency の記録より前に hook を呼ぶ順序は変えず、docstring の「LAST thing」を事実に直す。その後の失敗は error 行が覆う。WP-5b)。
 12. **訂正註 (監督、2026-09-30、作業の場所)**: 2 つ目のチャットから worktree は `.claude/worktrees/r115-cont` (branch `r115-cont`、`9ae742d` から分岐)。本文と §2.3・§9 の `mystifying-hellman-56a270` はこれに読み替える。
 13. **訂正註 (監督裁定 10、2026-10-01、WP-5。依頼者指示 2026-09-30「裁定は推奨で進めてください、最後に確認」の下で監督の推奨を採り、閉止前に一覧で確認を求める)**: (1) 完了条件 53 の「owner は schema の owner role で、provision role ではない」は両 peer で字面どおりに満たせない — r2db (`r2dbsvc_control`) でも MitateDB (`mitatedbsvc_provision`) でも schema の owner role が migration を適用する provision role と同じ role である (CREATEROLE・CREATEDB 持ち)。owner は schema の owner role のままとし、53 は「migration を走らせた role に依らず owner が schema の owner role になる」と読む。関数の本体は静的な SQL・`search_path` 固定・全 object の schema 修飾で、呼び手が渡せるのは値だけである。CREATEROLE を持たない専用の owner role を新設する案は、role の一覧・接続予算・runbook §10 に波及するので本件では採らない。(2) WP-5a のコードレビューの指摘 2・3・4・6・7・8・9 は両 peer に適用した: 窓の長さを counter の主 key に入れる、summary の枝の cursor と `event_classes` の試験、空振りの試験の修正、加算の対象行が無ければ RAISE、窓の長さの宣言値の上限、F-21 が runtime role の EXECUTE・auditreader の SELECT・runtime role が counter table に直接の権限を持たないことを grant から role を同定して検査する、古いコメントの修正。(3) conformance の port `flush_audit_buffer` は削除した (port v1.19)。拒否の窓が DB に移り役割が無くなり、呼ぶ test は 0 件だった。完了条件 46 の「no-op」はこれに読み替える。(4) `test_c09_v1_fail_closed_events_are_observable_through_audit_query` は `audit_query` を 1 頁 (limit 1000) だけ読んでいたので、event がすべて同期で永続化されるようになって platform の event が 1000 件に達すると新しい event が頁の外に出る。cursor で最後の頁までたどる形に直す。(5) MitateDB の backend の単発 `insert()` / `update()` は、それだけを直接呼ぶ試験 2 件とともに削除する (訂正註 11 (4) の実施)。(6) `ops startup-checks` の `KNOWN_FINGERPRINTS` は世代を足さず、branch の途中の commit の行を消して最終の行だけにした。このため `test_every_first_parent_fingerprint_is_in_the_table` は branch の先頭では赤で、完了ゲートは main に branch を `--no-ff` で merge した候補の上で回す。
+14. **訂正註 (監督、2026-10-01、runbook §10 の独立レビュー)**: 独立レビューの指摘 7 件をすべて反映した (7c = 7b の結果を writer role の DSN で F-21 として確かめる段、5 つの固定 alert message の表を 1.13.0 より前の revision のために残す、rollout の重なりの間に記録が 2 系統に割れる注、6 KiB の前提、再適用の間接の待ち、r2db §21 の lock、「Observed」の言い換え)。このうち §10.10 の **step 15** (provision DSN で `verify-declarations` が「すべて成功」) は 2026-09-18 からある既存の誤り (F-13 で exit 11 になり F-21 に届かない) で、実挙動に直した。step 15 の語の変更は訂正註 6 の「行と段だけを足す」の範囲を超えるので、旧文と新文 (`$SP/r115-wp6b-report.md` §7 に逐語) を依頼者の確認事項とし、確認が得られなければ旧文に戻して 7c だけを残す。完了条件 72 の不変の確かめは、追加行と置換 (版数 4 行、列挙 3 行、step 15 の 1 block) を元の字面に戻した残りの sha256 が変更前と一致することで示した (同報告 §7)。
+15. **訂正註 (監督、2026-10-01、受け入れ監査)**: 監査パケット (`$SP/acceptance-packet.md`) は 76 件中 充足 42 / 未充足 3 / 証拠不足 31。未充足 3 件は本註の変更セットで直した (68: `CM`:1262 の `:4294` → `:4335`、72: 本註 14、74: 引き継ぎ書と archive への移動)。証拠不足 31 件は、WP-1〜WP-4 の変異 (M1〜M6、M13〜M15、M20、M26〜M29、M35〜M44) の逐語が前のチャットの scratchpad にあり本チャットから読めないことによる — それらの WP のレビューと差し戻しの完了は `docs/work-orders/HANDOVER_20260930_R115_FABLE.md` §2・§6 が記録し、性質そのものは完了ゲート (4854 passed) が固定する。性能 (25・31・47・63) は §10 に記録する。

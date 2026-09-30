@@ -1259,7 +1259,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - an `unknown` that survives the second read stops the procedure and is never carried forward as a warning -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - That acceptance record judges item (5) and item (6)'s lock/downtime half, matching `inventory`'s own `unjudged_items`/`runbook-acceptance` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3042`.
 - platform migrations run only in numbered-set order through `apply-platform-migration` with its required `--lock-timeout`: `0005`, `0007`, `0011` one run each, then `0012`/`0013`/`0014` as one run -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3416`.
-- `0016` then runs alone at step 7a, and `0017` alone at step 7b, through the same subcommand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:4327`, `:4294`.
+- `0016` then runs alone at step 7a, and `0017` alone at step 7b, through the same subcommand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:4327`, `:4335`.
 - `0012`, `0013` and `0014` all `CREATE OR REPLACE` the same function in that order, and `0013` and `0014` both name the role `0005` creates -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - re-applying `0007`/`0012` is idempotent but not value-neutral, so the runbook records the writer-role timeouts, the `audit_writer_roles` row and the current `CONNECTION LIMIT`s first -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - it restores the two timeouts and that row, while the `CONNECTION LIMIT`s are recorded only and never restored, since `0012` sets each role it names to its own value -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
