@@ -1445,7 +1445,11 @@ than_the_length_check`).
 128 + 256 = 1472` characters. `denial_key` has no CHECK of its own: it is
 the JSON text of the window length and four of those columns, measured at
 4252 bytes with each of the four at its limit and made of characters JSON
-escapes as `\u00XX`. **Budget 6 KiB per counter row.**
+escapes as `\u00XX`. **Budget 6 KiB per counter row**, counting each
+character as one byte, as the 2 KiB `application_audit` budget above does.
+Multi-byte characters raise it: with every column filled with 4-byte UTF-8
+characters the text columns measured 8732 bytes, about 8.9 KB per row
+before compression with the fixed columns and tuple header.
 
 **Row count, whole deployment.** Nothing is counted per process: every
 event is written before its response, and every data-plane worker adds to
@@ -1488,13 +1492,50 @@ is the reason the row-size and row-count bounds above exist at all.
 
 ### 15.2 Logs-based alerting
 
-The audit pipeline emits no log message of its own. The five fixed
-`logging.error` messages earlier releases emitted (buffer overflow, the
-overflow-alert row, the coalesced-denial summary row) left `src/` with the
-buffer and the in-process refusal window: every event and every refusal
-count is written before its response, and a write that fails answers the
-request `SERVICE_UNAVAILABLE` (503) instead of waiting in memory (contract
-`audit.process_loss_policy`). An alert on those strings no longer fires.
+A revision that counts refusals in the platform database (`0016`, §21;
+contract 1.13.0) emits no log message of its own from the audit pipeline:
+every event and every refusal count is written before its response, and a
+write that fails answers the request `SERVICE_UNAVAILABLE` (503) instead of
+waiting in memory (contract `audit.process_loss_policy`). **A revision older
+than that -- the rollback target, and the old revision while a rollout
+overlaps -- still keeps a bounded buffer and an in-process refusal window,
+and the five fixed messages below are its only signal of evidence loss.
+Keep a logs-based alert on each of the five for as long as such a revision
+can serve.** They are fixed `logging.error` strings with no interpolation,
+defined in that revision's `src/r2db_api/service.py`, in two independent
+channels (buffer/overflow and coalescing), so alert on all five:
+
+| message (exact) | meaning |
+|---|---|
+| `application_audit buffer overflow: events were dropped` | evidence loss has ALREADY happened: the bounded buffer evicted its oldest events |
+| `application_audit overflow-alert row could not be written; retrying with backoff` | the in-band alert row itself cannot be written -- both the durable channel and the in-band alert are failing at once; retry is sticky with exponential backoff to a 60s ceiling |
+| `application_audit overflow-alert row recorded; pending overflow cleared` | recovery of the pair above: the alert row landed and the accumulated drop count was reported in its `count` |
+| `application_audit coalesced-denial summary row could not be written; retrying` | the window-end aggregate row of a coalesced denial is not landing. The first, synchronous row of that window IS durable, but the **repeat count is stranded in memory** -- and because the writer holds INSERT only, that first row's `count` can never be amended later (§15.1, design P4-D6). This is the only carrier of "how many times", so a stuck aggregate row is evidence loss even though nothing is refused |
+| `application_audit coalesced-denial summary row recorded; retry cleared` | recovery of the pair above: the aggregate row landed and the stranded repeat count is now in its `count` |
+
+Both retrying/recovered pairs fire only on a failing<->healthy **state
+transition** (never once per attempt), the same logging-DoS discipline the
+overflow alert uses.
+
+**Known sharpness, both peers (P4-D15, WP-B2, 2026-09-03)**: the flush
+"failing" flag clears on ANY successful flush, regardless of how much the
+buffer still holds -- it is not gated on the buffer fully draining, as an
+earlier revision had it. Completion-order semantics govern concurrent
+flushes (periodic, threshold, and explicit can all race on the same buffer):
+whichever attempt COMPLETES LAST decides the flag's value, so a still-failing
+concurrent flush that completes after a successful one sets the flag back to
+failing. If the sink is FLAPPING (success and failure completing
+alternately), the alert re-fire interval can rise from the 60s backoff
+ceiling up to one row per flush interval (this peer's default: 2s) -- this is
+an accepted tradeoff, not a defect: the declared bound of at most one alert
+row per flush interval still holds regardless (the `alert_min_interval_s`
+floor rate-limits every attempt independently of this flag), evidence reaches
+the durable table sooner from a partially-working sink, and no evidence is
+ever lost either way -- the drop counter keeps accumulating and is reported
+in the eventual alert row's `count`. As before, **do not read a gap between
+messages as recovery**; read the recovery message of the pair concerned (the
+third message for the buffer/overflow channel, the fifth for the coalescing
+one).
 
 ### 15.3 Retention and pruning (manual, external, deliberately unautomated)
 
@@ -2191,6 +2232,20 @@ preflight refuse to start, naming the migration (F-21) -- apply it before
 starting a release that counts in it. The file adds new objects only and
 changes no existing one, so a release that predates it keeps running on the
 migrated database.
+
+**Locks.** The first application locks only the objects it creates; a
+re-application takes ACCESS EXCLUSIVE on `denial_window_counter` until its
+`COMMIT` (fact: a read of the applying session's own `pg_locks` just before
+`COMMIT`, on a PostgreSQL 16 throwaway cluster; the statement that takes it
+is, by inference, the `ALTER TABLE ... OWNER TO`). While it waits and holds,
+every refusal a release that counts in the table records, and every
+`audit_query` read of the table, waits up to `--lock-timeout` plus that hold
+-- and, while every thread of a worker waits on such a refusal, every other
+request of that worker. `--lock-timeout` is required with no default, as
+for `0015` (§20) and every other `apply-platform-migration` run (§16): it
+bounds how long the run waits behind another session's lock, and so how
+long requests queued behind that wait are held; choose it the same way as
+for `0015`.
 
 **Check it with `ops verify-declarations` and read the `F-21` line.** The
 command reaches F-21 only over the DSN of a declared audit writer role; run

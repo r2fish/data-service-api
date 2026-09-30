@@ -316,8 +316,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Status
 
 - **acceptance boundary**: production network/IAM evidence for that split is absent until deployed, local/test-cluster evidence only.
-- **Network-layer isolation is a deployment default, not enforced code**: two Cloud Run services with separate IAM invoker bindings add it on top of credential-store separation only while that default deployment holds -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1146`.
-- **The control service's inability to invoke this path is a deployment assumption**: it holds only while the Cloud Run services' environments carry no such variable; no code or test pins that -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1100`.
+- **Network-layer isolation is a deployment default, not enforced code**: two Cloud Run services with separate IAM invoker bindings add it on top of credential-store separation only while that default deployment holds -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1187`.
+- **The control service's inability to invoke this path is a deployment assumption**: it holds only while the Cloud Run services' environments carry no such variable; no code or test pins that -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1141`.
 
 ### Common
 
@@ -955,7 +955,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Disclosed detection gap**: a stray `0013` re-applied after `0014` with NO application provisioned afterwards is NOT caught -- every existing role still carries `0014`'s ceiling, so item (8) reads confirmed while the provisioning function is silently back at 36.
 - **A stray single-file re-application is not reverted by any migration**, and `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10 carries that gap together with the re-application order.
 - **Disclosed scope limit of item (8)'s second condition**: raising a `CONNECTION LIMIT` adds no capacity, so condition 2 (total demand + reserved <= `max_connections`) is untouched by `0014`.
-- **`ops inventory` cannot check the declared old-basis process count**: a wrong, too-small declaration undercounts demand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:2568`.
+- **`ops inventory` cannot check the declared old-basis process count**: a wrong, too-small declaration undercounts demand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:2609`.
 - **The F-16 agreement holds for equal inputs only**: that the thread limit and process counts an operator declares match what each composition root passes F-16 rests on the runbook, not a test -- `docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md` section 10.1.
 - What an operator does when a cluster's `max_connections` does not cover the rollout total is not decided yet.
 
@@ -1060,16 +1060,16 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **F-18's floors do not track this peer's `MITATEDB_PLATFORM_POOL_SIZE` override**, exactly as F-16's do not.
 - **The control plane's startup judgment reads the thread limit from its own process environment** (`MITATEDB_THREAD_LIMIT`, as its F-16 call does), so a control deployment whose value differs from the data plane's judges a different floor for the application pair.
 - If the open rollout-overlap question (R-52) is resolved by declaring the overlap's own process count in `process_ceilings`, that count is exactly what this lower bound already counts.
-- **`concurrency` is shared within one instance only**: `enforced` holds only while `--max-instances=1` keeps every data worker on that instance, which neither composition root can read -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1358`.
-- **During a rollout overlap the slots are not shared**: an old and a new revision on two instances may hold up to twice the declared `concurrency`, while `requests_per_minute` still holds -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1749`.
-- **A worker stopped while holding `scan` holds up the whole instance**: every acquisition waits up to 1 s and answers 503; the runbook forbids stopping a single worker -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1665`.
-- **The rate ring may refuse slightly early**: at a window edge it counts up to one second more than 60 s, and never admits more than the declared `requests_per_minute` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1741`.
+- **`concurrency` is shared within one instance only**: `enforced` holds only while `--max-instances=1` keeps every data worker on that instance, which neither composition root can read -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1399`.
+- **During a rollout overlap the slots are not shared**: an old and a new revision on two instances may hold up to twice the declared `concurrency`, while `requests_per_minute` still holds -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1790`.
+- **A worker stopped while holding `scan` holds up the whole instance**: every acquisition waits up to 1 s and answers 503; the runbook forbids stopping a single worker -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1706`.
+- **The rate ring may refuse slightly early**: at a window edge it counts up to one second more than 60 s, and never admits more than the declared `requests_per_minute` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1782`.
 - **A database clock that steps back stretches the rate window by that step**: the ring's base second never moves back, so no count ages out until the clock passes it again (stricter, never looser); read from the function, not tested -- `MitateDB-api/migrations/0016_credential_request_rate.sql:149`.
 - **A database clock that steps forward ages counts out early**: the ring reads the database's wall clock, so a forward step admits up to twice the declared `requests_per_minute` in 60 real seconds; read from the function, not tested -- `MitateDB-api/migrations/0016_credential_request_rate.sql`.
-- **SIGHUP or SIGTTIN runs more data workers than declared**: the uvicorn supervisor then runs `MITATEDB_WORKERS + 1` or more, beyond `process_ceilings.data` and the F-16/F-18 budget; no check sees it and only the runbook forbids it -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1657`.
-- **The image's evidence is static**: the tests above read the Dockerfile as text; the development machine has no container runtime, so the preflight-then-uvicorn order is confirmed only on a deployed revision -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1767`.
+- **SIGHUP or SIGTTIN runs more data workers than declared**: the uvicorn supervisor then runs `MITATEDB_WORKERS + 1` or more, beyond `process_ceilings.data` and the F-16/F-18 budget; no check sees it and only the runbook forbids it -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1698`.
+- **The image's evidence is static**: the tests above read the Dockerfile as text; the development machine has no container runtime, so the preflight-then-uvicorn order is confirmed only on a deployed revision -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1808`.
 - **F-20 reads the workers from the operator's own shell**, never from the running revision, so it is a hand cross-check; the preflight's check is the one that stops a revision -- `MitateDB-api/src/mitatedb_api/ops.py:1472`.
-- **A new `process_ceilings` changes which running revisions can start**: section 10.10.1 step 6 judges F-16 / F-18 for every listed revision with `ops startup-checks` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3729`, `MitateDB-api/src/mitatedb_api/startup_checks.py:913`.
+- **A new `process_ceilings` changes which running revisions can start**: section 10.10.1 step 6 judges F-16 / F-18 for every listed revision with `ops startup-checks` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3770`, `MitateDB-api/src/mitatedb_api/startup_checks.py:913`.
 
 ### Common
 
@@ -1248,7 +1248,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `0014` requires ADMIN OPTION on every role it alters, exactly as `0013` requires it, refused rather than bypassed -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - **Platform-upgrade runbook** section 10 is the operator procedure for the Gate-0 read and the platform upgrade, in four stages: first read, platform remediation, second read, candidate -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - only the remediation and candidate stages change production state; a read performs no DDL, no DML, no declaration replacement, no restart, no traffic change and no API enablement -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
-- Gate-0 is ready only when all 10 items are confirmed AND section 10.8's acceptance records name the current versions; `ops inventory`'s own exit status 0 never makes it ready -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3041`.
+- Gate-0 is ready only when all 10 items are confirmed AND section 10.8's acceptance records name the current versions; `ops inventory`'s own exit status 0 never makes it ready -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3082`.
 - what ready gates is exactly the candidate deploy and the traffic switch onto it -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - Section 10.2 orders the isolated proof, the independent audit and the requester's approval before anything in either state-changing stage runs -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.2.
 - the remediation stage, which ready does not gate, carries the same three conditions for its own single move of traffic percentages onto the env-only revision running the same image digest -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.2.
@@ -1257,9 +1257,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - those limits are `0012`'s own value for a role it names and the catalog value for every other role -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - a role whose `CONNECTION LIMIT` sits below its own demand is reported and stopped on rather than remediated there, since raising such a limit takes a new platform migration -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - an `unknown` that survives the second read stops the procedure and is never carried forward as a warning -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
-- That acceptance record judges item (5) and item (6)'s lock/downtime half, matching `inventory`'s own `unjudged_items`/`runbook-acceptance` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3001`.
-- platform migrations run only in numbered-set order through `apply-platform-migration` with its required `--lock-timeout`: `0005`, `0007`, `0011` one run each, then `0012`/`0013`/`0014` as one run -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3375`.
-- `0016` then runs alone at step 7a, and `0017` alone at step 7b, through the same subcommand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:4286`, `:4294`.
+- That acceptance record judges item (5) and item (6)'s lock/downtime half, matching `inventory`'s own `unjudged_items`/`runbook-acceptance` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3042`.
+- platform migrations run only in numbered-set order through `apply-platform-migration` with its required `--lock-timeout`: `0005`, `0007`, `0011` one run each, then `0012`/`0013`/`0014` as one run -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3416`.
+- `0016` then runs alone at step 7a, and `0017` alone at step 7b, through the same subcommand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:4327`, `:4294`.
 - `0012`, `0013` and `0014` all `CREATE OR REPLACE` the same function in that order, and `0013` and `0014` both name the role `0005` creates -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - re-applying `0007`/`0012` is idempotent but not value-neutral, so the runbook records the writer-role timeouts, the `audit_writer_roles` row and the current `CONNECTION LIMIT`s first -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - it restores the two timeouts and that row, while the `CONNECTION LIMIT`s are recorded only and never restored, since `0012` sets each role it names to its own value -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
@@ -1291,7 +1291,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Production evidence is `absent`**: section 10 has never been run against production, and neither `0014_role_connection_limits_rollout.sql`, `0016`, `0017`, the `0004` stages R-54 adds, nor the run/closure behavior R-57 adds is applied there; every value above was measured on a throwaway cluster.
 - **`0014`'s header is true for one process, not for two**: it overwrites `0012`'s own statement that `mitatedbsvc_auditreader` is deliberately left untouched, rather than erasing it -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - **Each reviewed subject stays a draft until section 10.8's own row names that same version for it**: section 10.8 is the single place that state is read from, and a row naming an earlier version counts as no record at all.
-- **Sections 10.6 / 10.7 / 10.10 are at versions 7 / 7 / 11 and not accepted** (R-115 added `0017`; section 10.8 records the review of 6 / 6 / 10 only), so Gate-0 is not ready until the requester accepts them -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3008-3010`.
+- **Sections 10.6 / 10.7 / 10.10 are at versions 7 / 7 / 11 and not accepted** (R-115 added `0017`; section 10.8 records the review of 6 / 6 / 10 only), so Gate-0 is not ready until the requester accepts them -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3049-3051`.
 - **Every `apply-platform-migration` test targets a throwaway PostgreSQL cluster only** (`MITATEDB_TEST_ADMIN_DSN`).
 - **A stray `0012` applied alone after `0013`** drops the setting for FUTURE applications only, and, now that `0014_role_connection_limits_rollout.sql` replaces that same function last, additionally lowers every EXISTING role's `CONNECTION LIMIT` back to `0012`'s values.
 - **Either stray is corrected only by re-applying the set in its own order, ending at `apply-platform-migration 0014`** -- never by `0013` alone, which would leave the next application's roles at 36.

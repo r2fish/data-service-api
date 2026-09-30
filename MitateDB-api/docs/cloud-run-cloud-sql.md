@@ -712,7 +712,11 @@ a_value_longer_than_the_length_check`).
 128 + 256 = 1472` characters. `denial_key` has no CHECK of its own: it is
 the JSON text of the window length and four of those columns, measured at
 4252 bytes with each of the four at its limit and made of characters JSON
-escapes as `\u00XX`. **Budget 6 KiB per counter row.**
+escapes as `\u00XX`. **Budget 6 KiB per counter row**, counting each
+character as one byte, as the 2 KiB `application_audit` budget above does.
+Multi-byte characters raise it: with every column filled with 4-byte UTF-8
+characters the text columns measured 8732 bytes, about 8.9 KB per row
+before compression with the fixed columns and tuple header.
 
 **Row count, whole deployment.** Nothing is counted per process: every
 event is written before its response, and every data-plane worker adds to
@@ -756,14 +760,51 @@ reason the row-size and row-count bounds exist at all. On Cloud SQL, pair the
 query above with the instance's own storage-utilization metric and keep
 automatic storage increase enabled.
 
-**Logs-based alerting.** The audit pipeline emits no log message of its
-own. The five fixed `logging.error` messages earlier images emitted (buffer
-overflow, the overflow-alert row, the coalesced-denial summary row) left
-`src/` with the buffer and the in-process refusal window: every event and
-every refusal count is written before its response, and a write that fails
-answers the request `SERVICE_UNAVAILABLE` (503) instead of waiting in memory
-(contract `audit.process_loss_policy`). A logs-based metric on those strings
-no longer fires.
+**Logs-based alerting.** A revision that counts refusals in the platform
+database (`0017`; contract 1.13.0) emits no log message of its own from the
+audit pipeline: every event and every refusal count is written before its
+response, and a write that fails answers the request `SERVICE_UNAVAILABLE`
+(503) instead of waiting in memory (contract `audit.process_loss_policy`).
+**A revision older than that -- the rollback target, and the old revision
+while a rollout overlaps -- still keeps a bounded buffer and an in-process
+refusal window, and the five fixed messages below are its only signal of
+evidence loss. Keep a logs-based metric/alert on each of the five for as
+long as such a revision can serve.** They are fixed `logging.error` strings
+with no interpolation (no client-supplied value can reach Cloud Logging
+through them), defined in that revision's `src/mitatedb_api/audit_dispatch.py`,
+in two independent channels (buffer/overflow and coalescing), so alert on
+all five:
+
+| message (exact) | meaning |
+|---|---|
+| `application_audit buffer overflow: events were dropped` | evidence loss has ALREADY happened: the bounded buffer evicted its oldest events |
+| `application_audit overflow-alert row could not be written; retrying with backoff` | the in-band alert row itself cannot be written -- both channels failing at once; retry is sticky with exponential backoff to a 60s ceiling |
+| `application_audit overflow-alert row recorded; pending overflow cleared` | recovery of the pair above: the alert row landed and the accumulated drop count is in its `count` |
+| `application_audit coalesced-denial summary row could not be written; retrying` | the window-end aggregate row of a coalesced denial is not landing. The first, synchronous row of that window IS durable, but the **repeat count is stranded in memory** -- and because the writer holds INSERT only, that first row's `count` can never be amended later (§3.2d, design P4-D6). That row is the only carrier of "how many times", so a stuck aggregate row is evidence loss even though nothing is refused |
+| `application_audit coalesced-denial summary row recorded; retry cleared` | recovery of the pair above: the aggregate row landed and the stranded repeat count is now in its `count` |
+
+Both retrying/recovered pairs fire only on a failing<->healthy **state
+transition** (never once per attempt), the same logging-DoS discipline the
+overflow alert uses.
+
+**Known sharpness, both peers (P4-D15, WP-B2, 2026-09-03)**: the flush
+"failing" flag clears on ANY successful flush, regardless of how much the
+buffer still holds -- it is not gated on the buffer fully draining, as an
+earlier revision had it. Completion-order semantics govern concurrent
+flushes (periodic, threshold, and explicit can all race on the same buffer):
+whichever attempt COMPLETES LAST decides the flag's value, so a still-failing
+concurrent flush that completes after a successful one sets the flag back to
+failing. If the sink is FLAPPING (success and failure completing
+alternately), the alert re-fire interval can rise from the 60s backoff
+ceiling up to one row per flush interval -- this is an accepted tradeoff, not
+a defect: the declared bound of at most one alert row per flush interval
+still holds regardless (the `alert_min_interval_s` floor rate-limits every
+attempt independently of this flag), evidence reaches the durable table
+sooner from a partially-working sink, and no evidence is ever lost either way
+(the drop counter keeps accumulating and is reported in the eventual alert
+row's `count`). As before, **do not read a gap between messages as
+recovery** -- read the recovery message of the pair concerned (the third
+message for the buffer/overflow channel, the fifth for the coalescing one).
 
 ### 3.2e Retention and pruning (manual, external, deliberately unautomated)
 
@@ -2915,7 +2956,7 @@ record goes back to "not accepted".
 | `0013_role_statement_timeouts.sql` | applied (platform). `apply-platform-migration` refuses a lone `0013`; that call must also carry `0014` in the same run, and a solo `0013` application is possible only outside the tool, applied directly with `psql`. | none; not reverted | **compatible (inference)**. Adds a role-level `statement_timeout` (`5000ms`) to `mitatedbsvc_auditreader` and to every application's runtime/developer role, and replaces `begin_provision_application` so future roles get the same setting -- additive; it drops and revokes nothing (fact: the file's own header and statements). (2026-09-18: that still describes `0013` against `0012`, but it no longer holds for a re-application after `0014_role_connection_limits_rollout.sql`: `0013` alone afterwards lowers every FUTURE application's runtime and developer role to `CONNECTION LIMIT` 36 -- the value `0013` inherited from `0012` -- while every EXISTING role keeps its `0014` value and every future role still carries the `statement_timeout`. Re-applying `0014` compensates) A revision that lacks it passes its own per-request deadline with `SET LOCAL`, which overrides the role setting. R-87 (2026-09-23): the 8 developer-connection catalog reads (`schema_count`/`field_domains`/`field_types`/`all_field_types`/`field_constraints`/`field_types_and_constraints`/`all_field_constraints`/`schema_revision`) carry no per-request deadline, but each now issues its own per-transaction `SET LOCAL statement_timeout`/`lock_timeout` at the constructed `max_execution_ms` (the declared `execution_ms`) -- the role setting bites only on developer-connection statements that carry neither a deadline nor their own `SET LOCAL` (inference). Note: an audit query slower than the new bound is cancelled rather than running unbounded | fact + inference | a ref whose request paths set their own per-request deadline with `SET LOCAL statement_timeout`, or (R-87) whose own developer-connection catalog reads issue their own per-transaction `SET LOCAL` regardless of deadline. The note holds at every other ref: a path that carries neither a deadline nor a `SET LOCAL` of its own is bounded by the role setting |
 | `0014_role_connection_limits_rollout.sql` | applied (platform), last in the numbered set. It raises `mitatedbsvc_api` to `CONNECTION LIMIT` 132, `mitatedbsvc_controlplane` to 36, `mitatedbsvc_auditreader` to 12 and every application's runtime and developer role to 68 -- the demand of TWO revisions of the same process serving at once, which is what a rollout puts side by side (§10.10's precondition arithmetic). **A role whose current `CONNECTION LIMIT` is ABOVE the value this file sets is lowered to it**, exactly as `0012`'s own row warns: this file SETs its four values rather than raising toward them. On a deployment carrying `0012`'s and `0013`'s own values it lowers nothing, but a limit raised by hand above 132 / 36 / 12 / 68 comes back down to it -- so read the current values with the catalog read and record them before applying, the same way `0012`'s row says to (§10.10 step 2). **Re-applying `0014` itself is idempotent, but the two files before it are not value-neutral after it**: `0012` alone afterwards lowers the api, controlplane and existing application roles back to 68 / 20 / 36 and drops `0013`'s `statement_timeout` from future application roles, and `0013` alone afterwards lowers future application roles to 36 while leaving every existing role as `0014` set it. Re-applying `0014` compensates for either. **The second case is caught by nothing this procedure runs until an application is provisioned after it** -- item (8) compares the roles that exist, and until the next provisioning call no role carries the lowered value (§10.10.1 step 7). `apply-platform-migration` enforces the order: it refuses `0012` or `0013` given without every one of its own later files in the same run, so a run that includes `0012` is always `0012` `0013` `0014`, a run that includes `0013` always carries `0014`, and `0014` can still be applied on its own | none; not reverted | **compatible**. Sets four `CONNECTION LIMIT`s to fixed values above `0012`'s and `0005`'s own (132 / 36 / 12 / 68), raising each of those and lowering only a limit already above its own new value, and drops and revokes nothing, and replaces `begin_provision_application` with the same signature and result columns, keeping `0013`'s `statement_timeout` lines (fact: the file's own header and statements). An older revision's pool ceiling is at or below the new value (inference) | fact + inference | a ref whose own per-role pool composition, at the concurrency that ref is deployed with, stays within 132 / 36 / 12 / 68 -- compute it from that ref's own `config.py`, the same way `0012`'s row does |
 | `0016_credential_request_rate.sql` | applied (platform), by §10.10.1 step 7a, after the numbered set's `0014` and before the candidate is deployed. **A candidate that counts in it cannot start without it**: on a platform database without its rate function, the data service and its preflight refuse to start, naming the migration. No later accepted file redefines its targets, so `apply-platform-migration` accepts it alone | none; not reverted | **compatible**. Creates a new table `mitatedb_registry.credential_request_rate` (with a foreign key to the EXISTING `mitatedb_registry.credentials`, `ON DELETE CASCADE`) and a new function `mitatedb_registry.credential_request_rate_admit`, revokes both from `PUBLIC` and grants them to `mitatedbsvc_api` only -- it names no existing object in any `ALTER`/`DROP` and narrows no existing grant (fact: the file's own statements). A revision that lacks it reads and writes none of the new objects. That foreign key adds a referential-integrity trigger on the EXISTING `credentials` table, and an application's own deprovision (`0004`, `finish_deprovision_application`'s own `DELETE` from `credentials`) cascades to that application's own rows in `credential_request_rate` | fact | a ref whose `MitateDB-api/src/` does not name `credential_request_rate` (confirm with `git grep` at that ref) |
-| `0017_denial_window_counter.sql` | applied (platform), by §10.10.1 step 7b, after step 7a and before the candidate is deployed. **A candidate that counts in it cannot start without it**: on a platform database without its refusal-window function, or with one not in the state the file leaves it in, the data service and its preflight refuse to start, naming the migration (F-21). No later accepted file redefines its targets, so `apply-platform-migration` accepts it alone | none; not reverted | **compatible**. Creates a new table `mitatedb_registry.denial_window_counter` (no foreign key) and a new function `mitatedb_registry.denial_window_record` (`SECURITY DEFINER`), sets both owners to the schema's owner, revokes both from `PUBLIC`, and grants `EXECUTE` on the function to `mitatedbsvc_api` and `SELECT` on the table to `mitatedbsvc_auditreader` -- it names no existing object in any `ALTER`/`DROP` and narrows no existing grant (fact: the file's own statements). A revision that lacks it reads and writes none of the new objects. Note: counts a newer revision left in the table are not returned by that revision's `audit_query`, and stay readable there with `psql` as `mitatedbsvc_auditreader` (inference) | fact + inference | a ref whose `MitateDB-api/src/` does not name `denial_window_counter` (confirm with `git grep` at that ref) |
+| `0017_denial_window_counter.sql` | applied (platform), by §10.10.1 step 7b, after step 7a and before the candidate is deployed. **A candidate that counts in it cannot start without it**: on a platform database without its refusal-window function, or with one not in the state the file leaves it in, the data service and its preflight refuse to start, naming the migration (F-21). No later accepted file redefines its targets, so `apply-platform-migration` accepts it alone | none; not reverted | **compatible**. Creates a new table `mitatedb_registry.denial_window_counter` (no foreign key) and a new function `mitatedb_registry.denial_window_record` (`SECURITY DEFINER`), sets both owners to the schema's owner, revokes both from `PUBLIC`, and grants `EXECUTE` on the function to `mitatedbsvc_api` and `SELECT` on the table to `mitatedbsvc_auditreader` -- it names no existing object in any `ALTER`/`DROP` and narrows no existing grant (fact: the file's own statements). A revision that lacks it reads and writes none of the new objects. Note: counts a newer revision left in the table are not returned by that revision's `audit_query`, and stay readable there with `psql` as `mitatedbsvc_auditreader` (inference). While an older revision still serves alongside a newer one, one key's refusals in one window may be recorded by both: two first-refusal rows, and the count split between the older revision's own summary row and the counter row. The split itself loses nothing; the newer revision's `audit_query` returns both (inference) | fact + inference | a ref whose `MitateDB-api/src/` does not name `denial_window_counter` (confirm with `git grep` at that ref) |
 | `0006_declared_field_types_upgrade.sql` (per-application) | applied by `upgrade-applications` to applications that have not recorded it | none | **compatible (inference)**. Adds a table and fills type rows from the existing columns. A pre-`0006` revision does not read that table | inference | a ref that does not read the declared-field-types table |
 | `0008_platform_upgrades_upgrade.sql` (per-application) | as above | none | **compatible**. Adds the ledger table. "Not yet applied" is decided by (numbers this revision ships) minus (numbers recorded), so extra recorded numbers are ignored (fact: `platform_upgrades.pending_upgrade_numbers`). A pre-`0008` revision does not read the ledger | fact | a ref whose own `pending_upgrade_numbers` computes (numbers it ships) minus (numbers recorded), and which does not read the ledger |
 | `0009_field_constraints_upgrade.sql` (per-application) | as above | none | **compatible (with a note)**. Adds columns that have defaults. A pre-`0009` revision's INSERT into `_mdb_field_types` names its columns explicitly (fact: that revision's own `backend_postgres.py`). Note: constraints the new revision declared (`enum_json`/`nullable`) are not enforced by the old revision (inference) | fact + inference | a ref whose `backend_postgres.py` names the columns explicitly in its INSERT into `_mdb_field_types` |
@@ -2969,7 +3010,7 @@ goes back to "not accepted".
 | `0013` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE mitatedbsvc_auditreader SET statement_timeout`: role catalog row update (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... SET` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing sessions keep their own settings; the new bound applies at the next login | not needed (draft); do not run it at the same time as provisioning |
 | `0014` | **the whole file is one `BEGIN`/`COMMIT`** -- a permission failure anywhere rolls the whole run back and leaves nothing changed | `ALTER ROLE ... CONNECTION LIMIT` x3 on the platform-plane roles (`mitatedbsvc_api`, `mitatedbsvc_controlplane`, `mitatedbsvc_auditreader`): role catalog row updates (inference). `DO` block: `SELECT runtime_role, developer_role FROM mitatedb_registry.applications` (ACCESS SHARE, fact: documentation) plus `EXISTS (SELECT 1 FROM pg_roles ...)` and `ALTER ROLE ... CONNECTION LIMIT` per role (inference). `CREATE OR REPLACE FUNCTION mitatedb_registry.begin_provision_application` and `REVOKE ... ON FUNCTION`: inference | only an operation taking ACCESS EXCLUSIVE on `applications`; provisioning running at the same time (the function is replaced inside this transaction) | `3s` | 3 seconds + hold time (role catalog plus one function). Existing connections are not dropped; the new limit applies to new connections | not needed (draft); do not run it at the same time as provisioning |
 | `0016` | **the whole file is one `BEGIN`/`COMMIT`** -- a failure anywhere rolls the whole run back and leaves nothing changed | `CREATE TABLE IF NOT EXISTS mitatedb_registry.credential_request_rate` with `REFERENCES mitatedb_registry.credentials`: on the first application, SHARE ROW EXCLUSIVE on `credentials` (inference: the documentation states that lock for adding a foreign key with `ALTER TABLE`, and a `REFERENCES` clause in `CREATE TABLE` creates the same constraint), held to the end of the transaction; a no-op if the table is present (inference). `REVOKE`/`GRANT ... ON` the new table: inference (ACL update). `CREATE OR REPLACE FUNCTION mitatedb_registry.credential_request_rate_admit` and `REVOKE`/`GRANT ... ON FUNCTION`: inference (function catalog) | on the first application, credential issue, revoke, enable and disable, and deprovision (`0004`'s own `finish_deprovision_application` `DELETE` from `credentials`) -- their `INSERT`/`UPDATE`/`DELETE` on `credentials` all take ROW EXCLUSIVE, which conflicts with SHARE ROW EXCLUSIVE (fact: documentation); authentication reads of `credentials` (ACCESS SHARE) do not conflict | `3s` | 3 seconds + hold time (one new empty table, one function). Running processes' reads are unaffected | not needed (draft) |
-| `0017` | **the whole file is one `BEGIN`/`COMMIT`** -- a failure anywhere rolls the whole run back and leaves nothing changed | `CREATE TABLE IF NOT EXISTS mitatedb_registry.denial_window_counter` (no foreign key), `REVOKE`/`GRANT ... ON` that table, `CREATE OR REPLACE FUNCTION mitatedb_registry.denial_window_record`, `REVOKE`/`GRANT ... ON FUNCTION`, and the `DO` block's `ALTER TABLE ... OWNER TO`/`ALTER FUNCTION ... OWNER TO` on those two objects. Observed on a throwaway local cluster (the applying session's own `pg_locks` just before `COMMIT`): on the first application, relation locks only on the new table, its primary-key index and its TOAST relations; on a re-application, ACCESS EXCLUSIVE on `denial_window_counter`, held to the end of the transaction (the statement that takes it: inference, the `ALTER TABLE ... OWNER TO`, whose documented default is ACCESS EXCLUSIVE) | on the first application, nothing a running process does (every object it locks is new). On a re-application, every refusal a revision that counts in the table records, and every `audit_query` read of the table | `3s` | 3 seconds + hold time (one new table, one function). On the first application running processes are unaffected | not needed (draft) |
+| `0017` | **the whole file is one `BEGIN`/`COMMIT`** -- a failure anywhere rolls the whole run back and leaves nothing changed | `CREATE TABLE IF NOT EXISTS mitatedb_registry.denial_window_counter` (no foreign key), `REVOKE`/`GRANT ... ON` that table, `CREATE OR REPLACE FUNCTION mitatedb_registry.denial_window_record`, `REVOKE`/`GRANT ... ON FUNCTION`, and the `DO` block's `ALTER TABLE ... OWNER TO`/`ALTER FUNCTION ... OWNER TO` on those two objects. On the first application, relation locks only on the new table, its primary-key index and its TOAST relations; on a re-application, ACCESS EXCLUSIVE on `denial_window_counter`, held to the end of the transaction (fact: a read of the applying session's own `pg_locks` just before `COMMIT`, on a PostgreSQL 16 throwaway cluster; the statement that takes it: inference, the `ALTER TABLE ... OWNER TO`, whose documented default is ACCESS EXCLUSIVE) | on the first application, nothing a running process does (every object it locks is new). On a re-application, every refusal a revision that counts in the table records, every `audit_query` read of the table, and, while every thread of a worker is waiting on such a refusal, every other request of that worker | `3s` | 3 seconds + hold time (one new table, one function). On the first application running processes are unaffected | not needed (draft) |
 | per-application upgrade (`0006`, `0008`, `0009`, `0010`, via `upgrade-applications`) | per application: `GRANT <developer_role> TO CURRENT_USER` (auto-commit) -> one `BEGIN`/`COMMIT` -> `REVOKE` (auto-commit). A failure leaves the temporary membership behind (§3.4b's cleanup) | `CREATE TABLE IF NOT EXISTS` (`0006`, `0008`, `0010`): inference (no heavy lock on an existing table). `INSERT`: ROW EXCLUSIVE (fact: documentation). `0006`'s read of `information_schema.columns`: ACCESS SHARE (fact: documentation). **`0009`'s `ALTER TABLE public._mdb_field_types ADD COLUMN IF NOT EXISTS` x2: ACCESS EXCLUSIVE** (fact: the documented default); the defaults are constants so no table rewrite happens (fact: documentation); the lock is still taken when the column already exists (inference). `GRANT`/`REVOKE` on roles, tables and the schema: inference | that application's own requests that read `_mdb_field_types` (during `0009`), and schema operations on that application | `2s` (`--lock-timeout 2s`) | 2 seconds + hold time per application (catalog-only changes). Other applications are unaffected | not needed (draft) |
 | deprovision (`0004`, via `deprovision`) | outside a transaction (`DROP DATABASE` cannot run inside one -- fact: documentation). **A failure after stage (3) (and after either `GRANT` that already succeeded -- a cancel on the first `GRANT` itself leaves nothing changed) leaves the temporary self-grant membership behind** (design §5.1 (i)), the same property the per-application upgrade row above records for its own temporary grant | `begin_deprovision_application` / `finish_deprovision_application`: registry row updates (inference: ROW EXCLUSIVE and row locks). `GRANT <role> TO CURRENT_USER WITH INHERIT TRUE, SET FALSE` (stage (3), when either role still exists): inference (`pg_auth_members` row). `ALTER DATABASE ... WITH ALLOW_CONNECTIONS false` (stage (4)): inference (`pg_database` row update). `pg_terminate_backend`: no lock. `DROP DATABASE`: fails while another connection exists (fact: documentation), lock type inference. `DROP ROLE`: inference | operations updating the same application's registry rows, plus, after stage (4), every new connection attempt to that application's database (refused, not queued); existing sessions are ended by stage (5)'s terminate, not by the `ALTER` | `5s` (`--lock-timeout 5s`) -- applied to the whole psql session, so it also bounds stage (3)'s `GRANT` and stage (4)'s `ALTER DATABASE`; a timeout at either leaves only the temporary self-grant standing while `ALLOW_CONNECTIONS` is still true (see §9 item 3's failure-state table for that state) | that application stops permanently (irreversible, §10.6). An operation touching the SAME application's registry rows waits at most 5 seconds + hold time; other applications are not affected. If the run stops at stage (4) or later, that application's database is left refusing new connections (`datallowconn=false`) until an operator re-runs `0004` or reverts it -- an unbounded stop, not a lock wait, plus fleet-command degradation (design §4.1 / F-3) | never run by an upgrade |
 
@@ -3094,7 +3135,7 @@ acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <
 
 ### 10.10 Platform upgrade procedure (stages 2-4)
 
-Procedure version: **11** (2026-10-01: adds step 7b for `0017`. Version 10, 2026-09-30, described here by its final state,
+Procedure version: **11** (2026-10-01: adds steps 7b and 7c for `0017`; step 15 runs `verify-declarations` over the api role's DSN. Version 10, 2026-09-30, described here by its final state,
 not as a diff from version 9). Before step 6 declares `process_ceilings`,
 it runs `startup-checks` against the values it is about to declare, and
 the tool judges two startup checks: F-18's own connection-headroom bound
@@ -4304,6 +4345,40 @@ against production):
    running process does waits on its first application; a re-application
    makes refusals and `audit_query` reads of the counter table wait
    (§10.7's `0017` row).
+
+   **7c. Confirm step 7b with F-21**: `verify-declarations` reaches F-21
+   only over the DSN of a declared audit writer role; over the provision
+   DSN it stops earlier, at `FAIL F-13` (exit 11), because
+   `mitatedbsvc_provision` is not in `audit_writer_roles`. Run it over the
+   data service's own DSN (`mitatedb-platform-dsn`, §4, role
+   `mitatedbsvc_api`), with its host pointed at this section's proxy socket
+   and its password moved to a passfile by §10.1's converter, in §10.3's
+   subshell shape. The variable keeps §10.3's name because that is the one
+   `verify-declarations` reads; the value is the api role's, and it never
+   leaves the subshell:
+
+   ```sh
+   (
+     set +x
+     MITATEDB_PROVISION_DSN="$(gcloud secrets versions access latest \
+       --secret=mitatedb-platform-dsn --project=<project> --quiet 2>/dev/null)" || exit 1
+     export MITATEDB_PROVISION_DSN
+     MITATEDB_PROVISION_DSN="$(MITATEDB_SOCKET_HOST=<socket-dir>/<instance-connection-name> \
+       PYTHONPATH=MitateDB-api/src python3 -c 'import os; from psycopg.conninfo import conninfo_to_dict, make_conninfo; p = conninfo_to_dict(os.environ["MITATEDB_PROVISION_DSN"]); p["host"] = os.environ["MITATEDB_SOCKET_HOST"]; print(make_conninfo(**p))')" || exit 1
+     MITATEDB_PROVISION_PASSFILE="$(dirname "$MITATEDB_PROVISION_PASSFILE")/api.passfile"
+     export MITATEDB_PROVISION_PASSFILE
+     MITATEDB_PROVISION_DSN="$(PYTHONPATH=MitateDB-api/src python3 \
+       "$(dirname "$MITATEDB_PROVISION_PASSFILE")/dsn-to-passfile.py")" || exit 1
+     PYTHONPATH=MitateDB-api/src python3 -m mitatedb_api.ops verify-declarations
+   )
+   ```
+
+   `OK F-21` and exit 0 confirm step 7b. `FAIL F-21` (exit 20) names what
+   is not in the state the file leaves; re-run step 7b. A `FAIL` on an
+   earlier check stops the run before F-21. If a later step resolves that
+   check -- F-14 until step 8 has applied the per-application upgrades, the
+   surfaces checks until step 9 -- step 15's run confirms F-21 instead; any
+   other earlier `FAIL` is that check's own finding.
 8. **Per-application upgrade** (`--lock-timeout` is §10.7's
    per-application-upgrade value):
 
@@ -4570,9 +4645,12 @@ Gate-0 ready (step 12) gates exactly this stage.
 15. **Health (before moving traffic)**: the candidate's Ready condition is
     `True`; the candidate's digest equals the digest attested in the
     second read; the candidate's env names no longer carry the legacy
-    names. Over the provision DSN run `show-declarations`,
-    `verify-declarations` (with `--control` too on a deployment that runs
-    Control) and `upgrade-status`, and all must succeed. Some
+    names. Over the provision DSN run `show-declarations` and
+    `upgrade-status`, and both must succeed. Run `verify-declarations`
+    (with `--control` too on a deployment that runs Control) in step 7c's
+    form, over `mitatedbsvc_api`'s DSN, and it must exit 0: over the
+    provision DSN it stops at `FAIL F-13` (exit 11) before its later
+    checks. Some
     `verify-declarations` checks judge from the operator's own shell
     environment and local code, so use them for this post-check only,
     never as grounds for a Gate-0 confirmed. Call the candidate's own tag
