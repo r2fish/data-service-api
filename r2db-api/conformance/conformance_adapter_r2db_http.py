@@ -91,6 +91,7 @@ from adapter import (  # noqa: E402
     IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
+    PlanVerificationHold,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
@@ -913,6 +914,73 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
         release.set()
         setattr(cell_obj, "_idempotency_lookup", original_lookup)
         setattr(cell_obj, "_idempotency_reserve", original_reserve)
+
+
+# port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
+# section 9's `conformance-tests/` paragraph, Q-5): `hold_after_plan_
+# verification` realization for this HTTP plug. `PostgresCell.apply_
+# schema` reads the revision its `plan` is checked against ONCE, with
+# `_read_schema_revision`, inside its transaction and before any DDL
+# statement (`postgres.py`, the `revision_before` read; the `plan`
+# comparison itself follows the DDL, against the token built from that
+# read). The stall point is the return of that first `_read_schema_
+# revision` call made inside a schema operation: after the revision read
+# and after every lock the operation has taken by then, before the first
+# DDL statement. `PostgresCell` has no in-process cell lock, so what a
+# second schema operation ("B") waits on while the first ("A") is held is
+# whatever the database-level serialization of schema operations takes --
+# with none, B runs straight through while A is held. The wrap is gated
+# on a thread-local mark only this cell's own `apply_schema` wrapper sets
+# and on a claim the first caller takes, so `_read_schema_revision` calls
+# made by a data operation's delete confirmation, a later call and another
+# cell pass straight through and exactly ONE schema operation is held. A
+# schema operation that neither carries a `plan` nor is a `dry_run`, and
+# confirms no destructive operation, never reads the revision before its
+# DDL and is therefore not held by this realization.
+
+
+@contextmanager
+def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> Iterator[PlanVerificationHold]:
+    original_apply_schema = cell_obj.apply_schema  # noqa: SLF001
+    original_read = cell_obj._read_schema_revision  # noqa: SLF001
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    marked = threading.local()
+
+    def _apply_schema(*args: Any, **kwargs: Any):
+        marked.schema_operation = True
+        try:
+            return original_apply_schema(*args, **kwargs)
+        finally:
+            marked.schema_operation = False
+
+    def _read(conn: Any):
+        revision = original_read(conn)
+        if getattr(marked, "schema_operation", False) and claimed.acquire(blocking=False):
+            entered.release()
+            release.wait()
+        return revision
+
+    setattr(cell_obj, "apply_schema", _apply_schema)
+    setattr(cell_obj, "_read_schema_revision", _read)
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_plan_verification: no schema operation reached the end of its revision read "
+                f"within {timeout_s}s (expected the next plan-carrying schema operation on this "
+                "Application to stall right after _read_schema_revision returns -- see this helper's own "
+                "module comment)"
+            )
+        return 1
+
+    try:
+        yield PlanVerificationHold(_wait_until_held)
+    finally:
+        release.set()
+        setattr(cell_obj, "_read_schema_revision", original_read)
+        setattr(cell_obj, "apply_schema", original_apply_schema)
 
 
 def _stringify_for_path(payload: Any) -> str:
@@ -2620,6 +2688,20 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         app_id = self.scope_of(session).application_id
         cell = self._service._cells[app_id]  # noqa: SLF001
         return _hold_after_idempotency_lookup_via_stalled_cell_methods(cell, idempotency_key)
+
+    # port v1.20: wraps this SAME per-application `PostgresCell`'s `apply_schema` and
+    # `_read_schema_revision` -- see `_hold_after_plan_verification_via_stalled_cell_methods`'s own
+    # module comment for the stall point.
+    def hold_after_plan_verification(self, session):
+        """See `ConformanceAdapter.hold_after_plan_verification`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_plan_verification_via_stalled_cell_methods` and the
+        comment immediately above it."""
+        assert isinstance(session, _Session)
+        app_id = self.scope_of(session).application_id
+        cell = self._service._cells[app_id]  # noqa: SLF001
+        return _hold_after_plan_verification_via_stalled_cell_methods(cell)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
