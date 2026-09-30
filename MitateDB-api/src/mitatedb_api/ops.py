@@ -160,6 +160,7 @@ from psycopg.types.json import Json
 from . import pg_timeouts
 from . import platform_declarations
 from . import platform_upgrades
+from . import startup_checks
 from .control_audit import insert_control_audit_row, read_control_audit_events
 from .control_composition import build_control_service
 from .http import DEFAULT_THREAD_LIMIT
@@ -3090,6 +3091,66 @@ def cmd_inventory(args: argparse.Namespace) -> int:
     print(json.dumps(report, sort_keys=True))
     return _inventory_exit_code(report)
 
+
+#: Printed on stderr, at exit code 1, whenever `startup-checks` cannot
+#: produce any judgment (no DSN, a read-only setting that did not read back
+#: as `on`, a `--repository` that is not a git checkout) -- never the
+#: underlying exception text.
+_STARTUP_CHECKS_TOOL_FAILURE_MESSAGE = "error: startup-checks could not run"
+
+
+def _startup_checks_input_reject(rule: str) -> NoReturn:
+    """A rejected `startup-checks` input: exit code 1, a fixed rule word and
+    never the rejected value, before any database connection opens."""
+    print(f"error: startup-checks input rejected ({rule})", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _startup_checks_document(args: argparse.Namespace) -> "startup_checks.RevisionsDocument":
+    """Reads and validates `--revisions`; a rejected file exits 1 through
+    `_startup_checks_input_reject`."""
+    try:
+        text = Path(args.revisions).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        _startup_checks_input_reject("file-unreadable")
+    try:
+        return startup_checks.parse_revisions_document(text)
+    except startup_checks.InputRejected as exc:
+        _startup_checks_input_reject(exc.rule)
+
+
+def cmd_startup_checks(args: argparse.Namespace) -> int:
+    """Judges the startup checks of the declared revisions against a proposed
+    `process_ceilings` declaration (`startup_checks` holds the judgment and
+    its docstring the input, output and exit-code contract). The input file
+    and the repository are checked first, before a connection opens; the
+    connection is the read-only one `inventory` opens, read back before any
+    read; the report is printed as one JSON object on stdout."""
+    document = _startup_checks_document(args)
+    if not startup_checks.is_git_checkout(args.repository):
+        print(_STARTUP_CHECKS_TOOL_FAILURE_MESSAGE, file=sys.stderr)
+        return 1
+    dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
+    if not dsn:
+        print(_STARTUP_CHECKS_TOOL_FAILURE_MESSAGE, file=sys.stderr)
+        return 1
+    schema = _schema()
+    conn = _inventory_connect(dsn)
+    try:
+        if not _inventory_confirmed_read_only(conn):
+            print(_STARTUP_CHECKS_TOOL_FAILURE_MESSAGE, file=sys.stderr)
+            return 1
+        facts = startup_checks.read_database_facts(
+            conn, schema=schema, role_classes=_inventory_role_classes(conn, schema),
+        )
+    finally:
+        conn.close()
+    report = startup_checks.build_report(
+        document, startup_checks.identify_revisions(args.repository, document), facts, args.data, args.control,
+    )
+    print(json.dumps(report, sort_keys=True))
+    return startup_checks.exit_code(report)
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m mitatedb_api.ops",
@@ -3449,6 +3510,41 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p.error = _inventory_usage_error
 
+    p = sub.add_parser(
+        "startup-checks",
+        help="read-only judgment of the startup checks (role connection limits, max_connections headroom) "
+             "of every declared revision against a proposed process_ceilings declaration -- never mounted on "
+             "any HTTP surface, never changes platform state. Prints one JSON object to stdout. Requires "
+             "MITATEDB_PROVISION_DSN (env only, never an argument)",
+    )
+    p.add_argument(
+        "--data", type=_inventory_positive_int, required=True, metavar="N",
+        help="the proposed Data-plane process ceiling (a positive integer)",
+    )
+    p.add_argument(
+        "--control", type=_inventory_positive_int, required=True, metavar="N",
+        help="the proposed Control-plane process ceiling (a positive integer)",
+    )
+    p.add_argument(
+        "--revisions", required=True, metavar="FILE",
+        help="JSON file (format mitatedb-startup-checks/1) listing every revision that can start while the "
+             "declaration stands",
+    )
+    p.add_argument(
+        "--repository", required=True, metavar="PATH",
+        help="a git checkout that holds every source_ref in --revisions; only its git objects are read",
+    )
+    p.set_defaults(func=cmd_startup_checks)
+
+    def _startup_checks_usage_error(message: str, _parser: argparse.ArgumentParser = p) -> NoReturn:
+        # Same convention as `inventory`: a usage error exits 1, never
+        # argparse's default 2, which this subcommand reserves for a
+        # produced judgment that is not confirmed.
+        _parser.print_usage(sys.stderr)
+        _parser.exit(1, f"{_parser.prog}: error: {message}\n")
+
+    p.error = _startup_checks_usage_error
+
     return parser
 
 
@@ -3460,9 +3556,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # argparse's default 2, which this subcommand reserves for a
         # completed item judgment) extends to unrecognized/extra
         # arguments too, before any database connection opens -- the
-        # rejected value(s) are never echoed. Every other subcommand
-        # keeps argparse's own default (exit 2) for this same case.
-        if getattr(args, "command", None) == "inventory":
+        # rejected value(s) are never echoed. `startup-checks` follows
+        # the same convention; every other subcommand keeps argparse's own
+        # default (exit 2) for this same case.
+        # history: CH-0545
+        if getattr(args, "command", None) in ("inventory", "startup-checks"):
             print("error: unrecognized arguments", file=sys.stderr)
             raise SystemExit(1)
         parser.error(f"unrecognized arguments: {' '.join(extra_argv)}")

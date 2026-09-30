@@ -225,6 +225,7 @@ PINNED_MODULES: dict[str, frozenset[str]] = {
             "mitatedb_api.request_traversal",
             "mitatedb_api.request_vocabulary",
             "mitatedb_api.service",
+            "mitatedb_api.startup_checks",
             "mitatedb_api.surfaces",
         }
     ),
