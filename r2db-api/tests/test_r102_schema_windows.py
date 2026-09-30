@@ -22,8 +22,11 @@ Stop technique: no hook exists in product code. A test-local `_Stall` wraps
 one named method and, for ONE armed thread only (thread A), pauses inside
 the wrapper on a `threading.Event` until the test releases it. The wait
 for A to arrive is bounded and fails with an `AssertionError` naming the
-wrap point; B's not-having-completed is observed through a bounded window
-(`_B_WINDOW_S`), the only fixed-length wait in this file.
+wrap point. B's not-having-completed is observed through a bounded window
+(`_B_WINDOW_S`) and then confirmed by finding a backend of the application
+database waiting on a PostgreSQL lock (`pg_stat_activity.wait_event_type =
+'Lock'`, bounded wait); a B that is neither finished nor lock-waiting fails
+the test.
 
 Every test asserts the same two-branch shape. If B completed while A was
 stopped, A must have been refused and must have done nothing. If B did
@@ -34,9 +37,11 @@ one is refused).
 from __future__ import annotations
 
 import threading
+import time
 import types
 from typing import Any, Callable
 
+import psycopg
 import pytest
 
 from r2db_api.errors import FoundationError
@@ -113,9 +118,24 @@ class _Outcome:
         self.b_done_while_a_stopped = False
 
 
-def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], Any]) -> _Outcome:
-    """Runs A until it stops at the wrap point, then runs B, observes B
-    for `_B_WINDOW_S`, releases A and joins both."""
+def _lock_waiters(admin_dsn: str, database: str) -> int:
+    """Backends of `database` currently waiting on a PostgreSQL lock,
+    counted over a separate superuser connection (outside every product
+    path)."""
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND wait_event_type = 'Lock' "
+                "AND pid <> pg_backend_pid()", [database])
+            return cur.fetchone()[0]
+
+
+def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], Any], *,
+                admin_dsn: str, database: str) -> _Outcome:
+    """Runs A until it stops at the wrap point, then runs B. B is given
+    `_B_WINDOW_S`; if it has not finished by then it must be seen waiting
+    on a PostgreSQL lock (bounded by `_LOCK_TIMEOUT_S`; a B that finishes
+    during that wait counts as finished). Then releases A and joins both."""
     outcome = _Outcome()
     done = {"A": threading.Event(), "B": threading.Event()}
 
@@ -137,6 +157,12 @@ def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], A
         threads.append(thread_b)
         thread_b.start()
         outcome.b_done_while_a_stopped = done["B"].wait(timeout=_B_WINDOW_S)
+        if not outcome.b_done_while_a_stopped:
+            give_up_at = time.monotonic() + _LOCK_TIMEOUT_S
+            while not outcome.b_done_while_a_stopped and not _lock_waiters(admin_dsn, database):
+                assert time.monotonic() < give_up_at, (
+                    f"B neither completed nor is waiting on a PostgreSQL lock while A is stopped at {stall.point}")
+                outcome.b_done_while_a_stopped = done["B"].wait(timeout=0.05)
     finally:
         stall.release.set()
         for thread in threads:
@@ -166,7 +192,7 @@ def _fields(cell: PostgresCell) -> dict[str, list[str]]:
     return {entry["entity"]: entry["fields"] for entry in cell.catalog()}
 
 
-def test_plan_window_plan_is_checked_against_the_revision_inside_the_ddl_serialization(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+def test_plan_window_plan_is_checked_against_the_revision_inside_the_ddl_serialization(platform, app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """Plan. A: `apply_schema(add_field e1.extra)` carrying a dry-run plan,
     stopped right after `_read_schema_revision` returned the revision the
     plan is checked against -- before any DDL. B: `apply_schema(add_field
@@ -188,6 +214,7 @@ def test_plan_window_plan_is_checked_against_the_revision_inside_the_ddl_seriali
             stall,
             lambda: cell_a.apply_schema(operation, developer=True, limits=LIMITS, plan=dry.plan, plan_request=operation),
             lambda: _add_field(cell_b, "e2", "other"),
+            admin_dsn=platform.admin_dsn, database=app_a.database,
         )
 
         assert "B" in outcome.results, f"B must succeed in either branch: {outcome.errors}"
@@ -209,7 +236,7 @@ def test_plan_window_plan_is_checked_against_the_revision_inside_the_ddl_seriali
         cell_b.close()
 
 
-def test_confirmation_window_drop_entity_confirmation_is_checked_against_the_revision_inside_the_ddl_serialization(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+def test_confirmation_window_drop_entity_confirmation_is_checked_against_the_revision_inside_the_ddl_serialization(platform, app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """Confirmation. A: `apply_schema(drop_entity e1)` carrying the
     confirmation phrase of the revision current when it was made, stopped
     right after `_read_schema_revision` returned the revision the phrase is
@@ -231,6 +258,7 @@ def test_confirmation_window_drop_entity_confirmation_is_checked_against_the_rev
             stall,
             lambda: cell_a.apply_schema(drop, developer=True, limits=LIMITS),
             lambda: _add_field(cell_b, "e2", "other"),
+            admin_dsn=platform.admin_dsn, database=app_a.database,
         )
 
         assert "B" in outcome.results, f"B must succeed in either branch: {outcome.errors}"
@@ -250,7 +278,7 @@ def test_confirmation_window_drop_entity_confirmation_is_checked_against_the_rev
         cell_b.close()
 
 
-def test_schema_objects_window_concurrent_create_entity_cannot_exceed_schema_objects(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+def test_schema_objects_window_concurrent_create_entity_cannot_exceed_schema_objects(platform, app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """`schema_objects`. The bound is exactly the object count of ONE more
     entity (an entity with one declared field is 3 objects, see
     `test_backend_excludes_the_ledger_from_catalog_and_schema_objects_
@@ -265,7 +293,9 @@ def test_schema_objects_window_concurrent_create_entity_cannot_exceed_schema_obj
 
         stall = _Stall()
         stall.install(monkeypatch, PostgresCell, "_create_entity")
-        outcome = _run_window(stall, lambda: _create(cell_a, "e1", limits=limits), lambda: _create(cell_b, "e2", limits=limits))
+        outcome = _run_window(
+            stall, lambda: _create(cell_a, "e1", limits=limits), lambda: _create(cell_b, "e2", limits=limits),
+            admin_dsn=platform.admin_dsn, database=app_a.database)
 
         limit_errors = [
             name for name, error in outcome.errors.items()
@@ -273,7 +303,8 @@ def test_schema_objects_window_concurrent_create_entity_cannot_exceed_schema_obj
         ]
         assert len(outcome.results) == 1 and len(limit_errors) == 1, (
             f"exactly one create must succeed and one be LIMIT_EXCEEDED: results={sorted(outcome.results)} "
-            f"errors={ {name: repr(error) for name, error in outcome.errors.items()} }")
+            f"errors={ {name: repr(error) for name, error in outcome.errors.items()} } "
+            f"(B completed while A stopped: {outcome.b_done_while_a_stopped})")
         assert outcome.errors[limit_errors[0]].details["limit_class"] == "schema_objects"
         objects = sum(len(fields) + 1 for fields in _fields(cell_a).values())
         assert objects <= limits.schema_objects, (
