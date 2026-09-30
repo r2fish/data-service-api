@@ -69,6 +69,16 @@ _LOCK_TIMEOUT_S = 10.0
 # B that is NOT blocked must be seen to finish (a few DDL round trips), and
 # a window shorter than that would misread a slow, unblocked B as blocked.
 _B_WINDOW_S = 1.0
+# Bound on how long the test looks for B waiting on a PostgreSQL lock after
+# `_B_WINDOW_S` has passed. B's own lock wait ends by itself when the product's
+# `lock_timeout` (derived from the request deadline, default execution_ms
+# 5000 ms: MitateDB-api/src/mitatedb_api/backend_postgres.py `_set_timeouts` (SET LOCAL lock_timeout = the request's remaining deadline) and config.py `max_execution_ms = 5_000`) fires and B fails with LIMIT_EXCEEDED(execution_ms) -- a B that
+# then counts as "completed" would send a blind observation into the wrong
+# branch. So `_B_WINDOW_S + _LOCK_OBSERVE_S` stays below 5 s, and every other
+# bound (`_LOCK_TIMEOUT_S`, used for A's arrival, A's release wait and the
+# joins) stays above it.
+_LOCK_OBSERVE_S = 3.0
+assert _B_WINDOW_S + _LOCK_OBSERVE_S < 5.0 < _LOCK_TIMEOUT_S
 
 
 def _pair(app, config: FoundationConfig | None = None):
@@ -136,7 +146,7 @@ def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], A
                 admin_dsn: str, database: str) -> _Outcome:
     """Runs A until it stops at the wrap point, then runs B. B is given
     `_B_WINDOW_S`; if it has not finished by then it must be seen waiting
-    on a PostgreSQL lock (bounded by `_LOCK_TIMEOUT_S`; a B that finishes
+    on a PostgreSQL lock (bounded by `_LOCK_OBSERVE_S`; a B that finishes
     during that wait counts as finished). Then releases A and joins both."""
     outcome = _Outcome()
     done = {"A": threading.Event(), "B": threading.Event()}
@@ -160,11 +170,12 @@ def _run_window(stall: _Stall, a_call: Callable[[], Any], b_call: Callable[[], A
         thread_b.start()
         outcome.b_done_while_a_stopped = done["B"].wait(timeout=_B_WINDOW_S)
         if not outcome.b_done_while_a_stopped:
-            give_up_at = time.monotonic() + _LOCK_TIMEOUT_S
+            give_up_at = time.monotonic() + _LOCK_OBSERVE_S
             while not outcome.b_done_while_a_stopped and not _lock_waiters(admin_dsn, database):
                 assert time.monotonic() < give_up_at, (
                     f"B neither completed nor is waiting on a PostgreSQL lock while A is stopped at {stall.point}")
                 outcome.b_done_while_a_stopped = done["B"].wait(timeout=0.05)
+        assert not done["A"].is_set(), f"A finished while it was to be stopped at {stall.point}"
     finally:
         stall.release.set()
         for thread in threads:
