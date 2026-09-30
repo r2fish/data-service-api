@@ -719,7 +719,7 @@ class ControlPlaneService:
                 "was lost between recording allow and committing -- can also mean it did not; the audit "
                 "trail alone cannot distinguish the two in that one case."
             ),
-            # WP-2(b) review B-1: the durable `count` column's real semantics, matching contract `audit.query_event_fields_note` verbatim ("present only on an event representing more than one coalesced occurrence, absent -- never zero or one -- otherwise"). A denial-coalescing window or a buffer-overflow drop that ends up representing exactly one occurrence is written as an ordinary row with count absent, not count=1 -- a consumer must never read "count is present" as "this row alone represents 2+ occurrences" being the ONLY way to represent 2+; it is, but the converse (absent implies exactly 1) is what this note pins down.
+            # WP-2(b) review B-1: the durable `count` column's real semantics, matching contract `audit.query_event_fields_note` verbatim ("present only on an event representing more than one coalesced occurrence, absent -- never zero or one -- otherwise"). A denial-coalescing window that ends up representing exactly one occurrence is written as an ordinary row with count absent, not count=1 -- a consumer must never read "count is present" as "this row alone represents 2+ occurrences" being the ONLY way to represent 2+; it is, but the converse (absent implies exactly 1) is what this note pins down.
             # history: CH-0263
             "count_note": (
                 "count is the number of occurrences the ONE row represents; a row representing exactly "

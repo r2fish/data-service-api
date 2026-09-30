@@ -1158,6 +1158,53 @@ def test_platform_pool_sized_to_thread_limit_avoids_premature_503(platform, cred
         store.close()
 
 
+def test_credential_store_authenticates_after_every_idle_pooled_connection_was_ended_by_the_server(platform, credential_app):
+    """The credential store shares the pool's dead-connection handling: two
+    pooled connections idle, ended by the server (`pg_terminate_backend`,
+    the shape of a database restart or an idle disconnect), the pool left
+    past `pool.IDLE_PING_THRESHOLD_S` -- the next `authenticate()` calls
+    still succeed instead of answering `AuthorizationStateUnavailable` once
+    per dead connection.
+
+    mutation (`pool.py`, `_is_dead`): skip the round trip (`if self._ping(
+    conn):` becomes `if True:`) -- the first `authenticate()` is handed a
+    dead connection and raises `AuthorizationStateUnavailable`."""
+    from mitatedb_api import pool as pool_module
+
+    pool = BoundedConnectionPool(platform.api_dsn, max_size=3)
+    store = PostgresCredentialStore(
+        platform.api_dsn, pepper="synthetic-test-pepper-wp4e-platform-pool-0000",
+        schema=platform.registry_schema, pool=pool,
+    )
+    writer = PostgresCredentialStore(
+        platform.controlplane_dsn, pepper="synthetic-test-pepper-wp4e-platform-pool-0000",
+        schema=platform.registry_schema,
+    )
+    try:
+        _credential_id, secret = writer.issue(credential_app, Role.RUNTIME)
+    finally:
+        writer.close()
+    try:
+        first, second = pool.acquire(), pool.acquire()
+        backend_pids = [first.info.backend_pid, second.info.backend_pid]
+        pool.release(first)
+        pool.release(second)
+        admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+        try:
+            with admin.cursor() as cur:
+                for backend_pid in backend_pids:
+                    cur.execute("SELECT pg_terminate_backend(%s)", [backend_pid])
+                    assert cur.fetchone() == (True,)
+        finally:
+            admin.close()
+        time.sleep(pool_module.IDLE_PING_THRESHOLD_S + 0.3)
+        for _ in range(3):
+            assert store.authenticate(secret).application_id == credential_app
+        assert pool.platform_stats()["sessions"] == 3
+    finally:
+        store.close()
+
+
 # ---------------------------------------------------------------------------
 # R-101 WP-3 D-8: `create_app`'s own `thread_limit=` middleware wiring.
 # No real PostgreSQL needed -- `HttpService` itself only requires a

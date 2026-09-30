@@ -623,6 +623,20 @@ request.
 # (absent implies exactly 1) is what this note pins down.
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer (with its overflow drop) is removed; only a denial-coalescing window can still represent exactly one occurrence
+
+old:
+```
+A denial-coalescing window or a buffer-overflow drop that ends up representing exactly one occurrence is written
+```
+
+new:
+```
+A denial-coalescing window that ends up representing exactly one occurrence is written
+```
+
 ## CH-0264
 
 - moved from: `src/r2db_api/control_plane.py` (`<module>`)

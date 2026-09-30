@@ -66,6 +66,7 @@ from mitatedb_api.errors import (AuditSinkUnavailable, AuthenticationError,
                                  AuthorizationError, DestructiveConfirmationRequired,
                                  FoundationError)
 from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text
+from mitatedb_api import pool as pool_module
 from mitatedb_api.pool import BoundedConnectionPool
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
@@ -3135,12 +3136,13 @@ def test_pooled_writes_in_flight_together_never_share_a_transaction(platform: ty
 
 
 def test_pooled_sink_recovers_when_its_connection_is_lost(platform: types.SimpleNamespace) -> None:
-    """A pooled connection the server ended (a database restart, an idle
-    disconnect) costs at most the one write that found it dead: that write
-    either raises or lands -- never reports success without a row -- and
-    the next write lands on a fresh connection. The pool has one slot, so
-    a connection the sink failed to give back would leave the next write
-    waiting out the pool's acquire timeout and failing.
+    """A pooled connection the server ended, less than the pool's idle-ping
+    threshold after its last use, costs at most the one write that found it
+    dead: that write either raises or lands -- never reports success
+    without a row -- and the next write lands on a fresh connection. The
+    pool has one slot, so a connection the sink failed to give back would
+    leave the next write waiting out the pool's acquire timeout and
+    failing. (Past the threshold no write fails: the two tests below.)
 
     mutation (`application_audit.py`, `_borrow`): neither return nor
     discard a connection that raised (`self._pool.discard(conn)` becomes
@@ -3172,3 +3174,126 @@ def test_pooled_sink_recovers_when_its_connection_is_lost(platform: types.Simple
     finally:
         sink.close()
         clean_application_audit(platform)
+
+
+def test_pooled_sink_rolls_back_what_a_call_left_uncommitted_before_the_connection_returns(platform: types.SimpleNamespace) -> None:
+    """A call that returns normally without committing (a read-only
+    `events()`, or an INSERT it never committed) leaves a transaction open
+    on the pooled connection; `_borrow` rolls it back before the connection
+    goes back, so the next write on the same connection does not commit that
+    stray row along with its own. The pool has one slot, so the next write is
+    provably on the same connection.
+
+    mutation (`application_audit.py`, `_borrow`): drop the defensive
+    `conn.rollback()` on the healthy path (`try: conn.rollback()` becomes
+    `pass`) -- the connection returns inside its transaction and the next
+    write's commit lands the `stray` row too."""
+    clean_application_audit(platform)
+    sink, pool = _pooled_sink(platform, size=1)
+    table = sql.Identifier(platform.schema, "application_audit")
+    try:
+        with sink._borrow() as conn:  # noqa: SLF001 -- a call that never commits, held open on purpose
+            backend_pid = conn.info.backend_pid
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("INSERT INTO {} (event_id, event_class, occurred_at, operation, outcome, target_id) "
+                            "VALUES (%s, 'schema_change', now(), 'create_collection', 'allow', 'stray')").format(table),
+                    [uuid.uuid4().hex],
+                )
+            assert conn.info.transaction_status == psycopg.pq.TransactionStatus.INTRANS
+        again = pool.acquire()
+        assert again.info.backend_pid == backend_pid
+        assert again.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        pool.release(again)
+        _pooled_append(sink, "next")
+        assert _landed_target_ids(platform) == ["next"]
+        assert pool.platform_stats()["sessions"] == 1
+    finally:
+        sink.close()
+        clean_application_audit(platform)
+
+
+def _terminate_backends(platform: types.SimpleNamespace, backend_pids: "list[int]") -> None:
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            for backend_pid in backend_pids:
+                cur.execute("SELECT pg_terminate_backend(%s)", [backend_pid])
+                assert cur.fetchone() == (True,)
+    finally:
+        admin.close()
+
+
+def test_pooled_sink_writes_after_every_idle_connection_was_ended_by_the_server(platform: types.SimpleNamespace) -> None:
+    """A pool of size 3 holds two idle connections; the server ends both
+    (`pg_terminate_backend`, the shape of a database restart or an idle
+    disconnect); the pool then sits past `IDLE_PING_THRESHOLD_S`. Every write
+    after that lands -- none fails on a dead connection -- because the pool
+    checks a connection that long idle before it hands it out and replaces
+    it. Non-vacuous: the two terminated sessions really are gone from the
+    server, and the pool opened a third connection to serve the writes.
+
+    mutation (`pool.py`, `_is_dead`): skip the round trip (`if self._ping(
+    conn):` becomes `if True:`) -- the first write is handed a dead
+    connection and raises `psycopg.OperationalError`."""
+    clean_application_audit(platform)
+    sink, pool = _pooled_sink(platform, size=3)
+    try:
+        first, second = pool.acquire(), pool.acquire()
+        backend_pids = [first.info.backend_pid, second.info.backend_pid]
+        pool.release(first)
+        pool.release(second)
+        assert pool.platform_stats()["sessions"] == 2
+        _terminate_backends(platform, backend_pids)
+        time.sleep(pool_module.IDLE_PING_THRESHOLD_S + 0.3)
+        for index in range(3):
+            _pooled_append(sink, f"after-restart-{index}")
+        assert _landed_target_ids(platform) == [f"after-restart-{index}" for index in range(3)]
+        assert pool.platform_stats()["sessions"] == 3
+        admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+        try:
+            with admin.cursor() as cur:
+                cur.execute("SELECT count(*) FROM pg_stat_activity WHERE pid = ANY(%s)", [backend_pids])
+                assert cur.fetchone() == (0,)
+        finally:
+            admin.close()
+    finally:
+        sink.close()
+        clean_application_audit(platform)
+
+
+def test_pool_pings_only_a_connection_that_sat_idle_past_the_threshold(platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Counts the pool's round trips: borrowing a connection right after it
+    was returned (well within `IDLE_PING_THRESHOLD_S`) pings nothing, so a
+    pool under load adds no round trip; borrowing one that sat idle past the
+    threshold pings it exactly once, and the live connection is handed out
+    outside any transaction (`IDLE`), the same session as before.
+
+    mutation (`pool.py`): `IDLE_PING_THRESHOLD_S = 0.0` -- every borrow
+    pings, so the first count is 5 where this test requires 0."""
+    pool = BoundedConnectionPool(platform.api_dsn, max_size=2)
+    pings: list[object] = []
+    real_ping = pool._ping  # noqa: SLF001
+
+    def _counting_ping(conn: Any) -> bool:
+        pings.append(conn)
+        return real_ping(conn)
+
+    monkeypatch.setattr(pool, "_ping", _counting_ping)
+    try:
+        conn = pool.acquire()
+        backend_pid = conn.info.backend_pid
+        pool.release(conn)
+        for _ in range(5):
+            conn = pool.acquire()
+            pool.release(conn)
+        assert len(pings) == 0
+        time.sleep(pool_module.IDLE_PING_THRESHOLD_S + 0.3)
+        conn = pool.acquire()
+        assert len(pings) == 1
+        assert conn.info.backend_pid == backend_pid
+        assert conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        pool.release(conn)
+        assert pool.platform_stats()["sessions"] == 1
+    finally:
+        pool.closeall()

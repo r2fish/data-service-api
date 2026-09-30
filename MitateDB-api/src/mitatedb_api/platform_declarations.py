@@ -724,9 +724,8 @@ def check_writer_role_timeouts(
 ) -> RoleTimeoutCatalog:
     """D-1(b) + D-2(h) 2, full dual check for ONE writer role -- `conn` is
     the connection the caller's OWN audit-writer sink actually uses to
-    write (r2db-api: one connection borrowed from that sink's own pool;
-    MitateDB-api: one connection opened via the SAME function the sink
-    itself uses to open its connections) -- never a throwaway connection
+    write (both peers: one connection borrowed from that sink's own pool,
+    which the sink's later writes then reuse) -- never a throwaway connection
     opened by SOME OTHER mechanism, since role-level settings only apply
     at login time and this check must observe the exact connection
     identity the durable sink will use.

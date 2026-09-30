@@ -314,12 +314,18 @@ class PostgresApplicationAuditSink:
     what makes D-4's "buffer flush never shares a transaction with a
     fail-closed write" requirement structural rather than something a
     caller has to arrange. A connection that raised while borrowed is
-    closed and forgotten (the next call opens a fresh one, which is how a
-    restarted database or a server-side idle disconnect is recovered from);
-    one that returned normally is rolled back once more (a no-op after the
-    call's own commit, but it ends the transaction a read-only `events()`
-    leaves open) before it goes back to the pool. A `pool` this sink was
-    given is owned by it: `close()` releases every idle connection in it.
+    closed and forgotten; one that returned normally is rolled back once
+    more (a no-op after the call's own commit, but it ends the transaction
+    a read-only `events()` leaves open) before it goes back to the pool.
+    A restarted database or a server-side idle disconnect is recovered
+    from by the pool, not by this sink: a connection that sat idle longer
+    than `pool.IDLE_PING_THRESHOLD_S` is checked with one round trip when
+    it is borrowed and replaced if it is dead, so no write fails on it.
+    A connection the server ended within that window of its last use is
+    handed out unchecked, and the one write that borrows it fails (the
+    sink does not retry); the next call opens a fresh connection. A `pool`
+    this sink was given is owned by it: `close()` releases every idle
+    connection in it.
 
     Never accepts a `work` handle unlike `control_audit.
     insert_control_audit_row` -- there is no cross-database unit-of-work
@@ -369,10 +375,10 @@ class PostgresApplicationAuditSink:
         `_connect_wall_ms`/`_sessions` under `self._platform_stats_lock`,
         so this connection's own later `db_wall_ms`/`txn_count` can be
         folded into this sink's platform totals right before it closes.
-        Every call opens one when there is no pool; with a pool it serves
-        the startup declarations read only (`main.build_app`), never a
-        write -- a pooled connection is opened by the pool, with the same
-        DSN and arguments."""
+        Every call opens one when there is no pool; with a pool it is never
+        called -- a pooled connection is opened by the pool
+        (`BoundedConnectionPool._new_connection`), with the same DSN and
+        arguments."""
         connect_start = time.monotonic()
         conn = CountingConnection.connect(
             self._dsn, connect_timeout=self._connect_timeout, autocommit=False, **_application_name_connect_kwargs(),

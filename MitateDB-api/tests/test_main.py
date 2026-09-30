@@ -479,30 +479,62 @@ def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_a
     assert response_after.status_code == 200, response_after.text
 
 
-def test_build_app_writer_role_dual_check_connects_via_the_sinks_own_connect_method(main_module, platform, probe_app, monkeypatch):
-    """N-2 (monitor ruling 2026-09-05, delta review §4): `check_writer_
-    role_timeouts`'s own connection must be opened via the sink's own
-    method for opening a connection (`PostgresApplicationAuditSink.
-    _connect`, which the sink's writes use when it has no pool) -- never a
-    separately-written `psycopg.connect(...)` call that merely happens to
-    match its arguments today.
-    Patches `_connect` to record every call; `build_app` makes no HTTP
-    request of its own, so a call recorded here can only have happened
-    during the startup dual-check step itself. Would go RED under the
-    delta review's own finding (`main.py:295` duplicating the connect
-    call instead of calling `_connect`)."""
-    calls: list[object] = []
+def test_build_app_writer_role_dual_check_runs_on_a_connection_borrowed_from_the_audit_pool(main_module, platform, probe_app, monkeypatch):
+    """The writer role's dual check (F-9, `check_writer_role_timeouts`) runs
+    on a connection acquired from the audit sink's own pool -- the pool the
+    sink's real writes borrow from -- so the connection it observes is
+    itself a writer, not one opened by separate code that merely matches
+    today. The sink's own no-pool `_connect` is never called, the platform
+    pool is not involved, and the connection is back in the audit pool,
+    open, once the check is done.
+
+    `build_app` makes no HTTP request of its own, so an `acquire` recorded
+    here can only have happened during startup.
+
+    mutation (`main.py`): open the connection through the sink's `_connect`
+    instead of borrowing it (`with durable_audit._borrow() as
+    declarations_conn:` becomes a `closing(durable_audit._connect())`
+    block) -- the checked connection is in no pool's acquired list and
+    `_connect` was called."""
+    pools: list = []
+    real_pool = main_module.BoundedConnectionPool
+
+    class _SpyPool(real_pool):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.acquired: list = []
+            pools.append(self)
+
+        def acquire(self):
+            conn = super().acquire()
+            self.acquired.append(conn)
+            return conn
+
+    checked: list = []
+    real_check = main_module.check_writer_role_timeouts
+
+    def _check_spy(conn, **kwargs):
+        checked.append(conn)
+        return real_check(conn, **kwargs)
+
+    connect_calls: list = []
     real_connect = PostgresApplicationAuditSink._connect
 
-    def _spy(self):
-        calls.append(self)
+    def _connect_spy(self):
+        connect_calls.append(self)
         return real_connect(self)
 
-    monkeypatch.setattr(PostgresApplicationAuditSink, "_connect", _spy)
-    env = _base_env(platform, probe_app)
-    main_module.build_app(env)
-    assert len(calls) >= 1
-    assert all(isinstance(c, PostgresApplicationAuditSink) for c in calls)
+    monkeypatch.setattr(main_module, "BoundedConnectionPool", _SpyPool)
+    monkeypatch.setattr(main_module, "check_writer_role_timeouts", _check_spy)
+    monkeypatch.setattr(PostgresApplicationAuditSink, "_connect", _connect_spy)
+    main_module.build_app(_base_env(platform, probe_app))
+    assert len(checked) == 1
+    platform_pool, audit_pool = pools
+    assert any(checked[0] is conn for conn in audit_pool.acquired)
+    assert not any(checked[0] is conn for conn in platform_pool.acquired)
+    assert connect_calls == []
+    assert not checked[0].closed
+    assert audit_pool.platform_stats()["sessions"] == 1
 
 
 def _record_built_pools_and_sinks(main_module, monkeypatch) -> "tuple[list, list]":
@@ -539,9 +571,9 @@ def test_build_app_sizes_the_audit_sinks_pool_from_the_value_f16_counts_per_api_
     counted for it.
 
     mutation (`main.py`): build the sink's pool twice as large as the
-    platform pool (`max_size=pool_size` becomes `max_size=pool_size * 2`
-    on `audit_pool`) -- the two sizes then sum to 15 where the floor
-    counts 10."""
+    platform pool (`max_size=_role_pool_size` becomes `max_size=
+    _role_pool_size * 2` on `audit_pool`) -- the two sizes then sum to 15
+    where the floor counts 10."""
     from mitatedb_api import platform_declarations
     from mitatedb_api.config import role_pool_size
 
@@ -556,6 +588,28 @@ def test_build_app_sizes_the_audit_sinks_pool_from_the_value_f16_counts_per_api_
     assert sinks[0]._pool is pools[-1] and pools[-1] is not pools[0]
     assert [pool.stats()["size"] for pool in pools] == [per_store] * platform_declarations._API_ROLE_STORE_COUNT
     assert sum(pool.stats()["size"] for pool in pools) == platform_declarations._API_ROLE_STORE_COUNT * per_store
+
+
+@pytest.mark.parametrize("override", ["2", "9"])
+def test_build_app_sizes_the_audit_pool_from_role_pool_size_whatever_the_platform_pool_override_says(main_module, platform, probe_app, monkeypatch, override) -> None:
+    """`MITATEDB_PLATFORM_POOL_SIZE` sets the platform registry pool only:
+    the audit sink's pool stays `role_pool_size(thread_limit)`, the value
+    the F-16 floor counts for it, however the override is set (smaller or
+    larger).
+
+    mutation (`main.py`): build the sink's pool from `pool_size` (the
+    overridable value) instead of `_role_pool_size` -- with the override
+    at 2 the audit pool is 2 where the floor counts 5, and at 9 it is 9."""
+    from mitatedb_api.config import role_pool_size
+
+    pools, sinks = _record_built_pools_and_sinks(main_module, monkeypatch)
+    env = _base_env(platform, probe_app)
+    env["MITATEDB_THREAD_LIMIT"] = "3"
+    env["MITATEDB_PLATFORM_POOL_SIZE"] = override
+    main_module.build_app(env)
+    assert len(pools) == 2 and len(sinks) == 1
+    assert [pool.stats()["size"] for pool in pools] == [int(override), role_pool_size(3)]
+    assert sinks[0]._pool is pools[-1]
 
 
 def test_build_app_lifespan_shutdown_closes_the_audit_sinks_pooled_connections(main_module, platform, probe_app, monkeypatch) -> None:

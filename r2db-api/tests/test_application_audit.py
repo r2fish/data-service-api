@@ -1889,6 +1889,134 @@ def test_commit_waiting_on_a_lock_past_the_execution_budget_writes_an_error_row_
         cell.close()
 
 
+def _schema_hook_fields(app: types.SimpleNamespace, request_id: str) -> dict[str, Any]:
+    return {
+        "event_class": "data_operation", "request_id": request_id, "application_id": app.slug,
+        "actor_type": "application_credential", "actor_id": "cred-fake", "role": "developer",
+        "operation": "schema", "target_kind": "entity", "target_id": None,
+    }
+
+
+def test_a_failing_idempotency_record_write_happens_before_the_schema_pre_commit_row(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    """Same order as the data transaction: the pre-commit row is the last
+    statement of the schema transaction, after the idempotency record. A
+    record write that fails (here: cancelled) therefore leaves no `allow`
+    row behind for a schema change that never committed.
+
+    mutation (`postgres.py`, `apply_schema`): move the `audit_hook.
+    pre_commit()` block back in front of the idempotency record write -- the
+    `allow` row is durable and `hook.fired` is True."""
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    try:
+        request_id = f"r-schema-idem-order-{uuid.uuid4()}"
+        from r2db_api.service import _PreCommitHook
+
+        hook = _PreCommitHook(sink, _schema_hook_fields(app_a, request_id))
+        operation = {"operation": "create_entity", "entity": "notes", "fields": ["body"]}
+
+        def _cancelled_record_write(*args: Any, **kwargs: Any) -> None:
+            raise psycopg.errors.QueryCanceled("simulated cancel of the idempotency record write")
+
+        with patch.object(PostgresCell, "_idempotency_store", _cancelled_record_write):
+            with pytest.raises(FoundationError) as exc:
+                cell.apply_schema(
+                    operation, developer=True, limits=LIMITS, audit_hook=hook,
+                    plan_request={"operation": "create_entity", "entity": "notes"}, idempotency_key="k-schema-idem-order", request_id=request_id,
+                )
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert exc.value.status == 413
+        assert hook.fired is False
+        assert [r for r in _application_audit_rows(platform) if r[1] == request_id] == []
+    finally:
+        sink.close()
+        cell.close()
+
+
+def _install_schema_commit_trigger(platform: types.SimpleNamespace, app: types.SimpleNamespace, function_body: str) -> None:
+    """A deferred constraint trigger on the schema revision table -- every
+    schema change updates that row, so the trigger's function runs inside the
+    COMMIT itself, after the pre-commit row is durable."""
+    admin_dsn = _dsn_with(platform.admin_dsn, dbname=app.database)
+    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+        admin.execute(f"CREATE FUNCTION public.r2db_test_schema_commit() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN {function_body} RETURN NULL; END $$")
+        admin.execute(
+            "CREATE CONSTRAINT TRIGGER r2db_test_schema_commit AFTER UPDATE ON public._r2db_schema_revision "
+            "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.r2db_test_schema_commit()"
+        )
+
+
+def test_schema_commit_canceled_after_the_pre_commit_row_writes_an_error_row_and_stays_413(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    """The schema transaction's COMMIT can be cancelled after the `allow` row
+    is durable (a deferred trigger's work is not bounded by `statement_
+    timeout`, but a cancel request still interrupts it): the response stays
+    413 and the `error` row is written, like the data transaction's.
+
+    mutation (`postgres.py`, `apply_schema`): drop the `commit_failed()` call
+    from the `QueryCanceled` branch -- only the `allow` row is there."""
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    try:
+        _install_schema_commit_trigger(platform, app_a, "PERFORM pg_sleep(3.0);")
+        request_id = f"r-schema-commit-canceled-{uuid.uuid4()}"
+        from r2db_api.service import _PreCommitHook
+
+        canceller = threading.Thread(target=_cancel_the_commit_in_flight, args=(_dsn_with(platform.admin_dsn, dbname=app_a.database), app_a.database))
+        canceller.start()
+        try:
+            with pytest.raises(FoundationError) as exc:
+                cell.apply_schema(
+                    {"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS,
+                    audit_hook=_PreCommitHook(sink, _schema_hook_fields(app_a, request_id)),
+                )
+        finally:
+            canceller.join()
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert exc.value.status == 413
+        matching = [r for r in _application_audit_rows(platform) if r[1] == request_id]
+        assert sorted(r[8] for r in matching) == ["allow", "error"], f"expected an allow row then an error row for {request_id!r}, got {matching!r}"
+        assert [r[9] for r in matching if r[8] == "error"] == ["commit_failed"]
+    finally:
+        sink.close()
+        cell.close()
+
+
+def test_schema_commit_waiting_on_a_lock_past_the_execution_budget_writes_an_error_row_and_stays_413(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    """The other 413 branch of the schema transaction: work a deferred
+    trigger does at commit can wait on a lock, and `lock_timeout` bounds that
+    wait. The response stays 413 and the `error` row is written.
+
+    mutation (`postgres.py`, `apply_schema`): drop the `commit_failed()` call
+    from the `LockNotAvailable` branch -- only the `allow` row is there."""
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    admin_dsn = _dsn_with(platform.admin_dsn, dbname=app_a.database)
+    try:
+        # the entity is created first: `create_entity` refuses to commit while a table without row-level security (the lock target below) exists in the database.
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute("CREATE TABLE public.r2db_test_lock_target (id integer)")
+        _install_schema_commit_trigger(platform, app_a, "LOCK TABLE public.r2db_test_lock_target IN ACCESS SHARE MODE;")
+        request_id = f"r-schema-commit-lock-{uuid.uuid4()}"
+        from r2db_api.service import _PreCommitHook
+
+        with psycopg.connect(admin_dsn) as holder:
+            holder.execute("LOCK TABLE public.r2db_test_lock_target IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(FoundationError) as exc:
+                cell.apply_schema(
+                    {"operation": "add_field", "entity": "notes", "field": "extra"}, developer=True, limits=replace(LIMITS, execution_ms=1000),
+                    audit_hook=_PreCommitHook(sink, _schema_hook_fields(app_a, request_id)),
+                )
+            holder.rollback()
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert exc.value.status == 413
+        matching = [r for r in _application_audit_rows(platform) if r[1] == request_id]
+        assert sorted(r[8] for r in matching) == ["allow", "error"], f"expected an allow row then an error row for {request_id!r}, got {matching!r}"
+    finally:
+        sink.close()
+        cell.close()
+
+
 # ===========================================================================
 # Section 6: D-3 coalescing (§9.2 property 10(ii)) and the durable denial
 # code vocabulary (§9.2 property 10, D-3's range table, J-2 inclusion list).
@@ -2732,6 +2860,47 @@ def test_mutation_outcome_destructive_still_reports_the_confirmation_choke() -> 
     phrase = delete_confirmation_phrase("notes", [Predicate(field="id", operator="eq", value=1)], 0)
     outcome = service._mutate_outcome(ctx, "notes", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "destructive": True, "confirmation": phrase}], transaction="atomic", request_id=None)
     assert outcome.destructive is True
+
+
+class _CountingHook:
+    """An `ApplicationAuditHook` that counts its calls and can be made to fail."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self._fail = fail
+        self.pre_commit_calls = 0
+        self.commit_failed_calls = 0
+
+    def pre_commit(self) -> None:
+        self.pre_commit_calls += 1
+        if self._fail:
+            raise RuntimeError("simulated pre-commit failure")
+
+    def commit_failed(self) -> None:
+        self.commit_failed_calls += 1
+
+
+def test_in_memory_non_destructive_mutate_calls_the_pre_commit_hook_before_the_batch_is_kept() -> None:
+    """The in-memory backend calls the audit hook for every real batch, like
+    the PostgreSQL one -- the batch is kept only once the hook has returned,
+    and a hook that raises leaves the data untouched.
+
+    mutation (`structured.py`, `ApplicationCell.transact`): call the hook only
+    for a destructive batch again (`if audit_hook is not None:` becomes `if
+    destructive and audit_hook is not None:`) -- the hook is never called for
+    the insert and the failing one lets the row in."""
+    cell = ApplicationCell(application_id="app-mem-hook-order")
+    cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+    hook = _CountingHook()
+    outcome = cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], LIMITS, audit_hook=hook)
+    assert outcome.destructive is False
+    assert hook.pre_commit_calls == 1
+    assert [row["body"] for row in cell.query("notes", select=["body"], where=[], page_size=10, limits=LIMITS).items] == ["a"]
+
+    failing = _CountingHook(fail=True)
+    with pytest.raises(RuntimeError, match="simulated pre-commit failure"):
+        cell.transact("notes", [{"operation": "insert", "values": {"body": "b"}}], LIMITS, audit_hook=failing)
+    assert failing.pre_commit_calls == 1
+    assert [row["body"] for row in cell.query("notes", select=["body"], where=[], page_size=10, limits=LIMITS).items] == ["a"]
 
 
 def test_delete_bearing_mutate_adds_exactly_one_durable_row() -> None:

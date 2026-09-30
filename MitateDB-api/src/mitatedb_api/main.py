@@ -44,13 +44,15 @@ Environment variable contract:
                                            `build_app` at their own
                                            rewritten schema.
     MITATEDB_PLATFORM_POOL_SIZE           optional, default
-                                           `pool.DEFAULT_MAX_SIZE` (20,
-                                           matching `mitatedbsvc_api`'s own
-                                           `CONNECTION LIMIT 20`, migration
-                                           `0002_registry_and_functions.
-                                           sql`) -- the WP-3 completion
-                                           condition's own bounded pool
+                                           `config.role_pool_size(thread_
+                                           limit)` -- the size of the
+                                           platform registry's bounded pool
                                            (`pool.BoundedConnectionPool`).
+                                           Sets that one pool only: the
+                                           durable audit sink's own pool is
+                                           always `role_pool_size(thread_
+                                           limit)`, the value the F-16
+                                           floor counts for it.
     MITATEDB_SERVE_APPS                   required -- comma-separated
                                            application ids this process
                                            serves
@@ -382,47 +384,36 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # declared `max_concurrency` (`MITATEDB_MAX_CONCURRENCY`), which is the
     # deployment-wide admission bound the host-shared slot directory
     # enforces and holds no connection. `MITATEDB_PLATFORM_POOL_SIZE` wins
-    # outright when set explicitly (`pool_size_from_env`'s own `default=`
-    # is only the fallback). `_role_pool_size` is also the per-process
-    # figure the F-16/F-18 checks below are given.
+    # outright when set explicitly for the platform pool (`pool_size_from_
+    # env`'s own `default=` is only the fallback). `_role_pool_size` is
+    # also the per-process figure the F-16/F-18 checks below are given.
     _role_pool_size = role_pool_size(thread_limit)
     pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"), default=_role_pool_size)
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
     # The durable audit sink's own pool, against the same `mitatedbsvc_api`
-    # login role and sized to the same `pool_size` as `platform_pool`:
-    # `platform_declarations._API_ROLE_STORE_COUNT` (2) is the number of
-    # pools of this size the F-16 floor counts for that role, and these
-    # two are them.
-    audit_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
+    # login role. Its size is `_role_pool_size` whatever
+    # `MITATEDB_PLATFORM_POOL_SIZE` says: `platform_declarations._API_ROLE_
+    # STORE_COUNT` (2) is the number of pools of `role_pool_size(thread_
+    # limit)` connections the F-16 floor counts for that role, and these
+    # two are them -- the override reaches the platform pool only.
+    audit_pool = BoundedConnectionPool(platform_dsn, max_size=_role_pool_size)
 
-    # Q4 phase (design D-1(b), §3.7 data-plane steps 4-6): the single
-    # source of `surfaces`/`audit_coalescing_window_ms` (read + validated,
-    # F-3/F-4/F-4b/F-5/F-8), cross-checked against `*_CONTROL_PLANE_
-    # STATUS` (F-6), then the writer role's own declared-vs-effective
+    # Design D-1(b), §3.7 data-plane steps 4-6: the single source of
+    # `surfaces`/`audit_coalescing_window_ms` (read + validated, F-3/F-4/F-4b/F-5/F-8), cross-checked against `*_CONTROL_
+    # PLANE_STATUS` (F-6), then the writer role's own declared-vs-effective
     # timeout dual check (F-7/F-9/F-10/F-11) -- `platform_dsn`'s own login
     # role IS `mitatedbsvc_api` (the SAME role that writes `application_
-    # audit`), so this check observes the exact connection identity the
-    # durable sink below will use.
-    # N-2 (monitor ruling 2026-09-05, delta review §4): the durable sink is
-    # constructed HERE (before the dual check, not after it) so this
-    # connection can be opened via `durable_audit._connect()` itself --
-    # the sink's own method for opening a connection, which its `append`/
-    # `append_many` calls use whenever the sink has no pool -- rather than
-    # a separately-written `psycopg.connect(...)` call that merely
-    # happened to match its arguments. `audit_pool` opens the connections
-    # this process' real writes borrow (`pool.BoundedConnectionPool.
-    # _new_connection`) with the same DSN, connect timeout and
-    # `application_name`, but through its own code, so a future change to
-    # `_connect` alone (e.g. an `options=` override or a DSN
-    # transformation) would not reach them: it must be made in both
-    # places. `PostgresApplicationAuditSink.__init__` itself opens no
-    # connection (Q4 D-1(b)), so moving its construction earlier changes
-    # nothing about WHEN this process first touches the network. This
-    # connection is closed again immediately after; the sink's writes
-    # never receive it.
+    # audit`), so the check has to observe the exact connection the
+    # durable sink writes on.
+    # The durable sink is constructed HERE (before the dual check) so the
+    # check can borrow its connection from `audit_pool` -- the pool the
+    # sink's real writes borrow from -- and observe a connection that is
+    # itself a writer, rather than one opened by separate code that merely
+    # happened to match today. The borrowed connection is rolled back and
+    # returned to the pool after the block, where a later write reuses it.
+    # `PostgresApplicationAuditSink.__init__` itself opens no connection.
     durable_audit = PostgresApplicationAuditSink(platform_dsn, schema=schema, pool=audit_pool)
-    declarations_conn = durable_audit._connect()  # noqa: SLF001 -- same-module-family reach-in, deliberate (see comment above)
-    try:
+    with durable_audit._borrow() as declarations_conn:  # noqa: SLF001 -- same-module-family reach-in, deliberate (see comment above)
         declarations = read_platform_declarations(
             declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
             migration=platform_declarations.MIGRATION_NUMBER,
@@ -504,8 +495,6 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         platform_declarations.check_request_rate_function(
             declarations_conn, schema=schema, migration=platform_declarations.REQUEST_RATE_MIGRATION_FILENAME,
         )
-    finally:
-        declarations_conn.close()
 
     # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-6, work order
     # WP-3(a)): the durable application-plane audit sink -- writes to the
@@ -758,8 +747,9 @@ async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
     scope protocol, driven directly rather than through a real server.
     `build_app()`'s own `_lifespan` hook is what closes every connection
     this process opened (`credentials.close()` -- the platform pool --
-    and every served application's own two persistent connections,
-    `cell._backend.close()`) -- reused here rather than duplicated."""
+    `durable_audit.close()` -- the durable audit sink's pool -- and every
+    served application's own two persistent connections, `cell._backend.
+    close()`) -- reused here rather than duplicated."""
     to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
     from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
 

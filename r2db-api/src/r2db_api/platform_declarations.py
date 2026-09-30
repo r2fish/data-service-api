@@ -753,9 +753,8 @@ def check_writer_role_timeouts(
 ) -> RoleTimeoutCatalog:
     """D-1(b) + D-2(h) 2, full dual check for the role `conn` is logged in
     as. `conn` MUST be a connection the caller's own writer sink actually
-    uses to write (r2db-api: one connection borrowed from that sink's own
-    pool; MitateDB-api: one connection opened via the SAME function the
-    sink itself uses to open its connections) -- login role = the writer
+    uses to write (both peers: one connection borrowed from that sink's
+    own pool, which the sink's later writes then reuse) -- login role = the writer
     role being checked, since role-level settings only apply at login time
     and `SET ROLE` cannot substitute, design D-1(c): `r2db_api.main`/
     `r2db_api.control_main` each borrow one via their own

@@ -199,9 +199,9 @@ class _AuditBuffer:
         any moment (review B-2, major, supervisor ruling 2026-09-03).
         Writes the current buffer contents as one batch, then attempts
         the sticky overflow-alert retry -- always in that order, always
-        on a connection/transaction of its own (`sink.append`/
-        `append_many` each open their own connection --
-        `PostgresApplicationAuditSink`'s own docstring).
+        in a transaction of its own on a connection no other call holds
+        meanwhile (`sink.append`/`append_many` each borrow or open their
+        own connection -- `PostgresApplicationAuditSink`'s own docstring).
 
         Reentrancy (review B-2): the pending batch is SWAPPED OUT of
         `self._events` under the lock -- `self._events` is replaced with

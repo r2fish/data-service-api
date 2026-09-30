@@ -2391,13 +2391,6 @@ class PostgresCell:
                         outcome_plan = expected_plan
                         raise psycopg.Rollback()
                     outcome_revision = self._bump_revision(conn)
-                    # unconditional -- every schema operation is fail-closed class. Last statement
-                    # inside this `with conn.transaction():` block, same
-                    # reasoning as `transact`'s identical comment.
-                    # history: CH-0088
-                    if audit_hook is not None:
-                        audit_hook.pre_commit()
-                        hook_fired = True
                     # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c):
                     # recorded in the same `with conn.transaction():` block
                     # as the DDL/registry writes above -- see `transact`'s
@@ -2408,9 +2401,22 @@ class PostgresCell:
                             payload={"revision": outcome_revision, "request_id": request_id},
                             retention_ms=limits.idempotency_retention_ms,
                         )
+                    # unconditional -- every schema operation is fail-closed class. Last statement
+                    # inside this `with conn.transaction():` block, same
+                    # reasoning as `transact`'s identical comment.
+                    # history: CH-0088
+                    if audit_hook is not None:
+                        audit_hook.pre_commit()
+                        hook_fired = True
             except psycopg.errors.QueryCanceled:
+                # see `transact`'s identical branch: a cancel that lands on the COMMIT itself comes after the pre-commit row is durable.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
+                # see `transact`'s identical branch.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.UniqueViolation as exc:
                 # `create_index(unique=True)` against data that already violates the requested uniqueness.

@@ -39,14 +39,14 @@ class AuditEvent:
     # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-3/D-4): the
     # 14th column `application_audit`/`control_audit`'s durable schema adds
     # beyond contract `audit.fields`' 13 -- "this row represents `count`
-    # occurrences, NULL means 1". Only D-4's buffer-overflow alert row and
-    # D-3's coalesced-denial summary row ever set this to a concrete int;
+    # occurrences, NULL means 1". Only D-3's coalesced-denial summary row
+    # ever sets this to a concrete int;
     # every other event leaves it `None`. Carried on the shared `AuditEvent`
     # dataclass (not a `control_audit`/`application_audit`-only subclass)
     # so `ControlAuditSink`/`AuditSink`/`ApplicationAuditSink` all construct
     # the same event shape -- `control_audit` itself never receives a
-    # non-`None` value here (0006's table has no such column, and D-4/D-3
-    # are application-plane-only mechanisms), but the *type* stays uniform.
+    # non-`None` value here (0006's table has no such column, and D-3 is
+    # an application-plane-only mechanism), but the *type* stays uniform.
     count: int | None = None
 
     def as_dict(self) -> MappingProxyType:
@@ -169,14 +169,14 @@ class ApplicationAuditSink:
     `LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND` -- which never
     reach this class at all). Every event `DataService`'s dispatch logic
     (`service.py`) classifies as fail-closed, coalesced-denial, or
-    buffer-class is appended here (or to `PostgresApplicationAuditSink`,
+    ordinary data-operation event is appended here (or to `PostgresApplicationAuditSink`,
     `credential_store.py`'s Postgres-backed counterpart) instead.
 
-    `append_many` exists for D-4's buffer flush (`service.py`'s bounded
-    buffer always drains in one batch call, never one `append()` per
-    buffered event) -- `ControlAuditSink` has no equivalent because
-    control-plane events are never buffered (every `control_audit` row is
-    written synchronously, one event at a time).
+    `append_many` is a multi-row batch write kept in step with
+    `PostgresApplicationAuditSink.append_many` (`service.py` writes each
+    event with `append`, before its response is returned) --
+    `ControlAuditSink` has no equivalent because every `control_audit` row
+    is written synchronously, one event at a time.
 
     `inject_fault`/`work` mirror `ControlAuditSink`'s identical mechanisms
     one-for-one; see that class's docstring for the full rationale, which
@@ -220,11 +220,11 @@ class ApplicationAuditSink:
         return event
 
     def append_many(self, events: "list[AuditEvent]") -> None:
-        """D-4's buffer-flush batch write -- either every event in `events`
+        """Batch write -- either every event in `events`
         is recorded, or (on injected/simulated failure) none is: this
         mirrors the all-or-nothing character of `PostgresApplicationAuditSink.
         append_many`'s real single-statement multi-row `INSERT`, so a caller
-        cannot observe a partially-flushed buffer from either backend.
+        cannot observe a partially-written batch from either backend.
         """
         if self._fault is not None:
             raise self._fault
