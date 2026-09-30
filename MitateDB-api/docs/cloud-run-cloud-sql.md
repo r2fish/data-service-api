@@ -3046,9 +3046,9 @@ version counts as no record at all.**
 
 | Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
 |---|---|---|---|---|---|---|
-| §10.6 compatibility | 7 | not accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | -- | -- |
-| §10.7 lock / stop time / `lock_timeout` | 7 | not accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | -- | -- |
-| §10.10 upgrade procedure (stages 2-4) | 11 | not accepted | 10 | `docs/work-orders/WORK_ORDER_R116_STARTUP_CHECK_TOOL_V1.md` §6.1 (independent review of version 10; versions 6-9 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | -- | -- |
+| §10.6 compatibility | 7 | accepted | 7 | `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 correction note 14 (independent review of version 7; version 6 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | 2026-10-01 | Fable (supervisor), on the requester's ruling of 2026-10-01 |
+| §10.7 lock / stop time / `lock_timeout` | 7 | accepted | 7 | `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 correction note 14 (independent review of version 7; version 6 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | 2026-10-01 | Fable (supervisor), on the requester's ruling of 2026-10-01 |
+| §10.10 upgrade procedure (stages 2-4) | 11 | accepted | 11 | `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 correction note 14 (independent review of version 11; version 10 in `docs/work-orders/WORK_ORDER_R116_STARTUP_CHECK_TOOL_V1.md` §6.1, versions 6-9 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | 2026-10-01 | Fable (supervisor), on the requester's ruling of 2026-10-01 |
 
 History (2026-10-01, R-115: `0017` raised the three subjects to 7 / 7 / 11; the records they replace, verbatim):
 

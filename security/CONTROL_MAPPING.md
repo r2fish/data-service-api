@@ -2,7 +2,8 @@
 
 Status: **Implementation mapping template**
 
-Version: **3.12** (2026-10-01; R-115 -- SI-14 r2db-api, r2db-api -- audit query, MitateDB-api and Common: synchronous data-operation events, the platform refusal-window counter, F-21 and C-33 replace the buffer and the process-local windows; SI-08 MitateDB-api: the isomorphic-row pin name follows to 205; SI-09 r2db-api, MitateDB-api and MitateDB-api -- platform upgrade: the accepted platform-migration sets gain `0016` / `0017`, step 7b is named, and sections 10.6 / 10.7 / 10.10 are not accepted at 7 / 7 / 11; 276 line references into the changed files and runbooks followed; no new invariant)
+Version: **3.13** (2026-10-01; R-115 re-acceptance -- SI-09 MitateDB-api -- platform upgrade: section 10.8 records 10.6 / 10.7 / 10.10 accepted at 7 / 7 / 11 on the requester's ruling of 2026-10-01, so Gate-0 readiness again rests on the 10 items alone.)
+
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
 
@@ -1291,7 +1292,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Production evidence is `absent`**: section 10 has never been run against production, and neither `0014_role_connection_limits_rollout.sql`, `0016`, `0017`, the `0004` stages R-54 adds, nor the run/closure behavior R-57 adds is applied there; every value above was measured on a throwaway cluster.
 - **`0014`'s header is true for one process, not for two**: it overwrites `0012`'s own statement that `mitatedbsvc_auditreader` is deliberately left untouched, rather than erasing it -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - **Each reviewed subject stays a draft until section 10.8's own row names that same version for it**: section 10.8 is the single place that state is read from, and a row naming an earlier version counts as no record at all.
-- **Sections 10.6 / 10.7 / 10.10 are at versions 7 / 7 / 11 and not accepted** (R-115 added `0017`; section 10.8 records the review of 6 / 6 / 10 only), so Gate-0 is not ready until the requester accepts them -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3049-3051`.
+- **Section 10.8 names 10.6 / 10.7 / 10.10 accepted at versions 7 / 7 / 11** (requester 2026-10-01; review: `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` section 11 note 14), so Gate-0 readiness rests on the 10 items alone -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3049-3051`.
 - **Every `apply-platform-migration` test targets a throwaway PostgreSQL cluster only** (`MITATEDB_TEST_ADMIN_DSN`).
 - **A stray `0012` applied alone after `0013`** drops the setting for FUTURE applications only, and, now that `0014_role_connection_limits_rollout.sql` replaces that same function last, additionally lowers every EXISTING role's `CONNECTION LIMIT` back to `0012`'s values.
 - **Either stray is corrected only by re-applying the set in its own order, ending at `apply-platform-migration 0014`** -- never by `0013` alone, which would leave the next application's roles at 36.
