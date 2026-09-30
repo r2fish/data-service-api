@@ -2996,7 +2996,7 @@ version counts as no record at all.**
 |---|---|---|---|---|---|---|
 | §10.6 compatibility | 6 | accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | 2026-09-30 | Fable (supervisor), on the requester's ruling of 2026-09-30 |
 | §10.7 lock / stop time / `lock_timeout` | 6 | accepted | 6 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 | 2026-09-30 | Fable (supervisor), on the requester's ruling of 2026-09-30 |
-| §10.10 upgrade procedure (stages 2-4) | 9 | not accepted | 9 | `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3 (three independent reviews of version 9, none accepting; acceptance follows ledger R-116) | -- | -- |
+| §10.10 upgrade procedure (stages 2-4) | 10 | accepted | 10 | `docs/work-orders/WORK_ORDER_R116_STARTUP_CHECK_TOOL_V1.md` §6.1 (independent review of version 10; versions 6-9 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | 2026-09-30 | Fable (supervisor), on the requester's ruling of 2026-09-30 |
 
 ### 10.9 Gate-0 overall judgment and report
 
