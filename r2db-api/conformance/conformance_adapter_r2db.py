@@ -966,19 +966,20 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         if self._audit_query_status() not in ("enabled", "partial"):
             raise self._audit_surface_absent(
                 "flush_audit_buffer",
-                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
+                "audit_query is not declared enabled/partial -- there is nothing to make visible on this "
                 "deployment's own declared posture",
             )
-        # Phase 4 WP-2(b): D-4's bounded buffer (ordinary data-operation
-        # success events) and D-3's denial-coalescing windows both live on
+        # Ordinary data-operation events are written before their response
+        # is returned, so they are already visible. What can still wait is a
+        # denial-coalescing window's repeat-count summary row, which lives on
         # `self._service` (`DataService.flush_audit_buffer`, service.py) --
         # the SAME method the real composition root's periodic background
         # thread calls (`r2db_api.main.build_app`'s own `_audit_flush_loop`).
         # `force_expire_denial_windows` stays at its own default (False):
-        # this hook exists so a test can make a just-buffered/just-
-        # coalesced event visible without waiting, not to force-flush an
-        # UNEXPIRED denial window early (a different, narrower concern that
-        # default already serves correctly).
+        # this hook exists so a test can make a just-coalesced event visible
+        # without waiting, not to force-flush an UNEXPIRED denial window
+        # early (a different, narrower concern that default already serves
+        # correctly).
         self._call(lambda: self._service.flush_audit_buffer())
 
     # port v1.8

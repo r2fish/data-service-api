@@ -1700,27 +1700,33 @@ class PostgresCell:
                     if dry_run:
                         committed = False
                         raise psycopg.Rollback()
-                    # the pre-commit hook is the LAST statement inside this `with conn.transaction():` block -- a raise here propagates straight through the block's own `__exit__`, which rolls the data transaction back exactly like any other exception raised inside it (no special-casing needed at this call site: fail-closed by construction).
-                    # history: CH-0037
-                    if destructive and audit_hook is not None:
-                        audit_hook.pre_commit()
-                        hook_fired = True
                     # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c):
                     # recorded in the SAME `with conn.transaction():`
-                    # block as the data changes above -- the LAST
-                    # statement before this block's own normal exit
-                    # (implicit COMMIT). See this class' own "idempotency"
-                    # section header comment for the strict (non-nested-
-                    # savepoint) `UndefinedTable` handling here.
+                    # block as the data changes above -- the statement just
+                    # before the audit pre-commit call below, which is the
+                    # last one of this block. See this class' own
+                    # "idempotency" section header comment for the strict
+                    # (non-nested-savepoint) `UndefinedTable` handling here.
                     if idempotency_key is not None and idempotency_digest_value is not None:
                         self._idempotency_store(
                             conn, idempotency_key, digest=idempotency_digest_value, kind="mutation",
                             payload={"affected": affected, "assigned_addresses": assigned_addresses, "request_id": request_id},
                             retention_ms=limits.idempotency_retention_ms,
                         )
+                    # the pre-commit hook is the LAST statement inside this `with conn.transaction():` block -- a raise here propagates straight through the block's own `__exit__`, which rolls the data transaction back exactly like any other exception raised inside it (no special-casing needed at this call site: fail-closed by construction).
+                    # history: CH-0037
+                    if audit_hook is not None:
+                        audit_hook.pre_commit()
+                        hook_fired = True
             except psycopg.errors.QueryCanceled:
+                # a cancel can land on the COMMIT itself (work a deferred trigger does at commit is not bounded by `statement_timeout`, but a cancel request still interrupts it), after the pre-commit row is already durable: the response stays 413, and the row that says the data did not commit is written like the general branch below writes it.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
+                # same as the branch above: the COMMIT's own deferred work can wait on a lock after the pre-commit row is durable.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.UniqueViolation as exc:
                 self._fail_unique_conflict(entity, exc)

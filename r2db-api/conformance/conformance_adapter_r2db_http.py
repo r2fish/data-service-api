@@ -2678,15 +2678,16 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         if self._audit_query_status() not in ("enabled", "partial"):
             raise self._audit_surface_absent(
                 "flush_audit_buffer",
-                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
+                "audit_query is not declared enabled/partial -- there is nothing to make visible on this "
                 "deployment's own declared posture",
             )
-        # Phase 4 WP-2(b): identical rationale to `conformance_adapter_
-        # r2db.py`'s own `flush_audit_buffer` -- `self._service` (this
-        # adapter's own real, Postgres-backed `DataService`) owns D-4's
-        # bounded buffer and D-3's denial-coalescing windows; there is no
-        # separate HTTP endpoint for this (an adapter-privileged test
-        # hook, not a contract operation, design §8.3).
+        # Identical rationale to `conformance_adapter_r2db.py`'s own
+        # `flush_audit_buffer` -- `self._service` (this adapter's own real,
+        # Postgres-backed `DataService`) owns the denial-coalescing
+        # windows whose summary rows this makes visible; ordinary events
+        # are already written before their response. There is no separate
+        # HTTP endpoint for this (an adapter-privileged test hook, not a
+        # contract operation, design §8.3).
         self._service.flush_audit_buffer()
 
     # port v1.8

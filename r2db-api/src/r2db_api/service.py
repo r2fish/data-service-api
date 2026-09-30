@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
 import logging
 import threading
 import time
 from typing import Any, Callable, Iterator
 import uuid
 
-from .audit import ApplicationAuditSink, AuditEvent, AuditSink
+from .audit import ApplicationAuditSink, AuditSink
 from .audit_hook import ApplicationAuditHook
 from .audit_counts import _coalesced_count
 from .auth import AuthContext, CredentialStore
@@ -66,52 +65,20 @@ _AUDIT_SINK_ORIGIN = "audit_sink"
 # history: CH-0176
 _DENIAL_COALESCE_WINDOW_S = 60.0
 
-# the bounded buffer's default capacity (implementation discretion per the design -- "既定 1000、実装裁量で設定可").
-# history: CH-0175
-_DEFAULT_AUDIT_BUFFER_CAPACITY = 1000
-
-# Phase 4 (design §7.3/§7.4; WP-2(a) fix round 2 review N-2, N-6): ONE
-# constant serving two roles by construction, not by coincidence of two
-# independently-set literals agreeing -- (i) `_AuditBuffer`'s own default
-# minimum interval between overflow-alert-row attempts (N-2: "1 alert row
-# per flush interval per process"), and (ii) the default periodic
-# buffer-flush interval `r2db_api.main`'s composition-root background
-# thread uses (imports this name directly rather than defining its own).
+# The default interval of the composition root's periodic sweep of the
+# denial-coalescing windows (`DataService.flush_audit_buffer`); a latency
+# knob only -- it decides how soon an expired window's repeat-count
+# summary row is written, never whether a denial is recorded.
 _DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 
 # `_coalesced_count`'s own comment (Phase 4 WP-2(b) review B-1) moved with
 # it to `audit_counts.py` when that helper was extracted.
 # history: CH-0179
 
-# Phase 4 (design §7.4/D-4): fixed, no-interpolation log messages -- the
-# design's own instruction ("可変部に実データを載せない"). A fixed string
-# also means these two call sites can never accidentally leak a client-
-# supplied value (application_id, secret fragment, filter content) into
-# process logs.
-_BUFFER_OVERFLOW_LOG_MESSAGE = "application_audit buffer overflow: events were dropped"
-_ALERT_WRITE_FAILED_LOG_MESSAGE = "application_audit overflow-alert row could not be written; retrying with backoff"
-_ALERT_WRITE_RECOVERED_LOG_MESSAGE = "application_audit overflow-alert row recorded; pending overflow cleared"
-
-# fixed, no-interpolation log messages for the denial-coalescer's own aggregate (repeat-count summary) row write path -- mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline, applied to `_DenialCoalescer._note_aggregate_write_result`.
+# fixed, no-interpolation log messages for the denial-coalescer's own aggregate (repeat-count summary) row write path -- follows a state-transition-only discipline (logged on failing<->healthy transitions, never once per attempt), applied to `_DenialCoalescer._note_aggregate_write_result`.
 # history: CH-0173
 _COALESCE_AGGREGATE_WRITE_FAILED_LOG_MESSAGE = "application_audit coalesced-denial summary row could not be written; retrying"
 _COALESCE_AGGREGATE_WRITE_RECOVERED_LOG_MESSAGE = "application_audit coalesced-denial summary row recorded; retry cleared"
-
-# exponential backoff for the sticky overflow-alert retry, capped at 60s -- an unbounded equal-interval retry against a durably-failing sink would itself become a logging DoS (the same flow problem bounds for denials, recurring on the alert path).
-# The FLOOR for this backoff is `_DEFAULT_AUDIT_FLUSH_INTERVAL_S`
-# (`_AuditBuffer`'s own `alert_min_interval_s`, WP-2(a) fix round 2 review
-# N-2), not a separate, smaller initial value -- no alert attempt is ever
-# spaced closer together than the composition root's own flush cadence.
-# history: CH-0172
-_ALERT_BACKOFF_CAP_S = 60.0
-
-
-def _now_iso() -> str:
-    """The same `occurred_at` construction `audit.AuditSink.append`/
-    `audit.ControlAuditSink.append` already use -- factored out here so
-    `_event`'s own buffer-class `AuditEvent` construction (below) matches
-    it exactly, byte for byte."""
-    return datetime.now(timezone.utc).isoformat()
 
 # Default cell factory (design step 2): builds the existing in-memory `ApplicationCell`, unchanged, so every caller that does not pass `cell_factory` gets exactly today's behavior. A deployment that wants
 # `PostgresCell` (or any other `StorageBackend`) instead passes its own
@@ -132,22 +99,24 @@ class _PreCommitHook:
     the durable row needs (`event_class`/`request_id`/`application_id`/
     `actor_type`/`actor_id`/`role`/`operation`/`target_kind`/`target_id`)
     is already bound here at construction time -- the backend itself
-    supplies none of it, only the fail-closed/buffer-class decision (D-2's
-    normative rule: the confirmation choke for `transact`, unconditional
-    for `apply_schema`).
+    supplies none of it, only the moment (every real batch for `transact`,
+    unconditional for `apply_schema`).
 
     History: CH-0166
     """
 
-    __slots__ = ("_sink", "_fields")
+    __slots__ = ("_sink", "_fields", "fired")
 
     def __init__(self, sink: Any, fields: dict[str, Any]) -> None:
         self._sink = sink
         self._fields = fields
+        # `True` once `pre_commit()` has durably recorded the `allow` row, so the caller can tell a batch whose row is already written from one whose backend never called the hook.
+        self.fired = False
 
     def pre_commit(self) -> None:
         try:
             self._sink.append(outcome="allow", count=None, **self._fields)
+            self.fired = True
         except Exception:
             fail(
                 "SERVICE_UNAVAILABLE",
@@ -164,261 +133,6 @@ class _PreCommitHook:
         except Exception:
             pass
 
-
-class _AuditBuffer:
-    """Phase 4 (design D-4/§7.3/§7.4): the bounded in-memory buffer for
-    ordinary (buffer-class) data-operation success events, plus the
-    overflow-alert sticky-retry state. Owns its own lock; the durable I/O `flush()` performs happens on the calling thread using `sink.append`/`append_many`, each of which opens its own connection/transaction (D-1's `PostgresApplicationAuditSink` docstring) -- this is what makes "a flush never shares a transaction with a fail-closed write" automatic rather than something this class has to arrange.
-
-    capacity is per-process, not per-deployment -- a multi-instance deployment's real bound is `capacity * <max instances>`, which is runbook (§9.3), not code, territory.
-
-    §7.3 names TWO flush triggers, "periodic" and "threshold" -- a prior revision implemented only the periodic one (the composition root's background timer). `push()` now also triggers a
-    flush, synchronously, in the caller's own thread, the moment the buffer
-    reaches `_FLUSH_THRESHOLD_FRACTION` of capacity -- "その場で" (right
-    there), the simpler of the two options §7.3's own review text
-    sanctioned. Under a healthy sink this keeps the buffer far below
-    capacity, so overflow becomes a genuine signal that the sink cannot
-    keep up, not an artifact of the periodic timer's own interval.
-
-    `flush()` does not unconditionally empty `self._events` before
-    attempting the write -- a FAILED `append_many` leaves those events in
-    place (retried by the next flush) instead of discarding them outright,
-    so a transient I/O failure does not permanently destroy buffered
-    evidence a later retry might still durably record.
-
-    a RETAINED event is, by definition, NOT lost -- it is still sitting in `self._events`, waiting for the next flush attempt. Counting it in `_dropped_total` (a prior
-    revision did, via `+= len(pending)` on every failed `append_many`) both
-    mislabels "not yet flushed" as "dropped" (N-1: the same event, retried
-    and failing repeatedly, gets counted again and again) AND -- combined
-    with a failed flush marking the alert pending -- lets a single
-    threshold-triggered flush failure emit its own alert-row *attempt* on
-    every subsequent buffer-class request (N-2: a `push()` on every
-    request, no bound on request rate). `_dropped_total` now increments
-    ONLY where an event is actually, irrevocably discarded: `push()`'s own
-    eviction branch (capacity reached, oldest event evicted to make room).
-    A failed `append_many` retains its batch and adjusts NEITHER
-    `_dropped_total` NOR `_alert_pending` on its own -- there is nothing
-    new to alert about merely because a retry is still pending, and the
-    ALREADY-pending alert (if any, from a genuine eviction) is independently
-    rate-limited below regardless of how often `flush()` itself is retried.
-
-    Alert-row EMISSION RATE is bounded independently of eviction/flush-retry rate: `_alert_min_interval_s` (constructor parameter, matching the composition root's own periodic-flush interval, default 2.0s) is a hard floor under `_alert_backoff_s` -- no two alert attempts are ever less than `_alert_min_interval_s` apart, "1 alert row attempt per flush interval per process" even while eviction is ongoing. The backoff is
-    keyed to whether the underlying buffer FLUSH is currently succeeding
-    (`_flush_currently_failing`, updated by every `flush()` call), not to
-    whether the alert row's own INSERT succeeded: an alert row can itself
-    write successfully while the buffer flush keeps failing (evidence keeps
-    being evicted) -- in that case the backoff still grows, so a healthy
-    alert-write path does not let a broken buffer-flush path re-trigger a
-    fresh alert attempt every `_alert_min_interval_s` forever at the
-    fastest allowed rate; it backs off further, same as an outright alert
-    failure. The backoff only resets to the floor once the buffer flush
-    itself is observed healthy again.
-
-    History: CH-0164
-    """
-
-    # Review M-2's own suggested value ("k は 0.8 等").
-    _FLUSH_THRESHOLD_FRACTION = 0.8
-
-    def __init__(self, sink: Any, *, capacity: int, clock: Callable[[], float], alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S) -> None:
-        self._sink = sink
-        self._capacity = max(1, capacity)
-        self._flush_threshold = max(1, int(self._capacity * self._FLUSH_THRESHOLD_FRACTION))
-        self._clock = clock
-        self._alert_min_interval_s = max(0.0, alert_min_interval_s)
-        self._lock = threading.Lock()
-        self._events: list[AuditEvent] = []
-        self._dropped_total = 0
-        self._alert_pending = False
-        self._alert_next_retry_at = 0.0
-        self._alert_backoff_s = self._alert_min_interval_s
-        self._alert_failure_logged = False
-        # tracks whether the most recent `flush()` attempt's own `append_many` succeeded or failed -- independent of the alert row's own write outcome, and read by `_retry_alert` to decide whether the backoff may reset.
-        # history: CH-0163
-        self._flush_currently_failing = False
-
-    def push(self, event: AuditEvent) -> None:
-        overflowed = False
-        trigger_flush = False
-        with self._lock:
-            if len(self._events) >= self._capacity:
-                self._events.pop(0)
-                self._dropped_total += 1
-                self._alert_pending = True
-                overflowed = True
-            self._events.append(event)
-            if len(self._events) >= self._flush_threshold:
-                trigger_flush = True
-        if overflowed:
-            # §7.4: fixed message, no interpolation -- logged every time an
-            # event is actually, irrevocably evicted (N-1: not merely
-            # retained-for-retry), since each eviction is itself a new,
-            # permanent loss.
-            _logger.error(_BUFFER_OVERFLOW_LOG_MESSAGE)
-        if trigger_flush:
-            # threshold flush -- see class docstring. Outside the lock
-            # (already released above), on the calling thread.
-            # history: CH-0162
-            self.flush()
-
-    def pending_count(self) -> int:
-        with self._lock:
-            return len(self._events)
-
-    def flush(self) -> None:
-        """D-4/§7.3: called on demand (tests, the adapter privilege hook), periodically (composition root), and now also from `push()` at the threshold. Writes the current buffer contents as one batch,
-        then attempts the sticky overflow-alert retry -- always in that
-        order, always on a connection/transaction of its own. A failed batch write leaves the events in place for the next attempt (retained, not counted as dropped --) rather than discarding them or alerting on its own.
-
-        the periodic-flush thread (composition root) and a request-path threshold flush (`push()`, M-2 above) can call this method concurrently on the SAME buffer.
-        `pending` is therefore SWAPPED OUT of `self._events` under a single lock acquisition (not merely copied) -- this, not a separate "flush in progress" flag, is what makes two concurrent `flush()` calls durably write disjoint (usually one full, one empty) sets of events instead of both durably writing the SAME events (the double-row bug this found, reproduced verbatim by `test_concurrent_periodic_and_threshold_flush_never_double_writes_pending_events`). A concurrent call that finds `self.
-        _events` already emptied by the swap simply has nothing to flush
-        and returns without ever touching the sink -- it is not blocked or
-        serialized behind the in-flight I/O, so this stays lock-free
-        across the network round trip exactly as before.
-
-        A failed `append_many` puts `pending` BACK -- prepended, so it
-        precedes (in flush order) anything pushed while this I/O was in
-        flight -- preserving N-1's retain discipline (retained events are
-        never counted as dropped) and `_dropped_total`'s accuracy (a
-        retained batch is not itself a loss) exactly as the prior
-        read-then-delete version did.
-
-        WP-3(a) review B-1 (on the fix above): while this method holds `pending` outside `self._events`, `push()` sees an empty (or merely in-flight-refilled) buffer and does not evict -- capacity is enforced only against whatever is currently sitting in `self._events`. A naive unconditional `pending + self._events` restore on failure can therefore exceed `_capacity` (up to `len(pending)` extra), and because the surviving overflow is never itself re-evicted by a later `push()` (each `push()` only ever evicts ONE item, the one IT just added), a sink outage would let the buffer grow WITHOUT BOUND across repeated failed flushes -- breaking D-4's "bounded in-memory buffer" and D-1 review M-5's capacity-side availability argument, and doing so *silently*: no `push()` eviction fires during this growth, so `_dropped_total` never increments and the overflow alert never appears even though evidence is unboundedly accumulating in memory. So the
-        restore truncates back down to `_capacity`, dropping from the
-        FRONT (oldest first, matching `push()`'s own `pop(0)` FIFO
-        discipline) -- and, exactly like a genuine `push()`-path eviction,
-        counts only what was ACTUALLY, irrevocably discarded here (never
-        the merely-retried remainder) in `_dropped_total`, sets
-        `_alert_pending`, and logs the same fixed overflow message.
-
-        History: CH-0161
-        """
-        with self._lock:
-            pending = self._events
-            self._events = []
-        if pending:
-            try:
-                self._sink.append_many(pending)
-            except Exception:
-                truncated = 0
-                with self._lock:
-                    self._flush_currently_failing = True
-                    # put the un-written batch back rather than discarding it -- it is retried by the next flush, not counted in `_dropped_total` (nothing has actually been lost) and nothing new to alert or log about on this path alone. Prepended ahead of anything a concurrent
-                    # `push()` added to `self._events` while this I/O was in
-                    # flight, so flush order still matches arrival order.
-                    # history: CH-0160
-                    self._events = pending + self._events
-                    # re-impose the capacity bound `push()` could not enforce while this batch was held outside `self._events` -- drop the oldest overflow, exactly the FIFO discipline `push()`'s own eviction branch uses, and count ONLY this genuine, irrevocable loss (the rest is still a retained retry, not a drop).
-                    # history: CH-0159
-                    overflow = len(self._events) - self._capacity
-                    if overflow > 0:
-                        del self._events[:overflow]
-                        truncated = overflow
-                        self._dropped_total += truncated
-                        self._alert_pending = True
-                if truncated:
-                    _logger.error(_BUFFER_OVERFLOW_LOG_MESSAGE)
-                # `push()`'s own eviction branch is the only OTHER source
-                # of genuine, irrevocable loss.
-            else:
-                with self._lock:
-                    # `_flush_currently_failing` clears unconditionally on ANY successful `append_many` -- not gated on `self._events` being empty. Under
-                    # sustained push load the buffer is rarely empty even
-                    # once the sink has genuinely recovered (M-2's
-                    # threshold flush keeps refilling it), so the prior
-                    # "only when empty" gate left the flag -- and the
-                    # alert backoff it feeds, see `_retry_alert` below --
-                    # stuck at the sink-broken state long after recovery.
-                    #
-                    # Completion-order semantics absorb the WP-3(a) review m-1 race this replaces: a DIFFERENT, still-failing concurrent flush (disjoint batch, per the swap above) sets this back to True in its own failure branch whenever IT completes -- whichever flush completes LAST wins, exactly as with any other unsynchronized shared-state update. A brief window
-                    # where this reads False while that concurrent failure
-                    # is still in flight does not weaken the alert-rate
-                    # guarantee: `_retry_alert`'s own `alert_min_interval_s`
-                    # floor on `alert_next_retry_at` still bounds attempts
-                    # to at most one per flush interval regardless of how
-                    # many times this flag flips in between (§7.4's "at
-                    # most 1 alert row per flush interval" is enforced by
-                    # that floor, not by this flag).
-                    #
-                    # Accepted tradeoff (P4-D15): if the sink is FLAPPING
-                    # (success and failure completing alternately), the
-                    # backoff resets to the floor on every success, so the
-                    # observed alert-row rate can rise from "stuck at the
-                    # 60s backoff cap" up to "one per alert_min_interval_s"
-                    # (2.0s by default). This is intentional -- evidence
-                    # (`count`) reaches the durable table sooner from a
-                    # partially-working sink, and the declared bound itself
-                    # (at most 1 row per flush interval) still holds; only
-                    # the realized rate moves toward that bound instead of
-                    # sitting far under it.
-                    # history: CH-0158
-                    self._flush_currently_failing = False
-        self._retry_alert()
-
-    def _retry_alert(self) -> None:
-        with self._lock:
-            if not self._alert_pending:
-                return
-            now = self._clock()
-            if now < self._alert_next_retry_at:
-                return
-            count = self._dropped_total
-            flush_failing = self._flush_currently_failing
-        try:
-            self._sink.append(
-                event_class="security_control_failure",
-                request_id=str(uuid.uuid4()),
-                application_id=None,
-                actor_type="system",
-                actor_id=None,
-                role=None,
-                operation="audit_buffer",
-                target_kind="audit_sink",
-                outcome="deny",
-                reason_code="audit_buffer_overflow",
-                target_id=None,
-                count=_coalesced_count(count),
-            )
-        except Exception:
-            with self._lock:
-                self._alert_backoff_s = min(_ALERT_BACKOFF_CAP_S, max(self._alert_min_interval_s, self._alert_backoff_s * 2))
-                self._alert_next_retry_at = self._clock() + self._alert_backoff_s
-                self._alert_failure_logged = True
-            # this branch is only ever reached once the backoff interval has already elapsed (the early return above enforces that), so logging unconditionally here already matches "first attempt, then once per backoff interval" -- no separate first-attempt bookkeeping is needed.
-            # history: CH-0157
-            _logger.error(_ALERT_WRITE_FAILED_LOG_MESSAGE)
-            return
-        with self._lock:
-            # Review m-1: SUBTRACT exactly the `count` this alert row just
-            # reported, never blindly reset to 0 -- more drops can have
-            # accumulated (a concurrent eviction) between reading `count`
-            # above and this INSERT completing; resetting to 0
-            # unconditionally would silently lose track of those,
-            # understating a later alert row's own `count`. If drops
-            # remain, the alert stays pending (and will fire again once
-            # the backoff/rate-limit conditions allow) for the remainder.
-            self._dropped_total -= count
-            if self._dropped_total <= 0:
-                self._dropped_total = 0
-                self._alert_pending = False
-            # the backoff is keyed to whether the BUFFER FLUSH is currently failing, not to whether this alert row's own INSERT just succeeded. If the flush is still failing (more
-            # evictions can still be coming), keep backing off -- exactly
-            # like an alert-write failure would -- so a healthy alert path
-            # cannot be used to re-trigger a fresh attempt every single
-            # `_alert_min_interval_s` for as long as the underlying sink
-            # stays broken. Only reset to the floor once the flush itself
-            # is observed healthy.
-            # history: CH-0156
-            if flush_failing:
-                self._alert_backoff_s = min(_ALERT_BACKOFF_CAP_S, max(self._alert_min_interval_s, self._alert_backoff_s * 2))
-            else:
-                self._alert_backoff_s = self._alert_min_interval_s
-            self._alert_next_retry_at = self._clock() + self._alert_backoff_s
-            was_logged = self._alert_failure_logged
-            self._alert_failure_logged = False
-        if was_logged:
-            _logger.error(_ALERT_WRITE_RECOVERED_LOG_MESSAGE)
 
 class _DenialCoalescer:
     """Phase 4 (design D-3/P4-D3): the coalescing state for fail-closed-
@@ -478,7 +192,7 @@ class _DenialCoalescer:
         self._windows: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._key_locks: dict[tuple[Any, ...], threading.Lock] = {}
         self._key_lock_refcount: dict[tuple[Any, ...], int] = {}
-        # tracks whether the MOST RECENT aggregate-row write attempt (from any key) failed -- a single, process-wide flag, deliberately mirroring `_AuditBuffer`'s own N-2 state-transition logging discipline (log only on failing<->healthy transitions, never once per attempt).
+        # tracks whether the MOST RECENT aggregate-row write attempt (from any key) failed -- a single, process-wide flag, logging only on failing<->healthy transitions, never once per attempt.
         # history: CH-0154
         self._aggregate_write_failing = False
 
@@ -529,7 +243,7 @@ class _DenialCoalescer:
                 self._windows[key] = state
 
     def _note_aggregate_write_result(self, succeeded: bool) -> None:
-        """fixed-message `logging.error`, only on a failing<-> healthy state TRANSITION (N-2's own established discipline) -- not once per attempt, which would reproduce the exact logging-DoS risk N-2 already closed for the buffer-overflow alert path.
+        """fixed-message `logging.error`, only on a failing<-> healthy state TRANSITION (N-2's own established discipline) -- not once per attempt, which would let a persistently failing sink flood the log.
 
         History: CH-0151
         """
@@ -649,7 +363,7 @@ class _DenialCoalescer:
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1, operation_catalog_url: str | None = None, rate: Any | None = None, concurrency_slots: Any | None = None, concurrency_configured: bool = False) -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1, operation_catalog_url: str | None = None, rate: Any | None = None, concurrency_slots: Any | None = None, concurrency_configured: bool = False) -> None:
         # R-9 (CCR-14, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §1: "capability 申告は環境変数由来で composition root 注入"): whether this application-plane process' own `capabilities()` declares `control_plane: enabled` is a *deployer* fact this class cannot know on its own (a separated deployment, the default, means the application-plane process has no idea whether a control-plane process is running anywhere at all) -- it is constructor-injected, defaulting to the safe, honest `unavailable` so nothing short of an explicit composition-root decision (`main.py`, reading `R2DB_CONTROL_PLANE_STATUS`) ever declares `enabled`. Validated here too (not only at `main.py`'s env-parsing boundary) so any other caller constructing a `DataService` directly (this repository's own tests, the in-process conformance adapter) gets the same fail-loud guard against a typo'd status string, rather than silently publishing an invalid capability value.
         # history: CH-0148
         if control_plane_status not in {"enabled", "unavailable"}:
@@ -694,7 +408,6 @@ class DataService:
         # `main.py`'s composition root). `self._audit` above is untouched and stays the sole recorder for D-3's non-durable denial classes (everything outside `_DURABLE_DENIAL_CODES`'s inclusion list -- D-10's own instruction) -- this is a SEPARATE sink, not a replacement.
         # history: CH-0145
         self._durable_audit = durable_audit if durable_audit is not None else ApplicationAuditSink()
-        self._audit_buffer = _AuditBuffer(self._durable_audit, capacity=audit_buffer_capacity, clock=clock or time.monotonic, alert_min_interval_s=audit_alert_min_interval_s)
         self._denial_coalescer = _DenialCoalescer(self._durable_audit, window_s=denial_coalesce_window_s, clock=clock or time.monotonic)
         self._cell_factory: CellFactory = cell_factory or _default_cell_factory
         self._cells: dict[str, StorageBackend] = dict(initial_cells or {})
@@ -844,7 +557,7 @@ class DataService:
                 outcome = self._cells[canonical.application_id].query(
                     entity, select=select, where=predicates, page_size=resolved_page_size, order_by=order_by, cursor=cursor, limits=effective_limits, deadline=deadline, clock=self._clock
                 )
-                # `query` never passes through the confirmation choke -- always buffer-class.
+                # `query` writes its event synchronously, before the result is returned.
                 # history: CH-0131
                 self._event(canonical, operation="query", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid)
                 return outcome
@@ -921,7 +634,7 @@ class DataService:
                 # history: CH-0123
                 if effective_idempotency_key is not None:
                     plan_request["idempotency_key"] = effective_idempotency_key
-                # Phase 4, extended by D-4 (4)/U-2 = (A): the hook is only ever USED by the backend when this batch turns out to pass through the confirmation choke (a confirmed `delete`) -- building it unconditionally here is cheap (no I/O happens until/unless `pre_commit()` is actually called) and keeps this call site identical regardless of what the batch turns out to contain, matching `schema`'s own unconditional hook below. A
+                # Phase 4, extended by D-4 (4)/U-2 = (A): the backend calls the hook as the last statement of every real (non-`dry_run`) batch, so the `allow` row is durable before the data commit -- the same path `schema`'s own hook below takes. A
                 # `dry_run`, though, never gets one AT ALL -- not merely
                 # one that is never called -- so no audit line can ever be
                 # written for it, by construction (U-2 = (A): "監査行を一切
@@ -935,20 +648,20 @@ class DataService:
                 )
                 # D-4 (4)/U-2 = (A): a dry_run that reached this point
                 # reached the "would succeed" decision -- no audit event
-                # (buffer-class OR the legacy in-memory sink `_event`
+                # (durable OR the legacy in-memory sink `_event`
                 # itself unconditionally appends to) is written for it.
-                # `outcome.destructive` reports whether the backend's pre-commit hook already durably recorded this batch -- `already_durable` tells `_event` to skip the buffer-class enqueue in that case (at most one durable row per operation). Contract 1.7.0 (D-5 (1)(v), ruling I-11/J-4, WP-2c/WP-2cd): `outcome.replayed` -- a resend answered from an idempotency record still earns its OWN audit line (SI-14 audit N-5: a destructive resend must never return `committed: true` while leaving zero evidence of its own that this Application was touched at time T) -- `outcome="replayed"`, never `"allow"`, keeps a resend distinguishable from a genuine new execution in the audit trail itself; it carries THIS resend's own `request_id` (never the original), and, like every event this method emits, never the `idempotency_key` value. Always
+                # `hook.fired` reports whether the backend's pre-commit hook already durably recorded this batch -- `already_durable` tells `_event` to skip its own synchronous write in that case (at most one durable row per operation); a backend that never called the hook leaves the row to `_event`, which writes it before the response. Contract 1.7.0 (D-5 (1)(v), ruling I-11/J-4, WP-2c/WP-2cd): `outcome.replayed` -- a resend answered from an idempotency record still earns its OWN audit line (SI-14 audit N-5: a destructive resend must never return `committed: true` while leaving zero evidence of its own that this Application was touched at time T) -- `outcome="replayed"`, never `"allow"`, keeps a resend distinguishable from a genuine new execution in the audit trail itself; it carries THIS resend's own `request_id` (never the original), and, like every event this method emits, never the `idempotency_key` value. Always
                 # `already_durable=False`: a replay never invokes the
                 # pre-commit hook (nothing below the idempotency lookup
                 # executed), so no durable row has already been written for
-                # THIS event the way a genuinely destructive fresh commit's
+                # THIS event the way a fresh commit's
                 # hook already wrote one for its own.
                 # history: CH-0121
                 if not dry_run:
                     if outcome.replayed:
                         self._event(canonical, operation="mutate", outcome="replayed", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=False)
                     else:
-                        self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
+                        self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=hook is not None and hook.fired)
                 return outcome
         except FoundationError as exc:
             self._event(context, operation="mutate", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
@@ -1026,7 +739,7 @@ class DataService:
                 # publishes exactly what the cell itself already computes,
                 # with no narrowing.
                 entities = self._cells[canonical.application_id].catalog(self.limits)
-                # `catalog` never passes through the confirmation choke -- always buffer-class.
+                # `catalog` writes its event synchronously, before the result is returned.
                 # history: CH-0114
                 self._event(canonical, operation="catalog", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid)
                 return {"application_scope": canonical.application_id, "entities": entities}
@@ -1205,8 +918,8 @@ class DataService:
           above, when the backend's own pre-commit hook already durably
           recorded this exact event): return immediately. D-10's "at most
           one durable row per operation" rule.
-        - `outcome == "deny"`: `details["origin"] == "audit_sink"` means this denial's `SERVICE_UNAVAILABLE` was produced by the audit pipeline itself already failing to record this very operation (a pre-commit sink failure, a commit-failure error-row write, a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write for what is still logically one operation, so this returns without doing anything further. Otherwise, any reason code outside D-3's durable-code inclusion list (`_DURABLE_DENIAL_CODES` -- not merely the 4 originally named) returns without any durable/buffered record at all; every other reason code is fail-closed-class and goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
-        - `outcome == "allow"`: buffer-class -- `query`/`catalog` always reach here (they never pass through the confirmation choke), and `mutate` reaches here only when its batch did NOT (`already_durable=False`).
+        - `outcome == "deny"`: `details["origin"] == "audit_sink"` means this denial's `SERVICE_UNAVAILABLE` was produced by the audit pipeline itself already failing to record this very operation (a pre-commit sink failure, a commit-failure error-row write, a coalesced-denial first-insert failure) -- routing it through `_route_denial` again would be a second (or third) durable write for what is still logically one operation, so this returns without doing anything further. Otherwise, any reason code outside D-3's durable-code inclusion list (`_DURABLE_DENIAL_CODES` -- not merely the 4 originally named) returns without any durable record at all; every other reason code is fail-closed-class and goes through the coalescing denial router (which may itself raise `SERVICE_UNAVAILABLE`).
+        - `outcome == "allow"` (`data_operation` only) or `"replayed"` (any class): written synchronously to the durable sink before the caller's response is returned -- `query`/`catalog`, a `mutate` whose backend did not already record it (`already_durable=False`), and every replay. A sink failure raises `SERVICE_UNAVAILABLE` (fail-closed), so a response is only ever returned for an operation whose event is durable.
 
         History: CH-0109
         """
@@ -1230,26 +943,26 @@ class DataService:
                 target_id=target_id, details=None,
             )
             return
-        # outcome == "allow": D-4's buffer is scoped to `data_operation`
-        # successes only (§7.3's own text: "通常のdata-operation成功event
-        # のみ") -- `query`/`catalog` always land here as `data_operation`,
-        # and `mutate` lands here only when it was NOT destructive
-        # (`already_durable=False`, checked above). `authenticate`'s own
-        # success (`event_class="authentication"`) is a distinct event
-        # class outside that scope: it is not a data operation, and D-2's
-        # rule never names it as fail-closed either, so it stays exactly
-        # where it already was pre-Phase-4 -- the legacy in-memory sink
-        # only (already appended above), no durable/buffered record at all.
-        if event_class != "data_operation":
+        # `authenticate`'s own success (`event_class="authentication"`) is not a
+        # data operation, and no rule names it fail-closed either, so it stays
+        # in the legacy in-memory sink only (already appended above), with no
+        # durable record at all. Every other `allow` here is a `data_operation`;
+        # a `replayed` line is durable for every class.
+        if outcome == "allow" and event_class != "data_operation":
             return
-        self._audit_buffer.push(
-            AuditEvent(
-                event_id=str(uuid.uuid4()), event_class=event_class, occurred_at=_now_iso(), request_id=rid,
-                application_id=application_id, actor_type=actor_type, actor_id=actor_id, role=role,
-                operation=operation, target_kind=target_kind, outcome=outcome, reason_code=reason_code,
-                target_id=target_id,
+        try:
+            self._durable_audit.append(
+                event_class=event_class, request_id=rid, application_id=application_id, actor_type=actor_type,
+                actor_id=actor_id, role=role, operation=operation, target_kind=target_kind, outcome=outcome,
+                reason_code=reason_code, target_id=target_id, count=None,
             )
-        )
+        except Exception:
+            fail(
+                "SERVICE_UNAVAILABLE",
+                "The durable audit sink could not record this operation; the response was withheld.",
+                status=503,
+                details={"origin": _AUDIT_SINK_ORIGIN},
+            )
 
     def _denial_event(self, *, event_class: str, request_id: str, application_id: str | None, actor_type: str, actor_id: str | None, role: str | None, operation: str, target_kind: str | None, reason_code: str | None, target_id: str | None, details: dict[str, Any] | None) -> None:
         """The shared fail-closed/coalesced-denial dispatch, used both by `_event`'s own deny branch and by `authenticate`'s except clause (which has no `canonical`/`AuthContext` to route through `_event` at all -- authentication itself is what failed).
@@ -1269,7 +982,7 @@ class DataService:
         }
         self._denial_coalescer.route(key=key, fields=fields)
 
-    def _make_audit_hook(self, canonical: AuthContext, *, event_class: str, operation: str, target_kind: str, request_id: str) -> ApplicationAuditHook:
+    def _make_audit_hook(self, canonical: AuthContext, *, event_class: str, operation: str, target_kind: str, request_id: str) -> _PreCommitHook:
         """builds the `ApplicationAuditHook` passed to `StorageBackend.transact`/`apply_schema` as `audit_hook` -- every field the durable row needs is already resolved here (this is `DataService`'s own job; the backend has no identity/request context of its own beyond what it is given).
 
         History: CH-0107
@@ -1282,17 +995,15 @@ class DataService:
         return _PreCommitHook(self._durable_audit, fields)
 
     def flush_audit_buffer(self, *, force_expire_denial_windows: bool = False) -> None:
-        """Phase 4 (design D-4/§7.3/§7.4): synchronously drains the bounded buffer (writing it as one batch), retries the sticky overflow-alert row if one is pending and due, and sweeps denial-coalescing windows (writing their repeat-count summary row). Called on demand by this repository's own tests and by a
+        """Phase 4 (design D-4/§7.3/§7.4): sweeps denial-coalescing windows (writing their repeat-count summary row). Ordinary events are written before their response is returned, so no buffer is left to drain here. Called on demand by this repository's own tests and by a
         composition root's periodic timer alike -- there is nothing
         time-sensitive about calling this more or less often beyond how
-        promptly buffered/coalesced evidence becomes durable (D-4's own
-        "periodic or threshold" flush-trigger latitude).
+        promptly a window's repeat count becomes durable.
 
         flushes EVERY currently-open denial-coalescing window, expired or not, instead of only expired ones -- used exactly once, by a composition root's graceful-shutdown path. Without this, a window still short of its own `window_s` at the moment the process stops loses its accumulated repeat count entirely (only sanctions losing counts to an actual crash, not to an orderly stop); the default (periodic timer, explicit test calls) stays `False` -- an in-progress window still has a legitimate future to expire into naturally and must not be cut short just because something else happened to call this method.
 
         History: CH-0106
         """
-        self._audit_buffer.flush()
         if force_expire_denial_windows:
             self._denial_coalescer.flush_all()
         else:

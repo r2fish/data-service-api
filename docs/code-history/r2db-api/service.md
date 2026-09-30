@@ -97,6 +97,48 @@ expire into naturally and must not be cut short just because
 something else happened to call this method.
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the method no longer drains a buffer
+
+old:
+```
+synchronously drains the bounded buffer (writing it as one batch), retries the sticky overflow-alert row if one is pending and due, and sweeps denial-coalescing windows (writing their repeat-count summary row
+```
+
+new:
+```
+sweeps denial-coalescing windows (writing their repeat-count summary row
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; states why the historical method name has no buffer to drain
+
+old:
+```
+Called on demand by this repository's own tests and by a composition root's periodic timer alike
+```
+
+new:
+```
+Ordinary events are written before their response is returned, so no buffer is left to drain here. Called on demand by this repository's own tests and by a composition root's periodic timer alike
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; only coalescing windows are left to become durable later
+
+old:
+```
+promptly buffered/coalesced evidence becomes durable (D-4's own "periodic or threshold" flush-trigger latitude)
+```
+
+new:
+```
+promptly a window's repeat count becomes durable
+```
+
 ## CH-0107
 
 - moved from: `src/r2db_api/service.py` (`DataService._make_audit_hook`)
@@ -161,6 +203,48 @@ applies Phase 4's durable-recording dispatch (design D-2/D-3/D-4):
   always reach here (they never pass through the confirmation
   choke), and `mutate` reaches here only when its batch did NOT
   (`already_durable=False`).
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the `allow` bullet no longer describes a buffer
+
+old:
+```
+`outcome == "allow"`: buffer-class
+```
+
+new:
+```
+`outcome == "allow"` (`data_operation` only) or `"replayed"` (any class): written synchronously to the durable sink before the caller's response is returned
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a replay of any class is durable, and a sink failure is fail-closed
+
+old:
+```
+`query`/`catalog` always reach here (they never pass through the confirmation choke), and `mutate` reaches here only when its batch did NOT (`already_durable=False`).
+```
+
+new:
+```
+`query`/`catalog`, a `mutate` whose backend did not already record it (`already_durable=False`), and every replay. A sink failure raises `SERVICE_UNAVAILABLE` (fail-closed), so a response is only ever returned for an operation whose event is durable.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; no buffered record exists any more
+
+old:
+```
+without any durable/buffered record at all;
+```
+
+new:
+```
+without any durable record at all;
 ```
 
 ## CH-0110
@@ -304,6 +388,20 @@ never wrote a durable row before this WP either).
 ```
 # Phase 4 (design D-2 §7.3): `catalog` never passes through
 # the confirmation choke -- always buffer-class.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a catalog read's event is written before its result is returned
+
+old:
+```
+`catalog` never passes through the confirmation choke -- always buffer-class.
+```
+
+new:
+```
+`catalog` writes its event synchronously, before the result is returned.
 ```
 
 ## CH-0115
@@ -453,6 +551,48 @@ Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`; `tests
 # hook already wrote one for its own.
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; no buffer-class event exists
+
+old:
+```
+(buffer-class OR the legacy in-memory sink `_event` itself unconditionally appends to)
+```
+
+new:
+```
+(durable OR the legacy in-memory sink `_event` itself unconditionally appends to)
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the already-durable signal is the hook's own `fired` flag, and `_event` writes the row itself when the backend did not
+
+old:
+```
+`outcome.destructive` reports whether the backend's pre-commit hook already durably recorded this batch -- `already_durable` tells `_event` to skip the buffer-class enqueue in that case (at most one durable row per operation).
+```
+
+new:
+```
+`hook.fired` reports whether the backend's pre-commit hook already durably recorded this batch -- `already_durable` tells `_event` to skip its own synchronous write in that case (at most one durable row per operation); a backend that never called the hook leaves the row to `_event`, which writes it before the response.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a fresh commit's hook is no longer destructive-only
+
+old:
+```
+THIS event the way a genuinely destructive fresh commit's hook already wrote one for its own.
+```
+
+new:
+```
+THIS event the way a fresh commit's hook already wrote one for its own.
+```
+
 ## CH-0122
 
 - moved from: `src/r2db_api/service.py` (`DataService._mutate_outcome`)
@@ -472,6 +612,20 @@ Every pre-1.7.0 direct caller of this method (`tests/test_foundation.py`; `tests
 # one that is never called -- so no audit line can ever be
 # written for it, by construction (U-2 = (A): "監査行を一切
 # 書かない", not "書くが呼ばない").
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the backend calls the hook for every real batch
+
+old:
+```
+the hook is only ever USED by the backend when this batch turns out to pass through the confirmation choke (a confirmed `delete`) -- building it unconditionally here is cheap (no I/O happens until/unless `pre_commit()` is actually called) and keeps this call site identical regardless of what the batch turns out to contain, matching `schema`'s own unconditional hook below.
+```
+
+new:
+```
+the backend calls the hook as the last statement of every real (non-`dry_run`) batch, so the `allow` row is durable before the data commit -- the same path `schema`'s own hook below takes.
 ```
 
 ## CH-0123
@@ -644,6 +798,20 @@ this return type). `mutate_result` below is the richer shape
 ```
 # Phase 4 (design D-2 §7.3): `query` never passes through
 # the confirmation choke -- always buffer-class.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; a query's event is written before its result is returned
+
+old:
+```
+`query` never passes through the confirmation choke -- always buffer-class.
+```
+
+new:
+```
+`query` writes its event synchronously, before the result is returned.
 ```
 
 ## CH-0132
@@ -1213,6 +1381,20 @@ once per attempt, which would reproduce the exact logging-DoS risk
 N-2 already closed for the buffer-overflow alert path.
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the buffer-overflow alert path is removed
+
+old:
+```
+which would reproduce the exact logging-DoS risk N-2 already closed for the buffer-overflow alert path.
+```
+
+new:
+```
+which would let a persistently failing sink flood the log.
+```
+
 ## CH-0152
 
 - moved from: `src/r2db_api/service.py` (`_DenialCoalescer._requeue_failed_aggregate`)
@@ -1267,6 +1449,20 @@ are required for this to be safe.
 # deliberately mirroring `_AuditBuffer`'s own N-2 state-transition
 # logging discipline (log only on failing<->healthy transitions,
 # never once per attempt).
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the buffer whose discipline this mirrored is removed
+
+old:
+```
+a single, process-wide flag, deliberately mirroring `_AuditBuffer`'s own N-2 state-transition logging discipline (log only on failing<->healthy transitions, never once per attempt).
+```
+
+new:
+```
+a single, process-wide flag, logging only on failing<->healthy transitions, never once per attempt.
 ```
 
 ## CH-0155
@@ -1639,6 +1835,20 @@ normative rule: the confirmation choke for `transact`, unconditional
 for `apply_schema`).
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the hook fires for every real `transact` batch, not only a confirmed delete
+
+old:
+```
+supplies none of it, only the fail-closed/buffer-class decision (D-2's normative rule: the confirmation choke for `transact`, unconditional for `apply_schema`).
+```
+
+new:
+```
+supplies none of it, only the moment (every real batch for `transact`, unconditional for `apply_schema`).
+```
+
 ## CH-0167
 
 - moved from: `src/r2db_api/service.py` (`MutationResult`)
@@ -1777,6 +1987,20 @@ is the opaque cursor for the next page (`QueryOutcome.next_cursor`,
 # row write path -- mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_
 # WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline
 # (N-2), applied to `_DenialCoalescer._note_aggregate_write_result`.
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- ordinary data-operation events are written synchronously before the response and the in-memory buffer is removed; the alert messages this mirrored are removed
+
+old:
+```
+mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline
+```
+
+new:
+```
+follows a state-transition-only discipline (logged on failing<->healthy transitions, never once per attempt)
 ```
 
 ## CH-0174

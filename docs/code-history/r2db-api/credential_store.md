@@ -362,6 +362,34 @@ per-batch retry queue -- is SI-14's "explicit operational alert"
 answer to that loss).
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- the in-memory buffer that called `append_many` is removed; the batch is no longer a buffer flush
+
+old:
+```
+every buffered `audit.AuditEvent` in `events`
+```
+
+new:
+```
+every `audit.AuditEvent` in `events`
+```
+
+### correction: 2026-09-30
+
+- reason: R-115 WP-4a -- the in-memory buffer that called `append_many` is removed; no buffer-flush logic treats a failed batch as lost events any more
+
+old:
+```
+A `psycopg.Error` propagates to the caller unchanged; `service.py`'s buffer-flush logic treats a failed flush as lost events (D-4: buffer content is a best-effort channel, the overflow-alert mechanism -- not a per-batch retry queue -- is SI-14's "explicit operational alert" answer to that loss).
+```
+
+new:
+```
+A `psycopg.Error` propagates to the caller unchanged, so a failed batch is never silently treated as recorded (SI-14); `service.py` writes each event with `append` instead.
+```
+
 ## CH-0407
 
 - moved from: `src/r2db_api/credential_store.py` (`PostgresAuditQueryStore`)

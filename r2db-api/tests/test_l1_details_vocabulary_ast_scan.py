@@ -258,7 +258,13 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: single `fail()` call, pushing it down by 45 lines. Re-verified against
 #: the current file via `_fail_call_sites`. Entry count and site identity
 #: unchanged (1).
-    ("postgres.py", 1779),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+#: R-115 WP-4a (2026-09-30): line shift only (1779 -> 1785) -- `PostgresCell.
+#: transact` moved its audit pre-commit call after the idempotency record
+#: write and gained an `error`-row call in each of its two 413 branches, net
+#: +6 lines ABOVE `_fail_client_value`'s own single `fail()` call.
+#: Re-verified against the current file via `_fail_call_sites`. Entry count
+#: and site identity unchanged (1).
+    ("postgres.py", 1785),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

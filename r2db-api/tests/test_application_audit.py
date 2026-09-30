@@ -2,12 +2,12 @@
 `0007_application_audit.sql`, the sink pair (`audit.ApplicationAuditSink` /
 `credential_store.PostgresApplicationAuditSink`), the `StorageBackend`
 pre-commit hook (`backend.py`/`structured.py`/`postgres.py`), the dispatch
-rules in `service.py` (fail-closed vs. coalesced-denial vs. buffer vs.
-non-durable), the bounded buffer + overflow alert, and the two writer-
+rules in `service.py` (fail-closed vs. coalesced-denial vs. synchronously
+written ordinary events vs. non-durable), and the two writer-
 connection timeouts -- tested against real PostgreSQL (§5.3 C-5: must not
 be skipped) and, where real-PostgreSQL realism is not the point of the
 test, against the pure in-memory backend (`structured.ApplicationCell` +
-`audit.ApplicationAuditSink`), which lets the dispatch/buffer/coalescing
+`audit.ApplicationAuditSink`), which lets the dispatch/coalescing
 logic itself be exercised deterministically (an injected fake clock, no
 network) without diluting what each test is actually checking.
 
@@ -1358,7 +1358,7 @@ def test_control_visibility_lag_ms_reflects_the_sibling_roles_catalog_not_only_i
 
 
 # ===========================================================================
-# In-memory helpers for the dispatch/buffer/coalescing/hook tests below.
+# In-memory helpers for the dispatch/coalescing/hook tests below.
 # These deliberately do NOT use `PostgresCell`/real Postgres: what they
 # check is `DataService`'s own dispatch logic (§7.1-7.4, D-2/D-3/D-4/D-10),
 # which is backend-agnostic by construction (`StorageBackend` protocol) --
@@ -1384,17 +1384,15 @@ class _FakeClock:
 
 
 class _SelectiveFaultSink:
-    """Wraps a real `ApplicationAuditSink`, failing only `append`/
-    `append_many` calls whose `event_class` is in `fail_event_classes` --
-    lets a test target exactly one durable-write call site (e.g. only the
-    D-4 overflow-alert row) while every other call succeeds normally, which
-    a single blanket `inject_fault()` cannot express."""
+    """Wraps a real `ApplicationAuditSink`, failing only `append` calls
+    whose `event_class` is in `fail_event_classes` -- lets a test target
+    exactly one durable-write call site while every other call succeeds
+    normally, which a single blanket `inject_fault()` cannot express."""
 
     def __init__(self, inner: ApplicationAuditSink) -> None:
         self._inner = inner
         self.fail_event_classes: set[str] = set()
         self.append_calls: list[dict[str, Any]] = []
-        self.append_many_calls: int = 0
 
     def append(self, **kwargs: Any) -> AuditEvent:
         self.append_calls.append(dict(kwargs))
@@ -1402,18 +1400,12 @@ class _SelectiveFaultSink:
             raise RuntimeError("simulated selective sink failure")
         return self._inner.append(**kwargs)
 
-    def append_many(self, events: list[AuditEvent]) -> None:
-        self.append_many_calls += 1
-        if "__buffer__" in self.fail_event_classes:
-            raise RuntimeError("simulated buffer-flush failure")
-        self._inner.append_many(events)
-
     def events(self) -> tuple:
         return self._inner.events()
 
 
 def build_service(
-    *, durable_audit: Any | None = None, clock: Any | None = None, audit_buffer_capacity: int = 1000,
+    *, durable_audit: Any | None = None, clock: Any | None = None,
     denial_coalesce_window_s: float = 60.0, limits: ResourceLimits | None = None,
 ) -> tuple[DataService, Any]:
     """A pure in-memory `DataService`, one application (`app-a`, runtime
@@ -1427,7 +1419,7 @@ def build_service(
         credentials.add("dev-a", "app-a", "developer", "dev-secret-a", work=work)
     service = DataService(
         credentials, limits=limits or LIMITS, durable_audit=durable_audit, clock=clock,
-        audit_buffer_capacity=audit_buffer_capacity, denial_coalesce_window_s=denial_coalesce_window_s,
+        denial_coalesce_window_s=denial_coalesce_window_s,
     )
     control = ControlAuthority(service)
     control.register_application("app-a", entities={"notes": [{"body": "a"}]})
@@ -1490,7 +1482,7 @@ def test_destructive_mutate_is_service_unavailable_when_the_durable_sink_fails()
     # Data side is untouched: the row is still there.
     durable.inject_fault(None)
     assert service.query(ctx, "notes", select=["id"]) == [{"id": 1}]
-    assert durable_events(durable) == []
+    assert [e for e in durable_events(durable) if e["operation"] == "mutate"] == []
 
 
 def test_schema_operation_is_service_unavailable_when_the_durable_sink_fails() -> None:
@@ -1767,6 +1759,134 @@ def test_simulated_process_loss_leaves_the_allow_row_alone(platform: types.Simpl
         assert rows[0][8] == "allow"
     finally:
         sink.close()
+
+
+def _install_commit_time_sleep(platform: types.SimpleNamespace, app: types.SimpleNamespace, entity: str, *, seconds: float) -> None:
+    """Installs a deferred constraint trigger on `entity` that sleeps inside
+    the COMMIT statement itself (deferred triggers fire at commit, after
+    every statement of the transaction has already run) -- the one place a
+    cancellation can land AFTER the pre-commit hook has returned. A
+    statement timeout cannot do that job: PostgreSQL disarms it before it
+    commits, so a COMMIT that runs long inside a deferred trigger is never
+    canceled by `SET LOCAL statement_timeout` (measured, not assumed)."""
+    admin_dsn = _dsn_with(platform.admin_dsn, dbname=app.database)
+    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+        admin.execute(
+            f"CREATE FUNCTION public.r2db_test_slow_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep({seconds}); RETURN NULL; END $$"
+        )
+        admin.execute(
+            f"CREATE CONSTRAINT TRIGGER r2db_test_slow_commit AFTER INSERT OR DELETE ON public.{entity} "
+            "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.r2db_test_slow_commit()"
+        )
+
+
+def _cancel_the_commit_in_flight(admin_dsn: str, dbname: str, *, deadline_s: float = 10.0) -> None:
+    """Polls until a backend on `dbname` is running a bare `COMMIT`
+    (`conn.transaction()`'s own exit) and cancels that statement with
+    `pg_cancel_backend`, the same signal an operator's cancel sends."""
+    end = time.monotonic() + deadline_s
+    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+        while time.monotonic() < end:
+            rows = admin.execute(
+                "SELECT pg_cancel_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid() AND state = 'active' AND query = 'COMMIT'",
+                [dbname],
+            ).fetchall()
+            if rows:
+                return
+            time.sleep(0.05)
+
+
+@pytest.mark.parametrize("kind", ["insert", "delete"])
+def test_commit_canceled_after_the_pre_commit_row_writes_an_error_row_and_stays_413(platform: types.SimpleNamespace, app_a: types.SimpleNamespace, kind: str) -> None:
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], LIMITS)
+        phrase = _delete_phrase(cell, "notes", [{"field": "id", "operator": "eq", "value": 1}])
+        _install_commit_time_sleep(platform, app_a, "notes", seconds=3.0)
+
+        request_id = f"r-commit-canceled-{kind}-{uuid.uuid4()}"
+        fields = {
+            "event_class": "data_operation", "request_id": request_id, "application_id": app_a.slug,
+            "actor_type": "application_credential", "actor_id": "cred-fake", "role": "runtime",
+            "operation": "mutate", "target_kind": "entity", "target_id": None,
+        }
+        from r2db_api.service import _PreCommitHook
+
+        operation = (
+            {"operation": "insert", "values": {"body": "b"}} if kind == "insert"
+            else {"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "destructive": True, "confirmation": phrase}
+        )
+        canceller = threading.Thread(target=_cancel_the_commit_in_flight, args=(_dsn_with(platform.admin_dsn, dbname=app_a.database), app_a.database))
+        canceller.start()
+        try:
+            with pytest.raises(FoundationError) as exc:
+                cell.transact("notes", [operation], LIMITS, audit_hook=_PreCommitHook(sink, fields))
+        finally:
+            canceller.join()
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert exc.value.status == 413
+
+        matching = [r for r in _application_audit_rows(platform) if r[1] == request_id]
+        assert sorted(r[8] for r in matching) == ["allow", "error"], f"expected an allow row then an error row for {request_id!r}, got {matching!r}"
+        assert [r[9] for r in matching if r[8] == "error"] == ["commit_failed"]
+
+        # the data did not commit: the seeded row is still the only one, unchanged
+        fresh_cell = make_cell(app_a)
+        try:
+            outcome = fresh_cell.query("notes", select=["id", "body"], where=[], page_size=10, limits=LIMITS)
+            assert [(row["id"], row["body"]) for row in outcome.items] == [(1, "a")]
+        finally:
+            fresh_cell.close()
+    finally:
+        sink.close()
+        cell.close()
+
+
+def test_commit_waiting_on_a_lock_past_the_execution_budget_writes_an_error_row_and_stays_413(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    """The other 413 branch: work a deferred trigger does at commit can wait
+    on a lock, and `lock_timeout` (unlike `statement_timeout`) does bound
+    that wait. The response stays 413 and the `error` row is written."""
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    admin_dsn = _dsn_with(platform.admin_dsn, dbname=app_a.database)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute("CREATE TABLE public.r2db_test_lock_target (id integer)")
+            admin.execute(
+                "CREATE FUNCTION public.r2db_test_lock_wait() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$ "
+                "BEGIN LOCK TABLE public.r2db_test_lock_target IN ACCESS SHARE MODE; RETURN NULL; END $$"
+            )
+            admin.execute(
+                "CREATE CONSTRAINT TRIGGER r2db_test_lock_wait AFTER INSERT ON public.notes "
+                "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.r2db_test_lock_wait()"
+            )
+
+        request_id = f"r-commit-lock-{uuid.uuid4()}"
+        fields = {
+            "event_class": "data_operation", "request_id": request_id, "application_id": app_a.slug,
+            "actor_type": "application_credential", "actor_id": "cred-fake", "role": "runtime",
+            "operation": "mutate", "target_kind": "entity", "target_id": None,
+        }
+        from r2db_api.service import _PreCommitHook
+
+        with psycopg.connect(admin_dsn) as holder:
+            holder.execute("LOCK TABLE public.r2db_test_lock_target IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(FoundationError) as exc:
+                cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], replace(LIMITS, execution_ms=300), audit_hook=_PreCommitHook(sink, fields))
+            holder.rollback()
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert exc.value.status == 413
+
+        matching = [r for r in _application_audit_rows(platform) if r[1] == request_id]
+        assert sorted(r[8] for r in matching) == ["allow", "error"], f"expected an allow row then an error row for {request_id!r}, got {matching!r}"
+        assert cell.query("notes", select=["id"], where=[], page_size=10, limits=LIMITS).items == []
+    finally:
+        sink.close()
+        cell.close()
 
 
 # ===========================================================================
@@ -2247,7 +2367,7 @@ def test_different_denial_keys_do_not_coalesce_together() -> None:
     assert len(durable_events(durable)) == 1
 
 
-def test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry() -> None:
+def test_validation_failed_denials_add_no_durable_row() -> None:
     durable = ApplicationAuditSink()
     service, _control = build_service(durable_audit=durable)
     ctx = runtime_context(service)
@@ -2257,7 +2377,6 @@ def test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry() -> N
     assert exc.value.code == "VALIDATION_FAILED"
 
     assert durable_events(durable) == []
-    assert service._audit_buffer.pending_count() == 0
 
 
 def test_capability_unsupported_and_not_found_denials_add_no_durable_row() -> None:
@@ -2320,700 +2439,275 @@ def test_force_expire_denial_windows_flushes_an_unexpired_window_too() -> None:
 
 
 # ===========================================================================
-# Section 7: D-4 bounded buffer + overflow alert (§9.2 property 3/7).
+# Section 7: an ordinary data operation's event is durable before its
+# response. A query, a catalog read, a non-destructive mutate, and the
+# replay of a keyed mutate or schema operation all reach the durable sink
+# before the caller sees a result; a sink failure is fail-closed (503).
 # ===========================================================================
 
 
-class _AlwaysFailingAppendMany:
-    """WP-2(a) review M-2: `_AuditBuffer.push` now triggers a SYNCHRONOUS
-    `flush()` the moment the buffer reaches its threshold (§7.3's own
-    "periodic or threshold" flush triggers), and `flush()` now RETAINS
-    buffered events on a failed `append_many` instead of discarding them
-    (so a transient failure is retried, not lost outright) -- together,
-    this means that under a HEALTHY sink, capacity eviction is no longer
-    reachable via ordinary sequential `push()` calls at all: the threshold
-    flush keeps draining the buffer well before it can ever reach capacity
-    (see `test_healthy_sink_threshold_flush_prevents_reaching_capacity_
-    eviction`, below, which proves exactly this). Genuine eviction is now a
-    signal that the SINK cannot keep up, not an artifact of the periodic
-    timer's interval -- so these tests reach it with a durably-failing
-    `append_many` (a slow/down sink is exactly the scenario D-4's overflow
-    alert exists for)."""
+def _events_for(durable: Any, request_id: str) -> list[dict]:
+    return [e for e in durable_events(durable) if e["request_id"] == request_id]
+
+
+def test_query_event_is_durable_before_the_result_is_returned() -> None:
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable)
+    ctx = runtime_context(service)
+
+    service.query(ctx, "notes", select=["id"], request_id="r-query-sync")
+
+    rows = _events_for(durable, "r-query-sync")
+    assert [(r["event_class"], r["operation"], r["outcome"]) for r in rows] == [("data_operation", "query", "allow")]
+
+
+def test_catalog_event_is_durable_before_the_result_is_returned() -> None:
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable)
+    ctx = runtime_context(service)
+
+    service.catalog(ctx, request_id="r-catalog-sync")
+
+    rows = _events_for(durable, "r-catalog-sync")
+    assert [(r["event_class"], r["operation"], r["outcome"]) for r in rows] == [("data_operation", "catalog", "allow")]
+
+
+def test_mutate_replay_event_is_durable_before_the_result_is_returned() -> None:
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable)
+    ctx = runtime_context(service)
+    operations = [{"operation": "insert", "values": {"body": "replayed-once"}}]
+
+    service.mutate_result(ctx, "notes", operations, idempotency_key="k-mutate-replay", request_id="r-mutate-first")
+    replay = service.mutate_result(ctx, "notes", operations, idempotency_key="k-mutate-replay", request_id="r-mutate-resend")
+
+    assert replay.request_id == "r-mutate-first"  # answered from the record, not re-executed
+    rows = _events_for(durable, "r-mutate-resend")
+    assert [(r["event_class"], r["operation"], r["outcome"]) for r in rows] == [("data_operation", "mutate", "replayed")]
+
+
+def test_schema_replay_event_is_durable_before_the_result_is_returned() -> None:
+    """A resent keyed schema operation answered from its record still
+    leaves its own durable line -- unlike a first execution, no pre-commit
+    hook ran for it, so `_event` itself must write it before the response."""
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable)
+    dev = developer_context(service)
+    operation = {"operation": "create_entity", "entity": "widgets_schema_replay", "idempotency_key": "k-schema-replay"}
+
+    service.schema(dev, operation, request_id="r-schema-first")
+    replay = service.schema(dev, operation, request_id="r-schema-resend")
+
+    assert replay.replayed is True
+    rows = _events_for(durable, "r-schema-resend")
+    assert [(r["event_class"], r["operation"], r["outcome"]) for r in rows] == [("privilege_sensitive", "schema", "replayed")]
+
+
+@pytest.mark.parametrize("kind", ["query", "catalog", "insert", "mutate_replay", "schema_replay"])
+def test_a_sink_failure_makes_an_ordinary_operation_service_unavailable_and_keeps_no_event(kind: str) -> None:
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable)
+    ctx = runtime_context(service)
+    dev = developer_context(service)
+    operations = [{"operation": "insert", "values": {"body": "sink-failure"}}]
+    schema_operation = {"operation": "create_entity", "entity": "widgets_sink_failure", "idempotency_key": "k-sink-failure-schema"}
+    if kind == "mutate_replay":
+        service.mutate_result(ctx, "notes", operations, idempotency_key="k-sink-failure-mutate", request_id="r-first")
+    if kind == "schema_replay":
+        service.schema(dev, schema_operation, request_id="r-first")
+    events_before = len(durable_events(durable))
+
+    durable.inject_fault(RuntimeError("simulated durable-sink failure"))
+    with pytest.raises(FoundationError) as exc:
+        if kind == "query":
+            service.query(ctx, "notes", select=["id"])
+        elif kind == "catalog":
+            service.catalog(ctx)
+        elif kind == "insert":
+            service.mutate(ctx, "notes", operations)
+        elif kind == "mutate_replay":
+            service.mutate_result(ctx, "notes", operations, idempotency_key="k-sink-failure-mutate", request_id="r-resend")
+        else:
+            service.schema(dev, schema_operation, request_id="r-resend")
+    assert exc.value.code == "SERVICE_UNAVAILABLE"
+    assert exc.value.status == 503
+
+    durable.inject_fault(None)
+    assert len(durable_events(durable)) == events_before  # the failed write kept no event, and no denial row was made up for it
+
+
+def test_authenticate_success_stays_out_of_the_durable_sink() -> None:
+    """`authenticate`'s own success is not a data operation: it stays in the
+    legacy in-memory sink only, with no durable row (and so no new failure
+    mode on the login path)."""
+    durable = ApplicationAuditSink()
+    service, _control = build_service(durable_audit=durable)
+
+    runtime_context(service)
+    durable.inject_fault(RuntimeError("simulated durable-sink failure"))
+    ctx = runtime_context(service)  # would raise if authenticate wrote durably
+
+    assert ctx is not None
+    durable.inject_fault(None)
+    assert durable_events(durable) == []
+
+
+class _ObservingHook:
+    """Forwards to a real `_PreCommitHook`; right after the real
+    `pre_commit()` returns -- i.e. while the data transaction is still
+    open and uncommitted -- it records what a second connection can see:
+    the `allow` row in `application_audit`, and the entity's rows."""
+
+    def __init__(self, real_hook: Any, platform: types.SimpleNamespace, app: types.SimpleNamespace, request_id: str) -> None:
+        self._real_hook = real_hook
+        self._platform = platform
+        self._app = app
+        self._request_id = request_id
+        self.allow_rows_seen_before_commit: list[tuple] | None = None
+        self.entity_rows_seen_before_commit: int | None = None
+        self.fired = False
+
+    def pre_commit(self) -> None:
+        self._real_hook.pre_commit()
+        self.fired = True
+        self.allow_rows_seen_before_commit = [r for r in _application_audit_rows(self._platform) if r[1] == self._request_id]
+        fresh = make_cell(self._app)
+        try:
+            self.entity_rows_seen_before_commit = len(fresh.query("notes", select=["id"], where=[], page_size=10, limits=LIMITS).items)
+        finally:
+            fresh.close()
+
+    def commit_failed(self) -> None:
+        self._real_hook.commit_failed()
+
+
+def test_non_destructive_mutate_allow_row_is_committed_before_the_data_commit(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        request_id = f"r-nondestructive-{uuid.uuid4()}"
+        from r2db_api.service import _PreCommitHook
+
+        fields = {
+            "event_class": "data_operation", "request_id": request_id, "application_id": app_a.slug,
+            "actor_type": "application_credential", "actor_id": "cred-fake", "role": "runtime",
+            "operation": "mutate", "target_kind": "entity", "target_id": None,
+        }
+        hook = _ObservingHook(_PreCommitHook(sink, fields), platform, app_a, request_id)
+
+        outcome = cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], LIMITS, audit_hook=hook)
+
+        assert outcome.destructive is False  # an insert never passes the confirmation choke
+        assert hook.fired is True
+        assert [r[8] for r in hook.allow_rows_seen_before_commit or []] == ["allow"]  # committed before the data
+        assert hook.entity_rows_seen_before_commit == 0  # while the data was still uncommitted
+        assert len(cell.query("notes", select=["id"], where=[], page_size=10, limits=LIMITS).items) == 1
+    finally:
+        sink.close()
+        cell.close()
+
+
+class _FailingSink:
+    """An audit sink whose every write fails, standing in for a platform
+    database that cannot be written."""
 
     def append(self, **kwargs: Any) -> None:
-        pass  # unused by these two tests
-
-    def append_many(self, events: list[Any]) -> None:
-        raise RuntimeError("simulated durably-failing sink")
-
-    def events(self) -> tuple:
-        return ()
-
-
-def test_buffer_does_not_grow_past_its_configured_bound() -> None:
-    service, _control = build_service(durable_audit=_AlwaysFailingAppendMany(), audit_buffer_capacity=3)
-    ctx = runtime_context(service)
-
-    for _ in range(10):
-        service.query(ctx, "notes", select=["id"])
-
-    assert service._audit_buffer.pending_count() == 3
-
-
-def test_healthy_sink_threshold_flush_prevents_reaching_capacity_eviction() -> None:
-    """The positive counterpart to the eviction tests around it (M-2's own
-    "壊れるシナリオ", proven in the direction it actually protects against):
-    under a HEALTHY sink, pushing well past a small capacity never once
-    evicts -- the threshold flush (§7.3, `_AuditBuffer._FLUSH_THRESHOLD_
-    FRACTION`) keeps draining the buffer first."""
-    durable = ApplicationAuditSink()
-    service, _control = build_service(durable_audit=durable, audit_buffer_capacity=5)
-    ctx = runtime_context(service)
-
-    for _ in range(50):
-        service.query(ctx, "notes", select=["id"])
-
-    assert service._audit_buffer.pending_count() < 5
-    # Every event pushed either sits in the (small, below-threshold) tail
-    # or was already durably flushed -- none was silently dropped.
-    assert len(durable_events(durable)) + service._audit_buffer.pending_count() == 50
-
-
-def test_concurrent_periodic_and_threshold_flush_never_double_writes_pending_events() -> None:
-    """WP-3(a) review B-2 (both peers): `_AuditBuffer.flush()` had no
-    reentrancy guard. `push()`'s own synchronous threshold-flush (M-2,
-    above) and the composition root's periodic flush thread
-    (`main.py`'s `_audit_flush_loop` -> `service.flush_audit_buffer()`) can
-    both call `flush()` on the SAME buffer instance concurrently. The old
-    body only ever held `self._lock` for the brief snapshot
-    (`pending = list(self._events)`) and, on success, for the brief
-    deletion (`del self._events[:len(pending)]`) -- the durable
-    `append_many` I/O itself ran with the lock released. A second,
-    concurrent `flush()` call could take an IDENTICAL snapshot of
-    `self._events` before the first one's `append_many` returned and
-    deleted that prefix, so BOTH durably wrote the same pending events --
-    D-10's "1 operation = at most 1 durable row" broken by duplication
-    (observed verbatim on the MitateDB peer as `['e1','e2','e3','e1',
-    'e2','e3']`; r2db is the same shape).
-
-    Reproduced deterministically (not as a rare timing accident): a fake
-    sink blocks the FIRST `append_many` call it receives (signalling once
-    it has been entered) and lets any OTHER concurrent call through
-    immediately. The test starts one `flush()` thread, waits until it is
-    confirmed blocked inside `append_many` (i.e. it has already taken its
-    snapshot but not yet deleted it), THEN starts a second `flush()` call
-    for the very same buffer and lets it run to completion, and only then
-    releases the first call. This is exactly the interleaving a real
-    periodic-thread/threshold-flush race can hit, made certain instead of
-    probabilistic -- and it stays deterministic under the fix too: a
-    correct swap-under-lock leaves the second call nothing to flush (it
-    returns immediately without ever calling the sink), so this test can
-    never deadlock waiting for a second sink call that a correct
-    implementation would not make.
-    """
-    from r2db_api.service import _AuditBuffer
-
-    class _BlockFirstCallSink:
-        def __init__(self) -> None:
-            self.calls: list[list[str]] = []
-            self._state_lock = threading.Lock()
-            self.first_call_started = threading.Event()
-            self.release_first_call = threading.Event()
-            self._first_call_claimed = False
-
-        def append(self, **kwargs: Any) -> None:  # pragma: no cover - unused by this test
-            raise AssertionError("append() (single-event) is not used by this reentrancy test")
-
-        def append_many(self, events: "list[AuditEvent]") -> None:
-            with self._state_lock:
-                is_first = not self._first_call_claimed
-                self._first_call_claimed = True
-            if is_first:
-                self.first_call_started.set()
-                assert self.release_first_call.wait(timeout=5), "test never released the blocked first append_many() call"
-            with self._state_lock:
-                self.calls.append([e.request_id for e in events])
-
-    sink = _BlockFirstCallSink()
-    buffer = _AuditBuffer(sink, capacity=1000, clock=lambda: 0.0)
-    # Seed a pre-existing backlog directly -- this is the SAME backlog both
-    # flush() calls below race over, mirroring "the periodic timer fires
-    # while a request-path threshold flush is already in flight for it".
-    for i in range(3):
-        buffer._events.append(
-            AuditEvent(
-                str(uuid.uuid4()), "data_operation", "2026-09-03T00:00:00+00:00",
-                f"e{i + 1}", "app-a", "application_credential", "cred-a", "runtime",
-                "query", "entity", "allow", None, None, None,
-            )
-        )
-
-    thread_a = threading.Thread(target=buffer.flush, name="periodic-flush")
-    thread_a.start()
-    assert sink.first_call_started.wait(timeout=5), "thread A's flush() never reached append_many()"
-
-    # Thread A is now blocked inside append_many, holding no lock -- pre-fix,
-    # its snapshot is still sitting un-deleted in `self._events`; post-fix,
-    # it has already been swapped out and `self._events` is empty.
-    thread_b = threading.Thread(target=buffer.flush, name="threshold-flush")
-    thread_b.start()
-    thread_b.join(timeout=5)
-    assert not thread_b.is_alive(), "thread B's flush() did not complete promptly"
-
-    sink.release_first_call.set()
-    thread_a.join(timeout=5)
-    assert not thread_a.is_alive(), "thread A's flush() deadlocked after being released"
-
-    all_written = [rid for call in sink.calls for rid in call]
-    assert sorted(all_written) == ["e1", "e2", "e3"], (
-        "the same pending backlog must be durably written EXACTLY ONCE across both concurrent "
-        f"flush() calls (periodic + threshold), never duplicated -- got {all_written!r} from calls {sink.calls!r}"
-    )
-    assert buffer.pending_count() == 0, f"both events must have left the buffer after a successful flush, got {buffer.pending_count()} left"
-
-
-def test_concurrent_push_during_a_failing_flush_never_grows_the_buffer_past_capacity() -> None:
-    """WP-3(a) review B-1 (blocker, on the B-2 swap-out fix above): while
-    `flush()` holds `pending` outside `self._events` (the swap that fixed
-    B-2's double-write), `push()` sees an (transiently empty) buffer and
-    does not evict against `pending`'s size -- only against whatever
-    `push()` itself is concurrently adding. A naive unconditional
-    restore-on-failure (`self._events = pending + self._events`) could
-    therefore let the buffer grow WITHOUT BOUND across repeated failed
-    flushes, breaking D-4's "bounded in-memory buffer (既定 1000)" -- and
-    silently: no `push()` eviction fires during that growth, so neither
-    `_dropped_total` nor the overflow alert ever reflects it (a sink
-    outage would accumulate unbounded evidence in memory with no in-band
-    signal at all).
-
-    Reproduces the exact scenario deterministically: a `capacity`-sized
-    backlog is already held by an in-flight, durably-failing `flush()`
-    call (blocked inside `append_many` via a `threading.Event`, not a
-    timing guess) when MORE events are concurrently `push()`-ed. Asserts
-    (i) the buffer never exceeds `capacity` once the failed flush's
-    restore completes, (ii) `_dropped_total` equals EXACTLY the number of
-    events actually, irrevocably truncated by that restore (never the
-    retained remainder -- N-1's own discipline), and (iii) the truncation
-    drops the OLDEST events first (FIFO, matching `push()`'s own `pop(0)`
-    eviction), never the newly-pushed ones.
-    """
-    from r2db_api.service import _AuditBuffer
-
-    class _BlockThenAlwaysFailSink:
-        def __init__(self) -> None:
-            self.first_call_started = threading.Event()
-            self.release_first_call = threading.Event()
-            self.append_calls: list[dict[str, Any]] = []
-
-        def append(self, **kwargs: Any) -> None:
-            # The overflow-alert row (`_retry_alert()`, called at the tail
-            # of `flush()`) -- recorded (not just accepted) so this test can
-            # assert on its `count` directly, since `flush()`'s own success
-            # here immediately resolves `_dropped_total` back towards 0
-            # (by design -- the alert row having been durably written IS
-            # what the drop count is for), so `_dropped_total` itself is not
-            # observable post-flush.
-            self.append_calls.append(dict(kwargs))
-
-        def append_many(self, events: "list[AuditEvent]") -> None:
-            self.first_call_started.set()
-            assert self.release_first_call.wait(timeout=5), "test never released the blocked flush() call"
-            raise RuntimeError("simulated durably-failing sink")
-
-    def _event(request_id: str) -> AuditEvent:
-        return AuditEvent(
-            str(uuid.uuid4()), "data_operation", "2026-09-03T00:00:00+00:00",
-            request_id, "app-a", "application_credential", "cred-a", "runtime",
-            "query", "entity", "allow", None, None, None,
-        )
-
-    sink = _BlockThenAlwaysFailSink()
-    capacity = 5
-    buffer = _AuditBuffer(sink, capacity=capacity, clock=lambda: 0.0)
-    for i in range(capacity):
-        buffer._events.append(_event(f"seed{i + 1}"))
-
-    flush_thread = threading.Thread(target=buffer.flush, name="in-flight-flush")
-    flush_thread.start()
-    assert sink.first_call_started.wait(timeout=5), "flush() never reached append_many()"
-
-    # The flush is now blocked inside append_many, holding no lock, with
-    # `capacity` events swapped OUT of `self._events` -- push() below sees
-    # an empty buffer and will not evict any of these new pushes, exactly
-    # the B-1 window. Stays below the flush threshold (0.8 * capacity ==
-    # 4) so this does not itself trigger a nested threshold-flush.
-    new_event_count = 3
-    assert new_event_count < buffer._flush_threshold
-
-    def _push_more() -> None:
-        for i in range(new_event_count):
-            buffer.push(_event(f"new{i + 1}"))
-
-    push_thread = threading.Thread(target=_push_more, name="concurrent-push")
-    push_thread.start()
-    push_thread.join(timeout=5)
-    assert not push_thread.is_alive(), "concurrent push() did not complete promptly"
-    assert buffer.pending_count() == new_event_count, "push() must not evict while the buffer is transiently empty mid-flush"
-
-    sink.release_first_call.set()
-    flush_thread.join(timeout=5)
-    assert not flush_thread.is_alive(), "flush() deadlocked after being released"
-
-    total_pushed = capacity + new_event_count
-    expected_dropped = total_pushed - capacity  # combined restore length minus capacity
-    assert buffer.pending_count() <= capacity, (
-        f"buffer must never exceed its configured capacity ({capacity}) after a failed flush's "
-        f"restore, got {buffer.pending_count()}"
-    )
-    alert_rows = [c for c in sink.append_calls if c.get("event_class") == "security_control_failure"]
-    assert alert_rows, "a genuine truncation must produce an overflow alert row, same as a push()-path eviction"
-    for row in alert_rows:
-        assert row["reason_code"] == "audit_buffer_overflow"
-    assert sum(row.get("count", 1) for row in alert_rows) == expected_dropped, (
-        f"the alert row(s)' count must equal exactly the truncated overflow ({expected_dropped}), never the "
-        f"retained remainder -- got {alert_rows!r}"
-    )
-    assert buffer._dropped_total == 0 and not buffer._alert_pending, (
-        "the alert row above must have fully resolved the drop count (this fake sink's append() always "
-        "succeeds), leaving nothing pending"
-    )
-    remaining_ids = [e.request_id for e in buffer._events]
-    assert remaining_ids == [f"seed{i + 1}" for i in range(expected_dropped, capacity)] + [f"new{i + 1}" for i in range(new_event_count)], (
-        f"truncation must drop the OLDEST events first (FIFO) and keep the newly-pushed ones -- got {remaining_ids!r}"
-    )
-
-
-def test_a_successful_flush_clears_the_failing_flag_even_when_the_buffer_is_not_empty() -> None:
-    """P4-D15 (WP-B2, ledger L4-3): `_flush_currently_failing` clears on
-    ANY successful `append_many`, regardless of whether the buffer this
-    call observes afterward is empty. Under sustained push load the
-    buffer is essentially never empty even once the sink has genuinely
-    recovered (the threshold flush -- M-2 -- keeps refilling it), so the
-    prior "only when empty" gate left the flag (and the alert backoff it
-    feeds) stuck at the sink-broken state long after recovery.
-
-    Reproduces "buffer not empty under continuous push" deterministically
-    rather than by timing: the recovery flush's own (now succeeding)
-    `append_many` call appends a new event directly into the buffer
-    before returning -- standing in for a concurrent `push()` landing
-    while that I/O was in flight -- so `self._events` is provably
-    non-empty at the moment the success branch runs.
-
-    Opus review M-1 (coordinator-adopted): completion condition 1 also
-    requires the ALERT BACKOFF to return to its floor on this same
-    successful flush, not merely the flag. Reproduced here by: (1)
-    forcing GENUINE drops via `push()`'s own eviction branch while both
-    sink write paths durably fail, so `_alert_pending`/`_dropped_total`
-    are set for real (not hand-seeded); (2) driving further failing
-    `_retry_alert()` passes so `_alert_backoff_s` grows past the floor via
-    its own exception branch; (3) recovering both write paths; (4) one
-    successful flush, arranged (per above) to leave the buffer non-empty;
-    (5) asserting BOTH the flag and the backoff the flush's own trailing
-    `_retry_alert()` call already advanced are back to their recovered
-    state.
-
-    LOAD-BEARING (flag half): on the prior code
-    (`if not self._events: self._flush_currently_failing = False`) the
-    flag assertion fails, because the buffer is non-empty when the
-    successful flush's success branch runs, and the flag stays True.
-    LOAD-BEARING (backoff half, M-1): mutating the floor-reset branch in
-    `_retry_alert` (`if flush_failing:` -> `if True:`) makes the backoff
-    assertion fail, because the just-recovered flush would then still be
-    treated as failing for backoff purposes.
-    """
-    from r2db_api.service import _AuditBuffer
-
-    def _mk_event(request_id: str) -> AuditEvent:
-        return AuditEvent(
-            str(uuid.uuid4()), "data_operation", "2026-09-03T00:00:00+00:00",
-            request_id, "app-a", "application_credential", "cred-a", "runtime",
-            "query", "entity", "allow", None, None, None,
-        )
-
-    class _Clock:
-        def __init__(self) -> None:
-            self.now = 0.0
-
-        def __call__(self) -> float:
-            return self.now
-
-        def advance(self, seconds: float) -> None:
-            self.now += seconds
-
-    class _ControllableSink:
-        """A single `fail` switch controls BOTH write paths (`append_many`
-        -- the ordinary buffer flush -- and `append` -- the overflow-alert
-        row), standing in for "the sink is down" / "the sink has
-        recovered" as one fact, the same way a real Postgres outage would
-        affect both. `refill_on_next_success_write`, when set, lets the
-        NEXT successful `append_many` refill the buffer before returning
-        -- simulating a concurrent `push()` landing mid-flight."""
-
-        def __init__(self) -> None:
-            self.fail = True
-            self.buffer: Any = None
-            self.refill_on_next_success_write = False
-
-        def append_many(self, events: list) -> None:
-            if self.fail:
-                raise RuntimeError("simulated durably-failing sink (write path)")
-            if self.refill_on_next_success_write:
-                self.refill_on_next_success_write = False
-                assert self.buffer is not None
-                self.buffer._events.append(_mk_event("concurrent-push"))
-
-        def append(self, **kwargs: Any) -> None:
-            if self.fail:
-                raise RuntimeError("simulated durably-failing sink (alert path)")
-
-    clock = _Clock()
-    sink = _ControllableSink()
-    alert_min_interval_s = 2.0
-    capacity = 2
-    buffer = _AuditBuffer(sink, capacity=capacity, clock=clock, alert_min_interval_s=alert_min_interval_s)
-    sink.buffer = buffer
-
-    # Genuine drops via push()'s own eviction branch (capacity 2, 5
-    # pushes, BOTH sink write paths durably failing throughout) -- also
-    # drives several threshold-triggered failing flush() calls, each
-    # setting `_flush_currently_failing = True` and (once `_alert_pending`
-    # is set) attempting, and failing, the alert row -- growing
-    # `_alert_backoff_s` past the floor via `_retry_alert`'s own exception
-    # branch.
-    for i in range(5):
-        buffer.push(_mk_event(f"seed{i + 1}"))
-    assert buffer._alert_pending is True
-    assert buffer._dropped_total > 0
-    assert buffer._flush_currently_failing is True
-
-    # Drive a few more failing retry-alert passes explicitly, each spaced
-    # past the current backoff, so it keeps growing (both write paths
-    # still fail here -- the sink stays fully down).
-    for _ in range(3):
-        clock.advance(buffer._alert_backoff_s + 0.001)
-        buffer._retry_alert()
-    grown_backoff = buffer._alert_backoff_s
-    assert grown_backoff > alert_min_interval_s, (
-        f"setup check: the alert backoff must have grown past the floor ({alert_min_interval_s}) "
-        f"before recovery -- got {grown_backoff}"
-    )
-
-    # Recover: BOTH write paths start succeeding. Arrange for this
-    # recovery flush's own `append_many` to refill the buffer before
-    # returning, so the buffer is NOT empty when the success branch runs.
-    sink.fail = False
-    sink.refill_on_next_success_write = True
-    clock.advance(buffer._alert_backoff_s + 0.001)
-    buffer.flush()
-
-    assert buffer.pending_count() == 1, "sanity check: the buffer must be non-empty when the success branch runs"
-    assert buffer._flush_currently_failing is False, (
-        "a successful flush must clear the failing flag unconditionally (P4-D15) -- "
-        "even though the buffer is not empty afterward"
-    )
-    # M-1: `flush()`'s own trailing `_retry_alert()` call (which already
-    # ran, above, as part of this same `flush()`) reads the JUST-CLEARED
-    # `_flush_currently_failing` and must take the reset-to-floor branch,
-    # not the exponential-growth one.
-    assert buffer._alert_backoff_s == alert_min_interval_s, (
-        "the alert backoff must reset to the floor (alert_min_interval_s) on the retry that runs as part "
-        f"of a successful flush (P4-D15) -- got backoff still elevated at {buffer._alert_backoff_s}"
-    )
-
-
-def test_a_failing_flush_that_completes_after_a_successful_one_sets_the_flag_again() -> None:
-    """P4-D15 (WP-B2, ledger L4-3): completion-order semantics -- the
-    FAILURE branch unconditionally sets `_flush_currently_failing = True`
-    (unchanged by this WP). A failing flush that completes AFTER a
-    successful one must therefore win, which is what lets the flag track
-    "the outcome of the most recently COMPLETED flush attempt", not
-    merely "has any flush ever succeeded". This is a regression guard,
-    not a load-bearing test for P4-D15 itself: it is green both before
-    and after the WP-B2 change, because the failure branch is untouched
-    by it.
-
-    Opus review M-2 (coordinator-adopted): uses REAL threads with a
-    blocking fake sink to force the actual COMPLETION order, rather than
-    merely calling `flush()` twice in program order (which cannot by
-    itself distinguish "completes after" from "is merely called after").
-    Thread A's flush() BEGINS first and is durably failing, but is
-    blocked mid-I/O on a `threading.Event`; the main thread's own,
-    independent flush() then BEGINS and COMPLETES successfully SECOND,
-    while A is still blocked; only THEN is A released to finish failing,
-    reproducing "a failing flush that completes after a successful one"
-    by actual completion order, not call order.
-    """
-    from r2db_api.service import _AuditBuffer
-
-    def _mk_event(request_id: str) -> AuditEvent:
-        return AuditEvent(
-            str(uuid.uuid4()), "data_operation", "2026-09-03T00:00:00+00:00",
-            request_id, "app-a", "application_credential", "cred-a", "runtime",
-            "query", "entity", "allow", None, None, None,
-        )
-
-    class _BlockFirstCallThenFailSink:
-        def __init__(self) -> None:
-            self.calls = 0
-            self.first_call_started = threading.Event()
-            self.release_first_call = threading.Event()
-
-        def append_many(self, events: list) -> None:
-            self.calls += 1
-            if self.calls == 1:
-                self.first_call_started.set()
-                assert self.release_first_call.wait(timeout=5), "test never released the blocked first call"
-                raise RuntimeError("simulated durably-failing sink (first call)")
-            # second call onward: succeeds immediately, unblocked.
-
-        def append(self, **kwargs: Any) -> None:  # pragma: no cover -- alert row, unused here
-            pass
-
-    sink = _BlockFirstCallThenFailSink()
-    buffer = _AuditBuffer(sink, capacity=100, clock=lambda: 0.0)
-
-    # Thread A: a flush() whose own write is the FIRST call this sink ever
-    # receives -- blocked mid-I/O below, will raise once released.
-    buffer._events.append(_mk_event("a1"))
-    thread_a = threading.Thread(target=buffer.flush, name="failing-flush")
-    thread_a.start()
-    assert sink.first_call_started.wait(timeout=5), "thread A's flush() never reached append_many()"
-
-    # Thread A is now blocked inside append_many, holding no lock (the B-2
-    # swap-out already emptied `self._events`). Push a new event and run a
-    # SECOND, independent flush() on the main thread: its own append_many
-    # call is the second one this sink ever receives, which succeeds
-    # immediately.
-    buffer.push(_mk_event("b1"))
-    buffer.flush()
-    assert buffer._flush_currently_failing is False, (
-        "the main thread's own flush() completed successfully (second call to the sink) and must have "
-        "cleared the flag"
-    )
-
-    # NOW release thread A -- its still in-flight, durably-failing call
-    # COMPLETES AFTER the successful one above.
-    sink.release_first_call.set()
-    thread_a.join(timeout=5)
-    assert not thread_a.is_alive(), "thread A's flush() deadlocked after being released"
-
-    assert buffer._flush_currently_failing is True, (
-        "a failing flush that completes after a successful one must set the flag back to True"
-    )
-
-
-def test_buffer_overflow_emits_logging_error_and_exactly_one_security_control_failure_row(caplog: pytest.LogCaptureFixture) -> None:
-    """WP-2(a) fix round 2 review N-1: reproduces the audit's own probe
-    (capacity=2, 5 pushes, `append_many` durably failing throughout,
-    `append` -- used by the alert row -- healthy). The expected eviction
-    count is computed INDEPENDENTLY (push_count - capacity), never read
-    from the implementation's own internal `_dropped_total` counter --
-    the audit's own finding was precisely that the old counter could not
-    be trusted as its own expected value (it double-counted RETAINED,
-    not-actually-lost events). Before the fix: 5 alert-row attempts
-    (one per request) summing to a `count` of 12, even though only 3
-    events were ever irrevocably lost (2 remained genuinely buffered).
-    After the fix: the fixed overflow log fires exactly once per genuine
-    eviction, and every alert row's `count` sums to exactly that
-    independently-computed number.
-    """
-    inner = ApplicationAuditSink()
-    faulty = _SelectiveFaultSink(inner)
-    faulty.fail_event_classes.add("__buffer__")  # append_many always fails; append (the alert) stays healthy
-    clock = _FakeClock()
-    capacity = 2
-    push_count = 5
-    expected_evictions = push_count - capacity
-    service, _control = build_service(durable_audit=faulty, clock=clock, audit_buffer_capacity=capacity)
-    ctx = runtime_context(service)
-
-    with caplog.at_level(logging.ERROR, logger="r2db_api.service"):
-        for _ in range(push_count):
-            service.query(ctx, "notes", select=["id"])
-
-    overflow_events = [r for r in caplog.records if "application_audit buffer overflow" in r.message]
-    assert len(overflow_events) == expected_evictions, (
-        f"the fixed overflow log must fire exactly once per GENUINE eviction ({expected_evictions}), "
-        f"never per retained-but-not-lost flush failure -- got {len(overflow_events)}"
-    )
-    # The 2 events that never got evicted are still genuinely buffered,
-    # not counted anywhere as lost (N-1's own central claim).
-    assert service._audit_buffer.pending_count() == capacity
-
-    # Let any still-pending alert state resolve (backoff advanced past).
-    clock.advance(service._audit_buffer._alert_backoff_s + 1.0)
-    service.flush_audit_buffer()
-
-    events = durable_events(inner)
-    alert_rows = [e for e in events if e["event_class"] == "security_control_failure"]
-    assert alert_rows, "expected at least one alert row"
-    for row in alert_rows:
-        assert row["reason_code"] == "audit_buffer_overflow"
-        assert row["operation"] == "audit_buffer"
-        assert row["target_kind"] == "audit_sink"
-    # WP-2(b) review B-1 (supervisor ruling 2026-09-03): an alert row
-    # representing exactly ONE drop writes `count` ABSENT (NULL), not the
-    # literal `1` -- `row.get("count", 1)` reads that correctly (absence
-    # means one occurrence), never `row["count"]` (which would now raise
-    # `KeyError` on any single-drop alert row).
-    assert sum(row.get("count", 1) for row in alert_rows) == expected_evictions, (
-        f"alert rows' counts must sum to the independently-computed eviction count "
-        f"({expected_evictions}), got rows {alert_rows!r}"
-    )
-
-
-def test_buffer_overflow_alert_row_with_exactly_one_drop_writes_no_literal_count_of_one() -> None:
-    """WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): the
-    overflow-alert row follows the identical `count` rule as the denial-
-    coalescer's summary row (design D-4, one sentence added alongside D-3's)
-    -- exactly ONE genuine eviction must still produce an alert row with
-    `count` ABSENT, never the literal `1`.
-    """
-    inner = ApplicationAuditSink()
-    faulty = _SelectiveFaultSink(inner)
-    faulty.fail_event_classes.add("__buffer__")
-    clock = _FakeClock()
-    capacity = 2
-    push_count = 3  # exactly one genuine eviction: push_count - capacity == 1
-    service, _control = build_service(durable_audit=faulty, clock=clock, audit_buffer_capacity=capacity)
-    ctx = runtime_context(service)
-
-    for _ in range(push_count):
-        service.query(ctx, "notes", select=["id"])
-
-    clock.advance(service._audit_buffer._alert_backoff_s + 1.0)
-    service.flush_audit_buffer()
-
-    events = durable_events(inner)
-    alert_rows = [e for e in events if e["event_class"] == "security_control_failure"]
-    assert alert_rows, "expected at least one alert row"
-    assert sum(row.get("count", 1) for row in alert_rows) == 1, (
-        f"expected exactly one genuine eviction total, got rows {alert_rows!r}"
-    )
-    for row in alert_rows:
-        assert "count" not in row, f"an alert row representing exactly one drop must never write count=1 -- got {row!r}"
-
-
-def test_alert_row_rate_is_bounded_to_at_most_one_per_flush_interval() -> None:
-    """WP-2(a) fix round 2 review N-2: the alert-row EMISSION RATE is
-    bounded independently of how often eviction/flush-failure occurs --
-    "1 alert row (attempt) per flush interval per process" for as long as
-    the underlying flush keeps failing, from EITHER the threshold-flush
-    path or the periodic/explicit one (§7.4). Simulates sustained
-    continuous overflow (every request evicts, `append_many` durably
-    failing) across a controlled elapsed time span and asserts the alert
-    ROW COUNT ITSELF -- not merely the count each row carries -- respects
-    `elapsed_time / alert_min_interval_s`, rounded up with a little slack.
-    """
-    inner = ApplicationAuditSink()
-    faulty = _SelectiveFaultSink(inner)
-    faulty.fail_event_classes.add("__buffer__")
-    clock = _FakeClock()
-    alert_min_interval_s = 2.0  # _AuditBuffer's own default (_DEFAULT_AUDIT_FLUSH_INTERVAL_S)
-    service, _control = build_service(durable_audit=faulty, clock=clock, audit_buffer_capacity=2)
-    ctx = runtime_context(service)
-
-    n_requests = 40
-    step_s = 0.3  # far more frequent than the alert interval
-    for _ in range(n_requests):
-        service.query(ctx, "notes", select=["id"])
-        clock.advance(step_s)
-    elapsed_s = n_requests * step_s
-
-    clock.advance(service._audit_buffer._alert_backoff_s + 1.0)
-    service.flush_audit_buffer()
-
-    alert_rows = [e for e in durable_events(inner) if e["event_class"] == "security_control_failure"]
-    upper_bound = -(-int(elapsed_s * 10) // int(alert_min_interval_s * 10)) + 1  # ceil(elapsed/interval) + 1 slack, integer-safe
-    assert 1 <= len(alert_rows) <= upper_bound, (
-        f"alert row count ({len(alert_rows)}) must stay within the rate bound ({upper_bound}) "
-        f"for {elapsed_s:.1f}s elapsed at a {alert_min_interval_s}s floor -- got {len(alert_rows)} over "
-        f"{n_requests} requests, i.e. NOT one alert row per request"
-    )
-    assert len(alert_rows) < n_requests, "must not emit one alert row per request (N-2's own central claim)"
-
-
-def test_alert_insert_failure_is_sticky_with_exponential_backoff_and_does_not_block_operations(caplog: pytest.LogCaptureFixture) -> None:
-    inner = ApplicationAuditSink()
-    faulty = _SelectiveFaultSink(inner)
-    faulty.fail_event_classes.add("security_control_failure")
-    clock = _FakeClock()
-    service, _control = build_service(durable_audit=faulty, clock=clock, audit_buffer_capacity=1000)
-    ctx = runtime_context(service)
-    dev = developer_context(service)
-
-    # Seed the "an overflow already happened" state directly (WP-2(a)
-    # review M-2: a healthy `append_many` -- unfaulted here, this test is
-    # about the ALERT retry path specifically -- combined with the
-    # threshold-flush this WP adds means a small-capacity eviction burst,
-    # this test's original setup, no longer reaches eviction at all; see
-    # `test_buffer_overflow_emits_logging_error_and_exactly_one_security_
-    # control_failure_row` for a genuine-eviction reproduction. This test's
-    # own concern -- sticky/backoff/non-blocking retry of the ALERT WRITE
-    # itself -- does not depend on how the pending state was reached, so it
-    # seeds it directly rather than re-deriving it from a fragile
-    # capacity/threshold interaction it does not otherwise care about).
-    service._audit_buffer._dropped_total = 2
-    service._audit_buffer._alert_pending = True
-
-    with caplog.at_level(logging.ERROR, logger="r2db_api.service"):
-        service.flush_audit_buffer()
-    assert any("overflow-alert row could not be written" in r.message for r in caplog.records)
-    first_backoff = service._audit_buffer._alert_backoff_s
-    # Doubled from the floor (`_DEFAULT_AUDIT_FLUSH_INTERVAL_S` = 2.0,
-    # WP-2(a) fix round 2 review N-2 -- no alert attempt is ever spaced
-    # closer together than the composition root's own flush cadence).
-    assert first_backoff > 2.0
-
-    # A genuinely unrelated fail-closed operation still succeeds while the
-    # alert is pending (§9.2 property 7's own spirit, extended to the
-    # alert path specifically -- an alert failure must never block traffic).
-    revision = service.schema(dev, {"operation": "create_entity", "entity": "widgets_alert_test"}).revision
-    assert revision >= 1
-
-    # Before the backoff interval elapses, a retry is not even attempted.
-    calls_before = len(faulty.append_calls)
-    service.flush_audit_buffer()
-    assert len(faulty.append_calls) == calls_before
-
-    # After the backoff interval elapses, it retries (and fails again,
-    # backing off further).
-    clock.advance(first_backoff + 1.0)
-    caplog.clear()
-    with caplog.at_level(logging.ERROR, logger="r2db_api.service"):
-        service.flush_audit_buffer()
-    assert len(faulty.append_calls) > calls_before
-    assert service._audit_buffer._alert_backoff_s >= first_backoff
-
-    # Now let it succeed -- pending clears, a recovery log fires.
-    faulty.fail_event_classes.discard("security_control_failure")
-    clock.advance(service._audit_buffer._alert_backoff_s + 1.0)
-    caplog.clear()
-    with caplog.at_level(logging.ERROR, logger="r2db_api.service"):
-        service.flush_audit_buffer()
-    assert any("overflow-alert row recorded" in r.message for r in caplog.records)
-    alert_rows = [e for e in durable_events(inner) if e["event_class"] == "security_control_failure"]
-    assert len(alert_rows) == 1
-
-
-def test_buffer_row_failure_does_not_block_a_fail_closed_operation() -> None:
-    inner = ApplicationAuditSink()
-    faulty = _SelectiveFaultSink(inner)
-    faulty.fail_event_classes.add("__buffer__")  # append_many always fails
-    service, _control = build_service(durable_audit=faulty)
-    ctx = runtime_context(service)
-    dev = developer_context(service)
-
-    service.query(ctx, "notes", select=["id"])  # buffered, not yet flushed
-    service.flush_audit_buffer()  # fails -- buffer content lost, alert marked pending
-    assert faulty.append_many_calls == 1
-
-    # A fail-closed operation (schema, unconditionally fail-closed) still
-    # succeeds -- it does not go through append_many at all.
-    revision = service.schema(dev, {"operation": "create_entity", "entity": "widgets_buffer_test"}).revision
-    assert revision >= 1
-    schema_rows = [e for e in durable_events(inner) if e["operation"] == "schema" and e["outcome"] == "allow"]
-    assert len(schema_rows) == 1
+        raise RuntimeError("simulated durable-sink failure")
+
+
+def test_non_destructive_mutate_is_service_unavailable_and_uncommitted_when_the_sink_fails(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        from r2db_api.service import _PreCommitHook
+
+        hook = _PreCommitHook(_FailingSink(), {
+            "event_class": "data_operation", "request_id": "r-nondestructive-fail", "application_id": app_a.slug,
+            "actor_type": "application_credential", "actor_id": "cred-fake", "role": "runtime",
+            "operation": "mutate", "target_kind": "entity", "target_id": None,
+        })
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], LIMITS, audit_hook=hook)
+        assert exc.value.code == "SERVICE_UNAVAILABLE"
+        assert exc.value.status == 503
+        assert hook.fired is False
+        assert cell.query("notes", select=["id"], where=[], page_size=10, limits=LIMITS).items == []  # fail-closed: nothing committed
+    finally:
+        cell.close()
+
+
+def test_a_failing_idempotency_record_write_happens_before_the_pre_commit_row(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    """The pre-commit row is the last statement of the data transaction --
+    after the idempotency record is written. A record write that fails
+    (here: cancelled) therefore leaves no `allow` row behind for data that
+    never committed."""
+    sink = real_durable_sink(platform)
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        request_id = f"r-idem-order-{uuid.uuid4()}"
+        from r2db_api.service import _PreCommitHook
+
+        hook = _PreCommitHook(sink, {
+            "event_class": "data_operation", "request_id": request_id, "application_id": app_a.slug,
+            "actor_type": "application_credential", "actor_id": "cred-fake", "role": "runtime",
+            "operation": "mutate", "target_kind": "entity", "target_id": None,
+        })
+        operations = [{"operation": "insert", "values": {"body": "a"}}]
+
+        def _cancelled_record_write(*args: Any, **kwargs: Any) -> None:
+            raise psycopg.errors.QueryCanceled("simulated cancel of the idempotency record write")
+
+        with patch.object(PostgresCell, "_idempotency_store", _cancelled_record_write):
+            with pytest.raises(FoundationError) as exc:
+                cell.transact(
+                    "notes", operations, LIMITS, audit_hook=hook,
+                    plan_request={"entity": "notes", "operations": operations}, idempotency_key="k-idem-order", request_id=request_id,
+                )
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert exc.value.status == 413
+        assert hook.fired is False
+        assert [r for r in _application_audit_rows(platform) if r[1] == request_id] == []
+    finally:
+        sink.close()
+        cell.close()
+
+
+def test_non_destructive_mutate_through_dataservice_writes_exactly_one_durable_row(platform: types.SimpleNamespace, app_a: types.SimpleNamespace) -> None:
+    """A real `PostgresCell` records the row itself (pre-commit hook), so
+    `DataService` must not write a second one for the same operation."""
+    sink = real_durable_sink(platform)
+    credentials = CredentialStore(pepper="test-pepper-sync-events")
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-sync-runtime", app_a.slug, "runtime", "secret-sync-runtime", work=work)
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-sync-developer", app_a.slug, "developer", "secret-sync-developer", work=work)
+    real_cell = make_cell(app_a)
+
+    def _cell_factory(application_id: str, entities: Any) -> PostgresCell:
+        assert entities is None
+        return real_cell
+
+    service = DataService(credentials, limits=LIMITS, durable_audit=sink, cell_factory=_cell_factory)
+    control = ControlAuthority(service)
+    control.register_application(app_a.slug)
+    try:
+        ctx = service.authenticate(compose_bearer_locator("cred-sync-runtime", "secret-sync-runtime"))
+        dev = service.authenticate(compose_bearer_locator("cred-sync-developer", "secret-sync-developer"))
+        service.schema(dev, {"operation": "create_entity", "entity": "notes", "fields": ["body"]})
+
+        insert_id = f"r-sync-insert-{uuid.uuid4()}"
+        query_id = f"r-sync-query-{uuid.uuid4()}"
+        service.mutate_result(ctx, "notes", [{"operation": "insert", "values": {"body": "a"}}], request_id=insert_id)
+        service.query(ctx, "notes", select=["id"], request_id=query_id)
+
+        rows = _application_audit_rows(platform)
+        assert [(r[6], r[8]) for r in rows if r[1] == insert_id] == [("mutate", "allow")]
+        assert [(r[6], r[8]) for r in rows if r[1] == query_id] == [("query", "allow")]
+    finally:
+        sink.close()
+        real_cell.close()
 
 
 # ===========================================================================
@@ -3021,12 +2715,13 @@ def test_buffer_row_failure_does_not_block_a_fail_closed_operation() -> None:
 # ===========================================================================
 
 
-def test_dispatch_point_is_the_destructive_confirmation_choke() -> None:
-    """The判定点 is whether `require_destructive_confirmation` was actually
-    passed, not `event_class`: a batch with only insert/update never sets
-    `MutationOutcome.destructive`, but a confirmed delete does -- even
-    though both reach `DataService` through the identical `mutate` call and
-    the identical `data_operation` event_class."""
+def test_mutation_outcome_destructive_still_reports_the_confirmation_choke() -> None:
+    """`MutationOutcome.destructive` still says whether a batch passed
+    `require_destructive_confirmation`: a batch with only insert/update
+    never sets it, but a confirmed delete does -- even though both reach
+    `DataService` through the identical `mutate` call and the identical
+    `data_operation` event_class. It no longer selects how the event is
+    written (every real batch is recorded before its response)."""
     durable = ApplicationAuditSink()
     service, _control = build_service(durable_audit=durable)
     ctx = runtime_context(service)
@@ -3039,7 +2734,7 @@ def test_dispatch_point_is_the_destructive_confirmation_choke() -> None:
     assert outcome.destructive is True
 
 
-def test_delete_bearing_mutate_never_enters_the_buffer_path() -> None:
+def test_delete_bearing_mutate_adds_exactly_one_durable_row() -> None:
     durable = ApplicationAuditSink()
     service, _control = build_service(durable_audit=durable)
     ctx = runtime_context(service)
@@ -3047,7 +2742,6 @@ def test_delete_bearing_mutate_never_enters_the_buffer_path() -> None:
 
     service.mutate(ctx, "notes", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "destructive": True, "confirmation": phrase}])
 
-    assert service._audit_buffer.pending_count() == 0
     events = durable_events(durable)
     assert len(events) == 1
     assert events[0]["operation"] == "mutate"
@@ -3061,15 +2755,13 @@ def test_each_data_operation_adds_exactly_one_application_audit_row() -> None:
     dev = developer_context(service)
     phrase = delete_confirmation_phrase("notes", [Predicate(field="id", operator="eq", value=1)], 0)
 
-    # Fail-closed class: exactly +1 durable row immediately.
+    # A confirmed delete: exactly +1 durable row immediately.
     service.mutate(ctx, "notes", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "destructive": True, "confirmation": phrase}])
     assert len(durable_events(durable)) == 1
 
-    # Buffer class: +1 durable row only after a flush (D-10: max one row
-    # per operation, but the ROW ITSELF is durable once flushed).
+    # An ordinary insert: exactly +1 durable row immediately as well (D-10:
+    # max one row per operation), with no flush call in between.
     service.mutate(ctx, "notes", [{"operation": "insert", "values": {"body": "b"}}])
-    assert len(durable_events(durable)) == 1  # not yet flushed
-    service.flush_audit_buffer()
     assert len(durable_events(durable)) == 2
 
     # Schema (unconditionally fail-closed): +1 more.

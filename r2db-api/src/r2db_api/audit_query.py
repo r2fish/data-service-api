@@ -39,7 +39,7 @@ from .service import _DENIAL_COALESCE_WINDOW_S
 # D-7: the vocabulary this peer's `audit_query` reader can ever surface,
 # across BOTH `control_audit` (control_plane.py's own `_deny`/
 # `_write_state_audit` call sites) and `application_audit` (service.py's
-# `_event`/`_denial_event`/`_AuditBuffer` overflow-alert call sites) --
+# `_event`/`_denial_event` call sites) --
 # `capabilities().audit_query.event_classes` publishes exactly this set
 # (`control_plane.py`), and `r2db-api/tests/test_audit_query.py::
 # test_declared_event_classes_cover_every_emittable_class` fixes it against
@@ -47,9 +47,8 @@ from .service import _DENIAL_COALESCE_WINDOW_S
 # call site with an unlisted class is caught here, not silently under-
 # declared. "authentication" (successful auth, `service.py`'s `_event`
 # call at "authentication") is deliberately EXCLUDED: it never reaches the
-# durable/buffered sink at all (`_event`'s own comment: "no durable/
-# buffered record at all"), so it can never actually appear through
-# `audit_query`.
+# durable sink at all (`_event`'s own comment: "no durable record at
+# all"), so it can never actually appear through `audit_query`.
 DECLARED_AUDIT_EVENT_CLASSES = frozenset(
     {
         # application-plane (service.py) -- durable-eligible only.
@@ -61,7 +60,7 @@ DECLARED_AUDIT_EVENT_CLASSES = frozenset(
         "authentication_denial",
         "security_control_failure",
         # control-plane (control_plane.py) -- every `control_audit` row is
-        # durable by construction (no buffer/coalescing on this plane).
+        # durable by construction (no coalescing on this plane).
         "application_lifecycle",
         "capability_denial",
         "control_credential_lifecycle",

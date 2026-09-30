@@ -1509,8 +1509,8 @@ class PostgresControlAuditSink:
 
 # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/§6.1): the same 13
 # contract `audit.fields` columns `_CONTROL_AUDIT_INSERT` writes, plus the
-# 14th column `count` (D-3's coalesced-denial summary row / D-4's
-# buffer-overflow alert row -- every other event leaves it `NULL`).
+# 14th column `count` (D-3's coalesced-denial summary row -- every other
+# event leaves it `NULL`).
 # `audit_seq`/`recorded_at` are never named here -- both are server-side
 # defaults (`bigserial`/`DEFAULT clock_timestamp()`, migration `0007_
 # application_audit.sql`), exactly like `control_audit.recorded_at` is
@@ -1539,14 +1539,15 @@ class PostgresApplicationAuditSink:
     database entirely, one per application; `application_audit` lives in
     the platform database alongside `control_audit`). Every call -- the
     D-2 pre-commit fail-closed write, the D-3 coalesced-denial first-
-    occurrence write, the D-2 commit-failure `error` row, the D-4 buffer
-    flush -- opens (and commits, or rolls back on failure) its own single
+    occurrence write, the D-2 commit-failure `error` row, the synchronous
+    write of an ordinary event -- opens (and commits, or rolls back on
+    failure) its own single
     connection/transaction from this sink's own pool, which is exactly
-    what makes D-4's "buffer flush never shares a transaction with a
-    fail-closed write" requirement automatic rather than something a
-    caller has to arrange: two calls to this class are, structurally,
-    always two different connections (or the same pooled connection reused
-    only after the first call's transaction has already ended).
+    what makes "an event write never shares a transaction with the data
+    change it describes" automatic rather than something a caller has to
+    arrange: two calls to this class are, structurally, always two
+    different connections (or the same pooled connection reused only
+    after the first call's transaction has already ended).
     """
 
     def __init__(
@@ -1635,16 +1636,14 @@ class PostgresApplicationAuditSink:
             conn.commit()
 
     def append_many(self, events: "list[Any]") -> None:
-        """every buffered `audit.AuditEvent` in `events` is written as one
+        """every `audit.AuditEvent` in `events` is written as one
         multi-row `INSERT` on one connection/transaction -- either the
         whole batch commits or (on failure) none of it does, exactly
         like `audit.ApplicationAuditSink.append_many`'s in-memory
         all-or-nothing behaviour (D-10 parity). A `psycopg.Error` propagates
-        to the caller unchanged; `service.py`'s buffer-flush logic
-        treats a failed flush as lost events (D-4: buffer content is a
-        best-effort channel, the overflow-alert mechanism -- not a
-        per-batch retry queue -- is SI-14's "explicit operational
-        alert" answer to that loss).
+        to the caller unchanged, so a failed batch is never silently
+        treated as recorded (SI-14); `service.py` writes each event with
+        `append` instead.
 
         History: CH-0406
         """

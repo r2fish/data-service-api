@@ -1822,10 +1822,11 @@ _NON_DURABLE_EVENT_CLASSES: frozenset[str] = frozenset(
     {
         # `_event` (service.py, `event_class="authentication"`) --
         # `authenticate()`'s own success event. `_event`'s own dispatch
-        # body (the `if event_class != "data_operation": return` guard
-        # right before the buffer-class enqueue) keeps this literal in the
-        # legacy in-memory `self._audit` sink only; it never reaches the
-        # buffer or the denial-coalescer.
+        # body (the `if outcome == "allow" and event_class !=
+        # "data_operation": return` guard right before the synchronous
+        # durable write) keeps this literal in the legacy in-memory
+        # `self._audit` sink only; it never reaches the durable sink or
+        # the denial-coalescer.
         "authentication",
         # `_control_event` (service.py) writes ONLY to the legacy
         # in-memory `self._service._audit` sink -- never to the durable
@@ -1930,6 +1931,24 @@ _NON_DURABLE_TARGET_KINDS: frozenset[str] = frozenset(
         "application_or_credential",
     }
 )
+
+
+# Words the peer still DECLARES (a past row can carry one, and `audit_query`
+# must keep returning it -- contract 1.5.0's superset obligation) but no
+# source line emits any more. They belong to D, not N: N is for words that
+# are emitted but never reach a durable table. Each set below is part of the
+# equality checked by the three `test_declared_*_cover_every_emittable_*`
+# tests: `emitted == (D | N) - G`, with G a subset of D that no source line
+# emits. An entry here therefore fails as soon as a line emits the word
+# again, and a word that stops being emitted without being listed here
+# fails too.
+#
+# The application-plane events of a buffer that no longer exists: its
+# overflow-alert row (`event_class="security_control_failure"`,
+# `operation="audit_buffer"`, `target_kind="audit_sink"`).
+_DECLARED_BUT_NOT_EMITTED_EVENT_CLASSES: frozenset[str] = frozenset({"security_control_failure"})
+_DECLARED_BUT_NOT_EMITTED_OPERATIONS: frozenset[str] = frozenset({"audit_buffer"})
+_DECLARED_BUT_NOT_EMITTED_TARGET_KINDS: frozenset[str] = frozenset({"audit_sink"})
 
 
 def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
@@ -2105,11 +2124,14 @@ def test_declared_event_classes_cover_every_emittable_class(kind, platform):
 
         d = DECLARED_AUDIT_EVENT_CLASSES
         n = _NON_DURABLE_EVENT_CLASSES
+        g = _DECLARED_BUT_NOT_EMITTED_EVENT_CLASSES
         assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-        assert emitted == d | n, (
-            f"emittable-vs-(declared|N) mismatch: "
+        assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+        assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+        assert emitted == (d | n) - g, (
+            f"emittable-vs-((declared|N) minus G) mismatch: "
             f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-            f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+            f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
         )
     finally:
         h.cleanup()
@@ -2131,11 +2153,14 @@ def test_declared_operations_cover_every_emittable_operation(kind, platform):
 
         d = DECLARED_AUDIT_OPERATIONS
         n = _NON_DURABLE_OPERATIONS
+        g = _DECLARED_BUT_NOT_EMITTED_OPERATIONS
         assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-        assert emitted == d | n, (
-            f"emittable-vs-(declared|N) mismatch: "
+        assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+        assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+        assert emitted == (d | n) - g, (
+            f"emittable-vs-((declared|N) minus G) mismatch: "
             f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-            f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+            f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
         )
     finally:
         h.cleanup()
@@ -2155,11 +2180,14 @@ def test_declared_target_kinds_cover_every_emittable_target_kind(kind, platform)
 
         d = DECLARED_AUDIT_TARGET_KINDS
         n = _NON_DURABLE_TARGET_KINDS
+        g = _DECLARED_BUT_NOT_EMITTED_TARGET_KINDS
         assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-        assert emitted == d | n, (
-            f"emittable-vs-(declared|N) mismatch: "
+        assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+        assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+        assert emitted == (d | n) - g, (
+            f"emittable-vs-((declared|N) minus G) mismatch: "
             f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-            f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+            f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
         )
     finally:
         h.cleanup()
@@ -2194,12 +2222,13 @@ def test_declared_audit_event_classes_change_only_deliberately() -> None:
 
 def test_declared_audit_operations_change_only_deliberately() -> None:
     """Snapshot guard: `DECLARED_AUDIT_OPERATIONS` (`audit_query.py`)
-    currently holds exactly these 27 words -- the full emitted union U (31
+    currently holds exactly these 27 words -- the full emitted union U (30
     words, `_field_literal_union`) minus N's 4 words (`_NON_DURABLE_
     OPERATIONS`: `delete_audit`/`set_authorization_state_available`/
     `set_credential_state`, all legacy-sink-only, plus `control_
     capabilities`, structurally deny-unreachable -- fix-round M-1, Opus
-    review). `authenticate` is D, not N (its own denial path durably
+    review), plus `audit_buffer`, declared but no longer emitted
+    (`_DECLARED_BUT_NOT_EMITTED_OPERATIONS`). `authenticate` is D, not N (its own denial path durably
     routes); see `_NON_DURABLE_OPERATIONS`'s own comments for both
     corrections' rationale."""
     assert DECLARED_AUDIT_OPERATIONS == frozenset(
