@@ -1027,6 +1027,9 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     # directly (there is no `PlatformDeclarationError` to route through
     # `_verify_declarations_fail` for this operator-only diagnostic).
     "F-20": 19,
+    # the refusal-window function and table are in the state their
+    # migration leaves them in -- the next unused exit code.
+    "F-21": 20,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1226,6 +1229,20 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
         _verify_declarations_ok(
             "F-20", "R2DB_WORKERS/R2DB_CONTROL_WORKERS (this CLI invocation's own process env) do not exceed their declared process_ceilings"
         )
+
+    try:
+        platform_declarations.check_denial_window_function(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.DENIAL_WINDOW_MIGRATION_FILENAME)
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok(
+        "F-21",
+        "the refusal-window function is SECURITY DEFINER with a pinned search_path, not executable by PUBLIC, "
+        "it and its counter table are owned by the schema's owner role, every role that writes application_audit "
+        "may EXECUTE it, no runtime role holds a direct privilege on the counter table, and every role that reads "
+        "both audit tables may SELECT it",
+    )
     return 0
 
 
@@ -1783,7 +1800,7 @@ def cmd_upgrade_status(args: argparse.Namespace) -> int:
     return 4 if any_pending else 0
 
 
-# =========================================================================== `apply-platform-migration` re-applies one or more of the 5 known re-appliable platform migrations (0008/0012/0013/0014/0015 -- never the bootstrap-only 0001/0002, never a per-application migration, never one of the password-carrying 0005/0006/0007) against a running cluster's own R2DB_CONTROL_DSN, the same DSN `upgrade-applications` above already uses (design docs/work-orders/WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md D-1/D-3). Call shape only, independent of MitateDB-api's own same-named subcommand (P-6: no code sharing between peers) -- 3 of the 4 helpers below are isomorphic to MitateDB-api's own same-named functions (`_ISOMORPHIC_TARGETS`, `tests/test_audit_query.py`) because their bodies are already peer-generic, not because either peer imports the other. ===========================================================================
+# =========================================================================== `apply-platform-migration` re-applies one or more of the 6 known re-appliable platform migrations (0008/0012/0013/0014/0015/0016 -- never the bootstrap-only 0001/0002, never a per-application migration, never one of the password-carrying 0005/0006/0007) against a running cluster's own R2DB_CONTROL_DSN, the same DSN `upgrade-applications` above already uses (design docs/work-orders/WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md D-1/D-3). Call shape only, independent of MitateDB-api's own same-named subcommand (P-6: no code sharing between peers) -- 3 of the 4 helpers below are isomorphic to MitateDB-api's own same-named functions (`_ISOMORPHIC_TARGETS`, `tests/test_audit_query.py`) because their bodies are already peer-generic, not because either peer imports the other. ===========================================================================
 
 
 #: the platform migrations `apply-platform-migration` accepts -- every
@@ -1798,6 +1815,7 @@ _PLATFORM_MIGRATION_FILENAMES: tuple[str, ...] = (
     "0013_role_connection_limits.sql",
     "0014_auditreader_statement_timeout.sql",
     "0015_credential_request_rate.sql",
+    "0016_denial_window_counter.sql",
 )
 
 #: the psql `-v NAME=VALUE` variables each file above references, by
@@ -1812,6 +1830,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
     "0013_role_connection_limits.sql": (),
     "0014_auditreader_statement_timeout.sql": (),
     "0015_credential_request_rate.sql": (),
+    "0016_denial_window_counter.sql": (),
 }
 
 #: design D-1: `file -> the LATER accepted files that redefine at least
@@ -1823,7 +1842,7 @@ _PLATFORM_MIGRATION_VARIABLE_TABLE: dict[str, tuple[str, ...]] = {
 #: (`_validate_platform_migration_run`). A file absent from this table
 #: (or mapped to an empty tuple) has no known successor and may always
 #: be applied alone. This table is proved equal to the "target ->
-#: defining files" map derived directly from the 5 accepted migration
+#: defining files" map derived directly from the 6 accepted migration
 #: files themselves, folded to file granularity, by a static test (work
 #: order WORK_ORDER_R90_R2DB_PLATFORM_MIGRATION_AND_DEPROVISION_OPS_V1.md
 #: D-1, `test_ops_apply_platform_migration.py`) -- this table is the

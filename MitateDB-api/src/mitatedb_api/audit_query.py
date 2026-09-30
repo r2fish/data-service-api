@@ -266,7 +266,10 @@ class InMemoryAuditQueryStore:
     audit`'s in-memory half (`application_audit.ApplicationAuditSink.
     events()`), applying the identical `(recorded_at, plane, event_id)`
     order, opaque-cursor paging, and visibility-lag filtering `Postgres
-    AuditQueryStore` applies via SQL.
+    AuditQueryStore` applies via SQL. The application plane's refusal-window
+    summary events come from the sink's own tally table
+    (`ApplicationAuditSink.denial_window_summaries`), where the Postgres
+    reader reads the counter table.
 
     Constructed by the in-process conformance adapter and by this peer's
     own peer-local in-memory-backend tests -- never by `control_
@@ -294,6 +297,17 @@ class InMemoryAuditQueryStore:
             row = _application_event_dict(event)
             if row is None:
                 continue
+            rows.append(row)
+        # The summary events of the application plane's closed refusal
+        # windows: read from the sink's own table of window tallies, the
+        # in-memory counterpart of the counter table the Postgres reader
+        # adds to its UNION. `recorded_at` is the end of the window the
+        # summary stands for, not the first refusal's `occurred_at`.
+        for summary, window_end in self._application_audit.denial_window_summaries(closed_before=threshold):
+            row = _application_event_dict(summary)
+            if row is None:
+                continue
+            row["recorded_at"] = _to_utc(window_end)
             rows.append(row)
         filtered: list[dict[str, Any]] = []
         for row in rows:
@@ -344,6 +358,20 @@ WITH filtered AS (
         OR ROW(recorded_at, 'application'::text, event_id)
            > ROW(%(after_recorded_at)s::timestamptz, %(after_plane)s::text, %(after_event_id)s::text)
       )
+    UNION ALL
+    SELECT summary_event_id AS event_id, event_class, occurred_at, request_id, application_id,
+           actor_type, actor_id, role, operation, target_kind, 'deny'::text AS outcome, reason_code, target_id,
+           CASE WHEN occurrences = 2 THEN NULL ELSE occurrences - 1 END AS count,
+           window_end AS recorded_at, 'application'::text AS plane
+    FROM {denial_window_table}
+    WHERE occurrences >= 2
+      AND window_end < %(threshold)s
+      AND (%(classes)s::text[] IS NULL OR event_class = ANY(%(classes)s::text[]))
+      AND (
+        %(after_recorded_at)s::timestamptz IS NULL
+        OR ROW(window_end, 'application'::text, summary_event_id)
+           > ROW(%(after_recorded_at)s::timestamptz, %(after_plane)s::text, %(after_event_id)s::text)
+      )
 )
 SELECT event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role,
        operation, target_kind, outcome, reason_code, target_id, count, recorded_at, plane
@@ -388,6 +416,7 @@ class PostgresAuditQueryStore:
         self._connect_timeout = connect_timeout
         self._control_table = sql.Identifier(schema, "control_audit")
         self._application_table = sql.Identifier(schema, "application_audit")
+        self._denial_window_table = sql.Identifier(schema, "denial_window_counter")
 
     def query(
         self, *, event_classes: "Sequence[str] | None", after: "tuple[datetime, str, str] | None",
@@ -403,7 +432,8 @@ class PostgresAuditQueryStore:
             "row_limit": limit,
         }
         statement = sql.SQL(_AUDIT_QUERY_UNION_SQL).format(
-            control_table=self._control_table, application_table=self._application_table)
+            control_table=self._control_table, application_table=self._application_table,
+            denial_window_table=self._denial_window_table)
         try:
             conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, **_application_name_connect_kwargs())
             try:

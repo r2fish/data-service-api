@@ -1662,6 +1662,24 @@ _NON_DURABLE_OPERATIONS: frozenset[str] = frozenset(
 _NON_DURABLE_TARGET_KINDS: frozenset[str] = frozenset()
 
 
+# Words the peer still DECLARES (a past row can carry one, and `audit_query`
+# must keep returning it -- contract 1.5.0's superset obligation) but no
+# source line emits any more. They belong to D, not N: N is for words that
+# are emitted but never reach a durable table. Each set below is part of the
+# equality checked by the three `test_declared_*_cover_every_emittable_*`
+# tests: `emitted == (D | N) - G`, with G a subset of D that no source line
+# emits. An entry here therefore fails as soon as a line emits the word
+# again, and a word that stops being emitted without being listed here
+# fails too.
+#
+# The application-plane events of a buffer that no longer exists: its
+# overflow-alert row (`event_class="security_control_failure"`,
+# `operation="audit_buffer"`, `target_kind="audit_sink"`).
+_DECLARED_BUT_NOT_EMITTED_EVENT_CLASSES: frozenset[str] = frozenset({"security_control_failure"})
+_DECLARED_BUT_NOT_EMITTED_OPERATIONS: frozenset[str] = frozenset({"audit_buffer"})
+_DECLARED_BUT_NOT_EMITTED_TARGET_KINDS: frozenset[str] = frozenset({"audit_sink"})
+
+
 def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
     """WP-3 対称 (r2db-api WP-2 fix-round M-1): `operation=
     "control_capabilities"` is in `_NON_DURABLE_OPERATIONS` for a
@@ -1706,7 +1724,7 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
         cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     secret = bearer
     document = service.control_capabilities(secret)  # must NOT raise -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -1736,7 +1754,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     regardless of role, and this omission does not weaken the proof."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
 
     fresh_backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with fresh_backend.unit_of_work() as work:
@@ -1748,7 +1766,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     fresh_secret = fresh_bearer
     fresh_service = ControlPlaneService(fresh_backend, limits=_GENEROUS_LIMITS)
     fresh_document = fresh_service.control_capabilities(fresh_secret)  # must_rotate=True path
-    assert fresh_document["contract_version"] == "1.12.0"
+    assert fresh_document["contract_version"] == "1.13.0"
 
     durable_operations = {event.operation for event in h.control_audit.snapshot()}
     durable_operations |= {event.operation for event in fresh_backend.audit_sink.snapshot()}
@@ -1940,11 +1958,14 @@ def test_declared_event_classes_cover_every_emittable_class() -> None:
 
     d = DECLARED_AUDIT_EVENT_CLASSES
     n = _NON_DURABLE_EVENT_CLASSES
+    g = _DECLARED_BUT_NOT_EMITTED_EVENT_CLASSES
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-    assert emitted == d | n, (
-        f"emittable-vs-(declared|N) mismatch: "
+    assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+    assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+    assert emitted == (d | n) - g, (
+        f"emittable-vs-((declared|N) minus G) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-        f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
     )
 
     from mitatedb_api.application_audit import DECLARED_AUDIT_EVENT_CLASSES as APP_CLASSES
@@ -1976,11 +1997,14 @@ def test_declared_operations_cover_every_emittable_operation() -> None:
 
     d = DECLARED_AUDIT_OPERATIONS
     n = _NON_DURABLE_OPERATIONS
+    g = _DECLARED_BUT_NOT_EMITTED_OPERATIONS
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-    assert emitted == d | n, (
-        f"emittable-vs-(declared|N) mismatch: "
+    assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+    assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+    assert emitted == (d | n) - g, (
+        f"emittable-vs-((declared|N) minus G) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-        f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
     )
 
 
@@ -1996,11 +2020,14 @@ def test_declared_target_kinds_cover_every_emittable_target_kind() -> None:
 
     d = DECLARED_AUDIT_TARGET_KINDS
     n = _NON_DURABLE_TARGET_KINDS
+    g = _DECLARED_BUT_NOT_EMITTED_TARGET_KINDS
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-    assert emitted == d | n, (
-        f"emittable-vs-(declared|N) mismatch: "
+    assert g <= d, f"declared-but-not-emitted set G names a word that is not declared: {g - d!r}"
+    assert not (g & emitted), f"declared-but-not-emitted set G names a word a source line does emit: {g & emitted!r}"
+    assert emitted == (d | n) - g, (
+        f"emittable-vs-((declared|N) minus G) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
-        f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        f"declared or in N, not in G, but never actually emitted: {((d | n) - g) - emitted!r}"
     )
 
 
@@ -2050,9 +2077,11 @@ def test_declared_audit_operations_change_only_deliberately() -> None:
     OPERATIONS`) currently holds exactly these 30 words (Phase 9 WP-3a
     adds `alter_field`, design docs/design/
     PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)) --
-    the full emitted union U (31 words, `_field_literal_union`) minus N's
+    the full emitted union U (30 words, `_field_literal_union`) minus N's
     1 word (`_NON_DURABLE_OPERATIONS`: `control_capabilities`,
-    structurally deny-unreachable). Pins the UNION, not either half alone
+    structurally deny-unreachable), plus `audit_buffer`, declared but no
+    longer emitted (`_DECLARED_BUT_NOT_EMITTED_OPERATIONS`). Pins the
+    UNION, not either half alone
     (mutation 13 must go red whichever half loses a word)."""
     assert DECLARED_AUDIT_OPERATIONS == frozenset(
         {
@@ -2135,9 +2164,9 @@ def test_audit_query_declares_operations_and_target_kinds_over_http() -> None:
 # Phase 6 WP-0 (design D-4(c), L5-5/L5-6): the single-file/named-tuple
 # mechanism this section describes is generalized below into the
 # `_ISOMORPHIC_TARGETS` (r2db relative path, MitateDB relative path,
-# symbol name) table, which now also covers `src/mitatedb_api/main.py::
-# _optional_float` and `tests/test_http.py`'s byte-identical-contract test
-# function, not only this file's own 11 scanner-support helpers -- see
+# symbol name) table, which now also covers `tests/test_http.py`'s
+# byte-identical-contract test function, not only this file's own 11
+# scanner-support helpers -- see
 # that table's own comment for the full rationale.
 #
 # Phase 6 WP-3 追補 (isomorphism table extension, supervisor ruling
@@ -2162,8 +2191,8 @@ def test_audit_query_declares_operations_and_target_kinds_over_http() -> None:
 # generalized below into a table -- the row form is the object that now
 # defines the full set of peer-local symbols this repository pins
 # isomorphic, rather than one hardcoded sibling file. The 11 rows below
-# are the WP-2/WP-3 helpers, carried over UNCHANGED (not one dropped); 4
-# rows are the Phase 6 WP-0 additions (`main.py::_optional_float`, `tests/
+# are the WP-2/WP-3 helpers, carried over UNCHANGED (not one dropped); 3
+# rows are the Phase 6 WP-0 additions (`tests/
 # test_http.py`'s byte-identical-contract test function, plus the
 # mechanism's OWN two pieces of test-support code -- `_isomorphic_symbol_
 # source`, the row resolver below, and this table's own pin test -- added
@@ -2202,13 +2231,12 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
     # Phase 6 WP-0 additions (design D-4(a)/(b)):
-    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
     ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
     # Phase 6 WP-0 additions, round 2 (supervisor review ruling
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_199_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_205_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2310,6 +2338,9 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_acl_holders"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_denial_window_function"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
@@ -2806,10 +2837,18 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/postgres.py", "src/mitatedb_api/pool.py", "_application_name_connect_kwargs"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_declared_pool_size"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_request_rate_function"),
+    # The C-33 launcher's process helpers: the data plane's worker pids, the
+    # SIGKILL-and-wait-for-replacement call, the declared coalescing window it
+    # was started with, and the audit-role control credential -- each
+    # normalize-and-diff equal on the two launchers before adding.
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "worker_pids"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "kill_workers"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "coalescing_window_ms"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "issue_audit_credential"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_199_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_205_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2904,6 +2943,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_199_rows() -> None:
     The last 29 rows are the multi-process worker helpers named in the
     comment right above them in `_ISOMORPHIC_TARGETS`, each verified
     normalize-and-diff equal before adding.
+    Widened an eighteenth time by the C-33 launcher helpers (`worker_pids`,
+    `kill_workers`, `coalescing_window_ms`, `issue_audit_credential`, the
+    last 4 rows), each verified normalize-and-diff equal before adding.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -2925,10 +2967,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_199_rows() -> None:
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_field_definitions"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
-        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_199_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_205_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2978,6 +3019,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_199_rows() -> None:
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f21_acl_holders"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_denial_window_function"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
@@ -3233,8 +3277,12 @@ def test_isomorphic_target_table_is_pinned_to_its_current_199_rows() -> None:
         ("src/r2db_api/postgres.py", "src/mitatedb_api/pool.py", "_application_name_connect_kwargs"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_declared_pool_size"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_request_rate_function"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "worker_pids"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "kill_workers"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "coalescing_window_ms"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "issue_audit_credential"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 199
+    assert len(_ISOMORPHIC_TARGETS) == 205
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}
@@ -3611,6 +3659,31 @@ def test_declared_coalescing_window_ms_matches_the_single_source_constant() -> N
     assert DEFAULT_COALESCING_WINDOW_MS == int(DEFAULT_DENIAL_COALESCE_WINDOW_S * 1000)
 
 
+_EXPECTED_OUTCOME_NOTE = (
+    "outcome=allow means the operation was authorized and submitted; a later outcome=error "
+    "row sharing the same request_id means the service did not see it commit: either it did "
+    "not commit, or the connection was lost during the commit itself and its outcome is "
+    "unknown. An allow row with no "
+    "corresponding error row usually means the operation committed, but -- if the process "
+    "was lost between recording allow and committing, or if the error row itself could not "
+    "be recorded -- can also mean it did not; the audit trail alone cannot distinguish the "
+    "two in those cases."
+)
+
+
+def test_declared_outcome_note_names_both_ways_an_allow_row_can_be_uncommitted() -> None:
+    """An `allow` row with no `error` row is uncommitted in two cases only --
+    the process was lost between recording it and committing, or the `error`
+    row itself could not be recorded -- and the declaration says exactly
+    that, in the same words on both peers.
+
+    mutation (`control_plane.py`, `audit_query` declaration): put back the
+    sentence that names the process loss as the only case."""
+    h = _memory_harness()
+    document = h.service.control_capabilities(h.control_credential_secret)
+    assert document["capabilities"]["audit_query"]["outcome_note"] == _EXPECTED_OUTCOME_NOTE
+
+
 def test_coalesced_and_alert_rows_never_carry_a_literal_count_of_0_or_1() -> None:
     """D-3/D-4 property 10(ii)/property 3 (never zero or one). Exercises
     `application_audit.coalesced_count` directly (WP-3(a)'s own structural
@@ -3758,7 +3831,7 @@ def test_control_capabilities_declares_contract_version_1_5_0() -> None:
     own re-flipped pins."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.12.0"
+    assert document["contract_version"] == "1.13.0"
 
 
 # ---------------------------------------------------------------------------

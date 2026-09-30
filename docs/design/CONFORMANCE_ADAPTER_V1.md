@@ -2,6 +2,7 @@
 
 ## 文書情報
 
+- 版数: 1.19 (§29 を新設。port v1.19: 台帳 R-115 (design `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) 由来の coordinated revision -- port v1.8 の abstract method `flush_audit_buffer` を削除する。追加は無い。詳細は §29)
 - 版数: 1.18 (§28 を新設。port v1.18: design `docs/design/PHASE11_KEYSET_PAGING_V1.md` D-4 由来の coordinated revision -- 1 新規 abstract method `query_page(session, entity, select, *, where, order_by, page_size, cursor, budget) -> (items, next_page)` (条件 C-30 が使う。`order_by` と `cursor` を 1 つの query 要求で運び、peer の実 `next_page` をそのまま返す) を追加する。既存の query 系 method (`select_eq`/`attempt_filter`/`query_with_revisions`/`query_with_budget`/`attempt_filter_with_result`) は不変。4 registered adapter (両 peer の in-process/http) が実現し、socket plug は http adapter の実現をそのまま継承する (0 redefinition)。`_ISOMORPHIC_TARGETS` には追加しない (adapter の足場であり `src/` の symbol ではない)。削除は無い。詳細は §28)
 - 版数: 1.17 (§27 を新設。port v1.17: phase 11 WP-3、design `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §7.1 の 2 由来の coordinated revision -- 1 新規 abstract method `operation_catalog_document(session) -> bytes` (条件 C-29 が使う。配る本文を byte のまま返す) を追加する。全 6 registered adapter (両 peer の in-process/http/socket) が実現する -- socket adapter は port method 自体を継承する (0 redefinition) が、内部 hook `_operation_catalog_url_value()` (`_surfaces_value` と同形) を override して実 dial 可能な URL を返す。削除は無い。詳細は §27
 - 版数: 1.16 (§26 を新設。port v1.16: phase 11 WP-2、design `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §7.1 の 1・4 由来の coordinated revision -- 1 新規 abstract method `attempt_filter_with_result` (`attempt_filter` の request 形を `order_by`/`page.size`/`budget` で拡張、条件 C-28 段 (9) が使う) を追加する。`attempt_mutation` -> `attempt_mutation_with_result` / `query_with_revisions` -> `query_with_budget` の precedent どおり、既存 `attempt_filter`/`select_eq`/`query_with_budget` は不変。4 registered adapter (両 peer の in-process/http) が実現し、5・6 番目の socket plug は http adapter の composition をそのまま継承する (socket 固有のコードは無い)。`_ISOMORPHIC_TARGETS` (`tests/test_audit_query.py`、両 peer) には追加しない -- 既存 3 兄弟と同じ理由 (両 peer の実装本体が別のバックエンド呼び出しであり、正規化後も byte-identical にならない)。削除は無い。詳細は §26
@@ -14,7 +15,7 @@
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - §23.4 追補 (2026-09-07, 監督裁定 A `{scratchpad}/rulings-wp3a-review.md`): port v1.13 のまま (バージョン番号は据え置き)。`schema_operation_with_result(..., enum=...)` に tri-state sentinel `ENUM_CLEAR` (`adapter.py` モジュールレベル、`_EnumClear` 単一インスタンス) を追加し、「省略」(`None`、既定) と「明示 `enum: null`」(`ENUM_CLEAR`) を区別できるようにした。既存呼び出し (省略、または `Sequence` を渡すもの) は byte 互換のまま。4 adapter (`conformance_adapter_r2db{,_http}.py`/`conformance_adapter_mitatedb{,_http}.py`) の `schema_operation_with_result` を同型に更新し、`test_c20_constraint_declaration_agreement.py` の肯定枝に leg (9) (`alter_field(enum=ENUM_CLEAR)` で enum が解除される) を追加。詳細は §23.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08。§26 (v1.16) / §27 (v1.17) 追記日: 2026-09-24。§28 (v1.18) 追記日: 2026-09-25
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08。§26 (v1.16) / §27 (v1.17) 追記日: 2026-09-24。§28 (v1.18) 追記日: 2026-09-25。§29 (v1.19) 追記日: 2026-10-01
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -1934,7 +1935,7 @@ Added to `ConformanceAdapter` immediately after `control_audit_events()`
   category as `control_audit_events()`) forcing the peer's own bounded
   data-operation-event buffer (design D-4) to flush synchronously, so a
   test can observe a buffered event without depending on the buffer's own
-  real flush timer.
+  real flush timer. **【v1.19 (2026-10-01) で削除】** `flush_audit_buffer` は port v1.19 で port と 4 plug の実現から削除した (§29)。本段は v1.8〜v1.18 の記述として残す。
 - `audit_visibility_lag_ms(self) -> int` -- reads the peer's own declared
   `visibility_lag_ms` (design D-6: derived from the two durable-write
   connection timeouts) off its real `audit_query` capability declaration.
@@ -2036,7 +2037,7 @@ against the real, eventual dispatch shape:
   adapter-privileged test hook), so no naming convention exists yet to
   extrapolate from. This branch is unreachable as of this WP (every
   plug's own `audit_query` status is `unavailable`), so this is honest
-  dead code, not a functional gap.
+  dead code, not a functional gap. **【v1.19 (2026-10-01) で削除】** `flush_audit_buffer` は port v1.19 で port と 4 plug の実現から削除した (§29)。本段は v1.8〜v1.18 の記述として残す。
 - As of this WP, `_audit_query_status()` always returns `"unavailable"`
   for all four plugs (`capabilities()`/`control_capabilities()` always
   publish `audit_query: {"status": "unavailable"}` until WP-2(b)/WP-3(b)'s
@@ -3678,3 +3679,23 @@ peers) -- that pin covers same-named helpers under each peer's own `src/`
 tree, never `conformance/` adapter scaffolding.
 
 Deletions: none.
+
+## 29. v1.19 port revision (coordinated with docs/design/AUDIT_PROCESS_LOSS_V0_1.md §4・§5)
+
+Deleted abstract method: `flush_audit_buffer(self) -> None` (port v1.8,
+§18.1). Every data-operation event is written before its response is
+returned, and every refusal count is added to the platform counter table
+before its response is returned (ledger R-115), so a peer holds nothing
+that a test could make visible sooner. A test waits the declared
+`audit_visibility_lag_ms()` (and, for a refusal window's summary event,
+the window's own end) and polls. No test called the method when it was
+removed. The 4 registered adapters (both peers' in-process and http
+plugs) no longer implement it; the two socket plugs inherited it and
+change by 0 lines. `conformance-tests/adapter.py` records the removal
+in place of the old method, and `conformance-tests/CONDITIONS_HISTORY.md`
+(C-09) records the correction of the live row.
+
+`audit_query` and `audit_visibility_lag_ms` are unchanged, including
+their declare-first dispatch (§18.2).
+
+Additions: none.

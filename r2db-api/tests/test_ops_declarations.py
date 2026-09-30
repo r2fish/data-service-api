@@ -718,9 +718,9 @@ def _f4(schema: str) -> str:
 
 def _f4b_window(schema: str, value) -> str:
     return (
-        f"'audit_coalescing_window_ms' in {schema}.platform_declarations must be a non-negative integer (0 "
-        f"means no coalescing), got '{value}'. This table can be edited by hand, so the value is validated on "
-        f"every read as well as on write. Re-set it with 'python -m r2db_api.ops declare-coalescing-window "
+        f"'audit_coalescing_window_ms' in {schema}.platform_declarations must be a non-negative integer no "
+        f"larger than 2147483647 (0 means no coalescing), got '{value}'. This table can be edited by hand, so the "
+        f"value is validated on every read as well as on write. Re-set it with 'python -m r2db_api.ops declare-coalescing-window "
         f"--ms <N>', then restart both processes."
     )
 
@@ -901,11 +901,21 @@ def test_f4_message_is_pinned_verbatim(platform: types.SimpleNamespace) -> None:
             conn.commit()
 
 
-@pytest.mark.parametrize("bad_value", ["60000", 60000.5, -1])
+@pytest.mark.parametrize("bad_value", ["60000", 60000.5, -1, 2147483648])
 def test_f4b_window_message_is_pinned_verbatim(bad_value) -> None:
     with pytest.raises(PlatformDeclarationError) as exc:
         validate_coalescing_window_value(bad_value, schema="r2dbsvc_registry", ops_module=PEER_MODULE)
     assert str(exc.value) == _f4b_window("r2dbsvc_registry", bad_value)
+
+
+def test_coalescing_window_accepts_exactly_the_largest_value_the_counter_function_takes() -> None:
+    """`denial_window_record` takes the window length as a 32-bit integer of
+    milliseconds: the declaration accepts that bound and not one more, so a
+    length the function cannot take never starts a process."""
+    assert validate_coalescing_window_value(2147483647, schema="r2dbsvc_registry", ops_module=PEER_MODULE) == 2147483647
+    with pytest.raises(PlatformDeclarationError) as exc:
+        validate_coalescing_window_value(2147483648, schema="r2dbsvc_registry", ops_module=PEER_MODULE)
+    assert exc.value.code == "F-4b"
 
 
 def test_f5_message_is_pinned_verbatim() -> None:

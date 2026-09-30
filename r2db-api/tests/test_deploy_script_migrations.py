@@ -43,7 +43,7 @@ EXPECTED_EXCLUDED_MIGRATION_NUMBERS: frozenset[int] = PLATFORM_UPGRADE_NUMBERS |
 #: fenced code block (that block itself only shows steps 1-3, `0001`/
 #: `0002`/`0003`) -- the positional order `part1_provision_host_and_db.sh`'s
 #: own `-f`/`\i` invocations must appear in.
-EXPECTED_INVOCATION_ORDER = ("0001", "0002", "0005", "0006", "0007", "0013", "0014", "0015", "0008", "0012", "0003")
+EXPECTED_INVOCATION_ORDER = ("0001", "0002", "0005", "0006", "0007", "0013", "0014", "0015", "0016", "0008", "0012", "0003")
 
 
 def _strip_comment_lines(text: str) -> str:

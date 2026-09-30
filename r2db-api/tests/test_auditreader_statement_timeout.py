@@ -40,6 +40,8 @@ MIGRATION_NAMES = (
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
     "0014_auditreader_statement_timeout.sql",
+    # `audit_query`'s UNION reads the refusal-window counter table.
+    "0016_denial_window_counter.sql",
 )
 
 
@@ -143,6 +145,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
         _run_psql(control_dsn, rewritten["0014_auditreader_statement_timeout.sql"])
+        _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise

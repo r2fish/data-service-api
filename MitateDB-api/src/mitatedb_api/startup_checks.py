@@ -1172,4 +1172,18 @@ KNOWN_FINGERPRINTS: tuple = (
         default_thread_limit=_DEFAULT_THREAD_LIMIT_DIGEST,
         checker_references=_REFERENCES_G2_G3,
     )),
+    KnownFingerprint("data", "G3", None, Fingerprint(
+        platform_declarations="c6fdb0c46727a3f3304bcb48a605fa54d10dd430",
+        config="f75dbeef3f21eac41c8d91823c452055e253ca34",
+        startup_module="07c72f2328982d5b04cfecb38295bd9a03dff376",
+        default_thread_limit=_DEFAULT_THREAD_LIMIT_DIGEST,
+        checker_references=_REFERENCES_G2_G3,
+    )),
+    KnownFingerprint("control", "G3", None, Fingerprint(
+        platform_declarations="c6fdb0c46727a3f3304bcb48a605fa54d10dd430",
+        config="f75dbeef3f21eac41c8d91823c452055e253ca34",
+        startup_module="c12b93f3a8037b4c58374f5ef89949a6affe100c",
+        default_thread_limit=_DEFAULT_THREAD_LIMIT_DIGEST,
+        checker_references=_REFERENCES_G2_G3,
+    )),
 )

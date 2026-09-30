@@ -479,29 +479,165 @@ def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_a
     assert response_after.status_code == 200, response_after.text
 
 
-def test_build_app_writer_role_dual_check_connects_via_the_sinks_own_connect_method(main_module, platform, probe_app, monkeypatch):
-    """N-2 (monitor ruling 2026-09-05, delta review §4): `check_writer_
-    role_timeouts`'s own connection must be opened via THE SAME METHOD
-    `PostgresApplicationAuditSink` uses to open every connection it ever
-    writes through (`_connect`) -- never a separately-written `psycopg.
-    connect(...)` call that merely happens to match its arguments today.
-    Patches `_connect` to record every call; `build_app` makes no HTTP
-    request of its own, so a call recorded here can only have happened
-    during the startup dual-check step itself. Would go RED under the
-    delta review's own finding (`main.py:295` duplicating the connect
-    call instead of calling `_connect`)."""
-    calls: list[object] = []
+def test_build_app_writer_role_dual_check_runs_on_a_connection_borrowed_from_the_audit_pool(main_module, platform, probe_app, monkeypatch):
+    """The writer role's dual check (F-9, `check_writer_role_timeouts`) runs
+    on a connection acquired from the audit sink's own pool -- the pool the
+    sink's real writes borrow from -- so the connection it observes is
+    itself a writer, not one opened by separate code that merely matches
+    today. The sink's own no-pool `_connect` is never called, the platform
+    pool is not involved, and the connection is back in the audit pool,
+    open, once the check is done.
+
+    `build_app` makes no HTTP request of its own, so an `acquire` recorded
+    here can only have happened during startup.
+
+    mutation (`main.py`): open the connection through the sink's `_connect`
+    instead of borrowing it (`with durable_audit._borrow() as
+    declarations_conn:` becomes a `closing(durable_audit._connect())`
+    block) -- the checked connection is in no pool's acquired list and
+    `_connect` was called."""
+    pools: list = []
+    real_pool = main_module.BoundedConnectionPool
+
+    class _SpyPool(real_pool):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.acquired: list = []
+            pools.append(self)
+
+        def acquire(self):
+            conn = super().acquire()
+            self.acquired.append(conn)
+            return conn
+
+    checked: list = []
+    real_check = main_module.check_writer_role_timeouts
+
+    def _check_spy(conn, **kwargs):
+        checked.append(conn)
+        return real_check(conn, **kwargs)
+
+    connect_calls: list = []
     real_connect = PostgresApplicationAuditSink._connect
 
-    def _spy(self):
-        calls.append(self)
+    def _connect_spy(self):
+        connect_calls.append(self)
         return real_connect(self)
 
-    monkeypatch.setattr(PostgresApplicationAuditSink, "_connect", _spy)
+    monkeypatch.setattr(main_module, "BoundedConnectionPool", _SpyPool)
+    monkeypatch.setattr(main_module, "check_writer_role_timeouts", _check_spy)
+    monkeypatch.setattr(PostgresApplicationAuditSink, "_connect", _connect_spy)
+    main_module.build_app(_base_env(platform, probe_app))
+    assert len(checked) == 1
+    platform_pool, audit_pool = pools
+    assert any(checked[0] is conn for conn in audit_pool.acquired)
+    assert not any(checked[0] is conn for conn in platform_pool.acquired)
+    assert connect_calls == []
+    assert not checked[0].closed
+    assert audit_pool.platform_stats()["sessions"] == 1
+
+
+def _record_built_pools_and_sinks(main_module, monkeypatch) -> "tuple[list, list]":
+    """Makes `main.build_app` record every `BoundedConnectionPool` and every
+    `PostgresApplicationAuditSink` it constructs (both real, subclassed)."""
+    pools: list = []
+    sinks: list = []
+    real_pool = main_module.BoundedConnectionPool
+    real_sink = main_module.PostgresApplicationAuditSink
+
+    class _RecordingPool(real_pool):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            pools.append(self)
+
+    class _RecordingSink(real_sink):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sinks.append(self)
+
+    monkeypatch.setattr(main_module, "BoundedConnectionPool", _RecordingPool)
+    monkeypatch.setattr(main_module, "PostgresApplicationAuditSink", _RecordingSink)
+    return pools, sinks
+
+
+def test_build_app_sizes_the_audit_sinks_pool_from_the_value_f16_counts_per_api_store(main_module, platform, probe_app, monkeypatch) -> None:
+    """Completion condition 28: F-16's floor for the `mitatedbsvc_api`
+    role counts `platform_declarations._API_ROLE_STORE_COUNT` stores of
+    `role_pool_size(thread_limit)` connections each, per process. The
+    pools `build_app` builds against that role are exactly that many, each
+    of that size (a thread limit of 3 makes it 5), and the audit sink
+    writes through the last of them rather than sharing the credential
+    store's, so the sink cannot hold more connections than the floor
+    counted for it.
+
+    mutation (`main.py`): build the sink's pool twice as large as the
+    platform pool (`max_size=_role_pool_size` becomes `max_size=
+    _role_pool_size * 2` on `audit_pool`) -- the two sizes then sum to 15
+    where the floor counts 10."""
+    from mitatedb_api import platform_declarations
+    from mitatedb_api.config import role_pool_size
+
+    pools, sinks = _record_built_pools_and_sinks(main_module, monkeypatch)
     env = _base_env(platform, probe_app)
+    env["MITATEDB_THREAD_LIMIT"] = "3"
     main_module.build_app(env)
-    assert len(calls) >= 1
-    assert all(isinstance(c, PostgresApplicationAuditSink) for c in calls)
+    per_store = role_pool_size(3)
+    assert per_store == 5
+    assert len(sinks) == 1
+    assert len(pools) == platform_declarations._API_ROLE_STORE_COUNT
+    assert sinks[0]._pool is pools[-1] and pools[-1] is not pools[0]
+    assert [pool.stats()["size"] for pool in pools] == [per_store] * platform_declarations._API_ROLE_STORE_COUNT
+    assert sum(pool.stats()["size"] for pool in pools) == platform_declarations._API_ROLE_STORE_COUNT * per_store
+
+
+@pytest.mark.parametrize("override", ["2", "9"])
+def test_build_app_sizes_the_audit_pool_from_role_pool_size_whatever_the_platform_pool_override_says(main_module, platform, probe_app, monkeypatch, override) -> None:
+    """`MITATEDB_PLATFORM_POOL_SIZE` sets the platform registry pool only:
+    the audit sink's pool stays `role_pool_size(thread_limit)`, the value
+    the F-16 floor counts for it, however the override is set (smaller or
+    larger).
+
+    mutation (`main.py`): build the sink's pool from `pool_size` (the
+    overridable value) instead of `_role_pool_size` -- with the override
+    at 2 the audit pool is 2 where the floor counts 5, and at 9 it is 9."""
+    from mitatedb_api.config import role_pool_size
+
+    pools, sinks = _record_built_pools_and_sinks(main_module, monkeypatch)
+    env = _base_env(platform, probe_app)
+    env["MITATEDB_THREAD_LIMIT"] = "3"
+    env["MITATEDB_PLATFORM_POOL_SIZE"] = override
+    main_module.build_app(env)
+    assert len(pools) == 2 and len(sinks) == 1
+    assert [pool.stats()["size"] for pool in pools] == [int(override), role_pool_size(3)]
+    assert sinks[0]._pool is pools[-1]
+
+
+def test_build_app_lifespan_shutdown_closes_the_audit_sinks_pooled_connections(main_module, platform, probe_app, monkeypatch) -> None:
+    """The lifespan shutdown closes the connections the audit sink's pool
+    holds: with a connection idle in that pool, running the app's lifespan
+    startup and shutdown ends its server session.
+
+    mutation (`main.py`): drop the `durable_audit.close()` call from the
+    lifespan shutdown -- the pooled session is still on the server."""
+    _pools, sinks = _record_built_pools_and_sinks(main_module, monkeypatch)
+    app = main_module.build_app(_base_env(platform, probe_app))
+    sink = sinks[0]
+    conn = sink._pool.acquire()  # the pool opens a connection and, released, keeps it idle
+    backend_pid = conn.info.backend_pid
+    sink._pool.release(conn)
+
+    def _session_present() -> bool:
+        admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+        try:
+            with admin.cursor() as cur:
+                cur.execute("SELECT count(*) FROM pg_stat_activity WHERE pid = %s", [backend_pid])
+                return cur.fetchone()[0] == 1
+        finally:
+            admin.close()
+
+    assert _session_present()
+    asyncio.run(main_module._run_lifespan_once(app))
+    assert not _session_present()
 
 
 def test_build_app_rejects_invalid_control_plane_status_value(main_module, platform, probe_app):
@@ -514,8 +650,7 @@ def test_build_app_rejects_invalid_control_plane_status_value(main_module, platf
 def test_thread_limit_from_env_unit_contract(main_module) -> None:
     """Completion conditions 97/153: unset or empty falls back to
     `default`; a positive integer is returned as-is -- the function
-    itself, in isolation (mirrors `test_optional_float_default_path_is_
-    not_regressed` immediately below).
+    itself, in isolation.
 
     mutation M191 (`mitatedb_api/main.py`): treat an empty string as if
     it were a valid override -- this test's own second assertion (`""`
@@ -589,44 +724,23 @@ def test_build_app_rejects_invalid_thread_limit_env(main_module, platform, probe
             main_module.build_app(env)
 
 
-_INVALID_AUDIT_FLUSH_INTERVAL_VALUES = ["0", "-1", "nan", "inf", "not-a-number"]
+def test_build_app_starts_no_background_audit_thread_and_reads_no_flush_interval(main_module, platform, probe_app):
+    """Every audit event and every refusal count is durable before its
+    response is returned, so the composition root runs no periodic sweep:
+    the lifespan starts no `mitatedb-audit-flush` thread, and a stale
+    `MITATEDB_AUDIT_FLUSH_INTERVAL_S` in the environment -- once a startup
+    failure when malformed -- is not read at all."""
+    import threading
 
+    from starlette.testclient import TestClient
 
-@pytest.mark.parametrize("bad_value", _INVALID_AUDIT_FLUSH_INTERVAL_VALUES)
-def test_build_app_fails_fast_on_invalid_audit_flush_interval(main_module, platform, probe_app, bad_value):
-    """Phase 6 WP-0 (design D-4(a)): `MITATEDB_AUDIT_FLUSH_INTERVAL_S` is
-    the interval `main.py`'s own flush thread passes straight to
-    `threading.Event.wait` (`main.py:350`) -- `wait(0)`/`wait(-1)`/
-    `wait(float("nan"))` all return immediately (`False`), turning that
-    daemon thread into a silent hot loop nothing about which would look
-    alarming to an operator who mistyped this variable. `_optional_float`
-    must now refuse every non-empty value that is not a finite, positive
-    float at startup (`ValueError` naming the variable) -- exercised here
-    through the REAL `build_app` path (not a direct call to
-    `_optional_float`), so this is the actual startup-failure consumer
-    wiring, not merely the helper function in isolation. Each of the 5
-    forms (zero / negative / NaN / infinity / unparsable text) is its own
-    parametrize case, per WP-0 completion condition 1 ("5 形すべてを個別
-    ケースで観測する")."""
     env = _base_env(platform, probe_app)
-    env["MITATEDB_AUDIT_FLUSH_INTERVAL_S"] = bad_value
-    with pytest.raises(ValueError, match="MITATEDB_AUDIT_FLUSH_INTERVAL_S"):
-        main_module.build_app(env)
-
-
-def test_optional_float_default_path_is_not_regressed(main_module) -> None:
-    """WP-0 completion condition 2: an unset OR empty-string
-    `MITATEDB_AUDIT_FLUSH_INTERVAL_S` must still fall back to `default` --
-    the "空なら既定値" half that must stay green while mutation 2 (dropping
-    the `if not raw: return default` early return) turns it red. A direct
-    call is sufficient here (unlike the fail-fast cases above): the real-
-    startup wiring for this same function/variable pair is already
-    established by `test_build_app_fails_fast_on_invalid_audit_flush_
-    interval` and by `_optional_float` having exactly one caller in
-    `main.py` (the flush-interval assignment feeding `threading.Event.
-    wait`)."""
-    assert main_module._optional_float({}, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
-    assert main_module._optional_float({"MITATEDB_AUDIT_FLUSH_INTERVAL_S": ""}, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
+    env["MITATEDB_AUDIT_FLUSH_INTERVAL_S"] = "not-a-number"
+    asgi_app = main_module.build_app(env)
+    with TestClient(asgi_app) as client:
+        assert client.get("/v1/capabilities").status_code == 401  # the app is up and answering
+        names = [thread.name for thread in threading.enumerate()]
+        assert "mitatedb-audit-flush" not in names, names
 
 
 def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(main_module, platform):

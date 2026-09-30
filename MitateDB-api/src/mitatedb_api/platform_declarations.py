@@ -88,6 +88,12 @@ PROCESS_CEILINGS_MIGRATION_FILENAME = "0011_process_ceilings.sql"
 #: that check's own failure message.
 REQUEST_RATE_MIGRATION_FILENAME = "0016_credential_request_rate.sql"
 
+#: the platform single-shot migration that creates the refusal-window
+#: counter table and the `denial_window_record` function every refused
+#: request's count runs through -- named in `check_denial_window_function`'s
+#: failure message.
+DENIAL_WINDOW_MIGRATION_FILENAME = "0017_denial_window_counter.sql"
+
 #: `<peer>` in every fail-fast message's "next ops command" (design
 #: §3.8).
 PEER_MODULE = "mitatedb_api"
@@ -281,8 +287,9 @@ def _f4_message(schema: str, *, ops_module: str, migration: str) -> str:
 
 def _f4b_window_message(schema: str, value: Any, *, ops_module: str) -> str:
     return (
-        f"'audit_coalescing_window_ms' in {schema}.platform_declarations must be a non-negative integer (0 "
-        f"means no coalescing), got '{value}'. This table can be edited by hand, so the value is validated "
+        f"'audit_coalescing_window_ms' in {schema}.platform_declarations must be a non-negative integer no "
+        f"larger than 2147483647 (0 means no coalescing), got '{value}'. This table can be edited by hand, so "
+        f"the value is validated "
         f"on every read as well as on write. Re-set it with 'python -m {ops_module}.ops "
         f"declare-coalescing-window --ms <N>', then restart both processes."
     )
@@ -318,7 +325,7 @@ def validate_coalescing_window_value(value: object, *, schema: str, ops_module: 
     """F-4b(i) (design D-2(d)): jsonb numeric, integer, >= 0. `bool` is a
     Python `int` subclass -- rejected explicitly, since PostgreSQL's own
     jsonb `true`/`false` must never silently read back as `1`/`0`."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 2147483647:
         raise PlatformDeclarationError(_f4b_window_message(schema, value, ops_module=ops_module), code="F-4b")
     return value
 
@@ -724,9 +731,8 @@ def check_writer_role_timeouts(
 ) -> RoleTimeoutCatalog:
     """D-1(b) + D-2(h) 2, full dual check for ONE writer role -- `conn` is
     the connection the caller's OWN audit-writer sink actually uses to
-    write (r2db-api: one connection borrowed from that sink's own pool;
-    MitateDB-api: one connection opened via the SAME function the sink
-    itself uses to open its connections) -- never a throwaway connection
+    write (both peers: one connection borrowed from that sink's own pool,
+    which the sink's later writes then reuse) -- never a throwaway connection
     opened by SOME OTHER mechanism, since role-level settings only apply
     at login time and this check must observe the exact connection
     identity the durable sink will use.
@@ -916,10 +922,10 @@ _CONTRACT_170_LIMIT_CLASSES: tuple = ("enum_members", "idempotency_entries", "id
 #: `mitatedb_api.main`'s own platform pool (`PostgresCredentialStore`'s
 #: `BoundedConnectionPool`, pool-sized to `config.role_pool_size(thread_
 #: limit)` unless `MITATEDB_PLATFORM_POOL_SIZE` overrides it) PLUS
-#: `PostgresApplicationAuditSink`'s own per-write transient connections
-#: against the SAME role (worst case, one per worker thread plus the audit
-#: flush thread, also within `role_pool_size(thread_limit)`) -- both
-#: against `mitatedbsvc_api`. Identified by `INSERT` on `application_audit`.
+#: `PostgresApplicationAuditSink`'s own `BoundedConnectionPool` against
+#: the SAME role, built by `main.build_app` with the same size as the
+#: platform pool -- both against `mitatedbsvc_api`. Identified by `INSERT`
+#: on `application_audit`.
 _API_ROLE_STORE_COUNT = 2
 
 #: `mitatedb_api.control_composition`'s own 4 platform-plane stores
@@ -1513,6 +1519,146 @@ def check_request_rate_function(conn: "psycopg.Connection", *, schema: str, migr
             )
 
 
+#: the refusal-window function and table (migration
+#: `DENIAL_WINDOW_MIGRATION_FILENAME`) and the `search_path` the function is
+#: pinned to; `check_denial_window_function` compares the catalog against
+#: these.
+_DENIAL_WINDOW_FUNCTION_SIGNATURE = (
+    "denial_window_record(integer, text, timestamptz, text, text, text, text, text, text, text, text, text)"
+)
+_DENIAL_WINDOW_TABLE = "denial_window_counter"
+_DENIAL_WINDOW_SEARCH_PATH = "search_path=pg_catalog,pg_temp"
+
+
+def _f21_message(problems: "list[str]", *, schema: str, migration: str, ops_module: str) -> str:
+    return (
+        f"{schema}.denial_window_record is not in the state migration {migration} leaves it in: "
+        + "; ".join(problems)
+        + f". Apply that migration as the schema's owner role ('python -m {ops_module}.ops "
+        f"apply-platform-migration {migration} --lock-timeout <value>'), then restart the data plane."
+    )
+
+
+def _f21_acl_holders(cur: "psycopg.Cursor", schema: str, table: str, privilege: str) -> "list[str]":
+    """The roles (never the table's owner, the schema's owner or PUBLIC) whose ACL entry on
+    `<schema>.<table>` carries `privilege`, read from `pg_class.relacl` --
+    readable by every login role, unlike `information_schema.
+    role_table_grants`, which shows a role only the grants it is a party
+    to. A table with no ACL, or no table, has no holders."""
+    cur.execute(
+        "SELECT DISTINCT pg_get_userbyid(a.grantee) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "CROSS JOIN LATERAL aclexplode(c.relacl) a "
+        "WHERE n.nspname = %s AND c.relname = %s AND a.privilege_type = %s AND a.grantee <> 0 AND a.grantee <> c.relowner "
+        "AND a.grantee <> n.nspowner "
+        "ORDER BY 1",
+        [schema, table, privilege],
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def check_denial_window_function(conn: "psycopg.Connection", *, schema: str, ops_module: str, migration: str) -> None:
+    """F-21: read-only. `schema` carries the `denial_window_record`
+    function and the `denial_window_counter` table that hold the count of
+    refused requests, in the state migration `migration` leaves them in.
+    The function runs as its owner and is the only way the data plane
+    reaches the table, so the check names each way it can fail to be safe:
+    not `SECURITY DEFINER`, a `search_path` that is not pinned to
+    `pg_catalog, pg_temp`, EXECUTE held by PUBLIC, or the function or the
+    table owned by a role other than the schema's owner. It also names each
+    way the grants can be wrong, by role name (so a run as the schema's
+    owner, which may do everything, still sees them): a role that writes
+    `application_audit` -- the data plane's runtime role -- may not EXECUTE
+    the function, or this connection's own role may not (a role that reaches
+    the function only through a group); a runtime role (that one, or any role holding EXECUTE)
+    holds any privilege at all on the table (SELECT, INSERT, UPDATE,
+    DELETE, TRUNCATE, REFERENCES or TRIGGER), which is a count it can reach
+    without the function and so lower or erase; the schema's own owner
+    role is never counted as one (it owns the objects); a role
+    that reads both audit tables may not SELECT the table, so `audit_query`
+    fails. Reads `pg_proc`, `pg_class`, `pg_namespace`, `has_function_
+    privilege` and `has_table_privilege` only. Raises
+    `PlatformDeclarationError` (code `F-21`) listing every failed
+    property."""
+    problems: list[str] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT to_regprocedure(quote_ident(%s) || '.' || %s)::oid",
+            [schema, _DENIAL_WINDOW_FUNCTION_SIGNATURE],
+        )
+        (function_oid,) = cur.fetchone()
+        cur.execute(
+            "SELECT c.oid, c.relowner = n.nspowner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = %s AND c.relname = %s",
+            [schema, _DENIAL_WINDOW_TABLE],
+        )
+        table_row = cur.fetchone()
+        writers = _f21_acl_holders(cur, schema, "application_audit", "INSERT")
+        readers = sorted(
+            set(_f21_acl_holders(cur, schema, "application_audit", "SELECT"))
+            & set(_f21_acl_holders(cur, schema, "control_audit", "SELECT"))
+        )
+        if function_oid is None:
+            problems.append("the function does not exist")
+        else:
+            cur.execute(
+                "SELECT p.prosecdef, p.proconfig, p.proowner = n.nspowner, "
+                "(p.proacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a "
+                "WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')), "
+                "ARRAY(SELECT pg_get_userbyid(a.grantee) FROM aclexplode(p.proacl) a "
+                "WHERE a.privilege_type = 'EXECUTE' AND a.grantee <> 0 AND a.grantee <> p.proowner AND a.grantee <> n.nspowner ORDER BY 1) "
+                "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = %s::oid",
+                [function_oid],
+            )
+            security_definer, config, owned_by_schema_owner, public_executes, executors = cur.fetchone()
+            if not security_definer:
+                problems.append("it is not SECURITY DEFINER")
+            pinned = [entry.replace(" ", "") for entry in (config or []) if entry.startswith("search_path=")]
+            if pinned != [_DENIAL_WINDOW_SEARCH_PATH]:
+                problems.append("its search_path is not pinned to pg_catalog, pg_temp")
+            if public_executes:
+                problems.append("PUBLIC may EXECUTE it")
+            if not owned_by_schema_owner:
+                problems.append("it is not owned by the schema's owner role")
+            cannot_execute = []
+            for role in writers:
+                cur.execute("SELECT has_function_privilege(%s::name, %s::oid, 'EXECUTE')", [role, function_oid])
+                if not cur.fetchone()[0]:
+                    cannot_execute.append(role)
+            if cannot_execute:
+                problems.append("a role that writes application_audit may not EXECUTE it: " + ", ".join(cannot_execute))
+            cur.execute("SELECT has_function_privilege(current_user, %s::oid, 'EXECUTE')", [function_oid])
+            if not cur.fetchone()[0]:
+                problems.append("this connection's role may not EXECUTE it")
+            if table_row is not None:
+                holders = []
+                for role in sorted(set(writers) | set(executors)):
+                    cur.execute(
+                        "SELECT has_table_privilege(%s::name, %s::oid, "
+                        "'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
+                        [role, table_row[0]],
+                    )
+                    if cur.fetchone()[0]:
+                        holders.append(role)
+                if holders:
+                    problems.append("a runtime role holds a direct privilege on the counter table: " + ", ".join(holders))
+        if table_row is None:
+            problems.append("the denial_window_counter table does not exist")
+        else:
+            if not table_row[1]:
+                problems.append("the denial_window_counter table is not owned by the schema's owner role")
+            cannot_read = []
+            for role in readers:
+                cur.execute("SELECT has_table_privilege(%s::name, %s::oid, 'SELECT')", [role, table_row[0]])
+                if not cur.fetchone()[0]:
+                    cannot_read.append(role)
+            if cannot_read:
+                problems.append("a role that reads both audit tables may not SELECT the counter table: " + ", ".join(cannot_read))
+    if problems:
+        raise PlatformDeclarationError(
+            _f21_message(problems, schema=schema, migration=migration, ops_module=ops_module), code="F-21"
+        )
+
+
 def ops_module_hint() -> str:
     """`PEER_MODULE`, named through a function (not referenced directly by
     `check_contract_170_declarations`'s own f-strings) so this check's
@@ -1545,6 +1691,7 @@ __all__ = [
     "check_application_collations",
     "check_auditreader_statement_timeout",
     "check_control_surface_consistency",
+    "check_denial_window_function",
     "check_max_connections_headroom",
     "check_role_connection_limits",
     "check_writer_role_timeouts",

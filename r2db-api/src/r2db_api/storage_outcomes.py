@@ -66,11 +66,11 @@ class MutationOutcome:
     assigned_addresses: list[dict[str, Any]] | None = None
     # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-10): whether
     # this batch passed through the `DESTRUCTIVE_CONFIRMATION_V1` choke
-    # (a confirmed `delete`) -- the fail-closed/buffer-class dispatch
-    # point. `True` means the backend already durably recorded this batch
-    # via its `audit_hook` pre-commit call; `DataService` must not also
-    # enqueue it on the bounded buffer (D-10: at most one durable row per
-    # operation).
+    # (a confirmed `delete`). Whether the backend already durably
+    # recorded this batch via its `audit_hook` pre-commit call does not
+    # depend on it: the backend calls the hook for every real batch, and
+    # `DataService` reads the hook's own `fired` flag to write no second row
+    # (D-10: at most one durable row per operation).
     destructive: bool = False
     # Contract 1.7.0 (D-4, WP-2b): `committed` is `False` only for a
     # `dry_run` that reached the "would succeed" decision (rolled back at

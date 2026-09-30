@@ -240,7 +240,7 @@ def _count_execution_audit_events(session_adapter: ConformanceAdapter, request_i
     "実装の形 (6d-ii) の確定" (5) row (i)): where `audit_query` answers
     for real, counts the events carrying this execution's own
     `request_id` -- reusing only reads the port already exposes (`audit_
-    query`/`flush_audit_buffer`/`audit_visibility_lag_ms`), the same
+    query`/`audit_visibility_lag_ms`), the same
     declare-first, bounded-poll shape `test_c25_result_request_id.py`'s
     own `_find_audit_event_by_request_id` establishes (this file's own
     smaller copy).
@@ -260,7 +260,6 @@ def _count_execution_audit_events(session_adapter: ConformanceAdapter, request_i
     that are still draining backlog, so this genuinely converges once it
     reaches the live edge instead of endlessly restarting a losing race
     against a page too small to keep up."""
-    session_adapter.flush_audit_buffer()
     control_actor = session_adapter.control_credential()
     _status, page_limit = _audit_query_control_state(session_adapter)
     lag_s = session_adapter.audit_visibility_lag_ms() / 1000.0

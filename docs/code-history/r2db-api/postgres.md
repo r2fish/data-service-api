@@ -679,6 +679,20 @@ decided result out of that block, since a raise cannot itself
 return a value.
 ```
 
+### correction: 2026-09-30
+
+- reason: R-115 WP-4b -- the pre-commit hook is the last statement of the transaction, after the idempotency record (the dry_run exit stays before both); the docstring no longer says the hook directly follows the exit
+
+old:
+```
+the single tx-exit point sits right before the pre-commit hook,
+```
+
+new:
+```
+the single tx-exit point sits before the idempotency record and the pre-commit hook,
+```
+
 ## CH-0028
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell.transact`)

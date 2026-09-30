@@ -60,6 +60,9 @@ MIGRATION_NAMES = (
     # Phase 10 WP-4f (supervisor ruling 2026-09-09): raises `r2dbsvc_api`/
     # `r2dbsvc_controlplane`'s own `CONNECTION LIMIT`.
     "0013_role_connection_limits.sql",
+    # the refusal-window function `verify-declarations` checks (F-21);
+    # depends only on 0007, never on 0008/0012.
+    "0016_denial_window_counter.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
     # Phase 10 WP-6a (design D-5(ii)): widens `platform_declarations_key_
     # check` to admit `process_ceilings`. `_bootstrap` below auto-seeds a
@@ -194,6 +197,8 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
     # here regardless of which fixture variant (`MIGRATION_NAMES` vs
     # `MIGRATION_NAMES_WITHOUT_DECLARATIONS`) called this function.
     _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
+    # unconditional, like 0013 above -- depends only on 0007.
+    _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
     if "0008_platform_declarations_and_writer_timeouts.sql" in rewritten:
         _run_psql(
             control_dsn,
@@ -465,6 +470,42 @@ def test_verify_declarations_exits_0_when_every_check_passes(
     _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
     rc = _run_verify(monkeypatch, dsn=platform.api_dsn, schema=platform.schema)
     assert rc == 0
+
+
+_DENIAL_WINDOW_SIGNATURE = "denial_window_record(integer, text, timestamptz, text, text, text, text, text, text, text, text, text)"
+
+
+@pytest.mark.parametrize(
+    ("break_statement", "restore_statement", "fragment"),
+    [
+        ("ALTER FUNCTION {fn} SECURITY INVOKER", "ALTER FUNCTION {fn} SECURITY DEFINER", "SECURITY DEFINER"),
+        ("ALTER FUNCTION {fn} RESET search_path", "ALTER FUNCTION {fn} SET search_path = pg_catalog, pg_temp", "search_path"),
+        ("GRANT EXECUTE ON FUNCTION {fn} TO PUBLIC", "REVOKE ALL ON FUNCTION {fn} FROM PUBLIC", "PUBLIC"),
+        ("ALTER FUNCTION {fn} OWNER TO {api_role}", "ALTER FUNCTION {fn} OWNER TO {control_role}", "owned by the schema's owner role"),
+        ("REVOKE EXECUTE ON FUNCTION {fn} FROM {api_role}", "GRANT EXECUTE ON FUNCTION {fn} TO {api_role}", "a role that writes application_audit may not EXECUTE it"),
+        ("GRANT UPDATE ON TABLE {table} TO {api_role}", "REVOKE UPDATE ON TABLE {table} FROM {api_role}", "a runtime role holds a direct privilege on the counter table"),
+        ("GRANT TRUNCATE ON TABLE {table} TO {api_role}", "REVOKE TRUNCATE ON TABLE {table} FROM {api_role}", "a runtime role holds a direct privilege on the counter table"),
+        ("REVOKE SELECT ON TABLE {table} FROM {auditreader_role}", "GRANT SELECT ON TABLE {table} TO {auditreader_role}", "a role that reads both audit tables may not SELECT the counter table"),
+    ],
+    ids=["security_invoker", "search_path_unpinned", "public_execute", "function_owner", "runtime_without_execute", "runtime_direct_grant", "runtime_direct_truncate", "auditreader_without_select"],
+)
+def test_verify_declarations_f21_when_the_refusal_window_function_is_not_safe_to_run_as_its_owner(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    break_statement: str, restore_statement: str, fragment: str,
+) -> None:
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    names = dict(
+        fn=f"{platform.schema}.{_DENIAL_WINDOW_SIGNATURE}", api_role=platform.api_role, control_role=f"{platform.prefix}_control",
+        table=f"{platform.schema}.denial_window_counter", auditreader_role=f"{platform.prefix}_auditreader",
+    )
+    assert _run_verify(monkeypatch, dsn=platform.api_dsn, schema=platform.schema) == 0  # healthy first: F-21 passes
+    capsys.readouterr()
+    with psycopg.connect(_dsn_with(platform.admin_dsn, dbname=platform.platform_db), autocommit=True) as conn:
+        conn.execute(break_statement.format(**names))
+    rc = _run_verify(monkeypatch, dsn=platform.api_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 20, out
+    assert "FAIL F-21" in out and fragment in out, out
 
 
 def test_verify_declarations_exits_2_when_platform_database_is_unreachable(

@@ -37,6 +37,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 from typing import Iterator
@@ -218,6 +219,9 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         # this WP) -- every real request through `main_module`'s own app
         # needs this table/function to exist.
         "0015_credential_request_rate.sql",
+        # every refusal's count is written through this migration's
+        # function (`build_app` also checks it at startup).
+        "0016_denial_window_counter.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = rewritten_dir / name
@@ -248,6 +252,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
         _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+        _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(
@@ -1654,16 +1659,6 @@ def test_nul_locator_over_real_http_is_401_and_durably_audited_not_503_silent(
             assert response.status_code == 401, f"NUL locator {locator!r} returned {response.status_code}, not 401: {response.text}"
             assert response.json()["code"] == "AUTH_INVALID"
 
-        # Force any coalescing window open for this denial's key closed --
-        # `service.flush_audit_buffer`'s own hook, the same one the real
-        # periodic background thread calls (`main.py`'s `_audit_flush_loop`)
-        # -- so the durable row this denial's FIRST occurrence already
-        # wrote synchronously (`_DenialCoalescer.route`'s own "first
-        # occurrence writes immediately" rule) is guaranteed visible by the
-        # time this test reads `application_audit` below, regardless of
-        # real wall-clock timing relative to `denial_coalesce_window_s`.
-        asgi_app.app.state.service.flush_audit_buffer(force_expire_denial_windows=True)
-
     with psycopg.connect(_dsn_with(platform.admin_dsn, user=f"{platform.prefix}_auditreader", password=platform.auditreader_password, dbname=platform.platform_db)) as conn:
         with conn.cursor() as cur:
             table = sql.Identifier(platform.schema, "application_audit").as_string(conn)
@@ -1860,44 +1855,21 @@ def test_build_app_invalid_control_plane_status_raises(platform: types.SimpleNam
         main_module.build_app(env=env)
 
 
-_INVALID_AUDIT_FLUSH_INTERVAL_VALUES = ["0", "-1", "nan", "inf", "not-a-number"]
-
-
-@pytest.mark.parametrize("bad_value", _INVALID_AUDIT_FLUSH_INTERVAL_VALUES)
-def test_build_app_fails_fast_on_invalid_audit_flush_interval(
-    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType, bad_value: str,
+def test_build_app_starts_no_background_audit_thread_and_reads_no_flush_interval(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
 ) -> None:
-    """Phase 6 WP-0 (design D-4(a)): `R2DB_AUDIT_FLUSH_INTERVAL_S` is the
-    interval `main.py`'s own flush thread passes straight to `threading.
-    Event.wait` (`main.py:397`) -- `wait(0)`/`wait(-1)`/`wait(float("nan"))`
-    all return immediately (`False`), turning that daemon thread into a
-    silent hot loop nothing about which would look alarming to an operator
-    who mistyped this variable. `_optional_float` must now refuse every
-    non-empty value that is not a finite, positive float at startup
-    (`ValueError` naming the variable) -- exercised here through the REAL
-    `build_app` path (not a direct call to `_optional_float`), so this is
-    the actual startup-failure consumer wiring, not merely the helper
-    function in isolation. Each of the 5 forms (zero / negative / NaN /
-    infinity / unparsable text) is its own parametrize case, per WP-0
-    completion condition 1 ("5 形すべてを個別ケースで観測する")."""
+    """Every audit event and every refusal count is durable before its
+    response is returned, so the composition root runs no periodic sweep:
+    the lifespan starts no `r2db-audit-flush` thread, and a stale
+    `R2DB_AUDIT_FLUSH_INTERVAL_S` in the environment -- once a startup
+    failure when malformed -- is not read at all."""
     env = _main_env(platform, provisioned_app)
-    env["R2DB_AUDIT_FLUSH_INTERVAL_S"] = bad_value
-    with pytest.raises(ValueError, match="R2DB_AUDIT_FLUSH_INTERVAL_S"):
-        main_module.build_app(env=env)
-
-
-def test_optional_float_default_path_is_not_regressed(main_module: types.ModuleType) -> None:
-    """WP-0 completion condition 2: an unset OR empty-string
-    `R2DB_AUDIT_FLUSH_INTERVAL_S` must still fall back to `default` -- the
-    "空なら既定値" half that must stay green while mutation 2 (dropping the
-    `if not raw: return default` early return) turns it red. A direct call
-    is sufficient here (unlike the fail-fast cases above): the real-startup
-    wiring for this same function/variable pair is already established by
-    `test_build_app_fails_fast_on_invalid_audit_flush_interval` and by
-    `_optional_float` having exactly one caller in `main.py` (the flush-
-    interval assignment feeding `threading.Event.wait`)."""
-    assert main_module._optional_float({}, "R2DB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
-    assert main_module._optional_float({"R2DB_AUDIT_FLUSH_INTERVAL_S": ""}, "R2DB_AUDIT_FLUSH_INTERVAL_S", 2.5) == 2.5
+    env["R2DB_AUDIT_FLUSH_INTERVAL_S"] = "not-a-number"
+    asgi_app = main_module.build_app(env=env)
+    with TestClient(asgi_app) as client:
+        assert client.get("/v1/capabilities").status_code == 401  # the app is up and answering
+        names = [thread.name for thread in threading.enumerate()]
+        assert "r2db-audit-flush" not in names, names
 
 
 def test_build_app_default_control_plane_status_is_unavailable(

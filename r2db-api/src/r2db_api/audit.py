@@ -3,9 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
+import threading
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Callable
 import uuid
+
+from .audit_counts import _coalesced_count
 
 
 FORBIDDEN = ("credential", "token", "password", "secret", "private_key", "sql", "row_value")
@@ -39,14 +43,14 @@ class AuditEvent:
     # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-3/D-4): the
     # 14th column `application_audit`/`control_audit`'s durable schema adds
     # beyond contract `audit.fields`' 13 -- "this row represents `count`
-    # occurrences, NULL means 1". Only D-4's buffer-overflow alert row and
-    # D-3's coalesced-denial summary row ever set this to a concrete int;
+    # occurrences, NULL means 1". Only D-3's coalesced-denial summary row
+    # ever sets this to a concrete int;
     # every other event leaves it `None`. Carried on the shared `AuditEvent`
     # dataclass (not a `control_audit`/`application_audit`-only subclass)
     # so `ControlAuditSink`/`AuditSink`/`ApplicationAuditSink` all construct
     # the same event shape -- `control_audit` itself never receives a
-    # non-`None` value here (0006's table has no such column, and D-4/D-3
-    # are application-plane-only mechanisms), but the *type* stays uniform.
+    # non-`None` value here (0006's table has no such column, and D-3 is
+    # an application-plane-only mechanism), but the *type* stays uniform.
     count: int | None = None
 
     def as_dict(self) -> MappingProxyType:
@@ -169,23 +173,38 @@ class ApplicationAuditSink:
     `LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND` -- which never
     reach this class at all). Every event `DataService`'s dispatch logic
     (`service.py`) classifies as fail-closed, coalesced-denial, or
-    buffer-class is appended here (or to `PostgresApplicationAuditSink`,
+    ordinary data-operation event is appended here (or to `PostgresApplicationAuditSink`,
     `credential_store.py`'s Postgres-backed counterpart) instead.
 
-    `append_many` exists for D-4's buffer flush (`service.py`'s bounded
-    buffer always drains in one batch call, never one `append()` per
-    buffered event) -- `ControlAuditSink` has no equivalent because
-    control-plane events are never buffered (every `control_audit` row is
-    written synchronously, one event at a time).
+    `append_many` is a multi-row batch write kept in step with
+    `PostgresApplicationAuditSink.append_many` (`service.py` writes each
+    event with `append`, before its response is returned) --
+    `ControlAuditSink` has no equivalent because every `control_audit` row
+    is written synchronously, one event at a time.
 
     `inject_fault`/`work` mirror `ControlAuditSink`'s identical mechanisms
     one-for-one; see that class's docstring for the full rationale, which
     applies here unchanged.
+
+    `record_denial` is this class's counterpart of the refusal-window
+    counter `PostgresApplicationAuditSink.record_denial` keeps in the
+    platform database: the first refusal of a (key, window) pair is
+    recorded as an ordinary event, and every later one adds one to that
+    window's tally in a process-local table instead of writing a row. The
+    window is aligned to the sink's own clock. `denial_window_summaries`
+    returns the summary event of every closed window that held repeats,
+    which `audit_query.InMemoryAuditQueryStore` reads. The table lives in
+    this process only, which is exactly what an in-process plug is: the
+    durability a service process needs against its own sudden death is the
+    Postgres sink's property.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._events: list[AuditEvent] = []
         self._fault: Exception | None = None
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._denial_lock = threading.Lock()
+        self._denial_windows: dict[tuple[str, int], dict[str, Any]] = {}
 
     def inject_fault(self, exc: Exception | None) -> None:
         """Test-only fault injection (Phase 4 mutation coverage, the
@@ -219,12 +238,81 @@ class ApplicationAuditSink:
         self._events.append(event)
         return event
 
+    def record_denial(
+        self,
+        *,
+        window_ms: int,
+        event_class: str,
+        request_id: str,
+        application_id: str | None,
+        actor_type: str,
+        actor_id: str | None,
+        role: str | None,
+        operation: str,
+        target_kind: str | None,
+        reason_code: str | None = None,
+        target_id: str | None = None,
+    ) -> None:
+        """Counts one refusal. The first refusal of a (key, window) pair --
+        key = application, actor (`unknown` when there is none),
+        operation, reason code; window = the sink's clock truncated to a
+        multiple of `window_ms` -- is appended as an ordinary `deny`
+        event; every later one only adds one to that window's tally. A
+        `window_ms` of 0 declares no coalescing: every refusal is appended.
+        Raises the injected fault, like every other write."""
+        if self._fault is not None:
+            raise self._fault
+        fields: dict[str, Any] = dict(
+            event_class=event_class, request_id=request_id, application_id=application_id, actor_type=actor_type,
+            actor_id=actor_id, role=role, operation=operation, target_kind=target_kind, outcome="deny",
+            reason_code=reason_code, target_id=target_id,
+        )
+        if window_ms <= 0:
+            self.append(**fields)
+            return
+        now_ms = int(self._clock().timestamp() * 1000)
+        start_ms = now_ms - now_ms % window_ms
+        key = (json.dumps([window_ms, application_id, actor_id or "unknown", operation, reason_code]), start_ms)
+        with self._denial_lock:
+            window = self._denial_windows.get(key)
+            if window is not None:
+                window["occurrences"] += 1
+                return
+            first = self.append(**fields)
+            self._denial_windows[key] = {
+                "occurrences": 1,
+                "summary_event_id": str(uuid.uuid4()),
+                "window_end": datetime.fromtimestamp((start_ms + window_ms) / 1000, tz=timezone.utc),
+                "first": first,
+            }
+
+    def denial_window_summaries(self, *, closed_before: datetime) -> "list[tuple[AuditEvent, datetime]]":
+        """The summary event of every window that ended before
+        `closed_before` and held repeats, each with its window's end: the
+        first refusal's fields, its own stable `event_id`, and `count`
+        set to the repeats (absent when there was exactly one). A window
+        that held one refusal has no summary."""
+        summaries: list[tuple[AuditEvent, datetime]] = []
+        with self._denial_lock:
+            windows = list(self._denial_windows.values())
+        for window in windows:
+            if window["occurrences"] < 2 or window["window_end"] >= closed_before:
+                continue
+            first = window["first"]
+            summary = AuditEvent(
+                window["summary_event_id"], first.event_class, first.occurred_at, first.request_id, first.application_id,
+                first.actor_type, first.actor_id, first.role, first.operation, first.target_kind, first.outcome,
+                first.reason_code, first.target_id, _coalesced_count(window["occurrences"] - 1),
+            )
+            summaries.append((summary, window["window_end"]))
+        return summaries
+
     def append_many(self, events: "list[AuditEvent]") -> None:
-        """D-4's buffer-flush batch write -- either every event in `events`
+        """Batch write -- either every event in `events`
         is recorded, or (on injected/simulated failure) none is: this
         mirrors the all-or-nothing character of `PostgresApplicationAuditSink.
         append_many`'s real single-statement multi-row `INSERT`, so a caller
-        cannot observe a partially-flushed buffer from either backend.
+        cannot observe a partially-written batch from either backend.
         """
         if self._fault is not None:
             raise self._fault

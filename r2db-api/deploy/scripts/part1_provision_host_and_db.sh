@@ -413,6 +413,15 @@ psql "${R2DBSVC_CONTROL_DSN}" \
     -v ON_ERROR_STOP=1 \
     -f "${R2DBSVC_MIGRATIONS_DIR}/0015_credential_request_rate.sql"
 
+# The refusal-window counter and the function every refusal's count runs
+# through -- no `-v`/`\getenv` variables, takes no precondition beyond 0007
+# above having already created `application_audit` and the
+# `r2dbsvc_auditreader` role.
+log "0016_denial_window_counter.sql (r2dbsvc_control)"
+psql "${R2DBSVC_CONTROL_DSN}" \
+    -v ON_ERROR_STOP=1 \
+    -f "${R2DBSVC_MIGRATIONS_DIR}/0016_denial_window_counter.sql"
+
 # ---------------------------------------------------------------------------
 # Role-name / pg_roles consistency check (supervisor ruling 2026-09-06
 # L-3), run after 0005/0006 -- which create these two roles under FIXED,

@@ -109,7 +109,14 @@ re-verify them; it assumes they are already true.
    `requests_per_minute` row every data-plane worker shares) is **required
    by the application-plane process**: on a platform database without its
    rate function, the application-plane process and its preflight refuse
-   to start, naming the migration. **The required order for an already-provisioned host is:
+   to start, naming the migration. **Migration
+   `0016_denial_window_counter.sql`** (`POSTGRES_PROVISIONING_RUNBOOK.md`
+   §21 -- the refusal-window counter every data-plane worker adds to) is
+   likewise **required by the application-plane process**: without it, or
+   with its function not in the state the file leaves it in, the
+   application-plane process and its preflight refuse to start, naming the
+   migration (F-21). `part1_provision_host_and_db.sh` applies it right
+   after `0015`. **The required order for an already-provisioned host is:
    `0012` -> `ops declare-process-ceilings` -> restart both processes**
    (ledger LQ4-24; `POSTGRES_PROVISIONING_RUNBOOK.md` §18). Every
    application

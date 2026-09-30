@@ -1030,6 +1030,11 @@ async def post_schema(request: Request) -> Response:
             # all -- calling one directly on a runtime session would raise
             # `AttributeError`, not this peer's own `AuthorizationError`.
             if not isinstance(session, ApplicationDeveloper):
+                # The refusal goes through the session's own developer check
+                # first, so it is counted in the durable refusal window like
+                # the in-process schema calls' (`FORBIDDEN`, operation
+                # `schema`) before this response is returned.
+                session._require_developer_authority(request_id=_request_id(request))
                 raise AuthorizationError("developer authority required")
 
             # `digest_extra` (WP-3b closure, H-3 (b); Phase 9 WP-3d rework):

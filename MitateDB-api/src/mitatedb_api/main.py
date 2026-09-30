@@ -44,13 +44,15 @@ Environment variable contract:
                                            `build_app` at their own
                                            rewritten schema.
     MITATEDB_PLATFORM_POOL_SIZE           optional, default
-                                           `pool.DEFAULT_MAX_SIZE` (20,
-                                           matching `mitatedbsvc_api`'s own
-                                           `CONNECTION LIMIT 20`, migration
-                                           `0002_registry_and_functions.
-                                           sql`) -- the WP-3 completion
-                                           condition's own bounded pool
+                                           `config.role_pool_size(thread_
+                                           limit)` -- the size of the
+                                           platform registry's bounded pool
                                            (`pool.BoundedConnectionPool`).
+                                           Sets that one pool only: the
+                                           durable audit sink's own pool is
+                                           always `role_pool_size(thread_
+                                           limit)`, the value the F-16
+                                           floor counts for it.
     MITATEDB_SERVE_APPS                   required -- comma-separated
                                            application ids this process
                                            serves
@@ -90,18 +92,6 @@ Environment variable contract:
                                            Change with `python -m
                                            mitatedb_api.ops
                                            declare-surfaces`.
-    MITATEDB_AUDIT_BUFFER_CAPACITY        optional, default 1000 -- D-4's
-                                           bounded in-memory buffer
-                                           capacity for ordinary
-                                           (buffer-class) data-operation
-                                           success events, per process.
-    MITATEDB_AUDIT_FLUSH_INTERVAL_S       optional, default 2.0 -- how
-                                           often this process' own
-                                           background thread calls
-                                           `audit_dispatch.AuditRouter.
-                                           flush()` (D-4's periodic flush
-                                           trigger); a latency knob only,
-                                           never a correctness one.
     MITATEDB_THREAD_LIMIT                 optional, unset or empty
                                            defaults to `DEFAULT_THREAD_
                                            LIMIT` (4) -- `run_in_
@@ -121,10 +111,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import os
 import sys
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping
@@ -133,9 +121,7 @@ import psycopg
 from psycopg import sql
 from starlette.types import ASGIApp
 
-from .application_audit import (DEFAULT_AUDIT_BUFFER_CAPACITY,
-                                DEFAULT_AUDIT_FLUSH_INTERVAL_S,
-                                PostgresApplicationAuditSink)
+from .application_audit import PostgresApplicationAuditSink
 from .audit import AuditSink
 from .audit_dispatch import AuditRouter
 from .backend_postgres import PostgresBackend
@@ -186,33 +172,8 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
         return default
 
 
-def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
-    """Phase 6 WP-0 (design D-4(a)): unlike `_optional_int`, this
-    function's only consumer is the audit-buffer flush interval, and a
-    misconfigured value there does not degrade gracefully --
-    `threading.Event.wait(0)`, `.wait(-1)`, and `.wait(float("nan"))` all
-    return immediately (`False`), so a value that is unset or empty is
-    fine (falls back to `default`, same discipline as `_optional_int`),
-    but a *non-empty* value that is not a finite, positive float turns the
-    flush thread into a silent hot loop -- something a deployer who
-    mistyped the variable would never notice, since nothing about a hot
-    flush loop looks alarming on its own. So this fails loudly at startup
-    instead (`ValueError` naming the variable), the same discipline this
-    module's own other env-var validity checks already use."""
-    raw = env.get(name)
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}") from None
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}")
-    return value
-
-
 def _thread_limit_from_env(env: Mapping[str, str], name: str, default: int) -> int:
-    """Same fail-loud discipline as `_optional_float`, for a positive int:
+    """Fail-loud discipline for a positive int:
     unset or empty falls back to `default`, but a non-empty value that is
     not a positive integer stops startup (`ValueError` naming the
     variable) rather than silently degrading -- this sizes a worker-
@@ -352,8 +313,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     concurrency_slots.selfcheck_slot_locking(slot_dir)
     # design D-4: every connection this process opens from here on (the
     # platform pool, every served application's two persistent
-    # connections, the durable audit sink's per-write connections, the
-    # startup reads below) carries this `application_name` (`pool.py`'s
+    # connections, the durable audit sink's pool, the startup reads
+    # below) carries this `application_name` (`pool.py`'s
     # own module-level toggle).
     set_connection_application_name(f"MitateDB-api:data:{os.getpid()}")
 
@@ -382,40 +343,36 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # declared `max_concurrency` (`MITATEDB_MAX_CONCURRENCY`), which is the
     # deployment-wide admission bound the host-shared slot directory
     # enforces and holds no connection. `MITATEDB_PLATFORM_POOL_SIZE` wins
-    # outright when set explicitly (`pool_size_from_env`'s own `default=`
-    # is only the fallback). `_role_pool_size` is also the per-process
-    # figure the F-16/F-18 checks below are given.
+    # outright when set explicitly for the platform pool (`pool_size_from_
+    # env`'s own `default=` is only the fallback). `_role_pool_size` is
+    # also the per-process figure the F-16/F-18 checks below are given.
     _role_pool_size = role_pool_size(thread_limit)
     pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"), default=_role_pool_size)
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
+    # The durable audit sink's own pool, against the same `mitatedbsvc_api`
+    # login role. Its size is `_role_pool_size` whatever
+    # `MITATEDB_PLATFORM_POOL_SIZE` says: `platform_declarations._API_ROLE_
+    # STORE_COUNT` (2) is the number of pools of `role_pool_size(thread_
+    # limit)` connections the F-16 floor counts for that role, and these
+    # two are them -- the override reaches the platform pool only.
+    audit_pool = BoundedConnectionPool(platform_dsn, max_size=_role_pool_size)
 
-    # Q4 phase (design D-1(b), §3.7 data-plane steps 4-6): the single
-    # source of `surfaces`/`audit_coalescing_window_ms` (read + validated,
-    # F-3/F-4/F-4b/F-5/F-8), cross-checked against `*_CONTROL_PLANE_
-    # STATUS` (F-6), then the writer role's own declared-vs-effective
+    # Design D-1(b), §3.7 data-plane steps 4-6: the single source of
+    # `surfaces`/`audit_coalescing_window_ms` (read + validated, F-3/F-4/F-4b/F-5/F-8), cross-checked against `*_CONTROL_
+    # PLANE_STATUS` (F-6), then the writer role's own declared-vs-effective
     # timeout dual check (F-7/F-9/F-10/F-11) -- `platform_dsn`'s own login
     # role IS `mitatedbsvc_api` (the SAME role that writes `application_
-    # audit`), so this check observes the exact connection identity the
-    # durable sink below will use.
-    # N-2 (monitor ruling 2026-09-05, delta review §4): the durable sink is
-    # constructed HERE (before the dual check, not after it) so this
-    # connection can be opened via `durable_audit._connect()` itself --
-    # THE SAME METHOD the sink's own `append`/`append_many` calls use to
-    # open every connection it ever writes through -- rather than a
-    # separately-written `psycopg.connect(...)` call that merely happened
-    # to match its arguments. A future change to `_connect` (e.g. an
-    # `options=` override or a DSN transformation) now automatically
-    # applies here too, instead of silently going unobserved by F-9 the
-    # way two independently-maintained call sites would risk (delta
-    # review N-2: "`_connect` が将来...を持てば F-9 が実際の書き手接続を
-    # 観測しなくなる (無音)"). `PostgresApplicationAuditSink.__init__`
-    # itself opens no connection (Q4 D-1(b)), so moving its construction
-    # earlier changes nothing about WHEN this process first touches the
-    # network. Closed again immediately after -- the sink opens its own
-    # connections per write, it never receives this one.
-    durable_audit = PostgresApplicationAuditSink(platform_dsn, schema=schema)
-    declarations_conn = durable_audit._connect()  # noqa: SLF001 -- same-module-family reach-in, deliberate (see comment above)
-    try:
+    # audit`), so the check has to observe the exact connection the
+    # durable sink writes on.
+    # The durable sink is constructed HERE (before the dual check) so the
+    # check can borrow its connection from `audit_pool` -- the pool the
+    # sink's real writes borrow from -- and observe a connection that is
+    # itself a writer, rather than one opened by separate code that merely
+    # happened to match today. The borrowed connection is rolled back and
+    # returned to the pool after the block, where a later write reuses it.
+    # `PostgresApplicationAuditSink.__init__` itself opens no connection.
+    durable_audit = PostgresApplicationAuditSink(platform_dsn, schema=schema, pool=audit_pool)
+    with durable_audit._borrow() as declarations_conn:  # noqa: SLF001 -- same-module-family reach-in, deliberate (see comment above)
         declarations = read_platform_declarations(
             declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
             migration=platform_declarations.MIGRATION_NUMBER,
@@ -497,8 +454,19 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         platform_declarations.check_request_rate_function(
             declarations_conn, schema=schema, migration=platform_declarations.REQUEST_RATE_MIGRATION_FILENAME,
         )
-    finally:
-        declarations_conn.close()
+        # The refusal-window function every refusal's count runs through
+        # (as this same login role) must exist, be executable by it, and be
+        # in the state its migration leaves it in -- pinned `search_path`,
+        # no PUBLIC EXECUTE, owned by the schema's owner, no role that may
+        # EXECUTE it holding a direct privilege on the counter table.
+        # Checked here so a platform missing the migration, or holding a
+        # function that is not safe to run as its owner, stops startup (and
+        # `--preflight`) instead of answering every refusal with a 503 or
+        # running an unsafe definer function.
+        platform_declarations.check_denial_window_function(
+            declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.DENIAL_WINDOW_MIGRATION_FILENAME,
+        )
 
     # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-6, work order
     # WP-3(a)): the durable application-plane audit sink -- writes to the
@@ -512,21 +480,17 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # automatically. `durable_audit` itself was already constructed above
     # (N-2, before the dual check) so that check's own connection could be
     # opened via this sink's `_connect()` -- not reconstructed here.
-    audit_buffer_capacity = _optional_int(env, "MITATEDB_AUDIT_BUFFER_CAPACITY", DEFAULT_AUDIT_BUFFER_CAPACITY)
-    audit_flush_interval_s = _optional_float(env, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", DEFAULT_AUDIT_FLUSH_INTERVAL_S)
     # Q4 phase (design D-2(e)): `denial_coalesce_window_s` now comes from
     # the SAME single-source declaration `audit_query`'s own control-plane
     # declaration reads (`declarations["audit_coalescing_window_ms"]`),
     # not a peer-local constant -- both processes describe the same
     # window (§1.2's own former "別プロセスだから読めない" drift this
     # phase closes).
-    # ONE shared router (design D-3/D-4's own "process-local" scoping) --
-    # handed to `credentials` below AND to every `ApplicationCell` this
-    # process builds, so denial coalescing and the buffer are shared
-    # process-wide, not duplicated per credential store/cell.
+    # ONE shared router -- handed to `credentials` below AND to every
+    # `ApplicationCell` this process builds. It keeps no denial window of
+    # its own: every refusal's count goes to the platform database.
     audit_router = AuditRouter(
-        durable_audit, buffer_capacity=audit_buffer_capacity, alert_min_interval_s=audit_flush_interval_s,
-        denial_coalesce_window_s=declarations.audit_coalescing_window_ms / 1000,
+        durable_audit, denial_coalesce_window_s=declarations.audit_coalescing_window_ms / 1000,
     )
 
     credentials = PostgresCredentialStore(
@@ -648,68 +612,20 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # bounded by this deployment's own declared `concurrency` class.
     service = HttpService(credentials, _cell_factory, audit_router=audit_router, limit_holder=limit_holder, max_concurrency=config.max_concurrency)
 
-    # Phase 4 (design D-4, "実装裁量" -- periodic flush trigger): a daemon
-    # thread that calls `audit_router.flush()` on a fixed interval for
-    # the lifetime of this process, so buffered/coalesced evidence does
-    # not sit un-durable indefinitely on a served application that
-    # happens to receive no further traffic. Purely a latency knob --
-    # correctness of D-3/D-4's own bounds does not depend on this thread
-    # running at all. The stop `Event` and `Thread` are created FRESH
-    # inside `_lifespan` on every entry (mirroring r2db-api's own
-    # `main.py::_lifespan` identical reasoning, independently arrived at
-    # here): `threading.Thread.start()` may only be called once per
-    # object, so constructing them once outside `_lifespan` would raise
-    # on a second ASGI startup against the same built app (this
-    # repository's own tests re-entering lifespan on the same app object).
+    # Every audit event and every refusal count is durable before its
+    # response is returned, so nothing runs in the background and nothing
+    # is flushed at shutdown; the lifespan only releases the pools.
     @asynccontextmanager
     async def _lifespan(_app: Any):
-        audit_flush_stop = threading.Event()
-
-        def _audit_flush_loop() -> None:
-            while not audit_flush_stop.wait(audit_flush_interval_s):
-                try:
-                    audit_router.flush()
-                except Exception:
-                    # A flush failure must never kill this thread (there
-                    # would then be nothing left to retry the next
-                    # interval) -- D-4's own sticky/backoff retry logic
-                    # already lives inside `AuditRouter.flush()`; this is
-                    # only a defensive backstop against a truly
-                    # unexpected exception escaping it.
-                    pass
-
-        audit_flush_thread = threading.Thread(target=_audit_flush_loop, name="mitatedb-audit-flush", daemon=True)
-        audit_flush_thread.start()
         try:
             yield
         finally:
-            audit_flush_stop.set()
-            audit_flush_thread.join(timeout=5.0)
-            # One final synchronous flush before this process stops --
-            # without this, up to `buffer_capacity` buffered events and
-            # every still-open denial-coalescing window's accumulated
-            # repeat count are silently discarded on a graceful shutdown
-            # (the periodic thread has just stopped, and nothing else
-            # will ever call this again for this process).
-            # `force_expire_denial_windows=True`: a window that has not
-            # YET reached its own window_s at this exact moment still
-            # gets its repeat-summary row written here -- shutdown is not
-            # a crash, so D-3 only sanctions losing counts to an actual
-            # crash, never to an orderly stop.
-            try:
-                audit_router.flush(force_expire_denial_windows=True)
-            except Exception:
-                # Best-effort, like every other flush attempt -- shutdown
-                # must still complete and release connections below even
-                # if the sink happens to be down at this exact moment.
-                pass
             # Release every connection this process holds on shutdown: the
-            # platform registry's bounded pool, and every served
-            # application's own two persistent PostgreSQL connections.
-            # `durable_audit` opens a fresh connection per call (no pool
-            # of its own -- `application_audit.PostgresApplicationAuditSink`'s
-            # own docstring) and so needs no explicit close here.
+            # platform registry's bounded pool, the durable audit sink's
+            # pool, and every served application's own two persistent
+            # PostgreSQL connections.
             credentials.close()
+            durable_audit.close()
             for cell in cells.values():
                 cell._backend.close()
 
@@ -751,8 +667,9 @@ async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
     scope protocol, driven directly rather than through a real server.
     `build_app()`'s own `_lifespan` hook is what closes every connection
     this process opened (`credentials.close()` -- the platform pool --
-    and every served application's own two persistent connections,
-    `cell._backend.close()`) -- reused here rather than duplicated."""
+    `durable_audit.close()` -- the durable audit sink's pool -- and every
+    served application's own two persistent connections, `cell._backend.
+    close()`) -- reused here rather than duplicated."""
     to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
     from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
 

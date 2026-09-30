@@ -208,6 +208,7 @@ def test_dry_run_writes_no_audit_event_destructive(sessions) -> None:
         f"a CONFIRMED destructive dry run must write no audit event at all -- {durable._events!r}"
     )
     assert runtime.read("things") == [{"id": 1, "label": "keep-me"}]  # nothing deleted
+    durable._events.clear()  # the read above wrote its own `data_operation` row
 
     # Positive control: the identical real (non-dry-run) delete DOES write
     # the durable audit row -- proving `durable._events == []` above is
@@ -221,35 +222,25 @@ def test_dry_run_writes_no_audit_event_destructive(sessions) -> None:
 
 
 def test_dry_run_writes_no_audit_event_non_destructive(sessions) -> None:
-    """Same proposition as the destructive test above, for the OTHER
-    audit path a non-destructive batch uses -- `_push_data_operation_
-    event`, which dispatches through `AuditRouter.push_buffer_event`
-    (buffer-class, not immediately durable, so call-counted here rather
-    than read back from the sink, which may not reflect an unflushed
-    buffer yet)."""
+    """Same proposition as the destructive test above, for a non-destructive
+    batch: its `allow` row is written through the pre-commit hook, which a
+    dry run never builds, so the sink stays empty until the identical real
+    batch runs."""
     durable = ApplicationAuditSink()
     router = make_router(durable)
     cell = ApplicationCell("apptwo", FoundationConfig(), backend=SQLiteBackend(), audit_router=router)
     developer = make_developer(cell, "apptwo")
     developer.create_collection("widgets", {"label": "text"})
     runtime = make_runtime(cell, "apptwo")
+    durable._events.clear()
 
-    calls: list[Any] = []
-    real_push = router.push_buffer_event
+    runtime.transact([{"type": "insert", "collection": "widgets", "values": {"label": "x"}}], dry_run=True)
+    assert durable._events == [], "a non-destructive dry run must not write any audit event"
 
-    def _counting_push(*args: Any, **kwargs: Any) -> Any:
-        calls.append((args, kwargs))
-        return real_push(*args, **kwargs)
-
-    router.push_buffer_event = _counting_push
-    try:
-        runtime.transact([{"type": "insert", "collection": "widgets", "values": {"label": "x"}}], dry_run=True)
-        assert calls == [], "a non-destructive dry run must not even ATTEMPT a buffer-class audit event"
-
-        runtime.transact([{"type": "insert", "collection": "widgets", "values": {"label": "x"}}])
-        assert len(calls) == 1, "the identical REAL insert must still push its one buffer-class event"
-    finally:
-        router.push_buffer_event = real_push
+    runtime.transact([{"type": "insert", "collection": "widgets", "values": {"label": "x"}}])
+    assert [(e.event_class, e.operation, e.outcome) for e in durable._events] == [("data_operation", "transact", "allow")], (
+        "the identical REAL insert must still write its one durable event"
+    )
 
 
 # --- completion condition 5: schema dry run descriptor + PRE-apply revision ---

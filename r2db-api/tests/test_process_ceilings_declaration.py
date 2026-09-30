@@ -131,6 +131,9 @@ MIGRATION_NAMES = (
     # WP-2 (design D-3 (1), 監督裁定15): `r2db_api.main.build_app` now
     # always wires the PostgreSQL-backed `requests_per_minute` rate row.
     "0015_credential_request_rate.sql",
+    # every refusal's count is written through this migration's function,
+    # and `audit_query` reads its counter table.
+    "0016_denial_window_counter.sql",
 )
 
 _DATA_URL = "https://r2db-process-ceilings-test.example.invalid/v1"
@@ -251,6 +254,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
         _run_psql(control_dsn, rewritten["0015_credential_request_rate.sql"])
+        _run_psql(control_dsn, rewritten["0016_denial_window_counter.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(

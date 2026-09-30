@@ -227,12 +227,10 @@ def test_preauth_concurrency_denial_is_never_durably_audited(preauth_stack):
                 await asyncio.sleep(0.01)
             assert entered.qsize() >= 2, "not all held requests reached the blocked authenticate call"
 
-            router.flush()
             before = len(router.durable_sink.events())
             extra_response = await _query(client, preauth_stack.runtime_bearer)
             assert extra_response.status_code == 413, extra_response.text
             assert extra_response.json()["details"]["limit_class"] == "concurrency"
-            router.flush()
             after = len(router.durable_sink.events())
             assert after == before, "a pre-authentication concurrency denial was durably audited"
 

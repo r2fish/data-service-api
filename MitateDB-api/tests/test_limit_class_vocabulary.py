@@ -122,12 +122,13 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 47, (
-        f"expected exactly 47 ResourceLimitError(...) call sites -- cell.py's `_LimitStateHolder` carries 3 for its "
+    assert len(findings) == 45, (
+        f"expected exactly 45 ResourceLimitError(...) call sites -- cell.py's `_LimitStateHolder` carries 3 for its "
         f"host-shared strategies (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (1)/(2)): `acquire_rate`'s "
         f"PostgreSQL-backed branch (`requests_per_minute`) and `concurrency_slot`/`acquire_concurrency_slot`'s "
-        f"slot-directory branches mapping `concurrency_slots.LimitExceeded` (`concurrency`); 44 + 3 = 47. The 44 "
-        f"before them: (R-71 WP-1, work order docs/work-orders/"
+        f"slot-directory branches mapping `concurrency_slots.LimitExceeded` (`concurrency`); 42 + 3 = 45. The 42 "
+        f"before them (the chain below ends at 44, before R-115 removed the backend's single-statement `insert` / `update`, one "
+        f"`execution_ms` site each): (R-71 WP-1, work order docs/work-orders/"
         f"WORK_ORDER_R71_MITATEDB_CATALOG_READ_CANCEL_MAPPING_V1.md D-1: the 8 developer-connection catalog reads "
         f"-- `schema_count`, `field_domains`, `field_types`, `all_field_types`, `field_constraints`, `field_types_"
         f"and_constraints`, `all_field_constraints`, `schema_revision` -- each gained the SAME `QueryCanceled`/"

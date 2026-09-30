@@ -672,6 +672,9 @@ def test_postgres_execution_failure_releases_lock_for_a_concurrent_retry(app_a) 
         }
         with pytest.raises(AuditSinkUnavailable):
             runtime_a.transact([delete_op])
+        # A read writes its own event before it answers, so the sink is
+        # healthy again before the row count is read back.
+        sink.inject_fault(None)
         # The backend write already ran, on the SAME connection/
         # transaction the failed pre-commit hook aborted -- rolled back
         # together, so the row is still there.
