@@ -590,9 +590,9 @@ def test_c35_reference_client_turn(isolated, request: pytest.FixtureRequest) -> 
 
     # ------------------------------------------------------------------
     # The journal: every step observed something, every step that expects a
-    # success observed one, every classified response carried the media type
-    # that classification names, and every request a recorder carried is one
-    # a step accounts for.
+    # success observed one, every step that expects a refusal observed one,
+    # a step that sends nothing only observes, and every request a recorder
+    # carried is one a step accounts for.
     # ------------------------------------------------------------------
     journal = turn.journal
     for step in _STEPS:

@@ -48,13 +48,28 @@ module (`wire_discipline_violations`): no import of an HTTP or socket
 library, the entry's send function handed to a `Recorder` and nowhere else
 (never called by the test), the isolated surface used for
 `provision_application` and `wire_entry` only, no import of another port
-helper, no adapter object inside a function (no `adapter` parameter or name,
-no `registered_adapters`; `request` is used only for `.node` and as the
-argument of the group helper, so `getfixturevalue` is red), and no branch on
-an adapter, an entry, a host or a held adapter name -- the one place the
-module reads a plug's `transport_kind` is its import-time selection. The
-pin follows names and attributes one step; it does not follow a value
-through a container or a helper's parameter.
+helper (a plain `import` of `adapter` or `conftest`, with or without an alias,
+is red too), no adapter object inside a function (no `adapter` parameter or
+name, no `registered_adapters` by name or as an attribute), `request` used
+only as the one argument of the group helper and, inside that helper, only
+for `.nodeid`, `.get_closest_marker` and `.callspec` of its `.node` (so
+`getfixturevalue` and `funcargs` are red), and no branch on an adapter, an
+entry, a host or a held adapter name -- the one place the module reads a
+plug's `transport_kind` is its import-time selection.
+
+Known gaps of that pin:
+
+1. not detected: a value bound to another name and used from there -- a
+   module-level `_A = registered_adapters()` read as `_A[plug]`, `_R =
+   registered_adapters` called as `_R()[plug]`, a binding in a class body,
+   `n = self.adapter_name` followed by `if "socket" in n:`, `p = plug`
+   followed by `if p == ...:`; likewise a value carried through a container
+   or a helper's parameter.
+   why: the pin follows names and attributes one step, as a static check
+   that does not follow data flow.
+   caught by: the code review of a module that is one scenario function and
+   a few small helpers. Not by the journal: it accounts for what a recorder
+   carried, so a request that bypasses the client does not appear in it.
 """
 from __future__ import annotations
 
@@ -1000,6 +1015,7 @@ C35_BRANCH_ATTRS = frozenset({"name", "adapter_name", "transport_kind", "base_ur
 C35_FUNCTION_FORBIDDEN_NAMES = frozenset({"adapter", "registered_adapters"})
 C35_REQUEST_USES = "node"
 C35_GROUP_HELPER = "_own_group"
+C35_NODE_USES = frozenset({"nodeid", "get_closest_marker", "callspec"})
 C35_HOST_FRAGMENTS = (".invalid", "127.0.0.1", "localhost")
 C35_SELECTION_ATTR = "transport_kind"
 C35_RECORDER = "Recorder"
@@ -1035,6 +1051,8 @@ def wire_discipline_violations(source, *, adapter_names):
             for alias in node.names:
                 if alias.name.split(".")[0] in C35_FORBIDDEN_MODULES:
                     found.append(f"{node.lineno}: import {alias.name}")
+                elif alias.name.split(".")[0] in C35_IMPORTABLE_NAMES:
+                    found.append(f"{node.lineno}: import {alias.name} (only a from-import of the listed names is allowed)")
         elif isinstance(node, ast.ImportFrom):
             top = (node.module or "").split(".")[0]
             if top in C35_FORBIDDEN_MODULES:
@@ -1088,19 +1106,44 @@ def wire_discipline_violations(source, *, adapter_names):
             # `request.getfixturevalue(...)` would reach any fixture.
             if isinstance(node, ast.Name) and node.id in C35_FUNCTION_FORBIDDEN_NAMES:
                 found.append(f"{node.lineno}: {node.id} is used inside a function")
+            if isinstance(node, ast.Attribute) and node.attr in C35_FUNCTION_FORBIDDEN_NAMES:
+                found.append(f"{node.lineno}: .{node.attr} is used inside a function")
             if isinstance(node, ast.arg) and node.arg in C35_FUNCTION_FORBIDDEN_NAMES:
                 found.append(f"{node.lineno}: a function takes {node.arg}")
             if isinstance(node, ast.Name) and node.id == "request" and isinstance(node.ctx, ast.Load):
                 parent = parents.get(node)
-                read_node = isinstance(parent, ast.Attribute) and parent.value is node and parent.attr == C35_REQUEST_USES
+                function = enclosing(node, functions)
                 given_to_helper = (
                     isinstance(parent, ast.Call)
                     and node in parent.args
+                    and len(parent.args) == 1
                     and isinstance(parent.func, ast.Name)
                     and parent.func.id == C35_GROUP_HELPER
                 )
-                if not (read_node or given_to_helper):
-                    found.append(f"{node.lineno}: request is used other than for .{C35_REQUEST_USES} and {C35_GROUP_HELPER}")
+                read_node = isinstance(parent, ast.Attribute) and parent.value is node and parent.attr == C35_REQUEST_USES
+                if read_node and function.name == C35_GROUP_HELPER:
+                    # `request.node` is read only inside the group helper, and
+                    # only for what the helper uses: an attribute from
+                    # `C35_NODE_USES`, or `getattr(request.node, "callspec", ...)`.
+                    holder = parents.get(parent)
+                    used = (
+                        isinstance(holder, ast.Attribute) and holder.value is parent and holder.attr in C35_NODE_USES
+                    ) or (
+                        isinstance(holder, ast.Call)
+                        and isinstance(holder.func, ast.Name)
+                        and holder.func.id == "getattr"
+                        and holder.args[:1] == [parent]
+                        and len(holder.args) >= 2
+                        and isinstance(holder.args[1], ast.Constant)
+                        and holder.args[1].value in C35_NODE_USES
+                    )
+                    if not used:
+                        found.append(f"{node.lineno}: request.node is used for more than {sorted(C35_NODE_USES)}")
+                elif not given_to_helper:
+                    found.append(
+                        f"{node.lineno}: request is used other than as the one argument of {C35_GROUP_HELPER} "
+                        f"(or .{C35_REQUEST_USES} inside it)"
+                    )
         if isinstance(node, (ast.If, ast.IfExp, ast.While)):
             tests = [node.test]
         elif isinstance(node, ast.comprehension):
@@ -1159,6 +1202,13 @@ def test_c35_turn_reaches_the_wire_only_through_the_client():
         "a branch on the adapter's name held by an object": (
             "class Turn:\n    def m(self):\n        if 'socket' in self.adapter_name:\n            pass\n"
         ),
+        "a fixture taken from the node's funcargs": wrap.format("request.node.funcargs['adapter'].x()"),
+        "the node bound to a name": wrap.format("n = request.node\n    n.funcargs"),
+        "the node's request": wrap.format("request.node._request.getfixturevalue('adapter')"),
+        "a request given to another helper": wrap.format("other(request)"),
+        "a plain import of the registry's module": "import conftest\n",
+        "a plain import of the port's module under an alias": "import adapter as port\n",
+        "the registry read through its module inside a function": wrap.format("conftest.registered_adapters()"),
         "a registered adapter's name": wrap.format("y = 'r2db-api-http'"),
         "a host": wrap.format("y = 'http://127.0.0.1:8000'"),
         "an import of an HTTP library": "import httpx\n",
@@ -1173,7 +1223,11 @@ def test_c35_turn_reaches_the_wire_only_through_the_client():
         "the send handed to a recorder": "r = Recorder(entry.send)\n",
         "the two port calls": wrap.format("isolated.provision_application(i)\n    isolated.wire_entry(i)"),
         "a branch that tests neither": wrap.format("if y:\n        pass"),
-        "the group helper given the request": wrap.format("_own_group(request)\n    z = request.node.callspec"),
+        "the group helper given the request": wrap.format("_own_group(request)"),
+        "the group helper reading the node": (
+            "def _own_group(request):\n    a = getattr(request.node, 'callspec', None)\n"
+            "    b = request.node.nodeid\n    c = request.node.get_closest_marker('m')\n"
+        ),
         "the registry read at module level": "names = registered_adapters()\n",
         "the selection": "names = [n for n, o in registry.items() if o.transport_kind != 'in_process']\n",
         "the recorder reading the send it holds": (
