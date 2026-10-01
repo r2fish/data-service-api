@@ -2109,8 +2109,9 @@ def test_preflight_lifespan_closes_the_platform_pool_and_every_persistent_connec
     """Completion condition 124 -- mutation M124 (the lifespan shutdown
     skips `credentials.close()`): after one real authentication forces a
     pooled platform connection, one preflight lifespan cycle leaves the
-    platform pool with no connection and every served application's two
-    persistent connections closed."""
+    platform pool with no connection and both role pools of every served
+    application with no connection (the startup ledger check left one
+    runtime connection idle in its pool)."""
     main_module = _main_module(platform, r113_app)
     app = main_module.build_app(_main_env(platform, r113_app))
     try:
@@ -2120,11 +2121,11 @@ def test_preflight_lifespan_closes_the_platform_pool_and_every_persistent_connec
         store_pool = service._credentials._pool  # noqa: SLF001
         cell = service._cell_factory(r113_app.app_id)  # noqa: SLF001
         assert store_pool._created >= 1, "the platform pool holds no connection yet (空振り)"  # noqa: SLF001
-        assert not cell._backend._runtime.closed  # noqa: SLF001
+        assert cell._backend._runtime_pool._created >= 1, "the application's runtime pool holds no connection yet (空振り)"  # noqa: SLF001
     finally:
         _close_built_app(main_module, app)
     assert store_pool._created == 0, store_pool._created  # noqa: SLF001
-    assert cell._backend._runtime.closed and cell._backend._developer.closed  # noqa: SLF001
+    assert cell._backend._runtime_pool._created == 0 and cell._backend._developer_pool._created == 0  # noqa: SLF001
 
 
 # ===========================================================================
@@ -2134,17 +2135,20 @@ def test_preflight_lifespan_closes_the_platform_pool_and_every_persistent_connec
 
 def test_data_plane_connections_carry_the_documented_application_name(platform, r113_app) -> None:
     """Completion condition 126 -- mutation M126 (the served application's
-    persistent connections omit `application_name`): after `build_app()`,
-    its own persistent sessions read `MitateDB-api:data:<pid>`."""
+    pooled connections omit `application_name`): after `build_app()`, the
+    two sessions a data request borrows (runtime and developer) read
+    `MitateDB-api:data:<pid>`."""
     main_module = _main_module(platform, r113_app)
     app = main_module.build_app(_main_env(platform, r113_app))
     try:
         backend = app.app.state.service._cell_factory(r113_app.app_id)._backend  # noqa: SLF001
-        pids = [backend._runtime.info.backend_pid, backend._developer.info.backend_pid]  # noqa: SLF001
-        with psycopg.connect(platform.admin_dsn) as probe:
-            with probe.cursor() as cur:
-                cur.execute("SELECT application_name FROM pg_stat_activity WHERE pid = ANY(%s)", [pids])
-                names = [row[0] for row in cur.fetchall()]
+        with backend.request_scope("dml") as scope:
+            runtime_conn, developer_conn = scope.main, scope.developer
+            pids = [runtime_conn.info.backend_pid, developer_conn.info.backend_pid]
+            with psycopg.connect(platform.admin_dsn) as probe:
+                with probe.cursor() as cur:
+                    cur.execute("SELECT application_name FROM pg_stat_activity WHERE pid = ANY(%s)", [pids])
+                    names = [row[0] for row in cur.fetchall()]
     finally:
         _close_built_app(main_module, app)
     assert len(names) == 2, ("both persistent sessions must be visible (空振り)", names)

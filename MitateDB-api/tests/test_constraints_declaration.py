@@ -41,6 +41,8 @@ from mitatedb_api.config import FoundationConfig
 from mitatedb_api.errors import ConflictError, ResourceLimitError, ValidationError
 from mitatedb_api.auth import Principal
 
+from .scoped_backend import scoped
+
 # ===========================================================================
 # In-process (SQLite backend) fixtures -- completion conditions 1-9, 11, 12.
 # ===========================================================================
@@ -310,14 +312,14 @@ def test_postgres_add_field_nullable_false_on_entity_with_rows_conflicts(app_pg)
         assert dev.schema_revision() == revision_before
         row = {r["entity"]: r for r in dev.catalog()}[entity]
         assert "score" not in row["fields"], row
-        with backend._developer.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM information_schema.columns "
-                "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
-                [entity, "score"],
-            )
-            (present,) = cur.fetchone()
-        backend._developer.commit()
+        with backend.request_scope("schema") as scope:
+            with scope.main.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+                    [entity, "score"],
+                )
+                (present,) = cur.fetchone()
         assert present == 0, "a conflicting add_field must leave the column entirely absent"
     finally:
         backend.close()
@@ -1218,21 +1220,23 @@ def test_alter_field_constraints_is_a_single_transaction(app_pg) -> None:
         runtime.insert(entity, {"status": "a", "req": "ok", "label": "tx-row"})
 
         commit_calls = []
-        original_commit = backend._developer.commit
+        with backend.request_scope("schema") as scope:
+            original_commit = scope.main.commit
 
-        def _counting_commit():
-            commit_calls.append(1)
-            return original_commit()
+            def _counting_commit():
+                commit_calls.append(1)
+                return original_commit()
 
-        backend._developer.commit = _counting_commit
-        try:
-            # Phase 9 WP-3b: `alter_field_constraints` now returns
-            # `(revision, descriptor)` (design D-4) -- unpack rather than
-            # capture the whole tuple under a name that implies a bare
-            # revision.
-            new_revision, _descriptor = backend.alter_field_constraints(entity, "status", enum=["a", "b", "z"])
-        finally:
-            backend._developer.commit = original_commit
+            scope.main.commit = _counting_commit
+            try:
+                # Phase 9 WP-3b: `alter_field_constraints` now returns
+                # `(revision, descriptor)` (design D-4) -- unpack rather than
+                # capture the whole tuple under a name that implies a bare
+                # revision.
+                new_revision, _descriptor = backend.alter_field_constraints(
+                    entity, "status", enum=["a", "b", "z"], scope=scope)
+            finally:
+                scope.main.commit = original_commit
         assert new_revision is not None
         assert len(commit_calls) == 1, (
             f"alter_field_constraints made {len(commit_calls)} commit() calls on the developer connection -- "
@@ -1246,45 +1250,52 @@ def test_alter_field_constraints_is_a_single_transaction(app_pg) -> None:
 def test_insert_makes_one_merged_registry_round_trip_not_three(app_pg) -> None:
     """Code review §2 C / 監督裁定 C (2026-09-07, P-8/G-4 performance
     finding): a plain, non-conflicting `runtime.insert(...)` makes
-    exactly TWO developer-connection round trips against this
-    application's own catalog -- one `field_types_and_constraints`
-    (the merged `declared_type`/`enum_json`/`nullable` read
-    `_check_missing_required_fields` makes and `_prepare_values` reuses,
-    `prefetched=`) and one `field_domains` (`_prepare_values`'s own
-    value-domain lookup, unmerged -- out of this fix's own scope).
-    BEFORE this rework, the identical insert made FOUR: `field_
-    constraints` (in `_check_missing_required_fields`), `field_types` +
-    `field_constraints` again (`_prepare_values`'s own two, THEN-separate
-    calls against the identical `_mdb_field_types` row), and `field_
-    domains` -- the `field_constraints` round trip made twice, and
+    exactly TWO catalog reads against this application's own catalog --
+    one `field_types_and_constraints` (the merged `declared_type`/
+    `enum_json`/`nullable` read `_check_missing_required_fields` makes
+    and `_prepare_values` reuses, `prefetched=`) and one `field_domains`
+    (`_prepare_values`'s own value-domain lookup, unmerged -- out of this
+    fix's own scope). BEFORE this rework, the identical insert made FOUR:
+    `field_constraints` (in `_check_missing_required_fields`), `field_
+    types` + `field_constraints` again (`_prepare_values`'s own two,
+    THEN-separate calls against the identical `_mdb_field_types` row), and
+    `field_domains` -- the `field_constraints` round trip made twice, and
     `field_types`/`field_constraints` never merged despite reading the
-    same row (review §2 C's own two findings). `runtime.insert`'s own
-    write itself runs on the SEPARATE `_runtime` connection (`backend_
-    postgres.PostgresBackend.insert`, no `audit_hook`/developer
-    involvement for a plain data insert), so counting `_developer.
-    cursor()` invocations isolates exactly the catalog/registry round
-    trips this fix targets."""
+    same row (review §2 C's own two findings). The write itself runs on
+    the runtime connection (`backend_postgres.PostgresBackend.
+    insert_in_transaction`, no `audit_hook`/developer involvement for a
+    plain data insert), so counting the catalog-reading methods of the
+    backend isolates exactly the catalog/registry round trips this fix
+    targets."""
+    catalog_methods = (
+        "field_types", "field_constraints", "field_types_and_constraints", "field_domains",
+        "all_field_types", "all_field_constraints", "schema_count", "schema_revision",
+    )
     backend = PostgresBackend(runtime_dsn=app_pg.runtime_dsn, developer_dsn=app_pg.developer_dsn)
     try:
         cell = ApplicationCell(app_pg.app_id, FoundationConfig(), backend=backend)
         dev, runtime = _sessions_for(cell, app_pg.app_id)
         entity = _make_entity(dev, "roundtripwidgets")
 
-        cursor_calls: list = []
-        original_cursor = backend._developer.cursor
+        catalog_calls: list = []
+        originals = {name: getattr(backend, name) for name in catalog_methods}
 
-        def _counting_cursor(*args, **kwargs):
-            cursor_calls.append(1)
-            return original_cursor(*args, **kwargs)
+        def _counting(name):
+            def _call(*args, **kwargs):
+                catalog_calls.append(name)
+                return originals[name](*args, **kwargs)
+            return _call
 
-        backend._developer.cursor = _counting_cursor
+        for name in catalog_methods:
+            setattr(backend, name, _counting(name))
         try:
             result = runtime.insert(entity, {"status": "a", "req": "ok", "label": "roundtrip-row"})
         finally:
-            backend._developer.cursor = original_cursor
+            for name, original in originals.items():
+                setattr(backend, name, original)
         assert result is not None
-        assert len(cursor_calls) == 2, (
-            f"a plain insert made {len(cursor_calls)} developer-connection round trips -- "
+        assert sorted(catalog_calls) == ["field_domains", "field_types_and_constraints"], (
+            f"a plain insert made the catalog reads {catalog_calls} -- "
             "expected exactly 2 (one merged field_types_and_constraints, one field_domains); "
             "before this rework the identical insert made 4 (review §2 C)"
         )
@@ -1388,7 +1399,7 @@ def test_alter_field_constraints_lock_table_blocks_concurrent_write(app_pg) -> N
 
         def _run_alter_field():
             try:
-                backend.alter_field_constraints(entity, "status", enum=["a", "b", "c"])
+                scoped(backend).alter_field_constraints(entity, "status", enum=["a", "b", "c"])
             except Exception as exc:  # pragma: no cover - surfaced via thread_errors
                 thread_errors.append(exc)
 
@@ -1483,7 +1494,7 @@ def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadloc
 
         def _add_field_a():
             try:
-                backend_a.add_field(entity, "field_a", "text", contract_type="string", nullable=False)
+                scoped(backend_a).add_field(entity, "field_a", "text", contract_type="string", nullable=False)
             except Exception as exc:  # pragma: no cover - surfaced via a_errors
                 a_errors.append(exc)
 
@@ -1496,7 +1507,7 @@ def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadloc
 
             def _add_field_b():
                 try:
-                    backend_b.add_field(entity, "field_b", "text", contract_type="string", nullable=False)
+                    scoped(backend_b).add_field(entity, "field_b", "text", contract_type="string", nullable=False)
                 except Exception as exc:  # pragma: no cover - surfaced via b_errors
                     b_errors.append(exc)
 
@@ -1532,7 +1543,7 @@ def test_alter_field_fails_safely_on_an_application_missing_the_0009_upgrade(app
     (simulated by deleting its own ledger row, mirroring `test_platform_
     upgrades.py`'s own established technique for upgrade 8) refuses every
     storage-touching operation -- `alter_field` included -- with
-    `StorageConfigurationError` (F-12, `_guard_pending_platform_upgrades`),
+    `StorageConfigurationError` (F-12, `PostgresBackend.request_scope`),
     changing NOTHING: the row this test inserts BEFORE deleting the ledger
     row is still there afterward, unit for unit, and `_mdb_field_types`'
     own `enum_json`/`nullable` columns (already added by `0003` at
@@ -1560,6 +1571,7 @@ def test_alter_field_fails_safely_on_an_application_missing_the_0009_upgrade(app
     refusing_backend = PostgresBackend(
         runtime_dsn=app_pg.runtime_dsn, developer_dsn=app_pg.developer_dsn, application_id=app_pg.app_id,
     )
+    refusing_backend.verify_platform_upgrades()
     try:
         cell2 = ApplicationCell(app_pg.app_id, FoundationConfig(), backend=refusing_backend)
         dev2, runtime2 = _sessions_for(cell2, app_pg.app_id)

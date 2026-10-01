@@ -385,6 +385,9 @@ def app_b(platform) -> Iterator[object]:
         deprovision_app(platform, "iso_b")
 
 
+from .scoped_backend import scoped  # noqa: E402 -- helper shared with the other PostgreSQL tests
+
+
 def make_cell(app, config: FoundationConfig | None = None) -> ApplicationCell:
     backend = PostgresBackend(runtime_dsn=app.runtime_dsn, developer_dsn=app.developer_dsn)
     return ApplicationCell(app.app_id, config or FoundationConfig(), backend=backend)
@@ -427,7 +430,7 @@ def test_postgres_backend_identifier_violation_label_is_entity_not_collection(ap
     backend = PostgresBackend(runtime_dsn=app_a.runtime_dsn, developer_dsn=app_a.developer_dsn)
     try:
         with pytest.raises(ValidationError) as ctx:
-            backend.field_types("not a valid identifier!")
+            scoped(backend).field_types("not a valid identifier!")
         assert ctx.value.details["field"] == "entity"
     finally:
         backend.close()
@@ -708,13 +711,13 @@ def test_transact_two_pass_structure_zero_backend_calls_when_a_later_operation_f
         real_begin = backend.begin
         real_insert = backend.insert_in_transaction
 
-        def counting_begin():
+        def counting_begin(*args, **kwargs):
             calls["begin"] += 1
-            return real_begin()
+            return real_begin(*args, **kwargs)
 
-        def counting_insert(collection, fields, params):
+        def counting_insert(*args, **kwargs):
             calls["insert_in_transaction"] += 1
-            return real_insert(collection, fields, params)
+            return real_insert(*args, **kwargs)
 
         backend.begin = counting_begin
         backend.insert_in_transaction = counting_insert
@@ -756,7 +759,7 @@ def test_transact_error_priority_validation_error_wins_over_an_earlier_execution
         backend = cell._backend
         real_insert = backend.insert_in_transaction
 
-        def failing_insert(collection, fields, params):
+        def failing_insert(*args, **kwargs):
             raise ConflictError("synthetic execution-time failure")
 
         backend.insert_in_transaction = failing_insert
@@ -939,15 +942,15 @@ def test_transact_rollback_is_unconditional_for_a_non_foundation_error_raised_mi
         real_insert = backend.insert_in_transaction
         call_index = {"n": 0}
 
-        def counting_rollback():
+        def counting_rollback(*args, **kwargs):
             rollback_calls["count"] += 1
-            return real_rollback()
+            return real_rollback(*args, **kwargs)
 
-        def failing_second_insert(collection, fields, params):
+        def failing_second_insert(*args, **kwargs):
             call_index["n"] += 1
             if call_index["n"] == 2:
                 raise RuntimeError("synthetic non-FoundationError failure")
-            return real_insert(collection, fields, params)
+            return real_insert(*args, **kwargs)
 
         backend.rollback = counting_rollback
         backend.insert_in_transaction = failing_second_insert
@@ -1001,9 +1004,9 @@ def test_schema_revision_bump_on_one_entity_invalidates_stale_delete_confirmatio
             runtime.delete("gated_cross", [Filter("title", "eq", "keep-me")])
         stale_phrase = ctx.value.details["required_confirmation"]
 
-        before = cell._backend.schema_revision()
+        before = scoped(cell._backend).schema_revision()
         developer.add_field("gated_cross", "extra", "text")
-        after = cell._backend.schema_revision()
+        after = scoped(cell._backend).schema_revision()
         assert after == before + 1
 
         with pytest.raises(DestructiveConfirmationRequired):
@@ -1020,9 +1023,8 @@ def test_schema_revision_bump_on_one_entity_invalidates_stale_delete_confirmatio
 
 def test_transact_pass_boundary_schema_change_window_yields_not_found_and_sibling_entity_unchanged(app_a) -> None:
     """M-3 (independent review, WP-2 follow-up, §2 PG note v1.2
-    correction): the real window between pass 1 (validation, run OUTSIDE
-    `self._lock`) and pass 2 (execution, under `self._lock`/`begin()`)
-    is measured directly -- a SEPARATE connection (simulating a genuinely
+    correction): the real window between pass 1 (validation) and pass 2
+    (execution, from `begin()` on) is measured directly -- a SEPARATE connection (simulating a genuinely
     concurrent actor, not this same session) drops one planned entity's
     own table in the instant `backend.begin()` is called, i.e. exactly at
     the pass 1/pass 2 boundary, after pass 1 already built a plan
@@ -1044,10 +1046,10 @@ def test_transact_pass_boundary_schema_change_window_yields_not_found_and_siblin
         backend = cell._backend
         real_begin = backend.begin
 
-        def dropping_begin(*, deadline=None):
+        def dropping_begin(**kwargs):
             with admin_conn.cursor() as cur:
                 cur.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier("window_target")))
-            return real_begin(deadline=deadline)
+            return real_begin(**kwargs)
 
         backend.begin = dropping_begin
         try:
@@ -1365,11 +1367,11 @@ def test_backend_defense_in_depth_recovers_the_connection_for_delete_and_read(ap
         runtime.insert("raw_backend_probe2", {"n": 2})
 
         with pytest.raises(ValidationError, match="storage backend rejected the request"):
-            cell._backend.delete("raw_backend_probe2", [Filter("no_such_column", "eq", 1)])
+            scoped(cell._backend).delete("raw_backend_probe2", [Filter("no_such_column", "eq", 1)])
         assert len(runtime.read("raw_backend_probe2")) == 2  # connection recovered, nothing deleted
 
         with pytest.raises(ValidationError, match="storage backend rejected the request"):
-            cell._backend.read("raw_backend_probe2", ["n"], [Filter("no_such_column", "eq", 1)], None, 10)
+            scoped(cell._backend).read("raw_backend_probe2", ["n"], [Filter("no_such_column", "eq", 1)], None, 10)
         assert len(runtime.read("raw_backend_probe2")) == 2  # connection recovered again
     finally:
         close_cell(cell)
@@ -1421,12 +1423,12 @@ def test_postgres_backend_rejects_an_injection_shaped_order_by_direction(app_a) 
     try:
         developer.create_collection("orderby_probe", {"item_key": "integer"})
         with pytest.raises(ValidationError):
-            cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "asc); SELECT 1 --")], 10)
+            scoped(cell._backend).read("orderby_probe", ["item_key"], [], [("item_key", "asc); SELECT 1 --")], 10)
         with pytest.raises(ValidationError):
-            cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "ASC, (SELECT 1)")], 10)
+            scoped(cell._backend).read("orderby_probe", ["item_key"], [], [("item_key", "ASC, (SELECT 1)")], 10)
         # Regression guard: the two real directions still work.
-        assert cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "asc")], 10) == []
-        assert cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "desc")], 10) == []
+        assert scoped(cell._backend).read("orderby_probe", ["item_key"], [], [("item_key", "asc")], 10) == []
+        assert scoped(cell._backend).read("orderby_probe", ["item_key"], [], [("item_key", "desc")], 10) == []
     finally:
         close_cell(cell)
 
@@ -2234,9 +2236,9 @@ def test_schema_revision_bumps_durably_and_invalidates_a_stale_delete_confirmati
             runtime.delete("gated", [Filter("title", "eq", "keep-me")])
         stale_phrase = ctx.value.details["required_confirmation"]
 
-        before = cell._backend.schema_revision()
+        before = scoped(cell._backend).schema_revision()
         developer.add_field("gated", "extra", "text")
-        after = cell._backend.schema_revision()
+        after = scoped(cell._backend).schema_revision()
         assert after == before + 1
 
         with pytest.raises(DestructiveConfirmationRequired):
@@ -3265,7 +3267,7 @@ def test_migration_0006_backfills_declared_types_for_a_pre_1_6_0_style_database(
         # And the backend can actually read it back through the normal API.
         cell = make_cell(app)
         try:
-            declared = cell._backend.field_types("legacy_thing")
+            declared = scoped(cell._backend).field_types("legacy_thing")
             assert declared == {
                 "int_col": "integer", "num_col": "number", "bool_col": "boolean", "text_col": "object",
             }
@@ -3304,11 +3306,11 @@ def test_missing_field_types_registry_is_storage_configuration_error_not_validat
         cell = make_cell(app)
         try:
             with pytest.raises(StorageConfigurationError):
-                cell._backend.field_types("unregistered_thing")
+                scoped(cell._backend).field_types("unregistered_thing")
             with pytest.raises(StorageConfigurationError):
-                cell._backend.field_domains("unregistered_thing")
+                scoped(cell._backend).field_domains("unregistered_thing")
             with pytest.raises(StorageConfigurationError):
-                cell._backend.all_field_types()
+                scoped(cell._backend).all_field_types()
         finally:
             close_cell(cell)
     finally:
@@ -3343,16 +3345,17 @@ def test_postgres_idempotency_record_without_request_id_on_mutation_is_treated_a
             [{"type": "insert", "collection": "o4idem_probe", "values": {"title": "a"}, "idempotency_key": key}])
         assert first[-1]["request_id"]
 
-        with cell._backend._runtime.cursor() as cur:
-            cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
-            (response_json,) = cur.fetchone()
-            stored = json.loads(response_json)
-            del stored[-1]["request_id"]
-            cur.execute(
-                "UPDATE public._mdb_idempotency SET response_json = %s WHERE key = %s",
-                [json.dumps(stored), key],
-            )
-        cell._backend._runtime.commit()
+        with cell._backend.request_scope("dml") as scope:
+            with scope.main.cursor() as cur:
+                cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
+                (response_json,) = cur.fetchone()
+                stored = json.loads(response_json)
+                del stored[-1]["request_id"]
+                cur.execute(
+                    "UPDATE public._mdb_idempotency SET response_json = %s WHERE key = %s",
+                    [json.dumps(stored), key],
+                )
+            scope.main.commit()
 
         rows_before = runtime.read("o4idem_probe")
         second = runtime.transact(
@@ -3368,10 +3371,10 @@ def test_postgres_idempotency_record_without_request_id_on_mutation_is_treated_a
         # `ON CONFLICT (key) DO UPDATE` (`_write_idempotency_row`) means
         # the record itself was overwritten by the fresh execution's own
         # write, and now carries `request_id` again.
-        with cell._backend._runtime.cursor() as cur:
-            cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
-            (updated_json,) = cur.fetchone()
-        cell._backend._runtime.commit()
+        with cell._backend.request_scope("dml") as scope:
+            with scope.main.cursor() as cur:
+                cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
+                (updated_json,) = cur.fetchone()
         updated = json.loads(updated_json)
         assert updated[-1]["request_id"] == second[-1]["request_id"]
     finally:
@@ -3393,16 +3396,17 @@ def test_postgres_idempotency_record_without_request_id_on_schema_op_is_treated_
         first = developer.add_field("o4idem_probe_2", "o4_field", "text", idempotency_key=key)
         assert first["request_id"]
 
-        with cell._backend._developer.cursor() as cur:
-            cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
-            (response_json,) = cur.fetchone()
-            stored = json.loads(response_json)
-            del stored["request_id"]
-            cur.execute(
-                "UPDATE public._mdb_idempotency SET response_json = %s WHERE key = %s",
-                [json.dumps(stored), key],
-            )
-        cell._backend._developer.commit()
+        with cell._backend.request_scope("schema") as scope:
+            with scope.main.cursor() as cur:
+                cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
+                (response_json,) = cur.fetchone()
+                stored = json.loads(response_json)
+                del stored["request_id"]
+                cur.execute(
+                    "UPDATE public._mdb_idempotency SET response_json = %s WHERE key = %s",
+                    [json.dumps(stored), key],
+                )
+            scope.main.commit()
 
         with pytest.raises(ConflictError):
             developer.add_field("o4idem_probe_2", "o4_field", "text", idempotency_key=key)

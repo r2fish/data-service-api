@@ -390,13 +390,13 @@ class FoundationTests(unittest.TestCase):
         real_begin = backend.begin
         real_insert = backend.insert_in_transaction
 
-        def counting_begin():
+        def counting_begin(*args, **kwargs):
             calls["begin"] += 1
-            return real_begin()
+            return real_begin(*args, **kwargs)
 
-        def counting_insert(collection, fields, params):
+        def counting_insert(*args, **kwargs):
             calls["insert_in_transaction"] += 1
-            return real_insert(collection, fields, params)
+            return real_insert(*args, **kwargs)
 
         backend.begin = counting_begin
         backend.insert_in_transaction = counting_insert
@@ -437,7 +437,7 @@ class FoundationTests(unittest.TestCase):
         backend = cell._backend
         real_insert = backend.insert_in_transaction
 
-        def failing_insert(collection, fields, params):
+        def failing_insert(*args, **kwargs):
             raise ConflictError("synthetic execution-time failure")
 
         backend.insert_in_transaction = failing_insert
@@ -625,15 +625,15 @@ class FoundationTests(unittest.TestCase):
         real_insert = backend.insert_in_transaction
         call_index = {"n": 0}
 
-        def counting_rollback():
+        def counting_rollback(*args, **kwargs):
             rollback_calls["count"] += 1
-            return real_rollback()
+            return real_rollback(*args, **kwargs)
 
-        def failing_second_insert(collection, fields, params):
+        def failing_second_insert(*args, **kwargs):
             call_index["n"] += 1
             if call_index["n"] == 2:
                 raise RuntimeError("synthetic non-FoundationError failure")
-            return real_insert(collection, fields, params)
+            return real_insert(*args, **kwargs)
 
         backend.rollback = counting_rollback
         backend.insert_in_transaction = failing_second_insert

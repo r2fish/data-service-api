@@ -590,6 +590,26 @@ def test_build_app_sizes_the_audit_sinks_pool_from_the_value_f16_counts_per_api_
     assert sum(pool.stats()["size"] for pool in pools) == platform_declarations._API_ROLE_STORE_COUNT * per_store
 
 
+def test_build_app_sizes_each_applications_role_pools_from_the_thread_limit(main_module, platform, probe_app) -> None:
+    """Completion condition (R-102 M-8): the two role pools of every served
+    application are `role_pool_size(thread_limit)` connections each (a thread
+    limit of 7 makes it 9), and building the app opens none beyond the one
+    runtime connection of the startup ledger check.
+
+    mutation (`main.py`): build the backend without `pool_size=_role_pool_size`
+    -- the pools take the pool module's default size instead."""
+    from mitatedb_api.config import role_pool_size
+
+    env = _base_env(platform, probe_app)
+    env["MITATEDB_THREAD_LIMIT"] = "7"
+    app = main_module.build_app(env)
+    backend = app.app.state.service._cell_factory(probe_app.app_id)._backend  # noqa: SLF001
+    assert role_pool_size(7) == 9
+    assert backend._runtime_pool.stats()["size"] == 9  # noqa: SLF001
+    assert backend._developer_pool.stats()["size"] == 9  # noqa: SLF001
+    assert backend._developer_pool._created == 0  # noqa: SLF001
+
+
 @pytest.mark.parametrize("override", ["2", "9"])
 def test_build_app_sizes_the_audit_pool_from_role_pool_size_whatever_the_platform_pool_override_says(main_module, platform, probe_app, monkeypatch, override) -> None:
     """`MITATEDB_PLATFORM_POOL_SIZE` sets the platform registry pool only:

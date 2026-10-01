@@ -28,7 +28,6 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 
-from mitatedb_api.cell import ApplicationCell, _CountingRLock
 from mitatedb_api.config import FoundationConfig, role_pool_size
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import AuthorizationStateUnavailable
@@ -143,66 +142,6 @@ def test_bounded_connection_pool_wait_on_timeout_and_unavailable_message_unchang
             pool.release(held)
     finally:
         pool.closeall()
-
-
-def test_application_cell_lock_counts_waits_and_reentrant_acquisitions():
-    """Completion condition 6: `ApplicationCell._lock`'s wrapper counts
-    every acquisition (`lock_acquire_count`, including a single thread's
-    own reentrant one) and only counts a WAIT when a different thread
-    already holds the lock -- a single thread's own (possibly nested)
-    acquisitions never increment `wait_count`.
-
-    mutation M6 (`cell.py`): remove `_CountingRLock`'s non-blocking
-    pre-check, always acquiring blocking with no wait measurement at all
-    -- the two-thread `wait_count >= 1` assertion below goes red (it stays
-    0 forever, since no wait is ever timed any more)."""
-    cell = ApplicationCell("r78cell1")
-    lock = cell._lock  # noqa: SLF001 - test-only reach-in, same convention this suite already uses for `_lock`/`_pool` internals
-
-    # Single thread, reentrant: 2 acquisitions, 0 waits.
-    with lock:
-        with lock:
-            pass
-    solo_stats = lock.stats()
-    assert solo_stats["lock_acquire_count"] == 2
-    assert solo_stats["wait_count"] == 0
-
-    # Two threads contend: the second genuinely waits for the first.
-    ready = threading.Event()
-
-    def holder() -> None:
-        with lock:
-            ready.set()
-            time.sleep(0.3)
-
-    holder_thread = threading.Thread(target=holder)
-    holder_thread.start()
-    assert ready.wait(timeout=5)
-    with lock:
-        pass
-    holder_thread.join(timeout=5)
-
-    stats = lock.stats()
-    assert stats["wait_count"] >= 1
-    assert stats["wait_max_ms"] > 0.0
-
-
-def test_counting_rlock_acquire_rejects_a_negative_timeout_like_bare_rlock():
-    """Code review R-78 差し戻し 2 item 6(b): `_CountingRLock.acquire()`
-    validates `timeout` upfront, exactly like bare `threading.RLock.
-    acquire()` does -- a negative, non-`-1` `timeout` raises `ValueError`
-    with the SAME message text, even on a completely free (uncontended)
-    lock, where this class's own non-blocking probe would otherwise
-    succeed and silently swallow the invalid argument.
-
-    mutation (`cell.py`): drop the upfront `timeout != -1 and timeout < 0`
-    check from `_CountingRLock.acquire` -- this test's `pytest.raises`
-    goes unfulfilled (no exception at all, since the lock is free) and
-    the test goes red."""
-    lock = _CountingRLock()
-    with pytest.raises(ValueError) as excinfo:
-        lock.acquire(True, -2)
-    assert str(excinfo.value) == "timeout value must be a non-negative number"
 
 
 def test_http_and_socket_mitatedb_plugs_expose_pool_stats():

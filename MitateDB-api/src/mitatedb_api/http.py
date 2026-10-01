@@ -37,8 +37,8 @@ from .errors import (AuditSinkUnavailable, AuthenticationError,
                      DestructiveConfirmationRequired, FoundationError,
                      NotFoundError, PlatformUpgradePending,
                      PreconditionFailedError, ResourceLimitError,
-                     StorageConfigurationError, ValidationError,
-                     observed_type_of, violation)
+                     StorageConfigurationError, StorageTransientError,
+                     ValidationError, observed_type_of, violation)
 from .operation_catalog import load_operation_catalog_bytes
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -91,6 +91,7 @@ _STATUS_BY_CODE: dict[str, int] = {
 _CLASSIFY_ORDER: tuple[tuple[type[FoundationError], str], ...] = (
     (AuthorizationStateUnavailable, "AUTH_STATE_UNAVAILABLE"),
     (StorageConfigurationError, "SERVICE_UNAVAILABLE"),
+    (StorageTransientError, "SERVICE_UNAVAILABLE"),
     (AuditSinkUnavailable, "SERVICE_UNAVAILABLE"),
     (AuthenticationError, "AUTH_INVALID"),
     (AuthorizationError, "FORBIDDEN"),

@@ -2,24 +2,25 @@
 EXECUTION_MS_V1.md D-1/D-2/D-4): the 8 developer-connection catalog reads
 in `backend_postgres.py` -- `schema_count`, `field_domains`, `field_
 types`, `all_field_types`, `field_constraints`, `field_types_and_
-constraints`, `all_field_constraints`, `schema_revision` -- now each
-call `self._set_timeouts(cur, self._catalog_timeout_ms)` unconditionally,
-inside their own existing `try`, before their first real statement.
-`self._catalog_timeout_ms` is `PostgresBackend.__init__`'s new keyword
-`max_execution_ms` when given, else `FoundationConfig`'s own class-
-attribute default (5000) -- so the effective bound on these 8 reads is
-always the CONSTRUCTED value, never the role-level `statement_timeout`
-`0013_role_statement_timeouts.sql` sets (`test_application_audit.py`'s
-own `test_developer_connection_used_by_the_catalog_path_carries_the_
-role_level_statement_timeout` still observes that role-level value, but
-now only OUTSIDE these 8 reads' own transactions).
+constraints`, `all_field_constraints`, `schema_revision` -- run inside the
+request scope that opened the transaction they read in, and that scope set
+`statement_timeout`/`lock_timeout` when it opened: from the request's
+deadline, or, for a scope with no deadline (these tests call the backend
+with no request around it), from `self._default_timeout_ms` --
+`PostgresBackend.__init__`'s keyword `max_execution_ms` when given, else
+`FoundationConfig`'s own class-attribute default (5000). So the effective
+bound on these 8 reads is always the CONSTRUCTED value, never the role-
+level `statement_timeout` `0013_role_statement_timeouts.sql` sets
+(`test_application_audit.py`'s own `test_developer_connection_used_by_the_
+catalog_path_carries_the_role_level_statement_timeout` still observes that
+role-level value, but only on a connection outside a scope).
 
 Completion condition 2 (per-method wiring): `test_catalog_reads_use_the_
 constructed_statement_and_lock_timeout_inside_their_own_transaction`
 below, parametrized over the 8 methods, wraps `backend_postgres._execute`
 to read `pg_settings.setting` (raw ms, never `SHOW`) on the SAME cursor
 immediately before the first non-`SET LOCAL` statement each method
-issues.
+issues, in a scope the call opened for itself.
 
 Completion condition 3 (bare construction): `test_bare_construction_
 uses_the_foundation_config_default_execution_ms` below -- no `max_
@@ -62,6 +63,7 @@ from mitatedb_api.cell import ApplicationCell
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.errors import ResourceLimitError
 
+from .scoped_backend import scoped
 from .test_main import _base_env, main_module, probe_app  # noqa: F401 (fixtures)
 from .test_postgres import _dsn_with, app_a, platform, sessions_for  # noqa: F401 (fixtures)
 
@@ -76,14 +78,14 @@ from .test_postgres import _dsn_with, app_a, platform, sessions_for  # noqa: F40
 _CONSTRUCTED_MS = 7654
 
 _METHOD_CALLS = {
-    "schema_count": lambda backend, entity: backend.schema_count(),
-    "field_domains": lambda backend, entity: backend.field_domains(entity),
-    "field_types": lambda backend, entity: backend.field_types(entity),
-    "all_field_types": lambda backend, entity: backend.all_field_types(),
-    "field_constraints": lambda backend, entity: backend.field_constraints(entity),
-    "field_types_and_constraints": lambda backend, entity: backend.field_types_and_constraints(entity),
-    "all_field_constraints": lambda backend, entity: backend.all_field_constraints(),
-    "schema_revision": lambda backend, entity: backend.schema_revision(),
+    "schema_count": lambda backend, entity: scoped(backend).schema_count(),
+    "field_domains": lambda backend, entity: scoped(backend).field_domains(entity),
+    "field_types": lambda backend, entity: scoped(backend).field_types(entity),
+    "all_field_types": lambda backend, entity: scoped(backend).all_field_types(),
+    "field_constraints": lambda backend, entity: scoped(backend).field_constraints(entity),
+    "field_types_and_constraints": lambda backend, entity: scoped(backend).field_types_and_constraints(entity),
+    "all_field_constraints": lambda backend, entity: scoped(backend).all_field_constraints(),
+    "schema_revision": lambda backend, entity: scoped(backend).schema_revision(),
 }
 
 
@@ -193,7 +195,7 @@ def test_bare_construction_uses_the_foundation_config_default_execution_ms(app_a
         captured: dict[str, str] = {}
         _probe_first_real_statement(captured)
         try:
-            backend.schema_count()
+            scoped(backend).schema_count()
         finally:
             bp_module._execute = original
 
@@ -268,7 +270,7 @@ def test_blocked_catalog_read_is_bounded_by_the_constructed_value_not_the_role_v
         try:
             started = time.monotonic()
             with pytest.raises(ResourceLimitError) as excinfo:
-                backend.all_field_types()
+                scoped(backend).all_field_types()
             elapsed = time.monotonic() - started
         finally:
             released.set()
@@ -291,7 +293,7 @@ def test_blocked_catalog_read_is_bounded_by_the_constructed_value_not_the_role_v
         # call over the SAME connection succeeds (still under the
         # constructed 200ms bound, an information-only read with nothing
         # left to block on).
-        assert backend.all_field_types() == {}
+        assert scoped(backend).all_field_types() == {}
     finally:
         released.set()
         with lock_conn_guard:
@@ -318,4 +320,4 @@ def test_build_app_passes_the_declared_execution_ms_to_the_constructed_backend(m
     inner_app = app.app  # unwrap RequestByteBoundMiddleware -> the wrapped Starlette app
     service = inner_app.state.service
     cell = service._cell_factory(probe_app.app_id)
-    assert cell._backend._catalog_timeout_ms == _CONSTRUCTED_MS
+    assert cell._backend._default_timeout_ms == _CONSTRUCTED_MS

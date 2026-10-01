@@ -542,3 +542,20 @@ D-R102 判定規則 (計測前に固定。計測後に動かさない):
 11. (k) 観察: delete の確認句も revision を読む (`R/postgres.py`:1847、`M/cell.py`:2676)。DML の確認句の窓は設計の 3 窓にも D-3 にも入っていないので本件の範囲外とし、引き継ぎ書の「裁定」節に観察として残す。
 12. WP-2 の test file 名は `conformance-tests/test_c34_concurrent_plan_precondition.py` とする (本文の `<name>` = `concurrent_plan_precondition`)。
 13. WP-1 と WP-2 は触るファイルが重ならない (WP-1 = 新規 test 2 本、WP-2 = `CT/`・`RC/`・`MC/` の adapter と新規 test) ので、WP-2 は branch `r102` から分けた worktree `.claude/worktrees/r102-wp2` (branch `r102-wp2`) で並行に行い、監督が `r102` へ merge する (`OC` §1.2 の 16)。
+
+**訂正註 2 (2026-10-01、監督。WP-1〜WP-3 のコードレビュー 1 巡目の裁定。本文は書き換えない)**
+
+1. (WP-2 レビュー B-1) WP-7 の表に `docs/design/CONFORMANCE_ADAPTER_V1.md` (版数 1.19 → **1.20**、§30 = `hold_after_plan_verification` の節を新設。§25 の v1.15 の形) を足す。触ってよいパスにも足す。
+2. (WP-2 レビュー A-2 / B-2) 確定文を改めた: port の hook の文と C-34 の Condition cell は「`plan` または `dry_run` を提示する schema 操作」だけを対象にし、停止点を「plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点」とする (plan を提示しない操作は素通し)。M-13 の「」の文と §2.2 の起草案のうち plan 無しの節は削除して読む。新しい確定文は `$SP/confirmed-r102-hook.txt` / `$SP/confirmed-r102-condition.txt` (旧版は `*.v1.txt`)。理由: どの plug にも plan 無しの操作を「自分が進める revision を読み終えた地点」で止める点が無く (r2db は DDL の後に加算、MitateDB は読む前)、条件文のその節に観測も変異も無かった。
+3. (WP-2 レビュー B-7) 訂正註 1 の 10 は M-15 の「計測 D-R102 は監督が WP-3 の前 (基準値、基点 main) と WP-7 の後 (実装後) に行い」の句にも掛かる: 基準値と実装後は WP-7 の後に同じ日に交互に取る。
+4. (WP-3 レビュー B-2) 設計 D-2 (iii) の「必ず rollback」は、実装では `transaction_status != IDLE` のときだけ rollback する形とした (IDLE の rollback は psycopg が往復なしで返し、`CountingConnection.txn_count` だけが進むため)。観測可能な結果 (開いた transaction と `SET LOCAL` が戻る、INERROR も戻る) は設計と同じ。設計文書には WP-7 で註を足す。
+5. (WP-2 レビュー B-3) 完了条件 14 の V14a は r2db-http が変異なしでも赤の間は「監査照合 (理由行の逐語)」とし、WP-6 の後に監督が再実行して赤 (理由の変化ではなく失敗) を示す。完了条件 15 は V15 + V15b。
+6. (WP-1 レビュー) 完了条件 9 は V9 (MitateDB) + V9r (r2db、WP-6 の後)。WP-1 の停止点は開1・開3・開4 とも `_execute` の文そのもの (`ALTER TABLE … ADD COLUMN` / `INSERT INTO` / `CREATE TABLE`、thread A のみ)、未完了の枝は `pg_stat_activity` の lock 待ちの観測で裏付ける。後送りの spec は `$SP/r102-wp1-mutations-deferred-wp4.json` / `-wp6.json`。
+7. 手順の記録: レビュー群 1 (WP-1+2) と群 2 (WP-3+4) は、並行 worktree で WP が別々に終わったため、WP ごとに A / B の 2 起動並列で行った (各 WP を 1 回と数える。群の回数より起動は増えたが、§1.7 の 50 の回数は変えていない)。
+
+**訂正註 3 (2026-10-01、監督。WP-6 のコードレビュー 1 巡目の裁定。本文は書き換えない)**
+
+1. **M-17 (監督裁定、依頼者確認待ち)**: r2db の schema lock (訂正註 1 の 9) の取得順は per-key → lookup (replay は記録から答える) → **schema lock (3a) → 件数 lock** → `_load_catalog` → revision の読みとする。設計 D-3 の順序表 (MitateDB: 1 per-key → 2 件数 → 3a) と逆になる (peer 非対称)。理由: r2db では WP-6 前に無かった連鎖 — keyed の schema 操作が件数 lock を持ったまま無関係な遅い schema 操作の 3a を待ち、その間に別 key の keyed DML が件数 lock で止まる — が退行になるため (レビュー A-1)。輪は無い (3a の保持者が後で待つ件数 lock の保持者 (DML の `transact`) は 3a を取らない)。MitateDB は設計 D-3 の順のまま (依頼者裁定済み。同じ連鎖は設計 L-6 が開示済み)。両 peer を揃えるかは依頼者確認に含める。
+2. 完了条件 83 の「lock を取る点が `_load_catalog` (:2106) より前」は、実装 (lookup の後に lock を取り、`_load_catalog` をその後へ動かした) が趣旨 (plan・確認句・`schema_objects` の読みが lock の下) を満たすので、そのとおり読む。
+3. **起票 R-120** (監督): r2db の DML にも 開3 相当 (pass 1 の enum / nullable の検証と書き込みの間に `alter_field` が commit しうる。物理制約が無く registry を Python で検証する) が構造上開いている (WP-6 より前から。レビュー A-2)。設計 K-7 (依頼者裁定 Q-5) が r2db の窓を plan・確認句・`schema_objects` の 3 つに限ったので、本変更セットでは閉じず台帳に起票する (WP-7 で `RM` §8.1 に行を足す)。
+4. WP-6 の完了条件に次を足す: 87a = add_field の `LOCK TABLE … SHARE ROW EXCLUSIVE` の SQL 文字列 pin (変異 RB1)、87b = 3 つの advisory lock 定数の区別の pin (RB2)、87c = dry-run が schema lock の下で catalog と revision を読む (RA1)。製品コメント CH-0069 / CH-0071 の言い換えは `docs/code-history/r2db-api/postgres.md` に §9.3 の形で訂正を追記する。

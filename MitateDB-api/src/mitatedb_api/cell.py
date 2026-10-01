@@ -28,7 +28,7 @@ import json
 import logging
 import time
 import uuid
-from threading import Lock, RLock
+from threading import Lock
 from typing import Any
 
 from .audit import AuditSink
@@ -505,104 +505,6 @@ class _LimitStateHolder:
                 self._active -= 1
 
 
-class _CountingRLock:
-    """R-78 (D-1): wraps `threading.RLock` to count acquisition/wait
-    statistics. For every call site in `ApplicationCell` below (all of
-    them go through the context-manager protocol, never `.acquire()`/
-    `.release()` directly) this behaves exactly like the bare `RLock()`
-    it replaces: block, reenter, release, same eventual outcome, no added
-    timeout, no change to who is allowed to acquire when.
-
-    Two real differences from bare `RLock`, both about the `blocking`/
-    `timeout` KEYWORD ARGUMENTS a caller could pass to `.acquire()`
-    directly (unreached by anything in this file today, but part of this
-    class's own public surface):
-
-    - `acquire(blocking=False, timeout=<anything but -1>)` -- bare `RLock`
-      always raises `ValueError` for this combination, before even
-      checking whether the lock is available. This class's own non-
-      blocking probe (below) can succeed first (lock free, or the calling
-      thread already owns it) and return `True` WITHOUT ever raising --
-      only a probe that fails (someone else holds the lock) reaches the
-      `if not blocking: return False` branch, which does not validate
-      `timeout` at all.
-    - The non-blocking probe itself: this class always makes ONE extra
-      raw-lock attempt (`self._raw.acquire(False)`) before a genuinely
-      contended acquisition's real, timed, blocking attempt -- two C-level
-      calls where bare `RLock.acquire(blocking=True, timeout=...)` makes
-      one. Functionally equivalent (same eventual block/succeed/timeout
-      outcome, same total wait bound), but not bit-identical timing to
-      `RLock`'s own single call.
-
-    Every acquisition first tries `self._raw.acquire(False)` (RLock's own
-    reentrant fast path: a thread that already owns this lock always
-    succeeds here immediately, with no wait -- the same is true of the
-    very first acquisition of an uncontended lock). Only when that fails
-    (someone else currently holds it) does the wait get timed and a
-    blocking `self._raw.acquire(True, timeout)` follow. `lock_acquire_
-    count` counts every successful acquisition, INCLUDING the same
-    thread's own reentrant ones -- a thread that acquires this lock twice
-    in a row (its own second, nested context-manager scope) adds two to
-    this counter, not one.
-    """
-
-    def __init__(self) -> None:
-        self._raw = RLock()
-        self._stats_lock = Lock()
-        self._lock_acquire_count = 0
-        self._wait_count = 0
-        self._wait_total_ms = 0.0
-        self._wait_max_ms = 0.0
-
-    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        # Matches bare `RLock.acquire`'s own upfront validation (D-1): a
-        # negative, non-`-1` `timeout` is rejected before any acquisition
-        # is attempted at all, the same message text `threading.RLock`
-        # itself raises -- not only once this class's own non-blocking
-        # probe (below) has already failed.
-        if timeout != -1 and timeout < 0:
-            raise ValueError("timeout value must be a non-negative number")
-        got = self._raw.acquire(False)
-        if not got:
-            if not blocking:
-                return False
-            wait_start = time.monotonic()
-            got = self._raw.acquire(True, timeout)
-            waited_ms = (time.monotonic() - wait_start) * 1000.0
-            with self._stats_lock:
-                self._wait_count += 1
-                self._wait_total_ms += waited_ms
-                if waited_ms > self._wait_max_ms:
-                    self._wait_max_ms = waited_ms
-            if not got:
-                return False
-        with self._stats_lock:
-            self._lock_acquire_count += 1
-        return True
-
-    def release(self) -> None:
-        self._raw.release()
-
-    def __enter__(self) -> bool:
-        return self.acquire()
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.release()
-
-    def stats(self) -> dict[str, int | float]:
-        """Return this lock's acquisition statistics as a plain dict with
-        exactly four keys: `lock_acquire_count`, `wait_count`, `wait_
-        total_ms`, `wait_max_ms`. Read under `self._stats_lock`; never
-        touches `self._raw`."""
-        with self._stats_lock:
-            return {
-                "lock_acquire_count": self._lock_acquire_count,
-                "wait_count": self._wait_count,
-                "wait_total_ms": self._wait_total_ms,
-                "wait_max_ms": self._wait_max_ms,
-            }
-
-
 class ApplicationCell:
     """A private application storage boundary.
 
@@ -642,47 +544,12 @@ class ApplicationCell:
         # leave this `None` -- nothing in this WP relies on it for that
         # backend.
         self._db = getattr(self._backend, "raw_connection", None)
-        self._lock = _CountingRLock()
-        # WP-8b 差し戻し (0)/監督裁定 2026-09-08 (design D-8 (3), U-10 --
-        # RECORD OF FACT, after measurement, not an aspiration): every
-        # public method below now takes `self._lock` immediately inside
-        # its own `_gate`/`_limit_gate` (rate/concurrency slot) call, and
-        # holds it for the WHOLE lookup -> pass-1 (validation/catalog
-        # reads) -> pass-2 (execute/commit) sequence -- not merely the
-        # final backend call, which is all it covered before this fix
-        # (code review `{scratchpad}/phase10/wp8b-review.md` §1/§2 found
-        # pass-1's own catalog reads/`_idempotency_check` running OUTSIDE
-        # this lock, sharing `PostgresBackend`'s single `_developer`
-        # connection with every OTHER in-flight request against this SAME
-        # cell -- measured concretely: one request's own `commit()`/
-        # `rollback()` on that shared connection landing on a DIFFERENT
-        # request's still-open transaction, an application-name DDL
-        # leaking without its own audit pre-commit row in the worst case).
-        # An `RLock`, not a plain `Lock`, because `_schema_revision_
-        # uncounted` (called both directly, as `schema_revision`'s own
-        # body, and from inside `create_collection`/`add_field`/`alter_
-        # field`/`transact`'s own dry-run/plan precondition block) takes
-        # this SAME lock a second time, from the SAME thread, while the
-        # first acquisition is still held -- safe re-entry, not a
-        # deadlock, precisely because this is reentrant.
-        #
-        # The measured consequence (`test_pass1_and_pass2_serialize_
-        # through_cell_lock_no_developer_connection_race`, `tests/test_
-        # threadpool_offload.py`; `{scratchpad}/phase10/wp8b_review_slot_
-        # probe.py`, re-run against this fix): two requests against the
-        # SAME application (SAME `ApplicationCell` instance, one lock)
-        # are now fully serialized end to end -- concurrency across
-        # DIFFERENT applications (each with its own cell, its own lock)
-        # is unaffected, still real. `_limit_gate`'s own `concurrency_
-        # slot` is acquired BEFORE this lock on every call site (this
-        # lock sits inside the gate's `with`, never outside it) -- a
-        # `hold_in_flight` probe (C-05/C-27) still observes N distinct
-        # in-flight SLOTS held concurrently even though, for the SAME
-        # application, only one of those N requests can be past this
-        # lock's own acquisition at a time; slot accounting itself is
-        # therefore unaffected by this fix (measured: 3 concurrent
-        # slot holders, 1 concurrent lock holder, `wp8b_review_slot_
-        # probe.py`).
+        # No lock serializes this cell's requests: each one opens a request
+        # scope on the backend (`self._backend.request_scope`) and gets its
+        # own connections and its own transaction; what must not overlap
+        # across requests, in this process or another, is serialized by the
+        # backend at the points `schema` / `transact` / ... name below.
+        # history: CH-0547
         # Phase 8 WP-1a (design D-1): `None` (every pre-WP-1a caller --
         # this repository's own tests, any direct construction) gets a
         # PRIVATE, unshared holder -- exactly like `audit_router=None`
@@ -726,26 +593,15 @@ class ApplicationCell:
 
     def prepared_stats(self):
         """R-79 (WO §1.2 D-2, D-3; §2.1 起草時の裁定 4): read-only accessor
-        -- delegates to `self._backend.prepared_stats()` under `self.
-        _lock` (this class's own `RLock`, WO §1.2 D-2's own "lock is taken
-        by `ApplicationCell`, r2db does not take one -- it drains a queue
-        instead" split) and returns `[]` when the backend has no such
-        method (`SQLiteBackend`, and any other non-PostgreSQL backend).
-        Called exactly once per (plug, op) by `tools/perf_baseline.py`'s
-        `_emit_prepared_rows` (via the conformance adapter's own `prepared_
-        stats()`), so one call here is one `self._lock` acquisition --
-        this is also why the harness's own `POOL lock=` `acquire` count
-        includes one entry per preceding probe from R-79 onward (`tools/
-        PERF_BASELINE_README.md`).
-
-        Does not widen or narrow the scope `with self._lock:` already
-        covers elsewhere in this class -- this is a new, independent
-        acquisition of the SAME lock, not a change to any existing one."""
-        with self._lock:
-            backend_probe = getattr(self._backend, "prepared_stats", None)
-            if backend_probe is None:
-                return []
-            return backend_probe()
+        -- delegates to `self._backend.prepared_stats()` and returns `[]`
+        when the backend has no such method (`SQLiteBackend`, and any
+        other non-PostgreSQL backend). Called exactly once per (plug, op)
+        by `tools/perf_baseline.py`'s `_emit_prepared_rows` (via the
+        conformance adapter's own `prepared_stats()`)."""
+        backend_probe = getattr(self._backend, "prepared_stats", None)
+        if backend_probe is None:
+            return []
+        return backend_probe()
 
     @contextmanager
     def _limit_gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
@@ -924,26 +780,27 @@ class ApplicationCell:
                 hook.commit_failed()
             raise
 
-    def _write_row_before_commit(self, principal, *, operation, collection, request_id, deadline, write):
+    def _write_row_before_commit(self, principal, *, operation, collection, request_id, deadline, write, scope):
         """The single-row `insert`/`update` counterpart of `transact`'s
         pre-commit path: `write()` runs inside one backend transaction, the
         `allow` row is recorded durably as the LAST statement before the
         data commit, and a failure of the recording rolls the write back
         (`errors.AuditSinkUnavailable`, the write is not submitted). A
         failure after the row was recorded (the commit itself) writes the
-        `error` row for the same request id. Caller holds `self._lock`."""
+        `error` row for the same request id. Runs inside `scope`, the
+        request's own backend transaction."""
         hook = self._make_audit_hook(
             principal, event_class="data_operation", operation=operation,
             target_kind="collection", target_id=collection, request_id=request_id,
         )
-        self._backend.begin(deadline=deadline)
+        self._backend.begin(deadline=deadline, scope=scope)
         try:
             result = write()
             hook.pre_commit()
-            self._backend.commit()
+            self._backend.commit(scope=scope)
         except Exception as exc:
             try:
-                self._backend.rollback()
+                self._backend.rollback(scope=scope)
             except Exception:
                 # A rollback that itself fails (the connection was lost
                 # during the commit) still owes the `error` row: the
@@ -979,7 +836,7 @@ class ApplicationCell:
             target_kind="collection", target_id=target_id,
         )
 
-    def _idempotency_check(self, idempotency_key, digest_request, *, conn=None, deadline=None):
+    def _idempotency_check(self, idempotency_key, digest_request, *, scope):
         """Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
         rulings-r5-r6.md I-3/I-4/I-6/I-8): the shared lookup/write-prep
         choke every idempotency-key-carrying entry point (`transact`,
@@ -990,36 +847,12 @@ class ApplicationCell:
         called at all for a dry run) and for what `digest_request` itself
         contains (this method has no per-operation knowledge of it).
 
-        `deadline` (code-review fix F2, Opus review 2): forwarded
-        verbatim to `self._backend.idempotency_begin`/`idempotency_
-        reserve` below -- each caller's own `self._gate`/`self._limit_
-        gate` context manager's `deadline`, the SAME value every other
-        backend call this request makes already receives, so `Postgres
-        Backend` can bound its own advisory-lock wait by this request's
-        remaining budget instead of waiting unbounded.
-
-        `conn` (code-review fix F6, Opus review 2, ruled in -- replaces
-        this method's own former `for_developer` parameter): the
-        connection handle `_idempotency_pg_scope` already resolved, ONCE,
-        via `self._backend.idempotency_connection(for_developer=...)`,
-        at the start of THIS request's own keyed critical section --
-        `False` (default, at that resolution point) for `transact` (its
-        own eventual write, `record_idempotency`, lands on the backend's
-        `_runtime`-equivalent connection) and `True` for the 3 DDL
-        callers (their own eventual write, an `idempotency_record`
-        tuple, lands on the `_developer`-equivalent connection). Forwarded
-        verbatim to `self._backend.idempotency_begin`/`idempotency_
-        reserve` below, so a `PostgresBackend` runs this whole lookup
-        (lock included) on the SAME connection/transaction the caller
-        will later execute and store on -- never re-resolving `for_
-        developer` a second time here, so a future per-request-checkout
-        connection (WP-8b pooling) cannot drift between what took the
-        lock and what this call runs on (see `idempotency_connection`'s
-        own docstring). Every caller also holds `self._lock` (an `RLock`,
-        widened by WP-6d, narrowed again by F5 to keyed real requests
-        only) for its ENTIRE lookup -> execute -> store window -- the
-        in-memory/SQLite-backend counterpart of this same guarantee, see
-        `backend_sqlite.SQLiteBackend.idempotency_begin`'s own comment.
+        `scope` is the request's own backend scope: the lookup, the
+        backend's two idempotency locks (the key's, then the capacity
+        lock) and the write the caller makes at its commit point all run
+        in the one transaction it holds, so a second request for the same
+        key waits for this one to commit or roll back and then finds the
+        record -- or, when this one did not commit, runs itself.
 
         Returns `(replay_response, digest, now_ms)`. `replay_response`
         is not `None` when a retained record already answers this exact
@@ -1069,8 +902,7 @@ class ApplicationCell:
         digest = idempotency_digest(digest_request)
         now_ms = int(time.time() * 1000)
         existing = self._backend.idempotency_begin(
-            idempotency_key, now_ms, self.config.idempotency_retention_ms,
-            conn=conn, deadline=deadline)
+            idempotency_key, now_ms, self.config.idempotency_retention_ms, scope=scope)
         stored_response = None
         if existing is not None:
             stored_response = json.loads(existing["response_json"])
@@ -1092,9 +924,7 @@ class ApplicationCell:
                     details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
                 )
             return stored_response, digest, now_ms
-        if self._backend.idempotency_reserve(
-            conn=conn, deadline=deadline
-        ) >= self.config.idempotency_entries:
+        if self._backend.idempotency_reserve(scope=scope) >= self.config.idempotency_entries:
             raise ResourceLimitError("idempotency record capacity exceeded", limit_class="idempotency_entries")
         return None, digest, now_ms
 
@@ -1118,7 +948,7 @@ class ApplicationCell:
     #: nameable). Excluded here, never on either backend.
     _ROW_ORDER_COLUMN = "_mdb_row"
 
-    def _visible_field_domains(self, collection):
+    def _visible_field_domains(self, collection, *, scope):
         """The single choke point every one of this class's own six
         request-shape/catalog `field_domains` call sites goes through
         (create/alter field-count and existence checks, select-all,
@@ -1137,95 +967,17 @@ class ApplicationCell:
         always part of a page cursor's own ordering values, D-2's "既定
         順序"), never a select-all/order_by/values-binding site this
         wrapper's own exclusion exists to protect."""
-        domains = self._backend.field_domains(collection)
+        domains = self._backend.field_domains(collection, scope=scope)
         return {name: domain for name, domain in domains.items() if name != self._ROW_ORDER_COLUMN}
 
-    # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと合意;
-    # `{scratchpad}/phase10/wp8b-review-2.md` §5 (A) / §7-1): この直前に
-    # あった `_idempotency_lock_scope` ヘルパーは削除した。全 4 入口
-    # (`create_collection`/`add_field`/`alter_field`/`transact`) は
-    # WP-8b 案 A の外側 `with self._lock:` (それぞれのメソッド本体の
-    # 冒頭、`_gate`/`_limit_gate` の直後) に既に包まれており、これは
-    # `idempotency_key`/`dry_run` の値に関わらず無条件・pass 1 全体を
-    # 含めて直列化する。旧ヘルパーが分岐で返していた「keyed かつ real
-    # のときだけ `self._lock`、それ以外は `contextlib.nullcontext()`」
-    # という部分直列化は、外側 lock が常にそれより広い直列化を先に
-    # 与えるため in-process では完全に冗長 (かつ `_idempotency_lock_
-    # scope` 自体を無効化する変異を当てても既存テストが一切赤化しない
-    # ことで確認済み -- 上記レビュー §5 (A))。削除により、この
-    # in-process 直列化の唯一の担い手は外側 `self._lock` になる
-    # (テストで直接 pin: `MitateDB-api/tests/test_idempotency_
-    # concurrency.py` の in-memory 同一キーテストは、外側 lock を
-    # `nullcontext` に差し替える変異で赤化することを実測)。
-    # 【WP-8b 案 A 以前の記述】旧 `_idempotency_lock_scope(idempotency_
-    # key, *, dry_run)` は `idempotency_key is not None and not dry_run`
-    # のときだけ `self._lock` (`RLock`) を返し、それ以外は
-    # `contextlib.nullcontext()` を返していた -- 当時はどの入口にも
-    # 外側 `self._lock` が存在せず、pass 1 を不必要に直列化しないための
-    # 唯一の安全弁だった (code-review fix F5, Opus review 2, WP-6d
-    # rework)。
-
-    @contextmanager
-    def _idempotency_pg_scope(self, idempotency_key, *, for_developer, dry_run):
-        """Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
-        used via `with self._idempotency_pg_scope(...) as conn:` at all 4
-        keyed entry points (`transact`, `create_collection`, `add_field`,
-        `alter_field`) -- guarantees `self._backend.idempotency_unlock`
-        runs on EVERY exit from the keyed critical section it wraps (a
-        replay's early `return`, a CONFLICT/LIMIT_EXCEEDED raise, a
-        pass-1-equivalent validation failure, an execution failure, or
-        success), regardless of which one.
-
-        WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09): previously combined
-        into the SAME `with self._idempotency_lock_scope(...), self.
-        _idempotency_pg_scope(...) as conn:` statement -- that helper is
-        now removed (see the deletion note immediately above this
-        method); this method is unchanged otherwise, and every call site
-        now opens it alone.
-
-        `conn` (code-review fix F6, Opus review 2, ruled in): resolved
-        EXACTLY ONCE here, at scope-open, via `self._backend.idempotency_
-        connection(for_developer=for_developer)` -- the caller (`with ...
-        as conn:`) threads this SAME handle into `_idempotency_check`
-        (which forwards it to `PostgresBackend.idempotency_begin`/
-        `idempotency_reserve`), and this method's own `finally` passes
-        the IDENTICAL handle to `idempotency_unlock`. Before this fix,
-        `idempotency_unlock` re-resolved `for_developer` independently,
-        at its own later call time -- harmless only because `self.
-        _developer`/`self._runtime` happen to be stable, persistent
-        connections today; resolving once and threading the handle
-        through removes that reliance structurally, closing a real
-        future bug (see `backend.py::StorageBackend.idempotency_
-        connection`'s own docstring) before a later change (WP-8b
-        pooling) could ever introduce it.
-
-        `PostgresBackend.idempotency_begin`/`idempotency_reserve`
-        acquire their own session-scoped advisory locks LAZILY, inside
-        `_idempotency_check` itself (called from within this scope) --
-        nothing else guarantees their release, since a session lock
-        (unlike the transaction-scoped kind r2db-api's own U-7 fix
-        uses) survives every self-committing catalog read (`field_
-        domains`/`schema_revision`) this method's own body may run
-        AFTER the lookup and BEFORE the eventual write -- see
-        `PostgresBackend.idempotency_begin`'s own docstring for why a
-        session lock, not an xact one, is this backend's correct
-        realization of the SAME U-7 safety outcome (CLAUDE.md:
-        "platform-specific controls may differ...when they provide the
-        same required safety outcome"). A no-op for SQLite/in-memory
-        backends (`idempotency_connection` there always returns `None`;
-        `idempotency_unlock` is a no-op too; `self._lock` -- held by the
-        SAME combined `with` statement -- already serializes them within
-        this one process) and for a dry run or an unkeyed request (I-7:
-        neither ever locks at all; `conn` yielded is `None`, never used
-        by any caller in that case)."""
-        if idempotency_key is None or dry_run:
-            yield None
-            return
-        conn = self._backend.idempotency_connection(for_developer=for_developer)
-        try:
-            yield conn
-        finally:
-            self._backend.idempotency_unlock(idempotency_key, conn=conn)
+    @staticmethod
+    def _entity_lock_names(names):
+        """The entity names among `names` worth locking: the ones that are
+        syntactically valid identifiers. A request names its entities
+        before it validates them (a non-string, or a malformed name, is
+        refused later with its own request-shaped denial, before any
+        statement runs), and there is nothing to lock for such a name."""
+        return [name for name in names if is_identifier_syntax(name)]
 
     def create_collection(self, principal, name, fields, destructive=False, *, request_id=None,
                           field_types=None, field_constraints=None, dry_run=False, plan=None,
@@ -1273,7 +1025,7 @@ class ApplicationCell:
         # for two different jobs.
         request = {"name": name, "fields": fields}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
-            with self._lock:
+            with self._backend.request_scope("schema", deadline=deadline) as scope:
                 name = self._identifier(name, "entity")
                 if not isinstance(fields, dict) or not fields:
                     # Phase 9 WP-3e (design D-3 (2)/(4)): a request-shape
@@ -1318,8 +1070,6 @@ class ApplicationCell:
                         "field limit exceeded",
                         details=violation("request_schema", field="fields"),
                     )
-                if self._backend.schema_count() >= self.config.max_schema_objects:
-                    raise ResourceLimitError("schema object limit exceeded", limit_class="schema_objects")
                 validated_fields = {}
                 declared_types = {}
                 for field, field_type in fields.items():
@@ -1449,120 +1199,104 @@ class ApplicationCell:
                         digest_request["idempotency_key"] = idempotency_key
                 idempotency_response_digest = None
                 idempotency_now_ms = None
-                # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
-                # code-review fix F5 (Opus review 2): originally widened
-                # `self._lock` around this scope via `_idempotency_lock_
-                # scope`, but ONLY for a keyed, real request. Covered the
-                # idempotency lookup and the plan-precondition check below
-                # it, not only the backend DDL call.
-                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
-                # 合意; `_idempotency_lock_scope`'s own deletion note
-                # immediately after `_identifier` above): `_idempotency_
-                # lock_scope` は削除した。外側の `with self._lock:` (1354 行、
-                # WP-8b 案 A) が `idempotency_key`/`dry_run` の値に関わらず
-                # 無条件にこのメソッド全体 (lookup・plan 前提条件チェック・
-                # 実行のすべて) を直列化しているため、ここで個別に部分直列化
-                # する意味は in-process には無い。残る `self._idempotency_pg_
-                # scope(...)` は PostgreSQL の session advisory lock 取得と
-                # 接続束縛 (F6) のみを担う。下の DDL 呼び出し周りの内側
-                # `with self._lock:` (F5 由来) は `RLock` の再入として無害な
-                # まま維持。
-                # 【WP-8b 案 A 以前の記述】旧文はここで
-                # `contextlib.nullcontext()` (no lock at all over pass 1) が
-                # 使われる場合を説明していた -- `idempotency_key is None or
-                # dry_run` のときの旧 `_idempotency_lock_scope` の返り値。
-                with self._idempotency_pg_scope(
-                    idempotency_key, for_developer=True, dry_run=dry_run
-                ) as conn:
-                    if idempotency_key is not None and not dry_run:
-                        # Phase 9 WP-3c (design D-5, I-3/I-7): checked here --
-                        # after every VALIDATION_FAILED/LIMIT_EXCEEDED refusal
-                        # above, before the plan precondition and before anything
-                        # is created below (`create_collection` has no separate
-                        # target-existence stage of its own, D-3's `ConflictError`
-                        # for an already-existing name surfaces from the backend
-                        # call itself, at execution -- this lookup runs before
-                        # THAT too).
-                        replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
-                            idempotency_key, digest_request, conn=conn, deadline=deadline)
-                        if replay is not None:
-                            # J-4 (SI-14): a replayed schema response earns its
-                            # own durable row before it is ever returned.
-                            self._write_replayed_schema_event(
-                                principal, operation="create_collection", target_id=name, request_id=request_id)
-                            # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): the
-                            # `setdefault("request_id", ...)` fallback this WP
-                            # previously carried here is REMOVED -- `replay` is
-                            # never `request_id`-less any more, because
-                            # `_idempotency_check` now treats such a record as
-                            # though it did not exist (see that method's own
-                            # docstring).
-                            return replay
-                    # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
-                    # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
-                    # refusal above (this operation has no confirmation/target-
-                    # existence stage of its own to order against: `create_
-                    # collection` never refers to an entity that must already
-                    # exist), before anything is created below. Only computed at
-                    # all when there is a `plan` to check or a fresh one to
-                    # return (`dry_run`) -- an ordinary real call (`dry_run=
-                    # False, plan=None`, every pre-WP-3b caller) makes NO extra
-                    # backend round trip for this, unchanged behavior (measured:
-                    # `_schema_revision_uncounted` itself calls `self._backend.
-                    # schema_revision()`, a real commit on this backend's own
-                    # developer connection -- an unconditional call here would
-                    # have silently added one to every schema operation, real or
-                    # not). `current_revision` is read once, under `self._lock`
-                    # (`_schema_revision_uncounted`, the SAME ungated accessor
-                    # `_post_schema_revision` uses) -- the value both a submitted
-                    # `plan` is checked against and a fresh one (dry_run) is
-                    # computed against, so the two can never disagree with each
-                    # other.
-                    expected_token = None
-                    if dry_run or plan is not None:
-                        # Minor m-2 (review): no separate `with self._lock:` here
-                        # -- `_schema_revision_uncounted` already acquires it (an
-                        # `RLock`, safe to re-enter from the SAME thread, so this
-                        # was never a deadlock, only a pointless second acquire).
-                        current_revision = self._schema_revision_uncounted()
-                        # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
-                        # rework): built ABOVE, before this method's own
-                        # idempotency choke -- see that hoisted block's own
-                        # comment for the full per-key rationale (`operation`/
-                        # `entity`/`fields`/`field_types`/`field_constraints`/
-                        # `digest_extra`/`idempotency_key`, unchanged from the
-                        # pre-hoist version this replaces). `compute_plan_token`
-                        # excludes only `plan`/`dry_run`, so an `idempotency_key`
-                        # this object carries (I-13) is part of what THIS token
-                        # commits to too.
-                        expected_token = compute_plan_token(digest_request, current_revision)
-                        check_plan_precondition(plan, expected_token)
-                    # Phase 4 (design D-2 item 2): every schema operation is
-                    # unconditionally fail-closed class -- the hook's own `pre_commit()`
-                    # is called by `self._backend.create_collection` itself, as the
-                    # last thing it does before its own commit point. Phase 9 WP-3b
-                    # (design D-4 (4), §5 U-2 = (A)): NOT built at all for a dry
-                    # run -- no audit hook, no audit event, not even an attempt.
-                    hook = None if dry_run else self._make_audit_hook(
-                        principal, event_class="schema_change", operation="create_collection",
-                        target_kind="collection", target_id=name, request_id=request_id,
-                    )
-                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
-                    # the 4th tuple element -- the backend's own `response_json`
-                    # construction (`backend_sqlite.py`/`backend_postgres.py`)
-                    # persists it alongside `committed`/`revision`/`descriptor`,
-                    # so a later replay's `json.loads(...)` carries the ORIGINAL
-                    # execution's own request_id, never a fresh one (matching
-                    # `transact()`'s own identical mutation-level guarantee).
-                    idempotency_record = (
-                        (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
-                        if idempotency_key is not None and not dry_run else None
-                    )
-                    with self._lock, self._error_row_once_fired(hook):
-                        revision, descriptor = self._backend.create_collection(
-                            name, validated_fields, field_types=declared_types,
-                            field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline,
-                            dry_run=dry_run, idempotency_record=idempotency_record)
+                if idempotency_key is not None and not dry_run:
+                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked here --
+                    # after every VALIDATION_FAILED/LIMIT_EXCEEDED refusal
+                    # above, before the plan precondition and before anything
+                    # is created below (`create_collection` has no separate
+                    # target-existence stage of its own, D-3's `ConflictError`
+                    # for an already-existing name surfaces from the backend
+                    # call itself, at execution -- this lookup runs before
+                    # THAT too).
+                    replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                        idempotency_key, digest_request, scope=scope)
+                    if replay is not None:
+                        # J-4 (SI-14): a replayed schema response earns its
+                        # own durable row before it is ever returned.
+                        self._write_replayed_schema_event(
+                            principal, operation="create_collection", target_id=name, request_id=request_id)
+                        # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): the
+                        # `setdefault("request_id", ...)` fallback this WP
+                        # previously carried here is REMOVED -- `replay` is
+                        # never `request_id`-less any more, because
+                        # `_idempotency_check` now treats such a record as
+                        # though it did not exist (see that method's own
+                        # docstring).
+                        return replay
+                # The schema locks, in the order the backend's lock order
+                # names them: the application-wide schema lock, then this
+                # entity's exclusive entity lock -- after the idempotency
+                # lookup above (a replay answers from its record without
+                # waiting for a running schema operation) and before
+                # anything below reads the catalog, so every read and
+                # check that follows is still true when the DDL runs.
+                scope.lock_schema()
+                scope.lock_entities([name], shared=False)
+                # The bound on schema objects is checked here, under those
+                # locks (another `create_collection` cannot land between the
+                # count and this one's DDL), after the idempotency lookup (a
+                # replay is answered from its record even when the bound is
+                # reached) -- a dry run counts at the same point.
+                if self._backend.schema_count(scope=scope) >= self.config.max_schema_objects:
+                    raise ResourceLimitError("schema object limit exceeded", limit_class="schema_objects")
+                # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
+                # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
+                # refusal above (this operation has no confirmation/target-
+                # existence stage of its own to order against: `create_
+                # collection` never refers to an entity that must already
+                # exist), before anything is created below. Only computed at
+                # all when there is a `plan` to check or a fresh one to
+                # return (`dry_run`) -- an ordinary real call (`dry_run=
+                # False, plan=None`, every pre-WP-3b caller) makes NO extra
+                # backend round trip for this. `current_revision` is read
+                # once, in this request's own transaction and under the
+                # schema lock (`self._backend.schema_revision`, the SAME
+                # read `_post_schema_revision` uses) -- the value both a
+                # submitted `plan` is checked against and a fresh one
+                # (dry_run) is computed against, so the two can never
+                # disagree with each other, and no other schema operation
+                # can change it before this one's DDL commits.
+                expected_token = None
+                if dry_run or plan is not None:
+                    current_revision = self._backend.schema_revision(scope=scope)
+                    # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
+                    # rework): built ABOVE, before this method's own
+                    # idempotency choke -- see that hoisted block's own
+                    # comment for the full per-key rationale (`operation`/
+                    # `entity`/`fields`/`field_types`/`field_constraints`/
+                    # `digest_extra`/`idempotency_key`, unchanged from the
+                    # pre-hoist version this replaces). `compute_plan_token`
+                    # excludes only `plan`/`dry_run`, so an `idempotency_key`
+                    # this object carries (I-13) is part of what THIS token
+                    # commits to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                # Phase 4 (design D-2 item 2): every schema operation is
+                # unconditionally fail-closed class -- the hook's own `pre_commit()`
+                # is called by `self._backend.create_collection` itself, as the
+                # last thing it does before its own commit point. Phase 9 WP-3b
+                # (design D-4 (4), §5 U-2 = (A)): NOT built at all for a dry
+                # run -- no audit hook, no audit event, not even an attempt.
+                hook = None if dry_run else self._make_audit_hook(
+                    principal, event_class="schema_change", operation="create_collection",
+                    target_kind="collection", target_id=name, request_id=request_id,
+                )
+                # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+                # the 4th tuple element -- the backend's own `response_json`
+                # construction (`backend_sqlite.py`/`backend_postgres.py`)
+                # persists it alongside `committed`/`revision`/`descriptor`,
+                # so a later replay's `json.loads(...)` carries the ORIGINAL
+                # execution's own request_id, never a fresh one (matching
+                # `transact()`'s own identical mutation-level guarantee).
+                idempotency_record = (
+                    (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
+                    if idempotency_key is not None and not dry_run else None
+                )
+                with self._error_row_once_fired(hook):
+                    revision, descriptor = self._backend.create_collection(
+                        name, validated_fields, field_types=declared_types,
+                        field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline,
+                        dry_run=dry_run, idempotency_record=idempotency_record, scope=scope)
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="create_collection")
@@ -1684,7 +1418,7 @@ class ApplicationCell:
         # `_limit_gate` sizing exactly).
         request = {"collection": collection, "field": field, "field_type": field_type}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
-            with self._lock:
+            with self._backend.request_scope("schema", deadline=deadline) as scope:
                 collection = self._identifier(collection, "entity")
                 field = self._identifier(field, "field")
                 if field_type not in _FIELD_TYPE_VOCABULARY:
@@ -1733,132 +1467,115 @@ class ApplicationCell:
                         digest_request["idempotency_key"] = idempotency_key
                 idempotency_response_digest = None
                 idempotency_now_ms = None
-                # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
-                # code-review fix F5 (Opus review 2): originally widened
-                # `self._lock` around this scope via `_idempotency_lock_
-                # scope`, but ONLY for a keyed, real request. Covered the
-                # idempotency lookup, target-existence (`field_domains`),
-                # and every other validation below it.
-                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
-                # 合意; `create_collection`'s own identical note above for
-                # the full rationale): `_idempotency_lock_scope` は削除した
-                # -- 外側の `with self._lock:` (1760 行、WP-8b 案 A) が
-                # `idempotency_key`/`dry_run` の値に関わらず無条件にこの
-                # メソッド全体を直列化しているため、個別の部分直列化は
-                # in-process には冗長。残る `self._idempotency_pg_scope(...)`
-                # は PostgreSQL の session advisory lock 取得と接続束縛 (F6)
-                # のみを担う。
-                # 【WP-8b 案 A 以前の記述】旧文はここで
-                # `contextlib.nullcontext()` (no lock at all over pass 1) が
-                # 使われる場合を説明していた。
-                with self._idempotency_pg_scope(
-                    idempotency_key, for_developer=True, dry_run=dry_run
-                ) as conn:
-                    if idempotency_key is not None and not dry_run:
-                        # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
-                        # `field_domains` immediately below -- this method's own
-                        # target-existence check.
-                        replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
-                            idempotency_key, digest_request, conn=conn, deadline=deadline)
-                        if replay is not None:
-                            # J-4 (SI-14): a replayed schema response earns its own
-                            # durable row before it is ever returned.
-                            self._write_replayed_schema_event(
-                                principal, operation="add_field", target_id=collection, request_id=request_id)
-                            # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
-                            # `create_collection`'s own removal above -- `replay`
-                            # is never `request_id`-less (see `_idempotency_
-                            # check`'s own docstring).
-                            return replay
-                    # Q1-D11-consistent shape bound (same reasoning as `create_
-                    # collection`'s own field-count check above): the total column
-                    # count this collection would carry AFTER this call mirrors the
-                    # same fixed contract shape dimension `max_fields` already gates
-                    # at definition time -- not a repeated, finite-resource
-                    # consumption class, so `ValidationError`, not `ResourceLimitError`
-                    # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
-                    # `ResourceLimitError` call-site count unaffected by this WP).
-                    current = self._visible_field_domains(collection)  # NotFoundError if `collection` does not exist
-                    if len(current) >= self.config.max_fields:
-                        # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
-                        # names the request key this bound is about -- `add_field`
-                        # has no plural container to point at (unlike `create_
-                        # collection`'s own `fields`), so this points at the one
-                        # new field name the request itself carries.
-                        raise ValidationError(
-                            "field limit exceeded",
-                            details=violation("request_schema", field="field"),
-                        )
-                    if nullable is not None and not isinstance(nullable, bool):
-                        # Phase 9 WP-3e (design D-3 (3), mirrors r2db-api's own
-                        # identical `add_field` site, `structured.py`): a
-                        # non-boolean `nullable` on `add_field` is the
-                        # declaration itself being invalid (`constraint_
-                        # declaration`, not a `request_schema` shape defect --
-                        # `nullable` IS a recognized top-level key here) --
-                        # `declared_type` is this field's own resolved type
-                        # (known here, unlike `alter_field` below).
-                        raise ValidationError(
-                            "nullable must be a boolean",
-                            details={
-                                "violated_declaration": "constraint_declaration",
-                                "field": "nullable",
-                                "declared_type": declared_type,
-                            },
-                        )
-                    validated_enum = None
-                    if enum is not None:
-                        validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
-                        if len(validated_enum) > self.config.max_enum_members:
-                            raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
-                    # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
-                    # checked after target-existence (`field_domains` above) and
-                    # every other refusal, before anything is created below --
-                    # see `create_collection`'s own identical comment for why
-                    # this whole block is skipped (no extra backend round trip)
-                    # when there is neither a `plan` to check nor a fresh one to
-                    # return.
-                    expected_token = None
-                    if dry_run or plan is not None:
-                        # Minor m-2 (review): no separate `with self._lock:` --
-                        # see `create_collection`'s own identical comment above.
-                        current_revision = self._schema_revision_uncounted()
-                        # `digest_request` (rework, 監督裁定 M-1/G-1; WP-3b closure
-                        # H-3 (a); Phase 9 WP-3c rework): built ABOVE, before this
-                        # method's own idempotency choke -- see that hoisted
-                        # block's own comment for the full per-key rationale
-                        # (`field_type` sourced from `contract_type`, the RAW
-                        # argument, never the resolved `declared_type` -- H-3 (a),
-                        # unchanged by this hoist). `compute_plan_token` excludes
-                        # only `plan`/`dry_run`, so an `idempotency_key` this
-                        # object carries (I-13) is part of what THIS token commits
-                        # to too.
-                        expected_token = compute_plan_token(digest_request, current_revision)
-                        check_plan_precondition(plan, expected_token)
-                    # Phase 4 (design D-2 item 2): same unconditional fail-closed
-                    # pre-commit hook as `create_collection` above. Phase 9 WP-3b:
-                    # not built at all for a dry run.
-                    hook = None if dry_run else self._make_audit_hook(
-                        principal, event_class="schema_change", operation="add_field",
-                        target_kind="collection", target_id=collection, request_id=request_id,
+                if idempotency_key is not None and not dry_run:
+                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                    # `field_domains` immediately below -- this method's own
+                    # target-existence check.
+                    replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                        idempotency_key, digest_request, scope=scope)
+                    if replay is not None:
+                        # J-4 (SI-14): a replayed schema response earns its own
+                        # durable row before it is ever returned.
+                        self._write_replayed_schema_event(
+                            principal, operation="add_field", target_id=collection, request_id=request_id)
+                        # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
+                        # `create_collection`'s own removal above -- `replay`
+                        # is never `request_id`-less (see `_idempotency_
+                        # check`'s own docstring).
+                        return replay
+                # The schema locks (see `create_collection`'s identical
+                # block): the application-wide schema lock, then this
+                # entity's exclusive entity lock, before the first catalog
+                # read below.
+                scope.lock_schema()
+                scope.lock_entities([collection], shared=False)
+                # Q1-D11-consistent shape bound (same reasoning as `create_
+                # collection`'s own field-count check above): the total column
+                # count this collection would carry AFTER this call mirrors the
+                # same fixed contract shape dimension `max_fields` already gates
+                # at definition time -- not a repeated, finite-resource
+                # consumption class, so `ValidationError`, not `ResourceLimitError`
+                # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
+                # `ResourceLimitError` call-site count unaffected by this WP).
+                current = self._visible_field_domains(collection, scope=scope)  # NotFoundError if `collection` does not exist
+                if len(current) >= self.config.max_fields:
+                    # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
+                    # names the request key this bound is about -- `add_field`
+                    # has no plural container to point at (unlike `create_
+                    # collection`'s own `fields`), so this points at the one
+                    # new field name the request itself carries.
+                    raise ValidationError(
+                        "field limit exceeded",
+                        details=violation("request_schema", field="field"),
                     )
-                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
-                    # the 4th tuple element -- the backend's own `response_json`
-                    # construction (`backend_sqlite.py`/`backend_postgres.py`)
-                    # persists it alongside `committed`/`revision`/`descriptor`,
-                    # so a later replay's `json.loads(...)` carries the ORIGINAL
-                    # execution's own request_id, never a fresh one (matching
-                    # `transact()`'s own identical mutation-level guarantee).
-                    idempotency_record = (
-                        (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
-                        if idempotency_key is not None and not dry_run else None
+                if nullable is not None and not isinstance(nullable, bool):
+                    # Phase 9 WP-3e (design D-3 (3), mirrors r2db-api's own
+                    # identical `add_field` site, `structured.py`): a
+                    # non-boolean `nullable` on `add_field` is the
+                    # declaration itself being invalid (`constraint_
+                    # declaration`, not a `request_schema` shape defect --
+                    # `nullable` IS a recognized top-level key here) --
+                    # `declared_type` is this field's own resolved type
+                    # (known here, unlike `alter_field` below).
+                    raise ValidationError(
+                        "nullable must be a boolean",
+                        details={
+                            "violated_declaration": "constraint_declaration",
+                            "field": "nullable",
+                            "declared_type": declared_type,
+                        },
                     )
-                    # ConflictError if `field` already exists
-                    with self._lock, self._error_row_once_fired(hook):
-                        revision, descriptor = self._backend.add_field(
-                            collection, field, field_type, contract_type=declared_type,
-                            enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline,
-                            dry_run=dry_run, idempotency_record=idempotency_record)
+                validated_enum = None
+                if enum is not None:
+                    validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
+                    if len(validated_enum) > self.config.max_enum_members:
+                        raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
+                # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
+                # checked after target-existence (`field_domains` above) and
+                # every other refusal, before anything is created below --
+                # see `create_collection`'s own identical comment for why
+                # this whole block is skipped (no extra backend round trip)
+                # when there is neither a `plan` to check nor a fresh one to
+                # return.
+                expected_token = None
+                if dry_run or plan is not None:
+                    current_revision = self._backend.schema_revision(scope=scope)
+                    # `digest_request` (rework, 監督裁定 M-1/G-1; WP-3b closure
+                    # H-3 (a); Phase 9 WP-3c rework): built ABOVE, before this
+                    # method's own idempotency choke -- see that hoisted
+                    # block's own comment for the full per-key rationale
+                    # (`field_type` sourced from `contract_type`, the RAW
+                    # argument, never the resolved `declared_type` -- H-3 (a),
+                    # unchanged by this hoist). `compute_plan_token` excludes
+                    # only `plan`/`dry_run`, so an `idempotency_key` this
+                    # object carries (I-13) is part of what THIS token commits
+                    # to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                # Phase 4 (design D-2 item 2): same unconditional fail-closed
+                # pre-commit hook as `create_collection` above. Phase 9 WP-3b:
+                # not built at all for a dry run.
+                hook = None if dry_run else self._make_audit_hook(
+                    principal, event_class="schema_change", operation="add_field",
+                    target_kind="collection", target_id=collection, request_id=request_id,
+                )
+                # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+                # the 4th tuple element -- the backend's own `response_json`
+                # construction (`backend_sqlite.py`/`backend_postgres.py`)
+                # persists it alongside `committed`/`revision`/`descriptor`,
+                # so a later replay's `json.loads(...)` carries the ORIGINAL
+                # execution's own request_id, never a fresh one (matching
+                # `transact()`'s own identical mutation-level guarantee).
+                idempotency_record = (
+                    (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
+                    if idempotency_key is not None and not dry_run else None
+                )
+                # ConflictError if `field` already exists
+                with self._error_row_once_fired(hook):
+                    revision, descriptor = self._backend.add_field(
+                        collection, field, field_type, contract_type=declared_type,
+                        enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline,
+                        dry_run=dry_run, idempotency_record=idempotency_record, scope=scope)
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="add_field")
@@ -1938,7 +1655,7 @@ class ApplicationCell:
         if enum is not UNCHANGED:
             request["enum"] = enum
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
-            with self._lock:
+            with self._backend.request_scope("schema", deadline=deadline) as scope:
                 if field_type is not None:
                     raise ValidationError(
                         "alter_field does not redeclare a field's own type",
@@ -1996,131 +1713,115 @@ class ApplicationCell:
                         digest_request["idempotency_key"] = idempotency_key
                 idempotency_response_digest = None
                 idempotency_now_ms = None
-                # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
-                # code-review fix F5 (Opus review 2): originally widened
-                # `self._lock` around this scope via `_idempotency_lock_
-                # scope`, but ONLY for a keyed, real request. Covered the
-                # idempotency lookup, target-existence (`field_domains`),
-                # and every other validation below it.
-                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
-                # 合意; `create_collection`'s own identical note above for
-                # the full rationale): `_idempotency_lock_scope` は削除した
-                # -- 外側の `with self._lock:` (2013 行、WP-8b 案 A) が
-                # `idempotency_key`/`dry_run` の値に関わらず無条件にこの
-                # メソッド全体を直列化しているため、個別の部分直列化は
-                # in-process には冗長。残る `self._idempotency_pg_scope(...)`
-                # は PostgreSQL の session advisory lock 取得と接続束縛 (F6)
-                # のみを担う。
-                # 【WP-8b 案 A 以前の記述】旧文はここで
-                # `contextlib.nullcontext()` (no lock at all over pass 1) が
-                # 使われる場合を説明していた。
-                with self._idempotency_pg_scope(
-                    idempotency_key, for_developer=True, dry_run=dry_run
-                ) as conn:
-                    if idempotency_key is not None and not dry_run:
-                        # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
-                        # `field_domains` immediately below -- this method's own
-                        # target-existence check.
-                        replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
-                            idempotency_key, digest_request, conn=conn, deadline=deadline)
-                        if replay is not None:
-                            # J-4 (SI-14): a replayed schema response earns its own
-                            # durable row before it is ever returned.
-                            self._write_replayed_schema_event(
-                                principal, operation="alter_field", target_id=collection, request_id=request_id)
-                            # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
-                            # `create_collection`'s own removal above -- `replay`
-                            # is never `request_id`-less (see `_idempotency_
-                            # check`'s own docstring).
-                            return replay
-                    available = self._visible_field_domains(collection)  # NotFoundError if `collection` does not exist
-                    if field not in available:
-                        # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
-                        # request NAMES a field the entity does not have -- a
-                        # constraint-declaration violation (`errors.details_
-                        # vocabulary.violated_declaration_vocabulary`'s own
-                        # `constraint_declaration` word: "a declaration naming a
-                        # field the request does not create"), not a request-
-                        # shape one; `field` echoes the request's own top-level
-                        # `field` key (design D-3 (2)), never a type pair (D-3
-                        # (3): this is not a violation about a value's own type).
-                        raise ValidationError(
-                            "unknown field",
-                            details={
-                                "violated_declaration": "constraint_declaration",
-                                "field": "field",
-                            },
-                        )
-                    if nullable is not None and not isinstance(nullable, bool):
-                        # D-3 details for a request-shape violation about a
-                        # VALUE's own type: `field` is the request-relative
-                        # top-level key, `declared_type`/`observed_type` included
-                        # per D-3 (3)'s value-type-violation branch.
-                        raise ValidationError(
-                            "nullable must be a boolean",
-                            details={
-                                "violated_declaration": "request_schema",
-                                "field": "nullable",
-                                "declared_type": "boolean",
-                                "observed_type": json_type_name(nullable),
-                            },
-                        )
-                    if enum is UNCHANGED or enum is None:
-                        validated_enum = enum  # UNCHANGED, or None (clears)
-                    else:
-                        declared_type = self._backend.field_types(collection).get(field)
-                        validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
-                        if len(validated_enum) > self.config.max_enum_members:
-                            raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
-                    # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
-                    # checked after target-existence/`enum` validation, before
-                    # anything is altered below -- see `create_collection`'s own
-                    # identical comment for why this whole block is skipped (no
-                    # extra backend round trip) when there is neither a `plan` to
-                    # check nor a fresh one to return.
-                    expected_token = None
-                    if dry_run or plan is not None:
-                        # Minor m-2 (review): no separate `with self._lock:` --
-                        # see `create_collection`'s own identical comment above.
-                        current_revision = self._schema_revision_uncounted()
-                        # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
-                        # rework): built ABOVE, before this method's own
-                        # idempotency choke -- see that hoisted block's own
-                        # comment for the full per-key rationale (`field_type`
-                        # never included -- the `field_type is not None` check
-                        # above always refuses first, unchanged by this hoist).
-                        # `compute_plan_token` excludes only `plan`/`dry_run`, so
-                        # an `idempotency_key` this object carries (I-13) is part
-                        # of what THIS token commits to too.
-                        expected_token = compute_plan_token(digest_request, current_revision)
-                        check_plan_precondition(plan, expected_token)
-                    # Phase 4 (design D-2 item 2): same unconditional fail-closed
-                    # pre-commit hook as `create_collection`/`add_field` above.
-                    # Phase 9 WP-3b: not built at all for a dry run.
-                    hook = None if dry_run else self._make_audit_hook(
-                        principal, event_class="schema_change", operation="alter_field",
-                        target_kind="collection", target_id=collection, request_id=request_id,
+                if idempotency_key is not None and not dry_run:
+                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                    # `field_domains` immediately below -- this method's own
+                    # target-existence check.
+                    replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                        idempotency_key, digest_request, scope=scope)
+                    if replay is not None:
+                        # J-4 (SI-14): a replayed schema response earns its own
+                        # durable row before it is ever returned.
+                        self._write_replayed_schema_event(
+                            principal, operation="alter_field", target_id=collection, request_id=request_id)
+                        # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
+                        # `create_collection`'s own removal above -- `replay`
+                        # is never `request_id`-less (see `_idempotency_
+                        # check`'s own docstring).
+                        return replay
+                # The schema locks (see `create_collection`'s identical
+                # block): the application-wide schema lock, then this
+                # entity's exclusive entity lock, before the first catalog
+                # read below -- so the registry row the backend reads for
+                # the alteration is still the one it writes over.
+                scope.lock_schema()
+                scope.lock_entities([collection], shared=False)
+                available = self._visible_field_domains(collection, scope=scope)  # NotFoundError if `collection` does not exist
+                if field not in available:
+                    # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
+                    # request NAMES a field the entity does not have -- a
+                    # constraint-declaration violation (`errors.details_
+                    # vocabulary.violated_declaration_vocabulary`'s own
+                    # `constraint_declaration` word: "a declaration naming a
+                    # field the request does not create"), not a request-
+                    # shape one; `field` echoes the request's own top-level
+                    # `field` key (design D-3 (2)), never a type pair (D-3
+                    # (3): this is not a violation about a value's own type).
+                    raise ValidationError(
+                        "unknown field",
+                        details={
+                            "violated_declaration": "constraint_declaration",
+                            "field": "field",
+                        },
                     )
-                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
-                    # the 4th tuple element -- the backend's own `response_json`
-                    # construction (`backend_sqlite.py`/`backend_postgres.py`)
-                    # persists it alongside `committed`/`revision`/`descriptor`,
-                    # so a later replay's `json.loads(...)` carries the ORIGINAL
-                    # execution's own request_id, never a fresh one (matching
-                    # `transact()`'s own identical mutation-level guarantee).
-                    idempotency_record = (
-                        (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
-                        if idempotency_key is not None and not dry_run else None
+                if nullable is not None and not isinstance(nullable, bool):
+                    # D-3 details for a request-shape violation about a
+                    # VALUE's own type: `field` is the request-relative
+                    # top-level key, `declared_type`/`observed_type` included
+                    # per D-3 (3)'s value-type-violation branch.
+                    raise ValidationError(
+                        "nullable must be a boolean",
+                        details={
+                            "violated_declaration": "request_schema",
+                            "field": "nullable",
+                            "declared_type": "boolean",
+                            "observed_type": json_type_name(nullable),
+                        },
                     )
-                    # ConflictError (existing rows violate the new constraints)
-                    # or NotFoundError propagate from here unchanged -- the
-                    # SAME refusal a dry run reaches too (the existing-row
-                    # scan below always runs for real, dry_run or not; only
-                    # the registry write/revision bump/commit are skipped).
-                    with self._lock, self._error_row_once_fired(hook):
-                        revision, descriptor = self._backend.alter_field_constraints(
-                            collection, field, enum=validated_enum, nullable=nullable, audit_hook=hook,
-                            deadline=deadline, dry_run=dry_run, idempotency_record=idempotency_record)
+                if enum is UNCHANGED or enum is None:
+                    validated_enum = enum  # UNCHANGED, or None (clears)
+                else:
+                    declared_type = self._backend.field_types(collection, scope=scope).get(field)
+                    validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
+                    if len(validated_enum) > self.config.max_enum_members:
+                        raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
+                # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
+                # checked after target-existence/`enum` validation, before
+                # anything is altered below -- see `create_collection`'s own
+                # identical comment for why this whole block is skipped (no
+                # extra backend round trip) when there is neither a `plan` to
+                # check nor a fresh one to return.
+                expected_token = None
+                if dry_run or plan is not None:
+                    current_revision = self._backend.schema_revision(scope=scope)
+                    # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
+                    # rework): built ABOVE, before this method's own
+                    # idempotency choke -- see that hoisted block's own
+                    # comment for the full per-key rationale (`field_type`
+                    # never included -- the `field_type is not None` check
+                    # above always refuses first, unchanged by this hoist).
+                    # `compute_plan_token` excludes only `plan`/`dry_run`, so
+                    # an `idempotency_key` this object carries (I-13) is part
+                    # of what THIS token commits to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                # Phase 4 (design D-2 item 2): same unconditional fail-closed
+                # pre-commit hook as `create_collection`/`add_field` above.
+                # Phase 9 WP-3b: not built at all for a dry run.
+                hook = None if dry_run else self._make_audit_hook(
+                    principal, event_class="schema_change", operation="alter_field",
+                    target_kind="collection", target_id=collection, request_id=request_id,
+                )
+                # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+                # the 4th tuple element -- the backend's own `response_json`
+                # construction (`backend_sqlite.py`/`backend_postgres.py`)
+                # persists it alongside `committed`/`revision`/`descriptor`,
+                # so a later replay's `json.loads(...)` carries the ORIGINAL
+                # execution's own request_id, never a fresh one (matching
+                # `transact()`'s own identical mutation-level guarantee).
+                idempotency_record = (
+                    (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
+                    if idempotency_key is not None and not dry_run else None
+                )
+                # ConflictError (existing rows violate the new constraints)
+                # or NotFoundError propagate from here unchanged -- the
+                # SAME refusal a dry run reaches too (the existing-row
+                # scan below always runs for real, dry_run or not; only
+                # the registry write/revision bump/commit are skipped).
+                with self._error_row_once_fired(hook):
+                    revision, descriptor = self._backend.alter_field_constraints(
+                        collection, field, enum=validated_enum, nullable=nullable, audit_hook=hook,
+                        deadline=deadline, dry_run=dry_run, idempotency_record=idempotency_record, scope=scope)
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="alter_field")
@@ -2173,11 +1874,10 @@ class ApplicationCell:
         exempt the internal wire-formatting readback, rather than
         exempting both)."""
         self._require_data(principal, request_id=request_id)
-        with self._limit_gate(principal, None, request_id=request_id):
-            with self._lock:
-                return self._schema_revision_uncounted()
+        with self._limit_gate(principal, None, request_id=request_id) as deadline:
+            return self._schema_revision_uncounted(deadline=deadline)
 
-    def _schema_revision_uncounted(self):
+    def _schema_revision_uncounted(self, *, deadline=None):
         """Phase 8 WP-1a rework 1 (裁定 3): the actual backend read
         `schema_revision` above now wraps with `_limit_gate` -- this
         private accessor is the UNGATED remainder, originally called only
@@ -2190,21 +1890,13 @@ class ApplicationCell:
         callers are expected to have already authorized/gated the
         surrounding operation; this is a pure backend read, nothing more.
 
-        Phase 9 WP-3b rework (Minor m-2, review; docstring corrected WP-3b
-        closure, Minor B-1): also called directly by `create_collection`/
-        `add_field`/`alter_field`/`transact` above -- NONE of the four
-        take a separate `with self._lock:` of their own around this call
-        (m-2's own point: a second acquisition here would have been
-        redundant, not incorrect, since `self._lock` is an `RLock`, safe
-        to re-enter from the same thread -- but the rework went further
-        and removed the callers' own redundant acquisition entirely, so
-        this method's `with self._lock:` below is now the ONLY acquisition
-        on this path, not one of two). Reading the SAME current revision
-        both a submitted `plan` is checked against and a fresh one
-        (`dry_run`) is computed against is what actually matters here,
-        unaffected either way."""
-        with self._lock:
-            return self._backend.schema_revision()
+        Opens its own request scope (a revision read needs the developer
+        connection only, so the `"schema"` kind; it takes no schema lock --
+        it reads what is committed). A read inside a schema or data
+        request does not come through here: those call `self._backend.
+        schema_revision(scope=scope)` on the scope they already hold."""
+        with self._backend.request_scope("schema", deadline=deadline) as scope:
+            return self._backend.schema_revision(scope=scope)
 
     def catalog(self, principal, *, request_id=None):
         """Phase 6 WP-3 (design D-3): `application_catalog`'s own real
@@ -2226,15 +1918,10 @@ class ApplicationCell:
         `service.py:1079` inside `_slot`; this peer's own pre-rework
         `catalog()` did not, a real, measured gap)."""
         self._require_data(principal, request_id=request_id)
-        with self._limit_gate(principal, None, request_id=request_id):
-            with self._lock:
-                # WP-8b 差し戻し (0): this WP's own new outer `with self.
-                # _lock:` (immediately above) now covers what used to be
-                # a separate, standalone acquisition here -- an `RLock`,
-                # so the pre-existing inner one was merely redundant, not
-                # incorrect; removed rather than left doubled.
-                all_types = self._backend.all_field_types()
-                all_constraints = self._backend.all_field_constraints()
+        with self._limit_gate(principal, None, request_id=request_id) as deadline:
+            with self._backend.request_scope("schema", deadline=deadline) as scope:
+                all_types = self._backend.all_field_types(scope=scope)
+                all_constraints = self._backend.all_field_constraints(scope=scope)
         return [
             {
                 "entity": entity, "fields": sorted(types), "field_types": dict(types),
@@ -2256,7 +1943,12 @@ class ApplicationCell:
     def insert(self, principal, collection, values, *, request_id=None):
         self._require_data(principal, request_id=request_id)
         with self._limit_gate(principal, {"collection": collection, "values": values}, request_id=request_id) as deadline:
-            with self._lock:
+            with self._backend.request_scope("dml", deadline=deadline) as scope:
+                # The entity is locked shared before the first catalog read
+                # below (`lock_entities`): a schema operation on it cannot
+                # change what this write is validated against before the
+                # write commits.
+                scope.lock_entities(self._entity_lock_names([collection]), shared=True)
                 # Phase 9 WP-3a (design D-2 (3), "検査順序は欠落検査 -> 値検査"):
                 # a `nullable: false` field this insert simply does not name is
                 # never handed to `check_declared_value` at all (that choke
@@ -2287,14 +1979,14 @@ class ApplicationCell:
                 # request-internal position (`operations/0/...`) a real client
                 # submitting one operation would, even though this method's
                 # own Python-level `values` argument carries no such envelope.
-                prefetched = self._check_missing_required_fields(collection, values, path_prefix="operations/0/values")
+                prefetched = self._check_missing_required_fields(
+                    collection, values, path_prefix="operations/0/values", scope=scope)
                 collection, fields, params = self._prepare_values(
-                    collection, values, path_prefix="operations/0/values", prefetched=prefetched)
-                with self._lock:
-                    result = self._write_row_before_commit(
-                        principal, operation="insert", collection=collection, request_id=request_id,
-                        deadline=deadline,
-                        write=lambda: self._backend.insert_in_transaction(collection, fields, params))
+                    collection, values, path_prefix="operations/0/values", prefetched=prefetched, scope=scope)
+                result = self._write_row_before_commit(
+                    principal, operation="insert", collection=collection, request_id=request_id,
+                    deadline=deadline, scope=scope,
+                    write=lambda: self._backend.insert_in_transaction(collection, fields, params, scope=scope))
         return result
 
     #: Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2b.2/D-3 (8): the
@@ -2361,7 +2053,7 @@ class ApplicationCell:
         request = {"collection": collection, "fields": fields, "filters": filters, "order_by": order_by,
                   "limit": limit, "cursor": cursor}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="query") as deadline:
-            with self._lock:
+            with self._backend.request_scope("query", deadline=deadline) as scope:
                 # Phase 9 WP-3cd closure (K-1): `narrow_limits_by_budget` is
                 # no longer called at the facade layer, before this gate --
                 # `self._gate` above already validated `budget` (raising
@@ -2376,9 +2068,9 @@ class ApplicationCell:
                 # returned, L9-11).
                 limits = narrow_limits_by_budget(self.config, budget, "query")
                 collection = self._identifier(collection, "entity")
-                selected = self._select_fields(collection, fields)
-                bound_filters = self._bind_filters(collection, filters, limits=limits)
-                bound_order = self._bind_order_by(collection, order_by)
+                selected = self._select_fields(collection, fields, scope=scope)
+                bound_filters = self._bind_filters(collection, filters, limits=limits, scope=scope)
+                bound_order = self._bind_order_by(collection, order_by, scope=scope)
                 order_spec = (list(bound_order) if bound_order else []) + [(self._ROW_ORDER_COLUMN, "asc")]
                 if limit is not None:
                     if not isinstance(limit, int) or limit <= 0 or limit > self.MAX_PAGE_SIZE:
@@ -2400,15 +2092,21 @@ class ApplicationCell:
                     # happens to be (the isolated conformance surface's own
                     # small `max_result_rows` must never mask a genuine
                     # cursor-binding refusal behind a resource-limit one).
-                    cursor_values = self._decode_and_check_page_cursor(collection, cursor, binding, order_spec)
+                    cursor_values = self._decode_and_check_page_cursor(
+                        collection, cursor, binding, order_spec, scope=scope)
                 if limit > limits.max_result_rows:
                     raise ResourceLimitError("result limit exceeded", limit_class="result_items")
                 order_only_fields = [field_name for field_name, _direction in order_spec if field_name not in selected]
                 read_columns = list(selected) + order_only_fields
-                with self._lock:
-                    rows = self._backend.read(collection, read_columns, bound_filters, order_spec, limit + 1,
-                                              cursor_values=cursor_values, deadline=deadline)
-                rows = self._decode_rows(collection, rows)  # a catalog read: stays under the lock and the gate
+                # The declared types the rows are decoded with are read here,
+                # with the rest of the catalog reads this request makes
+                # before its own read, and used after it: the response is
+                # decoded without another catalog round trip, and nothing
+                # is read from the catalog after the scope ends.
+                declared_types = self._backend.field_types(collection, scope=scope)
+                rows = self._backend.read(collection, read_columns, bound_filters, order_spec, limit + 1,
+                                          cursor_values=cursor_values, deadline=deadline, scope=scope)
+                rows = self._decode_rows(rows, declared_types)
         has_more = len(rows) > limit
         page_rows = rows[:limit]
         items = [{field_name: row[field_name] for field_name in selected} for row in page_rows]
@@ -2427,7 +2125,7 @@ class ApplicationCell:
         self._write_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
         return items, next_page
 
-    def _decode_and_check_page_cursor(self, collection, cursor, binding, order_spec):
+    def _decode_and_check_page_cursor(self, collection, cursor, binding, order_spec, *, scope):
         """Decodes `cursor` against `binding` (`paging.decode_page_
         cursor`), then checks the decoded ordering values against
         `order_spec` (design D-2b.1) -- the count must match `order_spec`
@@ -2449,8 +2147,8 @@ class ApplicationCell:
             self._reject_page_cursor()
         if len(values) != len(order_spec):
             self._reject_page_cursor()
-        declared_types = self._backend.field_types(collection)
-        domains = self._backend.field_domains(collection)
+        declared_types = self._backend.field_types(collection, scope=scope)
+        domains = self._backend.field_domains(collection, scope=scope)
         checked: list[Any] = []
         for value, (field_name, _direction) in zip(values, order_spec):
             # `_ROW_ORDER_COLUMN` carries no `_mdb_field_types` registry
@@ -2482,7 +2180,7 @@ class ApplicationCell:
             details=violation("request_schema", field="page/cursor"),
         )
 
-    def _validate_update(self, collection, values, filters, *, path_prefix="values", limits=None):
+    def _validate_update(self, collection, values, filters, *, path_prefix="values", limits=None, scope):
         """m-1 (independent review, P3-D2 follow-up): the single choke
         BOTH `ApplicationCell.update` below AND `transact()`'s own
         batch-embedded update branch (`_plan_operation`, since P35 WP-2's
@@ -2501,9 +2199,9 @@ class ApplicationCell:
         convention).
 
         Returns `(collection, fields, values_params, bound_filters)` on
-        success. Does not execute the update itself and does not touch
-        `self._lock`/the backend's own transaction state -- callers own
-        both, same division of responsibility as
+        success. Does not execute the update itself and does not touch the
+        backend's transaction state beyond its catalog reads on `scope` --
+        callers own both, same division of responsibility as
         `_validate_delete_confirmation`.
         """
         item_prefix = path_prefix.rsplit("/", 1)[0] if "/" in path_prefix else path_prefix
@@ -2521,7 +2219,7 @@ class ApplicationCell:
                 "update requires non-empty filters",
                 details={"violated_declaration": "request_schema", "field": where_path},
             )
-        collection, fields, values_params = self._prepare_values(collection, values, path_prefix=path_prefix)
+        collection, fields, values_params = self._prepare_values(collection, values, path_prefix=path_prefix, scope=scope)
         if not fields:
             # WP-3e rework T1 (追補 L-1): unreachable in practice --
             # `_prepare_values` above already guarantees a non-empty
@@ -2537,31 +2235,34 @@ class ApplicationCell:
                 "values must be non-empty",
                 details=violation("request_schema", field=path_prefix),
             )
-        bound_filters = self._bind_filters(collection, filters, limits=limits, path_prefix=f"{item_prefix}/")
+        bound_filters = self._bind_filters(
+            collection, filters, limits=limits, path_prefix=f"{item_prefix}/", scope=scope)
         return collection, fields, values_params, bound_filters
 
     def update(self, principal, collection, values, filters, *, request_id=None):
         self._require_data(principal, request_id=request_id)
         request = {"collection": collection, "values": values, "filters": filters}
         with self._limit_gate(principal, request, request_id=request_id) as deadline:
-            with self._lock:
+            with self._backend.request_scope("dml", deadline=deadline) as scope:
+                # Shared entity lock before the first catalog read, as in
+                # `insert()`.
+                scope.lock_entities(self._entity_lock_names([collection]), shared=True)
                 # Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08):
                 # `path_prefix="operations/0/values"` -- same reasoning as
                 # `insert()` immediately above (this direct entry point
                 # occupies the same request-internal position a real client's
                 # solo-operation mutation would).
                 collection, fields, values_params, bound_filters = self._validate_update(
-                    collection, values, filters, path_prefix="operations/0/values")
-                with self._lock:
-                    result = self._write_row_before_commit(
-                        principal, operation="update", collection=collection, request_id=request_id,
-                        deadline=deadline,
-                        write=lambda: self._backend.update_in_transaction(
-                            collection, fields, values_params, bound_filters))
+                    collection, values, filters, path_prefix="operations/0/values", scope=scope)
+                result = self._write_row_before_commit(
+                    principal, operation="update", collection=collection, request_id=request_id,
+                    deadline=deadline, scope=scope,
+                    write=lambda: self._backend.update_in_transaction(
+                        collection, fields, values_params, bound_filters, scope=scope))
         return result
 
     def _validate_delete_confirmation(self, collection, filters, destructive, confirm, limits=None,
-                                       path_prefix="operations/0/values"):
+                                       path_prefix="operations/0/values", *, scope):
         """P3-D2 (design v1.2 R-5, WP-1.5): the single choke BOTH
         `ApplicationCell.delete` below AND `transact()`'s own
         batch-embedded delete branch (`_plan_operation`, since P35 WP-2's
@@ -2586,47 +2287,11 @@ class ApplicationCell:
 
         Returns `(collection, bound_filters)` on success; raises
         `DestructiveConfirmationRequired` otherwise. Does not execute the
-        delete itself and does not touch `self._lock`/the backend's own
-        transaction state -- callers own both.
-
-        m-1 correction (independent review, P35 WP-2 follow-up); comment
-        corrected again by code-review fix F7/F8 (Opus review 2, WP-6d
-        rework -- the WP-6d/F5 lock widening below made the previous
-        wording here stale a second time): the dedicated `delete()`
-        method still wraps its own `with self._lock:` AFTER this returns
-        (no open batch transaction at that point). `transact()`'s own
-        batch-embedded call site is DIFFERENT since P35 WP-2's two-pass
-        restructuring (R-1): it now runs from `_plan_operation`, during
-        pass 1.
-
-        WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと合意;
-        `{scratchpad}/phase10/wp8b-review-2.md` §5 (B) / §7-2): `transact`
-        の外側 `with self._lock:` (WP-8b 案 A、`_gate`/`_limit_gate` の
-        直後) は KEYED/UNKEYED、real/dry-run のいずれであっても
-        `_plan_operation` (pass 1) を含むメソッド本体全体を無条件に
-        直列化する -- `_idempotency_lock_scope` はこの直列化を部分的に
-        再現する意味を失ったため削除済み (削除note: `_idempotency_pg_
-        scope` の直前)。したがって現在は、UNKEYED/dry-run のバッチも
-        含め、`_plan_operation` は常に `self._lock` の内側で走る。
-        pass 2 の開始点にある内側の `with self._lock:` (`self._backend.
-        begin()` の直前) への到達は、その時点で既に外側 lock を保持して
-        いる同一スレッドによる `RLock` の再入であり、無害。
-
-        【WP-8b 案 A 以前の記述】UNKEYED または dry-run のバッチでは、
-        pass 1 は `self._lock` の外で走っていた -- `self._lock` はバッチ
-        全体の計画が成功した後、pass 2 の開始点でのみ取得されていた
-        (`with self._lock:` immediately around `self._backend.begin()`)。
-        KEYED かつ real なバッチでは、`transact` 自身の (削除済み)
-        `_idempotency_lock_scope` (F5, WP-6d rework) がその取得を pass 1
-        にも広げていた -- その場合だけ `_plan_operation` が `self._lock`
-        の内側で走り (`RLock` の再入として安全)、pass 2 自身の内側
-        `with self._lock:` に到達していた。この docstring 自体が担う
-        `_validate_delete_confirmation` の挙動は、いずれの変更でも
-        影響を受けない (lock/transaction 状態に一切触れないため) が、
-        より古い「`transact()` is already holding `self._lock` and has
-        already called `begin()` before this is ever reached」という
-        主張は pre-WP-2 の単一パス呼び出し箇所を指しており、どのバッチ
-        (keyed かどうかを問わず) にも当てはまらない。
+        delete itself and does not touch the backend's transaction state
+        beyond its catalog reads on `scope` (the request's own scope, with
+        the entity's shared lock already taken) -- callers own both. It runs
+        from `_plan_operation` during pass 1 of `transact()`, and from
+        `delete()` before the delete itself.
         """
         # WP-3e rework T2 (追補 L-3/M-4): every `field` this method raises
         # is derived from `path_prefix` -- `"operations/0/..."` for a
@@ -2671,8 +2336,9 @@ class ApplicationCell:
                 "delete requires non-empty filters",
                 details={"violated_declaration": "request_schema", "field": f"{item_prefix}/where"},
             )
-        bound_filters = self._bind_filters(collection, filters, limits=limits, path_prefix=f"{item_prefix}/")
-        schema_revision = self._backend.schema_revision()
+        bound_filters = self._bind_filters(
+            collection, filters, limits=limits, path_prefix=f"{item_prefix}/", scope=scope)
+        schema_revision = self._backend.schema_revision(scope=scope)
         phrase = _delete_confirmation_phrase(collection, filters, schema_revision)
         if destructive is not True or confirm != phrase:
             raise DestructiveConfirmationRequired(
@@ -2698,10 +2364,13 @@ class ApplicationCell:
         self._require_data(principal, request_id=request_id)
         request = {"collection": collection, "filters": filters, "destructive": destructive, "confirm": confirm}
         with self._limit_gate(principal, request, request_id=request_id) as deadline:
-            with self._lock:
+            with self._backend.request_scope("dml", deadline=deadline) as scope:
+                # Shared entity lock before the first catalog read, as in
+                # `insert()`.
+                scope.lock_entities(self._entity_lock_names([collection]), shared=True)
                 try:
                     collection, bound_filters = self._validate_delete_confirmation(
-                        collection, filters, destructive, confirm)
+                        collection, filters, destructive, confirm, scope=scope)
                 except DestructiveConfirmationRequired:
                     # Phase 4 (design D-3): `DESTRUCTIVE_CONFIRMATION_REQUIRED` is
                     # a durable-range denial code -- routed (coalesced) before
@@ -2716,13 +2385,14 @@ class ApplicationCell:
                     principal, event_class="destructive_data_operation", operation="delete",
                     target_kind="collection", target_id=collection, request_id=request_id,
                 )
-                with self._lock, self._error_row_once_fired(hook):
-                    result = self._backend.delete(collection, bound_filters, audit_hook=hook, deadline=deadline)
+                with self._error_row_once_fired(hook):
+                    result = self._backend.delete(
+                        collection, bound_filters, audit_hook=hook, deadline=deadline, scope=scope)
         self.__record("destructive_data_operation", self.application_id,
                       principal.credential_id, detail="delete_rows")
         return result
 
-    def _plan_operation(self, operation, index, limits=None):
+    def _plan_operation(self, operation, index, limits=None, *, scope):
         """P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_
         CONTRACT_130_V1.md §2): builds one fully-bound, side-effect-free
         plan step for a single `transact()` operation-dict -- identical
@@ -2732,21 +2402,12 @@ class ApplicationCell:
         checks) as before this WP, just no longer interleaved with any
         OTHER operation's own execution. Never touches the DML
         (`_runtime`) transaction state (no `begin`/`commit`/`rollback`,
-        no `..._in_transaction` call) -- m-3 correction (independent
-        review, P35 WP-2 follow-up): this is narrower than "never touches
-        `self._backend`'s transaction state" -- on the PostgreSQL backend,
-        the read-only catalog calls this method makes (`field_domains`/
-        `schema_revision`, via `_prepare_values`/`_bind_filters`/
-        `_validate_delete_confirmation`) run on the SEPARATE developer
-        connection (`backend_postgres.PostgresBackend._developer`) and DO
-        commit there (a real, distinct transaction lifecycle from the
-        runtime/DML connection's `begin()`/`commit()`/`rollback()` that
-        pass 2 alone governs) -- exactly the same pre-existing
-        `field_domains`/`schema_revision` behavior every single-operation
-        method (`insert`/`update`/`delete`/`read`) already has outside
-        any lock (module-level "PG 留意" note above `_DELETE_CONSEQUENCE`
-        / design §2's own PG note), not a new side effect this WP
-        introduces.
+        no `..._in_transaction` call): the read-only catalog calls this
+        method makes (`field_domains`/`schema_revision`, via `_prepare_
+        values`/`_bind_filters`/`_validate_delete_confirmation`) run on
+        `scope`'s developer connection, a separate transaction from the
+        runtime connection's that pass 2 alone writes in, and commit
+        nothing.
 
         Returns `("insert" | "update" | "delete", payload)` on success,
         `payload` a plain tuple of exactly the arguments the matching
@@ -2815,9 +2476,10 @@ class ApplicationCell:
             # the SAME shared-fetch reuse `insert()` applies above.
             path_prefix = f"operations/{index}/values"
             prefetched = self._check_missing_required_fields(
-                operation.get("collection"), operation.get("values"), path_prefix=path_prefix)
+                operation.get("collection"), operation.get("values"), path_prefix=path_prefix, scope=scope)
             collection, fields, params = self._prepare_values(
-                operation["collection"], operation["values"], path_prefix=path_prefix, prefetched=prefetched)
+                operation["collection"], operation["values"], path_prefix=path_prefix, prefetched=prefetched,
+                scope=scope)
             return ("insert", (collection, fields, params))
         if op_type == "update":
             if set(operation) - _TRANSACT_UPDATE_KEYS:
@@ -2831,7 +2493,7 @@ class ApplicationCell:
                 )
             collection, fields, values_params, bound_filters = self._validate_update(
                 operation.get("collection"), operation.get("values"), operation.get("filters"),
-                path_prefix=f"operations/{index}/values", limits=limits)
+                path_prefix=f"operations/{index}/values", limits=limits, scope=scope)
             return ("update", (collection, fields, values_params, bound_filters))
         if op_type == "delete":
             if set(operation) - _TRANSACT_DELETE_KEYS:
@@ -2846,7 +2508,7 @@ class ApplicationCell:
             collection, bound_filters = self._validate_delete_confirmation(
                 operation.get("collection"), operation.get("filters"),
                 destructive=operation.get("destructive", False),
-                confirm=operation.get("confirm"), limits=limits)
+                confirm=operation.get("confirm"), limits=limits, scope=scope)
             return ("delete", (collection, bound_filters))
         if op_type in _CONTRACT_MUTATION_VOCABULARY:
             # Only "upsert" ever reaches here -- P3-D2 (WP-1.5) converged
@@ -2988,7 +2650,7 @@ class ApplicationCell:
                     break
         request = {"operations": operations}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="mutate") as deadline:
-            with self._lock:
+            with self._backend.request_scope("dml", deadline=deadline) as scope:
                 # Phase 9 WP-3cd closure (K-1, design D-6, B-2): `narrow_
                 # limits_by_budget` is no longer called at the facade layer,
                 # before this gate -- `self._gate` above already validated
@@ -3046,371 +2708,334 @@ class ApplicationCell:
                         digest_request["idempotency_key"] = idempotency_key
                 idempotency_response_digest = None
                 now_ms = None
-                # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
-                # code-review fix F5 (Opus review 2): this cell-wide `RLock`
-                # (`self._lock`, also used below for the begin/execute/commit
-                # envelope) additionally covered the idempotency lookup and
-                # pass 1 validation above it. For a keyed real request,
-                # without this widened lock two threads sharing this SAME
-                # `ApplicationCell` (uvicorn's threadpool, or a future one,
-                # U-10) could both pass `_idempotency_check` (both see "no
-                # record yet") before either reached this lock, then both
-                # execute and both store -- the in-memory/SQLite counterpart
-                # of the PostgreSQL-side race this same ruling closes with
-                # `pg_advisory_xact_lock` (`backend_postgres.py`). The
-                # separate inner `with self._lock:` immediately below
-                # `self._backend.begin(deadline=deadline)` is RESTORED (F5),
-                # exactly as it was pre-WP-6d -- `self._lock` is an `RLock`,
-                # so a keyed request re-entering it there is safe, not a
-                # deadlock.
-                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
-                # 合意; `create_collection`'s own identical note above,
-                # `wp8b-review-2.md` §5 (B) / §7-2): `_idempotency_lock_
-                # scope` は削除した。外側の `with self._lock:` (2907 行付近、
-                # WP-8b 案 A、`_gate` の直後) が `idempotency_key`/`dry_run`
-                # の値に関わらず無条件に lookup->pass-1->pass-2 全体を直列化
-                # しているため、この二重ガードは in-process には冗長 --
-                # 上記の「二スレッドが両方とも record なしを見る」races は、
-                # keyed/real かどうかを問わず、この外側 lock だけで既に閉じて
-                # いる。残る `self._idempotency_pg_scope(...)` は PostgreSQL
-                # の session advisory lock 取得と接続束縛 (F6) のみを担う。
-                # pass 2 の内側 `with self._lock:` への到達は、同一スレッドに
-                # よる `RLock` の再入として、keyed/unkeyed・real/dry-run の
-                # いずれでも無害。
-                # 【WP-8b 案 A 以前の記述】この widened lock は
-                # `idempotency_key is not None and not dry_run` のときだけ
-                # 適用され (`_idempotency_lock_scope` below returns
-                # `contextlib.nullcontext()` for every other request)、
-                # unkeyed/dry-run トラフィックは pass 1 上で直列化されて
-                # いなかった (an earlier version of this fix acquired
-                # `self._lock` unconditionally here, which over-serialized
-                # exactly that traffic)。unkeyed/dry-run request では、
-                # pass 2 の内側 acquisition だけが唯一の取得点で、pre-WP-6d
-                # の挙動と一致していた。
-                with self._idempotency_pg_scope(
-                    idempotency_key, for_developer=False, dry_run=dry_run
-                ) as conn:
-                    if idempotency_key is not None and not dry_run:
-                        # I-7: a dry run never records or consults an idempotency
-                        # record, regardless of whether `idempotency_key` was
-                        # presented -- the `not dry_run` guard above is this
-                        # method's only such check.
-                        replay, idempotency_response_digest, now_ms = self._idempotency_check(
-                            idempotency_key, digest_request, conn=conn, deadline=deadline)
-                        if replay is not None:
-                            # I-3/I-8: answered from the record, before target
-                            # existence/confirmation/precondition/execution are
-                            # ever reached -- the exact `results` object this
-                            # method itself returned when the original request
-                            # committed. J-4 (SI-14): a replayed mutation response
-                            # earns its own durable row before it is ever
-                            # returned -- otherwise a confirmed destructive
-                            # delete's own resend would return `committed: true`
-                            # while leaving zero evidence this Application was
-                            # touched at time T (WP-2cd/WP-3cd audit N-5).
-                            self._write_replayed_data_operation_event(
-                                principal, operation="transact", target_id=None, request_id=request_id)
-                            return replay
+                if idempotency_key is not None and not dry_run:
+                    # I-7: a dry run never records or consults an idempotency
+                    # record, regardless of whether `idempotency_key` was
+                    # presented -- the `not dry_run` guard above is this
+                    # method's only such check.
+                    replay, idempotency_response_digest, now_ms = self._idempotency_check(
+                        idempotency_key, digest_request, scope=scope)
+                    if replay is not None:
+                        # I-3/I-8: answered from the record, before target
+                        # existence/confirmation/precondition/execution are
+                        # ever reached -- the exact `results` object this
+                        # method itself returned when the original request
+                        # committed. J-4 (SI-14): a replayed mutation response
+                        # earns its own durable row before it is ever
+                        # returned -- otherwise a confirmed destructive
+                        # delete's own resend would return `committed: true`
+                        # while leaving zero evidence this Application was
+                        # touched at time T (WP-2cd/WP-3cd audit N-5).
+                        self._write_replayed_data_operation_event(
+                            principal, operation="transact", target_id=None, request_id=request_id)
+                        return replay
 
-                    # Pass 1: validate every operation, across every entity, before
-                    # any execution begins (P35-D9/P35-D10 above). Nothing below this
-                    # line has touched `self._backend`'s own transaction state yet.
-                    # Phase 4 (design D-3): `_plan_operation`'s own delete branch may
-                    # raise `DestructiveConfirmationRequired` (via `_validate_delete_
-                    # confirmation`, the same choke `delete()` uses) -- routed
-                    # (coalesced) here, at the one call site with `principal` in
-                    # scope, mirroring `delete()`'s own identical wrapping.
-                    # Phase 9 WP-3b (design D-4 (7)): the LOCAL execution plan
-                    # `_plan_operation` builds is renamed `execution_plan` here
-                    # (it was `plan` before this WP) -- this method's own new
-                    # `plan` PARAMETER (the caller-presented token) needs the
-                    # name `add_field`/`alter_field`/`create_collection` above
-                    # already use for the identical concept; keeping both names
-                    # `plan` in one scope would shadow one with the other.
-                    execution_plan = []
-                    for index, operation in enumerate(operations):
-                        try:
-                            execution_plan.append(self._plan_operation(operation, index, limits=limits))
-                        except DestructiveConfirmationRequired:
-                            collection = operation.get("collection") if isinstance(operation, dict) else None
-                            self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
-                            raise
+                # Every entity this batch names is locked shared, in one step
+                # (the backend sorts and deduplicates them, so every request
+                # takes its entity locks in the same order), after the
+                # idempotency lookup (its locks come first in the lock order)
+                # and before pass 1's first catalog read: a schema operation
+                # on any of those entities waits for this batch to finish,
+                # and cannot change what pass 1 validates against before pass
+                # 2 writes.
+                scope.lock_entities(self._entity_lock_names(self._distinct_batch_entities(operations)), shared=True)
 
-                    # The confirmation choke decides the event class -- a batch
-                    # containing at least one "delete" kind is a
-                    # `destructive_data_operation` for the WHOLE batch (D-10: at most
-                    # one durable row per operation, so the batch gets exactly one
-                    # pre-commit row, never one per individual delete inside it); a
-                    # batch with none is a `data_operation`. Either way the row is
-                    # recorded before the data commit.
-                    destructive = any(kind == "delete" for kind, _ in execution_plan)
-                    # Phase 9 WP-3b (design D-4 (2)/(7), destructive_confirmation.
-                    # evaluation_order): the plan precondition is checked HERE --
-                    # after pass 1 above, which is where every destructive
-                    # operation's own confirmation is validated
-                    # (`_plan_operation`/`_route_delete_confirmation_denial`), and
-                    # before pass 2 below, which is EXECUTION. A batch that is
-                    # both unconfirmed and carries a stale `plan` therefore always
-                    # refuses for the missing confirmation first (D-4 (2)'s own
-                    # ordering example) -- pass 1 above already raised before
-                    # control ever reaches this line. This whole block is skipped
-                    # (no extra backend round trip) when there is neither a
-                    # `plan` to check nor a fresh one to return -- `create_
-                    # collection`'s own identical comment explains why.
-                    expected_token = None
-                    if dry_run or plan is not None:
-                        # Minor m-2 (review): no separate `with self._lock:` --
-                        # see `create_collection`'s own identical comment above.
-                        current_revision = self._schema_revision_uncounted()
-                        # `digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c
-                        # rework, I-13): built ONCE, above (before pass 1), not
-                        # here -- see this method's own idempotency-lookup block
-                        # for the full construction rationale (entity/budget/
-                        # transaction/idempotency_key handling unchanged from the
-                        # pre-WP-3c version this replaces). Reused verbatim here:
-                        # `compute_plan_token` excludes only `plan`/`dry_run`, so
-                        # an `idempotency_key` this object carries (I-13) is part
-                        # of what THIS token commits to too.
-                        expected_token = compute_plan_token(digest_request, current_revision)
-                        check_plan_precondition(plan, expected_token)
-                    hook = None
-                    # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): not built at
-                    # all for a dry run -- no audit hook, no audit event.
-                    if not dry_run:
-                        hook = self._make_audit_hook(
-                            principal,
-                            event_class="destructive_data_operation" if destructive else "data_operation",
-                            operation="transact", target_kind="collection", target_id=None,
-                            request_id=request_id,
-                        )
+                # Pass 1: validate every operation, across every entity, before
+                # any execution begins (P35-D9/P35-D10 above). Nothing below this
+                # line has written through `self._backend` yet.
+                # Phase 4 (design D-3): `_plan_operation`'s own delete branch may
+                # raise `DestructiveConfirmationRequired` (via `_validate_delete_
+                # confirmation`, the same choke `delete()` uses) -- routed
+                # (coalesced) here, at the one call site with `principal` in
+                # scope, mirroring `delete()`'s own identical wrapping.
+                # Phase 9 WP-3b (design D-4 (7)): the LOCAL execution plan
+                # `_plan_operation` builds is renamed `execution_plan` here
+                # (it was `plan` before this WP) -- this method's own new
+                # `plan` PARAMETER (the caller-presented token) needs the
+                # name `add_field`/`alter_field`/`create_collection` above
+                # already use for the identical concept; keeping both names
+                # `plan` in one scope would shadow one with the other.
+                execution_plan = []
+                for index, operation in enumerate(operations):
+                    try:
+                        execution_plan.append(self._plan_operation(operation, index, limits=limits, scope=scope))
+                    except DestructiveConfirmationRequired:
+                        collection = operation.get("collection") if isinstance(operation, dict) else None
+                        self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
+                        raise
 
-                    with self._lock:
-                        # Pass 2: execute the fully-bound plan inside the begin/commit/
-                        # rollback envelope -- unchanged from before this WP other than
-                        # reading its arguments from `execution_plan` instead of
-                        # re-validating them from the raw operation dicts inline.
-                        self._backend.begin(deadline=deadline)
-                        # Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
-                        # "the durable pre-commit write itself failed" (nothing was
-                        # committed to correct -- the batch is simply refused) from
-                        # "the durable write succeeded but this backend's own commit
-                        # then failed" (D-2's error-row case) -- mirrors `backend_
-                        # postgres.PostgresBackend`'s identical single-operation
-                        # pattern, here at the batch level since `transact`'s own
-                        # begin/commit/rollback envelope lives in `cell.py`, not
-                        # either backend module.
-                        hook_fired = False
-                        try:
-                            results = []
-                            for kind, payload in execution_plan:
-                                if kind == "insert":
-                                    collection, fields, params = payload
-                                    results.append(self._backend.insert_in_transaction(collection, fields, params))
-                                elif kind == "update":
-                                    collection, fields, values_params, bound_filters = payload
-                                    results.append(self._backend.update_in_transaction(
-                                        collection, fields, values_params, bound_filters))
-                                else:  # "delete"
-                                    collection, bound_filters = payload
-                                    results.append(self._backend.delete_in_transaction(collection, bound_filters))
-                            # Phase 4 (design D-2/D-10): the pre-commit hook is the
-                            # LAST thing this method does before its own commit point
-                            # -- a raise here (an `errors.AuditSinkUnavailable`) is
-                            # caught by the `except Exception` below, which rolls
-                            # back exactly like any other mid-batch failure (fail-
-                            # closed by construction). The pre-existing 6-field-sink
-                            # `destructive_data_operation` record (below, post-commit)
-                            # is unaffected either way (D-10: that sink's own
-                            # behaviour is completely unchanged by this WP).
-                            # Phase 9 WP-3b (design D-4 (4)): the commit-vs-
-                            # rollback decision is made at this ONE point, the
-                            # tx's own exit -- never earlier, so that everything
-                            # above (validation, confirmation, the plan
-                            # precondition, and the writes themselves) runs
-                            # identically for a dry run and a real request alike.
-                            if dry_run:
-                                self._backend.rollback()
-                            else:
-                                # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-4):
-                                # `request_id` is folded INTO the last operation's
-                                # own per-item result dict, IN PLACE -- never
-                                # appended as a new trailing list entry (unlike
-                                # the dry-run envelope further below), because
-                                # `len(results)` is load-bearing elsewhere: the
-                                # in-process port's pre-v1.13 `attempt_batch_
-                                # with_addresses` (`conformance/conformance_
-                                # adapter_mitatedb.py`) computes `affected` as
-                                # `len(session.transact(items))` directly, with no
-                                # `dry_run` keyword of its own at all -- appending
-                                # a length-changing entry there would silently
-                                # inflate every real batch's own `affected` count
-                                # by one. Mutating the LAST item's dict merely
-                                # ADDS a key alongside whatever it already carries
-                                # (`rowid`/`updated`/`deleted`) -- `results[-1]`
-                                # is exactly what `_mutation_result_to_mapping`'s
-                                # own `envelope = results[-1] if ... else {}`
-                                # (the port v1.13 `_with_result` family's shared
-                                # helper) already reads, and it is what
-                                # `record_idempotency` below persists, so a later
-                                # replay's own `json.loads(...)` of the stored
-                                # response carries this SAME request_id (Q-4:
-                                # "replay を返す要求は元実行の request_id を返
-                                # す") rather than a fresh one.
-                                if results and isinstance(results[-1], dict):
-                                    results[-1] = {**results[-1], "request_id": request_id}
-                                # Phase 9 WP-3c (design D-5, I-1): the idempotency
-                                # record is written as the LAST thing before this
-                                # backend's own commit -- a failure anywhere above
-                                # (including the execution loop itself) never
-                                # reaches this line, so a failed attempt leaves no
-                                # record (the `except Exception` below rolls the
-                                # whole transaction back, this write included, on
-                                # the PostgreSQL backend; the SQLite/in-memory
-                                # backend never applies it either, since this
-                                # statement itself never ran). `idempotency_
-                                # response_digest`/`idempotency_key` are only both
-                                # non-`None` when this method's own earlier lookup
-                                # block found no matching record to replay.
-                                if idempotency_key is not None:
-                                    self._backend.record_idempotency(
-                                        idempotency_key, idempotency_response_digest, json.dumps(results), now_ms)
-                                # The pre-commit row is the last statement before the
-                                # data commit, after the idempotency record: a
-                                # failure of the record write (or of anything above)
-                                # therefore leaves no `allow` row behind for data that
-                                # never committed, and everything that can still fail
-                                # after this point is the commit itself.
-                                if hook is not None:
-                                    hook.pre_commit()
-                                    hook_fired = True
-                                self._backend.commit()
-                        except Exception as exc:
-                            # Independent review B-2 (WP-2 follow-up -- the
-                            # atomicity hole, largest safety fix of that review):
-                            # rollback is now UNCONDITIONAL. The pre-fix `except`
-                            # tuple listed only `errors.FoundationError` subclasses;
-                            # a non-`FoundationError` exception reaching this point
-                            # used to skip `self._backend.rollback()` entirely and
-                            # escape this method uncaught -- measured concretely: a
-                            # lone UTF-16 surrogate code point in a value's own text
-                            # (e.g. `"\ud800"`) escapes both backend drivers' own
-                            # parameter-binding step as a raw `UnicodeEncodeError`
-                            # (neither a `sqlite3.Error` nor a `psycopg.Error`
-                            # subclass), on BOTH backends. With the pre-fix narrow
-                            # `except`, that left every EARLIER, individually-valid
-                            # operation's own write sitting UNCOMMITTED but already
-                            # VISIBLE on this same connection (both SQLite and
-                            # PostgreSQL give a transaction read-your-own-writes
-                            # visibility before `COMMIT`) -- a real partial-effect
-                            # breach of the "whole batch commits or rolls back as one
-                            # unit" invariant this method's own docstring promises.
-                            # B-2(ii) below (`encode_value`, both backends) now closes
-                            # THIS specific case deterministically at validation time
-                            # (pass 1, before `self._backend.begin()` is ever called),
-                            # but the unconditional rollback here is the actual safety
-                            # backstop -- it must hold for ANY exception a backend
-                            # could ever raise during pass 2, known or not, not only
-                            # the one concrete case that happened to be found.
-                            #
-                            # P3-D2 (WP-1.5) / m-2 (WP-2 review correction):
-                            # `DestructiveConfirmationRequired` is not actually
-                            # reachable from pass 2 at all -- `_plan_operation` (pass
-                            # 1) is the ONLY site that ever evaluates a destructive
-                            # confirmation (`_validate_delete_confirmation`), so a
-                            # schema change racing pass 1/pass 2 (§2 PG note) surfaces
-                            # here as a `NotFoundError`/`ConflictError` from the
-                            # backend's own DML instead (the table/column the plan
-                            # was bound against no longer matches reality), never as
-                            # a re-evaluated confirmation mismatch; it stays listed
-                            # here only for defensive symmetry with `_plan_operation`'s
-                            # own vocabulary, not because this `except Exception:`
-                            # needs it to reach that branch specifically (every
-                            # `Exception` already does). `ConflictError`/`NotFoundError`
-                            # (a unique-constraint conflict / a collection that
-                            # stopped existing between this call's own validation pass
-                            # and its execution pass) and `ValidationError`/
-                            # `ResourceLimitError`/`CapabilityError` (this file names
-                            # no backend-native exception type at all -- every backend
-                            # translates its own low-level, EXPECTED failures into
-                            # this shared `errors.FoundationError` vocabulary before
-                            # this point) remain the classified, expected outcomes;
-                            # anything else (like the `UnicodeEncodeError` above, pre
-                            # B-2(ii)) rolls back and re-raises unclassified, exactly
-                            # as before -- this method itself never reclassifies an
-                            # exception type, only guarantees rollback runs first.
-                            try:
-                                self._backend.rollback()
-                            except Exception:
-                                # A rollback that itself fails (the connection
-                                # was lost during the commit) still owes the
-                                # `error` row once the `allow` row is recorded.
-                                if hook_fired:
-                                    hook.commit_failed()
-                                raise
-                            # Phase 9 WP-3cd closure (K-5, N-8): undoes a `record_
-                            # idempotency` write that turned out NOT to share the
-                            # data's own fate -- e.g. `record_idempotency` itself
-                            # succeeded but `self._backend.commit()` immediately
-                            # after it then raised (reaching THIS handler with the
-                            # `SQLiteBackend`/in-memory backend's own private,
-                            # non-transactional dict already holding a record for
-                            # data `self.rollback()` above just discarded). A no-op
-                            # when there is nothing pending to discard (the far
-                            # more common case: some EARLIER step failed, before
-                            # `record_idempotency` was ever reached) -- mirrors the
-                            # 3 schema-mutating DDL methods' own identical `except
-                            # Exception:` cleanup one-for-one.
-                            if idempotency_key is not None:
-                                self._backend.idempotency_discard_pending(idempotency_key)
-                            # Phase 4 (design D-2, error-row rule): `hook_fired` is
-                            # only `True` once the durable pre-commit row has already
-                            # committed on its own (separate) connection -- so an
-                            # exception reaching here after that point can only be
-                            # this method's own `self._backend.commit()` failing.
-                            # Record the durable `outcome="error"` row for the same
-                            # operation's fields (still fail-closed: `commit_failed()`
-                            # never raises -- see `audit_hook.py` -- but the response
-                            # is `AuditSinkUnavailable` regardless of whether that
-                            # write itself succeeds).
-                            if hook_fired:
-                                hook.commit_failed()
-                                raise AuditSinkUnavailable(
-                                    "the durable audit sink recorded this batch but the data commit failed"
-                                ) from exc
-                            raise
-                        # Phase 4 (design D-10): the pre-existing 6-field-sink record
-                        # is unconditional and unchanged -- it fires for a
-                        # batch-embedded delete exactly as it did before this WP,
-                        # now safely AFTER `self._backend.commit()` has actually
-                        # succeeded (no `pending_audit` deferral needed any more: the
-                        # hook above already gave the durable trail its own, separate,
-                        # PRE-commit guarantee, so this post-commit legacy record
-                        # never needs to claim a write a later operation rolled back
-                        # -- if we are here at all, `self._backend.commit()` already
-                        # succeeded for the whole batch).
-                        # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): NEITHER
-                        # audit path below runs for a dry run -- rolled back
-                        # above, nothing to record. `results` itself is still the
-                        # real per-item outcome each write produced before the
-                        # rollback undid it (`affected` "is the count if it had
-                        # executed", D-4 (3)) -- a trailing envelope dict is
-                        # appended (only for a dry run) carrying `committed`/
-                        # `plan`/`request_id`, the same convention `attempt_
-                        # mutation_with_result`'s own port docstring documents
-                        # (`results[-1]`, `conformance-tests/adapter.py`); `zip`
-                        # against `items` (this method's own callers, `http.py`/
-                        # the port) truncates to `len(items)`, so this extra
-                        # entry never perturbs `affected`'s own per-item sum.
-                        if dry_run:
-                            results = results + [{"committed": False, "plan": expected_token, "request_id": request_id}]
-                            return results
-                        if destructive:
-                            self.__record("destructive_data_operation", self.application_id,
-                                          principal.credential_id, detail="delete_rows")
-                        return results
+                # The confirmation choke decides the event class -- a batch
+                # containing at least one "delete" kind is a
+                # `destructive_data_operation` for the WHOLE batch (D-10: at most
+                # one durable row per operation, so the batch gets exactly one
+                # pre-commit row, never one per individual delete inside it); a
+                # batch with none is a `data_operation`. Either way the row is
+                # recorded before the data commit.
+                destructive = any(kind == "delete" for kind, _ in execution_plan)
+                # Phase 9 WP-3b (design D-4 (2)/(7), destructive_confirmation.
+                # evaluation_order): the plan precondition is checked HERE --
+                # after pass 1 above, which is where every destructive
+                # operation's own confirmation is validated
+                # (`_plan_operation`/`_route_delete_confirmation_denial`), and
+                # before pass 2 below, which is EXECUTION. A batch that is
+                # both unconfirmed and carries a stale `plan` therefore always
+                # refuses for the missing confirmation first (D-4 (2)'s own
+                # ordering example) -- pass 1 above already raised before
+                # control ever reaches this line. This whole block is skipped
+                # (no extra backend round trip) when there is neither a
+                # `plan` to check nor a fresh one to return -- `create_
+                # collection`'s own identical comment explains why.
+                expected_token = None
+                if dry_run or plan is not None:
+                    current_revision = self._backend.schema_revision(scope=scope)
+                    # `digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c
+                    # rework, I-13): built ONCE, above (before pass 1), not
+                    # here -- see this method's own idempotency-lookup block
+                    # for the full construction rationale (entity/budget/
+                    # transaction/idempotency_key handling unchanged from the
+                    # pre-WP-3c version this replaces). Reused verbatim here:
+                    # `compute_plan_token` excludes only `plan`/`dry_run`, so
+                    # an `idempotency_key` this object carries (I-13) is part
+                    # of what THIS token commits to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                hook = None
+                # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): not built at
+                # all for a dry run -- no audit hook, no audit event.
+                if not dry_run:
+                    hook = self._make_audit_hook(
+                        principal,
+                        event_class="destructive_data_operation" if destructive else "data_operation",
+                        operation="transact", target_kind="collection", target_id=None,
+                        request_id=request_id,
+                    )
 
-    def _select_fields(self, collection, requested):
-        available = self._visible_field_domains(collection)
+                # Pass 2: execute the fully-bound plan inside the begin/commit/
+                # rollback envelope -- unchanged from before this WP other than
+                # reading its arguments from `execution_plan` instead of
+                # re-validating them from the raw operation dicts inline.
+                self._backend.begin(deadline=deadline, scope=scope)
+                # Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
+                # "the durable pre-commit write itself failed" (nothing was
+                # committed to correct -- the batch is simply refused) from
+                # "the durable write succeeded but this backend's own commit
+                # then failed" (D-2's error-row case) -- mirrors `backend_
+                # postgres.PostgresBackend`'s identical single-operation
+                # pattern, here at the batch level since `transact`'s own
+                # begin/commit/rollback envelope lives in `cell.py`, not
+                # either backend module.
+                hook_fired = False
+                try:
+                    results = []
+                    for kind, payload in execution_plan:
+                        if kind == "insert":
+                            collection, fields, params = payload
+                            results.append(self._backend.insert_in_transaction(collection, fields, params, scope=scope))
+                        elif kind == "update":
+                            collection, fields, values_params, bound_filters = payload
+                            results.append(self._backend.update_in_transaction(
+                                collection, fields, values_params, bound_filters, scope=scope))
+                        else:  # "delete"
+                            collection, bound_filters = payload
+                            results.append(self._backend.delete_in_transaction(collection, bound_filters, scope=scope))
+                    # Phase 4 (design D-2/D-10): the pre-commit hook is the
+                    # LAST thing this method does before its own commit point
+                    # -- a raise here (an `errors.AuditSinkUnavailable`) is
+                    # caught by the `except Exception` below, which rolls
+                    # back exactly like any other mid-batch failure (fail-
+                    # closed by construction). The pre-existing 6-field-sink
+                    # `destructive_data_operation` record (below, post-commit)
+                    # is unaffected either way (D-10: that sink's own
+                    # behaviour is completely unchanged by this WP).
+                    # Phase 9 WP-3b (design D-4 (4)): the commit-vs-
+                    # rollback decision is made at this ONE point, the
+                    # tx's own exit -- never earlier, so that everything
+                    # above (validation, confirmation, the plan
+                    # precondition, and the writes themselves) runs
+                    # identically for a dry run and a real request alike.
+                    if dry_run:
+                        self._backend.rollback(scope=scope)
+                    else:
+                        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-4):
+                        # `request_id` is folded INTO the last operation's
+                        # own per-item result dict, IN PLACE -- never
+                        # appended as a new trailing list entry (unlike
+                        # the dry-run envelope further below), because
+                        # `len(results)` is load-bearing elsewhere: the
+                        # in-process port's pre-v1.13 `attempt_batch_
+                        # with_addresses` (`conformance/conformance_
+                        # adapter_mitatedb.py`) computes `affected` as
+                        # `len(session.transact(items))` directly, with no
+                        # `dry_run` keyword of its own at all -- appending
+                        # a length-changing entry there would silently
+                        # inflate every real batch's own `affected` count
+                        # by one. Mutating the LAST item's dict merely
+                        # ADDS a key alongside whatever it already carries
+                        # (`rowid`/`updated`/`deleted`) -- `results[-1]`
+                        # is exactly what `_mutation_result_to_mapping`'s
+                        # own `envelope = results[-1] if ... else {}`
+                        # (the port v1.13 `_with_result` family's shared
+                        # helper) already reads, and it is what
+                        # `record_idempotency` below persists, so a later
+                        # replay's own `json.loads(...)` of the stored
+                        # response carries this SAME request_id (Q-4:
+                        # "replay を返す要求は元実行の request_id を返
+                        # す") rather than a fresh one.
+                        if results and isinstance(results[-1], dict):
+                            results[-1] = {**results[-1], "request_id": request_id}
+                        # Phase 9 WP-3c (design D-5, I-1): the idempotency
+                        # record is written as the LAST thing before this
+                        # backend's own commit -- a failure anywhere above
+                        # (including the execution loop itself) never
+                        # reaches this line, so a failed attempt leaves no
+                        # record (the `except Exception` below rolls the
+                        # whole transaction back, this write included, on
+                        # the PostgreSQL backend; the SQLite/in-memory
+                        # backend never applies it either, since this
+                        # statement itself never ran). `idempotency_
+                        # response_digest`/`idempotency_key` are only both
+                        # non-`None` when this method's own earlier lookup
+                        # block found no matching record to replay.
+                        if idempotency_key is not None:
+                            self._backend.record_idempotency(
+                                idempotency_key, idempotency_response_digest, json.dumps(results), now_ms, scope=scope)
+                        # The pre-commit row is the last statement before the
+                        # data commit, after the idempotency record: a
+                        # failure of the record write (or of anything above)
+                        # therefore leaves no `allow` row behind for data that
+                        # never committed, and everything that can still fail
+                        # after this point is the commit itself.
+                        if hook is not None:
+                            hook.pre_commit()
+                            hook_fired = True
+                        self._backend.commit(scope=scope)
+                except Exception as exc:
+                    # Independent review B-2 (WP-2 follow-up -- the
+                    # atomicity hole, largest safety fix of that review):
+                    # rollback is now UNCONDITIONAL. The pre-fix `except`
+                    # tuple listed only `errors.FoundationError` subclasses;
+                    # a non-`FoundationError` exception reaching this point
+                    # used to skip `self._backend.rollback()` entirely and
+                    # escape this method uncaught -- measured concretely: a
+                    # lone UTF-16 surrogate code point in a value's own text
+                    # (e.g. `"\ud800"`) escapes both backend drivers' own
+                    # parameter-binding step as a raw `UnicodeEncodeError`
+                    # (neither a `sqlite3.Error` nor a `psycopg.Error`
+                    # subclass), on BOTH backends. With the pre-fix narrow
+                    # `except`, that left every EARLIER, individually-valid
+                    # operation's own write sitting UNCOMMITTED but already
+                    # VISIBLE on this same connection (both SQLite and
+                    # PostgreSQL give a transaction read-your-own-writes
+                    # visibility before `COMMIT`) -- a real partial-effect
+                    # breach of the "whole batch commits or rolls back as one
+                    # unit" invariant this method's own docstring promises.
+                    # B-2(ii) below (`encode_value`, both backends) now closes
+                    # THIS specific case deterministically at validation time
+                    # (pass 1, before `self._backend.begin()` is ever called),
+                    # but the unconditional rollback here is the actual safety
+                    # backstop -- it must hold for ANY exception a backend
+                    # could ever raise during pass 2, known or not, not only
+                    # the one concrete case that happened to be found.
+                    #
+                    # P3-D2 (WP-1.5) / m-2 (WP-2 review correction):
+                    # `DestructiveConfirmationRequired` is not actually
+                    # reachable from pass 2 at all -- `_plan_operation` (pass
+                    # 1) is the ONLY site that ever evaluates a destructive
+                    # confirmation (`_validate_delete_confirmation`), so a
+                    # schema change racing pass 1/pass 2 (§2 PG note) surfaces
+                    # here as a `NotFoundError`/`ConflictError` from the
+                    # backend's own DML instead (the table/column the plan
+                    # was bound against no longer matches reality), never as
+                    # a re-evaluated confirmation mismatch; it stays listed
+                    # here only for defensive symmetry with `_plan_operation`'s
+                    # own vocabulary, not because this `except Exception:`
+                    # needs it to reach that branch specifically (every
+                    # `Exception` already does). `ConflictError`/`NotFoundError`
+                    # (a unique-constraint conflict / a collection that
+                    # stopped existing between this call's own validation pass
+                    # and its execution pass) and `ValidationError`/
+                    # `ResourceLimitError`/`CapabilityError` (this file names
+                    # no backend-native exception type at all -- every backend
+                    # translates its own low-level, EXPECTED failures into
+                    # this shared `errors.FoundationError` vocabulary before
+                    # this point) remain the classified, expected outcomes;
+                    # anything else (like the `UnicodeEncodeError` above, pre
+                    # B-2(ii)) rolls back and re-raises unclassified, exactly
+                    # as before -- this method itself never reclassifies an
+                    # exception type, only guarantees rollback runs first.
+                    try:
+                        self._backend.rollback(scope=scope)
+                    except Exception:
+                        # A rollback that itself fails (the connection
+                        # was lost during the commit) still owes the
+                        # `error` row once the `allow` row is recorded.
+                        if hook_fired:
+                            hook.commit_failed()
+                        raise
+                    # Phase 9 WP-3cd closure (K-5, N-8): undoes a `record_
+                    # idempotency` write that turned out NOT to share the
+                    # data's own fate -- e.g. `record_idempotency` itself
+                    # succeeded but `self._backend.commit()` immediately
+                    # after it then raised (reaching THIS handler with the
+                    # `SQLiteBackend`/in-memory backend's own private,
+                    # non-transactional dict already holding a record for
+                    # data `self.rollback()` above just discarded). A no-op
+                    # when there is nothing pending to discard (the far
+                    # more common case: some EARLIER step failed, before
+                    # `record_idempotency` was ever reached) -- mirrors the
+                    # 3 schema-mutating DDL methods' own identical `except
+                    # Exception:` cleanup one-for-one.
+                    if idempotency_key is not None:
+                        self._backend.idempotency_discard_pending(idempotency_key)
+                    # Phase 4 (design D-2, error-row rule): `hook_fired` is
+                    # only `True` once the durable pre-commit row has already
+                    # committed on its own (separate) connection -- so an
+                    # exception reaching here after that point can only be
+                    # this method's own `self._backend.commit()` failing.
+                    # Record the durable `outcome="error"` row for the same
+                    # operation's fields (still fail-closed: `commit_failed()`
+                    # never raises -- see `audit_hook.py` -- but the response
+                    # is `AuditSinkUnavailable` regardless of whether that
+                    # write itself succeeds).
+                    if hook_fired:
+                        hook.commit_failed()
+                        raise AuditSinkUnavailable(
+                            "the durable audit sink recorded this batch but the data commit failed"
+                        ) from exc
+                    raise
+                # Phase 4 (design D-10): the pre-existing 6-field-sink record
+                # is unconditional and unchanged -- it fires for a
+                # batch-embedded delete exactly as it did before this WP,
+                # now safely AFTER `self._backend.commit()` has actually
+                # succeeded (no `pending_audit` deferral needed any more: the
+                # hook above already gave the durable trail its own, separate,
+                # PRE-commit guarantee, so this post-commit legacy record
+                # never needs to claim a write a later operation rolled back
+                # -- if we are here at all, `self._backend.commit()` already
+                # succeeded for the whole batch).
+                # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): NEITHER
+                # audit path below runs for a dry run -- rolled back
+                # above, nothing to record. `results` itself is still the
+                # real per-item outcome each write produced before the
+                # rollback undid it (`affected` "is the count if it had
+                # executed", D-4 (3)) -- a trailing envelope dict is
+                # appended (only for a dry run) carrying `committed`/
+                # `plan`/`request_id`, the same convention `attempt_
+                # mutation_with_result`'s own port docstring documents
+                # (`results[-1]`, `conformance-tests/adapter.py`); `zip`
+                # against `items` (this method's own callers, `http.py`/
+                # the port) truncates to `len(items)`, so this extra
+                # entry never perturbs `affected`'s own per-item sum.
+                if dry_run:
+                    results = results + [{"committed": False, "plan": expected_token, "request_id": request_id}]
+                    return results
+                if destructive:
+                    self.__record("destructive_data_operation", self.application_id,
+                                  principal.credential_id, detail="delete_rows")
+                return results
+
+    def _select_fields(self, collection, requested, *, scope):
+        available = self._visible_field_domains(collection, scope=scope)
         if requested is None:
             return list(available)
         if not isinstance(requested, list) or not requested:
@@ -3457,7 +3082,7 @@ class ApplicationCell:
             result.append(field)
         return result
 
-    def _decode_rows(self, collection, rows):
+    def _decode_rows(self, rows, declared_types):
         """Phase 6 WP-3 (design D-3, F2/F3): the read-side counterpart of
         `_normalize_value_for_storage` -- restores a physical value to its
         declared contract shape, backend-independently (both `backend_
@@ -3466,8 +3091,11 @@ class ApplicationCell:
         `object`/`array`/`json`, `0`/`1` for `boolean`). A field with no
         registry row (`None`, backward compatible) or declared `string`/
         `integer`/`number` passes through unchanged. `None` (SQL NULL)
-        always passes through unchanged, for every declared type."""
-        declared_types = self._backend.field_types(collection)
+        always passes through unchanged, for every declared type.
+
+        `declared_types` is the `{field: declared_type}` map the caller
+        already read from the catalog for this request; this method reads
+        nothing itself."""
         json_types = ("object", "array", "json")
         for row in rows:
             for field, value in row.items():
@@ -3496,7 +3124,7 @@ class ApplicationCell:
     # shape (`backend_sqlite.py`/`backend_postgres.py`).
     _MAX_ORDER_BY_TERMS = 10  # mirrors contract `definitions.QueryRequest.order_by.maxItems`
 
-    def _bind_order_by(self, collection, order_by):
+    def _bind_order_by(self, collection, order_by, *, scope):
         # WP-3e rework T1 (追補 L-1/M-2): every branch below is a
         # choke-point request-shape violation about `order_by` -- 4-keyed
         # with `errors.violation()` like every other `_bind_*` site in
@@ -3521,7 +3149,7 @@ class ApplicationCell:
                 "order_by term limit exceeded",
                 details=violation("request_schema", field="order_by"),
             )
-        available = self._visible_field_domains(collection)
+        available = self._visible_field_domains(collection, scope=scope)
         bound = []
         for i, item in enumerate(order_by):
             if not isinstance(item, dict):
@@ -3548,7 +3176,7 @@ class ApplicationCell:
             bound.append((field, direction))
         return bound
 
-    def _check_missing_required_fields(self, collection, values, *, path_prefix="values"):
+    def _check_missing_required_fields(self, collection, values, *, path_prefix="values", scope):
         """Phase 9 WP-3a (design D-2 (3)): the insert-only 欠落検査 --
         `declared_non_nullable - set(values)`. Placed BEFORE `_prepare_
         values` at every real insert entry point (this method's own two
@@ -3584,7 +3212,7 @@ class ApplicationCell:
         if not isinstance(values, dict) or not isinstance(collection, str):
             return None
         try:
-            declared_types, declared_constraints = self._backend.field_types_and_constraints(collection)
+            declared_types, declared_constraints = self._backend.field_types_and_constraints(collection, scope=scope)
         except NotFoundError:
             return None
         missing = sorted(field for field, entry in declared_constraints.items()
@@ -3600,7 +3228,7 @@ class ApplicationCell:
             )
         return declared_types, declared_constraints
 
-    def _prepare_values(self, collection, values, *, path_prefix="values", prefetched=None):
+    def _prepare_values(self, collection, values, *, path_prefix="values", prefetched=None, scope):
         # WP-3e rework T2 (追補 L-3/M-4): `entity_path` mirrors this
         # method's own `path_prefix` sibling derivation elsewhere in this
         # class (`_validate_update`'s `filters_path`) -- `path_prefix` is
@@ -3611,7 +3239,7 @@ class ApplicationCell:
         # `"operations/<i>/entity"`, its own path_prefix sibling.
         entity_path = (path_prefix.rsplit("/", 1)[0] + "/entity") if "/" in path_prefix else "entity"
         collection = self._identifier(collection, entity_path)
-        available = self._visible_field_domains(collection)
+        available = self._visible_field_domains(collection, scope=scope)
         # Phase 6 WP-3 (design D-3, G3): the PRIMARY, backend-independent
         # declared-type choke point -- `field_types.check_declared_value`
         # runs BEFORE `encode_value` on every backend (sqlite included,
@@ -3636,7 +3264,7 @@ class ApplicationCell:
         if prefetched is not None:
             declared_types, declared_constraints = prefetched
         else:
-            declared_types, declared_constraints = self._backend.field_types_and_constraints(collection)
+            declared_types, declared_constraints = self._backend.field_types_and_constraints(collection, scope=scope)
         if not isinstance(values, dict) or not values:
             # Phase 9 WP-3e (design D-3 (2)/(4)): `field` is `path_
             # prefix` itself (the whole `values` object's own request
@@ -3739,7 +3367,7 @@ class ApplicationCell:
 
     _check_predicate_value = staticmethod(_check_predicate_value)
 
-    def _bind_filters(self, collection, filters, limits=None, path_prefix=""):
+    def _bind_filters(self, collection, filters, limits=None, path_prefix="", *, scope):
         """`limits` (Phase 9 WP-3cd closure, 監督裁定集約 rulings-r5-r6.md
         K-3/B-2): the `in`-filter `batch_items` check below is the ONE
         check point in this method that budget can ever narrow (`max_filter_
@@ -3773,10 +3401,10 @@ class ApplicationCell:
             # into, and `capabilities()` below publishes this exact bound
             # (`config.max_filter_terms`) under the `query_complexity` key.
             raise ResourceLimitError("filter limit exceeded", limit_class="query_complexity")
-        available = self._visible_field_domains(collection)
+        available = self._visible_field_domains(collection, scope=scope)
         # Phase 6 WP-3 (design D-3, G3): same choke point `_prepare_values`
         # above uses.
-        declared_types = self._backend.field_types(collection)
+        declared_types = self._backend.field_types(collection, scope=scope)
         bound = []
         for i, item in enumerate(filters):
             where_path = f"{path_prefix}where/{i}"

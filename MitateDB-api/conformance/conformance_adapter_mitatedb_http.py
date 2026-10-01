@@ -852,8 +852,9 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
 # in-process here too (`self._cells[app_id]`, same object every real
 # `POST` request against this Application dispatches into), so this
 # realization needs no HTTP-specific plumbing beyond locating the cell.
-# `ApplicationCell._lock` (WP-8b 案 A) is what a concurrent second
-# request actually waits on, exactly as on the in-process plug.
+# The per-key advisory lock (`pg_advisory_xact_lock`) the held request
+# keeps until its transaction ends is what a concurrent second request for
+# the same key actually waits on, in this process or another.
 
 
 @contextmanager
@@ -862,8 +863,8 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     entered = threading.Semaphore(0)
     release = threading.Event()
 
-    def _checked(key, digest_request, *, conn=None, deadline=None):
-        result = original_check(key, digest_request, conn=conn, deadline=deadline)
+    def _checked(key, digest_request, **kwargs):
+        result = original_check(key, digest_request, **kwargs)
         replay_response, _digest, _now_ms = result
         if replay_response is None and key == idempotency_key:
             entered.release()
@@ -1557,6 +1558,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             _evicted_id, evicted_cell = self._cells.popitem(last=False)
             evicted_cell._backend.close()
 
+    def _new_backend(self, info: Any, application_id: str) -> PostgresBackend:
+        """The backend of one provisioned application, built the way the
+        composition root builds it (`main.py::build_app`): pools sized by
+        the process's own thread limit (`role_pool_size(DEFAULT_THREAD_
+        LIMIT)`), then the startup ledger check."""
+        backend = PostgresBackend(
+            info.runtime_dsn, info.developer_dsn, application_id=application_id,
+            max_execution_ms=self._application_config.max_execution_ms,
+            pool_size=role_pool_size(DEFAULT_THREAD_LIMIT),
+        )
+        backend.verify_platform_upgrades()
+        return backend
+
     def provision_application(self, application_id: str) -> None:
         info = _provision_pg_app(self._platform, application_id)
         self._app_pg[application_id] = info
@@ -1571,10 +1585,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # (set in `__init__`) is byte-for-byte the same
             # `FoundationConfig(...)` this line used to construct inline.
             application_id, self._application_config,
-            backend=PostgresBackend(
-                info.runtime_dsn, info.developer_dsn, application_id=application_id,
-                max_execution_ms=self._application_config.max_execution_ms,
-            ),
+            backend=self._new_backend(info, application_id),
             audit_router=self._audit_router, limit_holder=self._limit_holder,
         )
         self._evict_cells_over_cap()
@@ -3474,22 +3485,23 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
     def pool_stats(self) -> dict[str, dict[str, int | float]]:
         """R-78 (D-2): the data-plane counterpart of `conformance_adapter_
-        r2db_http.py`'s identical addition. This peer has no connection
-        pool on its data plane (module docstring, `backend_postgres.py`
-        :71-74) -- each `ApplicationCell` in `self._cells` serializes its
-        two persistent connections through its own `RLock` instead
-        (`cell.py::ApplicationCell._lock`). Returns that lock's own
-        `stats()` dict (keys `lock_acquire_count`/`wait_count`/`wait_
-        total_ms`/`wait_max_ms`), keyed by `application_id` alone (there is
-        exactly one lock per application, not one per role). Empty when no
-        cell is currently open."""
-        return {application_id: cell._lock.stats() for application_id, cell in self._cells.items()}  # noqa: SLF001 -- adapter-internal reach-in, same convention as this file's other `cell._...` accesses above
+        r2db_http.py`'s identical addition. Each `ApplicationCell` in
+        `self._cells` holds one connection pool per role
+        (`backend_postgres.PostgresBackend.pool_stats`); returns each
+        pool's own `stats()` dict (keys `size`/`acquire_count`/`wait_count`/
+        `wait_total_ms`/`wait_max_ms`/`in_use_peak`), keyed `<application_
+        id>/<role>`. Empty when no cell is currently open."""
+        stats: dict[str, dict[str, int | float]] = {}
+        for application_id, cell in self._cells.items():
+            for role, role_stats in cell._backend.pool_stats().items():  # noqa: SLF001 -- adapter-internal reach-in, same convention as this file's other `cell._...` accesses above
+                stats[f"{application_id}/{role}"] = role_stats
+        return stats
 
     def prepared_stats(self) -> list[dict]:
         """R-79 (WO §1.2 D-2/D-3): the data-plane counterpart of
         `conformance_adapter_r2db_http.py`'s identical addition. Calls each
         open cell's own PUBLIC `prepared_stats()` (`cell.py::ApplicationCell.
-        prepared_stats`, under that cell's own lock) -- unlike `pool_stats`
+        prepared_stats`) -- unlike `pool_stats`
         immediately above, this needs no `noqa: SLF001` reach-in, since
         `ApplicationCell.prepared_stats` is itself a public method. Flat
         list across every open cell (each connection's own `label` already

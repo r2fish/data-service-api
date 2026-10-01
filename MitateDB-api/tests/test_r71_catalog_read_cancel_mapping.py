@@ -57,6 +57,7 @@ from mitatedb_api.cell import ApplicationCell
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.errors import ResourceLimitError
 
+from .scoped_backend import scoped
 from .test_http import _get, app_a_stack  # noqa: F401 (fixture)
 from .test_postgres import _dsn_with, app_a, platform, sessions_for  # noqa: F401 (fixtures)
 
@@ -81,11 +82,16 @@ def _raise_on_next_execute(exc: Exception):
     real call succeeds" property (completion condition 1) actually
     observable against a synthetic exception: without it, `exc` is a pure
     Python-level raise that never touches the real connection, so a
-    missing `self._developer.rollback()` in the branch under test would
-    leave the connection in a state indistinguishable from a rolled-back
-    one, and a subsequent real call would succeed either way."""
+    connection handed back without a rollback would be indistinguishable
+    from a rolled-back one, and a subsequent real call would succeed
+    either way."""
     original = bp_module._execute
     def _raising(cursor, statement, params=()):
+        # The `SET LOCAL` timeouts a request scope sets when it opens are
+        # not what is under test: they go through, the statement after
+        # them is what raises.
+        if statement.as_string(cursor).startswith("SET LOCAL"):
+            return original(cursor, statement, params)
         try:
             cursor.execute("SELECT 1/0")
         except psycopg.Error:
@@ -99,14 +105,14 @@ def _raise_on_next_execute(exc: Exception):
 
 
 _METHOD_CALLS = {
-    "schema_count": lambda backend, entity: backend.schema_count(),
-    "field_domains": lambda backend, entity: backend.field_domains(entity),
-    "field_types": lambda backend, entity: backend.field_types(entity),
-    "all_field_types": lambda backend, entity: backend.all_field_types(),
-    "field_constraints": lambda backend, entity: backend.field_constraints(entity),
-    "field_types_and_constraints": lambda backend, entity: backend.field_types_and_constraints(entity),
-    "all_field_constraints": lambda backend, entity: backend.all_field_constraints(),
-    "schema_revision": lambda backend, entity: backend.schema_revision(),
+    "schema_count": lambda backend, entity: scoped(backend).schema_count(),
+    "field_domains": lambda backend, entity: scoped(backend).field_domains(entity),
+    "field_types": lambda backend, entity: scoped(backend).field_types(entity),
+    "all_field_types": lambda backend, entity: scoped(backend).all_field_types(),
+    "field_constraints": lambda backend, entity: scoped(backend).field_constraints(entity),
+    "field_types_and_constraints": lambda backend, entity: scoped(backend).field_types_and_constraints(entity),
+    "all_field_constraints": lambda backend, entity: scoped(backend).all_field_constraints(),
+    "schema_revision": lambda backend, entity: scoped(backend).schema_revision(),
 }
 
 # `all_field_types`'s own `QueryCanceled` case is carried by the real
@@ -146,10 +152,11 @@ def test_catalog_read_cancel_synthetic_injection_maps_to_resource_limit_error(ap
         assert str(excinfo.value) == _EXPECTED_MESSAGE
         assert excinfo.value.details == _EXPECTED_DETAILS
 
-        # Rollback happened on the SAME developer connection: the next
-        # real call over it succeeds instead of hitting `psycopg.errors.
-        # InFailedSqlTransaction` (an aborted, un-rolled-back transaction).
-        assert backend.schema_count() >= 0
+        # The connection went back to its pool rolled back: the next real
+        # request borrows it and succeeds instead of hitting `psycopg.
+        # errors.InFailedSqlTransaction` (an aborted, un-rolled-back
+        # transaction).
+        assert scoped(backend).schema_count() >= 0
     finally:
         backend.close()
 

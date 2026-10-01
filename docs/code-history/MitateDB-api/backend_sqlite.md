@@ -772,57 +772,6 @@ no commit/rollback here -- mirrors
 # ------------------------------------------------------------------
 ```
 
-## CH-0376
-
-- moved from: `src/mitatedb_api/backend_sqlite.py` (`SQLiteBackend`)
-- parent commit: `4d45fc6`
-- kind: comment
-
-```
-# Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): thin
-# wrappers -- `cell.py::ApplicationCell._idempotency_check` calls
-# THESE now, not the three methods directly above. `conn` (code-
-# review fix F6, Opus review 2, ruled in) is accepted (the
-# `_idempotency_check` call sites need one uniform signature across
-# backends) and ignored: this backend has no connection concept at
-# all (`idempotency_connection` below always returns `None`), and
-# `ApplicationCell._lock` (an `RLock`, widened by WP-6d/narrowed
-# again by F5 to cover this method's own caller's ENTIRE lookup ->
-# execute -> store window for a keyed, real request) already
-# serializes every concurrent thread sharing this cell -- there is
-# nothing left for a PostgreSQL-style advisory lock to add on this
-# backend.
-```
-
-## CH-0377
-
-- moved from: `src/mitatedb_api/backend_sqlite.py` (`SQLiteBackend.idempotency_begin`)
-- parent commit: `4d45fc6`
-- kind: comment
-
-```
-# `deadline` (code-review fix F2, Opus review 2): accepted for
-# the same uniform-signature reason `conn` is, above, and
-# ignored identically -- this backend never takes a lock a
-# deadline could bound.
-```
-
-## CH-0378
-
-- moved from: `src/mitatedb_api/backend_sqlite.py` (`SQLiteBackend.idempotency_unlock`)
-- parent commit: `4d45fc6`
-- kind: docstring
-
-```
-No-op -- `PostgresBackend`'s own counterpart releases the two
-session-scoped `pg_advisory_lock`s `idempotency_begin`/
-`idempotency_reserve` may have taken, on the SAME `conn` handle
-those methods used (code-review fix F6); this backend never
-takes any (see `idempotency_begin`'s own comment above), and
-`conn` is always `None` here regardless of what `idempotency_
-connection` returns to a caller from this backend.
-```
-
 ## CH-0379
 
 - moved from: `src/mitatedb_api/backend_sqlite.py` (`SQLiteBackend.record_idempotency`)

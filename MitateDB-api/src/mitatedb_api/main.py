@@ -539,20 +539,25 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         runtime_dsn, developer_dsn = app_dsns[application_id]
         # Q4 phase (design D-3(f), F-12; supervisor ruling 2026-09-05
         # H-1(a)): "cell open" for this served application --
-        # `PostgresBackend.__init__` checks the ledger itself, over the
-        # runtime connection it just opened, but no longer RAISES on a
-        # missing upgrade -- it stores the F-12 message on the backend
-        # instead, so this loop always completes and every OTHER served
-        # application's cell opens normally. The affected application's
-        # own cell still gets built and registered below (a refusing
-        # cell, not a missing one) -- its backend refuses every real
-        # operation with `SERVICE_UNAVAILABLE`/F-12 the moment a request
-        # reaches it (`backend_postgres._guard_pending_platform_
-        # upgrades`), while this process itself starts and every other
-        # application is served without interruption.
+        # `PostgresBackend` opens no connection when it is built;
+        # `verify_platform_upgrades` borrows one runtime connection from
+        # the backend's pool, checks the ledger over it and returns it. A
+        # missing upgrade does not RAISE -- the F-12 message is stored on
+        # the backend instead, so this loop always completes and every
+        # OTHER served application's cell opens normally. The affected
+        # application's own cell still gets built and registered below (a
+        # refusing cell, not a missing one) -- its backend refuses every
+        # real request with `SERVICE_UNAVAILABLE`/F-12 the moment it
+        # reaches `request_scope`, while this process itself starts and
+        # every other application is served without interruption. The
+        # application's pools hold at most `_role_pool_size` connections
+        # per role, the same bound the platform pool and the F-16/F-18
+        # checks are sized with.
         backend = PostgresBackend(
             runtime_dsn, developer_dsn, application_id=application_id, max_execution_ms=config.max_execution_ms,
+            pool_size=_role_pool_size,
         )
+        backend.verify_platform_upgrades()
         if backend._pending_platform_upgrade_message is not None:
             # H-1: logged once, here, at cell-open time -- the SAME text
             # this application's own requests will see in every

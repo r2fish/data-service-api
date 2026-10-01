@@ -188,9 +188,9 @@ class IdempotencyRecordsTests(unittest.TestCase):
         calls = {"insert_in_transaction": 0}
         real_insert = backend.insert_in_transaction
 
-        def counting_insert(collection, fields, params):
+        def counting_insert(*args, **kwargs):
             calls["insert_in_transaction"] += 1
-            return real_insert(collection, fields, params)
+            return real_insert(*args, **kwargs)
 
         backend.insert_in_transaction = counting_insert
         try:

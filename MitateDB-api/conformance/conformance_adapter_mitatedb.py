@@ -370,9 +370,9 @@ class _StalledGateContextManager:
     and BEFORE returning that value back to the real caller (`catalog`/
     `insert`/.../`ApplicationRuntime.capabilities`'s own `with self.
     _limit_gate(...) as deadline:` block) -- which is exactly what lets
-    `ApplicationCell._lock` (`cell.py:329`, acquired by the caller only
-    AFTER that `with` block's own body starts) stay unacquired for as
-    long as this stalls."""
+    the backend's request scope (opened by the caller only AFTER that
+    `with` block's own body starts) stay unopened for as long as this
+    stalls."""
 
     __slots__ = ("_inner", "_entered", "_release")
 
@@ -434,7 +434,7 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
     table requires must sit AFTER the counter, not before it. Wrapping
     `_backend` instead would hang permanently at `n >= 2` (D-2's own
     explicit prohibition: a second held thread would block forever
-    trying to acquire `ApplicationCell._lock` while the first one holds
+    trying to open the backend's request scope while the first one holds
     it stalled inside `_backend`, never reaching this proxy's own release
     wait at all).
 
@@ -512,11 +512,11 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
 # is the ONE choke every keyed entry point calls -- it performs BOTH the
 # lookup AND the `idempotency_entries` reservation and returns `(replay_
 # response, digest, now_ms)`; a fresh admission is exactly the case
-# `replay_response is None` (`cell.py:1318`). Every public entry point
-# already holds this SAME cell's own `self._lock` (an `RLock`, WP-8b 案
-# A) for its ENTIRE call -- lookup -> pass-1 -> pass-2 -- so a second,
+# `replay_response is None`. Every public entry point already holds this
+# SAME backend's request scope (the SQLite backend's own `RLock`) for its
+# ENTIRE call -- lookup -> pass-1 -> pass-2 -- so a second,
 # key-matching request ("B") never even reaches `_idempotency_check`
-# while "A" is held: B blocks acquiring `self._lock` at the top of
+# while "A" is held: B blocks opening its own request scope at the top of
 # whatever public method it calls instead (design D-13 "実装の形
 # (6d-ii) の確定" (4) 表, `MitateDB-api` row). This function only needs
 # to recognize the ONE call that is both key-matching and a fresh
@@ -530,8 +530,8 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     entered = threading.Semaphore(0)
     release = threading.Event()
 
-    def _checked(key, digest_request, *, conn=None, deadline=None):
-        result = original_check(key, digest_request, conn=conn, deadline=deadline)
+    def _checked(key, digest_request, **kwargs):
+        result = original_check(key, digest_request, **kwargs)
         replay_response, _digest, _now_ms = result
         # A fresh admission (`replay_response is None`) for the key this
         # hold is watching -- a replay, a CONFLICT/LIMIT_EXCEEDED
@@ -1260,7 +1260,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
     # WP-6d-ii): wraps this SAME cell's own `_idempotency_check` --
     # see `_hold_after_idempotency_check`'s own module comment for why
-    # this cell's own `self._lock` (not this hook) is what a concurrent
+    # the backend's request scope (not this hook) is what a concurrent
     # second request actually waits on.
     def hold_after_idempotency_lookup(self, session, idempotency_key: str):
         """See `ConformanceAdapter.hold_after_idempotency_lookup`'s own
