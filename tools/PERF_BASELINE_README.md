@@ -262,18 +262,21 @@ server-side `pg_stat_database.xact_commit + xact_rollback` delta. The two
 peers' own connection-management shapes give these different units, and
 this tool does not attempt to reconcile them into one number.
 
-**MitateDB's `POOL lock=` `acquire`, on any op after the first, reflects
-TWO probe acquisitions, not one**: this op's own DBTIME PRE snapshot
-(taken inside `_measure_op`, before the measured window, so it lands on
-THIS SAME op's own `POOL lock=` line) and the PRECEDING op's own shared
-POST snapshot (`DBTIME scope=app`'s and `PREPARED`'s common `prepared_
-stats()` call, which runs after that preceding op's own `POOL lock=` line
-already printed, so it lands on the NEXT op's own line instead -- this
-op's). `ApplicationCell.prepared_stats()` takes the cell's own lock every
-time it runs at all, so each of the two calls raises `acquire_count` by 1
-independently. **The very first op's own `POOL lock=` line carries only
-its own PRE snapshot's acquisition** -- there is no preceding op's own
-POST snapshot to add.
+**MitateDB's `POOL role=` `acquire`, on any op after the first, reflects
+TWO probe acquisitions per role pool, not one**: this op's own DBTIME PRE
+snapshot (taken inside `_measure_op`, before the measured window, so it
+lands on THIS SAME op's own `POOL role=` lines) and the PRECEDING op's
+own shared POST snapshot (`DBTIME scope=app`'s and `PREPARED`'s common
+`prepared_stats()` call, which runs after that preceding op's own `POOL`
+lines already printed, so it lands on the NEXT op's own lines instead --
+this op's). `PostgresBackend.prepared_stats()` borrows one connection
+from EACH of the application's two role pools (runtime and developer)
+every time it runs, so each of the two calls raises BOTH `role=` rows'
+`acquire_count` by 1 independently. The `schema_lock=` row is unaffected:
+a probe takes no advisory lock. **The very first op's own `POOL role=`
+lines carry only its own PRE snapshot's acquisition** -- there is no
+preceding op's own POST snapshot to add. The tool does not subtract
+these borrowings from the printed `acquire`.
 
 **A probe that fails still shows up as a windowed round trip.** If the
 POST (or PRE) `prepared_stats()` call itself raises on a particular
@@ -297,17 +300,28 @@ BLOCK, all of them, BEFORE that plug's `PERF` lines, never interleaved
 with them op by op:
 
 ```
-POOL peer=<peer> plug=<plug> op=<op> role=<role> size=<n> acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>
-POOL peer=<peer> plug=<plug> op=<op> lock=<application_id> acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx>
+POOL peer=<peer> plug=<plug> op=<op> role=<application_id>/<role> size=<n> acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>
+POOL peer=<peer> plug=<plug> op=<op> schema_lock=<application_id> acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx>
 ```
 
-The first shape is a `r2db-api` role pool (`r2db_api.postgres._RolePool.
-stats()`'s own six keys: `size`/`acquire_count`/`wait_count`/`wait_total_
-ms`/`wait_max_ms`/`in_use_peak`); the second is a `MitateDB-api`
-application cell lock (`mitatedb_api.cell._CountingRLock.stats()`'s own
-four keys -- `lock_acquire_count`/`wait_count`/`wait_total_ms`/`wait_max_
-ms` -- there is no pool `size`/`in_use_peak` concept for a mutex, so
-neither column is printed on this shape). Only plugs with a `pool_stats()`
+The shape is chosen by the keys the plug's stats dict carries, never by
+peer or plug name. The first shape is a role pool of either peer
+(`r2db_api.postgres._RolePool.stats()`'s and `mitatedb_api.pool.Bounded
+ConnectionPool.stats()`'s own six keys: `size`/`acquire_count`/`wait_
+count`/`wait_total_ms`/`wait_max_ms`/`in_use_peak`): one row per
+application and role (`runtime`, `developer`), `acquire` counts borrowed
+connections, and a wait is a borrow that found the pool at its `size`.
+The second is a `MitateDB-api` application's schema lock
+(`mitatedb_api.backend_postgres.PostgresBackend.schema_lock_stats()`'s
+own four keys -- `acquire_count`/`wait_count`/`wait_total_ms`/`wait_max_
+ms` -- there is no pool `size`/`in_use_peak` concept for a lock, so
+neither column is printed on this shape): one row per application, the
+application-wide schema lock and the shared and exclusive entity locks
+counted together; `acquire` counts each lock call (a schema operation
+takes two, a data write one, a query none), and a wait is a call whose
+non-blocking attempt did not get the lock and which then blocked for it.
+`waits` therefore stays 0 while nothing contends. A stats dict of any
+other shape is refused with `KeyError`. Only plugs with a `pool_stats()`
 method print `POOL` lines at all -- a plug without one (any plug this WP
 did not touch) is silently skipped, the same way a plug without `cross_
 entity_mutation` support is silently skipped for that op.
@@ -421,21 +435,20 @@ same LRU behaviour `_counts` always has, `_preparing.py`'s own `_rotate`)
 appears in `pg_prepared_statements`/`PREPSTMT`, but it is not entirely
 free on the client side either (design memo §1's own F3 note).
 
-**MitateDB's `POOL lock=` `acquire`, at this section's own R-79 baseline,
+**MitateDB's `POOL role=` `acquire`, at this section's own R-79 baseline,
 included one acquisition per PRECEDING probe** (superseded by the `##
 DBTIME lines (R-101)` section above, which now runs `prepared_stats()`
 twice per op -- see that section's own note on this op's own PRE
 acquisition and the preceding op's own POST acquisition for the current
-count). `ApplicationCell.prepared_stats()`
-takes the SAME cell lock every other operation on that cell takes
-(`cell.py::ApplicationCell._lock`), so calling it once (to print the
-`PREPARED` line(s) for the op that just ran) raises that cell's own
-`lock_acquire_count` by 1 -- the NEXT op's own `POOL lock=` line reflects
-that extra acquisition alongside the op's own real ones. r2db-api's
-`POOL role=` line is unaffected: its probe drains idle connections
-directly off the pool's own queue (`get_nowait`/`put_nowait`), never
-`_acquire()`, so it never touches `acquire_count`/`wait_count`/`in_use_
-peak`.
+count). `PostgresBackend.prepared_stats()` borrows one connection from
+each role pool (runtime and developer), so calling it once (to print the
+`PREPARED` line(s) for the op that just ran) raises both of that
+application's `role=` rows' own `acquire_count` by 1 -- the NEXT op's own
+`POOL role=` lines reflect that extra acquisition alongside the op's own
+real ones. r2db-api's `POOL role=` line is unaffected: its probe drains
+idle connections directly off the pool's own queue (`get_nowait`/
+`put_nowait`), never `_acquire()`, so it never touches `acquire_count`/
+`wait_count`/`in_use_peak`.
 
 ## `ROUNDTRIP` lines (R-80)
 
@@ -553,25 +566,25 @@ stats()` returns, but `db=app`'s own probe-commit correction (above)
 only ever counts THIS run's own resolved cell, never that second
 application's.
 
-**Under `--roundtrip`, MitateDB's `POOL lock=` `acquire` carries ONE MORE
+**Under `--roundtrip`, MitateDB's `POOL role=` `acquire` carries ONE MORE
 extra acquisition per op than without it.** The `## DBTIME lines (R-101)`
 section above already notes that `DBTIME`'s own PRE probe (present on
 EVERY op regardless of `--roundtrip`) lands on THAT SAME op's own `POOL
-lock=` line, while its shared POST probe lands on the NEXT op's own line.
+role=` lines, while its shared POST probe lands on the NEXT op's own lines.
 `--roundtrip` adds `ROUNDTRIP`'s own SEPARATE PRE probe, taken even
-earlier (before warmup) but still before that op's own `POOL lock=` line
-prints, so it too lands on the SAME op's own line -- three calls in total
+earlier (before warmup) but still before that op's own `POOL` lines
+print, so it too lands on the SAME op's own line -- three calls in total
 across the two probed ops' own lines (two of this op's own, one carried
 over from the preceding op's own POST) where two ran without
 `--roundtrip` (one of this op's own, one carried over), so each op's own
-`POOL lock=` line runs 1 higher under `--roundtrip` than without it, from
+`POOL role=` lines run 1 higher under `--roundtrip` than without it, from
 the very first op onward -- not just the last one. **R-80 時点の実測** (before `DBTIME`'s
 own PRE probe existed, when the baseline was a single POST-only probe per
 op): against the real, registered `MitateDB-api-http` plug (a throwaway-
 cluster confirmation run, `--warmup 2 --n 5`, `perfbase_*` lock, `query`/
 `mutate`/`batch`/`cross_entity` in order, not a `tools/tests` assertion):
 `acquire=20/35/50/69` without `--roundtrip`, `acquire=21/37/53/73` with
-it -- these two specific series are from that R-80-era baseline (one
+it (the cell lock's own `lock=` row of that era, which no longer exists) -- these two specific series are from that R-80-era baseline (one
 probe per op) and are not re-measured against the current (two-probe)
 baseline here.
 

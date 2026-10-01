@@ -1,15 +1,17 @@
-r"""r78 pool/lock wait statistics -- `mitatedb_api.pool.
-BoundedConnectionPool`'s and `mitatedb_api.cell.ApplicationCell`'s new
-acquisition/wait counters (design D-1,
+r"""Pool and schema-lock statistics -- `mitatedb_api.pool.
+BoundedConnectionPool`'s acquisition/wait counters and the
+`PostgresBackend` schema-lock counters, as the `-http` conformance plug's
+`pool_stats()` returns them (design D-1; docs/design/
+MITATEDB_APPLICATION_SERIALIZATION_V0_1.md D-7;
 docs/work-orders/WORK_ORDER_R78_POOL_WAIT_MEASUREMENT_V1.md WP-1
 completion conditions 5, 6, 11).
 
-No real PostgreSQL: `BoundedConnectionPool` here uses the same fake-
-connection substitution `test_threadpool_offload.py`'s own thread-safety
-test already established (`pool._new_connection = ...`, a plain object
-with `closed`/`close()`/`info`) -- this file is entirely about pool/lock
-bookkeeping, never about a real connection's own behaviour.
-`ApplicationCell` uses its default in-memory `SQLiteBackend`.
+No real PostgreSQL for the pool tests: `BoundedConnectionPool` there uses
+the same fake-connection substitution `test_threadpool_offload.py`'s own
+thread-safety test already established (`pool._new_connection = ...`, a
+plain object with `closed`/`close()`/`info`) -- those tests are entirely
+about pool bookkeeping, never about a real connection's own behaviour. The
+plug test below builds a real `-http` adapter against the test PostgreSQL.
 
 Run directly:
     ./.venv/bin/python -m pytest MitateDB-api/tests/test_r78_pool_wait_stats.py -q
@@ -154,6 +156,44 @@ def test_http_and_socket_mitatedb_plugs_expose_pool_stats():
     import conformance_adapter_mitatedb_socket as _socket_module  # noqa: E402 - conformance dir already on sys.path (module level, above)
 
     assert _socket_module.MitateDBSocketConformanceAdapter.pool_stats is _http_module.MitateDBHttpConformanceAdapter.pool_stats
+
+
+def test_http_plug_pool_stats_returns_role_rows_and_one_schema_lock_row_per_application():
+    """The `-http` plug's `pool_stats()` returns, for each open application,
+    a `<application_id>/runtime` row and a `<application_id>/developer` row
+    (the role pools' own six keys, the same key form as r2db's) and one
+    `<application_id>` row (the schema lock's four keys). A schema operation
+    through the plug moves the developer pool's `acquire_count` and the
+    schema-lock row's `acquire_count` (the application-wide lock and the
+    entity lock, two acquisitions) and leaves every `wait_count` at 0 -- nothing
+    contends.
+
+    mutation V72 (`conformance_adapter_mitatedb_http.py`): return the
+    `runtime` row only -- the key-set assertion goes red (the `developer`
+    row is missing)."""
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    app_id = f"r102stats{secrets.token_hex(4)}"
+    try:
+        adapter.provision_application(app_id)
+        session = adapter.authenticate(adapter.issue_credential(app_id, "developer"))
+        before = adapter.pool_stats()
+        assert set(before) == {f"{app_id}/runtime", f"{app_id}/developer", app_id}
+        role_keys = {"size", "acquire_count", "wait_count", "wait_total_ms", "wait_max_ms", "in_use_peak"}
+        lock_keys = {"acquire_count", "wait_count", "wait_total_ms", "wait_max_ms"}
+        assert set(before[f"{app_id}/runtime"]) == role_keys
+        assert set(before[f"{app_id}/developer"]) == role_keys
+        assert set(before[app_id]) == lock_keys
+
+        adapter.create_entity(session, "r102stats_entity", {})
+        after = adapter.pool_stats()
+        assert after[f"{app_id}/developer"]["acquire_count"] > before[f"{app_id}/developer"]["acquire_count"]
+        assert after[app_id]["acquire_count"] - before[app_id]["acquire_count"] == 2
+        for key in (f"{app_id}/runtime", f"{app_id}/developer", app_id):
+            assert after[key]["wait_count"] == 0, key
+    finally:
+        with contextlib.suppress(Exception):
+            adapter.deprovision_application(app_id)
+        adapter.close()
 
 
 # ---------------------------------------------------------------------

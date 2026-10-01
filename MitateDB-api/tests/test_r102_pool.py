@@ -126,7 +126,10 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeClock]:
 def admin_dsn() -> str:
     dsn = os.environ.get(ADMIN_DSN_ENV)
     if not dsn:
-        pytest.fail(f"{ADMIN_DSN_ENV} is not set; tools/testpg/dsa_testpg.py sets it for each test run", pytrace=False)
+        raise RuntimeError(
+            f"{ADMIN_DSN_ENV} is not set (or is empty). "
+            "tools/testpg/dsa_testpg.py sets it for each test run; there is no shared-cluster default."
+        )
     return dsn
 
 

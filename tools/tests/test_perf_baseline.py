@@ -214,10 +214,9 @@ def test_perf_row_format_is_stable():
 
 
 def test_pool_row_format_is_stable_for_a_role_pool_entry():
-    """R-78 completion condition 8: `_format_pool_row`'s ROLE-shaped
-    column names/order/formatting for a `r2db_api.postgres._RolePool.
-    stats()`-shaped dict (six keys, `size`/`in_use_peak` present, no
-    `lock_acquire_count`).
+    """`_format_pool_row`'s ROLE-shaped column names/order/formatting for a
+    role pool's `stats()` dict (six keys, `size`/`in_use_peak` present) --
+    the shape both peers' role pools print.
 
     mutation M8 (`tools/perf_baseline.py`): rename one column (e.g.
     `wait_max_ms=` -> `max_wait_ms=`) -- this test goes red on the
@@ -233,19 +232,38 @@ def test_pool_row_format_is_stable_for_a_role_pool_entry():
     )
 
 
-def test_pool_row_format_is_stable_for_a_lock_entry():
-    """R-78 completion condition 8: `_format_pool_row`'s LOCK-shaped
-    column names/order/formatting for a `mitatedb_api.cell.
-    _CountingRLock.stats()`-shaped dict (four keys, `lock_acquire_count`
-    present, no `size`/`in_use_peak`) -- `lock=` replaces `role=` and
-    there is no `size=`/`in_use_peak=` column, since neither concept
-    applies to a mutex."""
-    stats = {"lock_acquire_count": 5, "wait_count": 1, "wait_total_ms": 3.0, "wait_max_ms": 3.0}
+def test_pool_row_format_is_stable_for_a_schema_lock_entry():
+    """`_format_pool_row`'s SCHEMA LOCK column names/order/formatting for a
+    `PostgresBackend.schema_lock_stats()`-shaped dict (four keys, no `size`
+    / `in_use_peak`) -- `schema_lock=` replaces `role=` and there is no
+    `size=`/`in_use_peak=` column, since neither concept applies to a lock.
+    The shape is chosen by the keys alone: the same peer, plug and op print
+    a role row for a six-key dict.
+
+    mutation V75 (`tools/perf_baseline.py`): print the schema lock shape
+    with the role row's `role=` label -- this test goes red on the
+    exact-string comparison below."""
+    stats = {"acquire_count": 5, "wait_count": 1, "wait_total_ms": 3.0, "wait_max_ms": 3.0}
     line = pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "mutate", "app1", stats)
     assert line == (
-        "POOL peer=MitateDB-api plug=MitateDB-api-http op=mutate lock=app1 "
+        "POOL peer=MitateDB-api plug=MitateDB-api-http op=mutate schema_lock=app1 "
         "acquire=5 waits=1 wait_total_ms=3.000 wait_max_ms=3.000"
     )
+    role_stats = {
+        "size": 4, "acquire_count": 5, "wait_count": 0, "wait_total_ms": 0.0, "wait_max_ms": 0.0, "in_use_peak": 1,
+    }
+    role_line = pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "mutate", "app1/runtime", role_stats)
+    assert role_line.startswith("POOL peer=MitateDB-api plug=MitateDB-api-http op=mutate role=app1/runtime size=4 ")
+    assert "schema_lock=" not in role_line
+
+
+def test_pool_row_refuses_a_stats_dict_of_a_third_shape():
+    """A dict with neither a role pool's keys nor a schema lock's four is
+    refused with `KeyError`, not printed in the nearest shape."""
+    with pytest.raises(KeyError):
+        pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "query", "app1", {"hits": 3})
+    with pytest.raises(KeyError):
+        pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "query", "app1", {"size": 2, "acquire_count": 1})
 
 
 def test_emit_pool_rows_prints_nothing_when_the_plug_has_no_pool_stats():
@@ -1134,7 +1152,7 @@ def test_default_run_probes_prepared_stats_exactly_twice_per_op(capsys):
     snapshot inside `_measure_op` (after warmup, before the measured
     window) and the POST call `_emit_measurement_rows` shares between
     `DBTIME scope=app` and `PREPARED` -- the ROUNDTRIP PRE probe never
-    runs outside `--roundtrip`, so R-79's own established `POOL lock=`
+    runs outside `--roundtrip`, so R-79's own established `POOL`
     `acquire`/`PREPARED` baseline stays undisturbed by that flag.
 
     mutation M31 (`tools/perf_baseline.py`): drop the PRE `prepared_

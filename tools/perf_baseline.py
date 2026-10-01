@@ -944,28 +944,29 @@ def _format_cpu_row(peer: str, plug: str, op: str, m: dict) -> str:
 def _format_pool_row(peer: str, plug: str, op: str, key: str, stats: dict) -> str:
     """R-78 (D-2): one `POOL` line for one entry of a plug's own `pool_
     stats()`. Two shapes, chosen by which keys `stats` carries -- never by
-    `peer`/`plug` name, so a future third pool/lock shape is refused
+    `peer`/`plug` name, so a stats dict of any other shape is refused
     loudly (`KeyError`) rather than silently misprinted:
 
-    - A ROLE row (`stats` has `lock_acquire_count` absent, `acquire_count`/
-      `size`/`in_use_peak` present -- `r2db_api.postgres._RolePool.stats()`'s
-      own six keys): `role=<key> size=<n> acquire=<n> waits=<n> wait_
-      total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>`.
-    - A LOCK row (`stats` has `lock_acquire_count` -- `mitatedb_api.cell.
-      _CountingRLock.stats()`'s own four keys, no pool `size`/`in_use_peak`
-      concept for a mutex): `lock=<key> acquire=<n> waits=<n> wait_total_
-      ms=<x.xxx> wait_max_ms=<x.xxx>`."""
-    if "lock_acquire_count" in stats:
+    - A ROLE row (`stats` carries `size`/`in_use_peak` -- a role pool's own
+      six keys, `r2db_api.postgres._RolePool.stats()` and `mitatedb_api.
+      pool.BoundedConnectionPool.stats()`): `role=<key> size=<n> acquire=<n>
+      waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>`.
+    - A SCHEMA LOCK row (`stats` carries neither `size` nor `in_use_peak` --
+      `mitatedb_api.backend_postgres.PostgresBackend.schema_lock_stats()`'s
+      own four keys, `acquire_count`/`wait_count`/`wait_total_ms`/`wait_max_
+      ms`; a lock has no pool size and no in-use peak): `schema_lock=<key>
+      acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx>`."""
+    if "size" in stats or "in_use_peak" in stats:
         return (
-            f"POOL peer={peer} plug={plug} op={op} lock={key} "
-            f"acquire={stats['lock_acquire_count']} waits={stats['wait_count']} "
-            f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f}"
+            f"POOL peer={peer} plug={plug} op={op} role={key} size={stats['size']} "
+            f"acquire={stats['acquire_count']} waits={stats['wait_count']} "
+            f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f} "
+            f"in_use_peak={stats['in_use_peak']}"
         )
     return (
-        f"POOL peer={peer} plug={plug} op={op} role={key} size={stats['size']} "
+        f"POOL peer={peer} plug={plug} op={op} schema_lock={key} "
         f"acquire={stats['acquire_count']} waits={stats['wait_count']} "
-        f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f} "
-        f"in_use_peak={stats['in_use_peak']}"
+        f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f}"
     )
 
 

@@ -291,6 +291,55 @@ def test_a_write_waiting_for_an_entity_lock_is_cut_by_the_deadline(app_a, monkey
         close_cell(cell_b)
 
 
+# ----------------------------------------- 73 / 74: schema-lock statistics
+def test_schema_lock_stats_count_the_application_wide_lock_and_both_entity_locks(app_a) -> None:
+    """`schema_lock_stats()["acquire_count"]` counts the application-wide
+    schema lock (3a) and the entity locks (3b), exclusive and shared,
+    together: a schema operation takes both (two acquisitions), a data write
+    takes the shared entity lock (one), a query takes neither (zero)."""
+    cell, dev, rt = _setup(app_a, "stat")
+    backend = cell._backend
+
+    def delta(operation: Callable[[], Any]) -> int:
+        before = backend.schema_lock_stats()["acquire_count"]
+        operation()
+        return backend.schema_lock_stats()["acquire_count"] - before
+
+    try:
+        assert delta(lambda: dev.add_field("stat", "extra", "text")) == 2
+        assert delta(lambda: rt.insert("stat", {"title": "x"})) == 1
+        assert delta(lambda: rt.read("stat")) == 0
+    finally:
+        close_cell(cell)
+
+
+def test_schema_lock_waits_count_only_acquisitions_the_try_form_could_not_take(app_a, monkeypatch) -> None:
+    """Without contention every acquisition is taken by the non-blocking
+    attempt and `wait_count` stays 0 while `acquire_count` rises. When a
+    stopped schema operation holds the application-wide lock, a second schema
+    operation's attempt fails, it blocks until the first finishes, and that
+    one acquisition is one wait with a positive `wait_total_ms` /
+    `wait_max_ms`; the second operation's entity lock (another entity) is not
+    contended and adds no wait."""
+    cell, dev, rt, stall, a = _stalled_add_field(app_a, monkeypatch, "ea", "eb")
+    backend = cell._backend
+    try:
+        quiet = backend.schema_lock_stats()
+        assert quiet["acquire_count"] >= 2 and quiet["wait_count"] == 0
+        b = _Run(lambda: dev.add_field("eb", "extra", "text"))
+        assert not b.done.wait(1.0), "the second schema operation did not wait for the application-wide lock"
+        stall.release.set()
+        a.finish()
+        b.finish()
+        stats = backend.schema_lock_stats()
+        assert stats["wait_count"] == 1
+        assert stats["wait_total_ms"] > 0.0 and stats["wait_max_ms"] > 0.0
+        assert stats["acquire_count"] >= quiet["acquire_count"] + 2
+    finally:
+        stall.release.set()
+        close_cell(cell)
+
+
 # ------------------------------------------- 53 / 54: pool failure mapping
 def test_a_pool_wait_that_outlasts_the_deadline_is_limit_exceeded_execution_ms(app_a) -> None:
     cell = _cell(app_a, pool_size=1, max_execution_ms=300)
@@ -308,7 +357,7 @@ def test_a_pool_wait_that_outlasts_the_deadline_is_limit_exceeded_execution_ms(a
 
 
 def test_a_database_that_cannot_be_reached_is_service_unavailable(app_a) -> None:
-    unreachable = "postgresql://nobody:unused@127.0.0.1:1/none"
+    unreachable = "host=/tmp port=1 user=nobody dbname=r102_unreachable_developer"
     backend = PostgresBackend(runtime_dsn=app_a.runtime_dsn, developer_dsn=unreachable)
     cell = ApplicationCell(app_a.app_id, FoundationConfig(), backend=backend)
     _dev, rt = _sessions(cell, app_a)

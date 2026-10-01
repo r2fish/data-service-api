@@ -3484,17 +3484,27 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 return cur.fetchone()[0]
 
     def pool_stats(self) -> dict[str, dict[str, int | float]]:
-        """R-78 (D-2): the data-plane counterpart of `conformance_adapter_
-        r2db_http.py`'s identical addition. Each `ApplicationCell` in
-        `self._cells` holds one connection pool per role
-        (`backend_postgres.PostgresBackend.pool_stats`); returns each
-        pool's own `stats()` dict (keys `size`/`acquire_count`/`wait_count`/
-        `wait_total_ms`/`wait_max_ms`/`in_use_peak`), keyed `<application_
-        id>/<role>`. Empty when no cell is currently open."""
+        """The data-plane counterpart of `conformance_adapter_r2db_http.py`'s
+        `pool_stats`. For each `ApplicationCell` in `self._cells`, two kinds
+        of entries:
+
+        - one per role pool (`backend_postgres.PostgresBackend.pool_stats`):
+          the pool's own `stats()` dict (keys `size`/`acquire_count`/
+          `wait_count`/`wait_total_ms`/`wait_max_ms`/`in_use_peak`), keyed
+          `<application_id>/<role>` -- the same key as r2db's;
+        - one for the application's schema lock (`PostgresBackend.schema_
+          lock_stats`, the shared and exclusive entity-lock acquisitions and
+          the application-wide one counted together): keys `acquire_count`/
+          `wait_count`/`wait_total_ms`/`wait_max_ms`, keyed
+          `<application_id>`. A wait is an acquisition the non-blocking
+          attempt did not get.
+
+        Empty when no cell is currently open."""
         stats: dict[str, dict[str, int | float]] = {}
         for application_id, cell in self._cells.items():
             for role, role_stats in cell._backend.pool_stats().items():  # noqa: SLF001 -- adapter-internal reach-in, same convention as this file's other `cell._...` accesses above
                 stats[f"{application_id}/{role}"] = role_stats
+            stats[application_id] = cell._backend.schema_lock_stats()  # noqa: SLF001 -- same reach-in
         return stats
 
     def prepared_stats(self) -> list[dict]:

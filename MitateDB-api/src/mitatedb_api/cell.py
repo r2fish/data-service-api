@@ -595,9 +595,16 @@ class ApplicationCell:
         """R-79 (WO §1.2 D-2, D-3; §2.1 起草時の裁定 4): read-only accessor
         -- delegates to `self._backend.prepared_stats()` and returns `[]`
         when the backend has no such method (`SQLiteBackend`, and any
-        other non-PostgreSQL backend). Called exactly once per (plug, op)
-        by `tools/perf_baseline.py`'s `_emit_prepared_rows` (via the
-        conformance adapter's own `prepared_stats()`)."""
+        other non-PostgreSQL backend). One call is one backend probe and
+        takes no lock of the cell's own (the cell holds none).
+        `tools/perf_baseline.py` calls it (via the conformance adapter's
+        own `prepared_stats()`) once before and once after each measured
+        (plug, op) window, and once more before the warmup under
+        `--roundtrip`; `tools/PERF_BASELINE_README.md` says what each call
+        adds to the `POOL` rows.
+
+        History: CH-0548
+        """
         backend_probe = getattr(self._backend, "prepared_stats", None)
         if backend_probe is None:
             return []
