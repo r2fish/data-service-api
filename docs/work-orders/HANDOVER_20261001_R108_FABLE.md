@@ -1,6 +1,6 @@
 # 引き継ぎ書 — 2026-10-01 R-108 (契約文書だけで要求を組む参照クライアント) 閉止
 
-本書は R-102 / R-119 の後片付け、既知の穴 G、CI の起動条件、R-108 の実施のチャットの記録である。規律の正本は `docs/work-orders/OPERATING_CONDITIONS.md` (以下 `OC`)、R-108 の正本は設計 `docs/design/REFERENCE_CLIENT_V0_1.md` v0.7 (依頼者裁定は同書 §9) と作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` (§1 の監督裁定 M-1〜M-10、§5 の記録、§6 の訂正註 1〜6) である。前のチャットの記録: `docs/work-orders/HANDOVER_20261001_R102_FABLE.md`。
+本書は R-102 / R-119 の後片付け、既知の穴 G、CI の起動条件、R-108 の実施のチャットの記録である。規律の正本は `docs/work-orders/OPERATING_CONDITIONS.md` (以下 `OC`)、R-108 の正本は設計 `docs/design/REFERENCE_CLIENT_V0_1.md` v0.7 (依頼者裁定は同書 §9) と作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` (§1 の監督裁定 M-1〜M-10、§5 の記録、§6 の訂正註 1〜9) である。前のチャットの記録: `docs/work-orders/HANDOVER_20261001_R102_FABLE.md`。
 
 ## 1. 現在地
 
@@ -13,7 +13,7 @@
 - (i) R-102 / R-119 の worktree 10 個を畳み込んだ。`tools/dev/fold.py` が SKIP した detached の 1 個と、未 merge の merge commit を持つ 2 個は、親がすべて main にあることを確かめて手で外した。
 - (ii) 既知の穴 G: `tools/check_comment_provenance.py` の Known gaps 8 番 (main `b656dbf`、commit `73985f8`)。完了ゲート 4927 passed (label known-gap-g)、`tools/tests` 786 passed、変異 G8-1 / G8-2 赤。
 - (iii) CI の起動条件を `main` への push と `workflow_dispatch` に絞った (依頼者裁定 2026-10-01、main `9be46b7`、commit `31037d5`)。完了ゲート 4927 passed (label ci-main-only)。
-- (iv) R-108。レビューの列は 1 巡目の A / B の件数と再確認の件数 (裁定は §6)。変異の列は `expect=red` / `expect=error` で期待どおりを実測した件数 (作業指示書 §2 と各報告の `mutate:` 行から)。
+- (iv) R-108。レビューの列は 1 巡目の A / B の件数と再確認の件数 (裁定は「裁定」節)。変異の列は `expect=red` / `expect=error` で期待どおりを実測した件数 (作業指示書 §2 と各報告の `mutate:` 行から)。
 
 | 段 | commit | 内容 | レビュー | 変異 |
 |---|---|---|---|---|
@@ -77,7 +77,13 @@
 - local main への merge: 本追記と作業指示書 訂正註 8 を足した commit を `tools/dev/finalize.py --tools-tests` で `--no-ff` に merge する。main の merge commit は `git log --first-parent main` の「Merge r108」の行で読む。push は停止中 (push の入口は Mitate 側の監督セッションが統制する)。
 - 依頼者確認 (§4 の A〜E) は merge の後に求め、結果は次の追記に逐語で記録する。
 
-## 7. 裁定
+## 7. 追記 — 2026-10-01 merge と依頼者の確認
+
+- local main `5b1ee65` (commit `092fb26` の `--no-ff` merge、`finalize: tools/tests: 789 passed in 89.24s (0:01:29)`)。push はしていない。
+- 依頼者 (逐語): 「確認しました、OKです」。§4 の A〜E は確定 (作業指示書 訂正註 9 の 2、台帳 v1.149)。§4 の「依頼者確認待ち」は無くなった。
+- このチャットの worktree はすべて畳んだ。push の入口は Mitate 側の監督セッションが統制する: 2026-10-01 22:10 JST 以降、ユーザー設定の session hook が全 repository のエージェントの直接の送信と CI の手動起動・再実行を拒む (同セッションからの通知)。data-service-api の main の送信は、依頼者の指示の後に同セッションが行う。
+
+## 8. 裁定
 
 `OC` §1.15 の 77。語は 起票 R-N / 既知の穴 / 観察 / 直した の 4 語。材料はレビュー報告 11 通 (WP-1〜WP-4 の観点 A / B と WP-1〜WP-3 の再確認)、差し戻し 5 通、作業指示書の訂正註 1〜6。表の順は時系列。
 

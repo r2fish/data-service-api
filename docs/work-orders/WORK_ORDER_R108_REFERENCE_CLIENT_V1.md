@@ -613,6 +613,12 @@ run 1 の全行 (p50 と p95 は ms、基準 / 実装後 (差)。`backend_calls`
 2. local main への merge は、本註と引き継ぎ書の追記だけを足した commit を `tools/dev/finalize.py --tools-tests` で `--no-ff` に merge する (本註の後の差分は `docs/work-orders/` の 2 ファイルだけで、root suite が読むファイルに触れない)。main の merge commit は `git log --first-parent main` の「Merge r108」の行で読む。push は停止中。
 3. 依頼者確認 (訂正註 7 の 4) の結果は、merge の後に次の訂正註と引き継ぎ書の追記に逐語で記録する。
 
+**訂正註 9 (2026-10-01、merge と依頼者確認。記録のみ)**
+
+1. local main への merge: commit `092fb26` (訂正註 8 と引き継ぎ書の追記) を `tools/dev/finalize.py --tools-tests` で `--no-ff` に merge した。main の merge commit は `5b1ee65`。`finalize: tools/tests: 789 passed in 89.24s (0:01:29)`。commit と merge の identity は r2fish / noreply だけである。push はしていない。
+2. 依頼者確認 2026-10-01 (逐語): 「確認しました、OKです」。対象は §1 の監督裁定 M-1〜M-10、訂正註 1〜8 の監督裁定、R-121 の起票、設計 v0.7 の §7 の註の読み替えで、監督が merge の後に一覧 (R-121 の起票 / 義務 (c) を「満たす」と書かないことと runbook の 1 文 / `tools/deploy_smoke.py` の修正を本項目に含めたこと / 送信関数は運ぶか拒む / クライアントの fail closed の追加 / 義務 (b) の証拠の置き場と設計 §7 の読み替え / 静的 pin の線引き / 確認の順序、ほか M-1〜M-10) を示して確認を求めた。§5.4 の「依頼者確認待ち」は無くなった。再審議しない (`OC` §1.7 の 51)。
+3. 台帳は v1.149 (本確認の記録)。worktree `r108`・`r108-wp2`・`r108-wp3`・`r108-wp5`・`known-gap-g`・`ci-main-only` は `tools/dev/fold.py` で畳んだ。
+
 ## 付録 — 確定文の抜き出し script
 
 確定文は、設計 §9.1 の表の「新しい文 (英文、確定案)」の列の 12 セルと、#12 の行の obligations の列の entry を、`<V-1>` → `1.13.0`、`<V>` → `1.14.0`、`<N>` → `19` の 3 つの置換だけで写したものである。手で打ち直さない。script は監督の scratchpad の `r108-fixed-text/extract.py` に置いた (起草時に実行済み)。scratchpad は次のチャットから読めないので、全文を下に載せる。再生成: worktree を cwd にして `python3 "$SP/r108-fixed-text/extract.py" . "$SP/r108-fixed-text"` (script を `$SP/r108-fixed-text/extract.py` に保存してから)。
