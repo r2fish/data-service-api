@@ -58,13 +58,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Trigger is supervisor ruling 2026-09-05: `push` on every branch only.
-# `pull_request` is deliberately not a trigger -- this is a single-worker
-# repository with no PR workflow, and the supervisor measures mutations by
-# pushing to a branch directly; keeping `pull_request` would double-run
-# the same commit for no reader.
+# Trigger (requester ruling 2026-10-01, replacing the supervisor ruling of
+# 2026-09-05 that ran on a `push` to every branch): a `push` to `main`, and
+# `workflow_dispatch`. September 2026 spent 3,637.7 Actions minutes on this
+# workflow against a 2,000-minute monthly allowance, and branch pushes were
+# most of it; acceptance on a branch is the local completion gate
+# (`tools/dev/gate.py`), and every branch reaches `main` by merge, where this
+# workflow runs in full. The 2026-09-08 ruling above is unchanged for `main`;
+# its "any other branch runs the 3.11 job alone" now describes only a
+# `workflow_dispatch` run started on another ref. `pull_request` is
+# deliberately not a trigger -- this is a single-worker repository with no
+# PR workflow, and it would double-run the same commit for no reader.
 "on":
   push:
+    branches: [main]
   workflow_dispatch:
 
 # Real values are never written to this file. The PostgreSQL password below
