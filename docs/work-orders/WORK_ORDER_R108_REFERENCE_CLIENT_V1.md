@@ -421,8 +421,8 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 | WP-1 | `r108` | `a77131d` → `3bd670b` → `cb6e295`。訂正註 4・5 は `4a8a6a8` |
 | WP-2 | `r108-wp2` → `r108` へ merge | `51c770d` → `03b43ba` → `4f32224`。`r108` への merge `7aea515` |
 | WP-3 | `r108-wp3` → `r108` へ merge | `7970d0f` → `b820658` → `cc6f9d6`。`r108` への merge `789e3ea` (`b820658` まで) と `a9202f0` (`cc6f9d6`) |
-| WP-4 | `r108` | `e5d0e0a` → 〈監督が埋める: レビュー後の commit〉 → 〈監督が埋める: 再確認後の commit (無ければ「なし」)〉 |
-| WP-5 | `r108` | 〈監督が埋める: WP-5 の commit (worktree `r108-wp5` で起草し `r108` へ)〉 |
+| WP-4 | `r108` | `e5d0e0a` → `495cd95` → `6bb9440` |
+| WP-5 | `r108` | `9f08f1f` (起草、worktree `r108-wp5`。`r108` への merge `58bd05d`) → 記録の commit (本節の記入と訂正註 7、`COLLECTION_FLOOR`。`git log` の「R-108 WP-5 records」の行)。local main の取り込みは `2e51997` |
 
 すべて r2fish / noreply、未 push。
 
@@ -430,30 +430,56 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 
 (候補の commit、集計行、judge、pg の差分、label、日時、`COLLECTION_FLOOR` の前後)
 
-- 正本: 〈監督が埋める: merge 候補の commit、`gate:` の集計行、judge、pg_database/pg_roles の差分、label、日時〉
-- `COLLECTION_FLOOR`: 4927 → 〈監督が埋める: 完了ゲートの実測〉
-- `tools/tests` (訂正註 2 の 6 により回す): 〈監督が埋める: `finalize.py --tools-tests` の集計行〉
+- 正本: `gate: 5014 passed, 2 subtests passed in 558.50s (0:09:18)`、judge=PASS、pg_database/pg_roles diff 0 (label r108、2026-10-01 21:18、merge 候補 `2e51997` = local main `9be46b7` を取り込んだ branch `r108`)。記録の commit を足した最終候補での再実行の集計行と main の merge commit は、merge の後の訂正註 (訂正註 7 の次) に記録する
+- `COLLECTION_FLOOR`: 4927 → 5014 (記録の commit で更新)
+- `tools/tests` (訂正註 2 の 6 により回す): `pt: 789 passed in 98.40s (0:01:38)` (`tools/dev/pt.py -C .claude/worktrees/r108 -- tools/tests -q`、`2e51997`。main の 786 との差 +3 は `tools/tests/test_deploy_smoke.py`)。merge 時の `finalize.py --tools-tests` の集計行は merge の後の訂正註
 - 予備 (正本ではない): 訂正註 6 の 4 (`a9202f0`、label r108-pre)。
 
 ### 5.3 計測 (§3)
 
 | 計測 | 形 | 基準 (`1e8f7fb`) | 実装後 | 判定 |
 |---|---|---|---|---|
-| C-35 の 4 node の所要時間 | `--durations=0` / ゲートの log | — | 〈監督が埋める: 完了ゲートの log の値 (参考: WP-4 の報告、`e5d0e0a` の上の call は r2db socket 0.61 s・MitateDB socket 0.35 s・r2db http 0.30 s・MitateDB http 0.14 s)〉 | 記録のみ |
-| `CT/test_wire_entry.py`・`CT/test_reference_client.py` の所要時間 | 同上 | — | 〈監督が埋める: 完了ゲートの log の値〉 | 記録のみ |
-| 完了ゲートの集計時間 | ゲートの集計行 | 前回 R-102 の値 | 〈監督が埋める: 完了ゲートの集計時間〉 | 記録のみ |
-| K=1 全 plug・全 op の p50 / p95 | `tools/perf_baseline.py --warmup 20 --n 200` | 〈監督が埋める: 基準 `1e8f7fb` の値〉 | 〈監督が埋める: merge 候補の値〉 | 〈監督が埋める: `RM` §0.1.4 の 1 との突き合わせ〉 |
+| C-35 の 4 node の所要時間 | `--durations=0` / ゲートの log | — | call は r2db http 0.47 s・r2db socket 0.45 s・MitateDB socket 0.41 s・MitateDB http 0.18 s、setup + call + teardown の合計 1.99 s (`pt.py ... --durations=0`、`2e51997`、2026-10-01 21:45。完了ゲートの log の `slowest 25 durations` には入らない。参考: WP-4 の報告、`e5d0e0a` の上の call は r2db socket 0.61 s・MitateDB socket 0.35 s・r2db http 0.30 s・MitateDB http 0.14 s) | 記録のみ |
+| `CT/test_wire_entry.py`・`CT/test_reference_client.py` の所要時間 | 同上 | — | `CT/test_wire_entry.py` 合計 2.57 s、`CT/test_reference_client.py` 合計 0.59 s (同じ run、3 ファイルで `pt: 70 passed in 5.30s`。どちらも `slowest 25 durations` に入らない) | 記録のみ |
+| 完了ゲートの集計時間 | ゲートの集計行 | 前回 R-102 の値 | 558.50 s (0:09:18)、5014 passed。前回 R-102 は 464.40 s と 910.29 s (4927 passed)、同日の他の 2 回は 587.55 s と 967.55 s (4927 passed)。負荷で変わるので判定に使わない | 記録のみ |
+| K=1 全 plug・全 op の p50 / p95 | `tools/perf_baseline.py --warmup 20 --n 200` | main `9be46b7` (計測対象の製品コードは `1e8f7fb` と同じ)。2 run、各 21 行 (下の表は run 1) | `2e51997`。2 run、各 21 行 (下の表は run 1) | 閾値 (p50 +40% / p95 +50%) の内側。run 1 の最大は p50 +7.6% (MitateDB-api の mutate)・p95 +6.8% (MitateDB-api-http の batch)、run 2 の最大は p50 +13.5% (MitateDB-api-socket の mutate)・p95 +18.9% (r2db-api-socket の query)。`backend_calls` は 2 run とも全 21 行で前後同じ |
 
 (各 run の開始時の load average と、捨てた run の理由)
 
-〈監督が埋める: 各 run の開始時の load average と、捨てた run の理由〉
+監督、2026-10-01。前後を続けて 1 run ずつ、2 巡。run 1 (21:17): 開始時の 1 分 load average は 基準 1.73 / 実装後 2.01、開始前に pytest 0 を確認 (nginx は未確認)。run 2 (21:44): 2.59 / 2.85、前後に pytest 0・nginx 0 を `ps` で確認 (受け入れ監査が run 1 の実施条件の記録の欠けを指摘したので取り直した)。捨てた run は無い。どちらの木も clean (`commit=9be46b7` / `commit=2e51997`)。出力は scratchpad の `perf-r108-<before|after>-k1-run<N>.txt`。
+
+run 1 の全行 (p50 と p95 は ms、基準 / 実装後 (差)。`backend_calls` は 基準 / 実装後):
+
+| plug | op | p50 | p95 | backend_calls |
+|---|---|---|---|---|
+| MitateDB-api | batch | 0.179 / 0.172 (-3.9%) | 0.189 / 0.189 (+0.0%) | 39.00 / 39.00 |
+| MitateDB-api | cross_entity | 0.132 / 0.133 (+0.8%) | 0.144 / 0.148 (+2.8%) | 18.00 / 18.00 |
+| MitateDB-api | mutate | 0.105 / 0.113 (+7.6%) | 0.117 / 0.122 (+4.3%) | 11.00 / 11.00 |
+| MitateDB-api | query | 0.136 / 0.141 (+3.7%) | 0.149 / 0.151 (+1.3%) | 12.00 / 12.00 |
+| MitateDB-api-http | batch | 2.156 / 2.242 (+4.0%) | 2.256 / 2.409 (+6.8%) | 34.00 / 34.00 |
+| MitateDB-api-http | cross_entity | 1.353 / 1.396 (+3.2%) | 1.547 / 1.635 (+5.7%) | 19.00 / 19.00 |
+| MitateDB-api-http | mutate | 1.148 / 1.170 (+1.9%) | 1.297 / 1.353 (+4.3%) | 14.00 / 14.00 |
+| MitateDB-api-http | query | 1.385 / 1.476 (+6.6%) | 1.443 / 1.534 (+6.3%) | 17.00 / 17.00 |
+| MitateDB-api-socket | batch | 5.502 / 5.586 (+1.5%) | 6.437 / 6.486 (+0.8%) | 34.00 / 34.00 |
+| MitateDB-api-socket | cross_entity | 4.839 / 4.922 (+1.7%) | 5.696 / 5.792 (+1.7%) | 19.00 / 19.00 |
+| MitateDB-api-socket | mutate | 4.570 / 4.672 (+2.2%) | 5.420 / 5.550 (+2.4%) | 14.00 / 14.00 |
+| MitateDB-api-socket | query | 4.742 / 4.845 (+2.2%) | 5.976 / 6.127 (+2.5%) | 17.00 / 17.00 |
+| r2db-api | batch | 0.873 / 0.878 (+0.6%) | 1.228 / 1.249 (+1.7%) | 1.00 / 1.00 |
+| r2db-api | mutate | 0.220 / 0.230 (+4.5%) | 0.305 / 0.300 (-1.6%) | 1.00 / 1.00 |
+| r2db-api | query | 0.119 / 0.118 (-0.8%) | 0.131 / 0.134 (+2.3%) | 1.00 / 1.00 |
+| r2db-api-http | batch | 1.930 / 2.031 (+5.2%) | 2.035 / 2.131 (+4.7%) | 23.00 / 23.00 |
+| r2db-api-http | mutate | 1.740 / 1.836 (+5.5%) | 1.834 / 1.933 (+5.4%) | 19.00 / 19.00 |
+| r2db-api-http | query | 1.681 / 1.784 (+6.1%) | 1.782 / 1.870 (+4.9%) | 18.00 / 18.00 |
+| r2db-api-socket | batch | 5.443 / 5.493 (+0.9%) | 5.595 / 5.658 (+1.1%) | 23.00 / 23.00 |
+| r2db-api-socket | mutate | 5.235 / 5.288 (+1.0%) | 5.371 / 5.426 (+1.0%) | 19.00 / 19.00 |
+| r2db-api-socket | query | 5.161 / 5.218 (+1.1%) | 5.309 / 5.361 (+1.0%) | 18.00 / 18.00 |
 
 ### 5.4 受け入れ監査と閉止
 
 (パケットの判定の集計、未充足と証拠不足の扱い、依頼者確認の結果)
 
-- 受け入れ監査: 〈監督が埋める: パケットの判定の集計、未充足と証拠不足の扱い〉
-- 依頼者確認 (§1 の M-1〜M-10 と訂正註 1〜6 の監督裁定、R-121 の起票、設計 v0.7 の §7 の註の読み替え): 〈監督が埋める: 依頼者確認の結果 (逐語)〉
+- 受け入れ監査: `evidence-auditor` 1 回 (候補 `2e51997`、パケット = scratchpad の `acceptance-packet-r108.md`)。完了条件 1〜99 は充足 99・未充足 0・証拠不足 0 (構造的な赤は訂正註 1 の 3 のとおり完了ゲートで判定)。§4 の受入条件の証拠不足 2 件と観察 2 件・設計疑義 1 件の扱いは訂正註 7 の 3
+- 依頼者確認 (§1 の M-1〜M-10 と訂正註 1〜6 の監督裁定、R-121 の起票、設計 v0.7 の §7 の註の読み替え): 依頼者確認待ち。依頼者指示 (2026-10-01、逐語)「裁定は監督の推奨で進め、依頼者には最後にまとめて確認を求めてください」の下で進めたので、local main への merge の後に一覧を示して確認を求め、結果は merge の後の訂正註に逐語で記録する (R-102 の先例。§4 の「閉止の前に」は「閉止の記録の確定の前に」と読む = 訂正註 7 の 4)
 
 ### 5.5 実装前の実測と静的な答え
 
@@ -559,6 +585,27 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
    - (B-5、低) C-19 に足した test は `test_c19_data_documents_declare_a_role` と名付ける (見るのは data 面の文書)。
    - (B-7、観察、直す) turn 末尾の media type の比較は送信ごとの検査と重複するので外し、段ごとの成功応答 1 件以上の assert を残す。
 4. (予備の完了ゲート、監督、`a9202f0`) `gate: 5014 passed, 2 subtests passed in 711.50s (0:11:51)`、judge=PASS、pg_database/pg_roles diff 0 (label r108-pre)。正本は merge 候補の上で取り直す (§4)。
+
+**訂正註 7 (2026-10-01、WP-4 の再確認レビュー、受け入れ監査、記録。監督裁定)**
+
+1. (WP-4 の再確認 = 1 起動、5 件。差し戻し 2、commit `6bb9440`) 差し戻し 1 の 7 項目は直っていると確認された。レビュー担当の変異 `RC-1`・`RC-2` は `495cd95` で緑 (生き残り)、直しの後は監督の実行で赤 (`mutate: 2 mutations, 2 as expected, restores verified 1/1 files (sha256 x2)`)。
+   - (1、中、直した) `request.node.funcargs[...]` 経由で fixture を取る経路。`request` は `_own_group(request)` の唯一の引数としてだけ許す。
+   - (2、中、直した) `import conftest` / `import adapter as port` で関数の中から registry と port を引く経路。plain な import と関数の中の `.registered_adapters` を赤にする。
+   - (3、低、既知の穴 = `OC` §1.12 の 71) 値の束ね直し (module 水準の `_A = registered_adapters()` を関数から引く、`n = self.adapter_name` で分岐する等) は検査を足さず、pin の docstring の Known gaps に書いた。**pin の範囲の線引き (監督裁定)**: C-35 の test module の pin とクライアント module の pin は書き方の規律を守る静的検査で、製品の欠陥がこの穴から完了ゲートを抜けることは無い。閉じた形で書ける経路は塞ぎ、data-flow を追わないと塞げない経路は既知の穴として pin の docstring に書く。以後、隣の形が見つかっても同じ線で扱う (WP-3・WP-4 で pin の隣の形の指摘が計 4 巡続いたため)。`COND` の C-35 の Status は経路を列挙せず pin の test 名を挙げる。
+   - (4、低、直した) journal 節のコメントが外した検査を述べていた。
+   - (5、観察) C-35 の Status から差し戻し 1 で削った句 (plug 名の列挙、ASGI の transport は host を見ない) は `CH` に移さない: main に載ったことの無い branch 上の文で、main の旧文 (declared) は逐語で記録済み。「ASGI は host を見ない」は `CM` の SI-10 Common と設計 §11 に残る。`CH` の段落の直後の `---` の表示は既存の並び (同ファイルにあと 4 か所) で、本項目では扱わない。
+2. (WP-2 の再確認の `V34d` の集計行。受け入れ監査の指摘) 監督の実行: `V34d expect=red got=red OK | 1 failed in 0.48s | restore=ok`、`mutate: 1 mutations, 1 as expected, restores verified 1/1 files (sha256 x2)` (commit `4f32224` の前)。
+3. (受け入れ監査、`2e51997`) 完了条件 1〜99 は充足 99。§4 の証拠不足 2 件・観察 2 件・設計疑義 1 件の裁定:
+   - (§4 の (a)、直した) `tools/tests` の集計行が未提出 → §5.2 に `pt: 789 passed` を記録。
+   - (§4 の (b)、直した) 計測の実施条件 (他の pytest と nginx が無い) の確認が記録に無い → run 2 を取り直し、前後に pytest 0・nginx 0 を記録 (§5.3)。
+   - (完了条件 1・96 の `git status --short` の逐語が報告に無い、観察) 監査が木と履歴で確かめ、充足と判定した。
+   - (性能の基準の commit、直した) §5.3 に実物の `9be46b7` と書いた (計測対象のコードは `1e8f7fb` と同じ)。
+   - (設計疑義: C-35 の Status が変異を `V79-V89` の範囲で引き、レビュー由来の `RA4` / `RB4` の赤も同じ列挙にある、観察 = (a) 現状のまま) `CH` の C-35 の節が `RA4` / `RB4` を名指すので追跡できる。Status の字数は残り 91 字である。
+   - (観察 1: WP-4 の再確認の裁定が訂正註に無い、直した) 本註の 1。
+   - (観察 2: C-19 の Status が 2,998 / 3,000 字、観察) 次に足す変更は register の test (`MAX_CELL_LENGTH`) が必ず赤にするので黙って通らない。そのときは文を `CH` へ移す。C-30・C-06・C-05 も 2,983〜2,993 字で、余白の少なさは本項目より前からある。
+4. (§4 の読み替え) 「閉止の前に…依頼者に示して確認を求める」は、local main への merge の後に一覧を示して確認を求め、結果を次の訂正註に逐語で記録する、と読む (依頼者指示 2026-10-01「裁定は監督の推奨で進め、依頼者には最後にまとめて確認を求めてください」、R-102 の先例)。
+5. (§0 の基点) 本書は基点を `1e8f7fb` と書くが、WP-1 の commit `a77131d` の親は `b656dbf` (`1e8f7fb` + `tools/` の 3 ファイル = `tools/check_comment_provenance.py` の Known gaps 8 番) である。本項目の対象と重ならない。merge 候補は local main `9be46b7` (CI の起動条件の変更) を取り込んだ `2e51997`。
+6. (§4 の `tools/tests`) 訂正註 2 の 6 のとおり `tools/` に触れたので、merge は `finalize.py --tools-tests` で行う。
 
 ## 付録 — 確定文の抜き出し script
 

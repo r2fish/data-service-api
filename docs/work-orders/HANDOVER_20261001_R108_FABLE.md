@@ -4,8 +4,8 @@
 
 ## 1. 現在地
 
-- local main `9be46b7` (CI の起動条件の変更の merge)。R-108 の WP-1〜WP-4 は branch `r108` (worktree `.claude/worktrees/r108`) にあり、WP-4 のレビュー修正 (差し戻し 1) は〈監督が埋める: WP-4 のレビュー後の commit と再確認の結果〉。WP-5 (本書を含む記録) は worktree `.claude/worktrees/r108-wp5` (branch `r108-wp5`、`a9202f0` から) で起草した。
-- R-108 の閉止: 〈監督が埋める: main の merge commit、完了ゲートの正本の集計行・judge・label・merge 候補〉。番号は契約 1.14.0 (従属判断 19)、共通条件 C-35、port v1.21、`security/CONTROL_MAPPING.md` 3.16、台帳 v1.148、設計 v0.7。R-121 を起票。push は停止中。
+- local main `9be46b7` (CI の起動条件の変更の merge)。R-108 の WP-1〜WP-4 は branch `r108` (worktree `.claude/worktrees/r108`) にあり、WP-4 のレビュー修正 (差し戻し 1) は `495cd95` (差し戻し 1)、再確認の 5 件は `6bb9440` (差し戻し 2) で直した。WP-5 (本書を含む記録) は worktree `.claude/worktrees/r108-wp5` (branch `r108-wp5`、`a9202f0` から) で起草した。
+- R-108 の閉止: branch `r108` を local main へ `--no-ff` で merge して閉じる。完了ゲートは `gate: 5014 passed, 2 subtests passed in 558.50s (0:09:18)`、judge=PASS、pg_database/pg_roles diff 0 (label r108、2026-10-01 21:18、merge 候補 `2e51997` = local main `9be46b7` を取り込んだ branch `r108`)。main の merge commit と、記録の commit を足した最終候補での再実行の集計行は末尾の「追記」。番号は契約 1.14.0 (従属判断 19)、共通条件 C-35、port v1.21、`security/CONTROL_MAPPING.md` 3.16、台帳 v1.148、設計 v0.7。R-121 を起票。push は停止中。
 - 記録の置き場: 本書を commit する変更セットで、最新 2 通から外れる `docs/work-orders/HANDOVER_20261001_R115_FABLE.md` を `docs/archive/` 配下へ移す (`OC` §1.16 の 78)。
 
 ## 2. 本チャットで閉じたもの
@@ -21,12 +21,12 @@
 | 訂正註 4・5 | `4a8a6a8` | WP-2・WP-3 のレビューの裁定の記録 | — | — |
 | WP-2 | `51c770d` → `03b43ba` → `4f32224` (`r108` への merge `7aea515`) | port v1.21 の `wire_entry` (wire の 4 plug、in-process は `AssertionError`)。送信関数は正規形でない method / URL、fragment、userinfo を運ばず拒む。`_ISOMORPHIC_TARGETS` 205 → 208、`docs/design/CONFORMANCE_ADAPTER_V1.md` §31 | A 3・B 7、再確認 1 | 18 (V31〜V40c の 15 (V38a は error)、V34c・V36b、V34d)。レビューの RB-1・RB-3 も赤 |
 | WP-3 | `7970d0f` → `b820658` → `cc6f9d6` (`r108` への merge `789e3ea`・`a9202f0`) | 参照クライアント `conformance-tests/reference_client.py` と単体テスト・静的 pin、`conformance-tests/schema_check.py` に `maxLength`・`maxProperties` | A 6・B 9、再確認 2 | 59 (37、差し戻し 1 の 16 (レビューの RA-1〜RA-3・RB1a〜RB5 を含む)、差し戻し 2 の 6) |
-| WP-4 | `e5d0e0a` → 〈監督が埋める: レビュー後の commit〉 | C-35 を `executable (four wire adapters)`、C-19 に義務 (b) の test、test module の pin、`conformance-tests/CONDITIONS.md` の凡例の 1 文、`security/CONTROL_MAPPING.md` 3.16、両 peer の runbook に義務 (c) の 1 文 | A 2・B 7、再確認〈監督が埋める: 件数〉 | 28 (V79 は error) + 〈監督が埋める: 差し戻し 1 の変異 (RA4-1〜3・RB4-1〜3 ほか) の結果〉 |
-| WP-5 | 〈監督が埋める: commit〉 | 設計 v0.7 の註、台帳 v1.148 (閉止・R-118 への追記・R-121 の起票)、本書、作業指示書 §5 | — | — (監査照合) |
+| WP-4 | `e5d0e0a` → `495cd95` → `6bb9440` | C-35 を `executable (four wire adapters)`、C-19 に義務 (b) の test、test module の pin、`conformance-tests/CONDITIONS.md` の凡例の 1 文、`security/CONTROL_MAPPING.md` 3.16、両 peer の runbook に義務 (c) の 1 文 | A 2・B 7、再確認 5 (中 2・低 2・観察 1) | 28 (V79 は error)。差し戻し 1 でレビューの RA4-1〜RA4-3・RB4-1〜RB4-3 の 6 件が赤 (28 件の再実行も赤。V87 は spec の test 名を直して再実行)、差し戻し 2 で RC-1・RC-2 が赤 (再実行 11 件は全件赤) |
+| WP-5 | `9f08f1f` (起草) → 記録の commit | 設計 v0.7 の註、台帳 v1.148 (閉止・R-118 への追記・R-121 の起票)、本書、作業指示書 §5 | — | — (監査照合) |
 | 予備ゲート | `a9202f0` | `gate: 5014 passed, 2 subtests passed in 711.50s (0:11:51)`、judge=PASS、pg_database/pg_roles diff 0 (label r108-pre) | — | — |
-| 完了ゲート | 〈監督が埋める: merge 候補〉 | 〈監督が埋める: 集計行・judge・pg の差分・label・日時、`COLLECTION_FLOOR` 4927 → 後の値、`tools/tests` の集計行〉 | — | — |
-| 計測 | — | 〈監督が埋める: 作業指示書 §5.3 の要約〉 | — | — |
-| 受け入れ監査 | — | 〈監督が埋める: パケットの判定の集計と扱い〉 | — | — |
+| 完了ゲート | `2e51997` | `gate: 5014 passed, 2 subtests passed in 558.50s (0:09:18)`、judge=PASS、pg_database/pg_roles diff 0 (label r108、2026-10-01 21:18)、`COLLECTION_FLOOR` 4927 → 5014、`tools/tests` `pt: 789 passed in 98.40s (0:01:38)` | — | — |
+| 計測 | — | K=1 (`--warmup 20 --n 200`、6 plug・21 行、基準 main `9be46b7` / 実装後 `2e51997`、2 run): 最大の悪化は run 1 が p50 +7.6%・p95 +6.8%、run 2 が p50 +13.5%・p95 +18.9% で、閾値 (p50 +40% / p95 +50%) の内側。`backend_calls` は前後同じ。C-35 の 4 node は合計 1.99 s | — | — |
+| 受け入れ監査 | — | `evidence-auditor` 1 回 (候補 `2e51997`): 完了条件 1〜99 は充足 99・未充足 0・証拠不足 0。§4 の証拠不足 2 件 (直した)・観察 2 件・設計疑義 1 件は「裁定」節と作業指示書 訂正註 7 の 3 | — | — |
 
 ## 3. 次の一手
 
@@ -59,7 +59,8 @@
   - 訂正註 6: 送信関数は fragment と userinfo も拒む。静的 pin の import を閉じた表にし、(iii) の免除の規則を絞った。WP-4 のレビューの 7 項目 (test module の pin の 6 形、#12 (b) の Evidence を SI-06 に置く、ほか)。予備の完了ゲートの記録。
 - C. R-121 の起票 (規模 S、着手条件なし)。
 - D. 設計 v0.7 の §7 の註: 表の「SI-03・SI-06: 本項目は新たに検証しない」を、C-19 に足した test が 6 adapter で data 面の文書の `role` を見る、と読み替えた。
-- E. 〈監督が埋める: 依頼者確認の結果 (逐語)〉
+- E. 訂正註 7 の監督裁定: C-35 の test module の pin とクライアント module の pin の範囲の線引き (閉じた形で書ける経路は塞ぎ、data-flow を追わないと塞げない経路は pin の docstring の既知の穴)、確認を merge の後に求める順序。
+- 上の A〜E は依頼者確認待ちである (local main への merge の後にまとめて確認を求める。結果は末尾の「追記」)。
 
 ## 5. 運用上の教訓
 
@@ -124,5 +125,16 @@
 | レビュー WP-4 B・4 (#12 (b) の Evidence の置き場、実装は SI-03) | 直した (裁定 = SI-06) | `security/CONTROL_MAPPING.md` の SI-06 Common。設計 v0.7 の §7 の註 (訂正註 6 の 3) |
 | レビュー WP-4 B・5 (改名後の test 名が見る範囲より広い) | 直した (差し戻し 1) | `test_c19_data_documents_declare_a_role` (訂正註 6 の 3) |
 | レビュー WP-4 B・7 (観察: turn 末尾の media type の比較が送信ごとの検査と重複) | 直した (差し戻し 1) | 外し、段ごとの成功応答 1 件以上の assert を残す (訂正註 6 の 3) |
-| 再確認 WP-4 | 〈監督が埋める: 再確認の指摘と裁定 (1 件 1 行)〉 | 〈監督が埋める〉 |
-| 受け入れ監査 | 〈監督が埋める: 監査の指摘・観察と裁定 (1 件 1 行)〉 | 〈監督が埋める〉 |
+| 再確認 WP-4・1 (`request.node.funcargs` 経由で fixture を取る経路を pin が検出しない、`RC-1` 緑) | 直した (差し戻し 2) | `request` は `_own_group` の唯一の引数だけ。`RC-1` 赤 (訂正註 7 の 1) |
+| 再確認 WP-4・2 (`import conftest` で関数の中から registry を引ける、`RC-2` 緑) | 直した (差し戻し 2) | plain な import と関数の中の `.registered_adapters` を赤に。`RC-2` 赤 |
+| 再確認 WP-4・3 (値の束ね直しを pin が追わず、開示も無い) | 既知の穴 (§1.12 の 71) | 製品の欠陥は通らない。pin の docstring の Known gaps に書いた (訂正註 7 の 1 の線引き) |
+| 再確認 WP-4・4 (journal 節のコメントが外した検査を述べる) | 直した (差し戻し 2) | — |
+| 再確認 WP-4・5 (観察: C-35 の Status から削った句の移し先、`CONDITIONS_HISTORY.md` の `---` の表示) | 観察 | main に載ったことの無い branch 上の文。表示は既存の並び |
+| 監査・§4 (a) (`tools/tests` の集計行が未提出) | 直した | `pt: 789 passed` を作業指示書 §5.2 に記録 |
+| 監査・§4 (b) (計測の実施条件の確認が記録に無い) | 直した | run 2 を取り直し pytest 0・nginx 0 を記録 (§5.3) |
+| 監査・完了条件 1・96 (`git status --short` の逐語が報告に無い) | 観察 | 監査が木と履歴で確かめ充足と判定 |
+| 監査・`V34d` の `mutate:` の集計行が記録に無い | 直した | 訂正註 7 の 2 |
+| 監査・性能の基準の commit が `1e8f7fb` でなく `9be46b7` | 直した | §5.3 に実物の commit を書いた (計測対象のコードは同じ) |
+| 監査・設計疑義 (C-35 の Status の `V79-V89` とレビュー由来の `RA4` / `RB4`) | 観察 ((a)) | `CONDITIONS_HISTORY.md` の C-35 の節が名指す |
+| 監査・観察 1 (WP-4 の再確認の裁定が訂正註に無い) | 直した | 訂正註 7 の 1 |
+| 監査・観察 2 (C-19 の Status が 2,998 / 3,000 字) | 観察 | register の test が必ず赤にする。次に足すときは履歴へ移す |
