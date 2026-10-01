@@ -502,6 +502,36 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 
 実測 (監督、2026-10-01): `pt: 3 passed in 2.02s` (`tools/tests/test_deploy_smoke.py`)。変異 `R1-4` / `RV-1` / `RV-2` はいずれも `expect=red got=red`、`mutate: 3 mutations, 3 as expected, restores verified 1/1 files (sha256 x2)`。
 
+**訂正註 4 (2026-10-01、WP-2 のコードレビュー 1 巡目 = 観点 A / B の並列。監督裁定)**
+
+実装担当の判断 (hook は factory を返す `_wire_transport_factory()`、同型性の行は 3 本で 208、3xx の URL は全 plug で末尾 slash の 307) は受け入れた。指摘 (A 3 件、B 7 件、重なり 1 件) の裁定と、レビュー担当の変異の実測 (監督、`51c770d` に対して): `RB-1` 赤 (host の綴りが受け渡し点で変わる)、`RB-2` 緑、`RB-3` 赤、`mutate: 3 mutations, 2 as expected`。
+
+1. (B-1、高、直す) `RT/test_r78_pool_wait_stats.py` に `_ISOMORPHIC_TARGETS` の件数の assert (`== 205`) が残り、完了ゲートで赤になる。WP-2 の触ってよいパスに同 file を足し、完了条件 40 に「件数を名指す他の assert を `git grep` で実測する」を足す (本書 §2.0 の表の漏れ)。
+2. (A-1 / B-2、中、直す = (a)) `send` は httpx の正規形でない method / URL を黙って直して運んでいた。両 peer の `wire_entry` で、組んだ要求の method と URL が入力と違えば送らずに例外にする (確定文「exactly as given」は変えない)。完了条件 34 に 34c (小文字の method・大文字の host・`..` の path で例外、受け渡し点 0 回) と変異 1 件を足す。
+3. (A-2、低、直す) secret が空のときにもう一方の secret が失敗文に出る assert を、添字だけを出す形にする。
+4. (B-3、低、直す) `WireEntry` の secret の 2 欄を `field(repr=False, compare=False)` にする。`RB-2` が緑だったので (`-q` では欄ごとの差分が出ない)、固定は欄の構造の assert と変異 1 件で行う。
+5. (B-4、低、対応不要) 完了条件 36 の失敗文の脚は `RB-3` で単独の赤を実測した。
+6. (A-3、低、直す = 開示) 圧縮された応答では返す header と本文が食い違う。`CA` §31.3 に 1 項足す (いまの 4 plug では届かない)。
+7. (実装担当の判断 (5)、直す) 接続失敗が例外になることを socket の 2 plug の test 1 本で固定する。
+8. (B-5、記録) `check_comment_provenance.py` の対象は両 peer の `src/` だけで、WP-2 は `src/` を触っていない。報告の当該行は対象外の出力である。
+9. (B-6、起票 = 台帳 `RM` §8.1 に新しい行。番号は WP-5 の版上げで main を読んで振る) socket plug の 307 の `Location` が宣言の port を持たない (実測)。harness の nginx と r2db の本番雛形は `listen` の port と `proxy_set_header Host $host` の組で、redirect を追う client は別の port へ送られる (静的な読解)。DB の利用者が気づく (redirect の宛先が違う) ので起票する。本項目では `CA` §31.2 に実測の 1 文を足すだけ。
+10. (B-7、情報) 変異 V34a は本書の形 (`_LazySocketClient` 経由) ではなく URL だけを書き換える transport の派生で測った。受け入れ (client 層の header で先に赤になる紛れが無い)。
+
+**訂正註 5 (2026-10-01、WP-3 のコードレビュー 1 巡目 = 観点 A / B の並列。監督裁定)**
+
+実装担当の判断 (公開 API は `fetch_capabilities` と `call`、例外 class の構成、violation の path だけを例外文に入れる、surface は `control.` 接頭辞と `control_endpoints` の key 名で決める、base URL の一致は client に持たせない) は受け入れた。指摘 (A 6 件、B 9 件、重なり 3 件) はすべて同じ変更セットで直す。レビュー担当の変異の実測 (監督、`7970d0f` に対して): `RA-1`・`RA-2`・`RA-3`・`RB1a`・`RB1b`・`RB2`・`RB4`・`RB5` は緑 (生き残り)、`RB3` は赤。
+
+1. (A-1、中) D-7 の 11 行・23 行の test が成功 JSON の本文しか持たず、失敗の種類を入れ替える変異 (`RA-1`・`RA-2`) が生き残った。problem 形の本文の場面を足す。
+2. (A-2 / B-9、低〜中) base URL の末尾判定が文字列の `endswith` で、query・fragment の中の base path でも結合して送る。URI の path で判定し、query か fragment を持つ base URL は送らない。
+3. (A-3 / B-8、低〜中、(b)) `ProblemResponse` の文に応答の `code` がそのまま入る。契約 `errors.codes` が列挙する `code` のときだけ文に入れる (属性は常に持つ)。
+4. (A-4 / B-2、低) 静的 pin の (iii) と docstring の免除を文の部品に限り、`.args` と `.__doc__` での持ち出しを赤にする。M-2 の (iii) は「`raise` の直下の例外の構築呼び出しの引数のうち、文字列の定数・f-string の定数部分・文字列の連結・`.join` の receiver」と読む。
+5. (A-5 / B-7、低、fail closed) `Content-Type` が 2 本以上の応答は解釈しない失敗にする。
+6. (A-6、低) NaN / Infinity を含む body は送らない。応答の NaN と深いネストは解釈しない失敗にする。
+7. (B-1、低、案 1) 完了条件 73 のガードは `SC` の全項 (alias を除く) が名指す schema に掛ける。§2.3 の完了条件 73 の「`SC` の data 面の項」を「`SC` の全項 (#10 の規則で alias を除く)」と読み替える (設計 D-7a の「クライアントが検証する schema」どおり。クライアントは control 面の schema も検証する)。
+8. (B-3、低) 4xx の status で `media_type` の応答を成功として読む場面を足す (`RB2`)。
+9. (B-4、低、外す) `localhost` の許可は設計 §4.1 の N-15 (loopback か `.invalid`) に無いので外す。
+10. (B-5・B-6、低) 段 (1) の応答検証は `RB3` の赤で固定を確かめた。`ContractMismatch` は「解釈しない失敗」の側の class として受け入れ、`role` の無い文書の場面を足す (`RB4`)。設計 D-7 の v0.6 註への 1 文は WP-5 の設計 v0.7 の註に入れる。
+
 ## 付録 — 確定文の抜き出し script
 
 確定文は、設計 §9.1 の表の「新しい文 (英文、確定案)」の列の 12 セルと、#12 の行の obligations の列の entry を、`<V-1>` → `1.13.0`、`<V>` → `1.14.0`、`<N>` → `19` の 3 つの置換だけで写したものである。手で打ち直さない。script は監督の scratchpad の `r108-fixed-text/extract.py` に置いた (起草時に実行済み)。scratchpad は次のチャットから読めないので、全文を下に載せる。再生成: worktree を cwd にして `python3 "$SP/r108-fixed-text/extract.py" . "$SP/r108-fixed-text"` (script を `$SP/r108-fixed-text/extract.py` に保存してから)。
