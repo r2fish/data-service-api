@@ -116,7 +116,7 @@ class PoolConnectFailed(PoolError):
 # app` each set this ONCE, near the top, to `"MitateDB-api:data:<pid>"`/
 # `"MitateDB-api:control:<pid>"` -- every connection factory in this
 # package (this module's own `_new_connection`, `backend_postgres.
-# PostgresBackend`'s two persistent connections, the credential stores,
+# PostgresBackend`'s role pools, the credential stores,
 # the audit sinks and readers, the control-plane stores) spreads
 # `_application_name_connect_kwargs()` into its own `connect(...)` call,
 # so every connection this SAME process opens afterward carries that one

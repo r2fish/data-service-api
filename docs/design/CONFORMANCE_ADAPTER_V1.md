@@ -3772,7 +3772,8 @@ The two socket plugs subclass the http adapters and inherit this
 realization unchanged. Mutations measured red against C-34 (work order
 `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md`): V17 (no schema lock, `MitateDB-api-http`), V18 (no request-scope
 `RLock`, `MitateDB-api`), V19 / V19s (no r2db schema lock,
-`r2db-api-http` / `r2db-api-socket`); V14a, V14b, V15, V15b (a stall that
+`r2db-api-http` / `r2db-api-socket`); RB-wp7-1 (no `_idempotency_lock` in `apply_schema`'s
+in-process cell, `r2db-api`, red 2026-10-01); V14a, V14b, V15, V15b (a stall that
 passes straight through) and V16 / V20 (an unrealized hook, a
 `wait_until_held` that returns at once) turn the test or its guard red.
 

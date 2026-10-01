@@ -15,8 +15,8 @@ level `statement_timeout` `0013_role_statement_timeouts.sql` sets
 catalog_path_carries_the_role_level_statement_timeout` still observes that
 role-level value, but only on a connection outside a scope).
 
-Completion condition 2 (per-method wiring): `test_catalog_reads_use_the_
-constructed_statement_and_lock_timeout_inside_their_own_transaction`
+Completion condition 2 (per-method wiring): `test_catalog_reads_in_a_
+scope_without_a_deadline_use_the_constructed_statement_and_lock_timeout`
 below, parametrized over the 8 methods, wraps `backend_postgres._execute`
 to read `pg_settings.setting` (raw ms, never `SHOW`) on the SAME cursor
 immediately before the first non-`SET LOCAL` statement each method
@@ -151,7 +151,7 @@ def _probe_first_real_statement(captured: dict) -> None:
 
 
 @pytest.mark.parametrize("method_name", list(_METHOD_CALLS))
-def test_catalog_reads_use_the_constructed_statement_and_lock_timeout_inside_their_own_transaction(
+def test_catalog_reads_in_a_scope_without_a_deadline_use_the_constructed_statement_and_lock_timeout(
     app_a, method_name,
 ) -> None:
     backend = PostgresBackend(

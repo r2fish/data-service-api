@@ -1947,12 +1947,19 @@ def test_inventory_connection_headroom_shared_application_role_budget_counts_onc
     per-role floor multiplied by K (a per-role floor that then "counts
     once" no matter how many applications share it, as long as
     `2 * K * (O + N * role_pool_size)` stays below it). With K=2
-    applications, one new-basis process (`thread_limit=4`,
-    `role_pool_size` 6), and no old-basis process, `2*2*(0+1*6)=24`
-    exceeds the per-role floor (6), so it is the term that is used."""
+    applications, one old-basis process (`concurrency=50`), one new-basis
+    process (`thread_limit=4`, `role_pool_size` 6): the per-role floor is
+    `O*c + N*p = 50 + 6 = 56`, the K term `2*2*(1+6) = 28`, so the floor
+    is the term used (56); a floor multiplied by K would read 112. Every
+    per-role CONNECTION LIMIT is raised out of the way so condition 1 alone
+    cannot explain a `blocked` result; `--reserved-connections` isolates the
+    aggregate boundary."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
-    _provision_app(platform, "app1")
-    _provision_app(platform, "app2")
+    for app_id in ("app1", "app2"):
+        database_name = _provision_app(platform, app_id)
+        _set_connection_limit(platform.admin_dsn, f"{database_name}_rt", 100000)
+        _set_connection_limit(platform.admin_dsn, f"{database_name}_dv", 100000)
+    _set_connection_limit(platform.admin_dsn, platform.api_role, 100000)
     admin = psycopg.connect(platform.admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
@@ -1961,43 +1968,32 @@ def test_inventory_connection_headroom_shared_application_role_budget_counts_onc
     finally:
         admin.close()
     max_connections = int(max_connections_text)
-    thread_limit = 4
+    old_basis, concurrency, thread_limit = 1, 50, 4
     pool_size = config.role_pool_size(thread_limit)
-    api_demand = platform_declarations._API_ROLE_STORE_COUNT * pool_size
-    controlplane_demand = 16
-    auditreader_demand = 4
-    app_shared_demand = max(pool_size, 2 * 2 * (0 + 1 * pool_size))  # K=2, O=0, N=1
-    correct_total = (
-        api_demand + controlplane_demand + auditreader_demand + app_shared_demand
-        + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
-    )
-    conn = ops._inventory_connect(platform.provision_dsn)
-    try:
-        report = ops._inventory_connection_headroom(
-            conn, platform.schema,
-            _headroom_args(
-                thread_limit=thread_limit, data_process_ceiling=1, data_process_count_total=1,
-                control_process_ceiling=1, control_process_count_total=1,
-                reserved_connections=max_connections - correct_total,
-            ),
-        )
-    finally:
-        conn.close()
-    assert report["judgment"] == "confirmed"
+    app_role_floor = old_basis * concurrency + 1 * pool_size
+    assert app_role_floor == 56
+    api_demand = platform_declarations._API_ROLE_STORE_COUNT * app_role_floor
+    app_shared_demand = max(app_role_floor, 2 * 2 * (old_basis + 1 * pool_size))  # K=2
+    assert app_shared_demand == app_role_floor == 56
+    correct_total = api_demand + app_shared_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
 
-    conn = ops._inventory_connect(platform.provision_dsn)
-    try:
-        report = ops._inventory_connection_headroom(
-            conn, platform.schema,
-            _headroom_args(
-                thread_limit=thread_limit, data_process_ceiling=1, data_process_count_total=1,
-                control_process_ceiling=1, control_process_count_total=1,
-                reserved_connections=max_connections - correct_total + 1,
-            ),
-        )
-    finally:
-        conn.close()
-    assert report["judgment"] == "blocked"
+    def _judge(reserved: int) -> str:
+        conn = ops._inventory_connect(platform.provision_dsn)
+        try:
+            report = ops._inventory_connection_headroom(
+                conn, platform.schema,
+                _headroom_args(
+                    data_process_count_old_basis=old_basis, concurrency=concurrency, thread_limit=thread_limit,
+                    data_process_ceiling=1, data_process_count_total=2, control_not_deployed=True,
+                    control_process_ceiling=None, control_process_count_total=None,
+                    reserved_connections=reserved,
+                ))
+        finally:
+            conn.close()
+        return report["judgment"]
+
+    assert _judge(max_connections - correct_total) == "confirmed"
+    assert _judge(max_connections - correct_total + 1) == "blocked"
 
 
 def test_inventory_connection_headroom_app_role_condition1_uses_concurrency_not_one(monkeypatch, platform):
@@ -3236,7 +3232,7 @@ def test_inventory_connection_headroom_aggregate_application_term_registration_c
     """205's own property (registration
     count wins), with an old-basis process present (`O=1`): 204's own
     input keeps `O` in the per-role floor's dominant term, so it never
-    exercises `2*K*(O+N)`'s own `O` addend. Here
+    exercises `2*K*(O+N*p)`'s own `O` addend. Here
     `O=1`, `concurrency=6`, one new-basis process (`thread_limit=4`,
     `role_pool_size` 6), and `K=4` registered applications: the per-role
     floor is `O*c + N*p = 6 + 6 = 12`, but `2*K*(O+N*p) = 2*4*(1+6) = 56`
@@ -3290,10 +3286,10 @@ def test_inventory_connection_headroom_aggregate_application_term_registration_c
 def test_inventory_connection_headroom_condition1_application_floor_independent_of_registration_count(monkeypatch, platform):
     """206: condition 1's own per-role floor for
     an application's runtime/developer role is `O*c + N*p` alone, never
-    `2*K*(O+N)` -- with K=4 registered applications and every runtime/
+    `2*K*(O+N*p)` -- with K=4 registered applications and every runtime/
     developer role's own CONNECTION LIMIT set to EXACTLY the per-role
     floor (6, not the larger `2*4*1=8`), item (8) still reads `confirmed`
-    (the aggregate's own larger `2*K*(O+N)` term still fits comfortably
+    (the aggregate's own larger `2*K*(O+N*p)` term still fits comfortably
     under `max_connections`)."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     thread_limit = 4

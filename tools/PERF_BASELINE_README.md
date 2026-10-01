@@ -823,6 +823,15 @@ is ever built for a `--real-server` run.
     request scope's own timeout statements -- `SET LOCAL statement_timeout`
     / `lock_timeout` on each connection the scope borrows, re-issued once
     more after a contended lock).
+    A request that finishes without an exception also COMMITs the
+    read-only transaction it still has open when its scope ends (a query's
+    runtime connection, the developer connection that served a data
+    request's pass 1; psycopg forgets every prepared statement of a
+    connection on ROLLBACK, so the commit is what lets the pooled
+    connections reach the prepare threshold): one more round trip per
+    query and per data request on the developer connection. A `commit()`
+    is not a `cursor.execute`, so it does not move `backend_calls`; it is
+    in `txn_count` and in the DBTIME wall time.
 
   These are **not the same unit**. A `backend_calls` value from a
   PostgreSQL-backed plug is not directly comparable to one from an

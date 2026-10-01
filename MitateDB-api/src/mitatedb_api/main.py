@@ -312,9 +312,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     concurrency_slots.check_slot_directory(slot_dir)
     concurrency_slots.selfcheck_slot_locking(slot_dir)
     # design D-4: every connection this process opens from here on (the
-    # platform pool, every served application's two persistent
-    # connections, the durable audit sink's pool, the startup reads
-    # below) carries this `application_name` (`pool.py`'s
+    # platform pool, every served application's role pools, the durable
+    # audit sink's pool, the startup reads below) carries this `application_name` (`pool.py`'s
     # own module-level toggle).
     set_connection_application_name(f"MitateDB-api:data:{os.getpid()}")
 
@@ -503,11 +502,9 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     )
     audit = AuditSink()
 
-    # Every served application's own `PostgresBackend` (two persistent
-    # connections, one per role -- `backend_postgres.PostgresBackend`'s
-    # own documented, deliberate choice not to pool data-plane connections
-    # this WP, design v1.1 §7 future-work ledger) is built once, eagerly,
-    # at startup -- the served set is static configuration for this WP
+    # Every served application's own `PostgresBackend` (one bounded
+    # connection pool per role, `backend_postgres.PostgresBackend`) is
+    # built once, eagerly, at startup -- the served set is static configuration for this WP
     # (no in-band `register_application`/`provision_application` exists
     # yet), so there is no "unknown application shows up later" case to
     # handle lazily.
@@ -627,8 +624,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         finally:
             # Release every connection this process holds on shutdown: the
             # platform registry's bounded pool, the durable audit sink's
-            # pool, and every served application's own two persistent
-            # PostgreSQL connections.
+            # pool, and every connection in every served application's role
+            # pools.
             credentials.close()
             durable_audit.close()
             for cell in cells.values():
@@ -673,7 +670,7 @@ async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
     `build_app()`'s own `_lifespan` hook is what closes every connection
     this process opened (`credentials.close()` -- the platform pool --
     `durable_audit.close()` -- the durable audit sink's pool -- and every
-    served application's own two persistent connections, `cell._backend.
+    served application's role-pool connections, `cell._backend.
     close()`) -- reused here rather than duplicated."""
     to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
     from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()

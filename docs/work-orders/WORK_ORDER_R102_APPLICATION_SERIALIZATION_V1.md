@@ -585,3 +585,9 @@ D-R102 判定規則 (計測前に固定。計測後に動かさない):
 2. 原因: psycopg の `Connection.rollback()` は ROLLBACK の後に prepared statement のキャッシュを捨てる (`_connection_base.py` の `_rollback_gen`: `self._prepared.clear()` + `DEALLOCATE ALL`)。範囲の出口で query の runtime transaction と pass 1 の developer の読み取り transaction を rollback して pool に返す形 (M-5) では、接続上の文が毎回捨てられ、二度と prepare されない。R-102 前は catalog 読みと `read()` が自己 commit していた。
 3. 裁定 (**M-19**、依頼者確認待ち): 例外なしで抜ける範囲は、INTRANS の主接続 (query) と developer 接続 (DML / query の pass 1 の読み) を **COMMIT** して返す (例外で抜けるときは rollback、`release` の rollback は安全網のまま)。読み取りだけの transaction の COMMIT は意味論を変えない。完了条件 **57b** (threshold 回の同じ query の後に `pg_prepared_statements` に文が残る、変異 V57b = 出口を rollback に戻す) を WP-4 に足す。`backend_calls` は commit の分だけ増える (query +1、DML +1 (developer))。
 4. 計測 D-R102 は訂正註 5 の 4 を改め、「実装後」の木を差し戻し 2 の後の r102 head とし、k4 / k1 / real-server の全段を取り直す (round 1 の結果は `$SP/perf-r102-round1/` に記録として残し、K=4 の判定値 (0/4856 = 0.0%、2 run) は参考値とする)。
+
+**訂正註 7 (2026-10-01、監督。依頼者確認の一覧の補い。本文は書き換えない)**
+
+1. **M-18 (問い、依頼者判断待ち)**: `plan` を持つ DML (transact の dry-run / plan) は 3a を取らない (設計 D-3・D-4) ので、別 entity への schema 操作が revision を進めても plan 付き DML は通る (WP-4 の実装担当の疑義 1)。(a) 設計どおり (DML の plan の照合は対象 entity の 3b の範囲で守られ、別 entity の schema 変更は DML の対象に触れない) / (b) plan 付き DML も 3a を共有で取る (schema 操作中は DML が止まる)。監督の推奨 = (a)、観察として記録。
+2. 裁定の語彙: 引き継ぎ書「裁定」節の語は `OC` §1.15 の 77 の 4 語 (起票 / 既知の穴 / 観察 / 直した) に限る。レビュー WP-5 B-3 (触ってよいパスの外の file) の「追認」は「観察 (監督の発注で許していた)」と読む。
+3. 最終一括 (`$SP/r102-final-batch.md` の 1〜7) を完了条件 **98a** とし、WP-7 に含める (34b の test の入力と V-ops-3、SI-01 Evidence、main.py / pool.py の旧コメント、r87 の test 名、C-34 Status の RB-wp7-1、差し戻し 2 後の CM の行と主張、README の 1 文)。
