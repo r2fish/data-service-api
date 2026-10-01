@@ -418,30 +418,42 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 
 | WP | worktree (branch) | commit (本体 → レビュー後 → 再確認後) |
 |---|---|---|
-| WP-1 | `r108` | |
-| WP-2 | `r108-wp2` → `r108` へ merge | |
-| WP-3 | `r108-wp3` → `r108` へ merge | |
-| WP-4 | `r108` | |
-| WP-5 | `r108` | |
+| WP-1 | `r108` | `a77131d` → `3bd670b` → `cb6e295`。訂正註 4・5 は `4a8a6a8` |
+| WP-2 | `r108-wp2` → `r108` へ merge | `51c770d` → `03b43ba` → `4f32224`。`r108` への merge `7aea515` |
+| WP-3 | `r108-wp3` → `r108` へ merge | `7970d0f` → `b820658` → `cc6f9d6`。`r108` への merge `789e3ea` (`b820658` まで) と `a9202f0` (`cc6f9d6`) |
+| WP-4 | `r108` | `e5d0e0a` → 〈監督が埋める: レビュー後の commit〉 → 〈監督が埋める: 再確認後の commit (無ければ「なし」)〉 |
+| WP-5 | `r108` | 〈監督が埋める: WP-5 の commit (worktree `r108-wp5` で起草し `r108` へ)〉 |
+
+すべて r2fish / noreply、未 push。
 
 ### 5.2 完了ゲート
 
 (候補の commit、集計行、judge、pg の差分、label、日時、`COLLECTION_FLOOR` の前後)
 
+- 正本: 〈監督が埋める: merge 候補の commit、`gate:` の集計行、judge、pg_database/pg_roles の差分、label、日時〉
+- `COLLECTION_FLOOR`: 4927 → 〈監督が埋める: 完了ゲートの実測〉
+- `tools/tests` (訂正註 2 の 6 により回す): 〈監督が埋める: `finalize.py --tools-tests` の集計行〉
+- 予備 (正本ではない): 訂正註 6 の 4 (`a9202f0`、label r108-pre)。
+
 ### 5.3 計測 (§3)
 
 | 計測 | 形 | 基準 (`1e8f7fb`) | 実装後 | 判定 |
 |---|---|---|---|---|
-| C-35 の 4 node の所要時間 | `--durations=0` / ゲートの log | — | | 記録のみ |
-| `CT/test_wire_entry.py`・`CT/test_reference_client.py` の所要時間 | 同上 | — | | 記録のみ |
-| 完了ゲートの集計時間 | ゲートの集計行 | 前回 R-102 の値 | | 記録のみ |
-| K=1 全 plug・全 op の p50 / p95 | `tools/perf_baseline.py --warmup 20 --n 200` | | | `RM` §0.1.4 の 1 |
+| C-35 の 4 node の所要時間 | `--durations=0` / ゲートの log | — | 〈監督が埋める: 完了ゲートの log の値 (参考: WP-4 の報告、`e5d0e0a` の上の call は r2db socket 0.61 s・MitateDB socket 0.35 s・r2db http 0.30 s・MitateDB http 0.14 s)〉 | 記録のみ |
+| `CT/test_wire_entry.py`・`CT/test_reference_client.py` の所要時間 | 同上 | — | 〈監督が埋める: 完了ゲートの log の値〉 | 記録のみ |
+| 完了ゲートの集計時間 | ゲートの集計行 | 前回 R-102 の値 | 〈監督が埋める: 完了ゲートの集計時間〉 | 記録のみ |
+| K=1 全 plug・全 op の p50 / p95 | `tools/perf_baseline.py --warmup 20 --n 200` | 〈監督が埋める: 基準 `1e8f7fb` の値〉 | 〈監督が埋める: merge 候補の値〉 | 〈監督が埋める: `RM` §0.1.4 の 1 との突き合わせ〉 |
 
 (各 run の開始時の load average と、捨てた run の理由)
+
+〈監督が埋める: 各 run の開始時の load average と、捨てた run の理由〉
 
 ### 5.4 受け入れ監査と閉止
 
 (パケットの判定の集計、未充足と証拠不足の扱い、依頼者確認の結果)
+
+- 受け入れ監査: 〈監督が埋める: パケットの判定の集計、未充足と証拠不足の扱い〉
+- 依頼者確認 (§1 の M-1〜M-10 と訂正註 1〜6 の監督裁定、R-121 の起票、設計 v0.7 の §7 の註の読み替え): 〈監督が埋める: 依頼者確認の結果 (逐語)〉
 
 ### 5.5 実装前の実測と静的な答え
 
@@ -449,24 +461,26 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 
 | plug | 面 | operation | 成功応答の `content-type` | capability document の `role` |
 |---|---|---|---|---|
-| r2db-api (http+postgres) | data | capabilities・catalog・operation-catalog・schema・mutate・query | | |
-| 同 | control | control_capabilities | | |
-| 同 | data (control credential) | capabilities | | |
-| r2db-api (socket) | (同じ 3 行) | | | |
-| MitateDB-api (http) | (同じ 3 行) | | | |
-| MitateDB-api (socket) | (同じ 3 行) | | | |
+| r2db-api (http+postgres) | data | capabilities・catalog・operation-catalog・schema・mutate・query | 6 operation とも 200 `application/json` | `runtime` (runtime の credential で読んだ文書) |
+| 同 | control | control_capabilities | 200 `application/json` | `control` |
+| 同 | data (control credential) | capabilities | 401 `application/problem+json` (`AUTH_INVALID`)。文書を返さない | — (文書なし) |
+| r2db-api (socket) | (同じ 3 行) | | 上の 3 行と同じ (data 6 operation 200 `application/json` / control 200 `application/json` / control credential 401 `application/problem+json` `AUTH_INVALID`) | `runtime` / `control` / 文書なし |
+| MitateDB-api (http) | (同じ 3 行) | | 同上 | `runtime` / `control` / 文書なし |
+| MitateDB-api (socket) | (同じ 3 行) | | 同上 | `runtime` / `control` / 文書なし |
+
+出所: 訂正註 1 の 4 と WP-1 の実装担当の探査 (一時の probe を置いて `pt.py -s` で 1 回実行し、削除した。出力の逐語は監督の scratchpad の `r108-wp1-probe-output.txt`)。in-process の 2 plug は wire が無く測っていない。義務 (a)(b) は 4 plug とも満たす。3 行目の経路は両 peer の data app が application credential だけを認証するので文書を返さず、義務 (b) は返す文書に掛かるので破れていない。
 
 表 2 — 設計 §10 末尾の 6 項目と D-4・D-7a・「運ぶだけ」:
 
 | 項目 | 静的な答え (本書) | 実測 (埋める) |
 |---|---|---|
-| C-19 の bearer の合成走査と socket harness の `_build_client` の pin に入口が干渉しない | 干渉しない見込み (§2.2 の静的な答え) | 完了条件 39 の前後の集計行 |
-| D-4 の xdist の group | adapter 名 (`CT/conftest.py`:95-132) | 完了条件 80 の自己 assert の結果 |
-| D-7a の後の C-11 の判定 | 変わらない見込み (§2.3 の静的な答え) | 完了条件 75 の前後の集計行 |
-| 「運ぶだけ」を確かめられる plug | 4 plug とも transport の受け渡し点まで。socket の nginx より先は確かめない (M-8) | 完了条件 34 の結果 |
-| wire 上で redirect を追わない | 3xx を返す URL は plug ごとに実測 (§2.2) | 完了条件 35 の URL・status と結果 |
-| 義務 (a)(b) を両 peer が既に満たす | 満たす見込み (§2.1 の静的な出所) | 表 1 |
-| 新しい key で既存の key 集合のピンが赤になるか | 赤になるのは `CT/test_contract.py`:2048 (`endpoint_fields_note`) と :403-406 (`OperationCatalogEntry` の dict 一致) の 2 つ (完了条件 21・22 で差し替え)。最上位・`versioning`・`errors` の key 集合を固定するテストは無い (`git grep -n 'set(contract\|keys()) ==' -- conformance-tests r2db-api/tests MitateDB-api/tests tools` の実測、2026-10-01) | WP-1 の集計行 |
+| C-19 の bearer の合成走査と socket harness の `_build_client` の pin に入口が干渉しない | 干渉しない見込み (§2.2 の静的な答え) | 完了条件 39 の前後の集計行: 前 `pt: 112 passed in 127.37s (0:02:07)`、後 `pt: 112 passed in 69.30s (0:01:09)` (どちらも `CT/test_c19_client_self_sufficiency.py`・`CT/test_socket_harness.py` の 2 ファイル、WP-2 の報告)。干渉しない |
+| D-4 の xdist の group | adapter 名 (`CT/conftest.py`:95-132) | 完了条件 80 の自己 assert の結果: 4 node とも緑 (WP-4 の報告、`e5d0e0a`)。V80 (parametrize の引数名を変える) は「'r2db-api' is not a selected wire adapter」で、V80b (conftest の group の hook を外す) は「xdist_group is 'registry-guards'」で赤。`CT/test_wire_entry.py` の同じ自己 assert は V38b で赤 (WP-2 の報告)。group は adapter 名 |
+| D-7a の後の C-11 の判定 | 変わらない見込み (§2.3 の静的な答え) | 完了条件 75 の前後の集計行: 前 `pt: 72 passed in 59.37s`、後 `pt: 75 passed in 23.89s` (差 +3 は `CT/test_schema_check.py` の新規 3 test。C-11 の 2 ファイルだけでは 45 passed)。差し戻し 1 の後も `pt: 75 passed in 22.15s` (WP-3 の報告と差し戻し 1 の報告)。判定は変わらない |
+| 「運ぶだけ」を確かめられる plug | 4 plug とも transport の受け渡し点まで。socket の nginx より先は確かめない (M-8) | 完了条件 34 の結果: 4 plug とも受け渡し点の `httpx.Request` が入力と一致 (WP-2 の報告の `pt: 221 passed in 150.43s (0:02:30)`)。V34a (r2db socket が URL だけを書き換える transport の派生。訂正註 4 の 10)・V34b は赤。正規形でない method / URL (34c、V34c) と fragment・userinfo (訂正註 6 の 1、V34d) は送らずに例外。socket の nginx より先は確かめない |
+| wire 上で redirect を追わない | 3xx を返す URL は plug ごとに実測 (§2.2) | 完了条件 35 の URL・status と結果: 4 plug とも末尾 slash 付きの `/v1/capabilities/` が 307 (`Location` は r2db http `https://r2db-http-pg-data.conformance.invalid/v1/capabilities`、MitateDB http `http://mitatedb-http-pg.conformance.invalid/v1/capabilities`、socket の 2 plug は loopback の host で port を持たない `/v1/capabilities`)。参考: `/v1` は ASGI の 2 plug で 404、socket の 2 plug で 301 (`text/html`、`Location` は port 付き)。送信関数は 307 をそのまま返し、受け渡し点の呼び出しは 1 回。V35 (`follow_redirects=True`) は赤 |
+| 義務 (a)(b) を両 peer が既に満たす | 満たす見込み (§2.1 の静的な出所) | 表 1: 満たす (4 wire plug。control credential で data 面を読む経路は 401 で文書を返さない) |
+| 新しい key で既存の key 集合のピンが赤になるか | 赤になるのは `CT/test_contract.py`:2048 (`endpoint_fields_note`) と :403-406 (`OperationCatalogEntry` の dict 一致) の 2 つ (完了条件 21・22 で差し替え)。最上位・`versioning`・`errors` の key 集合を固定するテストは無い (`git grep -n 'set(contract\|keys()) ==' -- conformance-tests r2db-api/tests MitateDB-api/tests tools` の実測、2026-10-01) | WP-1 の集計行: `pt: 2 failed, 187 passed in 28.10s` (契約系 6 ファイル。赤の 1 つは訂正註 1 の 3 の構造的な赤、もう 1 つは訂正註 1 の 2 で直した)。key 集合のピンで赤になったのは 3 つ (訂正註 1 の 1)。差し戻し 1 の後 `pt: 1 failed, 188 passed in 119.60s (0:01:59)` (構造的な赤だけ)、r2db `pt: 397 passed`、MitateDB `pt: 234 passed` |
 | `OperationCatalogEntry` の description を `schema_check.py` が keyword として扱うか | 扱わない (`ANNOTATION_KEYWORDS`、`CT/schema_check.py`:81-92) | — |
 | `operation_catalog_url` の上書きが同じ endpoint を別の綴りで名指したときの起動時の扱い | 両 peer とも絶対 URL (scheme と host がある) であることだけを見て、値をそのまま宣言する。正規化も、組む URL との比較もしない: `R/main.py`:214-219、`R/control_main.py`:589-597、`M/config.py`:173-177・:250・:286-288、`M/control_composition.py`:66-71。したがってその配備には #12 (c) が掛かり、peer の `operation_catalog` はその綴りでも認証を求めるので (c) を満たさない (設計 §11 の v0.6 の項のとおり) | — (静的な読解で足りる) |
 
@@ -531,6 +545,20 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 8. (B-3、低) 4xx の status で `media_type` の応答を成功として読む場面を足す (`RB2`)。
 9. (B-4、低、外す) `localhost` の許可は設計 §4.1 の N-15 (loopback か `.invalid`) に無いので外す。
 10. (B-5・B-6、低) 段 (1) の応答検証は `RB3` の赤で固定を確かめた。`ContractMismatch` は「解釈しない失敗」の側の class として受け入れ、`role` の無い文書の場面を足す (`RB4`)。設計 D-7 の v0.6 註への 1 文は WP-5 の設計 v0.7 の註に入れる。
+
+**訂正註 6 (2026-10-01、WP-2・WP-3 の再確認レビューと WP-4 のコードレビュー 1 巡目。監督裁定)**
+
+1. (WP-2 の再確認、低、直した = 監督) `send` の拒否の検査が fragment と userinfo を素通ししていた (どちらも要求行に載らない)。両 peer の検査を同じ文で広げ、test に 2 場面を足した。変異 `V34d` 赤、`pt: 116 passed` (`CT/test_wire_entry.py` ほか 2 ファイル)、同型性は r2db `5 passed`・MitateDB `4 passed`。
+2. (WP-3 の再確認、低 2 件、直した = 差し戻し 2) 静的 pin の持ち出し経路 (例外の束縛の `str(e)`、名前の `__doc__`、`inspect`) を閉じた: クライアントの import を閉じた表 (`ALLOWED_IMPORTS`) で固定し、例外の名前への束縛と名前の `__doc__` を赤にした。(iii) の免除は「位置引数がちょうど 1 つで keyword の無い構築のその引数」と `message=` の値に限り、`ProblemResponse` は文を `message=` で受ける。M-2 の (iii) はこの規則で読む。追加の変異 6 件は赤、`pt: 87 passed`。
+3. (WP-4 のレビュー、A 2 件・B 7 件、重なり 2 件。すべて同じ変更セットで直す = 差し戻し 1) レビュー担当の変異 `RA4-1`〜`RA4-3`・`RB4-1`〜`RB4-3` は 6 件とも緑 (生き残り) だった。
+   - (A-1 / B-1、中) C-35 の test module の pin が port の他の操作を呼ぶ経路 (`request.getfixturevalue`、`registered_adapters()`、`adapter` の object) と `adapter_name` での分岐を検出しない。6 形を赤にし planted と変異で固定する。
+   - (A-2 / B-6、低) 段 (11) は復唱句の key を位置ではなく `required_confirmation` の名前で引く。
+   - (B-2、低) C-35 の Status の変異の要約を、測った plug を名指す形に直す。
+   - (B-3、低) C-19 の Status から削った 2 句の記録を `CH` の `## C-19` の節へ移す (WP-4 の触ってよいパスを `CH` 全体に広げる)。
+   - (B-4、裁定 = SI-06) #12 (b) の Evidence は `CM` の SI-06 Common に置く (完了条件 91 の「C-28 と同じ 5 SI」は C-35 の Evidence についての文で、#12 (b) の置き場は本裁定による)。設計 §7 の SI-03・SI-06 の行への註は WP-5。
+   - (B-5、低) C-19 に足した test は `test_c19_data_documents_declare_a_role` と名付ける (見るのは data 面の文書)。
+   - (B-7、観察、直す) turn 末尾の media type の比較は送信ごとの検査と重複するので外し、段ごとの成功応答 1 件以上の assert を残す。
+4. (予備の完了ゲート、監督、`a9202f0`) `gate: 5014 passed, 2 subtests passed in 711.50s (0:11:51)`、judge=PASS、pg_database/pg_roles diff 0 (label r108-pre)。正本は merge 候補の上で取り直す (§4)。
 
 ## 付録 — 確定文の抜き出し script
 
