@@ -519,9 +519,53 @@ D-R102 判定規則 (計測前に固定。計測後に動かさない):
 
 ### 5.1 commit
 
+branch `r102` (基点 main `ddf9c73`、WP ごとの WIP commit 24 + 並行 worktree の merge 14。並行 worktree: r102-wp1b / r102-wp2 / r102-wp3 / r102-wp6 / r102-wp7)。main へは merge 候補 `r102-merge` (main に `r102` を `--no-ff` で merge) を経て 1 回。
+
+| WP | commit (本体 → レビュー後 → 再確認後) |
+|---|---|
+| WP-1 | `1d24454` → `fd0479d` → `b01ec6e` |
+| WP-2 | `9cb6787` → `e205819` → `9957afd` |
+| WP-3 | `361f3bd` → `a3c6078` → `610d641` |
+| WP-4 | `ff408fa` → `c29eb61` → `eb97a06` (WP-4/5 再確認) → `0d8ffd0` (差し戻し 2、訂正註 6) |
+| WP-5 | `32eefb0` → `4a37988` → `5e0cb08` |
+| WP-6 | `a2f9735` → `3d2656e` → `10f7833` |
+| WP-7 | `400f527` → `6116807` (訂正註 5、ops の式) → `0cd6fa0` → `d4bb075` (最終一括、訂正註 7、引き継ぎ書) → `3a03608` (指紋の行) |
+
 ### 5.2 完了ゲート
 
 ### 5.3 計測 D-R102
+
+監督、2026-10-01。木: 基準値 = 分岐点の main `ddf9c73` (worktree `r102-base`)、実装後 = `r102` の `3a03608` (製品コードは `0d8ffd0` で確定。`3a03608` は指紋の行のみ)。前後を同じ日に交互に取った (round 2)。各 run の開始時の 1 分 load average は 1.69〜2.50 (すべて 3.0 以下)。他の pytest と nginx は無し。出力は scratchpad の `perf-r102-<before|after>-<k4|k1|rs-…>-run<N>.txt` (K=4 と K=1 は 2 run、real-server は 1 run)。**round 1** (12:38〜12:48、実装後 = `eb97a06`) は K=1 で MitateDB-http の p50 が +176〜226% の退行を示し (訂正註 6: ROLLBACK による prepared statement の破棄)、M-19 の直しの後に全段を取り直した (round 1 の K=4 の判定値も 0/4856 = 0.0% で同じ)。
+
+表 A — D-R102 の判定 (K=4、`--warmup 10 --n 100`、thread limit 4、2 run。読む行 = `perfbase_<id>` の op=cross_entity の POOL 行):
+
+| run | 木 | load | plug | 基準値: `lock=` waits / acquire | 実装後: runtime | developer | `schema_lock=` | 判定値 | 10% 以下 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | before / after | 1.69 / 2.00 | MitateDB-api-http | 1319 / 3537 (37.3%) | 0 / 1762 | 0 / 1765 | 0 / 1329 | 0 / 4856 = 0.0% | 満たす |
+| 1 | before / after | 1.69 / 2.00 | MitateDB-api-socket | 1319 / 3537 (37.3%) | 0 / 1762 | 0 / 1765 | 0 / 1329 | 0 / 4856 = 0.0% | 満たす |
+| 2 | before / after | 2.38 / 2.25 | MitateDB-api-http | 1319 / 3537 (37.3%) | 0 / 1762 | 0 / 1765 | 0 / 1329 | 0 / 4856 = 0.0% | 満たす |
+| 2 | before / after | 2.38 / 2.25 | MitateDB-api-socket | 1319 / 3537 (37.3%) | 0 / 1762 | 0 / 1765 | 0 / 1329 | 0 / 4856 = 0.0% | 満たす |
+
+判定: 2 run とも 10% 以下 → `RM` §0.1.4 の 3 (設計 Q-2 の読み替え後) を満たす。開示: 分母の数え方が前後で違う (前 = RLock の再入を数える / 後 = pool の借用 + schema lock の取得を数える)。
+
+表 B — 併記 (判定に使わない。query p50 / p95、2 run の平均、`$SP/perf-r102-k1-summary-round2.txt`・`perf-r102-rs-summary-round2.txt`):
+
+| 計測 | 形 | r2db-api | MitateDB-api |
+|---|---|---|---|
+| K=1 全 plug・全 op | `tools/perf_baseline.py --warmup 20 --n 200` (6 plug) | p50 −1.8〜+1.4%、p95 −5.5〜+15.6% (http batch の p95 +15.6% が最大) | in-process p50 −2.8〜+4.2% / p95 −0.7〜+6.2%; http p50 −16.8〜−0.8% / p95 −16.9〜+1.0% (query 1.527 → 1.377 ms); socket p50 −9.2〜−2.3% / p95 −13.4〜−4.3% |
+| K=4 query / mutate の p50 (http plug) | D-R102 の run の PERF 行 | — | query 16.9 ms、mutate 11.2 ms (round 1 の実装後の値; 基準値の同 op は cell lock の待ちを含む) |
+| real-server N=1 K=1 / K=32 (比) | `--real-server <peer> --workers 1` (K=1: `--warmup 20 --n 200`、K=32: `--warmup 3 --n 15`) | 2.573 → 2.556 ms / 42.836 → 43.272 ms (16.65 → 16.93 倍) | 2.307 → 2.345 / 39.353 → 39.991 (17.06 → 17.05 倍) |
+| real-server N=4 K=1 / K=32 (比) | 同 `--workers 4` | 2.571 → 2.546 / 27.640 → 26.757 (10.75 → 10.51 倍) | 2.354 → 2.268 / 24.779 → 24.978 (10.53 → 11.01 倍) |
+
+`RM` §0.1.4 の 1 (K=1: p50 +40% / p95 +50%) はすべて内側。§0.1.4 の 2 (K=32 / K=1 ≤ 8) は本件の対象外 (R-101、設計 §10) で、前後とも変わらない。K=32 の real-server を `--warmup 20 --n 200` で取ると credential の rate (600/min) を超えて 429 になる (記録 `perf-r102-round2-rs32-n200/`)。
+
+表 C — `backend_calls` (K=1):
+
+| plug | op | 基準値 | 実装後 | 理由 |
+|---|---|---|---|---|
+| MitateDB-api-http / -socket | query / mutate / batch / cross_entity | 23 / 15 / 51 / 24 | 17 / 14 / 34 / 19 | catalog 読み 8 本の自己 commit と各自の `SET LOCAL` が無くなり、範囲の入口の `SET LOCAL` 2 文 × 2 接続に集約。per-key / 件数 / 3a / 3b の lock 文 (try 形) が加わる。読み取り transaction の COMMIT (M-19) は `cursor.execute` ではなく数に入らない |
+| MitateDB-api (SQLite) | query / mutate / batch / cross_entity | 11 / 9 / 37 / 16 | 12 / 11 / 39 / 18 | `request_scope` / `lock_schema` / `lock_entities` (no-op) が public method として数えられる |
+| r2db-api (3 plug) | query / mutate / batch | 1 / 1 / 1、18 / 19 / 23 | 不変 | schema lock は `apply_schema` だけ (計測の op に無い) |
 
 ### 5.4 受け入れ監査と閉止
 
