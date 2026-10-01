@@ -150,6 +150,23 @@ def test_the_advisory_lock_ids_of_the_four_serialization_points_are_distinct() -
     assert len(set(ids.values())) == len(ids), f"two serialization points share a lock id: {ids}"
 
 
+def test_the_per_key_lock_uses_the_two_argument_advisory_form() -> None:
+    """The per-key lock lives in the 2-argument `pg_advisory_xact_lock(int,
+    int)` space, which PostgreSQL records apart from the 1-argument
+    `pg_advisory_xact_lock(bigint)` space the count lock and the schema lock
+    use -- so a client-chosen key whose `hashtext` happens to equal one of
+    those two ids can never wait on them. Pinned on the statement text
+    itself, next to the id-distinctness test above.
+
+    mutation: `_idempotency_key_lock` issues `pg_advisory_xact_lock(hashtext(%s))`
+    (1-argument form) -- this test goes red."""
+    import inspect
+
+    source = inspect.getsource(PostgresCell._idempotency_key_lock)
+    assert "pg_advisory_xact_lock(%s, hashtext(%s))" in source, source
+    assert "pg_advisory_xact_lock(hashtext(%s))" not in source
+
+
 def test_a_keyed_schema_operation_waiting_for_the_schema_lock_does_not_block_a_keyed_data_operation(
     platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
