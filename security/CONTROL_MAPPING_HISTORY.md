@@ -349,6 +349,27 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*MitateDB-api capacity and concurrency Control claims, the cell lock as the in-process serializer and `_idempotency_pg_scope` as the cross-process one, superseded 2026-10-01 (Version 3.14, R-102 -- the cell lock is gone; each request runs in its own request scope and transaction-scoped advisory locks serialize what must not overlap), verbatim:*
+
+- handlers delegate the synchronous section to the threadpool, and `ApplicationCell._lock` covers the WHOLE lookup -> pass-1 -> pass-2 sequence inside that slot -- `MitateDB-api/src/mitatedb_api/cell.py:645`.
+- the separate `_idempotency_lock_scope` helper is gone: the outer cell lock is the in-process serializer and `_idempotency_pg_scope` the cross-process one -- `MitateDB-api/src/mitatedb_api/cell.py:645`.
+- that lock is per `ApplicationCell`, so requests against the SAME application serialize while different applications hold different locks -- `MitateDB-api/src/mitatedb_api/cell.py:645`.
+
+---
+
+*MitateDB-api Control claims, the 8 catalog reads each in their own transaction and the per-statement, not per-request, bound, superseded 2026-10-01 (Version 3.14, R-102 -- the reads run inside the request scope's transaction and the bound comes from the request's deadline), verbatim:*
+
+- each of the 8 reads opens its own developer-connection transaction and issues `SET LOCAL statement_timeout`/`lock_timeout` unconditionally (`_set_timeouts`, `backend_postgres.py:1524-1535`), at the value `PostgresBackend` was constructed with.
+- that bound is per statement, not per request (one insert runs two of these reads), and no per-request budget narrows it, since no `deadline` reaches these reads -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1524-1535`.
+
+---
+
+*MitateDB-api capacity and concurrency Control claim, no per-application pool, superseded 2026-10-01 (Version 3.14, R-102 -- each served application's backend now holds a runtime and a developer pool), verbatim:*
+
+- this peer's per-application `PostgresBackend` pools nothing, so it has no per-application counterpart -- `MitateDB-api/src/mitatedb_api/backend_postgres.py`.
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -513,6 +534,12 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api -- platform upgrade Status claim, section 10's subjects accepted at 10.6 = 7, 10.7 = 7 and 10.10 = 11, superseded 2026-10-01 (Version 3.14, R-102 -- section 10.10 moved to version 12, which section 10.8 records as not accepted, so Gate-0 is not ready), verbatim:*
+
+- **Section 10.8 names 10.6 / 10.7 / 10.10 accepted at versions 7 / 7 / 11** (requester 2026-10-01; review: `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` section 11 note 14), so Gate-0 readiness rests on the 10 items alone -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3049-3051`.
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -554,6 +581,12 @@ Rollback on a pass-2 failure is now unconditional regardless of exception type (
 
 - rollback/fault tests;
 
+
+---
+
+*MitateDB-api Status claim, the window between the two passes, superseded 2026-10-01 (Version 3.14, R-102 -- the batch now holds shared entity locks across both passes, so only a schema change outside the API remains), verbatim:*
+
+- **Disclosed PostgreSQL-specific window**: pass 1 runs outside `self._lock`, so a schema change can land between the two passes; the Evidence above drives exactly that window.
 
 ---
 

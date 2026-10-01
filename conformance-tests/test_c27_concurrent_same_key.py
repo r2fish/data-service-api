@@ -54,24 +54,20 @@ inherit this hook unchanged, are counted) drives every observation below
 -- `test_c27_drives_on_every_registered_plug` is this file's own
 non-vacuity guard for that fact.
 
-**Disclosed scope limit** (design D-13 "実装の形 (6d-ii) の確定" (7),
-carried into `CONDITIONS.md`'s own C-27 row): on `MitateDB-api-http`,
-removing the PostgreSQL session advisory lock `idempotency_begin`/
-`idempotency_reserve` take does NOT turn this file red -- this common
-suite drives exactly one `ApplicationCell` per Application (one process,
-one cell), and that cell's own `RLock` (`cell.py`'s WP-8b outer lock)
-already serializes the two concurrent requests before either ever reaches
-the advisory lock. The advisory lock only becomes load-bearing across
-TWO cells sharing one PostgreSQL-backed Application, a shape this common
-suite has no way to construct (a single deployment served by exactly one
-process here, same as every other single-process plug) -- its own
-non-vacuity is instead carried by the PEER-LOCAL `MitateDB-api/tests/
-test_idempotency_concurrency.py`, which drives two separate `cell_a`/
-`cell_b` objects against the SAME PostgreSQL database precisely to
-exercise the advisory lock once the in-process cell lock cannot. This is
-an observation-scope disclosure, not a weakening of C-27 itself -- the
-`r2db-api-http` row of this same table pins the equivalent real advisory
-lock directly, inside this very suite.
+**Mutation scope per plug** (carried into `CONDITIONS.md`'s own C-27
+row; design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md`
+section 6, the C-27 row): on `MitateDB-api-http` no cell lock exists, so
+the PostgreSQL transaction-scoped advisory locks `idempotency_begin`/
+`idempotency_reserve` take are the only serializer of the two concurrent
+requests, also inside one process -- making the per-key lock shared
+turns (i) red, and making the count lock shared turns (iii) red. On the
+in-process `MitateDB-api` plug the `SQLiteBackend` holds one `RLock` for
+each request scope, and removing it turns (i) red. The same advisory
+locks across TWO cells sharing one PostgreSQL-backed Application are
+pinned by the PEER-LOCAL `MitateDB-api/tests/test_idempotency_
+concurrency.py`, a shape this common suite does not construct (a single
+deployment served by exactly one process here). The `r2db-api-http` row
+of the same table pins r2db's own advisory locks inside this suite.
 """
 from __future__ import annotations
 

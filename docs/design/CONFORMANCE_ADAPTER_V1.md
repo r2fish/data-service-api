@@ -2,6 +2,7 @@
 
 ## 文書情報
 
+- 版数: 1.20 (§30 を新設。port v1.20: 台帳 R-102 (design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` §9・§11.1 Q-5) 由来の coordinated revision -- 1 新規 abstract method `hold_after_plan_verification(session)` (新条件 C-34。plan の前提条件を並行する schema 操作の下で決定的に観測させる primitive) と、非 normative の handle `PlanVerificationHold` を追加する。削除は無い。§22.1 の開示 2 と §25.2・§25.3 の `MitateDB-api` の記述に R-102 による覆しの註を足した。詳細は §30)
 - 版数: 1.19 (§29 を新設。port v1.19: 台帳 R-115 (design `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) 由来の coordinated revision -- port v1.8 の abstract method `flush_audit_buffer` を削除する。追加は無い。詳細は §29)
 - 版数: 1.18 (§28 を新設。port v1.18: design `docs/design/PHASE11_KEYSET_PAGING_V1.md` D-4 由来の coordinated revision -- 1 新規 abstract method `query_page(session, entity, select, *, where, order_by, page_size, cursor, budget) -> (items, next_page)` (条件 C-30 が使う。`order_by` と `cursor` を 1 つの query 要求で運び、peer の実 `next_page` をそのまま返す) を追加する。既存の query 系 method (`select_eq`/`attempt_filter`/`query_with_revisions`/`query_with_budget`/`attempt_filter_with_result`) は不変。4 registered adapter (両 peer の in-process/http) が実現し、socket plug は http adapter の実現をそのまま継承する (0 redefinition)。`_ISOMORPHIC_TARGETS` には追加しない (adapter の足場であり `src/` の symbol ではない)。削除は無い。詳細は §28)
 - 版数: 1.17 (§27 を新設。port v1.17: phase 11 WP-3、design `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` §7.1 の 2 由来の coordinated revision -- 1 新規 abstract method `operation_catalog_document(session) -> bytes` (条件 C-29 が使う。配る本文を byte のまま返す) を追加する。全 6 registered adapter (両 peer の in-process/http/socket) が実現する -- socket adapter は port method 自体を継承する (0 redefinition) が、内部 hook `_operation_catalog_url_value()` (`_surfaces_value` と同形) を override して実 dial 可能な URL を返す。削除は無い。詳細は §27
@@ -3009,6 +3010,13 @@ the port docstring and `CONDITIONS.md`'s own C-05 row):
    lock once released), but the `concurrency` bound this peer declares is
    therefore a REFUSAL THRESHOLD, never a claim of `n`-way parallel
    EXECUTION capacity.
+   **【追記 2026-10-01 (R-102, port v1.20)】** `ApplicationCell._lock` no
+   longer exists (design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` D-1). The one-operation-per-cell
+   bound above now holds on the in-process plug only, where the
+   `SQLiteBackend` holds one `RLock` for each request scope;
+   `MitateDB-api-http` runs a cell's operations in parallel on its
+   per-role connection pools. The port docstring's (ii) and
+   `CONDITIONS.md`'s C-05 row carry the same.
 3. The scope of the counter a bound protects (a per-deployment in-flight
    count; a per-credential rate window) is not observable by the common
    suite from the outside -- the isolated surface's own application/
@@ -3574,6 +3582,8 @@ api/tests/test_idempotency_concurrency.py`, which drives two separate
 `cell_a`/`cell_b` objects against the SAME PostgreSQL database precisely
 to exercise it where the in-process cell lock cannot.
 
+**【追記 2026-10-01 (R-102, port v1.20)】** The `MitateDB-api` rows of §25.2 and the limit above describe the cell `RLock` that R-102 removed (design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` D-1, D-3). On the in-process plug a second request now waits on the `SQLiteBackend`'s request-scope `RLock`; on `MitateDB-api-http` the transaction-scoped advisory locks `idempotency_begin`/`idempotency_reserve` take are the only serializer inside one process too, and making the per-key or the count lock shared turns C-27 red (work order `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md` V41, V42), so the limit above no longer holds. `CONDITIONS.md`'s C-27 row and `conformance-tests/CONDITIONS_HISTORY.md` (C-27) record the change.
+
 ## 26. v1.16 port revision (Phase 11 WP-2, coordinated with docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md §7.1 の 1・4)
 
 `attempt_filter`'s own request shape, extended with the contract's own
@@ -3699,3 +3709,84 @@ in place of the old method, and `conformance-tests/CONDITIONS_HISTORY.md`
 their declare-first dispatch (§18.2).
 
 Additions: none.
+
+## 30. v1.20 port revision (coordinated with docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md §9 and §11.1 Q-5)
+
+Ledger R-102 replaces MitateDB's per-cell lock with per-role pools and
+transaction-scoped advisory locks, and closes, on both peers, the window
+in which a schema operation's `plan` is checked against a revision that a
+concurrent schema operation then changes (design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` §2.5 and §2.6). This
+revision gives the common suite a deterministic way to DRIVE that
+closure -- new condition C-34 -- with the same "test-driving primitive,
+never a test-only hook on product code" discipline `hold_in_flight`
+(§22.1) and `hold_after_idempotency_lookup` (§25.1) follow. One
+addition, no removals.
+
+### 30.1 `hold_after_plan_verification(session)`
+
+Added to `ConformanceAdapter` after `hold_after_idempotency_lookup`:
+
+```python
+def hold_after_plan_verification(self, session) -> AbstractContextManager["PlanVerificationHold"]
+```
+
+Meaning (verbatim, the supervisor's ruling M-13 of work order `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md` as
+corrected by its correction note 2 item 2 -- carried into the port
+docstring unparaphrased):
+
+「`session` 上で次に到着する、`plan` または `dry_run` を提示する schema 操作を 1 件だけ、その要求自身が plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。`with` を抜けると先着は解放される。」
+
+Like `hold_after_idempotency_lookup`, this primitive never issues a
+request of its own: the held schema operation ("A") and the second one
+("B") are both issued by the CALLER, each from its own OS thread. A
+schema operation presenting neither `plan` nor `dry_run`, a data
+operation, a later schema operation and another Application's pass
+through. C-34 issues B against a DIFFERENT entity of the same
+Application, because the revision, the `plan` token and the schema
+object count are Application-wide.
+
+**`PlanVerificationHold`** (non-normative, `adapter.py` module level, the
+same status `IdempotencyHold` (§25.1) carries, a separate type only so
+that neither handle reads as the other's): one method,
+`wait_until_held(self, timeout_s: float = 30.0) -> int`, which returns
+the measured count of schema operations held (always `1` for a correct
+realization) and raises `AssertionError` -- never skips, never times out
+silently -- when none has reached the stall point within `timeout_s`.
+
+### 30.2 Per-plug realization (measured)
+
+Each plug replaces product functions or methods on the objects it
+already constructs for `isolated_application_surface()` and restores them
+on exit; no product source changes. Only a call presenting a `plan` or
+`dry_run` is marked, and the first marked call to reach the stall point
+claims it.
+
+| plug | stall point | what B waits on |
+|---|---|---|
+| `r2db-api` (in-process) | the return of `structured.compute_plan_token` inside A's `_apply_schema_locked` (a module-attribute replacement): A has read `before_revision` and built the token, before any change to the cell's schema state | the in-memory cell's own `_idempotency_lock`, which `apply_schema` holds for its whole call |
+| `r2db-api-http` | the return of A's first `PostgresCell._read_schema_revision` inside `apply_schema` (the revision read before any DDL) | the schema lock `pg_advisory_xact_lock(761761763)` `apply_schema` takes before `_load_catalog` |
+| `MitateDB-api` (in-process) | the entry of the backend's `create_collection` / `add_field` / `alter_field_constraints`, after the cell's `plan` check | the `SQLiteBackend`'s request-scope `RLock` |
+| `MitateDB-api-http` | the same wrap as the in-process plug | the application-wide schema lock `pg_advisory_xact_lock(761761763)` (3a) |
+
+The two socket plugs subclass the http adapters and inherit this
+realization unchanged. Mutations measured red against C-34 (work order
+`docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md`): V17 (no schema lock, `MitateDB-api-http`), V18 (no request-scope
+`RLock`, `MitateDB-api`), V19 / V19s (no r2db schema lock,
+`r2db-api-http` / `r2db-api-socket`); V14a, V14b, V15, V15b (a stall that
+passes straight through) and V16 / V20 (an unrealized hook, a
+`wait_until_held` that returns at once) turn the test or its guard red.
+
+### 30.3 Disclosed limits
+
+1. **The r2db plugs stop where the `plan` check's input is fixed, not at
+   the comparison itself**: the comparison is a pure function of the
+   revision already read, so a concurrent schema operation is observed
+   the same way at either point.
+2. **The hold of a schema operation presenting only `dry_run` is not
+   observed**: the hook arms it, but C-34's first operation always
+   presents a `plan`.
+3. **A schema operation presenting neither `plan` nor `dry_run` is never
+   held**: no plug has a point where such an operation has read the
+   revision it advances and has not yet run DDL (work order
+   `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md`
+   correction note 2 item 2).

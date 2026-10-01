@@ -2608,11 +2608,13 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
     (condition 1) is `O * concurrency + N * role_pool_size(thread_limit)`,
     same as a platform-plane role's own new-basis term; the AGGREGATE
     (condition 2) contribution from that shared budget is instead the
-    LARGER of that floor and `2 * K * (O + N)` (K = the number of
-    registered applications with a runtime/developer role), since K
-    applications each hold two persistent connections (one per role) on
-    every Data-plane process at once -- a floor that is only ever
-    RAISED by K, never displaced by it."""
+    LARGER of that floor and `2 * K * (O + N * role_pool_size(thread_limit))`
+    (K = the number of registered applications with a runtime/developer
+    role), since on every Data-plane process each of the K applications
+    holds, per role, up to `role_pool_size(thread_limit)` connections on
+    a new-basis process (its role pools' size) and one on an old-basis
+    process -- a floor that is only ever RAISED by K, never displaced by
+    it."""
     concurrency = args.concurrency
     thread_limit = args.thread_limit
     old_basis = args.data_process_count_old_basis
@@ -2749,15 +2751,15 @@ def _inventory_connection_headroom(conn: "psycopg.Connection", schema: str, args
         return _result("blocked")
 
     # The aggregate's own shared-application-role term is the LARGER of
-    # condition 1's per-role floor and `2 * K * (O + N)` (K registered
-    # applications each hold two persistent connections -- one per role
-    # -- on every Data-plane process at once): never smaller than either
-    # the per-role floor already enforced above or the real worst-case
-    # persistent-connection count, only ever raised by K, never
+    # condition 1's per-role floor and `2 * K * (O + N * pool_size)` (each of
+    # K registered applications holds, per role, up to `pool_size`
+    # connections on a new-basis process and one on an old-basis one):
+    # never smaller than either the per-role floor already enforced above
+    # or the real worst-case connection count, only ever raised by K, never
     # displaced by it (design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-2).
     application_count = len(app_roles)
     if application_count:
-        app_shared_demand = max(app_role_floor, 2 * application_count * data_process_count_total)
+        app_shared_demand = max(app_role_floor, 2 * application_count * (old_basis + new_basis_count * pool_size))
     else:
         app_shared_demand = 0
     total_demand = api_demand + controlplane_demand + auditreader_demand + app_shared_demand + _INVENTORY_MAX_CONCURRENT_CONNECTIONS

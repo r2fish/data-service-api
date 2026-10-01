@@ -1130,9 +1130,9 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         try:
             self._app_pg: dict[str, _PgAppInfo] = {}
             # R-1's own risk note ("接続数の有限性... adapter は接続を確実に
-            # 閉じる"): `backend_postgres.PostgresBackend` deliberately holds
-            # TWO PERSISTENT connections per application for this WP's own
-            # small, static-deployment use case (its own module docstring).
+            # 閉じる"): each `backend_postgres.PostgresBackend` holds one
+            # runtime and one developer pool per application, each opening
+            # its connections on first use up to its `pool_size`.
             # A conformance session provisions many dozens of short-lived
             # THROWAWAY applications (every `build_fixture()` call adds a
             # fresh pair), which would otherwise accumulate open connections
@@ -1143,7 +1143,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # and `provision_application` evicts (closes) the LEAST
             # recently used entry once the cap is exceeded -- bounding this
             # adapter's own steady-state connection count to
-            # `2 * _MAX_OPEN_CELLS` regardless of how many total
+            # `2 * pool_size * _MAX_OPEN_CELLS` regardless of how many total
             # applications this session ever provisions. Every conformance
             # test's own fixture apps stay at the "most recently used" end
             # for the whole duration of that one test (nothing else is
@@ -1539,8 +1539,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     # ------------------------------------------------------------------
 
     # See `self._cells`'s own docstring (`__init__`) for why this is
-    # bounded: 6 concurrently-open application cells (12 persistent
-    # PostgreSQL connections) comfortably covers this suite's own
+    # bounded: 6 concurrently-open application cells (two role pools
+    # each) comfortably covers this suite's own
     # per-test working set (almost always 2 apps, occasionally 3), while
     # keeping this adapter's own steady-state connection footprint small
     # relative to a local cluster's `max_connections` -- kept
@@ -1604,8 +1604,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # free registry+database+role state, not merely hide a row.
         #
         # Phase 7 WP-5 rework (supervisor ruling 2026-09-06 item 1):
-        # explicitly closes the popped cell's own two persistent
-        # connections (`_evict_cells_over_cap`'s own `evicted_cell.
+        # explicitly closes the popped cell's own two role pools
+        # (`_evict_cells_over_cap`'s own `evicted_cell.
         # _backend.close()` pattern, reused here) BEFORE the real DROP
         # DATABASE below, rather than relying on Python reference-count
         # deallocation to close them in time -- this method is about to

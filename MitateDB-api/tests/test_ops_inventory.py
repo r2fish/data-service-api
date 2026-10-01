@@ -1941,14 +1941,15 @@ def test_inventory_connection_headroom_rollout_two_processes_confirmed_three_pro
 def test_inventory_connection_headroom_shared_application_role_budget_counts_once(monkeypatch, platform):
     """34b: the aggregate's
     own shared-application-role term (condition 2) is the LARGER of
-    condition 1's per-role floor and `2 * K * (O + N)` (K registered
-    applications, each with two persistent connections -- one per role --
-    per Data-plane process), never the per-role floor multiplied by K (a
-    per-role floor that then "counts once" no matter how many
-    applications share it, as long as `2 * K * (O + N)` stays below it).
-    With K=2 applications, one new-basis process (`thread_limit=4`,
-    `role_pool_size` 6), and no old-basis process, the per-role floor (6)
-    exceeds `2*2*1=4`, so it is the term that is used."""
+    condition 1's per-role floor and `2 * K * (O + N * role_pool_size)` (K
+    registered applications, each with up to `role_pool_size` connections
+    per role on a new-basis process and one on an old-basis one), never the
+    per-role floor multiplied by K (a per-role floor that then "counts
+    once" no matter how many applications share it, as long as
+    `2 * K * (O + N * role_pool_size)` stays below it). With K=2
+    applications, one new-basis process (`thread_limit=4`,
+    `role_pool_size` 6), and no old-basis process, `2*2*(0+1*6)=24`
+    exceeds the per-role floor (6), so it is the term that is used."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     _provision_app(platform, "app1")
     _provision_app(platform, "app2")
@@ -1965,7 +1966,7 @@ def test_inventory_connection_headroom_shared_application_role_budget_counts_onc
     api_demand = platform_declarations._API_ROLE_STORE_COUNT * pool_size
     controlplane_demand = 16
     auditreader_demand = 4
-    app_shared_demand = max(pool_size, 2 * 2 * 1)  # K=2, O+N=1
+    app_shared_demand = max(pool_size, 2 * 2 * (0 + 1 * pool_size))  # K=2, O=0, N=1
     correct_total = (
         api_demand + controlplane_demand + auditreader_demand + app_shared_demand
         + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
@@ -2391,7 +2392,7 @@ def test_inventory_connection_headroom_app_role_demand_uses_the_total_not_the_ce
     out of the way so only the app role's own (default) CONNECTION
     LIMIT (36) can explain a `blocked` result: with `N=10` the app
     role's own demand is 60 (over 36), while condition 2's own
-    TOTAL-based aggregate demand (202) stays at or under
+    TOTAL-based aggregate demand (262) stays at or under
     `max_connections`, so condition 2 cannot explain the `blocked`
     result instead."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
@@ -2420,13 +2421,13 @@ def test_inventory_connection_headroom_app_role_demand_uses_the_total_not_the_ce
     pool_size = config.role_pool_size(ops.DEFAULT_THREAD_LIMIT)
     api_demand = platform_declarations._API_ROLE_STORE_COUNT * data_process_count_total * pool_size  # 120
     app_role_floor = data_process_count_total * pool_size  # 60
-    app_shared_demand = max(app_role_floor, 2 * 1 * data_process_count_total)  # 60
+    app_shared_demand = max(app_role_floor, 2 * 1 * data_process_count_total * pool_size)  # 120
     controlplane_demand = platform_declarations._CONTROLPLANE_ROLE_POOL_FLOOR  # 16
     auditreader_demand = platform_declarations._AUDITREADER_ROLE_POOL_FLOOR  # 4
     condition_2_demand = (
         api_demand + controlplane_demand + auditreader_demand + app_shared_demand
         + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
-    )  # 202
+    )  # 262
     assert condition_2_demand <= max_connections
     conn = ops._inventory_connect(platform.provision_dsn)
     try:
@@ -2510,8 +2511,8 @@ def test_inventory_connection_headroom_app_shared_demand_in_the_aggregate_uses_t
     assert app_role_floor == 60 and 150 >= app_role_floor
     controlplane_demand = 2 * 16
     auditreader_demand = 2 * 4
-    app_shared_demand = max(app_role_floor, 2 * 1 * data_process_count_total)
-    assert app_shared_demand == app_role_floor
+    app_shared_demand = max(app_role_floor, 2 * 1 * data_process_count_total * pool_size)
+    assert app_shared_demand == 2 * app_role_floor
     total_demand = (
         api_demand + controlplane_demand + auditreader_demand + app_shared_demand
         + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
@@ -3138,8 +3139,8 @@ def test_inventory_connection_headroom_control_demand_independent_of_thread_limi
 def test_inventory_connection_headroom_aggregate_application_term_uses_the_per_role_floor_when_larger(monkeypatch, platform):
     """204 (条件2 第1項): with K=1 registered
     application, the per-role floor (`O*c + N*p = 50 + 6 = 56`) exceeds
-    `2*K*(O+N) = 2*1*2 = 4` -- the aggregate's own application term is
-    56, never the smaller `2*K*(O+N)`. Every per-role CONNECTION LIMIT is
+    `2*K*(O+N*p) = 2*1*(1+6) = 14` -- the aggregate's own application term
+    is 56, never the smaller `2*K*(O+N*p)`. Every per-role CONNECTION LIMIT is
     raised out of the way so condition 1 alone cannot explain a `blocked`
     result; `--reserved-connections` isolates the aggregate boundary."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
@@ -3162,7 +3163,7 @@ def test_inventory_connection_headroom_aggregate_application_term_uses_the_per_r
     app_role_floor = old_basis * concurrency + 1 * pool_size
     assert app_role_floor == 56
     api_demand = platform_declarations._API_ROLE_STORE_COUNT * (old_basis * concurrency + 1 * pool_size)
-    app_shared_demand = max(app_role_floor, 2 * 1 * 2)
+    app_shared_demand = max(app_role_floor, 2 * 1 * (old_basis + 1 * pool_size))
     assert app_shared_demand == app_role_floor
     total_demand = api_demand + app_shared_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
 
@@ -3188,9 +3189,9 @@ def test_inventory_connection_headroom_aggregate_application_term_uses_the_per_r
 def test_inventory_connection_headroom_aggregate_application_term_uses_the_registration_count_when_larger(monkeypatch, platform):
     """205 (条件2 第2項): with K=4 registered
     applications and only one new-basis process (`thread_limit=4`,
-    `role_pool_size` 6, no old-basis process), `2*K*(O+N) = 2*4*1 = 8`
+    `role_pool_size` 6, no old-basis process), `2*K*(O+N*p) = 2*4*6 = 48`
     exceeds the per-role floor (6) -- the aggregate's own application
-    term is 8, never the smaller per-role floor."""
+    term is 48, never the smaller per-role floor."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     for app_id in ("app1", "app2", "app3", "app4"):
         _provision_app(platform, app_id)
@@ -3208,8 +3209,8 @@ def test_inventory_connection_headroom_aggregate_application_term_uses_the_regis
     pool_size = config.role_pool_size(thread_limit)
     api_demand = platform_declarations._API_ROLE_STORE_COUNT * pool_size
     app_role_floor = pool_size
-    app_shared_demand = max(app_role_floor, 2 * 4 * 1)
-    assert app_shared_demand == 8
+    app_shared_demand = max(app_role_floor, 2 * 4 * (0 + 1 * pool_size))
+    assert app_shared_demand == 48
     total_demand = api_demand + app_shared_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
 
     def _judge(reserved: int) -> str:
@@ -3238,11 +3239,10 @@ def test_inventory_connection_headroom_aggregate_application_term_registration_c
     exercises `2*K*(O+N)`'s own `O` addend. Here
     `O=1`, `concurrency=6`, one new-basis process (`thread_limit=4`,
     `role_pool_size` 6), and `K=4` registered applications: the per-role
-    floor is `O*c + N*p = 6 + 6 = 12`, but `2*K*(O+N) = 2*4*2 = 16`
-    exceeds it -- the aggregate's own application term is 16, never the
+    floor is `O*c + N*p = 6 + 6 = 12`, but `2*K*(O+N*p) = 2*4*(1+6) = 56`
+    exceeds it -- the aggregate's own application term is 56, never the
     smaller per-role floor. A mutation that drops `O` from this term
-    (`2*K*N = 2*4*1 = 8`) would read 12 (the per-role floor) instead,
-    under-counting by 4."""
+    (`2*K*N*p = 2*4*6 = 48`) would read 48 instead, under-counting by 8."""
     _declare_golden_path(monkeypatch, platform, data=1, control=1)
     for app_id in ("app1", "app2", "app3", "app4"):
         database_name = _provision_app(platform, app_id)
@@ -3264,8 +3264,8 @@ def test_inventory_connection_headroom_aggregate_application_term_registration_c
     app_role_floor = old_basis * concurrency + 1 * pool_size
     assert app_role_floor == 12
     api_demand = platform_declarations._API_ROLE_STORE_COUNT * (old_basis * concurrency + 1 * pool_size)
-    app_shared_demand = max(app_role_floor, 2 * 4 * 2)
-    assert app_shared_demand == 16
+    app_shared_demand = max(app_role_floor, 2 * 4 * (old_basis + 1 * pool_size))
+    assert app_shared_demand == 56
     total_demand = api_demand + app_shared_demand + ops._INVENTORY_MAX_CONCURRENT_CONNECTIONS
 
     def _judge(reserved: int) -> str:
