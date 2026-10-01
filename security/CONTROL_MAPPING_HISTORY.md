@@ -540,6 +540,10 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+**3.15 (2026-10-01), MitateDB-api -- platform upgrade, Status line withdrawn (verbatim at 3.14; the requester accepted runbook section 10.10 version 12):**
+
+- **Section 10.8 names 10.6 / 10.7 accepted at versions 7 / 7 and 10.10 not accepted at version 12**, so Gate-0 is not ready until 10.10's version 12 is accepted -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3051-3053`.
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
