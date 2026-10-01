@@ -3261,9 +3261,7 @@ the version goes up by one and §10.8's acceptance record goes back to
   (`O` = the worst-case OLD-basis Data process count, `N` = the worst-case
   NEW-basis Data process count, `role_pool_size(thread_limit) = thread_limit
   + 2` -- design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-2.)
-  `ops inventory` item (8) (`MitateDB-api/src/mitatedb_api/ops.py`) still
-  computes the application term as `2 x K x (O + N)`, so its condition 2
-  can come out lower than the one written here.
+  `ops inventory` item (8) computes the same term.
   The factor `2` in the api demand is the number of
   connection stores that role carries per process, on either basis; the
   `16` and the `4` are fixed floors that do not depend on either basis
