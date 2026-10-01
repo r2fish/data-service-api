@@ -535,107 +535,45 @@ def test_body_read_stays_on_the_loop(app_a_stack):
 
 # ---------------------------------------------------------------------------
 # Completion condition 9 (WP-8b 差し戻し (0), U-10): moving the synchronous
-# section off the event loop is only safe if that section's own critical
-# region (`ApplicationCell._lock`) actually covers the WHOLE per-request
-# lookup -> pass-1 (validation/catalog reads) -> pass-2 (execute/commit)
-# sequence -- not merely the final backend call. Before this WP's fix (per
-# the code review that sent WP-8b back, `{scratchpad}/phase10/wp8b-review.
-# md` §1/§2), `ApplicationCell`'s pass-1 catalog reads (`field_domains` et
-# al, `_idempotency_check`) ran OUTSIDE `self._lock`, sharing `Postgres
-# Backend`'s single `_developer` connection with every other in-flight
-# request against the SAME application/cell -- so one request's own
-# `commit()`/`rollback()` on that shared connection could land on a
-# DIFFERENT request's still-open transaction (measured concretely by the
-# review: an independent third connection could see request A's
-# uncommitted `CREATE TABLE` after request B's own unrelated `commit()`
-# ran on the shared connection). This WP moves `self._lock` to wrap
-# lookup -> pass-1 -> pass-2 for every public `ApplicationCell` method
-# (`create_collection`/`add_field`/`alter_field`/`schema_revision`/
-# `catalog`/`insert`/`read`/`update`/`delete`/`transact`), so two requests
-# against the SAME cell are now fully serialized in Python BEFORE either
-# one ever touches the shared `_developer` connection -- eliminating the
-# interleaving structurally.
+# section off the event loop is only safe if two requests against the SAME
+# application never share a connection or a transaction: each request
+# borrows its own connections for its whole lookup -> pass-1 (validation/
+# catalog reads) -> pass-2 (execute/commit) sequence (`PostgresBackend.
+# request_scope`), so one request's `commit()`/`rollback()` can never land
+# on a DIFFERENT request's still-open transaction.
 # ---------------------------------------------------------------------------
 
 
-def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_race(app_a_stack, app_a):
-    """Adapts the review's own read-only probe (`{scratchpad}/phase10/
-    wp8b_review_probe.py`) into a permanent regression test.
+def test_concurrent_requests_on_one_application_never_touch_each_others_transaction(app_a_stack, app_a):
+    """Two requests against the SAME application (one cell, one backend)
+    run at once and never reach each other's connection or transaction.
 
     A = `POST /v1/schema/operations` (`create_entity`) -- stalled, via a
-    patched `PostgresBackend._bump_schema_revision`, WHILE it still holds
-    an OPEN `_developer` transaction (the `CREATE TABLE` this operation
-    just issued) and -- post-fix -- `ApplicationCell._lock` itself.
-    B = `POST /v1/data/<entity>/query` -- its own pass-1 catalog read
-    (`field_domains`) used to run on the SAME shared `_developer`
-    connection, unlocked; post-fix it can only run once A's lock hold
-    ends.
+    patched `PostgresBackend._bump_schema_revision`, WHILE it holds an OPEN
+    developer transaction (the `CREATE TABLE` this operation just issued).
+    B = `POST /v1/data/<entity>/query` on another entity -- its catalog
+    reads run on the developer connection its own request scope borrowed,
+    and commit or roll back there, never on A's. While A is stalled:
 
-    Mutation (reverting `self._lock`'s new position back to wrapping only
-    pass-2, the pre-fix shape -- i.e. undoing this WP): B's own `field_
-    domains` call reaches the shared `_developer` connection and commits
-    WHILE A is still stalled inside its own open DDL transaction --
-    `visible_before_a_commit` becomes 1 again (an independent connection
-    sees A's uncommitted `CREATE TABLE`) and `b_started_before_a_released`
-    becomes `True` (B's own `field_domains` starts before A's `release`
-    event is ever set) -- both assertions below go red (measured: M1,
-    `{'b_done_before_a_released': True, 'b_started_before_a_released':
-    True, 'visible_before_a_commit': 1, 'a_status': 200, 'b_status':
-    200}`).
+    - B completes (nothing serializes the two requests on the cell: the
+      connections are per request and A's schema locks cover only A's own
+      entity, which a query never locks);
+    - an independent connection does not see A's uncommitted `CREATE TABLE`
+      (B's transaction end did not commit A's transaction);
+    - after A is released A commits, and its table is visible (B's scope
+      exit did not roll A's transaction back).
 
-    Budget precondition: B's own race window below (`b_race_window_s`,
-    derived from `app_a_stack.cell.config.max_execution_ms`, 1.0s at the
-    default 5000ms) must stay well inside B's own execution budget --
-    post-fix, B is held behind A's lock for that entire window, so B's
-    OWN `PostgresBackend._timeout_ms`/`_set_timeouts` (computed from the
-    wall-clock `deadline` set at B's own `ApplicationCell._limit_gate`
-    entry -- `cell.py`, `deadline = time.monotonic() + ...` -- reached
-    AFTER auth, the body read, and the request's own shape checks, never
-    at B's request start) would clamp to `max(1, ...)` ms once B finally
-    runs if that window ever reached B's own budget -- turning the
-    `a_status`/`b_status` assertion below into a load-timing assertion,
-    not a lock-correctness one.
-
-    R-87 (`backend_postgres.PostgresBackend`'s own developer-connection
-    catalog reads now call `_set_timeouts` unconditionally, at the
-    CONSTRUCTED `max_execution_ms`, never `deadline`) mixes two kinds of
-    `_set_timeouts` call into `after_release_timeouts` below: B's own
-    pass-1 catalog reads (`field_domains` via `_select_fields`, `field_
-    types` via `_decode_rows`) always record the constructed constant
-    (`5000` at `app_a_stack`'s default, D-3's own declared limitation --
-    the residual budget the lock hold ate into never reaches them), while
-    B's own data read (`backend.read(...)`, still `deadline`-derived, the
-    ORIGINAL single call this paragraph used to describe) records
-    whatever remains of B's budget after the hold. Measured on the
-    UNMUTATED baseline: `after_release_timeouts == [5000, 3964, 5000]` --
-    three calls, not one, and only the middle one moves with the hold.
-
-    Mutation (M2, the window widened back to exactly the pre-fix 10 s,
-    `/ 1000 * 2` instead of `/ 1000 / 5`): the precondition assertion on
-    `after_release_timeouts` still goes red deterministically BEFORE the
-    status assertion is ever reached, but no longer because "the one
-    call" clamps -- a hold of at least 10 s is longer than B's own 5 s
-    budget, so only B's own deadline-derived data read clamps to `1`ms;
-    the two constructed-constant catalog-read calls stay at `5000`, unmoved
-    by the hold (measured: `after_release_timeouts == [5000, 1, 5000]`,
-    `visible_before_a_commit`/`b_started_before_a_released` both stayed at
-    their correct, post-fix values) -- `all(t > 1 ...)` still fails on the
-    single clamped entry, so this is still genuinely a budget artifact on
-    B's data read, not a lock regression (the lock assertions stayed at
-    their post-fix values) and not evidence that the catalog-read calls
-    also clamp (D-3: they never see the residual budget at all).
-    """
+    Mutation: hand both requests the same connection (`PostgresBackend.
+    _borrow` returning one fixed connection per pool) -- B's catalog
+    reads then run inside A's transaction and B's scope end commits or
+    rolls it back: `visible_before_a_commit` becomes 1 or
+    `visible_after_a_commit` becomes 0."""
     _create_entity(app_a_stack, "wp8b_u10_probe_target", ["item_key"])
 
     entered = threading.Event()
     release = threading.Event()
-    b_started = threading.Event()
-    b_done = threading.Event()
 
     original_bump = PostgresBackend._bump_schema_revision
-    original_domains = PostgresBackend.field_domains
-    original_set_timeouts = PostgresBackend._set_timeouts
-    original_gate = type(app_a_stack.cell)._gate
 
     def _stalling_bump(self, cur):
         result = original_bump(self, cur)
@@ -644,33 +582,14 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
         assert held, "release was never set -- the held request would hang forever"
         return result
 
-    def _watched_domains(self, collection):
-        b_started.set()
-        try:
-            return original_domains(self, collection)
-        finally:
-            b_done.set()
-
-    set_timeouts_calls: list[dict] = []
-
-    def _recording_set_timeouts(self, cur, timeout_ms):
-        set_timeouts_calls.append({"timeout_ms": timeout_ms, "after_release": release.is_set()})
-        return original_set_timeouts(self, cur, timeout_ms)
-
-    b_gated = threading.Event()
-
-    def _watched_gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
-        if endpoint_kind == "query":
-            b_gated.set()
-        return original_gate(
-            self, principal, request, request_id=request_id, budget=budget, endpoint_kind=endpoint_kind)
-
     observed: dict[str, object] = {}
 
-    # Derived from the deployed budget -- see the docstring's "Budget
-    # precondition" paragraph for why this must stay well inside
-    # max_execution_ms.
-    b_race_window_s = app_a_stack.cell.config.max_execution_ms / 1000 / 5
+    def _visible() -> int:
+        with psycopg.connect(app_a.developer_dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name='wp8b_u10_probe_race'")
+            return cur.fetchone()[0]
 
     async def _scenario():
         async with httpx.AsyncClient(
@@ -686,66 +605,32 @@ def test_pass1_and_pass2_serialize_through_cell_lock_no_developer_connection_rac
                 await asyncio.sleep(0.025)
             assert entered.is_set(), "A never reached its own stall point"
 
-            b_task = asyncio.ensure_future(client.post(
+            b_response = await asyncio.wait_for(client.post(
                 "/v1/data/wp8b_u10_probe_target/query",
                 headers={"authorization": f"Bearer {app_a_stack.runtime_bearer}"},
-                json={"select": ["item_key"]}))
-            for _ in range(400):
-                if b_gated.is_set():
-                    break
-                await asyncio.sleep(0.025)
-            assert b_gated.is_set(), "B never reached its own _gate call (endpoint_kind='query')"
-
-            # See the docstring's "Budget precondition" paragraph for why
-            # this window must stay well inside B's own max_execution_ms.
-            window_end = time.monotonic() + b_race_window_s
-            while time.monotonic() < window_end and not b_done.is_set():
-                await asyncio.sleep(0.025)
-            observed["b_done_before_a_released"] = b_done.is_set()
-            observed["b_started_before_a_released"] = b_started.is_set()
-
-            def _peek() -> int:
-                with psycopg.connect(app_a.developer_dsn, autocommit=True) as conn, conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT count(*) FROM information_schema.tables "
-                        "WHERE table_schema='public' AND table_name='wp8b_u10_probe_race'")
-                    return cur.fetchone()[0]
-
-            observed["visible_before_a_commit"] = await asyncio.to_thread(_peek)
+                json={"select": ["item_key"]}), timeout=10)
+            observed["b_status"] = b_response.status_code
+            observed["a_still_stalled"] = not a_task.done() and not release.is_set()
+            observed["visible_before_a_commit"] = await asyncio.to_thread(_visible)
 
             release.set()
             a_response = await asyncio.wait_for(a_task, timeout=30)
-            b_response = await asyncio.wait_for(b_task, timeout=30)
             observed["a_status"] = a_response.status_code
-            observed["b_status"] = b_response.status_code
+            observed["visible_after_a_commit"] = await asyncio.to_thread(_visible)
 
-    with mock.patch.object(PostgresBackend, "_bump_schema_revision", _stalling_bump), \
-         mock.patch.object(PostgresBackend, "field_domains", _watched_domains), \
-         mock.patch.object(PostgresBackend, "_set_timeouts", _recording_set_timeouts), \
-         mock.patch.object(type(app_a_stack.cell), "_gate", _watched_gate):
+    with mock.patch.object(PostgresBackend, "_bump_schema_revision", _stalling_bump):
         asyncio.run(_scenario())
 
     print("\nU-10 PROBE OBSERVED:", observed)
+    assert observed["a_still_stalled"], (
+        f"request A was not stalled when B answered, so B never ran alongside it: {observed}")
+    assert observed["b_status"] == 200, (
+        f"request B did not complete while request A held its open transaction: {observed}")
     assert observed["visible_before_a_commit"] == 0, (
-        "INTERLEAVING REGRESSION: an independent connection saw request A's "
-        "own uncommitted CREATE TABLE before A's own commit point -- "
-        "request B's pass-1 catalog read is no longer serialized behind A "
-        f"on the same cell lock: {observed}")
-    assert not observed["b_started_before_a_released"], (
-        "request B reached field_domains (the shared _developer connection) "
-        f"BEFORE request A released its own lock hold: {observed}")
-    after_release_timeouts = [t["timeout_ms"] for t in set_timeouts_calls if t["after_release"]]
-    assert after_release_timeouts, (
-        "no PostgresBackend._set_timeouts call was observed after A's own "
-        "release was set -- this precondition would be vacuous: "
-        f"{set_timeouts_calls}")
-    assert all(t > 1 for t in after_release_timeouts), (
-        "a statement timeout of <= 1ms was set for a call made after A's "
-        "own release -- B's own execution budget (max_execution_ms) ran "
-        "out while B was held behind A's lock; the fix is to shorten B's "
-        f"own race window, not to treat this as a lock regression: {set_timeouts_calls}")
-    assert observed["a_status"] == 200 and observed["b_status"] == 200, (
-        f"{observed} timeouts={set_timeouts_calls}")
+        "INTERLEAVING REGRESSION: an independent connection saw request A's own uncommitted CREATE TABLE "
+        f"before A's own commit point -- B's transaction end committed A's transaction: {observed}")
+    assert observed["a_status"] == 200 and observed["visible_after_a_commit"] == 1, (
+        f"request A did not commit its own transaction after B finished: {observed}")
 
 
 # ---------------------------------------------------------------------------

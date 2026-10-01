@@ -312,9 +312,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     concurrency_slots.check_slot_directory(slot_dir)
     concurrency_slots.selfcheck_slot_locking(slot_dir)
     # design D-4: every connection this process opens from here on (the
-    # platform pool, every served application's two persistent
-    # connections, the durable audit sink's pool, the startup reads
-    # below) carries this `application_name` (`pool.py`'s
+    # platform pool, every served application's role pools, the durable
+    # audit sink's pool, the startup reads below) carries this `application_name` (`pool.py`'s
     # own module-level toggle).
     set_connection_application_name(f"MitateDB-api:data:{os.getpid()}")
 
@@ -503,11 +502,9 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     )
     audit = AuditSink()
 
-    # Every served application's own `PostgresBackend` (two persistent
-    # connections, one per role -- `backend_postgres.PostgresBackend`'s
-    # own documented, deliberate choice not to pool data-plane connections
-    # this WP, design v1.1 §7 future-work ledger) is built once, eagerly,
-    # at startup -- the served set is static configuration for this WP
+    # Every served application's own `PostgresBackend` (one bounded
+    # connection pool per role, `backend_postgres.PostgresBackend`) is
+    # built once, eagerly, at startup -- the served set is static configuration for this WP
     # (no in-band `register_application`/`provision_application` exists
     # yet), so there is no "unknown application shows up later" case to
     # handle lazily.
@@ -539,20 +536,25 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         runtime_dsn, developer_dsn = app_dsns[application_id]
         # Q4 phase (design D-3(f), F-12; supervisor ruling 2026-09-05
         # H-1(a)): "cell open" for this served application --
-        # `PostgresBackend.__init__` checks the ledger itself, over the
-        # runtime connection it just opened, but no longer RAISES on a
-        # missing upgrade -- it stores the F-12 message on the backend
-        # instead, so this loop always completes and every OTHER served
-        # application's cell opens normally. The affected application's
-        # own cell still gets built and registered below (a refusing
-        # cell, not a missing one) -- its backend refuses every real
-        # operation with `SERVICE_UNAVAILABLE`/F-12 the moment a request
-        # reaches it (`backend_postgres._guard_pending_platform_
-        # upgrades`), while this process itself starts and every other
-        # application is served without interruption.
+        # `PostgresBackend` opens no connection when it is built;
+        # `verify_platform_upgrades` borrows one runtime connection from
+        # the backend's pool, checks the ledger over it and returns it. A
+        # missing upgrade does not RAISE -- the F-12 message is stored on
+        # the backend instead, so this loop always completes and every
+        # OTHER served application's cell opens normally. The affected
+        # application's own cell still gets built and registered below (a
+        # refusing cell, not a missing one) -- its backend refuses every
+        # real request with `SERVICE_UNAVAILABLE`/F-12 the moment it
+        # reaches `request_scope`, while this process itself starts and
+        # every other application is served without interruption. The
+        # application's pools hold at most `_role_pool_size` connections
+        # per role, the same bound the platform pool and the F-16/F-18
+        # checks are sized with.
         backend = PostgresBackend(
             runtime_dsn, developer_dsn, application_id=application_id, max_execution_ms=config.max_execution_ms,
+            pool_size=_role_pool_size,
         )
+        backend.verify_platform_upgrades()
         if backend._pending_platform_upgrade_message is not None:
             # H-1: logged once, here, at cell-open time -- the SAME text
             # this application's own requests will see in every
@@ -622,8 +624,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         finally:
             # Release every connection this process holds on shutdown: the
             # platform registry's bounded pool, the durable audit sink's
-            # pool, and every served application's own two persistent
-            # PostgreSQL connections.
+            # pool, and every connection in every served application's role
+            # pools.
             credentials.close()
             durable_audit.close()
             for cell in cells.values():
@@ -668,7 +670,7 @@ async def _run_lifespan_once(asgi_app: ASGIApp) -> None:
     `build_app()`'s own `_lifespan` hook is what closes every connection
     this process opened (`credentials.close()` -- the platform pool --
     `durable_audit.close()` -- the durable audit sink's pool -- and every
-    served application's own two persistent connections, `cell._backend.
+    served application's role-pool connections, `cell._backend.
     close()`) -- reused here rather than duplicated."""
     to_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()
     from_app: "asyncio.Queue[dict[str, str]]" = asyncio.Queue()

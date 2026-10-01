@@ -58,6 +58,7 @@ from adapter import (  # noqa: E402
     IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
+    PlanVerificationHold,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
@@ -369,9 +370,9 @@ class _StalledGateContextManager:
     and BEFORE returning that value back to the real caller (`catalog`/
     `insert`/.../`ApplicationRuntime.capabilities`'s own `with self.
     _limit_gate(...) as deadline:` block) -- which is exactly what lets
-    `ApplicationCell._lock` (`cell.py:329`, acquired by the caller only
-    AFTER that `with` block's own body starts) stay unacquired for as
-    long as this stalls."""
+    the backend's request scope (opened by the caller only AFTER that
+    `with` block's own body starts) stay unopened for as long as this
+    stalls."""
 
     __slots__ = ("_inner", "_entered", "_release")
 
@@ -433,7 +434,7 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
     table requires must sit AFTER the counter, not before it. Wrapping
     `_backend` instead would hang permanently at `n >= 2` (D-2's own
     explicit prohibition: a second held thread would block forever
-    trying to acquire `ApplicationCell._lock` while the first one holds
+    trying to open the backend's request scope while the first one holds
     it stalled inside `_backend`, never reaching this proxy's own release
     wait at all).
 
@@ -511,11 +512,11 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
 # is the ONE choke every keyed entry point calls -- it performs BOTH the
 # lookup AND the `idempotency_entries` reservation and returns `(replay_
 # response, digest, now_ms)`; a fresh admission is exactly the case
-# `replay_response is None` (`cell.py:1318`). Every public entry point
-# already holds this SAME cell's own `self._lock` (an `RLock`, WP-8b 案
-# A) for its ENTIRE call -- lookup -> pass-1 -> pass-2 -- so a second,
+# `replay_response is None`. Every public entry point already holds this
+# SAME backend's request scope (the SQLite backend's own `RLock`) for its
+# ENTIRE call -- lookup -> pass-1 -> pass-2 -- so a second,
 # key-matching request ("B") never even reaches `_idempotency_check`
-# while "A" is held: B blocks acquiring `self._lock` at the top of
+# while "A" is held: B blocks opening its own request scope at the top of
 # whatever public method it calls instead (design D-13 "実装の形
 # (6d-ii) の確定" (4) 表, `MitateDB-api` row). This function only needs
 # to recognize the ONE call that is both key-matching and a fresh
@@ -529,8 +530,8 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     entered = threading.Semaphore(0)
     release = threading.Event()
 
-    def _checked(key, digest_request, *, conn=None, deadline=None):
-        result = original_check(key, digest_request, conn=conn, deadline=deadline)
+    def _checked(key, digest_request, **kwargs):
+        result = original_check(key, digest_request, **kwargs)
         replay_response, _digest, _now_ms = result
         # A fresh admission (`replay_response is None`) for the key this
         # hold is watching -- a replay, a CONFLICT/LIMIT_EXCEEDED
@@ -558,6 +559,85 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     finally:
         release.set()
         setattr(cell_obj, "_idempotency_check", original_check)
+
+
+# port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
+# section 9's `conformance-tests/` paragraph, Q-5): `hold_after_plan_
+# verification` realization for this in-process plug. A schema operation
+# on `ApplicationCell` (`create_entity` / `add_field` / `alter_field`,
+# `cell.py`) that presents a `plan` or `dry_run` reads the Application's
+# current revision and checks its `plan` against it in the cell
+# (`check_plan_precondition`), and only then calls the backend's
+# DDL-carrying method -- `create_collection` / `add_field` /
+# `alter_field_constraints` -- which is the first thing that changes the
+# schema. The stall point is the ENTRY of that backend call, on the
+# Application's own backend instance: after the revision read and the
+# plan check (and after every lock the cell took for them), before the
+# first DDL statement. The cell's own `create_collection` / `create_entity`
+# / `add_field` / `alter_field` are wrapped only to mark the calling
+# thread while a call that presents a `plan` or `dry_run` is in progress;
+# a schema operation presenting neither passes through, unmarked. One
+# armed hold claims the first marked call that reaches the stall point (a
+# `threading.Lock` nobody releases) and lets every later call through, so
+# exactly ONE schema operation is held. Data operations never reach the
+# three backend methods. The adapter replaces these product methods on
+# the instance and restores them on exit; no product source changes.
+
+
+@contextmanager
+def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerificationHold]:
+    backend = cell_obj._backend  # noqa: SLF001 -- adapter-internal plumbing, same convention `_hold_after_idempotency_check` above uses.
+    backend_names = ("create_collection", "add_field", "alter_field_constraints")
+    cell_names = ("create_collection", "create_entity", "add_field", "alter_field")
+    backend_originals = {name: getattr(backend, name) for name in backend_names}
+    cell_originals = {name: getattr(cell_obj, name) for name in cell_names}
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    marked = threading.local()
+
+    def _marking(original):
+        def _marked(*args, **kwargs):
+            previous = getattr(marked, "presents_plan_or_dry_run", False)
+            marked.presents_plan_or_dry_run = previous or kwargs.get("plan") is not None or bool(kwargs.get("dry_run"))
+            try:
+                return original(*args, **kwargs)
+            finally:
+                marked.presents_plan_or_dry_run = previous
+
+        return _marked
+
+    def _stalling(original):
+        def _stalled(*args, **kwargs):
+            if getattr(marked, "presents_plan_or_dry_run", False) and claimed.acquire(blocking=False):
+                entered.release()
+                release.wait()
+            return original(*args, **kwargs)
+
+        return _stalled
+
+    for name, original in cell_originals.items():
+        setattr(cell_obj, name, _marking(original))
+    for name, original in backend_originals.items():
+        setattr(backend, name, _stalling(original))
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_plan_verification: no schema operation reached the entry of the backend's "
+                f"DDL-carrying method within {timeout_s}s (expected the next schema operation presenting a "
+                "plan or dry_run on this Application to stall there -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield PlanVerificationHold(_wait_until_held)
+    finally:
+        release.set()
+        for name, original in backend_originals.items():
+            setattr(backend, name, original)
+        for name, original in cell_originals.items():
+            setattr(cell_obj, name, original)
 
 
 class MitateDBConformanceAdapter(ConformanceAdapter):
@@ -1180,7 +1260,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
     # WP-6d-ii): wraps this SAME cell's own `_idempotency_check` --
     # see `_hold_after_idempotency_check`'s own module comment for why
-    # this cell's own `self._lock` (not this hook) is what a concurrent
+    # the backend's request scope (not this hook) is what a concurrent
     # second request actually waits on.
     def hold_after_idempotency_lookup(self, session, idempotency_key: str):
         """See `ConformanceAdapter.hold_after_idempotency_lookup`'s own
@@ -1190,6 +1270,19 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         above this method."""
         cell = self._control.cells[session.principal.application_id]
         return _hold_after_idempotency_check(cell, idempotency_key)
+
+    # port v1.20: wraps this Application's own backend's DDL-carrying
+    # methods -- see `_hold_after_plan_verification`'s own module comment
+    # for why the stall point sits at their entry and what a concurrent
+    # second schema operation waits on.
+    def hold_after_plan_verification(self, session):
+        """See `ConformanceAdapter.hold_after_plan_verification`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_plan_verification` and the comment immediately above
+        it."""
+        cell = self._control.cells[session.principal.application_id]
+        return _hold_after_plan_verification(cell)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).

@@ -97,6 +97,7 @@ from adapter import (  # noqa: E402
     IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
+    PlanVerificationHold,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
@@ -851,8 +852,9 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
 # in-process here too (`self._cells[app_id]`, same object every real
 # `POST` request against this Application dispatches into), so this
 # realization needs no HTTP-specific plumbing beyond locating the cell.
-# `ApplicationCell._lock` (WP-8b 案 A) is what a concurrent second
-# request actually waits on, exactly as on the in-process plug.
+# The per-key advisory lock (`pg_advisory_xact_lock`) the held request
+# keeps until its transaction ends is what a concurrent second request for
+# the same key actually waits on, in this process or another.
 
 
 @contextmanager
@@ -861,8 +863,8 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     entered = threading.Semaphore(0)
     release = threading.Event()
 
-    def _checked(key, digest_request, *, conn=None, deadline=None):
-        result = original_check(key, digest_request, conn=conn, deadline=deadline)
+    def _checked(key, digest_request, **kwargs):
+        result = original_check(key, digest_request, **kwargs)
         replay_response, _digest, _now_ms = result
         if replay_response is None and key == idempotency_key:
             entered.release()
@@ -885,6 +887,87 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     finally:
         release.set()
         setattr(cell_obj, "_idempotency_check", original_check)
+
+
+# port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
+# section 9's `conformance-tests/` paragraph, Q-5): `hold_after_plan_
+# verification` realization for this HTTP plug (the same running
+# process's cell, reached the same way `_hold_after_idempotency_check`
+# above reaches it). A schema operation
+# on `ApplicationCell` (`create_entity` / `add_field` / `alter_field`,
+# `cell.py`) that presents a `plan` or `dry_run` reads the Application's
+# current revision and checks its `plan` against it in the cell
+# (`check_plan_precondition`), and only then calls the backend's
+# DDL-carrying method -- `create_collection` / `add_field` /
+# `alter_field_constraints` -- which is the first thing that changes the
+# schema. The stall point is the ENTRY of that backend call, on the
+# Application's own backend instance: after the revision read and the
+# plan check (and after every lock the cell took for them), before the
+# first DDL statement. The cell's own `create_collection` / `create_entity`
+# / `add_field` / `alter_field` are wrapped only to mark the calling
+# thread while a call that presents a `plan` or `dry_run` is in progress;
+# a schema operation presenting neither passes through, unmarked. One
+# armed hold claims the first marked call that reaches the stall point (a
+# `threading.Lock` nobody releases) and lets every later call through, so
+# exactly ONE schema operation is held. Data operations never reach the
+# three backend methods. The adapter replaces these product methods on
+# the instance and restores them on exit; no product source changes.
+
+
+@contextmanager
+def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerificationHold]:
+    backend = cell_obj._backend  # noqa: SLF001 -- adapter-internal plumbing, same convention `_hold_after_idempotency_check` above uses.
+    backend_names = ("create_collection", "add_field", "alter_field_constraints")
+    cell_names = ("create_collection", "create_entity", "add_field", "alter_field")
+    backend_originals = {name: getattr(backend, name) for name in backend_names}
+    cell_originals = {name: getattr(cell_obj, name) for name in cell_names}
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    marked = threading.local()
+
+    def _marking(original):
+        def _marked(*args, **kwargs):
+            previous = getattr(marked, "presents_plan_or_dry_run", False)
+            marked.presents_plan_or_dry_run = previous or kwargs.get("plan") is not None or bool(kwargs.get("dry_run"))
+            try:
+                return original(*args, **kwargs)
+            finally:
+                marked.presents_plan_or_dry_run = previous
+
+        return _marked
+
+    def _stalling(original):
+        def _stalled(*args, **kwargs):
+            if getattr(marked, "presents_plan_or_dry_run", False) and claimed.acquire(blocking=False):
+                entered.release()
+                release.wait()
+            return original(*args, **kwargs)
+
+        return _stalled
+
+    for name, original in cell_originals.items():
+        setattr(cell_obj, name, _marking(original))
+    for name, original in backend_originals.items():
+        setattr(backend, name, _stalling(original))
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_plan_verification: no schema operation reached the entry of the backend's "
+                f"DDL-carrying method within {timeout_s}s (expected the next schema operation presenting a "
+                "plan or dry_run on this Application to stall there -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield PlanVerificationHold(_wait_until_held)
+    finally:
+        release.set()
+        for name, original in backend_originals.items():
+            setattr(backend, name, original)
+        for name, original in cell_originals.items():
+            setattr(cell_obj, name, original)
 
 
 class _AuthGate:
@@ -1047,9 +1130,9 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         try:
             self._app_pg: dict[str, _PgAppInfo] = {}
             # R-1's own risk note ("接続数の有限性... adapter は接続を確実に
-            # 閉じる"): `backend_postgres.PostgresBackend` deliberately holds
-            # TWO PERSISTENT connections per application for this WP's own
-            # small, static-deployment use case (its own module docstring).
+            # 閉じる"): each `backend_postgres.PostgresBackend` holds one
+            # runtime and one developer pool per application, each opening
+            # its connections on first use up to its `pool_size`.
             # A conformance session provisions many dozens of short-lived
             # THROWAWAY applications (every `build_fixture()` call adds a
             # fresh pair), which would otherwise accumulate open connections
@@ -1060,7 +1143,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # and `provision_application` evicts (closes) the LEAST
             # recently used entry once the cap is exceeded -- bounding this
             # adapter's own steady-state connection count to
-            # `2 * _MAX_OPEN_CELLS` regardless of how many total
+            # `2 * pool_size * _MAX_OPEN_CELLS` regardless of how many total
             # applications this session ever provisions. Every conformance
             # test's own fixture apps stay at the "most recently used" end
             # for the whole duration of that one test (nothing else is
@@ -1456,8 +1539,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     # ------------------------------------------------------------------
 
     # See `self._cells`'s own docstring (`__init__`) for why this is
-    # bounded: 6 concurrently-open application cells (12 persistent
-    # PostgreSQL connections) comfortably covers this suite's own
+    # bounded: 6 concurrently-open application cells (two role pools
+    # each) comfortably covers this suite's own
     # per-test working set (almost always 2 apps, occasionally 3), while
     # keeping this adapter's own steady-state connection footprint small
     # relative to a local cluster's `max_connections` -- kept
@@ -1475,6 +1558,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             _evicted_id, evicted_cell = self._cells.popitem(last=False)
             evicted_cell._backend.close()
 
+    def _new_backend(self, info: Any, application_id: str) -> PostgresBackend:
+        """The backend of one provisioned application, built the way the
+        composition root builds it (`main.py::build_app`): pools sized by
+        the process's own thread limit (`role_pool_size(DEFAULT_THREAD_
+        LIMIT)`), then the startup ledger check."""
+        backend = PostgresBackend(
+            info.runtime_dsn, info.developer_dsn, application_id=application_id,
+            max_execution_ms=self._application_config.max_execution_ms,
+            pool_size=role_pool_size(DEFAULT_THREAD_LIMIT),
+        )
+        backend.verify_platform_upgrades()
+        return backend
+
     def provision_application(self, application_id: str) -> None:
         info = _provision_pg_app(self._platform, application_id)
         self._app_pg[application_id] = info
@@ -1489,10 +1585,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # (set in `__init__`) is byte-for-byte the same
             # `FoundationConfig(...)` this line used to construct inline.
             application_id, self._application_config,
-            backend=PostgresBackend(
-                info.runtime_dsn, info.developer_dsn, application_id=application_id,
-                max_execution_ms=self._application_config.max_execution_ms,
-            ),
+            backend=self._new_backend(info, application_id),
             audit_router=self._audit_router, limit_holder=self._limit_holder,
         )
         self._evict_cells_over_cap()
@@ -1511,8 +1604,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # free registry+database+role state, not merely hide a row.
         #
         # Phase 7 WP-5 rework (supervisor ruling 2026-09-06 item 1):
-        # explicitly closes the popped cell's own two persistent
-        # connections (`_evict_cells_over_cap`'s own `evicted_cell.
+        # explicitly closes the popped cell's own two role pools
+        # (`_evict_cells_over_cap`'s own `evicted_cell.
         # _backend.close()` pattern, reused here) BEFORE the real DROP
         # DATABASE below, rather than relying on Python reference-count
         # deallocation to close them in time -- this method is about to
@@ -2212,6 +2305,20 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         cell = self._cells[session.application_id]
         return _hold_after_idempotency_check(cell, idempotency_key)
+
+    # port v1.20: wraps this Application's own backend's DDL-carrying
+    # methods -- see `_hold_after_plan_verification`'s own module comment
+    # for why the stall point sits at their entry and what a concurrent
+    # second schema operation waits on.
+    def hold_after_plan_verification(self, session):
+        """See `ConformanceAdapter.hold_after_plan_verification`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_plan_verification` and the comment immediately above
+        it."""
+        assert isinstance(session, _Session)
+        cell = self._cells[session.application_id]
+        return _hold_after_plan_verification(cell)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
@@ -3377,23 +3484,34 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 return cur.fetchone()[0]
 
     def pool_stats(self) -> dict[str, dict[str, int | float]]:
-        """R-78 (D-2): the data-plane counterpart of `conformance_adapter_
-        r2db_http.py`'s identical addition. This peer has no connection
-        pool on its data plane (module docstring, `backend_postgres.py`
-        :71-74) -- each `ApplicationCell` in `self._cells` serializes its
-        two persistent connections through its own `RLock` instead
-        (`cell.py::ApplicationCell._lock`). Returns that lock's own
-        `stats()` dict (keys `lock_acquire_count`/`wait_count`/`wait_
-        total_ms`/`wait_max_ms`), keyed by `application_id` alone (there is
-        exactly one lock per application, not one per role). Empty when no
-        cell is currently open."""
-        return {application_id: cell._lock.stats() for application_id, cell in self._cells.items()}  # noqa: SLF001 -- adapter-internal reach-in, same convention as this file's other `cell._...` accesses above
+        """The data-plane counterpart of `conformance_adapter_r2db_http.py`'s
+        `pool_stats`. For each `ApplicationCell` in `self._cells`, two kinds
+        of entries:
+
+        - one per role pool (`backend_postgres.PostgresBackend.pool_stats`):
+          the pool's own `stats()` dict (keys `size`/`acquire_count`/
+          `wait_count`/`wait_total_ms`/`wait_max_ms`/`in_use_peak`), keyed
+          `<application_id>/<role>` -- the same key as r2db's;
+        - one for the application's schema lock (`PostgresBackend.schema_
+          lock_stats`, the shared and exclusive entity-lock acquisitions and
+          the application-wide one counted together): keys `acquire_count`/
+          `wait_count`/`wait_total_ms`/`wait_max_ms`, keyed
+          `<application_id>`. A wait is an acquisition the non-blocking
+          attempt did not get.
+
+        Empty when no cell is currently open."""
+        stats: dict[str, dict[str, int | float]] = {}
+        for application_id, cell in self._cells.items():
+            for role, role_stats in cell._backend.pool_stats().items():  # noqa: SLF001 -- adapter-internal reach-in, same convention as this file's other `cell._...` accesses above
+                stats[f"{application_id}/{role}"] = role_stats
+            stats[application_id] = cell._backend.schema_lock_stats()  # noqa: SLF001 -- same reach-in
+        return stats
 
     def prepared_stats(self) -> list[dict]:
         """R-79 (WO §1.2 D-2/D-3): the data-plane counterpart of
         `conformance_adapter_r2db_http.py`'s identical addition. Calls each
         open cell's own PUBLIC `prepared_stats()` (`cell.py::ApplicationCell.
-        prepared_stats`, under that cell's own lock) -- unlike `pool_stats`
+        prepared_stats`) -- unlike `pool_stats`
         immediately above, this needs no `noqa: SLF001` reach-in, since
         `ApplicationCell.prepared_stats` is itself a public method. Flat
         list across every open cell (each connection's own `label` already

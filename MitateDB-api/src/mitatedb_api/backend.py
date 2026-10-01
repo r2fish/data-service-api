@@ -57,6 +57,59 @@ SQL_OPERATOR_TOKENS = {
 UNCHANGED = object()
 
 
+#: The three kinds of request scope (`StorageBackend.request_scope`):
+#: `"schema"` holds the developer connection only (schema operations and the
+#: catalog reads that are served from the registry), `"dml"` the runtime
+#: connection for the write plus the developer connection for the catalog
+#: reads that precede it, `"query"` the same pair for a read.
+SCOPE_KINDS = ("schema", "dml", "query")
+
+
+class RequestScope:
+    """One request's hold on a storage backend, from the moment a cell
+    starts serving it until the response is decided.
+
+    `StorageBackend.request_scope` yields one. The backend methods a request
+    calls take it as their `scope=` keyword argument and do their work on
+    the connections it holds (`main`: the request's own transaction --
+    schema operations on the developer connection, data operations on the
+    runtime connection; `developer`: the connection every catalog read
+    goes through, the same object as `main` for a schema operation), so one
+    request is one transaction on `main` and two requests never share a
+    connection. A backend with no connection concept (the in-process
+    SQLite backend) leaves both `None` and holds its own lock for the whole
+    scope instead.
+
+    The scope takes no lock by itself. The cell takes them at the points
+    its own order requires, through `lock_schema` and `lock_entities`; a
+    backend whose scope already serializes the whole request implements
+    both as no-ops."""
+
+    __slots__ = ("kind", "deadline", "main", "developer", "_backend")
+
+    def __init__(self, kind, deadline, *, backend, main=None, developer=None):
+        if kind not in SCOPE_KINDS:
+            raise ValueError(f"unknown request scope kind {kind!r}")
+        self.kind = kind
+        self.deadline = deadline
+        self.main = main
+        self.developer = developer
+        self._backend = backend
+
+    def lock_schema(self):
+        """Serializes this request against every other schema operation on
+        the same application (schema operations only)."""
+        self._backend.lock_schema(scope=self)
+
+    def lock_entities(self, names, *, shared):
+        """Locks the entities `names` (each a validated identifier) for the
+        rest of this request: `shared=True` for a data operation, which
+        excludes a schema operation on those entities and nothing else;
+        `shared=False` for a schema operation on them, which excludes data
+        operations and other schema operations."""
+        self._backend.lock_entities(names, shared=shared, scope=self)
+
+
 class StorageBackend:
     """Documents the methods ``ApplicationCell`` calls on a backend.
 
@@ -75,11 +128,41 @@ class StorageBackend:
     into SQL text; every value reaches the database only as a bound
     parameter.
 
+    Every method that touches storage takes the request's ``RequestScope``
+    as its ``scope=`` keyword argument (``request_scope`` below opens it).
+    ``PostgresBackend`` requires it and works only on the connections the
+    scope holds; ``SQLiteBackend`` accepts it and ignores it, because the
+    scope already holds that backend's own lock.
+
     This class is never instantiated or subclassed for real -- it is pure
     documentation of the duck-typed contract both
     ``backend_sqlite.SQLiteBackend`` and ``backend_postgres.PostgresBackend``
     independently implement.
     """
+
+    def request_scope(self, kind, *, deadline=None):
+        """Context manager yielding the ``RequestScope`` of one request.
+        ``kind`` is one of ``SCOPE_KINDS``; ``deadline`` is the
+        ``time.monotonic()`` instant the request must be finished by
+        (``None`` for an internal read that has none).
+
+        ``PostgresBackend`` borrows the connections the kind needs
+        (developer first, then runtime), waiting for each no longer than
+        what remains of ``deadline``, opens the request's transaction and
+        sets its statement and lock timeouts from ``deadline`` once; on
+        exit it rolls back whatever is uncommitted and returns the
+        connections, so nothing one request did on a connection survives
+        into the next borrower. ``SQLiteBackend`` holds its own lock for
+        the whole scope."""
+        raise NotImplementedError
+
+    def lock_schema(self, *, scope):
+        """Backs ``RequestScope.lock_schema``."""
+        raise NotImplementedError
+
+    def lock_entities(self, names, *, shared, scope):
+        """Backs ``RequestScope.lock_entities``."""
+        raise NotImplementedError
 
     #: Frozen set of exact reserved names PLUS whatever additional pattern
     #: ``check_reserved`` itself enforces (e.g. PostgreSQL's ``pg_`` prefix
@@ -91,11 +174,11 @@ class StorageBackend:
         the shared syntax allowlist has already accepted it."""
         raise NotImplementedError
 
-    def schema_count(self):
+    def schema_count(self, *, scope=None):
         """Number of collections/entities that currently exist."""
         raise NotImplementedError
 
-    def field_domains(self, collection):
+    def field_domains(self, collection, *, scope=None):
         """Live ``{field_name: domain}`` mapping for `collection`. Raises
         ``errors.NotFoundError`` if it does not exist -- this doubles as
         every read/write/filter path's own live-catalog existence check
@@ -111,7 +194,7 @@ class StorageBackend:
         behavior must stay unchanged, WP-1 P3 round 2 instruction #1)."""
         raise NotImplementedError
 
-    def schema_revision(self):
+    def schema_revision(self, *, scope=None):
         """Current schema-revision counter for this application (bumped
         by every ``create_collection``/``add_field`` call -- see
         ``cell.py``'s own delete-confirmation-phrase comment for why this
@@ -119,7 +202,7 @@ class StorageBackend:
         raise NotImplementedError
 
     def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
-                          deadline=None, dry_run=False):
+                          deadline=None, dry_run=False, scope=None):
         """WP-3b rework (F-2): ``deadline`` -- both ``backend_sqlite.
         SQLiteBackend`` and ``backend_postgres.PostgresBackend`` have
         always accepted this keyword (``ApplicationCell._limit_gate``'s
@@ -169,7 +252,7 @@ class StorageBackend:
         raise NotImplementedError
 
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
-                  audit_hook=None, deadline=None, dry_run=False):
+                  audit_hook=None, deadline=None, dry_run=False, scope=None):
         """Raises ``errors.NotFoundError`` if ``collection`` does not
         exist, ``errors.ConflictError`` if ``field`` already exists on it.
         Bumps the schema revision atomically with the DDL. Returns
@@ -191,7 +274,7 @@ class StorageBackend:
         above. Phase 9 WP-3b: same ``dry_run`` contract too."""
         raise NotImplementedError
 
-    def field_constraints(self, collection):
+    def field_constraints(self, collection, *, scope=None):
         """Phase 9 WP-3a (design D-2 (1)/(4)): live ``{field_name:
         {"nullable": bool, "enum": [...]}}`` registry mapping for
         ``collection`` -- total over every field of ``collection``
@@ -202,14 +285,14 @@ class StorageBackend:
         never ``_bind_filters``) both read."""
         raise NotImplementedError
 
-    def all_field_constraints(self):
+    def all_field_constraints(self, *, scope=None):
         """Phase 9 WP-3a (design D-2 (1)/(4)): ``{collection: {field:
         {"nullable": bool, "enum": [...]}}}`` for EVERY collection this
         backend currently has -- ``GET /v1/catalog``'s own sole data
         source for ``field_constraints``, alongside ``all_field_types``."""
         raise NotImplementedError
 
-    def field_types_and_constraints(self, collection):
+    def field_types_and_constraints(self, collection, *, scope=None):
         """Phase 9 WP-3a rework (code review §2 C, P-8/G-4 performance
         finding): ``field_types(collection)`` and ``field_constraints(
         collection)`` combined into the ONE read both already make
@@ -228,7 +311,7 @@ class StorageBackend:
         raise NotImplementedError
 
     def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
-                                deadline=None, dry_run=False):
+                                deadline=None, dry_run=False, scope=None):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, 監督裁定 S-g;
         code review §2 A, 監督裁定 A 2026-09-07 for the tri-state ``enum``
         below): redeclares ``field``'s own ``enum``/``nullable``
@@ -278,7 +361,7 @@ class StorageBackend:
         method's own commit point, only on the non-conflicting path."""
         raise NotImplementedError
 
-    def field_types(self, collection):
+    def field_types(self, collection, *, scope=None):
         """Phase 6 WP-3 (design D-3): live ``{field_name: contract_type}``
         registry mapping for ``collection`` -- the 7-word contract
         vocabulary (``field_types.CONTRACT_TYPES``), NEVER derived from
@@ -293,7 +376,7 @@ class StorageBackend:
         against, backend-independently."""
         raise NotImplementedError
 
-    def all_field_types(self):
+    def all_field_types(self, *, scope=None):
         """Phase 6 WP-3 (design D-3): ``{collection: {field: contract_
         type}}`` for EVERY collection this backend currently has --
         ``GET /v1/catalog``'s (``http.py::get_catalog``) sole data
@@ -331,7 +414,7 @@ class StorageBackend:
         exercising this mechanism in isolation)."""
         raise NotImplementedError
 
-    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None):
+    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None, scope=None):
         """``filters``: list of already-bound ``cell.Filter`` (field
         verified to exist, operator verified supported, value already
         encoded). ``order_by``: ``None`` or a non-empty list of
@@ -348,7 +431,7 @@ class StorageBackend:
         matching this method's own pre-D-2b external behavior."""
         raise NotImplementedError
 
-    def delete(self, collection, filters, audit_hook=None):
+    def delete(self, collection, filters, audit_hook=None, *, deadline=None, scope=None):
         """Returns ``{"deleted": <row count>}``.
 
         Phase 4 (design D-2/D-10): ``cell.ApplicationCell`` has already
@@ -359,23 +442,27 @@ class StorageBackend:
         ``audit_hook.py`` for the full call contract."""
         raise NotImplementedError
 
-    def begin(self):
-        """Open a multi-statement transaction for ``transact()``."""
+    def begin(self, *, deadline=None, scope=None):
+        """Marks the start of a data request's write phase for
+        ``transact()`` and the single-row writes. ``PostgresBackend``'s
+        transaction is the scope's own, open since the scope was entered,
+        so there is nothing to open there; ``SQLiteBackend`` opens its
+        pseudo transaction."""
         raise NotImplementedError
 
-    def commit(self):
+    def commit(self, *, scope=None):
         raise NotImplementedError
 
-    def rollback(self):
+    def rollback(self, *, scope=None):
         raise NotImplementedError
 
-    def insert_in_transaction(self, collection, fields, params):
+    def insert_in_transaction(self, collection, fields, params, *, scope=None):
         """Inserts one row inside the transaction opened by ``begin()``
         (no implicit commit). Returns ``{"rowid": <backend-assigned row
         identifier>}``."""
         raise NotImplementedError
 
-    def update_in_transaction(self, collection, fields, params, filters):
+    def update_in_transaction(self, collection, fields, params, filters, *, scope=None):
         """P3-D2 (docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
         R-5, WP-1.5): updates rows inside the transaction ``begin()``
         already opened (no implicit commit) -- the ``transact()`` batch
@@ -383,7 +470,7 @@ class StorageBackend:
         count>}``."""
         raise NotImplementedError
 
-    def delete_in_transaction(self, collection, filters):
+    def delete_in_transaction(self, collection, filters, *, scope=None):
         """P3-D2 (WP-1.5): same contract as ``delete`` but executes
         inside the transaction ``begin()`` already opened (no implicit
         commit). ``cell.ApplicationCell`` has already run this exact
@@ -436,94 +523,34 @@ class StorageBackend:
         stage, before execution."""
         raise NotImplementedError
 
-    # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): the two
-    # methods below are what `ApplicationCell._idempotency_check`
-    # ACTUALLY calls now, replacing direct calls to the three methods
-    # above for the SAME purpose. `SQLiteBackend` implements them as
-    # thin wrappers over its own `idempotency_reap_expired`/`
-    # idempotency_get`/`idempotency_count` above (`for_developer` is
-    # accepted and ignored -- no separate connections; `ApplicationCell.
-    # _lock`, held by every caller for this method's ENTIRE lookup ->
-    # execute -> store window, already serializes concurrent threads).
-    # `PostgresBackend` implements them as the fused, locked,
-    # SAME-transaction-as-the-eventual-write versions that close F-①'s
-    # race for real, and no longer implements the three methods above
-    # at all (see `backend_postgres.py`'s own `idempotency_begin`/
-    # `idempotency_reserve` docstrings).
+    # The two methods below are what `ApplicationCell._idempotency_check`
+    # calls. `SQLiteBackend` implements them as thin wrappers over its own
+    # `idempotency_reap_expired`/`idempotency_get`/`idempotency_count`
+    # above (its scope holds the backend's own lock for the whole request,
+    # so a lookup and the write that follows it cannot interleave with
+    # another request's). `PostgresBackend` implements them on the scope's
+    # main connection, inside the request's own transaction, with the two
+    # transaction-scoped advisory locks that serialize a same-key race
+    # and the capacity count across keys; the locks go with the
+    # transaction's end, so there is nothing to release.
 
-    def idempotency_connection(self, *, for_developer=False):
-        """Code-review fix F6 (Opus review 2, ruled in -- forward-safety
-        for WP-8b pooling): resolves the connection handle THIS request's
-        own keyed critical section will use for its ENTIRE idempotency
-        lock lifetime. Called EXACTLY ONCE by `cell.py`'s `_idempotency_
-        pg_scope`, before `idempotency_begin` ever runs, and the SAME
-        returned handle is threaded through `idempotency_begin`/
-        `idempotency_reserve`/`idempotency_unlock` as their own `conn`
-        argument below -- none of those three methods resolve `self.
-        _developer`/`self._runtime` (or an equivalent) themselves any
-        more. Without this, `idempotency_unlock` used to re-resolve
-        `for_developer` independently, at a LATER point in the request;
-        if a future change makes those attributes per-request checkouts
-        (a connection pool, WP-8b), that later re-resolution could return
-        a DIFFERENT connection than the one that actually took the lock
-        -- leaking a session lock onto whatever connection happens to be
-        checked out at unlock time, which could ride into a completely
-        unrelated FUTURE request. Binding the handle once, at scope-open,
-        closes that whole class of bug structurally, before it can exist.
-        `for_developer` has the same meaning it always has: `False`
-        (default) is `transact`'s own writing connection, `True` is the 3
-        DDL methods' own writing connection. `SQLiteBackend` returns
-        `None` (no connection concept; every idempotency method below is
-        a no-op with respect to this handle on that backend)."""
-        raise NotImplementedError
-
-    def idempotency_begin(self, key, now_ms, retention_ms, *, conn, deadline=None):
-        """Reaps expired records, then looks up `key`, over `conn` --
+    def idempotency_begin(self, key, now_ms, retention_ms, *, scope=None):
+        """Takes `key`'s lock, reaps expired records, then looks `key` up --
         see `idempotency_get`/`idempotency_reap_expired` above for the
-        return shape and reclamation rule, both preserved exactly. `conn`
-        (code-review fix F6) is the handle `idempotency_connection` above
-        returned for this SAME request, at the start of its own keyed
-        critical section -- not re-resolved here. `deadline` (code-review
-        fix F2, Opus review 2): the SAME wall-clock deadline every other
-        backend call on this request already receives (`cell.py`'s own
-        `_gate`/`_limit_gate` context managers) -- `PostgresBackend` uses
-        it to bound how long this call's own `pg_advisory_lock` may wait
-        before giving up, mirroring every other backend method's own `SET
-        LOCAL lock_timeout` (`_timeout_ms`/`_set_timeouts`).
-        `SQLiteBackend` accepts and ignores both `conn` and `deadline`
-        (no connection, no lock either could bound)."""
+        return shape and reclamation rule. On `PostgresBackend` all of it
+        runs on `scope.main`, in the transaction the request's own write
+        will later commit in; how long a wait for the lock may last is
+        the scope's timeout."""
         raise NotImplementedError
 
-    def idempotency_reserve(self, *, conn, deadline=None):
-        """Number of records THIS Application currently retains, after
-        `idempotency_begin`'s own reap -- see `idempotency_count` above.
-        `conn` (code-review fix F6) must be the SAME handle a paired
-        `idempotency_begin` call in this same request just used --
-        `idempotency_connection`'s own docstring explains why this is
-        passed through rather than re-resolved. `deadline` (code-review
-        fix F2): identical meaning and purpose as `idempotency_begin`'s
-        own parameter of the same name."""
+    def idempotency_reserve(self, *, scope=None):
+        """Takes the capacity lock, then returns the number of records
+        this Application currently retains (after `idempotency_begin`'s own
+        reap) -- see `idempotency_count` above. Same connection and
+        transaction as the `idempotency_begin` call of the same request."""
         raise NotImplementedError
 
-    def idempotency_unlock(self, key, *, conn):
-        """Ruling U-7 (WP-6d): releases whatever `idempotency_begin`/
-        `idempotency_reserve` locked for `key` in this request -- called
-        unconditionally by `ApplicationCell._idempotency_pg_scope` in a
-        `finally`, on EVERY exit from a keyed critical section. `conn`
-        (code-review fix F6) is the SAME handle `_idempotency_pg_scope`
-        obtained from `idempotency_connection` at scope-open and passed
-        to `idempotency_begin`/`idempotency_reserve` above -- this method
-        unlocks on THAT object, never by re-resolving `for_developer`
-        itself (see `idempotency_connection`'s own docstring for why).
-        `SQLiteBackend` implements this as a no-op (nothing was locked;
-        `conn` is always `None` there). `PostgresBackend` implements it
-        as the paired release of the two SESSION-scoped `pg_advisory_
-        lock`s those methods take -- see its own docstring for why
-        session-, not transaction-, scoped locks are this backend's
-        correct realization of ruling U-7."""
-        raise NotImplementedError
-
-    def record_idempotency(self, key, digest, response_json, now_ms):
+    def record_idempotency(self, key, digest, response_json, now_ms, *, scope=None):
         """Writes (or replaces) one record, over the SAME connection/
         transaction this backend is currently mid-commit on -- called by
         `ApplicationCell.transact` immediately before `self.commit()`.

@@ -9,9 +9,11 @@ History: CH-0336
 
 import json
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 
-from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
+from .backend import SQL_OPERATOR_TOKENS, UNCHANGED, RequestScope
 from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError, violation, observed_type_of
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
@@ -82,9 +84,16 @@ _NULLS_TOKENS = {"asc": "NULLS LAST", "desc": "NULLS FIRST"}
 
 
 class SQLiteBackend:
-    """One private ``:memory:`` connection per application cell."""
+    """One private ``:memory:`` connection per application cell.
+
+    A request scope (``request_scope``) holds this backend's own lock from
+    its first statement to its last, so every request is serialized against
+    every other one on this backend and needs no advisory-lock equivalent:
+    an idempotency lookup, the execution that follows it and the store of
+    its record cannot interleave with another request's."""
 
     def __init__(self):
+        self._request_lock = threading.RLock()
         self._db = sqlite3.connect(":memory:", check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         # In-memory only, matching this backend's own already-non-durable
@@ -113,6 +122,20 @@ class SQLiteBackend:
         constructed with this backend, so that file needs no change."""
         return self._db
 
+    @contextmanager
+    def request_scope(self, kind, *, deadline=None):
+        """Holds this backend's lock for the whole request; the scope has
+        no connections (this backend has one, which every method below
+        uses directly)."""
+        with self._request_lock:
+            yield RequestScope(kind, deadline, backend=self)
+
+    def lock_schema(self, *, scope):
+        """No-op: the scope already serializes every request."""
+
+    def lock_entities(self, names, *, shared, scope):
+        """No-op: the scope already serializes every request."""
+
     def check_reserved(self, value, label):
         # mirrors `backend_postgres.PostgresBackend.check_reserved`'s own identical rationale -- the reserved-name half of the identifier choke point, not defence-in-depth, so it carries `identifier_syntax` too.
         # history: CH-0344
@@ -122,17 +145,17 @@ class SQLiteBackend:
                 details=violation("identifier_syntax", field=label),
             )
 
-    def schema_count(self):
+    def schema_count(self, *, scope=None):
         row = self._db.execute(
             "SELECT count(*) AS count FROM sqlite_master WHERE type='table' "
             "AND name NOT LIKE 'sqlite_%'"
         ).fetchone()
         return row["count"]
 
-    def schema_revision(self):
+    def schema_revision(self, *, scope=None):
         return self._schema_revision
 
-    def field_domains(self, collection):
+    def field_domains(self, collection, *, scope=None):
         # SQLite's own column affinity is dynamic (no equivalent to PostgreSQL's own type-mismatch failure mode this backend's domain concept exists to catch), so every field maps to domain `None` -- `ApplicationCell.encode_value` calls skip domain validation entirely for `None`, matching this backend's own pre-existing, unchanged external behavior (P3 instruction #1: "SQLite側の外部挙動は不変に保つこと").
         # history: CH-0345
         name = validate_identifier(collection, "entity")
@@ -154,7 +177,7 @@ class SQLiteBackend:
         self._db.execute("BEGIN")
 
     def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
-                          deadline=None, dry_run=False, idempotency_record=None):
+                          deadline=None, dry_run=False, idempotency_record=None, scope=None):
         _check_deadline(deadline)
         definitions = []
         for field, field_type in fields.items():
@@ -253,7 +276,7 @@ class SQLiteBackend:
         }
 
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
-                  audit_hook=None, deadline=None, dry_run=False, idempotency_record=None):
+                  audit_hook=None, deadline=None, dry_run=False, idempotency_record=None, scope=None):
         _check_deadline(deadline)
         resolved_nullable = True if nullable is None else nullable
         if resolved_nullable is False:
@@ -355,7 +378,7 @@ class SQLiteBackend:
         }
         return self._schema_revision, descriptor
 
-    def field_types(self, collection):
+    def field_types(self, collection, *, scope=None):
         """see `backend.StorageBackend.field_types`'s own contract. `field_domains` is called only for its existence check -- its own return value (all-`None` domains, this backend's own unchanged behaviour) is discarded here.
 
         History: CH-0356
@@ -363,14 +386,14 @@ class SQLiteBackend:
         self.field_domains(collection)  # NotFoundError if `collection` does not exist
         return dict(self._declared_types.get(collection, {}))
 
-    def all_field_types(self):
+    def all_field_types(self, *, scope=None):
         """`{collection: {field: contract_type}}` for EVERY collection this backend currently has -- `GET /v1/catalog`'s own sole data source (`http.py::get_catalog`). Never includes a collection with no registry entries (cannot occur for one this backend's own `create_collection` created -- every field always gets a registry row, `create_collection`'s own docstring).
 
         History: CH-0357
         """
         return {name: dict(types) for name, types in self._declared_types.items()}
 
-    def field_constraints(self, collection):
+    def field_constraints(self, collection, *, scope=None):
         """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend.
         StorageBackend.field_constraints`'s own contract. `field_domains`
         is called only for its existence check, matching `field_types`
@@ -378,7 +401,7 @@ class SQLiteBackend:
         self.field_domains(collection)  # NotFoundError if `collection` does not exist
         return {field: dict(value) for field, value in self._declared_constraints.get(collection, {}).items()}
 
-    def field_types_and_constraints(self, collection):
+    def field_types_and_constraints(self, collection, *, scope=None):
         """Phase 9 WP-3a rework (code §2 C): see `backend.StorageBackend.field_types_and_constraints`'s own contract. This backend has no round trip to cut -- `_declared_types`/`_declared_constraints` are already two plain in-process dicts -- so this exists purely to give `cell.py` the SAME method name on both backends; `field_domains` is still called only once here (not twice, as calling `field_types`+`field_constraints` separately would).
 
         History: CH-0358
@@ -389,7 +412,7 @@ class SQLiteBackend:
             {field: dict(value) for field, value in self._declared_constraints.get(collection, {}).items()},
         )
 
-    def all_field_constraints(self):
+    def all_field_constraints(self, *, scope=None):
         """Phase 9 WP-3a (design D-2 (1)/(4)): `{collection: {field:
         {"nullable": bool, "enum": [...]}}}` for EVERY collection this
         backend currently has -- `GET /v1/catalog`'s own sole data
@@ -401,7 +424,7 @@ class SQLiteBackend:
         }
 
     def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
-                                deadline=None, dry_run=False, idempotency_record=None):
+                                deadline=None, dry_run=False, idempotency_record=None, scope=None):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, 監督裁定 S-g): see `backend.StorageBackend.alter_field_constraints`'s own contract. This backend has no separate DDL step for a constraint change (only the registry moves) -- the existing-row scan, the registry write, and the schema-revision bump all happen here, in this one method, inside the SAME pseudo-tx `create_collection`/`add_field` above use for DDL (`_begin_pseudo_tx`) so a raised `ConflictError` (or a mid-method `AuditSinkUnavailable` from `audit_hook.pre_commit()`) leaves NOTHING changed -- not even a half-applied registry write -- exactly like this backend's own DDL methods already guarantee for schema changes.
 
         Code review §2 F / 監督裁定 F: unlike `backend_postgres.PostgresBackend`'s own implementation, this backend takes no `LOCK TABLE` before its own row scan below -- this whole method is one uninterruptible Python call on one private, single-threaded, in-process (`:memory:`) connection (`__init__`'s own module-level "PG 留意" note has no counterpart here: there is no OTHER session that could ever commit a row between this method's own scan and its own commit). The concurrency hole a PostgreSQL `LOCK TABLE` closes simply does not exist on this backend.
@@ -529,7 +552,7 @@ class SQLiteBackend:
             )
         return value
 
-    def insert_in_transaction(self, collection, fields, params):
+    def insert_in_transaction(self, collection, fields, params, *, scope=None):
         # No commit/rollback here: this runs inside a transaction the seam's own `transact()` already opened via `begin()` and will `commit()`/`rollback()` once, after every operation in the batch. Low-level driver errors are still translated to this shared `errors.FoundationError` vocabulary here so `cell.py`'s `transact()` never needs to name a backend-native exception type.
         # history: CH-0368
         table = quote_identifier(collection)
@@ -544,7 +567,7 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return {"rowid": cursor.lastrowid}
 
-    def update_in_transaction(self, collection, fields, params, filters):
+    def update_in_transaction(self, collection, fields, params, filters, *, scope=None):
         # no commit/rollback here -- mirrors `insert_in_transaction`'s own reasoning above. Runs inside the transaction `transact()` already opened via `begin()` and will `commit()`/`rollback()` once, after every operation in the batch.
         # history: CH-0369
         table = quote_identifier(collection)
@@ -557,7 +580,7 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return {"updated": cursor.rowcount}
 
-    def delete_in_transaction(self, collection, filters):
+    def delete_in_transaction(self, collection, filters, *, scope=None):
         # no commit/rollback here (unlike `delete` above) -- same reasoning as `update_in_transaction` immediately above. `cell.ApplicationCell` has already run this request through the same declare-and-echo confirmation choke `delete()` itself uses before this is ever called.
         # history: CH-0370
         table = quote_identifier(collection)
@@ -619,7 +642,7 @@ class SQLiteBackend:
             clauses.append(" AND ".join(term_parts))
         return "(" + " OR ".join(clauses) + ")", params
 
-    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None):
+    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None, scope=None):
         _check_deadline(deadline)
         table = quote_identifier(collection)
         statement = "SELECT " + ", ".join(_quote_column(x) for x in selected) + " FROM " + table
@@ -664,7 +687,7 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return [dict(row) for row in rows]
 
-    def delete(self, collection, filters, audit_hook=None, *, deadline=None):
+    def delete(self, collection, filters, audit_hook=None, *, deadline=None, scope=None):
         _check_deadline(deadline)
         table = quote_identifier(collection)
         where, params = self._where_sql(filters)
@@ -684,7 +707,7 @@ class SQLiteBackend:
             raise
         return {"deleted": cursor.rowcount}
 
-    def begin(self, *, deadline=None):
+    def begin(self, *, deadline=None, scope=None):
         _check_deadline(deadline)
         # defense in depth against ANY future case (not just the `OverflowError` this same round's fix closes off at `encode_value`) that raises an exception `cell.py::transact`'s own `except (...)` tuple does not list, leaving an earlier `BEGIN` transaction open on this connection -- `sqlite3.Connection.execute("BEGIN")` on a connection that ALREADY has an open transaction raises `sqlite3.OperationalError: cannot start a transaction within a transaction`, permanently wedging every future `transact()` call on this cell. Rolling back any stray open transaction FIRST makes starting a fresh one always safe, regardless of what left the previous one open.
         # history: CH-0374
@@ -692,10 +715,10 @@ class SQLiteBackend:
             self._db.rollback()
         self._db.execute("BEGIN")
 
-    def commit(self):
+    def commit(self, *, scope=None):
         self._db.commit()
 
-    def rollback(self):
+    def rollback(self, *, scope=None):
         self._db.rollback()
 
     def close(self):
@@ -718,27 +741,15 @@ class SQLiteBackend:
     def idempotency_count(self):
         return len(self._idempotency)
 
-    # thin wrappers -- `cell.py::ApplicationCell._idempotency_check` calls THESE now, not the three methods directly above. `conn` (fix F6, Opus 2, ruled in) is accepted (the `_idempotency_check` call sites need one uniform signature across backends) and ignored: this backend has no connection concept at all (`idempotency_connection` below always returns `None`), and `ApplicationCell._lock` (an `RLock`, widened by/narrowed again by F5 to cover this method's own caller's ENTIRE lookup -> execute -> store window for a keyed, real request) already serializes every concurrent thread sharing this cell -- there is nothing left for a PostgreSQL-style advisory lock to add on this backend.
-    # history: CH-0376
-    def idempotency_connection(self, *, for_developer=False):
-        return None
-
-    def idempotency_begin(self, key, now_ms, retention_ms, *, conn=None, deadline=None):
-        # `deadline` (fix F2, Opus 2): accepted for the same uniform-signature reason `conn` is, above, and ignored identically -- this backend never takes a lock a deadline could bound.
-        # history: CH-0377
+    # `ApplicationCell._idempotency_check` calls these two, not the three methods above. `scope` is accepted for the signature every backend shares and ignored: the request scope holds this backend's own lock for the whole request, so the lookup, the execution and the store of the record cannot interleave with another request's, and there is nothing for an advisory lock to add.
+    def idempotency_begin(self, key, now_ms, retention_ms, *, scope=None):
         self.idempotency_reap_expired(now_ms, retention_ms)
         return self.idempotency_get(key)
 
-    def idempotency_reserve(self, *, conn=None, deadline=None):
+    def idempotency_reserve(self, *, scope=None):
         return self.idempotency_count()
 
-    def idempotency_unlock(self, key, *, conn=None):
-        """No-op -- `PostgresBackend`'s own counterpart releases the two session-scoped `pg_advisory_lock`s `idempotency_begin`/`idempotency_reserve` may have taken, on the SAME `conn` handle those methods used (fix F6); this backend never takes any (see `idempotency_begin`'s own comment above), and `conn` is always `None` here regardless of what `idempotency_connection` returns to a caller from this backend.
-
-        History: CH-0378
-        """
-
-    def record_idempotency(self, key, digest, response_json, now_ms):
+    def record_idempotency(self, key, digest, response_json, now_ms, *, scope=None):
         # `transact()`'s own single-batch path: `ApplicationCell.transact` calls this directly (not through a DDL method's own `idempotency_record` parameter), immediately before its own `self._backend.commit()` -- a failed batch never reaches this line at all (the execution loop above it raises first), so this write and the batch's own commit share the identical fate, UNLESS `self._backend.commit()` itself is what fails -- see `idempotency_discard_pending` below, the cleanup `ApplicationCell.transact`'s own `except Exception:` calls for exactly that case.
         # history: CH-0379
         self._idempotency[key] = {"digest": digest, "response_json": response_json, "created_at_ms": now_ms}

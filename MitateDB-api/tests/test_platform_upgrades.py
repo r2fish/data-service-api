@@ -33,6 +33,8 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.errors import StorageConfigurationError
+
+from .scoped_backend import scoped
 from mitatedb_api.platform_upgrades import (LEDGER_TABLE_NAME, PEER_MODULE, PLATFORM_UPGRADE_NUMBERS,
                                             ApplicationUpgradeResult, PlatformUpgradeError,
                                             discover_upgrade_scripts, pending_upgrade_numbers,
@@ -470,9 +472,9 @@ def test_schema_count_excludes_the_ledger_table(new_app: types.SimpleNamespace) 
     のいずれも数えられていないことの実測。"""
     backend = PostgresBackend(new_app.runtime_dsn, new_app.developer_dsn)
     try:
-        assert backend.schema_count() == 0
-        backend.create_collection("widgets", {"title": "text"})
-        assert backend.schema_count() == 1
+        assert scoped(backend).schema_count() == 0
+        scoped(backend).create_collection("widgets", {"title": "text"})
+        assert scoped(backend).schema_count() == 1
     finally:
         backend.close()
 
@@ -483,7 +485,7 @@ def test_catalog_never_lists_the_ledger_table(new_app: types.SimpleNamespace) ->
     列挙に現れない (r2db の `_load_catalog` 除外とは異なる経路)。"""
     backend = PostgresBackend(new_app.runtime_dsn, new_app.developer_dsn)
     try:
-        assert backend.all_field_types() == {}
+        assert scoped(backend).all_field_types() == {}
     finally:
         backend.close()
 
@@ -620,8 +622,9 @@ def test_backfill_leaves_6_pending_when_field_types_table_is_absent(platform: ty
 def test_cell_open_check_raises_service_unavailable_for_missing_upgrade(platform: types.SimpleNamespace) -> None:
     """完了条件 11 (F-12), Q4 rework (supervisor ruling 2026-09-05, H-1 =
     (a)): 台帳に未適用番号がある DB (台帳表そのものが無い場合を含む) で、
-    `PostgresBackend(...)` 構築 (= cell open) 自体は例外を送出しない
-    (H-1(a): 起動は止めない) -- 構築後の実操作 (`all_field_types()`) が
+    `PostgresBackend(...)` 構築と起動時の検査 (`verify_platform_upgrades()`)
+    自体は例外を送出しない (H-1(a): 起動は止めない) -- 検査後の実操作
+    (`request_scope` を開く `all_field_types()`) が
     `StorageConfigurationError` (具体的には `errors.PlatformUpgradePending`
     のサブクラスインスタンス -- `isinstance` は基底クラスにもマッチする)
     を送出し、メッセージが未適用の番号と `ops upgrade-applications` を
@@ -630,9 +633,10 @@ def test_cell_open_check_raises_service_unavailable_for_missing_upgrade(platform
     legacy = provision_legacy_app(platform, "f12nol")
     try:
         backend = PostgresBackend(legacy.runtime_dsn, legacy.developer_dsn, application_id=legacy.app_id)
+        backend.verify_platform_upgrades()
         try:
             with pytest.raises(StorageConfigurationError) as excinfo:
-                backend.all_field_types()
+                scoped(backend).all_field_types()
             assert "missing platform upgrade(s) 6, 8" in str(excinfo.value)
             assert "ops upgrade-applications" in str(excinfo.value)
         finally:
@@ -652,9 +656,10 @@ def test_cell_open_check_raises_service_unavailable_for_missing_upgrade(platform
         finally:
             admin.close()
         backend = PostgresBackend(partial.runtime_dsn, partial.developer_dsn, application_id=partial.app_id)
+        backend.verify_platform_upgrades()
         try:
             with pytest.raises(StorageConfigurationError) as excinfo:
-                backend.all_field_types()
+                scoped(backend).all_field_types()
             assert "missing platform upgrade(s) 8" in str(excinfo.value)
         finally:
             backend.close()
@@ -668,10 +673,11 @@ def test_build_app_style_construction_never_raises_even_when_a_ledger_is_incompl
     """裁定 1 (H-1 = (a), supervisor ruling 2026-09-05, review H-1): the
     headline claim at the `PostgresBackend` unit level -- constructing a
     backend for an application whose own ledger is missing an upgrade
-    must NOT raise (a mutation reverting `__init__` back to raising
+    must NOT raise, nor may the startup check that follows it
+    (`verify_platform_upgrades`, what `build_app` calls for every served
+    application): a mutation making either raise
     `StorageConfigurationError`/`PlatformUpgradePending` directly would
-    fail this test at construction time, before any operation is ever
-    attempted). The full real-HTTP observation (`build_app` itself
+    fail this test before any operation is ever attempted. The full real-HTTP observation (`build_app` itself
     starting, `GET /v1/catalog` returning 200 for a healthy sibling
     application and 503 with the F-12 message for this one) lives in
     `test_main.py::test_build_app_h1_serves_every_application_and_
@@ -679,6 +685,7 @@ def test_build_app_style_construction_never_raises_even_when_a_ledger_is_incompl
     legacy = provision_legacy_app(platform, "f12ctor")
     try:
         backend = PostgresBackend(legacy.runtime_dsn, legacy.developer_dsn, application_id=legacy.app_id)
+        backend.verify_platform_upgrades()
         try:
             assert backend._pending_platform_upgrade_message is not None
             assert "missing platform upgrade(s) 6, 8" in backend._pending_platform_upgrade_message
@@ -692,6 +699,8 @@ def test_cell_open_check_passes_for_a_fully_upgraded_application(new_app: types.
     """非空振り companion: a fully-seeded application must NOT raise --
     proves the check above is discriminating, not merely always-fail."""
     backend = PostgresBackend(new_app.runtime_dsn, new_app.developer_dsn, application_id=new_app.app_id)
+    backend.verify_platform_upgrades()
+    assert backend._pending_platform_upgrade_message is None
     backend.close()
 
 

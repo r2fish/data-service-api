@@ -202,10 +202,27 @@ class StorageConfigurationError(FoundationError):
     """
 
 
+class StorageTransientError(FoundationError):
+    """Raised when the data backend could not serve a request for a reason
+    that is neither the client's doing nor a permanent misconfiguration and
+    that a retry may resolve: PostgreSQL chose this request's transaction
+    as the victim of a deadlock (40P01) or of a serialization failure
+    (40001), or no connection to the application database could be
+    opened. Nothing of the request was applied.
+
+    Distinct from :class:`StorageConfigurationError` (a permanent grant or
+    migration defect that keeps failing on retry) and from
+    :class:`ResourceLimitError` (a declared bound the request itself
+    exceeded). Maps to the common contract's ``SERVICE_UNAVAILABLE`` code
+    (``http.py::_CLASSIFY_ORDER``); the contract's vocabulary is
+    unchanged.
+    """
+
+
 class PlatformUpgradePending(StorageConfigurationError):
     """Q4 rework (supervisor ruling 2026-09-05, H-1; design docs/design/
     Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(f)/§3.8 F-12): raised (by `backend_
-    postgres.py`'s own `_guard_pending_platform_upgrades`) instead of the
+    postgres.py`'s own `request_scope`) instead of the
     bare `StorageConfigurationError` above for exactly one condition --
     an application's own per-application platform-upgrade ledger is
     missing an entry this package requires.

@@ -9,12 +9,12 @@ actually closed, on BOTH backends this peer ships.
 `ApplicationCell._idempotency_check` is this peer's ONE shared choke point
 for both backends (SQLite/in-memory AND PostgreSQL) -- it is the single
 method every one of the 4 keyed entry points (`transact`, `create_
-collection`, `add_field`, `alter_field`) calls, and it is where WP-6d's own
-locking now lives: `self._lock` (a cell-wide `RLock`, widened by WP-6d to
-cover this method's ENTIRE lookup -> execute -> store window) for BOTH
-backends, plus (`PostgresBackend` only) the two session-scoped `pg_
-advisory_lock`s `idempotency_begin`/`idempotency_reserve` take internally,
-BEFORE this method itself returns. Hook used: this SAME `_idempotency_
+collection`, `add_field`, `alter_field`) calls, and it is where the
+locking lives: the backend's request scope (the SQLite backend's own
+`RLock`, held for the whole request) for the in-memory backend, and
+(`PostgresBackend`) the two transaction-scoped `pg_advisory_xact_lock`s
+`idempotency_begin`/`idempotency_reserve` take internally, BEFORE this
+method itself returns and held until the request's transaction ends. Hook used: this SAME `_idempotency_
 check` method is monkeypatched -- no new hook is added to the source; a
 wrapper runs the real method, then (on the FIRST call that returns WITHOUT
 raising -- i.e. the winner, never a loser that just got CONFLICT/
@@ -37,6 +37,7 @@ from mitatedb_api.auth import Principal
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime
 from mitatedb_api.errors import ConflictError, FoundationError, ResourceLimitError
 
+from .scoped_backend import scoped
 from .test_postgres import app_a, close_cell, make_cell, platform  # noqa: F401 (fixtures) -- RELATIVE import, see test_http.py's own identical comment for why a bare `from test_postgres import ...` would be wrong here
 
 _LOCK_TIMEOUT_S = 10.0
@@ -177,7 +178,7 @@ def test_memory_two_different_keys_concurrent_at_capacity_exactly_one_limit_exce
     its limit; two threads submit DIFFERENT idempotency keys at the same
     time -- exactly one succeeds, the other is refused `LIMIT_EXCEEDED` /
     `limit_class: idempotency_entries` (D-5 (iii)'s own COUNT-then-write
-    race, closed by widening `self._lock` over the reserve check too)."""
+    race, closed because the backend's request scope covers the reserve check too)."""
     dev, runtime = _memory_pair(FoundationConfig(idempotency_entries=2))
     dev.create_collection("notes", {"title": "text"})
     runtime.transact([{"type": "insert", "collection": "notes", "values": {"title": "seed"}}], idempotency_key="mem-cap-seed")
@@ -221,7 +222,7 @@ def test_memory_two_different_keys_concurrent_at_capacity_exactly_one_limit_exce
 
 
 # ===========================================================================
-# PostgreSQL backend (`PostgresBackend`) -- session-scoped `pg_advisory_lock`.
+# PostgreSQL backend (`PostgresBackend`) -- transaction-scoped `pg_advisory_xact_lock`.
 # ===========================================================================
 
 
@@ -229,15 +230,10 @@ def _pg_pair(app_a, config: FoundationConfig | None = None):  # noqa: F811
     """TWO INDEPENDENT `ApplicationCell` instances, each its OWN fresh
     `PostgresBackend` connection pair, both pointed at the SAME
     provisioned application database. This is deliberate, not
-    incidental: `ApplicationCell.self._lock` (the Python-level `RLock`
-    WP-6d also widened) is scoped to ONE INSTANCE -- a test built on a
-    SINGLE shared cell would have both threads serialize on that SAME
-    Python lock regardless of whether the PostgreSQL-level session
-    advisory lock (`idempotency_begin`/`idempotency_reserve`,
-    `backend_postgres.py`) does anything at all, which would make the
-    PG-specific mutation-kill (removing the `pg_advisory_lock` call)
-    silently NOT turn red (measured directly: it does not, with a
-    single shared cell). Two independent cells -- exactly how two
+    incidental: two cells have two backends, so nothing in this process
+    can order the two requests -- only the PostgreSQL-level advisory lock
+    (`idempotency_begin`/`idempotency_reserve`, `backend_postgres.py`)
+    does, exactly as between two server processes. Two independent cells -- exactly how two
     separate uvicorn WORKER PROCESSES would each hold their own
     `ApplicationCell`/connections against the same database in a real
     multi-process deployment -- means the ONLY thing left to serialize
@@ -254,7 +250,7 @@ def test_postgres_same_key_same_digest_concurrent_executes_exactly_once(app_a, m
     """U-8 (i), PostgreSQL: identical to the in-memory case above, but on
     TWO INDEPENDENT `ApplicationCell`s (see `_pg_pair`'s own docstring for
     why) -- the lock under test is `idempotency_begin`'s real, per-key,
-    session-scoped `pg_advisory_lock` (`backend_postgres.py`)."""
+    transaction-scoped `pg_advisory_xact_lock` (`backend_postgres.py`)."""
     cell_a, cell_b, dev_a, runtime_a, runtime_b = _pg_pair(app_a)
     try:
         dev_a.create_collection("notes", {"title": "text"})
@@ -347,8 +343,8 @@ def test_postgres_same_key_different_digest_concurrent_conflicts_exactly_once(ap
 def test_postgres_two_different_keys_concurrent_at_capacity_exactly_one_limit_exceeded(app_a, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     """U-8 (iii), PostgreSQL: same shape as the in-memory case above, two
     independent cells (see `_pg_pair`) -- the lock under test is
-    `idempotency_reserve`'s table-level, session-scoped `pg_advisory_
-    lock`."""
+    `idempotency_reserve`'s table-level, transaction-scoped `pg_advisory_
+    xact_lock`."""
     cell_a, cell_b, dev_a, runtime_a, runtime_b = _pg_pair(app_a, FoundationConfig(idempotency_entries=2))
     try:
         dev_a.create_collection("notes", {"title": "text"})
@@ -407,17 +403,10 @@ def test_postgres_two_different_keys_concurrent_at_capacity_exactly_one_limit_ex
 
 def test_postgres_reap_is_committed_not_discarded_by_begin(app_a) -> None:  # noqa: F811
     """Code-review fix F1 (Opus review 2, blocker): `idempotency_begin`'s
-    own reap DELETE (retention-expired rows) used to run inside `self.
-    _runtime`'s own currently open transaction and never commit itself --
-    `cell.py::transact`'s own `self._backend.begin(deadline=deadline)`,
-    called for pass 2 right after `idempotency_begin` returns, opens with
-    `self._runtime.rollback()`, silently discarding that uncommitted
-    DELETE. Reproduction (measured on the pre-fix code: with
-    `idempotency_retention_ms=1`, BOTH keys' rows remained in the table
-    after the second keyed `transact`, never reaped; with the fix,
-    only the second key's own row does -- restoring the pre-WP-6d
-    self-committing reap's own behavior, see `idempotency_begin`'s own
-    docstring)."""
+    own reap DELETE (retention-expired rows) runs in the request's
+    transaction and is committed with it: with `idempotency_retention_ms=1`,
+    after the second keyed `transact` only the second key's own row remains
+    in the table (a reap that was discarded would leave BOTH keys' rows)."""
     cell = make_cell(app_a, FoundationConfig(idempotency_retention_ms=1))
     try:
         dev = ApplicationDeveloper(
@@ -451,24 +440,15 @@ def test_postgres_reap_is_committed_not_discarded_by_begin(app_a) -> None:  # no
         close_cell(cell)
 
 
-def test_postgres_reap_is_committed_not_discarded_by_begin_on_replay_path(app_a) -> None:  # noqa: F811
-    """WP-6d-i companion to `test_postgres_reap_is_committed_not_
-    discarded_by_begin` above: that test only exercises the NEW-key
-    path, where `idempotency_reserve`'s own `conn.commit()` (also added
-    by F1) would independently rescue `idempotency_begin`'s reap even if
-    `idempotency_begin`'s own commit were removed -- `idempotency_
-    reserve` runs right after `idempotency_begin` on that path and
-    commits the SAME connection a second time. On the REPLAY path
-    (`cell.py::_idempotency_check`, ~1148-1176: an existing record whose
-    digest matches returns immediately, `if existing is not None: ...
-    return stored_response, digest, now_ms`), `idempotency_reserve` is
-    never called at all, and the eventual `idempotency_unlock` (`cell.
-    py`'s `_idempotency_pg_scope`) begins with `conn.rollback()`. So on
-    a replay, `idempotency_begin`'s own commit is the ONLY thing that
-    can persist its reap DELETE -- this test must fail exactly when
-    that commit is removed, even though the sibling test above still
-    passes (its own new-key path is rescued by `idempotency_reserve`'s
-    separate commit, untouched by the same mutation)."""
+def test_postgres_replay_commits_its_reap(app_a) -> None:  # noqa: F811
+    """Companion to `test_postgres_reap_is_committed_not_discarded_by_begin`
+    above, for the REPLAY path (`cell.py::_idempotency_check`: an existing
+    record whose digest matches returns immediately, `idempotency_reserve`
+    is never called). The reap `idempotency_begin` makes is part of the
+    request's own transaction, and a replay that finishes normally ends its
+    scope with the commit of that transaction (it holds nothing but the
+    reap): the expired row is gone after the replay, the replayed key's own
+    row stays."""
     cell = make_cell(app_a, FoundationConfig(idempotency_retention_ms=400))
     try:
         dev = ApplicationDeveloper(
@@ -490,43 +470,35 @@ def test_postgres_reap_is_committed_not_discarded_by_begin_on_replay_path(app_a)
         # A further 0.15s later: A is now ~450ms old (past the 400ms
         # retention window) and B is only ~150ms old (still within it).
         time.sleep(0.15)
-        # Re-send B with an IDENTICAL operations list (same digest) --
-        # a REPLAY: `_idempotency_check` finds B's own existing record,
-        # confirms the digest matches, and returns the stored response
-        # WITHOUT ever calling `idempotency_reserve`. Only `idempotency_
-        # begin`'s own reap DELETE + commit runs on this call.
-        runtime.transact(
+
+        def _keys() -> list[str]:
+            conn = psycopg.connect(app_a.runtime_dsn)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT key FROM _mdb_idempotency ORDER BY key")
+                    return [row[0] for row in cur.fetchall()]
+            finally:
+                conn.close()
+
+        # Re-send B with an IDENTICAL operations list (same digest) -- a
+        # REPLAY: its reap DELETE is committed when its scope ends.
+        replayed = runtime.transact(
             [{"type": "insert", "collection": "notes_f1r", "values": {"title": "b"}}],
             idempotency_key="f1r-replay-b")
-
-        conn = psycopg.connect(app_a.runtime_dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT key FROM _mdb_idempotency ORDER BY key")
-                keys = [row[0] for row in cur.fetchall()]
-        finally:
-            conn.close()
-        assert keys == ["f1r-replay-b"], (
-            f"expected only the replayed key's own row to remain, found {keys!r} -- A's row "
-            "survives when idempotency_begin's own reap DELETE is discarded on the REPLAY path, "
-            "where idempotency_reserve is never called to commit it a second time (F1 regression, "
-            "replay path)"
-        )
+        assert len(runtime.read("notes_f1r")) == 2, "a replay must execute nothing"
+        assert replayed, "a replay answers from the record"
+        assert _keys() == ["f1r-replay-b"], "a replay must commit the reap of the expired row"
     finally:
         close_cell(cell)
 
 
 def test_postgres_key_lock_timeout_maps_to_limit_exceeded(app_a) -> None:  # noqa: F811
-    """Code-review fix F2 (Opus review 2, should-fix): before this fix,
-    `idempotency_begin`'s own `pg_advisory_lock` had no `lock_timeout` --
-    a second process contending for the SAME key's session lock waited
-    UNBOUNDED, stalling every request this cell's own `self._lock` (an
-    `RLock`, held for a keyed request's entire lookup -> execute -> store
-    window) would otherwise let through too, not merely this one key.
+    """Code-review fix F2 (Opus review 2, should-fix): a second process
+    contending for the SAME key's advisory lock must not wait UNBOUNDED.
     With a tiny `max_execution_ms` budget on the WAITING cell and a
-    SECOND, independent cell already holding this key's session lock
-    (a direct `idempotency_begin` call, never unlocked), the waiting
-    request must fail promptly with the SAME `LIMIT_EXCEEDED`/
+    SECOND, independent cell's request scope already holding this key's
+    lock (a direct `idempotency_begin` call inside an open scope), the
+    waiting request must fail promptly with the SAME `LIMIT_EXCEEDED`/
     `execution_ms` mapping every other PostgreSQL lock/statement-timeout
     site on this backend uses (`test_application_plane_limits.py`'s own
     `test_execution_ms_pg_lock_timeout_maps_to_limit_exceeded` is the
@@ -536,44 +508,59 @@ def test_postgres_key_lock_timeout_maps_to_limit_exceeded(app_a) -> None:  # noq
     waiter_cell = make_cell(app_a, FoundationConfig(max_execution_ms=300))
     try:
         now_ms = int(time.time() * 1000)
-        holder_conn = holder_cell._backend.idempotency_connection(for_developer=False)
-        held = holder_cell._backend.idempotency_begin(key, now_ms, 999_999_999, conn=holder_conn)
-        assert held is None, "test setup: this key must start with no record"
+        with holder_cell._backend.request_scope("dml") as holder_scope:
+            held = holder_cell._backend.idempotency_begin(key, now_ms, 999_999_999, scope=holder_scope)
+            assert held is None, "test setup: this key must start with no record"
 
-        dev = ApplicationDeveloper(
-            waiter_cell, Principal(application_id=app_a.app_id, credential_id="dev-f2", role=Role.DEVELOPER))
-        runtime = ApplicationRuntime(
-            waiter_cell, Principal(application_id=app_a.app_id, credential_id="rt-f2", role=Role.RUNTIME))
-        dev.create_collection("notes_f2", {"title": "text"})
+            dev = ApplicationDeveloper(
+                waiter_cell, Principal(application_id=app_a.app_id, credential_id="dev-f2", role=Role.DEVELOPER))
+            runtime = ApplicationRuntime(
+                waiter_cell, Principal(application_id=app_a.app_id, credential_id="rt-f2", role=Role.RUNTIME))
+            dev.create_collection("notes_f2", {"title": "text"})
 
-        start = time.monotonic()
-        with pytest.raises(ResourceLimitError) as excinfo:
-            runtime.transact(
-                [{"type": "insert", "collection": "notes_f2", "values": {"title": "x"}}], idempotency_key=key)
-        elapsed = time.monotonic() - start
-        assert excinfo.value.details == {"limit_class": "execution_ms"}
-        assert elapsed >= 0.05, f"denial returned suspiciously fast ({elapsed}s) for a 300ms budget"
-        assert elapsed < _LOCK_TIMEOUT_S, f"denial took {elapsed}s -- looks like it actually hung"
+            start = time.monotonic()
+            with pytest.raises(ResourceLimitError) as excinfo:
+                runtime.transact(
+                    [{"type": "insert", "collection": "notes_f2", "values": {"title": "x"}}], idempotency_key=key)
+            elapsed = time.monotonic() - start
+            assert excinfo.value.details == {"limit_class": "execution_ms"}
+            assert elapsed >= 0.05, f"denial returned suspiciously fast ({elapsed}s) for a 300ms budget"
+            assert elapsed < _LOCK_TIMEOUT_S, f"denial took {elapsed}s -- looks like it actually hung"
     finally:
-        holder_cell._backend.idempotency_unlock(key, conn=holder_conn)
         close_cell(holder_cell)
         close_cell(waiter_cell)
 
 
-def test_postgres_unlock_runs_on_pass1_validation_failure(app_a) -> None:  # noqa: F811
-    """Code-review fix F3 (Opus review 2, should-fix): a keyed request
-    that fails during PASS 1 (a shape/target-existence validation, BEFORE
-    any execution) must still release its session-scoped advisory lock --
-    checked two ways: (1) `pg_locks` directly, against the failing
-    cell's own runtime connection PID, shows zero advisory locks held
-    afterward; (2) a SECOND, independent cell's request for the SAME key
-    completes promptly, not blocked on a leaked lock.
+def _advisory_locks_held_in(app) -> int:
+    """Advisory locks currently held by any backend of the application's
+    database, counted over a separate connection (outside every product
+    path): every request of this module has finished, so whatever is held
+    belongs to a connection sitting idle in a pool."""
+    monitor = psycopg.connect(app.runtime_dsn)
+    try:
+        with monitor.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING (pid) "
+                "WHERE l.locktype = 'advisory' AND a.datname = current_database() AND l.pid <> pg_backend_pid()")
+            (count,) = cur.fetchone()
+        return count
+    finally:
+        monitor.close()
 
-    This is exactly the mutation-kill case named in the WP-6d rework
-    instructions: moving `self._backend.idempotency_unlock(...)` out of
-    the `finally` in `cell.py::_idempotency_pg_scope` must turn this test
-    red (the lock then survives a pass-1 failure, since only a `finally`
-    runs on every exit including a raise)."""
+
+def test_postgres_returned_connections_hold_no_advisory_lock_after_any_keyed_request(app_a) -> None:  # noqa: F811
+    """A connection a request returns to its pool holds no advisory lock,
+    whichever way the keyed request ended -- a pass-1 validation failure
+    (the lock is taken at the idempotency lookup, before pass 1 raises), an
+    execution, a replay -- checked on `pg_locks` directly, and by a SECOND,
+    independent cell's request for the SAME key completing promptly, not
+    blocked on a leaked lock.
+
+    The per-key and the capacity locks are transaction-scoped
+    (`pg_advisory_xact_lock`): the rollback/commit that ends the request's
+    transaction releases them, so nothing has to release them by hand and
+    nothing a failure path forgets can survive into the next borrower of
+    the connection."""
     cell_a = make_cell(app_a)
     cell_b = make_cell(app_a)
     try:
@@ -590,28 +577,14 @@ def test_postgres_unlock_runs_on_pass1_validation_failure(app_a) -> None:  # noq
         # check, NotFoundError, before `self._backend.begin()` is ever
         # called (`transact`'s own two-pass docstring) -- but reached
         # only AFTER `_idempotency_check` (and therefore `idempotency_
-        # begin`'s own lock acquisition) already ran, since the widened
-        # lock/`_idempotency_pg_scope` now covers pass 1 too for a keyed,
-        # real request (code-review fix F5).
+        # begin`'s own lock acquisition) already ran.
         with pytest.raises(FoundationError):
             runtime_a.transact(
                 [{"type": "insert", "collection": "does_not_exist_f3", "values": {"title": "x"}}],
                 idempotency_key=key,
             )
-
-        with cell_a._backend._runtime.cursor() as cur:
-            cur.execute("SELECT pg_backend_pid()")
-            (pid,) = cur.fetchone()
-        monitor = psycopg.connect(app_a.runtime_dsn)
-        try:
-            with monitor.cursor() as cur:
-                cur.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s", [pid])
-                (advisory_lock_count,) = cur.fetchone()
-        finally:
-            monitor.close()
-        assert advisory_lock_count == 0, (
-            f"cell_a's own runtime connection (pid={pid}) still holds {advisory_lock_count} advisory "
-            "lock(s) after a pass-1 validation failure -- idempotency_unlock did not run on this exit"
+        assert _advisory_locks_held_in(app_a) == 0, (
+            "a connection returned to cell_a's pool still holds an advisory lock after a pass-1 validation failure"
         )
 
         start = time.monotonic()
@@ -621,6 +594,12 @@ def test_postgres_unlock_runs_on_pass1_validation_failure(app_a) -> None:  # noq
         assert elapsed < 2.0, f"second cell's same-key request took {elapsed}s -- looks like it waited on a leaked lock"
         assert len(result) == 1
         assert len(runtime_b.read("notes_f3")) == 1
+        assert _advisory_locks_held_in(app_a) == 0, "an executed keyed request left an advisory lock on a pooled connection"
+
+        replayed = runtime_a.transact(
+            [{"type": "insert", "collection": "notes_f3", "values": {"title": "y"}}], idempotency_key=key)
+        assert replayed == result
+        assert _advisory_locks_held_in(app_a) == 0, "a replay left an advisory lock on a pooled connection"
     finally:
         close_cell(cell_a)
         close_cell(cell_b)
@@ -634,9 +613,8 @@ def test_postgres_execution_failure_releases_lock_for_a_concurrent_retry(app_a) 
     genuine rollback AFTER `begin()`/the idempotency lookup already ran)
     -- but here on `PostgresBackend`, with the RETRY issued from a
     SECOND, INDEPENDENT cell (see `_pg_pair`'s own docstring above for
-    why that is the only way to prove the real, cross-connection session
-    `pg_advisory_lock` was actually released, not merely this process's
-    own `self._lock`). The retry must execute as a BRAND-NEW request --
+    why that is the only way to prove the real, cross-connection advisory
+    lock was actually released, not merely this process's own state). The retry must execute as a BRAND-NEW request --
     success, its own `request_id`, exactly one row's worth of effect --
     within a small `max_execution_ms` budget bounding this test's own
     wait (a leaked lock surfaces as `ResourceLimitError`, not a hang)."""
@@ -663,7 +641,7 @@ def test_postgres_execution_failure_releases_lock_for_a_concurrent_retry(app_a) 
         runtime_a.transact([{"type": "insert", "collection": "things_f4pg", "values": {"id": 1}}])
 
         sink.inject_fault(RuntimeError("sink down"))
-        revision = cell_a._backend.schema_revision()
+        revision = scoped(cell_a._backend).schema_revision()
         phrase = _delete_confirmation_phrase("things_f4pg", [Filter("id", "eq", 1)], revision)
         key = "f4-pg-rollback-1"
         delete_op = {

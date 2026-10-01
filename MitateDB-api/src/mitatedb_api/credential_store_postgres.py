@@ -126,7 +126,8 @@ from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import (AuthenticationError, AuthorizationStateUnavailable,
                      NotFoundError, StorageConfigurationError)
 from .identifiers import validate_identifier
-from .pool import BoundedConnectionPool, _application_name_connect_kwargs
+from .pool import (BoundedConnectionPool, PoolError, PoolExhausted,
+                   _application_name_connect_kwargs)
 from .psycopg_counting import CountingConnection
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -397,9 +398,22 @@ class PostgresCredentialStore:
         open on it. `rollback()` with no transaction in progress is a
         no-op, so this is safe to call unconditionally on every healthy
         return, whether or not the method already rolled back itself.
+
+        A `pool.PoolError` from the borrow becomes
+        `AuthorizationStateUnavailable`: the exhausted pool with the
+        message "platform registry connection pool exhausted (max_size
+        reached)", any other failure with "authorization state
+        unavailable".
         """
         if self._pool is not None:
-            conn = self._pool.acquire()
+            try:
+                conn = self._pool.acquire()
+            except PoolExhausted as exc:
+                raise AuthorizationStateUnavailable(
+                    "platform registry connection pool exhausted (max_size reached)"
+                ) from exc
+            except PoolError as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
             healthy = True
             try:
                 yield conn

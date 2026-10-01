@@ -434,12 +434,10 @@ def build_capabilities_document(*, is_developer, role, application_id, cell_conf
             # reasoning above. WP-6d-i (design D-5 (ii) addendum (1))
             # is what keeps this bound genuinely `enforced` under
             # concurrent writers on the PostgreSQL backend (on THIS
-            # peer: a session-level `pg_advisory_lock` taken in
-            # `backend_postgres.py::idempotency_reserve`, the count
-            # committed right after it, and the lock released by
-            # `idempotency_unlock` on the bound connection -- a
-            # platform-specific realization, design D-13, distinct from
-            # r2db's same-transaction xact lock); this declaration site
+            # peer: a transaction-scoped `pg_advisory_xact_lock` taken in
+            # `backend_postgres.py::idempotency_reserve` and held until
+            # the request's own transaction ends -- the same shape as
+            # r2db's, design D-13); this declaration site
             # itself predates that WP and
             # is unchanged by it, since the class was already
             # `enforced` for the single-writer case this dict-literal

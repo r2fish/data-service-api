@@ -37,8 +37,8 @@ from .errors import (AuditSinkUnavailable, AuthenticationError,
                      DestructiveConfirmationRequired, FoundationError,
                      NotFoundError, PlatformUpgradePending,
                      PreconditionFailedError, ResourceLimitError,
-                     StorageConfigurationError, ValidationError,
-                     observed_type_of, violation)
+                     StorageConfigurationError, StorageTransientError,
+                     ValidationError, observed_type_of, violation)
 from .operation_catalog import load_operation_catalog_bytes
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -86,11 +86,12 @@ _STATUS_BY_CODE: dict[str, int] = {
     "SERVICE_UNAVAILABLE": 503,
 }
 
-# `errors.FoundationError` subclass -> contract code, evaluated in order (mirrors `conformance_adapter_mitatedb.py::_CLASSIFY_ORDER`, extended with `StorageConfigurationError` -- unreachable on the in-process adapter's own SQLite backend, real on this HTTP composition's PostgreSQL backend/credential store -- mapped to `SERVICE_UNAVAILABLE` per that class' own documented proposal, `errors.py`). Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-3): `AuditSinkUnavailable` is likewise mapped to `SERVICE_UNAVAILABLE` -- a durable-audit-sink failure on a fail-closed-class operation or denial, distinct from both `StorageConfigurationError` (a permanent DATA-backend privilege defect) and `AuthorizationStateUnavailable` (the credential store's own unreachability). Listed explicitly here (not left to the exhaustive-by-construction fallback in `_classify` below) so that fallback's own "pragma: no cover" comment stays true.
+# `errors.FoundationError` subclass -> contract code, evaluated in order (mirrors `conformance_adapter_mitatedb.py::_CLASSIFY_ORDER`, extended with `StorageConfigurationError` -- unreachable on the in-process adapter's own SQLite backend, real on this HTTP composition's PostgreSQL backend/credential store -- mapped to `SERVICE_UNAVAILABLE` per that class' own documented proposal, `errors.py`). Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-3): `AuditSinkUnavailable` is likewise mapped to `SERVICE_UNAVAILABLE` -- a durable-audit-sink failure on a fail-closed-class operation or denial, distinct from both `StorageConfigurationError` (a permanent DATA-backend privilege defect) and `AuthorizationStateUnavailable` (the credential store's own unreachability). `StorageTransientError` (a deadlock or serialization victim, or a data backend that could not be reached) is mapped the same way. Listed explicitly here (not left to the exhaustive-by-construction fallback in `_classify` below) so that fallback's own "pragma: no cover" comment stays true.
 # history: CH-0185
 _CLASSIFY_ORDER: tuple[tuple[type[FoundationError], str], ...] = (
     (AuthorizationStateUnavailable, "AUTH_STATE_UNAVAILABLE"),
     (StorageConfigurationError, "SERVICE_UNAVAILABLE"),
+    (StorageTransientError, "SERVICE_UNAVAILABLE"),
     (AuditSinkUnavailable, "SERVICE_UNAVAILABLE"),
     (AuthenticationError, "AUTH_INVALID"),
     (AuthorizationError, "FORBIDDEN"),

@@ -207,6 +207,8 @@ _IDEMPOTENCY_KEY_LOCK_NAMESPACE = 20261007
 # table-level (not per-key) advisory lock serializing `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys -- same family as `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (a single, fixed 64-bit `pg_advisory_xact_lock` key), a DIFFERENT constant from it (that lock guards bootstrap/reset ritual ordering; this one guards `idempotency_entries` capacity accounting -- two independent serialization points that must never share one lock id).
 # history: CH-0004
 _IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 1414142
+# the single-argument `pg_advisory_xact_lock(bigint)` key that serializes every SCHEMA operation of one application (see `_schema_serialization_lock` below). Each application has a database of its own, so one fixed key is per-application. A third constant in the family above, distinct from `_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY` and `ops.py::_RITUAL_ADVISORY_LOCK_KEY`: the three guard three independent serialization points and must never share a lock id.
+_SCHEMA_SERIALIZATION_ADVISORY_LOCK_KEY = 761761763
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
 # `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
@@ -1336,7 +1338,7 @@ class PostgresCell:
     #
     # Read (`_idempotency_lookup`) fails CLOSED on a missing table (ruling audit) -- an application that has never run upgrade 11 gets `SERVICE_UNAVAILABLE` right here, before target-existence/execution, exactly like the WRITE (`_idempotency_store`) already did: `UndefinedTable` is left to propagate to `transact`/`apply_schema`'s own `except psycopg.Error` clause, rolling back the (as yet empty) transaction and touching no row. This method runs FIRST on the
     # idempotent path (before `catalog`/target-existence in `transact`;
-    # right after `catalog` but before any operation-specific work in
+    # before `catalog` and before any operation-specific work in
     # `apply_schema`), so nothing has executed yet when it raises.
     # `_idempotency_reserve` (below) can therefore no longer actually
     # observe `UndefinedTable` in practice: on this same path it always
@@ -1399,6 +1401,18 @@ class PostgresCell:
         """
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
+
+    def _schema_serialization_lock(self, conn: "psycopg.Connection[Any]") -> None:
+        """Transaction-scoped, exclusive advisory lock that serializes every schema operation of this application (one database per application, so the fixed key is per-application) -- taken directly in `apply_schema`'s OUTER transaction, before `_load_catalog` and `_read_schema_revision`, and released only by that transaction's commit or rollback.
+
+        Without it two schema operations read the catalog and the revision before either one's DDL commits (READ COMMITTED gives each statement a fresh snapshot, but the read and the DDL are separate statements): both pass the same `plan` token, a destructive confirmation phrase computed from a revision the other has already advanced is still accepted, and the `schema_objects` count is taken from a catalog a concurrent `create_entity` is about to change.
+
+        `apply_schema` takes it after the per-key lock and the idempotency lookup (a replay answers before it and never waits here), then takes the count lock, and reads the catalog only after both: the order every schema operation follows is per-key lock, this lock, count lock. A keyed data operation takes per-key lock and count lock and never this lock, so a schema operation that is only waiting for this lock holds no count lock and blocks no keyed request at it.
+
+        Only schema operations take it. A data operation (`transact`) and a `query` never do, so this lock is only ever contended by other schema operations; a holder of this lock never takes the per-key lock afterwards, and the count lock it may take afterwards is held only by requests that do not take this lock. The wait is bounded by the `lock_timeout` `_set_timeouts` set at the start of the transaction.
+        """
+        with conn.cursor() as cur:
+            _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_SCHEMA_SERIALIZATION_ADVISORY_LOCK_KEY])
 
     def _idempotency_lookup(self, conn: "psycopg.Connection[Any]", key: str) -> tuple[str, str, dict[str, Any]] | None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
@@ -2103,10 +2117,9 @@ class PostgresCell:
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
-                    catalog = self._load_catalog(conn)
                     # Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling
                     # I-3, WP-2c): the idempotency lookup -- as early as
-                    # possible after loading the catalog, before ANY
+                    # possible, before the catalog is loaded, before ANY
                     # operation-specific accounting or target-dependent
                     # computation (including the `schema_objects`
                     # projection below, which for `drop_entity`/`add_
@@ -2141,10 +2154,13 @@ class PostgresCell:
                                 # history: CH-0064
                                 request_id=stored_payload["request_id"],
                             )
+                    self._schema_serialization_lock(conn)
+                    if idempotency_key is not None and not dry_run:
                         # capacity checked before this request executes anything. table-level count lock, same outer-transaction placement as `transact` above.
                         # history: CH-0065
                         self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
+                    catalog = self._load_catalog(conn)
                     # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): read ONCE, before any DDL/registry write this transaction is about to (tentatively) make -- "the revision as it stood when the request was decided", the SAME value a dry run's own `revision` reports (S-j) and a real apply's `plan` verification is checked against. read only when actually needed -- `dry_run` always needs it for `outcome_revision` below (S-j), and a caller-presented `plan` needs it to verify; an ordinary apply (neither) needs neither, and skips this extra round trip entirely (`plan_request` is otherwise built unconditionally by `service.py`, so gating on `plan_request is not None` alone would not have helped).
                     # history: CH-0066
                     revision_before = self._read_schema_revision(conn) if dry_run or plan is not None else None
@@ -2241,9 +2257,7 @@ class PostgresCell:
                         # "An add_field declaring nullable: false on an entity that already holds rows is refused with CONFLICT on the same rule" -- the SAME tx + lock `alter_field`'s own existing-row scan uses below: `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE` before the existence check, so a concurrent INSERT cannot slip a row in between this check and the DDL/registry write below.
                         #
                         # plain `SHARE MODE` does not conflict with itself, so two concurrent `add_field`/`alter_field` calls on the SAME entity could both acquire it, then each block at its own later `ALTER TABLE` (ACCESS EXCLUSIVE) waiting on the other's SHARE lock -- a guaranteed mutual wait, broken only by PostgreSQL's deadlock detector aborting one side with an error instead of the two calls simply serializing. `SHARE ROW EXCLUSIVE` conflicts with
-                        # itself, so the second caller instead waits here,
-                        # at LOCK TABLE, and proceeds only once the first
-                        # transaction commits or rolls back -- it still
+                        # itself, so a second caller that reached this point would instead wait here, at LOCK TABLE, until the first transaction commits or rolls back; every schema operation of this application is already serialized by `_schema_serialization_lock` before it gets here, so this self-conflict is a second line of defense -- it still
                         # excludes concurrent row writers (ROW EXCLUSIVE)
                         # exactly as plain SHARE did, so the R-2 existing-
                         # row-scan property above is unchanged.
@@ -2307,10 +2321,7 @@ class PostgresCell:
                         # lock the entity's own table (SHARE ROW EXCLUSIVE -- blocks concurrent writers, never concurrent readers) BEFORE the scan below, inside this SAME transaction. Without this, READ COMMITTED lets another session INSERT/UPDATE a row that violates the new constraints, commit it AFTER this scan sees zero violations but BEFORE this transaction's own `_write_field_constraints` commits -- `alter_field` would then succeed while a violating row already exists, making the catalog's own declaration false the instant it is published. A table-level lock (not a row lock) because the scan below reads the WHOLE table, not a single identified row (contrast the upsert TOCTOU fix below, which locks one row).
                         #
                         # the original fix used plain `SHARE MODE`, which does not conflict with itself -- two concurrent `alter_field`/`add_field` calls on the SAME entity could both acquire it here, then each block at its own later `ALTER TABLE` (ACCESS EXCLUSIVE) waiting on the other's SHARE lock, a guaranteed mutual wait broken only by PostgreSQL's deadlock detector aborting one side with an error rather than the two calls simply serializing. `SHARE ROW
-                        # EXCLUSIVE` conflicts with itself, so the second
-                        # caller instead waits here, at LOCK TABLE, and
-                        # proceeds only once the first transaction commits
-                        # or rolls back -- it still excludes concurrent row
+                        # EXCLUSIVE` conflicts with itself, so a second caller that reached this point would instead wait here, at LOCK TABLE, until the first transaction commits or rolls back; every schema operation of this application is already serialized by `_schema_serialization_lock` before it gets here, so this self-conflict is a second line of defense -- it still excludes concurrent row
                         # writers (ROW EXCLUSIVE) exactly as plain SHARE
                         # did, so the R-2 existing-row-scan property above
                         # is unchanged.

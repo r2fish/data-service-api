@@ -40,7 +40,9 @@ import uuid
 import psycopg
 from psycopg import sql
 
-from .pool import BoundedConnectionPool, _application_name_connect_kwargs
+from .errors import AuthorizationStateUnavailable
+from .pool import (BoundedConnectionPool, PoolError, PoolExhausted,
+                   _application_name_connect_kwargs)
 from .psycopg_counting import CountingConnection
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -504,7 +506,10 @@ class PostgresApplicationAuditSink:
         of the `with` block, so no other call can use it meanwhile; one
         that raised inside the block is discarded (closed, never
         returned), and one that did not is rolled back and returned -- a
-        rollback that itself fails discards it too. Without a pool, the
+        rollback that itself fails discards it too. A `pool.PoolError`
+        from the borrow becomes `errors.AuthorizationStateUnavailable`
+        (the exhausted pool with its own message, any other failure with
+        "authorization state unavailable"). Without a pool, the
         connection is a fresh one closed at the end of the block."""
         if self._pool is None:
             conn = self._connect()
@@ -514,7 +519,14 @@ class PostgresApplicationAuditSink:
                 self._fold_closed_connection_stats(conn)
                 conn.close()
             return
-        conn = self._pool.acquire()
+        try:
+            conn = self._pool.acquire()
+        except PoolExhausted as exc:
+            raise AuthorizationStateUnavailable(
+                "platform registry connection pool exhausted (max_size reached)"
+            ) from exc
+        except PoolError as exc:
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
         healthy = True
         try:
             yield conn
@@ -549,9 +561,10 @@ class PostgresApplicationAuditSink:
         """Synchronous durable INSERT + commit, in a transaction of this
         call's own on a connection no other call holds meanwhile. A
         failure here propagates to the caller unchanged (a `psycopg.Error`
-        from the statement or the connect, or -- with a pool -- the pool's
-        `errors.AuthorizationStateUnavailable` when it cannot connect or
-        stays exhausted past its acquire timeout; never mapped to
+        from the statement or the connect, or -- with a pool -- the
+        `errors.AuthorizationStateUnavailable` `_borrow` raises when the
+        pool cannot connect or stays exhausted past its acquire timeout
+        (`pool.PoolError`); never mapped to
         `errors.AuditSinkUnavailable` at this layer) -- `audit_dispatch.
         py`'s pre-commit-hook/denial/alert closures are the layer that
         decides how a failure here becomes `errors.AuditSinkUnavailable`."""

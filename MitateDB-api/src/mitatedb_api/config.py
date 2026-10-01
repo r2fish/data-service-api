@@ -359,11 +359,13 @@ def role_pool_size(thread_limit: int) -> int:
     data` processes share `max_connections` without the budget scaling
     with the declared `concurrency` bound.
 
-    This peer's per-application data path is NOT pooled at all
-    (`backend_postgres.PostgresBackend`: two fixed, persistent connections
-    per served application per process, serialized by `cell.py`'s own
-    request-wide lock) -- there is no per-application counterpart to this
-    function on this peer, only this one platform-pool consumer.
+    This peer's per-application data path uses the same size: each served
+    application's `backend_postgres.PostgresBackend` holds one pool per role
+    (runtime, developer) of up to this many connections (`main.py` passes
+    it as `pool_size=`), and a request borrows at most one connection per
+    role from them; `cell.py` holds no request-wide lock.
+
+    History: CH-0549
     """
     if isinstance(thread_limit, bool) or not isinstance(thread_limit, int) or thread_limit < 1:
         raise ValueError(f"thread_limit must be a positive integer, got {thread_limit!r}")

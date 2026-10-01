@@ -338,32 +338,31 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4) sits above every site
 #: below, one line each -- re-verified via `_fail_call_sites`. Entry count
 #: and site identity unchanged (20).
-    ("backend_postgres.py", 434),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 495),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 548),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 579),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 640),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 702),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 731),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 912),   # generic driver-exception translation
-    ("backend_postgres.py", 933),   # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1075),  # generic driver-exception translation
-    ("backend_postgres.py", 1233),  # generic driver-exception translation
-    # R-115: the backend's single-statement `insert()` / `update()` are
-    # removed (2 sites), and the lines between them move up -- entries below
-    # re-verified via `_fail_call_sites`, not hand-shifted. Entry count 20 -> 18.
-    ("backend_postgres.py", 1321),  # generic driver-exception translation
-    ("backend_postgres.py", 1353),  # generic driver-exception translation
-    ("backend_postgres.py", 1379),  # generic driver-exception translation
-    # Design docs/design/PHASE11_KEYSET_PAGING_V1.md D-2a/D-3 (4): `read`'s
-    # own keyset-predicate/NULLS-clause assembly (`_keyset_predicate_sql`,
-    # `_NULLS_SQL`) added 16 lines before this site and every one below it
-    # in this file (1484 -> 1500, 1512 -> 1528, 1553 -> 1569, 1822 -> 1838,
-    # 1891 -> 1907) -- re-verified via `_fail_call_sites`, not hand-shifted.
-    ("backend_postgres.py", 1462),  # generic driver-exception translation
-    ("backend_postgres.py", 1503),  # generic driver-exception translation
-    ("backend_postgres.py", 1773),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1842),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    # R-102: the request scope replaces the two persistent connections, so
+    # the catalog reads and the DML / DDL methods lost their rollback and
+    # commit lines and gained the transient-error clause; `_acquire_advisory`
+    # (the schema-lock and entity-lock acquisition) adds one site of the same
+    # generic driver-exception translation. Every line below re-verified via
+    # `_fail_call_sites`, not hand-shifted. Entry count 18 -> 19.
+    ("backend_postgres.py", 585),   # _acquire_advisory: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 645),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 701),   # field_domains: generic driver-exception translation
+    ("backend_postgres.py", 749),   # field_types: generic driver-exception translation
+    ("backend_postgres.py", 775),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 831),   # field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 888),   # field_types_and_constraints: generic driver-exception translation
+    ("backend_postgres.py", 912),   # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1089),  # alter_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1108),  # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1246),  # create_collection: generic driver-exception translation
+    ("backend_postgres.py", 1402),  # add_field: generic driver-exception translation
+    ("backend_postgres.py", 1491),  # insert_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1524),  # update_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1551),  # delete_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1629),  # read: generic driver-exception translation
+    ("backend_postgres.py", 1666),  # delete: generic driver-exception translation
+    ("backend_postgres.py", 1783),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1814),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
@@ -651,7 +650,9 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # (23 -> 21); see that module's own count below.
         # R-115: -2 -- the single-statement `insert()` / `update()` backend methods
         # (one generic driver-exception `ValidationError` each) are removed (21 -> 19).
-        "backend_postgres.py": 19,
+        # R-102: +1 -- `_acquire_advisory`'s generic driver-exception translation
+        # (the schema-lock / entity-lock acquisition) (19 -> 20).
+        "backend_postgres.py": 20,
         "backend_sqlite.py": 4,
         # R-37 WP-1 leaf extraction (2026-09-14): the 4 sites `_check_
         # domain` carried in `backend_postgres.py` before the move,

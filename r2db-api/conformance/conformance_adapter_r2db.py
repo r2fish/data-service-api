@@ -56,6 +56,7 @@ from adapter import (  # noqa: E402
     IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
+    PlanVerificationHold,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
@@ -359,6 +360,78 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
         release.set()
         setattr(cell_obj, "_idempotency_lookup", original_lookup)
         setattr(cell_obj, "_idempotency_reserve", original_reserve)
+
+
+# port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
+# section 9's `conformance-tests/` paragraph, Q-5): `hold_after_plan_
+# verification` realization for this in-process plug. Like `hold_after_
+# idempotency_lookup` above, this primitive never issues a request of its
+# own. `structured.ApplicationCell.apply_schema` holds this cell's own
+# `self._idempotency_lock` for its ENTIRE call, so a second schema
+# operation against the same Application ("B") blocks at that lock while
+# the first ("A") is held. The stall point is the return of
+# `structured.compute_plan_token` inside A's `_apply_schema_locked`: the
+# point where A has read the revision its `plan` is checked against
+# (`before_revision`) and built the token for it, before `_apply_schema_
+# locked` makes any change to the cell's schema state. The `plan`
+# comparison itself is the operation's exit point, after its tentative
+# changes; the stall point is where the comparison's input is fixed, which
+# is what a concurrent schema operation could invalidate. `compute_plan_
+# token` is a module function, not a cell method, so the wrap is a
+# module-attribute replacement (restored on exit; no product source
+# changes). It is gated on a thread-local mark that only this cell's own
+# `apply_schema` wrapper sets, and only for a call presenting a `plan` or
+# `dry_run`, and on a claim the first caller to reach it takes, so a data
+# operation (`transact` also calls `compute_plan_token`), another cell's
+# schema operation, a schema operation presenting neither `plan` nor
+# `dry_run` (it never calls `compute_plan_token`) and every later call
+# pass straight through and exactly ONE schema operation is held.
+
+
+@contextmanager
+def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> Iterator[PlanVerificationHold]:
+    from r2db_api import structured  # noqa: PLC0415 -- adapter-internal plumbing, patched and restored below.
+
+    original_apply_schema = cell_obj.apply_schema  # noqa: SLF001
+    original_token = structured.compute_plan_token
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    marked = threading.local()
+
+    def _apply_schema(*args: Any, **kwargs: Any):
+        marked.schema_operation = kwargs.get("plan") is not None or bool(kwargs.get("dry_run"))
+        try:
+            return original_apply_schema(*args, **kwargs)
+        finally:
+            marked.schema_operation = False
+
+    def _token(request: Any, schema_revision: int):
+        token = original_token(request, schema_revision)
+        if getattr(marked, "schema_operation", False) and claimed.acquire(blocking=False):
+            entered.release()
+            release.wait()
+        return token
+
+    setattr(cell_obj, "apply_schema", _apply_schema)
+    structured.compute_plan_token = _token
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_plan_verification: no schema operation reached the plan-token computation "
+                f"within {timeout_s}s (expected the next schema operation presenting a plan or dry_run on this "
+                "Application to stall right after compute_plan_token returns -- see this helper's own "
+                "module comment)"
+            )
+        return 1
+
+    try:
+        yield PlanVerificationHold(_wait_until_held)
+    finally:
+        release.set()
+        structured.compute_plan_token = original_token
+        setattr(cell_obj, "apply_schema", original_apply_schema)
 
 
 class R2DBConformanceAdapter(ConformanceAdapter):
@@ -904,6 +977,18 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         comment immediately above this method."""
         cell = self._service._cells[session.application_id]  # noqa: SLF001
         return _hold_after_idempotency_lookup_via_stalled_cell_methods(cell, idempotency_key)
+
+    # port v1.20: wraps this Application's own cell -- see `_hold_after_plan_verification_via_stalled_cell_methods`'s
+    # own module comment for why the stall point sits after the plan-token computation and what a
+    # concurrent second schema operation waits on for this in-process plug.
+    def hold_after_plan_verification(self, session):
+        """See `ConformanceAdapter.hold_after_plan_verification`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_plan_verification_via_stalled_cell_methods` and the
+        comment immediately above it."""
+        cell = self._service._cells[session.application_id]  # noqa: SLF001
+        return _hold_after_plan_verification_via_stalled_cell_methods(cell)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).

@@ -405,6 +405,20 @@ needs the table and is left to fail closed (`SERVICE_UNAVAILABLE`,
 # a caller having gotten the ordering right).
 ```
 
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- `apply_schema` takes the application-wide schema serialization lock before it loads the catalog, so the idempotency lookup, which has no use for the catalog, now runs before `_load_catalog` instead of right after it
+
+old:
+```
+right after `catalog` but before any operation-specific work in `apply_schema`
+```
+
+new:
+```
+before `catalog` and before any operation-specific work in `apply_schema`
+```
+
 ## CH-0016
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell._idempotency_key_lock`)
@@ -1262,6 +1276,20 @@ them) read `.revision` off the result.
 # I-7/D-4).
 ```
 
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- the idempotency lookup now precedes `_load_catalog` in `apply_schema` (the catalog is read only after the schema serialization lock, which a replay never reaches)
+
+old:
+```
+as early as possible after loading the catalog, before ANY
+```
+
+new:
+```
+as early as possible, before the catalog is loaded, before ANY
+```
+
 ## CH-0061
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)
@@ -1427,6 +1455,20 @@ them) read `.revision` off the result.
 # row-scan property above is unchanged.
 ```
 
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- every schema operation of an application is serialized by `_schema_serialization_lock` before it reaches the table lock, so the second caller waits on that advisory lock first and the `SHARE ROW EXCLUSIVE` self-conflict is a second line of defense, no longer the point where the second caller waits
+
+old:
+```
+so the second caller instead waits here, at LOCK TABLE, and proceeds only once the first transaction commits or rolls back
+```
+
+new:
+```
+so a second caller that reached this point would instead wait here, at LOCK TABLE, until the first transaction commits or rolls back; every schema operation of this application is already serialized by `_schema_serialization_lock` before it gets here, so this self-conflict is a second line of defense
+```
+
 ## CH-0070
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)
@@ -1487,6 +1529,20 @@ them) read `.revision` off the result.
 # writers (ROW EXCLUSIVE) exactly as plain SHARE
 # did, so the R-2 existing-row-scan property above
 # is unchanged.
+```
+
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- every schema operation of an application is serialized by `_schema_serialization_lock` before it reaches the table lock, so the second caller waits on that advisory lock first and the `SHARE ROW EXCLUSIVE` self-conflict is a second line of defense, no longer the point where the second caller waits
+
+old:
+```
+so the second caller instead waits here, at LOCK TABLE, and proceeds only once the first transaction commits or rolls back
+```
+
+new:
+```
+so a second caller that reached this point would instead wait here, at LOCK TABLE, until the first transaction commits or rolls back; every schema operation of this application is already serialized by `_schema_serialization_lock` before it gets here, so this self-conflict is a second line of defense
 ```
 
 ## CH-0072

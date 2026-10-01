@@ -106,7 +106,8 @@ def test_visible_field_domains_excludes_the_row_order_column_on_sqlite() -> None
     # The select-all path (`fields=None`) goes through the SAME helper
     # (`cell.py::ApplicationCell._select_fields` -> `_visible_field_
     # domains`) -- observed directly here, not merely inferred.
-    assert cell._visible_field_domains("widgets") == {"name": None, "score": None}  # noqa: SLF001
+    with cell._backend.request_scope("schema") as scope:  # noqa: SLF001
+        assert cell._visible_field_domains("widgets", scope=scope) == {"name": None, "score": None}  # noqa: SLF001
 
 
 def test_declaring_the_row_order_column_name_as_a_field_is_rejected_by_identifier_syntax() -> None:
@@ -376,7 +377,8 @@ def test_postgres_backend_create_collection_has_a_generated_identity_row_order_c
     1 件 (`widgets`) を実際に観測する。"""
     backend = PostgresBackend(runtime_dsn=pg_app.runtime_dsn, developer_dsn=pg_app.developer_dsn)
     try:
-        backend.create_collection("widgets", {"name": "text"})
+        with backend.request_scope("schema") as scope:
+            backend.create_collection("widgets", {"name": "text"}, scope=scope)
         columns = _columns(pg_app.developer_dsn, "widgets")
         assert ROW_ORDER_COLUMN in columns
         assert columns[ROW_ORDER_COLUMN]["data_type"] == "bigint"
@@ -416,7 +418,8 @@ def test_visible_field_domains_excludes_the_row_order_column_on_postgres(pg_app)
         # `_DOMAIN_BY_DATA_TYPE`/`_TEXT_DOMAIN_BY_DECLARED_TYPE`): `text`
         # 型・`string` 宣言は `"string"`、`integer` 物理型 (`BIGINT`) は
         # `"int64"`。除外をやめる変異はこの等値を単独で赤にする。
-        assert cell._visible_field_domains("widgets") == {"name": "string", "score": "int64"}  # noqa: SLF001
+        with backend.request_scope("schema") as scope:
+            assert cell._visible_field_domains("widgets", scope=scope) == {"name": "string", "score": "int64"}  # noqa: SLF001
     finally:
         backend.close()
 

@@ -22,10 +22,12 @@ directory that needs real PostgreSQL already pays independently.
 from __future__ import annotations
 
 import threading
+import time
 import types
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 
 import httpx
@@ -1215,10 +1217,12 @@ def test_pg_alter_field_locks_the_table_in_share_mode_before_scanning(app_a: typ
     R-35 (Phase 10, WP-6d-i review): originally plain `SHARE MODE`,
     which does not conflict with itself and could deadlock two
     concurrent `add_field`/`alter_field` calls on the same entity at
-    their own later `ALTER TABLE` -- see the deterministic two-
-    connection race test right below this one for that scenario
-    actually observed against real PostgreSQL, not merely at the SQL-
-    text level."""
+    their own later `ALTER TABLE`. Every schema operation of an
+    application is now serialized by the schema lock before it reaches
+    this table lock (see `test_pg_concurrent_add_field_calls_on_same_
+    entity_serialize_without_deadlock` below), so the self-conflicting
+    mode is a second line of defense and this SQL-text pin is what
+    keeps it in place."""
     import r2db_api.postgres as postgres_module
 
     cell = make_cell(app_a)
@@ -1250,18 +1254,76 @@ def test_pg_alter_field_locks_the_table_in_share_mode_before_scanning(app_a: typ
         cell.close()
 
 
+def test_pg_add_field_declaring_nullable_false_locks_the_table_in_share_row_exclusive_mode_before_scanning(app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`add_field` declaring `nullable: false` takes `LOCK TABLE ... IN
+    SHARE ROW EXCLUSIVE MODE` before its existing-row existence check,
+    inside the same transaction -- pinned at the SQL text level, like
+    `alter_field`'s test above. The schema lock serializes two schema
+    operations before they reach this statement, so the mode (plain
+    `SHARE` does not conflict with itself) is a second line of defense
+    and this pin is what keeps it in place."""
+    import r2db_api.postgres as postgres_module
+
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "lockpin", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS)
+
+        captured: list[str] = []
+        real_run = postgres_module._run
+
+        def spy(cursor: Any, statement: Any, params: Any = ()) -> None:
+            try:
+                captured.append(statement.as_string(cursor))
+            except Exception:
+                pass
+            real_run(cursor, statement, params)
+
+        monkeypatch.setattr(postgres_module, "_run", spy)
+        cell.apply_schema(
+            {"operation": "add_field", "entity": "lockpin", "field": "extra", "field_type": "string", "nullable": False},
+            developer=True, limits=LIMITS)
+
+        lock_statements = [s for s in captured if "LOCK TABLE" in s.upper()]
+        assert len(lock_statements) == 1, captured
+        assert "IN SHARE ROW EXCLUSIVE MODE" in lock_statements[0].upper()
+        scan_index = next(i for i, s in enumerate(captured) if s.strip().upper().startswith("SELECT 1 FROM"))
+        assert captured.index(lock_statements[0]) < scan_index
+    finally:
+        cell.close()
+
+
 # ---- R-35: the M-1/M-6 lock must not deadlock two concurrent schema ops --
 
 
-def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+def _advisory_lock_waiters(admin_dsn: str, database: str) -> int:
+    """Backends of `database` currently waiting on an advisory lock,
+    counted over a separate superuser connection (outside every product
+    path)."""
+    with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND wait_event_type = 'Lock' "
+                "AND wait_event = 'advisory' AND pid <> pg_backend_pid()", [database])
+            return cur.fetchone()[0]
+
+
+def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     """R-35 (Phase 10, WP-6d-i review): plain `LOCK TABLE ... IN SHARE
     MODE` does not conflict with itself, so two concurrent `add_field`
     calls declaring `nullable: false` on the SAME entity could both
     acquire it, then each block at its own later `ALTER TABLE` (ACCESS
     EXCLUSIVE) waiting on the other's SHARE lock -- a guaranteed mutual
     wait resolved only by PostgreSQL's deadlock detector aborting one
-    side with an error. `SHARE ROW EXCLUSIVE` (self-conflicting) instead
-    makes the second caller wait AT `LOCK TABLE` until the first commits.
+    side with an error. `SHARE ROW EXCLUSIVE` (self-conflicting) would
+    instead make a second caller that reached `LOCK TABLE` wait there until
+    the first commits. Every schema operation of one application also
+    serializes on the application-wide schema lock taken before the
+    catalog is read, so the second caller waits on that advisory lock
+    (seen in `pg_stat_activity`) and does not reach its own `LOCK TABLE`
+    until the first commits; the lock mode itself is pinned by the SQL-text
+    tests above.
 
     Verified against a REAL two-connection race, never merely at the SQL-
     text level (contrast the M-1 test above, whose own docstring
@@ -1273,8 +1335,10 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
     SAME entity -- if the two locks conflict, B's own `LOCK TABLE`
     blocks INSIDE `cursor.execute` itself and never reaches the line
     that would record it as returned, so it must not do so within a
-    short window. Releasing A lets both complete, in sequence, with no
-    deadlock error, and the final catalog carries both new fields."""
+    short window. With the schema lock B is seen waiting on an advisory
+    lock instead, and has not issued its `LOCK TABLE` at all. Releasing
+    A lets both complete, in sequence, with no deadlock error, and the
+    final catalog carries both new fields."""
     import r2db_api.postgres as postgres_module
 
     cell = make_cell(app_a, pool_size=2)
@@ -1347,11 +1411,15 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
             thread_b = threading.Thread(target=_add_field_b)
             thread_b.start()
             try:
-                assert b_lock_started.wait(timeout=10), "thread B never reached its own LOCK TABLE"
-                assert not b_lock_returned.wait(timeout=0.5), (
-                    "thread B's LOCK TABLE returned while thread A still holds the lock -- "
-                    "the two locks did not conflict (R-35 regression)"
+                give_up_at = time.monotonic() + 10
+                while not b_lock_started.is_set() and not _advisory_lock_waiters(platform.admin_dsn, app_a.database):
+                    assert time.monotonic() < give_up_at, "thread B neither reached its own LOCK TABLE nor waits on an advisory lock"
+                    time.sleep(0.05)
+                assert not b_lock_started.is_set(), (
+                    "thread B reached its own LOCK TABLE while thread A still holds its schema transaction -- "
+                    "two schema operations of one application must serialize before any table lock"
                 )
+                assert not b_lock_returned.is_set()
             finally:
                 release_a.set()
                 thread_b.join(timeout=10)

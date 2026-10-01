@@ -68,6 +68,8 @@ from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text
 from mitatedb_api import pool as pool_module
 from mitatedb_api.pool import BoundedConnectionPool
 
+from .scoped_backend import commits_failing, scoped
+
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
 # `main.build_app` requires `MITATEDB_WORKERS`/`MITATEDB_SLOT_DIR`: one
@@ -437,71 +439,65 @@ def test_developer_connection_used_by_the_catalog_path_carries_the_role_level_st
     timeout_probe_app: types.SimpleNamespace,
 ) -> None:
     """`PostgresBackend.all_field_types`/`.all_field_constraints` -- the
-    storage this application's `GET /v1/catalog` reads -- run entirely on
-    `self._developer` (`backend_postgres.py`). `0013_role_statement_
+    storage this application's `GET /v1/catalog` reads -- run on a
+    developer-pool connection (`backend_postgres.py`). `0013_role_statement_
     timeouts.sql` bounds that role with a role-level `ALTER ROLE ... SET
     statement_timeout = '5000ms'`. This reads the EFFECTIVE value straight
-    off the SAME connection object `PostgresBackend` opens for that path
-    (`pg_settings.setting`, never `pg_roles.rolconfig`/`pg_db_role_
-    setting`'s own declaration) -- proof the session the catalog path
-    actually runs in carries the bound, not merely that the role declares
-    one.
+    off a connection of the pool `PostgresBackend` borrows that path's
+    connections from (`pg_settings.setting`, never `pg_roles.rolconfig`/
+    `pg_db_role_setting`'s own declaration) -- proof the session the
+    catalog path actually runs in carries the bound, not merely that the
+    role declares one.
 
-    R-87 limits this to OUTSIDE the 8 catalog reads' own transactions:
-    since that work order, each of the 8 (`schema_count`/`field_domains`/
-    `field_types`/`all_field_types`/`field_constraints`/`field_types_and_
-    constraints`/`all_field_constraints`/`schema_revision`) issues its own
-    `SET LOCAL statement_timeout`/`lock_timeout` at the start of its own
-    transaction -- inside one of those 8 transactions the CONSTRUCTED
-    value (`PostgresBackend(..., max_execution_ms=...)`) is what actually
-    binds, not this role-level value (`test_r87_catalog_read_execution_
-    ms.py::test_catalog_reads_use_the_constructed_statement_and_lock_
-    timeout_inside_their_own_transaction`). The value this test reads,
-    straight after construction with no catalog call yet made, is
-    unaffected either way. The second half below (completion condition 5,
-    R-87) reads the SAME role-level value a SECOND time, this time AFTER
-    a real catalog call on a DIFFERENT backend -- proof the per-
-    transaction `SET LOCAL` does not leak past its own transaction back
-    onto this role-level value."""
+    A request scope sets `statement_timeout`/`lock_timeout` with `SET
+    LOCAL` when it opens (`request_scope`); the second half below reads
+    the SAME role-level value a SECOND time, this time AFTER a real scope
+    on a DIFFERENT backend -- proof the per-transaction `SET LOCAL` does
+    not leak past its own transaction onto the connection the next request
+    borrows."""
     backend = make_backend(timeout_probe_app)
     try:
-        with backend._developer.cursor() as cur:
-            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
-            statement_timeout = cur.fetchone()[0]
-        backend._developer.rollback()
+        conn = backend._developer_pool.acquire()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+                statement_timeout = cur.fetchone()[0]
+        finally:
+            backend._developer_pool.release(conn)
     finally:
         backend.close()
     assert statement_timeout == "5000"
 
-    # R-87 completion condition 5: a `SET LOCAL` issued by one of the 8
-    # catalog reads must not leak past its own transaction. Constructed
-    # with a value (1234) distinct from the role-level `statement_timeout`
-    # default (5000) -- if it leaked, `statement_timeout` would read back
-    # as `1234` after the call. The comparison is against a BASELINE read
-    # on the SAME `_developer` connection, taken BEFORE any catalog call,
-    # never a hardcoded cluster-default literal (`lock_timeout`'s own
-    # role-level absence is whatever this cluster's own global default
-    # is, not necessarily `0` on every cluster) -- so this test does not
-    # depend on this cluster's particular defaults, only on "before" and
-    # "after" agreeing.
+    # A `SET LOCAL` issued when a request scope opens must not leak past
+    # the scope: the connection goes back to its pool and the next borrower
+    # sees the role-level value again. Constructed with a value (1234)
+    # distinct from the role-level `statement_timeout` default (5000) -- if
+    # it leaked, `statement_timeout` would read back as `1234` after the
+    # call. The comparison is against a BASELINE read on a connection of
+    # the same pool, taken BEFORE any catalog call, never a hardcoded
+    # cluster-default literal (`lock_timeout`'s own role-level absence is
+    # whatever this cluster's own global default is, not necessarily `0`
+    # on every cluster) -- so this test does not depend on this cluster's
+    # particular defaults, only on "before" and "after" agreeing.
     probe_backend = PostgresBackend(
         timeout_probe_app.runtime_dsn, timeout_probe_app.developer_dsn, max_execution_ms=1234,
     )
     try:
-        with probe_backend._developer.cursor() as cur:
-            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
-            baseline_statement_timeout = cur.fetchone()[0]
-            cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
-            baseline_lock_timeout = cur.fetchone()[0]
-        probe_backend._developer.rollback()
+        def _settings() -> tuple[str, str]:
+            conn = probe_backend._developer_pool.acquire()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
+                    statement = cur.fetchone()[0]
+                    cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
+                    lock = cur.fetchone()[0]
+                return statement, lock
+            finally:
+                probe_backend._developer_pool.release(conn)
 
-        probe_backend.schema_count()
-        with probe_backend._developer.cursor() as cur:
-            cur.execute("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'")
-            after_statement_timeout = cur.fetchone()[0]
-            cur.execute("SELECT setting FROM pg_settings WHERE name = 'lock_timeout'")
-            after_lock_timeout = cur.fetchone()[0]
-        probe_backend._developer.rollback()
+        baseline_statement_timeout, baseline_lock_timeout = _settings()
+        scoped(probe_backend).schema_count()
+        after_statement_timeout, after_lock_timeout = _settings()
     finally:
         probe_backend.close()
     assert after_statement_timeout == baseline_statement_timeout, (
@@ -1591,7 +1587,7 @@ def test_schema_operation_is_service_unavailable_when_the_durable_sink_fails_sql
     developer = make_developer(cell, "appone")
     with pytest.raises(AuditSinkUnavailable):
         developer.create_collection("things", {"id": "integer"})
-    assert cell._backend.schema_count() == 0
+    assert scoped(cell._backend).schema_count() == 0
 
 
 def test_destructive_delete_is_service_unavailable_when_the_durable_sink_fails_sqlite() -> None:
@@ -1603,7 +1599,7 @@ def test_destructive_delete_is_service_unavailable_when_the_durable_sink_fails_s
     runtime = make_runtime(cell, "appone")
     runtime.insert("things", {"id": 1})
     sink.inject_fault(RuntimeError("sink down"))
-    revision = cell._backend.schema_revision()
+    revision = scoped(cell._backend).schema_revision()
     from mitatedb_api.cell import _delete_confirmation_phrase
     phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 1)], revision)
     with pytest.raises(AuditSinkUnavailable):
@@ -1619,10 +1615,10 @@ def _lose_the_connection_during_commit(backend: Any) -> "tuple[Any, Any]":
     two real methods for the caller to put back."""
     real_commit, real_rollback = backend.commit, backend.rollback
 
-    def _lost_commit() -> None:
+    def _lost_commit(**kwargs: Any) -> None:
         raise psycopg.OperationalError("the connection was lost during the commit")
 
-    def _closed_rollback() -> None:
+    def _closed_rollback(**kwargs: Any) -> None:
         raise psycopg.OperationalError("the connection is closed")
 
     backend.commit, backend.rollback = _lost_commit, _closed_rollback
@@ -1691,7 +1687,7 @@ def test_destructive_delete_is_service_unavailable_when_the_durable_sink_fails_p
         runtime = make_runtime(cell, app_a.app_id)
         runtime.insert("things", {"id": 1})
         sink.inject_fault(RuntimeError("sink down"))
-        revision = cell._backend.schema_revision()
+        revision = scoped(cell._backend).schema_revision()
         phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 1)], revision)
         with pytest.raises(AuditSinkUnavailable):
             runtime.delete("things", [Filter("id", "eq", 1)], destructive=True, confirm=phrase)
@@ -1713,7 +1709,7 @@ def test_schema_operation_is_service_unavailable_when_the_durable_sink_fails_pos
         with pytest.raises(AuditSinkUnavailable):
             developer.create_collection("things", {"id": "integer"})
         with pytest.raises(FoundationError):
-            cell._backend.field_domains("things")  # never created
+            scoped(cell._backend).field_domains("things")  # never created
     finally:
         backend.close()
 
@@ -1787,14 +1783,14 @@ def test_each_data_operation_adds_exactly_one_application_audit_row_for_every_op
 
         # 7) destructive delete (single-operation) -- durable before the
         # call returns.
-        revision = cell._backend.schema_revision()
+        revision = scoped(cell._backend).schema_revision()
         phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 1)], revision)
         runtime.delete("things", [Filter("id", "eq", 1)], destructive=True, confirm=phrase)
         assert _count() == 7
 
         # 8) destructive transact (batch containing a delete) -- exactly
         # ONE row for the WHOLE batch.
-        revision = cell._backend.schema_revision()
+        revision = scoped(cell._backend).schema_revision()
         phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 2)], revision)
         runtime.transact([
             {"type": "insert", "collection": "things", "values": {"id": 4, "label": "e"}},
@@ -1844,7 +1840,7 @@ def test_delete_bearing_mutate_adds_exactly_one_destructive_row(platform: types.
         developer.create_collection("things", {"id": "integer"})
         runtime = make_runtime(cell, app_a.app_id)
         runtime.insert("things", {"id": 1})
-        revision = cell._backend.schema_revision()
+        revision = scoped(cell._backend).schema_revision()
         phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 1)], revision)
         runtime.transact([
             {"type": "insert", "collection": "things", "values": {"id": 2}},
@@ -1873,26 +1869,14 @@ def test_failed_data_commit_writes_an_error_row_for_the_same_request_id(platform
         developer = make_developer(cell, app_a.app_id)
 
         # Force the backend's own DDL commit to fail AFTER the durable
-        # pre-commit hook has already succeeded, by monkeypatching the
-        # developer connection's `commit` to raise -- but only on the
-        # SECOND call: `create_collection`'s own `schema_count()` guard
-        # (`backend_postgres.py`) already commits its own read-only
-        # transaction once, before the DDL statement is even issued, and
-        # that first commit must succeed normally.
-        real_commit = backend._developer.commit
-        calls = {"n": 0}
-
-        def _commit_second_call_fails():
-            calls["n"] += 1
-            if calls["n"] >= 2:
-                raise psycopg.OperationalError("simulated commit failure")
-            return real_commit()
-
+        # pre-commit hook has already succeeded: the commit of the
+        # developer connection the request borrows raises. The schema
+        # operation's one transaction commits exactly once, at its end, so
+        # the first commit is the DDL's.
         probe_request_id = "req-" + uuid.uuid4().hex
-        with patch.object(backend._developer, "commit", side_effect=_commit_second_call_fails):
+        with commits_failing(backend, "developer", psycopg.OperationalError("simulated commit failure")):
             with pytest.raises(AuditSinkUnavailable):
                 developer.create_collection("things", {"id": "integer"}, request_id=probe_request_id)
-        backend._developer.rollback()
 
         events = durable.events()
         outcomes = [row[APPLICATION_AUDIT_FIELDS.index("outcome")] for row in events]
@@ -1933,19 +1917,9 @@ def test_error_row_write_failure_makes_the_response_service_unavailable(platform
     try:
         cell = ApplicationCell(app_a.app_id, FoundationConfig(), backend=backend, audit_router=router)
         developer = make_developer(cell, app_a.app_id)
-        real_commit = backend._developer.commit
-        calls = {"n": 0}
-
-        def _commit_second_call_fails():
-            calls["n"] += 1
-            if calls["n"] >= 2:
-                raise psycopg.OperationalError("simulated")
-            return real_commit()
-
-        with patch.object(backend._developer, "commit", side_effect=_commit_second_call_fails):
+        with commits_failing(backend, "developer", psycopg.OperationalError("simulated")):
             with pytest.raises(AuditSinkUnavailable):
                 developer.create_collection("things", {"id": "integer"})
-        backend._developer.rollback()
     finally:
         backend.close()
         clean_application_audit(platform)
@@ -2138,8 +2112,8 @@ def test_in_memory_and_postgres_backends_have_pre_commit_hook_parity(app_a: type
                 actor_id="c1", role="developer", operation="create_collection", target_kind="collection", target_id="things",
             )
             with pytest.raises(AuditSinkUnavailable):
-                backend.create_collection("things", {"id": "integer"}, audit_hook=hook)
-            assert backend.schema_count() == 0
+                scoped(backend).create_collection("things", {"id": "integer"}, audit_hook=hook)
+            assert scoped(backend).schema_count() == 0
         finally:
             backend.close()
 
@@ -2474,20 +2448,10 @@ def test_backend_commit_failure_is_classified_and_produces_an_error_row(
     try:
         cell = ApplicationCell(app_a.app_id, FoundationConfig(), backend=backend, audit_router=router)
         developer = make_developer(cell, app_a.app_id)
-        real_commit = backend._developer.commit
-        calls = {"n": 0}
-
-        def _commit_second_call_fails():
-            calls["n"] += 1
-            if calls["n"] >= 2:
-                raise psycopg.OperationalError("simulated commit failure")
-            return real_commit()
-
-        with patch.object(backend._developer, "commit", side_effect=_commit_second_call_fails):
+        with commits_failing(backend, "developer", psycopg.OperationalError("simulated commit failure")):
             with pytest.raises(AuditSinkUnavailable) as excinfo:
                 developer.create_collection("things", {"id": "integer"})
         assert not isinstance(excinfo.value, psycopg.Error), "the caller must see a CLASSIFIED FoundationError, never a raw psycopg.Error"
-        backend._developer.rollback()
 
         error_rows = [e for e in sink.events() if e.outcome == "error"]
         assert len(error_rows) == 1
@@ -2834,9 +2798,9 @@ def test_a_write_records_its_allow_row_before_the_data_commit(kind: str) -> None
     seen: list[list[tuple[str, str]]] = []
     real_commit = cell._backend.commit
 
-    def _observing_commit() -> None:
+    def _observing_commit(**kwargs: Any) -> None:
         seen.append([(e.request_id, e.outcome) for e in sink.events()])
-        real_commit()
+        real_commit(**kwargs)
 
     cell._backend.commit = _observing_commit
     request_id = f"rid-write-{kind}"
@@ -2870,12 +2834,12 @@ def test_a_non_destructive_batch_records_its_allow_row_before_the_data_commit_po
         seen: list[list[tuple[str, str]]] = []
         real_commit = backend.commit
 
-        def _observing_commit() -> None:
+        def _observing_commit(**kwargs: Any) -> None:
             seen.append([
                 (row[APPLICATION_AUDIT_FIELDS.index("request_id")], row[APPLICATION_AUDIT_FIELDS.index("outcome")])
                 for row in durable.events()
             ])
-            real_commit()
+            real_commit(**kwargs)
 
         backend.commit = _observing_commit
         runtime.transact([{"type": "insert", "collection": "things", "values": {"id": 1}}], request_id=request_id)
@@ -2993,7 +2957,7 @@ def test_a_failed_non_destructive_commit_writes_an_error_row_for_the_same_reques
     sink = ApplicationAuditSink()
     cell, runtime = _things_cell(make_router(sink))
 
-    def _failing_commit() -> None:
+    def _failing_commit(**kwargs: Any) -> None:
         raise RuntimeError("simulated commit failure")
 
     cell._backend.commit = _failing_commit
@@ -3014,7 +2978,7 @@ def test_a_single_write_whose_commit_fails_writes_an_error_row_for_the_same_requ
     sink = ApplicationAuditSink()
     cell, runtime = _things_cell(make_router(sink))
 
-    def _failing_commit() -> None:
+    def _failing_commit(**kwargs: Any) -> None:
         raise RuntimeError("simulated commit failure")
 
     cell._backend.commit = _failing_commit
@@ -3094,13 +3058,12 @@ def test_a_cancelled_delete_commit_after_the_pre_commit_row_writes_an_error_row_
         make_developer(cell, app_a.app_id).create_collection("things", {"id": "integer"})
         runtime = make_runtime(cell, app_a.app_id)
         runtime.insert("things", {"id": 1})
-        phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 1)], cell._backend.schema_revision())
+        phrase = _delete_confirmation_phrase("things", [Filter("id", "eq", 1)], scoped(cell._backend).schema_revision())
         request_id = "req-" + uuid.uuid4().hex
-        with patch.object(backend._runtime, "commit", side_effect=psycopg.errors.QueryCanceled("simulated cancel")):
+        with commits_failing(backend, "runtime", psycopg.errors.QueryCanceled("simulated cancel")):
             with pytest.raises(FoundationError) as exc:
                 runtime.delete("things", [Filter("id", "eq", 1)], destructive=True, confirm=phrase, request_id=request_id)
         assert type(exc.value).__name__ == "ResourceLimitError"
-        backend._runtime.rollback()
         outcomes = [
             row[APPLICATION_AUDIT_FIELDS.index("outcome")] for row in durable.events()
             if row[APPLICATION_AUDIT_FIELDS.index("request_id")] == request_id
@@ -3109,4 +3072,51 @@ def test_a_cancelled_delete_commit_after_the_pre_commit_row_writes_an_error_row_
         assert len(runtime.read("things")) == 1, "the cancelled delete must not have been kept"
     finally:
         backend.close()
+        clean_application_audit(platform)
+
+
+def test_a_schema_operation_waiting_for_the_audit_pool_is_refused_in_bounded_time_and_leaves_no_lock(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace,
+) -> None:
+    """The audit pool's connections are held by writers that touch only the
+    platform database and wait for nothing in an application database. A
+    schema operation holds its transaction and its advisory locks while its
+    pre-commit audit row waits for an audit connection: with the pool's only
+    connection borrowed elsewhere that wait ends at the pool's own limit
+    (here 0.5 s) as `AuditSinkUnavailable`. That refusal comes from inside
+    the backend's DDL method, which rolls its own transaction back, so the
+    next schema operation succeeds whether or not the scope's exit releases
+    the connection. The scope's exit is the only thing that releases the
+    locks of a refusal that comes after they are taken and before any DDL --
+    here a stale plan token -- and the last step checks exactly that: the
+    next schema operation, which needs the same locks, succeeds instead of
+    waiting for a lock the refused one still held."""
+    clean_application_audit(platform)
+    pool = BoundedConnectionPool(platform.api_dsn, max_size=1, acquire_timeout=0.5)
+    sink = PostgresApplicationAuditSink(platform.api_dsn, schema=platform.schema, pool=pool)
+    backend = make_backend(app_a)
+    try:
+        cell = ApplicationCell(app_a.app_id, FoundationConfig(max_execution_ms=3000), backend=backend,
+                               audit_router=make_router(sink))
+        developer = make_developer(cell, app_a.app_id)
+        held = pool.acquire()
+        started = time.monotonic()
+        try:
+            with pytest.raises(AuditSinkUnavailable):
+                developer.create_collection("things", {"id": "integer"})
+            assert time.monotonic() - started < 3.0
+        finally:
+            pool.release(held)
+        assert scoped(backend).schema_count() == 0
+        # A refusal after the locks are taken and before any DDL (a stale
+        # plan token) leaves nothing for the backend method to roll back:
+        # only the scope's exit can release the locks it took.
+        with pytest.raises(FoundationError) as stale:
+            developer.create_entity("things", {"id": "integer"}, plan="stale-plan-token")
+        assert type(stale.value).__name__ == "PreconditionFailedError"
+        developer.create_collection("things", {"id": "integer"})
+        assert scoped(backend).schema_count() == 1
+    finally:
+        backend.close()
+        pool.closeall()
         clean_application_audit(platform)

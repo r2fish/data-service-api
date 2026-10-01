@@ -1,15 +1,17 @@
-r"""r78 pool/lock wait statistics -- `mitatedb_api.pool.
-BoundedConnectionPool`'s and `mitatedb_api.cell.ApplicationCell`'s new
-acquisition/wait counters (design D-1,
+r"""Pool and schema-lock statistics -- `mitatedb_api.pool.
+BoundedConnectionPool`'s acquisition/wait counters and the
+`PostgresBackend` schema-lock counters, as the `-http` conformance plug's
+`pool_stats()` returns them (design D-1; docs/design/
+MITATEDB_APPLICATION_SERIALIZATION_V0_1.md D-7;
 docs/work-orders/WORK_ORDER_R78_POOL_WAIT_MEASUREMENT_V1.md WP-1
 completion conditions 5, 6, 11).
 
-No real PostgreSQL: `BoundedConnectionPool` here uses the same fake-
-connection substitution `test_threadpool_offload.py`'s own thread-safety
-test already established (`pool._new_connection = ...`, a plain object
-with `closed`/`close()`) -- this file is entirely about pool/lock
-bookkeeping, never about a real connection's own behaviour.
-`ApplicationCell` uses its default in-memory `SQLiteBackend`.
+No real PostgreSQL for the pool tests: `BoundedConnectionPool` there uses
+the same fake-connection substitution `test_threadpool_offload.py`'s own
+thread-safety test already established (`pool._new_connection = ...`, a
+plain object with `closed`/`close()`/`info`) -- those tests are entirely
+about pool bookkeeping, never about a real connection's own behaviour. The
+plug test below builds a real `-http` adapter against the test PostgreSQL.
 
 Run directly:
     ./.venv/bin/python -m pytest MitateDB-api/tests/test_r78_pool_wait_stats.py -q
@@ -25,13 +27,14 @@ import threading
 import time
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 
-from mitatedb_api.cell import ApplicationCell, _CountingRLock
 from mitatedb_api.config import FoundationConfig, role_pool_size
+from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import AuthorizationStateUnavailable
 from mitatedb_api.http import DEFAULT_THREAD_LIMIT
-from mitatedb_api.pool import BoundedConnectionPool
+from mitatedb_api.pool import BoundedConnectionPool, PoolExhausted
 
 _CONFORMANCE_DIR = os.path.join(os.path.dirname(__file__), "..", "conformance")
 if _CONFORMANCE_DIR not in sys.path:
@@ -42,10 +45,12 @@ import conformance_adapter_mitatedb_http as _http_module  # noqa: E402
 class _FakeConnection:
     """Same shape `test_threadpool_offload.py`'s own thread-safety test
     substitutes for a real `psycopg.Connection` -- only `closed`/`close()`
-    are ever touched by `BoundedConnectionPool` itself."""
+    and `info.transaction_status` (idle, so `release()` has nothing to roll
+    back) are ever touched by `BoundedConnectionPool` itself."""
 
     def __init__(self) -> None:
         self.closed = False
+        self.info = SimpleNamespace(transaction_status=psycopg.pq.TransactionStatus.IDLE)
 
     def close(self) -> None:
         self.closed = True
@@ -115,84 +120,30 @@ def test_bounded_connection_pool_wait_stats_and_key_set():
 
 def test_bounded_connection_pool_wait_on_timeout_and_unavailable_message_unchanged():
     """Completion condition 5: the TIMEOUT path (stage (3)'s deadline
-    elapsing with nothing returned) also counts as a wait, and
-    `AuthorizationStateUnavailable`'s firing condition/message text stay
-    exactly what they were before this WP (this WP only observes the wait
-    around them, never changes them)."""
+    elapsing with nothing returned) also counts as a wait. The pool itself
+    raises `PoolExhausted`; the credential store borrowing from it answers
+    `AuthorizationStateUnavailable` with the message text it always had."""
     pool = _fake_pool(max_size=1, acquire_timeout=0.2)
+    store = PostgresCredentialStore(
+        "dsn-unused-fake-pool-r78-test.invalid", pepper="synthetic-test-pepper-wp4e-platform-pool-0000",
+        pool=pool,
+    )
     try:
         held = pool.acquire()
         try:
-            with pytest.raises(AuthorizationStateUnavailable) as excinfo:
+            with pytest.raises(PoolExhausted):
                 pool.acquire()
+            with pytest.raises(AuthorizationStateUnavailable) as excinfo:
+                with store._borrow_connection():  # noqa: SLF001 -- the one choke point every store method borrows through
+                    pass
             assert str(excinfo.value) == "platform registry connection pool exhausted (max_size reached)"
             stats = pool.stats()
-            assert stats["wait_count"] == 1
+            assert stats["wait_count"] == 2  # the direct `acquire()` and the store's
             assert stats["wait_max_ms"] > 0.0
         finally:
             pool.release(held)
     finally:
         pool.closeall()
-
-
-def test_application_cell_lock_counts_waits_and_reentrant_acquisitions():
-    """Completion condition 6: `ApplicationCell._lock`'s wrapper counts
-    every acquisition (`lock_acquire_count`, including a single thread's
-    own reentrant one) and only counts a WAIT when a different thread
-    already holds the lock -- a single thread's own (possibly nested)
-    acquisitions never increment `wait_count`.
-
-    mutation M6 (`cell.py`): remove `_CountingRLock`'s non-blocking
-    pre-check, always acquiring blocking with no wait measurement at all
-    -- the two-thread `wait_count >= 1` assertion below goes red (it stays
-    0 forever, since no wait is ever timed any more)."""
-    cell = ApplicationCell("r78cell1")
-    lock = cell._lock  # noqa: SLF001 - test-only reach-in, same convention this suite already uses for `_lock`/`_pool` internals
-
-    # Single thread, reentrant: 2 acquisitions, 0 waits.
-    with lock:
-        with lock:
-            pass
-    solo_stats = lock.stats()
-    assert solo_stats["lock_acquire_count"] == 2
-    assert solo_stats["wait_count"] == 0
-
-    # Two threads contend: the second genuinely waits for the first.
-    ready = threading.Event()
-
-    def holder() -> None:
-        with lock:
-            ready.set()
-            time.sleep(0.3)
-
-    holder_thread = threading.Thread(target=holder)
-    holder_thread.start()
-    assert ready.wait(timeout=5)
-    with lock:
-        pass
-    holder_thread.join(timeout=5)
-
-    stats = lock.stats()
-    assert stats["wait_count"] >= 1
-    assert stats["wait_max_ms"] > 0.0
-
-
-def test_counting_rlock_acquire_rejects_a_negative_timeout_like_bare_rlock():
-    """Code review R-78 差し戻し 2 item 6(b): `_CountingRLock.acquire()`
-    validates `timeout` upfront, exactly like bare `threading.RLock.
-    acquire()` does -- a negative, non-`-1` `timeout` raises `ValueError`
-    with the SAME message text, even on a completely free (uncontended)
-    lock, where this class's own non-blocking probe would otherwise
-    succeed and silently swallow the invalid argument.
-
-    mutation (`cell.py`): drop the upfront `timeout != -1 and timeout < 0`
-    check from `_CountingRLock.acquire` -- this test's `pytest.raises`
-    goes unfulfilled (no exception at all, since the lock is free) and
-    the test goes red."""
-    lock = _CountingRLock()
-    with pytest.raises(ValueError) as excinfo:
-        lock.acquire(True, -2)
-    assert str(excinfo.value) == "timeout value must be a non-negative number"
 
 
 def test_http_and_socket_mitatedb_plugs_expose_pool_stats():
@@ -205,6 +156,68 @@ def test_http_and_socket_mitatedb_plugs_expose_pool_stats():
     import conformance_adapter_mitatedb_socket as _socket_module  # noqa: E402 - conformance dir already on sys.path (module level, above)
 
     assert _socket_module.MitateDBSocketConformanceAdapter.pool_stats is _http_module.MitateDBHttpConformanceAdapter.pool_stats
+
+
+def test_http_plug_pool_stats_returns_role_rows_and_one_schema_lock_row_per_application():
+    """The `-http` plug's `pool_stats()` returns, for each open application,
+    a `<application_id>/runtime` row and a `<application_id>/developer` row
+    (the role pools' own six keys, the same key form as r2db's) and one
+    `<application_id>` row (the schema lock's four keys). A schema operation
+    through the plug moves the developer pool's `acquire_count` and the
+    schema-lock row's `acquire_count` (the application-wide lock and the
+    entity lock, two acquisitions) and leaves every `wait_count` at 0 -- nothing
+    contends.
+
+    mutation V72 (`conformance_adapter_mitatedb_http.py`): return the
+    `runtime` row only -- the key-set assertion goes red (the `developer`
+    row is missing)."""
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    app_id = f"r102stats{secrets.token_hex(4)}"
+    try:
+        adapter.provision_application(app_id)
+        session = adapter.authenticate(adapter.issue_credential(app_id, "developer"))
+        before = adapter.pool_stats()
+        assert set(before) == {f"{app_id}/runtime", f"{app_id}/developer", app_id}
+        role_keys = {"size", "acquire_count", "wait_count", "wait_total_ms", "wait_max_ms", "in_use_peak"}
+        lock_keys = {"acquire_count", "wait_count", "wait_total_ms", "wait_max_ms"}
+        assert set(before[f"{app_id}/runtime"]) == role_keys
+        assert set(before[f"{app_id}/developer"]) == role_keys
+        assert set(before[app_id]) == lock_keys
+
+        adapter.create_entity(session, "r102stats_entity", {})
+        after = adapter.pool_stats()
+        assert after[f"{app_id}/developer"]["acquire_count"] > before[f"{app_id}/developer"]["acquire_count"]
+        assert after[app_id]["acquire_count"] - before[app_id]["acquire_count"] == 2
+        for key in (f"{app_id}/runtime", f"{app_id}/developer", app_id):
+            assert after[key]["wait_count"] == 0, key
+    finally:
+        with contextlib.suppress(Exception):
+            adapter.deprovision_application(app_id)
+        adapter.close()
+
+
+def test_http_adapter_builds_each_applications_role_pools_like_the_composition_root():
+    """Completion condition 65 (adapter half): the backend the `-http`
+    adapter builds for a provisioned application has two role pools of
+    `role_pool_size(DEFAULT_THREAD_LIMIT)` = 6 connections each, the figure
+    `main.build_app` passes, not the pool module's default.
+
+    mutation V65b (`conformance_adapter_mitatedb_http.py`): drop the
+    `pool_size=` keyword from `_new_backend` -- the pools take the default
+    size (20) and the assertion goes red."""
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    app_id = f"r102size{secrets.token_hex(4)}"
+    try:
+        adapter.provision_application(app_id)
+        backend = adapter._cells[app_id]._backend  # noqa: SLF001 -- adapter-internal reach-in
+        expected = role_pool_size(DEFAULT_THREAD_LIMIT)
+        assert expected == 6
+        assert backend.pool_stats()["runtime"]["size"] == expected
+        assert backend.pool_stats()["developer"]["size"] == expected
+    finally:
+        with contextlib.suppress(Exception):
+            adapter.deprovision_application(app_id)
+        adapter.close()
 
 
 # ---------------------------------------------------------------------

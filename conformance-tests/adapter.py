@@ -1022,6 +1022,33 @@ class IdempotencyHold:
         return self._wait_until_held(timeout_s)
 
 
+@dataclass(frozen=True)
+class PlanVerificationHold:
+    """Yielded by `hold_after_plan_verification()`'s own `with` block
+    (port v1.20, design docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
+    section 9's `conformance-tests/` paragraph and section 11.1 Q-5).
+    Non-normative, the same status `IdempotencyHold` above carries: this
+    port prescribes only what `wait_until_held` does, never this class's
+    own shape beyond that one method. It has the same shape as
+    `IdempotencyHold` and is a separate type only so that neither
+    primitive's yielded handle reads as the other's.
+
+    `wait_until_held(timeout_s=30.0) -> int`: blocks until the ONE held
+    schema operation `hold_after_plan_verification` is arming has actually
+    reached the stall point (see that method's own docstring), then
+    returns the REAL measured count of schema operations held there
+    (always `1` for a correct realization -- this primitive holds exactly
+    one, never more), never a bare echo of an argument. Raises
+    `AssertionError` -- never skips, never times out silently -- if no
+    schema operation has reached that point within `timeout_s` seconds
+    (`OPERATING_CONDITIONS.md` §1.3 の 26)."""
+
+    _wait_until_held: Callable[[float], int]
+
+    def wait_until_held(self, timeout_s: float = 30.0) -> int:
+        return self._wait_until_held(timeout_s)
+
+
 # ---------------------------------------------------------------------------
 # 4.4 Abstract adapter
 # ---------------------------------------------------------------------------
@@ -1799,15 +1826,18 @@ class ConformanceAdapter(ABC):
             concurrency across a real socket or a reverse proxy. Genuine
             wire-level concurrency is out of this primitive's scope until
             L7-2 (a future phase's own multi-plug/real-transport work).
-        (ii) `MitateDB-api` holds at most one in-flight operation PER CELL
-             at a time (`ApplicationCell._lock`) -- this primitive's own
-             stop point sits BEFORE that lock is acquired (concurrency-
+        (ii) The in-process `MitateDB-api` plug runs at most one
+             operation PER CELL at a time (its `SQLiteBackend` holds one
+             `RLock` for each request scope) -- this primitive's own stop
+             point sits BEFORE that lock is acquired (concurrency-
              counter-side, not lock-side), so holding N > 1 in-flight
              requests against ONE cell is still structurally possible
              (the held requests simply queue behind the lock once
-             released), but the `concurrency` bound this peer declares is
+             released), but the `concurrency` bound that plug declares is
              therefore a REFUSAL THRESHOLD, not a claim of N-way parallel
-             EXECUTION capacity.
+             EXECUTION capacity. `MitateDB-api-http` holds no such lock:
+             a cell's operations run in parallel on its per-role
+             connection pools.
         (iii) The scope of the counter this primitive holds open (a
               per-deployment in-flight counter; a per-credential rate
               window) is not something the common suite can observe
@@ -1888,6 +1918,53 @@ class ConformanceAdapter(ABC):
         why the wrap point sits at the end of the admission window on
         that peer's own structure, and what a second, key-matching
         request actually waits on while this primitive holds the first.
+        """
+
+    @abstractmethod
+    def hold_after_plan_verification(self, session) -> AbstractContextManager["PlanVerificationHold"]:
+        """`session` 上で次に到着する、`plan` または `dry_run` を提示する schema 操作を 1 件だけ、その要求自身が plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。`with` を抜けると先着は解放される。
+
+        Verbatim above (word-for-word from the supervisor's ruling M-13
+        in work order docs/work-orders/
+        WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md; the design's own section 9
+        `conformance-tests/` paragraph and section 11.1 Q-5 decide only
+        that the condition and the hook exist).
+
+        port v1.20: condition C-34's own driving primitive -- a `plan`'s
+        precondition under a concurrent schema operation against the same
+        Application, decided deterministically by an adapter hook instead
+        of a bare `time.sleep()` race. It is the same "test-driving
+        primitive, never a test-only hook on product code" discipline
+        `hold_in_flight` and `hold_after_idempotency_lookup` above already
+        establish, applied to the window between a schema operation's
+        read of the revision its `plan` is checked against and its first
+        DDL statement.
+
+        Structural difference from `hold_in_flight` (the same one
+        `hold_after_idempotency_lookup` has): this primitive never issues
+        any request of its own. The held schema operation ("A") and the
+        second one ("B") are both issued by the CALLER, each from its own
+        OS thread -- this method only arms the ONE stall point and yields
+        the `PlanVerificationHold` handle a caller uses to wait for A to
+        actually reach it (`PlanVerificationHold.wait_until_held`, above).
+        A caller confirms B has not completed while A is held with a
+        bounded wait window of its own, the same shape
+        `test_c27_concurrent_same_key.py` uses. A caller that exits the
+        `with` block without having called `wait_until_held` has verified
+        nothing about non-vacuity.
+
+        The arming is for the ONE next schema operation that presents a
+        `plan` or `dry_run`; a schema operation presenting neither passes
+        through, like every other request -- a data operation, a second
+        schema operation, or one arriving after the hold was taken --
+        undisturbed. A second schema operation that B issues against a
+        DIFFERENT entity of the same Application is what C-34 observes,
+        because the Application's revision, plan token and schema object
+        count are Application-wide.
+
+        Called against the YIELDED instance of `isolated_application_
+        surface()`, never against the shared, session-scoped adapter --
+        the same convention the two primitives above follow.
         """
 
     # ------------------------------------------------------------------

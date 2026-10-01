@@ -68,74 +68,56 @@ This is not a port of r2db-api's own ``postgres.py`` (R-2's closing
 paragraph: "the peer implementations are never shared" -- two independent
 implementations of the same safety property is what gives the common
 conformance suite its own detection power). Notable, deliberate
-differences from that peer's own design: no pooling (this foundation
-serializes every operation through ``cell.ApplicationCell``'s own lock
-already, so a single persistent connection per role is sufficient for this
-WP; connection pooling/limits are future-work, design v1.1 §7), no row
+differences from that peer's own design: no row
 addressability (``row_addressability`` stays declared ``unavailable`` --
 see ``insert_in_transaction``'s own comment for why its ``rowid`` return value uses
 PostgreSQL's ``ctid`` rather than a stable published address), and no Row
 Level Security (this foundation's primary isolation wall is
 database-per-application, R-1 -- RLS as an additional layer is future-work,
 design v1.1 §7, not this WP's own containment boundary).
+
+Connections and requests: each application has one bounded pool per role
+(runtime, developer). A request borrows what it needs once, at its start
+(``request_scope``), runs as ONE transaction on its main connection and
+returns the connections when it ends, rolling back whatever is
+uncommitted -- so no two requests ever share a connection or a
+transaction, and nothing one request set on a connection reaches the next.
+Requests on the same application run concurrently; what PostgreSQL
+serializes for them is named at each lock (``lock_schema``,
+``lock_entities``, the two idempotency locks).
 """
 
-import functools
 import json
+import threading
 import time
+from contextlib import contextmanager
 
 import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 
-from .backend import UNCHANGED
+from .backend import SCOPE_KINDS, UNCHANGED, RequestScope
 from .config import FoundationConfig
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
                      PlatformUpgradePending, ResourceLimitError,
-                     StorageConfigurationError, ValidationError, violation)
+                     StorageConfigurationError, StorageTransientError,
+                     ValidationError, violation)
 from .identifiers import validate_identifier
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
-# R-79 (WO §2.1 D-1/D-2): the counting cursor/connection subclasses
-# `__init__` (below) uses instead of plain `psycopg.connect`, and the
-# `pg_prepared_statements` probe `prepared_stats` (below) calls -- all
-# byte-identical to `r2db_api.psycopg_counting` (a same-named test in
-# `tests/` pins the sha256 match; rework 指摘 3 moved the
-# probe itself there so it is not duplicated per peer).
-from .pool import _application_name_connect_kwargs
-from .psycopg_counting import CountingConnection, prepared_stats_skeleton, probe_prepared_statements
+# The `pg_prepared_statements` probe
+# `prepared_stats` (below) calls -- byte-identical to
+# `r2db_api.psycopg_counting` (a same-named test in `tests/` pins the
+# sha256 match; rework 指摘 3 moved the probe itself there so it is not
+# duplicated per peer).
+from .pool import DEFAULT_MAX_SIZE, BoundedConnectionPool, PoolConnectFailed, PoolExhausted
+from .psycopg_counting import prepared_stats_skeleton, probe_prepared_statements
 # `_INT_DOMAIN_RANGES`/`_check_domain` are re-exported for facade
 # compatibility (design D-2); not referenced elsewhere in this module.
 from .postgres_value_domain import _INT_DOMAIN_RANGES, _validate_value_domain, _check_domain
 from .postgres_reserved_names import _RESERVED_EXACT, _RESERVED_PREFIX, _check_reserved_name
 from .postgres_types import _TYPE_SQL, _DOMAIN_BY_DATA_TYPE, _TEXT_DOMAIN_BY_DECLARED_TYPE
 from .postgres_sql import _DIRECTION_SQL, _NULLS_SQL, _keyset_predicate_sql, _where_sql
-
-
-def _guard_pending_platform_upgrades(method):
-    """Q4 rework (supervisor ruling 2026-09-05, H-1(a)): decorates every
-    `PostgresBackend` method below that touches THIS application's own
-    storage. `PostgresBackend.__init__` no longer raises when this
-    application's own platform-upgrade ledger is missing an entry --  it
-    stores the F-12 message on `self._pending_platform_upgrade_message`
-    instead (`None` when nothing is pending) so `main.py::build_app`'s
-    own eager per-application construction loop completes and every
-    OTHER served application's cell opens normally. This decorator is
-    the single place the deferred `errors.PlatformUpgradePending` (F-12)
-    actually gets raised -- at the moment a real request against THIS
-    specific, refusing cell reaches its backend, never earlier. Raises
-    the dedicated `PlatformUpgradePending` subclass (never the bare
-    `StorageConfigurationError`) so `http.py::_problem_for_exception`'s
-    own `isinstance` narrowing can let JUST this one message reach the
-    HTTP response verbatim (design §3.8: "F-12だけは...API応答として
-    利用者に届く") without changing what every OTHER `StorageConfig
-    urationError` site in this file surfaces on the wire."""
-    @functools.wraps(method)
-    def _wrapped(self, *args, **kwargs):
-        if self._pending_platform_upgrade_message is not None:
-            raise PlatformUpgradePending(self._pending_platform_upgrade_message)
-        return method(self, *args, **kwargs)
-    return _wrapped
 
 
 # Bookkeeping table name (provisioned by `migrations/0003_provision_
@@ -193,11 +175,11 @@ _PLATFORM_UPGRADES_TABLE = platform_upgrades.LEDGER_TABLE_NAME
 # TABLE` (developer-connection only) and LIKE `_PLATFORM_UPGRADES_TABLE`
 # (runtime holds a real grant), this table is written from BOTH
 # connections: `ApplicationCell.transact`'s own batch path writes it over
-# `self._runtime` (the same connection the batch's own DML already runs
-# on, so the record lands in the SAME transaction, I-1), while `create_
-# collection`/`add_field`/`alter_field_constraints`'s own `idempotency_
-# record` parameter writes it over `self._developer` (the same connection
-# their own DDL already runs on) -- created AFTER `ALTER DEFAULT
+# the request's runtime connection (the same connection the batch's own DML
+# already runs on, so the record lands in the SAME transaction, I-1), while
+# `create_collection`/`add_field`/`alter_field_constraints`'s own
+# `idempotency_record` parameter writes it over the request's developer
+# connection (the same connection their own DDL already runs on) -- created AFTER `ALTER DEFAULT
 # PRIVILEGES FOR ROLE developer_role` in `0003` (and granted explicitly in
 # `0010`, for an existing application whose ledger predates this table),
 # so the runtime role holds full DML (`SELECT`/`INSERT`/`UPDATE`/
@@ -206,7 +188,7 @@ _PLATFORM_UPGRADES_TABLE = platform_upgrades.LEDGER_TABLE_NAME
 _IDEMPOTENCY_TABLE = "_mdb_idempotency"
 
 # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): two-int
-# `pg_advisory_lock(namespace, hashtext(key))` namespace for the
+# `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the
 # PER-KEY idempotency lock -- see `idempotency_begin` below.
 #
 # Code-review fix F8 (Opus review 2): the rationale this comment
@@ -239,6 +221,54 @@ _IDEMPOTENCY_KEY_LOCK_NAMESPACE = 76176100
 # this one guards `idempotency_entries` capacity accounting -- two
 # independent serialization points that must never share one lock id).
 _IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 761761762
+# Schema-operation lock: one fixed single-bigint `pg_advisory_xact_lock` key
+# per application database (an advisory lock is scoped to the database it is
+# taken in), taken exclusively by every schema operation and by nothing
+# else, so the schema operations of one application run one at a time --
+# across processes, because PostgreSQL holds it. It is what makes a plan
+# token's revision, the `schema_objects` count and the registry row an
+# `alter_field` reads still true when the DDL they justify runs. A third
+# family beside the two above: a different value from each of them.
+_SCHEMA_SERIALIZATION_LOCK_KEY = 761761763
+# Entity lock: two-int `(namespace, hashtext(entity))` advisory locks, a
+# separate key space from the single-bigint family above and from the
+# idempotency namespace (`_IDEMPOTENCY_KEY_LOCK_NAMESPACE`). A schema
+# operation takes its entity exclusively, a data write takes every entity
+# it touches shared: a write and a schema operation on the same entity
+# never overlap, while writes on an entity, and everything on other
+# entities, do not wait for each other. A `hashtext` collision only makes
+# two entities share a lock (too much serialization, never too little).
+_ENTITY_LOCK_NAMESPACE = 76176101
+
+# (try statement, blocking statement) per lock mode. Both take the same
+# locks; a lock wait is told apart from an immediate acquisition by trying
+# first (`_acquire_advisory`). The entity statements take a whole sorted
+# array of names in one round trip.
+_KEY_LOCK_STATEMENTS = (
+    sql.SQL("SELECT pg_try_advisory_xact_lock(%s, hashtext(%s))"),
+    sql.SQL("SELECT pg_advisory_xact_lock(%s, hashtext(%s))"),
+)
+_COUNT_LOCK_STATEMENTS = (
+    sql.SQL("SELECT pg_try_advisory_xact_lock(%s)"),
+    sql.SQL("SELECT pg_advisory_xact_lock(%s)"),
+)
+_SCHEMA_LOCK_STATEMENTS = (
+    sql.SQL("SELECT pg_try_advisory_xact_lock(%s)"),
+    sql.SQL("SELECT pg_advisory_xact_lock(%s)"),
+)
+_ENTITY_LOCK_SHARED = (
+    sql.SQL("SELECT bool_and(pg_try_advisory_xact_lock_shared(%s, hashtext(e))) FROM unnest(%s::text[]) AS e"),
+    sql.SQL("SELECT pg_advisory_xact_lock_shared(%s, hashtext(e)) FROM unnest(%s::text[]) AS e"),
+)
+_ENTITY_LOCK_EXCLUSIVE = (
+    sql.SQL("SELECT bool_and(pg_try_advisory_xact_lock(%s, hashtext(e))) FROM unnest(%s::text[]) AS e"),
+    sql.SQL("SELECT pg_advisory_xact_lock(%s, hashtext(e)) FROM unnest(%s::text[]) AS e"),
+)
+
+# PostgreSQL's two "try again" outcomes: the transaction was chosen as the
+# victim of a deadlock (40P01) or failed to serialize (40001). Neither is
+# the client's doing; nothing was applied.
+_TRANSIENT_ERRORS = (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure)
 
 # m-1 (independent review correction, extended Q4 phase WP-4; Phase 9
 # WP-3c adds `_IDEMPOTENCY_TABLE`): the full set of this package's own
@@ -275,130 +305,313 @@ def _execute(cursor, statement, params=()):
 
 
 class PostgresBackend:
-    """Two persistent connections per application cell.
+    """One application's PostgreSQL storage: a bounded pool per role.
 
-    `developer_conn` (this application's own PostgreSQL DEVELOPER role --
-    schema owner, DDL authority) executes every schema-mutating and
-    catalog-reading statement; `runtime_conn` (this application's own
-    PostgreSQL RUNTIME role -- DML only, per R-1's provisioning grants)
-    executes every data statement. This is R-1's own role separation
-    enforced a second time, structurally, underneath this foundation's own
-    application-level `_require_developer`/`_require_data` gates (`cell.
-    py`): even a code defect that let a non-developer principal reach
-    `create_collection` at the Python level would still hit PostgreSQL's
-    own `InsufficientPrivilege` the moment it attempted DDL over
-    `runtime_conn`, because this backend never even attempts DDL there.
+    The developer pool's connections authenticate as this application's own
+    PostgreSQL DEVELOPER role (schema owner, DDL authority) and execute every
+    schema-mutating and catalog-reading statement; the runtime pool's as its
+    RUNTIME role (DML only, per R-1's provisioning grants) and execute every
+    data statement. This is R-1's own role separation enforced a second time,
+    structurally, underneath this foundation's own application-level
+    `_require_developer`/`_require_data` gates (`cell.py`): even a code defect
+    that let a non-developer principal reach `create_collection` at the Python
+    level would still hit PostgreSQL's own `InsufficientPrivilege` the moment
+    it attempted DDL over a runtime connection, because this backend never
+    even attempts DDL there.
+
+    Nothing here holds a connection between requests. `request_scope` hands
+    one request its connections and every other method works on them.
     """
 
-    def __init__(self, runtime_dsn, developer_dsn, *, application_id=None, max_execution_ms: int | None = None):
-        self._runtime = CountingConnection.connect(runtime_dsn, autocommit=False, **_application_name_connect_kwargs())
-        self._developer = CountingConnection.connect(developer_dsn, autocommit=False, **_application_name_connect_kwargs())
-        # R-87: the constructed upper bound the developer-connection
-        # catalog reads below (`schema_count`/`field_domains`/`field_
-        # types`/`all_field_types`/`field_constraints`/`field_types_and_
-        # constraints`/`all_field_constraints`/`schema_revision`) pass to
-        # `self._set_timeouts` at the start of their own transaction,
-        # unconditionally -- independent of any caller-supplied value
-        # (a bare construction, e.g. this module's own test suite, gets
-        # `FoundationConfig`'s class-attribute default, never an unbound
-        # read). `None` keeps this the deployment's declared
+    def __init__(self, runtime_dsn, developer_dsn, *, application_id=None, max_execution_ms: int | None = None,
+                 pool_size: int = DEFAULT_MAX_SIZE):
+        # No connection is opened here: each pool opens its connections on
+        # first use, up to `pool_size` (the composition root passes the
+        # process's own simultaneous-request bound, `config.role_pool_size`).
+        self._runtime_pool = BoundedConnectionPool(runtime_dsn, max_size=pool_size)
+        self._developer_pool = BoundedConnectionPool(developer_dsn, max_size=pool_size)
+        # The timeout a scope that has no deadline of its own
+        # (`request_scope(..., deadline=None)`: an internal read, a direct
+        # caller) applies to its connections -- the deployment's declared
         # `execution_ms` (`MITATEDB_MAX_EXECUTION_MS` via `FoundationConfig.
-        # from_env`); an explicit value overrides it for tests/tooling.
-        self._catalog_timeout_ms = (
+        # from_env`), or `FoundationConfig`'s class-attribute default for a
+        # bare construction. A scope that has a deadline derives its timeout
+        # from it instead.
+        self._default_timeout_ms = (
             max_execution_ms if max_execution_ms is not None else FoundationConfig.max_execution_ms
         )
         # Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(f),
-        # §3.7 data-plane steps 9-10, F-12; requester ruling 2026-09-05
-        # U-2, reworked by supervisor ruling 2026-09-05 H-1(a)): "cell
-        # open" for THIS peer -- the served set is static configuration
-        # this WP applies eagerly at startup for every served application
-        # (`main.py::build_app`'s own docstring), so there is no later,
-        # per-request "first open" moment to hook instead -- IS the
-        # moment this backend's own two persistent connections come into
-        # existence, once per served application. `application_id=None`
-        # (test/tooling callers that construct a bare `PostgresBackend`
-        # with no application context at all, e.g. `tests/test_postgres.
-        # py`'s own low-level catalog/RLS probes) skips this check
-        # entirely -- those callers are not exercising a served
-        # application's own storage boundary.
-        #
-        # H-1(a) rework: this constructor no longer RAISES when this
-        # application's own ledger is missing an upgrade -- before this
-        # rework, raising here out of `main.py::build_app`'s own eager
-        # `for application_id in ids` loop took the WHOLE PROCESS down
-        # the moment even ONE served application's ledger had a pending
-        # upgrade, refusing every OTHER served application too (review
-        # H-1). Instead this constructor stores the F-12 message on
-        # `self._pending_platform_upgrade_message` (`None` when nothing
-        # is pending); `build_app` still completes and every OTHER
-        # served application's cell serves normally. Every public
-        # storage-touching method below is decorated with `_guard_
-        # pending_platform_upgrades`, which raises `errors.
-        # StorageConfigurationError` (F-12) -- mapped by `http.py::
-        # _CLASSIFY_ORDER` to the contract's `SERVICE_UNAVAILABLE` code
-        # -- the moment a request actually reaches THIS application's
-        # own refusing cell.
+        # §3.7 data-plane steps 9-10, F-12): the application's own platform-
+        # upgrade ledger is checked once per served application, at startup,
+        # by `verify_platform_upgrades` (`main.py::build_app` calls it). A
+        # missing upgrade does not stop the process -- every OTHER served
+        # application keeps serving -- the message is held here
+        # (`None` when nothing is pending) and `request_scope` refuses every
+        # request to THIS application with it, as `errors.PlatformUpgradePending`
+        # (mapped by `http.py::_CLASSIFY_ORDER` to `SERVICE_UNAVAILABLE`).
+        # `application_id=None` (a bare backend in a test or tool, not a
+        # served application) skips the check.
+        self._application_id = application_id
         self._pending_platform_upgrade_message = None
-        if application_id is not None:
+        # Schema-lock statistics (`lock_schema` / `lock_entities`): one
+        # acquire per call, one wait when the first, non-blocking attempt
+        # did not get the lock and the call had to block for it.
+        self._schema_lock_stats_lock = threading.Lock()
+        self._schema_lock_stats = {"acquire_count": 0, "wait_count": 0, "wait_total_ms": 0.0, "wait_max_ms": 0.0}
+
+    def verify_platform_upgrades(self):
+        """F-12 (design §3.8): borrows one runtime connection, checks that
+        this application's own ledger records every upgrade this package
+        requires, and returns the connection. Holds the refusal message
+        (`_pending_platform_upgrade_message`) when one is missing -- it does
+        not raise for that: the process starts and this application's own
+        requests refuse. A database that cannot be reached at all raises
+        `pool.PoolConnectFailed`, as an unreachable database always stopped
+        the startup of the process. A no-op for a backend built without an
+        `application_id`."""
+        if self._application_id is None:
+            return
+        conn = self._runtime_pool.acquire()
+        try:
             try:
-                try:
-                    platform_upgrades.require_application_upgrades_applied(
-                        self._runtime, ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME,
-                        expected=platform_upgrades.PLATFORM_UPGRADE_NUMBERS, application_id=application_id,
-                        ops_module=platform_upgrades.PEER_MODULE,
-                    )
-                finally:
-                    # `require_application_upgrades_applied` only ever
-                    # reads (a `SELECT`, or nothing at all if `UndefinedTable`
-                    # already rolled the runtime connection back itself) --
-                    # this `rollback()` closes out that read-only
-                    # transaction either way.
-                    self._runtime.rollback()
-            except platform_upgrades.PlatformUpgradeError as exc:
-                # design §3.8 F-12: the ONLY platform-upgrade condition
-                # that reaches an API response. H-1(a): the message is
-                # HELD here, not raised -- both connections stay open (a
-                # refusing cell is otherwise a normal, live cell; only
-                # every storage-touching method on it refuses) so a
-                # later `ops upgrade-applications` run followed by a
-                # process restart is the only way this application's own
-                # cell becomes a normal one again.
-                self._pending_platform_upgrade_message = str(exc)
+                platform_upgrades.require_application_upgrades_applied(
+                    conn, ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME,
+                    expected=platform_upgrades.PLATFORM_UPGRADE_NUMBERS, application_id=self._application_id,
+                    ops_module=platform_upgrades.PEER_MODULE,
+                )
+            finally:
+                # `require_application_upgrades_applied` only ever
+                # reads (a `SELECT`, or nothing at all if `UndefinedTable`
+                # already rolled the connection back itself) -- this
+                # `rollback()` closes out that read-only transaction either
+                # way.
+                conn.rollback()
+        except platform_upgrades.PlatformUpgradeError as exc:
+            # design §3.8 F-12: the ONLY platform-upgrade condition that
+            # reaches an API response. The message is HELD here, not
+            # raised -- a later `ops upgrade-applications` run followed by a
+            # process restart is the only way this application's own
+            # requests stop refusing.
+            self._pending_platform_upgrade_message = str(exc)
+        finally:
+            self._runtime_pool.release(conn)
 
     def close(self):
-        self._runtime.close()
-        self._developer.close()
+        self._runtime_pool.closeall()
+        self._developer_pool.closeall()
+
+    def schema_lock_stats(self):
+        """A copy of the schema-lock statistics: `acquire_count` (calls to
+        `lock_schema` / `lock_entities` that got their locks), `wait_count`
+        (entries into the blocking statement, including those that ended in a
+        timeout or an error), `wait_total_ms`, `wait_max_ms`."""
+        with self._schema_lock_stats_lock:
+            return dict(self._schema_lock_stats)
+
+    def pool_stats(self):
+        """`{"runtime": ..., "developer": ...}`: each pool's own `stats()`."""
+        return {"runtime": self._runtime_pool.stats(), "developer": self._developer_pool.stats()}
 
     def prepared_stats(self):
-        """R-79 (WO §1.2 D-2, completion condition 9): probe both
-        persistent connections this backend holds, labelled `runtime@
-        <pid>`/`developer@<pid>` (`conn.info.backend_pid`, the same public
-        attribute r2db-api's own pool-based `label` uses -- a re-connect
-        shows up as the pid changing). Unlike r2db-api's pool, there is no
-        queue to drain/refill here -- these two connections are held
-        directly for this cell's whole lifetime, so there is nothing to
-        return anywhere afterwards. `cell.py::ApplicationCell.prepared_
-        stats()` is the caller, under `self._lock`.
+        """Probes every connection that is idle in either role pool,
+        labelled `runtime@<pid>`/`developer@<pid>` (`conn.info.backend_pid`,
+        the same public attribute r2db-api's own pool-based `label` uses): a
+        row per idle connection, the runtime pool's first. The connections
+        are taken out of the pool's idle queue without `acquire()`
+        (`BoundedConnectionPool.map_idle`) and put back afterwards, so the
+        probe does not count as an acquisition and sees the same set of
+        connections on every call; a connection a request has checked out at
+        that moment is not probed.
 
         A probe that raises may leave its connection mid-transaction
         (aborted) -- if the failure happened after the probe's own SELECT
         but before its `commit()` (rework 指摘 5): rolled
-        back here so this backend's own persistent connection is never
-        left aborted for the NEXT real request on it (mutation M25 drops
-        this rollback). This does lose whatever was prepared on that
-        connection (F2), but a connection already stuck aborted from a
-        probe failure is not a state worth preserving prepared statements
-        over."""
+        back here so the row reports the connection idle, and so it is
+        never put back aborted (mutation M25 drops this rollback). This
+        does lose whatever was prepared on that connection (F2), but a
+        connection already stuck aborted from a probe failure is not a
+        state worth preserving prepared statements over."""
         rows = []
-        for role_name, conn in (("runtime", self._runtime), ("developer", self._developer)):
+
+        def probe(role_name, conn):
             label = f"{role_name}@{conn.info.backend_pid}"
             try:
-                rows.append(probe_prepared_statements(conn, label))
+                return probe_prepared_statements(conn, label)
             except Exception as exc:  # noqa: BLE001 -- reported as probed=False/error=<class name> (D-2, WO §6.1 H-4)
                 if conn.info.transaction_status != TransactionStatus.IDLE:
                     conn.rollback()
-                rows.append(prepared_stats_skeleton(conn, label, error=type(exc).__name__))
+                return prepared_stats_skeleton(conn, label, error=type(exc).__name__)
+
+        for role_name, pool in (("runtime", self._runtime_pool), ("developer", self._developer_pool)):
+            rows.extend(pool.map_idle(lambda conn, role_name=role_name: probe(role_name, conn)))
         return rows
+
+    # ------------------------------------------------------------------
+    # request scope: connections, transaction, timeouts, locks
+    # ------------------------------------------------------------------
+    def _borrow(self, pool, deadline):
+        """One connection from `pool`, waiting no longer than what remains
+        of `deadline` (the pool's own wait limit when there is none). A
+        wait that outlasts the deadline is the request running past its
+        `execution_ms`; a database that cannot be reached is a transient
+        storage failure."""
+        timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        try:
+            return pool.acquire(timeout=timeout)
+        except PoolExhausted as exc:
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms") from exc
+        except PoolConnectFailed as exc:
+            raise StorageTransientError("the storage backend could not be reached") from exc
+
+    @contextmanager
+    def request_scope(self, kind, *, deadline=None):
+        """See `backend.StorageBackend.request_scope`. Borrows the
+        developer connection first and, for a data request, the runtime
+        connection second -- always in that order, before any lock is
+        taken, so a request never waits for a connection while holding a
+        lock another request is waiting for -- opens the transaction on
+        each and sets `statement_timeout` / `lock_timeout` from `deadline`
+        once. The connections go back to their pools when the scope ends,
+        by whichever way it ends: a request that finished normally commits
+        the read-only transaction it may still have open (`_end_reads`), and
+        the pool rolls back whatever is still open on return, which also
+        releases every lock the request took."""
+        if kind not in SCOPE_KINDS:
+            raise ValueError(f"unknown request scope kind {kind!r}")
+        if self._pending_platform_upgrade_message is not None:
+            raise PlatformUpgradePending(self._pending_platform_upgrade_message)
+        held = []
+        try:
+            developer = self._borrow(self._developer_pool, deadline)
+            held.append((self._developer_pool, developer))
+            if kind == "schema":
+                main = developer
+            else:
+                main = self._borrow(self._runtime_pool, deadline)
+                held.append((self._runtime_pool, main))
+            timeout_ms = self._timeout_ms(deadline)
+            if timeout_ms is None:
+                timeout_ms = self._default_timeout_ms
+            for _pool, conn in held:
+                try:
+                    with conn.cursor() as cur:
+                        self._set_timeouts(cur, timeout_ms)
+                except psycopg.Error as exc:
+                    raise StorageTransientError("the storage backend could not be reached") from exc
+            scope = RequestScope(kind, deadline, backend=self, main=main, developer=developer)
+            yield scope
+            self._end_reads(scope)
+        finally:
+            for pool, conn in reversed(held):
+                pool.release(conn)
+
+    def _end_reads(self, scope):
+        """Reached only when the request's body finished without raising:
+        a connection still inside a transaction then holds nothing but reads
+        (the main connection of a query, the developer connection of a data
+        request's pass 1 or of a catalog read) and its transaction is
+        committed, not rolled back. A rollback makes psycopg forget every
+        statement it had prepared on the connection (and `DEALLOCATE ALL`
+        on the server), so rolling back each read-only transaction at the
+        scope's end would keep a pooled connection from ever reaching its
+        prepare threshold. The main connection goes first, then the developer
+        connection. A request that raised never gets here: the pool rolls its
+        connections back when they are returned."""
+        seen = set()
+        for conn in (scope.main, scope.developer):
+            if conn is None or id(conn) in seen:
+                continue
+            seen.add(id(conn))
+            if conn.info.transaction_status != TransactionStatus.INTRANS:
+                continue
+            try:
+                conn.commit()
+            except psycopg.Error as exc:
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
+
+    def _retime(self, scope):
+        """Sets `statement_timeout` / `lock_timeout` again, from what remains
+        of the request's deadline, on every connection the scope holds. Called
+        after a lock wait: the scope's timeouts were set from the budget the
+        request had when it opened, and the wait has spent some of it, so the
+        statements that follow must not get the full amount again. A wait that
+        used the whole budget ends the request."""
+        if scope.deadline is None:
+            return
+        if scope.deadline - time.monotonic() <= 0:
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        timeout_ms = self._timeout_ms(scope.deadline)
+        seen = set()
+        for conn in (scope.main, scope.developer):
+            if conn is None or id(conn) in seen:
+                continue
+            seen.add(id(conn))
+            try:
+                with conn.cursor() as cur:
+                    self._set_timeouts(cur, timeout_ms)
+            except psycopg.Error as exc:
+                raise StorageTransientError("the storage backend could not be reached") from exc
+
+    def _acquire_advisory(self, scope, statements, params, *, count=True):
+        """Takes the advisory locks `statements` name on the scope's main
+        connection, for the rest of its transaction: first the non-blocking
+        statement; when it does not get every lock, the blocking one. Entering
+        the blocking statement is one wait (in the schema-lock statistics when
+        `count`), counted with the time it took whether it ends in the lock or
+        in a timeout, a deadlock or a lost connection; an acquisition is
+        counted when it succeeded. After a wait the request's timeouts are set
+        again from the remaining deadline. An uncontended acquisition is one
+        statement. A wait ends at the scope's `lock_timeout`."""
+        try_statement, block_statement = statements
+        waited_ms = None
+        started = None
+        try:
+            try:
+                with scope.main.cursor() as cur:
+                    _execute(cur, try_statement, params)
+                    acquired = cur.fetchone()[0]
+                    if not acquired:
+                        waited_ms = 0.0
+                        started = time.monotonic()
+                        _execute(cur, block_statement, params)
+            except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+                raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+            except _TRANSIENT_ERRORS as exc:
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
+            except psycopg.errors.DataError as exc:
+                # The one client-chosen value these statements carry is an
+                # idempotency key; PostgreSQL refusing it as data is a refusal of
+                # the request, as for every other statement that binds a value.
+                raise ValidationError("storage backend rejected the request") from exc
+            except psycopg.Error as exc:
+                # Everything else is the connection or the server, never the
+                # request.
+                raise StorageTransientError("the storage backend could not be reached") from exc
+        finally:
+            if waited_ms is not None:
+                if started is not None:
+                    waited_ms = (time.monotonic() - started) * 1000.0
+                if count:
+                    with self._schema_lock_stats_lock:
+                        self._schema_lock_stats["wait_count"] += 1
+                        self._schema_lock_stats["wait_total_ms"] += waited_ms
+                        if waited_ms > self._schema_lock_stats["wait_max_ms"]:
+                            self._schema_lock_stats["wait_max_ms"] = waited_ms
+        if count:
+            with self._schema_lock_stats_lock:
+                self._schema_lock_stats["acquire_count"] += 1
+        if waited_ms is not None:
+            self._retime(scope)
+
+    def lock_schema(self, *, scope):
+        self._acquire_advisory(scope, _SCHEMA_LOCK_STATEMENTS, [_SCHEMA_SERIALIZATION_LOCK_KEY])
+
+    def lock_entities(self, names, *, shared, scope):
+        ordered = sorted({validate_identifier(name, "entity") for name in names})
+        if not ordered:
+            return
+        statements = _ENTITY_LOCK_SHARED if shared else _ENTITY_LOCK_EXCLUSIVE
+        self._acquire_advisory(scope, statements, [_ENTITY_LOCK_NAMESPACE, ordered])
 
     def check_reserved(self, value, label):
         # WP-3e rework T1 (追補2 M-1): the reserved-name half of the
@@ -416,28 +629,23 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # catalog (developer connection -- schema owner)
     # ------------------------------------------------------------------
-    @_guard_pending_platform_upgrades
-    def schema_count(self):
+    def schema_count(self, *, scope):
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s, %s, %s)"
                 ), list(_BOOKKEEPING_TABLES))
                 count = cur.fetchone()[0]
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         return count
 
-    @_guard_pending_platform_upgrades
-    def field_domains(self, collection):
+    def field_domains(self, collection, *, scope):
         """Live catalog lookup (R-2 stage 2) doubling as the value-domain
         source B-1 (i) needs: for every column of `collection`, this
         database's own `information_schema.columns.data_type` is mapped
@@ -460,8 +668,7 @@ class PostgresBackend:
         """
         validate_identifier(collection, "entity")
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT column_name, data_type FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s "
@@ -470,10 +677,8 @@ class PostgresBackend:
                 rows = cur.fetchall()
                 declared = self._field_types_locked(cur, collection) if rows else {}
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
-            self._developer.rollback()
             # WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
             # 裁定 6, review F9): `_mdb_field_types` missing entirely means
             # migration 0006 was never applied to this application DB -- an
@@ -490,11 +695,10 @@ class PostgresBackend:
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         if not rows:
             raise NotFoundError("collection not found")
         domains = {}
@@ -514,8 +718,7 @@ class PostgresBackend:
                   .format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
         return {field: declared_type for field, declared_type in cur.fetchall()}
 
-    @_guard_pending_platform_upgrades
-    def field_types(self, collection):
+    def field_types(self, collection, *, scope):
         """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.
         field_types`'s own contract -- the single source of truth `GET
         /v1/catalog` (`http.py::get_catalog`) and the cell-layer choke
@@ -524,8 +727,7 @@ class PostgresBackend:
         no columns at all cannot exist on this backend)."""
         validate_identifier(collection, "entity")
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s"
@@ -533,52 +735,44 @@ class PostgresBackend:
                 (exists,) = cur.fetchone()
                 declared = self._field_types_locked(cur, collection) if exists else {}
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
-            self._developer.rollback()
             # See `field_domains`'s own identical rework above -- same
             # operator/deployment-fault attribution, same class.
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         if not exists:
             raise NotFoundError("collection not found")
         return declared
 
-    @_guard_pending_platform_upgrades
-    def all_field_types(self):
+    def all_field_types(self, *, scope):
         """Phase 6 WP-3 (design D-3): see `backend_sqlite.SQLiteBackend.
         all_field_types`'s identical docstring -- `GET /v1/catalog`'s
         sole data source."""
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL("SELECT entity, field, declared_type FROM {}")
                           .format(sql.Identifier(_FIELD_TYPES_TABLE)))
                 rows = cur.fetchall()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
-            self._developer.rollback()
             # See `field_domains`'s own identical rework above -- same
             # operator/deployment-fault attribution, same class.
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         result: dict = {}
         for entity, field, declared_type in rows:
             result.setdefault(entity, {})[field] = declared_type
@@ -609,8 +803,7 @@ class PostgresBackend:
             for field, enum_json, nullable_value in cur.fetchall()
         }
 
-    @_guard_pending_platform_upgrades
-    def field_constraints(self, collection):
+    def field_constraints(self, collection, *, scope):
         """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend.
         StorageBackend.field_constraints`'s own contract -- the single
         source of truth `GET /v1/catalog` and the cell-layer choke point
@@ -618,8 +811,7 @@ class PostgresBackend:
         Existence-checked the same way `field_types` is."""
         validate_identifier(collection, "entity")
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s"
@@ -627,19 +819,16 @@ class PostgresBackend:
                 (exists,) = cur.fetchone()
                 declared = self._field_constraints_locked(cur, collection) if exists else {}
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
-            self._developer.rollback()
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         if not exists:
             raise NotFoundError("collection not found")
         return declared
@@ -664,8 +853,7 @@ class PostgresBackend:
             constraints[field] = self._decode_constraint_row(enum_json, nullable_value)
         return types, constraints
 
-    @_guard_pending_platform_upgrades
-    def field_types_and_constraints(self, collection):
+    def field_types_and_constraints(self, collection, *, scope):
         """Code review §2 C / 監督裁定 C (P-8/G-4 performance
         finding): see `backend.StorageBackend.field_types_and_
         constraints`'s own contract -- `field_types` and `field_
@@ -680,8 +868,7 @@ class PostgresBackend:
         """
         validate_identifier(collection, "entity")
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.columns "
                     "WHERE table_schema = 'public' AND table_name = %s"
@@ -689,64 +876,55 @@ class PostgresBackend:
                 (exists,) = cur.fetchone()
                 types, constraints = self._field_types_and_constraints_locked(cur, collection) if exists else ({}, {})
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
-            self._developer.rollback()
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         if not exists:
             raise NotFoundError("collection not found")
         return types, constraints
 
-    @_guard_pending_platform_upgrades
-    def all_field_constraints(self):
+    def all_field_constraints(self, *, scope):
         """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend_sqlite.
         SQLiteBackend.all_field_constraints`'s identical docstring --
         `GET /v1/catalog`'s sole data source for `field_constraints`."""
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL("SELECT entity, field, enum_json, nullable FROM {}")
                           .format(sql.Identifier(_FIELD_TYPES_TABLE)))
                 rows = cur.fetchall()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
-            self._developer.rollback()
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         result: dict = {}
         for entity, field, enum_json, nullable_value in rows:
             result.setdefault(entity, {})[field] = self._decode_constraint_row(enum_json, nullable_value)
         return result
 
-    @_guard_pending_platform_upgrades
     def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
-                                deadline=None, dry_run=False, idempotency_record=None):
+                                deadline=None, dry_run=False, idempotency_record=None, scope):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, F-6, 監督裁定
         S-g): see `backend.StorageBackend.alter_field_constraints`'s own
         contract. Unlike `create_collection`/`add_field` above (whose own
         "read the live catalog, then DDL in a later transaction" shape
         `field_domains` embodies), this method never leaves the developer
         connection's own transaction between its existing-row SELECT and
-        its registry UPDATE -- both happen inside the SAME `with self.
-        _developer.cursor()` block, committed (or rolled back) together
+        its registry UPDATE -- both happen inside the SAME `with scope.
+        main.cursor()` block, committed (or rolled back) together
         as the LAST step of this one method. The developer connection
         reads real APPLICATION DATA rows here (not only the catalog) --
         safe because this application's own developer role OWNS every
@@ -756,12 +934,9 @@ class PostgresBackend:
         `migrations/0003_provision_application.sql`)."""
         validate_identifier(collection, "entity")
         validate_identifier(field, "field")
-        timeout_ms = self._timeout_ms(deadline)
         hook_fired = False
         try:
-            with self._developer.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
+            with scope.main.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT declared_type, enum_json, nullable FROM {} WHERE entity = %s AND field = %s"
                 ).format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection, field])
@@ -877,7 +1052,7 @@ class PostgresBackend:
                 "field_constraints": {**existing_constraints, field: new_field_constraints},
             }
             if dry_run:
-                self._developer.rollback()
+                scope.main.rollback()
             else:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
@@ -891,48 +1066,46 @@ class PostgresBackend:
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
                         "request_id": req_id,
                     })
-                    self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
-                self._developer.commit()
+                    self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                scope.main.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
+            scope.main.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except (NotFoundError, ConflictError):
-            self._developer.rollback()
+            scope.main.rollback()
             raise
         except psycopg.errors.UndefinedTable:
-            self._developer.rollback()
+            scope.main.rollback()
             raise NotFoundError("collection not found")
         except psycopg.Error as exc:
-            self._developer.rollback()
+            scope.main.rollback()
             if hook_fired:
                 audit_hook.commit_failed()
                 raise AuditSinkUnavailable(
                     "the durable audit sink recorded this operation but the data commit failed"
                 ) from exc
+            if isinstance(exc, _TRANSIENT_ERRORS):
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
             raise ValidationError("storage backend rejected the request") from exc
         except Exception:
-            self._developer.rollback()
+            scope.main.rollback()
             raise
         # `descriptor` was already built above (Phase 9 WP-3c rework),
         # before the commit/rollback branch -- reused verbatim here.
         return new_revision, descriptor
 
-    @_guard_pending_platform_upgrades
-    def schema_revision(self):
+    def schema_revision(self, *, scope):
         try:
-            with self._developer.cursor() as cur:
-                self._set_timeouts(cur, self._catalog_timeout_ms)
+            with scope.developer.cursor() as cur:
                 _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
                           .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
                 row = cur.fetchone()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
         return row[0] if row else 0
 
     def _bump_schema_revision(self, cur):
@@ -942,9 +1115,8 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # DDL (developer connection only -- R-1)
     # ------------------------------------------------------------------
-    @_guard_pending_platform_upgrades
     def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
-                          deadline=None, dry_run=False, idempotency_record=None):
+                          deadline=None, dry_run=False, idempotency_record=None, scope):
         validate_identifier(name, "collection")
         definitions = []
         for field, field_type in fields.items():
@@ -992,7 +1164,7 @@ class PostgresBackend:
         # reaching this method's own `except psycopg.Error` translation at
         # all). `audit_hook.pre_commit()` -- when this schema op is
         # dispatched through `cell.py` -- runs as the LAST statement before
-        # `self._developer.commit()`, still inside this same try: a raise
+        # `scope.main.commit()`, still inside this same try: a raise
         # from it (an `AuditSinkUnavailable`, not a `psycopg.Error`) is
         # caught by the final `except Exception` below, which rolls back
         # the still-uncommitted DDL before propagating (fail-closed by
@@ -1002,11 +1174,8 @@ class PostgresBackend:
         # committed to correct) from "the durable write succeeded but
         # THIS backend's own commit then failed" (D-2's error-row case).
         hook_fired = False
-        timeout_ms = self._timeout_ms(deadline)
         try:
-            with self._developer.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
+            with scope.main.cursor() as cur:
                 _execute(cur, statement)
                 # Phase 9 WP-3b (design D-4 (4)): the revision bump and
                 # the declared-type registry write are both skipped for a
@@ -1029,7 +1198,7 @@ class PostgresBackend:
                           .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
                 new_revision = cur.fetchone()[0]
             if dry_run:
-                self._developer.rollback()
+                scope.main.rollback()
             else:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
@@ -1057,21 +1226,23 @@ class PostgresBackend:
                         },
                         "request_id": req_id,
                     })
-                    self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
-                self._developer.commit()
+                    self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                scope.main.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
+            scope.main.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.DuplicateTable:
-            self._developer.rollback()
+            scope.main.rollback()
             raise ConflictError("collection already exists")
         except psycopg.Error as exc:
-            self._developer.rollback()
+            scope.main.rollback()
             if hook_fired:
                 audit_hook.commit_failed()
                 raise AuditSinkUnavailable(
                     "the durable audit sink recorded this operation but the data commit failed"
                 ) from exc
+            if isinstance(exc, _TRANSIENT_ERRORS):
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
             raise ValidationError("storage backend rejected the request") from exc
         except Exception:
             # Covers `audit_hook.pre_commit()` itself raising
@@ -1079,7 +1250,7 @@ class PostgresBackend:
             # branch above does not catch it) -- the DDL above already ran
             # on this connection but was never committed; roll it back
             # before letting the failure propagate.
-            self._developer.rollback()
+            scope.main.rollback()
             raise
         return new_revision, {
             "entity": name,
@@ -1088,9 +1259,8 @@ class PostgresBackend:
             "field_constraints": {f: dict(c) for f, c in resolved_constraints.items()},
         }
 
-    @_guard_pending_platform_upgrades
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
-                  audit_hook=None, deadline=None, dry_run=False, idempotency_record=None):
+                  audit_hook=None, deadline=None, dry_run=False, idempotency_record=None, scope):
         validate_identifier(collection, "entity")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
@@ -1112,11 +1282,8 @@ class PostgresBackend:
         # Phase 4: same `commit()`-inside-`try` + pre-commit-hook structure
         # as `create_collection` above -- see that method's own comment.
         hook_fired = False
-        timeout_ms = self._timeout_ms(deadline)
         try:
-            with self._developer.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
+            with scope.main.cursor() as cur:
                 if resolved_nullable is False:
                     # M-6 (監督裁定, WP-3a rework 2, 2026-09-07): mirrors
                     # `alter_field_constraints`'s own existing-row rule
@@ -1130,7 +1297,7 @@ class PostgresBackend:
                     # way. Checked BEFORE the DDL below, so a conflicting
                     # call changes NOTHING -- no column, no registry row,
                     # no revision bump; this cursor's own transaction
-                    # rolls back whole (`except ... self._developer.
+                    # rolls back whole (`except ... scope.main.
                     # rollback()` below, the same as every other failure
                     # path here).
                     #
@@ -1199,7 +1366,7 @@ class PostgresBackend:
                 "field_constraints": {**existing_constraints, field: new_field_constraints},
             }
             if dry_run:
-                self._developer.rollback()
+                scope.main.rollback()
             else:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
@@ -1212,27 +1379,29 @@ class PostgresBackend:
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
                         "request_id": req_id,
                     })
-                    self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
-                self._developer.commit()
+                    self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                scope.main.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._developer.rollback()
+            scope.main.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.DuplicateColumn:
-            self._developer.rollback()
+            scope.main.rollback()
             raise ConflictError("field already exists")
         except psycopg.errors.UndefinedTable:
-            self._developer.rollback()
+            scope.main.rollback()
             raise NotFoundError("collection not found")
         except psycopg.Error as exc:
-            self._developer.rollback()
+            scope.main.rollback()
             if hook_fired:
                 audit_hook.commit_failed()
                 raise AuditSinkUnavailable(
                     "the durable audit sink recorded this operation but the data commit failed"
                 ) from exc
+            if isinstance(exc, _TRANSIENT_ERRORS):
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
             raise ValidationError("storage backend rejected the request") from exc
         except Exception:
-            self._developer.rollback()
+            scope.main.rollback()
             raise
         return new_revision, descriptor
 
@@ -1257,8 +1426,7 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     _where_sql = staticmethod(_where_sql)
 
-    @_guard_pending_platform_upgrades
-    def insert_in_transaction(self, collection, fields, params):
+    def insert_in_transaction(self, collection, fields, params, *, scope):
         # No commit/rollback here: this runs inside a transaction the
         # seam's own `transact()` already opened via `begin()` and will
         # `commit()`/`rollback()` once, after every operation in the batch
@@ -1290,7 +1458,7 @@ class PostgresBackend:
             sql.Identifier(collection), columns, placeholders
         )
         try:
-            with self._runtime.cursor() as cur:
+            with scope.main.cursor() as cur:
                 _execute(cur, statement, params)
                 rowid = str(cur.fetchone()[0])
         # Phase 8 WP-1a rework 1 (裁定 2): the `execution_ms` mapping --
@@ -1313,6 +1481,8 @@ class PostgresBackend:
             raise ConflictError("write conflicts with a constraint")
         except psycopg.errors.UndefinedTable:
             raise NotFoundError("collection not found")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
             # B-1 (ii): translated, not rolled back here -- the OUTER
             # `transact()` (`cell.py`) always calls `self._backend.
@@ -1321,8 +1491,7 @@ class PostgresBackend:
             raise ValidationError("storage backend rejected the request") from exc
         return {"rowid": rowid}
 
-    @_guard_pending_platform_upgrades
-    def update_in_transaction(self, collection, fields, params, filters):
+    def update_in_transaction(self, collection, fields, params, filters, *, scope):
         # P3-D2 (WP-1.5): no commit/rollback here
         # -- mirrors `insert_in_transaction`'s own reasoning above. Runs
         # inside the transaction the seam's own `transact()` already
@@ -1335,7 +1504,7 @@ class PostgresBackend:
         where, where_params = self._where_sql(filters)
         statement = statement + where
         try:
-            with self._runtime.cursor() as cur:
+            with scope.main.cursor() as cur:
                 _execute(cur, statement, list(params) + where_params)
                 updated = cur.rowcount
         # Phase 8 WP-1a rework 1 (裁定 2): see `insert_in_transaction`'s own
@@ -1346,6 +1515,8 @@ class PostgresBackend:
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
             raise NotFoundError("collection not found")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
             # B-1 (ii): translated, not rolled back here -- the OUTER
             # `transact()` (`cell.py`) always calls `self._backend.
@@ -1353,8 +1524,7 @@ class PostgresBackend:
             raise ValidationError("storage backend rejected the request") from exc
         return {"updated": updated}
 
-    @_guard_pending_platform_upgrades
-    def delete_in_transaction(self, collection, filters):
+    def delete_in_transaction(self, collection, filters, *, scope):
         # P3-D2 (WP-1.5): no commit/rollback here (unlike `delete` below)
         # -- same reasoning as `update_in_transaction` immediately above.
         # `cell.ApplicationCell` has already run this request through the
@@ -1364,7 +1534,7 @@ class PostgresBackend:
         where, params = self._where_sql(filters)
         statement = statement + where
         try:
-            with self._runtime.cursor() as cur:
+            with scope.main.cursor() as cur:
                 _execute(cur, statement, params)
                 deleted = cur.rowcount
         # Phase 8 WP-1a rework 1 (裁定 2): see `insert_in_transaction`'s own
@@ -1375,12 +1545,13 @@ class PostgresBackend:
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
             raise NotFoundError("collection not found")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
             raise ValidationError("storage backend rejected the request") from exc
         return {"deleted": deleted}
 
-    @_guard_pending_platform_upgrades
-    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None):
+    def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None, scope):
         columns = sql.SQL(", ").join(sql.Identifier(x) for x in selected)
         statement = sql.SQL("SELECT {} FROM {}").format(columns, sql.Identifier(collection))
         where, where_params = self._where_sql(filters)
@@ -1443,29 +1614,22 @@ class PostgresBackend:
             statement = statement + sql.SQL(" ORDER BY ") + terms
         statement = statement + sql.SQL(" LIMIT %s")
         params = params + [limit]
-        timeout_ms = self._timeout_ms(deadline)
         try:
-            with self._runtime.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
+            with scope.main.cursor() as cur:
                 _execute(cur, statement, params)
                 columns_desc = [c.name for c in cur.description]
                 rows = [dict(zip(columns_desc, row)) for row in cur.fetchall()]
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._runtime.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
-            self._runtime.rollback()
             raise NotFoundError("collection not found")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            self._runtime.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._runtime.commit()
         return rows
 
-    @_guard_pending_platform_upgrades
-    def delete(self, collection, filters, audit_hook=None, *, deadline=None):
+    def delete(self, collection, filters, audit_hook=None, *, deadline=None, scope):
         statement = sql.SQL("DELETE FROM {}").format(sql.Identifier(collection))
         where, params = self._where_sql(filters)
         statement = statement + where
@@ -1476,43 +1640,42 @@ class PostgresBackend:
         # ever called, so every call here is confirmed-destructive and
         # therefore unconditionally fail-closed class (D-2 item 1).
         hook_fired = False
-        timeout_ms = self._timeout_ms(deadline)
         try:
-            with self._runtime.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
+            with scope.main.cursor() as cur:
                 _execute(cur, statement, params)
                 deleted = cur.rowcount
             if audit_hook is not None:
                 audit_hook.pre_commit()
                 hook_fired = True
-            self._runtime.commit()
+            scope.main.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            self._runtime.rollback()
+            scope.main.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
-            self._runtime.rollback()
+            scope.main.rollback()
             raise NotFoundError("collection not found")
         except psycopg.Error as exc:
-            self._runtime.rollback()
+            scope.main.rollback()
             if hook_fired:
                 audit_hook.commit_failed()
                 raise AuditSinkUnavailable(
                     "the durable audit sink recorded this operation but the data commit failed"
                 ) from exc
+            if isinstance(exc, _TRANSIENT_ERRORS):
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
             raise ValidationError("storage backend rejected the request") from exc
         except Exception:
-            self._runtime.rollback()
+            scope.main.rollback()
             raise
         return {"deleted": deleted}
 
     # ------------------------------------------------------------------
-    # execution_ms (Phase 8 WP-1a, design D-1 "実装の形" 3): a real
-    # `SET LOCAL statement_timeout`/`lock_timeout`, computed from the
-    # residual budget `cell.ApplicationCell._limit_gate`'s own wall-clock
-    # `deadline` still has left -- r2db `postgres.py::_timeout_ms`/`_set_
-    # timeouts` (`:1936-1959`) is the matching reference realization
-    # (independent code, P-6).
+    # execution_ms: a real `SET LOCAL statement_timeout`/`lock_timeout`,
+    # computed from the residual budget `cell.ApplicationCell._limit_gate`'s
+    # own wall-clock `deadline` still has left and set once per connection
+    # when the request's scope opens (`request_scope`); r2db
+    # `postgres.py::_timeout_ms`/`_set_timeouts` is the matching reference
+    # realization (independent code, P-6).
     # ------------------------------------------------------------------
 
     def _timeout_ms(self, deadline):
@@ -1524,92 +1687,50 @@ class PostgresBackend:
     def _set_timeouts(self, cur, timeout_ms):
         """`SET LOCAL` (not session-wide `SET`): scoped to the current
         transaction only, automatically discarded on commit/rollback --
-        never leaking onto the next call this persistent connection
-        serves. `timeout_ms` is always a server-computed `int` (from
-        `_timeout_ms` above), never request content, so `sql.Literal`
-        (necessary -- PostgreSQL's `SET` grammar has no bind-placeholder
-        position here) composes a trusted value, not untrusted text."""
+        never leaking onto the next transaction this connection serves.
+        `timeout_ms` is always a server-computed `int` (from `_timeout_ms`
+        above), never request content, so `sql.Literal` (necessary --
+        PostgreSQL's `SET` grammar has no bind-placeholder position here)
+        composes a trusted value, not untrusted text."""
         statement_timeout = sql.SQL("SET LOCAL statement_timeout = {t}").format(t=sql.Literal(f"{timeout_ms}ms"))
         lock_timeout = sql.SQL("SET LOCAL lock_timeout = {t}").format(t=sql.Literal(f"{timeout_ms}ms"))
         _execute(cur, statement_timeout)
         _execute(cur, lock_timeout)
 
-    @_guard_pending_platform_upgrades
-    def begin(self, *, deadline=None):
-        # psycopg3 connections (`autocommit=False`) already implicitly
-        # start a transaction on first use; nothing to do beyond ensuring
-        # no stale transaction is left open from a previous call.
-        self._runtime.rollback()
-        # Phase 8 WP-1a: `transact()`'s own multi-operation envelope sets
-        # the timeout ONCE, here, for the whole batch's transaction --
-        # `SET LOCAL` stays in effect for every statement `insert_in_
-        # transaction`/`update_in_transaction`/`delete_in_transaction`
-        # below run until this same transaction commits or rolls back.
-        timeout_ms = self._timeout_ms(deadline)
-        if timeout_ms is not None:
-            with self._runtime.cursor() as cur:
-                self._set_timeouts(cur, timeout_ms)
+    def begin(self, *, deadline=None, scope):
+        """Nothing to open: the request's transaction on `scope.main` is
+        open since the scope was entered, with its timeouts already set
+        from the request's deadline."""
 
-    def commit(self):
-        self._runtime.commit()
+    def commit(self, *, scope):
+        scope.main.commit()
 
-    def rollback(self):
-        self._runtime.rollback()
+    def rollback(self, *, scope):
+        scope.main.rollback()
 
     # ------------------------------------------------------------------
-    # Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
-    # rulings-r5-r6.md I-1): idempotency records, `public._mdb_idempotency`
-    # (per-application upgrade 0010).
+    # Idempotency records, `public._mdb_idempotency` (per-application
+    # upgrade 0010).
     #
-    # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
-    # PRE-WP-6d, lookup/reap/count ran over `self._runtime` as a plain,
-    # small, SELF-COMMITTING read/delete -- a SEPARATE transaction from
-    # whichever connection the eventual WRITE later landed on
-    # (`record_idempotency`, `self._runtime`; the 3 DDL methods' own
-    # `idempotency_record` parameter, `self._developer`, via `_write_
-    # idempotency_row`). That gap is exactly F-①'s race: two concurrent
-    # requests for the SAME key each ran their own self-committing
-    # lookup, both saw "no record", and both went on to execute.
-    #
-    # `idempotency_begin`/`idempotency_reserve` below REPLACE that
-    # self-committing trio (`idempotency_get`/`idempotency_reap_expired`/
-    # `idempotency_count`, removed) with two methods that run DIRECTLY on
-    # a caller-supplied `conn` (code-review fix F6, Opus review 2, ruled
-    # in -- see `idempotency_connection`'s own docstring below for why
-    # this is passed through rather than resolved internally from a
-    # `for_developer` flag as an earlier version of this fix did) --
-    # `self._developer` or `self._runtime`, the SAME connection the
-    # caller's own eventual write will later land on. Code-review fix F1
-    # (Opus review 2, blocker) corrects what this paragraph used to claim
-    # here: each method commits ITSELF, immediately, right after its own
-    # reap/lookup or COUNT -- it does NOT stay open inside one
-    # transaction shared with the caller's later write (on the `transact`
-    # path, `cell.py`'s own `self._backend.begin(deadline=deadline)`,
-    # called for pass 2 after this returns, opens with `self._runtime.
-    # rollback()`, which silently discarded an uncommitted reap DELETE
-    # here before this fix). What actually closes the SAME race a shared
-    # transaction would have closed for r2db is the SESSION-scoped
-    # `pg_advisory_lock` each method takes FIRST, before touching the
-    # table -- not `pg_advisory_xact_lock` (a session lock, unlike a
-    # transaction-scoped one, survives this method's own commit, so it
-    # still spans the read and the later write) -- see each method's own
-    # docstring for which lock and why. `cell.py`'s `_idempotency_check`
-    # is the only caller, resolving `conn` once via `idempotency_
-    # connection` (`for_developer=False`: `transact`, over `self.
-    # _runtime`; `True`: `create_collection`/`add_field`/`alter_field`,
-    # over `self._developer`) and threading that SAME handle through
-    # `idempotency_begin`/`idempotency_reserve`/`idempotency_unlock`.
+    # A keyed request looks its key up, executes and stores its record on
+    # its scope's main connection, inside ONE transaction. Two advisory
+    # locks, both transaction-scoped and therefore released by the commit
+    # or rollback that ends the request -- there is no separate release --
+    # serialize what must not interleave: `idempotency_begin` takes the
+    # key's lock first, so a second request for the same key waits until
+    # the first has committed or rolled back and then finds its record (or
+    # runs, when the first did not commit); `idempotency_reserve` takes the
+    # application-wide capacity lock, so the count of retained records and
+    # the write that follows it cannot interleave across different keys.
+    # `cell.py`'s `_idempotency_check` is the only caller.
     # ------------------------------------------------------------------
-
-    def idempotency_connection(self, *, for_developer=False):
-        return self._developer if for_developer else self._runtime
 
     def _write_idempotency_row(self, conn, key, digest, response_json, now_ms):
         """Writes (or replaces) one record over `conn`'s OWN currently
         open transaction -- never commits/rolls back itself; the caller
-        (either `record_idempotency` below, right before `self._runtime.
-        commit()`, or a DDL method's own pre-commit point, right before
-        `self._developer.commit()`) owns that. `ON CONFLICT ... DO UPDATE`
+        (either `record_idempotency` below, right before the scope's own
+        commit, or a DDL method's own pre-commit point, right before its
+        commit) owns that. `ON CONFLICT ... DO UPDATE`
         (not a bare `INSERT`) so a stale, not-yet-reaped row for this
         exact key (a benign race -- the caller already confirmed no
         ACTIVE record exists before reaching this point) is replaced
@@ -1622,79 +1743,11 @@ class PostgresBackend:
         with conn.cursor() as cur:
             _execute(cur, statement, [key, digest, response_json, now_ms])
 
-    @_guard_pending_platform_upgrades
-    def idempotency_begin(self, key, now_ms, retention_ms, *, conn, deadline=None):
-        """Ruling U-7 (WP-6d): `conn` (code-review fix F6, Opus review 2,
-        ruled in) is the WRITING connection this keyed entry point will
-        eventually commit on -- resolved ONCE by the caller, via
-        `idempotency_connection`, and passed through here rather than
-        re-resolved internally (see that method's own docstring for why):
-        `self._developer` for the 3 DDL methods, `self._runtime` for
-        `transact` (default).
-
-        `deadline` (code-review fix F2, Opus review 2, should-fix):
-        without this, `pg_advisory_lock` below waits UNBOUNDED for a
-        second process holding the same key's lock -- and since `cell.
-        py` also holds this cell's own in-process `self._lock` (an
-        `RLock`) for a keyed request's entire lookup -> execute -> store
-        window, an unbounded wait here stalls every OTHER request this
-        same cell would otherwise serve too, not merely this one key.
-        `_timeout_ms(deadline)`/`_set_timeouts` (this class's own Phase 8
-        WP-1a helpers, module comment above `_timeout_ms`) are reused
-        here exactly as every other backend method already uses them --
-        `SET LOCAL lock_timeout`/`statement_timeout`, scoped to this
-        method's own transaction, bounding how long `pg_advisory_lock`
-        may block before PostgreSQL cancels it (mirrors r2db-api's own
-        `postgres.py::_set_timeouts` preceding its own lock acquisition).
-        A timed-out lock wait raises `psycopg.errors.LockNotAvailable`/
-        `QueryCanceled`, mapped below to `ResourceLimitError(limit_class=
-        "execution_ms")` -- the SAME error class every other lock/
-        statement-timeout site on this backend already maps to
-        (`insert_in_transaction`/`update_in_transaction`/`delete_in_transaction`
-        etc.), not a hang.
-
-        M-1 (WP-6d, MitateDB-specific realization of U-7 -- CLAUDE.md
-        "platform-specific controls may differ...when they provide the
-        SAME required safety outcome"): `r2db-api`'s own U-7 fix uses a
-        transaction-scoped `pg_advisory_xact_lock`, correct THERE
-        because `r2db_api.postgres.PostgresCell` wraps an ENTIRE keyed
-        request in ONE `with conn.transaction():` from lookup through
-        store. This backend cannot do that: `field_domains`/`schema_
-        revision` (and every other catalog read `cell.py` calls between
-        the idempotency lookup and the eventual DDL/DML write) are each
-        their OWN SELF-COMMITTING round trip on this SAME connection
-        (measured: an xact lock taken here would be released the moment
-        ANY one of those later self-commits, long before this key's own
-        write). This method therefore takes a SESSION-scoped
-        `pg_advisory_lock` instead -- released ONLY by an explicit
-        `idempotency_unlock` call (`cell.py`'s `_idempotency_pg_scope`
-        context manager calls it in a `finally`, guaranteeing release on
-        EVERY exit: replay, CONFLICT, LIMIT_EXCEEDED, pass-1-equivalent
-        validation failure, execution failure, or success) -- a session
-        lock survives every intervening self-commit on this connection,
-        closing the SAME race `pg_advisory_xact_lock` closes for r2db,
-        by the SAME mechanism (a second concurrent request for the SAME
-        key blocks here until the first's session releases it), just
-        with an explicit instead of an implicit release point.
-
-        Reaps expired records, then looks up `key`, over `conn`
-        (whichever connection `idempotency_connection`'s own
-        `for_developer` selected for this request) -- and commits
-        immediately (code-review fix F1, Opus review 2): the read and
-        the caller's later write do NOT share one transaction on the
-        `transact` path (`for_developer=False`) -- `cell.py::transact`'s
-        own `self._backend.begin(deadline=deadline)`, called for pass 2
-        AFTER this method returns, opens with `self._runtime.rollback()`,
-        which would silently discard this method's own reap DELETE if it
-        were left uncommitted (measured: it did, before this fix -- see
-        this method's own commit-site comment below for the concrete
-        reproduction). What DOES span both this lookup and the caller's
-        eventual write is the SESSION-scoped advisory lock taken above --
-        a lock survives this commit (unlike an xact-scoped one), so a
-        second concurrent request for the SAME key still blocks here
-        until the first's `idempotency_unlock` releases it, restoring
-        the SAME pre-WP-6d reap/serialization semantics this docstring's
-        earlier "one transaction" wording incorrectly described.
+    def idempotency_begin(self, key, now_ms, retention_ms, *, scope):
+        """Takes `key`'s advisory lock, reaps expired records, then looks
+        `key` up, all on `scope.main` inside the request's transaction.
+        How long the lock wait may last is the scope's `lock_timeout`; a
+        wait that outlasts it is `ResourceLimitError(execution_ms)`.
 
         The lock key: two-int form (`_IDEMPOTENCY_KEY_LOCK_NAMESPACE`,
         `hashtext(key)`), not a bare `hashtext(key)::bigint` -- `hashtext`
@@ -1709,184 +1762,67 @@ class PostgresBackend:
         already (I-5) -- no extra scoping component is needed.
 
         Returns `{"digest": str, "response_json": str}` for `key`, or
-        `None` if this Application has no (unexpired) record for it --
-        identical shape to the pre-WP-6d `idempotency_get` this method
-        replaces (removed, along with `idempotency_reap_expired`, both
-        folded in here so the lock/reap/lookup happen as one step,
-        never as separate round trips a concurrent session could
-        interleave between)."""
-        timeout_ms = self._timeout_ms(deadline)
+        `None` if this Application has no (unexpired) record for it."""
+        self._acquire_advisory(scope, _KEY_LOCK_STATEMENTS, [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key], count=False)
         try:
-            with conn.cursor() as cur:
-                # Code-review fix F2 (Opus review 2, should-fix): set
-                # BEFORE acquiring the lock below -- see this method's
-                # own docstring for why an unbounded wait here is worse
-                # than on most other backend calls (it stalls this
-                # cell's own in-process `self._lock` too).
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
-                _execute(cur, sql.SQL("SELECT pg_advisory_lock(%s, hashtext(%s))"),
-                          [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
+            with scope.main.cursor() as cur:
                 _execute(cur, sql.SQL("DELETE FROM {} WHERE %s - created_at_ms > %s")
                           .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [now_ms, retention_ms])
                 _execute(cur, sql.SQL("SELECT digest, response_json FROM {} WHERE key = %s")
                           .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [key])
                 row = cur.fetchone()
-            # Code-review fix F1 (Opus review 2, blocker): commit HERE,
-            # immediately -- not left open for the caller's own eventual
-            # commit/rollback as the docstring above used to claim. On
-            # the `transact` path (`for_developer=False`), `cell.py`'s
-            # `transact` calls `self._backend.begin(deadline=deadline)`
-            # for pass 2 AFTER this method returns, and `begin()` opens
-            # with `self._runtime.rollback()` (discarding whatever
-            # uncommitted work sits on this connection) -- so leaving the
-            # reap DELETE uncommitted here silently discarded it on every
-            # keyed `transact` call (verified: `idempotency_retention_ms
-            # =1`, two keyed transacts left BOTH keys' rows in the table,
-            # never reaped -- on `main`, before WP-6d, the reap was its
-            # own self-committing round trip and correctly left only the
-            # new key's row). The SESSION advisory lock taken above is
-            # untouched by this commit (`pg_advisory_lock`, not `_xact` --
-            # a session lock survives commit/rollback on its own
-            # connection, same as every self-committing catalog read
-            # `cell.py` runs between this call and the eventual write);
-            # it is what actually serializes a same-key race, not this
-            # transaction boundary -- see this method's own docstring
-            # above. Correct on the DDL path (`for_developer=True`,
-            # `conn` is `self._developer`) too: that connection commits
-            # once per DDL call already (`create_collection`/`add_field`/
-            # `alter_field`'s own terminal `self._developer.commit()`),
-            # so committing the reap+lookup here simply closes it out a
-            # statement earlier than before, same as the `transact` path.
-            conn.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            # Code-review fix F2: the SAME mapping every other lock/
-            # statement-timeout site on this backend already uses
-            # (`insert_in_transaction`/`update_in_transaction`/`delete_in_transaction` etc.) -- a
-            # bounded wait for a same-key advisory lock that expires
+            # A bounded wait for a same-key advisory lock that expires
             # surfaces as a real, classified `LIMIT_EXCEEDED` refusal,
-            # never an unbounded hang.
-            conn.rollback()
+            # never an unbounded hang -- the same mapping every other
+            # lock/statement-timeout site on this backend uses.
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            conn.rollback()
             raise ValidationError("storage backend rejected the request") from exc
         if row is None:
             return None
         digest, response_json = row
         return {"digest": digest, "response_json": response_json}
 
-    @_guard_pending_platform_upgrades
-    def idempotency_reserve(self, *, conn, deadline=None):
-        """Ruling U-7 (WP-6d): table-level, SESSION-scoped advisory
-        lock (same `pg_advisory_lock`-not-`_xact` reasoning as
-        `idempotency_begin` above -- self-commits between this COUNT
-        and the eventual write would release an xact lock early too)
-        serializing this COUNT-then-write across DIFFERENT keys (D-5
-        (iii)). Released by the SAME `idempotency_unlock` call that
-        releases `idempotency_begin`'s own per-key lock (`cell.py`'s
-        `_idempotency_pg_scope`) -- unconditionally, whether or not this
-        method was ever reached (a replay short-circuits before it;
-        `pg_advisory_unlock` on a lock this session never took simply
-        returns `false`, never an error). Replaces the pre-WP-6d
-        self-committing `idempotency_count` (removed).
+    def idempotency_reserve(self, *, scope):
+        """Takes the application-wide advisory lock that serializes this
+        COUNT-then-write across DIFFERENT keys (D-5 (iii)), then returns
+        the number of records this Application retains. Same scope
+        connection and transaction as `idempotency_begin`'s.
 
         `LOCK TABLE public.{_IDEMPOTENCY_TABLE} IN SHARE MODE` was
         considered and rejected for this purpose: two concurrent SHARE
         holders never conflict with EACH OTHER (SHARE only conflicts
         with ROW EXCLUSIVE and stronger), so both would pass the COUNT
         and only then deadlock against each other's own subsequent
-        INSERT (which needs ROW EXCLUSIVE) -- see the WP-6d report for
-        the Phase 9 R-2 precedent's own lock-mode finding.
-        `pg_advisory_lock` has no such self-conflict-free class: a
-        second holder of the SAME key always waits for the first.
-
-        `deadline` (code-review fix F2, Opus review 2, should-fix):
-        identical purpose as `idempotency_begin`'s own parameter of the
-        same name -- bounds how long this method's own `pg_advisory_
-        lock` (the table-level count lock, a DIFFERENT key than
-        `idempotency_begin`'s per-key lock) may wait. `conn` (code-review
-        fix F6): the SAME handle a paired `idempotency_begin` call in
-        this same request already used -- see `idempotency_connection`'s
-        own docstring for why this is passed through rather than
-        re-resolved."""
-        timeout_ms = self._timeout_ms(deadline)
+        INSERT (which needs ROW EXCLUSIVE). An advisory lock has no
+        such self-conflict-free class: a second holder of the SAME key
+        always waits for the first."""
+        self._acquire_advisory(
+            scope, _COUNT_LOCK_STATEMENTS, [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY], count=False)
         try:
-            with conn.cursor() as cur:
-                if timeout_ms is not None:
-                    self._set_timeouts(cur, timeout_ms)
-                _execute(cur, sql.SQL("SELECT pg_advisory_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
+            with scope.main.cursor() as cur:
                 _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(_IDEMPOTENCY_TABLE)))
                 (count,) = cur.fetchone()
-            # Code-review fix F1 (Opus review 2, blocker): commit HERE,
-            # immediately, for the identical reason `idempotency_begin`
-            # above now does -- this COUNT would otherwise sit open on
-            # `conn` until the caller's own eventual commit/rollback,
-            # and on the `transact` path that window is discarded by
-            # `self._backend.begin(deadline=deadline)`'s own `self.
-            # _runtime.rollback()` before it is ever reached. A bare
-            # `SELECT count(*)` leaves nothing for that rollback to
-            # discard either way (unlike `idempotency_begin`'s own
-            # reap DELETE), so this commit is here for symmetry and to
-            # close out the SESSION-scoped `pg_advisory_lock` acquired
-            # above's surrounding transaction promptly, not because a
-            # correctness bug was measured on this specific method.
-            conn.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            # Code-review fix F2: same mapping as `idempotency_begin`
-            # above -- see that method's own comment.
-            conn.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            conn.rollback()
             raise ValidationError("storage backend rejected the request") from exc
         return count
 
-    def idempotency_unlock(self, key, *, conn):
-        """Ruling U-7 (WP-6d): releases BOTH session-scoped advisory
-        locks `idempotency_begin`/`idempotency_reserve` above may have
-        taken for THIS request, on `conn` -- always both, unconditionally
-        (a lock never taken this session simply reports `false`,
-        harmlessly). `conn` (code-review fix F6, Opus review 2, ruled in)
-        is the SAME handle `idempotency_begin`/`idempotency_reserve`
-        above used for THIS request -- `cell.py`'s `_idempotency_pg_
-        scope` obtains it ONCE, from `idempotency_connection`, at
-        scope-open, and passes it here too, rather than this method
-        re-resolving `for_developer` independently (see `idempotency_
-        connection`'s own docstring for why that distinction matters).
-        Called from `_idempotency_pg_scope`'s own context manager, in a
-        `finally`, so it runs on EVERY exit from a keyed critical
-        section: replay, CONFLICT, LIMIT_EXCEEDED, a pass-1-equivalent
-        validation failure, an execution failure, or success.
-
-        `conn.rollback()` FIRST is not optional: an exception raised
-        between `idempotency_begin` and here (a validation failure with
-        no explicit rollback of its own -- unlike `transact`'s/each DDL
-        method's own terminal `except psycopg.Error`/`except Exception`
-        clause, which already rolls back before this ever runs) can
-        leave `conn` in PostgreSQL's own aborted-transaction state,
-        where EVERY further statement (including `pg_advisory_unlock`
-        itself) is rejected until a `ROLLBACK`. This call is therefore
-        always safe to reach in ANY state -- already clean (a no-op),
-        merely open (discarded, matching every other failure path's own
-        rollback), or aborted (cleared)."""
-        conn.rollback()
-        with conn.cursor() as cur:
-            _execute(cur, sql.SQL("SELECT pg_advisory_unlock(%s, hashtext(%s))"),
-                      [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
-            _execute(cur, sql.SQL("SELECT pg_advisory_unlock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
-        conn.commit()
-
-    @_guard_pending_platform_upgrades
-    def record_idempotency(self, key, digest, response_json, now_ms):
+    def record_idempotency(self, key, digest, response_json, now_ms, *, scope):
         """`ApplicationCell.transact`'s own single-batch write path --
-        called directly, immediately before `self._runtime.commit()`
+        called directly, immediately before the scope's commit
         (the SAME connection/transaction the batch's own `..._in_
         transaction` DML calls already ran on, I-1); a failed batch never
         reaches this line (the caller's own execution loop raises first,
         never calling this method), so this write and the batch's own
         commit share the identical fate."""
-        self._write_idempotency_row(self._runtime, key, digest, response_json, now_ms)
+        self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
 
     def idempotency_discard_pending(self, key):
         """Phase 9 WP-3cd closure (K-5, N-8): a real no-op HERE -- unlike

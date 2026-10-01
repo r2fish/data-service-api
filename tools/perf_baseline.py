@@ -407,20 +407,30 @@ def _resolve_app_db_and_matcher(cell: Any, app_id: str) -> "tuple[str | None, Ca
       (`SharedPoolManager.prepared_stats`) -- the matcher is a `<app_id>/`
       prefix check, since a pool's own idle-connection count varies and
       cannot be predicted ahead of a probe.
-    - **MitateDB form**: the resolved backend object's own `_runtime`
-      (`mitatedb_api.backend_postgres.PostgresBackend`) has a public
-      `.info.dbname` (psycopg's own public `ConnectionInfo`, never a
-      private psycopg attribute -- WO §1.1 (e)). Unlike r2db, MitateDB
-      always holds exactly 2 persistent connections per cell (`_runtime`/
-      `_developer`, `backend_postgres.py`:358) -- their own `.info.
-      backend_pid` (also public, cached client-side, no extra round trip)
-      is read directly to build the exact 2 labels (`runtime@<pid>`/
-      `developer@<pid>`) THIS cell's own backend would produce, so a
-      capability-probe application's own cell (a second, unrelated
+    - **MitateDB form**: the resolved backend object's own two role pools
+      (`mitatedb_api.backend_postgres.PostgresBackend._runtime_pool` /
+      `_developer_pool`, each a `mitatedb_api.pool.BoundedConnectionPool`).
+      The application database name is the `dbname` of the runtime pool's
+      DSN (`_dsn`, parsed with `psycopg.conninfo.conninfo_to_dict`): a pool
+      holds no connection until the first request. Which probed rows belong
+      to THIS application is decided when the matcher is CALLED, not when it
+      is built: a pool's connections come and go (its size grows with
+      concurrency, an idle one is replaced), so the matcher reads, at call
+      time, the `backend_pid` of every connection currently idle in each
+      pool (public `psycopg.ConnectionInfo.backend_pid`, cached client-side,
+      no round trip) and accepts a row whose `label` is `runtime@<pid>` or
+      `developer@<pid>` for one of them. The correction in `_emit_roundtrip_
+      db_rows` calls it once per op, after the measured window, for the rows
+      of BOTH probes: the POST probe's connections were just returned to
+      their pools, so they are idle then; the PRE probe's rows (taken
+      after the warmup, before the measured window) match only while their connection is still idle in
+      the pool, so one that left the pool in between (discarded by a failed
+      liveness check, or by the 300 s idle sweep) is not matched and its
+      probe commit is not subtracted. A capability-probe application's own cell (a second, unrelated
       application `capability_document()` may have provisioned, WO §1.3
-      (8)'s own "cross_entity が作る 2 つ目の application") never gets
-      counted here even though the adapter's own `prepared_stats()`
-      aggregates every open cell.
+      (8)'s own "cross_entity が作る 2 つ目の application") has its own
+      pools, so its rows never match even though the adapter's own
+      `prepared_stats()` aggregates every open cell.
 
     Returns `(None, <a matcher that always returns False>)` when neither
     form resolves -- never raises (completion condition 12b)."""
@@ -432,17 +442,26 @@ def _resolve_app_db_and_matcher(cell: Any, app_id: str) -> "tuple[str | None, Ca
         prefix = f"{app_id}/"
         return app_db, (lambda stats, _prefix=prefix: stats.get("label", "").startswith(_prefix))
     backend = _resolve_backend_object(cell)
-    runtime_conn = getattr(backend, "_runtime", None)
-    info = getattr(runtime_conn, "info", None) if runtime_conn is not None else None
-    if info is not None:
-        app_db = info.dbname
-        own_labels: set[str] = set()
-        for role_name in ("runtime", "developer"):
-            conn = getattr(backend, f"_{role_name}", None)
-            if conn is not None:
-                own_labels.add(f"{role_name}@{conn.info.backend_pid}")
-        frozen = frozenset(own_labels)
-        return app_db, (lambda stats, _labels=frozen: stats.get("label") in _labels)
+    pools = {role_name: getattr(backend, f"_{role_name}_pool", None) for role_name in ("runtime", "developer")}
+    runtime_dsn = getattr(pools["runtime"], "_dsn", None)
+    if runtime_dsn is not None:
+        from psycopg.conninfo import conninfo_to_dict
+
+        app_db = conninfo_to_dict(runtime_dsn).get("dbname")
+
+        def _own_row(stats: dict, _pools: dict = pools) -> bool:
+            label = stats.get("label")
+            for role_name, pool in _pools.items():
+                idle = getattr(pool, "_idle", None)
+                if idle is None:
+                    continue
+                with idle.mutex:
+                    pids = [conn.info.backend_pid for conn in list(idle.queue)]
+                if label in {f"{role_name}@{pid}" for pid in pids}:
+                    return True
+            return False
+
+        return app_db, _own_row
     return None, (lambda stats: False)
 
 
@@ -941,32 +960,38 @@ def _format_cpu_row(peer: str, plug: str, op: str, m: dict) -> str:
     )
 
 
+_SCHEMA_LOCK_STATS_KEYS = frozenset({"acquire_count", "wait_count", "wait_total_ms", "wait_max_ms"})
+
+
 def _format_pool_row(peer: str, plug: str, op: str, key: str, stats: dict) -> str:
     """R-78 (D-2): one `POOL` line for one entry of a plug's own `pool_
     stats()`. Two shapes, chosen by which keys `stats` carries -- never by
-    `peer`/`plug` name, so a future third pool/lock shape is refused
+    `peer`/`plug` name, so a stats dict of any other shape is refused
     loudly (`KeyError`) rather than silently misprinted:
 
-    - A ROLE row (`stats` has `lock_acquire_count` absent, `acquire_count`/
-      `size`/`in_use_peak` present -- `r2db_api.postgres._RolePool.stats()`'s
-      own six keys): `role=<key> size=<n> acquire=<n> waits=<n> wait_
-      total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>`.
-    - A LOCK row (`stats` has `lock_acquire_count` -- `mitatedb_api.cell.
-      _CountingRLock.stats()`'s own four keys, no pool `size`/`in_use_peak`
-      concept for a mutex): `lock=<key> acquire=<n> waits=<n> wait_total_
-      ms=<x.xxx> wait_max_ms=<x.xxx>`."""
-    if "lock_acquire_count" in stats:
+    - A ROLE row (`stats` carries `size`/`in_use_peak` -- a role pool's own
+      six keys, `r2db_api.postgres._RolePool.stats()` and `mitatedb_api.
+      pool.BoundedConnectionPool.stats()`): `role=<key> size=<n> acquire=<n>
+      waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx> in_use_peak=<n>`.
+    - A SCHEMA LOCK row (`stats` carries exactly `acquire_count`/`wait_
+      count`/`wait_total_ms`/`wait_max_ms` -- `mitatedb_api.backend_postgres.
+      PostgresBackend.schema_lock_stats()`'s own four keys; a lock has no
+      pool size and no in-use peak): `schema_lock=<key>
+      acquire=<n> waits=<n> wait_total_ms=<x.xxx> wait_max_ms=<x.xxx>`."""
+    if "size" in stats or "in_use_peak" in stats:
         return (
-            f"POOL peer={peer} plug={plug} op={op} lock={key} "
-            f"acquire={stats['lock_acquire_count']} waits={stats['wait_count']} "
+            f"POOL peer={peer} plug={plug} op={op} role={key} size={stats['size']} "
+            f"acquire={stats['acquire_count']} waits={stats['wait_count']} "
+            f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f} "
+            f"in_use_peak={stats['in_use_peak']}"
+        )
+    if set(stats) == _SCHEMA_LOCK_STATS_KEYS:
+        return (
+            f"POOL peer={peer} plug={plug} op={op} schema_lock={key} "
+            f"acquire={stats['acquire_count']} waits={stats['wait_count']} "
             f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f}"
         )
-    return (
-        f"POOL peer={peer} plug={plug} op={op} role={key} size={stats['size']} "
-        f"acquire={stats['acquire_count']} waits={stats['wait_count']} "
-        f"wait_total_ms={stats['wait_total_ms']:.3f} wait_max_ms={stats['wait_max_ms']:.3f} "
-        f"in_use_peak={stats['in_use_peak']}"
-    )
+    raise KeyError(f"POOL stats of an unknown shape for {key!r}: keys {sorted(stats)}")
 
 
 def _emit_pool_rows(peer: str, plug: str, op: str, adapter_obj: Any) -> None:
@@ -1588,8 +1613,10 @@ def _measure_plug(
         cell = _resolve_cell(adapter_obj, app_id)
 
         # R-80 (WO §1.2 D-2): resolved ONCE per plug (never per op) --
-        # `db_names`/`correction_matcher` stay fixed for this cell's whole
-        # lifetime. Empty `db_names` (neither form resolved) means every
+        # `db_names` stays fixed for this cell's whole lifetime;
+        # `correction_matcher` is a function fixed for it too, but for the
+        # MitateDB form it reads the pools' idle connections at each call.
+        # Empty `db_names` (neither form resolved) means every
         # op's `db=` emission below is a silent no-op (completion
         # condition 12b), computed only when `roundtrip` is actually on.
         db_names: "dict[str, str]" = {}
