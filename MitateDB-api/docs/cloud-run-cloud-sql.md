@@ -1288,6 +1288,13 @@ the contract's own `endpoints.operation_catalog.path` -- reachable
 behind the same reverse-proxy prefix, if any, `surfaces.data.base_url`
 itself already carries. Set it (the SAME value on both `gcloud run
 deploy` commands) only for a CDN-fronted copy of the operation catalog.
+Under contract 1.14.0 a value set here that is not, character for
+character, the derived URL obliges the deployment to serve the
+operation catalog there, as `application/json`, to a request that
+carries no credential -- a 1.14.0 client presents none at such a URL
+-- so do not set it to another spelling of the derived URL: this
+service's own `GET /v1/operation-catalog` requires a credential at
+every spelling.
 Both services reading the SAME row is now **structural, once they are
 both actually pointed at the same platform database** -- not a deployer
 discipline to remember for the row's OWN content any more (design's own

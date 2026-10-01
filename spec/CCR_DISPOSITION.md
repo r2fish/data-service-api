@@ -340,6 +340,30 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     **版数の扱い**: 契約 1.12.0 の次の minor 版 (1.13.0) とする。この従属判断は実挙動を伴う (両 peer が worker process の突然死で audit の証拠を失わない実装を入れる) ので、両 peer の `contract_version` は、実挙動を入れる commit で動かす (`versioning.version_binding` の "must land in the same commit as the real behavior change it claims")。
 
+19. **契約 1.14.0 (契約文書だけで要求を組む参照クライアントのために、要求の組み方と応答の読み方を契約に書く) への裁定 (2026-09-30、依頼者裁定、監督起票 R-108)。** 新規 CCR ではなく、client が要求を組み応答を読むための規則 12 文と、実装への無条件の義務 3 件を契約に足す。`versioning.obligations` に entry を 1 つ足す。規模 L・変更クラス D。設計は `docs/design/REFERENCE_CLIENT_V0_1.md` (v0.6)、作業指示書は `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md`。
+
+    **発端**: 契約だけを持つ client (`spec/data-service-api.v1.json` と派生 catalog、配備の base URL、認可済みの credential 1 本) が、契約外の知識なしに要求の method・URL・header・body を組めるかを示す参照クライアントを置く。設計の §4 は、契約から読めない点 10 件 (base URL と path の結合規則、placeholder の値と encode、Content-Type、応答の分類、capability document の `role`、前提にする外部標準、`operation_catalog_url` に credential を出す範囲、派生 catalog の項が属する surface) を挙げた。この 10 件を契約に書く。
+
+    **本文**: 12 文の置き場は次のとおりである。英文は確定文で、各 JSON path の値がその全文である (本節は写さず、`versioning.version_binding` に足す段落だけを引く)。`versioning.url_composition` (新)、`schemas.CapabilityDocument.properties.surfaces.description` (1 文を置き換える)、`endpoint_fields_note.path` (新)、`media_type_note` (新、最上位)、`errors.response_classification` (新)、`schemas.CapabilityDocument.properties.role.description` (新。`required` は変えない)、`external_standards` (新、最上位)、`definitions.OperationCatalogEntry.description` (新)、`schemas.CapabilityDocument.properties.operation_catalog_url.description` (末尾に足す)、`versioning.version_binding` (段落を足す)。
+
+    **`versioning.version_binding` に足す 1 段落** (1.13.0 の段落の後、version-flip の文の前):
+
+    > Only an implementation declaring 1.14.0 or higher additionally claims conformance to the obligations 1.14.0 introduces (subordinate ruling 19). Those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.14.0, independent of any capability's own status: (a) every successful response it returns carries media_type as the media type of its Content-Type header (media_type_note); (b) every capability document it returns, on either surface, carries role (CapabilityDocument.properties.role); and (c) where its operation_catalog_url differs, character for character, from the URL versioning.url_composition forms for endpoints.operation_catalog, a request that carries no credential receives the document there, as media_type (CapabilityDocument.properties.operation_catalog_url). What else 1.14.0 adds -- versioning.url_composition, the sentence it rewrites in CapabilityDocument.properties.surfaces, endpoint_fields_note.path, errors.response_classification, external_standards and definitions.OperationCatalogEntry's description -- states how a client forms a request and reads a response, and holds an implementation to no behavior beyond these three. 1.14.0 requires no implementation to refuse a request it accepted under 1.13.0: a request valid under 1.13.0 stays valid. An implementation still declaring 1.13.0 is not held to any 1.14.0-only obligation retroactively.
+
+    **`versioning.obligations` に足す entry** (末尾。無条件 3 件、条件付き 0 件):
+
+    > {"version": "1.14.0", "subordinate_ruling": 19, "unconditional": ["successful_responses_carry_media_type", "capability_document_carries_role", "other_url_operation_catalog_served_without_credential"], "conditional": []}
+
+    **依頼者裁定 (逐語、2026-09-30)**:
+
+    > Q-1〜Q-4 はすべて監督の推奨どおりで進めてください
+
+    設計 §9 の Q-1 (base URL と path の結合規則 = (A1))、Q-2 (§4 の読めない点の 8 件を契約に足す = (A))、Q-3 (作業列の範囲 = (A))、Q-4 (surfaces の外の origin にある `operation_catalog_url` への credential = (A)) への回答である。別名 (`endpoints.audit_query`) の扱いは、監督の案「新しい文では別名の規則を言い直さず既存の注記への参照にとどめ、この一致は R-118 (別名の保持期限の食い違い) に追記する」への回答が次のとおりである。
+
+    > その案で良いです
+
+    **版数の扱い**: 12 文はどれも `versioning.compatibility` の「removal or semantic change requires a new major version」に当たらない (設計 §9.2)。実装の挙動を変える義務 (成功応答の Content-Type、capability document の `role`、組む URL 以外の catalog URL を credential 無しで配ること) は、`contract_version` が 1.14.0 以上の宣言にだけ掛かり、旧版を宣言する実装を遡って縛らない。両 peer は (a) と (b) を既に満たす (4 つの wire plug での実測。作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` §5.5 の表 1)。(c) の掛かる URL を宣言する plug は無い (設計 §9.2 の静的な読解)。実装の挙動は変えず、両 peer の `contract_version` は契約の文言と同一の変更セットで 1.14.0 にする。minor 版 (1.14.0) とする。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**

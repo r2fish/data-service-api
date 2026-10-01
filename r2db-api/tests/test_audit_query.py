@@ -1988,7 +1988,7 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
     with control_credentials.unit_of_work() as work:
         control_credentials.add(credential_id, secret, work=work)  # must_rotate=True by construction; deliberately never rotated
     document = service.capabilities(compose_bearer_locator(credential_id, secret))  # must NOT raise FORBIDDEN -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.13.0"
+    assert document["contract_version"] == "1.14.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -2444,7 +2444,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_205_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_208_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -3065,10 +3065,19 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "kill_workers"),
     ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "coalescing_window_ms"),
     ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "issue_audit_credential"),
+    # port v1.21: the wire entry (`wire_entry` on the two http plugs and on the two
+    # in-process plugs, and the `_wire_transport_factory` default hook of the http
+    # plugs), each verified normalize-and-diff equal before adding. The socket
+    # plugs' own `_wire_transport_factory` overrides are NOT rows: the two peers
+    # start their data surface differently (`_DeclaredSocketSurface` on r2db-api,
+    # `_AppSocketSurface` on MitateDB-api).
+    ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "wire_entry"),
+    ("conformance/conformance_adapter_r2db.py", "conformance/conformance_adapter_mitatedb.py", "wire_entry"),
+    ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_wire_transport_factory"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_205_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_208_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -3167,6 +3176,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_205_rows() -> None:
     Widened an eighteenth time by the C-33 launcher helpers (`worker_pids`,
     `kill_workers`, `coalescing_window_ms`, `issue_audit_credential`, the
     last 4 rows), each verified normalize-and-diff equal before adding.
+    Widened a nineteenth time by the wire entry (`wire_entry` on the http pair
+    and on the in-process pair, and the http pair's `_wire_transport_factory`,
+    the last 3 rows), each verified normalize-and-diff equal before adding.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -3190,7 +3202,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_205_rows() -> None:
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_205_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_208_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3502,8 +3514,11 @@ def test_isomorphic_target_table_is_pinned_to_its_current_205_rows() -> None:
         ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "kill_workers"),
         ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "coalescing_window_ms"),
         ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "issue_audit_credential"),
+        ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "wire_entry"),
+        ("conformance/conformance_adapter_r2db.py", "conformance/conformance_adapter_mitatedb.py", "wire_entry"),
+        ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_wire_transport_factory"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 205
+    assert len(_ISOMORPHIC_TARGETS) == 208
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}
@@ -4029,7 +4044,7 @@ def test_control_capabilities_declares_contract_version_1_5_0(kind, platform):
     h = _build_harness(kind, platform)
     try:
         document = h.service.capabilities(h.control_credential_secret)
-        assert document["contract_version"] == "1.13.0"
+        assert document["contract_version"] == "1.14.0"
     finally:
         h.cleanup()
 
@@ -4063,7 +4078,7 @@ def test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query
     authority.register_application(application_id)
     context, _secret = _seed_application_credential(credentials, application_id, "runtime")
     document = service.capabilities(context)
-    assert document["contract_version"] == "1.13.0"
+    assert document["contract_version"] == "1.14.0"
     assert document["capabilities"]["audit_query"] == {"status": "unavailable", "authority": "control_or_audit"}
 
 

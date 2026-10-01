@@ -10,6 +10,7 @@
 | v0.4 | 2026-09-30 | 依頼者裁定反映済み・設計レビュー 2 前。裁定は §9 の【裁定】、帰結は §9.1 (契約 (仮) の変更案)・§9.2 (契約版の帰結) と各節の v0.4 註。基点は main 168f25f |
 | v0.5 | 2026-09-30 | 設計レビュー 2 反映済み。実装は R-115 の merge 後。反映の一覧は §14、各節の v0.5 註 |
 | v0.6 | 2026-09-30 | 設計レビュー 2 と再確認を反映済み。実装は台帳 `RM` R-115 の merge 後。反映の一覧は §15、各節の v0.6 註 |
+| v0.7 | 2026-10-01 | 実装後の註のみ (本文の判定は変えない)。(仮) の番号は契約 1.14.0・従属判断 19・条件 C-35・port v1.21・`security/CONTROL_MAPPING.md` 3.16 に振った (作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` §0 の 9)。本書の `file:line` と現行の行の対応は同書 §0.2。各節の v0.7 註 (D-2・D-6・D-7・§6・§7・§11) |
 
 - 対象: 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-108 (`RM`:462)。規模 L。
 - 基点: main c729ab0 (契約 1.12.0)。v0.4 以降に足した file:line は main 168f25f による (§4 の判定は c729ab0 のまま)。並走: 台帳 `RM` R-115 が契約版・条件番号・port 版・launcher を持つ (未 merge)。本書の契約版・条件番号・port 版はすべて (仮) であり、merge 直前に main を読んで振る (フェーズ11 設計 `docs/design/PHASE11_MIN_COMMON_PROFILE_V1.md` D-7 と同じ規律)。
@@ -38,6 +39,7 @@ D-1 置き場と形。`conformance-tests/reference_client.py` (テストでな�
 D-2 要求の組み立て。operation 名から catalog の method / path / request_schema / roles を引く。path の placeholder は呼び出し側が値を渡し、クライアントは値によらず常に percent-encode する (`/` を含む予約文字をすべて。N-11)。認証 header は契約 `security.schemes` から組む (N-6)。Content-Type、成功と失敗の判別、problem+json でない応答の扱いは §4.1 の表の行による (N-8・N-13・N-14)。body は呼び出し側 (作業列) が意図として与え、送信前に契約の request schema で `conformance-tests/schema_check.py` により検証する (クライアントが契約外の body を送れない)。応答は response schema で検証し、失敗は problem+json の `code` で判断する。HTTP status では分岐しない (`spec/data-service-api.v1.json`:872)。参照クライアントは `operation_catalog_url` を取りに行かない。catalog は入力 1 の `spec/OPERATION_CATALOG.json` から読む (N-18)。宛先は最初の要求 (capabilities) を含め §4.1 の N-19・N-1 の行で決める。入力の base URL が `versioning.base_path` で終わらないとき、operation の surface が段 (1) の capability document に宣言されていないとき (`surfaces.control` の欠落) は、送信せず例外にする (fail closed)。https でない base URL には bearer を送らない (例外は §4.1 の N-15 の行)。
 - v0.4 註 (2026-09-30、依頼者裁定 Q-1 (A1)・Q-2 (A)・Q-4 (A)): 上の「§4.1 の表の行による」「§4.1 の N-19・N-1 の行で決める」は、契約 (仮) の変更案 (§9.1) の文を読むことに置き換わる。挙動の差は 2 点だけである: (i) 自分の key の role は段 (1) の capability document の `role` から読む (§9.1 の #8。v0.3 は入口の申告)、(ii) 要求に body があるときは `Content-Type` を `media_type` で送る (#5)。surface の判定は、`control_endpoints` と同じ名前を持つ `endpoints` の項を control とする (#10。v0.3 の「`deprecation_note` を持つ項」から、契約の文に合わせて改めた)。
 - v0.5 註 (2026-09-30、設計レビュー 2 の B-9・A-2): (ii) は挙動の差ではない。出所が §4.1 の N-8 の行から #5 に移るだけで挙動は v0.3 と同じである (単体テストの行は D-7 の 21 で足した)。挙動の差は (i) と次の 1 点になる: `control_endpoints` と同じ名前を持つ `endpoints` の項 (alias) は URL を組まず、送信せず例外にする (#1・#10。v0.4 の「control とする」を改めた)。v0.6 註 (再確認の指摘 5 (f)): 上の「次の 1 点」は数え漏れである。挙動の差は (i)、alias、3xx を追わない (D-7 の 25)、`errors.shape` に合わない problem+json の `code` を読まない (24)、media type の大小文字 (22) である。
+- v0.7 註 (2026-10-01、コードレビューで足した client の挙動。作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` 訂正註 5 の 2・3・5・6・9): (1) base URL は URI として読み、query か fragment を持つものは結合しない (送信せず例外)。(2) 例外の文に入れる `code` は契約 `errors.codes` が列挙するものだけである (`code` の属性は常に持つ)。(3) `Content-Type` が 2 本以上の応答、NaN / Infinity を含む応答、深すぎる本文は解釈しない失敗とする。(4) NaN / Infinity を含む request body は送らない (送信せず例外)。(5) `localhost` は §4.1 の N-15 の例外に入れない (N-15 の行どおり loopback か `.invalid` だけ)。
 
 D-2a 結合の検証と送信関数。(1) 参照クライアントの単体テスト (記録用の偽の送信関数) で、接頭辞付き base URL・control 面・`/v1` 二重・`operation_catalog_url` の結合と、alias を結合しないことを固定する (D-7 の 3・14・19。alias は v0.5)。(2) wire への入口が返す base URL は、その plug の capability document の `surfaces.data.base_url` (application credential の面の base_url。#1) と一致することを段 (1) で assert する。(3) 送信関数は渡された URL・header・body を変えない「運ぶだけ」のものとする。r2db socket の既存 client の `send` は要求 URL の scheme/host/port を宣言面の値で上書きする (`r2db-api/conformance/conformance_adapter_r2db_socket.py`:458-460)。これは避けられるので避ける: 宣言 URL の port は面の生成時に予約済みで (同:208-210)、面の `base_url` を読むと面が起動する (同:233-236)。入口は返す前にそれを読み、宣言 URL をそのまま dial する素の transport を渡す。MitateDB socket は既に URL を書き換えずに dial する (`MitateDB-api/conformance/conformance_adapter_mitatedb_socket.py`:319-329)。既存の `send` は変えない (K-6)。送信関数は redirect を追わない (3xx をそのまま返す)。v0.6 (再確認の指摘 6): #1 の redirect の規則は、wire では送信関数 (D-6 の pin の外) が redirect を追わないことに依る (§11)。
 
@@ -58,6 +60,8 @@ D-6 直書き禁止の検査 (AST)。
 |---|---|
 | `Authorization` | `spec/data-service-api.v1.json`:13 (`security.schemes.application_credential.description` の「Authorization: Bearer <secret>」) |
 | `Content-Type` | §9.1 の #5 (v0.4 で足した。header 名は HTTP の語で、#9 が HTTP を名指す) |
+
+D-6 の v0.7 註 (2026-10-01): 上の「許可集合の厳密な形は作業指示書で確定する」の確定形は、作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` の M-2 を、同書 訂正註 5 の 4 と訂正註 6 の 2 で改めたものである (クライアントの import は閉じた表で固定する、例外の名前への束縛と `__doc__` の読み出しは赤、(iii) の免除は位置引数がちょうど 1 つで keyword の無い構築のその引数と `message=` の値だけ)。テスト module の pin の確定形は同書 訂正註 6 の 3 (port の他の操作を呼ぶ経路と `adapter_name` による分岐を赤にする)。
 
 D-7 単体テストと変異 (空振り防止の見込み。確定は作業指示書)。記録用の偽の送信関数で参照クライアントを駆動する単体テストを置き、完了条件と変異を 1 対 1 で持つ。変異の注入先は `spec/` のファイルではなくクライアントのコードとテストとする (`spec/` に入れると再生成一致テストと C-29 も同時に赤になり、`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 33 を満たさない)。wire 上の作業列の変異 (§5) は C-28 と同時に赤になってよく、この条件単独で赤になる必要があるのは単体テスト側である。契約の文の文字列ピン (§10 の契約 WP) は別で、#2・#12 のピンの変異は CONTRACT_HISTORY の引用一致テスト (`conformance-tests/test_contract_history_register.py`:343) と同時に赤になってよい。同じ文を契約と `spec/CONTRACT_HISTORY.md` (:266・:385) の 2 か所で縛っているためである (v0.5、設計レビュー 2 の B-12)。v0.6 (再確認の指摘 1): 参照クライアントの失敗は 2 種類 (`code` を読んだ失敗 / `code` を持たない解釈しない失敗) で、失敗を固定する行はどちらの種類かを assert する。「例外になる」だけの assert では、失敗の種類を入れ替える変異 (10・11・13・22・23・24) が生き残る。
 
@@ -92,6 +96,8 @@ D-7 単体テストと変異 (空振り防止の見込み。確定は作業指�
 D-7a `schema_check.py` の拡張。現行の `schema_check.py` は、作業列が使う request schema の keyword の一部 (MutationRequest の `maxLength`・`maxProperties`、SchemaOperationRequest の `maxLength`) を実装しておらず、未知の keyword には例外を出す (fail-closed)。作業列が使う request / response schema の keyword をすべて実装する。未知の keyword で例外を出す性質は変えない。同じ変更セットで module docstring (`conformance-tests/schema_check.py`:1-38 の「C-11 の 3 schema が使う keyword の部分集合」) を直す。クライアントが検証する schema の `used_keywords()` が実装済み集合に収まることを、`conformance-tests/test_schema_check.py`:226-245 と同じ形のガードで静的に固定する (例外は instance が通った節点でしか出ないため)。C-11 の判定が変わらないことは §10 で実測する。
 
 D-7 の v0.4 註 (v0.5 で訂正。設計レビュー 2 の B-4): 表の根拠は、契約 WP の後は §4.1 の行ではなく §9.1 の文になる: 10・13・22 は #6、11・23・24 は #7、17・18 は #1、19 は #1・#10、20 は #8、21 は #5。12 は D-9 (K-5)、14 は D-2 のまま、16 は §4.1 の N-15 の行のまま (v0.4 の「12 は #7、14 は #11」は、#7・#11 が述べない性質だったので改めた)。契約の新しい文を固定するテストは契約 WP が持つ (§10)。v0.6 (再確認の指摘 5 (e)): 上の対応に漏れがあった。3・25 も #1、4 は #4 である。
+
+D-7 の v0.7 註 (2026-10-01、作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` 訂正註 5 の 10): D-7 の冒頭の v0.6 註の「失敗は 2 種類」は、実装では次の class に分かれる。`RequestRefused` は送信前の拒否、`ProblemResponse` は `code` を読んだ失敗、`UninterpretedResponse` と `ContractMismatch` はどちらも `code` を持たない解釈しない失敗の側である (`ContractMismatch` は段 (1) の契約版の不一致と `role` の無い文書)。
 
 D-8 クラスと規模。Class D。`security/CONTROL_MAPPING.md` に触れ、wire への入口を両 peer に同名で置くので `_ISOMORPHIC_TARGETS` が増える (台帳 `RM` §9 の 8 の D 行、`RM`:582)。設計レビューは 2 回で、v0.2 が 1 回目の反映、v0.3 がその再確認の反映である。2 回目は依頼者裁定 (Q-1〜Q-4) を反映した版に対して行う (v0.4 註: その版が v0.4 である)。規模 L。実装の着手は台帳 `RM` R-115 の merge 後とする (契約版・条件番号・port 版・launcher が重なるため)。
 
@@ -172,6 +178,7 @@ D-10 契約版の照合。段 (1) で、`spec/data-service-api.v1.json` の `con
 - 対象の選別は `transport_kind` の宣言 (`conformance-tests/adapter.py`:1125) による。名前や URL の形では判定しない (`docs/work-orders/OPERATING_CONDITIONS.md` §1.7 の 52、C-29 と同じ)。
 - 返す secret は 2 本だが、参照クライアントの 1 インスタンスに渡すのは 1 本である (D-4a)。v0.4 註: どちらが runtime / developer かの申告は参照クライアントに渡さない。テストが、段 (1) で読んだ `role` と申告が一致することを assert する。
 - 送信関数の引数と戻り値の形、in-process plug での振る舞いは作業指示書で確定し、実装前に監督へ上げる (`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 37)。入口を両 peer に同名で置くので同型性テストの対象である (同 §1.5 の 38、D-8)。
+- v0.7 註 (2026-10-01): 入口と送信関数の確定形は作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` の M-1 である。送信関数は、HTTP ライブラリの正規形でない method / URL と、fragment か userinfo を持つ URL を運ばず、送らずに例外にする (同書 訂正註 4 の 2、訂正註 6 の 1)。
 
 ## 7. Security Invariants との関係
 
@@ -188,6 +195,8 @@ D-10 契約版の照合。段 (1) で、`spec/data-service-api.v1.json` の `con
 | SI-00・SI-07 (v0.4、v0.5 で改めた) | 裁定 Q-4 (A) により、契約は `operation_catalog_url` が `versioning.url_composition` の組む URL でないとき application の bearer を出さないこと、bearer を付けた要求の redirect を追わないことを client に求める (§9.1 の #11)。SI-07 と `security/THREAT_MODEL_V1.md` T-01 は credential が盗まれた後の被害の範囲を定める。#11 はその前段の、第三者 (CDN 等) に bearer が渡る経路を狭める。#11 の文が及ぶのは `operation_catalog_url` への要求で、#1 で組む URL への要求の redirect は #1 の redirect の文 (credential を付けた要求の redirect を追わない。v0.6 で「末尾の文」という位置の言い方を改めた。再確認の指摘 5 (c)) が扱う。どちらも client の規則であり、規則に従わない client からの漏れは防がない (v0.4 の「経路を契約から除く」は言い過ぎだったので改めた。設計レビュー 2 の A-3)。どの SI の文も変えず、新しい不変条件は足さない。参照クライアントは `operation_catalog_url` を取りに行かないので (D-2)、本条件はこの性質を wire で示さない (§11) |
 
 新条件 (仮) の SI 列は C-28 と同じ SI-05、SI-09、SI-10、SI-11、SI-14 を見込む。公開リポジトリ規律 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.9 の 60) により、文書・テスト・失敗メッセージには合成値と `example.invalid` だけを使う。
+
+v0.7 註 (2026-10-01): §9.1 の #12 の (b) の Evidence は `security/CONTROL_MAPPING.md` の SI-06 の Common 節に置いた (監督裁定、作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` 訂正註 6 の 3)。上の表の「SI-03・SI-06」の行の「本項目は新たに検証しない」は、C-19 に足した test (`test_c19_data_documents_declare_a_role`) が 6 adapter で data 面の capability document の `role` を見る、と読み替える。
 
 ## 8. 却下した代替案
 
@@ -343,6 +352,14 @@ Q-4 (A) の判定。
 - alias (`endpoints.audit_query`、`spec/data-service-api.v1.json`:432) の扱い。(i) deprecation_note は保持を「1.4.0 の後の minor 1 版」とするが、契約 1.12.0 に alias は残っている。この食い違いは本設計では解かず、台帳 `RM` R-118 に起票した。(ii) v0.5 (設計レビュー 2 の A-2): data と control が同じ origin・同じ接頭辞の配備では、control の base URL は `<origin>/control/v1` で、v0.4 の #1 のとおり alias を結合すると `<origin>/v1/audit/query` になる。r2db の本番 nginx 雛形 (`r2db-api/deploy/nginx/r2dbsvc-api-8443.conf.example`:113-114・:152-153) と socket harness (`conformance-tests/socket_harness.py`:295-296・:306-307・:1385-1386) では、その URL は data の process に届き、そこは application の認証の後に拒否する stub である (`r2db-api/src/r2db_api/http.py`:718-745・:766)。control の process の route (`r2db-api/src/r2db_api/control_http.py`:463) には届かず、1.4.0 の追記 (`spec/data-service-api.v1.json`:37) は stub が control / audit の credential を AUTH_INVALID で拒むことを許す。v0.5 の #1・#10 は alias の URL を組まないのでこの一致に依らないが、alias を呼ぶ既存の client には残る (台帳 `RM` R-118 への追記は監督が行う)。(iii) alias が削除されると #1・#10 の alias の句は当てはまる項を失う。そのときの文の扱いは R-118 が決める。
 - 性能について何も主張しない。4 node 分の往復が完了ゲートの壁時計を延ばす量は実測して記録する。目標値は先に置かない。
 - 本設計は実行検証されていない。§3 D-7 と §5 の変異はすべて候補であり、実測は作業指示書の「完了条件 → 変異」表で行う (`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 34)。
+- v0.7 註 (2026-10-01、実装後の実測。出所は作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` の §5.5 と訂正註。上の項は書き換えない):
+  - 義務 (a)(b): wire の 4 plug で、data 面の 6 operation と control 面の `control_capabilities` の成功応答はすべて `application/json`、capability document の `role` は data 面が `runtime`、control 面が `control` (同書 訂正註 1 の 4)。control の credential で data 面の capabilities を読む経路 (§10 の v0.4 の項の co-hosting の経路) は、4 plug とも 401 `application/problem+json` (`AUTH_INVALID`) で文書を返さない。義務 (b) は返す文書に掛かるので破れていない。
+  - 「運ぶだけ」(D-2a (3)・D-6) を確かめた範囲は transport の受け渡し点 (`httpx.ASGITransport` と `httpx.AsyncHTTPTransport` の `handle_async_request`) までで、4 plug とも確かめた (同書 M-8、完了条件 34)。socket の 2 plug の nginx から upstream までは確かめない。
+  - redirect を追わないことの wire 上の実測: 4 plug とも末尾 slash 付きの capabilities の path が 307 を返し、送信関数は 3xx をそのまま返し、受け渡し点の呼び出しは 1 回である (完了条件 35)。socket の 2 plug の 307 の `Location` は宣言の port を持たない (台帳 `RM` R-121)。
+  - D-4 の xdist の group は adapter 名である。C-35 と `conformance-tests/test_wire_entry.py` の各 test が自分の group 名を assert する (同書 M-7、完了条件 38・80)。
+  - D-7a の後も C-11 の判定は変わらない: 実装前後の集計は 72 → 75 passed で、差は `conformance-tests/test_schema_check.py` の新規 3 test である (完了条件 75)。
+  - C-35 の 4 node の所要時間 (WP-4 の報告、`e5d0e0a` の上の `--durations=0` の call): r2db socket 0.61 s、MitateDB socket 0.35 s、r2db http 0.30 s、MitateDB http 0.14 s。完了ゲートでの値は同書 §5.3。
+  - 同じ変更セットで、`tools/deploy_smoke.py` を credential を付けた要求の redirect を追わない形に直し (同書 訂正註 2 の 6・訂正註 3)、両 peer の runbook (`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md`・`MitateDB-api/docs/cloud-run-cloud-sql.md`) に義務 (c) の 1 文を足した (同書 訂正註 2 の 4)。
 
 ## 12. 設計レビュー 1 の反映 (v0.2)
 

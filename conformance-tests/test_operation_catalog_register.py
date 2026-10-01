@@ -50,7 +50,7 @@ order's original six-item enumeration):
         "schema_operations"]` and `["constraint_declarations",
         "application_catalog"]` (D-8 (2)'s own "capability を配列にする理由").
   (viii) The top-level `endpoint_fields_note` object exists and carries all
-        3 keys (`roles`, `requires_capability`, `atomicity`), each a
+        4 keys (`roles`, `requires_capability`, `atomicity`, `path`), each a
         non-empty string.
 
 Plus the byte-identical regeneration check: `spec/OPERATION_CATALOG.json`
@@ -458,9 +458,9 @@ def test_endpoint_fields_note_present_and_non_empty():
     contract = _contract()
     assert "endpoint_fields_note" in contract, "contract has no top-level endpoint_fields_note key"
     note = contract["endpoint_fields_note"]
-    assert set(note.keys()) == {"roles", "requires_capability", "atomicity"}, (
+    assert set(note.keys()) == {"roles", "requires_capability", "atomicity", "path"}, (
         f"endpoint_fields_note has keys {sorted(note.keys())}, expected exactly "
-        f"{{'roles', 'requires_capability', 'atomicity'}}"
+        f"{{'roles', 'requires_capability', 'atomicity', 'path'}}"
     )
     for key, value in note.items():
         assert isinstance(value, str) and value.strip(), f"endpoint_fields_note.{key} is not a non-empty string"

@@ -2,8 +2,8 @@
 
 Status: **Implementation mapping template**
 
+Version: **3.16** (2026-10-01; R-108 -- SI-05 Common, SI-06 Common, SI-09 Common, SI-10 Common, SI-11 Common, SI-14 Common: C-35 drives C-28's 12 steps through a reference client that composes every request from the contract, on the four wire plugs, and C-19 reads the `role` of every adapter's capability document; both peers' operation-catalog override documentation states contract 1.14.0's obligation, and the line references into MitateDB-api's runbook that lie after the inserted lines are re-pulled.)
 Version: **3.15** (2026-10-01; R-102 acceptance -- SI-09 MitateDB-api -- platform upgrade: section 10.8 records 10.10 accepted at version 12 on the requester's confirmation of 2026-10-01, so Gate-0 readiness again rests on the 10 items alone.)
-Version: **3.14** (2026-10-01; R-102 -- SI-01 MitateDB-api, SI-08 MitateDB-api and its capacity and concurrency block, SI-08 r2db-api -- capacity and concurrency, SI-09 r2db-api, SI-09 MitateDB-api -- platform upgrade, SI-10 MitateDB-api, SI-11 r2db-api, SI-11 MitateDB-api, SI-11 Common: per-role pools, a request scope and transaction-scoped advisory locks replace the cell lock; runbook section 10.10 version 12 is not yet accepted.)
 
 
 This document maps common Security Invariants to platform-specific controls. It is intentionally not the source of truth for the invariants themselves.
@@ -496,11 +496,14 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the socket-plug branch is narrow by construction: `transport_kind == "socket"` only, wire-carried positions only, and only for `httpx.LocalProtocolError` or an `UNCLASSIFIED` non-problem+json failure, never an unreachable peer -- `conformance-tests/test_c03_structured_injection.py`.
 - body-carried positions still demand a genuine contract-coded denial on every plug -- `conformance-tests/test_c03_structured_injection.py::test_c03_wire_rejection_never_applies_to_a_body_carried_position`, `::test_c03_wire_rejection_never_applies_to_a_reachability_failure`.
 - C-28, on all six adapters: in a baseline-only turn, an out-of-enum value and a null in a `nullable: false` field are each refused as `VALIDATION_FAILED` naming that declaration -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
+- C-35, on the four wire adapters: a client composing each request from the contract alone is refused an out-of-enum value and a null in a `nullable: false` field as `VALIDATION_FAILED` naming that declaration -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 
 #### Status
 
 - **Phase 10 socket plugs -- disclosed**: C-03's corpus now also runs on the two real-socket plugs, where a URL-path-carried identifier payload can be refused by the client's own HTTP/1.1 layer (h11) before any byte reaches the peer;
 - the suite counts that wire refusal as a rejection, so for the `entity` position on a socket plug the denial is not always the peer's own validation.
+- C-35 proves one `common_baseline` turn on the four wire plugs only: the two in-process plugs have no wire (C-28 is their evidence) and a real-server launcher is not driven.
+- C-35's client never requests `operation_catalog_url`, so 1.14.0's obligation to serve it without a credential at another spelling is shown by the string pins in `conformance-tests/test_contract.py` only, never on a wire.
 
 ## SI-06 Server-Bound Credential Scope
 
@@ -578,6 +581,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the shared dummy verifier on both peers -- `test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest`.
 - condition C-01 on all four adapters -- `conformance-tests/test_c01_scope_binding.py::test_must_deny_vectors_are_denied_with_contract_codes`, `::test_must_ignore_vectors_leave_scope_and_other_app_unchanged`.
 - same four adapters -- `conformance-tests/test_c01_scope_binding.py::test_structurally_absent_vectors_have_no_forbidden_parameters`, `::test_runtime_credential_cannot_self_elevate_to_schema_authority`.
+- Contract 1.14.0 obligation (b): every adapter's data-surface capability document carries a `role` in `security.roles` -- `conformance-tests/test_c19_client_self_sufficiency.py::test_c19_data_documents_declare_a_role`.
+- On the four wire plugs the role a client reads from its capability document equals the role of its secret -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 
 #### Status
 
@@ -876,7 +881,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the same `batch_entities` boundary holds over real HTTP -- `test_cross_entity_mutation_batch_entities_boundary`.
 - F-17 -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_passes_from_migration_0013`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_zero`, `::test_verify_declarations_f17_fails_when_declared_timeout_is_reset`.
 - F-17 -- `MitateDB-api/tests/test_ops_verify_declarations.py::test_verify_declarations_f17_fails_when_a_per_database_override_exists`, `::test_verify_declarations_f17_passes_when_auditreader_role_is_absent`, `::test_f17_the_schema_owning_role_is_never_flagged_despite_an_explicit_select_grant`.
-- the isomorphic target -- `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_205_rows`.
+- the isomorphic target -- `MitateDB-api/tests/test_audit_query.py::test_isomorphic_target_table_is_pinned_to_its_current_208_rows`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r71_catalog_read_cancel_mapping.py::test_catalog_read_cancel_synthetic_injection_maps_to_resource_limit_error`, `::test_get_catalog_returns_limit_exceeded_not_validation_failed_when_the_read_is_canceled`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_blocked_catalog_read_is_bounded_by_the_constructed_value_not_the_role_value`.
 - the scope's timeouts and the reads inside it -- `MitateDB-api/tests/test_r102_request_scope.py::test_catalog_reads_run_inside_the_scope_transaction_without_committing_or_setting_timeouts`, `::test_the_scope_sets_its_timeouts_from_the_deadline_not_the_constructed_value`.
@@ -970,7 +975,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Disclosed detection gap**: a stray `0013` re-applied after `0014` with NO application provisioned afterwards is NOT caught -- every existing role still carries `0014`'s ceiling, so item (8) reads confirmed while the provisioning function is silently back at 36.
 - **A stray single-file re-application is not reverted by any migration**, and `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10 carries that gap together with the re-application order.
 - **Disclosed scope limit of item (8)'s second condition**: raising a `CONNECTION LIMIT` adds no capacity, so condition 2 (total demand + reserved <= `max_connections`) is untouched by `0014`.
-- **`ops inventory` cannot check the declared old-basis process count**: a wrong, too-small declaration undercounts demand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:2611`.
+- **`ops inventory` cannot check the declared old-basis process count**: a wrong, too-small declaration undercounts demand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:2618`.
 - **The F-16 agreement holds for equal inputs only**: that the thread limit and process counts an operator declares match what each composition root passes F-16 rests on the runbook, not a test -- `docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md` section 10.1.
 - What an operator does when a cluster's `max_connections` does not cover the rollout total is not decided yet.
 
@@ -1090,16 +1095,16 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **F-18's floors do not track this peer's `MITATEDB_PLATFORM_POOL_SIZE` override**, exactly as F-16's do not.
 - **The control plane's startup judgment reads the thread limit from its own process environment** (`MITATEDB_THREAD_LIMIT`, as its F-16 call does), so a control deployment whose value differs from the data plane's judges a different floor for the application pair.
 - If the open rollout-overlap question (R-52) is resolved by declaring the overlap's own process count in `process_ceilings`, that count is exactly what this lower bound already counts.
-- **`concurrency` is shared within one instance only**: `enforced` holds only while `--max-instances=1` keeps every data worker on that instance, which neither composition root can read -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1399`.
-- **During a rollout overlap the slots are not shared**: an old and a new revision on two instances may hold up to twice the declared `concurrency`, while `requests_per_minute` still holds -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1792`.
-- **A worker stopped while holding `scan` holds up the whole instance**: every acquisition waits up to 1 s and answers 503; the runbook forbids stopping a single worker -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1706`.
-- **The rate ring may refuse slightly early**: at a window edge it counts up to one second more than 60 s, and never admits more than the declared `requests_per_minute` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1784`.
+- **`concurrency` is shared within one instance only**: `enforced` holds only while `--max-instances=1` keeps every data worker on that instance, which neither composition root can read -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1406`.
+- **During a rollout overlap the slots are not shared**: an old and a new revision on two instances may hold up to twice the declared `concurrency`, while `requests_per_minute` still holds -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1799`.
+- **A worker stopped while holding `scan` holds up the whole instance**: every acquisition waits up to 1 s and answers 503; the runbook forbids stopping a single worker -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1713`.
+- **The rate ring may refuse slightly early**: at a window edge it counts up to one second more than 60 s, and never admits more than the declared `requests_per_minute` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1791`.
 - **A database clock that steps back stretches the rate window by that step**: the ring's base second never moves back, so no count ages out until the clock passes it again (stricter, never looser); read from the function, not tested -- `MitateDB-api/migrations/0016_credential_request_rate.sql:149`.
 - **A database clock that steps forward ages counts out early**: the ring reads the database's wall clock, so a forward step admits up to twice the declared `requests_per_minute` in 60 real seconds; read from the function, not tested -- `MitateDB-api/migrations/0016_credential_request_rate.sql`.
-- **SIGHUP or SIGTTIN runs more data workers than declared**: the uvicorn supervisor then runs `MITATEDB_WORKERS + 1` or more, beyond `process_ceilings.data` and the F-16/F-18 budget; no check sees it and only the runbook forbids it -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1698`.
-- **The image's evidence is static**: the tests above read the Dockerfile as text; the development machine has no container runtime, so the preflight-then-uvicorn order is confirmed only on a deployed revision -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1810`.
+- **SIGHUP or SIGTTIN runs more data workers than declared**: the uvicorn supervisor then runs `MITATEDB_WORKERS + 1` or more, beyond `process_ceilings.data` and the F-16/F-18 budget; no check sees it and only the runbook forbids it -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1705`.
+- **The image's evidence is static**: the tests above read the Dockerfile as text; the development machine has no container runtime, so the preflight-then-uvicorn order is confirmed only on a deployed revision -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1817`.
 - **F-20 reads the workers from the operator's own shell**, never from the running revision, so it is a hand cross-check; the preflight's check is the one that stops a revision -- `MitateDB-api/src/mitatedb_api/ops.py:1472`.
-- **A new `process_ceilings` changes which running revisions can start**: section 10.10.1 step 6 judges F-16 / F-18 for every listed revision with `ops startup-checks` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3785`, `MitateDB-api/src/mitatedb_api/startup_checks.py:913`.
+- **A new `process_ceilings` changes which running revisions can start**: section 10.10.1 step 6 judges F-16 / F-18 for every listed revision with `ops startup-checks` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3792`, `MitateDB-api/src/mitatedb_api/startup_checks.py:913`.
 - **A keyed write holding the idempotency count lock while it waits for an entity lock** holds up other keys' keyed writes until the schema operation on that entity ends -- `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` section 10.
 - **A process that receives no request closes no idle connection**: the idle sweep runs only inside an acquire -- `MitateDB-api/src/mitatedb_api/pool.py:423`.
 
@@ -1282,7 +1287,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `0014` requires ADMIN OPTION on every role it alters, exactly as `0013` requires it, refused rather than bypassed -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - **Platform-upgrade runbook** section 10 is the operator procedure for the Gate-0 read and the platform upgrade, in four stages: first read, platform remediation, second read, candidate -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - only the remediation and candidate stages change production state; a read performs no DDL, no DML, no declaration replacement, no restart, no traffic change and no API enablement -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
-- Gate-0 is ready only when all 10 items are confirmed AND section 10.8's acceptance records name the current versions; `ops inventory`'s own exit status 0 never makes it ready -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3090`.
+- Gate-0 is ready only when all 10 items are confirmed AND section 10.8's acceptance records name the current versions; `ops inventory`'s own exit status 0 never makes it ready -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3097`.
 - what ready gates is exactly the candidate deploy and the traffic switch onto it -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - Section 10.2 orders the isolated proof, the independent audit and the requester's approval before anything in either state-changing stage runs -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.2.
 - the remediation stage, which ready does not gate, carries the same three conditions for its own single move of traffic percentages onto the env-only revision running the same image digest -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.2.
@@ -1291,9 +1296,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - those limits are `0012`'s own value for a role it names and the catalog value for every other role -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - a role whose `CONNECTION LIMIT` sits below its own demand is reported and stopped on rather than remediated there, since raising such a limit takes a new platform migration -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - an `unknown` that survives the second read stops the procedure and is never carried forward as a warning -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
-- That acceptance record judges item (5) and item (6)'s lock/downtime half, matching `inventory`'s own `unjudged_items`/`runbook-acceptance` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3044`.
-- platform migrations run only in numbered-set order through `apply-platform-migration` with its required `--lock-timeout`: `0005`, `0007`, `0011` one run each, then `0012`/`0013`/`0014` as one run -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3431`.
-- `0016` then runs alone at step 7a, and `0017` alone at step 7b, through the same subcommand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:4342`, `:4350`.
+- That acceptance record judges item (5) and item (6)'s lock/downtime half, matching `inventory`'s own `unjudged_items`/`runbook-acceptance` -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3051`.
+- platform migrations run only in numbered-set order through `apply-platform-migration` with its required `--lock-timeout`: `0005`, `0007`, `0011` one run each, then `0012`/`0013`/`0014` as one run -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3438`.
+- `0016` then runs alone at step 7a, and `0017` alone at step 7b, through the same subcommand -- `MitateDB-api/docs/cloud-run-cloud-sql.md:4349`, `:4357`.
 - `0012`, `0013` and `0014` all `CREATE OR REPLACE` the same function in that order, and `0013` and `0014` both name the role `0005` creates -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - re-applying `0007`/`0012` is idempotent but not value-neutral, so the runbook records the writer-role timeouts, the `audit_writer_roles` row and the current `CONNECTION LIMIT`s first -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
 - it restores the two timeouts and that row, while the `CONNECTION LIMIT`s are recorded only and never restored, since `0012` sets each role it names to its own value -- `MitateDB-api/docs/cloud-run-cloud-sql.md` section 10.
@@ -1325,7 +1330,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Production evidence is `absent`**: section 10 has never been run against production, and neither `0014_role_connection_limits_rollout.sql`, `0016`, `0017`, the `0004` stages R-54 adds, nor the run/closure behavior R-57 adds is applied there; every value above was measured on a throwaway cluster.
 - **`0014`'s header is true for one process, not for two**: it overwrites `0012`'s own statement that `mitatedbsvc_auditreader` is deliberately left untouched, rather than erasing it -- `MitateDB-api/migrations/0014_role_connection_limits_rollout.sql`.
 - **Each reviewed subject stays a draft until section 10.8's own row names that same version for it**: section 10.8 is the single place that state is read from, and a row naming an earlier version counts as no record at all.
-- **Section 10.8 names 10.6 / 10.7 / 10.10 accepted at versions 7 / 7 / 12** (requester, 2026-10-01; design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` section 11.2), so Gate-0 readiness rests on the 10 items alone -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3051-3053`.
+- **Section 10.8 names 10.6 / 10.7 / 10.10 accepted at versions 7 / 7 / 12** (requester, 2026-10-01; design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` section 11.2), so Gate-0 readiness rests on the 10 items alone -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3058-3060`.
 - **Every `apply-platform-migration` test targets a throwaway PostgreSQL cluster only** (`MITATEDB_TEST_ADMIN_DSN`).
 - **A stray `0012` applied alone after `0013`** drops the setting for FUTURE applications only, and, now that `0014_role_connection_limits_rollout.sql` replaces that same function last, additionally lowers every EXISTING role's `CONNECTION LIMIT` back to `0012`'s values.
 - **Either stray is corrected only by re-applying the set in its own order, ending at `apply-platform-migration 0014`** -- never by `0013` alone, which would leave the next application's roles at 36.
@@ -1343,6 +1348,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the C-06 vectors -- `conformance-tests/test_c06_destructive_confirmation.py::test_c06_v1_unconfirmed_destructive_delete_denied`, `::test_c06_v3_confirmation_exact_match_required`, `::test_c06_v4_phrase_is_deterministic_and_requester_independent`, `::test_c06_v5_echo_executes`.
 - the C-06 vectors -- `conformance-tests/test_c06_destructive_confirmation.py::test_c06_v6_drop_entity_fingerprint_invalidation`, `::test_c06_v7_control_credential_gate`, `::test_c06_v8_no_payload_echo_in_declarations`.
 - C-28, on all six adapters: the turn's predicate `delete` is refused unconfirmed, executes once the client presents the declared phrase, and removes exactly the matched row (exact-match enforcement itself is C-06's) -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
+- C-35, on the four wire adapters: the turn's predicate `delete` is refused unconfirmed, then executes with the phrase the client read from that refusal's details -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 
 #### Status
 
@@ -1478,6 +1484,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Evidence
 
 - C-28, on all six adapters: an enum refusal names the request-body position, never the rejected value or a declared member, with details keys inside the contract vocabulary -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
+- C-35, on the four wire adapters: an enum refusal's whole body carries neither the rejected value nor a declared member, with details keys inside the contract vocabulary -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
+- C-35's client: no failure text it raises carries the bearer secret -- `conformance-tests/test_reference_client.py::test_no_failure_text_carries_the_secret`.
 - C-29: each plug serves a catalog byte-identical to the packaged one; socket plugs serve it at the declared URL -- `conformance-tests/test_c29_operation_catalog_url.py::test_c29_served_body_matches_the_packaged_catalog`, `::test_c29_operation_catalog_url_is_really_dialable_on_socket_plugs`.
 - An undecodable cursor and one bound to a different Application, entity, where or order_by all produce the identical 2-key denial: `test_c30_keyset_paging.py::test_c30_cursor_refusal_details`.
 - r2db pins a wrong-count/wrong-type cursor token as the same denial: `r2db-api/tests/test_foundation.py::test_cursor_rejects_a_tampered_token_with_the_wrong_value_count_or_type`.
@@ -1490,6 +1498,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **No cited evidence for the common error-probing coverage**: no test is named for this block's blanket error-probing claim; version 2.25's uncited wording is in the history file.
 - The count/type-mismatch causes above are not driven through the port (a cursor is contractually opaque, so the conformance suite cannot manufacture a tampered token); the port-only causes are malformed, cross-Application, cross-entity and where/order_by mismatch.
 - A page cursor is a recoverable encoding of a row's ordering values, so, as audit.forbidden_fields excludes row_value, no audit event field carries it; both peers' event field sets are fixed, so no further check is added.
+- C-35's client carries a bearer over `http` only to a loopback or `.invalid` host (3 of the 4 wire plugs declare one), so the turn does not exercise TLS; an ASGI transport ignores the host, so a wrong origin fails only on the two socket plugs.
+- C-35's send function is outside the client's static pin: `conformance-tests/test_wire_entry.py` observes what it carries only up to the transport hand-over point, not a socket plug's nginx or its upstream.
 
 ## SI-11 Atomic Integrity
 
@@ -1560,6 +1570,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - cross-entity atomic-unit agreement, declared against observed, with both entities voided together on a mixed-validity unit, is additionally covered by C-16 -- `conformance-tests/test_c16_cross_entity_atomicity.py`.
 - V1 and V2 drive the two PROVIDED MitateDB adapters and V5's evidence-form check the two ABSENT r2db adapters -- `conformance-tests/test_c16_cross_entity_atomicity.py::test_c16_v5_unavailable_peers_take_their_declared_evidence_form`.
 - C-28, on all six adapters: a dry run under the real send's idempotency key leaves no row, the real send presenting that plan commits one row, and a same-key resend adds none -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
+- C-35, on the four wire adapters: a dry run under the real send's idempotency key leaves no row, the real send presenting that plan commits one, and a same-key resend adds none -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 - C-34, on all six adapters: with a `plan`-presenting schema operation held after its revision read, a second one on another entity answers only after the first commits -- `conformance-tests/test_c34_concurrent_plan_precondition.py::test_c34_concurrent_schema_operation_keeps_plan_precondition`.
 
 #### Status
@@ -1966,6 +1977,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - shutdown and a start failure leave no process, no bound port, no temporary directory and no throwaway database or role behind -- `conformance-tests/test_c26_composition_root.py::test_c26_no_residue_after_shutdown`, `::test_c26_start_failure_leaves_no_residue`.
 - the composition-roots registry -- `conformance-tests/test_c26_composition_root.py::test_c26_composition_roots_registry_has_at_least_two`, `::test_c26_items_are_grouped_per_launcher`.
 - C-28, on all six adapters: the turn's real send carries a `request_id`, and a same-key, same-body resend returns that same `request_id` -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
+- C-35, on the four wire adapters: the real send carries a `request_id`, and a same-key resend returns that same `request_id` -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 - C-33, on both composition roots: after every worker of a `workers = 2` root is SIGKILLed, every returned success keeps its audit event -- `conformance-tests/test_c33_process_loss.py::test_c33_returned_successes_keep_their_audit_event_after_the_kill`.
 - C-33: the denial events still total every denial the service returned -- `conformance-tests/test_c33_process_loss.py::test_c33_denial_count_total_survives_the_kill`.
 

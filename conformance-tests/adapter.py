@@ -1049,6 +1049,47 @@ class PlanVerificationHold:
         return self._wait_until_held(timeout_s)
 
 
+@dataclass(frozen=True)
+class WireEntry:
+    """Returned by `wire_entry()` (port v1.21, design docs/design/
+    REFERENCE_CLIENT_V0_1.md section 6 and D-2a). Non-normative, the same
+    status `IdempotencyHold` and `PlanVerificationHold` above carry: this
+    port prescribes only the four fields' meaning, never this class's own
+    shape beyond them.
+
+    `base_url`: the base URL this surface declares as
+    `surfaces.data.base_url`, character for character.
+
+    `send(method, url, headers, body) -> (status, headers, body)`:
+    synchronous and blocking. `method` and `url` are `str`; `headers` is a
+    tuple of `(name, value)` pairs, passed on in the order and spelling
+    given; `body` is `bytes` or `None`. It hands exactly those four values
+    to this plug's own transport -- adding only the `Host` and
+    `Content-Length` framing an HTTP library puts on every request -- and
+    returns the response's status, its header pairs (order and spelling as
+    received) and its body as `bytes`. It never follows a redirect: a 3xx
+    response is returned as it is. A method or URL that the HTTP library
+    would write in a form other than the one given, and a URL with a
+    fragment or a userinfo part (neither reaches the request line), is
+    refused with `ValueError` before anything is sent. A connection failure
+    is raised as an exception.
+
+    `runtime_secret` / `developer_secret`: the complete bearer token of
+    one runtime and one developer credential issued to the application
+    (`CredentialHandle.secret`, verbatim). Both fields are excluded from
+    `repr` and from comparison (`field(repr=False, compare=False)`), so
+    neither `repr(entry)` nor the explanation of a comparison between
+    entries shows a secret."""
+
+    base_url: str
+    send: Callable[
+        [str, str, tuple[tuple[str, str], ...], bytes | None],
+        tuple[int, tuple[tuple[str, str], ...], bytes],
+    ]
+    runtime_secret: str = field(repr=False, compare=False)
+    developer_secret: str = field(repr=False, compare=False)
+
+
 # ---------------------------------------------------------------------------
 # 4.4 Abstract adapter
 # ---------------------------------------------------------------------------
@@ -1965,6 +2006,47 @@ class ConformanceAdapter(ABC):
         Called against the YIELDED instance of `isolated_application_
         surface()`, never against the shared, session-scoped adapter --
         the same convention the two primitives above follow.
+        """
+
+    @abstractmethod
+    def wire_entry(self, application_id: str) -> "WireEntry":
+        """Returns this surface's wire entry for `application_id`, an
+        Application already provisioned on this surface: the base URL this
+        surface declares as `surfaces.data.base_url`, a send function that
+        carries one request -- method, URL, header pairs and body, exactly as
+        given -- to that URL over this plug's own transport and returns the
+        status, the response's header pairs and its body without following a
+        redirect, and the bearer secret of one runtime and one developer
+        credential issued to that Application through this adapter's own
+        bootstrap path. A plug whose `transport_kind` is `in_process` has no
+        wire and raises `AssertionError`.
+
+        port v1.21: the way into a surface's wire, for a client that holds
+        only the contract (design docs/design/REFERENCE_CLIENT_V0_1.md section
+        6, D-2a, D-4 and D-5). The `WireEntry` it returns carries the four
+        values named in that class's own docstring, above. Called against the
+        YIELDED instance of `isolated_application_surface()`, after
+        `provision_application(application_id)`, never against the shared,
+        session-scoped adapter -- the same convention the three primitives
+        above follow. The two secrets come from `issue_credential`, the
+        adapter's own bootstrap path, one call per role; the entry never mints
+        a credential by any other route.
+
+        `send` is a plain carrier. It does not apply a client-layer default
+        header, a cookie jar or a redirect policy, and it does not rewrite the
+        URL it is given -- a request whose host differs from the declared one
+        reaches the plug's own transport with that host. A plug whose
+        `transport_kind` is `in_process` has no wire; its realization raises
+        `AssertionError` that names `in_process` (a port-usage error, never a
+        skip and never a returned placeholder), the same way
+        `fold_batch_idempotency_key` treats a port-usage error.
+
+        A method or URL that is not in the HTTP library's own normal form (a
+        lower-case method, an upper-case host, a path with dot segments), or
+        a URL that carries a fragment or a userinfo part, is
+        not carried: `send` raises `ValueError` before anything reaches the
+        transport, so a request is either carried as given or refused, never
+        carried in a rewritten form.
         """
 
     # ------------------------------------------------------------------

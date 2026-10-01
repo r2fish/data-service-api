@@ -1,16 +1,25 @@
 """Self-contained JSON-Schema-subset validator for the C-11 discovery/catalog
 document conformance condition (design docs/design/
-CONFORMANCE_CONDITIONS_V1_1.md section 3).
+CONFORMANCE_CONDITIONS_V1_1.md section 3) and for the reference client
+(`reference_client.py`), which validates the request and response schemas of
+the operations the derived operation catalog names.
 
 This deliberately does not depend on a general-purpose JSON Schema library
 (no new dependency for the common repository) and does not attempt to
 implement JSON Schema in full. It implements exactly the keyword subset the
-common contract's own schemas (`spec/data-service-api.v1.json`:
-`CapabilityDocument`, `CatalogDocument`, `EntityDescriptor`) actually use:
+common contract's schemas that those two users check actually use. Those are
+`CapabilityDocument`, `CatalogDocument` and `EntityDescriptor` for C-11, and
+for the reference client the schemas named by the catalog's entries except an
+alias of a control endpoint
+(`test_reference_client_schemas_use_only_implemented_or_annotation_keywords`
+derives that set from the catalog). The keywords are:
 `type`, `required`, `properties`, `additionalProperties`, `enum`, `const`,
-`pattern`, `items`, `minItems`, `maxItems`, `minimum`, `maximum`, `if`+`then`
-(+`else`), and same-document `$ref` (a `#/...` JSON pointer resolved against
-the full contract document, never a remote reference). Every keyword this
+`pattern`, `items`, `minItems`, `maxItems`, `minimum`, `maximum`, `maxLength`,
+`maxProperties`, `if`+`then` (+`else`), and same-document `$ref` (a `#/...`
+JSON pointer resolved against the full contract document, never a remote
+reference). `maxLength` bounds a string's length in code points and
+`maxProperties` an object's number of properties; each applies only to a value
+of its own type, as the draft says. Every keyword this
 file implements follows the JSON Schema draft's real semantics rather than
 being special-cased to this contract's current shape -- in particular, `if`
 is evaluated as an ordinary schema (its own `required`/`properties` apply
@@ -28,14 +37,19 @@ deliberately ignores (`ANNOTATION_KEYWORDS`, e.g. `title`/`description` --
 metadata with no bearing on conformance). A silently-ignored keyword would
 be exactly the "skip converts unverified into permitted" failure mode
 (design principle 4): if the contract ever added a keyword this validator
-does not implement to one of the three schemas C-11 checks, an adapter
+does not implement to one of the schemas either user checks, an adapter
 could satisfy the letter of that keyword while this validator kept quietly
 passing every instance, having never actually looked at it.
-`test_schema_check.py` has a dedicated guard test asserting that every
-keyword the three real contract schemas actually use is a member of
-`IMPLEMENTED_KEYWORDS | ANNOTATION_KEYWORDS` -- so growing the contract
-schemas past this validator's current coverage fails loudly, in the suite,
-rather than silently under-validating.
+`test_schema_check.py` has two guard tests asserting that every keyword the
+real contract schemas actually use is a member of
+`IMPLEMENTED_KEYWORDS | ANNOTATION_KEYWORDS` -- one for the C-11 schemas
+(`test_c11_schemas_use_only_implemented_or_annotation_keywords`), one for the
+schemas the reference client validates
+(`test_reference_client_schemas_use_only_implemented_or_annotation_keywords`)
+-- so growing the contract schemas past this validator's current coverage
+fails loudly, in the suite, rather than silently under-validating.
+`test_unknown_schema_keyword_fails_loud` pins the rejection of a keyword
+outside both sets.
 """
 from __future__ import annotations
 
@@ -69,6 +83,8 @@ IMPLEMENTED_KEYWORDS = frozenset({
     "maxItems",
     "minimum",
     "maximum",
+    "maxLength",
+    "maxProperties",
     "if",
     "then",
     "else",
@@ -188,6 +204,12 @@ def validate(instance: Any, schema: Mapping, root: Mapping, *, path: str = "$") 
                 SchemaViolation(path, f"value {instance!r} does not match pattern {schema['pattern']!r}")
             )
 
+    if "maxLength" in schema and isinstance(instance, str):
+        if len(instance) > schema["maxLength"]:
+            violations.append(
+                SchemaViolation(path, f"string of length {len(instance)} exceeds maxLength {schema['maxLength']!r}")
+            )
+
     if isinstance(instance, (int, float)) and not isinstance(instance, bool):
         if "minimum" in schema and instance < schema["minimum"]:
             violations.append(
@@ -199,6 +221,12 @@ def validate(instance: Any, schema: Mapping, root: Mapping, *, path: str = "$") 
             )
 
     if isinstance(instance, dict):
+        if "maxProperties" in schema and len(instance) > schema["maxProperties"]:
+            violations.append(
+                SchemaViolation(
+                    path, f"object with {len(instance)} properties exceeds maxProperties {schema['maxProperties']!r}"
+                )
+            )
         properties = schema.get("properties", {})
         for key, subschema in properties.items():
             if key in instance:
