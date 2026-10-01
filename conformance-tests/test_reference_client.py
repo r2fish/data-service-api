@@ -48,7 +48,10 @@ module (`wire_discipline_violations`): no import of an HTTP or socket
 library, the entry's send function handed to a `Recorder` and nowhere else
 (never called by the test), the isolated surface used for
 `provision_application` and `wire_entry` only, no import of another port
-helper, and no branch on an adapter, an entry or a host -- the one place the
+helper, no adapter object inside a function (no `adapter` parameter or name,
+no `registered_adapters`; `request` is used only for `.node` and as the
+argument of the group helper, so `getfixturevalue` is red), and no branch on
+an adapter, an entry, a host or a held adapter name -- the one place the
 module reads a plug's `transport_kind` is its import-time selection. The
 pin follows names and attributes one step; it does not follow a value
 through a container or a helper's parameter.
@@ -993,7 +996,10 @@ C35_IMPORTABLE_NAMES = {
     "conftest": frozenset({"registered_adapters"}),
 }
 C35_BRANCH_NAMES = frozenset({"adapter", "entry", "isolated", "plug", "request"})
-C35_BRANCH_ATTRS = frozenset({"name", "transport_kind", "base_url", "hostname", "netloc", "host", "nodeid"})
+C35_BRANCH_ATTRS = frozenset({"name", "adapter_name", "transport_kind", "base_url", "hostname", "netloc", "host", "nodeid"})
+C35_FUNCTION_FORBIDDEN_NAMES = frozenset({"adapter", "registered_adapters"})
+C35_REQUEST_USES = "node"
+C35_GROUP_HELPER = "_own_group"
 C35_HOST_FRAGMENTS = (".invalid", "127.0.0.1", "localhost")
 C35_SELECTION_ATTR = "transport_kind"
 C35_RECORDER = "Recorder"
@@ -1075,6 +1081,26 @@ def wire_discipline_violations(source, *, adapter_names):
                 facts["selection_mentions"] += 1
             if node.value in adapter_names or any(fragment in node.value for fragment in C35_HOST_FRAGMENTS):
                 found.append(f"{node.lineno}: {node.value!r} names an adapter or a host")
+        if enclosing(node, functions) is not None:
+            # Inside a function the turn holds no adapter object (no `adapter`
+            # parameter or name, no `registered_adapters`), and takes nothing
+            # from `request` but its `.node` (read by the group helper) --
+            # `request.getfixturevalue(...)` would reach any fixture.
+            if isinstance(node, ast.Name) and node.id in C35_FUNCTION_FORBIDDEN_NAMES:
+                found.append(f"{node.lineno}: {node.id} is used inside a function")
+            if isinstance(node, ast.arg) and node.arg in C35_FUNCTION_FORBIDDEN_NAMES:
+                found.append(f"{node.lineno}: a function takes {node.arg}")
+            if isinstance(node, ast.Name) and node.id == "request" and isinstance(node.ctx, ast.Load):
+                parent = parents.get(node)
+                read_node = isinstance(parent, ast.Attribute) and parent.value is node and parent.attr == C35_REQUEST_USES
+                given_to_helper = (
+                    isinstance(parent, ast.Call)
+                    and node in parent.args
+                    and isinstance(parent.func, ast.Name)
+                    and parent.func.id == C35_GROUP_HELPER
+                )
+                if not (read_node or given_to_helper):
+                    found.append(f"{node.lineno}: request is used other than for .{C35_REQUEST_USES} and {C35_GROUP_HELPER}")
         if isinstance(node, (ast.If, ast.IfExp, ast.While)):
             tests = [node.test]
         elif isinstance(node, ast.comprehension):
@@ -1126,6 +1152,13 @@ def test_c35_turn_reaches_the_wire_only_through_the_client():
         "a conditional expression on the entry": wrap.format("y = 1 if entry.base_url else 2"),
         "a comprehension filter on the entry's host": wrap.format("y = [a for a in z if entry.base_url]"),
         "a second read of transport_kind": wrap.format("y = obj.transport_kind"),
+        "a fixture reached by name": wrap.format("request.getfixturevalue('adapter').capability_document()"),
+        "the isolated fixture reached by name": wrap.format("request.getfixturevalue('isolated').capability_document()"),
+        "the registry read inside a function": wrap.format("registered_adapters()[plug].capability_document()"),
+        "an adapter taken as a parameter": "def turn(adapter, isolated):\n    adapter.capability_document()\n",
+        "a branch on the adapter's name held by an object": (
+            "class Turn:\n    def m(self):\n        if 'socket' in self.adapter_name:\n            pass\n"
+        ),
         "a registered adapter's name": wrap.format("y = 'r2db-api-http'"),
         "a host": wrap.format("y = 'http://127.0.0.1:8000'"),
         "an import of an HTTP library": "import httpx\n",
@@ -1140,6 +1173,8 @@ def test_c35_turn_reaches_the_wire_only_through_the_client():
         "the send handed to a recorder": "r = Recorder(entry.send)\n",
         "the two port calls": wrap.format("isolated.provision_application(i)\n    isolated.wire_entry(i)"),
         "a branch that tests neither": wrap.format("if y:\n        pass"),
+        "the group helper given the request": wrap.format("_own_group(request)\n    z = request.node.callspec"),
+        "the registry read at module level": "names = registered_adapters()\n",
         "the selection": "names = [n for n, o in registry.items() if o.transport_kind != 'in_process']\n",
         "the recorder reading the send it holds": (
             "class Recorder:\n    def __call__(self, *a):\n        return self._send(*a)\n"

@@ -55,12 +55,13 @@ library, no use of the isolated surface beyond `provision_application` and
 **Observation, not skipping.** `Journal` records, per step, each exchange the
 wire carried (the HTTP method, the URL and the response's media type, never a
 request header) and each explicit observation of a step that sends nothing
-(step 5 repairs a request body from a diagnosis and sends nothing). The turn
-ends by asserting that every step observed at least one thing; that every
-response a client classified as a success carried `media_type` and every one
-it classified as a failure carried `errors.content_type`; that every step
-that expects a success observed at least one; and that every request a
-recorder carried is one the journal attributes to a step.
+(step 5 repairs a request body from a diagnosis and sends nothing). Each
+exchange is checked as it is attributed to a step: a response a client
+classified as a success carried `media_type`, one it classified as a failure
+carried `errors.content_type`. The turn ends by asserting that every step
+observed at least one thing; that every step that expects a success observed
+one and every step that expects a refusal observed one; and that every
+request a recorder carried is one the journal attributes to a step.
 
 Secrets: a failure text names the adapter, the step and values the scenario
 itself produced; a `WireEntry`'s secret fields are `repr=False` and no
@@ -106,6 +107,10 @@ _BASELINE_OPERATORS = tuple(
     if op not in _OUTSIDE_BASELINE_OPERATORS
 )
 _BASELINE_CAPABILITIES = tuple(CONTRACT["common_baseline"]["capabilities"])
+
+# The key of a confirmation denial's details that carries the phrase to echo
+# (`destructive_confirmation.denial.details_keys` names it; step (11) asserts so).
+_PHRASE_KEY = "required_confirmation"
 
 _STEPS = tuple(range(1, 13))
 _STEPS_THAT_FAIL = (4, 11)
@@ -547,11 +552,14 @@ def test_c35_reference_client_turn(isolated, request: pytest.FixtureRequest) -> 
         f"{plug}: C-35 step (11): an unconfirmed predicate delete was refused with {unconfirmed.code!r}, "
         f"not {confirmation['denial']['code']!r}"
     )
+    assert _PHRASE_KEY in confirmation["denial"]["details_keys"], (
+        f"{plug}: C-35 step (11): the contract's confirmation denial does not name {_PHRASE_KEY!r} among its details keys"
+    )
     assert set(confirmation["denial"]["details_keys"]) <= set(unconfirmed.problem["details"]), (
         f"{plug}: C-35 step (11): the confirmation denial lacks a key the contract names -- "
         f"{sorted(unconfirmed.problem['details'])!r}"
     )
-    required = unconfirmed.problem["details"][confirmation["denial"]["details_keys"][0]]
+    required = unconfirmed.problem["details"][_PHRASE_KEY]
     assert isinstance(required, str) and required, f"{plug}: C-35 step (11): the denial's declared confirmation is not a non-empty string"
     assert len(_rows(turn, 11, entity, updated_marker, nonnull_field)) == 1, (
         f"{plug}: C-35 step (11): the refused delete removed the row"
@@ -597,15 +605,6 @@ def test_c35_reference_client_turn(isolated, request: pytest.FixtureRequest) -> 
     for step in _STEPS_THAT_SEND_NOTHING:
         assert not journal.successes[step] and not journal.failures[step] and journal.observations[step] >= 1, (
             f"{plug}: C-35 step ({step}): a step that sends nothing must observe, and only observe"
-        )
-    media_type = CONTRACT["media_type"].lower()
-    problem_type = CONTRACT["errors"]["content_type"].lower()
-    for step in _STEPS:
-        assert all(e.media_type == media_type for e in journal.successes[step]), (
-            f"{plug}: C-35 step ({step}): a response classified as a success without media_type"
-        )
-        assert all(e.media_type == problem_type for e in journal.failures[step]), (
-            f"{plug}: C-35 step ({step}): a response classified as a failure without errors.content_type"
         )
     assert journal.attributed() == len(runtime_recorder.exchanges) + len(developer_recorder.exchanges), (
         f"{plug}: C-35: the recorders carried {len(runtime_recorder.exchanges) + len(developer_recorder.exchanges)} "

@@ -1163,7 +1163,7 @@ def test_c19_composition_allowlist_has_no_dead_entries() -> None:
 # --- the role a data-surface capability document declares (contract 1.14.0)
 
 
-def test_c19_every_document_declares_its_role():
+def test_c19_data_documents_declare_a_role():
     """Whole-registry guard, the same non-parametrized/`registered_adapters()`
     -walking shape as `test_c19_every_control_surface_adapter_declares_1_6_0`
     above. A client holding one opaque secret learns which role the secret has

@@ -2,7 +2,7 @@
 
 Status: **Implementation mapping template**
 
-Version: **3.16** (2026-10-01; R-108 -- SI-03 Common, SI-05 Common, SI-09 Common, SI-10 Common, SI-11 Common, SI-14 Common: C-35 drives C-28's 12 steps through a reference client that composes every request from the contract, on the four wire plugs, and C-19 reads the `role` of every adapter's capability document; both peers' operation-catalog override documentation states contract 1.14.0's obligation, and the line references into MitateDB-api's runbook that lie after the inserted lines are re-pulled.)
+Version: **3.16** (2026-10-01; R-108 -- SI-05 Common, SI-06 Common, SI-09 Common, SI-10 Common, SI-11 Common, SI-14 Common: C-35 drives C-28's 12 steps through a reference client that composes every request from the contract, on the four wire plugs, and C-19 reads the `role` of every adapter's capability document; both peers' operation-catalog override documentation states contract 1.14.0's obligation, and the line references into MitateDB-api's runbook that lie after the inserted lines are re-pulled.)
 Version: **3.15** (2026-10-01; R-102 acceptance -- SI-09 MitateDB-api -- platform upgrade: section 10.8 records 10.10 accepted at version 12 on the requester's confirmation of 2026-10-01, so Gate-0 readiness again rests on the 10 items alone.)
 
 
@@ -390,8 +390,6 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Evidence
 
 - the in-band `role=control` issuance refusal (a third, non-runtime/developer role never silently granted), condition C-14; the adapter state is in the SI-00 row above -- `conformance-tests/test_c14_authority_boundary.py`.
-- Contract 1.14.0 obligation (b): every adapter's data-surface capability document carries a `role` in `security.roles` -- `conformance-tests/test_c19_client_self_sufficiency.py::test_c19_every_document_declares_its_role`.
-- On the four wire plugs the role a client reads from its capability document equals the role of its secret -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 
 #### Status
 
@@ -583,6 +581,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the shared dummy verifier on both peers -- `test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest`.
 - condition C-01 on all four adapters -- `conformance-tests/test_c01_scope_binding.py::test_must_deny_vectors_are_denied_with_contract_codes`, `::test_must_ignore_vectors_leave_scope_and_other_app_unchanged`.
 - same four adapters -- `conformance-tests/test_c01_scope_binding.py::test_structurally_absent_vectors_have_no_forbidden_parameters`, `::test_runtime_credential_cannot_self_elevate_to_schema_authority`.
+- Contract 1.14.0 obligation (b): every adapter's data-surface capability document carries a `role` in `security.roles` -- `conformance-tests/test_c19_client_self_sufficiency.py::test_c19_data_documents_declare_a_role`.
+- On the four wire plugs the role a client reads from its capability document equals the role of its secret -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 
 #### Status
 
