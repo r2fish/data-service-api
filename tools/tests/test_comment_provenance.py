@@ -5445,3 +5445,89 @@ def test_4b_archive_companion_duplicate_excluded_from_tree_enumeration():
 
     assert rel_paths != [], "companion enumeration must not be empty (空振り禁止)"
     assert rel_paths == ["docs/code-history/r2db-api/y.md"], rel_paths
+
+
+# ---------------------------------------------------------------------------
+# Known gaps item 8 of tools/check_comment_provenance.py's module docstring
+# (docs/work-orders/OPERATING_CONDITIONS.md 1.12-71): a history comment whose
+# code the same change removes cannot be registered by moving it verbatim
+# into a companion fence and leaving the `history: CH-ID` line -- when one
+# of its sentences carries a protected reference, the tool reads the move as
+# the deletion of a protected sentence. This is a false red, not a false
+# green; the test pins the documented behaviour in both forms it was met in
+# (`--base` against the pre-move revision, and the standing rev-vs-itself
+# form of `test_0f_both_peers_all_src_rev_vs_itself_is_green`), with a
+# control that differs only in the protected reference.
+# ---------------------------------------------------------------------------
+def _known_gap_8_scenario(tmp_path, removed_sentence_lines: list[str]):
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/tests/test_lock.py", "def test_lock():\n    assert True\n")
+    kept_line = "    # A caller without a holder gets a private one."
+    old_block_lines = [*removed_sentence_lines, kept_line]
+    old = (
+        "def f():\n"
+        "    lock = make_lock()\n"
+        + "\n".join(old_block_lines) + "\n"
+        "    holder = make_holder(lock)\n"
+        "    return holder\n"
+    )
+    rel_path = "r2db-api/src/r2db_api/mod.py"
+    _write(repo, rel_path, old)
+    pre_move_rev = _commit_all(repo, "old")
+    new = (
+        "def f():\n"
+        f"{kept_line}\n"
+        "    # history: CH-0001\n"
+        "    holder = make_holder()\n"
+        "    return holder\n"
+    )
+    _write(repo, rel_path, new)
+    companion_block = "\n".join(line.strip() for line in old_block_lines)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", companion_block),
+    )
+    moved_rev = _commit_all(repo, "moved")
+    return repo, rel_path, pre_move_rev, moved_rev
+
+
+def test_known_gap_8_verbatim_move_of_removed_code_history_is_red(tmp_path):
+    repo, rel_path, pre_move_rev, moved_rev = _known_gap_8_scenario(
+        tmp_path,
+        [
+            "    # The lock above serializes every request (measured by",
+            "    # tests/test_lock.py).",
+        ],
+    )
+    protected = "cannot delete a whole sentence carrying a protected reference"
+
+    code, output = _run_base(repo, pre_move_rev, rel_path)
+    assert code == 1
+    assert "§4.1 (3)" in output and protected in output, output
+    assert "tests/test_lock.py" in output, output
+
+    # The standing form: the committed revision against itself.
+    code, output = _run_base(repo, moved_rev, rel_path)
+    assert code == 1
+    assert "§4.1 (1)" not in output, output
+    assert "§4.1 (2)" in output and "basis block for CH-0001 is not derivable" in output, output
+    assert protected in output, output
+
+
+def test_known_gap_8_control_without_protected_reference_is_green(tmp_path):
+    repo, rel_path, pre_move_rev, moved_rev = _known_gap_8_scenario(
+        tmp_path,
+        [
+            "    # The lock above serializes every request (measured before",
+            "    # this change).",
+        ],
+    )
+
+    # Against the pre-move revision only the code change itself is red.
+    code, output = _run_base(repo, pre_move_rev, rel_path)
+    assert code == 1
+    assert "§4.1 (1)" in output, output
+    assert "§4.1 (2)" not in output and "§4.1 (3)" not in output, output
+
+    code, output = _run_base(repo, moved_rev, rel_path)
+    assert code == 0, output

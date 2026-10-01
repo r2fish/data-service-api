@@ -114,6 +114,21 @@ through the completion gate is recorded here and not filed in the ledger):
        caught by: a human reading the pair of reds and classifying it as
        a rename of the scope (accepted; the alternative, keeping a name
        that no longer matches what the function does, is worse).
+    8. not detected: that the code a protected-reference sentence
+       describes was removed by the same change -- moving such a block
+       verbatim into a companion fence and leaving its `history: CH-ID`
+       line reads as the deletion of a protected sentence: `--base`
+       reports a section 4.1 (3) red, and the standing rev-vs-itself
+       check a section 4.1 (2) red (`basis block ... is not derivable`).
+       why: section 4.1 (3) compares the retained text with the
+       companion sentence by sentence and never reads the code the block
+       sits on; a protected reference stays protected whether or not its
+       subject still exists.
+       caught by: the change set leaves such a block's history to git and
+       registers no CH-ID for it (accepted: a false red, never a false
+       green; met in ledger R-115 and R-102, pinned by
+       `test_known_gap_8_verbatim_move_of_removed_code_history_is_red`
+       in `tools/tests/test_comment_provenance.py`).
 """
 from __future__ import annotations
 
