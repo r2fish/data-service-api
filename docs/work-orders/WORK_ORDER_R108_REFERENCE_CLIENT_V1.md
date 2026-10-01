@@ -480,6 +480,17 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 4. (完了条件 1 の実測、§5.5 表 1) 4 wire plug の data 面 (capabilities・catalog・operation-catalog・schema・mutate・query) と control 面 (`control_capabilities`) の成功応答はすべて `application/json`、capability document の `role` は data 面が `runtime`、control 面が `control` — 義務 (a)(b) を両 peer は既に満たす。表 1 の 3 行目 (control credential で data 面の capabilities を読む) は 4 plug とも 401 `application/problem+json` (`AUTH_INVALID`) で文書を返さない: 両 peer の data app は application credential だけを認証する。義務 (b) は返す文書に掛かるので破れていない。契約の文は変えず、設計 §11 の記録 (WP-5) に「その経路は文書を返さない」と書く。
 5. (`check_comment_provenance.py --base 1e8f7fb`) 宣言 4 か所の src は版の literal の変更で §4.1 (1) (code changed) が出る。他の FAIL は 0、`--register` は緑 (実装担当の報告)。版上げの変更セットでは正当な赤である。
 
+**訂正註 2 (2026-10-01、WP-1 のコードレビュー 1 巡目 = 観点 A / B の並列。監督裁定)**
+
+確定文 12 文・obligations の entry・置き場・index・写しの byte 一致は両観点とも一致を確認した。指摘 (A 5 件、B 5 件、重なり 4 件) の裁定:
+
+1. (A-1 / B-1、直す) `spec/README.md` と両 peer の宣言の直前のコメントが義務 (c) まで「既に満たす」と言い切っていた。(a)(b) の実測と「(c) の掛かる URL を宣言する plug は無い」に限る (差し戻し 1 の 1。文面は監督確定)。
+2. (A-3 / B-3、直す) `CT/test_contract.py` の要約コメントの「of another origin」を、組む URL 以外という表現に直す (差し戻し 1 の 2)。
+3. (B-4、直す) `spec/README.md` と `spec/CONTRACT_HISTORY.md` の (c) の要約に、要約である旨の断り書きを足す (差し戻し 1 の 3)。
+4. (A-2 / B-2、直す = WP-4 に足す) 配備者向けの文書が 1.14.0 の義務 (c) を書いていない。WP-4 の触ってよいパスに `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` (`R2DB_OPERATION_CATALOG_URL` の行) と `MitateDB-api/docs/cloud-run-cloud-sql.md` (`MITATEDB_OPERATION_CATALOG_URL` の段落) を足し、次の確定文 (監督確定。`<own path>` は各文書の既存の書き方に合わせた `GET /v1/operation-catalog`) を既存の文の直後に足す: 「Under contract 1.14.0 a value set here that is not, character for character, the derived URL obliges the deployment to serve the operation catalog there, as `application/json`, to a request that carries no credential -- a 1.14.0 client presents none at such a URL -- so do not set it to another spelling of the derived URL: this service's own `GET /v1/operation-catalog` requires a credential at every spelling.」 行が増える文書は、`CM` がその文書を指す行参照のうち挿入位置より後のものを増えた行数だけ引き直し、引き直した各参照の行の字面が前後で同じであることを script で照合して報告する (完了条件 91 の「前後の件数」に加える)。`r2db-api/README.md`:113-118 は runbook を指すだけなので変えない。起動時に別綴りの上書きを拒む検査は足さない (観察: 「同じ endpoint の別綴り」は一般には機械判定できず、(c) を満たすかは上書き先の配備の性質である。設計 §11 の v0.6 の項が開示済み)。
+5. (A-4 / B-5、直す = WP-5) `spec/CCR_DISPOSITION.md` の 19 の段が引く §5.5 の表 1 は、監督が WP-5 で訂正註 1 の 4 の実測から埋める。
+6. (A-5、直す = 差し戻し 1 の 4。本項目の範囲に足す) `tools/deploy_smoke.py` の `_request` が credential を付けたまま redirect を追う。契約 1.14.0 の `versioning.url_composition` の client の規則に本 repo の道具が反するので、同じ変更セットで redirect を追わない形に直し、`tools/tests/test_deploy_smoke.py` (新規) と変異 1 件で固定する。WP-1 の触ってよいパスに `tools/deploy_smoke.py`・`tools/tests/test_deploy_smoke.py` を足す。§4 の「`tools/` には触れないので `tools/tests` は回さない」は成り立たなくなる: 統合時に `finalize.py --tools-tests` を回す。
+
 ## 付録 — 確定文の抜き出し script
 
 確定文は、設計 §9.1 の表の「新しい文 (英文、確定案)」の列の 12 セルと、#12 の行の obligations の列の entry を、`<V-1>` → `1.13.0`、`<V>` → `1.14.0`、`<N>` → `19` の 3 つの置換だけで写したものである。手で打ち直さない。script は監督の scratchpad の `r108-fixed-text/extract.py` に置いた (起草時に実行済み)。scratchpad は次のチャットから読めないので、全文を下に載せる。再生成: worktree を cwd にして `python3 "$SP/r108-fixed-text/extract.py" . "$SP/r108-fixed-text"` (script を `$SP/r108-fixed-text/extract.py` に保存してから)。

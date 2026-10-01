@@ -88,6 +88,24 @@ class SmokeStageError(RuntimeError):
     it directly."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses to follow a redirect: contract `versioning.url_composition`
+    says a client follows no redirect in answer to a request that carries a
+    credential, and the default opener would send this tool's bearer to the
+    `Location` of a 3xx. With `redirect_request` returning `None` the 3xx
+    surfaces as an `HTTPError` carrying its own status, and nothing is sent
+    to the `Location`. `_request` reports such a 3xx as its own status with
+    its body uninterpreted; the stage that asked treats any status but 200
+    as its failure, and neither the `Location` value nor the credential
+    appears in any message."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401, ARG002
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _request(method: str, url: str, *, api_key: str, body: dict[str, Any] | None = None) -> tuple[int, Any]:
     data = None
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -96,7 +114,7 @@ def _request(method: str, url: str, *, api_key: str, body: dict[str, Any] | None
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _OPENER.open(req, timeout=15) as resp:
             status = resp.status
             raw = resp.read()
     except urllib.error.HTTPError as exc:
@@ -107,6 +125,8 @@ def _request(method: str, url: str, *, api_key: str, body: dict[str, Any] | None
         # never a raw traceback: every stage's own failure surfaces as one
         # SmokeStageError line, same as an unexpected status code does.
         raise SmokeStageError(f"{method} {url} -> could not connect: {exc.reason}") from None
+    if 300 <= status < 400:
+        return status, None
     try:
         parsed = json.loads(raw) if raw else None
     except json.JSONDecodeError as exc:

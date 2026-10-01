@@ -1313,7 +1313,7 @@ def test_contract_pins_the_1_13_0_version_binding_paragraph_verbatim():
 # client forms a request (versioning.url_composition, endpoint_fields_note.path,
 # media_type_note) and reads a response (errors.response_classification, external_standards,
 # definitions.OperationCatalogEntry's description), requires the capability document to carry
-# `role`, and names what a client presents at an operation_catalog_url of another origin.
+# `role`, and names what a client presents at an operation_catalog_url other than the URL versioning.url_composition forms.
 # Every text below is copied verbatim from the confirmed-text files (OPERATING_CONDITIONS.md
 # section 1.5 items 35/36) -- never paraphrased. The three obligations are unconditional.
 PIN_1_14_0_URL_COMPOSITION = (
