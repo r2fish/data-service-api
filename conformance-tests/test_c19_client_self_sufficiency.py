@@ -1158,3 +1158,39 @@ def test_c19_composition_allowlist_has_no_dead_entries() -> None:
         assert findings_by_key.get((relative_path, function_name), 0) >= 1, (
             f"{relative_path}::{function_name}: allowlisted but the allowlist-ignored scan found nothing there"
         )
+
+
+# --- the role a data-surface capability document declares (contract 1.14.0)
+
+
+def test_c19_every_document_declares_its_role():
+    """Whole-registry guard, the same non-parametrized/`registered_adapters()`
+    -walking shape as `test_c19_every_control_surface_adapter_declares_1_6_0`
+    above. A client holding one opaque secret learns which role the secret has
+    from the capability document it fetches with it: contract 1.14.0 requires
+    an implementation declaring that version or higher to carry `role` in the
+    document (`schemas.CapabilityDocument.properties.role`), and the value is
+    a member of `security.roles`.
+
+    Every registered adapter is read through `capability_document()`, the
+    data-surface document of the plug's own surface: the two in-process and
+    the two ASGI plugs, and the two socket plugs. An adapter declaring a lower
+    `contract_version` is not held to the obligation; the guard collects the
+    adapters it held and fails when it held none, so a registry on which no
+    adapter declares 1.14.0 cannot pass by checking nothing. That the `role`
+    equals the role of the credential the document was fetched with is not
+    read here: C-35's step (1) reads it on each wire plug.
+    """
+    roles = set(load_contract()["security"]["roles"])
+    assert roles, "the contract names no security.roles"
+    held: list[str] = []
+    for name, adapter_obj in registered_adapters().items():
+        document = _capability_document(adapter_obj)
+        if _semver_tuple(str(document.get("contract_version", "0.0.0"))) < (1, 14, 0):
+            continue
+        held.append(name)
+        assert document.get("role") in roles, (
+            f"{name}: declares contract_version {document['contract_version']!r} but its data-surface "
+            f"capability document carries role {document.get('role')!r}, not a member of security.roles"
+        )
+    assert held, "no registered adapter declares contract_version >= 1.14.0 -- this guard held nothing"

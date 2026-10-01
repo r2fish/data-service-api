@@ -35,6 +35,18 @@ A constant equal to any operation name, method or path in the catalog, to the
 name without its `control.` prefix, or to the name of any schema or definition
 in the contract is red in every kind (`forbidden_names`). The client may import
 only the standard library and `schema_check`.
+
+`test_c35_turn_reaches_the_wire_only_through_the_client` is the pin on the
+other side: it reads the source of `test_c35_reference_client_turn.py`, the
+condition's turn, and holds it to what the client's design asks of the test
+module (`wire_discipline_violations`): no import of an HTTP or socket
+library, the entry's send function handed to a `Recorder` and nowhere else
+(never called by the test), the isolated surface used for
+`provision_application` and `wire_entry` only, no import of another port
+helper, and no branch on an adapter, an entry or a host -- the one place the
+module reads a plug's `transport_kind` is its import-time selection. The
+pin follows names and attributes one step; it does not follow a value
+through a container or a helper's parameter.
 """
 from __future__ import annotations
 
@@ -921,3 +933,174 @@ def test_client_source_holds_to_the_closed_set_of_literals():
     }
     for label, allowed_source in allowed.items():
         assert literal_violations(allowed_source, **options) == [], label
+
+
+# ---------------------------------------------------------------------------
+# Static pin on the condition's turn (C-35)
+# ---------------------------------------------------------------------------
+
+C35_TURN_PATH = Path(__file__).parent / "test_c35_reference_client_turn.py"
+REGISTRY_PATH = Path(__file__).parent / "registry.json"
+
+C35_PORT_USES = frozenset({"provision_application", "wire_entry"})
+C35_FORBIDDEN_MODULES = frozenset({"httpx", "requests", "aiohttp", "urllib", "http", "socket", "ssl", "asyncio", "subprocess"})
+C35_IMPORTABLE_NAMES = {
+    "adapter": frozenset({"REPO_ROOT", "fresh_identifier", "load_contract"}),
+    "conftest": frozenset({"registered_adapters"}),
+}
+C35_BRANCH_NAMES = frozenset({"adapter", "entry", "isolated", "plug", "request"})
+C35_BRANCH_ATTRS = frozenset({"name", "transport_kind", "base_url", "hostname", "netloc", "host", "nodeid"})
+C35_HOST_FRAGMENTS = (".invalid", "127.0.0.1", "localhost")
+C35_SELECTION_ATTR = "transport_kind"
+C35_RECORDER = "Recorder"
+
+
+def wire_discipline_violations(source, *, adapter_names):
+    """Every way `source`, the condition's turn, leaves the discipline above,
+    each as a short text, and the facts a real turn must show (`facts`), so
+    that a pin which finds nothing because it sees nothing is itself red."""
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+    def enclosing(node, kinds):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, kinds):
+                return node
+        return None
+
+    def mentions(expression, names, attrs):
+        return any(
+            (isinstance(inner, ast.Name) and inner.id in names) or (isinstance(inner, ast.Attribute) and inner.attr in attrs)
+            for inner in ast.walk(expression)
+        )
+
+    found = []
+    facts = {"port_uses": set(), "recorders_given_a_send": 0, "selection_mentions": 0}
+    recorder_names = set()
+    docstrings = _docstring_ids(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in C35_FORBIDDEN_MODULES:
+                    found.append(f"{node.lineno}: import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            if top in C35_FORBIDDEN_MODULES:
+                found.append(f"{node.lineno}: from {node.module} import ...")
+            elif top in C35_IMPORTABLE_NAMES:
+                extra = {alias.name for alias in node.names} - C35_IMPORTABLE_NAMES[top]
+                if extra:
+                    found.append(f"{node.lineno}: from {top} import {sorted(extra)}")
+        elif isinstance(node, ast.Attribute):
+            if node.attr in ("send", "_send"):
+                parent = parents.get(node)
+                handed_over = (
+                    node.attr == "send"
+                    and isinstance(parent, ast.Call)
+                    and node in parent.args
+                    and isinstance(parent.func, ast.Name)
+                    and parent.func.id == C35_RECORDER
+                )
+                inside_recorder = any(
+                    isinstance(c, ast.ClassDef) and c.name == C35_RECORDER for c in _enclosing_chain(node, parents)
+                )
+                if handed_over:
+                    facts["recorders_given_a_send"] += 1
+                elif not inside_recorder:
+                    found.append(f"{node.lineno}: .{node.attr} is used other than handed to {C35_RECORDER}")
+            if node.attr == C35_SELECTION_ATTR:
+                facts["selection_mentions"] += 1
+                if enclosing(node, functions) is not None:
+                    found.append(f"{node.lineno}: {C35_SELECTION_ATTR} is read inside a function")
+        elif isinstance(node, ast.Name) and node.id == "isolated" and isinstance(node.ctx, ast.Load):
+            parent = parents.get(node)
+            if isinstance(parent, ast.Attribute) and parent.value is node and parent.attr in C35_PORT_USES:
+                facts["port_uses"].add(parent.attr)
+            else:
+                found.append(f"{node.lineno}: the isolated surface is used other than for {sorted(C35_PORT_USES)}")
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == C35_RECORDER
+            for inner in ast.walk(node.value)
+        ):
+            for target in node.targets:
+                recorder_names |= {inner.id for inner in ast.walk(target) if isinstance(inner, ast.Name)}
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            if node.value == C35_SELECTION_ATTR:
+                facts["selection_mentions"] += 1
+            if node.value in adapter_names or any(fragment in node.value for fragment in C35_HOST_FRAGMENTS):
+                found.append(f"{node.lineno}: {node.value!r} names an adapter or a host")
+        if isinstance(node, (ast.If, ast.IfExp, ast.While)):
+            tests = [node.test]
+        elif isinstance(node, ast.comprehension):
+            tests = list(node.ifs)
+        elif isinstance(node, ast.Match):
+            tests = [node.subject]
+        else:
+            tests = []
+        if enclosing(node, functions) is not None:
+            for test in tests:
+                if mentions(test, C35_BRANCH_NAMES, C35_BRANCH_ATTRS):
+                    found.append(f"{test.lineno}: a branch tests an adapter, an entry or a host")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in recorder_names:
+            found.append(f"{node.lineno}: a recorder is called directly")
+    return found, facts
+
+
+def _enclosing_chain(node, parents):
+    while node in parents:
+        node = parents[node]
+        yield node
+
+
+def test_c35_turn_reaches_the_wire_only_through_the_client():
+    source = C35_TURN_PATH.read_text()
+    registered = {entry["name"] for entry in json.loads(REGISTRY_PATH.read_text())["adapters"]}
+    assert len(registered) == 6
+
+    # The turn holds to the discipline, and shows what it must: the two port
+    # calls, one send function handed to each of two recorders, and exactly one
+    # read of `transport_kind` (the import-time selection).
+    violations, facts = wire_discipline_violations(source, adapter_names=registered)
+    assert violations == []
+    assert facts["port_uses"] == C35_PORT_USES
+    assert facts["recorders_given_a_send"] == 2
+    assert facts["selection_mentions"] == 1
+
+    # The check sees what it must: each of these planted violations is found.
+    wrap = "def turn(isolated, entry, plug, request):\n    {}\n"
+    planted = {
+        "a direct call of the entry's send": wrap.format("entry.send('GET', 'u', (), None)"),
+        "a send kept for a later call": wrap.format("fn = entry.send"),
+        "a send handed to another callable": wrap.format("run(entry.send)"),
+        "a recorder called by the test": wrap.format("rec = Recorder(entry.send)\n    rec('GET', 'u', (), None)"),
+        "a use of the isolated surface beyond the port's two": wrap.format("isolated.capability_document()"),
+        "the isolated surface handed to a helper": wrap.format("helper(isolated)"),
+        "a branch on the adapter's name": wrap.format("if plug == 'x':\n        pass"),
+        "a conditional expression on the entry": wrap.format("y = 1 if entry.base_url else 2"),
+        "a comprehension filter on the entry's host": wrap.format("y = [a for a in z if entry.base_url]"),
+        "a second read of transport_kind": wrap.format("y = obj.transport_kind"),
+        "a registered adapter's name": wrap.format("y = 'r2db-api-http'"),
+        "a host": wrap.format("y = 'http://127.0.0.1:8000'"),
+        "an import of an HTTP library": "import httpx\n",
+        "an import from an HTTP library": "from httpx import Client\n",
+        "an import of the port's helper that authenticates": "from conftest import provision_pair\n",
+        "an import of a port operation helper": "from adapter import attempt_mutation\n",
+    }
+    for label, planted_source in planted.items():
+        planted_violations, _facts = wire_discipline_violations(planted_source, adapter_names=registered)
+        assert planted_violations, label
+    allowed = {
+        "the send handed to a recorder": "r = Recorder(entry.send)\n",
+        "the two port calls": wrap.format("isolated.provision_application(i)\n    isolated.wire_entry(i)"),
+        "a branch that tests neither": wrap.format("if y:\n        pass"),
+        "the selection": "names = [n for n, o in registry.items() if o.transport_kind != 'in_process']\n",
+        "the recorder reading the send it holds": (
+            "class Recorder:\n    def __call__(self, *a):\n        return self._send(*a)\n"
+        ),
+    }
+    for label, allowed_source in allowed.items():
+        allowed_violations, _facts = wire_discipline_violations(allowed_source, adapter_names=registered)
+        assert allowed_violations == [], label
