@@ -75,8 +75,8 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_13_0():
-    # CCR_DISPOSITION.md subordinate ruling 18: the version bump itself,
+def test_contract_declares_1_14_0():
+    # CCR_DISPOSITION.md subordinate ruling 19: the version bump itself,
     # pinned so a future revert of just this one line is caught here rather
     # than only by whichever other test happens to touch contract_version.
     # This file carries one "declares" pin, for the version the contract
@@ -88,7 +88,7 @@ def test_contract_declares_1_13_0():
     # (`versioning.version_binding`: a version-flip "must land in the same
     # commit as the real behavior change it claims").
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.13.0"
+    assert contract["contract_version"] == "1.14.0"
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +282,22 @@ FIXED_1_9_0_SCHEMA_OPERATION_CATALOG_DOCUMENT = {
   }
 }
 
-FIXED_1_9_0_DEFINITION_OPERATION_CATALOG_ENTRY = {
+# Contract 1.14.0 (subordinate ruling 19) adds one description to this definition and
+# changes nothing else in it: the shape below is the 1.9.0 shape, and the description is
+# the confirmed text of `definitions.OperationCatalogEntry.description`, copied verbatim
+# from the confirmed-text file (never paraphrased).
+PIN_1_14_0_OPERATION_CATALOG_ENTRY_DESCRIPTION = (
+    "Each entry is derived from one entry of endpoints or of control_endpoints. An entry derived from "
+    "control_endpoints carries that entry's name prefixed with control.; an entry derived from "
+    "endpoints carries that entry's name unchanged. An entry of endpoints whose name "
+    "control_endpoints also carries is that control endpoint's alias "
+    "(endpoints.audit_query.deprecation_note); versioning.url_composition forms no URL for it, and a "
+    "client reaches the operation at the entry derived from control_endpoints. Every other entry "
+    "derived from endpoints belongs to the data surface, and every entry derived from "
+    "control_endpoints to the control surface."
+)
+
+FIXED_1_14_0_DEFINITION_OPERATION_CATALOG_ENTRY = {
   "type": "object",
   "additionalProperties": False,
   "required": [
@@ -340,7 +355,8 @@ FIXED_1_9_0_DEFINITION_OPERATION_CATALOG_ENTRY = {
         "null"
       ]
     }
-  }
+  },
+  "description": PIN_1_14_0_OPERATION_CATALOG_ENTRY_DESCRIPTION
 }
 
 
@@ -400,7 +416,7 @@ def test_contract_pins_the_1_9_0_texts_verbatim():
         f"schemas.OperationCatalogDocument does not byte-match the design §6.6 schema: "
         f"{contract['schemas']['OperationCatalogDocument']!r}"
     )
-    assert contract["definitions"]["OperationCatalogEntry"] == FIXED_1_9_0_DEFINITION_OPERATION_CATALOG_ENTRY, (
+    assert contract["definitions"]["OperationCatalogEntry"] == FIXED_1_14_0_DEFINITION_OPERATION_CATALOG_ENTRY, (
         f"definitions.OperationCatalogEntry does not byte-match the design §6.6 definition: "
         f"{contract['definitions']['OperationCatalogEntry']!r}"
     )
@@ -1271,22 +1287,299 @@ def test_contract_pins_the_1_13_0_obligations_entry_verbatim():
 def test_contract_pins_the_1_13_0_version_binding_paragraph_verbatim():
     """The confirmed 1.13.0 paragraph -- including its own trailing
     1.12.0-declaring retroactive-denial sentence -- occupies EXACTLY the
-    text between the 1.12.0 sentence and the version-flip sentence (an
-    equality check, not a containment check, so a further sentence
-    slipped in on either side is caught here too)."""
+    text between the 1.12.0 sentence and the start of the 1.14.0 paragraph
+    (an equality check, not a containment check, so a further sentence
+    slipped in on either side is caught here too). Right edge follows
+    contract 1.14.0 (subordinate ruling 19): its paragraph sits between
+    this paragraph and the version-flip sentence; this paragraph's own
+    text is unchanged."""
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
     version_binding = contract["versioning"]["version_binding"]
     assert PIN_1_13_0_VERSION_BINDING_PARAGRAPH in version_binding, (
         "versioning.version_binding no longer contains the confirmed 1.13.0 paragraph verbatim"
     )
     idx_1_12_0_end = version_binding.index(PIN_1_12_0_VERSION_BINDING_SENTENCE) + len(PIN_1_12_0_VERSION_BINDING_SENTENCE)
-    idx_version_flip = version_binding.index("A peer's version-flip")
-    between = version_binding[idx_1_12_0_end:idx_version_flip]
+    idx_1_14_0_paragraph = version_binding.index("Only an implementation declaring 1.14.0 or higher")
+    between = version_binding[idx_1_12_0_end:idx_1_14_0_paragraph]
     assert between == " " + PIN_1_13_0_VERSION_BINDING_PARAGRAPH + " ", (
-        "the text between the 1.12.0 sentence and the version-flip sentence is not exactly "
+        "the text between the 1.12.0 sentence and the start of the 1.14.0 paragraph is not exactly "
         f"the confirmed 1.13.0 paragraph (surrounded by one space on each side): {between!r}"
     )
     assert "An implementation still declaring 1.12.0 is not held to any 1.13.0-only obligation retroactively." in between
+
+
+# Contract 1.14.0 (CCR_DISPOSITION.md subordinate ruling 19). Summary (not the confirmed
+# texts; the confirmed texts are the PIN_1_14_0_* constants below): the contract states how a
+# client forms a request (versioning.url_composition, endpoint_fields_note.path,
+# media_type_note) and reads a response (errors.response_classification, external_standards,
+# definitions.OperationCatalogEntry's description), requires the capability document to carry
+# `role`, and names what a client presents at an operation_catalog_url of another origin.
+# Every text below is copied verbatim from the confirmed-text files (OPERATING_CONDITIONS.md
+# section 1.5 items 35/36) -- never paraphrased. The three obligations are unconditional.
+PIN_1_14_0_URL_COMPOSITION = (
+    "Each operation belongs to one surface: every entry in control_endpoints belongs to the control "
+    "surface, and every entry in endpoints to the data surface, except endpoints.audit_query, the "
+    "alias its deprecation_note describes: this rule forms no URL for it, and a client reaches that "
+    "operation at control_endpoints.audit_query instead. The base URL a client is given is the "
+    "base_url of the surface its credential is for -- surfaces.data.base_url for an application "
+    "credential, surfaces.control.base_url for a control or audit credential -- and the client "
+    "reaches that surface's capability document (endpoints.capabilities or "
+    "control_endpoints.control_capabilities) from it by the rule that follows. To call an operation, "
+    "a client takes the base_url of the operation's surface, removes that surface's own base path "
+    "from its end -- versioning.base_path for the data surface, versioning.control_base_path for the "
+    "control surface -- and appends the operation's whole path, so any prefix ahead of the base path "
+    "is kept. A base_url that does not end with its surface's base path is not joined, and an "
+    "operation of a surface the capability document does not declare -- the control surface where "
+    "surfaces.control is omitted -- is not called: the client stops rather than guessing. A client "
+    "follows no redirect in answer to a request that carries a credential, at any URL this rule "
+    "forms. operation_catalog_url is not formed this way: a client uses it exactly as declared."
+)
+
+# The sentence of `CapabilityDocument.properties.surfaces.description` that 1.14.0 replaces, and
+# the sentence that replaces it. Every other sentence of that value is pinned by
+# PIN_1_6_0_ITEM_2_SURFACES (whose text carries the replacement).
+PIN_1_14_0_SURFACES_REPLACED_SENTENCE = (
+    "Neither URL ends in a trailing slash, so that appending a path to it yields exactly one separator."
+)
+PIN_1_14_0_SURFACES_SENTENCE = (
+    "Neither URL ends in a trailing slash; a client forms the URL of an operation from them as "
+    "versioning.url_composition states, not by appending the operation's path to them."
+)
+
+PIN_1_14_0_PATH_PLACEHOLDER_SENTENCE = (
+    "A placeholder in braces in path is filled with the value this contract gives the field of the "
+    "same name: {entity} with an entity name, the value EntityDescriptor.entity and "
+    "SchemaOperationRequest.entity carry, and {application_id} and {credential_id} with an "
+    "application_id and a credential_id as the control endpoints return them."
+)
+
+PIN_1_14_0_PATH_PERCENT_ENCODING_SENTENCE = (
+    "The value is percent-encoded as URI syntax (external_standards) defines it before it is placed "
+    "in path, so that every character outside the unreserved set is encoded, '/' included; an "
+    "identifier, being ASCII letters, digits and underscore, is unchanged by it."
+)
+
+PIN_1_14_0_MEDIA_TYPE_NOTE = (
+    "media_type is the media type of every request body a client sends, named in that request's "
+    "Content-Type header, and of every successful response an implementation returns; a failure is "
+    "returned as errors.content_type instead (errors.response_classification)."
+)
+
+PIN_1_14_0_RESPONSE_CLASSIFICATION_FIRST_SENTENCE = (
+    "A client classifies every response by the media type of its Content-Type header, parameters such "
+    "as charset ignored and type and subtype compared case-insensitively as HTTP defines: "
+    "errors.content_type is a failure, read by its code; media_type is a success, read against the "
+    "operation's response schema. HTTP status decides neither (http_status_note)."
+)
+
+PIN_1_14_0_RESPONSE_CLASSIFICATION_REMAINING_SENTENCES = (
+    "A response of any other media type, or of none -- one an intermediary ahead of the service "
+    "returns, for instance -- is a failure the client does not interpret: it reads neither a code nor "
+    "a result from it. So is a response of media_type that the operation's response schema does not "
+    "accept, and one of errors.content_type whose body lacks a key errors.shape names or carries one "
+    "with a value of another type than errors.shape names for it."
+)
+
+PIN_1_14_0_ROLE_DESCRIPTION = (
+    "The role, from security.roles, of the credential this document was fetched with. A secret is "
+    "opaque (security.schemes), so this is where a client learns which endpoints' roles its "
+    "credential satisfies. Required of an implementation declaring 1.14.0 or higher; this schema's "
+    "required list does not name it, so that a document an implementation declaring a lower version "
+    "returns stays valid."
+)
+
+PIN_1_14_0_EXTERNAL_STANDARDS = (
+    "This contract is read against three external standards: HTTP semantics (RFC 9110) for methods, "
+    "header fields, and media types with their parameters; JSON (RFC 8259) for every request and "
+    "response body; and URI syntax (RFC 3986) for base URLs, paths and percent-encoding. Where this "
+    "contract states a rule those standards leave open, this contract's rule applies."
+)
+
+PIN_1_14_0_OPERATION_CATALOG_URL_SENTENCES = (
+    "Where the URL is, character for character, the one versioning.url_composition forms for "
+    "endpoints.operation_catalog, what it reaches is that endpoint, and a client presents its "
+    "application credential there as that entry's auth and roles require and follows no redirect in "
+    "answer to a request that carries it. Where it is any other URL, a client presents no credential "
+    "there, and a deployment that names such a URL serves the document there, as media_type, to a "
+    "request that carries none: the document is this contract version's derived operation catalog, "
+    "the same for every application and every deployment declaring that version, so serving it "
+    "without a credential discloses nothing this contract does not already publish. Against a "
+    "deployment declaring a version lower than 1.14.0, such a URL may require a credential a client "
+    "will not present there; the document is then the derived operation catalog of the version that "
+    "deployment declares (1.9.0's obligation (b)), which a client holding that version of this "
+    "contract derives for itself rather than fetching it. endpoints.operation_catalog's auth and "
+    "roles are unchanged; they govern that endpoint at the URL versioning.url_composition forms for "
+    "it."
+)
+
+PIN_1_14_0_VERSION_BINDING_PARAGRAPH = (
+    "Only an implementation declaring 1.14.0 or higher additionally claims conformance to the "
+    "obligations 1.14.0 introduces (subordinate ruling 19). Those obligations are unconditional in "
+    "the same sense as every obligation enumerated above -- they bind simply by declaring 1.14.0, "
+    "independent of any capability's own status: (a) every successful response it returns carries "
+    "media_type as the media type of its Content-Type header (media_type_note); (b) every capability "
+    "document it returns, on either surface, carries role (CapabilityDocument.properties.role); and "
+    "(c) where its operation_catalog_url differs, character for character, from the URL "
+    "versioning.url_composition forms for endpoints.operation_catalog, a request that carries no "
+    "credential receives the document there, as media_type "
+    "(CapabilityDocument.properties.operation_catalog_url). What else 1.14.0 adds -- "
+    "versioning.url_composition, the sentence it rewrites in CapabilityDocument.properties.surfaces, "
+    "endpoint_fields_note.path, errors.response_classification, external_standards and "
+    "definitions.OperationCatalogEntry's description -- states how a client forms a request and reads "
+    "a response, and holds an implementation to no behavior beyond these three. 1.14.0 requires no "
+    "implementation to refuse a request it accepted under 1.13.0: a request valid under 1.13.0 stays "
+    "valid. An implementation still declaring 1.13.0 is not held to any 1.14.0-only obligation "
+    "retroactively."
+)
+
+FIXED_1_14_0_OBLIGATIONS_ENTRY = {
+    "version": "1.14.0",
+    "subordinate_ruling": 19,
+    "unconditional": [
+        "successful_responses_carry_media_type",
+        "capability_document_carries_role",
+        "other_url_operation_catalog_served_without_credential",
+    ],
+    "conditional": [],
+}
+
+
+def _contract() -> dict:
+    return json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+
+
+def test_contract_pins_the_1_14_0_url_composition_verbatim():
+    """`versioning.url_composition` byte-matches the confirmed text: how a client forms the URL
+    of an operation from a surface's base_url, and that it follows no redirect in answer to a
+    request that carries a credential."""
+    value = _contract()["versioning"]["url_composition"]
+    assert value == PIN_1_14_0_URL_COMPOSITION, (
+        f"versioning.url_composition does not byte-match the confirmed text: {value!r}"
+    )
+
+
+def test_contract_pins_the_1_14_0_surfaces_sentence_verbatim():
+    """`CapabilityDocument.properties.surfaces.description` carries the confirmed replacement
+    sentence and no longer carries the sentence it replaces."""
+    value = _contract()["schemas"]["CapabilityDocument"]["properties"]["surfaces"]["description"]
+    assert PIN_1_14_0_SURFACES_SENTENCE in value, (
+        "schemas.CapabilityDocument.properties.surfaces.description no longer carries the confirmed sentence"
+    )
+    assert PIN_1_14_0_SURFACES_REPLACED_SENTENCE not in value, (
+        "schemas.CapabilityDocument.properties.surfaces.description still carries the replaced sentence"
+    )
+
+
+def test_contract_pins_the_1_14_0_path_placeholder_sentence_verbatim():
+    """`endpoint_fields_note.path` opens with the confirmed placeholder sentence."""
+    value = _contract()["endpoint_fields_note"]["path"]
+    assert value[: len(PIN_1_14_0_PATH_PLACEHOLDER_SENTENCE) + 1] == PIN_1_14_0_PATH_PLACEHOLDER_SENTENCE + " ", (
+        f"endpoint_fields_note.path does not open with the confirmed placeholder sentence: {value!r}"
+    )
+
+
+def test_contract_pins_the_1_14_0_path_percent_encoding_sentence_verbatim():
+    """`endpoint_fields_note.path` ends with the confirmed percent-encoding sentence, so that
+    the value is exactly the two confirmed sentences joined by one space."""
+    value = _contract()["endpoint_fields_note"]["path"]
+    assert value[len(PIN_1_14_0_PATH_PLACEHOLDER_SENTENCE) + 1:] == PIN_1_14_0_PATH_PERCENT_ENCODING_SENTENCE, (
+        f"endpoint_fields_note.path does not end with the confirmed percent-encoding sentence: {value!r}"
+    )
+
+
+def test_contract_pins_the_1_14_0_media_type_note_verbatim():
+    """The top-level `media_type_note` byte-matches the confirmed text."""
+    value = _contract()["media_type_note"]
+    assert value == PIN_1_14_0_MEDIA_TYPE_NOTE, f"media_type_note does not byte-match the confirmed text: {value!r}"
+
+
+def test_contract_pins_the_1_14_0_response_classification_first_sentence_verbatim():
+    """`errors.response_classification` opens with the confirmed classification sentence."""
+    value = _contract()["errors"]["response_classification"]
+    assert value[: len(PIN_1_14_0_RESPONSE_CLASSIFICATION_FIRST_SENTENCE) + 1] == (
+        PIN_1_14_0_RESPONSE_CLASSIFICATION_FIRST_SENTENCE + " "
+    ), f"errors.response_classification does not open with the confirmed first sentence: {value!r}"
+
+
+def test_contract_pins_the_1_14_0_response_classification_remaining_sentences_verbatim():
+    """`errors.response_classification` ends with the confirmed remaining sentences, so that the
+    value is exactly the confirmed first sentence, one space, and these."""
+    value = _contract()["errors"]["response_classification"]
+    assert value[len(PIN_1_14_0_RESPONSE_CLASSIFICATION_FIRST_SENTENCE) + 1:] == (
+        PIN_1_14_0_RESPONSE_CLASSIFICATION_REMAINING_SENTENCES
+    ), f"errors.response_classification does not end with the confirmed remaining sentences: {value!r}"
+
+
+def test_contract_pins_the_1_14_0_role_description_verbatim():
+    """`CapabilityDocument.properties.role.description` byte-matches the confirmed text, and
+    `role` stays out of `CapabilityDocument.required` (the requirement is a version_binding
+    obligation, so that a document of an implementation declaring a lower version stays valid)."""
+    document = _contract()["schemas"]["CapabilityDocument"]
+    role = document["properties"]["role"]
+    assert role["description"] == PIN_1_14_0_ROLE_DESCRIPTION, (
+        f"CapabilityDocument.properties.role.description does not byte-match the confirmed text: {role['description']!r}"
+    )
+    assert role["enum"] == ["runtime", "developer", "control", "audit"]
+    assert "role" not in document["required"], "CapabilityDocument.required must not name role (1.14.0)"
+
+
+def test_contract_pins_the_1_14_0_external_standards_verbatim():
+    """The top-level `external_standards` byte-matches the confirmed text."""
+    value = _contract()["external_standards"]
+    assert value == PIN_1_14_0_EXTERNAL_STANDARDS, (
+        f"external_standards does not byte-match the confirmed text: {value!r}"
+    )
+
+
+def test_contract_pins_the_1_14_0_operation_catalog_entry_description_verbatim():
+    """`definitions.OperationCatalogEntry.description` byte-matches the confirmed text."""
+    value = _contract()["definitions"]["OperationCatalogEntry"]["description"]
+    assert value == PIN_1_14_0_OPERATION_CATALOG_ENTRY_DESCRIPTION, (
+        f"definitions.OperationCatalogEntry.description does not byte-match the confirmed text: {value!r}"
+    )
+
+
+def test_contract_pins_the_1_14_0_operation_catalog_url_sentences_verbatim():
+    """`CapabilityDocument.properties.operation_catalog_url.description` is the 1.9.0 text, one
+    space, and the confirmed 1.14.0 sentences: the 1.9.0 text itself is unchanged."""
+    value = _contract()["schemas"]["CapabilityDocument"]["properties"]["operation_catalog_url"]["description"]
+    suffix = " " + PIN_1_14_0_OPERATION_CATALOG_URL_SENTENCES
+    assert value.endswith(suffix), (
+        f"operation_catalog_url.description does not end with a space and the confirmed 1.14.0 sentences: {value!r}"
+    )
+    assert value[: -len(suffix)] == PIN_1_9_0_CAPABILITY_DOCUMENT_OPERATION_CATALOG_URL, (
+        "operation_catalog_url.description's text before the 1.14.0 sentences is not the 1.9.0 text"
+    )
+
+
+def test_contract_pins_the_1_14_0_version_binding_paragraph_verbatim():
+    """The confirmed 1.14.0 paragraph occupies EXACTLY the text between the end of the 1.13.0
+    paragraph and the version-flip sentence (an equality check, so a further sentence slipped in
+    on either side is caught here too)."""
+    version_binding = _contract()["versioning"]["version_binding"]
+    idx_1_13_0_end = version_binding.index(PIN_1_13_0_VERSION_BINDING_PARAGRAPH) + len(
+        PIN_1_13_0_VERSION_BINDING_PARAGRAPH
+    )
+    idx_version_flip = version_binding.index("A peer's version-flip")
+    between = version_binding[idx_1_13_0_end:idx_version_flip]
+    assert between == " " + PIN_1_14_0_VERSION_BINDING_PARAGRAPH + " ", (
+        "the text between the 1.13.0 paragraph and the version-flip sentence is not exactly "
+        f"the confirmed 1.14.0 paragraph (surrounded by one space on each side): {between!r}"
+    )
+
+
+def test_contract_pins_the_1_14_0_obligations_entry_verbatim():
+    """`versioning.obligations` ends with the 1.14.0 entry, byte-matching the confirmed entry --
+    3 unconditional obligations, 0 conditional."""
+    obligations = _contract()["versioning"]["obligations"]
+    # Pinned by an index fixed to its 1.14.0-era position (obligations[11], after 1.13.0's own
+    # entry at [10]) -- the same form the earlier entries' pins use, so a later version
+    # appending its own entry leaves this pin untouched.
+    assert obligations[11] == FIXED_1_14_0_OBLIGATIONS_ENTRY, (
+        f"versioning.obligations[11] does not byte-match the confirmed 1.14.0 entry: {obligations[11]!r}"
+    )
+    assert set(obligations[11]) == {"version", "subordinate_ruling", "unconditional", "conditional"}
+    assert len(obligations[11]["unconditional"]) == 3
 
 
 def test_audit_requests_per_minute_is_a_declared_limit_class():
@@ -1562,7 +1855,11 @@ def test_contract_pins_the_requester_finalized_1_4_0_and_1_5_0_prose():
 PIN_1_6_0_ITEM_1_SECRET_IS_BEARER = """`CredentialIssued.secret` — and the `secret` a rotate response returns, wherever this contract defines one — **is the complete bearer token for the surface that credential is for**: a client presents that exact string, verbatim, as `Authorization: Bearer <secret>`; an application credential on the application surface, a control or audit credential on the control surface (`security.schemes.control_credential` continues to state that application credentials are not accepted there). A client MUST NOT compose it from, split it into, or derive it from any other field of the response — `credential_id` is returned as its own field, for naming the credential in later control operations, and is never something a client extracts from the secret. Its internal structure is opaque; an implementation may change that structure without a contract change, and no client may depend on it. The service still stores only a verifier/digest and never returns the secret again."""
 
 # (2) CapabilityDocument.surfaces description (D-2)
-PIN_1_6_0_ITEM_2_SURFACES = """`surfaces` names the absolute base URLs at which this deployment's own surfaces are reached, **as declared by the deployer** — never derived, and never to be inferred by a client from the URL it happened to use. `surfaces.data.base_url` ends at `versioning.base_path`; `surfaces.control.base_url` ends at `versioning.control_base_path`. **The data surface's capability document and the control surface's own capability document return the same `surfaces` object**, so a client holding either base URL can reach the other surface, and either document, fetched again at its own declared URL, answers with the same `contract_version` and the same `surfaces` — the rest of each document remains scoped to the credential presented. A deployment declaring `control_plane` as `unavailable` omits `surfaces.control`. Neither URL ends in a trailing slash, so that appending a path to it yields exactly one separator. Whether the two surfaces share a host is read from the **origins** (scheme, host and port — not the path) of these two URLs — the co-hosting `versioning.control_discovery` permits — and is never assumed; where `surfaces.control` is absent, the surfaces are not co-hosted. **Where the two surfaces run as separate processes, both are configured from the same declaration**: neither can verify the other's document, so a deployment whose two documents disagree is non-conformant, and a client is given no rule for preferring one over the other."""
+# Contract 1.14.0 (subordinate ruling 19) replaces one sentence of this value (the one about
+# a trailing slash) with PIN_1_14_0_SURFACES_SENTENCE; the pin carries the replacement and
+# every other sentence is unchanged -- the same version-flip pin-migration discipline the
+# other pins of this file apply.
+PIN_1_6_0_ITEM_2_SURFACES = """`surfaces` names the absolute base URLs at which this deployment's own surfaces are reached, **as declared by the deployer** — never derived, and never to be inferred by a client from the URL it happened to use. `surfaces.data.base_url` ends at `versioning.base_path`; `surfaces.control.base_url` ends at `versioning.control_base_path`. **The data surface's capability document and the control surface's own capability document return the same `surfaces` object**, so a client holding either base URL can reach the other surface, and either document, fetched again at its own declared URL, answers with the same `contract_version` and the same `surfaces` — the rest of each document remains scoped to the credential presented. A deployment declaring `control_plane` as `unavailable` omits `surfaces.control`. Neither URL ends in a trailing slash; a client forms the URL of an operation from them as versioning.url_composition states, not by appending the operation's path to them. Whether the two surfaces share a host is read from the **origins** (scheme, host and port — not the path) of these two URLs — the co-hosting `versioning.control_discovery` permits — and is never assumed; where `surfaces.control` is absent, the surfaces are not co-hosted. **Where the two surfaces run as separate processes, both are configured from the same declaration**: neither can verify the other's document, so a deployment whose two documents disagree is non-conformant, and a client is given no rule for preferring one over the other."""
 
 # (3) field-type vocabulary json + EntityDescriptor.field_types + SchemaOperationRequest.field_types (D-3)
 # Phase 9 WP-1 (contract 1.7.0, §5 U-8 #28, design docs/design/
@@ -2045,7 +2342,9 @@ def test_contract_pins_the_supervisor_finalized_1_7_0_prose():
     )
 
     endpoint_fields_note = contract["endpoint_fields_note"]
-    assert set(endpoint_fields_note) == {"roles", "requires_capability", "atomicity"}
+    # `path` joined the note with contract 1.14.0; its own text is pinned by
+    # test_contract_pins_the_1_14_0_path_*.
+    assert set(endpoint_fields_note) == {"roles", "requires_capability", "atomicity", "path"}
     for key, pin in (
         ("roles", PIN_1_7_0_ENDPOINT_FIELDS_NOTE_ROLES),
         ("requires_capability", PIN_1_7_0_ENDPOINT_FIELDS_NOTE_REQUIRES_CAPABILITY),

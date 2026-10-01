@@ -448,3 +448,9 @@ Both r2db-api and MitateDB-api have since flipped `contract_version` to 1.10.0 (
 **Status filled 2026-10-01 (work order `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md` section 2.7):** the placeholder that held the observed scope and the per-plug mutations until the implementation was measured is replaced by the measured values (V14a, V14b, V17, V18, V19, V19s), the stall points per plug, and the unobserved `dry_run`-only hold. **旧文は以下のとおりである (逐語):**
 
 - Status cell, placeholder: "〈観測の範囲と plug ごとの赤になる変異は、WP-4・WP-6 の実測の後に WP-7 で記入する (`OC` §1.5 の 34)〉"
+
+## C-35
+
+**起票 2026-10-01 (`docs/design/REFERENCE_CLIENT_V0_1.md` section 10, work order `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` M-5, WP-1):** this row was opened as `declared; not yet executable`, ahead of port v1.21's `wire_entry`, `conformance-tests/reference_client.py` and its tests, so that the design document's and the work order's own `C-35` references resolve (`tools/check_doc_refs.py` requires a defined row for every `C-NN` a `.md` names) -- the same sequence C-28..C-30 followed (declared first, executable later). The condition itself is new; nothing was moved out of an earlier row into this section. The Condition, Invariants and Evidence cells are the confirmed text (the work order's M-10); the row's Status becomes `executable (four wire adapters)` in the work package that lands the tests, and the legend sentence that defines that label is added to `CONDITIONS.md` in the same change.
+
+Executability lands in the work order's WP-4. Until then the row carries no historical narrative of its own: its current text is its first text.
