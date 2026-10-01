@@ -1192,7 +1192,7 @@ def test_postgres_backend_enforces_and_round_trips_field_constraints(app_pg) -> 
 def test_alter_field_constraints_is_a_single_transaction(app_pg) -> None:
     """完了条件 13 (design D-2 実装の形 4, F-6, 監督裁定 S-g): the
     existing-row scan, the registry UPDATE, and the schema-revision bump
-    all happen inside ONE `self._developer` transaction -- exactly ONE
+    all happen inside ONE developer-connection transaction -- exactly ONE
     `commit()` call on the developer connection for the whole `backend.
     alter_field_constraints(...)` call itself. If the existing-row scan
     were moved to a separate pre-flight call (the `field_domains`-style

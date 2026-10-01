@@ -121,6 +121,20 @@ single source of truth for which top-level request fields are accepted.
 # "pragma: no cover" comment stays true.
 ```
 
+### correction: 2026-10-01
+
+- reason: R-102 -- `StorageTransientError` joins the table (a deadlock or serialization victim, or a data backend that could not be reached, both `SERVICE_UNAVAILABLE`); the sentence listing the classes mapped there names it
+
+old:
+```
+unreachability). Listed explicitly here
+```
+
+new:
+```
+unreachability). `StorageTransientError` (a deadlock or serialization victim, or a data backend that could not be reached) is mapped the same way. Listed explicitly here
+```
+
 ## CH-0186
 
 - moved from: `src/mitatedb_api/http.py` (`<module>`)

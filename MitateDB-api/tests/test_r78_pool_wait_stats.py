@@ -196,6 +196,30 @@ def test_http_plug_pool_stats_returns_role_rows_and_one_schema_lock_row_per_appl
         adapter.close()
 
 
+def test_http_adapter_builds_each_applications_role_pools_like_the_composition_root():
+    """Completion condition 65 (adapter half): the backend the `-http`
+    adapter builds for a provisioned application has two role pools of
+    `role_pool_size(DEFAULT_THREAD_LIMIT)` = 6 connections each, the figure
+    `main.build_app` passes, not the pool module's default.
+
+    mutation V65b (`conformance_adapter_mitatedb_http.py`): drop the
+    `pool_size=` keyword from `_new_backend` -- the pools take the default
+    size (20) and the assertion goes red."""
+    adapter = _http_module.MitateDBHttpConformanceAdapter()
+    app_id = f"r102size{secrets.token_hex(4)}"
+    try:
+        adapter.provision_application(app_id)
+        backend = adapter._cells[app_id]._backend  # noqa: SLF001 -- adapter-internal reach-in
+        expected = role_pool_size(DEFAULT_THREAD_LIMIT)
+        assert expected == 6
+        assert backend.pool_stats()["runtime"]["size"] == expected
+        assert backend.pool_stats()["developer"]["size"] == expected
+    finally:
+        with contextlib.suppress(Exception):
+            adapter.deprovision_application(app_id)
+        adapter.close()
+
+
 # ---------------------------------------------------------------------
 # R-101 WP-1 D-3 / WP-3 D-10: the `DSA_PERF_THREAD_LIMIT` env reader and
 # the `-http` adapter's construction-time wiring of its effective value

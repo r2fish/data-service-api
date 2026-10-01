@@ -535,26 +535,12 @@ def test_body_read_stays_on_the_loop(app_a_stack):
 
 # ---------------------------------------------------------------------------
 # Completion condition 9 (WP-8b 差し戻し (0), U-10): moving the synchronous
-# section off the event loop is only safe if that section's own critical
-# region (`ApplicationCell._lock`) actually covers the WHOLE per-request
-# lookup -> pass-1 (validation/catalog reads) -> pass-2 (execute/commit)
-# sequence -- not merely the final backend call. Before this WP's fix (per
-# the code review that sent WP-8b back, `{scratchpad}/phase10/wp8b-review.
-# md` §1/§2), `ApplicationCell`'s pass-1 catalog reads (`field_domains` et
-# al, `_idempotency_check`) ran OUTSIDE `self._lock`, sharing `Postgres
-# Backend`'s single `_developer` connection with every other in-flight
-# request against the SAME application/cell -- so one request's own
-# `commit()`/`rollback()` on that shared connection could land on a
-# DIFFERENT request's still-open transaction (measured concretely by the
-# review: an independent third connection could see request A's
-# uncommitted `CREATE TABLE` after request B's own unrelated `commit()`
-# ran on the shared connection). This WP moves `self._lock` to wrap
-# lookup -> pass-1 -> pass-2 for every public `ApplicationCell` method
-# (`create_collection`/`add_field`/`alter_field`/`schema_revision`/
-# `catalog`/`insert`/`read`/`update`/`delete`/`transact`), so two requests
-# against the SAME cell are now fully serialized in Python BEFORE either
-# one ever touches the shared `_developer` connection -- eliminating the
-# interleaving structurally.
+# section off the event loop is only safe if two requests against the SAME
+# application never share a connection or a transaction: each request
+# borrows its own connections for its whole lookup -> pass-1 (validation/
+# catalog reads) -> pass-2 (execute/commit) sequence (`PostgresBackend.
+# request_scope`), so one request's `commit()`/`rollback()` can never land
+# on a DIFFERENT request's still-open transaction.
 # ---------------------------------------------------------------------------
 
 

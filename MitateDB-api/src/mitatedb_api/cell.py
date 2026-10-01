@@ -546,10 +546,11 @@ class ApplicationCell:
         self._db = getattr(self._backend, "raw_connection", None)
         # No lock serializes this cell's requests: each one opens a request
         # scope on the backend (`self._backend.request_scope`) and gets its
-        # own connections and its own transaction; what must not overlap
-        # across requests, in this process or another, is serialized by the
-        # backend at the points `schema` / `transact` / ... name below.
-        # history: CH-0547
+        # own connections and its own transaction. What must not overlap
+        # across requests, in this process or in another, is serialized by
+        # the backend at the points where the public methods below take its
+        # schema, entity and idempotency locks.
+
         # Phase 8 WP-1a (design D-1): `None` (every pre-WP-1a caller --
         # this repository's own tests, any direct construction) gets a
         # PRIVATE, unshared holder -- exactly like `audit_router=None`
@@ -560,6 +561,7 @@ class ApplicationCell:
         # see `main.py`/`service.py`/both conformance adapters, which all
         # construct exactly one holder and pass it to every cell they
         # build).
+        # history: CH-0547
         self.__limit_holder = limit_holder if limit_holder is not None else _LimitStateHolder()
         # Phase 10 WP-6b (design D-5 (ii)): the deployer's OWN declared
         # `process_ceilings.data` (default 1 -- every pre-existing direct
