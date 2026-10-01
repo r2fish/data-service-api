@@ -1217,10 +1217,12 @@ def test_pg_alter_field_locks_the_table_in_share_mode_before_scanning(app_a: typ
     R-35 (Phase 10, WP-6d-i review): originally plain `SHARE MODE`,
     which does not conflict with itself and could deadlock two
     concurrent `add_field`/`alter_field` calls on the same entity at
-    their own later `ALTER TABLE` -- see the deterministic two-
-    connection race test right below this one for that scenario
-    actually observed against real PostgreSQL, not merely at the SQL-
-    text level."""
+    their own later `ALTER TABLE`. Every schema operation of an
+    application is now serialized by the schema lock before it reaches
+    this table lock (see `test_pg_concurrent_add_field_calls_on_same_
+    entity_serialize_without_deadlock` below), so the self-conflicting
+    mode is a second line of defense and this SQL-text pin is what
+    keeps it in place."""
     import r2db_api.postgres as postgres_module
 
     cell = make_cell(app_a)
@@ -1252,6 +1254,46 @@ def test_pg_alter_field_locks_the_table_in_share_mode_before_scanning(app_a: typ
         cell.close()
 
 
+def test_pg_add_field_declaring_nullable_false_locks_the_table_in_share_row_exclusive_mode_before_scanning(app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`add_field` declaring `nullable: false` takes `LOCK TABLE ... IN
+    SHARE ROW EXCLUSIVE MODE` before its existing-row existence check,
+    inside the same transaction -- pinned at the SQL text level, like
+    `alter_field`'s test above. The schema lock serializes two schema
+    operations before they reach this statement, so the mode (plain
+    `SHARE` does not conflict with itself) is a second line of defense
+    and this pin is what keeps it in place."""
+    import r2db_api.postgres as postgres_module
+
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "lockpin", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS)
+
+        captured: list[str] = []
+        real_run = postgres_module._run
+
+        def spy(cursor: Any, statement: Any, params: Any = ()) -> None:
+            try:
+                captured.append(statement.as_string(cursor))
+            except Exception:
+                pass
+            real_run(cursor, statement, params)
+
+        monkeypatch.setattr(postgres_module, "_run", spy)
+        cell.apply_schema(
+            {"operation": "add_field", "entity": "lockpin", "field": "extra", "field_type": "string", "nullable": False},
+            developer=True, limits=LIMITS)
+
+        lock_statements = [s for s in captured if "LOCK TABLE" in s.upper()]
+        assert len(lock_statements) == 1, captured
+        assert "IN SHARE ROW EXCLUSIVE MODE" in lock_statements[0].upper()
+        scan_index = next(i for i, s in enumerate(captured) if s.strip().upper().startswith("SELECT 1 FROM"))
+        assert captured.index(lock_statements[0]) < scan_index
+    finally:
+        cell.close()
+
+
 # ---- R-35: the M-1/M-6 lock must not deadlock two concurrent schema ops --
 
 
@@ -1274,12 +1316,14 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
     acquire it, then each block at its own later `ALTER TABLE` (ACCESS
     EXCLUSIVE) waiting on the other's SHARE lock -- a guaranteed mutual
     wait resolved only by PostgreSQL's deadlock detector aborting one
-    side with an error. `SHARE ROW EXCLUSIVE` (self-conflicting) instead
-    makes the second caller wait AT `LOCK TABLE` until the first commits.
-    Every schema operation of one application now also serializes on the
-    application-wide schema lock taken before the catalog is read, so the
-    second caller waits on that advisory lock (seen in `pg_stat_activity`)
-    and does not reach its own `LOCK TABLE` until the first commits.
+    side with an error. `SHARE ROW EXCLUSIVE` (self-conflicting) would
+    instead make a second caller that reached `LOCK TABLE` wait there until
+    the first commits. Every schema operation of one application also
+    serializes on the application-wide schema lock taken before the
+    catalog is read, so the second caller waits on that advisory lock
+    (seen in `pg_stat_activity`) and does not reach its own `LOCK TABLE`
+    until the first commits; the lock mode itself is pinned by the SQL-text
+    tests above.
 
     Verified against a REAL two-connection race, never merely at the SQL-
     text level (contrast the M-1 test above, whose own docstring

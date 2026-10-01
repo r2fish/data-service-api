@@ -1455,6 +1455,20 @@ as early as possible, before the catalog is loaded, before ANY
 # row-scan property above is unchanged.
 ```
 
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- every schema operation of an application is serialized by `_schema_serialization_lock` before it reaches the table lock, so the second caller waits on that advisory lock first and the `SHARE ROW EXCLUSIVE` self-conflict is a second line of defense, no longer the point where the second caller waits
+
+old:
+```
+so the second caller instead waits here, at LOCK TABLE, and proceeds only once the first transaction commits or rolls back
+```
+
+new:
+```
+so a second caller that reached this point would instead wait here, at LOCK TABLE, until the first transaction commits or rolls back; every schema operation of this application is already serialized by `_schema_serialization_lock` before it gets here, so this self-conflict is a second line of defense
+```
+
 ## CH-0070
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell.apply_schema`)
@@ -1515,6 +1529,20 @@ as early as possible, before the catalog is loaded, before ANY
 # writers (ROW EXCLUSIVE) exactly as plain SHARE
 # did, so the R-2 existing-row-scan property above
 # is unchanged.
+```
+
+### correction: 2026-10-01
+
+- reason: R-102 WP-6 -- every schema operation of an application is serialized by `_schema_serialization_lock` before it reaches the table lock, so the second caller waits on that advisory lock first and the `SHARE ROW EXCLUSIVE` self-conflict is a second line of defense, no longer the point where the second caller waits
+
+old:
+```
+so the second caller instead waits here, at LOCK TABLE, and proceeds only once the first transaction commits or rolls back
+```
+
+new:
+```
+so a second caller that reached this point would instead wait here, at LOCK TABLE, until the first transaction commits or rolls back; every schema operation of this application is already serialized by `_schema_serialization_lock` before it gets here, so this self-conflict is a second line of defense
 ```
 
 ## CH-0072
