@@ -571,3 +571,17 @@ D-R102 判定規則 (計測前に固定。計測後に動かさない):
 7. (WP-4 レビュー A-2) `tools/perf_baseline.py` の `_resolve_app_db_and_matcher` (MitateDB の `backend._runtime` を読む) を WP-5 の対象に足す (pool の形に作り直し、偽物の test と README :495 を合わせる。変異 V78a)。SQLite plug で `request_scope` / `lock_schema` / `lock_entities` が backend call に数えられる点は §3 の表 C の説明に使う。
 8. (WP-4 レビュー A-4) `MitateDB-api/src/mitatedb_api/capabilities_document.py`:432-442 の docstring (session-level lock / `idempotency_unlock`) を WP-4 の触ってよいパスに足し、xact 化に合わせる。
 9. (WP-5 レビュー前の監督裁定) WP-3 の `test_r102_pool.py` の admin DSN reader は raise 形、`tools/tests/test_no_shared_cluster_defaults.py` の pin は 33 → 34 (WP-5 の commit 32eefb0)。`prepared_stats` の旧 docstring は CH-0548 として登録。
+
+**訂正註 5 (2026-10-01、監督。WP-7 の起草とレビュー再確認の裁定。本文は書き換えない)**
+
+1. (WP-7 起草の疑義) `ops inventory` item (8) (`MitateDB-api/src/mitatedb_api/ops.py`) の application 項を `2 x K x (O + N)` から `2 x K x (O + N x role_pool_size(thread_limit))` に改める (新 basis の data process は role ごとに最大 `role_pool_size(thread_limit)` 本、旧 basis は 1 本)。runbook §10.10 版 12 の式と一致させる。完了条件 **92a** (item (8) の値を pin する test の実測更新、変異 V-ops-1 = 旧形に戻す、V-ops-2 = O を落とす)。commit 6116807 (branch r102-wp7)。
+2. (WP-4/5 再確認) `BoundedConnectionPool.map_idle` の例外時の put-back を pin する test (変異 RR-MI1) を完了条件 **77c** として足す。`prepared_stats` が probe 中に死んだ idle 接続で raise する点は観察 (製品の経路に無く、r2db も同形)。
+3. (WP-7 起草) 作業指示書 §2.7 の「`CR`:509-531」は 0012 の表 (記録) を指しており、接続の式は現行 :540。表はそのまま、式を直した。
+4. 計測 D-R102 の「実装後」の木は r102 の eb97a06 (製品コードはここで確定。以後の変更は記録 (WP-7) と指紋の更新のみ)。
+
+**訂正註 6 (2026-10-01、監督。計測 D-R102 の K=1 で見つけた退行の裁定。本文は書き換えない)**
+
+1. 事実: 実装後 (eb97a06) の K=1 `--warmup 20 --n 200` で MitateDB-api-http の p50 が query 2.144 → 6.476 ms (+202%)、mutate +176%、batch +226%、socket plug で +20〜50% (閾値 `RM` §0.1.4 の 1 を超える)。DBTIME の db_calls は減っている (3800 → 2600) のに 1 文あたりの時間が 10 倍。PREPARED 行は before `prepared=5 share=0.989` → after `prepared=0`。
+2. 原因: psycopg の `Connection.rollback()` は ROLLBACK の後に prepared statement のキャッシュを捨てる (`_connection_base.py` の `_rollback_gen`: `self._prepared.clear()` + `DEALLOCATE ALL`)。範囲の出口で query の runtime transaction と pass 1 の developer の読み取り transaction を rollback して pool に返す形 (M-5) では、接続上の文が毎回捨てられ、二度と prepare されない。R-102 前は catalog 読みと `read()` が自己 commit していた。
+3. 裁定 (**M-19**、依頼者確認待ち): 例外なしで抜ける範囲は、INTRANS の主接続 (query) と developer 接続 (DML / query の pass 1 の読み) を **COMMIT** して返す (例外で抜けるときは rollback、`release` の rollback は安全網のまま)。読み取りだけの transaction の COMMIT は意味論を変えない。完了条件 **57b** (threshold 回の同じ query の後に `pg_prepared_statements` に文が残る、変異 V57b = 出口を rollback に戻す) を WP-4 に足す。`backend_calls` は commit の分だけ増える (query +1、DML +1 (developer))。
+4. 計測 D-R102 は訂正註 5 の 4 を改め、「実装後」の木を差し戻し 2 の後の r102 head とし、k4 / k1 / real-server の全段を取り直す (round 1 の結果は `$SP/perf-r102-round1/` に記録として残し、K=4 の判定値 (0/4856 = 0.0%、2 run) は参考値とする)。

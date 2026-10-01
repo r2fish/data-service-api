@@ -472,8 +472,10 @@ class PostgresBackend:
         lock another request is waiting for -- opens the transaction on
         each and sets `statement_timeout` / `lock_timeout` from `deadline`
         once. The connections go back to their pools when the scope ends,
-        by whichever way it ends: the pool rolls back what is still open,
-        which also releases every lock the request took."""
+        by whichever way it ends: a request that finished normally commits
+        the read-only transaction it may still have open (`_end_reads`), and
+        the pool rolls back whatever is still open on return, which also
+        releases every lock the request took."""
         if kind not in SCOPE_KINDS:
             raise ValueError(f"unknown request scope kind {kind!r}")
         if self._pending_platform_upgrade_message is not None:
@@ -496,10 +498,36 @@ class PostgresBackend:
                         self._set_timeouts(cur, timeout_ms)
                 except psycopg.Error as exc:
                     raise StorageTransientError("the storage backend could not be reached") from exc
-            yield RequestScope(kind, deadline, backend=self, main=main, developer=developer)
+            scope = RequestScope(kind, deadline, backend=self, main=main, developer=developer)
+            yield scope
+            self._end_reads(scope)
         finally:
             for pool, conn in reversed(held):
                 pool.release(conn)
+
+    def _end_reads(self, scope):
+        """Reached only when the request's body finished without raising:
+        a connection still inside a transaction then holds nothing but reads
+        (the main connection of a query, the developer connection of a data
+        request's pass 1 or of a catalog read) and its transaction is
+        committed, not rolled back. A rollback makes psycopg forget every
+        statement it had prepared on the connection (and `DEALLOCATE ALL`
+        on the server), so rolling back each read-only transaction at the
+        scope's end would keep a pooled connection from ever reaching its
+        prepare threshold. The main connection goes first, then the developer
+        connection. A request that raised never gets here: the pool rolls its
+        connections back when they are returned."""
+        seen = set()
+        for conn in (scope.main, scope.developer):
+            if conn is None or id(conn) in seen:
+                continue
+            seen.add(id(conn))
+            if conn.info.transaction_status != TransactionStatus.INTRANS:
+                continue
+            try:
+                conn.commit()
+            except psycopg.Error as exc:
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
 
     def _retime(self, scope):
         """Sets `statement_timeout` / `lock_timeout` again, from what remains

@@ -551,6 +551,27 @@ def test_catalog_reads_run_inside_the_scope_transaction_without_committing_or_se
         close_cell(cell)
 
 
+def test_read_only_transactions_end_in_a_commit_so_prepared_statements_survive(app_a) -> None:
+    """psycopg forgets every prepared statement of a connection when it rolls
+    it back. A query's runtime transaction and the developer connection's
+    catalog reads are read-only; a request that finishes normally commits them
+    at the end of its scope instead of leaving the return to the pool to roll
+    them back. After the same query has run past psycopg's prepare threshold
+    (5), the pooled runtime and developer connections each still hold
+    prepared statements. A request that raises still rolls back (the other
+    tests of this file and `test_application_audit.py` keep that)."""
+    cell, _dev, rt = _setup(app_a, "pq")
+    rt.insert("pq", {"title": "x"})
+    try:
+        for _ in range(8):
+            rt.read("pq")
+        by_role = {row["label"].split("@", 1)[0]: row for row in cell._backend.prepared_stats()}
+        assert by_role["runtime"]["prepared"] >= 1, by_role["runtime"]
+        assert by_role["developer"]["prepared"] >= 1, by_role["developer"]
+    finally:
+        close_cell(cell)
+
+
 # ---------------------------------------- 58: timeout from the deadline
 def test_the_scope_sets_its_timeouts_from_the_deadline_not_the_constructed_value(app_a, monkeypatch) -> None:
     """A schema operation of a deployment whose constructed bound is 60 s

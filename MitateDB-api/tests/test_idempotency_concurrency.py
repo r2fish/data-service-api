@@ -440,15 +440,15 @@ def test_postgres_reap_is_committed_not_discarded_by_begin(app_a) -> None:  # no
         close_cell(cell)
 
 
-def test_postgres_replay_commits_nothing_and_the_next_committing_request_reaps(app_a) -> None:  # noqa: F811
+def test_postgres_replay_commits_its_reap(app_a) -> None:  # noqa: F811
     """Companion to `test_postgres_reap_is_committed_not_discarded_by_begin`
     above, for the REPLAY path (`cell.py::_idempotency_check`: an existing
     record whose digest matches returns immediately, `idempotency_reserve`
     is never called). The reap `idempotency_begin` makes is part of the
-    request's own transaction, and a replay ends without committing it: the
-    expired row stays until a request that commits reaps it. A request
-    that does commit (here: a third key's first execution) takes the
-    expired row with it."""
+    request's own transaction, and a replay that finishes normally ends its
+    scope with the commit of that transaction (it holds nothing but the
+    reap): the expired row is gone after the replay, the replayed key's own
+    row stays."""
     cell = make_cell(app_a, FoundationConfig(idempotency_retention_ms=400))
     try:
         dev = ApplicationDeveloper(
@@ -481,23 +481,13 @@ def test_postgres_replay_commits_nothing_and_the_next_committing_request_reaps(a
                 conn.close()
 
         # Re-send B with an IDENTICAL operations list (same digest) -- a
-        # REPLAY: its reap DELETE is rolled back with the rest of its
-        # transaction.
+        # REPLAY: its reap DELETE is committed when its scope ends.
         replayed = runtime.transact(
             [{"type": "insert", "collection": "notes_f1r", "values": {"title": "b"}}],
             idempotency_key="f1r-replay-b")
         assert len(runtime.read("notes_f1r")) == 2, "a replay must execute nothing"
         assert replayed, "a replay answers from the record"
-        assert _keys() == ["f1r-replay-a", "f1r-replay-b"], (
-            "a replay must leave the store exactly as it was, expired row included"
-        )
-
-        runtime.transact(
-            [{"type": "insert", "collection": "notes_f1r", "values": {"title": "c"}}],
-            idempotency_key="f1r-replay-c")
-        assert _keys() == ["f1r-replay-b", "f1r-replay-c"], (
-            "a committing request must take the expired row with it (reap committed with the request)"
-        )
+        assert _keys() == ["f1r-replay-b"], "a replay must commit the reap of the expired row"
     finally:
         close_cell(cell)
 
