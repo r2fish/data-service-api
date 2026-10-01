@@ -3838,7 +3838,8 @@ pass the request through an `httpx.AsyncClient`, so no default header,
 cookie jar or redirect policy acts on it, and it does not rewrite the URL it
 is given (the existing `r2db-api` socket client does, `_LazySocketClient.send`; `wire_entry` does not use it).
 A method or URL that the HTTP library would write in a form other than the
-one given (a lower-case method, an upper-case host, a path with dot segments)
+one given (a lower-case method, an upper-case host, a path with dot segments),
+or a URL that carries a fragment or a userinfo part (neither reaches the request line),
 is not carried: `send` raises `ValueError` before anything reaches the
 transport, so a request is carried as given or refused, never carried in a
 rewritten form. The two secret fields are excluded from `repr` and from
@@ -3887,7 +3888,7 @@ spy). Mutations measured red against it (work order
 (the two secrets swapped), V34a (the `r2db-api` socket send rewrites the
 URL as `_LazySocketClient.send` does), V34b (a header added on the
 `MitateDB-api` http send), V35 (a send through a client that follows
-redirects), V34c (the refusal of a method or URL not in the library's normal form removed from the `MitateDB-api` http send), V36 (`repr` shows a secret), V36b (a secret field takes part in comparison), V37 (an in-process plug returning
+redirects), V34c (the refusal of a method or URL not in the library's normal form removed from the `MitateDB-api` http send), V34d (the fragment and userinfo terms removed from the `r2db-api` http send's refusal), V36 (`repr` shows a secret), V36b (a secret field takes part in comparison), V37 (an in-process plug returning
 `None`), V38a (a socket plug removed from the registry, an error at
 collection), V38b (an item that does not take `adapter` indirectly), V40a,
 V40b, V40c (a one-line difference between the two peers' `wire_entry`

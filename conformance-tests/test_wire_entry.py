@@ -269,7 +269,8 @@ def test_send_refuses_a_method_or_url_that_is_not_in_the_http_librarys_normal_fo
 ) -> None:
     """A lower-case method, a host with upper-case letters and a path with
     dot segments are each written differently by the HTTP library than they
-    were given. `send` raises `ValueError` for each and nothing reaches a
+    were given, and a fragment or a userinfo part never reaches the request
+    line at all. `send` raises `ValueError` for each and nothing reaches a
     transport -- a request is carried as given or refused, never carried in
     a rewritten form."""
     _assert_own_group(request)
@@ -281,6 +282,8 @@ def test_send_refuses_a_method_or_url_that_is_not_in_the_http_librarys_normal_fo
         ("get", canonical),
         ("GET", canonical.replace(declared.host, "LocalHost", 1)),
         ("GET", _url(entry, _BASE_PATH + "/a/../b")),
+        ("GET", canonical + "#fragment"),
+        ("GET", canonical.replace("://", "://user@", 1)),
     )
     for method, url in cases:
         with pytest.raises(ValueError):

@@ -1069,9 +1069,10 @@ class WireEntry:
     returns the response's status, its header pairs (order and spelling as
     received) and its body as `bytes`. It never follows a redirect: a 3xx
     response is returned as it is. A method or URL that the HTTP library
-    would write in a form other than the one given is refused with
-    `ValueError` before anything is sent. A connection failure is raised
-    as an exception.
+    would write in a form other than the one given, and a URL with a
+    fragment or a userinfo part (neither reaches the request line), is
+    refused with `ValueError` before anything is sent. A connection failure
+    is raised as an exception.
 
     `runtime_secret` / `developer_secret`: the complete bearer token of
     one runtime and one developer credential issued to the application
@@ -2041,7 +2042,8 @@ class ConformanceAdapter(ABC):
         `fold_batch_idempotency_key` treats a port-usage error.
 
         A method or URL that is not in the HTTP library's own normal form (a
-        lower-case method, an upper-case host, a path with dot segments) is
+        lower-case method, an upper-case host, a path with dot segments), or
+        a URL that carries a fragment or a userinfo part, is
         not carried: `send` raises `ValueError` before anything reaches the
         transport, so a request is either carried as given or refused, never
         carried in a rewritten form.

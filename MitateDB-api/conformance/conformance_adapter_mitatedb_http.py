@@ -2353,7 +2353,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             transport = transport_factory()
             try:
                 request = httpx.Request(method, url, headers=list(headers), content=body)
-                if request.method != method or str(request.url) != url:
+                if request.method != method or str(request.url) != url or request.url.fragment or request.url.userinfo:
                     raise ValueError(
                         "send: the method or URL is not in the HTTP library's own normal form, "
                         "so it would not be carried as given: method=%r url=%r" % (method, url)
