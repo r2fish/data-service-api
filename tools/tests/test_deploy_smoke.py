@@ -40,10 +40,14 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
         self._record()
         redirect_to = getattr(self.server, "redirect_to", None)
         if redirect_to is not None:
+            # a body that is not JSON, as a front proxy's own 3xx carries
+            body = b"<html>moved</html>"
             self.send_response(302)
             self.send_header("Location", redirect_to)
-            self.send_header("Content-Length", "0")
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
             return
         body = b'{"contract_version": "0.0.0"}'
         self.send_response(200)
@@ -81,9 +85,10 @@ def test_request_follows_no_redirect_and_sends_no_credential_to_the_target(two_s
     status, parsed = ds._request("GET", url, api_key=SENTINEL_KEY)
     # the observation exists: the first server saw the request and its bearer
     assert first.received == [("GET", "/v1/capabilities", f"Bearer {SENTINEL_KEY}")], first.received
-    assert 300 <= status < 400, status
-    assert parsed is None
     assert second.received == [], f"the redirect target received a request: {second.received!r}"
+    assert status == 302, status
+    # the 3xx body (not JSON here) is not interpreted
+    assert parsed is None
 
 
 def test_a_redirect_is_a_stage_failure_that_names_neither_the_key_nor_the_location(two_servers) -> None:
@@ -93,7 +98,7 @@ def test_a_redirect_is_a_stage_failure_that_names_neither_the_key_nor_the_locati
         ds._stage_capabilities(base, SENTINEL_KEY)
     message = str(caught.value)
     assert first.received, "the first server saw no request"
-    assert "302" in message, message
+    assert message == "GET /v1/capabilities -> 302 (expected 200)", message
     assert SENTINEL_KEY not in message and second_url not in message, message
     assert second.received == []
 

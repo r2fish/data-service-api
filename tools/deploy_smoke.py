@@ -91,8 +91,8 @@ class SmokeStageError(RuntimeError):
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Refuses to follow a redirect: contract `versioning.url_composition`
     says a client follows no redirect in answer to a request that carries a
-    credential, and the default opener would send this tool's bearer to the
-    `Location` of a 3xx. With `redirect_request` returning `None` the 3xx
+    credential, at any URL this rule forms, and the default opener would
+    send this tool's bearer to the `Location` of a 3xx. With `redirect_request` returning `None` the 3xx
     surfaces as an `HTTPError` carrying its own status, and nothing is sent
     to the `Location`. `_request` reports such a 3xx as its own status with
     its body uninterpreted; the stage that asked treats any status but 200

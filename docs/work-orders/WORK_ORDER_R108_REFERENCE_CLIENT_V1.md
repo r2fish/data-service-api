@@ -491,6 +491,17 @@ key の位置は M-6。`SJ` と両 peer の packaged 写し (`R/contract/data-se
 5. (A-4 / B-5、直す = WP-5) `spec/CCR_DISPOSITION.md` の 19 の段が引く §5.5 の表 1 は、監督が WP-5 で訂正註 1 の 4 の実測から埋める。
 6. (A-5、直す = 差し戻し 1 の 4。本項目の範囲に足す) `tools/deploy_smoke.py` の `_request` が credential を付けたまま redirect を追う。契約 1.14.0 の `versioning.url_composition` の client の規則に本 repo の道具が反するので、同じ変更セットで redirect を追わない形に直し、`tools/tests/test_deploy_smoke.py` (新規) と変異 1 件で固定する。WP-1 の触ってよいパスに `tools/deploy_smoke.py`・`tools/tests/test_deploy_smoke.py` を足す。§4 の「`tools/` には触れないので `tools/tests` は回さない」は成り立たなくなる: 統合時に `finalize.py --tools-tests` を回す。
 
+**訂正註 3 (2026-10-01、WP-1 の差し戻し 1 の再確認レビュー = 1 起動。監督裁定)**
+
+ゲートを止める指摘は無い。低 4 件はすべて同じ変更セットで監督が直した (`tools/deploy_smoke.py`・`tools/tests/test_deploy_smoke.py`):
+
+1. (3xx の本文を読まない分岐が未固定。レビューの変異 RV-1 が緑で生き残った) test の 302 に JSON でない本文 (`text/html`) を持たせ、`_request` が `(302, None)` を返すことと、stage の失敗文が「GET /v1/capabilities -> 302 (expected 200)」に等しいことを assert する。RV-1 は赤になった。
+2. (sentinel の api_key が失敗文に出ない完了条件に変異が無い) レビューの RV-2 を変異表に加えた (赤)。
+3. (`_NoRedirect` の docstring の契約の写しから「, at any URL this rule forms」が落ちていた) 逐語に戻した。
+4. (R1-4 の赤が status の assert で止まり、漏洩が観測されていなかった) 転送先の server が要求を受けていない assert を status の assert の前に移した。R1-4 の赤は「the redirect target received a request」で、bearer 付きの要求が観測される。
+
+実測 (監督、2026-10-01): `pt: 3 passed in 2.02s` (`tools/tests/test_deploy_smoke.py`)。変異 `R1-4` / `RV-1` / `RV-2` はいずれも `expect=red got=red`、`mutate: 3 mutations, 3 as expected, restores verified 1/1 files (sha256 x2)`。
+
 ## 付録 — 確定文の抜き出し script
 
 確定文は、設計 §9.1 の表の「新しい文 (英文、確定案)」の列の 12 セルと、#12 の行の obligations の列の entry を、`<V-1>` → `1.13.0`、`<V>` → `1.14.0`、`<N>` → `19` の 3 つの置換だけで写したものである。手で打ち直さない。script は監督の scratchpad の `r108-fixed-text/extract.py` に置いた (起草時に実行済み)。scratchpad は次のチャットから読めないので、全文を下に載せる。再生成: worktree を cwd にして `python3 "$SP/r108-fixed-text/extract.py" . "$SP/r108-fixed-text"` (script を `$SP/r108-fixed-text/extract.py` に保存してから)。
