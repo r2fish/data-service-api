@@ -607,6 +607,12 @@ run 1 の全行 (p50 と p95 は ms、基準 / 実装後 (差)。`backend_calls`
 5. (§0 の基点) 本書は基点を `1e8f7fb` と書くが、WP-1 の commit `a77131d` の親は `b656dbf` (`1e8f7fb` + `tools/` の 3 ファイル = `tools/check_comment_provenance.py` の Known gaps 8 番) である。本項目の対象と重ならない。merge 候補は local main `9be46b7` (CI の起動条件の変更) を取り込んだ `2e51997`。
 6. (§4 の `tools/tests`) 訂正註 2 の 6 のとおり `tools/` に触れたので、merge は `finalize.py --tools-tests` で行う。
 
+**訂正註 8 (2026-10-01、最終候補の完了ゲートと merge。監督)**
+
+1. 記録の commit (`9f5ede9`: §5 の記入、訂正註 7、`COLLECTION_FLOOR` 4927 → 5014、台帳と引き継ぎ書の記入) を足した最終候補での完了ゲート: `gate: 5014 passed, 2 subtests passed in 634.75s (0:10:34)`、judge=PASS、pg_database/pg_roles diff 0 (label r108-final、2026-10-01 21:48、最終候補 `9f5ede9` = merge 候補 `2e51997` + 記録の commit)。merge 候補 `2e51997` の上の集計行 (§5.2) と同じ 5014 passed である。
+2. local main への merge は、本註と引き継ぎ書の追記だけを足した commit を `tools/dev/finalize.py --tools-tests` で `--no-ff` に merge する (本註の後の差分は `docs/work-orders/` の 2 ファイルだけで、root suite が読むファイルに触れない)。main の merge commit は `git log --first-parent main` の「Merge r108」の行で読む。push は停止中。
+3. 依頼者確認 (訂正註 7 の 4) の結果は、merge の後に次の訂正註と引き継ぎ書の追記に逐語で記録する。
+
 ## 付録 — 確定文の抜き出し script
 
 確定文は、設計 §9.1 の表の「新しい文 (英文、確定案)」の列の 12 セルと、#12 の行の obligations の列の entry を、`<V-1>` → `1.13.0`、`<V>` → `1.14.0`、`<N>` → `19` の 3 つの置換だけで写したものである。手で打ち直さない。script は監督の scratchpad の `r108-fixed-text/extract.py` に置いた (起草時に実行済み)。scratchpad は次のチャットから読めないので、全文を下に載せる。再生成: worktree を cwd にして `python3 "$SP/r108-fixed-text/extract.py" . "$SP/r108-fixed-text"` (script を `$SP/r108-fixed-text/extract.py` に保存してから)。

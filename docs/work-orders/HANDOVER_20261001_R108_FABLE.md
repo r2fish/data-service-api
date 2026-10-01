@@ -71,7 +71,13 @@
 - 作業指示書が参照する条件 ID は、`conformance-tests/CONDITIONS.md` に declared の行を先に開かないと doc 参照検査が赤になる (M-5)。declared の行が未作成の test file を名指すと `conformance-tests/test_conditions_register.py` が赤になる (訂正註 1 の 2)。
 - 別セッション経由で届いた依頼者裁定 (CI の起動条件) は、このセッションで依頼者に確認してから main に入れた。
 
-## 6. 裁定
+## 6. 追記 — 2026-10-01 最終候補の完了ゲートと merge
+
+- 最終候補の完了ゲート: `gate: 5014 passed, 2 subtests passed in 634.75s (0:10:34)`、judge=PASS、pg_database/pg_roles diff 0 (label r108-final、2026-10-01 21:48、最終候補 `9f5ede9` = merge 候補 `2e51997` + 記録の commit)。merge 候補 `2e51997` の上の集計行と同じ 5014 passed。
+- local main への merge: 本追記と作業指示書 訂正註 8 を足した commit を `tools/dev/finalize.py --tools-tests` で `--no-ff` に merge する。main の merge commit は `git log --first-parent main` の「Merge r108」の行で読む。push は停止中 (push の入口は Mitate 側の監督セッションが統制する)。
+- 依頼者確認 (§4 の A〜E) は merge の後に求め、結果は次の追記に逐語で記録する。
+
+## 7. 裁定
 
 `OC` §1.15 の 77。語は 起票 R-N / 既知の穴 / 観察 / 直した の 4 語。材料はレビュー報告 11 通 (WP-1〜WP-4 の観点 A / B と WP-1〜WP-3 の再確認)、差し戻し 5 通、作業指示書の訂正註 1〜6。表の順は時系列。
 
