@@ -1826,15 +1826,18 @@ class ConformanceAdapter(ABC):
             concurrency across a real socket or a reverse proxy. Genuine
             wire-level concurrency is out of this primitive's scope until
             L7-2 (a future phase's own multi-plug/real-transport work).
-        (ii) `MitateDB-api` holds at most one in-flight operation PER CELL
-             at a time (`ApplicationCell._lock`) -- this primitive's own
-             stop point sits BEFORE that lock is acquired (concurrency-
+        (ii) The in-process `MitateDB-api` plug runs at most one
+             operation PER CELL at a time (its `SQLiteBackend` holds one
+             `RLock` for each request scope) -- this primitive's own stop
+             point sits BEFORE that lock is acquired (concurrency-
              counter-side, not lock-side), so holding N > 1 in-flight
              requests against ONE cell is still structurally possible
              (the held requests simply queue behind the lock once
-             released), but the `concurrency` bound this peer declares is
+             released), but the `concurrency` bound that plug declares is
              therefore a REFUSAL THRESHOLD, not a claim of N-way parallel
-             EXECUTION capacity.
+             EXECUTION capacity. `MitateDB-api-http` holds no such lock:
+             a cell's operations run in parallel on its per-role
+             connection pools.
         (iii) The scope of the counter this primitive holds open (a
               per-deployment in-flight counter; a per-credential rate
               window) is not something the common suite can observe

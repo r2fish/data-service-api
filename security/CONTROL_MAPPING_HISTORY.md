@@ -349,6 +349,10 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
+*R-102 (2026-10-01, Version 3.14): the SI-08 MitateDB-api claims that `ApplicationCell._lock` serializes a cell's requests, that `_idempotency_pg_scope` serializes across processes, that the 8 catalog reads each open their own transaction at the constructed timeout, and that `PostgresBackend` pools nothing were replaced by the claims on per-role pools, the request scope and transaction-scoped advisory locks (the old text is in git).*
+
+---
+
 ## SI-09
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -513,6 +517,12 @@ WP-5/Q1-D11 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7): `delete` impl
 
 ---
 
+*MitateDB-api -- platform upgrade Status claim, section 10's subjects accepted at 10.6 = 7, 10.7 = 7 and 10.10 = 11, superseded 2026-10-01 (Version 3.14, R-102 -- section 10.10 moved to version 12, which section 10.8 records as not accepted, so Gate-0 is not ready), verbatim:*
+
+- **Section 10.8 names 10.6 / 10.7 / 10.10 accepted at versions 7 / 7 / 11** (requester 2026-10-01; review: `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` section 11 note 14), so Gate-0 readiness rests on the 10 items alone -- `MitateDB-api/docs/cloud-run-cloud-sql.md:3049-3051`.
+
+---
+
 ## SI-10
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**
@@ -554,6 +564,10 @@ Rollback on a pass-2 failure is now unconditional regardless of exception type (
 
 - rollback/fault tests;
 
+
+---
+
+*R-102 (2026-10-01, Version 3.14): the SI-11 MitateDB-api Status claim that pass 1 runs outside `self._lock` was replaced by the narrower window a schema change made outside the API leaves between the two passes (the old text is in git).*
 
 ---
 

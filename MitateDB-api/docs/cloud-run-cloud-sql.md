@@ -537,7 +537,7 @@ max_connections >= real simultaneous connections this deployment can produce at 
                     + superuser_reserved_connections (default 3)
 ```
 
-"real simultaneous connections this deployment can produce at once" is declared `concurrency` x role count (runtime + developer) x applications served by this process, plus `2 x platform_pool_size` for the two platform-plane pools, plus however many interactive/diagnostic `psql` sessions an operator expects to hold open at once. Summing the CONNECTION LIMIT table instead is a conservative, easy-to-compute stand-in for that real figure for an operator who has not derived it -- not a PostgreSQL requirement in its own right. Re-check the real figure against `SHOW max_connections;` before applying a migration to an instance already close to its own configured ceiling.
+"real simultaneous connections this deployment can produce at once" is, per data process, `role_pool_size` (`MITATEDB_THREAD_LIMIT` + 2) x role count (runtime + developer) x applications served by that process (each application has one pool per role, which opens its connections on first use and closes those idle for more than 300 s on the process's next acquire), plus `2 x platform_pool_size` for the two platform-plane pools, plus however many interactive/diagnostic `psql` sessions an operator expects to hold open at once. Summing the CONNECTION LIMIT table instead is a conservative, easy-to-compute stand-in for that real figure for an operator who has not derived it -- not a PostgreSQL requirement in its own right. Re-check the real figure against `SHOW max_connections;` before applying a migration to an instance already close to its own configured ceiling.
 
 `python -m mitatedb_api.ops verify-declarations` now also checks this
 (new check `F-16`): each role's own `pg_roles.rolconnlimit` is `-1` or at
@@ -1718,9 +1718,11 @@ so in-flight requests may reach up to twice the declared `concurrency`.
 has more requests using the database at once than its thread limit
 (`MITATEDB_THREAD_LIMIT`, default 4), so every pool of one worker is sized
 `p = MITATEDB_THREAD_LIMIT + 2` (`role_pool_size`; `p = 6` by default).
-Each worker also holds one persistent connection per served application
-for each of its runtime and developer roles, so `W` workers hold `W` such
-connections per role. The declared `concurrency` is not part of the
+Each worker also holds, per served application, one pool per role
+(runtime, developer) of up to `p` connections, opened on first use; the
+worker's next acquire closes any connection idle for more than 300 s. So
+`W` workers hold up to `p × W` connections per application role, and up
+to `2 × p × W` per served application. The declared `concurrency` is not part of the
 budget -- a slot holds a file lock, not a connection. With
 `W = process_ceilings.data` (equal to `MITATEDB_WORKERS`) and
 `C = process_ceilings.control` (1):
@@ -1728,7 +1730,7 @@ budget -- a slot holds a file lock, not a connection. With
 | Role | F-16 floor (startup and `verify-declarations`) | At `p = 6` | Limit `0014` sets | Largest count that fits |
 | --- | --- | --- | --- | --- |
 | `mitatedbsvc_api` | `2 × p × W` | `12 × W` | 132 | `W` ≤ 11 |
-| each `<app>_rt` / `<app>_dv` | `p × W` (the persistent connections are `W`; the floor keeps the pool formula) | `6 × W` | 68 | `W` ≤ 11 |
+| each `<app>_rt` / `<app>_dv` | `p × W` (each worker's pool for that role holds up to `p`) | `6 × W` | 68 | `W` ≤ 11 |
 | `mitatedbsvc_controlplane` | `16 × C` | `16 × C` | 36 | `C` ≤ 2 |
 | `mitatedbsvc_auditreader` | `4 × C` | `4 × C` | 12 | `C` ≤ 3 |
 
@@ -3048,6 +3050,12 @@ version counts as no record at all.**
 |---|---|---|---|---|---|---|
 | §10.6 compatibility | 7 | accepted | 7 | `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 correction note 14 (independent review of version 7; version 6 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | 2026-10-01 | Fable (supervisor), on the requester's ruling of 2026-10-01 |
 | §10.7 lock / stop time / `lock_timeout` | 7 | accepted | 7 | `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 correction note 14 (independent review of version 7; version 6 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | 2026-10-01 | Fable (supervisor), on the requester's ruling of 2026-10-01 |
+| §10.10 upgrade procedure (stages 2-4) | 12 | not accepted | 11 | `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 correction note 14 (independent review of version 11; version 10 in `docs/work-orders/WORK_ORDER_R116_STARTUP_CHECK_TOOL_V1.md` §6.1, versions 6-9 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | -- | -- |
+
+History (2026-10-01, R-102: section 10.10 version 12 counts a Data process's application connections from its role pools; the record it replaces, verbatim):
+
+| Subject | Current version | Conclusion | Version reviewed | Where the review is recorded | Date accepted | Recorded by |
+|---|---|---|---|---|---|---|
 | §10.10 upgrade procedure (stages 2-4) | 11 | accepted | 11 | `docs/work-orders/WORK_ORDER_R115_AUDIT_PROCESS_LOSS_V1.md` §11 correction note 14 (independent review of version 11; version 10 in `docs/work-orders/WORK_ORDER_R116_STARTUP_CHECK_TOOL_V1.md` §6.1, versions 6-9 in `docs/work-orders/WORK_ORDER_R113_MULTI_PROCESS_WORKER_V1.md` §6.3) | 2026-10-01 | Fable (supervisor), on the requester's ruling of 2026-10-01 |
 
 History (2026-10-01, R-115: `0017` raised the three subjects to 7 / 7 / 11; the records they replace, verbatim):
@@ -3135,7 +3143,7 @@ acceptance records: §10.6 version <n> <accepted|not accepted>, §10.7 version <
 
 ### 10.10 Platform upgrade procedure (stages 2-4)
 
-Procedure version: **11** (2026-10-01: adds steps 7b and 7c for `0017`; step 15 runs `verify-declarations` over the api role's DSN. Version 10, 2026-09-30, described here by its final state,
+Procedure version: **12** (2026-10-01: item (8)'s condition 2 counts a Data process's connections per registered application from one pool per role of up to `role_pool_size`, in place of one persistent connection per role. Version 11, 2026-10-01: adds steps 7b and 7c for `0017`; step 15 runs `verify-declarations` over the api role's DSN. Version 10, 2026-09-30, described here by its final state,
 not as a diff from version 9). Before step 6 declares `process_ceilings`,
 it runs `startup-checks` against the values it is about to declare, and
 the tool judges two startup checks: F-18's own connection-headroom bound
@@ -3242,7 +3250,7 @@ the version goes up by one and §10.8's acceptance record goes back to
                                         role, even if registered-only
                                         applications exist), else the
                                         LARGER of that per-role demand and
-                                        2 x K x (O + N)
+                                        2 x K x (O + N x role_pool_size(thread_limit))
                                         (K = the number of registered
                                         applications with a role)
   total demand                       = api + controlplane + auditreader
@@ -3253,6 +3261,9 @@ the version goes up by one and §10.8's acceptance record goes back to
   (`O` = the worst-case OLD-basis Data process count, `N` = the worst-case
   NEW-basis Data process count, `role_pool_size(thread_limit) = thread_limit
   + 2` -- design docs/design/MITATEDB_INVENTORY_DEMAND_BASIS_V0_1.md D-2.)
+  `ops inventory` item (8) (`MitateDB-api/src/mitatedb_api/ops.py`) still
+  computes the application term as `2 x K x (O + N)`, so its condition 2
+  can come out lower than the one written here.
   The factor `2` in the api demand is the number of
   connection stores that role carries per process, on either basis; the
   `16` and the `4` are fixed floors that do not depend on either basis
@@ -3291,18 +3302,19 @@ the version goes up by one and §10.8's acceptance record goes back to
   each application's
   runtime / developer        68   32 + 6x5 = 62                 62 <=  68 ok
 
-  total demand   = 98 + 18x5 + 20 = 208   (98 + 18W + 20C is the general
-                                            form at C = 1 control process;
-                                            condition 2 compares 208 + the
-                                            reserve against max_connections)
+  application term = LARGER of 62 and 2 x K x (1 + 6x5) = 62K
+  total demand   = 124 + 16 + 4 + 62K + 2 = 146 + 62K   (208 at K = 1;
+                   66 + 12W + 20C + the application term is the general
+                   form at O = 1; condition 2 compares the total + the
+                   reserve against max_connections)
   ```
 
-  **This `208` holds while the number of registered applications with a
-  role (K) is 1 through 5.** The application term inside it is the LARGER
-  of the per-role floor (`62` at `W = 5`) and `2 x K x (O + N)` (`12K` at
-  `O + N = 6`); `12K` stays at or below `62` only through `K = 5`
-  (`12 x 6 = 72` exceeds it), so at `K = 6` or more the application term is
-  `12K` instead of `62` and the total is correspondingly larger.
+  **This `208` holds only while the number of registered applications with
+  a role (K) is 1.** The application term inside it is the LARGER of the
+  per-role floor (`62` at `W = 5`) and `2 x K x (O + N x 6)` (`62K` at
+  `O = 1`, `N = 5`); `62K` equals `62` at `K = 1` and exceeds it from
+  `K = 2` (`124`, total `270`), so the total grows by `62` for every
+  further registered application with a role.
 
   **At `W = 6` the api role's own condition 1 fails**: the api demand is
   `2x32 + 2x6x6 = 136`, above 132, so the answer is
@@ -3328,13 +3340,18 @@ the version goes up by one and §10.8's acceptance record goes back to
   demands, the reserve and `max_connections` -- none of which a
   `CONNECTION LIMIT` change touches -- so that sum is the same before and
   after step 7. **The application term in that sum is the LARGER of the
-  per-role demand above and `2 x K x (O + N)`** (K = the number of
-  registered applications with a role): each of the
-  K applications holds a persistent connection on each of its own two
-  roles per Data process at once, so a once-per-process count alone would
-  undercount once `K` reaches 4 at the default thread limit. Read the sum
-  for what it is: the number this procedure compares, never smaller than
-  the real worst-case persistent-connection count. When it is condition 2
+  per-role demand above and `2 x K x (O + N x role_pool_size(thread_limit))`**
+  (K = the number of registered applications with a role): on a NEW-basis
+  Data process each of the K applications holds one pool on each of its
+  own two roles, each of up to `role_pool_size(thread_limit)` connections
+  opened on first use, so that process's worst case is `2 x
+  role_pool_size(thread_limit) x K` (the process's next acquire closes
+  connections idle for more than 300 s, so in normal operation the count
+  comes back down); an OLD-basis process is counted, as before, at one
+  connection per role. F-18's own lower bound counts only ONE
+  application's pair, `2 x role_pool_size(thread_limit)` per Data process
+  (§6.5), so a once-per-process count alone would undercount. Read the sum for what it is: the number this procedure compares, never
+  smaller than the real worst-case connection count. When it is condition 2
   that fails, the lever is the Cloud SQL instance's own `max_connections`
   flag (§3.2b names it) rather than any migration -- what value it should
   carry is not settled here.
