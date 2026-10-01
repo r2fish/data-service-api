@@ -533,6 +533,8 @@ branch `r102` (基点 main `ddf9c73`、WP ごとの WIP commit 24 + 並行 workt
 
 ### 5.2 完了ゲート
 
+監督、候補 `4d7181a` (main `ddf9c73` + branch `r102` `22fc73a`、`--no-ff`) の上で単独実行: `gate: 4927 passed, 2 subtests passed in 464.40s (0:07:44)`、judge=PASS、pg_database/pg_roles diff 0 (label r102、2026-10-01 16:27、merge 候補 `4d7181a` = main `ddf9c73` + branch `r102` `22fc73a`)。`COLLECTION_FLOOR` 4855 → 4927。`tools/tests` は候補の上で別に実行 (§5.4)。branch の先頭では `MitateDB-api/tests/test_ops_startup_checks.py::test_every_first_parent_fingerprint_is_in_the_table` だけが赤 (first-parent の履歴に branch の途中の commit が入るため。訂正註 4 / R-115 の先例)。
+
 ### 5.3 計測 D-R102
 
 監督、2026-10-01。木: 基準値 = 分岐点の main `ddf9c73` (worktree `r102-base`)、実装後 = `r102` の `3a03608` (製品コードは `0d8ffd0` で確定。`3a03608` は指紋の行のみ)。前後を同じ日に交互に取った (round 2)。各 run の開始時の 1 分 load average は 1.69〜2.50 (すべて 3.0 以下)。他の pytest と nginx は無し。出力は scratchpad の `perf-r102-<before|after>-<k4|k1|rs-…>-run<N>.txt` (K=4 と K=1 は 2 run、real-server は 1 run)。**round 1** (12:38〜12:48、実装後 = `eb97a06`) は K=1 で MitateDB-http の p50 が +176〜226% の退行を示し (訂正註 6: ROLLBACK による prepared statement の破棄)、M-19 の直しの後に全段を取り直した (round 1 の K=4 の判定値も 0/4856 = 0.0% で同じ)。

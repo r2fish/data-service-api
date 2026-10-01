@@ -5,7 +5,7 @@
 ## 1. 現在地
 
 - R-119 は閉止 (local main `ddf9c73`、完了ゲート 4855、台帳 v1.145)。
-- R-102 は閉止: local main 〈merge sha〉 (merge 候補の上の完了ゲート 〈集計行〉)。契約は 1.13.0 のまま (`spec/` 不変)、`CM` 3.14、共通条件 C-34 (port v1.20)、台帳 v1.146、設計 v0.6、R-120 を起票。push は停止中。
+- R-102 は閉止: local main (merge 候補 `4d7181a` = main `ddf9c73` + branch `r102` を `--no-ff` で merge した候補の上の完了ゲート `gate: 4927 passed, 2 subtests passed in 464.40s (0:07:44)`、judge=PASS、pg_database/pg_roles diff 0 (label r102、2026-10-01 16:27、merge 候補 `4d7181a` = main `ddf9c73` + branch `r102` `22fc73a`)。最終の merge は記録の commit を足した候補で再実行した完了ゲートの後に 1 回)。契約は 1.13.0 のまま (`spec/` 不変)、`CM` 3.14、共通条件 C-34 (port v1.20)、台帳 v1.146、設計 v0.6、R-120 を起票。push は停止中。
 - 記録の置き場: 本書を commit する変更セットで、最新 2 通から外れる `docs/work-orders/HANDOVER_20260930_R46_FABLE.md` を `docs/archive/` 配下へ移す (`OC` §1.16 の 78)。
 
 ## 2. 本チャットで閉じたもの
@@ -22,17 +22,17 @@
 | WP-5 | `32eefb0` → `4a37988` → `5e0cb08` → `eb97a06` | 計測器: role ごとの pool 行と schema lock 行、adapter の `pool_stats` / `prepared_stats`、`--roundtrip` の matcher を pool の形に | A 4・B 7、再確認は WP-4 と合同 | 9 (V72〜V77・V78a〜V78c) + 再確認の RR-MI1 (監督) |
 | WP-6 | `a2f9735` → `3d2656e` → `10f7833` | r2db の `apply_schema` に application 単位の schema lock。順序は per-key → lookup → 3a → 件数 lock (M-17、§4 の A) | A 3 + 観察 1・B 2、再確認 2 | 16 (15 + 監督の RC1) |
 | WP-7 | `400f527` → `0cd6fa0`、ops の式 `6116807` | `CM` 3.14、`COND` C-05 / C-27 / C-34 と履歴、port 設計 1.20 §30、設計 v0.6 の註、runbook §6.5 と §10.10 版 12、台帳 v1.146。ops inventory item (8) を pool の式に (訂正註 5) | A 5・B 9、再確認 5 + 観察 2 | V-ops-1・V-ops-2 (log mutate の log (12:36:44))、RB-wp7-1 (監督、`1 failed in 0.50s` 赤、log mutate の log (12:50:49)) |
-| 最終一括 | 〈sha〉 | 再確認 WP-7 の直し 7 項目 (34b の入力、SI-01 Evidence、main.py / pool.py の語、r87 の test 名、C-34 Status の RB-wp7-1、`CM` の行参照、PERF README の `backend_calls`) | 〈最終一括の結果〉 | V-ops-3 |
+| 最終一括 | `d4bb075` (+ 指紋の行 `3a03608`、§5.1 / §5.3 `22fc73a`) | 再確認 WP-7 の直し 7 項目 (34b の入力、SI-01 Evidence、main.py / pool.py の語、r87 の test 名、C-34 Status の RB-wp7-1、`CM` の行参照、PERF README の `backend_calls`) | 〈最終一括の結果〉 | V-ops-3 |
 | 完了条件 85 | — | `_ISOMORPHIC_TARGETS` の集合 (205 行) は不変: `c29eb61` で `pt: 8 passed, 134 deselected in 4.77s` (log pt の log (12:30:23)) | — | 監査照合 |
 | 計測 D-R102 | — | round 1 (参考値): K=4 の判定値は before 37.3% / after 0.0% (2 run とも)。K=1 で MitateDB-http の p50 が +176〜226% の退行 → M-19 で直し全段を取り直した。round 2: 〈表 A / B / C〉 | — | — |
-| 完了ゲート | 〈候補 sha〉 | 〈集計行〉、`COLLECTION_FLOOR` 〈〉 | — | — |
+| 完了ゲート | 候補 `4d7181a` | `gate: 4927 passed, 2 subtests passed in 464.40s (0:07:44)`、judge=PASS、pg_database/pg_roles diff 0 (label r102、2026-10-01 16:27、merge 候補 `4d7181a` = main `ddf9c73` + branch `r102` `22fc73a`)、`COLLECTION_FLOOR` 4855 → 4927 | — | — |
 | 受け入れ監査 | — | 〈監査の結果〉 | — | — |
 
 ## 3. 次の一手
 
 1. 依頼者の確認 (§4)。確認の後に §4 の運用の残り: runbook §10.8 の版 12 の受理、M-17 の両 peer の揃え方、M-18 の問い、R-120 の着手判断。
 2. R-108 (参照クライアント) は着手可能。R-101 は開いたまま (閾値 2 は real-server の 8 倍で、R-113 の値のまま)。
-3. 性能: D-R102 の判定値 〈〉。`RM` §0.1.4 の 3 の充足 〈〉。
+3. 性能: D-R102 の判定値 = round 2 の 2 run とも 0 / 4856 = 0.0% (基準値 1319 / 3537 = 37.3%)。`RM` §0.1.4 の 3 (Q-2 の読み替え後) は充足。K=1 は全 plug が閾値の内側 (MitateDB-http は −10〜−17%)。K=32 / K=1 の real-server 比は前後で不変 (N=4 で 10.5〜11.0 倍、§0.1.4 の 2 は R-101 の範囲)。
 
 ## 4. 依頼者判断待ち・未決
 

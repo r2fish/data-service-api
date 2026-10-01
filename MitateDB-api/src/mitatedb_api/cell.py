@@ -561,7 +561,6 @@ class ApplicationCell:
         # see `main.py`/`service.py`/both conformance adapters, which all
         # construct exactly one holder and pass it to every cell they
         # build).
-        # history: CH-0547
         self.__limit_holder = limit_holder if limit_holder is not None else _LimitStateHolder()
         # Phase 10 WP-6b (design D-5 (ii)): the deployer's OWN declared
         # `process_ceilings.data` (default 1 -- every pre-existing direct
