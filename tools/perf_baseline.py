@@ -407,20 +407,26 @@ def _resolve_app_db_and_matcher(cell: Any, app_id: str) -> "tuple[str | None, Ca
       (`SharedPoolManager.prepared_stats`) -- the matcher is a `<app_id>/`
       prefix check, since a pool's own idle-connection count varies and
       cannot be predicted ahead of a probe.
-    - **MitateDB form**: the resolved backend object's own `_runtime`
-      (`mitatedb_api.backend_postgres.PostgresBackend`) has a public
-      `.info.dbname` (psycopg's own public `ConnectionInfo`, never a
-      private psycopg attribute -- WO §1.1 (e)). Unlike r2db, MitateDB
-      always holds exactly 2 persistent connections per cell (`_runtime`/
-      `_developer`, `backend_postgres.py`:358) -- their own `.info.
-      backend_pid` (also public, cached client-side, no extra round trip)
-      is read directly to build the exact 2 labels (`runtime@<pid>`/
-      `developer@<pid>`) THIS cell's own backend would produce, so a
-      capability-probe application's own cell (a second, unrelated
+    - **MitateDB form**: the resolved backend object's own two role pools
+      (`mitatedb_api.backend_postgres.PostgresBackend._runtime_pool` /
+      `_developer_pool`, each a `mitatedb_api.pool.BoundedConnectionPool`).
+      The application database name is the `dbname` of the runtime pool's
+      DSN (`_dsn`, parsed with `psycopg.conninfo.conninfo_to_dict`): a pool
+      holds no connection until the first request. Which probed rows belong
+      to THIS application is decided when the matcher is CALLED, not when it
+      is built: a pool's connections come and go (its size grows with
+      concurrency, an idle one is replaced), so the matcher reads, at call
+      time, the `backend_pid` of every connection currently idle in each
+      pool (public `psycopg.ConnectionInfo.backend_pid`, cached client-side,
+      no round trip) and accepts a row whose `label` is `runtime@<pid>` or
+      `developer@<pid>` for one of them. The correction in `_emit_roundtrip_
+      db_rows` calls it right after a probe, which returned every
+      connection it borrowed to its pool, so the connections the probe
+      reached are idle then. A capability-probe application's own cell (a second, unrelated
       application `capability_document()` may have provisioned, WO §1.3
-      (8)'s own "cross_entity が作る 2 つ目の application") never gets
-      counted here even though the adapter's own `prepared_stats()`
-      aggregates every open cell.
+      (8)'s own "cross_entity が作る 2 つ目の application") has its own
+      pools, so its rows never match even though the adapter's own
+      `prepared_stats()` aggregates every open cell.
 
     Returns `(None, <a matcher that always returns False>)` when neither
     form resolves -- never raises (completion condition 12b)."""
@@ -432,17 +438,26 @@ def _resolve_app_db_and_matcher(cell: Any, app_id: str) -> "tuple[str | None, Ca
         prefix = f"{app_id}/"
         return app_db, (lambda stats, _prefix=prefix: stats.get("label", "").startswith(_prefix))
     backend = _resolve_backend_object(cell)
-    runtime_conn = getattr(backend, "_runtime", None)
-    info = getattr(runtime_conn, "info", None) if runtime_conn is not None else None
-    if info is not None:
-        app_db = info.dbname
-        own_labels: set[str] = set()
-        for role_name in ("runtime", "developer"):
-            conn = getattr(backend, f"_{role_name}", None)
-            if conn is not None:
-                own_labels.add(f"{role_name}@{conn.info.backend_pid}")
-        frozen = frozenset(own_labels)
-        return app_db, (lambda stats, _labels=frozen: stats.get("label") in _labels)
+    pools = {role_name: getattr(backend, f"_{role_name}_pool", None) for role_name in ("runtime", "developer")}
+    runtime_dsn = getattr(pools["runtime"], "_dsn", None)
+    if runtime_dsn is not None:
+        from psycopg.conninfo import conninfo_to_dict
+
+        app_db = conninfo_to_dict(runtime_dsn).get("dbname")
+
+        def _own_row(stats: dict, _pools: dict = pools) -> bool:
+            label = stats.get("label")
+            for role_name, pool in _pools.items():
+                idle = getattr(pool, "_idle", None)
+                if idle is None:
+                    continue
+                with idle.mutex:
+                    pids = [conn.info.backend_pid for conn in list(idle.queue)]
+                if label in {f"{role_name}@{pid}" for pid in pids}:
+                    return True
+            return False
+
+        return app_db, _own_row
     return None, (lambda stats: False)
 
 

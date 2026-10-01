@@ -559,3 +559,15 @@ D-R102 判定規則 (計測前に固定。計測後に動かさない):
 2. 完了条件 83 の「lock を取る点が `_load_catalog` (:2106) より前」は、実装 (lookup の後に lock を取り、`_load_catalog` をその後へ動かした) が趣旨 (plan・確認句・`schema_objects` の読みが lock の下) を満たすので、そのとおり読む。
 3. **起票 R-120** (監督): r2db の DML にも 開3 相当 (pass 1 の enum / nullable の検証と書き込みの間に `alter_field` が commit しうる。物理制約が無く registry を Python で検証する) が構造上開いている (WP-6 より前から。レビュー A-2)。設計 K-7 (依頼者裁定 Q-5) が r2db の窓を plan・確認句・`schema_objects` の 3 つに限ったので、本変更セットでは閉じず台帳に起票する (WP-7 で `RM` §8.1 に行を足す)。
 4. WP-6 の完了条件に次を足す: 87a = add_field の `LOCK TABLE … SHARE ROW EXCLUSIVE` の SQL 文字列 pin (変異 RB1)、87b = 3 つの advisory lock 定数の区別の pin (RB2)、87c = dry-run が schema lock の下で catalog と revision を読む (RA1)。製品コメント CH-0069 / CH-0071 の言い換えは `docs/code-history/r2db-api/postgres.md` に §9.3 の形で訂正を追記する。
+
+**訂正註 4 (2026-10-01、監督。WP-4 / WP-5 のコードレビュー 1 巡目の裁定。本文は書き換えない)**
+
+1. (WP-4 レビュー A-1) M-4 の「範囲の入口で 1 回」は、競合した lock の取得 (try 形で取れず block 形で取り直した 3a / 3b、per-key / 件数 lock の待ち) の後・pass 2 / DDL の前に、残り deadline から `SET LOCAL` を 1 回打ち直す形に改める (残りが 0 以下なら `LIMIT_EXCEEDED(execution_ms)`)。競合の無い要求では往復は増えない。M-6 の「上限は execution_ms」はこの打ち直しで成り立つ。完了条件 **52a** (lock を待たされた要求の statement_timeout が残り時間に縮む、変異 V52a = 打ち直しを消す) を WP-4 に足す。
+2. (WP-4 レビュー B-3) 完了条件 65 の後半に **65b** (http adapter の cell の backend の pool の size が `role_pool_size(DEFAULT_THREAD_LIMIT)` = 6、変異 V65b = `pool_size=` を外す) を足す。
+3. (WP-4 レビュー B-5) 新設の `_acquire_advisory` の `except psycopg.Error` は `StorageTransientError` (503) に写す (M-1 の凍結は既存の DML / idempotency の箇所に限る)。完了条件 **56a** (lock 取得中の接続断が 503、変異 = `ValidationError` に戻す)。
+4. (WP-4 レビュー B-8 (a)) 完了条件 68 と §2.4 の「MitateDB の 4 plug」は **3 plug** (in-process / http / socket) と読む。C-34 は 6 adapter (両 peer 3 plug ずつ) で、`RealServerMitateDB` は composition root (C-33 用) であり C-34 の plug ではない。
+5. (WP-4 レビュー B-8 (c)) R-120 の台帳行は WP-4 の WIP commit (ff408fa) で入った (訂正註 3 の 3 の「WP-7 で」を改める)。版数 (v1.146) と版数ログの回転は WP-7 で 1 回。
+6. (WP-4 レビュー A-3、観察) F-12 の refusing cell は範囲の入口で拒否するので、不正な形の要求も (旧の VALIDATION_FAILED ではなく) SERVICE_UNAVAILABLE になる。どちらも拒否であり、F-12 状態の application に限る。M-12 の「意味論は不変」の註として WP-7 の記録に書く。
+7. (WP-4 レビュー A-2) `tools/perf_baseline.py` の `_resolve_app_db_and_matcher` (MitateDB の `backend._runtime` を読む) を WP-5 の対象に足す (pool の形に作り直し、偽物の test と README :495 を合わせる。変異 V78a)。SQLite plug で `request_scope` / `lock_schema` / `lock_entities` が backend call に数えられる点は §3 の表 C の説明に使う。
+8. (WP-4 レビュー A-4) `MitateDB-api/src/mitatedb_api/capabilities_document.py`:432-442 の docstring (session-level lock / `idempotency_unlock`) を WP-4 の触ってよいパスに足し、xact 化に合わせる。
+9. (WP-5 レビュー前の監督裁定) WP-3 の `test_r102_pool.py` の admin DSN reader は raise 形、`tools/tests/test_no_shared_cluster_defaults.py` の pin は 33 → 34 (WP-5 の commit 32eefb0)。`prepared_stats` の旧 docstring は CH-0548 として登録。

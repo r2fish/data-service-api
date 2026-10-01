@@ -31,6 +31,7 @@ import importlib.util
 import itertools
 import json
 import os
+import queue
 import subprocess
 import sys
 import time
@@ -989,36 +990,78 @@ def test_poll_marks_a_timed_out_result_as_stale():
     assert result["app"]["stale"] is True
 
 
+def _fake_role_pool(dbname: str, role: str, pids: "list[int]") -> SimpleNamespace:
+    """The two things `_resolve_app_db_and_matcher` reads off a MitateDB role
+    pool (`mitatedb_api.pool.BoundedConnectionPool`): its DSN and its idle
+    connections (`_idle`, a `queue.LifoQueue`), each connection exposing
+    `.info.backend_pid`."""
+    idle: "queue.LifoQueue" = queue.LifoQueue()
+    for pid in pids:
+        idle.put(SimpleNamespace(info=SimpleNamespace(backend_pid=pid)))
+    return SimpleNamespace(_dsn=f"host=/x port=5432 dbname={dbname} user={role}", _idle=idle)
+
+
 def test_resolve_app_db_and_platform_db_use_the_two_known_forms():
     """WO §2.2 completion condition 12a (WO §1.3 (8)): `db=` resolution
     tries the r2db form (`cell._runtime_dsn`, a DSN string) and the
-    MitateDB form (backend's own `_runtime.info.dbname`) -- both yield an
+    MitateDB form (the backend's two role pools: the runtime pool's DSN
+    names the database, the connections idle in each pool at call time
+    decide which probed rows are this application's) -- both yield an
     application DB name, and `_platform.platform_db` yields the platform
     DB name.
 
-    mutation M12 (`tools/perf_baseline.py`): drop the MitateDB form
-    (`_runtime.info.dbname`) from `_resolve_app_db_and_matcher` -- this
-    test's own `app_db_mitate == "mdb_app1"` assertion goes red (would
-    read `None`)."""
+    mutation V78a (`tools/perf_baseline.py`): read the runtime pool off
+    the backend's former persistent connection (`_runtime`) instead of
+    `_runtime_pool` -- this test's own `app_db_mitate == "mdb_app1"`
+    assertion goes red (would read `None`)."""
     r2db_cell = SimpleNamespace(_runtime_dsn="host=/x port=5432 dbname=perf_app1 user=runtime")
     app_db_r2db, matcher_r2db = pb._resolve_app_db_and_matcher(r2db_cell, "app1")
     assert app_db_r2db == "perf_app1"
     assert matcher_r2db({"label": "app1/runtime@1"}) is True
     assert matcher_r2db({"label": "app2/runtime@1"}) is False
 
-    backend = SimpleNamespace(
-        _runtime=SimpleNamespace(info=SimpleNamespace(dbname="mdb_app1", backend_pid=111)),
-        _developer=SimpleNamespace(info=SimpleNamespace(dbname="mdb_app1", backend_pid=222)),
-    )
+    runtime_pool = _fake_role_pool("mdb_app1", "runtime", [111, 112])
+    developer_pool = _fake_role_pool("mdb_app1", "developer", [222])
+    backend = SimpleNamespace(_runtime_pool=runtime_pool, _developer_pool=developer_pool)
     mitate_cell = SimpleNamespace(_backend=backend)
     app_db_mitate, matcher_mitate = pb._resolve_app_db_and_matcher(mitate_cell, "app1")
     assert app_db_mitate == "mdb_app1"
     assert matcher_mitate({"label": "runtime@111"}) is True
+    assert matcher_mitate({"label": "runtime@112"}) is True
     assert matcher_mitate({"label": "developer@222"}) is True
     assert matcher_mitate({"label": "runtime@999"}) is False
+    # a pid belongs to the role pool that holds it, not to the other one
+    assert matcher_mitate({"label": "developer@111"}) is False
 
     adapter_stub = SimpleNamespace(_platform=SimpleNamespace(platform_db="perf_platform"))
     assert pb._resolve_platform_db(adapter_stub) == "perf_platform"
+
+
+def test_mitatedb_matcher_follows_the_pools_connections_as_they_change():
+    """The matcher is built once per plug but the pools' connections change
+    (a pool grows with concurrency, an idle connection is replaced): a
+    connection that enters a pool after the matcher was built is matched,
+    one that left it is not, and a second application's own pools never
+    match this application's rows."""
+    runtime_pool = _fake_role_pool("mdb_app1", "runtime", [111])
+    developer_pool = _fake_role_pool("mdb_app1", "developer", [222])
+    cell = SimpleNamespace(_backend=SimpleNamespace(_runtime_pool=runtime_pool, _developer_pool=developer_pool))
+    _app_db, matcher = pb._resolve_app_db_and_matcher(cell, "app1")
+    assert matcher({"label": "runtime@333"}) is False
+    runtime_pool._idle.put(SimpleNamespace(info=SimpleNamespace(backend_pid=333)))
+    assert matcher({"label": "runtime@333"}) is True
+    while not runtime_pool._idle.empty():
+        runtime_pool._idle.get()
+    assert matcher({"label": "runtime@111"}) is False
+    assert matcher({"label": "runtime@333"}) is False
+
+    other = SimpleNamespace(_backend=SimpleNamespace(
+        _runtime_pool=_fake_role_pool("cap_probe", "runtime", [555]),
+        _developer_pool=_fake_role_pool("cap_probe", "developer", [666]),
+    ))
+    _other_db, other_matcher = pb._resolve_app_db_and_matcher(other, "cap_probe")
+    assert other_matcher({"label": "runtime@555"}) is True
+    assert matcher({"label": "runtime@555"}) is False
 
 
 def test_resolve_app_db_returns_none_without_exception_for_an_unknown_shape():

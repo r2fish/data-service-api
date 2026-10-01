@@ -504,8 +504,11 @@ activity BETWEEN two ops (credential issuance, `authenticate`, a
 **`db=app`/`db=platform` name resolution.** The application database name
 comes from whichever of two forms a plug's resolved cell/backend has: a
 DSN string (`r2db_api.postgres.PostgresCell._runtime_dsn`, parsed with
-`psycopg.conninfo.conninfo_to_dict`) or a public `psycopg` property
-(`mitatedb_api.backend_postgres.PostgresBackend._runtime.info.dbname`).
+`psycopg.conninfo.conninfo_to_dict`) or the DSN of the backend's runtime
+pool (`mitatedb_api.backend_postgres.PostgresBackend._runtime_pool`,
+a `pool.BoundedConnectionPool`, parsed the same way -- a pool holds no
+connection until its first request, so no connection's own `info.dbname`
+is read).
 The platform database name is both http plugs' own `_platform.
 platform_db`. A plug matching NEITHER form (every non-PostgreSQL plug)
 gets zero `db=` lines for that op -- never an exception.
@@ -516,11 +519,13 @@ as the `PREPARED` section above) -- each such commit raises that
 connection's own database `xact_commit` by 1, a round trip this tool
 itself caused, not the measured op. `db=app`'s own `xacts` subtracts the
 count of POST-probed connections belonging to THIS run's own application
-(r2db-api: `label` starts with `<application_id>/`; MitateDB-api: the
-resolved cell's own exactly-2 persistent connections, identified by
-their own `.info.backend_pid` -- never a DIFFERENT application's own
-cell, such as the one `capability_document()` provisions once to probe
-`cross_entity_mutation` availability). **`db=platform`'s own correction
+(r2db-api: `label` starts with `<application_id>/`; MitateDB-api: a
+`runtime@<pid>`/`developer@<pid>` label whose pid is that of a
+connection idle in one of the resolved cell's own two role pools at the
+moment of the call -- read then, not once at start, because a pool's
+connections change with concurrency; never a DIFFERENT application's own
+cell, whose pools are separate, such as the one `capability_document()`
+provisions once to probe `cross_entity_mutation` availability). **`db=platform`'s own correction
 is always 0** -- neither peer's platform/credential connections are ever
 probed (r2db-api's platform/credential/audit-sink pools are never
 registered with `SharedPoolManager`; MitateDB-api's credential-store
@@ -801,7 +806,12 @@ is ever built for a `--real-server` run.
   - For the two in-process plugs (`r2db-api`'s in-memory cell, `MitateDB-
     api`'s SQLite-backed cell), there is no lower-level "statement" layer
     to count, so it counts calls to the backend/cell object's own public
-    methods instead.
+    methods instead. For `MitateDB-api`'s SQLite-backed cell that count
+    includes `request_scope`, `lock_schema` and `lock_entities` -- the
+    request-scope entry and the two lock calls, no-ops on SQLite
+    (the backend's own lock covers the scope) -- which the PostgreSQL-
+    backed plug has no counterpart for in its `psycopg` statement count
+    (its locks are statements of their own, counted there).
 
   These are **not the same unit**. A `backend_calls` value from a
   PostgreSQL-backed plug is not directly comparable to one from an
