@@ -344,25 +344,25 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # (the schema-lock and entity-lock acquisition) adds one site of the same
     # generic driver-exception translation. Every line below re-verified via
     # `_fail_call_sites`, not hand-shifted. Entry count 18 -> 19.
-    ("backend_postgres.py", 514),   # _acquire_advisory: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 562),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 618),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 666),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 692),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 748),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 805),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 829),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 1006),  # alter_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 1025),  # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1163),  # create_collection: generic driver-exception translation
-    ("backend_postgres.py", 1319),  # add_field: generic driver-exception translation
-    ("backend_postgres.py", 1408),  # insert_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1441),  # update_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1468),  # delete_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1546),  # read: generic driver-exception translation
-    ("backend_postgres.py", 1583),  # delete: generic driver-exception translation
-    ("backend_postgres.py", 1701),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1731),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 557),   # _acquire_advisory: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 617),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 673),   # field_domains: generic driver-exception translation
+    ("backend_postgres.py", 721),   # field_types: generic driver-exception translation
+    ("backend_postgres.py", 747),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 803),   # field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 860),   # field_types_and_constraints: generic driver-exception translation
+    ("backend_postgres.py", 884),   # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1061),  # alter_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1080),  # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1218),  # create_collection: generic driver-exception translation
+    ("backend_postgres.py", 1374),  # add_field: generic driver-exception translation
+    ("backend_postgres.py", 1463),  # insert_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1496),  # update_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1523),  # delete_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1601),  # read: generic driver-exception translation
+    ("backend_postgres.py", 1638),  # delete: generic driver-exception translation
+    ("backend_postgres.py", 1755),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1786),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --

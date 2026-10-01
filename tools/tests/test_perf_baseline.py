@@ -259,12 +259,17 @@ def test_pool_row_format_is_stable_for_a_schema_lock_entry():
 
 
 def test_pool_row_refuses_a_stats_dict_of_a_third_shape():
-    """A dict with neither a role pool's keys nor a schema lock's four is
-    refused with `KeyError`, not printed in the nearest shape."""
+    """A dict with neither a role pool's keys nor exactly a schema lock's
+    four is refused with `KeyError`, not printed in the nearest shape."""
     with pytest.raises(KeyError):
         pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "query", "app1", {"hits": 3})
     with pytest.raises(KeyError):
         pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "query", "app1", {"size": 2, "acquire_count": 1})
+    four = {"acquire_count": 5, "wait_count": 1, "wait_total_ms": 3.0, "wait_max_ms": 3.0}
+    with pytest.raises(KeyError):  # a fifth key: not the schema lock's four
+        pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "query", "app1", {**four, "hits": 3})
+    with pytest.raises(KeyError):  # one of the four missing
+        pb._format_pool_row("MitateDB-api", "MitateDB-api-http", "query", "app1", {k: v for k, v in four.items() if k != "wait_count"})
 
 
 def test_emit_pool_rows_prints_nothing_when_the_plug_has_no_pool_stats():
@@ -1035,6 +1040,37 @@ def test_resolve_app_db_and_platform_db_use_the_two_known_forms():
 
     adapter_stub = SimpleNamespace(_platform=SimpleNamespace(platform_db="perf_platform"))
     assert pb._resolve_platform_db(adapter_stub) == "perf_platform"
+
+
+def test_resolve_app_db_and_matcher_reads_a_real_postgres_backend(monkeypatch):
+    """The two fakes above stand in for the pools; this builds a real
+    `PostgresBackend` (its constructor opens no connection) from synthetic
+    DSNs and checks that the resolver reads what the real class holds: the
+    runtime pool's DSN names the database, and a connection sitting idle in a
+    real `BoundedConnectionPool` makes its `runtime@<pid>` label match.
+
+    mutation V78c (`tools/perf_baseline.py`): read the runtime pool under a
+    different attribute name than the backend's own `_runtime_pool` -- this
+    test's own `app_db == "mdb_real_shape"` assertion goes red (would read
+    `None`)."""
+    repo_root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(repo_root / "MitateDB-api" / "src"))
+    from mitatedb_api.backend_postgres import PostgresBackend
+
+    backend = PostgresBackend(
+        "host=/nonexistent-r102 port=1 dbname=mdb_real_shape user=runtime",
+        "host=/nonexistent-r102 port=1 dbname=mdb_real_shape user=developer",
+    )
+    try:
+        app_db, matcher = pb._resolve_app_db_and_matcher(SimpleNamespace(_backend=backend), "app1")
+        assert app_db == "mdb_real_shape"
+        assert matcher({"label": "runtime@4242"}) is False
+        backend._runtime_pool._idle.put(SimpleNamespace(info=SimpleNamespace(backend_pid=4242)))  # noqa: SLF001
+        assert matcher({"label": "runtime@4242"}) is True
+        assert matcher({"label": "developer@4242"}) is False
+        backend._runtime_pool._idle.get()  # noqa: SLF001 -- no fake connection is left for `close()`
+    finally:
+        backend.close()
 
 
 def test_mitatedb_matcher_follows_the_pools_connections_as_they_change():

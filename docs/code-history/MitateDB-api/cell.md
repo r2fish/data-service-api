@@ -1,4 +1,4 @@
-# src/mitatedb_api/cell.py -- code-comment history (change set 7)
+# src/mitatedb_api/cell.py -- code-comment history
 
 Companion for `src/mitatedb_api/cell.py` per `docs/code-history/README.md`.
 
@@ -49,6 +49,16 @@ Companion for `src/mitatedb_api/cell.py` per `docs/code-history/README.md`.
 # therefore unaffected by this fix (measured: 3 concurrent
 # slot holders, 1 concurrent lock holder, `wp8b_review_slot_
 # probe.py`).
+# Phase 8 WP-1a (design D-1): `None` (every pre-WP-1a caller --
+# this repository's own tests, any direct construction) gets a
+# PRIVATE, unshared holder -- exactly like `audit_router=None`
+# already defaults to a private `AuditRouter()` two lines above --
+# so a lone `ApplicationCell()` still enforces its own 4 classes
+# correctly, just without sharing state with any sibling cell (the
+# composition root is what actually needs the SHARED instance;
+# see `main.py`/`service.py`/both conformance adapters, which all
+# construct exactly one holder and pass it to every cell they
+# build).
 ```
 
 ## CH-0548

@@ -105,7 +105,7 @@ from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
 from .identifiers import validate_identifier
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
-# R-79 (WO §2.1 D-1/D-2): the `pg_prepared_statements` probe
+# The `pg_prepared_statements` probe
 # `prepared_stats` (below) calls -- byte-identical to
 # `r2db_api.psycopg_counting` (a same-named test in `tests/` pins the
 # sha256 match; rework 指摘 3 moved the probe itself there so it is not
@@ -244,6 +244,14 @@ _ENTITY_LOCK_NAMESPACE = 76176101
 # locks; a lock wait is told apart from an immediate acquisition by trying
 # first (`_acquire_advisory`). The entity statements take a whole sorted
 # array of names in one round trip.
+_KEY_LOCK_STATEMENTS = (
+    sql.SQL("SELECT pg_try_advisory_xact_lock(%s, hashtext(%s))"),
+    sql.SQL("SELECT pg_advisory_xact_lock(%s, hashtext(%s))"),
+)
+_COUNT_LOCK_STATEMENTS = (
+    sql.SQL("SELECT pg_try_advisory_xact_lock(%s)"),
+    sql.SQL("SELECT pg_advisory_xact_lock(%s)"),
+)
 _SCHEMA_LOCK_STATEMENTS = (
     sql.SQL("SELECT pg_try_advisory_xact_lock(%s)"),
     sql.SQL("SELECT pg_advisory_xact_lock(%s)"),
@@ -322,7 +330,7 @@ class PostgresBackend:
         # process's own simultaneous-request bound, `config.role_pool_size`).
         self._runtime_pool = BoundedConnectionPool(runtime_dsn, max_size=pool_size)
         self._developer_pool = BoundedConnectionPool(developer_dsn, max_size=pool_size)
-        # R-87: the timeout a scope that has no deadline of its own
+        # The timeout a scope that has no deadline of its own
         # (`request_scope(..., deadline=None)`: an internal read, a direct
         # caller) applies to its connections -- the deployment's declared
         # `execution_ms` (`MITATEDB_MAX_EXECUTION_MS` via `FoundationConfig.
@@ -394,8 +402,9 @@ class PostgresBackend:
 
     def schema_lock_stats(self):
         """A copy of the schema-lock statistics: `acquire_count` (calls to
-        `lock_schema` / `lock_entities`), `wait_count` (those that had to
-        block), `wait_total_ms`, `wait_max_ms`."""
+        `lock_schema` / `lock_entities` that got their locks), `wait_count`
+        (entries into the blocking statement, including those that ended in a
+        timeout or an error), `wait_total_ms`, `wait_max_ms`."""
         with self._schema_lock_stats_lock:
             return dict(self._schema_lock_stats)
 
@@ -404,35 +413,37 @@ class PostgresBackend:
         return {"runtime": self._runtime_pool.stats(), "developer": self._developer_pool.stats()}
 
     def prepared_stats(self):
-        """R-79 (WO §1.2 D-2, completion condition 9): probe one connection
-        of each role pool, labelled `runtime@<pid>`/`developer@<pid>`
-        (`conn.info.backend_pid`, the same public attribute r2db-api's own
-        pool-based `label` uses). The connections are borrowed from their
-        pools for the probe and returned afterwards, so the probe sees
-        whichever connection the pool hands out, and the pid changing shows
-        a re-connect.
+        """Probes every connection that is idle in either role pool,
+        labelled `runtime@<pid>`/`developer@<pid>` (`conn.info.backend_pid`,
+        the same public attribute r2db-api's own pool-based `label` uses): a
+        row per idle connection, the runtime pool's first. The connections
+        are taken out of the pool's idle queue without `acquire()`
+        (`BoundedConnectionPool.map_idle`) and put back afterwards, so the
+        probe does not count as an acquisition and sees the same set of
+        connections on every call; a connection a request has checked out at
+        that moment is not probed.
 
         A probe that raises may leave its connection mid-transaction
         (aborted) -- if the failure happened after the probe's own SELECT
         but before its `commit()` (rework 指摘 5): rolled
         back here so the row reports the connection idle, and so it is
-        never returned aborted (mutation M25 drops this rollback). This
+        never put back aborted (mutation M25 drops this rollback). This
         does lose whatever was prepared on that connection (F2), but a
         connection already stuck aborted from a probe failure is not a
         state worth preserving prepared statements over."""
         rows = []
-        for role_name, pool in (("runtime", self._runtime_pool), ("developer", self._developer_pool)):
-            conn = pool.acquire()
+
+        def probe(role_name, conn):
+            label = f"{role_name}@{conn.info.backend_pid}"
             try:
-                label = f"{role_name}@{conn.info.backend_pid}"
-                try:
-                    rows.append(probe_prepared_statements(conn, label))
-                except Exception as exc:  # noqa: BLE001 -- reported as probed=False/error=<class name> (D-2, WO §6.1 H-4)
-                    if conn.info.transaction_status != TransactionStatus.IDLE:
-                        conn.rollback()
-                    rows.append(prepared_stats_skeleton(conn, label, error=type(exc).__name__))
-            finally:
-                pool.release(conn)
+                return probe_prepared_statements(conn, label)
+            except Exception as exc:  # noqa: BLE001 -- reported as probed=False/error=<class name> (D-2, WO §6.1 H-4)
+                if conn.info.transaction_status != TransactionStatus.IDLE:
+                    conn.rollback()
+                return prepared_stats_skeleton(conn, label, error=type(exc).__name__)
+
+        for role_name, pool in (("runtime", self._runtime_pool), ("developer", self._developer_pool)):
+            rows.extend(pool.map_idle(lambda conn, role_name=role_name: probe(role_name, conn)))
         return rows
 
     # ------------------------------------------------------------------
@@ -490,35 +501,79 @@ class PostgresBackend:
             for pool, conn in reversed(held):
                 pool.release(conn)
 
-    def _acquire_advisory(self, scope, statements, params):
+    def _retime(self, scope):
+        """Sets `statement_timeout` / `lock_timeout` again, from what remains
+        of the request's deadline, on every connection the scope holds. Called
+        after a lock wait: the scope's timeouts were set from the budget the
+        request had when it opened, and the wait has spent some of it, so the
+        statements that follow must not get the full amount again. A wait that
+        used the whole budget ends the request."""
+        if scope.deadline is None:
+            return
+        if scope.deadline - time.monotonic() <= 0:
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        timeout_ms = self._timeout_ms(scope.deadline)
+        seen = set()
+        for conn in (scope.main, scope.developer):
+            if conn is None or id(conn) in seen:
+                continue
+            seen.add(id(conn))
+            try:
+                with conn.cursor() as cur:
+                    self._set_timeouts(cur, timeout_ms)
+            except psycopg.Error as exc:
+                raise StorageTransientError("the storage backend could not be reached") from exc
+
+    def _acquire_advisory(self, scope, statements, params, *, count=True):
         """Takes the advisory locks `statements` name on the scope's main
         connection, for the rest of its transaction: first the non-blocking
-        statement; when it does not get every lock, the blocking one, and
-        the call counts as one wait. A wait ends at the scope's
-        `lock_timeout`."""
+        statement; when it does not get every lock, the blocking one. Entering
+        the blocking statement is one wait (in the schema-lock statistics when
+        `count`), counted with the time it took whether it ends in the lock or
+        in a timeout, a deadlock or a lost connection; an acquisition is
+        counted when it succeeded. After a wait the request's timeouts are set
+        again from the remaining deadline. An uncontended acquisition is one
+        statement. A wait ends at the scope's `lock_timeout`."""
         try_statement, block_statement = statements
         waited_ms = None
+        started = None
         try:
-            with scope.main.cursor() as cur:
-                _execute(cur, try_statement, params)
-                acquired = cur.fetchone()[0]
-                if not acquired:
-                    started = time.monotonic()
-                    _execute(cur, block_statement, params)
-                    waited_ms = (time.monotonic() - started) * 1000.0
-        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
-        except _TRANSIENT_ERRORS as exc:
-            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
-        except psycopg.Error as exc:
-            raise ValidationError("storage backend rejected the request") from exc
-        with self._schema_lock_stats_lock:
-            self._schema_lock_stats["acquire_count"] += 1
+            try:
+                with scope.main.cursor() as cur:
+                    _execute(cur, try_statement, params)
+                    acquired = cur.fetchone()[0]
+                    if not acquired:
+                        waited_ms = 0.0
+                        started = time.monotonic()
+                        _execute(cur, block_statement, params)
+            except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+                raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+            except _TRANSIENT_ERRORS as exc:
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
+            except psycopg.errors.DataError as exc:
+                # The one client-chosen value these statements carry is an
+                # idempotency key; PostgreSQL refusing it as data is a refusal of
+                # the request, as for every other statement that binds a value.
+                raise ValidationError("storage backend rejected the request") from exc
+            except psycopg.Error as exc:
+                # Everything else is the connection or the server, never the
+                # request.
+                raise StorageTransientError("the storage backend could not be reached") from exc
+        finally:
             if waited_ms is not None:
-                self._schema_lock_stats["wait_count"] += 1
-                self._schema_lock_stats["wait_total_ms"] += waited_ms
-                if waited_ms > self._schema_lock_stats["wait_max_ms"]:
-                    self._schema_lock_stats["wait_max_ms"] = waited_ms
+                if started is not None:
+                    waited_ms = (time.monotonic() - started) * 1000.0
+                if count:
+                    with self._schema_lock_stats_lock:
+                        self._schema_lock_stats["wait_count"] += 1
+                        self._schema_lock_stats["wait_total_ms"] += waited_ms
+                        if waited_ms > self._schema_lock_stats["wait_max_ms"]:
+                            self._schema_lock_stats["wait_max_ms"] = waited_ms
+        if count:
+            with self._schema_lock_stats_lock:
+                self._schema_lock_stats["acquire_count"] += 1
+        if waited_ms is not None:
+            self._retime(scope)
 
     def lock_schema(self, *, scope):
         self._acquire_advisory(scope, _SCHEMA_LOCK_STATEMENTS, [_SCHEMA_SERIALIZATION_LOCK_KEY])
@@ -1680,10 +1735,9 @@ class PostgresBackend:
 
         Returns `{"digest": str, "response_json": str}` for `key`, or
         `None` if this Application has no (unexpired) record for it."""
+        self._acquire_advisory(scope, _KEY_LOCK_STATEMENTS, [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key], count=False)
         try:
             with scope.main.cursor() as cur:
-                _execute(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s, hashtext(%s))"),
-                          [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
                 _execute(cur, sql.SQL("DELETE FROM {} WHERE %s - created_at_ms > %s")
                           .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [now_ms, retention_ms])
                 _execute(cur, sql.SQL("SELECT digest, response_json FROM {} WHERE key = %s")
@@ -1718,9 +1772,10 @@ class PostgresBackend:
         INSERT (which needs ROW EXCLUSIVE). An advisory lock has no
         such self-conflict-free class: a second holder of the SAME key
         always waits for the first."""
+        self._acquire_advisory(
+            scope, _COUNT_LOCK_STATEMENTS, [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY], count=False)
         try:
             with scope.main.cursor() as cur:
-                _execute(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
                 _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(_IDEMPOTENCY_TABLE)))
                 (count,) = cur.fetchone()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):

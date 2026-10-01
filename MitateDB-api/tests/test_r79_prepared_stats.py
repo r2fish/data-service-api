@@ -207,10 +207,69 @@ def test_postgres_backend_prepared_stats_labels_runtime_and_developer_by_pid():
         backend.close()
 
 
+def test_postgres_backend_prepared_stats_probes_every_idle_connection_without_acquiring():
+    """Every connection idle in a role pool is probed, one row each (runtime
+    pool's first), the same set on every call, and the probe is not an
+    acquisition: the pools' `acquire_count` does not move.
+
+    mutation V77b (`mitatedb_api/backend_postgres.py`): borrow one connection
+    per pool with `acquire()` instead -- two connections are idle per role,
+    one row per role is returned, and the row-count assertion goes red."""
+    backend = PostgresBackend(_admin_dsn(), _admin_dsn())
+    try:
+        for pool in (backend._runtime_pool, backend._developer_pool):
+            first, second = pool.acquire(), pool.acquire()
+            pool.release(first)
+            pool.release(second)
+        acquired_before = [pool.stats()["acquire_count"] for pool in (backend._runtime_pool, backend._developer_pool)]
+        rows = backend.prepared_stats()
+        again = backend.prepared_stats()
+        roles = [row["label"].split("@", 1)[0] for row in rows]
+        assert roles == ["runtime", "runtime", "developer", "developer"]
+        assert len({row["label"] for row in rows}) == 4
+        assert sorted(r["label"] for r in again) == sorted(r["label"] for r in rows)
+        assert [pool.stats()["acquire_count"] for pool in (backend._runtime_pool, backend._developer_pool)] == acquired_before
+    finally:
+        backend.close()
+
+
 # ---------------------------------------------------------------------
 # rework item (B): probe never counts itself as an
 # application execute()
 # ---------------------------------------------------------------------
+
+
+def test_map_idle_puts_every_connection_back_even_when_fn_raises():
+    """`BoundedConnectionPool.map_idle` returns every idle connection to the
+    queue, in its former order, when `fn` raises part-way through -- the
+    pool's idle set and its `_created` count are the same before and after,
+    so a failed probe never shrinks the pool for good.
+
+    mutation (`pool.py`, `map_idle`): drop the `finally` and put the
+    connections back only after `fn` succeeded on all of them -- the raise
+    leaves the idle queue empty and this test goes red."""
+    pool = BoundedConnectionPool("dsn-unused-fake-pool-r102-map-idle.invalid", max_size=3)
+    first, second, third = object(), object(), object()
+    for conn in (first, second, third):
+        pool._idle.put_nowait(conn)  # noqa: SLF001 -- test-only reach-in, same convention as test_r102_pool.py
+    created_before = pool._created  # noqa: SLF001
+
+    def probe(conn):
+        if conn is second:
+            raise RuntimeError("probe failed on the second idle connection")
+        return conn
+
+    with pytest.raises(RuntimeError):
+        pool.map_idle(probe)
+
+    remaining = []
+    while True:
+        try:
+            remaining.append(pool._idle.get_nowait())  # noqa: SLF001
+        except Exception:
+            break
+    assert remaining == [third, second, first], remaining
+    assert pool._created == created_before  # noqa: SLF001
 
 
 def test_probe_does_not_increase_execute_count():
@@ -258,6 +317,8 @@ def test_postgres_backend_prepared_stats_exception_rolls_back_a_non_idle_connect
 
     backend = PostgresBackend(_admin_dsn(), _admin_dsn())
     try:
+        for pool in (backend._runtime_pool, backend._developer_pool):
+            pool.release(pool.acquire())  # one idle connection per role to probe
         monkeypatch.setattr(pc_module, "PREPARED_STATEMENTS_SQL", "SELECT * FROM r79_nonexistent_probe_table_2")
         rows = backend.prepared_stats()
         assert len(rows) == 2

@@ -3083,10 +3083,14 @@ def test_a_schema_operation_waiting_for_the_audit_pool_is_refused_in_bounded_tim
     schema operation holds its transaction and its advisory locks while its
     pre-commit audit row waits for an audit connection: with the pool's only
     connection borrowed elsewhere that wait ends at the pool's own limit
-    (here 0.5 s) as `AuditSinkUnavailable`, and the scope's exit returns the
-    application connection rolled back -- so once the audit connection is
-    back the next schema operation, which needs the same locks, succeeds
-    instead of waiting for a lock the refused one still held."""
+    (here 0.5 s) as `AuditSinkUnavailable`. That refusal comes from inside
+    the backend's DDL method, which rolls its own transaction back, so the
+    next schema operation succeeds whether or not the scope's exit releases
+    the connection. The scope's exit is the only thing that releases the
+    locks of a refusal that comes after they are taken and before any DDL --
+    here a stale plan token -- and the last step checks exactly that: the
+    next schema operation, which needs the same locks, succeeds instead of
+    waiting for a lock the refused one still held."""
     clean_application_audit(platform)
     pool = BoundedConnectionPool(platform.api_dsn, max_size=1, acquire_timeout=0.5)
     sink = PostgresApplicationAuditSink(platform.api_dsn, schema=platform.schema, pool=pool)

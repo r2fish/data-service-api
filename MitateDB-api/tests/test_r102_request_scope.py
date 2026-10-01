@@ -278,10 +278,10 @@ def test_a_write_waiting_for_an_entity_lock_is_cut_by_the_deadline(app_a, monkey
     _dev_b, rt_b = _sessions(cell_b, app_a)
     try:
         b = _Run(lambda: rt_b.insert("ea", {"title": "x"}))
-        if not b.done.wait(4.0):
-            stall.release.set()  # safety: never hang the suite
+        cut_while_a_stopped = b.done.wait(2.5)  # the 300 ms budget, not A's release, ends the wait
         stall.release.set()
         a.finish()
+        assert cut_while_a_stopped, "the write kept waiting for the entity lock past its budget"
         with pytest.raises(ResourceLimitError) as excinfo:
             b.finish()
         assert excinfo.value.details == {"limit_class": "execution_ms"}
@@ -337,6 +337,92 @@ def test_schema_lock_waits_count_only_acquisitions_the_try_form_could_not_take(a
         assert stats["acquire_count"] >= quiet["acquire_count"] + 2
     finally:
         stall.release.set()
+        close_cell(cell)
+
+
+def test_a_failed_lock_wait_is_still_counted_as_a_wait_but_not_as_an_acquisition(app_a) -> None:
+    """Another scope holds the application-wide schema lock; a second scope
+    with a 300 ms budget enters the blocking statement, is cut by the lock
+    timeout and is answered `LIMIT_EXCEEDED(execution_ms)`: the statistics
+    show one wait with its time and no acquisition."""
+    holder = _cell(app_a)
+    waiter = _cell(app_a)
+    try:
+        with holder._backend.request_scope("schema") as held:
+            holder._backend.lock_schema(scope=held)
+            with waiter._backend.request_scope("schema", deadline=time.monotonic() + 0.3) as scope:
+                with pytest.raises(ResourceLimitError):
+                    waiter._backend.lock_schema(scope=scope)
+        stats = waiter._backend.schema_lock_stats()
+        assert stats["wait_count"] == 1, stats
+        assert stats["acquire_count"] == 0, stats
+        assert stats["wait_total_ms"] >= 100.0 and stats["wait_max_ms"] >= 100.0, stats
+    finally:
+        close_cell(holder)
+        close_cell(waiter)
+
+
+def test_a_lock_wait_shortens_the_timeouts_of_the_statements_that_follow(app_a, monkeypatch) -> None:
+    """A holds entity A's exclusive entity lock; B writes to that entity with
+    a 6 s budget, waits about 1.3 s for the shared lock, gets it when A is
+    released, and sets `statement_timeout` / `lock_timeout` again from what
+    remains: every timeout B sets after the wait is at least a second below
+    the one it opened with."""
+    cell, dev, rt, stall, a = _stalled_add_field(app_a, monkeypatch, "ea")
+    cell_b = _cell(app_a, max_execution_ms=6000)
+    _dev_b, rt_b = _sessions(cell_b, app_a)
+    calls: list[tuple[threading.Thread, int]] = []
+    original = PostgresBackend._set_timeouts
+    monkeypatch.setattr(PostgresBackend, "_set_timeouts",
+                        lambda self, cur, ms: (calls.append((threading.current_thread(), ms)), original(self, cur, ms))[1])
+    try:
+        b = _Run(lambda: rt_b.insert("ea", {"title": "x"}))
+        time.sleep(1.3)
+        assert not b.done.is_set(), "B was not waiting for the lock"
+        stall.release.set()
+        a.finish()
+        b.finish()
+        mine = [ms for thread, ms in calls if thread is b.thread]
+        assert len(mine) == 4, mine  # two connections at the scope's opening, the same two after the wait
+        opened, after_wait = mine[:2], mine[2:]
+        assert all(ms <= 6000 for ms in opened)
+        assert all(ms <= min(opened) - 1000 for ms in after_wait), mine
+    finally:
+        stall.release.set()
+        close_cell(cell)
+        close_cell(cell_b)
+
+
+def test_an_uncontended_request_sets_its_timeouts_once_per_connection(app_a, monkeypatch) -> None:
+    """No wait, no second `SET LOCAL`: a write with every lock free sets the
+    timeouts only when its scope opens (its two connections)."""
+    cell, _dev, rt = _setup(app_a, "plain")
+    calls: list[int] = []
+    original = PostgresBackend._set_timeouts
+    monkeypatch.setattr(PostgresBackend, "_set_timeouts",
+                        lambda self, cur, ms: (calls.append(ms), original(self, cur, ms))[1])
+    try:
+        rt.insert("plain", {"title": "x"})
+        assert len(calls) == 2, calls
+    finally:
+        close_cell(cell)
+
+
+def test_a_connection_lost_while_taking_a_lock_is_service_unavailable(app_a) -> None:
+    """The scope's connection is terminated server-side before the lock
+    statement runs: the failure is the storage's, answered as the transient
+    storage error (503), not as a rejection of the request."""
+    cell = _cell(app_a)
+    try:
+        with cell._backend.request_scope("schema") as scope:
+            main_conn = scope.main
+            pid = main_conn.info.backend_pid
+            with psycopg.connect(app_a.developer_dsn, autocommit=True) as admin, admin.cursor() as cur:
+                cur.execute("SELECT pg_terminate_backend(%s)", [pid])
+            time.sleep(0.2)
+            with pytest.raises(StorageTransientError):
+                cell._backend.lock_schema(scope=scope)
+    finally:
         close_cell(cell)
 
 

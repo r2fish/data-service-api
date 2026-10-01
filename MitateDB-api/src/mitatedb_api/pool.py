@@ -331,6 +331,27 @@ class BoundedConnectionPool:
                 "db_calls": live_db_calls + self._closed_db_calls,
             }
 
+    def map_idle(self, fn):
+        """Applies `fn` to every connection currently idle in this pool and
+        returns the results in the idle queue's order. The connections are
+        taken out of the idle queue without going through `acquire()` (the
+        acquisition statistics stay untouched) and put back, in their former
+        order, even when `fn` raises. A connection a caller has checked out is
+        not idle and is not seen; for the time the call takes, a caller that
+        wants a connection does not find these ones. No DB round trip of its
+        own: whatever `fn` does is the only traffic."""
+        conns: "list[psycopg.Connection]" = []
+        while True:
+            try:
+                conns.append(self._idle.get_nowait())
+            except queue.Empty:
+                break
+        try:
+            return [fn(conn) for conn in conns]
+        finally:
+            for conn in reversed(conns):
+                self._idle.put_nowait(conn)
+
     def _forget_one(self) -> None:
         with self._lock:
             self._created = max(0, self._created - 1)
