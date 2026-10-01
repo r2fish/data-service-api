@@ -2,15 +2,15 @@
 document conformance condition (design docs/design/
 CONFORMANCE_CONDITIONS_V1_1.md section 3) and for the reference client
 (`reference_client.py`), which validates the request and response schemas of
-the data-surface operations the derived operation catalog names.
+the operations the derived operation catalog names.
 
 This deliberately does not depend on a general-purpose JSON Schema library
 (no new dependency for the common repository) and does not attempt to
 implement JSON Schema in full. It implements exactly the keyword subset the
 common contract's schemas that those two users check actually use. Those are
 `CapabilityDocument`, `CatalogDocument` and `EntityDescriptor` for C-11, and
-for the reference client the schemas named by the catalog's entries that are
-not derived from `control_endpoints` and are not an alias of one
+for the reference client the schemas named by the catalog's entries except an
+alias of a control endpoint
 (`test_reference_client_schemas_use_only_implemented_or_annotation_keywords`
 derives that set from the catalog). The keywords are:
 `type`, `required`, `properties`, `additionalProperties`, `enum`, `const`,

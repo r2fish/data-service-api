@@ -23,8 +23,12 @@ reads the client's source and holds every string and bytes constant in it
 - a literal in `PROSE_LITERALS`, each with where the contract (or, for the
   scheme and host words, the client's own `OUT_OF_CONTRACT_KNOWLEDGE` row)
   states it;
-- a constant that appears only inside the arguments of an exception class's
-  constructor, defined in the client, for the text of a failure;
+- a constant that is a part of the text of a failure: a string, the constant
+  part of an f-string, or a `join` separator, in the arguments of an
+  exception's construction that is itself the operand of a `raise`, the
+  exception being a class defined in the client. A key or call argument inside
+  such an argument is held to the other kinds; `.args` and `__doc__` are not
+  used in the client, so a text cannot be carried out of its `raise`;
 - a key or value of `OUT_OF_CONTRACT_KNOWLEDGE` itself.
 
 A constant equal to any operation name, method or path in the catalog, to the
@@ -88,6 +92,7 @@ CONTRACT_KEY_PATHS = (
     ("contract", "errors.content_type"),
     ("contract", "errors.shape"),
     ("contract", "errors.shape.code"),
+    ("contract", "errors.codes"),
     ("contract", "schemas.CapabilityDocument.type"),
     ("contract", "schemas.CapabilityDocument.properties.role"),
     ("contract", "schemas.CapabilityDocument.properties.surfaces"),
@@ -120,7 +125,6 @@ PROSE_LITERALS = (
      "kept safe; also the empty start of the path being filled", None),
     ("https", "client table N-15", "client table"),
     ("http", "client table N-15", "client table"),
-    ("localhost", "client table N-15", "client table"),
     (".invalid", "client table N-15", "client table"),
 )
 
@@ -393,6 +397,12 @@ def test_response_that_is_neither_failure_nor_success_is_an_uninterpreted_failur
     assert type(error) is UninterpretedResponse
     assert not hasattr(error, "code")
     assert len(wire.sent) == 2
+    # A body that has the shape of a failure is not read for its code when the
+    # media type is not the contract's failure type.
+    client, _wire = ready(respond(problem_body("CODE_FOUR"), content_type="text/html", status=409))
+    error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
+    assert type(error) is UninterpretedResponse
+    assert not hasattr(error, "code")
 
 
 def test_uninterpreted_failure_text_carries_neither_the_response_body_nor_its_headers():
@@ -416,6 +426,9 @@ def test_failure_body_is_read_by_its_code_whatever_the_status():
     error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
     assert type(error) is ProblemResponse
     assert error.code == "CODE_TWO"
+    # And the other way: a success body is a success whatever the status.
+    client, _wire = ready(respond(QUERY_RESULT, status=409))
+    assert client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY) == QUERY_RESULT
 
 
 def test_declared_operation_catalog_url_is_never_requested():
@@ -438,12 +451,18 @@ def test_table_of_knowledge_outside_the_contract_has_exactly_the_expected_rows()
 
 
 def test_base_url_that_is_not_https_is_refused_unless_it_is_a_test_host():
-    for refused in ("http://db.example.test/v1", "ftp://db.example.invalid/v1", "http://[2001:db8::7]/v1"):
+    for refused in (
+        "http://db.example.test/v1",
+        "ftp://db.example.invalid/v1",
+        "http://[2001:db8::7]/v1",
+        "http://localhost/v1",
+        "http://localhost:8080/v1",
+    ):
         client, wire = build(base_url=refused)
         error = raised(lambda: client.fetch_capabilities(CAPABILITIES))
         assert type(error) is RequestRefused, refused
         assert wire.sent == [], refused
-    for allowed in ("http://db.example.invalid/v1", "http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"):
+    for allowed in ("http://db.example.invalid/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"):
         client, wire = build(respond(capability_document()), base_url=allowed)
         client.fetch_capabilities(CAPABILITIES)
         assert wire.urls == [f"{allowed}/capabilities"], allowed
@@ -460,6 +479,33 @@ def test_base_url_that_does_not_end_with_the_base_path_is_refused_before_sending
         error = raised(lambda: client.fetch_capabilities(CAPABILITIES))
         assert type(error) is RequestRefused, refused
         assert wire.sent == [], refused
+
+
+def test_base_url_with_a_query_or_a_fragment_is_refused_before_sending():
+    data_refused = (
+        "https://db.example.invalid/x?q=/v1",
+        "https://db.example.invalid/x#/v1",
+        "https://db.example.invalid/v1?q=/v1",
+        "https://db.example.invalid/v1#/v1",
+        "https://db.example.invalid/v1?",
+        "https://db.example.invalid/v1#",
+    )
+    for refused in data_refused:
+        client, wire = build(base_url=refused)
+        error = raised(lambda: client.fetch_capabilities(CAPABILITIES))
+        assert type(error) is RequestRefused, refused
+        assert wire.sent == [], refused
+    # The same check holds for the control surface's base URL, which the
+    # capability document declares.
+    for refused in (
+        "https://db.example.invalid/control/v1?q=/control/v1",
+        "https://db.example.invalid/control/v1#/control/v1",
+        "https://db.example.invalid/x?q=/control/v1",
+    ):
+        client, wire = ready(role="control", control_base=refused)
+        error = raised(lambda: client.call(CONTROL_CAPABILITIES))
+        assert type(error) is RequestRefused, refused
+        assert len(wire.sent) == 1, refused
 
 
 def test_control_operation_is_refused_when_the_document_declares_no_control_surface():
@@ -522,6 +568,29 @@ def test_response_without_a_content_type_is_an_uninterpreted_failure():
     assert type(error) is UninterpretedResponse
     assert not hasattr(error, "code")
     assert len(wire.sent) == 2
+    client, _wire = ready(respond(problem_body("CODE_FIVE"), content_type=None, status=409))
+    error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
+    assert type(error) is UninterpretedResponse
+    assert not hasattr(error, "code")
+
+
+def test_response_with_two_content_type_headers_is_an_uninterpreted_failure():
+    # Each body is one the first header's type reads and the last header's type
+    # does not, or the other way round, so taking either header alone would
+    # turn the response into a result or a `code`.
+    problem = json.dumps(problem_body("CODE_SIX")).encode()
+    result = json.dumps(QUERY_RESULT).encode()
+    pairs = (("Content-Type", PROBLEM_TYPE), ("Content-Type", MEDIA_TYPE))
+    cases = 0
+    for headers in (pairs, pairs[::-1]):
+        for body in (problem, result):
+            client, wire = ready((409, headers, body))
+            error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
+            assert type(error) is UninterpretedResponse
+            assert not hasattr(error, "code")
+            assert len(wire.sent) == 2
+            cases += 1
+    assert cases == 4
 
 
 def test_failure_body_that_does_not_have_the_named_shape_is_not_read_for_a_code():
@@ -574,6 +643,66 @@ def test_no_operation_is_sent_before_the_capability_document_has_been_read():
 
     client, wire = ready(respond(QUERY_RESULT))
     assert client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY) == QUERY_RESULT
+
+
+def test_problem_text_names_a_code_only_when_the_contract_lists_it():
+    listed = sorted(CONTRACT["errors"]["codes"])[0]
+    client, _wire = ready(respond(problem_body(listed), content_type=PROBLEM_TYPE, status=409))
+    error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
+    assert type(error) is ProblemResponse
+    assert error.code == listed
+    assert listed in str(error) and listed in repr(error)
+
+    # A peer, or something ahead of it, that writes the request's credential
+    # into `code` gets it nowhere in the text; the attribute still reads it.
+    echoed = f"Bearer {SECRET}"
+    for unlisted in (SECRET, echoed):
+        client, _wire = ready(respond(problem_body(unlisted), content_type=PROBLEM_TYPE, status=409))
+        error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
+        assert type(error) is ProblemResponse
+        assert error.code == unlisted
+        assert error.problem["code"] == unlisted
+        for text in (str(error), repr(error), repr(error.args)):
+            assert SECRET not in text
+
+
+def test_request_body_that_json_cannot_carry_is_refused_before_sending():
+    client, wire = ready(respond(QUERY_RESULT))
+    for value in (float("nan"), float("inf"), float("-inf")):
+        body = {"operations": [{"operation": "insert", "values": {"a": value}}]}
+        assert validate(body, CONTRACT["schemas"]["MutationRequest"], CONTRACT) == []
+        error = raised(lambda: client.call("mutate", path_values={"entity": "notes"}, body=body))
+        assert type(error) is RequestRefused
+    assert len(wire.sent) == 1
+
+
+def test_response_body_with_nan_infinity_or_too_deep_nesting_is_an_uninterpreted_failure():
+    depth = 100_000
+    bodies = (
+        b'{"items": [NaN], "next_page": null}',
+        b'{"items": [Infinity], "next_page": null}',
+        b'{"items": [-Infinity], "next_page": null}',
+        b'{"items": ' + b"[" * depth + b"]" * depth + b', "next_page": null}',
+    )
+    for body in bodies:
+        client, wire = ready((200, (("Content-Type", MEDIA_TYPE),), body))
+        error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
+        assert type(error) is UninterpretedResponse
+        assert not hasattr(error, "code")
+        assert len(wire.sent) == 2
+
+
+def test_capability_document_without_a_role_is_refused_and_leaves_the_client_unready():
+    document = capability_document()
+    del document["role"]
+    assert validate(document, CONTRACT["schemas"]["CapabilityDocument"], CONTRACT) == []
+    client, wire = build(respond(document))
+    error = raised(lambda: client.fetch_capabilities(CAPABILITIES))
+    assert type(error) is ContractMismatch
+    assert client.role is None
+    error = raised(lambda: client.call("query", path_values={"entity": "notes"}, body=QUERY_BODY))
+    assert type(error) is RequestRefused
+    assert len(wire.sent) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +770,31 @@ def _docstring_ids(tree):
     return ids
 
 
+def _sentence_part_ids(expression):
+    """The string constants of `expression` that are parts of a sentence: a
+    string, the constant part of an f-string, either side of a `+`, either
+    branch of a conditional, the receiver of a `join`. What an index, a call
+    argument or an f-string's expression holds is not a part."""
+    ids = set()
+
+    def visit(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            ids.add(id(node))
+        elif isinstance(node, ast.JoinedStr):
+            ids.update(id(part) for part in node.values if isinstance(part, ast.Constant))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            visit(node.left)
+            visit(node.right)
+        elif isinstance(node, ast.IfExp):
+            visit(node.body)
+            visit(node.orelse)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join":
+            visit(node.func.value)
+
+    visit(expression)
+    return ids
+
+
 def literal_violations(source, *, key_tails, prose, forbidden, stdlib=None):
     """Every way `source` leaves the closed set, each as a short text."""
     stdlib = sys.stdlib_module_names if stdlib is None else stdlib
@@ -654,13 +808,20 @@ def literal_violations(source, *, key_tails, prose, forbidden, stdlib=None):
         elif isinstance(node, ast.ImportFrom):
             if node.level or (node.module or "").split(".")[0] not in stdlib | {"schema_check"}:
                 found.append(f"from {'.' * node.level}{node.module} import ...")
+        elif isinstance(node, ast.Attribute) and node.attr in ("args", "__doc__"):
+            found.append(f"{node.lineno}: .{node.attr} carries a text out of where it is written")
     docstrings = _docstring_ids(tree)
-    in_exception_arguments = set()
+    sentence_parts = set()
     exception_names = _exception_class_names(tree)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in exception_names:
-            for part in [*node.args, *[keyword.value for keyword in node.keywords]]:
-                in_exception_arguments |= {id(inner) for inner in ast.walk(part)}
+        if (
+            isinstance(node, ast.Raise)
+            and isinstance(node.exc, ast.Call)
+            and isinstance(node.exc.func, ast.Name)
+            and node.exc.func.id in exception_names
+        ):
+            for argument in node.exc.args:
+                sentence_parts |= _sentence_part_ids(argument)
     in_table = set()
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
@@ -673,7 +834,7 @@ def literal_violations(source, *, key_tails, prose, forbidden, stdlib=None):
         value = node.value
         if value in forbidden:
             found.append(f"{node.lineno}: {value!r} is a name or path the contract and catalog define")
-        elif id(node) in in_exception_arguments or id(node) in in_table:
+        elif id(node) in sentence_parts or id(node) in in_table:
             continue
         elif value not in key_tails and value not in prose:
             found.append(f"{node.lineno}: {value!r} is in no allowed set")
@@ -737,6 +898,11 @@ def test_client_source_holds_to_the_closed_set_of_literals():
         "a getattr name": 'x = getattr(y, "unlisted")\n',
         "a string given to an ordinary call": 'x = print("unlisted sentence")\n',
         "an operation name inside an exception": exception_prefix + 'raise Failure("capabilities")\n',
+        "a key inside an exception's argument": exception_prefix + 'raise Failure(y["unlisted_key"], "a sentence")\n',
+        "a call argument inside an exception's argument": exception_prefix + 'raise Failure(y.get("unlisted_key"))\n',
+        "an exception built outside a raise": exception_prefix + 'x = Failure("unlisted sentence")\n',
+        "an exception's text carried out by .args": exception_prefix + 'x = Failure("a sentence").args\n',
+        "a docstring carried out by __doc__": 'def f():\n    "unlisted"\n\n\nx = f.__doc__\n',
         "an import of the adapter": "import adapter\n",
         "a from-import of the adapter": "from adapter import load_contract\n",
         "a relative import": "from . import sibling\n",

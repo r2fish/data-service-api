@@ -286,20 +286,22 @@ def test_c11_schemas_use_only_implemented_or_annotation_keywords():
 
 
 def test_reference_client_schemas_use_only_implemented_or_annotation_keywords():
-    """The same guard for the request and response schemas that the
-    operations of the data surface name in the derived operation catalog -- the
-    ones a client validates against. An entry derived from `control_endpoints`
-    (its name carries the `control.` prefix) or an alias of one (its name is
-    also a key of `control_endpoints`) names schemas the client never uses.
+    """The same guard for the request and response schemas that the entries of
+    the derived operation catalog name -- the ones the reference client
+    validates against, for the data surface and the control surface alike. An
+    alias (an entry of `endpoints` whose name is also a key of
+    `control_endpoints`, `definitions.OperationCatalogEntry.description`) is
+    skipped: no URL is formed for it, so the client never validates against
+    its schemas, and the control entry it stands for names the same ones.
     """
     contract = _contract()
     catalog = json.loads((REPO_ROOT / "spec" / "OPERATION_CATALOG.json").read_text())
     names: set[str] = set()
     for entry in catalog["operations"]:
-        if entry["name"].startswith("control.") or entry["name"] in contract["control_endpoints"]:
+        if entry["name"] in contract["control_endpoints"]:
             continue
         names |= {entry[key] for key in ("request_schema", "response_schema") if entry[key] is not None}
-    assert names, "no data-surface schema was found to check"
+    assert names, "no schema was found to check"
     used: set[str] = set()
     for name in sorted(names):
         used |= used_keywords(contract["schemas"][name], contract)

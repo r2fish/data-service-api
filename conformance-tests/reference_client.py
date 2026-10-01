@@ -38,10 +38,10 @@ What the module does, each step from a statement the contract makes:
   ignored and compared case-insensitively (`errors.response_classification`):
   `errors.content_type` is a failure read by its `code` once the body has the
   keys and value types `errors.shape` names; `media_type` is a success read
-  against the operation's response schema; every other response, and every one
-  of these that does not meet its condition, is a failure the client does not
-  interpret and reads neither a `code` nor a result from. The HTTP status
-  decides nothing.
+  against the operation's response schema; every other response (one with no `Content-Type`, or with more than
+  one, has no media type to classify it by), and every one of these that does
+  not meet its condition, is a failure the client does not interpret and
+  reads neither a `code` nor a result from. The HTTP status decides nothing.
 - The first exchange is the capability document: its operation name comes from
   the caller like any other, its response is validated against that operation's
   response schema and only then read for `contract_version`, `role` and
@@ -51,8 +51,12 @@ What the module does, each step from a statement the contract makes:
   catalog roles do not include it is not sent.
 - `operation_catalog_url` is never requested; the catalog is an input.
 
-A failure carries no secret: an exception built here names no header value,
-no response body and no response header.
+An exception's text carries no request header value, no response header and no
+response value the contract does not list: a `ProblemResponse` names the `code`
+it read only where `errors.codes` lists it, and keeps the parsed body as an
+attribute, not in its text. A request body is JSON without NaN or Infinity, and
+a response body that has either, or is nested too deeply to parse, is not
+interpreted.
 
 `OUT_OF_CONTRACT_KNOWLEDGE` lists what this module knows that no contract
 statement provides. `test_reference_client.py` reads this module's source and
@@ -80,7 +84,7 @@ CONTENT_TYPE = "Content-Type"
 OUT_OF_CONTRACT_KNOWLEDGE = {
     "N-15": (
         "A base URL that is not https carries no credential, except that http "
-        "is accepted when its host is a loopback address, localhost or a name "
+        "is accepted when its host is a loopback address or a name "
         "under .invalid, so that the plugs the conformance suite runs, which "
         "do not terminate TLS, can be driven."
     ),
@@ -106,11 +110,12 @@ class ResponseFailure(ReferenceClientError):
 
 class ProblemResponse(ResponseFailure):
     """A failure the contract defines: `code` was read from a body that has the
-    shape `errors.shape` names. `problem` is that parsed body; it is not part
-    of the exception's text."""
+    shape `errors.shape` names. `code` and `problem`, the parsed body, are
+    attributes; the exception's text names the code only where `errors.codes`
+    lists it."""
 
-    def __init__(self, code: str, problem: Mapping) -> None:
-        super().__init__(code)
+    def __init__(self, code: str, problem: Mapping, message: str) -> None:
+        super().__init__(message)
         self.code = code
         self.problem = problem
 
@@ -197,7 +202,10 @@ class ReferenceClient:
                     "the request body does not conform to the operation's request schema at: "
                     + ", ".join(violation.path for violation in violations)
                 )
-            payload = json.dumps(body).encode()
+            try:
+                payload = json.dumps(body, allow_nan=False).encode()
+            except (TypeError, ValueError, RecursionError):
+                raise RequestRefused("the request body cannot be written as JSON") from None
             headers.append((CONTENT_TYPE, self._contract["media_type"]))
         _status, response_headers, raw = self._send(entry["method"], url, tuple(headers), payload)
         return self._read(response_headers, raw, response_schema)
@@ -226,8 +234,9 @@ class ReferenceClient:
 
     @staticmethod
     def _compose(base_url: str, base_path: str, path: str, path_values: Mapping[str, str] | None) -> str:
-        if not base_url.endswith(base_path):
-            raise RequestRefused("the base URL does not end with its surface's base path")
+        parts = urlsplit(base_url)
+        if parts.query or parts.fragment or not base_url.endswith(base_path):
+            raise RequestRefused("the base URL is not a URI whose path ends with its surface's base path")
         values = dict(path_values or {})
         filled = ""
         placeholders = []
@@ -262,13 +271,13 @@ class ReferenceClient:
     def _read(self, headers: Iterable, raw: Any, response_schema: Mapping | None) -> Any:
         media_type = _media_type(headers)
         if media_type is None or not isinstance(raw, (bytes, bytearray)):
-            raise UninterpretedResponse("the response has no media type to classify it by")
+            raise UninterpretedResponse("the response has no single media type to classify it by")
         failure = media_type == self._contract["errors"]["content_type"].lower()
         if not failure and media_type != self._contract["media_type"].lower():
             raise UninterpretedResponse("the response's media type is neither a failure's nor a success's")
         try:
-            parsed = json.loads(raw)
-        except ValueError:
+            parsed = json.loads(raw, parse_constant=_reject_constant)
+        except (ValueError, RecursionError):
             raise UninterpretedResponse("the response body is not JSON") from None
         if failure:
             shape = self._contract["errors"]["shape"]
@@ -277,23 +286,32 @@ class ReferenceClient:
                 for key, kind in shape.items()
             ):
                 raise UninterpretedResponse("the failure body does not have the shape the contract names")
-            raise ProblemResponse(parsed["code"], parsed)
+            code = parsed["code"]
+            raise ProblemResponse(
+                code,
+                parsed,
+                code if code in self._contract["errors"]["codes"] else "the failure carries a code the contract does not list",
+            )
         if response_schema is None or validate(parsed, response_schema, self._contract):
             raise UninterpretedResponse("the success body does not conform to the operation's response schema")
         return parsed
 
 
+def _reject_constant(name: str) -> None:
+    raise ValueError(name)
+
+
 def _media_type(headers: Iterable) -> str | None:
-    for name, value in headers:
-        if name.lower() == CONTENT_TYPE.lower():
-            return value.split(";")[0].strip().lower()
-    return None
+    found = [value for name, value in headers if name.lower() == CONTENT_TYPE.lower()]
+    if len(found) != 1:
+        return None
+    return found[0].split(";")[0].strip().lower()
 
 
 def _is_test_host(host: str | None) -> bool:
     if host is None:
         return False
-    if host == "localhost" or host.endswith(".invalid"):
+    if host.endswith(".invalid"):
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
