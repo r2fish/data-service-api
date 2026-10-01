@@ -61,6 +61,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    WireEntry,
     apply_limits_override,
     fold_batch_idempotency_key,
     fresh_identifier,
@@ -989,6 +990,17 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         comment immediately above it."""
         cell = self._service._cells[session.application_id]  # noqa: SLF001
         return _hold_after_plan_verification_via_stalled_cell_methods(cell)
+
+    def wire_entry(self, application_id: str) -> WireEntry:
+        """See `ConformanceAdapter.wire_entry`'s own docstring
+        (`adapter.py`). This plug's `transport_kind` is `"in_process"`: it
+        drives the peer's product objects directly and has no wire, so a
+        call is a port-usage error and raises `AssertionError` -- it never
+        returns a send function and never skips."""
+        raise AssertionError(
+            "wire_entry: this plug's transport_kind is 'in_process' and it has no wire; "
+            "only a plug that dials a transport (asgi or socket) has a wire entry"
+        )
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).

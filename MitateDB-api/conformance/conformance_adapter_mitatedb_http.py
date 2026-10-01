@@ -102,6 +102,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    WireEntry,
     fold_batch_idempotency_key,
     fresh_identifier,
     resolve_valid_confirmation,
@@ -1078,6 +1079,17 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         non-dialable `_OPERATION_CATALOG_URL` constant. The socket
         adapter (WP-4) overrides this to report a real, dialable URL."""
         return _OPERATION_CATALOG_URL
+
+    def _wire_transport_factory(self) -> Callable[[], httpx.AsyncBaseTransport]:
+        """Default: a factory of in-process ASGI transports over this
+        surface's own data app -- the transport `wire_entry`'s send
+        function hands each request to, one fresh transport per request
+        (no state crosses a send). The socket adapter overrides this to
+        start its data surface and to return a factory of real-socket
+        transports that dial a declared URL exactly as given. Called once,
+        from `wire_entry`, before that method returns."""
+        app = self._app
+        return lambda: httpx.ASGITransport(app=app)
 
     def _reset_surface_state(self) -> None:
         """Hook (monitor 裁定 2026-09-08, F-2 (b)) -- see the identically-
@@ -2319,6 +2331,48 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         cell = self._cells[session.application_id]
         return _hold_after_plan_verification(cell)
+
+    def wire_entry(self, application_id: str) -> WireEntry:
+        """See `ConformanceAdapter.wire_entry`'s own docstring
+        (`adapter.py`) for this method's port-level meaning. Both
+        credentials come from `issue_credential`, this adapter's own
+        bootstrap path. The send function builds an `httpx.Request` from
+        exactly the four values it is given and hands it straight to a
+        fresh transport from `_wire_transport_factory` -- never through an
+        `httpx.AsyncClient`, whose default headers, cookie jar and redirect
+        handling would otherwise act on the request."""
+        runtime = self.issue_credential(application_id, "runtime")
+        developer = self.issue_credential(application_id, "developer")
+        transport_factory = self._wire_transport_factory()
+        base_url = self._surfaces_value()["data"]["base_url"]
+        run = self._run
+
+        async def _carry(
+            method: str, url: str, headers: tuple[tuple[str, str], ...], body: bytes | None
+        ) -> tuple[int, tuple[tuple[str, str], ...], bytes]:
+            transport = transport_factory()
+            try:
+                request = httpx.Request(method, url, headers=list(headers), content=body)
+                response = await transport.handle_async_request(request)
+                await response.aread()
+            finally:
+                await transport.aclose()
+            received = tuple(
+                (name.decode("latin-1"), value.decode("latin-1")) for name, value in response.headers.raw
+            )
+            return response.status_code, received, response.content
+
+        def send(
+            method: str, url: str, headers: tuple[tuple[str, str], ...], body: bytes | None
+        ) -> tuple[int, tuple[tuple[str, str], ...], bytes]:
+            return run(_carry(method, url, headers, body))
+
+        return WireEntry(
+            base_url=base_url,
+            send=send,
+            runtime_secret=runtime.secret,
+            developer_secret=developer.secret,
+        )
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).

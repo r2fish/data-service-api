@@ -71,7 +71,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import httpx
 
@@ -434,6 +434,16 @@ class MitateDBSocketConformanceAdapter(MitateDBHttpConformanceAdapter):
         surface = self._socket_surface_for(app)
         surface.acquire()
         return httpx.AsyncClient(transport=_LazyDialTransport(surface), base_url=surface.base_url)
+
+    def _wire_transport_factory(self) -> Callable[[], httpx.AsyncBaseTransport]:
+        """Override: starts this plug's data surface (`_AppSocketSurface.
+        ensure_started`, the same start `_LazyDialTransport` performs on
+        its first request) and returns a factory of plain, one-shot
+        `httpx.AsyncHTTPTransport` objects, which dial the URL in the
+        request exactly as given."""
+        self._ensure_socket_registry()
+        self._socket_surface_for(self._app).ensure_started()
+        return httpx.AsyncHTTPTransport
 
     def _reset_surface_state(self) -> None:
         """Called on `isolated_application_surface()`'s own fresh `copy.
