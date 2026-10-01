@@ -2,6 +2,7 @@
 
 ## 文書情報
 
+- 版数: 1.21 (§31 を新設。port v1.21: 台帳 R-108 (design `docs/design/REFERENCE_CLIENT_V0_1.md` §6・D-2a・D-4) 由来の coordinated revision -- 1 新規 abstract method `wire_entry(application_id)` (参照クライアントの条件 C-35 が使う。wire への入口: 面が宣言する data の base URL、要求 1 件を渡されたとおり運ぶ送信関数、runtime と developer の bearer secret) と、非 normative の値型 `WireEntry` を追加する。削除は無い。in-process の 2 plug は `AssertionError` を上げ、wire の 4 plug が実現する。詳細は §31)
 - 版数: 1.20 (§30 を新設。port v1.20: 台帳 R-102 (design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` §9・§11.1 Q-5) 由来の coordinated revision -- 1 新規 abstract method `hold_after_plan_verification(session)` (新条件 C-34。plan の前提条件を並行する schema 操作の下で決定的に観測させる primitive) と、非 normative の handle `PlanVerificationHold` を追加する。削除は無い。§22.1 の開示 2 と §25.2・§25.3 の `MitateDB-api` の記述に R-102 による覆しの註を足した。詳細は §30)
 - 版数: 1.19 (§29 を新設。port v1.19: 台帳 R-115 (design `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) 由来の coordinated revision -- port v1.8 の abstract method `flush_audit_buffer` を削除する。追加は無い。詳細は §29)
 - 版数: 1.18 (§28 を新設。port v1.18: design `docs/design/PHASE11_KEYSET_PAGING_V1.md` D-4 由来の coordinated revision -- 1 新規 abstract method `query_page(session, entity, select, *, where, order_by, page_size, cursor, budget) -> (items, next_page)` (条件 C-30 が使う。`order_by` と `cursor` を 1 つの query 要求で運び、peer の実 `next_page` をそのまま返す) を追加する。既存の query 系 method (`select_eq`/`attempt_filter`/`query_with_revisions`/`query_with_budget`/`attempt_filter_with_result`) は不変。4 registered adapter (両 peer の in-process/http) が実現し、socket plug は http adapter の実現をそのまま継承する (0 redefinition)。`_ISOMORPHIC_TARGETS` には追加しない (adapter の足場であり `src/` の symbol ではない)。削除は無い。詳細は §28)
@@ -16,7 +17,7 @@
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - §23.4 追補 (2026-09-07, 監督裁定 A `{scratchpad}/rulings-wp3a-review.md`): port v1.13 のまま (バージョン番号は据え置き)。`schema_operation_with_result(..., enum=...)` に tri-state sentinel `ENUM_CLEAR` (`adapter.py` モジュールレベル、`_EnumClear` 単一インスタンス) を追加し、「省略」(`None`、既定) と「明示 `enum: null`」(`ENUM_CLEAR`) を区別できるようにした。既存呼び出し (省略、または `Sequence` を渡すもの) は byte 互換のまま。4 adapter (`conformance_adapter_r2db{,_http}.py`/`conformance_adapter_mitatedb{,_http}.py`) の `schema_operation_with_result` を同型に更新し、`test_c20_constraint_declaration_agreement.py` の肯定枝に leg (9) (`alter_field(enum=ENUM_CLEAR)` で enum が解除される) を追加。詳細は §23.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08。§26 (v1.16) / §27 (v1.17) 追記日: 2026-09-24。§28 (v1.18) 追記日: 2026-09-25。§29 (v1.19) 追記日: 2026-10-01
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08。§26 (v1.16) / §27 (v1.17) 追記日: 2026-09-24。§28 (v1.18) 追記日: 2026-09-25。§29 (v1.19) 追記日: 2026-10-01。§31 (v1.21) 追記日: 2026-10-01
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -3791,3 +3792,124 @@ passes straight through) and V16 / V20 (an unrealized hook, a
    revision it advances and has not yet run DDL (work order
    `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md`
    correction note 2 item 2).
+
+## 31. v1.21 port revision (coordinated with docs/design/REFERENCE_CLIENT_V0_1.md section 6, D-2a and D-4)
+
+Ledger R-108's reference client builds every request of the common
+baseline turn from the contract alone and sends it over a wire. The common
+suite needs a way to hand such a client three things it cannot take from
+the contract: where a surface is, a way to put one request on that surface's
+own transport, and the two secrets of an Application's credentials. This
+revision adds that entry. It is not a test-driving hook on product code: the
+send function carries a request to the transport each plug already dials
+with, and the secrets come from the bootstrap path the port already has
+(`issue_credential`). One addition, no removals.
+
+### 31.1 `wire_entry(application_id)`
+
+Added to `ConformanceAdapter` after `hold_after_plan_verification`:
+
+```python
+@abstractmethod
+def wire_entry(self, application_id: str) -> "WireEntry"
+```
+
+Meaning (verbatim, the first paragraph of the port docstring, fixed by the
+supervisor's ruling M-10 of work order `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` -- carried into the port
+docstring unparaphrased):
+
+> Returns this surface's wire entry for `application_id`, an Application already provisioned on this surface: the base URL this surface declares as `surfaces.data.base_url`, a send function that carries one request -- method, URL, header pairs and body, exactly as given -- to that URL over this plug's own transport and returns the status, the response's header pairs and its body without following a redirect, and the bearer secret of one runtime and one developer credential issued to that Application through this adapter's own bootstrap path. A plug whose `transport_kind` is `in_process` has no wire and raises `AssertionError`.
+
+**`WireEntry`** (non-normative, `adapter.py` module level, a frozen
+dataclass, the same status `IdempotencyHold` (§25.1) and
+`PlanVerificationHold` (§30.1) carry): four fields.
+
+| field | type | meaning |
+|---|---|---|
+| `base_url` | `str` | the base URL the surface declares as `surfaces.data.base_url`, character for character |
+| `send` | `(method: str, url: str, headers: tuple[tuple[str, str], ...], body: bytes \| None) -> tuple[int, tuple[tuple[str, str], ...], bytes]` | synchronous and blocking; hands exactly those four values to the plug's own transport, adding only the `Host` and `Content-Length` framing an HTTP library puts on every request; returns the status, the response's header pairs (order and spelling as received) and its body; never follows a redirect; a connection failure is raised as an exception |
+| `runtime_secret` | `str` | the complete bearer token of one runtime credential issued to the Application (`CredentialHandle.secret`, verbatim); `field(repr=False)` |
+| `developer_secret` | `str` | the same for one developer credential; `field(repr=False)` |
+
+A caller takes the entry on the YIELDED instance of
+`isolated_application_surface()`, after `provision_application`, the
+convention §22, §25 and §30 follow. `send` is a plain carrier: it does not
+pass the request through an `httpx.AsyncClient`, so no default header,
+cookie jar or redirect policy acts on it, and it does not rewrite the URL it
+is given (the existing `r2db-api` socket client does, `_LazySocketClient.send`; `wire_entry` does not use it).
+A method or URL that the HTTP library would write in a form other than the
+one given (a lower-case method, an upper-case host, a path with dot segments),
+or a URL that carries a fragment or a userinfo part (neither reaches the request line),
+is not carried: `send` raises `ValueError` before anything reaches the
+transport, so a request is carried as given or refused, never carried in a
+rewritten form. The two secret fields are excluded from `repr` and from
+comparison (`field(repr=False, compare=False)`).
+
+### 31.2 Per-plug realization (measured)
+
+Each of the four plugs that has a wire takes a transport from one hook of
+its http adapter, `_wire_transport_factory()`, called once from
+`wire_entry` before it returns, and builds a fresh transport for every
+`send` (no state crosses a send, so no connection is bound to the event
+loop of an earlier call). The http adapters of the two peers carry the same
+`wire_entry` body and the same default hook body
+(`_ISOMORPHIC_TARGETS`: three rows, `wire_entry` on the http pair and on
+the in-process pair, and `_wire_transport_factory` on the http pair). The
+socket overrides differ by peer and are not rows.
+
+| plug | `transport_kind` | transport behind `send` | what the hook does before `wire_entry` returns |
+|---|---|---|---|
+| `r2db-api` (in-process) | `in_process` | none | `wire_entry` raises `AssertionError` naming `in_process` |
+| `MitateDB-api` (in-process) | `in_process` | none | the same |
+| `r2db-api-http` | `asgi` | `httpx.ASGITransport` over the surface's data app | nothing (the default hook returns the factory) |
+| `MitateDB-api-http` | `asgi` | the same | the same |
+| `r2db-api-socket` | `socket` | a one-shot `httpx.AsyncHTTPTransport`, dialing the URL it is given | reads the data surface's `base_url`, which starts its uvicorn and nginx (`_DeclaredSocketSurface`) |
+| `MitateDB-api-socket` | `socket` | the same | starts the data surface (`_AppSocketSurface.ensure_started`) |
+
+The synthetic hosts the two http plugs declare (`.invalid`) are never
+resolved: an ASGI transport does not read the host. Redirects, measured on a
+throwaway Application per plug (a `GET` of the capability path with a
+trailing slash): the two ASGI plugs and the two socket plugs answer 307 with
+a `Location` that is the same path without the slash (on the socket plugs
+the `Location` origin is not necessarily the declared origin: measured, it
+carries no port); the two socket plugs
+also answer 301 for `<origin>/v1` (nginx's `location /v1/`), and the two
+ASGI plugs 404.
+
+`conformance-tests/test_wire_entry.py` pins the port over the four wire
+plugs (the selection is made once, at import, from `transport_kind`, and its
+number is asserted there) and over the two in-process plugs. It observes
+"carries only" at the transport hand-over point
+(`httpx.ASGITransport.handle_async_request` and
+`httpx.AsyncHTTPTransport.handle_async_request`, wrapped by a recording
+spy). Mutations measured red against it (work order
+`docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` WP-2): V31 / V31b / V32 / V32b
+(a `wire_entry` that returns the control base URL, on each of the four wire plugs), V33
+(the two secrets swapped), V34a (the `r2db-api` socket send rewrites the
+URL as `_LazySocketClient.send` does), V34b (a header added on the
+`MitateDB-api` http send), V35 (a send through a client that follows
+redirects), V34c (the refusal of a method or URL not in the library's normal form removed from the `MitateDB-api` http send), V34d (the fragment and userinfo terms removed from the `r2db-api` http send's refusal), V36 (`repr` shows a secret), V36b (a secret field takes part in comparison), V37 (an in-process plug returning
+`None`), V38a (a socket plug removed from the registry, an error at
+collection), V38b (an item that does not take `adapter` indirectly), V40a,
+V40b, V40c (a one-line difference between the two peers' `wire_entry`
+bodies, between their hooks' default bodies, and between their in-process
+bodies; red in `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer`).
+
+### 31.3 Disclosed limits
+
+1. **What happens after the hand-over point is not observed**: on the socket
+   plugs, nginx and the uvicorn behind it (and the application's own
+   routing) see the request after the transport has written it.
+2. **A connection failure is tested on the socket plugs only**: `send` lets
+   the transport's exception through, and a test sends to a loopback port
+   nobody listens on (`httpx.TransportError`). The two ASGI plugs are not
+   covered, because an ASGI transport does not read the host and has no
+   connection to refuse.
+3. **Only the ASGI and loopback-socket transports are exercised**: no plug
+   dials a TLS endpoint, so the entry says nothing about certificate
+   handling.
+4. **The returned body is the decoded body**: the body is read through the
+   transport's response, so a peer that answers with a `Content-Encoding`
+   returns header pairs that describe the encoded body (`Content-Length`,
+   `Content-Encoding`) next to a decoded body. No current plug reaches this:
+   neither peer nor the nginx configuration compresses.

@@ -102,7 +102,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -619,6 +619,18 @@ class R2DBSocketConformanceAdapter(R2DBHttpConformanceAdapter):
         surface.rebind_app(app)
         self._register_surface(surface)
         return _LazySocketClient(surface, stop_surface_on_close=True)
+
+    def _wire_transport_factory(self) -> Callable[[], httpx.AsyncBaseTransport]:
+        """Override: reads the data surface's own `base_url` first, which
+        starts its uvicorn+nginx pair (`_DeclaredSocketSurface._ensure_
+        started`), and returns a factory of plain, one-shot
+        `httpx.AsyncHTTPTransport` objects. A plain transport dials the URL
+        in the request exactly as given -- unlike `_LazySocketClient.send`
+        above, which overwrites the request URL's scheme, host and port
+        with the surface's own."""
+        self._ensure_declared_surfaces()
+        _ = self._data_surface.base_url
+        return httpx.AsyncHTTPTransport
 
     def _reset_surface_state(self) -> None:
         """Override (monitor 裁定 2026-09-08, F-2 (b); design D-1 (A) 6

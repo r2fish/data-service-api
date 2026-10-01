@@ -63,6 +63,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    WireEntry,
     apply_limits_override,
     fold_batch_idempotency_key,
     fresh_identifier,
@@ -1283,6 +1284,17 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         it."""
         cell = self._control.cells[session.principal.application_id]
         return _hold_after_plan_verification(cell)
+
+    def wire_entry(self, application_id: str) -> WireEntry:
+        """See `ConformanceAdapter.wire_entry`'s own docstring
+        (`adapter.py`). This plug's `transport_kind` is `"in_process"`: it
+        drives the peer's product objects directly and has no wire, so a
+        call is a port-usage error and raises `AssertionError` -- it never
+        returns a send function and never skips."""
+        raise AssertionError(
+            "wire_entry: this plug's transport_kind is 'in_process' and it has no wire; "
+            "only a plug that dials a transport (asgi or socket) has a wire entry"
+        )
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
