@@ -819,7 +819,10 @@ is ever built for a `--real-server` run.
     request-scope entry and the two lock calls, no-ops on SQLite
     (the backend's own lock covers the scope) -- which the PostgreSQL-
     backed plug has no counterpart for in its `psycopg` statement count
-    (its locks are statements of their own, counted there).
+    (its locks are statements of their own, counted there, and so are the
+    request scope's own timeout statements -- `SET LOCAL statement_timeout`
+    / `lock_timeout` on each connection the scope borrows, re-issued once
+    more after a contended lock).
 
   These are **not the same unit**. A `backend_calls` value from a
   PostgreSQL-backed plug is not directly comparable to one from an

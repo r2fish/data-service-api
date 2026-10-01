@@ -423,7 +423,7 @@ def _resolve_app_db_and_matcher(cell: Any, app_id: str) -> "tuple[str | None, Ca
       db_rows` calls it once per op, after the measured window, for the rows
       of BOTH probes: the POST probe's connections were just returned to
       their pools, so they are idle then; the PRE probe's rows (taken
-      before the warmup) match only while their connection is still idle in
+      after the warmup, before the measured window) match only while their connection is still idle in
       the pool, so one that left the pool in between (discarded by a failed
       liveness check, or by the 300 s idle sweep) is not matched and its
       probe commit is not subtracted. A capability-probe application's own cell (a second, unrelated
