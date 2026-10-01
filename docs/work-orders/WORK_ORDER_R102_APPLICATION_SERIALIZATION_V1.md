@@ -537,7 +537,7 @@ branch `r102` (基点 main `ddf9c73`、WP ごとの WIP commit 24 + 並行 workt
 
 ### 5.3 計測 D-R102
 
-監督、2026-10-01。木: 基準値 = 分岐点の main `ddf9c73` (worktree `r102-base`)、実装後 = `r102` の `3a03608` (製品コードは `0d8ffd0` で確定。`3a03608` は指紋の行のみ)。前後を同じ日に交互に取った (round 2)。各 run の開始時の 1 分 load average は 1.69〜2.50 (すべて 3.0 以下)。他の pytest と nginx は無し。出力は scratchpad の `perf-r102-<before|after>-<k4|k1|rs-…>-run<N>.txt` (K=4 と K=1 は 2 run、real-server は 1 run)。**round 1** (12:38〜12:48、実装後 = `eb97a06`) は K=1 で MitateDB-http の p50 が +176〜226% の退行を示し (訂正註 6: ROLLBACK による prepared statement の破棄)、M-19 の直しの後に全段を取り直した (round 1 の K=4 の判定値も 0/4856 = 0.0% で同じ)。
+監督、2026-10-01。木: 基準値 = 分岐点の main `ddf9c73` (worktree `r102-base`)、実装後 = `r102` の `3a03608` (製品コードは `0d8ffd0` で確定。`3a03608` は指紋の行のみ)。前後を同じ日に交互に取った (round 2)。各 run の開始時の 1 分 load average は 1.69〜2.50 (すべて 3.0 以下)。開示: 実装後の木は K=4 run 1 以外 `commit=3a03608-dirty` (本書 §5 の未 commit の記録が作業ツリーにあった。製品コードは同じ)。他の pytest と nginx は無し。出力は scratchpad の `perf-r102-<before|after>-<k4|k1|rs-…>-run<N>.txt` (K=4 と K=1 は 2 run、real-server は 1 run)。**round 1** (12:38〜12:48、実装後 = `eb97a06`) は K=1 で MitateDB-http の p50 が +176〜226% の退行を示し (訂正註 6: ROLLBACK による prepared statement の破棄)、M-19 の直しの後に全段を取り直した (round 1 の K=4 の判定値も 0/4856 = 0.0% で同じ)。
 
 表 A — D-R102 の判定 (K=4、`--warmup 10 --n 100`、thread limit 4、2 run。読む行 = `perfbase_<id>` の op=cross_entity の POOL 行):
 
@@ -555,7 +555,7 @@ branch `r102` (基点 main `ddf9c73`、WP ごとの WIP commit 24 + 並行 workt
 | 計測 | 形 | r2db-api | MitateDB-api |
 |---|---|---|---|
 | K=1 全 plug・全 op | `tools/perf_baseline.py --warmup 20 --n 200` (6 plug) | p50 −1.8〜+1.4%、p95 −5.5〜+15.6% (http batch の p95 +15.6% が最大) | in-process p50 −2.8〜+4.2% / p95 −0.7〜+6.2%; http p50 −16.8〜−0.8% / p95 −16.9〜+1.0% (query 1.527 → 1.377 ms); socket p50 −9.2〜−2.3% / p95 −13.4〜−4.3% |
-| K=4 query / mutate の p50 (http plug) | D-R102 の run の PERF 行 | — | query 16.9 ms、mutate 11.2 ms (round 1 の実装後の値; 基準値の同 op は cell lock の待ちを含む) |
+| K=4 query / mutate の p50 (http plug、round 2 の 2 run) | D-R102 の run の PERF 行 | — | query 5.21 / 5.33 → 4.16 / 4.15 ms、mutate 4.11 / 4.07 → 4.02 / 3.94 ms (基準値は cell lock の待ちを含む) |
 | real-server N=1 K=1 / K=32 (比) | `--real-server <peer> --workers 1` (K=1: `--warmup 20 --n 200`、K=32: `--warmup 3 --n 15`) | 2.573 → 2.556 ms / 42.836 → 43.272 ms (16.65 → 16.93 倍) | 2.307 → 2.345 / 39.353 → 39.991 (17.06 → 17.05 倍) |
 | real-server N=4 K=1 / K=32 (比) | 同 `--workers 4` | 2.571 → 2.546 / 27.640 → 26.757 (10.75 → 10.51 倍) | 2.354 → 2.268 / 24.779 → 24.978 (10.53 → 11.01 倍) |
 
@@ -570,6 +570,11 @@ branch `r102` (基点 main `ddf9c73`、WP ごとの WIP commit 24 + 並行 workt
 | r2db-api (3 plug) | query / mutate / batch | 1 / 1 / 1、18 / 19 / 23 | 不変 | schema lock は `apply_schema` だけ (計測の op に無い) |
 
 ### 5.4 受け入れ監査と閉止
+
+- 受け入れ監査 (`evidence-auditor`、候補 `4d7181a`、パケット = scratchpad の `acceptance-packet-r102.md`): 充足が主。未充足 / 証拠不足 = 完了条件 90 (grep の前後値が最終の木に無い → 下に記録)、97 (§5.2 / §5.4 が空 → 本節)、98a の 1 件 (`CM`:1469 の `backend_postgres.py:480` → :481-482、直した)、§3 の K=4 の p50 の前後 (round 2 の値を §5.3 表 B に記録)、§4 の `tools/tests` (候補 `4d7181a` で `1 failed, 783 passed` = `test_0f_both_peers_all_src_rev_vs_itself_is_green` の CH-0547 → `c3e5ca7` で直し、最終候補で再実行)。主張 vs 実測: CM の R-102 の行 175 行のうち test 名 56 件・file:line 88 件がすべて解決、内容は 26 件を読み不一致 1 件 (上の 98a)。逐語 (M-1〜M-16、D-R102、lock の順序表、hook 文、C-34) は一致。観察 5 件 (cell.py の参照 8 件の 1 行ずれ → `c3e5ca7` の削除分を全 17 件で引き直した; 引き継ぎ書の語と欠落 → 直した; 計測の木の dirty → §5.3 に開示; 変異 id の衝突 (V15 × 2、56a が V70) → 観察; 固定 sleep で待ちの到達を代用 (test_r102_request_scope.py:380・:422・:701) → 観察)。
+- `grep -c '<path>:' security/CONTROL_MAPPING.md` (完了条件 90、main `ddf9c73` → 最終の木): backend_postgres.py 7 → 18 (+ `` `path`: `` 1)、cell.py 17 → 18 (+3)、pool.py 0 → 3、main.py 8 → 9、ops.py 94 → 94 (+1)、platform_declarations.py 13 → 13、r2db postgres.py 10 → 15 (+9)、cloud-run-cloud-sql.md 15 → 15、test_r102_request_scope.py 0 → 8、test_r102_cross_cell_windows.py 0 → 3、test_r102_pool.py 0 → 2、test_r102_schema_windows.py 0 → 3、test_schema_serialization_lock.py 0 → 2、test_c34 0 → 1。
+- 最終候補 `5da56d1` (main `ddf9c73` + `r102` `c3e5ca7`): 完了ゲート `gate: 4927 passed, 2 subtests passed in 910.29s (0:15:10)`、judge=PASS、pg_database/pg_roles diff 0 (label r102-final、2026-10-01 16:42)、`tools/tests` `pt: 784 passed in 88.08s (0:01:28)` (tools/tests、候補 `5da56d1`)。本節と CM の行参照の直しは最終ゲートの後の記録の commit (docs のみ) で入れ、`conformance-tests/test_control_mapping_register.py` と `tools/check_doc_refs.py` で確かめた。
+- 閉止: 台帳 v1.146 (R-102 を §8.2 の索引と記録ファイルへ)、`CM` 3.14、設計 v0.6、R-120 起票。依頼者確認は引き継ぎ書 §4。
 
 ## 6. 訂正註 (本文は書き換えない。`OC` §1.8 の 57)
 
@@ -637,3 +642,10 @@ branch `r102` (基点 main `ddf9c73`、WP ごとの WIP commit 24 + 並行 workt
 1. **M-18 (問い、依頼者判断待ち)**: `plan` を持つ DML (transact の dry-run / plan) は 3a を取らない (設計 D-3・D-4) ので、別 entity への schema 操作が revision を進めても plan 付き DML は通る (WP-4 の実装担当の疑義 1)。(a) 設計どおり (DML の plan の照合は対象 entity の 3b の範囲で守られ、別 entity の schema 変更は DML の対象に触れない) / (b) plan 付き DML も 3a を共有で取る (schema 操作中は DML が止まる)。監督の推奨 = (a)、観察として記録。
 2. 裁定の語彙: 引き継ぎ書「裁定」節の語は `OC` §1.15 の 77 の 4 語 (起票 / 既知の穴 / 観察 / 直した) に限る。レビュー WP-5 B-3 (触ってよいパスの外の file) の「追認」は「観察 (監督の発注で許していた)」と読む。
 3. 最終一括 (`$SP/r102-final-batch.md` の 1〜7) を完了条件 **98a** とし、WP-7 に含める (34b の test の入力と V-ops-3、SI-01 Evidence、main.py / pool.py の旧コメント、r87 の test 名、C-34 Status の RB-wp7-1、差し戻し 2 後の CM の行と主張、README の 1 文)。
+
+
+**訂正註 8 (2026-10-01、監督。受け入れ監査と最終候補の裁定。本文は書き換えない)**
+
+1. (WP-4 レビュー B-1 の裁定の変更) 消えた cell lock の経緯コメント (main の `cell.py`:646-685) の受け皿 CH-0547 は、(ii) 「元の塊全体を fence に、参照行を残す塊の末尾に」の形では `tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green` (常設) が赤になる (検査器は「保護参照 (test 名) を含む文の削除」を companion から導出できない: 設計 §4.1 (3))。`c3e5ca7` で (i) に戻した: `_CountingRLock` の docstring と同じく git に任せ、CH-0547 の節と参照行を外す (R-115 作業指示書 訂正註 9 (2) の先例)。§2.0 の注意 5 の「逐語の受け皿」はコードごと消える塊には掛からない、と読む。覆した日付 2026-10-01、根拠 = 本註。
+2. (監査) 完了条件 90 の grep の前後値は §5.4 に記録した。完了条件 98a の `CM`:1469 の参照を :481-482 に直し、`c3e5ca7` の 1 行削除で動いた `cell.py` の参照 17 件を引き直した。
+3. (監査の観察) 変異 id の衝突 (`r102-wp4-mutations-d.json` の V15 が 2 つ、56a の変異が V70) と、固定 sleep による待ちの到達の代用 (`test_r102_request_scope.py`:380・:422・:701) は観察。製品コードの最終 (`0d8ffd0`) の後に再実行した変異は V39 / V43 / V44 / V57b で、spec の 101 edit のうち 94 は最終の木に old が在る (V73 の old は無い = WP-4 差し戻し後の文字列と異なる。観察)。
