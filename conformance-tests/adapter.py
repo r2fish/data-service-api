@@ -1068,22 +1068,25 @@ class WireEntry:
     `Content-Length` framing an HTTP library puts on every request -- and
     returns the response's status, its header pairs (order and spelling as
     received) and its body as `bytes`. It never follows a redirect: a 3xx
-    response is returned as it is. A connection failure is raised as an
-    exception.
+    response is returned as it is. A method or URL that the HTTP library
+    would write in a form other than the one given is refused with
+    `ValueError` before anything is sent. A connection failure is raised
+    as an exception.
 
     `runtime_secret` / `developer_secret`: the complete bearer token of
     one runtime and one developer credential issued to the application
     (`CredentialHandle.secret`, verbatim). Both fields are excluded from
-    `repr` (`field(repr=False)`), so neither `repr(entry)` nor an assert
-    failure message that prints the entry shows a secret."""
+    `repr` and from comparison (`field(repr=False, compare=False)`), so
+    neither `repr(entry)` nor the explanation of a comparison between
+    entries shows a secret."""
 
     base_url: str
     send: Callable[
         [str, str, tuple[tuple[str, str], ...], bytes | None],
         tuple[int, tuple[tuple[str, str], ...], bytes],
     ]
-    runtime_secret: str = field(repr=False)
-    developer_secret: str = field(repr=False)
+    runtime_secret: str = field(repr=False, compare=False)
+    developer_secret: str = field(repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2036,6 +2039,12 @@ class ConformanceAdapter(ABC):
         `AssertionError` that names `in_process` (a port-usage error, never a
         skip and never a returned placeholder), the same way
         `fold_batch_idempotency_key` treats a port-usage error.
+
+        A method or URL that is not in the HTTP library's own normal form (a
+        lower-case method, an upper-case host, a path with dot segments) is
+        not carried: `send` raises `ValueError` before anything reaches the
+        transport, so a request is either carried as given or refused, never
+        carried in a rewritten form.
         """
 
     # ------------------------------------------------------------------

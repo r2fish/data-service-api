@@ -3837,6 +3837,12 @@ convention §22, §25 and §30 follow. `send` is a plain carrier: it does not
 pass the request through an `httpx.AsyncClient`, so no default header,
 cookie jar or redirect policy acts on it, and it does not rewrite the URL it
 is given (the existing `r2db-api` socket client does, `_LazySocketClient.send`; `wire_entry` does not use it).
+A method or URL that the HTTP library would write in a form other than the
+one given (a lower-case method, an upper-case host, a path with dot segments)
+is not carried: `send` raises `ValueError` before anything reaches the
+transport, so a request is carried as given or refused, never carried in a
+rewritten form. The two secret fields are excluded from `repr` and from
+comparison (`field(repr=False, compare=False)`).
 
 ### 31.2 Per-plug realization (measured)
 
@@ -3863,7 +3869,9 @@ The synthetic hosts the two http plugs declare (`.invalid`) are never
 resolved: an ASGI transport does not read the host. Redirects, measured on a
 throwaway Application per plug (a `GET` of the capability path with a
 trailing slash): the two ASGI plugs and the two socket plugs answer 307 with
-a `Location` that is the same path without the slash; the two socket plugs
+a `Location` that is the same path without the slash (on the socket plugs
+the `Location` origin is not necessarily the declared origin: measured, it
+carries no port); the two socket plugs
 also answer 301 for `<origin>/v1` (nginx's `location /v1/`), and the two
 ASGI plugs 404.
 
@@ -3879,7 +3887,7 @@ spy). Mutations measured red against it (work order
 (the two secrets swapped), V34a (the `r2db-api` socket send rewrites the
 URL as `_LazySocketClient.send` does), V34b (a header added on the
 `MitateDB-api` http send), V35 (a send through a client that follows
-redirects), V36 (`repr` shows a secret), V37 (an in-process plug returning
+redirects), V34c (the refusal of a method or URL not in the library's normal form removed from the `MitateDB-api` http send), V36 (`repr` shows a secret), V36b (a secret field takes part in comparison), V37 (an in-process plug returning
 `None`), V38a (a socket plug removed from the registry, an error at
 collection), V38b (an item that does not take `adapter` indirectly), V40a,
 V40b, V40c (a one-line difference between the two peers' `wire_entry`
@@ -3891,9 +3899,16 @@ bodies; red in `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer`).
 1. **What happens after the hand-over point is not observed**: on the socket
    plugs, nginx and the uvicorn behind it (and the application's own
    routing) see the request after the transport has written it.
-2. **A connection failure is stated, not tested**: `send` lets the
-   transport's exception through, and no test makes a plug refuse a
-   connection.
+2. **A connection failure is tested on the socket plugs only**: `send` lets
+   the transport's exception through, and a test sends to a loopback port
+   nobody listens on (`httpx.TransportError`). The two ASGI plugs are not
+   covered, because an ASGI transport does not read the host and has no
+   connection to refuse.
 3. **Only the ASGI and loopback-socket transports are exercised**: no plug
    dials a TLS endpoint, so the entry says nothing about certificate
    handling.
+4. **The returned body is the decoded body**: the body is read through the
+   transport's response, so a peer that answers with a `Content-Encoding`
+   returns header pairs that describe the encoded body (`Content-Length`,
+   `Content-Encoding`) next to a decoded body. No current plug reaches this:
+   neither peer nor the nginx configuration compresses.

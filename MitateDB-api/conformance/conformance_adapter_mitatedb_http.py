@@ -2353,6 +2353,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             transport = transport_factory()
             try:
                 request = httpx.Request(method, url, headers=list(headers), content=body)
+                if request.method != method or str(request.url) != url:
+                    raise ValueError(
+                        "send: the method or URL is not in the HTTP library's own normal form, "
+                        "so it would not be carried as given: method=%r url=%r" % (method, url)
+                    )
                 response = await transport.handle_async_request(request)
                 await response.aread()
             finally:

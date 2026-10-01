@@ -11,9 +11,9 @@ plugs) and, separately, over the in-process plugs, which have no wire.
 
 The selection is made once, at module import, from the built registry
 (`registered_adapters()`), and the number of wire plugs is asserted there
-(`_WIRE_ADAPTER_NAMES`). Every test takes the session-scoped `adapter`
-fixture through an indirect `pytest.mark.parametrize("adapter", ...)` and
-asserts, first, that its own `xdist_group` marker names that same adapter
+(`_WIRE_ADAPTER_NAMES`). Every test except the one over `WireEntry`'s own
+field table takes the session-scoped `adapter` fixture through an indirect
+`pytest.mark.parametrize("adapter", ...)` and asserts, first, that its own `xdist_group` marker names that same adapter
 (`conftest.py`'s `pytest_collection_modifyitems` derives the group from the
 `adapter` parameter): a test that did not take `adapter` that way would fall
 into the shared `registry-guards` group, and the real surface it starts
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import socket
 
 import httpx
 import pytest
@@ -56,7 +57,16 @@ assert len(_IN_PROCESS_ADAPTER_NAMES) == 2, (
     f"found {len(_IN_PROCESS_ADAPTER_NAMES)}: {_IN_PROCESS_ADAPTER_NAMES!r}"
 )
 
+_SOCKET_ADAPTER_NAMES: tuple[str, ...] = tuple(
+    name for name, obj in registered_adapters().items() if getattr(obj, "transport_kind", None) == "socket"
+)
+assert len(_SOCKET_ADAPTER_NAMES) == 2, (
+    f"expected exactly two registered adapters whose transport_kind is 'socket', "
+    f"found {len(_SOCKET_ADAPTER_NAMES)}: {_SOCKET_ADAPTER_NAMES!r}"
+)
+
 _WIRE = pytest.mark.parametrize("adapter", _WIRE_ADAPTER_NAMES, indirect=True)
+_SOCKET = pytest.mark.parametrize("adapter", _SOCKET_ADAPTER_NAMES, indirect=True)
 _IN_PROCESS = pytest.mark.parametrize("adapter", _IN_PROCESS_ADAPTER_NAMES, indirect=True)
 
 _CONTRACT = load_contract()
@@ -227,7 +237,8 @@ def test_secrets_never_appear_in_repr_or_in_an_assert_failure_message(
         developer_secret=sentinels[1],
     )
     for candidate, secrets_in_it in ((entry, (entry.runtime_secret, entry.developer_secret)), (synthetic, sentinels)):
-        assert all(secrets_in_it), f"{adapter.name}: an empty secret cannot be shown absent"
+        empty = [index for index, secret in enumerate(secrets_in_it) if not secret]
+        assert not empty, f"{adapter.name}: secret(s) number {empty} are empty, so their absence cannot be shown"
         shown = repr(candidate)
         with pytest.raises(AssertionError) as failure:
             assert candidate is None
@@ -235,7 +246,60 @@ def test_secrets_never_appear_in_repr_or_in_an_assert_failure_message(
         leaked_in_failure = [index for index, secret in enumerate(secrets_in_it) if secret in str(failure.value)]
         assert not leaked_in_repr, f"{adapter.name}: secret(s) number {leaked_in_repr} appear in repr(entry)"
         assert not leaked_in_failure, f"{adapter.name}: secret(s) number {leaked_in_failure} appear in an assert failure message"
-    assert dataclasses.is_dataclass(entry)
+
+
+def test_wire_entry_secret_fields_are_excluded_from_repr_and_comparison() -> None:
+    """The two secret fields of `WireEntry` are declared with
+    `repr=False` and `compare=False`: neither `repr(entry)` nor the
+    explanation pytest gives for a comparison between entries is built from
+    a secret field. Observed on the dataclass's own field table, because the
+    wording of a comparison's explanation depends on pytest's verbosity."""
+    by_name = {f.name: f for f in dataclasses.fields(WireEntry)}
+    assert {"runtime_secret", "developer_secret"} <= set(by_name)
+    for name in ("runtime_secret", "developer_secret"):
+        assert by_name[name].repr is False, f"{name}: the field is shown in repr"
+        assert by_name[name].compare is False, f"{name}: the field takes part in comparison"
+    others = [f.name for f in dataclasses.fields(WireEntry) if f.name not in ("runtime_secret", "developer_secret")]
+    assert others == ["base_url", "send"], f"unexpected non-secret fields {others!r}"
+
+
+@_WIRE
+def test_send_refuses_a_method_or_url_that_is_not_in_the_http_librarys_normal_form(
+    adapter, wire, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """A lower-case method, a host with upper-case letters and a path with
+    dot segments are each written differently by the HTTP library than they
+    were given. `send` raises `ValueError` for each and nothing reaches a
+    transport -- a request is carried as given or refused, never carried in
+    a rewritten form."""
+    _assert_own_group(request)
+    _iso, entry = wire
+    spies = _spies(monkeypatch)
+    canonical = _url(entry, _CAPABILITIES_PATH)
+    declared = httpx.URL(entry.base_url)
+    cases = (
+        ("get", canonical),
+        ("GET", canonical.replace(declared.host, "LocalHost", 1)),
+        ("GET", _url(entry, _BASE_PATH + "/a/../b")),
+    )
+    for method, url in cases:
+        with pytest.raises(ValueError):
+            entry.send(method, url, (), None)
+    assert _all_requests(spies) == [], f"{adapter.name}: a refused request reached a transport"
+
+
+@_SOCKET
+def test_send_raises_on_a_refused_connection(adapter, wire, request: pytest.FixtureRequest) -> None:
+    """A URL on a loopback port nobody listens on (a port that was bound and
+    closed) makes `send` raise a transport error; it returns no status."""
+    _assert_own_group(request)
+    _iso, entry = wire
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    url = f"http://127.0.0.1:{closed_port}{_CAPABILITIES_PATH}"
+    with pytest.raises(httpx.TransportError):
+        entry.send("GET", url, (), None)
 
 
 @_IN_PROCESS
