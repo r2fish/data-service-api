@@ -13,9 +13,11 @@ a missing-validator let through before this file existed): no
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from adapter import load_contract
+from adapter import REPO_ROOT, load_contract
 from schema_check import ANNOTATION_KEYWORDS, IMPLEMENTED_KEYWORDS, assert_valid, used_keywords, validate
 
 
@@ -121,6 +123,44 @@ def test_minimum_and_maximum():
     assert validate(10, schema, {}) == []
     assert validate(0, schema, {})
     assert validate(11, schema, {})
+
+
+def test_max_length_accepts_a_string_at_the_bound_and_rejects_one_past_it():
+    schema = {"type": "string", "maxLength": 3}
+    assert validate("abc", schema, {}) == []
+    assert validate("", schema, {}) == []
+    violations = validate("abcd", schema, {})
+    assert violations and "maxLength" in violations[0].message
+    # The bound counts code points, as JSON Schema does, and says nothing of a
+    # value that is not a string.
+    assert validate("\u00e9\U0001F600\u00e9", schema, {}) == []
+    assert validate(12345, {"maxLength": 3}, {}) == []
+
+    contract = _contract()
+    request = contract["schemas"]["MutationRequest"]
+    base = {"operations": [{"operation": "insert", "values": {"a": 1}}]}
+    assert validate({**base, "idempotency_key": "k" * 128}, request, contract) == []
+    over = validate({**base, "idempotency_key": "k" * 129}, request, contract)
+    assert over and "maxLength" in over[0].message and over[0].path == "$.idempotency_key"
+
+
+def test_max_properties_accepts_an_object_at_the_bound_and_rejects_one_past_it():
+    schema = {"type": "object", "maxProperties": 2}
+    assert validate({}, schema, {}) == []
+    assert validate({"a": 1, "b": 2}, schema, {}) == []
+    violations = validate({"a": 1, "b": 2, "c": 3}, schema, {})
+    assert violations and "maxProperties" in violations[0].message
+    assert validate([1, 2, 3], {"maxProperties": 2}, {}) == []
+
+    contract = _contract()
+    request = contract["schemas"]["MutationRequest"]
+
+    def with_values(count):
+        return {"operations": [{"operation": "insert", "values": {f"f{i}": i for i in range(count)}}]}
+
+    assert validate(with_values(100), request, contract) == []
+    over = validate(with_values(101), request, contract)
+    assert over and "maxProperties" in over[0].message and over[0].path == "$.operations[0].values"
 
 
 def test_unknown_schema_keyword_fails_loud():
@@ -241,6 +281,33 @@ def test_c11_schemas_use_only_implemented_or_annotation_keywords():
     unknown = used - known
     assert not unknown, (
         f"contract schema(s) use keyword(s) schema_check.py does not recognize: {sorted(unknown)} -- "
+        "extend IMPLEMENTED_KEYWORDS (or ANNOTATION_KEYWORDS) in schema_check.py"
+    )
+
+
+def test_reference_client_schemas_use_only_implemented_or_annotation_keywords():
+    """The same guard for the request and response schemas that the entries of
+    the derived operation catalog name -- the ones the reference client
+    validates against, for the data surface and the control surface alike. An
+    alias (an entry of `endpoints` whose name is also a key of
+    `control_endpoints`, `definitions.OperationCatalogEntry.description`) is
+    skipped: no URL is formed for it, so the client never validates against
+    its schemas, and the control entry it stands for names the same ones.
+    """
+    contract = _contract()
+    catalog = json.loads((REPO_ROOT / "spec" / "OPERATION_CATALOG.json").read_text())
+    names: set[str] = set()
+    for entry in catalog["operations"]:
+        if entry["name"] in contract["control_endpoints"]:
+            continue
+        names |= {entry[key] for key in ("request_schema", "response_schema") if entry[key] is not None}
+    assert names, "no schema was found to check"
+    used: set[str] = set()
+    for name in sorted(names):
+        used |= used_keywords(contract["schemas"][name], contract)
+    unknown = used - (IMPLEMENTED_KEYWORDS | ANNOTATION_KEYWORDS)
+    assert not unknown, (
+        f"schema(s) the reference client validates use keyword(s) schema_check.py does not recognize: {sorted(unknown)} -- "
         "extend IMPLEMENTED_KEYWORDS (or ANNOTATION_KEYWORDS) in schema_check.py"
     )
 
