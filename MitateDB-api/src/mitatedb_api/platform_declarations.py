@@ -1034,9 +1034,9 @@ def check_role_connection_limits(
     controlplane`/`<...>_auditreader` roles (module-level floor constants
     above) and every PROVISIONED application's own runtime/developer roles
     (floor = `pool_size * process_ceilings.data`, the same floor r2db-
-    api's sibling uses; this peer's own per-application demand is two
-    persistent connections per process, one per role, which this floor
-    covers). A role with no grants matching any of the three
+    api's sibling uses; this peer's own per-application demand is one
+    pool per role of up to `pool_size` connections per process, which
+    this floor covers). A role with no grants matching any of the three
     platform-plane shapes above (identity unknown to this check) is
     silently skipped, never flagged.
 
@@ -1058,7 +1058,10 @@ def check_role_connection_limits(
     sequence means "check no application role at all"
     (`control_composition`'s own case: that process serves no
     application); `None` (the default) means every registered
-    application, unchanged pre-existing behavior."""
+    application, unchanged pre-existing behavior.
+
+    History: CH-0550
+    """
     if role_classes is None:
         role_classes = _ROLE_CLASSES
     floors: dict = {}

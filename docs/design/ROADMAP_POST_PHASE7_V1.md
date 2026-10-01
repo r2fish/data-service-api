@@ -1,6 +1,6 @@
 # フェーズ7 以降の計画 (Roadmap) v1
 
-- 版数: **v1.146 (2026-10-01)**。v1.145 からの変更: **R-102 (MitateDB のデータ面の application 単位の直列化、規模 L、Class D) を実施して閉止し、§8.2 の索引と記録ファイルへ移した。** 設計 `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` v0.6 (実装後の註のみ)、作業指示書 `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md`、`security/CONTROL_MAPPING.md` 3.14、共通条件 C-34、conformance port v1.20、契約は 1.13.0 のまま。§0.1.3 の G-4 行に【2026-10-01 再実測】を足した。R-120 の行は R-102 の WP-4 の変更セットで §8.1 に入った (同 作業指示書 訂正註 4 の 5)。完了ゲート 〈集計行〉。
+- 版数: **v1.146 (2026-10-01)**。v1.145 からの変更: **R-102 (MitateDB のデータ面の application 単位の直列化、規模 L、Class D) を実施して閉止し、§8.2 の索引と記録ファイルへ移した。** 設計 `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` v0.6 (実装後の註のみ)、作業指示書 `docs/work-orders/WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md`、`security/CONTROL_MAPPING.md` 3.14、共通条件 C-34、conformance port v1.20、契約は 1.13.0 のまま。§0.1.3 の G-4 行に【2026-10-01 再実測】を足し、§0.1.1 の G-2 / G-3 行の条件数を 35 件 (C-34 を足した) にし、§1 に 1.0j を足した。R-120 の行は R-102 の WP-4 の変更セットで §8.1 に入った (同 作業指示書 訂正註 4 の 5)。完了ゲート 〈集計行〉。版数ログの v1.141 の行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__VERSION_LOG.md` へ回転した (`docs/work-orders/OPERATING_CONDITIONS.md` §1.16 の 78)。
 - 版数: **v1.145 (2026-10-01)**。v1.144 からの変更: **R-119 (MitateDB の `read_page` の decode が cell lock の外、規模 S、Class B) を実施して閉止し、§8.2 の索引と記録ファイルへ移した。** `read_page` の decode を外側 lock の内側へ移した 1 箇所。テスト 1 本と変異 1 件、完了ゲート `gate: 4855 passed, 2 subtests passed in 462.54s (0:07:42)` (judge=PASS、label r119)、`COLLECTION_FLOOR` 4854 → 4855。R-102 の実装 (設計 D-5) で同テストを作り替える。版数ログの v1.140 の行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__VERSION_LOG.md` へ回転した (`docs/work-orders/OPERATING_CONDITIONS.md` §1.16 の 78)。
 - 版数: **v1.144 (2026-10-01)**。v1.143 からの変更: **R-46 のレビュー指摘の裁定 (直した 8 件、既知の穴 2 件、観察 1 件) を依頼者が確定した** (依頼者裁定 2026-10-01 (逐語): 「裁定はすべてその通りで確定してください」)。記録ファイルの R-46 の節に逐語で【追記】。引き継ぎ書 `docs/work-orders/HANDOVER_20260930_R46_FABLE.md` への記録は main `ae98bad` で先に入った (その commit message が言う記録ファイルと版上げは本版で行った)。Class A の変更セット。版数ログの v1.139 の行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__VERSION_LOG.md` へ回転した (`docs/work-orders/OPERATING_CONDITIONS.md` §1.16 の 78)。
 - 版数: **v1.143 (2026-10-01)**。v1.142 からの変更: **R-115 (worker process の突然死による audit の欠落、規模 M、Class D) を実施して閉止し、§8.2 の索引と記録ファイルへ移した。** 契約 1.13.0 `audit.process_loss_policy`、決定 1-A (i) + 2-A (設計 `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` v0.5)、共通条件 C-33、`security/CONTROL_MAPPING.md` 3.12。§0.1.1 の G-2 / G-3 の条件数を 34 件にし、§1 に 1.0i を足した。版数ログの v1.138 の行を `docs/archive/docs/design/ROADMAP_POST_PHASE7_V1__VERSION_LOG.md` へ回転した (`docs/work-orders/OPERATING_CONDITIONS.md` §1.16 の 78)。
@@ -36,7 +36,7 @@
 | G | 終了条件 | 検証法 |
 |---|---|---|
 | **G-1** | エージェントの 1 周 (§4 P-2: catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) の 4 段それぞれに、両 peer で executable な共通条件 (`conformance-tests/CONDITIONS.md`) が少なくとも 1 件あり、緑である | 下の 0.1.2 の対応づけと `conformance-tests/registry.json` の adapter 構成、および完了ゲート (`tools/dev/gate.py`) の集計行 |
-| **G-2 / G-3** | 契約の現行版 (現在 1.13.0。`spec/data-service-api.v1.json`:6、両 peer の `capabilities_document`。契約版を上げる変更セットは同じ変更セットで本行の版を更新する) の性質が両 peer で conformance に固定されている — `conformance-tests/CONDITIONS.md` の全条件 (現在 C-00〜C-33 の 34 件。C-32 は 2026-09-29 の R-113、C-33 は 2026-10-01 の R-115 で足した) が両 peer で executable かつ緑 (C-26 は plug ではなく composition root 単位) (完了ゲートの集計行で failed / skipped / xfailed = 0) — かつ、`security/SECURITY_INVARIANTS_V1.md` の各 SI (SI-00〜SI-15 の 16 件) について `security/CONTROL_MAPPING.md` の r2db-api 節と MitateDB-api 節の両方に、テスト名で指せる証拠がある | `CONDITIONS.md` の `executable` 欄と完了ゲートの集計行、`CONTROL_MAPPING.md` の各 SI の peer 節のテスト名 |
+| **G-2 / G-3** | 契約の現行版 (現在 1.13.0。`spec/data-service-api.v1.json`:6、両 peer の `capabilities_document`。契約版を上げる変更セットは同じ変更セットで本行の版を更新する) の性質が両 peer で conformance に固定されている — `conformance-tests/CONDITIONS.md` の全条件 (現在 C-00〜C-34 の 35 件。C-32 は 2026-09-29 の R-113、C-33 は 2026-10-01 の R-115、C-34 は 2026-10-01 の R-102 で足した) が両 peer で executable かつ緑 (C-26 は plug ではなく composition root 単位) (完了ゲートの集計行で failed / skipped / xfailed = 0) — かつ、`security/SECURITY_INVARIANTS_V1.md` の各 SI (SI-00〜SI-15 の 16 件) について `security/CONTROL_MAPPING.md` の r2db-api 節と MitateDB-api 節の両方に、テスト名で指せる証拠がある | `CONDITIONS.md` の `executable` 欄と完了ゲートの集計行、`CONTROL_MAPPING.md` の各 SI の peer 節のテスト名 |
 | **G-4** | 性能の大前提が計測で満たされている — R-101 (1 process 内の直列化の主体の切り分け) と R-102 (MitateDB のデータ面の application 単位の直列化) が閉じ、`docs/design/PERF_*` の基準値が閾値付きで記録され、直近の計測がその閾値の内側にある | §8 の R-101・R-102 行の閉止と、`tools/perf_baseline.py` の PERF 行 (p50 / p95 / `backend_calls`) の記録 (閾値は 0.1.4 のとおり。依頼者裁定 2026-09-24) |
 
 ### 0.1.2 G-1 の 4 段と共通条件の対応づけ (実物の Condition 文から)
@@ -81,6 +81,11 @@
 ---
 
 ## 1. 現状
+
+### 1.0j 更新 (2026-10-01、R-102 の閉止。`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 55)
+
+- **MitateDB のデータ面は application ごとに直列化されなくなり、R-102 を閉じた。** cell lock を廃止し、要求は application × role の pool から接続を借り、1 要求 = 主接続の 1 transaction とし、同じ application の要求の調停は transaction scope の advisory lock (schema 操作の直列化 lock と実体単位の共有 / 排他 lock、idempotency の per-key / 件数 lock) が process をまたいで担う。r2db は `apply_schema` が schema lock を取る。plan の前提条件の共通条件 **C-34** が両 peer でこれを固定する。契約 1.13.0 は不変、`security/CONTROL_MAPPING.md` は 3.14 (§8 の R-102 行、記録ファイル)。
+- **r2db の DML の検証と `alter_field` の間の窓は開いたまま** (R-120 に起票)。MitateDB の runbook §10.10 は版 12 で not accepted (依頼者の再受理待ち)。
 
 ### 1.0i 更新 (2026-10-01、R-115 の閉止。`docs/work-orders/OPERATING_CONDITIONS.md` §1.8 の 55)
 

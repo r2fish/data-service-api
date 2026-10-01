@@ -349,7 +349,24 @@ resource boundary tests; the three control-plane SI-08 classes' publish-and-enfo
 
 ---
 
-*R-102 (2026-10-01, Version 3.14): the SI-08 MitateDB-api claims that `ApplicationCell._lock` serializes a cell's requests, that `_idempotency_pg_scope` serializes across processes, that the 8 catalog reads each open their own transaction at the constructed timeout, and that `PostgresBackend` pools nothing were replaced by the claims on per-role pools, the request scope and transaction-scoped advisory locks (the old text is in git).*
+*MitateDB-api capacity and concurrency Control claims, the cell lock as the in-process serializer and `_idempotency_pg_scope` as the cross-process one, superseded 2026-10-01 (Version 3.14, R-102 -- the cell lock is gone; each request runs in its own request scope and transaction-scoped advisory locks serialize what must not overlap), verbatim:*
+
+- handlers delegate the synchronous section to the threadpool, and `ApplicationCell._lock` covers the WHOLE lookup -> pass-1 -> pass-2 sequence inside that slot -- `MitateDB-api/src/mitatedb_api/cell.py:645`.
+- the separate `_idempotency_lock_scope` helper is gone: the outer cell lock is the in-process serializer and `_idempotency_pg_scope` the cross-process one -- `MitateDB-api/src/mitatedb_api/cell.py:645`.
+- that lock is per `ApplicationCell`, so requests against the SAME application serialize while different applications hold different locks -- `MitateDB-api/src/mitatedb_api/cell.py:645`.
+
+---
+
+*MitateDB-api Control claims, the 8 catalog reads each in their own transaction and the per-statement, not per-request, bound, superseded 2026-10-01 (Version 3.14, R-102 -- the reads run inside the request scope's transaction and the bound comes from the request's deadline), verbatim:*
+
+- each of the 8 reads opens its own developer-connection transaction and issues `SET LOCAL statement_timeout`/`lock_timeout` unconditionally (`_set_timeouts`, `backend_postgres.py:1524-1535`), at the value `PostgresBackend` was constructed with.
+- that bound is per statement, not per request (one insert runs two of these reads), and no per-request budget narrows it, since no `deadline` reaches these reads -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1524-1535`.
+
+---
+
+*MitateDB-api capacity and concurrency Control claim, no per-application pool, superseded 2026-10-01 (Version 3.14, R-102 -- each served application's backend now holds a runtime and a developer pool), verbatim:*
+
+- this peer's per-application `PostgresBackend` pools nothing, so it has no per-application counterpart -- `MitateDB-api/src/mitatedb_api/backend_postgres.py`.
 
 ---
 
@@ -567,7 +584,9 @@ Rollback on a pass-2 failure is now unconditional regardless of exception type (
 
 ---
 
-*R-102 (2026-10-01, Version 3.14): the SI-11 MitateDB-api Status claim that pass 1 runs outside `self._lock` was replaced by the narrower window a schema change made outside the API leaves between the two passes (the old text is in git).*
+*MitateDB-api Status claim, the window between the two passes, superseded 2026-10-01 (Version 3.14, R-102 -- the batch now holds shared entity locks across both passes, so only a schema change outside the API remains), verbatim:*
+
+- **Disclosed PostgreSQL-specific window**: pass 1 runs outside `self._lock`, so a schema change can land between the two passes; the Evidence above drives exactly that window.
 
 ---
 
