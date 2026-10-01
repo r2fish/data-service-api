@@ -290,7 +290,7 @@ class ReferenceClient:
             raise ProblemResponse(
                 code,
                 parsed,
-                code if code in self._contract["errors"]["codes"] else "the failure carries a code the contract does not list",
+                message=code if code in self._contract["errors"]["codes"] else "the failure carries a code the contract does not list",
             )
         if response_schema is None or validate(parsed, response_schema, self._contract):
             raise UninterpretedResponse("the success body does not conform to the operation's response schema")

@@ -24,17 +24,22 @@ reads the client's source and holds every string and bytes constant in it
   scheme and host words, the client's own `OUT_OF_CONTRACT_KNOWLEDGE` row)
   states it;
 - a constant that is a part of the text of a failure: a string, the constant
-  part of an f-string, or a `join` separator, in the arguments of an
-  exception's construction that is itself the operand of a `raise`, the
-  exception being a class defined in the client. A key or call argument inside
-  such an argument is held to the other kinds; `.args` and `__doc__` are not
-  used in the client, so a text cannot be carried out of its `raise`;
+  part of an f-string, or a `join` separator, in the one positional argument
+  of an exception's construction that has no keyword argument, or in its
+  `message=` keyword argument, where the construction is the operand of a
+  `raise` and the exception is a class defined in the client. A key or call
+  argument inside such an argument, and every other argument, is held to the
+  other kinds. The known routes by which a text or a docstring could be read
+  out as a value are red: `.args`, `__doc__` (as an attribute and as a name),
+  the binding of a caught exception (`except ... as name`) and an import that
+  `ALLOWED_IMPORTS` does not list;
 - a key or value of `OUT_OF_CONTRACT_KNOWLEDGE` itself.
 
 A constant equal to any operation name, method or path in the catalog, to the
 name without its `control.` prefix, or to the name of any schema or definition
-in the contract is red in every kind (`forbidden_names`). The client may import
-only the standard library and `schema_check`.
+in the contract is red in every kind (`forbidden_names`). The client imports
+the modules of `ALLOWED_IMPORTS` and no other: the standard library and
+`schema_check`.
 
 `test_c35_turn_reaches_the_wire_only_through_the_client` is the pin on the
 other side: it reads the source of `test_c35_reference_client_turn.py`, the
@@ -119,6 +124,18 @@ CONTRACT_KEY_PATHS = (
     ("catalog", "operations.*.request_schema"),
     ("catalog", "operations.*.response_schema"),
 )
+
+# The modules the client imports, as the import statements name them.
+ALLOWED_IMPORTS = frozenset({
+    "__future__",
+    "ipaddress",
+    "json",
+    "collections.abc",
+    "string",
+    "typing",
+    "urllib.parse",
+    "schema_check",
+})
 
 # (literal, where it comes from, a path in the contract whose string value
 # contains the literal -- or None). A source that is "client table" is the
@@ -807,21 +824,24 @@ def _sentence_part_ids(expression):
     return ids
 
 
-def literal_violations(source, *, key_tails, prose, forbidden, stdlib=None):
+def literal_violations(source, *, key_tails, prose, forbidden, imports=ALLOWED_IMPORTS):
     """Every way `source` leaves the closed set, each as a short text."""
-    stdlib = sys.stdlib_module_names if stdlib is None else stdlib
     tree = ast.parse(source)
     found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] not in stdlib | {"schema_check"}:
+                if alias.name not in imports:
                     found.append(f"import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
-            if node.level or (node.module or "").split(".")[0] not in stdlib | {"schema_check"}:
+            if node.level or node.module not in imports:
                 found.append(f"from {'.' * node.level}{node.module} import ...")
         elif isinstance(node, ast.Attribute) and node.attr in ("args", "__doc__"):
             found.append(f"{node.lineno}: .{node.attr} carries a text out of where it is written")
+        elif isinstance(node, ast.Name) and node.id == "__doc__":
+            found.append(f"{node.lineno}: __doc__ carries a docstring out of where it is written")
+        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+            found.append(f"{node.lineno}: a caught exception is bound to {node.name}")
     docstrings = _docstring_ids(tree)
     sentence_parts = set()
     exception_names = _exception_class_names(tree)
@@ -832,8 +852,12 @@ def literal_violations(source, *, key_tails, prose, forbidden, stdlib=None):
             and isinstance(node.exc.func, ast.Name)
             and node.exc.func.id in exception_names
         ):
-            for argument in node.exc.args:
-                sentence_parts |= _sentence_part_ids(argument)
+            call = node.exc
+            if len(call.args) == 1 and not call.keywords:
+                sentence_parts |= _sentence_part_ids(call.args[0])
+            for keyword in call.keywords:
+                if keyword.arg == "message":
+                    sentence_parts |= _sentence_part_ids(keyword.value)
     in_table = set()
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
@@ -898,6 +922,18 @@ def test_client_source_holds_to_the_closed_set_of_literals():
     assert key_tails <= present, sorted(key_tails - present)
     assert prose <= present, sorted(prose - present)
 
+    # The import table is the standard library and `schema_check`, and the
+    # client uses every row of it.
+    assert all(name.split(".")[0] in sys.stdlib_module_names | {"schema_check"} for name in ALLOWED_IMPORTS)
+    tree = ast.parse(source)
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert imported == ALLOWED_IMPORTS, sorted(imported ^ ALLOWED_IMPORTS)
+
     # The check sees what it must: each of these planted violations is found.
     options = {"key_tails": key_tails, "prose": prose, "forbidden": forbidden}
     exception_prefix = "class Failure(Exception):\n    pass\n"
@@ -919,6 +955,13 @@ def test_client_source_holds_to_the_closed_set_of_literals():
         "a from-import of the adapter": "from adapter import load_contract\n",
         "a relative import": "from . import sibling\n",
         "an import of a third-party package": "import httpx\n",
+        "an import of a standard library module the table does not list": "import inspect\n",
+        "a from-import of a standard library module the table does not list": "from inspect import getdoc\n",
+        "a caught exception bound to a name": exception_prefix
+        + 'try:\n    raise Failure("unlisted sentence")\nexcept Failure as e:\n    x = str(e)\n',
+        "a docstring read as a name": "x = __doc__\n",
+        "a constant that is not a sentence among an exception's arguments": exception_prefix
+        + 'raise Failure("NOT_FOUND", {}, message="a sentence")\n',
     }
     for label, planted_source in planted.items():
         assert literal_violations(planted_source, **options), label
@@ -929,6 +972,7 @@ def test_client_source_holds_to_the_closed_set_of_literals():
         "a key name": 'x = y["role"]\n',
         "a prose literal": 'x = y.startswith("control.")\n',
         "the schema_check import": "from schema_check import validate\n",
+        "a message keyword": exception_prefix + 'raise Failure(y, {}, message="an unlisted sentence")\n',
         "a standard library import": "import json\nfrom urllib.parse import quote\n",
     }
     for label, allowed_source in allowed.items():
