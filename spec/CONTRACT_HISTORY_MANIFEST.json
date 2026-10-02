@@ -33,7 +33,11 @@
   "control_endpoints.audit_query.semantics": {
     "stripped_insert": " (subordinate ruling 9, item 7)",
     "stripped_insert_suffix_length": 924,
-    "unstripped": false
+    "unstripped": false,
+    "rewrite": {
+      "from": "for one further minor version after 1.4.0 (endpoints.audit_query.deprecation_note)",
+      "to": "for the whole of this major version (no minor version removes it; only a new major version may, per versioning.compatibility, and none is scheduled -- endpoints.audit_query.deprecation_note)"
+    }
   },
   "control_endpoints.revoke_credential.semantics": {
     "stripped_insert": " Resolved in contract 1.2.0 (previously a pending contract decision, the destructive-confirmation semantics question).",
@@ -70,7 +74,11 @@
   },
   "endpoints.audit_query.deprecation_note": {
     "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 7): ",
-    "unstripped": false
+    "unstripped": false,
+    "rewrite": {
+      "from": "for one further minor version after 1.4.0, resolving to",
+      "to": "for the whole of this major version (no minor version removes it; only a new major version may, per versioning.compatibility, and none is scheduled), resolving to"
+    }
   },
   "limits.audit_requests_per_minute_note": {
     "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 8, conditional on audit_query being provided -- versioning.version_binding). ",

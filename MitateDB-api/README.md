@@ -134,7 +134,7 @@ when PostgreSQL is unreachable, they fail loudly).
   covers 11 of these, every one except `audit_query` --
   `control_http.py`'s route table has 13 `Route(...)` entries because
   `audit_query` is registered twice, at its canonical
-  `/control/v1/audit/query` path and, for one further minor version, also
+  `/control/v1/audit/query` path and, for the whole of this major version, also
   at the `/v1/audit/query` alias (contract `endpoints.audit_query.
   deprecation_note`; same handler) -- a fixed evaluation order
   (rate-limit -> authenticate -> must_rotate gate -> capability check ->

@@ -391,7 +391,7 @@ async def post_enable_credential(request: Request) -> Response:
 # `/control/v1/audit/query` is the canonical location (contract 1.4.0
 # `control_endpoints.audit_query`); `/v1/audit/query` is the pre-1.4.0
 # `endpoints.audit_query` path, retained here as an alias of the identical
-# operation for one further minor version (contract `endpoints.audit_query.
+# operation for the whole of this major version (contract 1.15.0, `endpoints.audit_query.
 # deprecation_note`) -- D-5's own rationale for serving it from the CONTROL
 # host, not the data-plane one: a single-ingress deployment that routes by
 # path prefix (`/v1/*` -> data-plane, `/control/v1/*` -> control-plane)

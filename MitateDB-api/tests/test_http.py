@@ -390,7 +390,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
     # commit as this host's own `process_ceilings` mapping (design D-5
     # (v)).
-    assert document["contract_version"] == "1.14.0"
+    assert document["contract_version"] == "1.15.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 
