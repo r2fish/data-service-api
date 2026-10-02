@@ -1249,8 +1249,8 @@ gcloud run deploy mitatedb-data \
   --cpu=1 \
   --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_PLATFORM_DSN=mitatedb-platform-dsn:latest \
   --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled,MITATEDB_WORKERS=1
-# ... plus one --set-secrets pair per onboarded application's own
-# MITATEDB_APP_<ID_UPPER>_{RUNTIME,DEVELOPER}_DSN.
+# plus that one application's own --set-secrets pair MITATEDB_APP_<ID_UPPER>_{RUNTIME,DEVELOPER}_DSN; each deployment's runtime service account reads only that application's DSN pair (the access rule above), a second deployment uses its own service account;
+# one served application per service (SI-00 Deployment posture); another application is a separate deployment (its own data and control services).
 ```
 
 **`--max-instances=1` with `MITATEDB_WORKERS=1` here matches the

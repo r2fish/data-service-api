@@ -86,6 +86,9 @@ Implementations may use separate databases, roles, schemas, tenants, IAM boundar
 **Verification requirement**  
 Conformance evidence must demonstrate that loss of one Application credential does not provide a path to another Application or the Control Plane.
 
+**Deployment posture (ledger R-30, requester ruling 2026-10-03)**  
+Containment under this invariant is satisfied at the database boundary -- one database, one `CONNECT` grant and one role pair per Application, with the DSN chosen per request under SI-01 -- and the statement above sets no process topology (Implementation freedom). In addition, the production posture of both implementations is one Application per serving process: a production process holds the runtime and developer DSNs of exactly one Application, and a deployment that serves several Applications runs one process per Application. Where database authority comes from the identity a process runs as rather than from a secret in its DSN (r2db-api's peer-authentication posture), that identity is mapped to one Application's roles alone, so the posture bounds authority and not only configuration; and because no component today routes one data base URL's requests to per-Application processes (ledger R-36 designs one), several Applications in production are today several deployments, each with its own surfaces. A process whose serving set names several Applications is a test or development configuration, not a prohibited one, and it is not the production default. This posture is a deployment declaration, not a startup check: no implementation refuses to start on a multi-Application serving set, and the evidence is each implementation's runbook, environment example (where one exists) and deployment record (`security/CONTROL_MAPPING.md`, SI-00). The platform DSN a process holds is outside this posture; its reach across the registry is bounded by its own grants (SI-01).
+
 ---
 
 ## 5. Core invariants
