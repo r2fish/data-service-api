@@ -100,3 +100,13 @@
 | 再確認 F11 (RC-11。CONTROL_MAPPING の :659・:852・:870・:1023 の書き換えが漏れる。:1023 は現物と不一致) | 直した | 設計 §6.5 に足し、§6.1 に現物との差を添えた |
 | 再確認 F12 (RC-12。THREAT_MODEL との関係が無い) | 直した | 設計 §7 に T-07・T-08・T-09・T-14 の段落 |
 | 再確認 観察 (RC-13。B が照合した範囲の印が残っている) | 直した | 設計 §1.4 #4、§6.1・§6.5 の印を外した |
+
+## 7. 作業機の追記 (2026-10-02)
+
+- 取り込み: branch `claude/happy-einstein-f2oyqf` を worktree `.claude/worktrees/r42` (branch `r42`) に取り、main へ `--no-ff` で merge した (main `9674ab9`)。§3 の 1 が名指す `docs/work-orders/HANDOVER_20261001_R102_FABLE.md` は R-121 のチャットが移動済みだったので、最新 2 通から外れる `docs/work-orders/HANDOVER_20261001_R108_FABLE.md` を archive へ移した。
+- 台帳 v1.151: R-42 を進行中にし、【追記 2026-10-02】を足した。新しい行は起票していない。
+- §6 の「レビュー A-1・B-F2 (RV-1 の派生)」の裁定「起票 (R-N は作業機で採番)」を次の行で上書きする (`OC` §1.8 の 56。元の行は消さない)。
+
+| 指摘 | 裁定 | 理由 |
+|---|---|---|
+| レビュー A-1・B-F2 (RV-1 の派生: MitateDB の schema 操作の cancel 分岐に `commit_failed` が無い) | 観察 (起票しない)。監督裁定 2026-10-02 | 作業機の照合で前提が現物と合わなかった。`MitateDB-api/src/mitatedb_api/cell.py:770-789` の `_error_row_once_fired` (R-115 WP-4b) が backend の 4 経路の呼び出しを包み、pre_commit の後の失敗で error 行を書く。`MitateDB-api/tests/test_application_audit.py` の 2 テストが `["allow", "error"]` を固定している。指摘は backend の分岐だけを読んでいた。設計 §1.4 #7・D-3・D-9・§7 の該当記述は次の版で訂正する |
