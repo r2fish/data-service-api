@@ -75,8 +75,8 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_14_0():
-    # CCR_DISPOSITION.md subordinate ruling 19: the version bump itself,
+def test_contract_declares_1_15_0():
+    # CCR_DISPOSITION.md subordinate ruling 20: the version bump itself,
     # pinned so a future revert of just this one line is caught here rather
     # than only by whichever other test happens to touch contract_version.
     # This file carries one "declares" pin, for the version the contract
@@ -86,9 +86,11 @@ def test_contract_declares_1_14_0():
     # `control_plane.py`) moves in the commit that lands the real behavior,
     # not in the commit that changes the contract text
     # (`versioning.version_binding`: a version-flip "must land in the same
-    # commit as the real behavior change it claims").
+    # commit as the real behavior change it claims"). 1.15.0 changes no
+    # behavior, so both peers' declaration moves in the same commit as the
+    # contract text.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.14.0"
+    assert contract["contract_version"] == "1.15.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1143,7 +1145,8 @@ def test_audit_query_endpoint_classification_moved_to_control_endpoints_with_an_
     assert legacy_audit_query["request"] == "AuditQueryRequest"
     assert legacy_audit_query["response"] == "AuditResult"
     assert "alias" in legacy_audit_query["deprecation_note"]
-    assert "one further minor version" in legacy_audit_query["deprecation_note"]
+    assert "for the whole of this major version" in legacy_audit_query["deprecation_note"]
+    assert "one further minor version" not in legacy_audit_query["deprecation_note"]
 
 
 # Contract 1.12.0 (CCR_DISPOSITION.md subordinate ruling 17): the contract no
@@ -1554,16 +1557,18 @@ def test_contract_pins_the_1_14_0_operation_catalog_url_sentences_verbatim():
 
 def test_contract_pins_the_1_14_0_version_binding_paragraph_verbatim():
     """The confirmed 1.14.0 paragraph occupies EXACTLY the text between the end of the 1.13.0
-    paragraph and the version-flip sentence (an equality check, so a further sentence slipped in
-    on either side is caught here too)."""
+    paragraph and the start of the 1.15.0 sentence (an equality check, so a further sentence
+    slipped in on either side is caught here too). Right edge follows contract 1.15.0
+    (subordinate ruling 20): its one sentence sits between the 1.14.0 paragraph and the
+    version-flip sentence; the 1.14.0 paragraph's own text is unchanged."""
     version_binding = _contract()["versioning"]["version_binding"]
     idx_1_13_0_end = version_binding.index(PIN_1_13_0_VERSION_BINDING_PARAGRAPH) + len(
         PIN_1_13_0_VERSION_BINDING_PARAGRAPH
     )
-    idx_version_flip = version_binding.index("A peer's version-flip")
-    between = version_binding[idx_1_13_0_end:idx_version_flip]
+    idx_1_15_0_sentence = version_binding.index(PIN_1_15_0_VERSION_BINDING_SENTENCE)
+    between = version_binding[idx_1_13_0_end:idx_1_15_0_sentence]
     assert between == " " + PIN_1_14_0_VERSION_BINDING_PARAGRAPH + " ", (
-        "the text between the 1.13.0 paragraph and the version-flip sentence is not exactly "
+        "the text between the 1.13.0 paragraph and the start of the 1.15.0 sentence is not exactly "
         f"the confirmed 1.14.0 paragraph (surrounded by one space on each side): {between!r}"
     )
 
@@ -1580,6 +1585,109 @@ def test_contract_pins_the_1_14_0_obligations_entry_verbatim():
     )
     assert set(obligations[11]) == {"version", "subordinate_ruling", "unconditional", "conditional"}
     assert len(obligations[11]["unconditional"]) == 3
+
+
+# Contract 1.15.0 (CCR_DISPOSITION.md subordinate ruling 20): the retention clause of the
+# endpoints.audit_query alias is rewritten in three values (the whole of this major version, no
+# minor version removes it, none is scheduled). The texts are copied verbatim from the ruling's own
+# record and from the contract value they sit in.
+PIN_1_15_0_DEPRECATION_NOTE = (
+    "this entry's path is retained as an alias of control_endpoints.audit_query for the whole of "
+    "this major version (no minor version removes it; only a new major version may, per "
+    "versioning.compatibility, and none is scheduled), resolving to the identical operation on the "
+    "control surface's own host, not this section's application surface. audit_query's canonical "
+    "classification is control_endpoints.audit_query; a client should prefer POST "
+    "/control/v1/audit/query going forward. This entry is not removed here (removal would be a "
+    "non-additive contract change) -- it is retained, unmodified in method/request/response shape, "
+    "specifically so a pre-1.4.0-shaped client is not broken by the reclassification."
+)
+
+PIN_1_15_0_CONTROL_AUDIT_QUERY_SEMANTICS = (
+    "Added in 1.4.0: this is audit_query's canonical location, moved here from endpoints.audit_query "
+    "because its only real authority (control or audit) and its only real host (the control surface, "
+    "per control_plane.separability) are both control-plane-shaped, not application-shaped -- "
+    "endpoints.audit_query's own path (POST /v1/audit/query) remains valid as an alias of this "
+    "identical operation for the whole of this major version (no minor version removes it; only a "
+    "new major version may, per versioning.compatibility, and none is scheduled -- "
+    "endpoints.audit_query.deprecation_note). Application credentials are denied. Emission is a "
+    "service consequence and cannot be authored by an application caller. Where audit_query is "
+    "provided at all, this path and its alias resolve to the same handler and the same response; "
+    "where it is unavailable, both still authenticate and authorize the caller before answering "
+    "CAPABILITY_UNSUPPORTED (never a bare 404) -- see control_plane.provision and "
+    "versioning.version_binding's 1.4.0 conditional-obligation list."
+)
+
+# Item (c) of versioning.version_binding's 1.4.0 list, as 1.15.0 rewrites it.
+PIN_1_15_0_VERSION_BINDING_C_CLAUSE = (
+    "retained as an alias of the identical operation for the whole of this major version (no minor "
+    "version removes it; only a new major version may, per versioning.compatibility, and none is "
+    "scheduled)."
+)
+
+PIN_1_15_0_VERSION_BINDING_SENTENCE = (
+    "1.15.0 introduces no obligation (subordinate ruling 20): it rewrites the retention clause of "
+    "the endpoints.audit_query alias in endpoints.audit_query.deprecation_note, "
+    "control_endpoints.audit_query.semantics and item (c) of the 1.4.0 list above from one further "
+    "minor version after 1.4.0 to the whole of this major version -- the earlier clause had lapsed "
+    "at 1.5.0 while the alias stayed, and versioning.compatibility already reserves a removal to a "
+    "new major version -- so the alias, both of its paths and every implementation's behavior are "
+    "unchanged, and an implementation conforming to 1.14.0 conforms to 1.15.0 without a behavior "
+    "change."
+)
+
+
+def test_contract_pins_the_1_15_0_alias_retention_clauses_verbatim():
+    """The alias's retention clause reads the same in the three values that state it, and the
+    1.4.0 clause ("one further minor version") appears nowhere in the contract text -- neither in
+    the contract nor in either peer's packaged copy of it -- except inside the 1.15.0 sentence
+    (PIN_1_15_0_VERSION_BINDING_SENTENCE), which quotes it as the clause it replaces."""
+    contract = _contract()
+    legacy_audit_query = contract["endpoints"]["audit_query"]
+    assert legacy_audit_query["deprecation_note"] == PIN_1_15_0_DEPRECATION_NOTE
+    control_audit_query = contract["control_endpoints"]["audit_query"]
+    assert control_audit_query["semantics"] == PIN_1_15_0_CONTROL_AUDIT_QUERY_SEMANTICS
+    version_binding = contract["versioning"]["version_binding"]
+    assert version_binding.count(PIN_1_15_0_VERSION_BINDING_C_CLAUSE) == 1, (
+        "versioning.version_binding does not carry the 1.15.0 item (c) clause exactly once"
+    )
+    raw_texts = {
+        "spec": (ROOT / "spec" / "data-service-api.v1.json").read_text(),
+        "r2db-api": (
+            ROOT / "r2db-api" / "src" / "r2db_api" / "contract" / "data-service-api.v1.json"
+        ).read_text(),
+        "MitateDB-api": (
+            ROOT / "MitateDB-api" / "src" / "mitatedb_api" / "contract" / "data-service-api.v1.json"
+        ).read_text(),
+    }
+    assert len(raw_texts) == 3 and all(raw_texts.values()), "an empty contract copy would pass the check below"
+    for where, raw in raw_texts.items():
+        assert raw.count(PIN_1_15_0_VERSION_BINDING_SENTENCE) == 1, (
+            f"the {where} contract text does not carry the 1.15.0 sentence exactly once"
+        )
+        assert raw.replace(PIN_1_15_0_VERSION_BINDING_SENTENCE, "").count("one further minor version") == 0, (
+            f"the 1.4.0 retention clause is still present in the {where} contract text"
+        )
+
+
+def test_contract_pins_the_1_15_0_version_binding_sentence_verbatim():
+    """The 1.15.0 sentence occupies EXACTLY the text between the end of the 1.14.0 paragraph and
+    the version-flip sentence, and 1.15.0 adds no `versioning.obligations` entry (it introduces no
+    obligation)."""
+    contract = _contract()
+    version_binding = contract["versioning"]["version_binding"]
+    idx_1_14_0_end = version_binding.index(PIN_1_14_0_VERSION_BINDING_PARAGRAPH) + len(
+        PIN_1_14_0_VERSION_BINDING_PARAGRAPH
+    )
+    idx_version_flip = version_binding.index("A peer's version-flip")
+    between = version_binding[idx_1_14_0_end:idx_version_flip]
+    assert between == " " + PIN_1_15_0_VERSION_BINDING_SENTENCE + " ", (
+        "the text between the 1.14.0 paragraph and the version-flip sentence is not exactly "
+        f"the 1.15.0 sentence (surrounded by one space on each side): {between!r}"
+    )
+    versions = [entry["version"] for entry in contract["versioning"]["obligations"]]
+    assert "1.15.0" not in versions
+    assert versions[11] == "1.14.0"
+    assert len(versions) == 12
 
 
 def test_audit_requests_per_minute_is_a_declared_limit_class():
