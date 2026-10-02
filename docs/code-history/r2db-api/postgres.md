@@ -2195,7 +2195,7 @@ Only schema operations take it. A data operation (`transact`) and a `query` neve
 
 ### correction: 2026-10-03
 
-- reason: R-120 -- a data operation (`transact`) now takes an entity-scoped advisory lock (SHARED) and every schema operation the same lock (EXCLUSIVE), both after the schema lock and the per-key lock and before the count lock and the catalog read, so the old statements that a keyed data operation takes only the per-key and count locks, and that the lock order of a schema operation is per-key, schema lock, count lock, are no longer the whole order; the docstring states the one global order instead
+- reason: R-120 -- a data operation (`transact`) now takes an entity-scoped advisory lock (SHARED) and every schema operation the same lock (EXCLUSIVE); a data operation takes it after the per-key lock (it never takes the schema lock), a schema operation after the schema lock, both before the count lock and the catalog read, so the old statements that a keyed data operation takes only the per-key and count locks, and that the lock order of a schema operation is per-key, schema lock, count lock, are no longer the whole order; the docstring states the one global order instead
 
 old:
 ```
