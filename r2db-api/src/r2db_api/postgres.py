@@ -209,6 +209,10 @@ _IDEMPOTENCY_KEY_LOCK_NAMESPACE = 20261007
 _IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 1414142
 # the single-argument `pg_advisory_xact_lock(bigint)` key that serializes every SCHEMA operation of one application (see `_schema_serialization_lock` below). Each application has a database of its own, so one fixed key is per-application. A third constant in the family above, distinct from `_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY` and `ops.py::_RITUAL_ADVISORY_LOCK_KEY`: the three guard three independent serialization points and must never share a lock id.
 _SCHEMA_SERIALIZATION_ADVISORY_LOCK_KEY = 761761763
+# two-int `pg_advisory_xact_lock[_shared](namespace, hashtext(entity))` namespace for the ENTITY lock (see `_lock_entities` below): a data operation holds it SHARED and a schema operation EXCLUSIVE, both before the catalog is read. A fourth constant in the families above, distinct from all of them; the 2-argument form is a lock space of its own (see the note on `_IDEMPOTENCY_KEY_LOCK_NAMESPACE`), so only this value and the per-key namespace can meet.
+_ENTITY_LOCK_NAMESPACE = 20261201
+_ENTITY_LOCK_SHARED = sql.SQL("SELECT pg_advisory_xact_lock_shared(%s, hashtext(%s))")
+_ENTITY_LOCK_EXCLUSIVE = sql.SQL("SELECT pg_advisory_xact_lock(%s, hashtext(%s))")
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
 # `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
@@ -1407,12 +1411,28 @@ class PostgresCell:
 
         Without it two schema operations read the catalog and the revision before either one's DDL commits (READ COMMITTED gives each statement a fresh snapshot, but the read and the DDL are separate statements): both pass the same `plan` token, a destructive confirmation phrase computed from a revision the other has already advanced is still accepted, and the `schema_objects` count is taken from a catalog a concurrent `create_entity` is about to change.
 
-        `apply_schema` takes it after the per-key lock and the idempotency lookup (a replay answers before it and never waits here), then takes the count lock, and reads the catalog only after both: the order every schema operation follows is per-key lock, this lock, count lock. A keyed data operation takes per-key lock and count lock and never this lock, so a schema operation that is only waiting for this lock holds no count lock and blocks no keyed request at it.
+        `apply_schema` takes it after the per-key lock and the idempotency lookup (a replay answers before it and never waits here), then the entity lock (`_lock_entities`, EXCLUSIVE), then the count lock, and reads the catalog only after all three.
 
-        Only schema operations take it. A data operation (`transact`) and a `query` never do, so this lock is only ever contended by other schema operations; a holder of this lock never takes the per-key lock afterwards, and the count lock it may take afterwards is held only by requests that do not take this lock. The wait is bounded by the `lock_timeout` `_set_timeouts` set at the start of the transaction.
+        Every request of this backend takes its advisory locks in ONE global order and never takes a lock above one it already holds: 1 per-key lock, 2 this lock, 3 entity lock, 4 count lock, then the table and row locks. A data operation (`transact`) takes per-key, entity (SHARED), count and never this lock, and a dry run of it takes no entity lock (it writes nothing); a schema operation takes per-key, this lock, entity (EXCLUSIVE), count; a replay takes only the per-key lock and a `query` takes none. A request waiting for an advisory lock holds only advisory locks below it, so no request holds an advisory lock another request needs while waiting for one the first holds: no cycle. The one exception is not an advisory lock: the lookup's `DELETE` of expired idempotency records takes row locks before the entity lock, so a keyed request can wait for an entity lock while holding them and make another request's lookup wait on those rows; that is a chain bounded by `lock_timeout`, not a cycle, because a holder of the entity lock has already finished its lookup. So no deadlock, and PostgreSQL's deadlock detector (40P01, which this module maps to `SERVICE_UNAVAILABLE`) is never the thing that breaks a wait. The entity lock sits BEFORE the count lock on both paths because the other order makes a keyed data operation that waits for an entity hold the count lock meanwhile, and every other keyed request then stops at the count lock behind it.
+
+        A schema operation that is only waiting for this lock holds no entity lock and no count lock, so a keyed data operation on any entity proceeds meanwhile, unless it is deleting expired records in its lookup (`test_schema_serialization_lock.py::test_a_keyed_schema_operation_waiting_for_the_schema_lock_does_not_block_a_keyed_data_operation`). The order is pinned on the statements each request issues by `test_r120_entity_lock.py::test_every_request_takes_its_advisory_locks_in_the_one_global_order`: with the data operation's entity lock moved after its count lock that test is red (R-120 mutation M3).
+
+        Only schema operations take this lock. A data operation and a `query` never do, so it is only ever contended by other schema operations. The wait is bounded by the `lock_timeout` `_set_timeouts` set at the start of the transaction.
+
+        History: CH-0551
         """
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_SCHEMA_SERIALIZATION_ADVISORY_LOCK_KEY])
+
+    def _lock_entities(self, conn: "psycopg.Connection[Any]", entities: Sequence[str], *, shared: bool) -> None:
+        """Transaction-scoped advisory lock on each named entity (`pg_advisory_xact_lock_shared` when `shared`, else `pg_advisory_xact_lock`, keyed `(_ENTITY_LOCK_NAMESPACE, hashtext(entity))`), one statement per entity in sorted order, taken directly in the caller's OUTER transaction before the catalog is read and released only by its commit or rollback. Structurally the same as MitateDB-api's entity lock (shared for a data write, exclusive for a schema operation, sorted, ahead of the catalog read); its place relative to the count lock differs and is the order set out in `_schema_serialization_lock`.
+
+        A data operation holds it SHARED from before it reads the catalog until it commits, so a schema operation on the same entity (EXCLUSIVE, all six kinds) cannot commit between the data operation's validation against the declaration and its write: it waits, and when it runs its own scan or empty-table check finds the row. Data operations never conflict with each other here, and a data operation and a schema operation on different entities never conflict here either. A `hashtext` collision between two entity names only makes two unrelated entities briefly wait for each other, never the reverse. The two windows are reproduced with two independent cells by `test_r120_entity_lock.py::test_a_narrowing_alter_field_cannot_commit_between_a_data_operations_validation_and_its_write` (data operation stopped at `_insert`, `alter_field` narrowing an `enum`) and `::test_an_add_field_nullable_false_cannot_commit_between_a_data_operations_validation_and_its_write` (`add_field` with `nullable: false`); each is red when the corresponding lock call is removed (R-120 mutations M1 and M2).
+        """
+        statement = _ENTITY_LOCK_SHARED if shared else _ENTITY_LOCK_EXCLUSIVE
+        with conn.cursor() as cur:
+            for entity in sorted(set(entities)):
+                _run(cur, statement, [_ENTITY_LOCK_NAMESPACE, entity])
 
     def _idempotency_lookup(self, conn: "psycopg.Connection[Any]", key: str) -> tuple[str, str, dict[str, Any]] | None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
@@ -1663,6 +1683,9 @@ class PostgresCell:
                                 # history: CH-0032
                                 request_id=stored_payload["request_id"],
                             )
+                    if not dry_run:
+                        self._lock_entities(conn, [entity], shared=True)
+                    if idempotency_key is not None and not dry_run:
                         # capacity checked before this request executes anything. the table-level count lock is likewise taken in THIS outer transaction, before `_idempotency_reserve` opens its own nested savepoint.
                         # history: CH-0033
                         self._idempotency_reserve_lock(conn)
@@ -2155,6 +2178,7 @@ class PostgresCell:
                                 request_id=stored_payload["request_id"],
                             )
                     self._schema_serialization_lock(conn)
+                    self._lock_entities(conn, [bound.entity], shared=False)
                     if idempotency_key is not None and not dry_run:
                         # capacity checked before this request executes anything. table-level count lock, same outer-transaction placement as `transact` above.
                         # history: CH-0065
