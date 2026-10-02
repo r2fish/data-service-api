@@ -114,7 +114,21 @@ server {
         proxy_pass http://127.0.0.1:REPLACE_ME_INTERNAL_PORT;
 
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        # $http_host (the client's own Host header, port included), not $host
+        # (the name alone): the application builds a redirect's Location from
+        # the Host it receives, and this listener is on 8443, not the scheme's
+        # default port. With $host, a client that followed the application's
+        # own trailing-slash redirect would be sent to the same name on 443 --
+        # the existing production service -- and a client that re-sends its
+        # credentials across such a redirect would carry its bearer there
+        # (ledger R-121; pinned by tests/test_deploy_nginx_host_header_static.py).
+        # Disclosed: a request that carries no Host header at all (HTTP/1.0)
+        # makes $http_host empty, nginx then forwards no Host, and the
+        # application's HTTP/1.1 parser answers it with a bare 400 instead of
+        # reaching the application; $host would have substituted server_name.
+        # A map-based fallback would live outside this server block, so it is
+        # not carried here.
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         # $remote_addr, not $proxy_add_x_forwarded_for: this is the first (and,
         # in stage 1, only) hop nginx makes to the application, so there is no
@@ -153,7 +167,9 @@ server {
         proxy_pass http://127.0.0.1:REPLACE_ME_CONTROL_PORT;
 
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        # $http_host, not $host: same rationale as the data-plane block above
+        # (ledger R-121).
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         # Same rationale as the data-plane block above: this is the first
         # (and, in stage 1, only) hop nginx makes to either backend process,

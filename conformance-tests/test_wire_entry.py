@@ -34,6 +34,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import socket
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -72,6 +73,8 @@ _IN_PROCESS = pytest.mark.parametrize("adapter", _IN_PROCESS_ADAPTER_NAMES, indi
 _CONTRACT = load_contract()
 _BASE_PATH: str = _CONTRACT["versioning"]["base_path"]
 _CAPABILITIES_PATH: str = _CONTRACT["endpoints"]["capabilities"]["path"]
+_CONTROL_BASE_PATH: str = _CONTRACT["versioning"]["control_base_path"]
+_CONTROL_CAPABILITIES_PATH: str = _CONTRACT["control_endpoints"]["control_capabilities"]["path"]
 
 
 def _assert_own_group(request: pytest.FixtureRequest) -> None:
@@ -217,6 +220,69 @@ def test_send_does_not_follow_a_redirect(
     assert 300 <= status < 400, f"{adapter.name}: expected a redirect status, got {status}"
     assert any(name.lower() == "location" for name, _ in headers), f"{adapter.name}: redirect carries no Location header"
     assert len(_all_requests(spies)) == 1, f"{adapter.name}: a redirect was followed"
+
+
+@_SOCKET
+@pytest.mark.parametrize("surface", ("data", "control"))
+def test_socket_redirect_location_keeps_the_declared_authority(
+    adapter, wire, surface: str, request: pytest.FixtureRequest
+) -> None:
+    """Over the two socket plugs and both surfaces the plug's nginx proxies
+    (data `/v1/`, control `/control/v1/`), the redirect of the surface's
+    capability path with a trailing slash names in its `Location` the same
+    authority (host and port) as that surface's declared base URL, and the
+    capability path without the slash. The upstream builds that URL from the
+    `Host` header nginx forwards, and the declared base URL carries an
+    explicit port (asserted first, so the property is observed and not
+    vacuous): a `Host` forwarded without its port (`$host` rather than
+    `$http_host` in `socket_harness.py`'s conf, on either `location`) would
+    send a client that followed the redirect to the scheme's default port,
+    another service than the one it dialed (ledger R-121).
+
+    The data URL is the isolated surface's own declared one (the entry's
+    `base_url`); the control URL is the one the registered plug's control
+    surface declares in its own capability document, read through the port
+    (`adapter.control_capabilities()`, the order C-19's control dial uses):
+    that is the control surface the isolated copy's own control calls go
+    through on both socket plugs -- the MitateDB socket plug's isolated copy
+    declares a control URL it reserves but never serves (ledger R-122) --
+    and obtaining the control credential and reading the document through
+    the port (`adapter.control_credential()`, then
+    `adapter.control_capabilities()`) is what makes the MitateDB socket plug,
+    which starts a surface on that surface's first request through the port,
+    serve the declared URL before it is dialed (dialed without those calls,
+    the reserved port accepts the connection and never answers). The request
+    is a plain, bounded `httpx` request that follows no redirect: the
+    property is the proxy's, not the send function's
+    (`test_send_does_not_follow_a_redirect` above covers that one), and a
+    surface that never answers fails this test instead of holding the run."""
+    _assert_own_group(request)
+    _iso, entry = wire
+    if surface == "data":
+        declared_base_url, base_path, capabilities_path = entry.base_url, _BASE_PATH, _CAPABILITIES_PATH
+    else:
+        control_document = adapter.control_capabilities(adapter.control_credential())
+        declared_base_url = control_document["surfaces"]["control"]["base_url"]
+        base_path, capabilities_path = _CONTROL_BASE_PATH, _CONTROL_CAPABILITIES_PATH
+    assert isinstance(declared_base_url, str) and declared_base_url.endswith(base_path), (
+        f"{adapter.name}: declared {surface} base URL {declared_base_url!r} does not end with {base_path!r}"
+    )
+    declared = urlsplit(declared_base_url)
+    assert declared.port is not None, f"{adapter.name}: declared {surface} base URL {declared_base_url!r} carries no port"
+    url = declared_base_url.removesuffix(base_path) + capabilities_path + "/"
+    with httpx.Client(timeout=httpx.Timeout(30.0), follow_redirects=False, trust_env=False) as client:
+        response = client.get(url)
+    assert 300 <= response.status_code < 400, (
+        f"{adapter.name}/{surface}: expected a redirect status for {url!r}, got {response.status_code}"
+    )
+    locations = response.headers.get_list("location")
+    assert len(locations) == 1, f"{adapter.name}/{surface}: expected exactly one Location header, got {locations!r}"
+    target = urlsplit(locations[0])
+    assert target.netloc == declared.netloc, (
+        f"{adapter.name}/{surface}: Location {locations[0]!r} names authority {target.netloc!r}, "
+        f"the declared base URL {declared_base_url!r} names {declared.netloc!r}"
+    )
+    assert target.path == capabilities_path, f"{adapter.name}/{surface}: Location path {target.path!r}"
 
 
 @_WIRE

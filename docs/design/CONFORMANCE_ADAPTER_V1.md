@@ -3876,6 +3876,15 @@ carries no port); the two socket plugs
 also answer 301 for `<origin>/v1` (nginx's `location /v1/`), and the two
 ASGI plugs 404.
 
+Note (2026-10-02, ledger `docs/design/ROADMAP_POST_PHASE7_V1.md` R-121): the
+parenthesis above records the measurement before R-121. Since R-121 the
+socket plugs' nginx forwards the client's own `Host` header with its port
+(`$http_host`, `conformance-tests/socket_harness.py`), and
+`conformance-tests/test_wire_entry.py::test_socket_redirect_location_keeps_the_declared_authority`
+pins, over both socket plugs and both surfaces the proxy serves (data and
+control), that the 307's `Location` carries the declared authority (host and
+port); its measurement is recorded in that ledger row.
+
 `conformance-tests/test_wire_entry.py` pins the port over the four wire
 plugs (the selection is made once, at import, from `transport_kind`, and its
 number is asserted there) and over the two in-process plugs. It observes
