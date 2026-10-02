@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.5 (2026-10-02、作業機)。** 依頼者裁定 U-1〜U-9 (全件 (a)。逐語は §10) を反映。§5 の各項に裁定を記し、D-2 の (d) を置かない形に確定、D-6・D-7・D-9 を裁定に合わせ、§9 を裁定どおりの 1 本の候補文に組んだ。契約文 (§9) の確定は設計レビュー 2 回目の後に依頼者へ求める。反映の一覧は §11.4。
 - **v0.4 (2026-10-02、作業機)。** 作業機の照合 (設計が引く file:line と「基点で未照合」の 12 行) と実測 (M-1〜M-8) を反映。主な変更: (1) `statement_timeout` は COMMIT を打ち切らない (M-4) ので、「COMMIT は文の bound で打ち切られる」を取り下げ、commit 段の【保留】文と U-6 の commit 段の選択肢を削った。(2) v0.2 の起票候補 (MitateDB schema 操作の `commit_failed` の欠け) は現物に無く、取り下げた (台帳 v1.151 の R-42 行)。(3) 修正前の挙動を conformance の水準で記録した (MitateDB の PostgreSQL 2 plug は予算を過ぎた要求を commit する)。(4) §12 に実測の記録を足した。一覧は §11.3。基点は local main `3ce48d2` (製品コードは `4241b55` から変わっていない。`r2db-api/src`・`MitateDB-api/src` の差分 0)。
 - **v0.3 (2026-10-02)。** 再確認 (担当観点: 指定なし) の 12 件と観察 1 件を反映。U-8 の (d) の扱い、U-9 の pin の向きの訂正。反映の一覧は §11.2。同日、レビュー項目の記号を R-N から RV-N に改めた (台帳の R 族との衝突を避ける)。
 - **v0.2 (2026-10-02)。** 設計レビュー 1 回目 (A 9 件・B 15 件 → 19 件に統合) を反映。新しい U-8・U-9。起票候補 1 件 (MitateDB schema 操作の cancel 分岐の `commit_failed` 欠落)。反映の一覧は §11。
@@ -110,17 +111,17 @@
 ## 3. 決定と根拠
 
 **D-1 execution_ms は 1 要求の wall-clock 予算である。** 始点は遅くとも「受理点」— 要求がその配備の rate・concurrency の gate を通り、budget で狭めた要求固有の bound が確定した時点 (両 peer が今期限を計算している点、§1.3 の 2・§1.4 の 1)。予算に数えるのは、受理点から**要求が commit を始めるまで** (pool の取得待ち、lock の待ち、文の実行)。**commit を始めた要求は、execution_ms では拒否も打ち切りもされない** (M-4: `statement_timeout` は COMMIT に掛からない。両 peer の COMMIT の仕事は WAL の書き出しだけで、deferred の制約・trigger は無い **【実測 2026-10-02: §12.1】**)。commit の後に時計で拒否することはできない (commit 済みの要求を失敗として返せない)。実装はもっと早く (受信時から) 数え始めてよいが、遅く始めてはならない。1 page = 1 要求で、page ごとに新しい予算。dry_run も同じ予算の下で走る (dry run は文を発行する)。ただし dry run の execution_ms の拒否は real の要求の拒否を予言しない (発行する文が違う)。契約は dry run が limit の拒否も決めると読める文を持つ (1.7.0 (3)) ので、execution_ms がその例外であることを §9.1 で明記する。
-- 根拠: SI-08 は要求 1 件が資源を無限に持てないことを求め、利用者に見える所要時間を bound するのは待ちを含めてこそである。MitateDB の `_borrow` の docstring は既に「期限を超える待ちは要求が execution_ms を超えたこと」と読んでいる。待ちを別 class に分けると `limits.classes` の語彙 (1.2.0 の規則) に新語が要り、利用者が 2 つの予算を推論する負担が増え、安全の結果は増えない (→ U-1 で両論を残す)。
+- 根拠: SI-08 は要求 1 件が資源を無限に持てないことを求め、利用者に見える所要時間を bound するのは待ちを含めてこそである。MitateDB の `_borrow` の docstring は既に「期限を超える待ちは要求が execution_ms を超えたこと」と読んでいる。待ちを別 class に分けると `limits.classes` の語彙 (1.2.0 の規則) に新語が要り、利用者が 2 つの予算を推論する負担が増え、安全の結果は増えない (U-1 の裁定 (a))。
 - 受理点の後の待ち (pool・lock) は、台帳 R-102 の後の 32 並列で最大 3.4 ms で、既定 5000 ms に対して 3 桁の余裕がある (M-5、§12.5)。
 - 受理点の前 (認証・body の解析・worker の順番待ち) は逐次で r2db 約 0.5 ms・MitateDB 約 5 ms、32 並列で p50 53〜78 ms (M-7、§12.3)。
 
 **D-2 予算を使い切った要求は、次の文を発行する前に拒否する。**
-- 「文」の定義: 実装が要求のために保持するすべての接続 (MitateDB の developer 接続の catalog 読みを含む。要求自身の各 transaction) で、要求の内容から発行する文。psycopg の暗黙の BEGIN はその transaction の一部。`SET LOCAL`、catalog 読み、lock の文、idempotency の読み書き、DML / DDL を含む。含めない: pool の維持 (r2db の checkout ごとの `SELECT 1` `postgres.py:621`、新規接続の `SET search_path` `postgres.py:388`、MitateDB の idle ping `pool.py:369` (閾値の条件は `:384`、呼び出しは `:386`))、transaction を終える COMMIT / ROLLBACK (下の (d) で別に扱う)、別接続の audit sink への書き込み。
+- 「文」の定義: 実装が要求のために保持するすべての接続 (MitateDB の developer 接続の catalog 読みを含む。要求自身の各 transaction) で、要求の内容から発行する文。psycopg の暗黙の BEGIN はその transaction の一部。`SET LOCAL`、catalog 読み、lock の文、idempotency の読み書き、DML / DDL を含む。含めない: pool の維持 (r2db の checkout ごとの `SELECT 1` `postgres.py:621`、新規接続の `SET search_path` `postgres.py:388`、MitateDB の idle ping `pool.py:369` (閾値の条件は `:384`、呼び出しは `:386`))、transaction を終える COMMIT / ROLLBACK (D-1・D-3 のとおり予算の外)、別接続の audit sink への書き込み。
 - 実装は、文を発行しようとする各点で残り予算を process 内の時計で比べ、残りが 1 ms 未満 (整数 ms で 0) なら文を発行せず `LIMIT_EXCEEDED` + `details.limit_class: execution_ms` で終える。`_timeout_ms` 自身も残り 1 ms 未満で `LIMIT_EXCEEDED` を上げ、決して 0 を返さない (`statement_timeout = 0` は timeout の無効 **【PG 文書 (未実測)】** なので、0 を返すと fail-open になる)。v0.1 の「`max(1, …)` の丸めを廃止する」はこの形に改めた (§11 RV-3)。
-- 検査点は実装の自由だが、少なくとも (a) pool 取得の後・最初の `SET LOCAL` の前 (`_timeout_ms` の拒否が兼ねる 1 点)、(b) lock 待ちの後、(c) 複数文の要求の文と文の間、(d) [U-8 (b)] durable audit の pre_commit の前、に置く。**検査点はすべて pre_commit より前に置く。pre_commit の後は時計で検査せず COMMIT を発行する。COMMIT は文の bound の外にあり、予算では打ち切られない (M-4)。**
-- 最後の文が完了した後に時計で検査するか ((d) を置くか) は U-8。U-8 (a) では (d) を置かない。
+- 検査点は実装の自由だが、少なくとも (a) pool 取得の後・最初の `SET LOCAL` の前 (`_timeout_ms` の拒否が兼ねる 1 点)、(b) lock 待ちの後、(c) 複数文の要求の文と文の間、に置く。(d) は置かない (U-8 の裁定 (a))。最後の文が完了した後は時計で検査せず、pre_commit → COMMIT と進む。**検査点はすべて pre_commit より前に置く。pre_commit の後は時計で検査せず COMMIT を発行する。COMMIT は文の bound の外にあり、予算では打ち切られない (M-4)。**
+- U-8 の裁定 (a) により (d) は置かない。
 - 検査は時計の比較だけで DB 往復を足さない (X-1)。
-- 閾値を「1 ms 未満」とする理由: `statement_timeout` の分解能は 1 ms で、0 は「無効」を意味するので、1 ms 未満の残りで文を発行する手段が無い **【PG 文書 (未実測)】**。→ 閾値は U-7 で確認。
+- 閾値を「1 ms 未満」とする理由: `statement_timeout` の分解能は 1 ms で、0 は「無効」を意味するので、1 ms 未満の残りで文を発行する手段が無い **【PG 文書 (未実測)】**。(U-7 の裁定 (a))。
 - 範囲: D-2 が決定的にするのは予算を使い切った要求だけである。残りが 1 ms 以上で文の所要時間より短い帯 (例 1.5 ms) では 200 / 413 が負荷に依り、D-3 により再送は安全である。修正前の揺れの実測: r2db で残り 0.6 ms の軽い query が 200 21/50・413 29/50 (M-1、§12.2)。
 
 **D-3 期限で終わった要求は、行・catalog・schema revision・idempotency 記録を残さない。** 1 要求 = 1 transaction の rollback による。idempotency は契約 `structured_operations.idempotency.record` の「失敗した要求は記録を残さない」の帰結であり、execution_ms の失敗もこれに含まれる。同じ key の再送は新規の試行として実行される。
@@ -128,22 +129,22 @@
 - audit: `LIMIT_EXCEEDED` は耐久 denial ではない (両 peer の現物。SI-14 の security-relevant な denial ではない) ので変えない。
 - **execution_ms で拒否または打ち切られた要求は commit していない。** 予算の強制 (時計の検査と文の bound) はどちらも commit の前にしか働かない **【実測 2026-10-02: §12.1 (M-4)】**。従って `LIMIT_EXCEEDED` + `limit_class: execution_ms` を受け取った利用者は、要求が何も残していないと決められる。COMMIT が予算の外の原因 (運用者の cancel、接続断) で失敗した場合の audit の扱い (allow 行の後の error 行) は現行のままで、本書の範囲外。r2db は backend の except の 5 分岐 (§1.3 #9)、MitateDB は `cell.py` の `_error_row_once_fired` と transact・単一行の経路がそれぞれ error 行を書く (§1.4 #7・#8)。【訂正 2026-10-02 (v0.4)】 v0.2〜v0.3 の「MitateDB の schema 操作は `commit_failed` を呼ばない」は誤りで、削った (§11.3)。
 
-**D-4 エラーの形は既存のまま**: code `LIMIT_EXCEEDED`、`details.limit_class: execution_ms`。HTTP status は契約で未定義のまま (両 peer の 413 は conformance の cross-peer 証拠で固定済み)。新しい code (X-5)・新しい class (X-4)・新しい details key (X-8) は足さない。再送の可否は D-3 の保証 (何も残っていない) で足りる。既存の `details.futility` を付けるかは U-3。
+**D-4 エラーの形は既存のまま**: code `LIMIT_EXCEEDED`、`details.limit_class: execution_ms`。HTTP status は契約で未定義のまま (両 peer の 413 は conformance の cross-peer 証拠で固定済み)。新しい code (X-5)・新しい class (X-4)・新しい details key (X-8) は足さない。再送の可否は D-3 の保証 (何も残っていない) で足りる。`details.futility` は付けない (U-3 の裁定 (a))。
 
 **D-5 文の途中で期限が来た要求は、実装の文の bound (`statement_timeout` / `lock_timeout`) で打ち切る (現行どおり)。** 打ち切りの結果は D-3 と同じ。両 peer の形 (2 つの timeout を同値で設定) では、lock の待ちの超過は 57014 `query_canceled` になる (文の開始が lock 待ちの開始より先なので `statement_timeout` が先に満了する。`lock_timeout` 単独なら 55P03。両 peer は両方を捕まえている。M-6 **【実測 2026-10-02: §12.1】**)。
-- 上限の主張は**文の実行区間に限る**: 文の bound を「scope 入口の残り」で 1 回設定し (lock 待ちの後に再設定)、文の間は D-2 の時計検査で補う現行の形では、文の実行区間の合計は「残りの 2 倍未満」である (文 n は残りが尽きる前にしか始まらず、その文自身は入口の残りまで走れる) **【PG 文書 (未実測): 文ごとの計測】**。文ごとに bound を再設定すれば「残り + 1 文の分解能」になるが、文ごとに 1 往復が増える。→ U-2 で両論。
+- 上限の主張は**文の実行区間に限る**: 文の bound を「scope 入口の残り」で 1 回設定し (lock 待ちの後に再設定)、文の間は D-2 の時計検査で補う現行の形では、文の実行区間の合計は「残りの 2 倍未満」である (文 n は残りが尽きる前にしか始まらず、その文自身は入口の残りまで走れる) **【PG 文書 (未実測): 文ごとの計測】**。文ごとに bound を再設定すれば「残り + 1 文の分解能」になるが、文ごとに 1 往復が増える。U-2 の裁定 (a): 現行の形 + 文の間の時計検査。
 - 文の実行区間の外は、次の別の上限で bound される:
-  - 接続の確立: 上限は `connect_timeout`。MitateDB は `min(connect_timeout, max(1, ceil(残り)))` で psycopg の下限 2 s が掛かる (`pool.py:444-492`)。r2db は固定 5 s (`postgres.py:230`)。接続の確立の後に期限が切れていれば、D-2 (a) の検査 (pool 取得の後) が文の前で捕まえる。
+  - 接続の確立: 上限は `connect_timeout`。MitateDB は `min(connect_timeout, max(1, ceil(残り)))` で psycopg の下限 2 s が掛かる (`pool.py:444-492`)。r2db は固定 5 s (`postgres.py:230`)。接続の確立の後に期限が切れていれば、D-2 (a) の検査 (pool 取得の後) が文の前で捕まえる。U-6 の裁定 (接続確立 (a)): 接続の確立が時間切れで失敗し、その時点で予算が尽きていれば (残り < 1 ms) `LIMIT_EXCEEDED` execution_ms、尽きていなければ (拒否・到達不能・予算内の時間切れ) `SERVICE_UNAVAILABLE` のまま。判定は process 内の時計で行う (監督の決定。設計レビュー 2 回目で確かめる)。
   - audit sink への書き込み (別接続)。
   - COMMIT: 予算でも文の bound でも bound されない (M-4)。両 peer とも deferred の仕事を持たないので、所要時間は WAL の書き出し。
 
-**D-6 契約の文言を足し、minor 版 1.15.0 (subordinate ruling 20) とする (推奨。→ U-4 で両論)。** 足す場所と記録:
-- execution_ms の節 (始点、待ちの算入、要求全体の予算、1 page = 1 要求、dry_run、「予算を使い切った要求は次の文を発行する前に拒否され、行・catalog・schema revision・idempotency 記録を残さない」)。置き場は U-9 (推奨 (a) `limits` の新 key `execution_ms`)。v0.1 では `limits.execution_ms` の新 key に置くと定めていたが、v0.2 (2026-10-02) で `conformance-tests/test_contract.py` の `_PRE_1_8_0_LIMITS_KEYS` の pin (`:138-146`、`:180-184`) が新しい sibling key を 1.8.0 の裁定として禁じていることがわかったので、U-9 に移した (§11 RV-14)。`errors.details_vocabulary.LIMIT_EXCEEDED` は変えない。選択肢ごとの pin: (a) は `_PRE_1_8_0_LIMITS_KEYS` の切り直し、(b) は `limits.profile` の endswith pin (`conformance-tests/test_contract.py:111-115`、`:177`) を 1.8.0 の文より前に挿入すれば保ち、末尾なら切り直す、(c) は `PIN_1_7_0_REQUEST_BUDGET` が包含照合 (`:2267-2268`) なので末尾追記なら保つ (U-9)。
+**D-6 契約の文言を足し、minor 版 1.15.0 (subordinate ruling 20) とする (U-4 の裁定 (a))。** 足す場所と記録:
+- execution_ms の節 (始点、待ちの算入、要求全体の予算、1 page = 1 要求、dry_run、「予算を使い切った要求は次の文を発行する前に拒否され、行・catalog・schema revision・idempotency 記録を残さない」)。置き場は `limits` の新 key `execution_ms` (U-9 の裁定 (a))。`conformance-tests/test_contract.py:138-146`・`:180-184` の `_PRE_1_8_0_LIMITS_KEYS` の pin は切り直す (依頼者確認は U-9 の裁定が兼ねる。§10)。v0.1 では `limits.execution_ms` の新 key に置くと定めていたが、v0.2 (2026-10-02) で `conformance-tests/test_contract.py` の `_PRE_1_8_0_LIMITS_KEYS` の pin (`:138-146`、`:180-184`) が新しい sibling key を 1.8.0 の裁定として禁じていることがわかったので、U-9 に移した (§11 RV-14)。`errors.details_vocabulary.LIMIT_EXCEEDED` は変えない。
 - `structured_operations.idempotency.record` には挿入しない。§9.1 の「no idempotency record」と義務 (c) で足りる。v0.1 の挿入案は、文中への挿入が `PIN_1_7_0_IDEMPOTENCY_RECORD` (`conformance-tests/test_contract.py:2165-2166`、包含で照合 `:2286`) を、末尾への追記が `PIN_1_8_0` の endswith (`:525-532`、`:578`) を壊すので削った (§11 RV-14)。
 - `versioning.version_binding` の散文に 1.15.0 の段落 (無条件義務の列挙、「1.14.0 のままの実装は遡って縛られない」)、`versioning.obligations[]` に entry。段落の置き場は 1.14.0 の前例どおり「1.14.0 の段落の直後・version-flip 文の前」。
 - `structured_operations.dry_run.decision` に、execution_ms の拒否は dry run と real で同じとは限らない旨の相互参照の 1 文を追記する (§9.4。`PIN_1_7_0_DRY_RUN_DECISION` は `conformance-tests/test_contract.py:2279` の包含照合で、`dry_run["decision"]` を見る pin はこの 1 件だけなので、追記で壊れない)。
 - 1.14.0 の前例どおりの記録: `spec/CONTRACT_HISTORY.md` の revision note (`:428` の Revision note 10 の形。既存の義務 1.7.0 (3) を狭めることも記録する)、`spec/CCR_DISPOSITION.md` の ruling 20 (`:343` の ruling 19 の形)。
-- 文言は候補として §9 に置き、依頼者が確定する。変える節に掛かる pin (U-9 の選択で決まる) を確定後に更新する (本 session では触らない)。
+- 文言は候補として §9 に置き、依頼者が確定する。変える節に掛かる pin (`_PRE_1_8_0_LIMITS_KEYS`。U-9 の裁定 (a)) を確定後に更新する (本 session では触らない)。
 
 **D-7 conformance で決定的に固定する: 新しい共通条件を 1 件足す** (番号は conformance の WP で採番し、C-35 の次を見込む。`tools/check_doc_refs.py` が未定義の C 族番号を参照切れとして止めるので本書では番号を書かない。先例 `docs/design/MULTI_PROCESS_WORKER_V0_1.md:766`。以下「新条件」)。性質は §6.2 の (i)〜(iii)。
 - 駆動 (i): 新 primitive は、契約の点で「rate・concurrency・budget の bound が確定した後、最初の接続取得の前」で止めると定義する。従って期限の検査と文のどちらよりも前である。受理点から stall 点までに検査が無いので `budget.execution_ms = 1` でよく、十分長く (例 100 ms) 保持して放すと、放した後の最初の検査で拒否される。
@@ -154,19 +155,20 @@
 - 各 vector に positive control (十分な予算で同じ保持 → 完了し効果が残る) を組にする (`docs/design/CONFORMANCE_ADAPTER_V1.md:40` の規則)。
 - **決定性の論法**: 拒否の方向は負荷に対して単調である — 放した時点で受理点からの経過が予算より長ければ、負荷はそれを更に長くするだけで短くしない。従って「放した後の拒否」は負荷で揺れない。**単調性が保証するのは放した後の拒否だけである。** stall 点への到達、(iii) の plan を得る dry run、(ii) の再送の成功は B の余裕に依る (成功の方向)。
 - (ii) は既存の `hold_after_idempotency_lookup` (lock 保持・効果 0 件で止める)、(iii) は既存の `hold_after_plan_verification` で駆動できる (修正前の計測で 6 plug とも stall 点に 20/20 到達。§12.4)。ただし stall 点の定義と 4 実装を port v1.22 で揃える (§6.4)。(i) の点で止める primitive は port v1.21 に無く、port v1.22 の新 primitive (仮称 `hold_after_admission`。ABC + 6 plug) が要る。
-- 観測: 応答だけでは「文を発行しなかった」と「1 ms で cancel された」を区別できない。primitive の handle が「放した後に要求のために発行された文の数」(D-2 の定義の文。要求が保持するすべての接続。pool 維持の文を除く手段は §6.4) を返す形を候補にする (台帳 R-79 の `execute_count` が接続ごとの文の数を既に数えている)。既存 handle は文の数を持たない (§6.4)。in-process 2 plug では文の数を観測できない (§6.4)。→ U-5。
+- 観測: 応答だけでは「文を発行しなかった」と「1 ms で cancel された」を区別できない。primitive の handle が「放した後に要求のために発行された文の数」(D-2 の定義の文。要求が保持するすべての接続。pool 維持の文を除く手段は §6.4) を返す形を候補にする (台帳 R-79 の `execute_count` が接続ごとの文の数を既に数えている)。既存 handle は文の数を持たない (§6.4)。in-process 2 plug では文の数を観測できない (§6.4)。U-5 の裁定: (i)〜(iii) を全部、観測は文の数。
 - `limit_enforcement.execution_ms` による分岐は置かない (§6.2 の註)。
 - C-05 の開示「execution_ms never driven」は新条件を指す形に書き換える (§6.5)。`security/CONTROL_MAPPING.md` に両 peer の「文発行前の拒否」「rollback」の claim を足す (実装 WP の仕事)。
 
 **D-8 Security Invariants**: 新しい不変条件は足さない。適用は §7。
 
 **D-9 実装の義務 (本書は列挙だけ。作業指示書は裁定後)**:
-- r2db — 入口検査 (`postgres.py:1498`、`:1613`) を pool 取得の後へ**移す** (足すのではなく置き換える。検査点は 1 つになる)。apply_schema も同じ位置に 1 つ置く。pool 取得に期限の残りを渡し超過を `LIMIT_EXCEEDED` execution_ms に写す (→ U-6)。advisory lock 待ち後の再検査と再設定、operation loop・DDL・store の前 (pre_commit より前) の検査。`_timeout_ms` は残り 1 ms 未満で `LIMIT_EXCEEDED` を上げ、0 を返さない。`query` の SELECT 後の検査 (`postgres.py:1554`) は U-8 (a) なら外す。
-- MitateDB — 最優先の欠陥は、文の間の検査が無く、予算を過ぎた要求が commit することである (§1.5、§12.2、§12.4)。`request_scope` 入口 (pool 取得後) の検査、文の間の検査、`_retime` の閾値を D-2 に揃える、`_timeout_ms` を D-2 の形にする、`record_idempotency` (`backend_postgres.py:1817-1825`) の psycopg 例外の翻訳 (文なので範囲内)。`SET LOCAL` (`backend_postgres.py:493-500`) と `_retime` (`:544-552`) の `QueryCanceled` / `LockNotAvailable` を execution_ms に写す。schema 3 経路 (`backend_postgres.py:1058→1069→1070`、`:1204→1229→1230`、`:1372→1382→1383`) の `_write_idempotency_row` を `pre_commit` の前へ移し、r2db (`postgres.py:1725→1733`、`:2416→2426`) と transact の順序 (store → pre_commit → COMMIT) に揃える (`_error_row_once_fired` があっても、pre_commit の後の文が予算で cancel されると allow + error の 2 行が残る経路が開いたままになるため)。U-8 (b) なら read の SELECT 後に検査を足す。
+- r2db — 入口検査 (`postgres.py:1498`、`:1613`) を pool 取得の後へ**移す** (足すのではなく置き換える。検査点は 1 つになる)。apply_schema も同じ位置に 1 つ置く。pool 取得に期限の残りを渡し超過を `LIMIT_EXCEEDED` execution_ms に写す (U-6 の裁定 (a))。advisory lock 待ち後の再検査と再設定、operation loop・DDL・store の前 (pre_commit より前) の検査。`_timeout_ms` は残り 1 ms 未満で `LIMIT_EXCEEDED` を上げ、0 を返さない。`query` の SELECT 後の検査 (`postgres.py:1554`) は外す (U-8 の裁定 (a))。規則は 1 つ: **検査は次に文を発行する点にだけ置き、次が pre_commit / COMMIT である点には置かない。** transact の loop 後の検査 (`postgres.py:1701`) は、次に idempotency の store (文) が続く要求では「次の文の前」の検査として残り、続かない要求では外れる (行ごとの確定は作業指示書)。
+- MitateDB — 最優先の欠陥は、文の間の検査が無く、予算を過ぎた要求が commit することである (§1.5、§12.2、§12.4)。`request_scope` 入口 (pool 取得後) の検査、文の間の検査、`_retime` の閾値を D-2 に揃える、`_timeout_ms` を D-2 の形にする、`record_idempotency` (`backend_postgres.py:1817-1825`) の psycopg 例外の翻訳 (文なので範囲内)。`SET LOCAL` (`backend_postgres.py:493-500`) と `_retime` (`:544-552`) の `QueryCanceled` / `LockNotAvailable` を execution_ms に写す。schema 3 経路 (`backend_postgres.py:1058→1069→1070`、`:1204→1229→1230`、`:1372→1382→1383`) の `_write_idempotency_row` を `pre_commit` の前へ移し、r2db (`postgres.py:1725→1733`、`:2416→2426`) と transact の順序 (store → pre_commit → COMMIT) に揃える (`_error_row_once_fired` があっても、pre_commit の後の文が予算で cancel されると allow + error の 2 行が残る経路が開いたままになるため)。
 - 【訂正 2026-10-02 (v0.4)】 v0.2〜v0.3 の「schema 4 経路の cancel 分岐に `commit_failed` を足す」「この欠けを台帳に起票する」「transact の commit の psycopg 例外の翻訳」を削った。前 2 つは呼び出し側の `_error_row_once_fired` が既に error 行を書くため (§1.4 #7。台帳 v1.151 の R-42 行)、3 つ目は commit が予算の外にあるため (M-4)。
+- 両 peer — 接続の確立の時間切れの写像 (D-5。U-6 の裁定)。
 - 両 peer — 閾値を D-2 (残り < 1 ms) に揃える: `check_deadline` (r2db `limits.py:100` は `clock() > deadline`)、SQLite の `_check_deadline` (strict `>`)、r2db の in-memory backend。
 - 両 peer — 変異: 各検査点を外すと新条件の対応 vector が赤になること (観測は D-7 の文の数。見込みは §6.6)。
-- 共通条件で駆動しない検査点 — D-2 (b) lock 待ちの後、[U-8 (b)] (d) pre_commit の前、U-6 (a) の pool 待ち超過の写像、閾値 — は peer の単体テストで固定する (r2db は clock の注入、MitateDB は test 側での `time.monotonic` の差し替え。製品コードに hook は足さない)。義務 (a) (待ちを数え、受理点より遅く始めない) の証拠もこの単体テストと `security/CONTROL_MAPPING.md` の claim で取る (§6.4)。完了条件 → 変異の対応は作業指示書で確定する (運用条件 §1.5 の 40)。SQLite / in-memory backend は同じ意味論。
+- 共通条件で駆動しない検査点 — D-2 (b) lock 待ちの後、U-6 の裁定の pool 待ち超過と接続確立の時間切れの写像、閾値 — は peer の単体テストで固定する (r2db は clock の注入、MitateDB は test 側での `time.monotonic` の差し替え。製品コードに hook は足さない)。義務 (a) (待ちを数え、受理点より遅く始めない) の証拠もこの単体テストと `security/CONTROL_MAPPING.md` の claim で取る (§6.4)。完了条件 → 変異の対応は作業指示書で確定する (運用条件 §1.5 の 40)。SQLite / in-memory backend は同じ意味論。
 
 ## 4. 却下した代替案
 
@@ -174,16 +176,17 @@
 |---|---|---|
 | X-1 | 期限検査のための DB 往復 (`SELECT clock_timestamp()`、`SELECT now()`) | 決定軸に反する。process 内の単調時計で足りる (両 peer とも既にそうしている) |
 | X-2 | 現行 (`max(1, …)` で 1 ms の文を発行) を維持し「境界では未定義」と文書化 | 予算を使い切った要求の結果が負荷で変わるのは SI-08 の Verification 句 (deterministic) に反し、利用者が再送の可否を決められない (残りが 1 ms 以上の帯は D-2 の範囲の外) |
-| X-3 | 計測の始点を「最初の文」にして待ちを数えない | 利用者に見える所要時間が予算と無関係になり、pool・lock の保持が予算で bound されない。MitateDB の現行の読み (待ち超過 = 予算超過) とも逆行。U-1 の選択肢としては残す |
-| X-4 | 待ちを別の limit class (例 `queue_ms`) にする | `limits.classes` の語彙に新語が要り (1.2.0 の規則)、利用者が 2 つの予算を推論する。安全の結果は増えない。U-1 の選択肢としては残す |
+| X-3 | 計測の始点を「最初の文」にして待ちを数えない | 利用者に見える所要時間が予算と無関係になり、pool・lock の保持が予算で bound されない。MitateDB の現行の読み (待ち超過 = 予算超過) とも逆行。U-1 の裁定 (a) で不採用 |
+| X-4 | 待ちを別の limit class (例 `queue_ms`) にする | `limits.classes` の語彙に新語が要り (1.2.0 の規則)、利用者が 2 つの予算を推論する。安全の結果は増えない。U-1 の裁定 (a) で不採用 |
 | X-5 | 文の途中の期限切れを `ATOMICITY_FAILED` で返す | 契約はこの code の意味を定義していない。両 peer の現物は `LIMIT_EXCEEDED` で、limit_class が原因を伝える |
 | X-6 | PostgreSQL 17 の `transaction_timeout` を使う (transaction 全体の上限を 1 回で設定) | CI は `postgres:16`。作業機も 16.14 (M-2、§12.1)。将来の選択肢として M-2 に残す |
 | X-7 | conformance のために製品コードに test 用 hook や clock 注入を足す (MitateDB には clock 注入が無い) | `docs/design/CONFORMANCE_ADAPTER_V1.md` の規律 (adapter の primitive で駆動し、製品コードに test 用 hook を足さない) に反する。stall primitive で実時間を経過させれば決定的に拒否側へ倒せる (D-7 の単調性) |
 | X-8 | 新しい details key (`stage` / `executed` など) で「どこで予算が尽きたか」を返す | 既存の `futility` で足り、`details` の語彙を増やさない |
 
-## 5. 未確定の選択肢 (依頼者裁定待ち。推奨は確定ではない)
+## 5. 選択肢と依頼者裁定 (2026-10-02 に全件裁定済み。逐語は §10)
 
 **U-1 計測の始点と待ちの算入**
+- **【依頼者裁定 2026-10-02】(a)。**
 - (a) 受理点から、待ちをすべて数える (**推奨**。D-1)。
   - 利点: 実装が制御する所要時間を 1 つの予算で bound する。両 peer の現行の計算点のままで、新しい class が要らない。
   - 欠点: 受理点の前は数えない: 逐次で r2db 約 0.5 ms・MitateDB 約 5 ms (うち認証 p50 0.23〜0.25 ms / 2.4〜2.6 ms)、32 並列では受理点の前の待ち (worker thread の順番待ち) が p50 53〜78 ms・max 101〜113 ms (M-7、§12.3。in-process の ASGI で、uvicorn・TLS・reverse proxy を含まない)。pool・lock の待ちは他要求の負荷で伸びるので、同じ要求が負荷で拒否され得る (再送は D-3 で安全)。
@@ -199,42 +202,50 @@
   - 欠点: `limits.classes` に新語が要る (1.2.0 の規則)。利用者が 2 つの予算を推論し、安全の結果は増えない。
 
 **U-2 文の途中の期限切れの上限 (文の実行区間。区間外は D-5)**
+- **【依頼者裁定 2026-10-02】(a)。**
 - (a) 現行の形 + 文の間の時計検査 (上限 < 残りの 2 倍。往復を足さない。**推奨**)。
 - (b) 文ごとに `SET LOCAL` を再設定 (上限 ≒ 残り。文ごとに 1 往復)。要求あたり 3〜15 往復を足す。見積もりの下限は 1 往復 11 µs × 文の数 = +0.03〜0.17 ms、上限の目安は現在の DB 時間の倍 = +0.36〜0.95 ms (http plug の p50 1.2〜1.9 ms の 2〜50%)。実装して測った値ではない (M-3、§12.1・§12.5)。決定軸 (往復を足さない) に反する点は変わらない。
 - (c) PostgreSQL 17 の `transaction_timeout` (X-6)。作業機の 16.14 に `transaction_timeout` は無い (M-2、§12.1)。
 - 契約文言は (a) でも成り立つ弱さにする (「文の途中で尽きた予算は実装の文の bound で打ち切られ、その bound は設定時の残りを超えない」)。
 
 **U-3 再送可否の伝達** (v0.1 の推奨は (b)。v0.2 (2026-10-02) で (a) に移した — §11 RV-16)
+- **【依頼者裁定 2026-10-02】(a)。**
 - (a) D-3 の保証だけ (何も残らない → 再送は常に安全) (**推奨**)。
 - (b) 加えて、文の実行で使い切ったときは `details.futility` を MAY で付ける (任意なので conformance は「付くなら SI-10 に適う内容」だけを見る)。欠点: 実装は「再送しても同じ」を知り得ない (文の所要時間は負荷と行 lock の待ちで変わる) ので、`futility` の文を真に書けない。
 - (c) 必須の新 key (X-8、却下)。
 
 **U-4 契約の版**
+- **【依頼者裁定 2026-10-02】(a)。**
 - (a) minor 1.15.0 + subordinate ruling 20 + obligations entry (**推奨**)。先例: 1.11.0 (拒否 code を変える義務)・1.12.0 が minor。本件は未定義の意味を埋めるものであり、文発行前の拒否の型は `structured_operations.idempotency.record` の「before it executes」に既にある。
 - (b) major。既存の義務 1.7.0 (3) (dry run の拒否は real と同じ code と details) を execution_ms について狭めるので、この読みを強める。1.14.0 の自制「requires no implementation to refuse a request it accepted under 1.13.0」に照らすと、今 200 になり得る要求を拒否に変える。ただしその 200 は保証されていない偶然の結果である。
 - (c) 版を上げず subordinate ruling の註だけ (義務を機械可読にできない)。
 
 **U-5 conformance の範囲**
+- **【依頼者裁定 2026-10-02】範囲 (a)、観測 = 文の数を返す。**
 - (a) 新条件の (i)〜(iii) を全部、port v1.22 の新 primitive を含めて (**推奨**。(i) が台帳 R-42 の候補そのもの)。
 - (b) 既存 primitive で駆動できる (ii)(iii) だけを先に、(i) は後続。
 - (c) 観測の形: handle が「放した後に発行された文の数」を返す (**推奨**) / 応答 code だけ (r2db の 3 plug と MitateDB の SQLite plug は修正前から期待どおりの code を返すので、D-2 の検査点を外す変異がこの 4 plug で常に生き残る。M-8)。in-process の MitateDB SQLite plug には、SQLite の trace callback で文を数える代替がある (r2db の in-memory plug には文が無い)。
 
 **U-6 pool 待ち超過・接続確立の code**
+- **【依頼者裁定 2026-10-02】pool 待ち (a)、接続確立 (a)。**
 - pool 待ち: (a) 予算を超えたら両 peer とも `LIMIT_EXCEEDED` execution_ms (**推奨**。MitateDB の現行は上限到達の `PoolExhausted` だけ。r2db は 503 から変える)。(b) r2db の現行 (503 `SERVICE_UNAVAILABLE`) を許す (peer で分かれる)。
 - 接続確立の時間切れ・失敗: (a) 予算由来の connect timeout の超過は 413 execution_ms。(b) 503 のまま (MitateDB の現行 `PoolConnectFailed`、§1.4 #2)。材料: `security/CONTROL_MAPPING.md:1023` (pool・lock の待ちの超過は `LIMIT_EXCEEDED`、到達不能は `SERVICE_UNAVAILABLE`) は現物と合うが、新規接続の確立が予算を超えた場合がどちらの句に入るかを述べていない。
 - 【v0.4 で削除: 予算による commit 段の cancel は存在しない (M-4)】
 
 **U-7 閾値**
+- **【依頼者裁定 2026-10-02】(a)。**
 - (a) 残り < 1 ms (整数 ms で 0) で拒否 (**推奨**。D-2)。
 - (b) 残り ≤ 0 で拒否し、0 < 残り < 1 ms は 1 ms で発行 (現行の `_retime`)。
 - (c) 残り < 安全余裕 (例 5 ms) で拒否。利点: D-2 の範囲の外に残る「残り 1 ms 以上・文の所要時間未満」の帯 (負荷で 200 / 413) を狭める (M-1: 1 ms を超える文は 1.04〜1.37 ms で cancel される。§12.1)。欠点: 契約で数を決めることになる。
 
 **U-8 最後の文が完了した後の時計検査**
+- **【依頼者裁定 2026-10-02】(a)。**
 - (a) 検査しない — 結果は要求自身の最後の文の完了で決まり、その後は時計で拒否しない。(a) では D-2 (d) を置かない: 最後の文の後は pre_commit → COMMIT と進む (r2db は `postgres.py:1554` の検査を外す) (**推奨**: 文の実行は文の bound で既に bound されており、完了した仕事を捨てて利用者に何も返さないのは自由の損失。現物の r2db は (b) の形で、仕事が終わっているのに 413 になる回が負荷で変わる (M-1: 残り 0.6 ms の軽い query が 200 21/50・413 29/50。§12.2))。
 - (b) 検査する — (d) を置き、read は SELECT の後にも検査する。予算を wall-clock の上限として厳密に読む (r2db の現行。MitateDB は read の SELECT 後に検査を足す)。
 - どちらも決定的 (境界の位置が違うだけ)。どちらを選んでも commit は bound されない (M-4)。§9.1 の差し替えは [U-8 (a)] の印。
 
 **U-9 `limits.execution_ms` の置き場**
+- **【依頼者裁定 2026-10-02】(a)。**
 - (a) `limits` の新 key `execution_ms` (per-class の key の先例 `enum_members`)。ただし `conformance-tests/test_contract.py:138-146`・`:180-184` の `_PRE_1_8_0_LIMITS_KEYS` は「新しい sibling key を置かない」を 1.8.0 の裁定として pin しており、pin の切り直しに依頼者確認が要る (**推奨**)。
 - (b) `limits.profile` の文字列の中 (1.8.0 (2) の先例)。`limits.profile` は endswith の pin (`conformance-tests/test_contract.py:111-115`、`:177`) を持つ。1.8.0 の文より前に挿入すれば pin はそのまま、末尾なら切り直す。
 - (c) `limits.request_budget` の末尾。`request_budget` の `PIN_1_7_0` は包含照合 (`:2267-2268`) なので、末尾追記なら pin はそのまま。
@@ -270,7 +281,7 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 ### 6.4 port v1.22 の候補
 
 - 新 primitive (仮称 `hold_after_admission`): caller が出す budget 付き要求を、契約の点で「rate・concurrency・budget の bound が確定した後、最初の接続取得の前」で止める。ABC の `@abstractmethod` + 6 plug の実装 + `docs/design/CONFORMANCE_ADAPTER_V1.md` の新節。製品コードに test 用 hook を足さない (X-7)。
-- handle の候補: 放した後に plug の backend が発行した文の数を返す (台帳 R-79 の `execute_count`。両 peer の `psycopg_counting.py`)。観測は「放した後に要求のために発行された文が 0 件」と定義する (D-2 の定義の文。要求が保持するすべての接続)。`execute_count` は pool 維持の文 (r2db の checkout ごとの `SELECT 1`、新規接続の `SET search_path`) も数えるので、それを除く手段は port の設計で決める。候補: 計数 cursor が文の本文を記録して pool 維持の文を除く / 計測前に pool を warm にして新規接続を無くす。いずれも製品コードに test 用 hook を足さない (X-7) 形に限る。既存の 2 primitive の handle にも同じ値を持たせるかは U-5 の裁定に従う。
+- handle の候補: 放した後に plug の backend が発行した文の数を返す (台帳 R-79 の `execute_count`。両 peer の `psycopg_counting.py`)。観測は「放した後に要求のために発行された文が 0 件」と定義する (D-2 の定義の文。要求が保持するすべての接続)。`execute_count` は pool 維持の文 (r2db の checkout ごとの `SELECT 1`、新規接続の `SET search_path`) も数えるので、それを除く手段は port の設計で決める。候補: 計数 cursor が文の本文を記録して pool 維持の文を除く / 計測前に pool を warm にして新規接続を無くす。いずれも製品コードに test 用 hook を足さない (X-7) 形に限る。既存の 2 primitive の handle にも同じ値を持たせる (U-5 の裁定: 3 vector とも文の数で観測する)。
 - 既存 handle は文の数を持たない: `IdempotencyHold` (`conformance-tests/adapter.py:997-1022`) と `PlanVerificationHold` (`:1026-1049`) は `wait_until_held(timeout_s=30.0) -> int` だけを持ち、4 つの実装すべてで戻り値は定数 1。stall 点より前に拒否されると `wait_until_held` は timeout (30 s) まで待って `AssertionError` を上げる (「届かなければ赤」は成り立つが 30 s 掛かる)。
 - 既存 2 primitive の docstring: 放した後の約束は `hold_after_idempotency_lookup` だけにある (`conformance-tests/adapter.py:1902`:「`with` を抜けると先着は解放され、実行・記録・commit まで進む。」)。`hold_after_plan_verification` (`:1966`) は「`with` を抜けると先着は解放される。」だけで、2 件目について「先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない」と書いており、先着の拒否を既に許す形である。従って port v1.22 で改訂する docstring は `hold_after_idempotency_lookup` の 1 文 (確定文の経路、運用条件 §1.5 の 35) で、`hold_after_plan_verification` は「先着が `LIMIT_EXCEEDED` で拒否される」場合を 2 件目の記述に足すかどうかを port の設計で決める。
 - stall 点は plug で違う: (ii) で r2db の 2 実装 (`r2db-api/conformance/conformance_adapter_r2db.py:339-344`、`r2db-api/conformance/conformance_adapter_r2db_http.py:893-898`) は `_idempotency_reserve` の**入口** (予約を取る前) で止まり、MitateDB の 2 実装 (`MitateDB-api/conformance/conformance_adapter_mitatedb.py:534-545`、`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py:867-873`) は `_idempotency_check` が戻った後 (照会と予約の後) で止まる。port の docstring (`conformance-tests/adapter.py:1902`) は「予約を取り終え」と書いており、r2db の実装はこれと合わない。(iii) も、r2db in-process は `compute_plan_token` の後 (`r2db-api/conformance/conformance_adapter_r2db.py:410-414`)、r2db-http は `_read_schema_revision` の後 (`r2db-api/conformance/conformance_adapter_r2db_http.py:960-964`) で plan の照合より前、MitateDB は backend の DDL メソッドの入口 (`MitateDB-api/conformance/conformance_adapter_mitatedb.py:612-616`) で plan 検査の後。
@@ -302,9 +313,8 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 | DDL 前の検査を外す | — | — | 赤 | — |
 | 検査の閾値を `<= 0` に戻す | — | — | — | 赤 |
 | D-2 (b) lock 待ちの後の検査を外す | — | — | — | 赤 |
-| [U-8 (b)] D-2 (d) pre_commit の前の検査を外す | — | — | — | 赤 |
 | MitateDB schema 3 経路の順序を戻す (pre_commit の後に idempotency を書く。D-9) | — | — | — | 赤 |
-| pool 待ち超過の写像を外す (U-6 (a) のとき) | — | — | — | 赤 |
+| pool 待ち超過・接続確立の時間切れの写像を外す (U-6 の裁定) | — | — | — | 赤 |
 
 - in-process 2 plug では、単一の検査点の変異は後段の検査が同じ code で拒否するので観測できない。殺すのは PG plug の文の数と peer 単体テスト (§6.4 の表)。r2db の http・socket plug も、応答の code だけでは (ii)(iii) が修正前から緑になる (§12.4、U-5 (c))。
 
@@ -312,13 +322,13 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 
 新しい不変条件は足さない (§2、`CLAUDE.md`)。
 
-`security/THREAT_MODEL_V1.md` (:100-138) との関係: T-07 (資源枯渇。connections を含む) — execution_ms が pool・lock の待ちを含めて 1 要求の保持を bound する (D-1、D-5)。T-08 (エラーによる情報開示) — `futility` を付けるなら内部情報を含めない (U-3 (b)、SI-10)。T-09 (並行・部分失敗による不整合) — 打ち切られた要求が行・idempotency 記録を残さない (D-3、新条件 (ii)(iii))。T-14 (security evidence の欠落) — error 行の保証は現行のまま (r2db は backend の except 分岐、MitateDB は `_error_row_once_fired`)。変更なし。
+`security/THREAT_MODEL_V1.md` (:100-138) との関係: T-07 (資源枯渇。connections を含む) — execution_ms が pool・lock の待ちを含めて 1 要求の保持を bound する (D-1、D-5)。T-08 (エラーによる情報開示) — 新しい details を足さない (U-3 の裁定 (a)。`futility` は付けない)。T-09 (並行・部分失敗による不整合) — 打ち切られた要求が行・idempotency 記録を残さない (D-3、新条件 (ii)(iii))。T-14 (security evidence の欠落) — error 行の保証は現行のまま (r2db は backend の except 分岐、MitateDB は `_error_row_once_fired`)。変更なし。
 
 | SI | 関係 |
 |---|---|
 | SI-08 | Verification 句の「deterministic rejection or termination」を execution_ms について初めて検証可能にする (新条件)。C-05 の文「over-bound requests terminate deterministically」の execution_ms の欠けを埋める |
 | SI-11 | 打ち切りが部分状態を残さない。既存の atomic の検証に期限切れの vector が加わる (新条件の (ii)(iii)) |
-| SI-10 | `futility` を付けるなら (U-3 (b))、その文は内部情報を含めない。SQL・lock 名・pool の寸法を書かない |
+| SI-10 | 変更なし。`futility` は付けない (U-3 の裁定 (a))。拒否の message に SQL・lock 名・pool の寸法を書かない点は現行のまま |
 | SI-14 | `LIMIT_EXCEEDED` は耐久 denial ではない。変更なし。error 行の保証は T-14 の段のとおり現行のまま |
 | SI-15 | 関係なし (認可の fail-closed ではない) |
 
@@ -337,37 +347,24 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 
 ## 9. 契約文言の候補
 
-**以下は候補である。依頼者が確定するまで逐語 pin を置かない** (運用条件 §1.5 の 35)。確定文は scratchpad の確定文ファイルから複製する。`[U-N (x)]` は未確定の選択肢ごとの差し替え箇所を示す。
+**以下は依頼者裁定 (§10) を反映した候補である。依頼者が確定するまで逐語 pin を置かない** (運用条件 §1.5 の 35)。確定は設計レビュー 2 回目の後に求める。v0.4 までの `[U-N (x)]` の差し替え案は裁定で不要になったので落とした (v0.4 は main `23559b8`)。
 
-### 9.1 execution_ms の節 (置き場は U-9。推奨 (a) は `limits.execution_ms` の新 key)
+### 9.1 `limits.execution_ms` (新 key)
 
-> execution_ms bounds one request's own wall-clock time. The bound starts no later than the point at which the request has passed this deployment's request-rate and concurrency bounds and the bound in force for it is fixed; an implementation may start it earlier, never later. Everything between that point and the point at which the request begins to commit counts against it: waiting for a database connection, waiting for a lock and executing statements. A request that has begun to commit is neither refused nor terminated for execution_ms. Each request is bounded on its own: each page of a query is one request with its own bound, and a dry run is bounded exactly as the request it previews, because it executes statements as well. A dry run's own execution_ms refusal does not predict the real request's: the two issue different statements.
+> execution_ms bounds one request's own wall-clock time. The bound starts no later than the point at which the request has passed this deployment's request-rate and concurrency bounds and the bound in force for it is fixed; an implementation may start it earlier, never later. Everything between that point and the point at which the request begins to commit counts against it: waiting for a database connection, waiting for a lock and executing statements. After its last statement has completed, a request is not refused for execution_ms by a clock check. A request that has begun to commit is neither refused nor terminated for execution_ms. Each request is bounded on its own: each page of a query is one request with its own bound, and a dry run is bounded exactly as the request it previews, because it executes statements as well. A dry run's own execution_ms refusal does not predict the real request's: the two issue different statements.
 
-- [U-1 (b)] 始点の文を「The bound starts when the request is received, before its authentication and body are processed.」に差し替える。
-- [U-1 (c)] 始点の文を「The bound starts when the request issues its first statement; waiting for a database connection or a lock before that is not counted.」に差し替え、待ちの列挙から connection と lock を除く。
-- [U-1 (d)] 待ちを `limits.classes` の新しい class で bound する別の文になる (本節の文は実行だけを指す)。
-- [U-8 (a)] 追記: 「After its last statement has completed, it is not refused for execution_ms by a clock check.」[U-8 (b)] 追記: 「A request whose execution_ms is exhausted when its last statement completes is refused in the same way, before it commits.」
+> A statement here is one the implementation issues from the request's content on any connection it holds for the request -- each of the request's own transactions, the implicit begin of each included -- including setting the request's own bounds, reading the catalog, taking locks, reading or writing idempotency records, and the request's own data and schema changes; maintaining a connection pool, the commit or rollback that ends the transaction, and audit recording on a separate connection are not. A request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement, rather than issuing that statement under a bound too short for it to complete. A remaining bound shorter than one millisecond is exhausted. A request whose execution_ms is exhausted while it waits for a database connection, or while one is being established for it, is refused in the same way. A statement already executing when the bound is exhausted is terminated by the implementation's own per-statement bound, which never exceeds what remained of execution_ms when that bound was set. A request refused or terminated this way has not committed: it leaves no row, no catalog entry, no schema revision and no idempotency record. This sentence does not govern audit evidence; transactions.atomic and structured_operations.dry_run.external_effects are unchanged.
 
-> A statement here is one the implementation issues from the request's content on any connection it holds for the request -- each of the request's own transactions, the implicit begin of each included -- including setting the request's own bounds, reading the catalog, taking locks, reading or writing idempotency records, and the request's own data and schema changes; maintaining a connection pool, the commit or rollback that ends the transaction, and audit recording on a separate connection are not. A request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement, rather than issuing that statement under a bound too short for it to complete. A remaining bound shorter than one millisecond is exhausted. A statement already executing when the bound is exhausted is terminated by the implementation's own per-statement bound, which never exceeds what remained of execution_ms when that bound was set. A request refused or terminated this way has not committed: it leaves no row, no catalog entry, no schema revision and no idempotency record. This sentence does not govern audit evidence; transactions.atomic and structured_operations.dry_run.external_effects are unchanged.
-
-- [U-7 (b)] 「A remaining bound shorter than one millisecond is exhausted.」を「A remaining bound of zero or less is exhausted.」に差し替える。[U-7 (c)] は数を契約で定める文になる。
-- [U-2 (b)] 「which never exceeds what remained of execution_ms when that bound was set」を「which is set again before every statement from what then remains of execution_ms」に差し替える。
-- [U-6 (a)] 追記: 「Waiting for a database connection beyond the bound, or failing to establish one within it, is refused in the same way.」(接続確立の部分は U-6 の接続確立の行に依る)。
-- [U-3 (b)] 追記: 「Where the bound was spent executing the request's own statements rather than waiting, the denial may carry details.futility.」
 - 【v0.4 で削除】commit 段の文は置かない (M-4: 予算は commit を打ち切らない)。
+- v0.4 との差: 1 段落目の「After its last statement has completed, a request is not refused for execution_ms by a clock check.」は [U-8 (a)] の追記文の主語を「it」から「a request」に替えて段落に組み込んだもの。2 段落目の「A request whose execution_ms is exhausted while it waits for a database connection, or while one is being established for it, is refused in the same way.」は [U-6 (a)] の追記文を、U-6 の裁定 (接続確立 (a)。D-5: 予算の内に起きた拒否・到達不能は `SERVICE_UNAVAILABLE` のまま) と字義で合うように書き直したもの (監督の案。設計レビュー 2 回目で確かめる)。
 
-### 9.2 `versioning.version_binding` に足す段落 ([U-4 (a)]。置き場は 1.14.0 の段落の直後・version-flip 文の前)
+### 9.2 `versioning.version_binding` に足す段落 (置き場は 1.14.0 の段落の直後・version-flip 文の前)
 
-> Only an implementation declaring 1.15.0 or higher additionally claims conformance to the obligations 1.15.0 introduces (subordinate ruling 20). Those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.15.0, independent of any capability's own status: (a) execution_ms counts every wait and statement from no later than the point limits.execution_ms names; (b) a request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement; and (c) a request refused or terminated for exhausting execution_ms has not committed and leaves no row, no catalog entry, no schema revision and no idempotency record. What else 1.15.0 adds -- limits.execution_ms and the sentence it rewrites in ... -- holds an implementation to no behavior beyond these three. 1.15.0 newly requires refusing a request whose execution_ms is exhausted; such a request was never guaranteed to succeed under 1.14.0. 1.7.0's obligation (3) -- the same code and the same details on a refusal a dry run receives -- does not extend to an execution_ms refusal, because a dry run and the real request issue different statements. An implementation still declaring 1.14.0 is not held to any 1.15.0-only obligation retroactively.
+> Only an implementation declaring 1.15.0 or higher additionally claims conformance to the obligations 1.15.0 introduces (subordinate ruling 20). Those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.15.0, independent of any capability's own status: (a) execution_ms counts every wait and statement from no later than the point limits.execution_ms names; (b) a request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement; after its last statement has completed, it is not refused for execution_ms by a clock check; and (c) a request refused or terminated for exhausting execution_ms has not committed and leaves no row, no catalog entry, no schema revision and no idempotency record. What else 1.15.0 adds -- limits.execution_ms and the sentence it adds to structured_operations.dry_run.decision -- holds an implementation to no behavior beyond these three. 1.15.0 newly requires refusing a request whose execution_ms is exhausted; such a request was never guaranteed to succeed under 1.14.0. 1.7.0's obligation (3) -- the same code and the same details on a refusal a dry run receives -- does not extend to an execution_ms refusal, because a dry run and the real request issue different statements. An implementation still declaring 1.14.0 is not held to any 1.15.0-only obligation retroactively.
 
-- [U-9 (b)] 「the point limits.execution_ms names」を「the point limits.profile names for execution_ms」に、「What else 1.15.0 adds -- limits.execution_ms」の `limits.execution_ms` を「what it adds to limits.profile」に差し替える。[U-9 (c)] 同じ 2 箇所の名指しを `limits.request_budget` に差し替える。
-- 「the sentence it rewrites in ...」の対象は U-9 の選択で決まる ((a) なら書き換える既存の文は無く、この句を落とす。(b) は `limits.profile`、(c) は `limits.request_budget`)。
-- [U-1 (b)] (a) を「execution_ms counts every wait and statement from the request's receipt」に。[U-1 (c)] (a) を「execution_ms counts every statement from the request's first statement; waits are not counted」に。[U-1 (d)] (a) を、待ちを bound する新しい class の義務に置き換える。
-- [U-7 (b)] (b) の「exhausted」を「whose remaining execution_ms is zero or less」と読む文に。
-- [U-8 (a)] (b) の末尾に「; after its last statement has completed, it is not refused for execution_ms by a clock check」。[U-8 (b)] (b) の末尾に「; and a request whose execution_ms is exhausted when its last statement completes is refused the same way, before it commits」。
-- [U-4 (b)] major 版の段落になり、本段落の形は使わない。[U-4 (c)] 本段落を置かず subordinate ruling の註だけにする。
+- v0.4 との差: (b) に [U-8 (a)] の末尾を組み込んだ。「and the sentence it rewrites in ...」は U-9 の裁定 (a) で書き換える既存の文が無くなったので、§9.4 の追記を指す「and the sentence it adds to structured_operations.dry_run.decision」に替えた — これは監督の案で、設計レビュー 2 回目で確かめる。
 
-### 9.3 `versioning.obligations[]` に足す entry ([U-4 (a)]。識別子は候補)
+### 9.3 `versioning.obligations[]` に足す entry (識別子は候補)
 
 ```json
 {
@@ -382,20 +379,31 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 }
 ```
 
-- [U-1 (b)] 1 つ目を `execution_ms_counts_waits_from_receipt` に。[U-1 (c)] `execution_ms_counts_statements_from_first_statement` に。[U-1 (d)] 待ちを bound する新しい class の識別子に置き換える。
-- [U-7] 識別子は変えない (閾値は散文の側)。
-- [U-8 (b)] `exhausted_execution_ms_refused_after_last_statement` を足し、散文 (§9.2) の個数を four にする。
 - 散文 (§9.2) の無条件義務の個数 (three) と entry の個数を一致させる (`versioning.obligations_note`)。
 
-### 9.4 `structured_operations.dry_run.decision` に足す相互参照 ([U-4 (a)]。末尾追記。包含 pin なので壊れない)
+### 9.4 `structured_operations.dry_run.decision` に足す相互参照 (末尾追記。包含 pin なので壊れない)
 
 > An execution_ms refusal is the exception: a dry run and the real request issue different statements, so neither one's execution_ms refusal predicts the other's (limits.execution_ms).
 
-- [U-9 (b)/(c)] 括弧内の参照先を `limits.profile` / `limits.request_budget` に差し替える。
-
 ## 10. 依頼者裁定
 
-裁定待ち (U-1〜U-9)。
+依頼者裁定 2026-10-02 (設計 v0.4 の §5 に対して。監督が選択式で尋ね、依頼者が選んだ。問いと選ばれた選択肢の文は逐語。選択肢の「(Recommended)」は監督の推奨の印)。
+
+| U | 問い (逐語) | 依頼者の選択 (逐語) | 選ばれた選択肢の説明 (監督が提示した文、逐語) |
+|---|---|---|---|
+| U-1 | execution_ms の計測の始点と、待ち (pool・lock) の算入はどれにしますか? | (a) 受理点から (Recommended) | rate・concurrency の gate を通り bound が確定した時点から、pool・lock の待ちと文の実行をすべて数える。両 peer の現行の計算点のまま。受理点の前 (認証・body 解析・worker の順番待ち) は数えない: 実測で逐次 0.5 ms / 5 ms、32 並列で p50 53〜78 ms。契約は「遅くとも受理点」とし、実装がより早く数え始めることは許す。 |
+| U-2 | 文の途中で期限が来たときの上限 (文の実行区間) はどの形にしますか? | (a) 現行 + 文の間の検査 (Recommended) | 文の bound は scope 入口 (と lock 待ちの後) で設定し、文と文の間は process 内の時計で検査する。DB の往復を足さない。文の実行区間の合計は「残りの 2 倍未満」。 |
+| U-3 | 再送してよいかを利用者にどう伝えますか? | (a) 保証だけ (Recommended) | 「execution_ms で拒否・打ち切られた要求は commit しておらず、何も残していない」という保証だけを契約に書く。再送は常に安全。details に新しい情報は足さない。 |
+| U-4 | 契約の版はどうしますか? | (a) minor 1.15.0 (Recommended) | subordinate ruling 20 と obligations entry を足す。未定義だった意味を埋める変更で、1.11.0・1.12.0 と同じ扱い。1.7.0 の義務 (3) (dry run の拒否は real と同じ) が execution_ms には及ばないことを明記する。 |
+| U-5 (範囲) | 新条件の conformance はどこまで入れますか? | (a) (i)〜(iii) を全部 (Recommended) | port v1.22 の新 primitive (受理点の後・最初の接続取得の前で止める) を足し、(i) 入口、(ii) 文の間、(iii) DDL の前の 3 vector を 6 plug で固定する。(i) が台帳 R-42 の候補そのもの。 |
+| U-5 (観測) | 「次の文を発行しなかった」をどう観測しますか? | 文の数を返す (Recommended) | primitive の handle が「放した後に要求のために発行された文の数」を返す (PostgreSQL の 4 plug)。実測では、応答の code だけだと r2db の 3 plug と SQLite plug が修正前から緑になり、検査点を外す変異が常に生き残る。 |
+| U-6 (pool 待ち) | 接続 pool の待ちが予算を超えたときの code は? | (a) 両 peer とも LIMIT_EXCEEDED (Recommended) | execution_ms の超過として返す。MitateDB は現行どおり、r2db は現行の 503 から変える (pool 取得に期限の残りを渡す)。U-1 (a) で待ちを予算に数えることと揃う。 |
+| U-6 (接続確立) | 新しい DB 接続の確立が予算を超えて時間切れになったときの code は? | (a) 予算由来の超過は LIMIT_EXCEEDED | connect の時間切れが予算の残りによるものなら execution_ms の超過として返す。DB に到達できない障害 (拒否・到達不能) は SERVICE_UNAVAILABLE のまま。設計は U-6 のこの行に推奨を付けていませんが、pool 待ちを (a) にするなら揃う側です。 |
+| U-7 | 「予算を使い切った」と判定する閾値は? | (a) 残り < 1 ms (Recommended) | 整数 ms で 0 なら拒否する。statement_timeout の分解能は 1 ms で、0 は「無効」を意味するので、1 ms 未満の残りで文を発行する手段が無い。 |
+| U-8 | 最後の文が完了した後に、時計で検査して拒否しますか? (どちらでも commit 自体は予算で打ち切られません) | (a) 検査しない (Recommended) | 結果は最後の文の完了で決まり、その後は commit へ進む。完了した仕事を捨てない。r2db は現行の SELECT 後の検査を外す。実測では、現行の r2db は仕事が終わっているのに 413 になる回が負荷で変わる (200 21/50・413 29/50)。 |
+| U-9 | 契約の execution_ms の文はどこに置きますか? | (a) limits の新 key (Recommended) | limits.execution_ms を新設する。1.8.0 の裁定「limits に新しい sibling key を置かない」を pin しているテスト (_PRE_1_8_0_LIMITS_KEYS) の切り直しが要り、この選択がその確認を兼ねます。 |
+
+未確定のまま残るもの: 契約文 (設計 §9) の確定。依頼者が確定するまで逐語 pin を置かない (運用条件 §1.5 の 35)。設計レビュー 2 回目の後に、裁定を反映した 1 本の文として依頼者に提示する。
 
 ## 11. 設計レビュー
 
@@ -479,6 +487,24 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 | W-22 | M-7 | D-1、U-1、§12.3 |
 | W-23 | M-3 (perf_baseline の文の数) | U-2 (b)、§12.5 |
 | W-24 | M-5 | D-1、§1.6、§12.5 |
+
+### 11.4 依頼者裁定の反映 (2026-10-02、v0.5)
+
+| # | 裁定 | 反映先 |
+|---|---|---|
+| J-1 | U-1 (a) 受理点から | §5 U-1、D-1、X-3・X-4 |
+| J-2 | U-2 (a) 現行 + 文の間の検査 | §5 U-2、D-5 |
+| J-3 | U-3 (a) 保証だけ | §5 U-3、D-4 |
+| J-4 | U-4 (a) minor 1.15.0 | §5 U-4、D-6、§9.2〜§9.4 |
+| J-5 | U-5 (範囲) (a) (i)〜(iii) を全部 | §5 U-5、D-7 |
+| J-6 | U-5 (観測) 文の数を返す | §5 U-5、D-7、§6.4 |
+| J-7 | U-6 (pool 待ち) (a) 両 peer とも LIMIT_EXCEEDED | §5 U-6、D-9、§6.6、§9.1 |
+| J-8 | U-6 (接続確立) (a) 予算由来の超過は LIMIT_EXCEEDED | §5 U-6、D-5、D-9、§6.6、§9.1 |
+| J-9 | U-7 (a) 残り < 1 ms | §5 U-7、D-2 |
+| J-10 | U-8 (a) 検査しない | §5 U-8、D-2、D-9、§6.6、§9.1、§9.2 |
+| J-11 | U-9 (a) limits の新 key | §5 U-9、D-6、§9.1、§9.2、§9.4 |
+
+2 回目の設計レビューは本版 (v0.5) に対して行う。
 
 ## 12. 実測の記録 (2026-10-02、作業機。逐語)
 
