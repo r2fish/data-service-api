@@ -987,7 +987,7 @@ class ApplicationCell:
         statement runs), and there is nothing to lock for such a name."""
         return [name for name in names if is_identifier_syntax(name)]
 
-    def create_collection(self, principal, name, fields, destructive=False, *, request_id=None,
+    def create_collection(self, principal, name, fields, *, request_id=None,
                           field_types=None, field_constraints=None, dry_run=False, plan=None,
                           digest_extra=None, operation="create_entity", idempotency_key=None,
                           budget=None):
