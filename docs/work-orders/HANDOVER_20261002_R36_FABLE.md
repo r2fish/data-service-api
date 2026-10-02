@@ -28,6 +28,10 @@
   - 本書の更新の commit (監督が起草後に積む。hash は `git log -1 -- docs/work-orders/HANDOVER_20261002_R36_FABLE.md`)。
 - 【更新 2026-10-02】push: `4befd27` までの 3 commit と `1b258ec`、`3064a77`、`dfd6f26` は push 済み (origin の同名 branch)。main への merge・送信はしていない。
 - 【更新 2026-10-02】設計の状態は「候補」のまま。契約・conformance・実装は未着手 (作業機の完了ゲートが要る)。`1b258ec`・`3064a77`・`dfd6f26` が触ったのは設計 1 ファイルだけである。
+- 【追記 2026-10-02 作業機】取り込み: worktree `.claude/worktrees/r36` を branch `claude/sweet-heisenberg-nqoica` から作った。7 commit (`48470d5`〜`15b0a5e`) の author / committer は r2fish の noreply のみ、触れているのは設計と本書の 2 ファイルだけと確かめた。作業機の local main は `05a60c0` (R-121 の閉止、台帳 v1.150) に進んでいたので、main を branch に merge してから (`137850d`) 完了ゲートと台帳の更新を行った。
+- 【追記 2026-10-02 作業機】完了ゲート (監督が単独実行、`-C .claude/worktrees/r36`): `gate: 5019 passed, 2 subtests passed in 465.18s (0:07:45)`、judge=PASS、pg_database/pg_roles diff 0、label r36-design-v05。件数は main `05a60c0` の 5019 と同じ (`COLLECTION_FLOOR` 5019 のまま)。main との差分は `.md` だけなので性能は計測していない (`OC` §1.3 の 27)。
+- 【追記 2026-10-02 作業機】台帳 v1.151: `RM` R-36 行を「進行中」(着手条件の欄は `-`) にして【追記】、`RM` R-30 行と R-42 行に【追記】、版数ログの v1.146 の行を archive へ回転した。`tools/dev/ledger.py --check` は GREEN (open=26)。
+- 【追記 2026-10-02 作業機】main への merge: 本追記を含む commit を `tools/dev/finalize.py` が local main へ `--no-ff` で merge する (merge commit の hash は main の `git log --merges -1`。本追記の時点では未確定)。main の送信は従前どおり (`docs/work-orders/HANDOVER_20261001_R108_FABLE.md` §3 の 4)。
 
 ## 2. 本チャットで閉じたもの
 
@@ -73,6 +77,8 @@
 8. 契約改版の作業指示書 (Class C/D。CLAUDE.md の開発順序: 共通契約 (media_type の操作別例外・version_binding (a)・OperationCatalogEntry の request/response media type と headers・field 定義・violated_declaration 14 語・limits.classes +5・destructive applies_to・Idempotency-Key header・X-Request-Id・{object_id}・authorization_propagation_bound_ms の正の宣言) → conformance (port v1.22 以降、設計 §7.1 の O-n → C-n) → 両 peer の実装 → CONTROL_MAPPING (SI-00 の router 残余、SI-08 の総量残余) → 配備値)。設計レビューの回数は済み (2 回)。実装 WP は規模 L の手順。
 9. 設計 §12.1 の観察 (v0.1 の不在、未確認事項) はそのまま。
 
+【追記 2026-10-02 作業機】上の【更新 2026-10-02】の 1〜6 は済み (1 は本書 §4 の【追記】、2〜4・6 は本書 §1 の【追記】)。5 の `docs/work-orders/HANDOVER_20261001_R102_FABLE.md` は R-121 の取り込み (`03ef01c`) で archive へ移動済みだったので、本変更セットでは最新 2 通 (`docs/work-orders/HANDOVER_20261002_R121_FABLE.md` と本書) から外れる `docs/work-orders/HANDOVER_20261001_R108_FABLE.md` を `docs/archive/docs/work-orders/` へ移した (`OC` §1.16 の 78。依頼者確認 2026-10-02)。7 は本書 §7。残りは 8 (契約改版の作業指示書。別の変更セット) と worktree の畳み込み (`tools/dev/fold.py`)。
+
 ## 4. 依頼者判断待ち・未決
 
 - 着手条件の充足そのものが依頼者裁定である (設計 §11 の Q-0)。
@@ -84,6 +90,7 @@
   - 設計 §11 の Q-7: 推奨 (a)+(b) router を前段と同格の基盤部品とし、SI-00 の残余を記録 + 要件を条件にする。
   - 設計 §11 の Q-8: 推奨 (a) object-capable な配備では `concurrency` を `deployment_required` と宣言する。
   - 設計 §11 の Q-9: 推奨 (a) header は常にその要求自身の request_id とする。
+- 【追記 2026-10-02 作業機】依頼者の確認 (2026-10-02、作業機の session。選択肢の選択): 設計 §11 の Q-0 は「(a) 充足」、Q-6〜Q-9 は「4 件とも推奨どおり」。覆した件は無く、設計は v0.5 のまま (【訂正】なし)。Q-0 は cloud session の監督が推奨を置かなかった件で、依頼者指示 (逐語)「裁定は推奨を示してください」を受けて作業機の監督が (a) を推奨した (理由: 依頼者指示「全て監督推奨で進めてください」は Q-0 を先頭に置いた提示への返答であり (b) 保留と両立しない。設計レビュー 2 回は済みで、設計は候補のまま何も宣言していない。object_storage は common_baseline の外の加算的な capability)。実需は 2026-10-02 時点も部分的のままである (Mitate `docs/remaining-work-index.md` の「添付ファイル・画像」は「F2とは別工程として保留」。作業機で確認し、確認の提示に添えた)。
 
 以下は設計 v0.3 §11 (Q-0〜Q-5 と §11.1) の逐語の写しである。本小節の中の節番号 (§n)・M-n・RC-n・S-n・O-n・P-n・A-1〜B-12 は設計 v0.3 のもの、R-n・§3.2 等で `RM` を添えたものは台帳のものである。
 
@@ -321,3 +328,77 @@
 | 再確認 2・13 (新語の基準の矛盾) | 直した (RC2-13) | 基準を 3 つの header に限定 |
 | 再確認 2・14 (印・§12 の行・N-13 の出所と replay 先行) | 直した (RC2-14) | :716 と replay 先行を足した |
 | 再確認 2 (uvicorn の 100 Continue / 400 の挙動) | 観察 | 再確認の環境では未検証。1 巡目 A は本環境のソースで確認、実行は未確認 |
+
+## 7. 作業機の追記 (2026-10-02) — provider / RFC / nginx の公式文書の確認
+
+本書 §3 の【更新 2026-10-02】の 7。設計 v0.5 が「未確認」と書いた 33 行を 35 件にまとめ、調査担当 (general-purpose、Sonnet、読み取り専用) が公式文書で確かめた結果である。次の契約改版の作業指示書の材料であり、設計は改版していない (設計 §5 の表の「確認済み / 未確認」列の更新は v0.6 以降)。
+
+- 限界: 取得は WebFetch (ページを要約して返す方式) で、要旨は取得結果の言い換えであり原文の通読ではない。**監督は原文で再確認していない。** 作業指示書に載せる件は、載せる前に原文で確かめる (特に下の表の 2・19・32・33)。
+- 「設計の行」は設計 v0.5 (`docs/design/OBJECT_STORAGE_BINARY_API_V0_1.md`、1026 行) の行番号、O-n・N-n は設計の局所 ID である。
+- 公開値スキャナ (`tools/public_value_scan.py`) は実 host 名を拒むので、根拠は URL ではなく「文書の置き場: path」の形で書く (置き場 = Cloudflare docs / Google Cloud docs / RFC Editor / IETF datatracker / IETF archive / nginx docs / nginx trac / nginx ML。各 provider・団体の公式文書の site)。
+- 判定の凡例: 確認済み = 設計の記述どおり / 食い違い = 設計の記述または前提と公式文書が違う / 見つからず = 読んだ範囲に記述なし / 対象外。
+- 裁定 (`OC` §1.15 の 77): 食い違い 3 件 (2・19・32) と見つからず 7 件は観察とし、起票しない (設計は候補で何も宣言しておらず、DB の利用者は気づかない。契約改版の作業指示書の起草時に設計 v0.6 の【訂正】として扱う)。
+
+### 判定の集計
+
+| 判定 | 件数 | 番号 |
+| --- | --- | --- |
+| 確認済み | 23 | 1, 3, 4, 5, 7, 9, 11, 12, 13, 14, 15, 16, 18, 20, 22, 23, 25, 26, 27, 28, 29, 31, 33 |
+| 食い違い | 3 | 2, 19, 32 |
+| 見つからず | 7 | 6, 8, 10, 17, 21, 24, 30 |
+| 対象外 | 2 | 34, 35 |
+| 読めず (主張ではなく URL 単位) | 下の「読めなかった URL」 | |
+
+### 結果の表
+
+| 番号 | 設計の行 | 主張 | 判定 | 根拠 URL | 要旨 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 522, 532 | R2: 当該 bucket 以外への操作を provider が拒否する credential を発行できる (bucket 単位の API token) | 確認済み | Cloudflare docs: /r2/api/tokens/ , Cloudflare docs: /r2/api/s3/tokens/ | Object Read & Write / Object Read only を選ぶと token を指定した bucket の集合に絞れる。account 全体の token と bucket 限定の token がある。他 bucket が拒否される挙動そのものの記述は読んだ範囲に無い (絞れることまでが文書の記述)。 |
+| 2 | 523, 532, 531 (旧文の「GetObject/PutObject/DeleteObject 以外を拒否」) | R2: token の粒度が操作単位 (get / put / delete) まで絞れる | 食い違い | Cloudflare docs: /r2/api/tokens/ , Cloudflare docs: /r2/api/s3/temporary-credentials/ | 恒久 token の permission は 4 種 (Admin Read & Write / Admin Read only / Object Read & Write / Object Read only) の group 単位で、操作単位の絞りは無い。Object Read & Write は「read, write, list objects」で、list と multipart 系も入る。操作単位 (`actions`) の絞りは temporary credentials にあるが、文書は「local signing のみ、API は coming soon」とする。bucket 単位の主張 (行 1) は成り立つが、3 操作だけに限る主張は恒久 token では成り立たない。 |
+| 3 | 533 (§5.1 の親 token の段落) | R2: temporary credential を bucket にしか届かない親 token から発行できる | 確認済み | Cloudflare docs: /r2/api/s3/temporary-credentials/ , Cloudflare docs: /api/resources/r2/subresources/temporary_credentials/methods/create/ | temporary credential は親 token の access key から派生し、1 bucket に束縛され、prefixes / objects でさらに絞れる。permission は admin-read-write / admin-read-only / object-read-write / object-read-only。TTL は最大 604800 秒 (7 日)。 |
+| 4 | 524, 537 | R2: 条件付き PUT で既存 key の上書きを防げる | 確認済み | Cloudflare docs: /r2/api/s3/api/ , Cloudflare docs: /r2/platform/release-notes/ , Cloudflare docs: /r2/api/error-codes/ | S3 互換表の PutObject に If-Match / If-None-Match / If-Modified-Since / If-Unmodified-Since が対応済みとある。release notes (2022-05-27) は、UploadObject / CreateMultipartUpload に条件 header を付け条件が満たされないとき 412 を返すと記す。同 (2022-07-30) は If-Match / If-None-Match が ETag の配列・weak ETag・ワイルドカード `*` に対応と記す。error code 10031 は PreconditionFailed (412)。PutObject の表自体には `If-None-Match: *` の create-only の明記は無い (根拠は release notes)。Workers API の put() は条件不成立で null を返す。 |
+| 5 | 506, 525, 536 | R2: 未完了 multipart upload を abort できる | 確認済み | Cloudflare docs: /r2/objects/multipart-objects/ , Cloudflare docs: /r2/buckets/object-lifecycles/ , Cloudflare docs: /r2/api/s3/api/ | S3 の AbortMultipartUpload が実装済み (未対応は x-amz-request-payer のみ)。未完了 upload は既定で 7 日後に自動 abort され、lifecycle rule (AbortIncompleteMultipartUpload) で日数を変えられる。 |
+| 6 | 536 | R2: cleanup worker が abort に要る権限の粒度 | 見つからず | Cloudflare docs: /r2/api/tokens/ , Cloudflare docs: /r2/api/s3/temporary-credentials/ | 恒久 token の文書に permission と S3 操作の対応表は無い。temporary credentials の文書は操作を Read / Write / Multipart に分けて列挙し、Multipart に AbortMultipartUpload、Read に ListMultipartUploads を置くが、object-read-write がそれらを含むとは明記していない (「read, write, and list objects」とだけある)。推測では埋めない。 |
+| 7 | 506, 525, 546 | GCS: resumable session を破棄できる | 確認済み | Google Cloud docs: /storage/docs/performing-resumable-uploads , Google Cloud docs: /storage/docs/resumable-uploads | session URI への DELETE で取り消す (JSON API は 499、XML API は 204 を返す)。session URI は 1 週間で失効する。完了した upload だけが bucket に現れる。 |
+| 8 | 546 | GCS: resumable session の破棄に要る IAM 権限 | 見つからず | Google Cloud docs: /storage/docs/resumable-uploads , Google Cloud docs: /storage/docs/access-control/iam-permissions | 破棄に要る IAM 権限の記述は無い。文書は session URI が認証 token として働き、要求に署名が要らないと述べる。XML API の multipart abort には `storage.multipartUploads.abort` が対応表にあるが、設計の resumable 経路ではない。 |
+| 9 | 524, 545 | GCS: generation precondition (`ifGenerationMatch=0`) で上書きを防げる | 確認済み | Google Cloud docs: /storage/docs/request-preconditions , Google Cloud docs: /storage/docs/json_api/v1/objects/insert | `ifGenerationMatch=0` は live な版が無いときだけ成功し、不成立は 412。objects.insert は `uploadType=resumable` でも使えるが、resumable では初回の POST で指定し、後続の PUT では無視される。XML API の multipart upload では precondition が使えず 400 NotImplemented。上書きには `storage.objects.create` と `storage.objects.delete` の両方が要る (iam-permissions と insert の文書)。 |
+| 10 | 545 | GCS: resumable で precondition が評価される時点 (開始時か、完了時か) | 見つからず | Google Cloud docs: /storage/docs/request-preconditions , Google Cloud docs: /storage/docs/xml-api/post-object-resumable , Google Cloud docs: /storage/docs/json_api/v1/objects/insert | 評価時点を述べる記述は無い。分かるのは「初回 POST で指定でき、後続 PUT では無視される」ことまで。開始から完了までの間に別の書き込みが入る場合の挙動は文書から導けない。 |
+| 11 | 522, 543 | GCS: bucket 単位の service account と Uniform bucket-level access | 確認済み | Google Cloud docs: /storage/docs/uniform-bucket-level-access | 有効にすると bucket 内の資源の ACL が無効になり、アクセスは IAM だけで付与される。IAM policy は bucket 資源に直接置ける (bucket に対する IAM conditions も同じ前提)。 |
+| 12 | 523 | GCS: IAM で操作単位 (get / put / delete) まで権限を絞れる | 確認済み | Google Cloud docs: /storage/docs/access-control/iam-permissions | 権限は `storage.objects.get` / `create` / `delete` / `list`、`storage.multipartUploads.create` / `abort` / `list` / `listParts` のように操作別で、custom role で組める。上書きは create と delete の両方が要る。 |
+| 13 | 526, 545, 569 | Cloud Run の front end の要求本文上限 | 確認済み (値が分かった) | Google Cloud docs: /run/quotas , Google Cloud docs: /run/docs/configuring/http2 | HTTP/1 の要求は 32 MiB まで、HTTP/2 server なら上限なし (文書の注記)。応答は HTTP/1 で 32 MiB (chunked か streaming を使わないとき)。Cloud Run は既定で HTTP/2 を HTTP/1 に落とし、end-to-end HTTP/2 (h2c) を有効にしたときだけ container へ HTTP/2 で渡す。設計への含意: h2c を有効にしない配備では `object_bytes` は 32 MiB 以下が要る。超過時の status code の記述は無い。 |
+| 14 | 526, 545 | Cloud Run の要求時間上限 | 確認済み (値が分かった) | Google Cloud docs: /run/docs/configuring/request-timeout , Google Cloud docs: /run/quotas | 既定 5 分、最大 60 分。要求と応答の全体に掛かり、超過すると接続が閉じられ 504。timeout 後も container は終了しない。 |
+| 15 | 569 | nginx の `client_max_body_size` (既定、超過時の挙動) | 確認済み | nginx docs: /en/docs/http/ngx_http_core_module.html , nginx trac: /nginx/ticket/1642 | 既定 1m。Content-Length が超えると 413。0 で検査を無効にする。chunked 本文への適用は core module の文書に明記が無い。nginx 開発者は ticket 1642 (wontfix) で、本文を buffer するかどうかに関わらず常に検査すると述べる (project の ticket であって nginx docs の仕様文書ではない)。 |
+| 16 | 570 | nginx の `proxy_request_buffering off` / `proxy_buffering off` | 確認済み | nginx docs: /en/docs/http/ngx_http_proxy_module.html | `proxy_request_buffering off` は本文を受け取りながら直ちに upstream へ送る。ただし本文送信を始めた後は次の upstream へ回せない。HTTP/1.1 chunked の要求本文は、proxy に HTTP/1.1 か HTTP/2 を使わない限り directive に関わらず buffer される。`proxy_buffering off` は応答を同期的に client へ流し、nginx は `proxy_buffer_size` 分だけ読む (X-Accel-Buffering で上書き可)。`proxy_http_version` の既定は文書上 1.1 (1.29.7 から、それ以前は 1.0) なので、古い版では明示が要る。 |
+| 17 | 264, 345, 570, 652 | nginx が `Expect: 100-continue` をどう扱うか | 見つからず (nginx docs の文書に記述なし) | nginx docs: /en/docs/http/ngx_http_core_module.html , nginx docs: /en/docs/http/ngx_http_proxy_module.html。参考 (仕様文書ではない): nginx ML: /pipermail/nginx/2012-November/036334.html , nginx trac: /nginx/ticket/493 , nginx ML: /pipermail/nginx/2021-May/060643.html | core module と proxy module の文書に Expect / 100-continue の記述は無い。nginx project の ML と ticket では、開発者が (2012-11-17) nginx は 100 Continue を自分で返し、`client_max_body_size` の検査より先に返すので、後で 413 になる場合も 100 を避けられないと述べる。ticket 493 は wontfix (2014 年に close) で、nginx が 100 を upstream に委ねず自分で返すという報告。2021-05-01 の ML では upstream への要求に Expect を使わないと述べる。これらは 5 年から 14 年前の発言で、現行版の挙動を保証しない。設計の「認証後にしか 100 を返さない」(O-15) は nginx 経由では観測できない可能性がある、という点は作業指示書で扱うべき (実測が要る)。 |
+| 18 | 336 | RFC 9530: 未対応 algorithm の member の扱い | 確認済み | RFC Editor: /rfc/rfc9530.html , RFC Editor: /rfc/rfc9530.txt (RFC 9530, 2024) | Content-Digest は Dictionary で、key が algorithm、値が byte sequence (§2)。受信側は digest の一部または全部を無視してよい (§2)。送信側は相手の対応を知らずに送ってよい (§2)。実装は検証する algorithm の種類・個数・大きさを制限してよい (§6.7)。登録簿では sha-256 と sha-512 が Active、md5・sha・unixsum・unixcksum・adler・crc32c は Deprecated。不一致時の応答 code は規定されず、アプリケーションの方針に委ねられる。設計の「他の member は無視、sha-256 が無ければ `VALIDATION_FAILED`」は RFC に反しない (後半は設計側の方針)。 |
+| 19 | 299 | IETF Idempotency-Key 草案の値の書式 | 食い違い (設計の判断が草案と違う) | IETF datatracker: /doc/draft-ietf-httpapi-idempotency-key-header/ , IETF archive: /archive/id/draft-ietf-httpapi-idempotency-key-header-07.txt | 最新版は draft-ietf-httpapi-idempotency-key-header-07 (2025-10-15。datatracker 上は Expired、RFC 化されていない)。§2.1 で値は RFC 8941 の Item Structured Header の String (sf-string) で、例は引用符付き。§2.2 で key は一意で、別 payload で再利用してはならず、UUID 等の無作為な識別子が推奨される。長さの上限の規定は無い。設計は引用符を外さず値の一部として扱う (最大 128 octet) ので、草案どおりに引用符付きで送る client の key は引用符込みの文字列になる。草案のエラー対応: 欠落 400 / 同 key 別 payload 422 / 処理中の再送 409。 |
+| 20 | 313, 322, 330 | RFC 8187 / RFC 6266 の挙動 (`filename*`、UTF-8、優先順位、path 情報) | 確認済み | RFC Editor: /rfc/rfc8187.txt (2017) , RFC Editor: /rfc/rfc6266.txt (2011) | RFC 8187 §3.2: 受信側は UTF-8 に対応しなければならず、ext-value は `charset'language'value` で、attr-char 以外は percent-encode (§3.2.1)。不正な escape や復号できない octet に頑健に対処すべきで、parameter の無視・除去・U+FFFD への置換が許される。RFC 6266 §4.3: `filename*` と `filename` が両方あれば `filename*` を優先する。filename の folder 情報を信用せず、`\` と `/` で区切った最後の segment だけを使う。§4.2: `attachment` は保存を促す意味。設計の表の「両方あれば `filename*` を採る」「パス区切りを置換」はこれと整合する。「`filename*` の charset が UTF-8 以外なら `VALIDATION_FAILED`」は設計側の方針 (RFC 8187 は UTF-8 の対応だけを必須とする)。 |
+| 21 | 330 (N-9) | download の `Content-Disposition` の `filename=` を quoted-string にし `"` `\` `;` と制御文字を `_` に置換する | 見つからず | RFC Editor: /rfc/rfc6266.txt | 取得結果に quoted-string の文法 (どの文字をどう escape するか) の記述が出なかった。取得結果は RFC 6266 が RFC 2616 より token 形式も許すこと (Appendix A) までしか示さない。置換方針は安全側の設計判断で、RFC の文法との突き合わせは未了。 |
+| 22 | 352 | HTTP/1.1: header 送出後の失敗では宣言長未満で切断し、受信側は不完全と判定する | 確認済み | RFC Editor: /rfc/rfc9112.html (RFC 9112, 2022) | §6.3: Content-Length を持つ message が宣言長未満で閉じられたら、受信側は不完全とみなし接続を閉じなければならない。§8: 受信した本文が Content-Length 未満なら不完全で、client は不完全として記録しなければならない。chunked は終端の 0 長 chunk が無いと完了しない。設計の「chunked の正常終端を送らない」と整合する。 |
+| 23 | 352 | HTTP/2: 応答を途中で打ち切るのに RST_STREAM を使う | 確認済み | RFC Editor: /rfc/rfc9113.html , RFC Editor: /rfc/rfc9113.txt (RFC 9113, 2022) | §6.4: RST_STREAM は stream の即時終了を表し、取り消しまたはエラーの通知に使う。error code (INTERNAL_ERROR / CANCEL 等) の使用を禁じる記述は無い。§8.1.1: DATA frame の payload 長の合計と Content-Length が一致しない message は malformed (stream error PROTOCOL_ERROR)。 |
+| 24 | 352 | HTTP/2: RST_STREAM で終わった応答を受信側が不完全として扱う | 見つからず | RFC Editor: /rfc/rfc9113.html , RFC Editor: /rfc/rfc9113.txt | 取得した §6.4・§8.1 の要旨に、END_STREAM 前に RST_STREAM で終わった応答を不完全と扱う規範は出なかった。§8.7 (Request Reliability) は取得結果に全文が入らず読めていない。設計の「client は受信長 = Content-Length かつ digest 一致のときだけ成功とする」は RFC に依らず client 側義務として書かれているので、この規範が無くても設計は成り立つ。 |
+| 25 | 356 | 共有 cache と `Cache-Control: private, no-store, no-transform` | 確認済み | RFC Editor: /rfc/rfc9111.html (RFC 9111, 2022) | §5.2.2.5 no-store: cache は要求と応答のどの部分も保存してはならない (private / shared の両方)。§5.2.2.7 private: shared cache は保存してはならない。§5.2.2.6 no-transform: cache を持つかどうかに関わらず中継者は内容を変換してはならない。no-store だけで shared cache の保存を防ぐのに足りる。実在の shared cache 製品の挙動は仕様の範囲外で、読んでいない。 |
+| 26 | 110, 696 | R2: provider 側の hard quota の有無 | 確認済み (hard quota は無い) | Cloudflare docs: /r2/platform/limits/ | 「Data storage per bucket」「Number of objects per bucket」はともに無制限と表にある。上限の表にあるのは object 1 個 5 TiB、単一 PUT 5 GiB、multipart 最大 4.995 TiB、10,000 part、同一 object への同時書き込み毎秒 1 件、bucket 管理 毎秒 50 件など。総保存量の上限は provider 側に無いので、設計の「実装側の検査を必須にする」は必要な手当てになる。 |
+| 27 | 110, 696 | GCS: provider 側の hard quota の有無 | 確認済み (hard quota は無い) | Google Cloud docs: /storage/quotas | bucket あたりの保存量に上限は無い (zonal bucket は project 全体で zone あたり 1 TB 既定という別の制約がある)。同一 object 名への書き込みは毎秒 1 回。object 最大 5 TiB。予算 alert の仕組みは読んでいない。 |
+| 28 | 670 | R2 の multipart の part 長 | 確認済み | Cloudflare docs: /r2/objects/multipart-objects/ , Cloudflare docs: /r2/platform/limits/ | 最小 5 MiB (最後の part を除く)、最大 5 GiB、最大 10,000 part。最後を除いて全 part が同じ大きさでなければならない。 |
+| 29 | 670 | GCS の chunk 長 | 確認済み | Google Cloud docs: /storage/docs/performing-resumable-uploads , Google Cloud docs: /storage/docs/resumable-uploads , Google Cloud docs: /storage/docs/multipart-uploads | resumable の chunk は 256 KiB の倍数 (最後の chunk を除く)。XML API の multipart の part は 5 MiB から 5 GiB (最後を除く)。 |
+| 30 | 670, 518 | SDK が実際に溜める上限 B (SDK の既定の part 長・buffer) | 見つからず | (一次資料の対象 domain 外のため未調査) | 設計が指す SDK (S3 互換 client、GCS client) の既定値は、依頼の一次資料の範囲 (Cloudflare・Google Cloud・IETF・nginx) に無い。provider の下限と上限は行 28・29 のとおり。SDK ごとの既定は実装時に SDK の版を決めて確かめる事項。 |
+| 31 | 592, 814 | Cloud Run: service が複数なら複数 host になる | 確認済み | Google Cloud docs: /run/docs/triggering/https-request | service ごとに固有の run.app の URL (host) を持つ。custom domain を別に割り当てることもできる。 |
+| 32 | 592, 814 | Cloud Run: 最大 instance 1 で「専用単位は 1 instance」とみなせる (自動 scale の挙動) | 食い違い (一部) | Google Cloud docs: /run/docs/configuring/max-instances , Google Cloud docs: /run/docs/about-instance-autoscaling | 最大 instance は 1 に設定できる (既定は revision あたり 100)。ただし文書は、この上限が traffic の急増などで短時間超えうると述べ、例外的な状況では scale を絞ることもあるとする。deploy や急増時は、上限を超えた instance が最大 15 分、または request timeout の値まで in-flight の要求のために残りうる。traffic splitting では上限が revision に按分される。したがって「最大 1 なら必ず 1 instance」は保証されない。`object_transfers` が `enforced` になる条件 (専用単位が 1 instance) を Cloud Run で満たすかは、この点の扱い次第。 |
+| 33 | 264, 345, 652 | RFC 9110 §10.1.1: `Expect: 100-continue` を認証と検査の後まで返さない | 確認済み (設計の行は未確認と書いていない) | IETF datatracker: /doc/html/rfc9110 (RFC 9110, 2022) | §10.1.1: 100-continue の期待を受けた server は 100 の中間応答か最終 status を返す。本文を受け取る前に最終 status を返して接続を閉じてよい。100 を返さなくてよい。proxy は Expect を転送する。取得結果は要約で、全文は読めていない (RFC Editor の html は §5.5 で切れ、datatracker の取得で補った)。 |
+| 34 | 882 | OS 側で user を揃えると単位間の分離が弱まる点の塞ぎ方 | 対象外 | — | provider・RFC・nginx の挙動ではなく、設計内の OS user 設計の問い。 |
+| 35 | 399, 445, 467, 1026 | uvicorn / starlette の実行時挙動 (最初の receive での 100 Continue、`Content-Length` 不正値への 400) | 対象外 | — | 依頼で対象外とされた。本文書は install 済みのソースを読んで確認し、実行は未確認と書いている。 |
+
+### 読めなかった URL / 経路
+
+- `Google Cloud docs (旧 host): /storage/docs/...` は 301 で `Google Cloud docs: /storage/docs/...` に移る。上の表は移動先で読んだ。
+- `Google Cloud docs: /storage/docs/quotas` は 404。`Google Cloud docs: /storage/quotas` で読んだ (行 27)。
+- `Google Cloud docs: /storage/docs/xml-api/put-object-resumable` は 404 (読めず)。
+- `RFC Editor: /rfc/rfc9110.html` と `rfc9110.txt` は取得結果が長さで切れ、§10.1.1 と §8.6 の本文に届かなかった。§10.1.1 は `IETF datatracker: /doc/html/rfc9110#section-10.1.1` で読んだ (行 33)。§8.6 は読めていない。
+- Cloudflare R2: 恒久 token の permission と S3 操作の対応表は、読んだ文書のどこにも無かった (行 6)。
+
+### 作業指示書の材料としての要点 (判断は含めない)
+
+- 設計の前提を変える可能性があるもの: 行 2 (恒久 token は操作単位に絞れない。絞れるのは temporary credentials の `actions` で、文書上は local signing のみ)、行 19 (草案は sf-string)、行 32 (最大 instance 1 は保証でない)。
+- 設計の想定が検証を要するもの: 行 17 (nginx 経由で 100 Continue の送出時点が観測できるか。nginx 側の挙動は project の ticket と ML にしか記述が無く、実測が要る)、行 10 (GCS の precondition の評価時点)。
+- 値が決まったもの: Cloud Run の本文上限 (HTTP/1 は 32 MiB、HTTP/2 end-to-end は上限なし) と要求時間 (既定 5 分、最大 60 分)、R2 / GCS の part・chunk 長、provider 側に hard quota が無いこと。
