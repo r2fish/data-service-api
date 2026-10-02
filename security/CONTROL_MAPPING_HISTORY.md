@@ -598,6 +598,16 @@ Rollback on a pass-2 failure is now unconditional regardless of exception type (
 
 ---
 
+*r2db-api Status claim, the DML validation and `alter_field` window, closed 2026-10-03 (R-120 -- `PostgresCell.transact` and `PostgresCell.apply_schema` now hold an entity-scoped advisory lock, shared and exclusive, before the catalog read; the window is reproduced by two cells and closed), verbatim:*
+
+- **r2db's DML validation and an `alter_field` commit are not serialized**: a data write validated against the registry can commit after a concurrent `alter_field` changed the constraint, leaving a row against the declaration (structural, not reproduced; ledger item R-120, still open).
+
+*r2db-api Control claim, the lock order, superseded 2026-10-03 (R-120 -- the entity lock sits after the schema lock and before the count lock, and a data operation takes it too), verbatim:*
+
+- its lock order is per-key -> lookup -> schema lock -> count lock -> `_load_catalog`, and a replay answers from its record before the schema lock -- `r2db-api/src/r2db_api/postgres.py:1405`.
+
+---
+
 ## SI-12
 
 **MitateDB-api pre-condensation original (verbatim, pre-condensation original -- appended during WP-7 差し戻し rework for verbatim coverage, 監督裁定 1):**

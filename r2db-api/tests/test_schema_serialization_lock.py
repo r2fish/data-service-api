@@ -135,14 +135,19 @@ def test_replay_of_a_recorded_schema_operation_answers_while_another_schema_oper
         cell.close()
 
 
-def test_the_advisory_lock_ids_of_the_four_serialization_points_are_distinct() -> None:
-    """Per-key namespace (2-argument form), count lock, schema lock and the
-    bootstrap/reset ritual lock guard four independent serialization points:
-    no two may share an id. The count lock and the schema lock are both
-    1-argument `pg_advisory_xact_lock(bigint)` keys, so a shared value would
-    make a schema operation and a keyed data operation wait on each other."""
+def test_the_advisory_lock_ids_of_the_five_serialization_points_are_distinct() -> None:
+    """Per-key namespace (2-argument form), entity namespace (2-argument
+    form), count lock, schema lock and the bootstrap/reset ritual lock guard
+    five independent serialization points: no two may share an id. The count
+    lock and the schema lock are both 1-argument `pg_advisory_xact_lock(bigint)`
+    keys, so a shared value would make a schema operation and a keyed data
+    operation wait on each other; the per-key namespace and the entity
+    namespace are both the first argument of the 2-argument form, so a
+    shared value would put a client-chosen idempotency key and an entity
+    name in one lock space."""
     ids = {
         "per-key namespace": postgres_module._IDEMPOTENCY_KEY_LOCK_NAMESPACE,
+        "entity namespace": postgres_module._ENTITY_LOCK_NAMESPACE,
         "count lock": postgres_module._IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY,
         "schema lock": postgres_module._SCHEMA_SERIALIZATION_ADVISORY_LOCK_KEY,
         "ritual lock": ops_module._RITUAL_ADVISORY_LOCK_KEY,

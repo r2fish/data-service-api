@@ -2176,3 +2176,41 @@ new:
 ```
 The ping runs under `autocommit=True` so `SELECT 1` never opens a transaction, leaving nothing for a `rollback()` to close afterwards -- `rollback()` on a non-IDLE connection clears every prepared statement on it, which a checkout-time ping must not do. The check above rolls a non-IDLE connection back first so this flip (which requires IDLE) never raises. `autocommit` returns to `False` in `finally` so the connection is handed to the caller IDLE, exactly as `_connect()` leaves a freshly opened one -- the ping itself must be invisible to whatever runs next.
 ```
+
+## CH-0551
+
+- moved from: `src/r2db_api/postgres.py` (`PostgresCell._schema_serialization_lock`)
+- parent commit: `1abd5e8`
+- kind: docstring
+
+```
+Transaction-scoped, exclusive advisory lock that serializes every schema operation of this application (one database per application, so the fixed key is per-application) -- taken directly in `apply_schema`'s OUTER transaction, before `_load_catalog` and `_read_schema_revision`, and released only by that transaction's commit or rollback.
+
+Without it two schema operations read the catalog and the revision before either one's DDL commits (READ COMMITTED gives each statement a fresh snapshot, but the read and the DDL are separate statements): both pass the same `plan` token, a destructive confirmation phrase computed from a revision the other has already advanced is still accepted, and the `schema_objects` count is taken from a catalog a concurrent `create_entity` is about to change.
+
+`apply_schema` takes it after the per-key lock and the idempotency lookup (a replay answers before it and never waits here), then takes the count lock, and reads the catalog only after both: the order every schema operation follows is per-key lock, this lock, count lock. A keyed data operation takes per-key lock and count lock and never this lock, so a schema operation that is only waiting for this lock holds no count lock and blocks no keyed request at it.
+
+Only schema operations take it. A data operation (`transact`) and a `query` never do, so this lock is only ever contended by other schema operations; a holder of this lock never takes the per-key lock afterwards, and the count lock it may take afterwards is held only by requests that do not take this lock. The wait is bounded by the `lock_timeout` `_set_timeouts` set at the start of the transaction.
+```
+
+### correction: 2026-10-03
+
+- reason: R-120 -- a data operation (`transact`) now takes an entity-scoped advisory lock (SHARED) and every schema operation the same lock (EXCLUSIVE); a data operation takes it after the per-key lock (it never takes the schema lock), a schema operation after the schema lock, both before the count lock and the catalog read, so the old statements that a keyed data operation takes only the per-key and count locks, and that the lock order of a schema operation is per-key, schema lock, count lock, are no longer the whole order; the docstring states the one global order instead
+
+old:
+```
+`apply_schema` takes it after the per-key lock and the idempotency lookup (a replay answers before it and never waits here), then takes the count lock, and reads the catalog only after both: the order every schema operation follows is per-key lock, this lock, count lock. A keyed data operation takes per-key lock and count lock and never this lock, so a schema operation that is only waiting for this lock holds no count lock and blocks no keyed request at it.
+
+Only schema operations take it. A data operation (`transact`) and a `query` never do, so this lock is only ever contended by other schema operations; a holder of this lock never takes the per-key lock afterwards, and the count lock it may take afterwards is held only by requests that do not take this lock. The wait is bounded by the `lock_timeout` `_set_timeouts` set at the start of the transaction.
+```
+
+new:
+```
+`apply_schema` takes it after the per-key lock and the idempotency lookup (a replay answers before it and never waits here), then the entity lock (`_lock_entities`, EXCLUSIVE), then the count lock, and reads the catalog only after all three.
+
+Every request of this backend takes its advisory locks in ONE global order and never takes a lock above one it already holds: 1 per-key lock, 2 this lock, 3 entity lock, 4 count lock, then the table and row locks. A data operation (`transact`) takes per-key, entity (SHARED), count and never this lock, and a dry run of it takes no entity lock (it writes nothing); a schema operation takes per-key, this lock, entity (EXCLUSIVE), count; a replay takes only the per-key lock and a `query` takes none. A request waiting for an advisory lock holds only advisory locks below it, so no request holds an advisory lock another request needs while waiting for one the first holds: no cycle. The one exception is not an advisory lock: the lookup's `DELETE` of expired idempotency records takes row locks before the entity lock, so a keyed request can wait for an entity lock while holding them and make another request's lookup wait on those rows; that is a chain bounded by `lock_timeout`, not a cycle, because a holder of the entity lock has already finished its lookup. So no deadlock, and PostgreSQL's deadlock detector (40P01, which this module maps to `SERVICE_UNAVAILABLE`) is never the thing that breaks a wait. The entity lock sits BEFORE the count lock on both paths because the other order makes a keyed data operation that waits for an entity hold the count lock meanwhile, and every other keyed request then stops at the count lock behind it.
+
+A schema operation that is only waiting for this lock holds no entity lock and no count lock, so a keyed data operation on any entity proceeds meanwhile, unless it is deleting expired records in its lookup (`test_schema_serialization_lock.py::test_a_keyed_schema_operation_waiting_for_the_schema_lock_does_not_block_a_keyed_data_operation`). The order is pinned on the statements each request issues by `test_r120_entity_lock.py::test_every_request_takes_its_advisory_locks_in_the_one_global_order`: with the data operation's entity lock moved after its count lock that test is red (R-120 mutation M3).
+
+Only schema operations take this lock. A data operation and a `query` never do, so it is only ever contended by other schema operations. The wait is bounded by the `lock_timeout` `_set_timeouts` set at the start of the transaction.
+```

@@ -855,7 +855,8 @@ def test_postgres_keyed_write_round_trip_count_after_removing_the_redundant_dele
         # `pg_advisory_xact_lock` dispatch each, both taken on a genuine
         # (non-replay) keyed write. Measured directly (13), matching J-6's
         # own "measure the delta, do not guess" convention.
-        assert counts["n"] == 13, f"keyed write round trips: {counts['n']} (expected 13 after WP-6d's own 2 advisory-lock dispatches; 11 before it, per J-6)"
+        # R-120: +1 over WP-6d's 13 -- `_lock_entities` (the entity lock, SHARED), one `pg_advisory_xact_lock_shared` dispatch for the one entity, between the lookup and the count lock. Measured directly (14).
+        assert counts["n"] == 14, f"keyed write round trips: {counts['n']} (expected 14 after WP-6d's own 2 advisory-lock dispatches and R-120's entity-lock dispatch; 11 before them, per J-6)"
 
         counts["n"] = 0
         replay = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1", request_id="rid-rt-2")
