@@ -32,6 +32,7 @@
 - 【追記 2026-10-02 作業機】完了ゲート (監督が単独実行、`-C .claude/worktrees/r36`、label r36-design-v05): 1 回目 (main `05a60c0` を merge した木) `gate: 5019 passed, 2 subtests passed in 465.18s (0:07:45)`、judge=PASS。2 回目 (main `557cdd2` を merge した最終の木) `gate: 5019 passed, 2 subtests passed in 470.09s (0:07:50)`、judge=PASS、pg_database/pg_roles diff 0。件数は main の 5019 と同じ (`COLLECTION_FLOOR` 5019 のまま)。main との差分は `.md` だけなので性能は計測していない (`OC` §1.3 の 27)。
 - 【追記 2026-10-02 作業機】台帳 v1.152: `RM` R-36 行を「進行中」(着手条件の欄は `-`) にして【追記】、`RM` R-30 行と R-42 行に【追記】、版数ログの v1.147 の行を archive へ回転した。`tools/dev/ledger.py --check` は GREEN (open=26)。
 - 【追記 2026-10-02 作業機】main への merge: 本追記を含む commit を `tools/dev/finalize.py` が local main へ `--no-ff` で merge する (merge commit の hash は main の `git log --merges -1`。本追記の時点では未確定)。main の送信は従前どおり (`docs/work-orders/HANDOVER_20261001_R108_FABLE.md` §3 の 4)。
+- 【追記 2026-10-02 作業機 (merge の後)】main への merge commit は `3ce48d2` (R-36 の取り込み。親は main `557cdd2` と branch の commit `c06c1dd`)。`tools/dev/fold.py --apply` で統合済みの古い worktree 5 つを畳んだ。残っているもの: (a) worktree `.claude/worktrees/r36` (作成直後で fold の対象外だった。次の fold で畳む)、(b) origin の branch `claude/sweet-heisenberg-nqoica` (削除は GitHub への送信に当たり agent からはできない。main の送信の指示のときに依頼者 / Mitate 側の監督セッションが削除する)、(c) main の送信 (local main が origin/main `05a60c0` より先行)、(d) 本書 §7 の原文確認 (契約改版の作業指示書に載せる件)。
 
 ## 2. 本チャットで閉じたもの
 
