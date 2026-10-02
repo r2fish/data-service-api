@@ -2,7 +2,7 @@
 
 ## 0. 版数・位置づけ
 
-- **v0.3 (2026-10-02)。** 再確認 (担当観点: 指定なし) の 12 件と観察 1 件を反映。U-8 の (d) の扱い、U-9 の pin の向きの訂正。反映の一覧は §11.2。
+- **v0.3 (2026-10-02)。** 再確認 (担当観点: 指定なし) の 12 件と観察 1 件を反映。U-8 の (d) の扱い、U-9 の pin の向きの訂正。反映の一覧は §11.2。同日、レビュー項目の記号を R-N から RV-N に改めた (台帳の R 族との衝突を避ける)。
 - **v0.2 (2026-10-02)。** 設計レビュー 1 回目 (A 9 件・B 15 件 → 19 件に統合) を反映。新しい U-8・U-9。起票候補 1 件 (MitateDB schema 操作の cancel 分岐の `commit_failed` 欠落)。反映の一覧は §11。
 - **v0.1 (2026-10-02)。** 基点 local main `4241b55`。台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-42 (規模 L、変更クラス D (`RM` §9 の 8))。契約 1.14.0 (subordinate ruling 19)、port v1.21。
 - 着手の根拠: 台帳 R-42 行の依頼者裁定 (`RM`:462) 「**【追記 2026-09-15 依頼者裁定】** 「R-42はフェーズ11で」 — **フェーズ11 で扱う**。」
@@ -99,7 +99,7 @@
 
 **D-2 予算を使い切った要求は、次の文を発行する前に拒否する。**
 - 「文」の定義: 実装が要求のために保持するすべての接続 (MitateDB の developer 接続の catalog 読みを含む。要求自身の各 transaction) で、要求の内容から発行する文。psycopg の暗黙の BEGIN はその transaction の一部。`SET LOCAL`、catalog 読み、lock の文、idempotency の読み書き、DML / DDL を含む。含めない: pool の維持 (r2db の checkout ごとの `SELECT 1` `postgres.py:621`、新規接続の `SET search_path` `postgres.py:388`、MitateDB の idle ping `pool.py:369`・`:384`。いずれもレビューの報告。基点で未照合)、transaction を終える COMMIT / ROLLBACK (下の (d) で別に扱う)、別接続の audit sink への書き込み。
-- 実装は、文を発行しようとする各点で残り予算を process 内の時計で比べ、残りが 1 ms 未満 (整数 ms で 0) なら文を発行せず `LIMIT_EXCEEDED` + `details.limit_class: execution_ms` で終える。`_timeout_ms` 自身も残り 1 ms 未満で `LIMIT_EXCEEDED` を上げ、決して 0 を返さない (`statement_timeout = 0` は timeout の無効 **【PG 文書 (未実測)】** なので、0 を返すと fail-open になる)。v0.1 の「`max(1, …)` の丸めを廃止する」はこの形に改めた (§11 R-3)。
+- 実装は、文を発行しようとする各点で残り予算を process 内の時計で比べ、残りが 1 ms 未満 (整数 ms で 0) なら文を発行せず `LIMIT_EXCEEDED` + `details.limit_class: execution_ms` で終える。`_timeout_ms` 自身も残り 1 ms 未満で `LIMIT_EXCEEDED` を上げ、決して 0 を返さない (`statement_timeout = 0` は timeout の無効 **【PG 文書 (未実測)】** なので、0 を返すと fail-open になる)。v0.1 の「`max(1, …)` の丸めを廃止する」はこの形に改めた (§11 RV-3)。
 - 検査点は実装の自由だが、少なくとも (a) pool 取得の後・最初の `SET LOCAL` の前 (`_timeout_ms` の拒否が兼ねる 1 点)、(b) lock 待ちの後、(c) 複数文の要求の文と文の間、(d) [U-8 (b)] durable audit の pre_commit の前、に置く。**検査点はすべて pre_commit より前に置く。pre_commit の後は時計で検査せず COMMIT を発行し、COMMIT は最後に設定した文の bound (lock 待ちの後の再設定を含む) でだけ打ち切られる (D-3 の例外)。**
 - 最後の文が完了した後に時計で検査するか ((d) を置くか) は U-8。U-8 (a) では (d) を置かない。
 - 検査は時計の比較だけで DB 往復を足さない (X-1)。
@@ -121,8 +121,8 @@
   - COMMIT (D-2 のとおり最後に設定した文の bound。lock 待ちの後の再設定を含む)。
 
 **D-6 契約の文言を足し、minor 版 1.15.0 (subordinate ruling 20) とする (推奨。→ U-4 で両論)。** 足す場所と記録:
-- execution_ms の節 (始点、待ちの算入、要求全体の予算、1 page = 1 要求、dry_run、「予算を使い切った要求は次の文を発行する前に拒否され、行・catalog・schema revision・idempotency 記録を残さない」)。置き場は U-9 (推奨 (a) `limits` の新 key `execution_ms`)。v0.1 では `limits.execution_ms` の新 key に置くと定めていたが、v0.2 (2026-10-02) で `conformance-tests/test_contract.py` の `_PRE_1_8_0_LIMITS_KEYS` の pin (`:137-146`、`:180-184`) が新しい sibling key を 1.8.0 の裁定として禁じていることがわかったので、U-9 に移した (§11 R-14)。`errors.details_vocabulary.LIMIT_EXCEEDED` は変えない。選択肢ごとの pin: (a) は `_PRE_1_8_0_LIMITS_KEYS` の切り直し、(b) は `limits.profile` の endswith pin (`conformance-tests/test_contract.py:111-115`、`:177`) を 1.8.0 の文より前に挿入すれば保ち、末尾なら切り直す、(c) は `PIN_1_7_0_REQUEST_BUDGET` が包含照合 (`:2267-2268`) なので末尾追記なら保つ (U-9)。
-- `structured_operations.idempotency.record` には挿入しない。§9.1 の「no idempotency record」と義務 (c) で足りる。v0.1 の挿入案は、文中への挿入が `PIN_1_7_0_IDEMPOTENCY_RECORD` (`conformance-tests/test_contract.py:2165-2166`、包含で照合 `:2286`) を、末尾への追記が `PIN_1_8_0` の endswith (`:525-532`、`:578`) を壊すので削った (§11 R-14。行番号はレビューの報告。基点で未照合)。
+- execution_ms の節 (始点、待ちの算入、要求全体の予算、1 page = 1 要求、dry_run、「予算を使い切った要求は次の文を発行する前に拒否され、行・catalog・schema revision・idempotency 記録を残さない」)。置き場は U-9 (推奨 (a) `limits` の新 key `execution_ms`)。v0.1 では `limits.execution_ms` の新 key に置くと定めていたが、v0.2 (2026-10-02) で `conformance-tests/test_contract.py` の `_PRE_1_8_0_LIMITS_KEYS` の pin (`:137-146`、`:180-184`) が新しい sibling key を 1.8.0 の裁定として禁じていることがわかったので、U-9 に移した (§11 RV-14)。`errors.details_vocabulary.LIMIT_EXCEEDED` は変えない。選択肢ごとの pin: (a) は `_PRE_1_8_0_LIMITS_KEYS` の切り直し、(b) は `limits.profile` の endswith pin (`conformance-tests/test_contract.py:111-115`、`:177`) を 1.8.0 の文より前に挿入すれば保ち、末尾なら切り直す、(c) は `PIN_1_7_0_REQUEST_BUDGET` が包含照合 (`:2267-2268`) なので末尾追記なら保つ (U-9)。
+- `structured_operations.idempotency.record` には挿入しない。§9.1 の「no idempotency record」と義務 (c) で足りる。v0.1 の挿入案は、文中への挿入が `PIN_1_7_0_IDEMPOTENCY_RECORD` (`conformance-tests/test_contract.py:2165-2166`、包含で照合 `:2286`) を、末尾への追記が `PIN_1_8_0` の endswith (`:525-532`、`:578`) を壊すので削った (§11 RV-14。行番号はレビューの報告。基点で未照合)。
 - `versioning.version_binding` の散文に 1.15.0 の段落 (無条件義務の列挙、「1.14.0 のままの実装は遡って縛られない」)、`versioning.obligations[]` に entry。段落の置き場は 1.14.0 の前例どおり「1.14.0 の段落の直後・version-flip 文の前」。
 - `structured_operations.dry_run.decision` に、execution_ms の拒否は dry run と real で同じとは限らない旨の相互参照の 1 文を追記する (§9.4。`PIN_1_7_0_DRY_RUN_DECISION` は包含照合なので追記で壊れない、レビューの報告。基点で未照合)。
 - 1.14.0 の前例どおりの記録: `spec/CONTRACT_HISTORY.md` の revision note (`:428` の Revision note 10 の形。既存の義務 1.7.0 (3) を狭めることも記録する)、`spec/CCR_DISPOSITION.md` の ruling 20 (`:343` の ruling 19 の形)。
@@ -184,7 +184,7 @@
 - (c) PostgreSQL 17 の `transaction_timeout` (X-6、M-2)。
 - 契約文言は (a) でも成り立つ弱さにする (「文の途中で尽きた予算は実装の文の bound で打ち切られ、その bound は設定時の残りを超えない」)。
 
-**U-3 再送可否の伝達** (v0.1 の推奨は (b)。v0.2 (2026-10-02) で (a) に移した — §11 R-16)
+**U-3 再送可否の伝達** (v0.1 の推奨は (b)。v0.2 (2026-10-02) で (a) に移した — §11 RV-16)
 - (a) D-3 の保証だけ (何も残らない → 再送は常に安全) (**推奨**)。
 - (b) 加えて、文の実行で使い切ったときは `details.futility` を MAY で付ける (任意なので conformance は「付くなら SI-10 に適う内容」だけを見る)。欠点: 実装は「再送しても同じ」を知り得ない (文の所要時間は負荷と行 lock の待ちで変わる) ので、`futility` の文を真に書けない。
 - (c) 必須の新 key (X-8、却下)。
@@ -383,25 +383,25 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 
 | # | 元 | 採否 | 反映先 |
 |---|---|---|---|
-| R-1 | A-1, B-F2 | 直す (起票 1 件を D-9 に添える) | D-2 (d)、D-3、§1.4 #7・#8、D-9 |
-| R-2 | A-2, B-F3 | 直す | D-3、§9.1 (列挙と【保留】)、§9.2 の (c) |
-| R-3 | B-F1 | 直す | D-2、D-9、§6.6 |
-| R-4 | A-3, B-F7 | 直す | D-7、§6.2、§6.3、M-8 |
-| R-5 | A-4, B-F13 | 依頼者判断 | U-8、D-2、D-9、§9.1・§9.2・§9.3 の [U-8] |
-| R-6 | A-5, B-F11 | 直す | D-5、§1.4 #2、U-6 |
-| R-7 | A-6 | 直す | D-2、§9.1、§6.4 |
-| R-8 | A-7, B-F5 | 直す | §6.4、§6.6、D-9、U-5 (c) |
-| R-9 | A-8, B-F14 | 直す | §9.1、§9.2、§9.3、§6.2 の註 |
-| R-10 | A-9 | 直す | D-2、U-7 (c)、X-2 |
-| R-11 | B-F4 | 直す | D-1、§9.1 |
-| R-12 | B-F6 | 直す | D-7、§6.4、D-9 |
-| R-13 | B-F8 | 直す | §6.4 |
-| R-14 | B-F9 | 直す + 依頼者判断 | U-9、D-6、§9 (旧 idempotency.record の挿入案を削除、§9.2 の「rewrites」) |
-| R-15 | B-F10 | 直す | §1.4 #3・#5、§1.5、M-1、D-9 |
-| R-16 | B-F12 | 直す | U-3 (推奨を (a) へ)、D-4、§7 SI-10 |
-| R-17 | B-F14 残り | 直す (R-9 に含む) | R-9 と同じ |
-| R-18 | B-F15 | 直す | §6.1、§6.5、§6.6 の見出し |
-| R-19 | B の照合 | 直す | §1.2、§1.3、§1.4、§1.7、§6.1 (照合済みの印を外し、行番号を訂正) |
+| RV-1 | A-1, B-F2 | 直す (起票 1 件を D-9 に添える) | D-2 (d)、D-3、§1.4 #7・#8、D-9 |
+| RV-2 | A-2, B-F3 | 直す | D-3、§9.1 (列挙と【保留】)、§9.2 の (c) |
+| RV-3 | B-F1 | 直す | D-2、D-9、§6.6 |
+| RV-4 | A-3, B-F7 | 直す | D-7、§6.2、§6.3、M-8 |
+| RV-5 | A-4, B-F13 | 依頼者判断 | U-8、D-2、D-9、§9.1・§9.2・§9.3 の [U-8] |
+| RV-6 | A-5, B-F11 | 直す | D-5、§1.4 #2、U-6 |
+| RV-7 | A-6 | 直す | D-2、§9.1、§6.4 |
+| RV-8 | A-7, B-F5 | 直す | §6.4、§6.6、D-9、U-5 (c) |
+| RV-9 | A-8, B-F14 | 直す | §9.1、§9.2、§9.3、§6.2 の註 |
+| RV-10 | A-9 | 直す | D-2、U-7 (c)、X-2 |
+| RV-11 | B-F4 | 直す | D-1、§9.1 |
+| RV-12 | B-F6 | 直す | D-7、§6.4、D-9 |
+| RV-13 | B-F8 | 直す | §6.4 |
+| RV-14 | B-F9 | 直す + 依頼者判断 | U-9、D-6、§9 (旧 idempotency.record の挿入案を削除、§9.2 の「rewrites」) |
+| RV-15 | B-F10 | 直す | §1.4 #3・#5、§1.5、M-1、D-9 |
+| RV-16 | B-F12 | 直す | U-3 (推奨を (a) へ)、D-4、§7 SI-10 |
+| RV-17 | B-F14 残り | 直す (RV-9 に含む) | RV-9 と同じ |
+| RV-18 | B-F15 | 直す | §6.1、§6.5、§6.6 の見出し |
+| RV-19 | B の照合 | 直す | §1.2、§1.3、§1.4、§1.7、§6.1 (照合済みの印を外し、行番号を訂正) |
 
 ### 11.2 再確認 (2026-10-02、担当観点: 指定なし)
 
@@ -423,6 +423,6 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 | RC-12 | F12 | 直す | §7 (THREAT_MODEL の段落) |
 | RC-13 | 観察 | 直す | §1.4 #4、§6.1・§6.5 の印 |
 
-- R-14 の採否表にあった pin の記述 (U-9 (b) は「pin はそのまま」、(c) は「切り直す」) は逆だった (監督の事実誤認)。再確認 (RC-7) で正した。
+- RV-14 の採否表にあった pin の記述 (U-9 (b) は「pin はそのまま」、(c) は「切り直す」) は逆だった (監督の事実誤認)。再確認 (RC-7) で正した。
 
 2 回目は依頼者裁定の反映後に行う。
