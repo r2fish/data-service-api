@@ -26,6 +26,7 @@
 - **A-1 決定（依頼者、2026-09-11）**: security 強度を最優先し、object storage は application ごとの private bucket、application 専用 provider identity、application 専用の object-capable 実行単位で隔離する。application-facing 実行単位は他 application の bucket 資格情報、広い親資格情報、他 application 用の downscoped credential を発行できる資格情報のいずれも保持してはならない。
 - **A-2〜B-12 決定（依頼者、2026-09-11）**: §0 の全推薦案を採用する。
 - 【註 2026-10-02】A-1 は台帳 `RM` R-30 (SI-00 の境界と、1 process が複数 Application の DSN を保持する構成の関係。未着手・依頼者裁定待ち) の一方の答え (serving set を 1 Application に限る) を object-capable 実行単位に先取りしている (§10 の S-13)。1 つの data base URL の背後で application 専用の実行単位へ要求を届ける経路は設計に無く、§11 の Q-2 で依頼者裁定待ちである。
+- 【註 2026-10-03】R-30 は (ii) 配備姿勢の宣言で裁定された (台帳 v1.154)。A-1 と同じ姿勢。
 - 【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】到達経路は案 (ii) に確定した (§3.1 の Q-2 の段落)。JSON 経路の serving set は台帳 `RM` R-30 の裁定に委ねる。
 
 ## 0. 確定した設計判断
@@ -699,6 +700,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 
 1. A-1 の provider 側分離を前提に、既存の複数 application を一 process で serve する配備を、object-capable endpoint では application 専用の実行単位へ分割する provisioning/deployment 設計を確定する。各 peer-local integration test で provider 自身が越境を拒否することを実測する。
    【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】1 を案 (ii) に合わせて次に改める (旧文は残す)。object-capable endpoint について、1 つの data base URL の前段に router を置き、credential から application を引いて当該 application 専用の object-capable 単位へ振り分ける provisioning/deployment 設計を確定する (§3.1 の Q-2 の段落)。router の欠陥による越境 (SI-00、`security/SECURITY_INVARIANTS_V1.md`) の検証と、provider 自身が越境を拒否することの実測は peer-local integration test と deployment evidence で行う。JSON 経路の serving set (`*_SERVE_APPS`) の分割はここに含めず、台帳 `RM` R-30 の裁定に委ねる。
+   【訂正註 2026-10-03 (R-30)】R-30 は (ii) 配備姿勢の宣言で裁定された (台帳 v1.154、`security/SECURITY_INVARIANTS_V1.md` SI-00 の Deployment posture)。本番の既定は JSON 経路でも 1 serving process = 1 Application であり、本項の「既存の複数 application を一 process で serve する配備」は試験・開発の構成を指すものとして読む。
 2. §8 の配備値・運用手順をレビューし、実行環境ごとに確定する。
 3. 該当する Security Invariants と threat model の適用を確定する。
 4. 共通契約、capability/limit、エラー、操作カタログを更新する。

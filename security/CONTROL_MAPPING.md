@@ -2,6 +2,7 @@
 
 Status: **Implementation mapping template**
 
+Version: **3.17** (2026-10-03; R-30 -- SI-00 r2db-api, SI-00 MitateDB-api, SI-00 Common: the production deployment posture of one Application per serving process is declared in the SI-00 note (requester ruling 2026-10-03 (ii)), with the env example, both runbooks and the deployment records as its controls and evidence, and the shared-OS-user reach under peer authentication, the absence of a JSON router behind one data base URL, the two-Application test fixtures and the un-reread deployment counts disclosed.)
 Version: **3.16** (2026-10-01; R-108 -- SI-05 Common, SI-06 Common, SI-09 Common, SI-10 Common, SI-11 Common, SI-14 Common: C-35 drives C-28's 12 steps through a reference client that composes every request from the contract, on the four wire plugs, and C-19 reads the `role` of every adapter's capability document; both peers' operation-catalog override documentation states contract 1.14.0's obligation, and the line references into MitateDB-api's runbook that lie after the inserted lines are re-pulled.)
 Version: **3.15** (2026-10-01; R-102 acceptance -- SI-09 MitateDB-api -- platform upgrade: section 10.8 records 10.10 accepted at version 12 on the requester's confirmation of 2026-10-01, so Gate-0 readiness again rests on the 10 items alone.)
 
@@ -109,6 +110,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - A failed run leaves a bounded residue, not a wider authority (design §4.1): stopping at or after `ALTER DATABASE ... WITH ALLOW_CONNECTIONS false` leaves that database non-connectable with the temporary membership standing -- `0004`:166-170.
 - That residue is availability lost for one application, not privilege gained: the membership covers only that application's own two roles and carries `SET FALSE` (no `SET ROLE`) -- `r2db-api/migrations/0004_deprovision_application.sql`.
 - `r2dbsvc_control` undoes the membership alone with `REVOKE <role> FROM CURRENT_USER` and needs no other role to do so; re-running `0004` clears both and completes -- `r2db-api/migrations/0004_deprovision_application.sql`.
+- `R2DB_SERVE_APPS` env example and runbook state one slug per serving process in production, several only for test or development -- `r2db-api/deploy/env/api.env.example:59-62`, `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md:315`.
 
 #### Evidence
 
@@ -120,6 +122,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the deprovision path -- `r2db-api/tests/test_postgres.py::test_deprovision_succeeds_in_a_single_pass_with_a_live_runtime_role_connection`, `::test_0004_temporary_grant_uses_inherit_true_set_false`.
 - an unrelated LOGIN role's open connection leaves the database, its `datallowconn`, the executing role's `inherit_option = true` membership count and the registry row intact -- `r2db-api/tests/test_postgres.py::test_deprovision_pre_check_stops_and_changes_nothing_for_an_unrelated_connected_role`.
 - a re-run after the drop completes -- `r2db-api/tests/test_postgres.py::test_deprovision_completes_on_rerun_after_the_database_was_already_dropped`; the operator's own recovery from that residue is `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §5 and §14, which no test exercises.
+- the deployment record names one slug (`sandbox`) for the 2026-09 install -- `docs/work-orders/DEPLOY_PHASE6_20260904.md:1554`.
 
 #### Status
 
@@ -130,6 +133,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - each of those 6 tests is pinned by a mutation of its own stage (design §6.1's one-condition-one-test rule; 6 mutations on this peer, all red);
 - production evidence is `absent` -- `0004` is still never applied at install (this block's own acceptance boundary above), and nothing was applied to the VPS for R-54;
 - whether `ALTER DATABASE ... WITH ALLOW_CONNECTIONS false` and `GRANT ... WITH INHERIT TRUE, SET FALSE` behave the same on a managed platform is unexercised; the place that reading is to be taken is `MitateDB-api/docs/cloud-run-cloud-sql.md` §9 item 3 (design §7).
+- **Shared OS user (posture B)**: where several Applications' processes share one OS user, the posture does not limit T-13 to one Application (the `pg_ident` map reaches the others' roles), unless the user is per Application -- `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md:481-489`.
 
 ### MitateDB-api
 
@@ -156,6 +160,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - Background workers (`usesysid IS NULL`) are not counted by that pre-check, and the refusal message names no role -- `0004`:96-107.
 - The residue a failure leaves is the same bounded one (design §4.1): stopping at or after `ALTER DATABASE ... WITH ALLOW_CONNECTIONS false` leaves that database non-connectable with the self-grant standing -- `0004`:158-162.
 - That self-grant is removable by `mitatedbsvc_provision` alone (`REVOKE <role> FROM CURRENT_USER`, since it holds ADMIN OPTION over the roles it granted) and is cleared by re-running `0004` -- `0004`:158-162.
+- Cloud Run runbook's deploy command states one served application per service (each deployment's account reads only that application's DSN pair), another a separate deployment -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1252-1253`, `:1155-1161`.
 
 #### Evidence
 
@@ -165,6 +170,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - an AST check on identifiers, not string literals, over the data-plane composition root -- `test_data_plane_composition_root_does_not_import_the_control_credential_store`.
 - the deprovision path -- `MitateDB-api/tests/test_postgres.py::test_deprovision_succeeds_in_a_single_pass_with_a_live_runtime_role_connection`, `::test_0004_temporary_grant_uses_inherit_true_set_false`.
 - its pre-check, and a re-run after the drop -- `MitateDB-api/tests/test_postgres.py::test_deprovision_pre_check_stops_and_changes_nothing_for_an_unrelated_connected_role`, `::test_deprovision_completes_on_rerun_after_the_database_was_already_dropped`.
+- the runbook's deploy command sets `MITATEDB_SERVE_APPS=acme`, one slug -- `MitateDB-api/docs/cloud-run-cloud-sql.md:1251`.
+- the 2026-09 deployment record sets `MITATEDB_SERVE_APPS=mitate`, one slug, on the real deployment -- `docs/work-orders/DEPLOY_PHASE6_20260904.md:528`.
 
 #### Status
 
@@ -187,7 +194,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- —
+- SI-00 Deployment posture note declares one Application per serving process in production, several only as a test or development configuration -- `security/SECURITY_INVARIANTS_V1.md:89-90`.
 
 #### Evidence
 
@@ -199,9 +206,15 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Status
 
-- **No cited evidence for the lateral/control-plane path**: no test is named for that part of this block's controls; version 2.25's uncited wording is in the history file.
+- **No cited evidence for the data-surface lateral path**: no test is named here for the cross-Application lateral path on the data surface; the per-peer negatives are each peer's own Evidence; version 2.25's uncited wording is in the history file.
 - All four registered plugs currently resolve `False` there (no currently-registered deployment co-hosts both surfaces on the same origin), so the `provided` branch of `test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted` remains unreached by any registered plug;
 - that residual limit is restated, not closed, in the C-09 row of `conformance-tests/CONDITIONS.md`.
+- **R-30 posture is a declaration, not a check**: no startup check refuses a multi-Application serving set; the requester took the declaration, not option C of `docs/design/REQUESTER_RULINGS_R30_R118_R120_V0_1.md` §3.3, which can be added later.
+- The number of Applications in real deployments was not re-read in the change set that added this posture (the records show one each).
+- Tests compose a two-Application serving set as a test configuration, not a production one -- `r2db-api/tests/test_application_audit.py:2958`, `:3026`, `:3069`, `MitateDB-api/tests/test_main.py:287`.
+- The platform DSN's reach across the registry is unchanged by this posture; its own grants (SI-01) remain its boundary.
+- No component routes one `surfaces.data.base_url`'s JSON requests to per-Application processes (`spec/data-service-api.v1.json:1410`, the surfaces rule), so several Applications in production are today several deployments; R-36's router is the candidate.
+- R-36's router is a foundation component on a par with the front stage, not an application-facing implementation, and is compatible with this posture (`docs/design/OBJECT_STORAGE_BINARY_API_V0_1.md` v0.5 §11 Q-2 (ii), Q-7).
 
 ## SI-01 Application Isolation
 
