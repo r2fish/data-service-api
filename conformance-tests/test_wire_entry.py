@@ -73,6 +73,8 @@ _IN_PROCESS = pytest.mark.parametrize("adapter", _IN_PROCESS_ADAPTER_NAMES, indi
 _CONTRACT = load_contract()
 _BASE_PATH: str = _CONTRACT["versioning"]["base_path"]
 _CAPABILITIES_PATH: str = _CONTRACT["endpoints"]["capabilities"]["path"]
+_CONTROL_BASE_PATH: str = _CONTRACT["versioning"]["control_base_path"]
+_CONTROL_CAPABILITIES_PATH: str = _CONTRACT["control_endpoints"]["control_capabilities"]["path"]
 
 
 def _assert_own_group(request: pytest.FixtureRequest) -> None:
@@ -221,32 +223,44 @@ def test_send_does_not_follow_a_redirect(
 
 
 @_SOCKET
+@pytest.mark.parametrize("surface", ("data", "control"))
 def test_socket_redirect_location_keeps_the_declared_authority(
-    adapter, wire, request: pytest.FixtureRequest
+    adapter, wire, surface: str, request: pytest.FixtureRequest
 ) -> None:
-    """Over the two socket plugs, the redirect the previous test observes
-    names in its `Location` the same authority (host and port) as the
-    declared data base URL, and the capability path without the slash. The
-    upstream builds that URL from the `Host` header the plug's nginx
-    forwards, and the declared base URL carries a non-default port (asserted
-    first, so the property is observed and not vacuous): a `Host` forwarded
-    without its port (`$host` rather than `$http_host` in `socket_harness.py`'s
-    conf) would send a client that followed the redirect to the scheme's
-    default port, another service than the one it dialed (ledger R-121)."""
+    """Over the two socket plugs and both surfaces the plug's nginx proxies
+    (data `/v1/`, control `/control/v1/`), the redirect of the surface's
+    capability path with a trailing slash names in its `Location` the same
+    authority (host and port) as that surface's declared base URL, and the
+    capability path without the slash. The upstream builds that URL from the
+    `Host` header nginx forwards, and the declared base URL carries an
+    explicit port (asserted first, so the property is observed and not
+    vacuous): a `Host` forwarded without its port (`$host` rather than
+    `$http_host` in `socket_harness.py`'s conf, on either `location`) would
+    send a client that followed the redirect to the scheme's default port,
+    another service than the one it dialed (ledger R-121)."""
     _assert_own_group(request)
-    _iso, entry = wire
-    declared = urlsplit(entry.base_url)
-    assert declared.port is not None, f"{adapter.name}: declared base URL {entry.base_url!r} carries no port"
-    status, headers, _body = entry.send("GET", _url(entry, _CAPABILITIES_PATH + "/"), (), None)
-    assert 300 <= status < 400, f"{adapter.name}: expected a redirect status, got {status}"
+    iso, entry = wire
+    if surface == "data":
+        declared_base_url, base_path, capabilities_path = entry.base_url, _BASE_PATH, _CAPABILITIES_PATH
+    else:
+        declared_base_url = iso.capability_document()["surfaces"]["control"]["base_url"]
+        base_path, capabilities_path = _CONTROL_BASE_PATH, _CONTROL_CAPABILITIES_PATH
+    assert isinstance(declared_base_url, str) and declared_base_url.endswith(base_path), (
+        f"{adapter.name}: declared {surface} base URL {declared_base_url!r} does not end with {base_path!r}"
+    )
+    declared = urlsplit(declared_base_url)
+    assert declared.port is not None, f"{adapter.name}: declared {surface} base URL {declared_base_url!r} carries no port"
+    url = declared_base_url.removesuffix(base_path) + capabilities_path + "/"
+    status, headers, _body = entry.send("GET", url, (), None)
+    assert 300 <= status < 400, f"{adapter.name}/{surface}: expected a redirect status for {url!r}, got {status}"
     locations = [value for name, value in headers if name.lower() == "location"]
-    assert len(locations) == 1, f"{adapter.name}: expected exactly one Location header, got {locations!r}"
+    assert len(locations) == 1, f"{adapter.name}/{surface}: expected exactly one Location header, got {locations!r}"
     target = urlsplit(locations[0])
     assert target.netloc == declared.netloc, (
-        f"{adapter.name}: Location {locations[0]!r} names authority {target.netloc!r}, "
-        f"the declared base URL {entry.base_url!r} names {declared.netloc!r}"
+        f"{adapter.name}/{surface}: Location {locations[0]!r} names authority {target.netloc!r}, "
+        f"the declared base URL {declared_base_url!r} names {declared.netloc!r}"
     )
-    assert target.path == _CAPABILITIES_PATH, f"{adapter.name}: Location path {target.path!r}"
+    assert target.path == capabilities_path, f"{adapter.name}/{surface}: Location path {target.path!r}"
 
 
 @_WIRE

@@ -331,6 +331,15 @@ target host's existing nginx configuration actually uses -- some hosts
 instead use a flat `conf.d/` directory. Confirm from the existing 443
 configuration's own layout rather than assuming.)
 
+**Already-installed copies (ledger `docs/design/ROADMAP_POST_PHASE7_V1.md`
+R-121, 2026-10-02):** a copy of this template installed before R-121 carries
+`proxy_set_header Host $host;` in both `location` blocks, so the
+application's own trailing-slash redirect names the same host on 443 rather
+than 8443. Re-apply the template's current `proxy_set_header Host
+$http_host;` line in the installed copy (both blocks; the data-plane block's
+own comment states why), then `sudo nginx -t` and `sudo systemctl reload
+nginx`.
+
 ### Step 6 -- verify
 
 1. **Connectivity / auth wiring, no credential:**
