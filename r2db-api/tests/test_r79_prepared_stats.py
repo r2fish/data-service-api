@@ -1344,3 +1344,38 @@ def test_role_pool_fold_is_lexically_inside_the_stats_lock():
     assert _body_contains(body, lambda n: isinstance(n, ast.AugAssign) and _self_attr(n.target, "_closed_db_calls") and isinstance(n.op, ast.Add)), (
         "the db_calls accumulation is not lexically inside `with self._stats_lock:`"
     )
+
+
+
+def test_txn_open_count_counts_only_the_enter_of_transaction():
+    """One enter of `with conn.transaction():` raises `txn_open_count` by
+    exactly 1, observed from inside the block; leaving the block, a
+    `commit()` and a `rollback()` raise it by nothing. `execute_count`
+    plus `txn_open_count` is the number of statements the connection
+    sent, so an exit that counted would count the same transaction
+    twice.
+
+    Dropping the `txn_open_count` increment from `transaction()` in this
+    peer's `psycopg_counting.py` turns this test red on
+    `assert (0 - 0) == 1` and nothing else is edited (mutation run:
+    `1 failed` for each peer, restores verified)."""
+    conn = CountingConnection.connect(_admin_dsn(), autocommit=False)
+    try:
+        start = conn.txn_open_count
+        with conn.transaction():
+            inside = conn.txn_open_count
+        after_exit = conn.txn_open_count
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.commit()
+        after_commit = conn.txn_open_count
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.rollback()
+        after_rollback = conn.txn_open_count
+        assert inside - start == 1
+        assert after_exit == inside
+        assert after_commit == after_exit
+        assert after_rollback == after_commit
+    finally:
+        conn.close()

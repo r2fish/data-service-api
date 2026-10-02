@@ -2,6 +2,7 @@
 
 ## 文書情報
 
+- 版数: 1.22 (§32 を新設。port v1.22: 台帳 R-42 (design `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4・D-7) 由来の coordinated revision -- 1 新規 abstract method `hold_after_admission(session)` (新条件 -- C-35 の次。番号は版の flip の commit で付く。rate・concurrency・budget の bound が確定した後、最初の接続取得の前で要求を止める primitive) と、非 normative の handle `AdmissionHold` を追加し、既存の handle `IdempotencyHold`・`PlanVerificationHold` に `statements_after_release()` (放した後に要求のために発行された文の数。PostgreSQL の 4 plug は整数、in-process の 2 plug は `None`) を足す。削除は無い。`hold_after_idempotency_lookup` の契約文の 2 文を 3 文に改め (§25.1 に【追記】)、`hold_after_plan_verification` の契約文の 1 文を改め (§30.1 に【追記】)、r2db の 2 plug の stall 点を予約の後へ移す。詳細は §32)
 - 版数: 1.21 (§31 を新設。port v1.21: 台帳 R-108 (design `docs/design/REFERENCE_CLIENT_V0_1.md` §6・D-2a・D-4) 由来の coordinated revision -- 1 新規 abstract method `wire_entry(application_id)` (参照クライアントの条件 C-35 が使う。wire への入口: 面が宣言する data の base URL、要求 1 件を渡されたとおり運ぶ送信関数、runtime と developer の bearer secret) と、非 normative の値型 `WireEntry` を追加する。削除は無い。in-process の 2 plug は `AssertionError` を上げ、wire の 4 plug が実現する。詳細は §31)
 - 版数: 1.20 (§30 を新設。port v1.20: 台帳 R-102 (design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` §9・§11.1 Q-5) 由来の coordinated revision -- 1 新規 abstract method `hold_after_plan_verification(session)` (新条件 C-34。plan の前提条件を並行する schema 操作の下で決定的に観測させる primitive) と、非 normative の handle `PlanVerificationHold` を追加する。削除は無い。§22.1 の開示 2 と §25.2・§25.3 の `MitateDB-api` の記述に R-102 による覆しの註を足した。詳細は §30)
 - 版数: 1.19 (§29 を新設。port v1.19: 台帳 R-115 (design `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) 由来の coordinated revision -- port v1.8 の abstract method `flush_audit_buffer` を削除する。追加は無い。詳細は §29)
@@ -17,7 +18,7 @@
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - §23.4 追補 (2026-09-07, 監督裁定 A `{scratchpad}/rulings-wp3a-review.md`): port v1.13 のまま (バージョン番号は据え置き)。`schema_operation_with_result(..., enum=...)` に tri-state sentinel `ENUM_CLEAR` (`adapter.py` モジュールレベル、`_EnumClear` 単一インスタンス) を追加し、「省略」(`None`、既定) と「明示 `enum: null`」(`ENUM_CLEAR`) を区別できるようにした。既存呼び出し (省略、または `Sequence` を渡すもの) は byte 互換のまま。4 adapter (`conformance_adapter_r2db{,_http}.py`/`conformance_adapter_mitatedb{,_http}.py`) の `schema_operation_with_result` を同型に更新し、`test_c20_constraint_declaration_agreement.py` の肯定枝に leg (9) (`alter_field(enum=ENUM_CLEAR)` で enum が解除される) を追加。詳細は §23.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08。§26 (v1.16) / §27 (v1.17) 追記日: 2026-09-24。§28 (v1.18) 追記日: 2026-09-25。§29 (v1.19) 追記日: 2026-10-01。§31 (v1.21) 追記日: 2026-10-01
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08。§26 (v1.16) / §27 (v1.17) 追記日: 2026-09-24。§28 (v1.18) 追記日: 2026-09-25。§29 (v1.19) 追記日: 2026-10-01。§31 (v1.21) 追記日: 2026-10-01。§32 (v1.22) 追記日: 2026-10-03
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -3491,6 +3492,10 @@ into the port docstring unparaphrased, per this repository's own 常設
 先着は解放され、実行・記録・commit まで進む。保持するのは 1 件だけであり、
 `idempotency_key` に一致しない要求は素通しする。」
 
+**【追記 2026-10-03 (port v1.22, design `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4)】** Of the quoted text above, the two sentences 「保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後にはじめて答えを返す。`with` を抜けると先着は解放され、実行・記録・commit まで進む。」 are revised by port v1.22 (§32) into the three sentences below; `conformance-tests/adapter.py`'s docstring carries them, and the rest of the quotation is unchanged. The handle `IdempotencyHold` below also gains a second method in port v1.22, `statements_after_release()` (§32.1):
+
+「保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後、または先着が `execution_ms` の予算切れで拒否されて何も残さなかった後にはじめて答えを返す。`with` を抜けると先着は解放され、その時点で先着の `execution_ms` の予算が残っていれば、実行・記録・commit まで進む。使い切っていれば、解放の後の最初の検査で `LIMIT_EXCEEDED` (`limit_class: execution_ms`) により次の文を発行せずに終わり、効果も idempotency の記録も残さない。」
+
 **Structural difference from `hold_in_flight`** (design 同 (2)): this
 primitive never issues any request of its own. The held request ("A")
 and the second, waiting request ("B") are both issued by the CALLER,
@@ -3737,6 +3742,10 @@ docstring unparaphrased):
 
 「`session` 上で次に到着する、`plan` または `dry_run` を提示する schema 操作を 1 件だけ、その要求自身が plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。`with` を抜けると先着は解放される。」
 
+**【追記 2026-10-03 (port v1.22, design `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4)】** Of the quoted text above, the sentence 「2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。」 (its part after 「保持中に同じ Application への 2 件目の schema 操作を出すと、」) is revised by port v1.22 (§32); `conformance-tests/adapter.py`'s docstring carries the revised sentence, and the rest of the quotation is unchanged:
+
+「2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` か `LIMIT_EXCEEDED` (`limit_class: execution_ms`) で拒否され何も実行しない。」
+
 Like `hold_after_idempotency_lookup`, this primitive never issues a
 request of its own: the held schema operation ("A") and the second one
 ("B") are both issued by the CALLER, each from its own OS thread. A
@@ -3922,3 +3931,154 @@ bodies; red in `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer`).
    returns header pairs that describe the encoded body (`Content-Length`,
    `Content-Encoding`) next to a decoded body. No current plug reaches this:
    neither peer nor the nginx configuration compresses.
+
+
+## 32. v1.22 port revision (coordinated with docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and section 6.4)
+
+Ledger R-42 fixes what a request does whose `execution_ms` budget is already
+spent when it reaches the point where its next statement would be issued
+(contract 1.16.0, `limits.execution_ms`): it issues no statement and ends
+`LIMIT_EXCEEDED` / `execution_ms`. The common suite needs a deterministic way
+to DRIVE that -- the new condition, C-35's successor, numbered in the version-flip commit -- at three points: before the request's
+first connection, between two statements of a multi-statement request, and
+before a schema operation's first DDL statement. The last two points are the
+stall points of `hold_after_idempotency_lookup` (§25.1) and
+`hold_after_plan_verification` (§30.1) already; the first has no primitive.
+The response alone cannot tell "no statement was issued" from "a statement
+was cancelled after 1 ms", so the three handles also report how many
+statements the held request issued after it was released. Same "test-driving
+primitive, never a test-only hook on product code" discipline
+`hold_in_flight` (§22.1) follows. One addition, one extension of three
+handles, no removals.
+
+### 32.1 `hold_after_admission(session)` and `statements_after_release()`
+
+Added to `ConformanceAdapter` after `hold_after_plan_verification`:
+
+```python
+@abstractmethod
+def hold_after_admission(self, session) -> AbstractContextManager["AdmissionHold"]
+```
+
+Meaning (the contract point, in the port docstring's own words; this port
+revision's wording, not a supervisor-fixed text): 「`session` 上で次に到着する、`limits.execution_ms` が名指す要求 (query、単一 / cross-entity の変更、schema 操作) のうち、その plug で `budget` を取る形で到着する次の 1 件だけを、その要求自身の rate・concurrency・budget の bound が確定した後、最初の接続取得の前の地点で停止させたまま保持する。この地点には、実行期限の検査も文もまだ無い。保持中に要求が完了することは無い。`with` を抜けると、保持された要求は解放される。保持するのは 1 件だけであり、その plug で `budget` を取る形で到着しない要求 (catalog の読みなど)、2 件目以降の要求、保持の後に到着した要求は素通しする。plug ごとにどの要求形がこの点に届くかは `CONFORMANCE_ADAPTER_V1.md` §32.2 に開示する。」
+
+Like the two `hold_after_*` primitives, it never issues a request of its own;
+the held request is issued by the CALLER from its own OS thread. It arms for
+the ONE next request, of the kinds `limits.execution_ms` names (a query, a
+single or cross-entity mutation, a schema operation), that arrives on the plug
+in a shape that takes a `budget`; §32.2 discloses which request shapes reach
+the point on each plug. It does not look at the request's `budget`.
+
+**`AdmissionHold`** (non-normative, `adapter.py` module level, the same status
+`IdempotencyHold` (§25.1) and `PlanVerificationHold` (§30.1) carry): two
+methods.
+
+- `wait_until_held(self, timeout_s: float = 30.0) -> int`: the same as the two
+  existing handles' (the measured count of requests held, always `1`;
+  `AssertionError` when none reached the stall point in `timeout_s`).
+- `statements_after_release(self) -> int | None`: the number of statements
+  issued for the held request after the `with` block released it, over every
+  connection the request holds. A transaction or savepoint opened after the
+  release counts as one (its `BEGIN` or `SAVEPOINT`); a transaction or
+  savepoint closed, a commit and a rollback count for none; the statements a
+  pool sends on its own account when it hands a connection out count for none.
+  `None` on a plug with no PostgreSQL statement to count (the two in-process
+  plugs), never `0`. Meant to be read once the held request has completed.
+
+`IdempotencyHold` and `PlanVerificationHold` carry the same
+`statements_after_release()` (counted from the release of their own hold); a
+handle built without a count returns `None`.
+
+Not gated by a contract version: the primitives are port facts. The condition
+that uses them binds a plug from `contract_version >= 1.16.0`.
+
+### 32.2 Per-plug realization
+
+Each plug replaces product functions or methods on objects it already
+constructs for `isolated_application_surface()` and restores them on exit; no
+product source change makes a stall possible.
+
+| plug | stall point of `hold_after_admission` | statements counted from |
+|---|---|---|
+| `r2db-api` (in-process) | the entry of the in-memory cell's `query` / `transact` / `apply_schema`, which `DataService` calls after the bounds are fixed and the deadline is computed | `None` |
+| `r2db-api-http` | the entry of `PostgresCell.query` / `transact` / `apply_schema` (each opens the request's first connection) | the two role pools (`_runtime`, `_developer`) of the Application's cell |
+| `MitateDB-api` (in-process) | just after `ApplicationCell._limit_gate` yields its deadline, for a request that names an `endpoint_kind` (`query`, `mutate`, `schema`) | `None` |
+| `MitateDB-api-http` | the same wrap as the in-process plug | the two role pools (`_runtime_pool`, `_developer_pool`) of the Application's backend |
+
+The two socket plugs subclass the http adapters and inherit this realization
+unchanged.
+
+**Which request shapes reach the point of `hold_after_admission`.** On the two
+r2db plugs the point is the entry of the cell's `query` / `transact` /
+`apply_schema`, so every query, every mutation that reaches `transact` -- a
+single mutation included -- and every schema operation is held. On the two
+MitateDB plugs the point is just after `_limit_gate` yields, and only a request
+that names an `endpoint_kind` (`query`, `mutate`, `schema`) is held: a
+single-row `insert` / `update` / `delete` passes `_limit_gate` with neither an
+`endpoint_kind` nor a `budget`, so it takes no `budget` on that plug and passes
+through the primitive unheld. The conformance vectors use a batch `insert`
+(`transact`), which reaches the point on every plug.
+
+**Where the enter side of a transaction is counted.** `CountingConnection`
+(`psycopg_counting.py`, byte-identical in the two peers) already counts every
+`execute()` / `executemany()` as `execute_count` / `executemany_count`, and
+`txn_count` counts every boundary of `transaction()` -- the `BEGIN` or
+`SAVEPOINT` that opens it and the `COMMIT` / `ROLLBACK` / `RELEASE` that closes
+it -- together with every `commit()` and `rollback()`. A statement count must
+include what opens a transaction and not what ends one, which `txn_count`
+cannot say, so the counting module gains `txn_open_count`: the enter side of
+`transaction()` only, counted in the same `finally` that counts `txn_count`
+for it. Both copies change identically (`test_psycopg_counting_sha256_matches_
+across_peers` in each peer pins that). The plug computes the figure from the
+connections' own counters, so no product method is wrapped to count and the
+count survives the `with` block that armed it.
+
+**How the plug computes the figure** (the two http plugs; each plug's own
+comment is the full account). Per role pool: the `execute()` / `executemany()`
+calls of its connections (those of a connection closed since are in the pool's
+own closed totals) plus their `txn_open_count`, minus the statements the pool
+sends on its own account -- r2db's pool sends one `SELECT 1` per checkout and
+one `SET search_path` per connection it opens (counted one for one by
+`acquire_count` and `sessions`); MitateDB's pool sends none that is an
+`execute()` (its idle ping goes through `pgconn.exec_`). The figure is taken at
+the release and again when the caller reads the handle; the release-time figure
+adds the counters of the connection(s) the held request still has checked out,
+which the plug is handed at its stall point (r2db: the connection argument of
+the wrapped `_idempotency_reserve` / `_read_schema_revision`; MitateDB: the
+`RequestScope`'s `main` and `developer`), because a checked-out connection is in
+neither the idle queue nor the closed totals. A request that holds no
+connection at its stall point (`hold_after_admission`) has nothing to add.
+Reading a pool's idle queue is a snapshot under the queue's own mutex and
+drains nothing. A request that was already running on the pools at the release
+is not attributable and is outside what the figure means.
+
+**What `hold_after_idempotency_lookup` stalls at on the r2db plugs.** Both r2db
+plugs now stall after `_idempotency_reserve` has returned (its savepoint
+released), the point the port docstring has always described; before, they
+stalled at the entry of that reservation. The MitateDB plugs, which stall after
+`_idempotency_check` returns, are unchanged. The two sentences of that
+primitive's contract text that promise what follows the release are revised
+into three (§25.1, 【追記】), and one sentence of
+`hold_after_plan_verification`'s contract text is revised (§30.1, 【追記】).
+
+Measured: recorded here once the implementations are measured (design M-8:
+the three vectors and their positive controls on the six plugs, and the
+statement count against an independent count of the statements the Application's
+connections sent).
+
+### 32.3 Disclosed limits
+
+1. **The figure counts the statements the Application's own pools carried.**
+   The audit sink, the credential store and the control plane use other
+   connections; their statements are not the request's own pool traffic and are
+   outside the count.
+2. **The enter side of a transaction is counted per connection; a connection
+   that is closed loses its `txn_open_count`.** Its `execute()` count is kept in
+   the pool's closed totals, its enter count is not.
+3. **A request that was running on the pools when the hold was released is not
+   attributable.** The conformance vectors that read the figure run exactly one
+   request on the Application.
+4. **The in-process plugs report `None`.** Their backends (an in-memory cell,
+   SQLite) issue no PostgreSQL statement; a test reads the error code and the
+   effect alone.

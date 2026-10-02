@@ -110,6 +110,13 @@ class CountingConnection(psycopg.Connection):
         self.executemany_count = 0
         self.db_wall_ms = 0.0
         self.txn_count = 0
+        # The enter side of `transaction()` only -- each `BEGIN` or
+        # `SAVEPOINT` it sends, never an exit, a `commit()` or a
+        # `rollback()`. `execute_count` plus `txn_open_count` is the number
+        # of statements this connection has sent for the work done on it:
+        # the `execute()` and `executemany()` calls, plus the `BEGIN` or
+        # `SAVEPOINT` that `transaction()` sends outside any `execute()`.
+        self.txn_open_count = 0
         self.cursor_factory = CountingCursor
 
     def commit(self) -> None:
@@ -157,6 +164,7 @@ class CountingConnection(psycopg.Connection):
             # only counting a round trip that succeeded.
             self.db_wall_ms += (time.perf_counter() - enter_start) * 1000.0
             self.txn_count += 1
+            self.txn_open_count += 1
         try:
             yield tx
         except BaseException as exc:

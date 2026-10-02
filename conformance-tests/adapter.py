@@ -993,6 +993,13 @@ class IsolatedControlHandle:
         return self.capabilities(actor)
 
 
+def _statements_not_observable() -> int | None:
+    """The `statements_after_release` of a handle whose plug has no
+    PostgreSQL statements to count (the two in-process plugs): `None`,
+    never `0`."""
+    return None
+
+
 @dataclass(frozen=True)
 class IdempotencyHold:
     """Yielded by `hold_after_idempotency_lookup()`'s own `with` block
@@ -1014,12 +1021,20 @@ class IdempotencyHold:
     primitive actually hold something" without a tautological check).
     Raises `AssertionError` -- never skips, never times out silently --
     if the held request has not reached that point within `timeout_s`
-    seconds (`OPERATING_CONDITIONS.md` §1.3 の 26)."""
+    seconds (`OPERATING_CONDITIONS.md` §1.3 の 26).
+
+    `statements_after_release() -> int | None` (port v1.22): see
+    `AdmissionHold.statements_after_release` below -- the same meaning
+    here, counted from the moment the `with` block released this hold."""
 
     _wait_until_held: Callable[[float], int]
+    _statements_after_release: Callable[[], int | None] = _statements_not_observable
 
     def wait_until_held(self, timeout_s: float = 30.0) -> int:
         return self._wait_until_held(timeout_s)
+
+    def statements_after_release(self) -> int | None:
+        return self._statements_after_release()
 
 
 @dataclass(frozen=True)
@@ -1041,12 +1056,60 @@ class PlanVerificationHold:
     one, never more), never a bare echo of an argument. Raises
     `AssertionError` -- never skips, never times out silently -- if no
     schema operation has reached that point within `timeout_s` seconds
-    (`OPERATING_CONDITIONS.md` §1.3 の 26)."""
+    (`OPERATING_CONDITIONS.md` §1.3 の 26).
+
+    `statements_after_release() -> int | None` (port v1.22): see
+    `AdmissionHold.statements_after_release` below -- the same meaning
+    here, counted from the moment the `with` block released this hold."""
 
     _wait_until_held: Callable[[float], int]
+    _statements_after_release: Callable[[], int | None] = _statements_not_observable
 
     def wait_until_held(self, timeout_s: float = 30.0) -> int:
         return self._wait_until_held(timeout_s)
+
+    def statements_after_release(self) -> int | None:
+        return self._statements_after_release()
+
+
+@dataclass(frozen=True)
+class AdmissionHold:
+    """Yielded by `hold_after_admission()`'s own `with` block (port v1.22,
+    design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md section 6.4).
+    Non-normative, the same status `IdempotencyHold` and
+    `PlanVerificationHold` above carry: this port prescribes only what its
+    two methods do, never this class's own shape beyond them.
+
+    `wait_until_held(timeout_s=30.0) -> int`: blocks until the ONE held
+    request `hold_after_admission` is arming has actually reached the stall
+    point (see that method's own docstring), then returns the REAL measured
+    count of requests held there (always `1` for a correct realization --
+    this primitive holds exactly one, never more), never a bare echo of an
+    argument. Raises `AssertionError` -- never skips, never times out
+    silently -- if no request has reached that point within `timeout_s`
+    seconds (`OPERATING_CONDITIONS.md` §1.3 の 26).
+
+    `statements_after_release() -> int | None`: the number of statements
+    issued for the held request after the `with` block released it, counted
+    over every connection the request holds. A transaction or savepoint
+    opened after the release counts as one statement (its `BEGIN` or
+    `SAVEPOINT`); a transaction or savepoint closed, a commit and a
+    rollback count for none; the statements a connection pool sends on its
+    own account when it hands a connection out (a liveness ping, the
+    search-path statement of a new connection) count for none. `None` when
+    the plug has no PostgreSQL statement to count (the two in-process
+    plugs) -- never `0`, which would claim an observation that was not
+    made. Meant to be read once the held request has completed: the value
+    read earlier is a lower bound."""
+
+    _wait_until_held: Callable[[float], int]
+    _statements_after_release: Callable[[], int | None] = _statements_not_observable
+
+    def wait_until_held(self, timeout_s: float = 30.0) -> int:
+        return self._wait_until_held(timeout_s)
+
+    def statements_after_release(self) -> int | None:
+        return self._statements_after_release()
 
 
 @dataclass(frozen=True)
@@ -1899,14 +1962,18 @@ class ConformanceAdapter(ABC):
 
     @abstractmethod
     def hold_after_idempotency_lookup(self, session, idempotency_key: str) -> AbstractContextManager["IdempotencyHold"]:
-        """`session` 上で次に到着する、`idempotency_key` に一致する key を持つ要求を 1 件だけ、その要求自身の **idempotency 受理区間の末尾**で停止させたまま保持する。受理区間の末尾とは、照会が「記録なし」を返し、`idempotency_entries` の予約を取り終え、その区間が取った lock をすべて保持したまま、効果をまだ 1 件も実行していない地点である。保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後にはじめて答えを返す。`with` を抜けると先着は解放され、実行・記録・commit まで進む。保持するのは 1 件だけであり、`idempotency_key` に一致しない要求は素通しする。
+        """`session` 上で次に到着する、`idempotency_key` に一致する key を持つ要求を 1 件だけ、その要求自身の **idempotency 受理区間の末尾**で停止させたまま保持する。受理区間の末尾とは、照会が「記録なし」を返し、`idempotency_entries` の予約を取り終え、その区間が取った lock をすべて保持したまま、効果をまだ 1 件も実行していない地点である。保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後、または先着が `execution_ms` の予算切れで拒否されて何も残さなかった後にはじめて答えを返す。`with` を抜けると先着は解放され、その時点で先着の `execution_ms` の予算が残っていれば、実行・記録・commit まで進む。使い切っていれば、解放の後の最初の検査で `LIMIT_EXCEEDED` (`limit_class: execution_ms`) により次の文を発行せずに終わり、効果も idempotency の記録も残さない。保持するのは 1 件だけであり、`idempotency_key` に一致しない要求は素通しする。
 
         Verbatim above (常設規律 4, word-for-word from design docs/design/
         PHASE10_DEPLOYMENT_EVIDENCE_V1.md §3 D-13 "実装の形 (6d-ii) の
         確定" (1)'s own quoted contract text -- see also that same
         section's own claim that this docstring stays true of it, the
         same convention `hold_in_flight`'s own docstring above already
-        follows for its own §22.1 citation).
+        follows for its own §22.1 citation), except the two sentences
+        that begin `保持中に同じ key` and `with` を抜けると: port v1.22
+        revises them and adds a third (see the port v1.22 paragraph
+        below), and the same design section's copy of them carries the
+        matching 【追記】.
 
         port v1.15 (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
         D-13, work order docs/work-orders/WORK_ORDER_PHASE10_DEPLOYMENT_
@@ -1959,17 +2026,38 @@ class ConformanceAdapter(ABC):
         why the wrap point sits at the end of the admission window on
         that peer's own structure, and what a second, key-matching
         request actually waits on while this primitive holds the first.
+
+        port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md
+        D-7 and section 6.4): two changes, both additive in what a caller
+        can rely on. (1) The sentences that begin `保持中に同じ key` and
+        `with` を抜けると now allow for a first request whose
+        `execution_ms` budget has run out by the release: the second
+        request answers after the first committed or after the first was
+        refused for `execution_ms` and left nothing, and the first, if
+        its budget is spent, is refused `LIMIT_EXCEEDED` at the next
+        point where a statement would be issued and leaves neither an
+        effect nor an idempotency record (the third sentence). (2) The two r2db plugs now
+        stall where the MitateDB plugs always did, after the reservation
+        has been taken and its savepoint released (`_idempotency_reserve`
+        has returned), which is the point the first paragraph above
+        describes; before, they stalled at the entry of that reservation.
+        The yielded `IdempotencyHold` also carries `statements_after_
+        release()` (see `AdmissionHold`).
         """
 
     @abstractmethod
     def hold_after_plan_verification(self, session) -> AbstractContextManager["PlanVerificationHold"]:
-        """`session` 上で次に到着する、`plan` または `dry_run` を提示する schema 操作を 1 件だけ、その要求自身が plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。`with` を抜けると先着は解放される。
+        """`session` 上で次に到着する、`plan` または `dry_run` を提示する schema 操作を 1 件だけ、その要求自身が plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` か `LIMIT_EXCEEDED` (`limit_class: execution_ms`) で拒否され何も実行しない。`with` を抜けると先着は解放される。
 
         Verbatim above (word-for-word from the supervisor's ruling M-13
         in work order docs/work-orders/
         WORK_ORDER_R102_APPLICATION_SERIALIZATION_V1.md; the design's own section 9
         `conformance-tests/` paragraph and section 11.1 Q-5 decide only
-        that the condition and the hook exist).
+        that the condition and the hook exist), except the sentence that
+        begins `2 件目は`: port v1.22 extends its second alternative to a
+        first schema operation refused `LIMIT_EXCEEDED` (`limit_class:
+        execution_ms`), and `docs/design/CONFORMANCE_ADAPTER_V1.md`
+        section 30.1 carries the matching 【追記】.
 
         port v1.20: condition C-34's own driving primitive -- a `plan`'s
         precondition under a concurrent schema operation against the same
@@ -2006,6 +2094,72 @@ class ConformanceAdapter(ABC):
         Called against the YIELDED instance of `isolated_application_
         surface()`, never against the shared, session-scoped adapter --
         the same convention the two primitives above follow.
+        """
+
+    @abstractmethod
+    def hold_after_admission(self, session) -> AbstractContextManager["AdmissionHold"]:
+        """`session` 上で次に到着する、`limits.execution_ms` が名指す要求 (query、単一 / cross-entity の変更、schema 操作) のうち、その plug で `budget` を取る形で到着する次の 1 件だけを、その要求自身の rate・concurrency・budget の bound が確定した後、最初の接続取得の前の地点で停止させたまま保持する。この地点には、実行期限の検査も文もまだ無い。保持中に要求が完了することは無い。`with` を抜けると、保持された要求は解放される。保持するのは 1 件だけであり、その plug で `budget` を取る形で到着しない要求 (catalog の読みなど)、2 件目以降の要求、保持の後に到着した要求は素通しする。plug ごとにどの要求形がこの点に届くかは `CONFORMANCE_ADAPTER_V1.md` §32.2 に開示する。
+
+        port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md
+        D-7 and section 6.4): this port's own wording of the contract
+        point above, the driving primitive of the condition that fixes how
+        a request whose `execution_ms` budget is already spent when it
+        reaches its first statement ends (`limits.execution_ms`). It is
+        the same "test-driving primitive, never a test-only hook on
+        product code" discipline `hold_in_flight`, `hold_after_
+        idempotency_lookup` and `hold_after_plan_verification` above
+        already establish.
+
+        What "the point" is. The request has passed authentication, its
+        rate and concurrency gates, its request-shape checks, and the
+        narrowing of its bounds by its own `budget`, and the deadline that
+        `budget.execution_ms` (or the deployment's own `execution_ms`)
+        defines has therefore been computed; it has not yet taken a
+        connection from any pool. A request held here that is released
+        after longer than its budget finds the budget spent before it has
+        issued anything. `budget.execution_ms = 1` is enough: nothing sits
+        between the point where the deadline is computed and this point
+        that could end the request first.
+
+        Structural difference from `hold_in_flight` (the same one the two
+        `hold_after_*` primitives above have): this primitive never issues
+        any request of its own. The held request is issued by the CALLER
+        from its own OS thread; this method only arms the ONE stall point
+        and yields the `AdmissionHold` handle a caller uses to wait for
+        that request to reach it (`AdmissionHold.wait_until_held`, above)
+        and, afterwards, to read how many statements it issued once
+        released (`AdmissionHold.statements_after_release`). A caller that
+        exits the `with` block without having called `wait_until_held` has
+        verified nothing about non-vacuity.
+
+        The arming is for the ONE next request, of the kinds
+        `limits.execution_ms` names (a query, a single or cross-entity
+        mutation, a schema operation), that arrives on this plug in a
+        shape that takes a `budget`. Which request shapes reach the point
+        differs by plug and is disclosed in `docs/design/CONFORMANCE_
+        ADAPTER_V1.md` section 32.2. Anything else (a catalog read, a
+        request that does not take a `budget` on this plug), a second
+        request and one arriving after the hold was taken passes through
+        undisturbed. A request that reaches the point and carries no
+        `budget` is held too: the arming does not look at the budget.
+
+        Realization. An adapter realizes the point by wrapping an object
+        it already constructs out-of-band for `isolated_application_
+        surface()` -- never by adding a test-only hook, delay endpoint or
+        callable to the peer's own PRODUCT code. See each plug's own
+        implementation comment for exactly which method is wrapped and
+        why that wrap point sits between the computation of the deadline
+        and the first connection of the request.
+
+        `AdmissionHold.statements_after_release()` is an integer on the
+        four plugs that run against PostgreSQL (the two http plugs and the
+        two socket plugs) and `None` on the two in-process plugs, which
+        have no PostgreSQL statement to count; a caller that reads `None`
+        decides from the error code alone.
+
+        Called against the YIELDED instance of `isolated_application_
+        surface()`, never against the shared, session-scoped adapter --
+        the same convention the primitives above follow.
         """
 
     @abstractmethod

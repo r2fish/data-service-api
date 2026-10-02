@@ -373,6 +373,10 @@ def hold_after_idempotency_lookup(self, session, idempotency_key: str) -> Abstra
 
 > `session` 上で次に到着する、`idempotency_key` に一致する key を持つ要求を 1 件だけ、その要求自身の **idempotency 受理区間の末尾**で停止させたまま保持する。受理区間の末尾とは、照会が「記録なし」を返し、`idempotency_entries` の予約を取り終え、その区間が取った lock をすべて保持したまま、効果をまだ 1 件も実行していない地点である。保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後にはじめて答えを返す。`with` を抜けると先着は解放され、実行・記録・commit まで進む。保持するのは 1 件だけであり、`idempotency_key` に一致しない要求は素通しする。
 
+**【追記 2026-10-03 (port v1.22、設計 `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4)】** 上の契約文のうち「保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後にはじめて答えを返す。`with` を抜けると先着は解放され、実行・記録・commit まで進む。」の 2 文は、port v1.22 で次の 3 文に改められた (`conformance-tests/adapter.py` の docstring が同じ文を持つ)。他の文は変わらない。また、下の (2) の「メソッドは 1 つだけである」は、port v1.22 で `statements_after_release()` (放した後に発行された文の数。in-process の 2 plug は `None`) が加わり 2 つになった。
+
+> 保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後、または先着が `execution_ms` の予算切れで拒否されて何も残さなかった後にはじめて答えを返す。`with` を抜けると先着は解放され、その時点で先着の `execution_ms` の予算が残っていれば、実行・記録・commit まで進む。使い切っていれば、解放の後の最初の検査で `LIMIT_EXCEEDED` (`limit_class: execution_ms`) により次の文を発行せずに終わり、効果も idempotency の記録も残さない。
+
 **(2) yield する handle** — **`IdempotencyHold`** (**非 normative**。`adapter.py` に置く。`IsolatedControlHandle` (port §21.4) と同じ「非 normative な handle を yield する」先例)。**メソッドは 1 つだけである**:
 
 - `wait_until_held(self, timeout_s: float = 30.0) -> int` — **保持点へ実際に到達するまで blocking し、実測した保持件数を返す** (正しい実現では常に 1)。**到達しないまま `timeout_s` を過ぎたら `AssertionError` を上げる — skip も xfail もしない** (`OPERATING_CONDITIONS.md` §1.3 の 26)。**既定値 30.0 は 4 adapter が既に持つ `_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S` と同値である。** **戻り値は引数の折り返しではなく実測値である** — `hold_in_flight` が `entered_count` を yield する理由と同じである (port v1.12、裁定 5)。

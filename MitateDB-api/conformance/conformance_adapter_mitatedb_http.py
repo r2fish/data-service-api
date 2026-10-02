@@ -88,6 +88,7 @@ from adapter import (  # noqa: E402
     ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    AdmissionHold,
     BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
@@ -844,6 +845,86 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
         raise errors[0]
 
 
+# port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
+# section 6.4): the statement count the three `hold_after_*` handles of this
+# HTTP plug return from `statements_after_release()`. It counts the
+# statements the Application's own two pools (`_runtime_pool`,
+# `_developer_pool`) carried for the held request after the `with` block
+# released it:
+#
+#   per pool: the `execute()` / `executemany()` calls its connections have
+#   made (`CountingConnection.execute_count` + `executemany_count`, which a
+#   connection that was closed since keeps in the pool's own
+#   `_closed_db_calls`), plus the transactions and savepoints its
+#   connections have opened (`CountingConnection.txn_open_count`, the enter
+#   side of `transaction()` only -- this backend never calls it, its `BEGIN`
+#   is the implicit one that goes out with a connection's first statement
+#   and is part of that statement's `execute()`).
+#
+# This backend's pool sends no counted statement on its own account: its
+# idle ping goes through `pgconn.exec_` and is not an `execute()`, and a new
+# connection issues no `SET`, so nothing is subtracted (the r2db plug's
+# `_RolePoolStatementMeter` subtracts the two statements that its pool does
+# send).
+#
+# The figure is taken twice: at the release, and when the caller reads the
+# handle. The release-time figure adds the counters of the connection(s) the
+# held request still has checked out -- a connection that is checked out is
+# in neither the idle queue nor the closed totals, so a request held in the
+# middle of its transaction would otherwise have its earlier statements
+# counted as later ones. The stalled wrappers below hand over the request
+# scope they were given, which carries them (`RequestScope.main` and
+# `.developer`). Reading a pool's idle queue takes a snapshot under the
+# queue's own mutex and drains nothing, so a request that checks a
+# connection out at the same moment is never starved of one. A request that
+# was already running on these pools when the hold was released is not
+# attributable and is outside what the figure means; the conformance
+# vectors that read it run exactly one request.
+
+
+def _scope_connections(scope: Any) -> list[Any]:
+    """The distinct connections a `RequestScope` holds (`main` and
+    `developer` are the same object for a schema operation)."""
+    conns: list[Any] = []
+    for conn in (getattr(scope, "main", None), getattr(scope, "developer", None)):
+        if conn is not None and not any(conn is seen for seen in conns):
+            conns.append(conn)
+    return conns
+
+
+class _BoundedPoolStatementMeter:
+    def __init__(self, cell_obj: object) -> None:
+        backend = cell_obj._backend  # noqa: SLF001 -- adapter-internal plumbing, read-only.
+        self._pools = (backend._runtime_pool, backend._developer_pool)  # noqa: SLF001
+        self._base: int | None = None
+        self._base_error: BaseException | None = None
+
+    def _statements(self, held: Sequence[Any] = ()) -> int:
+        total = 0
+        for pool in self._pools:
+            with pool._idle.mutex:  # noqa: SLF001
+                idle = list(pool._idle.queue)  # noqa: SLF001
+            with pool._stats_lock:  # noqa: SLF001
+                total += pool._closed_db_calls  # noqa: SLF001
+            for conn in idle:
+                total += conn.execute_count + conn.executemany_count + conn.txn_open_count
+        for conn in held:
+            total += conn.execute_count + conn.executemany_count + conn.txn_open_count
+        return total
+
+    def mark_release(self, held: Sequence[Any]) -> None:
+        try:
+            self._base = self._statements(held)
+        except BaseException as exc:  # noqa: BLE001 -- kept and raised by `statements_after_release`, never lost; the release itself must still happen.
+            self._base_error = exc
+
+    def statements_after_release(self) -> int:
+        if self._base_error is not None:
+            raise AssertionError("the statement count could not be taken at the release") from self._base_error
+        assert self._base is not None, "statements_after_release was read before the hold was released"
+        return self._statements() - self._base
+
+
 # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
 # WP-6d-ii): `hold_after_idempotency_lookup` realization for this HTTP
 # plug -- see `conformance_adapter_mitatedb.py`'s own identical-named
@@ -863,11 +944,14 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
     original_check = cell_obj._idempotency_check  # noqa: SLF001
     entered = threading.Semaphore(0)
     release = threading.Event()
+    held: list[Any] = []
+    meter = _BoundedPoolStatementMeter(cell_obj)
 
     def _checked(key, digest_request, **kwargs):
         result = original_check(key, digest_request, **kwargs)
         replay_response, _digest, _now_ms = result
         if replay_response is None and key == idempotency_key:
+            held.extend(_scope_connections(kwargs.get("scope")))
             entered.release()
             release.wait()
         return result
@@ -884,10 +968,13 @@ def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Ite
         return 1
 
     try:
-        yield IdempotencyHold(_wait_until_held)
+        yield IdempotencyHold(_wait_until_held, meter.statements_after_release)
     finally:
-        release.set()
-        setattr(cell_obj, "_idempotency_check", original_check)
+        try:
+            meter.mark_release(held)
+        finally:
+            release.set()
+            setattr(cell_obj, "_idempotency_check", original_check)
 
 
 # port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
@@ -926,6 +1013,8 @@ def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerification
     entered = threading.Semaphore(0)
     release = threading.Event()
     marked = threading.local()
+    held: list[Any] = []
+    meter = _BoundedPoolStatementMeter(cell_obj)
 
     def _marking(original):
         def _marked(*args, **kwargs):
@@ -941,6 +1030,7 @@ def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerification
     def _stalling(original):
         def _stalled(*args, **kwargs):
             if getattr(marked, "presents_plan_or_dry_run", False) and claimed.acquire(blocking=False):
+                held.extend(_scope_connections(kwargs.get("scope")))
                 entered.release()
                 release.wait()
             return original(*args, **kwargs)
@@ -962,13 +1052,97 @@ def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerification
         return 1
 
     try:
-        yield PlanVerificationHold(_wait_until_held)
+        yield PlanVerificationHold(_wait_until_held, meter.statements_after_release)
     finally:
-        release.set()
-        for name, original in backend_originals.items():
-            setattr(backend, name, original)
-        for name, original in cell_originals.items():
-            setattr(cell_obj, name, original)
+        try:
+            meter.mark_release(held)
+        finally:
+            release.set()
+            for name, original in backend_originals.items():
+                setattr(backend, name, original)
+            for name, original in cell_originals.items():
+                setattr(cell_obj, name, original)
+
+
+# port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
+# section 6.4): `hold_after_admission` realization for this HTTP plug (the
+# same running process's cell, reached the same way
+# `_hold_after_idempotency_check` above reaches it). See
+# `conformance_adapter_mitatedb.py`'s identically named helper for the full
+# rationale: `ApplicationCell._limit_gate` yields the request's deadline
+# after the rate and concurrency gates, the request-shape checks and the
+# narrowing by `budget`, and the caller opens the backend's request scope
+# -- the first connection -- only after that, so a stall just after the
+# gate yields is the point the contract names. The wrap replaces the gate on
+# the cell instance and restores it on exit; no product source changes. A
+# request that names no `endpoint_kind` (a catalog read, a single-row
+# write) passes through; the first one that does claims the stall, so
+# exactly ONE request is held. It holds no connection there, so the
+# statement count (`_BoundedPoolStatementMeter`) has nothing to add to its
+# release-time figure.
+
+
+class _AdmissionGateContextManager:
+    """The per-call context-manager object `_hold_after_admission_via_
+    stalled_gate` returns for a request that names an `endpoint_kind`:
+    delegates to the REAL `_limit_gate` context manager it wraps, and
+    inside `__enter__`, after the real gate has run and returned its
+    `deadline`, the first such request to arrive claims the stall and
+    blocks on a shared `threading.Event` before the value reaches the
+    caller."""
+
+    __slots__ = ("_inner", "_claimed", "_entered", "_release")
+
+    def __init__(self, inner_cm, claimed: threading.Lock, entered: threading.Semaphore, release: threading.Event) -> None:
+        self._inner = inner_cm
+        self._claimed = claimed
+        self._entered = entered
+        self._release = release
+
+    def __enter__(self):
+        value = self._inner.__enter__()
+        if self._claimed.acquire(blocking=False):
+            self._entered.release()
+            self._release.wait()
+        return value
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._inner.__exit__(exc_type, exc, tb)
+
+
+@contextmanager
+def _hold_after_admission_via_stalled_gate(cell_obj: object) -> Iterator[AdmissionHold]:
+    original_gate = cell_obj._limit_gate  # noqa: SLF001 -- adapter-internal plumbing, same convention `_hold_after_idempotency_check` above uses.
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    meter = _BoundedPoolStatementMeter(cell_obj)
+
+    def _admission_limit_gate(*args, **kwargs):
+        inner = original_gate(*args, **kwargs)
+        if kwargs.get("endpoint_kind") is None:
+            return inner
+        return _AdmissionGateContextManager(inner, claimed, entered, release)
+
+    cell_obj._limit_gate = _admission_limit_gate  # noqa: SLF001
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_admission: no request reached the stalled `_limit_gate` within {timeout_s}s "
+                "(expected the next query, mutation or schema operation on this Application to stall just "
+                "after the gate yielded its deadline -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield AdmissionHold(_wait_until_held, meter.statements_after_release)
+    finally:
+        try:
+            meter.mark_release([])
+        finally:
+            release.set()
+            cell_obj._limit_gate = original_gate  # noqa: SLF001
 
 
 class _AuthGate:
@@ -2331,6 +2505,20 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         cell = self._cells[session.application_id]
         return _hold_after_plan_verification(cell)
+
+    # port v1.22: wraps this SAME per-application cell's `_limit_gate` -- see
+    # `_hold_after_admission_via_stalled_gate`'s own module comment for why the point just after
+    # the gate yields is the point after the bounds are fixed and before the first connection
+    # acquisition.
+    def hold_after_admission(self, session):
+        """See `ConformanceAdapter.hold_after_admission`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point is documented on
+        `_hold_after_admission_via_stalled_gate` and the comment
+        immediately above it."""
+        assert isinstance(session, _Session)
+        cell = self._cells[session.application_id]
+        return _hold_after_admission_via_stalled_gate(cell)
 
     def wire_entry(self, application_id: str) -> WireEntry:
         """See `ConformanceAdapter.wire_entry`'s own docstring
