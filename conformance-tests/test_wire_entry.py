@@ -34,6 +34,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import socket
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -217,6 +218,35 @@ def test_send_does_not_follow_a_redirect(
     assert 300 <= status < 400, f"{adapter.name}: expected a redirect status, got {status}"
     assert any(name.lower() == "location" for name, _ in headers), f"{adapter.name}: redirect carries no Location header"
     assert len(_all_requests(spies)) == 1, f"{adapter.name}: a redirect was followed"
+
+
+@_SOCKET
+def test_socket_redirect_location_keeps_the_declared_authority(
+    adapter, wire, request: pytest.FixtureRequest
+) -> None:
+    """Over the two socket plugs, the redirect the previous test observes
+    names in its `Location` the same authority (host and port) as the
+    declared data base URL, and the capability path without the slash. The
+    upstream builds that URL from the `Host` header the plug's nginx
+    forwards, and the declared base URL carries a non-default port (asserted
+    first, so the property is observed and not vacuous): a `Host` forwarded
+    without its port (`$host` rather than `$http_host` in `socket_harness.py`'s
+    conf) would send a client that followed the redirect to the scheme's
+    default port, another service than the one it dialed (ledger R-121)."""
+    _assert_own_group(request)
+    _iso, entry = wire
+    declared = urlsplit(entry.base_url)
+    assert declared.port is not None, f"{adapter.name}: declared base URL {entry.base_url!r} carries no port"
+    status, headers, _body = entry.send("GET", _url(entry, _CAPABILITIES_PATH + "/"), (), None)
+    assert 300 <= status < 400, f"{adapter.name}: expected a redirect status, got {status}"
+    locations = [value for name, value in headers if name.lower() == "location"]
+    assert len(locations) == 1, f"{adapter.name}: expected exactly one Location header, got {locations!r}"
+    target = urlsplit(locations[0])
+    assert target.netloc == declared.netloc, (
+        f"{adapter.name}: Location {locations[0]!r} names authority {target.netloc!r}, "
+        f"the declared base URL {entry.base_url!r} names {declared.netloc!r}"
+    )
+    assert target.path == _CAPABILITIES_PATH, f"{adapter.name}: Location path {target.path!r}"
 
 
 @_WIRE

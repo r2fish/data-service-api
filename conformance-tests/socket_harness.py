@@ -264,6 +264,14 @@ def find_nginx_binary() -> str:
 # both), TLS removed (design D-3, section 4 A-8: "conformance に TLS を
 # 張る" is out of scope here) and listen/upstream/paths and the prefix-
 # scoped process directives (design D-2 (b)) substituted in.
+# `Host` is `$http_host` (the client's own `Host` header, port included),
+# not `$host` (the name alone, as the example carried until ledger R-121):
+# the upstream builds a redirect's `Location` from the `Host` it receives,
+# and the surface's declared base URL carries a non-default port, so with
+# `$host` a client that followed the upstream's own trailing-slash redirect
+# would be sent to the scheme's default port -- another service than the
+# one it dialed. Measured over both socket plugs by `test_wire_entry.py::
+# test_socket_redirect_location_keeps_the_declared_authority`.
 _NGINX_CONF_TEMPLATE = """\
 pid {pid_path};
 error_log {error_log_path};
@@ -295,7 +303,7 @@ http {{
         location /v1/ {{
             proxy_pass http://127.0.0.1:{data_port};
             proxy_http_version 1.1;
-            proxy_set_header Host $host;
+            proxy_set_header Host $http_host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
@@ -306,7 +314,7 @@ http {{
         location /control/v1/ {{
             proxy_pass http://127.0.0.1:{control_port};
             proxy_http_version 1.1;
-            proxy_set_header Host $host;
+            proxy_set_header Host $http_host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
