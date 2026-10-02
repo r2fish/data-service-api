@@ -6,10 +6,11 @@
 |---|---|---|
 | v0.1 | 2026-09-11 以前 | 推薦案を含む初稿。推薦案と退けた選択肢の記録は repository に無い (観察。復元しない。§12.1) |
 | v0.2 | 2026-09-11 | 依頼者決定 A-1〜B-12 を反映 (下の 2 行と §0 確定した設計判断の表) |
-| v0.3 | 2026-10-02 | 設計レビュー 1 回目 (観点 A / B の並列 2 起動) を反映。依頼者裁定待ち Q-0〜Q-5 (§11)。設計レビュー 2 回目は裁定反映後。現状との突き合わせは §10、反映の一覧は §12 |
+| v0.3 | 2026-10-02 | 設計レビュー 1 回目 (観点 A / B の並列 2 起動) と再確認 (指定なし 1 起動) を反映。依頼者裁定待ち Q-0〜Q-5 (§11)。設計レビュー 2 回目は裁定反映後。現状との突き合わせは §10、反映の一覧は §12 |
 
 - 位置づけ: 台帳 `RM` R-36 の設計文書。状態は候補のまま (未実装・未宣言・非正本) で、v0.3 でも変えない。
 - v0.3 の印: 設計レビュー 1 の反映箇所には【v0.3 2026-10-02 設計レビュー 1 反映 M-n】(S-n は §10 の行) を、依頼者決定と現状の食い違いには【註 2026-10-02】を付す。v0.2 の行は消さず、判定を変える箇所は旧文の後に新文と根拠を続ける。
+- 再確認の印: 再確認 (指定なし 1 起動) の反映箇所には【v0.3 2026-10-02 再確認反映 RC-n】を付す。RC-n は本文書の局所 ID であり、一覧は §12 の「再確認の反映 (RC-1〜RC-21)」。判定を変える箇所は旧文を残し、印を付けた新文を続ける。
 - ID の出所: 本文書の SI-N は `security/SECURITY_INVARIANTS_V1.md`、C-N は `conformance-tests/CONDITIONS.md`、R-N と P-N は台帳 `RM` の ID である。M-n・S-n・Q-n・O-n は本文書の局所 ID (§10〜§12、§7.1)。O-n は仮番号であり、conformance 条件の正式 ID は契約確定時に `conformance-tests/CONDITIONS.md` で採番する。
 - provider (Cloudflare R2 / GCS / Cloud Run) と RFC の挙動に依る記述は、v0.3 の時点で公式文書を読めていないため全て「未確認」である (§12.1)。
 
@@ -90,14 +91,16 @@
 
 | 性質 | 適用する SI (`security/SECURITY_INVARIANTS_V1.md`) | conformance 条件 (仮 O-n、§7.1) |
 | --- | --- | --- |
-| 認証・認可 | SI-06、SI-07、SI-03 (runtime / developer の対称は B-9)、SI-15、SI-13 (B-7。§11 の Q-4) | O-6、O-12、O-13 |
+| 認証・認可 | SI-06、SI-07、SI-03 (runtime / developer の対称は B-9)、SI-15、SI-13 (B-7。§11 の Q-4)。【v0.3 2026-10-02 再確認反映 RC-12】SI-03 は「object 操作は schema 変更の経路にならない (B-9 の対称性の根拠ではない)」に言い換える (旧文は残す) | O-6、O-12、O-13 |
 | スコープ隔離 | SI-01、SI-00 (A-1。provider 側の隔離は deployment evidence)、SI-12 (bucket 資格情報を client に渡さない) | O-5、O-17、O-18 |
 | 有限資源 | SI-08 | O-4a、O-4b、O-11、O-15、O-16 |
-| 完全性 | SI-05 (header 値の検証境界)、SI-11 | O-1、O-2、O-3、O-22 |
+| 完全性 | SI-05 (header 値の検証境界)、SI-11。【v0.3 2026-10-02 再確認反映 RC-12】SI-11 は atomic と宣言する upload / delete に掛かる | O-1、O-2、O-3、O-22 |
 | コンテンツの扱い | SI-05 (header 値の検証境界)。nosniff・attachment・no-transform を直接に述べる SI の文言は無い (新設しない) | O-10、O-23 |
-| 失敗時の後始末 | SI-11、SI-14 (`cleanup_failed` は security-control failure として監査) | O-9、O-14、O-19 |
+| 失敗時の後始末 | SI-11、SI-14 (`cleanup_failed` は security-control failure として監査)。【v0.3 2026-10-02 再確認反映 RC-12】SI-11 は atomic と宣言する upload / delete に掛かる | O-9、O-14、O-19。【v0.3 2026-10-02 再確認反映 RC-2】O-19b |
 | 監査・非開示 | SI-14、SI-10 | O-10、O-20 |
 | 削除 (B-2) | SI-09 | O-8 |
+
+【v0.3 2026-10-02 再確認反映 RC-13】下の案は非網羅の例示。確定時に §7.1 の O-n 全件と 1 対 1 で対応させる。B-3 (X-Request-Id) が全成功応答に掛かるなら unconditional に置く。
 
 `versioning.obligations` に置く object_storage 条件付き行の案 (版番号と従属判断の番号は契約確定時に決める。§3 の「版番号を先に固定しない」に従う):
 
@@ -149,6 +152,10 @@
 【v0.3 2026-10-02 設計レビュー 1 反映 S-9】`object_storage` は `common_baseline` (1.9.0 の floor) の外に置く。置かないと 1.9.0 の規則で全 peer に必須になる (§10 の S-9)。conformance 条件は PROVIDED / ABSENT の分岐で書く (§7.1)。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 S-10】操作カタログの案: OperationCatalogEntry (`spec/data-service-api.v1.json:2069`) に `request_media_type` / `response_media_type` を足し、bytes の操作 (upload の request、download の response) の `request_schema` / `response_schema` は null とする (§10 の S-10)。
+
+【v0.3 2026-10-02 再確認反映 RC-9】S-10 の註: upload の request_schema が null のため、header の要件は OperationCatalogEntry に足す `request_headers` (名前 / 必須か / 構文の参照) の記述で agent に示す案。確定は設計レビュー 2。
+
+【v0.3 2026-10-02 再確認反映 RC-12】S-10 の註: 4 操作の `atomicity` の案。`upload_object` = atomic (object は available になるか、ならないか)、`delete_object` = atomic、`download_object` / `get_object_metadata` = none (読み取り)。
 
 ### 3.1 API 経路
 
@@ -231,6 +238,12 @@
 | 上限 N octet を超える (N は未定) | `VALIDATION_FAILED` |
 | `filename*=UTF-8''…` (RFC 8187) | 受け付ける。`filename` と両方あれば `filename*` を採る |
 | `filename` に非 ASCII の octet | `VALIDATION_FAILED` |
+| 【v0.3 2026-10-02 再確認反映 RC-5】対象文字集合 (上の制御文字・パス区切りの行) | Unicode の Cc と Cf (U+202E 等の双方向制御を含む) と `/` `\` |
+| 【v0.3 2026-10-02 再確認反映 RC-5】処理順 | decode (`filename*` の percent-decoding) → NFC → 置換 → 長さ検査 (N octet は UTF-8 の octet 数) |
+| 【v0.3 2026-10-02 再確認反映 RC-5】`filename*` があるとき | `filename` を無視する (非 ASCII の検査は `filename*` が無いときだけ) |
+| 【v0.3 2026-10-02 再確認反映 RC-5】`filename*` の charset が UTF-8 以外 | `VALIDATION_FAILED` (`filename`) |
+| 【v0.3 2026-10-02 再確認反映 RC-5】正規化後に空 | `VALIDATION_FAILED` (`filename`) |
+| 【v0.3 2026-10-02 再確認反映 RC-5】download の `Content-Disposition` | `filename*=UTF-8''<percent-encoded>` と ASCII fallback の `filename=` (非 ASCII を `_` に置換) の両方を返す |
 
 #### 3.2.3 Content-Digest
 
@@ -269,12 +282,33 @@
 - 最初の確認不足の要求の本文は `{}` (`Content-Type: application/json`)。
 - 削除要求の schema は閉じ、`dry_run` / `budget` は `VALIDATION_FAILED` (`unsupported_field`) で拒否する (B-10 の「適用対象外」の具体形)。
 - 削除の再送は `NOT_FOUND` になる。
+- 【v0.3 2026-10-02 再確認反映 RC-9】上の「`VALIDATION_FAILED` (`unsupported_field`)」の語を `request_schema` に固定する。削除要求の `dry_run` / `budget` は閉じた schema で受け取れない field であり、`unsupported_field` は「schema がまだ受け取れる field」の語である (`spec/data-service-api.v1.json:921`)。
+- 【v0.3 2026-10-02 再確認反映 RC-1】上の「削除の再送は `NOT_FOUND` になる」を分ける。`idempotency_key` なしの再送は `NOT_FOUND`。retention 内に同じ key・同じ digest の再送は元の 200 (`ObjectDeleteResult`、`request_id` も元の値) の replay。digest が異なれば `CONFLICT`。
+- 【v0.3 2026-10-02 再確認反映 RC-3】`delete_object` (destructive) の audit の allow 行も、upload と同じ pre_commit 経路に乗せる (data commit の直前に pre_commit で書く。`AUDIT_PROCESS_LOSS_V0_1.md` 決定 1-A。§4 の RC-3)。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-14】destructive の句には identifier 検証を通った `object_id` だけを含める (`spec/data-service-api.v1.json:711`)。認証前に本文を読まずに拒否したときは `Connection: close` を付けて接続を閉じる (keep-alive の desync 防止)。
 
 ### 3.4 失敗の表
 
+【v0.3 2026-10-02 再確認反映 RC-8】検査順を次の表に固定する。同じ段の複数違反は、検査順の表の括弧内に列挙した順 ((4) なら Content-Type → Content-Disposition → Idempotency-Key → Content-Digest → Content-Length の値 → Content-Encoding) で最初の違反を返す (監督 2026-10-02。失敗の表の行順は優先順位ではない)。未認証で `Content-Length` > `object_bytes` は (2) で `AUTH_*` (B-6)。
+
+| 段 | 検査 |
+| --- | --- |
+| (1) | 認証前の小さい byte bound と concurrency slot |
+| (2) | 認証 (`AUTH_*`) |
+| (3) | capability (`CAPABILITY_UNSUPPORTED`) |
+| (4) | header の構文 (`Content-Type`、`Content-Disposition`、`Idempotency-Key`、`Content-Digest`、`Content-Length` の値、`Content-Encoding`) |
+| (5) | `object_metadata_bytes` |
+| (6) | `Content-Length` vs `object_bytes` |
+| (7) | `object_requests_per_minute` |
+| (8) | `object_transfers` |
+| (9) | 本文の受信 (受信中の `object_bytes`、digest) |
+
 【v0.3 2026-10-02 設計レビュー 1 反映 M-15】header の違反の位置 (`field`) は `header/<小文字の header 名>` と書く。`violated_declaration` に `content_type`、`content_digest`、`filename` を足すことは、契約の閉じた語彙 (`spec/data-service-api.v1.json:921`) の拡張になる。「未定」は v0.3 の材料で決まっていない欄である。
+
+【v0.3 2026-10-02 再確認反映 RC-20】上の「「未定」は v0.3 の材料で決まっていない欄である。」を経緯の記述に改める: v0.3 起草時に未定だった欄は 2026-10-02 の監督裁定で埋めた (旧文は残す)。
+
+【v0.3 2026-10-02 再確認反映 RC-9】`field` の定義 (`spec/data-service-api.v1.json:909`、本文 root からの位置) も `header/<名>` を含む形に改版する。
 
 | 条件 | code | violated_declaration | field | 出所 |
 | --- | --- | --- | --- | --- |
@@ -291,13 +325,18 @@
 | 存在しない / 他 application / `available` 以外の状態 | `NOT_FOUND` | — | — | §3.3、M-14 |
 | capability が ABSENT | `CAPABILITY_UNSUPPORTED` | `capability` | 要求全体のため省略 | §7 の 6 |
 | 削除の確認不足 | `DESTRUCTIVE_CONFIRMATION_REQUIRED` | — | — | §3.3 |
-| 削除要求に `dry_run` / `budget` | `VALIDATION_FAILED` | `unsupported_field` | 当該 field | M-9 |
+| 削除要求に `dry_run` / `budget` | `VALIDATION_FAILED` | `unsupported_field`。【v0.3 2026-10-02 再確認反映 RC-9】`request_schema` に固定 (閉じた schema で受け取れない field。`unsupported_field` は「schema がまだ受け取れる field」の語。`spec/data-service-api.v1.json:921`) | 当該 field | M-9、RC-9 |
 | provider 失敗 (header 送出前) | `SERVICE_UNAVAILABLE` | — | — | M-15 |
 | `object_transfers` の枯渇 | `LIMIT_EXCEEDED` (`limit_class: object_transfers`) | — | — | M-15、§6.1 |
 | `object_requests_per_minute` の超過 | `LIMIT_EXCEEDED` (`limit_class: object_requests_per_minute`) | — | — | §6.1 |
 | `object_metadata_bytes` の超過 | `LIMIT_EXCEEDED` (`limit_class: object_metadata_bytes`) | — | — | §6.1 |
 | download の header 送出後の失敗 (provider 失敗、再認可での失効、期限、digest 不一致) | code なし。接続の異常終了 | — | — | M-6 |
 | 転送中の再認可で失効または `AUTH_STATE_UNAVAILABLE` | 転送を中断 (fail closed)。download で header 送出後なら前行と同じ。upload (応答前) では既存の `AUTH_REVOKED` / `APPLICATION_DISABLED` / `AUTH_STATE_UNAVAILABLE` をそのまま返す (監督裁定 2026-10-02。新 code を増やさない) | — | — | M-11 |
+| `Idempotency-Key` の構文・長さ違反 | `VALIDATION_FAILED` | `idempotency_key` | `header/idempotency-key` | 【v0.3 2026-10-02 再確認反映 RC-8】 |
+| `Content-Disposition` の構文違反 | `VALIDATION_FAILED` | `filename` | `header/content-disposition` | 【v0.3 2026-10-02 再確認反映 RC-8】 |
+| 正規化後に空の filename | `VALIDATION_FAILED` | `filename` | `header/content-disposition` | 【v0.3 2026-10-02 再確認反映 RC-8】、§3.2.2 の RC-5 |
+| `Content-Length` の値が不正 | `VALIDATION_FAILED` | `request_schema` | `header/content-length` | 【v0.3 2026-10-02 再確認反映 RC-8】 |
+| `filename*` の charset が UTF-8 以外 | `VALIDATION_FAILED` | `filename` | `header/content-disposition` | §3.2.2 の RC-5 (監督 2026-10-02 に失敗の表へ写した) |
 
 ## 4. 保存モデル
 
@@ -316,17 +355,24 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 3. ストリームを最大 `object_bytes` まで読み、同期 provider SDK の呼出しは threadpool に offload しながら `Content-Digest` を計算して private bucket へ送る。
 4. バイト数と任意の `Content-Digest` を検証し、authorization propagation bound 以内の周期で再認可する。
    【v0.3 2026-10-02 設計レビュー 1 反映 M-11】4 の再認可を「転送の間、周期 P で再認可する (§6 の 5)。完了時にも 1 回再認可する」に改める (§11 の Q-4 の案を問わない)。再認可で `AUTH_STATE_UNAVAILABLE` なら中断する (fail closed)。P と宣言 `authorization_propagation_bound_ms` の関係は Q-4 で依頼者裁定待ち。
+   【v0.3 2026-10-02 再確認反映 RC-16】上の「(§11 の Q-4 の案を問わない)」を「Q-4 の (a)(b) のいずれでも。(c) を採るなら本項を見直す」に改める。
 5. `available` メタデータを永続化して成功応答を返す。
 
 3〜5 に失敗した場合、provider object を削除してから問題応答を返す。削除に失敗した場合は `cleanup_failed` を永続化し、公開されない cleanup worker が再試行する。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-7】upload は 2 transaction 構成とする: 「`pending` 永続化 (tx1) → provider 転送 (lock・pool 接続を持たない) → `available` 永続化 + idempotency record + audit event (tx2)」。契約 `spec/data-service-api.v1.json:851` の「record は effects と同じ transaction」は tx2 に対して成り立ち、provider 側の効果は transaction の外にある。直列化の地点は §3.2.1 のとおり tx2 の record 書き込みである。
 
-【v0.3 2026-10-02 設計レビュー 1 反映 S-11】tx2 の audit event (`upload_object`) は成功応答の前に同期で書く (`AUDIT_PROCESS_LOSS_V0_1.md` v0.5 決定 1-A)。bytes を provider に送った後・応答前の process 喪失は process-loss policy の外 (`security/CONTROL_MAPPING.md:1825`) であり、provider に残る孤児 object は `pending` 行と cleanup worker が担う (下の M-5)。
+【v0.3 2026-10-02 再確認反映 RC-3】上の「+ audit event (tx2)」を「audit の allow 行は tx2 の commit の直前に pre_commit で書く (`AUDIT_PROCESS_LOSS_V0_1.md` 決定 1-A。sink が別 DB なので同一 transaction ではない)」に改める。`delete_object` (destructive) も同じ pre_commit 経路に乗せる (§3.3 の RC-3)。O-20 の観測点は §7.1 の RC-11 のとおり。
+
+【v0.3 2026-10-02 設計レビュー 1 反映 S-11】tx2 の audit event (`upload_object`) は成功応答の前に同期で書く (【RC-3 の帰結、監督 2026-10-02】「tx2 の」は tx2 の commit の直前の pre_commit を指す。sink が別 DB なので同一 transaction ではない) (`AUDIT_PROCESS_LOSS_V0_1.md` v0.5 決定 1-A)。bytes を provider に送った後・応答前の process 喪失は process-loss policy の外 (`security/CONTROL_MAPPING.md:1825`) であり、provider に残る孤児 object は `pending` 行と cleanup worker が担う (下の M-5)。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-4】cleanup worker は application ごとに、当該 application の provider identity だけで動く (A-1 の制約を application-facing でない worker にも及ぼす)。provider key は metadata 行の provider_key から読まず、worker 自身の設定 (bucket) と object_id から上の論理構造で再計算する。行の provider_key は照合にだけ使い、一致しなければ削除せず security-control failure (SI-14、`security/SECURITY_INVARIANTS_V1.md`) として監査する。検証の形 (peer-local): application A の DB に application B の provider key を持つ `cleanup_failed` 行を書き、B の bucket に何も起きないことを実測する (§7.1 の O-18)。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-5】process 喪失・強制終了で 3〜5 の途中に止まった upload は `pending` のまま残る。`pending` のうち作成から (転送の全体時間上限 + 余裕) を過ぎたものは cleanup 対象とする。provider 側の未完了 multipart upload (R2) / resumable session (GCS) も対象に含め、その操作に要る provider 権限を §5.1 / §5.2 に列挙する (provider の挙動は未確認)。cleanup の成功・失敗を監査する (event_class は実装の宣言。`cleanup_failed` は security-control failure)。検証の形 (peer-local): upload 中に process を SIGKILL し、再起動後に `pending` が期限で回収され provider object が残らない (§7.1 の O-19)。転送の全体時間上限は §11 の Q-3 の裁定に従う。
+
+【v0.3 2026-10-02 再確認反映 RC-2】上の M-5 の回収対象に「`deleting` のまま一定時間 (削除の全体時間上限 + 余裕) を過ぎた行」を足す。検証の形 (peer-local): 確認済み削除の途中で SIGKILL すると、再起動後に回収され provider object が残らない (§7.1 の O-19b)。
+
+【v0.3 2026-10-02 再確認反映 RC-7】tx2 の `pending → available` は状態が `pending` のときだけ成功する条件付き更新。worker は provider を削除する前に行を `pending → deleting` へ条件付きで遷移させ、遷移できた行だけ削除する。遷移に負けた upload は tx2 で失敗し、provider object を自分で cleanup (または `cleanup_failed`) して `SERVICE_UNAVAILABLE` を返す。
 
 ## 5. 実装ごとの責務
 
@@ -372,6 +418,7 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 2. 未認証 request は既存の小さい request byte bound を超えて本文を読まない。Authorization header を認証した request だけが、受信チャンクごとに `object_bytes` を数える streaming 経路へ進む。上限超過時は読み取りを中止し `LIMIT_EXCEEDED`（`limit_class: object_bytes`）を返す。
 3. 既存の pre-auth concurrency slot を認証前から獲得する。認証後には deployment 全体で効く `object_transfers` 枠を獲得し、接続切断・例外も含め必ず解放する。複数 process が一 base URL を serve する deployment で process-local 枠しか持てない場合、`limit_enforcement.object_transfers` は `deployment_required` と宣言する。
    【v0.3 2026-10-02 設計レビュー 1 反映 M-3】3 を次に改める。object 経路は認証前に既存の concurrency slot を獲得し、認証成功時にこれを解放して `object_transfers` 枠に持ち替える (現行 JSON 経路は slot を要求全体で保持する: `r2db-api/src/r2db_api/http.py:473-474`。object 経路はこれに従わない)。`object_transfers` は application 単位の枠とし、その意味を `limit_enforcement.object_transfers` として契約に書く。枠の実現は concurrency と同じ host 共有の OS flock slot とする (`MULTI_PROCESS_WORKER_V0_1.md` v0.5 裁定 10。process が死ねば kernel が解放するので、転送中の crash で枠が漏れない)。1 host 内の複数 worker は共有の範囲内、複数 host は `deployment_required`。object 経路は `requests_per_minute` / `concurrency` (持ち替え後) に数えず、`object_requests_per_minute` / `object_transfers` にだけ数える。根拠: 旧文の「process-local 枠しか持てない場合 `deployment_required`」は、`conformance-tests/CONDITIONS.md` C-32 で両 peer が既に deployment 全体の枠を実現している現状と比べて後退であり (§10 の S-4)、長い転送が host 共有の pre-auth slot を占有する。class ごとの定義は §6.1。
+   【v0.3 2026-10-02 再確認反映 RC-6】持ち替えるのは `upload_object` / `download_object` だけ。`get_object_metadata` / `delete_object` は既存の JSON 経路と同じく concurrency slot を要求全体で保持する (本文が小さく短い)。`object_requests_per_minute` の鍵は credential_id (既存 `requests_per_minute` と同じ鍵。`r2db-api/src/r2db_api/http.py` の WP-8c の註)。`object_transfers` の鍵は application。
 4. JSON endpoint の既存 `request_bytes` 挙動は変更しない。
 5. HTTP client と provider SDK の接続・読取・全体時間には有限 timeout を設ける。同期 provider SDK の stream read/write は event loop 上で実行せず threadpool に offload する。転送中も authorization propagation bound 以内に再認可する。
    【v0.3 2026-10-02 設計レビュー 1 反映 M-11】再認可で `AUTH_STATE_UNAVAILABLE` のときは転送を中断する (fail closed)。再認可周期 P と宣言 `authorization_propagation_bound_ms` の関係は §11 の Q-4 で依頼者裁定待ち。転送時間の bound をどの limit class が表すかは §11 の Q-3 で依頼者裁定待ち。
@@ -387,6 +434,8 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 | `object_metadata_bytes` | `Content-Type`・`Content-Disposition`・`Idempotency-Key`・`Content-Digest` の値の octet 合計 | 合計 N octet は受理、N+1 octet で拒否 | `object_metadata_bytes` | 同上 |
 | `object_requests_per_minute` | 4 操作 (`upload_object` / `download_object` / `get_object_metadata` / `delete_object`) の要求数 | N 件目は受理、N+1 件目を拒否 | `object_requests_per_minute` | 同上 |
 | `object_transfers` | 同時に本文を読み書きしている要求数 | N 本の同時転送は受理、N+1 本目を拒否 | `object_transfers` | application 単位。host 共有の OS flock slot。1 host 内の複数 worker は共有の範囲内、複数 host は `deployment_required` |
+
+【v0.3 2026-10-02 再確認反映 RC-6】持ち替えるのは `upload_object` / `download_object` だけ。`get_object_metadata` / `delete_object` は既存の JSON 経路と同じく concurrency slot を要求全体で保持する (本文が小さく短い)。`object_requests_per_minute` の鍵は credential_id (既存 `requests_per_minute` と同じ鍵。`r2db-api/src/r2db_api/http.py` の WP-8c の註)。`object_transfers` の鍵は application。
 
 ## 7. conformance tests の候補
 
@@ -415,6 +464,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 
 - 番号は `O-1`〜 (仮) とする。正式 ID は契約確定時に `conformance-tests/CONDITIONS.md` で採番する。
 - port は v1.22 以降に、streaming 送信 (chunked、途中切断、低速送信) と、偽 provider の状態を読む method を足す (現行 `WireEntry.send` は bytes 一括・`Content-Length` 固定: `conformance-tests/adapter.py:1062-1068`)。
+- 【v0.3 2026-10-02 再確認反映 RC-10】port に足す method には、偽 provider に失敗・破損を注入する method (put / get の失敗、読み出し bytes の改変) も含める。偽 provider は test の composition root でだけ選べ、本番の設定では選べない (fail closed。選択は環境変数ではなく test 専用の composition root)。
 - `object_storage` は `common_baseline` の外に置き (1.9.0 の floor に入れない)、条件は PROVIDED / ABSENT の分岐で書く。ABSENT は `CAPABILITY_UNSUPPORTED` と storage を呼ばないことを検証し、skip にしない。
 - Evidence の語: 「6 adapter」= 全 6 adapter の共通 conformance。「wire」= HTTP / socket 専用条件。「peer-local」= 各 peer の integration test。「deployment」= `security/CONTROL_MAPPING.md` の行に記録する deployment evidence。
 - 変異の列は「その条件だけを壊す変異」の候補であり、`tools/dev/mutate.py` の引数は作業指示書で定める。
@@ -424,27 +474,30 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | O-1 | 任意 bytes (NUL、非 UTF-8、画像らしい bytes) の upload と download が完全一致する | SI-11 | 6 adapter | 取得 bytes = upload bytes | 保存時に末尾 1 byte を落とす | 1 |
 | O-2 | 保存・取得 metadata (content type、filename、size、Content-Digest) が一致し、filename の正規化 (§3.2.2) が両 peer で同値 | SI-05 | 6 adapter | `ObjectDescriptor` の各 field、同じ入力 filename に対する両 peer の出力 | 片 peer の NFC 正規化を外す | 2 |
 | O-3 | `Content-Digest` 一致は成功、不一致は拒否され取得可能な object を残さない。`sha-256` の member 無しは `VALIDATION_FAILED` (`content_digest`)、他 algorithm の member は無視 (§3.2.3) | SI-05、SI-11 | 6 adapter | 応答 code、拒否後の metadata 取得が `NOT_FOUND` | upload 側の digest 照合を外す | 3 |
-| O-4a | `Content-Length` が `object_bytes` を超える要求は provider を呼ばず metadata も残さず `LIMIT_EXCEEDED` (`object_bytes`) | SI-08 | 6 adapter | 偽 provider の呼出し 0、metadata 0 | `Content-Length` の事前検査を外す | 4 (i) |
+| O-4a | `Content-Length` が `object_bytes` を超える要求は provider を呼ばず metadata も残さず `LIMIT_EXCEEDED` (`object_bytes`) | SI-08 | 6 adapter。【v0.3 2026-10-02 再確認反映 RC-17】wire (4 adapter) に改める。in-process では `Content-Length` の概念が無いので対象外 | 偽 provider の呼出し 0、metadata 0 | `Content-Length` の事前検査を外す | 4 (i) |
 | O-4b | 途中で `object_bytes` を超えた要求は `available` の object と取得可能な metadata を残さず、provider に残ったものが cleanup 対象として記録される | SI-08、SI-11 | wire | 取得が `NOT_FOUND`、偽 provider の残存物に対応する cleanup 記録 | 超過時の cleanup 記録を書かない | 4 (ii) |
-| O-5 | application A の object を application B が取得・metadata 取得・削除できず、いずれも `NOT_FOUND` (期待値は §11 の Q-2 の案 (ii) で `AUTH_INVALID` に変わり得る) | SI-01 | 6 adapter | 3 操作の応答 code | 所有 application の照合を外す | 5 |
+| O-5 | application A の object を application B が取得・metadata 取得・削除できず、いずれも `NOT_FOUND` (期待値は §11 の Q-2 の案 (ii) で `AUTH_INVALID` に変わり得る)。【v0.3 2026-10-02 再確認反映 RC-4】期待値は全案で `NOT_FOUND` に固定する (B が自分の経路で A の object_id を要求したとき)。他 application の単位 / URL へ誤配されたときの結果は O-5 ではなく §11.1 の最終列 | SI-01 | 6 adapter | 3 操作の応答 code | 所有 application の照合を外す | 5 |
 | O-6 | capability が PROVIDED / ABSENT で分岐する。ABSENT は認証後に `CAPABILITY_UNSUPPORTED` を返し storage を呼ばない | SI-15 | 6 adapter | 応答 code、偽 provider の呼出し 0 | capability 判定を本文の転送後に移す | 6 |
 | O-7 | idempotency の再送・同時送信は一 object に収束 (`available` は高々 1)、異なる bytes / metadata の同一 key は `CONFLICT`。replay の `X-Request-Id` と `request_id` は元の値。敗者の pending object は cleanup される (§3.2.1) | SI-11 | 6 adapter (同時送信は wire) | available な object の数、応答の request_id、偽 provider の残存物 | digest の材料から `Content-Type` を外す | 7 |
-| O-8 | 確認不足 (本文 `{}`) の削除は副作用なく `DESTRUCTIVE_CONFIRMATION_REQUIRED`、正しい confirmation で `200 ObjectDeleteResult`、再送は `NOT_FOUND`、`dry_run` / `budget` は `VALIDATION_FAILED` (`unsupported_field`) | SI-09 | 6 adapter | 応答 code と本文、削除前後の取得 | 確認無しで削除を実行する | 8 |
+| O-8 | 確認不足 (本文 `{}`) の削除は副作用なく `DESTRUCTIVE_CONFIRMATION_REQUIRED`、正しい confirmation で `200 ObjectDeleteResult`、再送は `NOT_FOUND`、`dry_run` / `budget` は `VALIDATION_FAILED` (`unsupported_field`)。【v0.3 2026-10-02 再確認反映 RC-1】再送を分ける: `idempotency_key` なしの再送は `NOT_FOUND`、retention 内に同じ key・同じ digest の再送は元の 200 (`ObjectDeleteResult`、`request_id` も元の値) の replay、digest が異なれば `CONFLICT`。【v0.3 2026-10-02 再確認反映 RC-9】`dry_run` / `budget` の violated_declaration は `request_schema` | SI-09 | 6 adapter | 応答 code と本文、削除前後の取得 | 確認無しで削除を実行する | 8 |
 | O-9 | `pending` / `deleting` / `deleted` / `cleanup_failed` の object は `NOT_FOUND`。provider 失敗は `SERVICE_UNAVAILABLE` で object を残さない。同一 object ID は再利用されない | SI-11 | 6 adapter | 状態ごとの取得・metadata 取得の応答 | `pending` を取得可能にする | 9 |
 | O-10 | download 応答は `Content-Length`、`Content-Digest`、`Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-transform`、`X-Request-Id` (body の `request_id` があれば同値) を持ち、provider URL・provider key・credential を含まない | SI-10 | wire | 応答 header と本文の走査 | `Cache-Control: no-transform` を外す | 10 |
-| O-11 | upload 本文を全量メモリにバッファしない | SI-08 | wire | 偽 provider が最後の chunk の前に先頭 bytes を受け取っている | 本文を読み切ってから provider に渡す | 11 |
+| O-11 | upload 本文を全量メモリにバッファしない (【v0.3 2026-10-02 再確認反映 RC-18】両論の註は表の後) | SI-08 | wire | 偽 provider が最後の chunk の前に先頭 bytes を受け取っている | 本文を読み切ってから provider に渡す | 11 |
 | O-12 | 未認証要求は小さい byte bound を超えて本文を読まず、本文を読まずに拒否したときは `Connection: close` で接続を閉じる | SI-08、SI-15 | wire | 読まれた octet 数、接続の終了 | 認証前に object 経路の大きい bound を適用する | 11 |
 | O-13 | 一定速度の download の途中 t0 で revoke すると、t0 + 宣言 `authorization_propagation_bound_ms` 以内に接続が終わる。再認可で `AUTH_STATE_UNAVAILABLE` なら中断する (§11 の Q-4 の裁定に依存) | SI-13、SI-15 | wire | 接続終了の時刻 | 転送中の再認可を外す (完了時だけにする) | 11 |
 | O-14 | provider 読み出しを N byte 後に失敗させると、受信長 < `Content-Length` で接続が終わり、chunked の正常終端が無い | SI-11 | wire (socket) | 受信長と接続終了 | 失敗時に正常終端を送る | 11 |
 | O-15 | `Content-Length` > `object_bytes` は本文を読む前に `LIMIT_EXCEEDED`。`Expect: 100-continue` には認証と検査の前に 100 を返さない | SI-08 | wire | 100 の送出時点、読まれた octet 数 | 100 を即時に返す | — |
-| O-16 | `object_transfers` の枯渇は `LIMIT_EXCEEDED` (`object_transfers`)。切断・例外の後に枠が戻る。object 経路は `requests_per_minute` / `concurrency` (持ち替え後) を消費しない | SI-08 | wire | 直後の upload が枠を取れること、JSON 経路の枠の残量 | 切断時に枠を解放しない | 11 |
+| O-16 | `object_transfers` の枯渇は `LIMIT_EXCEEDED` (`object_transfers`)。切断・例外の後に枠が戻る。object 経路のうち upload / download は持ち替え後に `requests_per_minute` / `concurrency` を消費しない (metadata / delete は RC-6 のとおり concurrency を要求全体で保持する。監督 2026-10-02) | SI-08 | wire | 直後の upload が枠を取れること、JSON 経路の枠の残量 | 切断時に枠を解放しない | 11 |
 | O-17 | application A の provider identity で application B の bucket への get / put / delete が provider 自身から拒否される | SI-00、SI-01 | peer-local と deployment (`security/CONTROL_MAPPING.md` の SI-00 行)。共通 suite は実クラウドを要求しない | provider の拒否応答 | A の identity に B の bucket の権限を与える構成 | — |
-| O-18 | cleanup worker は A の DB にある B の provider key を持つ `cleanup_failed` 行に対し、B の bucket に何もせず security-control failure を監査する (§4 の M-4) | SI-00、SI-14 | peer-local | B の bucket の状態、監査 event | worker が行の provider_key をそのまま使う | — |
+| O-18 | cleanup worker は A の DB にある B の provider key を持つ `cleanup_failed` 行に対し、B の bucket に何もせず security-control failure を監査する (§4 の M-4) | SI-00、SI-14 | peer-local | B の bucket の状態、監査 event。【v0.3 2026-10-02 再確認反映 RC-21】監査 event (security-control failure) の観測を必須にする。B の bucket に何も起きないことだけでは空振りし得る | worker が行の provider_key をそのまま使う | — |
 | O-19 | upload 中に process を SIGKILL すると、再起動後に `pending` が期限で回収され provider object が残らない。cleanup の成功・失敗が監査される (§4 の M-5) | SI-11、SI-14 | peer-local | 偽 provider または provider の残存物、監査 event | `pending` を cleanup 対象から外す | 9 |
-| O-20 | 宣言 `audit_query.operations` に 4 操作名、`target_kinds` に `object` があり、宣言と実挙動が一致する。`upload_object` の event は成功応答の前に同期で書かれる | SI-14 | 6 adapter | 成功応答の受信後の audit_query の結果 | upload の event を応答後に非同期で書く | — |
+| O-19b | 【v0.3 2026-10-02 再確認反映 RC-2】確認済み削除の途中で SIGKILL すると、再起動後に回収され provider object が残らない (§4 の RC-2。O-19 と同形) | SI-11、SI-14 | peer-local | 偽 provider または provider の残存物、監査 event | `deleting` を cleanup 対象から外す | — |
+| O-20 | 宣言 `audit_query.operations` に 4 操作名、`target_kinds` に `object` があり、宣言と実挙動が一致する。`upload_object` の event は成功応答の前に同期で書かれる | SI-14 | 宣言と一致は 6 adapter。同期書き込みの観測は `conformance-tests/CONDITIONS.md` C-33 と同じ composition root (wire、workers = 2) で行い、in-process は対象外 (監督 2026-10-02) | 成功応答の受信後の audit_query の結果。【v0.3 2026-10-02 再確認反映 RC-11】`conformance-tests/CONDITIONS.md` C-33 の形 (成功応答の直後に process を SIGKILL し、再起動後の audit_query に event がある) にする | upload の event を応答後に非同期で書く | — |
 | O-21 | 同期 provider SDK の呼出しが event loop 上で走らない (threadpool offload) | SI-08 | peer-local | event loop の占有の観測 (形は peer が定める) | offload を外す | 11 |
 | O-22 | download で provider が保存値と異なる bytes を返すと本文が切られ (O-14 と同じ観測)、security-control failure が監査される | SI-11、SI-14 | wire | 受信長と接続終了、監査 event | download 側の digest 照合を外す | — |
 | O-23 | §3.4 の失敗の表の各行の入力に、表のとおりの code / violated_declaration / field を返す (「未定」の欄は 2026-10-02 の監督裁定で埋めた) | SI-05、SI-10 | 6 adapter (header の行は wire) | problem 応答の各 field | 行ごとに該当する検査を外す | — |
+
+【v0.3 2026-10-02 再確認反映 RC-18】O-11 の註 (両論): (a) 実装が溜めてよい上限 B octet を契約で固定し、観測は B を超える本文で行う。(b) O-11 を peer-local に移す。SDK の part 長・GCS の chunk 長は未確認。確定は設計レビュー 2。
 
 ## 8. 運用値・後続 capability の検討事項
 
@@ -518,7 +571,9 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 ### Q-0 着手条件の充足
 
 - 決定: 台帳 `RM` R-36 の着手条件は「設計レビュー。充足は依頼者裁定」。
+- 【v0.3 2026-10-02 再確認反映 RC-14】決定 (追記): 台帳 `RM` R-36 の着手条件には「運用開始後 (v1.105 の追記: 運用が始まって data と client が存在しても直す費用は上がらない)」もある (`RM`:459)。
 - 現状: 実需は台帳 `RM` §3.2 の突合表で「部分的」(Mitate `docs/remaining-work-index.md` §将来設計・保留「添付ファイル・画像 — F2 とは別工程として保留」、`docs/design/agent-entry-record.md` §6.1。data-service-api への具体的な要件は未確定)。
+- 【v0.3 2026-10-02 再確認反映 RC-14】運用開始の現状は本 session では確かめていない (作業機で台帳 `RM` §1 の現状から確認)。
 - 食い違い: 設計レビュー 1 回目は 2026-10-02 に行ったが、契約・conformance・実装へ進む着手条件の充足は依頼者裁定である。
 - 選択肢 (両論): (a) 充足とみなし、設計レビュー 2 回目へ進む。(b) 実需の記録を待つ (候補のまま保留)。
 - 推奨: 監督は判断しない (依頼者事項)。
@@ -533,6 +588,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
   - (乙) 甲に加えて、upload で media type が errors.content_type に一致するものを `VALIDATION_FAILED` で拒否する (problem+json 文書を保存する能力を失う)。
   - (丙) download は常に `application/octet-stream` で返し、保存値は metadata にだけ載せる (§2 の「返却する」と B-11 の想定を変える)。
   - いずれも契約の `media_type_note` / `response_classification` / `external_standards` の改版 (1.x.0、従属判断 19 の例外) になる。
+  - 【v0.3 2026-10-02 再確認反映 RC-19】`spec/data-service-api.v1.json:36` では additive な capability は minor。object_storage は common_baseline の外の新 capability で、既存の要求・応答の意味は変えない。media_type_note / response_classification の改版は新しい操作にだけ掛かる例外の追加であり、既存操作の分類は不変。したがって minor (1.x.0) と読む。semantic change と読む余地があれば major であり、その判断は依頼者。
 - 推奨 (監督の推奨): (甲) + (乙)。
 
 ### Q-2 A-1 の application 専用実行単位への到達経路
@@ -547,10 +603,10 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 
 「監督の見立て 2026-10-02」の欄は、v0.3 の材料 (設計レビュー 1 と監督の突合) に無く監督が起草後に埋めたものであり、設計レビュー 2 回目で検証する。裁定は依頼者。
 
-| 案 | 内容 | 改版の要る契約・規則 | `concurrency` の `limit_enforcement` | `object_transfers` の `limit_enforcement` | SI-00 の観点 | O-5 の期待値 |
+| 案 | 内容 | 改版の要る契約・規則 | `concurrency` の `limit_enforcement` | `object_transfers` の `limit_enforcement` | SI-00 の観点 | O-5 の期待値。【v0.3 2026-10-02 再確認反映 RC-4】他 application の単位 / URL へ誤配されたときの結果 (欠陥の観測。peer-local または deployment evidence の条件であり O-5 ではない) |
 | --- | --- | --- | --- | --- | --- | --- |
 | (i) | application ごとに別の data base URL (= 別 deployment)。台帳 `RM` R-30 の「serving set を 1 Application に限る」側を全面採用する | control surface と、surfaces 同一の規則 (`spec/data-service-api.v1.json:1410`) | 監督の見立て 2026-10-02: 各 deployment が 1 host なら `enforced` (`MULTI_PROCESS_WORKER_V0_1.md` 裁定 10・27 のまま) | 監督の見立て: 同じく 1 host 内の共有 slot で `enforced` | 監督の見立て: multi-application 部品が無く SI-00 の面では最も単純。費用は application 数に比例する deployment 数 | 監督の見立て: 別 deployment の credential は `AUTH_INVALID` (そもそも base URL が別) |
-| (ii) | 1 base URL のまま、前段 router が credential から application を引き、専用単位へ振り分ける。router は bucket 資格情報を持たない。各単位は bearer を自分の 1 application に再認証するので、誤配は `AUTH_INVALID` で閉じる | 監督の見立て 2026-10-02: 契約は変えなくてよい (surfaces は 1 つのまま) | Cloud Run で service が複数 = 複数 host なら `deployment_required` へ後退 (Cloud Run の挙動は未確認)。1 host 内の process 分割なら `enforced` のまま | 監督の見立て: application 単位の枠はその application の単位 (1 host) に閉じるので `enforced` | router は全 application の認証状態と全 bytes を扱う multi-application 部品であり、SI-00 の対象 | `NOT_FOUND` は `AUTH_INVALID` に変わり得る |
+| (ii) | 1 base URL のまま、前段 router が credential から application を引き、専用単位へ振り分ける。router は bucket 資格情報を持たない。各単位は bearer を自分の 1 application に再認証するので、誤配は `AUTH_INVALID` で閉じる | 監督の見立て 2026-10-02: 契約は変えなくてよい (surfaces は 1 つのまま) | Cloud Run で service が複数 = 複数 host なら `deployment_required` へ後退 (Cloud Run の挙動は未確認)。1 host 内の process 分割なら `enforced` のまま | 監督の見立て: application 単位の枠はその application の単位 (1 host) に閉じるので `enforced`。【v0.3 2026-10-02 再確認反映 RC-15】application の単位が 1 instance (Cloud Run なら最大 instance 1。自動スケールの挙動は未確認) のとき | router は全 application の認証状態と全 bytes を扱う multi-application 部品であり、SI-00 の対象 | `NOT_FOUND` は `AUTH_INVALID` に変わり得る。【v0.3 2026-10-02 再確認反映 RC-4】誤配の結果は `AUTH_INVALID` |
 | (iii) | object endpoint を application 専用の path prefix、または新 surface (`surfaces.objects`) に置く | url_composition、`conformance-tests/CONDITIONS.md` C-19 と C-35 | 監督の見立て 2026-10-02: (ii) と同じ (prefix で振り分ける前段が要る) | 監督の見立て: (ii) と同じ | 監督の見立て: 前段は path だけ見るので認証状態を持たないが、application の識別子が URL に出る (非開示の衛生に反する) | 監督の見立て: 他 application の prefix へ送った credential は `AUTH_INVALID` |
 
 ### Q-3 転送時間の bound
@@ -612,6 +668,34 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | M-21 | F17 | 反映 | §2.1 |
 | M-22 | F18 | 反映 | 冒頭の「版数・位置づけ」、§0 の表の後の A-2 の註、§2 の註、§7 冒頭の註 |
 | S-1〜S-16 | 監督の突き合わせ | 反映 | §10、§0 の表の後の註 (A-2・B-1・B-2・B-3・B-5・B-12)、§1 (S-16)、§3 (S-9・S-10)、§3.2 と §4 (S-11) |
+
+### 再確認の反映 (RC-1〜RC-21) (番号なし。§12.1 の番号を保つ)
+
+再確認は指定なし 1 起動で行い、指摘 21 件を監督が裁定した (2026-10-02)。全件「直した」であり、v0.3 の中で反映した (版は v0.3 のまま。冒頭の版数表の v0.3 行を改めた)。反映箇所の印は【v0.3 2026-10-02 再確認反映 RC-n】。
+
+| RC-n | 反映した節 |
+| --- | --- |
+| RC-1 | §3.3、§7.1 の O-8 |
+| RC-2 | §2.1、§4、§7.1 の O-19b |
+| RC-3 | §3.3、§4 |
+| RC-4 | §7.1 の O-5、§11.1 (最終列の見出しと (ii) 行) |
+| RC-5 | §3.2.2 |
+| RC-6 | §6 の 3、§6.1 |
+| RC-7 | §4 |
+| RC-8 | §3.4 (冒頭の検査順の表、失敗の表の末尾 4 行) |
+| RC-9 | §3 (S-10 の註)、§3.3、§3.4、§7.1 の O-8 |
+| RC-10 | §7.1 |
+| RC-11 | §4 (RC-3 の文から参照)、§7.1 の O-20 |
+| RC-12 | §2.1、§3 (S-10 の註) |
+| RC-13 | §2.1 (obligations 案の直前) |
+| RC-14 | §11 の Q-0 |
+| RC-15 | §11.1 |
+| RC-16 | §4 の 4 |
+| RC-17 | §7.1 の O-4a |
+| RC-18 | §7.1 (O-11 と表の後の註) |
+| RC-19 | §11 の Q-1 |
+| RC-20 | §3.4 |
+| RC-21 | §7.1 の O-18 |
 
 ### 12.1 観察 (台帳には載せない)
 
