@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.4 (2026-10-02、作業機)。** 作業機の照合 (設計が引く file:line と「基点で未照合」の 12 行) と実測 (M-1〜M-8) を反映。主な変更: (1) `statement_timeout` は COMMIT を打ち切らない (M-4) ので、「COMMIT は文の bound で打ち切られる」を取り下げ、commit 段の【保留】文と U-6 の commit 段の選択肢を削った。(2) v0.2 の起票候補 (MitateDB schema 操作の `commit_failed` の欠け) は現物に無く、取り下げた (台帳 v1.151 の R-42 行)。(3) 修正前の挙動を conformance の水準で記録した (MitateDB の PostgreSQL 2 plug は予算を過ぎた要求を commit する)。(4) §12 に実測の記録を足した。一覧は §11.3。基点は local main `3ce48d2` (製品コードは `4241b55` から変わっていない。`r2db-api/src`・`MitateDB-api/src` の差分 0)。
 - **v0.3 (2026-10-02)。** 再確認 (担当観点: 指定なし) の 12 件と観察 1 件を反映。U-8 の (d) の扱い、U-9 の pin の向きの訂正。反映の一覧は §11.2。同日、レビュー項目の記号を R-N から RV-N に改めた (台帳の R 族との衝突を避ける)。
 - **v0.2 (2026-10-02)。** 設計レビュー 1 回目 (A 9 件・B 15 件 → 19 件に統合) を反映。新しい U-8・U-9。起票候補 1 件 (MitateDB schema 操作の cancel 分岐の `commit_failed` 欠落)。反映の一覧は §11。
 - **v0.1 (2026-10-02)。** 基点 local main `4241b55`。台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の R-42 (規模 L、変更クラス D (`RM` §9 の 8))。契約 1.14.0 (subordinate ruling 19)、port v1.21。
@@ -9,7 +10,8 @@
 - ファイル名は依頼者指示 2026-10-02 による。台帳項目の設計であり計画文書のフェーズ節ではないので、運用条件 §1.8 の 53 の転記は行わない。
 - 範囲: 共通の意味論と契約文言の候補まで (`CLAUDE.md` の開発順序)。契約・conformance・実装は変えない。
 - 本 session は cloud で PostgreSQL が無く、新しい実測はしない。PostgreSQL の挙動に依る主張には次のどれかを添える: **【既存実測: 出所】** / **【PG 文書 (未実測)】** / **【未確認 → M-N】** (§8)。
-- 表記: file:line は基点 main のもの。r2db の製品コードは `r2db-api/src/r2db_api/`、MitateDB は `MitateDB-api/src/mitatedb_api/` からの相対で書く。「(読解の報告。基点で未照合)」「(レビューの報告。基点で未照合)」を添えた事実は報告であり、照合済みの事実と区別する。出所の記法は運用条件 §0。
+- v0.4 から: 作業機で測った主張には **【実測 2026-10-02: §12 の節】** を添える。
+- 表記: file:line は基点 main のもの。r2db の製品コードは `r2db-api/src/r2db_api/`、MitateDB は `MitateDB-api/src/mitatedb_api/` からの相対で書く。v0.3 まで報告由来の事実に添えていた「基点で未照合」の印は、v0.4 で照合を済ませ、印を外した (結果は §11.3)。出所の記法は運用条件 §0。
 
 ## 1. 問題設定
 
@@ -30,12 +32,12 @@
 | 1 | rate・concurrency slot (`_slot`) | `service.py:552-584` | slot は待たず即 429。期限は未計算 |
 | 2 | 期限の計算 `self._clock() + effective_limits.execution_ms / 1000` (budget で狭めた値) | `service.py:313` (query) / `:374` (transact) / `:455` (apply_schema)。clock は注入可 (`service.py:176`) | — |
 | 3 | 入口の `limits.check_deadline` (`clock() > deadline` で 413) | `postgres.py:1498` (query) / `:1613` (transact)。**apply_schema には無い** (`:2108-2120`) | query・transact は DB の前で拒否。apply_schema は進む |
-| 4 | pool 取得 (`self._runtime.connection()` / `self._developer.connection()`) | 期限を渡さない。固定の `_DEFAULT_CONNECT_TIMEOUT_S = 5`、`_DEFAULT_ACQUIRE_TIMEOUT_S = 10.0` (`postgres.py:230-231`) | 待ちの超過は `psycopg.OperationalError` が backend の `try` の外 (`:1502` 対 `:1504`) → http 層で汎用 503 (`http.py:362-367`) |
+| 4 | pool 取得 (`self._runtime.connection()` / `self._developer.connection()`) | 期限を渡さない。固定の `_DEFAULT_CONNECT_TIMEOUT_S = 5`、`_DEFAULT_ACQUIRE_TIMEOUT_S = 10.0` (`postgres.py:230-231`) | 待ちの超過は `psycopg.OperationalError` (`postgres.py:458`) が backend の `try` の外 (`:1502` 対 `:1504`) → http 層で汎用 503 (`http.py:360-368`) |
 | 5 | `_timeout_ms` → `_set_timeouts` | `postgres.py:2649-2654` / `:2656-2672` | `max(1, int(remaining))` で残り 0 以下でも 1 ms。transaction ごとに 1 回、再計算なし。`statement_timeout` と `lock_timeout` を同値で `SET LOCAL` |
-| 6 | advisory lock (`_idempotency_key_lock` / `_idempotency_reserve_lock` / `_schema_serialization_lock`) | `postgres.py:1352-1412` | `pg_advisory_xact_lock` の待ちは `lock_timeout` に掛かる **【PG 文書 (未実測)】**。待った後の再検査・再設定は無い |
+| 6 | advisory lock (`_idempotency_key_lock` / `_idempotency_reserve_lock` / `_schema_serialization_lock`) | `postgres.py:1352-1412` | `pg_advisory_xact_lock` の待ちは `lock_timeout` に掛かる **【実測 2026-10-02: §12.1 (M-6)】**。待った後の再検査・再設定は無い |
 | 7 | 以降の `check_deadline` | query `:1554` (SELECT 後)、transact `:1691` (各 operation 前)・`:1701` (loop 後)、apply_schema `:2202` (DDL 前の 1 回) | `_idempotency_store`・`pre_commit`・COMMIT の前には無い |
 | 8 | エラー写像 | `limits.py:101` と `postgres.py` の各 except (`:1120-1123` / `:1544-1547` / `:1735-1744` / `:2428-2437`) | `QueryCanceled` / `LockNotAvailable` → 413 `LIMIT_EXCEEDED`、details `{resource: "execution_ms", limit_class: "execution_ms", limit: <実効の execution_ms>}` |
-| 9 | 残るもの | 1 transaction | rollback で部分適用・idempotency 記録は残らない。`pre_commit` (durable audit の allow 行、別接続で commit 済み) の後に COMMIT が cancel されると、data は rollback、allow 行は残り、`commit_failed()` が error 行を best-effort で追記し、応答は 413 (`service.py:112-117`)。transact も apply_schema も同じ (apply_schema は idempotency を pre_commit より前に書く、`postgres.py:2407-2415`、レビューの報告。基点で未照合)。`LIMIT_EXCEEDED` は `_DURABLE_DENIAL_CODES` (`service.py:49-56`) に無く、deny event は in-memory sink のみ |
+| 9 | 残るもの | 1 transaction | rollback で部分適用・idempotency 記録は残らない。transact (`postgres.py:1735-1764`) と apply_schema (`:2428-2454`) の except の 5 分岐 (QueryCanceled / LockNotAvailable / UniqueViolation / DataError / psycopg.Error) はすべて、hook が fired なら `commit_failed()` で error 行を best-effort で追記する (`service.py:112-117`)。`pre_commit` は try 内の最後の文 (`:1733`・`:2426`) なので、hook の後に起き得るのは COMMIT の psycopg 例外だけで、そのとき data は rollback、allow 行と error 行が残る。COMMIT は予算では打ち切られない (D-3)。transact も apply_schema も同じ (apply_schema は idempotency を pre_commit より前に書く。store は `postgres.py:2416-2420` (`if` は `:2415`)、pre_commit は `:2426`)。`LIMIT_EXCEEDED` は `_DURABLE_DENIAL_CODES` (`service.py:49-56`) に無く、deny event は in-memory sink のみ |
 | 10 | dry_run | 2〜5・catalog・各 operation 前の検査は同じ | idempotency の lock・lookup・reserve を飛ばす。終端は `psycopg.Rollback` |
 
 ### 1.4 MitateDB の時系列 (`MitateDB-api/src/mitatedb_api/` 相対)
@@ -43,31 +45,44 @@
 | # | 段 | 場所 | 期限を既に過ぎていたら |
 |---|---|---|---|
 | 1 | `_limit_gate`: rate → concurrency slot (待たない) → bytes・depth → budget で狭める → `deadline = time.monotonic() + max_execution_ms/1000` | `cell.py:686-692`。clock の注入は無い | — |
-| 2 | `_borrow`: `pool.acquire(timeout = max(0, deadline - now))` | `backend_postgres.py:452-463`、`pool.py:444-508` | 3 経路: (1) idle 接続あり → 残り 0 でも即返る (`pool.py:465-475`)。(2) 上限未満・idle なし → 新規接続。`connect_timeout = min(設定値, max(1, ceil(残り)))` で、psycopg の下限 2 s が掛かる (`pool.py:444-492`)。失敗は `PoolConnectFailed` → `StorageTransientError` 503 (`backend_postgres.py:462-463`)。(3) 上限到達・idle なし → `PoolExhausted` → `ResourceLimitError(limit_class="execution_ms")` 413 (`pool.py:498-508`) |
-| 3 | `request_scope`: `_timeout_ms(deadline)` → `SET LOCAL` | `backend_postgres.py:484-500`、`_timeout_ms` は `:1681-1685` | **入口の残り検査は無い**。`max(1, int(remaining))` で残り 0 以下でも 1 ms。`SET LOCAL` の cancel は `psycopg.Error` → `StorageTransientError` 503 (`:493-500`) |
+| 2 | `_borrow`: `pool.acquire(timeout = max(0, deadline - now))` | `backend_postgres.py:452-463`、`pool.py:444-508` | 3 経路: (1) idle 接続あり → 残り 0 でも即返る (`pool.py:467-477`)。(2) 上限未満・idle なし → 新規接続。`connect_timeout = min(設定値, max(1, ceil(残り)))` で、psycopg の下限 2 s が掛かる (`pool.py:444-492`)。失敗は `PoolConnectFailed` (`pool.py:496`) → `StorageTransientError` 503 (`backend_postgres.py:463-464`)。(3) 上限到達・idle なし → `PoolExhausted` (`pool.py:508`) → `ResourceLimitError(limit_class="execution_ms")` 413 (`backend_postgres.py:461-462`) |
+| 3 | `request_scope`: `_timeout_ms(deadline)` → `SET LOCAL` | `backend_postgres.py:484-500`、`_timeout_ms` は `:1681-1685` | **入口の残り検査は無い**。`max(1, int(remaining))` で残り 0 以下でも 1 ms。`SET LOCAL` の cancel は `psycopg.Error` → `StorageTransientError` 503 (`:493-500`。経路は存在するが作業機では再現しなかった、§1.5) |
 | 4 | advisory lock (`_acquire_advisory`) | `backend_postgres.py:555-606` | try 形で取れれば 1 文で `_retime` 無し。取れなければ block 形で待ち、`lock_timeout` に掛かる (`QueryCanceled` / `LockNotAvailable` → `ResourceLimitError` execution_ms、`:577-578`)。待った後だけ `_retime` (`:604`)。idempotency の key lock・件数 lock も同じ経路 (`:1766`、`:1803-1804`) |
-| 5 | `_retime` | `backend_postgres.py:532-552` | `scope.deadline - now <= 0` なら拒否。それ以外は `_timeout_ms` で再 `SET LOCAL`。0 < 残り < 1 ms は `max(1, int(0)) = 1` → 1 ms。再 `SET LOCAL` の cancel は `psycopg.Error` → `StorageTransientError` 503 (`:544-552`) |
+| 5 | `_retime` | `backend_postgres.py:532-552` | `scope.deadline - now <= 0` なら拒否。それ以外は `_timeout_ms` で再 `SET LOCAL`。0 < 残り < 1 ms は `max(1, int(0)) = 1` → 1 ms。再 `SET LOCAL` の cancel は `psycopg.Error` → `StorageTransientError` 503 (`:544-552`。経路は存在するが作業機では再現しなかった、§1.5) |
 | 6 | 文の間 | operation loop (`cell.py:2838-2848`) と create_collection の複数文 (`backend_postgres.py:1176-1218`) の間に検査なし。`begin` は no-op (`backend_postgres.py:1700-1703`) | 検査されない |
-| 7 | 残るもの | 1 transaction、release 時に rollback | 部分適用・idempotency 記録は残らない。`LIMIT_EXCEEDED` は耐久 denial の対象外 (`audit_dispatch.py:30-55`、読解の報告。基点で未照合)。順序は経路で違う: transact は idempotency 記録 → pre_commit → commit (`cell.py:2908-2919`) で、pre_commit の前の打ち切りなら audit 行なし。schema 操作は pre_commit (`backend_postgres.py:1204`) を idempotency の書き込み (`:1229`) と commit (`:1230`) より先に行い、その後の cancel 分岐 (`:1231-1233`) も `except Exception` も `commit_failed` を呼ばない — allow 行だけが残り error 行は追記されない (`:1058`、`:1372`、`:1648` の同形はレビューの報告。基点で未照合)。この順序 (pre_commit の後に idempotency の書き込み = 文) は D-2 (pre_commit の後に文を発行しない) と両立しないので、D-9 で並べ替える |
-| 8 | 応答の経路差 | (読解の報告。基点で未照合) | schema 操作は commit も同じ try 内で 413 execution_ms (#7 のとおり `commit_failed` なし)。transact の `backend.commit` (`backend_postgres.py:1705`) と `record_idempotency` は psycopg 例外を翻訳しない → commit の cancel は `AuditSinkUnavailable` 503、`record_idempotency` の cancel は http の `except Exception` で汎用 503。read の `_end_reads` の commit 失敗は `StorageTransientError` 503 |
+| 7 | 残るもの | 1 transaction、release 時に rollback | 部分適用・idempotency 記録は残らない。`LIMIT_EXCEEDED` は耐久 denial の対象外 (`audit_dispatch.py:32-60` のコメント、集合 `DURABLE_DENIAL_CODES` は `:61-68`)。順序は経路で違う: transact は idempotency 記録 → pre_commit → commit (`cell.py:2908-2919`) で、pre_commit の前の打ち切りなら audit 行なし。単一行の insert / update (`_write_row_before_commit` `cell.py:791`、呼び出し `:1994`・`:2265`) は write → pre_commit → commit。schema 3 経路 (`alter_field_constraints` `backend_postgres.py:1058`、`create_collection` `:1204`、`add_field` `:1372`) は pre_commit を idempotency の書き込み (`:1069`・`:1229`・`:1382`) と commit (`:1070`・`:1230`・`:1383`) より先に行う。行の `delete` (`:1632`) は idempotency の書き込みが無く pre_commit (`:1648`) → commit。backend 単体の cancel 分岐 (`:1071`・`:1231`・`:1384`・`:1651`) は `commit_failed` を呼ばないが、呼び出し側の `_error_row_once_fired` (`cell.py:770-789`、R-115 WP-4b) がこの 4 経路の呼び出し (`cell.py:1303`・`:1582`・`:1829`・`:2396`) を包み、pre_commit の後に commit せず抜けるあらゆる失敗で error 行を書く (`MitateDB-api/tests/test_application_audit.py` の `test_a_cancelled_schema_record_write_after_the_pre_commit_row_writes_an_error_row_and_keeps_the_response` と `test_a_cancelled_delete_commit_after_the_pre_commit_row_writes_an_error_row_and_keeps_the_response` が `["allow", "error"]` を固定)。【訂正 2026-10-02 (v0.4)】 v0.2〜v0.3 の「allow 行だけが残り error 行は追記されない」は backend 単体だけを読んだ誤り。schema 3 経路の順序 (pre_commit の後に idempotency の書き込み = 文) は D-2 (pre_commit の後に文を発行しない) と両立しないので、D-9 で並べ替える |
+| 8 | 応答の経路差 | `cell.py:2919`・`:2920`・`:3010`、`backend_postgres.py:1817-1825`・`:528-530`、`http.py:568` | schema 操作は commit も同じ try 内で 413 execution_ms (error 行は #7 の `_error_row_once_fired`)。transact の `backend.commit` (`backend_postgres.py:1705`、呼び出し `cell.py:2919`) の例外は `:2920` の except で rollback し、hook が fired なら `commit_failed` の後 `AuditSinkUnavailable` (`:3010`) → 503。`record_idempotency` の cancel は翻訳されず (`backend_postgres.py:1817-1825`)、`http.py:568` の `except Exception` で汎用 503。read の `_end_reads` の commit 失敗は `backend_postgres.py:528-530` で `StorageTransientError` → 503。COMMIT は予算では打ち切られない (D-3) |
 | 9 | HTTP | `http.py:84`、`errors.py:80-91` | `LIMIT_EXCEEDED` は 413、details は `{"limit_class": "execution_ms"}` のみ |
 | 10 | SQLite plug | `backend_sqlite.py:22-27`、`:181`、`:646`、`:711` | 入口と begin で `_check_deadline` (strict `>`) を持つ |
 | 11 | dry_run | 期限・pool・lock・`SET LOCAL` は同じ | idempotency 検査なし、audit hook 不構築、rollback。create_collection の dry_run は CREATE TABLE を実走し bump と INSERT を飛ばす (`backend_postgres.py:1180-1200`) |
 
-### 1.5 1 ms の文が走る経路 (両 peer に残る)
+### 1.5 1 ms の文が走る経路 (両 peer に残る) と修正前の挙動
 
+経路:
 - r2db: `check_deadline` を通った後の pool 待ち → `_timeout_ms` = 1 ms (pool に期限が渡らない)。apply_schema は入口検査が無いので期限切れでも pool → 1 ms。advisory lock を待った後に再設定が無いので、待ちの後の文は「scope 入口の残り」の満額で走る (超過の方向)。0 < 残り < 1 ms は `check_deadline` を通り `_timeout_ms` = 1 ms。
-- MitateDB: `request_scope` の入口 (残り 0 以下でも 1 ms。pool に idle があれば `_borrow` は即返る)、`_retime` の 0 < 残り < 1 ms、その下で走る全文。
-- 共通: 1 ms の `statement_timeout` の下では、`SET LOCAL` 自体・catalog 読み・本体の文のどれが cancel されるかが負荷で変わり、同じ要求が 200 にも 413 にもなる。MitateDB について **【既存実測: `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §10.5 の【追記 2026-09-15、v0.17】】**。r2db について **【未確認 → M-1】**。
-- MitateDB では `SET LOCAL` と `_retime` の cancel が 503 に写るので (§1.4 #3・#5)、同じ要求は 200 / 413 / 503 に分かれる。`SET` 自体が 1 ms で cancel され得るかは **【未確認 → M-1】**。
-- 利用者 (AI エージェント) は結果から再送の可否を決められない。契約は期限切れの要求が「何も残していない」ことを明文化していない。
+- MitateDB: `request_scope` の入口 (残り 0 以下でも 1 ms。pool に idle があれば `_borrow` は即返る)、`_retime` の 0 < 残り < 1 ms、その下で走る全文。文の間に検査は無い (§1.4 #6)。
+
+実測で確かめられたこと **【実測 2026-10-02: §12.1・§12.2・§12.4】**:
+- r2db: `timeout_ms == 1` は駆動 A・C・D の全経路で 50/50 記録された (B の query・transact は入口の `check_deadline` `postgres.py:1498` / `:1613` が先に拒否し、文は 0 本)。apply_schema は入口検査が無く、期限を 1 s 過ぎた B でも `SET LOCAL` を 1 ms で発行し、catalog 読みが cancel されて 413 (50/50。期限切れで CREATE TABLE が走った回は 0)。
+- r2db の結果は揺れる: 残り 0.6 ms (C) の軽い query は 200 21/50・413 29/50。`budget.execution_ms = 1` (D) の軽い query は無負荷で 200 50/50、CPU 負荷の下で 413 50/50。重い query は C・D とも 413 50/50。同じ条件でも run の間で内訳が変わる。413 の相当数は文の cancel ではなく、全文が完了した後の `check_deadline` (`postgres.py:1554` / `:1691` / `:2202`) による — U-8 の現物の姿で、仕事は終わっているのに 413 になり、境界が負荷で動く。応答は 200 か 413 だけ (503 は 0)。r2db の `_set_timeouts` は try の内側なので `SET LOCAL` の cancel は 413 になり、MitateDB (503、§1.4 #3) と peer で応答が違う。
+- MitateDB: 期限を過ぎた要求が成功して commit する。軽い read と transact (軽い / 約 312 行を更新する重い) は、R1 (期限を 30〜40 ms 過ぎている)・R1b・D・R2 のすべてで 200 50/50 (各文が 1 ms 未満で終わり、文の間に検査が無い)。conformance の水準でも、PostgreSQL の 2 plug は予算 50 ms を 60 ms 以上過ぎた要求を最後まで実行して commit する (20/20、負荷に依らない。§12.4)。これは「1 ms の文」より手前の欠陥である。
+- MitateDB の重い文は負荷で揺れる: 重い read は R1 で 200 5/50・413 45/50、create_collection は R1 で 200 7/50・413 43/50 (CREATE TABLE の cancel)。CPU 負荷の下では R1b・D・R2 でも 2〜4/50 が 413、`budget.execution_ms = 1` の 312 行の更新は 12〜13/50 が 413。`_retime` は blocking の advisory lock 待ちの後にだけ到達する。
+- 機構: 1 ms の bound の下の文の成否は、その文が 1 ms を超えるかで決まる。PostgreSQL 単体では軽い文 (`SET LOCAL`、`SELECT 1`、主キー 1 行、5000 行の整列) は 1 回も cancel されず、1 ms を超える文は 200/200 が 1.04〜1.37 ms で cancel される。peer 経由でも軽い文から少し重い文へ移ると 200 が r2db C で 21/50 → 0/50、D で 50/50 → 0/50、MitateDB R1 で 50/50 → 5/50 に落ちる。MitateDB の既存実測は §1.6 の `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §10.5。
+
+再現しなかったこと (起き得ないことの証明ではない):
+- MitateDB の 503: 経路は存在するが (`backend_postgres.py:493-500`、`:544-552`)、作業機では再現しなかった (0 / 1695)。
+- `SET LOCAL` 自体の cancel: 最後の `_timeout_ms` が 1 だった要求 (MitateDB 1695 件・r2db 1400 件、CPU 負荷の下を含む) で 0 回。PostgreSQL 単体でも 0/2000。
+
+未実測: r2db の pool 待ち超過 (§1.3 #4 の 503)、MitateDB の §1.4 #2 の (2)(3) (新規接続、`PoolExhausted`)、idempotency 経路と dry run の 1 ms 経路、実 HTTP スタック (uvicorn / TLS / proxy)。
+
+利用者 (AI エージェント) は結果から再送の可否を決められない。契約は期限切れの要求が「何も残していない」ことを明文化していない。
 
 ### 1.6 既存の記録にある実測 (再測しない)
 
 - `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §10.5 【追記 2026-09-15、v0.17】: MitateDB の要求 B が lock の後ろで約 10 s 待ち、`statement_timeout = 1ms` で走っていた。`timeout_ms == 1` のときに 10 ms の文を強制すると、ゲートの赤が再現した (`a_status: 200`、`b_status: 413`)。
-- 台帳 R-78 (`docs/design/PERF_CONCURRENCY_MEASUREMENT_V0_1.md`): r2db の pool size 32 の待ちは 0、size 2 の最大待ちは K=4 で 2.5 ms、K=32 で 35.0 ms。MitateDB の cell lock の最大待ちは 28〜67 ms (K=32 で 67.1 ms) — **台帳 R-102 で cell lock が廃止される前の値**。query p50 は K=32 で r2db 63〜67 ms、MitateDB 211〜220 ms。
+- 台帳 R-78 (`docs/design/PERF_CONCURRENCY_MEASUREMENT_V0_1.md`): r2db の pool size 32 の待ちは 0、size 2 の最大待ちは K=4 で 2.5 ms、K=32 で 35.0 ms。MitateDB の cell lock の最大待ちは 28〜67 ms (K=32 で 67.1 ms) — **台帳 R-102 で cell lock が廃止される前の値**。query p50 は K=32 で r2db 63〜67 ms、MitateDB 211〜220 ms。R-102 の後の値は §8 M-5。
 - 台帳 R-80 (`docs/design/PERF_ROUNDTRIP_MEASUREMENT_V0_1.md`): 往復の成分を測る道具 (`tools/perf_baseline.py --roundtrip`)。1 文の追加の費用はこの道具で測る。
-- CI は `postgres:16` (`CI`:196)。PostgreSQL 17 の `transaction_timeout` は使えない。作業機の版は **【未確認 → M-2】**。
+- CI は `postgres:16` (`CI`:196)。PostgreSQL 17 の `transaction_timeout` は使えない。作業機は PostgreSQL 16.14 で `transaction_timeout` は無い **【実測 2026-10-02: §12.1】**。配備の版は未確認 (M-2)。
 - `statement_timeout = 0` は timeout の無効を意味する (だから `max(1, …)` が置かれている) **【PG 文書 (未実測)】**。`statement_timeout` は文ごとに計測され、transaction 全体の上限ではない **【PG 文書 (未実測)】**。
 
 ### 1.7 契約の沈黙
@@ -94,48 +109,52 @@
 
 ## 3. 決定と根拠
 
-**D-1 execution_ms は 1 要求の wall-clock 予算である。** 始点は遅くとも「受理点」— 要求がその配備の rate・concurrency の gate を通り、budget で狭めた要求固有の bound が確定した時点 (両 peer が今期限を計算している点、§1.3 の 2・§1.4 の 1)。受理点から応答が決まるまでの時間 — pool の取得待ち、lock の待ち、文の実行、commit — はすべて予算に数える。実装はもっと早く (受信時から) 数え始めてよいが、遅く始めてはならない。1 page = 1 要求で、page ごとに新しい予算。dry_run も同じ予算の下で走る (dry run は文を発行する)。ただし dry run の execution_ms の拒否は real の要求の拒否を予言しない (発行する文が違う)。契約は dry run が limit の拒否も決めると読める文を持つ (1.7.0 (3)) ので、execution_ms がその例外であることを §9.1 で明記する。
+**D-1 execution_ms は 1 要求の wall-clock 予算である。** 始点は遅くとも「受理点」— 要求がその配備の rate・concurrency の gate を通り、budget で狭めた要求固有の bound が確定した時点 (両 peer が今期限を計算している点、§1.3 の 2・§1.4 の 1)。予算に数えるのは、受理点から**要求が commit を始めるまで** (pool の取得待ち、lock の待ち、文の実行)。**commit を始めた要求は、execution_ms では拒否も打ち切りもされない** (M-4: `statement_timeout` は COMMIT に掛からない。両 peer の COMMIT の仕事は WAL の書き出しだけで、deferred の制約・trigger は無い **【実測 2026-10-02: §12.1】**)。commit の後に時計で拒否することはできない (commit 済みの要求を失敗として返せない)。実装はもっと早く (受信時から) 数え始めてよいが、遅く始めてはならない。1 page = 1 要求で、page ごとに新しい予算。dry_run も同じ予算の下で走る (dry run は文を発行する)。ただし dry run の execution_ms の拒否は real の要求の拒否を予言しない (発行する文が違う)。契約は dry run が limit の拒否も決めると読める文を持つ (1.7.0 (3)) ので、execution_ms がその例外であることを §9.1 で明記する。
 - 根拠: SI-08 は要求 1 件が資源を無限に持てないことを求め、利用者に見える所要時間を bound するのは待ちを含めてこそである。MitateDB の `_borrow` の docstring は既に「期限を超える待ちは要求が execution_ms を超えたこと」と読んでいる。待ちを別 class に分けると `limits.classes` の語彙 (1.2.0 の規則) に新語が要り、利用者が 2 つの予算を推論する負担が増え、安全の結果は増えない (→ U-1 で両論を残す)。
+- 受理点の後の待ち (pool・lock) は、台帳 R-102 の後の 32 並列で最大 3.4 ms で、既定 5000 ms に対して 3 桁の余裕がある (M-5、§12.5)。
+- 受理点の前 (認証・body の解析・worker の順番待ち) は逐次で r2db 約 0.5 ms・MitateDB 約 5 ms、32 並列で p50 53〜78 ms (M-7、§12.3)。
 
 **D-2 予算を使い切った要求は、次の文を発行する前に拒否する。**
-- 「文」の定義: 実装が要求のために保持するすべての接続 (MitateDB の developer 接続の catalog 読みを含む。要求自身の各 transaction) で、要求の内容から発行する文。psycopg の暗黙の BEGIN はその transaction の一部。`SET LOCAL`、catalog 読み、lock の文、idempotency の読み書き、DML / DDL を含む。含めない: pool の維持 (r2db の checkout ごとの `SELECT 1` `postgres.py:621`、新規接続の `SET search_path` `postgres.py:388`、MitateDB の idle ping `pool.py:369`・`:384`。いずれもレビューの報告。基点で未照合)、transaction を終える COMMIT / ROLLBACK (下の (d) で別に扱う)、別接続の audit sink への書き込み。
+- 「文」の定義: 実装が要求のために保持するすべての接続 (MitateDB の developer 接続の catalog 読みを含む。要求自身の各 transaction) で、要求の内容から発行する文。psycopg の暗黙の BEGIN はその transaction の一部。`SET LOCAL`、catalog 読み、lock の文、idempotency の読み書き、DML / DDL を含む。含めない: pool の維持 (r2db の checkout ごとの `SELECT 1` `postgres.py:621`、新規接続の `SET search_path` `postgres.py:388`、MitateDB の idle ping `pool.py:369` (閾値の条件は `:384`、呼び出しは `:386`))、transaction を終える COMMIT / ROLLBACK (下の (d) で別に扱う)、別接続の audit sink への書き込み。
 - 実装は、文を発行しようとする各点で残り予算を process 内の時計で比べ、残りが 1 ms 未満 (整数 ms で 0) なら文を発行せず `LIMIT_EXCEEDED` + `details.limit_class: execution_ms` で終える。`_timeout_ms` 自身も残り 1 ms 未満で `LIMIT_EXCEEDED` を上げ、決して 0 を返さない (`statement_timeout = 0` は timeout の無効 **【PG 文書 (未実測)】** なので、0 を返すと fail-open になる)。v0.1 の「`max(1, …)` の丸めを廃止する」はこの形に改めた (§11 RV-3)。
-- 検査点は実装の自由だが、少なくとも (a) pool 取得の後・最初の `SET LOCAL` の前 (`_timeout_ms` の拒否が兼ねる 1 点)、(b) lock 待ちの後、(c) 複数文の要求の文と文の間、(d) [U-8 (b)] durable audit の pre_commit の前、に置く。**検査点はすべて pre_commit より前に置く。pre_commit の後は時計で検査せず COMMIT を発行し、COMMIT は最後に設定した文の bound (lock 待ちの後の再設定を含む) でだけ打ち切られる (D-3 の例外)。**
+- 検査点は実装の自由だが、少なくとも (a) pool 取得の後・最初の `SET LOCAL` の前 (`_timeout_ms` の拒否が兼ねる 1 点)、(b) lock 待ちの後、(c) 複数文の要求の文と文の間、(d) [U-8 (b)] durable audit の pre_commit の前、に置く。**検査点はすべて pre_commit より前に置く。pre_commit の後は時計で検査せず COMMIT を発行する。COMMIT は文の bound の外にあり、予算では打ち切られない (M-4)。**
 - 最後の文が完了した後に時計で検査するか ((d) を置くか) は U-8。U-8 (a) では (d) を置かない。
 - 検査は時計の比較だけで DB 往復を足さない (X-1)。
 - 閾値を「1 ms 未満」とする理由: `statement_timeout` の分解能は 1 ms で、0 は「無効」を意味するので、1 ms 未満の残りで文を発行する手段が無い **【PG 文書 (未実測)】**。→ 閾値は U-7 で確認。
-- 範囲: D-2 が決定的にするのは予算を使い切った要求だけである。残りが 1 ms 以上で文の所要時間より短い帯 (例 1.5 ms) では 200 / 413 が負荷に依り、D-3 により再送は安全である。
+- 範囲: D-2 が決定的にするのは予算を使い切った要求だけである。残りが 1 ms 以上で文の所要時間より短い帯 (例 1.5 ms) では 200 / 413 が負荷に依り、D-3 により再送は安全である。修正前の揺れの実測: r2db で残り 0.6 ms の軽い query が 200 21/50・413 29/50 (M-1、§12.2)。
 
 **D-3 期限で終わった要求は、行・catalog・schema revision・idempotency 記録を残さない。** 1 要求 = 1 transaction の rollback による。idempotency は契約 `structured_operations.idempotency.record` の「失敗した要求は記録を残さない」の帰結であり、execution_ms の失敗もこれに含まれる。同じ key の再送は新規の試行として実行される。
 - 語の分け方: 契約 `structured_operations.dry_run.external_effects` は「externally visible な状態変化」に audit event を含めるので、本書と §9 はこの語を使わず、残さないものを列挙する。この列挙は audit の証跡を律しない (どの audit event が残るかは列挙の外で、`transactions.atomic` と `structured_operations.dry_run.external_effects` は変えない)。
 - audit: `LIMIT_EXCEEDED` は耐久 denial ではない (両 peer の現物。SI-14 の security-relevant な denial ではない) ので変えない。
-- 例外は commit 段 (pre_commit の allow 行の後に COMMIT が cancel される場合)。error 行を best-effort で追記する現行の形を維持するのは **transact と r2db の全経路に限る**。MitateDB の schema 操作は現行で `commit_failed` を呼ばない (§1.4 #7。D-9 で足す)。commit が実際に成立したかの判定は **【未確認 → M-4】** で、commit 段の契約文は M-4 の結果まで【保留】とする (§9.1)。
+- **execution_ms で拒否または打ち切られた要求は commit していない。** 予算の強制 (時計の検査と文の bound) はどちらも commit の前にしか働かない **【実測 2026-10-02: §12.1 (M-4)】**。従って `LIMIT_EXCEEDED` + `limit_class: execution_ms` を受け取った利用者は、要求が何も残していないと決められる。COMMIT が予算の外の原因 (運用者の cancel、接続断) で失敗した場合の audit の扱い (allow 行の後の error 行) は現行のままで、本書の範囲外。r2db は backend の except の 5 分岐 (§1.3 #9)、MitateDB は `cell.py` の `_error_row_once_fired` と transact・単一行の経路がそれぞれ error 行を書く (§1.4 #7・#8)。【訂正 2026-10-02 (v0.4)】 v0.2〜v0.3 の「MitateDB の schema 操作は `commit_failed` を呼ばない」は誤りで、削った (§11.3)。
 
 **D-4 エラーの形は既存のまま**: code `LIMIT_EXCEEDED`、`details.limit_class: execution_ms`。HTTP status は契約で未定義のまま (両 peer の 413 は conformance の cross-peer 証拠で固定済み)。新しい code (X-5)・新しい class (X-4)・新しい details key (X-8) は足さない。再送の可否は D-3 の保証 (何も残っていない) で足りる。既存の `details.futility` を付けるかは U-3。
 
-**D-5 文の途中で期限が来た要求は、実装の文の bound (`statement_timeout` / `lock_timeout`) で打ち切る (現行どおり)。** 打ち切りの結果は D-3 と同じ。
+**D-5 文の途中で期限が来た要求は、実装の文の bound (`statement_timeout` / `lock_timeout`) で打ち切る (現行どおり)。** 打ち切りの結果は D-3 と同じ。両 peer の形 (2 つの timeout を同値で設定) では、lock の待ちの超過は 57014 `query_canceled` になる (文の開始が lock 待ちの開始より先なので `statement_timeout` が先に満了する。`lock_timeout` 単独なら 55P03。両 peer は両方を捕まえている。M-6 **【実測 2026-10-02: §12.1】**)。
 - 上限の主張は**文の実行区間に限る**: 文の bound を「scope 入口の残り」で 1 回設定し (lock 待ちの後に再設定)、文の間は D-2 の時計検査で補う現行の形では、文の実行区間の合計は「残りの 2 倍未満」である (文 n は残りが尽きる前にしか始まらず、その文自身は入口の残りまで走れる) **【PG 文書 (未実測): 文ごとの計測】**。文ごとに bound を再設定すれば「残り + 1 文の分解能」になるが、文ごとに 1 往復が増える。→ U-2 で両論。
 - 文の実行区間の外は、次の別の上限で bound される:
   - 接続の確立: 上限は `connect_timeout`。MitateDB は `min(connect_timeout, max(1, ceil(残り)))` で psycopg の下限 2 s が掛かる (`pool.py:444-492`)。r2db は固定 5 s (`postgres.py:230`)。接続の確立の後に期限が切れていれば、D-2 (a) の検査 (pool 取得の後) が文の前で捕まえる。
   - audit sink への書き込み (別接続)。
-  - COMMIT (D-2 のとおり最後に設定した文の bound。lock 待ちの後の再設定を含む)。
+  - COMMIT: 予算でも文の bound でも bound されない (M-4)。両 peer とも deferred の仕事を持たないので、所要時間は WAL の書き出し。
 
 **D-6 契約の文言を足し、minor 版 1.15.0 (subordinate ruling 20) とする (推奨。→ U-4 で両論)。** 足す場所と記録:
-- execution_ms の節 (始点、待ちの算入、要求全体の予算、1 page = 1 要求、dry_run、「予算を使い切った要求は次の文を発行する前に拒否され、行・catalog・schema revision・idempotency 記録を残さない」)。置き場は U-9 (推奨 (a) `limits` の新 key `execution_ms`)。v0.1 では `limits.execution_ms` の新 key に置くと定めていたが、v0.2 (2026-10-02) で `conformance-tests/test_contract.py` の `_PRE_1_8_0_LIMITS_KEYS` の pin (`:137-146`、`:180-184`) が新しい sibling key を 1.8.0 の裁定として禁じていることがわかったので、U-9 に移した (§11 RV-14)。`errors.details_vocabulary.LIMIT_EXCEEDED` は変えない。選択肢ごとの pin: (a) は `_PRE_1_8_0_LIMITS_KEYS` の切り直し、(b) は `limits.profile` の endswith pin (`conformance-tests/test_contract.py:111-115`、`:177`) を 1.8.0 の文より前に挿入すれば保ち、末尾なら切り直す、(c) は `PIN_1_7_0_REQUEST_BUDGET` が包含照合 (`:2267-2268`) なので末尾追記なら保つ (U-9)。
-- `structured_operations.idempotency.record` には挿入しない。§9.1 の「no idempotency record」と義務 (c) で足りる。v0.1 の挿入案は、文中への挿入が `PIN_1_7_0_IDEMPOTENCY_RECORD` (`conformance-tests/test_contract.py:2165-2166`、包含で照合 `:2286`) を、末尾への追記が `PIN_1_8_0` の endswith (`:525-532`、`:578`) を壊すので削った (§11 RV-14。行番号はレビューの報告。基点で未照合)。
+- execution_ms の節 (始点、待ちの算入、要求全体の予算、1 page = 1 要求、dry_run、「予算を使い切った要求は次の文を発行する前に拒否され、行・catalog・schema revision・idempotency 記録を残さない」)。置き場は U-9 (推奨 (a) `limits` の新 key `execution_ms`)。v0.1 では `limits.execution_ms` の新 key に置くと定めていたが、v0.2 (2026-10-02) で `conformance-tests/test_contract.py` の `_PRE_1_8_0_LIMITS_KEYS` の pin (`:138-146`、`:180-184`) が新しい sibling key を 1.8.0 の裁定として禁じていることがわかったので、U-9 に移した (§11 RV-14)。`errors.details_vocabulary.LIMIT_EXCEEDED` は変えない。選択肢ごとの pin: (a) は `_PRE_1_8_0_LIMITS_KEYS` の切り直し、(b) は `limits.profile` の endswith pin (`conformance-tests/test_contract.py:111-115`、`:177`) を 1.8.0 の文より前に挿入すれば保ち、末尾なら切り直す、(c) は `PIN_1_7_0_REQUEST_BUDGET` が包含照合 (`:2267-2268`) なので末尾追記なら保つ (U-9)。
+- `structured_operations.idempotency.record` には挿入しない。§9.1 の「no idempotency record」と義務 (c) で足りる。v0.1 の挿入案は、文中への挿入が `PIN_1_7_0_IDEMPOTENCY_RECORD` (`conformance-tests/test_contract.py:2165-2166`、包含で照合 `:2286`) を、末尾への追記が `PIN_1_8_0` の endswith (`:525-532`、`:578`) を壊すので削った (§11 RV-14)。
 - `versioning.version_binding` の散文に 1.15.0 の段落 (無条件義務の列挙、「1.14.0 のままの実装は遡って縛られない」)、`versioning.obligations[]` に entry。段落の置き場は 1.14.0 の前例どおり「1.14.0 の段落の直後・version-flip 文の前」。
-- `structured_operations.dry_run.decision` に、execution_ms の拒否は dry run と real で同じとは限らない旨の相互参照の 1 文を追記する (§9.4。`PIN_1_7_0_DRY_RUN_DECISION` は包含照合なので追記で壊れない、レビューの報告。基点で未照合)。
+- `structured_operations.dry_run.decision` に、execution_ms の拒否は dry run と real で同じとは限らない旨の相互参照の 1 文を追記する (§9.4。`PIN_1_7_0_DRY_RUN_DECISION` は `conformance-tests/test_contract.py:2279` の包含照合で、`dry_run["decision"]` を見る pin はこの 1 件だけなので、追記で壊れない)。
 - 1.14.0 の前例どおりの記録: `spec/CONTRACT_HISTORY.md` の revision note (`:428` の Revision note 10 の形。既存の義務 1.7.0 (3) を狭めることも記録する)、`spec/CCR_DISPOSITION.md` の ruling 20 (`:343` の ruling 19 の形)。
 - 文言は候補として §9 に置き、依頼者が確定する。変える節に掛かる pin (U-9 の選択で決まる) を確定後に更新する (本 session では触らない)。
 
 **D-7 conformance で決定的に固定する: 新しい共通条件を 1 件足す** (番号は conformance の WP で採番し、C-35 の次を見込む。`tools/check_doc_refs.py` が未定義の C 族番号を参照切れとして止めるので本書では番号を書かない。先例 `docs/design/MULTI_PROCESS_WORKER_V0_1.md:766`。以下「新条件」)。性質は §6.2 の (i)〜(iii)。
 - 駆動 (i): 新 primitive は、契約の点で「rate・concurrency・budget の bound が確定した後、最初の接続取得の前」で止めると定義する。従って期限の検査と文のどちらよりも前である。受理点から stall 点までに検査が無いので `budget.execution_ms = 1` でよく、十分長く (例 100 ms) 保持して放すと、放した後の最初の検査で拒否される。
-- 駆動 (ii)(iii): stall 点に届くまでに文と検査がある (r2db は入口検査・`SET LOCAL`・key lock・lookup、plan 検証)。予算 B は「stall 点に届く」のに足りる値にし、保持は test が受け取る「stall 点に入った」合図 (`hold_after_idempotency_lookup` / `hold_after_plan_verification` の handle の既存の合図) の時点から B + 余裕 (例 B/5) を単調時計で測って放す。受理点は stall 点より前なので、放した時点で受理点からの経過は必ず B + 余裕以上である。test は「stall 点に入った」ことを assert し、届かずに先に拒否されたら赤にする (運用条件 §1.5 の 32 の空振り禁止)。B の値は作業機で stall 点到達までの時間を完了ゲートの負荷の下で測って決める (M-8。`docs/design/CODE_COMMENT_PROVENANCE_V1.md` §10.5 の教訓: 窓は `max_execution_ms / 5` の形 — ここで効いている予算は B なので、余裕は B/5)。
+- 駆動 (ii)(iii): stall 点に届くまでに文と検査がある (r2db は入口検査・`SET LOCAL`・key lock・lookup、plan 検証)。予算 B は「stall 点に届く」のに足りる値にし、保持は test が受け取る「stall 点に入った」合図 (`hold_after_idempotency_lookup` / `hold_after_plan_verification` の handle の既存の合図) の時点から B + 余裕 (例 B/5) を単調時計で測って放す。受理点は stall 点より前なので、放した時点で受理点からの経過は必ず B + 余裕以上である。test は「stall 点に入った」ことを assert し、届かずに先に拒否されたら赤にする (運用条件 §1.5 の 32 の空振り禁止)。「届かなければ赤」は handle の `wait_until_held` の timeout (30 s) で成り立つ (§6.4)。
+- B は作業指示書の conformance の WP で、完了ゲートの中での到達時間を測って決める。初期値の候補は 500 ms (無負荷の到達時間の最大 17.2 ms の約 30 倍。保持は B + B/5 = 600 ms。§12.4)。余裕を B/5 とするのは `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §10.5 の教訓 (窓は `max_execution_ms / 5` の形 — ここで効いている予算は B) による。
+- (iii) の plan を得る dry run は実要求と同じ budget を付ける: budget の無い dry run で得た plan を budget 付きの実要求に出すと、6 plug すべてで `PRECONDITION_FAILED` (`violated_declaration` は `plan`) になる (plan は budget を含む要求に束縛される。§12.4)。
 - (ii) の再送は budget を外して送る (digest が変わる)。従って「記録があれば `CONFLICT`、無ければ新規実行」で観測し、B の下での成功に依らない。
 - 各 vector に positive control (十分な予算で同じ保持 → 完了し効果が残る) を組にする (`docs/design/CONFORMANCE_ADAPTER_V1.md:40` の規則)。
 - **決定性の論法**: 拒否の方向は負荷に対して単調である — 放した時点で受理点からの経過が予算より長ければ、負荷はそれを更に長くするだけで短くしない。従って「放した後の拒否」は負荷で揺れない。**単調性が保証するのは放した後の拒否だけである。** stall 点への到達、(iii) の plan を得る dry run、(ii) の再送の成功は B の余裕に依る (成功の方向)。
-- (ii) は既存の `hold_after_idempotency_lookup` (lock 保持・効果 0 件で止める)、(iii) は既存の `hold_after_plan_verification` で駆動できる見込み。(i) の点で止める primitive は port v1.21 に無く、port v1.22 の新 primitive (仮称 `hold_after_admission`。ABC + 6 plug) が要る。
-- 観測: 応答だけでは「文を発行しなかった」と「1 ms で cancel された」を区別できない。primitive の handle が「放した後に要求のために発行された文の数」(D-2 の定義の文。要求が保持するすべての接続。pool 維持の文を除く手段は §6.4) を返す形を候補にする (台帳 R-79 の `execute_count` が接続ごとの文の数を既に数えている)。in-process 2 plug では文の数を観測できない (§6.4)。→ U-5。
+- (ii) は既存の `hold_after_idempotency_lookup` (lock 保持・効果 0 件で止める)、(iii) は既存の `hold_after_plan_verification` で駆動できる (修正前の計測で 6 plug とも stall 点に 20/20 到達。§12.4)。ただし stall 点の定義と 4 実装を port v1.22 で揃える (§6.4)。(i) の点で止める primitive は port v1.21 に無く、port v1.22 の新 primitive (仮称 `hold_after_admission`。ABC + 6 plug) が要る。
+- 観測: 応答だけでは「文を発行しなかった」と「1 ms で cancel された」を区別できない。primitive の handle が「放した後に要求のために発行された文の数」(D-2 の定義の文。要求が保持するすべての接続。pool 維持の文を除く手段は §6.4) を返す形を候補にする (台帳 R-79 の `execute_count` が接続ごとの文の数を既に数えている)。既存 handle は文の数を持たない (§6.4)。in-process 2 plug では文の数を観測できない (§6.4)。→ U-5。
 - `limit_enforcement.execution_ms` による分岐は置かない (§6.2 の註)。
 - C-05 の開示「execution_ms never driven」は新条件を指す形に書き換える (§6.5)。`security/CONTROL_MAPPING.md` に両 peer の「文発行前の拒否」「rollback」の claim を足す (実装 WP の仕事)。
 
@@ -143,8 +162,8 @@
 
 **D-9 実装の義務 (本書は列挙だけ。作業指示書は裁定後)**:
 - r2db — 入口検査 (`postgres.py:1498`、`:1613`) を pool 取得の後へ**移す** (足すのではなく置き換える。検査点は 1 つになる)。apply_schema も同じ位置に 1 つ置く。pool 取得に期限の残りを渡し超過を `LIMIT_EXCEEDED` execution_ms に写す (→ U-6)。advisory lock 待ち後の再検査と再設定、operation loop・DDL・store の前 (pre_commit より前) の検査。`_timeout_ms` は残り 1 ms 未満で `LIMIT_EXCEEDED` を上げ、0 を返さない。`query` の SELECT 後の検査 (`postgres.py:1554`) は U-8 (a) なら外す。
-- MitateDB — `request_scope` 入口 (pool 取得後) の検査、文の間の検査、`_retime` の閾値を D-2 に揃える、`_timeout_ms` を D-2 の形にする、transact の commit / `record_idempotency` の psycopg 例外の翻訳 (→ U-6)。`SET LOCAL` (`backend_postgres.py:493-500`) と `_retime` (`:544-552`) の `QueryCanceled` / `LockNotAvailable` を execution_ms に写す。schema 4 経路の cancel 分岐に `commit_failed` を足す (§1.4 #7)。schema 3 経路 (`backend_postgres.py:1058→1069→1070`、`:1204→1229→1230`、`:1372→1382→1383`。`:1204` 系は照合済み、他 2 つはレビューの報告。基点で未照合) の `_write_idempotency_row` を `pre_commit` の前へ移し、r2db (`postgres.py:1725→1733`、`:2416→2426`) と transact の順序 (store → pre_commit → COMMIT) に揃える。U-8 (b) なら read の SELECT 後に検査を足す。
-- この `commit_failed` の欠けは R-42 と独立の audit 証跡の欠陥なので、台帳に起票する (R-N は作業機で採番)。
+- MitateDB — 最優先の欠陥は、文の間の検査が無く、予算を過ぎた要求が commit することである (§1.5、§12.2、§12.4)。`request_scope` 入口 (pool 取得後) の検査、文の間の検査、`_retime` の閾値を D-2 に揃える、`_timeout_ms` を D-2 の形にする、`record_idempotency` (`backend_postgres.py:1817-1825`) の psycopg 例外の翻訳 (文なので範囲内)。`SET LOCAL` (`backend_postgres.py:493-500`) と `_retime` (`:544-552`) の `QueryCanceled` / `LockNotAvailable` を execution_ms に写す。schema 3 経路 (`backend_postgres.py:1058→1069→1070`、`:1204→1229→1230`、`:1372→1382→1383`) の `_write_idempotency_row` を `pre_commit` の前へ移し、r2db (`postgres.py:1725→1733`、`:2416→2426`) と transact の順序 (store → pre_commit → COMMIT) に揃える (`_error_row_once_fired` があっても、pre_commit の後の文が予算で cancel されると allow + error の 2 行が残る経路が開いたままになるため)。U-8 (b) なら read の SELECT 後に検査を足す。
+- 【訂正 2026-10-02 (v0.4)】 v0.2〜v0.3 の「schema 4 経路の cancel 分岐に `commit_failed` を足す」「この欠けを台帳に起票する」「transact の commit の psycopg 例外の翻訳」を削った。前 2 つは呼び出し側の `_error_row_once_fired` が既に error 行を書くため (§1.4 #7。台帳 v1.151 の R-42 行)、3 つ目は commit が予算の外にあるため (M-4)。
 - 両 peer — 閾値を D-2 (残り < 1 ms) に揃える: `check_deadline` (r2db `limits.py:100` は `clock() > deadline`)、SQLite の `_check_deadline` (strict `>`)、r2db の in-memory backend。
 - 両 peer — 変異: 各検査点を外すと新条件の対応 vector が赤になること (観測は D-7 の文の数。見込みは §6.6)。
 - 共通条件で駆動しない検査点 — D-2 (b) lock 待ちの後、[U-8 (b)] (d) pre_commit の前、U-6 (a) の pool 待ち超過の写像、閾値 — は peer の単体テストで固定する (r2db は clock の注入、MitateDB は test 側での `time.monotonic` の差し替え。製品コードに hook は足さない)。義務 (a) (待ちを数え、受理点より遅く始めない) の証拠もこの単体テストと `security/CONTROL_MAPPING.md` の claim で取る (§6.4)。完了条件 → 変異の対応は作業指示書で確定する (運用条件 §1.5 の 40)。SQLite / in-memory backend は同じ意味論。
@@ -158,7 +177,7 @@
 | X-3 | 計測の始点を「最初の文」にして待ちを数えない | 利用者に見える所要時間が予算と無関係になり、pool・lock の保持が予算で bound されない。MitateDB の現行の読み (待ち超過 = 予算超過) とも逆行。U-1 の選択肢としては残す |
 | X-4 | 待ちを別の limit class (例 `queue_ms`) にする | `limits.classes` の語彙に新語が要り (1.2.0 の規則)、利用者が 2 つの予算を推論する。安全の結果は増えない。U-1 の選択肢としては残す |
 | X-5 | 文の途中の期限切れを `ATOMICITY_FAILED` で返す | 契約はこの code の意味を定義していない。両 peer の現物は `LIMIT_EXCEEDED` で、limit_class が原因を伝える |
-| X-6 | PostgreSQL 17 の `transaction_timeout` を使う (transaction 全体の上限を 1 回で設定) | CI は `postgres:16`。作業機の版も未確認。将来の選択肢として M-2 に残す |
+| X-6 | PostgreSQL 17 の `transaction_timeout` を使う (transaction 全体の上限を 1 回で設定) | CI は `postgres:16`。作業機も 16.14 (M-2、§12.1)。将来の選択肢として M-2 に残す |
 | X-7 | conformance のために製品コードに test 用 hook や clock 注入を足す (MitateDB には clock 注入が無い) | `docs/design/CONFORMANCE_ADAPTER_V1.md` の規律 (adapter の primitive で駆動し、製品コードに test 用 hook を足さない) に反する。stall primitive で実時間を経過させれば決定的に拒否側へ倒せる (D-7 の単調性) |
 | X-8 | 新しい details key (`stage` / `executed` など) で「どこで予算が尽きたか」を返す | 既存の `futility` で足り、`details` の語彙を増やさない |
 
@@ -167,10 +186,11 @@
 **U-1 計測の始点と待ちの算入**
 - (a) 受理点から、待ちをすべて数える (**推奨**。D-1)。
   - 利点: 実装が制御する所要時間を 1 つの予算で bound する。両 peer の現行の計算点のままで、新しい class が要らない。
-  - 欠点: 認証・body 解析の時間は数えない (大きさは M-7)。pool・lock の待ちは他要求の負荷で伸びるので、同じ要求が負荷で拒否され得る (再送は D-3 で安全)。
+  - 欠点: 受理点の前は数えない: 逐次で r2db 約 0.5 ms・MitateDB 約 5 ms (うち認証 p50 0.23〜0.25 ms / 2.4〜2.6 ms)、32 並列では受理点の前の待ち (worker thread の順番待ち) が p50 53〜78 ms・max 101〜113 ms (M-7、§12.3。in-process の ASGI で、uvicorn・TLS・reverse proxy を含まない)。pool・lock の待ちは他要求の負荷で伸びるので、同じ要求が負荷で拒否され得る (再送は D-3 で安全)。
+  - 推奨の理由: 契約は「遅くとも受理点」と定め、実装がより早く数え始めることを許す。受理点の前の待ちは配備の資源保護 = 台帳 R-31 の範囲で、execution_ms の意味論に入れると実装が HTTP 層の待ちを観測する義務を負う。
 - (b) 受信時から (認証・body の解析も数える)。
   - 利点: より厳しく、利用者に見える所要時間に最も近い。
-  - 欠点: HTTP 層の実装に依る。(a) との差の大きさは未確認 (M-7)。
+  - 欠点: HTTP 層の実装に依る。(a) との差は逐次で約 0.5 ms (r2db)・約 5 ms (MitateDB)、既定 5000 ms の 0.01〜0.1%。32 並列で p50 53〜78 ms (§12.3)。
 - (c) 最初の文から (待ちを数えない。X-3)。
   - 利点: 予算が文の実行だけを指し、待ちの長さで拒否されない。
   - 欠点: 利用者に見える所要時間が予算と無関係になり、pool・lock の保持が予算で bound されない。MitateDB の現行の読みと逆行する。
@@ -180,8 +200,8 @@
 
 **U-2 文の途中の期限切れの上限 (文の実行区間。区間外は D-5)**
 - (a) 現行の形 + 文の間の時計検査 (上限 < 残りの 2 倍。往復を足さない。**推奨**)。
-- (b) 文ごとに `SET LOCAL` を再設定 (上限 ≒ 残り。文ごとに 1 往復。費用は M-3 で測る)。
-- (c) PostgreSQL 17 の `transaction_timeout` (X-6、M-2)。
+- (b) 文ごとに `SET LOCAL` を再設定 (上限 ≒ 残り。文ごとに 1 往復)。要求あたり 3〜15 往復を足す。見積もりの下限は 1 往復 11 µs × 文の数 = +0.03〜0.17 ms、上限の目安は現在の DB 時間の倍 = +0.36〜0.95 ms (http plug の p50 1.2〜1.9 ms の 2〜50%)。実装して測った値ではない (M-3、§12.1・§12.5)。決定軸 (往復を足さない) に反する点は変わらない。
+- (c) PostgreSQL 17 の `transaction_timeout` (X-6)。作業機の 16.14 に `transaction_timeout` は無い (M-2、§12.1)。
 - 契約文言は (a) でも成り立つ弱さにする (「文の途中で尽きた予算は実装の文の bound で打ち切られ、その bound は設定時の残りを超えない」)。
 
 **U-3 再送可否の伝達** (v0.1 の推奨は (b)。v0.2 (2026-10-02) で (a) に移した — §11 RV-16)
@@ -197,26 +217,25 @@
 **U-5 conformance の範囲**
 - (a) 新条件の (i)〜(iii) を全部、port v1.22 の新 primitive を含めて (**推奨**。(i) が台帳 R-42 の候補そのもの)。
 - (b) 既存 primitive で駆動できる (ii)(iii) だけを先に、(i) は後続。
-- (c) 観測の形: handle が「放した後に発行された文の数」を返す (**推奨**) / 応答 code だけ (変異の赤が確率的になる)。in-process の MitateDB SQLite plug には、SQLite の trace callback で文を数える代替がある (r2db の in-memory plug には文が無い)。
+- (c) 観測の形: handle が「放した後に発行された文の数」を返す (**推奨**) / 応答 code だけ (r2db の 3 plug と MitateDB の SQLite plug は修正前から期待どおりの code を返すので、D-2 の検査点を外す変異がこの 4 plug で常に生き残る。M-8)。in-process の MitateDB SQLite plug には、SQLite の trace callback で文を数える代替がある (r2db の in-memory plug には文が無い)。
 
-**U-6 pool 待ち超過・接続確立・commit 段の code**
+**U-6 pool 待ち超過・接続確立の code**
 - pool 待ち: (a) 予算を超えたら両 peer とも `LIMIT_EXCEEDED` execution_ms (**推奨**。MitateDB の現行は上限到達の `PoolExhausted` だけ。r2db は 503 から変える)。(b) r2db の現行 (503 `SERVICE_UNAVAILABLE`) を許す (peer で分かれる)。
-- 接続確立の時間切れ・失敗: (a) 予算由来の connect timeout の超過は 413 execution_ms。(b) 503 のまま (MitateDB の現行 `PoolConnectFailed`、§1.4 #2)。
-- commit 段: (a) 予算による cancel は commit 段でも `LIMIT_EXCEEDED` execution_ms (**推奨**。r2db の現行。MitateDB は 503 から変える)。(b) commit 段は `SERVICE_UNAVAILABLE` (MitateDB の現行)。
-- commit が成立したかの判定は M-4 の結果に依る。
+- 接続確立の時間切れ・失敗: (a) 予算由来の connect timeout の超過は 413 execution_ms。(b) 503 のまま (MitateDB の現行 `PoolConnectFailed`、§1.4 #2)。材料: `security/CONTROL_MAPPING.md:1023` (pool・lock の待ちの超過は `LIMIT_EXCEEDED`、到達不能は `SERVICE_UNAVAILABLE`) は現物と合うが、新規接続の確立が予算を超えた場合がどちらの句に入るかを述べていない。
+- 【v0.4 で削除: 予算による commit 段の cancel は存在しない (M-4)】
 
 **U-7 閾値**
 - (a) 残り < 1 ms (整数 ms で 0) で拒否 (**推奨**。D-2)。
 - (b) 残り ≤ 0 で拒否し、0 < 残り < 1 ms は 1 ms で発行 (現行の `_retime`)。
-- (c) 残り < 安全余裕 (例 5 ms) で拒否。利点: D-2 の範囲の外に残る「残り 1 ms 以上・文の所要時間未満」の帯 (負荷で 200 / 413) を狭める。欠点: 契約で数を決めることになる。
+- (c) 残り < 安全余裕 (例 5 ms) で拒否。利点: D-2 の範囲の外に残る「残り 1 ms 以上・文の所要時間未満」の帯 (負荷で 200 / 413) を狭める (M-1: 1 ms を超える文は 1.04〜1.37 ms で cancel される。§12.1)。欠点: 契約で数を決めることになる。
 
 **U-8 最後の文が完了した後の時計検査**
-- (a) 検査しない — 結果は要求自身の最後の文の完了で決まり、その後は時計で拒否しない。**(a) では D-2 (d) を置かない**: 最後の文の後は pre_commit → COMMIT と進み、COMMIT は最後に設定した文の bound でだけ打ち切られる (r2db は `postgres.py:1554` の検査を外す) (**推奨**: 文の bound で既に資源は bound されており、完了した仕事を捨てて利用者に何も返さないのは自由の損失)。
+- (a) 検査しない — 結果は要求自身の最後の文の完了で決まり、その後は時計で拒否しない。(a) では D-2 (d) を置かない: 最後の文の後は pre_commit → COMMIT と進む (r2db は `postgres.py:1554` の検査を外す) (**推奨**: 文の実行は文の bound で既に bound されており、完了した仕事を捨てて利用者に何も返さないのは自由の損失。現物の r2db は (b) の形で、仕事が終わっているのに 413 になる回が負荷で変わる (M-1: 残り 0.6 ms の軽い query が 200 21/50・413 29/50。§12.2))。
 - (b) 検査する — (d) を置き、read は SELECT の後にも検査する。予算を wall-clock の上限として厳密に読む (r2db の現行。MitateDB は read の SELECT 後に検査を足す)。
-- どちらも決定的 (境界の位置が違うだけ)。§9.1 の差し替えは [U-8 (a)] の印。
+- どちらも決定的 (境界の位置が違うだけ)。どちらを選んでも commit は bound されない (M-4)。§9.1 の差し替えは [U-8 (a)] の印。
 
 **U-9 `limits.execution_ms` の置き場**
-- (a) `limits` の新 key `execution_ms` (per-class の key の先例 `enum_members`)。ただし `conformance-tests/test_contract.py:137-146`・`:180-184` の `_PRE_1_8_0_LIMITS_KEYS` は「新しい sibling key を置かない」を 1.8.0 の裁定として pin しており、pin の切り直しに依頼者確認が要る (**推奨**)。
+- (a) `limits` の新 key `execution_ms` (per-class の key の先例 `enum_members`)。ただし `conformance-tests/test_contract.py:138-146`・`:180-184` の `_PRE_1_8_0_LIMITS_KEYS` は「新しい sibling key を置かない」を 1.8.0 の裁定として pin しており、pin の切り直しに依頼者確認が要る (**推奨**)。
 - (b) `limits.profile` の文字列の中 (1.8.0 (2) の先例)。`limits.profile` は endswith の pin (`conformance-tests/test_contract.py:111-115`、`:177`) を持つ。1.8.0 の文より前に挿入すれば pin はそのまま、末尾なら切り直す。
 - (c) `limits.request_budget` の末尾。`request_budget` の `PIN_1_7_0` は包含照合 (`:2267-2268`) なので、末尾追記なら pin はそのまま。
 
@@ -227,9 +246,9 @@
 - C-05 は「2 classes never driven -- `execution_ms`, `idempotency_retention_ms` (no deterministic construction / not enabled)」と開示する (`conformance-tests/CONDITIONS.md:34`、D-6.2/§7.3)。
 - C-24 は execution_ms を駆動せず、宣言 unavailable の budget=1 → `CAPABILITY_UNSUPPORTED` と、配備値 + 1 → `VALIDATION_FAILED` だけを使う (`conformance-tests/test_c24_request_budget.py:40-41`)。
 - port v1.21 の stall primitive (`conformance-tests/adapter.py`): `hold_in_flight` (`:1810`。plug 自身の catalog 読みを止める。budget も operation も指定できない)、`hold_after_idempotency_lookup` (`:1901`。caller が出す budget 付き mutation を idempotency 受理区間の末尾 = lock 保持・効果 0 件で止める。C-27 の primitive)、`hold_after_plan_verification` (`:1965`。schema 操作を DDL 前で止める)。clock の注入・期限を操る手段は port に無い。
-- 6 adapter: in-process と http の各 plug は個別実装。socket 2 本は http plug の subclass で同一 process 内の cell を差し替えるので、stall は socket 越しでも効く (r2db socket は読解の報告で確認、MitateDB socket は未確認)。
-- port の設計原則は `docs/design/CONFORMANCE_ADAPTER_V1.md` の §2 (negative test に positive control を組にする規則は `:40`)。port 拡張の規則 (新節 + ABC の `@abstractmethod` + 全 plug の実装 + 製品コードに test 用 hook を足さない) は同書 §25 (`:3461-3472`) の形。
-- `security/CONTROL_MAPPING.md`: r2db `_set_timeouts` が execution_ms を `statement_timeout`/`lock_timeout` に写す second enforcement layer (`:659`)。MitateDB は期限を `SET LOCAL` に写し、pool・lock 待ちが期限を超えれば `LIMIT_EXCEEDED` execution_ms (`:852`、`:869-870`、`:1023`)。ただし現物では接続確立の経路は `PoolConnectFailed` → 503 で (§1.4 #2)、`:1023` の claim と合わない (レビューの報告。基点で未照合)。「文発行前の拒否」「1 ms」「rollback の保証」は claim されていない。
+- 6 adapter: in-process と http の各 plug は個別実装。socket 2 本は http plug の subclass で `hold_*` を自前で定義せず (`r2db-api/conformance/conformance_adapter_r2db_socket.py:477`、`MitateDB-api/conformance/conformance_adapter_mitatedb_socket.py:338`)、同一 process 内の cell を差し替えるので、stall は socket 越しでも効く (両 socket plug で確認済み。§12.4)。
+- port の設計原則は `docs/design/CONFORMANCE_ADAPTER_V1.md` の §2 (negative test に positive control を組にする規則は `:40`)。port 拡張の規則: 同書 §25 の導入 (`:3461-3472`) が明文で定めるのは「test 用 hook を製品コードに足さない」「追加のみ」で、ABC の `@abstractmethod` と全 plug の実装は既存 primitive の実際の形である (同書の導入の明文ではない)。
+- `security/CONTROL_MAPPING.md`: r2db `_set_timeouts` が execution_ms を `statement_timeout`/`lock_timeout` に写す second enforcement layer (`:659`)。MitateDB は期限を `SET LOCAL` に写し、pool・lock 待ちが期限を超えれば `LIMIT_EXCEEDED` execution_ms (`:852`、`:869-870`、`:1023`)。`:1023` は現物と合う (pool 上限到達の待ち超過は 413、到達不能は 503、§1.4 #2)。新規接続の確立が予算を超えた場合は述べていない (U-6)。「文発行前の拒否」「1 ms」「rollback の保証」は claim されていない。
 
 ### 6.2 新条件の候補文 (候補。文言は契約の確定後に CONDITIONS.md の形で書く)
 
@@ -243,21 +262,24 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 |---|---|---|---|---|
 | (i) 受理点の後・最初の接続取得の前 | port v1.22 の新 primitive (仮称 `hold_after_admission`) | `budget.execution_ms = 1` の要求。保持は例 100 ms | code・limit_class、放した後の文の数 = 0 (U-5 (c)) | 十分な予算で同じ保持 → 完了し効果が残る |
 | (ii) 文の間 | `hold_after_idempotency_lookup` (既存) | `budget.execution_ms = B` の idempotency_key 付き mutation。保持は「stall 点に入った」合図から B + 余裕 | 「stall 点に入った」こと、code・limit_class、行が残らないこと、budget を外した同 key の再送が `CONFLICT` でなく新規実行になること、文の数 | 同上 |
-| (iii) DDL の前 | `hold_after_plan_verification` (既存) | `budget.execution_ms = B` の plan 付き schema 操作。保持は「stall 点に入った」合図から B + 余裕 | 「stall 点に入った」こと、code・limit_class、revision が動かないこと、文の数 | 同上 |
+| (iii) DDL の前 | `hold_after_plan_verification` (既存) | `budget.execution_ms = B` の plan 付き schema 操作 (plan は同じ budget を付けた dry run で得る、D-7)。保持は「stall 点に入った」合図から B + 余裕 | 「stall 点に入った」こと、code・limit_class、revision が動かないこと、文の数 | 同上 |
 
-- B と余裕・保持の測り方は D-7。決定性の論法は D-7 の単調性 (保証は放した後の拒否だけ)。B の決定と実証は M-8。
+- B と余裕・保持の測り方は D-7 (B は conformance の WP で決める。初期値の候補 500 ms)。決定性の論法は D-7 の単調性 (保証は放した後の拒否だけ)。修正前に測れる分の実証は §12.4、残り (100/100、vector (i)、完了ゲートの負荷の下の B) は M-8。
 - 費用の見積もり: 1 plug あたり (i) 0.1 s ×2 (positive control 込み) + (ii)(iii) 1.2B ×2 ×2 ≒ 0.2 + 4.8B s、6 plug で 6 × (0.2 + 4.8B) s (直列。例 B = 0.5 s なら約 16 s)。保持は budget で選ぶ B に比例し、配備の execution_ms (既定 5000) には比例しないので、運用条件 §1.6 の 44 (構成値に比例しない形) に反しない。
 
 ### 6.4 port v1.22 の候補
 
 - 新 primitive (仮称 `hold_after_admission`): caller が出す budget 付き要求を、契約の点で「rate・concurrency・budget の bound が確定した後、最初の接続取得の前」で止める。ABC の `@abstractmethod` + 6 plug の実装 + `docs/design/CONFORMANCE_ADAPTER_V1.md` の新節。製品コードに test 用 hook を足さない (X-7)。
 - handle の候補: 放した後に plug の backend が発行した文の数を返す (台帳 R-79 の `execute_count`。両 peer の `psycopg_counting.py`)。観測は「放した後に要求のために発行された文が 0 件」と定義する (D-2 の定義の文。要求が保持するすべての接続)。`execute_count` は pool 維持の文 (r2db の checkout ごとの `SELECT 1`、新規接続の `SET search_path`) も数えるので、それを除く手段は port の設計で決める。候補: 計数 cursor が文の本文を記録して pool 維持の文を除く / 計測前に pool を warm にして新規接続を無くす。いずれも製品コードに test 用 hook を足さない (X-7) 形に限る。既存の 2 primitive の handle にも同じ値を持たせるかは U-5 の裁定に従う。
-- 既存 2 primitive (`hold_after_idempotency_lookup`、`hold_after_plan_verification`) の逐語 docstring は「放した後に実行・記録・commit まで進む」と約束している (例 `hold_after_idempotency_lookup`:「`with` を抜けると先着は解放され、実行・記録・commit まで進む。」、レビューの報告。基点で未照合)。vector (ii)(iii) はこれを拒否の駆動に使うので、docstring の改訂 (確定文の経路、運用条件 §1.5 の 35) を port v1.22 に含める。
+- 既存 handle は文の数を持たない: `IdempotencyHold` (`conformance-tests/adapter.py:997-1022`) と `PlanVerificationHold` (`:1026-1049`) は `wait_until_held(timeout_s=30.0) -> int` だけを持ち、4 つの実装すべてで戻り値は定数 1。stall 点より前に拒否されると `wait_until_held` は timeout (30 s) まで待って `AssertionError` を上げる (「届かなければ赤」は成り立つが 30 s 掛かる)。
+- 既存 2 primitive の docstring: 放した後の約束は `hold_after_idempotency_lookup` だけにある (`conformance-tests/adapter.py:1902`:「`with` を抜けると先着は解放され、実行・記録・commit まで進む。」)。`hold_after_plan_verification` (`:1966`) は「`with` を抜けると先着は解放される。」だけで、2 件目について「先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない」と書いており、先着の拒否を既に許す形である。従って port v1.22 で改訂する docstring は `hold_after_idempotency_lookup` の 1 文 (確定文の経路、運用条件 §1.5 の 35) で、`hold_after_plan_verification` は「先着が `LIMIT_EXCEEDED` で拒否される」場合を 2 件目の記述に足すかどうかを port の設計で決める。
+- stall 点は plug で違う: (ii) で r2db の 2 実装 (`r2db-api/conformance/conformance_adapter_r2db.py:339-344`、`r2db-api/conformance/conformance_adapter_r2db_http.py:893-898`) は `_idempotency_reserve` の**入口** (予約を取る前) で止まり、MitateDB の 2 実装 (`MitateDB-api/conformance/conformance_adapter_mitatedb.py:534-545`、`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py:867-873`) は `_idempotency_check` が戻った後 (照会と予約の後) で止まる。port の docstring (`conformance-tests/adapter.py:1902`) は「予約を取り終え」と書いており、r2db の実装はこれと合わない。(iii) も、r2db in-process は `compute_plan_token` の後 (`r2db-api/conformance/conformance_adapter_r2db.py:410-414`)、r2db-http は `_read_schema_revision` の後 (`r2db-api/conformance/conformance_adapter_r2db_http.py:960-964`) で plan の照合より前、MitateDB は backend の DDL メソッドの入口 (`MitateDB-api/conformance/conformance_adapter_mitatedb.py:612-616`) で plan 検査の後。
+  - 監督裁定 (2026-10-02): 直す — port v1.22 の WP で、(ii)(iii) の stall 点の定義 (docstring) と 4 実装を一致させる。新条件の vector は「放した後に発行された文の数 = 0」を見るので、stall 点が plug で違うと「放した後の最初の文」が plug で違い、変異の対応が plug ごとにずれる。既存の C-27 と plan 検証のテストへの影響 (r2db では key lock を保持しているので 2 件目は待つ) は port の設計で確かめる。
 - plug ごとの観測:
 
 | plug | backend | 文の数 | 新条件で見るもの |
 |---|---|---|---|
-| r2db in-process | in-memory `structured.ApplicationCell` (文が無い。`r2db-api/conformance/conformance_adapter_r2db.py:394`、レビューの報告。基点で未照合) | 対象外 (常に 0) | code・limit_class だけ |
+| r2db in-process | in-memory `structured.ApplicationCell` (文が無い。`r2db-api/src/r2db_api/service.py:76-77` の `_default_cell_factory` と、adapter が cell_factory 無しで `DataService` を作る `r2db-api/conformance/conformance_adapter_r2db.py:469`) | 対象外 (常に 0) | code・limit_class だけ |
 | MitateDB in-process | SQLite (psycopg を通らない) | 対象外 (代替は SQLite の trace callback、U-5 (c)) | code・limit_class だけ |
 | r2db-http / r2db-socket | PostgreSQL | `execute_count` | code・limit_class・文の数 |
 | MitateDB-http / MitateDB-socket | PostgreSQL | `execute_count` | code・limit_class・文の数 |
@@ -268,7 +290,7 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 
 - C-05 の Disclosed scope limits (1) の `execution_ms` を「never driven」から「新条件で駆動」を指す形に改める。`idempotency_retention_ms` の開示はそのまま。
 - 同じ形に改める: C-24 の行 (`conformance-tests/CONDITIONS.md:53`) の「`execution_ms` is not driven at all」、`conformance-tests/test_c24_request_budget.py:40-41` の同文、`security/CONTROL_MAPPING.md:1141` の「never driven by this suite」。
-- `security/CONTROL_MAPPING.md` の書き換え対象 (いずれもレビューの報告。基点で未照合): `:659` (「per transaction」の記述。lock 待ち後の再設定と D-2 の検査に合わせる)、`:852` (引く行番号 `backend_postgres.py:1687-1696` が古い。現物の `_timeout_ms` は `:1681-1685`)、`:870`、`:1023` (接続確立の経路は現物では 503。U-6 の裁定に合わせる)。
+- `security/CONTROL_MAPPING.md` の書き換え対象: `:659` (「per transaction」の記述。lock 待ち後の再設定と D-2 の検査に合わせる)、`:852` (引用の範囲を `backend_postgres.py:1687-1698` に直す。`:1687` は `_set_timeouts` の def、`SET LOCAL` の組み立てと実行は `:1695-1698`。実装 WP で行が動くので、そのときに取り直す)、`:870`、`:1023` (U-6 の接続確立の裁定に合わせる)。
 - CONDITIONS の行を変えるときは、`conformance-tests/CONDITIONS.md` 冒頭の Update convention どおり、現行行を書き換え、旧文を `conformance-tests/CONDITIONS_HISTORY.md` の該当 ID の節へ逐語で移す。
 
 ### 6.6 変異の対応の見込み (運用条件 §1.5 の 40。表は作業指示書で確定する)
@@ -284,34 +306,34 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 | MitateDB schema 3 経路の順序を戻す (pre_commit の後に idempotency を書く。D-9) | — | — | — | 赤 |
 | pool 待ち超過の写像を外す (U-6 (a) のとき) | — | — | — | 赤 |
 
-- in-process 2 plug では、単一の検査点の変異は後段の検査が同じ code で拒否するので観測できない。殺すのは PG plug の文の数と peer 単体テスト (§6.4 の表)。
+- in-process 2 plug では、単一の検査点の変異は後段の検査が同じ code で拒否するので観測できない。殺すのは PG plug の文の数と peer 単体テスト (§6.4 の表)。r2db の http・socket plug も、応答の code だけでは (ii)(iii) が修正前から緑になる (§12.4、U-5 (c))。
 
 ## 7. Security Invariants との関係
 
 新しい不変条件は足さない (§2、`CLAUDE.md`)。
 
-`security/THREAT_MODEL_V1.md` (:100-138) との関係: T-07 (資源枯渇。connections を含む) — execution_ms が pool・lock の待ちを含めて 1 要求の保持を bound する (D-1、D-5)。T-08 (エラーによる情報開示) — `futility` を付けるなら内部情報を含めない (U-3 (b)、SI-10)。T-09 (並行・部分失敗による不整合) — 打ち切られた要求が行・idempotency 記録を残さない (D-3、新条件 (ii)(iii))。T-14 (security evidence の欠落) — MitateDB schema 操作の `commit_failed` の欠け (D-9 の起票)。
+`security/THREAT_MODEL_V1.md` (:100-138) との関係: T-07 (資源枯渇。connections を含む) — execution_ms が pool・lock の待ちを含めて 1 要求の保持を bound する (D-1、D-5)。T-08 (エラーによる情報開示) — `futility` を付けるなら内部情報を含めない (U-3 (b)、SI-10)。T-09 (並行・部分失敗による不整合) — 打ち切られた要求が行・idempotency 記録を残さない (D-3、新条件 (ii)(iii))。T-14 (security evidence の欠落) — error 行の保証は現行のまま (r2db は backend の except 分岐、MitateDB は `_error_row_once_fired`)。変更なし。
 
 | SI | 関係 |
 |---|---|
 | SI-08 | Verification 句の「deterministic rejection or termination」を execution_ms について初めて検証可能にする (新条件)。C-05 の文「over-bound requests terminate deterministically」の execution_ms の欠けを埋める |
 | SI-11 | 打ち切りが部分状態を残さない。既存の atomic の検証に期限切れの vector が加わる (新条件の (ii)(iii)) |
 | SI-10 | `futility` を付けるなら (U-3 (b))、その文は内部情報を含めない。SQL・lock 名・pool の寸法を書かない |
-| SI-14 | `LIMIT_EXCEEDED` は耐久 denial ではない。変更なし。MitateDB schema 操作の `commit_failed` の欠け (D-9) は別件として起票する |
+| SI-14 | `LIMIT_EXCEEDED` は耐久 denial ではない。変更なし。error 行の保証は T-14 の段のとおり現行のまま |
 | SI-15 | 関係なし (認可の fail-closed ではない) |
 
 ## 8. 作業機で測る項目 (cloud では測らない)
 
-| ID | 項目 | 効く先 |
-|---|---|---|
-| M-1 | 1 ms 経路の再現 (両 peer): `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §10.5 の plugin 法 (`_set_timeouts` の記録) を r2db にも当て、§1.5 の各経路で `timeout_ms == 1` が出ることを修正前に記録する。MitateDB では 200 / 413 / 503 に分かれること、`SET` 自体が 1 ms で cancel され得るかも記録する | §1.5、D-2、D-9 |
-| M-2 | 作業機と配備の PostgreSQL の版。17 以上なら `transaction_timeout` の可否 | X-6、U-2 (c) |
-| M-3 | 文ごとの `SET LOCAL` 再設定の費用: `tools/perf_baseline.py --roundtrip` (台帳 R-80) で K=1 と K=32、6 plug | U-2 (b) |
-| M-4 | 検証用 DB で COMMIT 自体を遅くする構成 (deferred constraint trigger に `pg_sleep` を置く等) で、`statement_timeout` が COMMIT を cancel したとき transaction が commit 済みになり得るかを PostgreSQL の文書と実測で確かめる | D-3 の commit 段、§9.1 の【保留】、U-6 |
-| M-5 | 台帳 R-102 後の MitateDB の advisory lock 待ちと pool 待ちの分布 (台帳 R-78 の値は cell lock 廃止前)。既定 5000 ms に対する余裕の確認 | D-1、U-1 |
-| M-6 | advisory lock の `lock_timeout` 超過の SQLSTATE (55P03 `lock_not_available` か 57014 `query_canceled` か)。両 peer は両方を捕まえているが、記録として 1 回確かめる | §1.3 の 8、§1.4 の 4 |
-| M-7 | 受信から受理点までの時間 (認証・body 解析) の実測 | U-1 (a) と (b) の差 |
-| M-8 | 新条件の駆動の確認。(i): `budget.execution_ms = 1`、保持 100 ms で、完了ゲートの負荷の下でも 6 plug すべてで拒否が 100/100 になること。(ii)(iii): 完了ゲートの負荷の下で受理点から stall 点到達までの時間と、(iii) の plan を得る dry run が B の下で完了する時間を 6 plug で測り、B を決める (余裕は B/5 の形)。その B で、stall 点到達と拒否が 6 plug すべてで 100/100 になること。positive control も同じ回数 | D-7 の B と単調性の実証 |
+| ID | 項目 | 効く先 | 結果 (2026-10-02) |
+|---|---|---|---|
+| M-1 | 1 ms 経路の再現 (両 peer): `docs/design/CODE_COMMENT_PROVENANCE_V1.md` §10.5 の plugin 法 (`_set_timeouts` の記録) を r2db にも当て、§1.5 の各経路で `timeout_ms == 1` が出ることを修正前に記録する。MitateDB では 200 / 413 / 503 に分かれること、`SET` 自体が 1 ms で cancel され得るかも記録する | §1.5、D-2、D-9 | r2db は全経路で `timeout_ms == 1`、結果は負荷と run で揺れる。MitateDB は期限を過ぎた要求が成功する。503 と `SET LOCAL` の cancel は再現せず。§1.5、§12.1・§12.2 |
+| M-2 | 作業機と配備の PostgreSQL の版。17 以上なら `transaction_timeout` の可否 | X-6、U-2 (c) | 作業機は 16.14 で `transaction_timeout` は無い。配備の版は未確認。§12.1 |
+| M-3 | 文ごとの `SET LOCAL` 再設定の費用: `tools/perf_baseline.py --roundtrip` (台帳 R-80) で K=1 と K=32、6 plug | U-2 (b) | `SET LOCAL` 1 往復 p50 11 µs、要求あたりの文は 3〜15。U-2 (b) の費用は見積もり。§12.1・§12.5 |
+| M-4 | 検証用 DB で COMMIT 自体を遅くする構成 (deferred constraint trigger に `pg_sleep` を置く等) で、`statement_timeout` が COMMIT を cancel したとき transaction が commit 済みになり得るかを PostgreSQL の文書と実測で確かめる | D-3 の commit 段、§9.1 の【保留】、U-6 | `statement_timeout` は COMMIT の仕事 (deferred trigger を含む) を打ち切らない。競合窓でも cancel 0 件。commit 段の【保留】と U-6 の commit 段を削った。§12.1 |
+| M-5 | 台帳 R-102 後の MitateDB の advisory lock 待ちと pool 待ちの分布 (台帳 R-78 の値は cell lock 廃止前)。既定 5000 ms に対する余裕の確認 | D-1、U-1 | 32 並列で MitateDB の pool・lock の待ちは 0、r2db の pool 待ちは最大 3.4 ms。§12.5 |
+| M-6 | advisory lock の `lock_timeout` 超過の SQLSTATE (55P03 `lock_not_available` か 57014 `query_canceled` か)。両 peer は両方を捕まえているが、記録として 1 回確かめる | §1.3 の 8、§1.4 の 4 | 同値の設定では 57014 (90/90)、`lock_timeout` 単独なら 55P03。D-5、§12.1 |
+| M-7 | 受信から受理点までの時間 (認証・body 解析) の実測 | U-1 (a) と (b) の差 | 逐次で r2db 約 0.5 ms・MitateDB 約 5 ms、32 並列で p50 53〜78 ms。§12.3 |
+| M-8 | 新条件の駆動の確認。(i): `budget.execution_ms = 1`、保持 100 ms で、完了ゲートの負荷の下でも 6 plug すべてで拒否が 100/100 になること。(ii)(iii): 完了ゲートの負荷の下で受理点から stall 点到達までの時間と、(iii) の plan を得る dry run が B の下で完了する時間を 6 plug で測り、B を決める (余裕は B/5 の形)。その B で、stall 点到達と拒否が 6 plug すべてで 100/100 になること。positive control も同じ回数 | D-7 の B と単調性の実証 | 修正前に測れる分は実測済み (§12.4)。100/100、vector (i)、完了ゲートの負荷の下の B は conformance の WP の完了条件 |
 
 ## 9. 契約文言の候補
 
@@ -319,30 +341,30 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 
 ### 9.1 execution_ms の節 (置き場は U-9。推奨 (a) は `limits.execution_ms` の新 key)
 
-> execution_ms bounds one request's own wall-clock time. The bound starts no later than the point at which the request has passed this deployment's request-rate and concurrency bounds and the bound in force for it is fixed; an implementation may start it earlier, never later. Everything between that point and the point at which the request's outcome is decided counts against it: waiting for a database connection, waiting for a lock, executing statements and committing. Each request is bounded on its own: each page of a query is one request with its own bound, and a dry run is bounded exactly as the request it previews, because it executes statements as well. A dry run's own execution_ms refusal does not predict the real request's: the two issue different statements.
+> execution_ms bounds one request's own wall-clock time. The bound starts no later than the point at which the request has passed this deployment's request-rate and concurrency bounds and the bound in force for it is fixed; an implementation may start it earlier, never later. Everything between that point and the point at which the request begins to commit counts against it: waiting for a database connection, waiting for a lock and executing statements. A request that has begun to commit is neither refused nor terminated for execution_ms. Each request is bounded on its own: each page of a query is one request with its own bound, and a dry run is bounded exactly as the request it previews, because it executes statements as well. A dry run's own execution_ms refusal does not predict the real request's: the two issue different statements.
 
 - [U-1 (b)] 始点の文を「The bound starts when the request is received, before its authentication and body are processed.」に差し替える。
 - [U-1 (c)] 始点の文を「The bound starts when the request issues its first statement; waiting for a database connection or a lock before that is not counted.」に差し替え、待ちの列挙から connection と lock を除く。
 - [U-1 (d)] 待ちを `limits.classes` の新しい class で bound する別の文になる (本節の文は実行だけを指す)。
-- [U-8 (a)] 「executing statements and committing」の列挙はそのまま (COMMIT は文の bound で bound される)。追記: 「After its last statement has completed, it is not refused for execution_ms by a clock check; its commit remains bounded by the implementation's statement bound.」[U-8 (b)] はそのまま (最後の文の後も予算の内)。
+- [U-8 (a)] 追記: 「After its last statement has completed, it is not refused for execution_ms by a clock check.」[U-8 (b)] 追記: 「A request whose execution_ms is exhausted when its last statement completes is refused in the same way, before it commits.」
 
-> A statement here is one the implementation issues from the request's content on any connection it holds for the request -- each of the request's own transactions, the implicit begin of each included -- including setting the request's own bounds, reading the catalog, taking locks, reading or writing idempotency records, and the request's own data and schema changes; maintaining a connection pool, the commit or rollback that ends the transaction, and audit recording on a separate connection are not. A request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement, rather than issuing that statement under a bound too short for it to complete. A remaining bound shorter than one millisecond is exhausted. A statement already executing when the bound is exhausted is terminated by the implementation's own per-statement bound, which never exceeds what remained of execution_ms when that bound was set. A request refused or terminated this way before it commits leaves no row, no catalog entry, no schema revision and no idempotency record. This sentence does not govern audit evidence; transactions.atomic and structured_operations.dry_run.external_effects are unchanged.
+> A statement here is one the implementation issues from the request's content on any connection it holds for the request -- each of the request's own transactions, the implicit begin of each included -- including setting the request's own bounds, reading the catalog, taking locks, reading or writing idempotency records, and the request's own data and schema changes; maintaining a connection pool, the commit or rollback that ends the transaction, and audit recording on a separate connection are not. A request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement, rather than issuing that statement under a bound too short for it to complete. A remaining bound shorter than one millisecond is exhausted. A statement already executing when the bound is exhausted is terminated by the implementation's own per-statement bound, which never exceeds what remained of execution_ms when that bound was set. A request refused or terminated this way has not committed: it leaves no row, no catalog entry, no schema revision and no idempotency record. This sentence does not govern audit evidence; transactions.atomic and structured_operations.dry_run.external_effects are unchanged.
 
 - [U-7 (b)] 「A remaining bound shorter than one millisecond is exhausted.」を「A remaining bound of zero or less is exhausted.」に差し替える。[U-7 (c)] は数を契約で定める文になる。
 - [U-2 (b)] 「which never exceeds what remained of execution_ms when that bound was set」を「which is set again before every statement from what then remains of execution_ms」に差し替える。
 - [U-6 (a)] 追記: 「Waiting for a database connection beyond the bound, or failing to establish one within it, is refused in the same way.」(接続確立の部分は U-6 の接続確立の行に依る)。
 - [U-3 (b)] 追記: 「Where the bound was spent executing the request's own statements rather than waiting, the denial may carry details.futility.」
-- 【保留 — M-4 の結果まで基本文に入れない】commit 段: 「A commit the bound terminates is refused in the same way [U-6 commit (a)].」と、そのときに何が残るかの文。
+- 【v0.4 で削除】commit 段の文は置かない (M-4: 予算は commit を打ち切らない)。
 
 ### 9.2 `versioning.version_binding` に足す段落 ([U-4 (a)]。置き場は 1.14.0 の段落の直後・version-flip 文の前)
 
-> Only an implementation declaring 1.15.0 or higher additionally claims conformance to the obligations 1.15.0 introduces (subordinate ruling 20). Those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.15.0, independent of any capability's own status: (a) execution_ms counts every wait and statement from no later than the point limits.execution_ms names; (b) a request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement; and (c) a request refused before commit, or terminated before commit, for exhausting execution_ms leaves no row, no catalog entry, no schema revision and no idempotency record. What else 1.15.0 adds -- limits.execution_ms and the sentence it rewrites in ... -- holds an implementation to no behavior beyond these three. 1.15.0 newly requires refusing a request whose execution_ms is exhausted; such a request was never guaranteed to succeed under 1.14.0. 1.7.0's obligation (3) -- the same code and the same details on a refusal a dry run receives -- does not extend to an execution_ms refusal, because a dry run and the real request issue different statements. An implementation still declaring 1.14.0 is not held to any 1.15.0-only obligation retroactively.
+> Only an implementation declaring 1.15.0 or higher additionally claims conformance to the obligations 1.15.0 introduces (subordinate ruling 20). Those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.15.0, independent of any capability's own status: (a) execution_ms counts every wait and statement from no later than the point limits.execution_ms names; (b) a request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement; and (c) a request refused or terminated for exhausting execution_ms has not committed and leaves no row, no catalog entry, no schema revision and no idempotency record. What else 1.15.0 adds -- limits.execution_ms and the sentence it rewrites in ... -- holds an implementation to no behavior beyond these three. 1.15.0 newly requires refusing a request whose execution_ms is exhausted; such a request was never guaranteed to succeed under 1.14.0. 1.7.0's obligation (3) -- the same code and the same details on a refusal a dry run receives -- does not extend to an execution_ms refusal, because a dry run and the real request issue different statements. An implementation still declaring 1.14.0 is not held to any 1.15.0-only obligation retroactively.
 
 - [U-9 (b)] 「the point limits.execution_ms names」を「the point limits.profile names for execution_ms」に、「What else 1.15.0 adds -- limits.execution_ms」の `limits.execution_ms` を「what it adds to limits.profile」に差し替える。[U-9 (c)] 同じ 2 箇所の名指しを `limits.request_budget` に差し替える。
 - 「the sentence it rewrites in ...」の対象は U-9 の選択で決まる ((a) なら書き換える既存の文は無く、この句を落とす。(b) は `limits.profile`、(c) は `limits.request_budget`)。
 - [U-1 (b)] (a) を「execution_ms counts every wait and statement from the request's receipt」に。[U-1 (c)] (a) を「execution_ms counts every statement from the request's first statement; waits are not counted」に。[U-1 (d)] (a) を、待ちを bound する新しい class の義務に置き換える。
 - [U-7 (b)] (b) の「exhausted」を「whose remaining execution_ms is zero or less」と読む文に。
-- [U-8 (a)] (b) の末尾に「; after its last statement has completed, it is not refused for execution_ms by a clock check; its commit remains bounded by the implementation's statement bound」。[U-8 (b)] (b) の末尾に「; and a request whose execution_ms is exhausted when its last statement completes is refused the same way」。
+- [U-8 (a)] (b) の末尾に「; after its last statement has completed, it is not refused for execution_ms by a clock check」。[U-8 (b)] (b) の末尾に「; and a request whose execution_ms is exhausted when its last statement completes is refused the same way, before it commits」。
 - [U-4 (b)] major 版の段落になり、本段落の形は使わない。[U-4 (c)] 本段落を置かず subordinate ruling の註だけにする。
 
 ### 9.3 `versioning.obligations[]` に足す entry ([U-4 (a)]。識別子は候補)
@@ -354,7 +376,7 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
   "unconditional": [
     "execution_ms_counts_waits_from_admission",
     "exhausted_execution_ms_refused_before_next_statement",
-    "execution_ms_refusal_before_commit_leaves_no_state"
+    "execution_ms_refusal_leaves_no_state"
   ],
   "conditional": []
 }
@@ -426,3 +448,273 @@ execution_ms を使い切った要求は決定的に終わる: (i) 受理点の�
 - RV-14 の採否表にあった pin の記述 (U-9 (b) は「pin はそのまま」、(c) は「切り直す」) は逆だった (監督の事実誤認)。再確認 (RC-7) で正した。
 
 2 回目は依頼者裁定の反映後に行う。
+
+### 11.3 作業機の照合と実測 (2026-10-02)
+
+照合は worktree r42 (設計が引く約 60 の file:line のうち約 50 が一致。食い違い 6 件、行番号ずれ 5 件)。v0.3 の「基点で未照合」の印 12 か所は、一致したものは印だけ外し、食い違い・ずれは訂正後の内容に直した。
+
+| # | 元 | 反映先 |
+|---|---|---|
+| W-1 | M-4: `statement_timeout` は COMMIT を打ち切らない | D-1、D-2、D-3、D-5、D-9、U-6、U-8、§9.1〜§9.3、§12.1 |
+| W-2 | M-6: 同値の 2 つの timeout では lock 待ちの超過は 57014 | D-5、§1.3 #6、§12.1 |
+| W-3 | M-2: 作業機 16.14、`transaction_timeout` 無し | §1.6、X-6、U-2 (c)、§12.1 |
+| W-4 | M-1 (PostgreSQL 単体): 1 ms の下の軽い文は cancel されず、1 ms を超える文は 1.04〜1.37 ms で cancel | §1.5、U-7 (c)、§12.1 |
+| W-5 | M-3 micro: `SET LOCAL` 1 往復 p50 11 µs | U-2 (b)、§12.1 |
+| W-6 | 照合: MitateDB schema 操作の `commit_failed` の欠けは存在しない (`_error_row_once_fired`。台帳 v1.151 の R-42 行) | §1.4 #7・#8、D-3、D-9、§7、§8 M-4 |
+| W-7 | 照合 (内容 1): 放した後の約束は `hold_after_idempotency_lookup` の docstring だけ | §6.4 |
+| W-8 | 照合 (内容 2): r2db in-process が in-memory である出所 | §6.4 の表 |
+| W-9 | 照合 (内容 3): `security/CONTROL_MAPPING.md:852` の引用は古くない (範囲が 2 行短い) | §6.5 |
+| W-10 | 照合 (内容 4): `security/CONTROL_MAPPING.md:1023` は現物と合う | §6.1、§6.5、U-6 |
+| W-11 | 照合 (内容 5): schema 3 経路と行の `delete` の区別 | §1.4 #7、D-9 |
+| W-12 | 照合 (内容 6): `commit_failed` の誤りが残る行 (v0.2 の版数行は記録として残す) | §1.4 #7・#8、D-3、D-9、§7 |
+| W-13 | 照合 (行番号 5 件): `postgres.py:2416-2420`、`audit_dispatch.py:32-68`、`pool.py:384`/`:386`、`pool.py:467-477`、`test_contract.py:138-146` | §1.3 #9、§1.4 #2・#7、D-2、D-6、U-9 |
+| W-14 | 照合 (確かめられた事実): §1.4 #8 の経路、単一行の経路、§1.3 #4・#9、`SET LOCAL` の cancel の peer 差、`PIN_1_7_0_DRY_RUN_DECISION`、`docs/design/CONFORMANCE_ADAPTER_V1.md` §25 の導入、socket plug の subclass | §1.3、§1.4、§1.5、D-6、§6.1 |
+| W-15 | M-8 (修正前): MitateDB の PostgreSQL 2 plug は予算を過ぎた要求を commit する。他 4 plug は応答の code では修正前から緑 | §1.5、D-9、U-5 (c)、§6.6、§8、§12.4 |
+| W-16 | M-8: B の初期値の候補 500 ms (保持 600 ms) | D-7、§6.3 |
+| W-17 | M-8: (iii) の dry run は実要求と同じ budget を付ける | D-7、§6.3 |
+| W-18 | M-8: handle は文の数を持たず、`wait_until_held` は 30 s で赤 | D-7、§6.4 |
+| W-19 | M-8: stall は両 socket plug でも効く | §6.1 |
+| W-20 | M-8: stall 点が plug で違う (監督裁定 2026-10-02: port v1.22 で揃える) | D-7、§6.4 |
+| W-21 | M-1 (peer 経由) | §1.5、D-2、U-8、§8、§12.2 |
+| W-22 | M-7 | D-1、U-1、§12.3 |
+| W-23 | M-3 (perf_baseline の文の数) | U-2 (b)、§12.5 |
+| W-24 | M-5 | D-1、§1.6、§12.5 |
+
+## 12. 実測の記録 (2026-10-02、作業機。逐語)
+
+### 12.1 PostgreSQL 単体 (M-2・M-4・M-6・M-1・M-3 micro)
+
+throwaway cluster (`tools/testpg/dsa_testpg.py` の `cluster()`)、共有 suite lock、load average 2.5〜2.9。
+
+```
+M-2 version: PostgreSQL 16.14 (Homebrew) on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.0.123.102), 64-bit
+M-2 transaction_timeout GUC present: 0
+M-6 lock_timeout only     : LockNotAvailable/55P03
+M-6 statement_timeout only: QueryCanceled/57014
+M-6 both = 50 ms (stmt set first) x30: {'QueryCanceled/57014': 30}
+M-6 both = 50 ms (lock set first) x30: {'QueryCanceled/57014': 30}
+M-6 both = 50 ms (one statement) x30: {'QueryCanceled/57014': 30}
+M-4 control  (sleep 0.05 s, timeout 1000 ms): ('commit-ok', 1, 'IDLE', 51.575166173279285)
+M-4 cancel   (sleep 0.50 s, timeout 100 ms) : ('commit-ok', 1, 'IDLE', 502.0395405590534)
+M-4 cancel x30 (outcome, row_exists, txn_status): {('commit-ok', 1, 'IDLE'): 30}
+M-4 race x400 (timeout 46..55 ms vs sleep 50 ms) (outcome, row_exists): {('commit-ok', 1): 400}
+M-4 cancelled-but-committed cases: []
+M-4 plain COMMIT under statement_timeout = 1 ms x300 (outcome, row_exists): {('commit-ok', 1): 300}
+M-4b timeout 100 ms, deferred trigger sleeps 0.5 s, final step = sleep-statement: ('100ms', 'QueryCanceled/57014', '101ms', 'row_exists=0')
+M-4b timeout 100 ms, deferred trigger sleeps 0.5 s, final step = set-constraints-immediate: ('100ms', 'QueryCanceled/57014', '101ms', 'row_exists=0')
+M-4b timeout 100 ms, deferred trigger sleeps 0.5 s, final step = commit: ('100ms', 'ok', '503ms', 'row_exists=1')
+M-4b timeout 100 ms, deferred trigger sleeps 0.5 s, final step = explicit-COMMIT-text: ('100ms', 'ok', '503ms', 'row_exists=1')
+M-4b commit x20: {('ok', 'row_exists=1'): 20}
+M-1(PG) under statement_timeout = 1 ms, SET LOCAL lock_timeout = 1 (after stmt timeout = 1) x2000: {'ok': 2000}
+M-1(PG) under statement_timeout = 1 ms, SELECT 1 x2000: {'ok': 2000}
+M-1(PG) under statement_timeout = 1 ms, SELECT by pk x2000: {'ok': 2000}
+M-1(PG) under statement_timeout = 1 ms, SELECT 5000 rows ordered x300: {'ok': 300}
+M-1(PG) SET LOCAL under an already-installed 1 ms timeout x2000: {'ok': 2000}
+M-1(PG) 1 ms control, pg_sleep(0.002) x200: {'QueryCanceled/57014': 200} cancel latency ms min/max = 1.06/1.24
+M-1(PG) 1 ms control, pg_sleep(0.01) x200: {'QueryCanceled/57014': 200} cancel latency ms min/max = 1.06/1.37
+M-1(PG) 1 ms control, generate_series sort 200k x200: {'QueryCanceled/57014': 200} cancel latency ms min/max = 1.04/1.21
+M-3 micro SET LOCAL statement_timeout: n=5000 p50=11.0us p95=13.8us mean=11.6us
+M-3 micro set_config x2 in one SELECT: n=5000 p50=10.2us p95=12.6us mean=10.9us
+M-3 micro SELECT 1: n=5000 p50=11.5us p95=13.7us mean=11.9us
+```
+
+構成: M-4 は表 `m4(id int primary key)` に `CREATE CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY DEFERRED` で `pg_sleep` する関数を付け、transaction の中で `SET LOCAL statement_timeout` (M-4b は `lock_timeout` も同値) を設定して INSERT し、最後の手を変えた。M-6 は別接続が `pg_advisory_xact_lock(42)` を保持した状態で、同じ lock を待たせた。M-3 micro は unix socket の 1 接続で同じ文を 5000 回 (psycopg の `execute` 1 回 = 1 往復)。両 peer の `src/` と migrations に `DEFERRABLE` / constraint trigger は無い (grep 0 件)。r2db の製品コードのコメント (`r2db-api/src/r2db_api/postgres.py:1736`) は既に同じこと (deferred trigger の仕事は `statement_timeout` で bound されない) を述べている。
+
+### 12.2 M-1 (peer 経由、修正前)
+
+計測専用 worktree (main `557cdd2`)、両 peer の tests に一時の未追跡テスト各 1 本 (計測後に削除)、`tools/dev/pt.py`。PostgreSQL 16.14、10 CPU、in-process の ASGI、認証は実 PostgreSQL の credential store。各 50 回、逐次。pt.py の集計行: r2db M-1 `pt: 1 passed, 2 deselected in 22.78s`、MitateDB M-1 `pt: 1 passed, 1 deselected in 44.41s`、r2db 負荷あり `pt: 1 passed, 2 deselected in 4.70s`、MitateDB 負荷あり `pt: 1 passed, 2 deselected in 15.96s`。
+
+読み方: 列は 操作 / 駆動 / 予算 E (ms) / 記録した `_timeout_ms` の値:回数 / 50 回の結果。駆動は、r2db — A = 入口検査を通った後の pool 取得に 50 ms の実 sleep (予算 20 ms)、B = cell の入口の直前に clock を期限の 1 s 後へ (clock 注入)、C = pool 取得の後に残りを 0.6 ms にする、D = `budget.execution_ms = 1` だけ。MitateDB — R1 = `request_scope` の前に 50 ms の sleep (予算 20 ms)、R1b = deadline を now + 0.6 ms に差し替え、R2 = 別接続の advisory lock の競合で実際に待たせ `_retime` の直前に deadline を now + 0.6 ms にする、R2nat = 同じ競合で差し替えなし、D = `budget.execution_ms = 1` だけ。`_load` の節は CPU を busy な 10 process で埋めた状態。結果の `deadline@N` は `postgres.py:N` の `check_deadline` による 413、`cancel57014@<文>` はその文の `statement_timeout` による cancel の 413。
+
+```
+## r2db_m1_final
+| query_light | baseline | E=20 | 19:50 | 50 x 200/ok |
+| query_light | A | E=20 | 1:50 | 50 x 413/deadline@1554 |
+| query_light | B | E=20 | none:50 | 50 x 413/deadline@1498 |
+| query_light | C | E=20 | 1:50 | 29 x 413/deadline@1554; 21 x 200/ok |
+| query_light | D | E=1 | 1:50 | 50 x 200/ok |
+| query_heavy | baseline | E=20 | 19:50 | 50 x 200/ok |
+| query_heavy | A | E=20 | 1:50 | 49 x 413/cancel57014@SELECT c.table_name, c.col; 1 x 413/cancel57014@SELECT "id", "label", "_r2 |
+| query_heavy | B | E=20 | none:50 | 50 x 413/deadline@1498 |
+| query_heavy | C | E=20 | 1:50 | 50 x 413/cancel57014@SELECT "id", "label", "_r2 |
+| query_heavy | D | E=1 | 1:50 | 50 x 413/cancel57014@SELECT "id", "label", "_r2 |
+| transact_light | baseline | E=20 | 19:50 | 50 x 200/ok |
+| transact_light | A | E=20 | 1:50 | 49 x 413/cancel57014@SELECT c.table_name, c.col; 1 x 413/deadline@1691 |
+| transact_light | B | E=20 | none:50 | 50 x 413/deadline@1613 |
+| transact_light | C | E=20 | 1:50 | 50 x 413/deadline@1691 |
+| transact_light | D | E=1 | 1:50 | 50 x 413/deadline@1691 |
+| transact_heavy | baseline | E=20 | 19:50 | 50 x 200/ok |
+| transact_heavy | A | E=20 | 1:50 | 49 x 413/cancel57014@SELECT c.table_name, c.col; 1 x 413/deadline@1691 |
+| transact_heavy | B | E=20 | none:50 | 50 x 413/deadline@1613 |
+| transact_heavy | C | E=20 | 1:50 | 50 x 413/deadline@1691 |
+| transact_heavy | D | E=1 | 1:50 | 50 x 413/deadline@1691 |
+| schema_create | baseline | E=20 | 19:50 | 50 x 200/ok |
+| schema_create | A | E=20 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| schema_create | B | E=20 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| schema_create | C | E=20 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| schema_create | D | E=1 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| query_light(rep) | baseline | E=20 | 19:50 | 50 x 200/ok |
+| query_light(rep) | C | E=20 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| query_light(rep) | A | E=20 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+## r2db_load
+| query_light | C | E=20 | 1:50 | 50 x 413/deadline@1554 |
+| query_light | D | E=1 | 1:50 | 50 x 413/deadline@1554 |
+| query_heavy | C | E=20 | 1:50 | 49 x 413/cancel57014@SELECT c.table_name, c.col; 1 x 413/cancel57014@SELECT "id", "label", "_r2 |
+| query_heavy | D | E=1 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| transact_light | C | E=20 | 1:50 | 49 x 413/cancel57014@SELECT c.table_name, c.col; 1 x 413/deadline@1691 |
+| transact_light | D | E=1 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| transact_heavy | C | E=20 | 1:50 | 49 x 413/cancel57014@SELECT c.table_name, c.col; 1 x 413/deadline@1691 |
+| transact_heavy | D | E=1 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+| schema_create | C | E=20 | 1:50 | 49 x 413/cancel57014@SELECT c.table_name, c.col; 1 x 413/deadline@2202 |
+| schema_create | D | E=1 | 1:50 | 50 x 413/cancel57014@SELECT c.table_name, c.col |
+## mitatedb_m1_final
+| read_light | baseline | E=20 | 19:50 | 50 x 200/ok |
+| read_light | R1 | E=20 | 1:50 | 50 x 200/ok |
+| read_light | R1b | E=20 | 1:50 | 50 x 200/ok |
+| read_light | D | E=1 | 1:50 | 50 x 200/ok |
+| read_heavy | baseline | E=20 | 19:50 | 50 x 200/ok |
+| read_heavy | R1 | E=20 | 1:50 | 44 x 413/cancel57014@SELECT column_name, data_t; 5 x 200/ok; 1 x 413/cancel57014@SELECT "label", "tag", "_m |
+| read_heavy | R1b | E=20 | 1:50 | 50 x 200/ok |
+| read_heavy | D | E=1 | 1:50 | 50 x 200/ok |
+| transact_light | baseline | E=20 | 19:50 | 50 x 200/ok |
+| transact_light | R1 | E=20 | 1:50 | 50 x 200/ok |
+| transact_light | R1b | E=20 | 1:50 | 50 x 200/ok |
+| transact_light | D | E=1 | 1:50 | 50 x 200/ok |
+| transact_light | R2nat | E=5000 | 4999/4983:3, 4999/4984:11, 4999/4985:35, 4999/4986:1 | 50 x 200/ok |
+| transact_light | R2 | E=5000 | 4999/1:50 | 50 x 200/ok |
+| transact_heavy | baseline | E=20 | 19:50 | 50 x 200/ok |
+| transact_heavy | R1 | E=20 | 1:50 | 50 x 200/ok |
+| transact_heavy | R1b | E=20 | 1:50 | 50 x 200/ok |
+| transact_heavy | D | E=1 | 1:50 | 50 x 200/ok |
+| transact_heavy | R2nat | E=5000 | 4999/4983:2, 4999/4985:27, 4999/4984:19, 4999/4986:2 | 50 x 200/ok |
+| transact_heavy | R2 | E=5000 | 4999/1:50 | 50 x 200/ok |
+| schema_create | baseline | E=20 | 19:50 | 50 x 200/ok |
+| schema_create | R1 | E=20 | 1:50 | 43 x 413/cancel57014@CREATE TABLE "m1s_schr1x76; 7 x 200/ok |
+| schema_create | R1b | E=20 | 1:50 | 50 x 200/ok |
+| schema_create | D | E=1 | 1:50 | 50 x 200/ok |
+| schema_create | R2nat | E=5000 | 4999/4983:3, 4999/4984:15, 4999/4985:29, 4999/4986:3 | 50 x 200/ok |
+| schema_create | R2 | E=5000 | 4999/1:50 | 50 x 200/ok |
+| read_light(rep) | baseline | E=20 | 19:50 | 50 x 200/ok |
+| read_light(rep) | R1 | E=20 | 1:50 | 50 x 200/ok |
+| read_heavy(rep) | baseline | E=20 | 19:50 | 50 x 200/ok |
+| read_heavy(rep) | R1 | E=20 | 1:50 | 44 x 413/cancel57014@SELECT column_name, data_t; 5 x 200/ok; 1 x 413/cancel57014@SELECT "label", "tag", "_m |
+| transact_light(rep) | baseline | E=20 | 19:50 | 50 x 200/ok |
+| transact_light(rep) | R1 | E=20 | 1:50 | 50 x 200/ok |
+## mitatedb_load
+| read_light | R1b | E=20 | 1:50 | 50 x 200/ok |
+| read_light | D | E=1 | 1:50 | 50 x 200/ok |
+| read_heavy | R1b | E=20 | 1:50 | 50 x 200/ok |
+| read_heavy | D | E=1 | 1:50 | 50 x 200/ok |
+| transact_light | R1b | E=20 | 1:50 | 50 x 200/ok |
+| transact_light | D | E=1 | 1:50 | 50 x 200/ok |
+| transact_light | R2 | E=5000 | 4999/1:48, 4999:2 | 50 x 200/ok |
+| transact_heavy | R1b | E=20 | 1:50 | 50 x 200/ok |
+| transact_heavy | D | E=1 | 1:50 | 37 x 200/ok; 12 x 413/cancel57014@SELECT count(*) FROM infor; 1 x 413/cancel57014@SELECT column_name, data_t |
+| transact_heavy | R2 | E=5000 | 4999/1:48, 4999:2 | 50 x 200/ok |
+| schema_create | R1b | E=20 | 1:50 | 46 x 200/ok; 4 x 413/cancel57014@CREATE TABLE "m1s_ldschr1b |
+| schema_create | D | E=1 | 1:50 | 47 x 200/ok; 3 x 413/cancel57014@CREATE TABLE "m1s_ldschdxa |
+| schema_create | R2 | E=5000 | 4999/1:49, 4999:1 | 48 x 200/ok; 2 x 413/cancel57014@CREATE TABLE "m1s_ldschr2x |
+```
+
+### 12.3 M-7 (受信から受理点まで。n = 200、ms)
+
+M-1 と同じ環境。pt.py の集計行: r2db `pt: 1 passed, 1 deselected in 4.75s`、MitateDB `pt: 1 passed, 2 deselected in 12.63s`。受理点は r2db が `r2db-api/src/r2db_api/service.py:313` / `:374` の期限計算、MitateDB が `MitateDB-api/src/mitatedb_api/cell.py:686-692` の `_limit_gate` が deadline を渡す時点。全系列で 受信 < 認証の開始 < 認証の終了 < body の解析の終了 < 受理点 の順を 200/200 で確認した。MitateDB の「body の解析の終了 → 受理点」の約 2.5 ms の内訳は未調査。
+
+| 系列 | peer | 受信→受理点 p50 / p95 / max | うち認証 p50 | 要求全体 p50 |
+|---|---|---|---|---|
+| query 軽 | r2db | 0.510 / 0.553 / 0.591 | 0.234 | 1.309 |
+| query 重 | r2db | 0.538 / 0.570 / 0.604 | 0.247 | 5.659 |
+| mutate 3 operation | r2db | 0.531 / 0.565 / 0.617 | 0.240 | 1.479 |
+| mutate 100 operation (body 約 9 KB) | r2db | 0.785 / 0.816 / 0.851 | 0.253 | 5.806 |
+| query 軽、32 並列 (n = 224) | r2db | 53.257 / 88.808 / 101.015 | 0.749 | 62.984 |
+| read 軽 | MitateDB | 5.090 / 5.180 / 5.336 | 2.436 | 5.616 |
+| read 重 | MitateDB | 5.138 / 5.332 / 5.910 | 2.468 | 6.938 |
+| mutate 3 operation | MitateDB | 5.141 / 5.267 / 5.744 | 2.456 | 6.146 |
+| mutate 100 operation | MitateDB | 5.956 / 6.124 / 6.273 | 2.552 | 27.737 |
+| read 軽、32 並列 | MitateDB | 77.954 / 106.097 / 112.655 | 4.906 | 81.101 |
+
+### 12.4 M-8 (修正前に測れる分)
+
+計測専用 worktree (main `557cdd2`)、一時の未追跡テスト 1 本 (計測後に削除)、`tools/dev/pt.py` で 2 回 (`pt: 12 passed in 93.06s (0:01:33)`、`pt: 12 passed in 95.39s (0:01:35)`)。N=20、6 plug。load average は 1 回目 2.3/2.7/2.6、2 回目 3.3/3.4/3.1。完了ゲートの負荷の下ではない。件数は 2 回とも同じ。「到達」は、要求を出す直前から handle の `wait_until_held` が戻るまで。6 plug とも `request_budget` は enabled、`limits.execution_ms` は 5000、`limit_enforcement.execution_ms` は `reference_wall_clock`。
+
+(ii) `hold_after_idempotency_lookup` の stall 点への到達 (budget なし、ms、p50 / max): r2db in-process 0.1 / 0.2、r2db-http 1.2 / 4.1、r2db-socket 4.5 / 7.9、MitateDB in-process 0.1 / 0.3、MitateDB-http 1.2 / 1.8、MitateDB-socket 4.2 / 5.5。全 plug で 20/20 到達。
+
+(iii) `hold_after_plan_verification` の stall 点への到達と、plan を得る dry run 単体 (ms、p50 / max):
+
+| plug | 到達 | dry run |
+|---|---|---|
+| r2db in-process | 0.1 / 0.2 | 0.1 / 0.2 |
+| r2db-http | 2.8 / 3.4 | 4.5 / 5.6 |
+| r2db-socket | 5.8 / 6.1 | 8.1 / 17.2 |
+| MitateDB in-process | 0.1 / 0.3 | 0.1 / 0.2 |
+| MitateDB-http | 1.6 / 1.8 | 1.8 / 2.0 |
+| MitateDB-socket | 5.0 / 5.5 | 5.2 / 5.4 |
+
+`budget.execution_ms = B` での到達率: B ∈ {5, 10, 20, 50, 100, 200, 500} のすべてで、(ii)(iii) とも 6 plug で 20/20 が stall 点に届いた (届く前の拒否 0 件)。到達時間は B に依らない。
+
+修正前の挙動 (B = 50、合図から 60 ms 保持して放す。全 plug 20/20 到達):
+
+(ii)
+
+| plug | 放した後の応答 | 残った行 | budget を外した同 key の再送 |
+|---|---|---|---|
+| r2db in-process / http / socket | `LIMIT_EXCEEDED` / execution_ms 20/20 | 0 | 新規実行で成功 20/20 |
+| MitateDB in-process (SQLite) | `LIMIT_EXCEEDED` / execution_ms 20/20 | 0 | 新規実行で成功 20/20 |
+| MitateDB-http / MitateDB-socket (PostgreSQL) | **成功 20/20** | **1** | **`CONFLICT` / `idempotency_key` 20/20** |
+
+(iii)
+
+| plug | 放した後の応答 | revision |
+|---|---|---|
+| r2db in-process / http / socket | `LIMIT_EXCEEDED` / execution_ms 20/20 | 動かない |
+| MitateDB in-process (SQLite) | `LIMIT_EXCEEDED` / execution_ms 20/20 | 動かない |
+| MitateDB-http / MitateDB-socket (PostgreSQL) | **成功 20/20** | **+1 (field が増える)** |
+
+- r2db の 3 plug と MitateDB の SQLite plug が修正前から期待どおりになるのは、r2db は各 operation 前の `check_deadline`、SQLite は `_check_deadline` による。
+- budget の無い dry run で得た plan を budget 付きの実要求に出すと、6 plug すべてで `PRECONDITION_FAILED` (`violated_declaration` は `plan`)。r2db の 3 plug は stall 点に届いてから放した後に拒否され、MitateDB の 3 plug は stall 点より前で拒否される (到達 0)。
+- 補足 (推測を含む): B = 5 で合図の直後に放すと、r2db-http と r2db-socket の (ii) だけが 5/20 で `LIMIT_EXCEEDED` を返した (2 回とも 5/20)。新しい application の最初の要求 (pool が冷えている) が遅いためと推測するが、未検証。
+
+### 12.5 perf_baseline (M-3・M-5)
+
+main checkout、他の pytest なし、load average 2.8〜4.1。`./.venv/bin/python tools/perf_baseline.py --n 100 --warmup 10 --concurrency 1` と `./.venv/bin/python tools/perf_baseline.py --n 15 --warmup 3 --concurrency 32` (K=32 を既定の n で回すと r2db の rate の bound に当たって `LIMIT_EXCEEDED` で止まるので、`tools/PERF_BASELINE_README.md` の D-16 の標本数を使った)。
+
+```
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=3ce48d2 date=2026-10-02
+```
+
+M-3: K=1 の `DBTIME ... scope=app` (PostgreSQL の http plug。各 op は 100 要求 × 2 回 = 200 要求ぶん):
+
+| plug | op | db_calls / 要求 | db_wall_ms / 要求 | 要求の p50 (ms) |
+|---|---|---|---|---|
+| r2db-api-http | query | 3.0 | 0.437 | 1.627 |
+| r2db-api-http | mutate | 3.5 | 0.502 | 1.680 |
+| r2db-api-http | batch | 5.5 | 0.584 | 1.851 |
+| MitateDB-api-http | query | 6.5 | 0.419 | 1.341 |
+| MitateDB-api-http | mutate | 5.0 | 0.359 | 1.153 |
+| MitateDB-api-http | batch | 15.0 | 0.945 | 1.947 |
+| MitateDB-api-http | cross_entity | 7.5 | 0.460 | 1.325 |
+
+```
+DBTIME peer=r2db-api plug=r2db-api-http op=query concurrency=1 scope=app conns=2 gone=0 db_calls=600 txns=200 db_wall_ms=43.665 db_wall_ms_per_req=0.437
+DBTIME peer=r2db-api plug=r2db-api-http op=mutate concurrency=1 scope=app conns=2 gone=0 db_calls=700 txns=400 db_wall_ms=50.234 db_wall_ms_per_req=0.502
+DBTIME peer=r2db-api plug=r2db-api-http op=batch concurrency=1 scope=app conns=2 gone=0 db_calls=1100 txns=400 db_wall_ms=58.423 db_wall_ms_per_req=0.584
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=query concurrency=1 scope=app conns=2 gone=0 db_calls=1300 txns=200 db_wall_ms=41.942 db_wall_ms_per_req=0.419
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=mutate concurrency=1 scope=app conns=2 gone=0 db_calls=1000 txns=200 db_wall_ms=35.903 db_wall_ms_per_req=0.359
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=batch concurrency=1 scope=app conns=2 gone=0 db_calls=3000 txns=200 db_wall_ms=94.473 db_wall_ms_per_req=0.945
+DBTIME peer=MitateDB-api plug=MitateDB-api-http op=cross_entity concurrency=1 scope=app conns=3 gone=0 db_calls=1500 txns=200 db_wall_ms=46.038 db_wall_ms_per_req=0.460
+```
+
+M-5: K=32 の `POOL` 行の要約:
+- MitateDB (http / socket): role の pool (size 6) は runtime / developer とも `waits=0`、`in_use_peak=4`。`schema_lock` (application の advisory lock。acquire は op により 5〜1737) も `waits=0 wait_max_ms=0.000`。台帳 R-102 の後、この負荷の形では pool の待ちも lock の待ちも 0 (台帳 R-78 の「cell lock の最大待ち 28〜67 ms」は廃止前の値で、現物には当てはまらない)。
+- r2db (http / socket): runtime の pool (size 2) は `waits` 142〜1207、`wait_max_ms` 3.234〜3.433、`in_use_peak=2`。
+- 要求の p50 (K=32): http plug 30.6〜47.5 ms、socket plug 133〜154 ms。
+- 既定の execution_ms 5000 ms に対して、受理点の後の待ち (pool・lock) は最大 3.4 ms で、余裕は 3 桁ある。計測は harness の負荷の形 (同じ application への 32 並列、4 op) に限る。schema 操作と data 操作の競合、長い transaction の後ろの待ちは測っていない。
+
+```
+POOL peer=r2db-api plug=r2db-api-http op=batch role=perfbase_bf6937d44c41/runtime size=2 acquire=1729 waits=1207 wait_total_ms=647.108 wait_max_ms=3.234 in_use_peak=2
+POOL peer=r2db-api plug=r2db-api-socket op=query role=perfbase_471555f7c2d4/runtime size=2 acquire=577 waits=151 wait_total_ms=97.167 wait_max_ms=3.433 in_use_peak=2
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity role=perfbase_9765af0760d6/runtime size=6 acquire=2306 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+POOL peer=MitateDB-api plug=MitateDB-api-http op=cross_entity schema_lock=perfbase_9765af0760d6 acquire=1737 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity role=perfbase_c65c40a6d067/runtime size=6 acquire=2306 waits=0 wait_total_ms=0.000 wait_max_ms=0.000 in_use_peak=4
+POOL peer=MitateDB-api plug=MitateDB-api-socket op=cross_entity schema_lock=perfbase_c65c40a6d067 acquire=1737 waits=0 wait_total_ms=0.000 wait_max_ms=0.000
+```
