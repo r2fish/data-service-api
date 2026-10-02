@@ -87,3 +87,17 @@
 | 再確認 2 (実測前に「測った」と書いている。`OC` §1.5 の 34) | 直した | harness のコメント・`CA` §31.2 の Note・`RC` の【追記】を「test が固定する。実測は台帳 R-121 の追記」の形にした |
 | 再確認 3 (`docs/design/AUDIT_PROCESS_LOSS_V0_1.md`:44 の行番号参照がずれた) | 直した | +8 行のずれを現物に合わせた (:802・:880・:974・:399-433) |
 | 再確認 4 (`RC` v0.7 註の「上の項は書き換えない」と行番号の更新が食い違う) | 観察 | 行番号の更新は判定を覆すものではなく参照を解決可能に保つだけ (`OC` §1.8 の 56 の対象外) |
+| 作業機の実測 (引き継いだ版は `control-MitateDB-api-socket` の item が `httpx.ReadTimeout` で赤。`pt: 1 failed, 3 passed, 33 deselected`) | 直した (test) | §3 の 3 の候補「test の中で起動を強いる」を採った。MitateDB の socket plug は surface を port 経由の最初の要求で起動するので、control 側は C-19 の control dial と同じ順 (`adapter.control_credential()` → `adapter.control_capabilities()` で control 文書を読み、その `surfaces.control.base_url` を dial) にした。上の「再確認 1」の行の「`adapter.capability_document()` から取り」はこの形に置き換わった (行は記録として残す) |
+| 再確認 2 回目 1 (docstring が surface を起動させる呼び出しを `control_capabilities()` と書くが、port を通る最初の要求は `control_credential()` の側) | 直した | docstring を「control credential の取得と文書の読み (`adapter.control_credential()`、次に `adapter.control_capabilities()`)」に直した。コードは変えていない |
+| 再確認 2 回目 2 (本書 §6 の「再確認 1」の行が直す前の形を記録したまま) | 直した | 行は消さず、上の「作業機の実測」の行と §7 に記録した |
+
+## 7. 追記 — 2026-10-02 作業機での実測・完了ゲート・閉止
+
+- worktree `.claude/worktrees/r121` (branch `r121`、`origin/claude/blissful-gauss-dk9gfk` の `03ef01c` から)。
+- 実測: 引き継いだ版は `pt: 1 failed, 3 passed, 33 deselected` (`control-MitateDB-api-socket` が `httpx.ReadTimeout`。§3 の 3 の見込みが外れた)。§6 の「作業機の実測」の行の裁定で control 側を直し、`pt: 4 passed, 33 deselected`、module 全体 + static で `pt: 38 passed`。4 item とも status 307、`Location` は宣言の base URL と同じ port を持った。
+- 変異: §2 の spec で `5 mutations, 5 as expected, restores verified 2/2 files (sha256 x2)`。`mutate.py` は最初の失敗で止まるので、M1 / M1b は item 単位の 4 件でも実行し `4 mutations, 4 as expected` (失敗は 4 件とも authority の assert)。
+- レビュー: 作業機で再確認 1 起動 (担当観点の指定なし、静的照合のみ。完了ゲートを止める指摘なし、軽微 2 件。§6 の末尾 2 行)。確認した観点: 両 socket plug の port 予約と遅延起動、isolated copy の control 面の共有、control credential の状態、xdist group 内の順序、docstring と実測・実装の照合。確認していない観点: 変異と集計行の再実行、既存 4 commit の全体。
+- 完了ゲート: `gate: 5019 passed, 2 subtests passed in 461.32s (0:07:41)`、judge=PASS、pg_database/pg_roles diff 0、label r121。`COLLECTION_FLOOR` 5014 → 5019。
+- 台帳 v1.150: R-121 を閉止して記録ファイルへ移し、R-122 (§4 の 2) を §8.1 に起票し、版数ログの v1.145 の行を回転した。
+- local main への merge は本追記の commit を `tools/dev/finalize.py --tools-tests` で `--no-ff` に行う。main の送信は依頼者の指示の後。
+- 残り: §4 の 1 (既設の 8443 配備の copy の入れ替え。依頼者の運用作業)、R-122。
