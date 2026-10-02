@@ -8,7 +8,7 @@
 | v0.2 | 2026-09-11 | 依頼者決定 A-1〜B-12 を反映 (下の 2 行と §0 確定した設計判断の表) |
 | v0.3 | 2026-10-02 | 設計レビュー 1 回目 (観点 A / B の並列 2 起動) と再確認 (指定なし 1 起動) を反映。依頼者裁定待ち Q-0〜Q-5 (§11)。設計レビュー 2 回目は裁定反映後。現状との突き合わせは §10、反映の一覧は §12 |
 | v0.4 | 2026-10-02 | 依頼者裁定 Q-0〜Q-5 の反映 (裁定の逐語は §11 の冒頭、帰結の一覧は §12 の「v0.4 の帰結の一覧」)。設計レビュー 2 回目の対象版 |
-| v0.5 | 2026-10-02 | 設計レビュー 2 回目 (観点 A / B の並列 2 起動) の反映。Q-6〜Q-9 は依頼者指示により推奨で進めた。再確認は次 (反映の一覧は §12 の「設計レビュー 2 の反映の一覧」) |
+| v0.5 | 2026-10-02 | 設計レビュー 2 回目 (観点 A / B の並列 2 起動) の反映と再確認 (指定なし 1 起動) の反映。Q-6〜Q-9 は依頼者指示により推奨で進めた (契約改版 WP の着手前に依頼者の確認) |
 
 - 位置づけ: 台帳 `RM` R-36 の設計文書。状態は候補のまま (未実装・未宣言・非正本) で、v0.3 でも変えない。
 - v0.3 の印: 設計レビュー 1 の反映箇所には【v0.3 2026-10-02 設計レビュー 1 反映 M-n】(S-n は §10 の行) を、依頼者決定と現状の食い違いには【註 2026-10-02】を付す。v0.2 の行は消さず、判定を変える箇所は旧文の後に新文と根拠を続ける。
@@ -17,6 +17,7 @@
 - provider (Cloudflare R2 / GCS / Cloud Run) と RFC の挙動に依る記述は、v0.3 の時点で公式文書を読めていないため全て「未確認」である (§12.1)。
 - v0.4 の印: 依頼者裁定 (2026-10-02。逐語は §11 の冒頭) の帰結の反映箇所には【v0.4 2026-10-02 依頼者裁定の帰結 Q-n】を、§11 の各 Q の末尾には【裁定 2026-10-02】を付す。判定を変える箇所は旧文を残し、印を付けた新文を続ける。状態は v0.4 でも候補のまま (契約・conformance・実装はまだ。Q-0 の帰結)。provider と RFC の挙動は v0.4 でも未確認である。
 - v0.5 の印: 設計レビュー 2 回目 (観点 A / B の並列 2 起動) の反映箇所には【v0.5 2026-10-02 設計レビュー 2 反映 N-n】を、新たに依頼者裁定級とした Q-6〜Q-9 (§11) の帰結には【v0.5 2026-10-02 設計レビュー 2 反映 Q-n】を付す。N-n は本文書の局所 ID であり、出所 (観点 A の指摘番号 A2-n、観点 B の指摘番号 B2-n) と反映した節の一覧は §12 の「設計レビュー 2 の反映の一覧」。判定を変える箇所は旧文を残し、印を付けた新文を続ける。Q-6〜Q-9 は、依頼者指示 (§11 の冒頭の逐語) を本件にも及ぶものと読み (監督の読み)、推奨で進めた。状態は v0.5 でも候補のまま。provider・RFC・nginx の挙動は未確認、uvicorn / starlette の挙動は本環境のソースで確認、実行は未確認である (§12.1)。
+- 再確認 2 の印: 設計レビュー 2 回目の再確認 (指定なし 1 起動) の反映箇所には【v0.5 2026-10-02 再確認 2 反映 RC2-n】を付す。RC2-n は本文書の局所 ID であり、一覧は §12 の「再確認 2 の反映 (RC2-1〜RC2-14)」。判定を変える箇所は旧文を残し、印を付けた新文を続ける。版は v0.5 のまま、状態は候補のままである。
 
 - 状態: **候補**。依頼者・設計レビューで確定するまで、共通契約・conformance tests・実装の正本ではない。
 - 対象: `r2db-api` と `MitateDB-api` が共有する Data Service API。
@@ -53,6 +54,7 @@
 - B-2: `destructive_confirmation.applies_to` (`spec/data-service-api.v1.json:678-683`) は閉じた列挙であり、object 削除の追加は契約の改版になる。本文の形式は継承できる (§10 の S-6)。
 - B-3: spec に `X-Request-Id` は無い。`request_id` は body の field (`spec/data-service-api.v1.json:871` 等) と audit の field である。両 peer の http.py は実装として `x-request-id` 応答 header を返す (§10 の S-8)。B-3 は peer 実装の header を契約へ昇格させる決定になる。bytes 応答には body の `request_id` が置けないので、header が唯一の経路である。
   - 【v0.5 2026-10-02 設計レビュー 2 反映 Q-9】B-3 の契約化の範囲は「object_storage の 4 操作の全応答 (成功・失敗) が `X-Request-Id` にその要求自身の `request_id` を運ぶ」(object_storage 条件付きの義務。既存操作は変えない) とする (§3.2 の Q-9、§11 の Q-9)。
+  - 【v0.5 2026-10-02 再確認 2 反映 RC2-12】上の範囲の「全応答 (成功・失敗)」を「application が組む全応答 (wire framing で server や前段が返す契約外の応答を除く)」に改める (旧文は残す。§3.2 の RC2-12)。
 - B-5: `limits.classes` は閉じた語彙 17 (`spec/data-service-api.v1.json:929-947`。`:323` は語彙外の key を非適合とする) であり、4 class の追加は `limits.classes` の拡張 (契約の版上げ) になる (§10 の S-4)。class ごとの定義は §6.1。時間の bound は §11 の Q-3、総量の bound は §11 の Q-5 で依頼者裁定待ち。
   - 【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】時間の bound は `execution_ms` が表す (class を増やさない。§2、§6.1)。
   - 【v0.4 2026-10-02 依頼者裁定の帰結 Q-5】総量の bound の class は足さず、§8 の運用値に置く (§2)。
@@ -115,12 +117,12 @@
 | --- | --- | --- |
 | 認証・認可 | SI-06、SI-07、SI-03 (runtime / developer の対称は B-9)、SI-15、SI-13 (B-7。§11 の Q-4)。【v0.3 2026-10-02 再確認反映 RC-12】SI-03 は「object 操作は schema 変更の経路にならない (B-9 の対称性の根拠ではない)」に言い換える (旧文は残す) | O-6、O-12、O-13 |
 | スコープ隔離 | SI-01、SI-00 (A-1。provider 側の隔離は deployment evidence)、SI-12 (bucket 資格情報を client に渡さない) | O-5、O-17、O-18 |
-| 有限資源 | SI-08 | O-4a、O-4b、O-11、O-15、O-16 |
+| 有限資源 | SI-08 | O-4a、O-4b、O-11、O-15、O-16、O-29、O-30 (監督 2026-10-02 追記。RC2-2) |
 | 完全性 | SI-05 (header 値の検証境界)、SI-11。【v0.3 2026-10-02 再確認反映 RC-12】SI-11 は atomic と宣言する upload / delete に掛かる | O-1、O-2、O-3、O-22 |
 | コンテンツの扱い | SI-05 (header 値の検証境界)。nosniff・attachment・no-transform を直接に述べる SI の文言は無い (新設しない) | O-10、O-23 |
 | 失敗時の後始末 | SI-11、SI-14 (`cleanup_failed` は security-control failure として監査)。【v0.3 2026-10-02 再確認反映 RC-12】SI-11 は atomic と宣言する upload / delete に掛かる | O-9、O-14、O-19。【v0.3 2026-10-02 再確認反映 RC-2】O-19b |
 | 監査・非開示 | SI-14、SI-10 | O-10、O-20 |
-| (監督 2026-10-02 追記) 認証・認可 (upload 中の失効) / 失敗の形 | SI-13 / SI-05、SI-10 | O-27 / O-28 (wire 条件。N-17 の obligation 対応の候補に入る) |
+| (監督 2026-10-02 追記) 認証・認可 (upload 中の失効) / 失敗の形 | SI-13 / SI-05、SI-10 | O-27 / O-28 (wire 条件。N-17 の obligation 対応の候補に入る)。【v0.5 2026-10-02 再確認 2 反映 RC2-14】この行は N-17 相当 (監督) の追記である |
 | 削除 (B-2) | SI-09 | O-8 |
 
 【v0.4 2026-10-02 依頼者裁定の帰結 Q-1 / Q-3】§7.1 に足した条件の対応: O-24 は「コンテンツの扱い」(SI-05)、O-25 は「有限資源」(SI-08) に加える (上の表の行は残す)。
@@ -178,6 +180,8 @@
 
 【v0.5 2026-10-02 設計レビュー 2 反映 Q-6】上の `limits` の例に転送専用の class `object_transfer_ms` を足す (例は残す。値は配備値)。agent が必要な最低速度 = `object_bytes` / `object_transfer_ms` を宣言から導けることを契約文に書く (§6.1 の Q-6)。
 
+【v0.5 2026-10-02 再確認 2 反映 RC2-9】上の「必要な最低速度 = `object_bytes` / `object_transfer_ms`」は下限と書く (旧文は残す。§6.1 の RC2-9)。
+
 【v0.3 2026-10-02 設計レビュー 1 反映 M-14】操作名を 1 組にする。`upload_object` / `download_object` / `get_object_metadata` / `delete_object` を、capability の `operations`、操作カタログの `name`、監査の operations に共通で使う。上の例の `["upload", "download", "delete"]` はこの 4 語に読み替える (例は残す)。B-12 の 3 語はそのまま用い、`get_object_metadata` は B-12 の列挙への追加である。metadata 取得も監査する (query と同じ扱い)。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 S-9】`object_storage` は `common_baseline` (1.9.0 の floor) の外に置く。置かないと 1.9.0 の規則で全 peer に必須になる (§10 の S-9)。conformance 条件は PROVIDED / ABSENT の分岐で書く (§7.1)。
@@ -189,6 +193,8 @@
 【v0.5 2026-10-02 設計レビュー 2 反映 N-3】上の RC-9 の案に `response_headers` (名前 / 必須か / 構文の参照) を足す。download の `Content-Length`・`Content-Digest`・`Content-Disposition`・`X-Request-Id` を載せる。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 N-4】S-10 の註: 現行の操作カタログと reference client では `request_schema: null` は「本文を取らない」を意味する (`conformance-tests/reference_client.py:193-195`)。upload_object の null は `request_media_type` があるときに限り「bytes 本文」と読む、を契約の OperationCatalogEntry.description に書く。値の形の案: upload_object は `request_media_type: "*/*"` と「`errors.content_type` を除く単一の media type」の規則文、download_object は `response_media_type: "stored"` (保存値)、他の 2 操作は省略 (= `media_type`)。`request_headers` / `response_headers` は契約の endpoints の entry 側に置き、操作カタログへ派生させる (`conformance-tests/CONDITIONS.md` C-29)。確定は契約改版の WP。
+
+【v0.5 2026-10-02 再確認 2 反映 RC2-11】上の N-4 の upload_object の `request_media_type: "*/*"` 案を退け (旧文は残す)、構造値 `{"any_single_except": "errors.content_type"}` の形を推す。
 
 【v0.3 2026-10-02 再確認反映 RC-12】S-10 の註: 4 操作の `atomicity` の案。`upload_object` = atomic (object は available になるか、ならないか)、`delete_object` = atomic、`download_object` / `get_object_metadata` = none (読み取り)。
 
@@ -211,6 +217,8 @@
 
 【v0.5 2026-10-02 設計レビュー 2 反映 N-5】`object_id` の構文を identifier 構文 (`spec/data-service-api.v1.json:778`) に収まる形に確定する: `o_` + 26 文字の小文字 base32 (Crockford、ULID 相当。英字始まり、[a-z0-9_])。上の「URL-safe UUID/ULID 形式など」を改める (旧文は残す)。identifier_syntax、path の percent-encoding (`spec/data-service-api.v1.json:651`)、destructive の phrase (`spec/data-service-api.v1.json:711`) の規則をそのまま使う。上の「構文違反は `IDENTIFIER_INVALID`」を改め (旧文は残す)、code は既存条件と同じ許容集合 {`IDENTIFIER_INVALID`, `VALIDATION_FAILED`}、`violated_declaration` は `identifier_syntax` で固定する (§3.4 の N-5)。
 
+【v0.5 2026-10-02 再確認 2 反映 RC2-5】上の N-5 の `object_id` の構文を正規表現 `^o_[0-7][0-9a-hjkmnp-tv-z]{25}$` で定める。文字列のまま完全一致で比較し decode しない (Crockford の別名同一視をしない)。identifier 構文は満たすが object_id 構文を満たさない値は `identifier_syntax` (code は既存の許容集合 {`IDENTIFIER_INVALID`, `VALIDATION_FAILED`})。`identifier_syntax` の定義の改版は §3.4 の RC2-5、観測は §7.1 の O-23 の RC2-5。
+
 【註 2026-10-02】`endpoint_fields_note.path` (`spec/data-service-api.v1.json:651`) の placeholder は `{entity}`、`{application_id}`、`{credential_id}` だけである。`{object_id}` の埋め方 (構文・percent-encoding) を契約に足す必要がある (§10 の S-3)。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 N-3】上の註に足す: 実装は object 経路の照合を percent-decoding 前の path (ASGI の raw_path) で行うか、`%2F` を含む segment を拒否する。
@@ -229,8 +237,11 @@
 
 - 位置づけ: router は既存の前段 (reverse proxy) と同格の基盤部品であり、application-facing 実装ではない。router は TLS 終端として全 application の bearer を平文で受けるので、router の単一欠陥は他 application の bearer に届く。A-1 の目的 (application-facing の単一欠陥で他 bucket に届かない) は router については成り立たず、これを SI-00 (`security/SECURITY_INVARIANTS_V1.md`) の残余として `security/CONTROL_MAPPING.md` の SI-00 行に記録する (作業機。§9 の新 5)。
 - 要件 1: router は契約の応答を一切組まない。lookup に失敗した要求は deployment の JSON process へ回し、そこが `AUTH_INVALID` / `AUTH_REQUIRED` を返して監査する。
+  - 【v0.5 2026-10-02 再確認 2 反映 RC2-1 / RC2-3】要件 1 の lookup に失敗した要求の扱いを改める (旧文は残す): lookup に失敗した要求 (未知の credential_id、locator を持たない bearer、credential 無し、application に専用単位が無い) は deployment の JSON process へ回し、JSON process は通常の認証を行って既存の結果 (`AUTH_REQUIRED` / `AUTH_INVALID` 等) を返す。認証に成功したが専用単位が無い application の credential には `CAPABILITY_UNSUPPORTED` を返す (deployment は全 application に専用単位があるときだけ object_storage を enabled と宣言する。台帳 `RM` P-3)。JSON process は object 経路の本文を 1 octet も読まず (receive を呼ばない。既存 request_bytes middleware を object 経路に掛けない) `Connection: close` で応答する。
 - 要件 2: router は application logic・bucket 資格情報・DB 書き込み・本文の保存を持たない。本文は転送するだけである。
+  - 【v0.5 2026-10-02 再確認 2 反映 RC2-1 / RC2-3】要件 2 に pepper と verifier を足す (旧文は残す): router は application logic・bucket 資格情報・pepper・verifier・DB 書き込み・本文の保存を持たない。
 - 要件 3: router が保持する状態は「bearer の hash → application_id」の読み取り専用の射影だけである (secret を再構成できない)。上の「router の認証状態は「credential → application の対応」の読み取りだけ」をこの形に限る (旧文は残す)。
+  - 【v0.5 2026-10-02 再確認 2 反映 RC2-1 / RC2-3】要件 3 を改める (旧文は残す): router は bearer の locator 部 (両 peer の bearer は `<credential_id>.<secret>` の形: `r2db-api/src/r2db_api/auth.py:27-40`。peer の実現) の credential_id → application_id の読み取り専用の射影だけを持ち、pepper・verifier・secret の照合手段を持たない。secret の照合は専用単位が行う。射影の更新: control plane の発行・失効と同じ transaction で射影を書く (または control DB の読み取り専用 view を引く)。発行から反映までの遅延は `authorization_propagation_bound_ms` の内側。観測は §7.1 の O-26 の RC2-1。
 - 要件 4: 専用単位は自分の 1 application で bearer を再認証する (誤配は `AUTH_INVALID`。§7.1 の O-26)。
 - 要件 5: 専用単位は serving set が 1 application でなければ起動しない (fail closed)。多 application を許すのは test 専用の composition root だけである (§7.1 の RC-10 と同形)。
 - 要件 6: capability document を返す process と専用単位の設定値は同じ出所から導き、起動時に一致を検査する (台帳 `RM` P-3。§6.1 の Q-7)。
@@ -276,6 +287,8 @@
 
 【v0.5 2026-10-02 設計レビュー 2 反映 Q-9】上の「`X-Request-Id` は、body に `request_id` がある応答では同じ値とする」を改める (旧文は残す。§11 の Q-9): `X-Request-Id` は常にその要求自身の `request_id` (= その要求の監査行の値) とする。replay の元の値は body の `request_id` だけが運ぶ (既存 JSON の replay の挙動のまま。`r2db-api/src/r2db_api/http.py:279`)。B-3 の契約化の範囲は「object_storage の 4 操作の全応答 (成功・失敗) が `X-Request-Id` にその要求自身の `request_id` を運ぶ」(object_storage 条件付きの義務。既存操作は変えない) とする。
 
+【v0.5 2026-10-02 再確認 2 反映 RC2-12】上の B-3 の契約化の範囲の「全応答 (成功・失敗)」を「application が組む全応答 (wire framing で server や前段が返す契約外の応答を除く)」に改める (旧文は残す)。
+
 【v0.3 2026-10-02 設計レビュー 1 反映 S-11】upload の成功応答の前に `upload_object` の audit event を同期で書く (`AUDIT_PROCESS_LOSS_V0_1.md` v0.5 決定 1-A)。順序は §4 の 2 transaction 構成に従う。
 
 #### 3.2.1 Idempotency-Key
@@ -289,6 +302,7 @@
 - 直列化の地点は record の書き込み (available への遷移) であり、ここで B-1 の「高々 1 本が available になる」を満たす。
 - `idempotency_entries` と `idempotency_retention_ms` は upload にも掛かる。
 - 【v0.5 2026-10-02 設計レビュー 2 反映 N-8】`idempotency_entries` の検査は tx1 (`pending` の永続化) で per-key lock の下に予約として行い、同じ application の同時の keyed upload が両方とも通らないようにする (契約 `spec/data-service-api.v1.json:851` の「before it executes」)。契約の idempotency.record に「upload では provider への書き込みは実行と数えず、available への遷移を実行と数える」を足す案を置く。object_storage の `requires_capability` に `idempotency` を含める (1.9.0 以降 common_baseline で必ず提供されるので追加の負担は無い)。
+- 【v0.5 2026-10-02 再確認 2 反映 RC2-6】上の N-8 の「予約」の定義: 予約 = key を持つ pending 行。`idempotency_entries` が数えるのは record と pending の key の重複を除いた数。pending の終了 (available / 失敗 / 回収) で消える。同じ key の同時 2 本は 1 と数える (O-7 の収束と整合)。SIGKILL 後の pending は回収まで予約として残るが、同じ key の再試行は同 key の pending として数えるので entries を増やさない。観測は §7.1 の O-7 の RC2-6。
 - replay の応答の `X-Request-Id` と `ObjectDescriptor.request_id` は元の実行の `request_id` とする。
 - 【v0.5 2026-10-02 設計レビュー 2 反映 Q-9】上の行のうち `X-Request-Id` を改める (旧文は残す): replay の応答の `X-Request-Id` は replay 要求自身の `request_id`、`ObjectDescriptor.request_id` は元の実行の `request_id` とする (§3.2 の Q-9)。
 - 削除は JSON 本文なので、既存形式の `idempotency_key` field を受ける (B-1 と矛盾しない追加)。
@@ -394,6 +408,8 @@
 
 【v0.5 2026-10-02 設計レビュー 2 反映 N-13】削除の順: `NOT_FOUND` (存在・所有・状態) は destructive confirmation の検査より先とする (契約 `spec/data-service-api.v1.json:851` の「target existence, destructive confirmation」の順と揃う)。
 
+【v0.5 2026-10-02 再確認 2 反映 RC2-14】上の N-13 の出所を `spec/data-service-api.v1.json:716` (`destructive_confirmation.evaluation_order`) に改める (旧文は残す)。replay の照合はこれより先 (契約 `spec/data-service-api.v1.json:851`、§3.3 の RC-1)。
+
 【v0.5 2026-10-02 設計レビュー 2 反映 N-18】同じ要求に段 (4) の 2 つの違反があれば先の方の field を返す。段 (3) と (4) の同時違反は `CAPABILITY_UNSUPPORTED` を返す (§7.1 の O-28)。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 N-19】検査順の各段の実行主体 (上の表の行は残す):
@@ -402,7 +418,7 @@
 | --- | --- |
 | (1) | 専用単位 (router は本文を読まない) |
 | (2)〜(9) | 専用単位 |
-| router の lookup に失敗した要求 | deployment の JSON process (`AUTH_INVALID` / `AUTH_REQUIRED` を返して監査する。§3.1 の Q-7 の要件 1) |
+| router の lookup に失敗した要求 | deployment の JSON process (`AUTH_INVALID` / `AUTH_REQUIRED` を返して監査する。§3.1 の Q-7 の要件 1)。【v0.5 2026-10-02 再確認 2 反映 RC2-1】この欄の「`AUTH_INVALID` / `AUTH_REQUIRED`」を「既存の認証の結果」に改める (旧文は残す。§3.1 の Q-7 の要件 1 の RC2-1 / RC2-3) |
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-15】header の違反の位置 (`field`) は `header/<小文字の header 名>` と書く。`violated_declaration` に `content_type`、`content_digest`、`filename` を足すことは、契約の閉じた語彙 (`spec/data-service-api.v1.json:921`) の拡張になる。「未定」は v0.3 の材料で決まっていない欄である。
 
@@ -412,12 +428,15 @@
 
 【v0.5 2026-10-02 設計レビュー 2 反映 N-5】上の `field` 定義の改版に「path の placeholder は placeholder 名」を含める (`{entity}` → "entity" の既存の扱いと揃う)。
 
+【v0.5 2026-10-02 再確認 2 反映 RC2-5】`identifier_syntax` の定義 (`spec/data-service-api.v1.json:921`) の改版に「object_id は本契約が宣言する object_id 構文」を含める (§3.1 の RC2-5)。
+
 【v0.5 2026-10-02 設計レビュー 2 反映 N-6】`violated_declaration` の新語 3 つの定義文案 (契約の閉じた語彙 `spec/data-service-api.v1.json:921` に足す):
 
 - `content_type`: `Content-Type` header の値が、契約の宣言する構文 (単一の media type、`errors.content_type` 以外) に反する。
 - `content_digest`: `Content-Digest` header の値が構文に反する、sha-256 member を欠く、または受信 bytes と一致しない。
 - `filename`: `Content-Disposition` の `filename` / `filename*` が契約の宣言する規則に反する。
 - 新語を足す基準: header の値が契約の宣言する構文に反する = 新語。契約が受け付けない header の存在 (`Content-Encoding`) や閉じた schema 外の field = `request_schema`。
+- 【v0.5 2026-10-02 再確認 2 反映 RC2-13】上の「新語を足す基準」を改める (旧文は残す): その header に専用の構文を契約が宣言する 3 つ (`Content-Type`、`Content-Digest`、`Content-Disposition` の filename) = 新語。既存 field の写し (`Idempotency-Key`)・`Content-Length`・受け付けない header (`Content-Encoding`) = `request_schema`。
 - 契約改版の WP の範囲に、語彙の文の「eleven values」→「fourteen values」と、pin (`conformance-tests/test_contract.py` の PIN_1_7_0_VIOLATED_DECLARATION_VOCABULARY、`conformance-tests/test_c21_denial_details_vocabulary.py:53`) の更新を挙げる。
 
 | 条件 | code | violated_declaration | field | 出所 |
@@ -560,7 +579,7 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 | `object_metadata_bytes` | `Content-Type`・`Content-Disposition`・`Idempotency-Key`・`Content-Digest` の値の octet 合計 | 合計 N octet は受理、N+1 octet で拒否 | `object_metadata_bytes` | 同上 |
 | `object_requests_per_minute` | 4 操作 (`upload_object` / `download_object` / `get_object_metadata` / `delete_object`) の要求数 | N 件目は受理、N+1 件目を拒否 | `object_requests_per_minute` | 同上 |
 | `object_transfers` | 同時に本文を読み書きしている要求数 | N 本の同時転送は受理、N+1 本目を拒否 | `object_transfers` | application 単位。host 共有の OS flock slot。1 host 内の複数 worker は共有の範囲内、複数 host は `deployment_required` |
-| `object_transfer_ms` | 【v0.5 2026-10-02 設計レビュー 2 反映 Q-6】(監督 2026-10-02: `execution_ms` は upload / download には掛けず本 class が代わる。`get_object_metadata` / `delete_object` には既存どおり `execution_ms` が掛かる。) upload / download の 1 要求の転送時間 (起点 = `object_transfers` 枠の獲得時点、終点 = available への遷移 / 送信完了) | N ms 以内に終わる転送は受理、N ms を超えた転送は拒否 | `object_transfer_ms` | `object_bytes` の行と同じ |
+| `object_transfer_ms` | 【v0.5 2026-10-02 設計レビュー 2 反映 Q-6】(監督 2026-10-02: `execution_ms` は upload / download には掛けず本 class が代わる。`get_object_metadata` / `delete_object` には既存どおり `execution_ms` が掛かる。) upload / download の 1 要求の転送時間 (起点 = `object_transfers` 枠の獲得時点、終点 = available への遷移 / 送信完了)。【v0.5 2026-10-02 再確認 2 反映 RC2-9】upload の tx1 / tx2 の lock 待ちは `object_transfer_ms` に数え、limit_class は `object_transfer_ms` | N ms 以内に終わる転送は受理、N ms を超えた転送は拒否。【v0.5 2026-10-02 再確認 2 反映 RC2-9】この欄を時間の表現に改める (旧文は残す): 宣言 T ms 以内に完了した転送は受理、T を超えた時点で打ち切り | `object_transfer_ms` | `object_bytes` の行と同じ。【v0.5 2026-10-02 再確認 2 反映 RC2-9】この欄を `reference_wall_clock` に改める (旧文は残す。既存の時間の class と同じ。`r2db-api/src/r2db_api/capabilities_document.py:144,:174`、`MitateDB-api/src/mitatedb_api/capabilities_document.py:338`) |
 
 【v0.3 2026-10-02 再確認反映 RC-6】持ち替えるのは `upload_object` / `download_object` だけ。`get_object_metadata` / `delete_object` は既存の JSON 経路と同じく concurrency slot を要求全体で保持する (本文が小さく短い)。`object_requests_per_minute` の鍵は credential_id (既存 `requests_per_minute` と同じ鍵。`r2db-api/src/r2db_api/http.py` の WP-8c の註)。`object_transfers` の鍵は application。
 
@@ -568,9 +587,13 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 
 【v0.5 2026-10-02 設計レビュー 2 反映 Q-6】上の Q-3 の段落の「転送時間は `execution_ms` が表す」を「転送時間は `object_transfer_ms` が表す」に改める (旧文は残す。§11 の Q-6)。`object_transfer_ms` は B-5 の 4 class を超える加算的な class であり、起点 = `object_transfers` 枠の獲得時点、終点 = available への遷移 / 送信完了で、台帳 `RM` R-42 と独立する。超過は `LIMIT_EXCEEDED` (`limit_class: object_transfer_ms`)、download で header 送出後なら接続の異常終了 (§3.3 の M-6)。agent が必要な最低速度 = `object_bytes` / `object_transfer_ms` を宣言から導けることを契約文に書く。実装側の socket timeout は `object_transfer_ms` 以下の運用値とする (§8)。超過した upload の `object_transfers` 枠は解放される (§7.1 の O-25)。
 
+【v0.5 2026-10-02 再確認 2 反映 RC2-9】上の「agent が必要な最低速度 = `object_bytes` / `object_transfer_ms` を宣言から導ける」の最低速度は下限と書く (旧文は残す)。`limit_enforcement.object_transfer_ms` の宣言、境界の表現、upload の tx1 / tx2 の lock 待ちの扱いは上の表の `object_transfer_ms` 行の RC2-9。§8 の 1 に `object_transfer_ms` を足す (§8 の RC2-9)。
+
 【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】案 (ii) (§3.1 の Q-2 の段落) の `limit_enforcement` の帰結 (§11.1 の (ii) 行から): `concurrency` は、router と全ての専用単位が base URL を serve する 1 host (1 composition root の worker 群。`MULTI_PROCESS_WORKER_V0_1.md` 裁定 10 の slot 共有の範囲) の process なら `enforced` のまま、別 host (Cloud Run の別 service 等) なら `deployment_required`。`object_transfers` は、専用単位が 1 instance のとき `enforced`、複数 instance なら `deployment_required`。宣言は台帳 `RM` P-3 (真であり検査される) に従う。Cloud Run の挙動は未確認。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 Q-8】上の「`concurrency` は ... 1 host ... の process なら `enforced` のまま」を改める (旧文は残す。§11 の Q-8): object-capable な配備 (router・JSON process・専用単位が別 composition root で並ぶ) では `concurrency` を `deployment_required` と宣言する。根拠: `MULTI_PROCESS_WORKER_V0_1.md` 裁定 27・28 (`MULTI_PROCESS_WORKER_V0_1.md:845-846`) の `enforced` の写像は「自 supervisor の workers ≥ process_ceilings.data」かつ「slot directory が自 user 所有 0700」を条件とし、別 composition root (A-1 なら別 OS user) が並ぶ構成はこれを満たさない。宣言を変えても `conformance-tests/CONDITIONS.md` C-32 の挙動は変わらない。
+
+【v0.5 2026-10-02 再確認 2 反映 RC2-10】`process_ceilings.data` は base URL を serve する専用単位の process を含む。宣言は `MULTI_PROCESS_WORKER_V0_1.md` 裁定 27 の写像から機械的に導く (別のフラグは置かない)。§3.1 の Q-7 の要件 6 の一致検査の対象に `process_ceilings` を含める。単一 composition root の conformance plug では写像どおり `enforced` のまま。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 Q-7】capability document (`limits.object_*`、`limit_enforcement.object_*`、`authorization_propagation_bound_ms`) を返す process と専用単位の設定値は同じ出所から導き、起動時に一致を検査する (台帳 `RM` P-3。§3.1 の Q-7 の要件 6)。
 
@@ -613,15 +636,15 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | --- | --- | --- | --- | --- | --- | --- |
 | O-1 | 任意 bytes (NUL、非 UTF-8、画像らしい bytes) の upload と download が完全一致する | SI-11 | 6 adapter | 取得 bytes = upload bytes | 保存時に末尾 1 byte を落とす | 1 |
 | O-2 | 保存・取得 metadata (content type、filename、size、Content-Digest) が一致し、filename の正規化 (§3.2.2) が両 peer で同値。【v0.5 2026-10-02 設計レビュー 2 反映 N-9】観測の入力に `"` と `;` を含む filename を加える | SI-05 | 6 adapter | `ObjectDescriptor` の各 field、同じ入力 filename に対する両 peer の出力 | 片 peer の NFC 正規化を外す | 2 |
-| O-3 | `Content-Digest` 一致は成功、不一致は拒否され取得可能な object を残さない。`sha-256` の member 無しは `VALIDATION_FAILED` (`content_digest`)、他 algorithm の member は無視 (§3.2.3) | SI-05、SI-11 | 6 adapter | 応答 code、拒否後の metadata 取得が `NOT_FOUND` | upload 側の digest 照合を外す | 3 |
+| O-3 | `Content-Digest` 一致は成功、不一致は拒否され取得可能な object を残さない。`sha-256` の member 無しは `VALIDATION_FAILED` (`content_digest`)、他 algorithm の member は無視 (§3.2.3) | SI-05、SI-11 | 6 adapter | 応答 code、拒否後の metadata 取得が `NOT_FOUND`。【v0.5 2026-10-02 再確認 2 反映 RC2-8】「拒否後の metadata 取得が `NOT_FOUND`」を「偽 provider の状態を読む port の method で available の object が 0、かつ metadata 行に available が無い」に改める (旧文は残す。object_id は client に返らないため) | upload 側の digest 照合を外す | 3 |
 | O-4a | `Content-Length` が `object_bytes` を超える要求は provider を呼ばず metadata も残さず `LIMIT_EXCEEDED` (`object_bytes`) | SI-08 | 6 adapter。【v0.3 2026-10-02 再確認反映 RC-17】wire (4 adapter) に改める。in-process では `Content-Length` の概念が無いので対象外 | 偽 provider の呼出し 0、metadata 0 | `Content-Length` の事前検査を外す | 4 (i) |
-| O-4b | 途中で `object_bytes` を超えた要求は `available` の object と取得可能な metadata を残さず、provider に残ったものが cleanup 対象として記録される | SI-08、SI-11 | wire | 取得が `NOT_FOUND`、偽 provider の残存物に対応する cleanup 記録 | 超過時の cleanup 記録を書かない | 4 (ii) |
+| O-4b | 途中で `object_bytes` を超えた要求は `available` の object と取得可能な metadata を残さず、provider に残ったものが cleanup 対象として記録される | SI-08、SI-11 | wire | 取得が `NOT_FOUND`、偽 provider の残存物に対応する cleanup 記録。【v0.5 2026-10-02 再確認 2 反映 RC2-8】「取得が `NOT_FOUND`」を「偽 provider の状態を読む port の method で available の object が 0、かつ metadata 行に available が無い」に改める (旧文は残す。object_id は client に返らないため) | 超過時の cleanup 記録を書かない | 4 (ii) |
 | O-5 | application A の object を application B が取得・metadata 取得・削除できず、いずれも `NOT_FOUND` (期待値は §11 の Q-2 の案 (ii) で `AUTH_INVALID` に変わり得る)。【v0.3 2026-10-02 再確認反映 RC-4】期待値は全案で `NOT_FOUND` に固定する (B が自分の経路で A の object_id を要求したとき)。他 application の単位 / URL へ誤配されたときの結果は O-5 ではなく §11.1 の最終列 | SI-01 | 6 adapter | 3 操作の応答 code | 所有 application の照合を外す | 5 |
 | O-6 | capability が PROVIDED / ABSENT で分岐する。ABSENT は認証後に `CAPABILITY_UNSUPPORTED` を返し storage を呼ばない。【v0.5 2026-10-02 設計レビュー 2 反映 N-16】ABSENT の観測は「読まれた octet 数 0 と 100 Continue の不送出」(wire) とし、偽 provider の呼出し 0 だけにしない。ABSENT の分岐を通す plug 構成 (object_storage が unavailable の instance) を必須にする | SI-15 | 6 adapter | 応答 code、偽 provider の呼出し 0 | capability 判定を本文の転送後に移す | 6 |
-| O-7 | idempotency の再送・同時送信は一 object に収束 (`available` は高々 1)、異なる bytes / metadata の同一 key は `CONFLICT`。replay の `X-Request-Id` と `request_id` は元の値。敗者の pending object は cleanup される (§3.2.1)。【v0.5 2026-10-02 設計レビュー 2 反映 Q-9】replay の `X-Request-Id` は replay 要求自身の `request_id`、body の `request_id` は元の値 (上の「replay の `X-Request-Id` ... は元の値」を改める。§3.2.1 の Q-9) | SI-11 | 6 adapter (同時送信は wire) | available な object の数、応答の request_id、偽 provider の残存物 | digest の材料から `Content-Type` を外す | 7 |
+| O-7 | idempotency の再送・同時送信は一 object に収束 (`available` は高々 1)、異なる bytes / metadata の同一 key は `CONFLICT`。replay の `X-Request-Id` と `request_id` は元の値。敗者の pending object は cleanup される (§3.2.1)。【v0.5 2026-10-02 設計レビュー 2 反映 Q-9】replay の `X-Request-Id` は replay 要求自身の `request_id`、body の `request_id` は元の値 (上の「replay の `X-Request-Id` ... は元の値」を改める。§3.2.1 の Q-9) | SI-11 | 6 adapter (同時送信は wire) | available な object の数、応答の request_id、偽 provider の残存物。【v0.5 2026-10-02 再確認 2 反映 RC2-6】`idempotency_entries` の境界で同 key を同時に送る観測 (§3.2.1 の RC2-6) | digest の材料から `Content-Type` を外す | 7 |
 | O-8 | 確認不足 (本文 `{}`) の削除は副作用なく `DESTRUCTIVE_CONFIRMATION_REQUIRED`、正しい confirmation で `200 ObjectDeleteResult`、再送は `NOT_FOUND`、`dry_run` / `budget` は `VALIDATION_FAILED` (`unsupported_field`)。【v0.3 2026-10-02 再確認反映 RC-1】再送を分ける: `idempotency_key` なしの再送は `NOT_FOUND`、retention 内に同じ key・同じ digest の再送は元の 200 (`ObjectDeleteResult`、`request_id` も元の値) の replay、digest が異なれば `CONFLICT`。【v0.3 2026-10-02 再確認反映 RC-9】`dry_run` / `budget` の violated_declaration は `request_schema` | SI-09 | 6 adapter | 応答 code と本文、削除前後の取得 | 確認無しで削除を実行する | 8 |
 | O-9 | `pending` / `deleting` / `deleted` / `cleanup_failed` の object は `NOT_FOUND`。provider 失敗は `SERVICE_UNAVAILABLE` で object を残さない。同一 object ID は再利用されない | SI-11 | 6 adapter | 状態ごとの取得・metadata 取得の応答 | `pending` を取得可能にする | 9 |
-| O-10 | download 応答は `Content-Length`、`Content-Digest`、`Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-transform`、`X-Request-Id` (body の `request_id` があれば同値) を持ち、provider URL・provider key・credential を含まない。【v0.5 2026-10-02 設計レビュー 2 反映 Q-9】`X-Request-Id` はその要求自身の `request_id` (上の「body の `request_id` があれば同値」を改める。§3.2 の Q-9)。【v0.5 2026-10-02 設計レビュー 2 反映 N-14】`Cache-Control` は `private, no-store, no-transform` (§3.3 の N-14) | SI-10 | wire | 応答 header と本文の走査 | `Cache-Control: no-transform` を外す | 10 |
+| O-10 | download 応答は `Content-Length`、`Content-Digest`、`Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-transform`、`X-Request-Id` (body の `request_id` があれば同値) を持ち、provider URL・provider key・credential を含まない。【v0.5 2026-10-02 設計レビュー 2 反映 Q-9】`X-Request-Id` はその要求自身の `request_id` (上の「body の `request_id` があれば同値」を改める。§3.2 の Q-9)。【v0.5 2026-10-02 設計レビュー 2 反映 N-14】`Cache-Control` は `private, no-store, no-transform` (§3.3 の N-14) | SI-10 | wire | 応答 header と本文の走査。【v0.5 2026-10-02 再確認 2 反映 RC2-7】download の `Content-Type` が upload 時の値と一致する (O-24 の peer 側変異を検出する観測。O-10 または O-24 の観測点) | `Cache-Control: no-transform` を外す | 10 |
 | O-11 | upload 本文を全量メモリにバッファしない (【v0.3 2026-10-02 再確認反映 RC-18】両論の註は表の後) | SI-08 | wire | 偽 provider が最後の chunk の前に先頭 bytes を受け取っている | 本文を読み切ってから provider に渡す | 11 |
 | O-12 | 未認証要求は小さい byte bound を超えて本文を読まず、本文を読まずに拒否したときは `Connection: close` で接続を閉じる。【v0.5 2026-10-02 設計レビュー 2 反映 N-7】object 経路は認証前に本文を 1 octet も読まない (§3.4 の段 (1))。本文を読み終える前に応答するときは認証の前後を問わず `Connection: close` で閉じ (§3.3 の N-7)、`LIMIT_EXCEEDED` の後に client が送り続けた bytes が読まれないことを観測する | SI-08、SI-15 | wire | 読まれた octet 数、接続の終了 | 認証前に object 経路の大きい bound を適用する | 11 |
 | O-13 | 一定速度の download の途中 t0 で revoke すると、t0 + 宣言 `authorization_propagation_bound_ms` 以内に接続が終わる。再認可で `AUTH_STATE_UNAVAILABLE` なら中断する (§11 の Q-4 の裁定に依存)。【v0.4 2026-10-02 依頼者裁定の帰結 Q-4】条件の形に確定する: 一定速度で読む download の途中 t0 で revoke → t0 + 宣言 bound 以内に接続が終わる (受信長 < `Content-Length`)。Q-4 は (a) (§6 の 5 の Q-4 の段落)。【v0.5 2026-10-02 設計レビュー 2 反映 N-11】試験配備の bound と転送時間の関係: 転送時間 ≫ t0 + 宣言 bound + 余裕とし、`object_transfer_ms` はそれより大きくする。revoke しない同速度の download が完走する陽性対照を必須にする。終了判定はサーバ側の送信停止 (偽 provider の読み出し停止) で行い、client 側の EOF は使わない。upload 側の対は O-27 | SI-13、SI-15 | wire | 接続終了の時刻。【v0.4 2026-10-02 依頼者裁定の帰結 Q-4】受信長と `Content-Length` | 転送中の再認可を外す (完了時だけにする) | 11 |
@@ -635,18 +658,22 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | O-20 | 宣言 `audit_query.operations` に 4 操作名、`target_kinds` に `object` があり、宣言と実挙動が一致する。`upload_object` の event は成功応答の前に同期で書かれる | SI-14 | 宣言と一致は 6 adapter。同期書き込みの観測は `conformance-tests/CONDITIONS.md` C-33 と同じ composition root (wire、workers = 2) で行い、in-process は対象外 (監督 2026-10-02) | 成功応答の受信後の audit_query の結果。【v0.3 2026-10-02 再確認反映 RC-11】`conformance-tests/CONDITIONS.md` C-33 の形 (成功応答の直後に process を SIGKILL し、再起動後の audit_query に event がある) にする | upload の event を応答後に非同期で書く | — |
 | O-21 | 同期 provider SDK の呼出しが event loop 上で走らない (threadpool offload) | SI-08 | peer-local | event loop の占有の観測 (形は peer が定める) | offload を外す | 11 |
 | O-22 | download で provider が保存値と異なる bytes を返すと本文が切られ (O-14 と同じ観測)、security-control failure が監査される | SI-11、SI-14 | wire | 受信長と接続終了、監査 event | download 側の digest 照合を外す | — |
-| O-23 | §3.4 の失敗の表の各行の入力に、表のとおりの code / violated_declaration / field を返す (「未定」の欄は 2026-10-02 の監督裁定で埋めた)。【v0.5 2026-10-02 設計レビュー 2 反映 N-5】code は許容集合で検証する (`object_id` の構文違反は {`IDENTIFIER_INVALID`, `VALIDATION_FAILED`}、失効 / 無効化は `conformance-tests/CONDITIONS.md` C-08 の集合)。socket plug での path の wire rejection (`conformance-tests/CONDITIONS.md` C-03 の開示) は `object_id` にも及ぶ。【v0.5 2026-10-02 設計レビュー 2 反映 N-7】`Content-Length` の 2 行は対象外 (§3.4) | SI-05、SI-10 | 6 adapter (header の行は wire) | problem 応答の各 field | 行ごとに該当する検査を外す | — |
+| O-23 | §3.4 の失敗の表の各行の入力に、表のとおりの code / violated_declaration / field を返す (「未定」の欄は 2026-10-02 の監督裁定で埋めた)。【v0.5 2026-10-02 設計レビュー 2 反映 N-5】code は許容集合で検証する (`object_id` の構文違反は {`IDENTIFIER_INVALID`, `VALIDATION_FAILED`}、失効 / 無効化は `conformance-tests/CONDITIONS.md` C-08 の集合)。socket plug での path の wire rejection (`conformance-tests/CONDITIONS.md` C-03 の開示) は `object_id` にも及ぶ。【v0.5 2026-10-02 設計レビュー 2 反映 N-7】`Content-Length` の 2 行は対象外 (§3.4)。【v0.5 2026-10-02 再確認 2 反映 RC2-5】`object_id` の構文違反の入力に `abc`、`O_…`、`o_` の直後の文字が `8` の 26 文字 (正規表現の先頭文字 [0-7] に反する)を加える (§3.1 の RC2-5) | SI-05、SI-10 | 6 adapter (header の行は wire) | problem 応答の各 field | 行ごとに該当する検査を外す | — |
 | O-24 | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-1】`Content-Type: application/json` で upload した、errors.shape を満たす本文の object (乙により problem+json では保存できないので、観測は `application/json` で行う。監督 2026-10-02) を契約だけで組む client で download すると、bytes の成功に分類される (2xx は media type を問わず response schema と照合しない。§3.3 の Q-1)。upload 時に media type が `errors.content_type` に一致する要求は `VALIDATION_FAILED` (`content_type`、`header/content-type`)。【v0.5 2026-10-02 設計レビュー 2 反映 N-3】`Content-Digest` を持たない 2xx (前段の 200 を模す) が解釈しない失敗に分類されることも観測する。【v0.5 2026-10-02 設計レビュー 2 反映 N-12】upload 側の入力に `Application/Problem+JSON; charset=utf-8` を含める | SI-05 | wire (契約だけで組む client。`conformance-tests/CONDITIONS.md` C-35 への影響は契約改版の WP で見る) | download の分類結果、upload の problem 応答の各 field | (download) 2xx でも media type が errors.content_type なら失敗に分類する。(upload) errors.content_type の拒否を外す。【v0.5 2026-10-02 設計レビュー 2 反映 N-12】download 側の変異を「download の 2xx を media type で分類する (1.14.0 の規則に戻す)」と「peer が download の `Content-Type` を errors.content_type にする」に替える (上の download 側の変異は残す) | — |
 | O-25 | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】1 byte/秒の upload が宣言 `execution_ms` で `LIMIT_EXCEEDED` (`limit_class: execution_ms`) になり、`object_transfers` 枠が解放される (直後の upload が枠を取れる)。【v0.5 2026-10-02 設計レビュー 2 反映 Q-6】上の `execution_ms` を `object_transfer_ms` に改める (旧文は残す): 1 byte/秒の upload が宣言 `object_transfer_ms` で `LIMIT_EXCEEDED` (`limit_class: object_transfer_ms`) になり、`object_transfers` 枠が解放される | SI-08 | wire | 応答 code と limit_class、拒否までの時間、直後の upload が枠を取れること | upload の転送に `execution_ms` の期限を掛けない。【v0.5 2026-10-02 設計レビュー 2 反映 Q-6】upload の転送に `object_transfer_ms` の期限を掛けない | — |
-| O-26 | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-2 (監督 2026-10-02)】誤配の観測: application B の credential を application A の専用単位へ直接送ると `AUTH_INVALID` で閉じ、bytes は保存されず、認証拒否の audit event が残る (router を経ない直接送信で観測する) | SI-00、SI-06、SI-14 | peer-local / deployment evidence (共通 conformance の 6 adapter では router と専用単位を立てないため対象外)。【v0.5 2026-10-02 設計レビュー 2 反映 (監督)】本番形 (router + 専用単位) の宣言値 (limits.object_*、limit_enforcement.object_*、authorization_propagation_bound_ms) と実挙動の一致もここで観測する (P-3) | A の単位の応答 code、A の bucket と metadata に変化が無いこと、audit の denial | A の単位が自分の application 以外の credential も受理する | — |
-| O-27 | 【v0.5 2026-10-02 設計レビュー 2 反映 N-11】一定速度の upload の途中 t0 で revoke すると、t0 + 宣言 `authorization_propagation_bound_ms` 以内に既存 code の problem 応答 (§3.4 の再認可の行。または接続終了) となり、object は available にならない (O-13 の upload 側の対) | SI-13、SI-15 (O-13 と同じ) | wire | 応答 code または接続終了の時刻、metadata 取得が `NOT_FOUND` | upload の再認可を外す | — |
+| O-26 | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-2 (監督 2026-10-02)】誤配の観測: application B の credential を application A の専用単位へ直接送ると `AUTH_INVALID` で閉じ、bytes は保存されず、認証拒否の audit event が残る (router を経ない直接送信で観測する) | SI-00、SI-06、SI-14 | peer-local / deployment evidence (共通 conformance の 6 adapter では router と専用単位を立てないため対象外)。【v0.5 2026-10-02 設計レビュー 2 反映 (監督)】本番形 (router + 専用単位) の宣言値 (limits.object_*、limit_enforcement.object_*、authorization_propagation_bound_ms) と実挙動の一致もここで観測する (P-3)。【v0.5 2026-10-02 再確認 2 反映 RC2-14】この欄の (監督) の追記は N-17 相当 (監督) である | A の単位の応答 code、A の bucket と metadata に変化が無いこと、audit の denial。【v0.5 2026-10-02 再確認 2 反映 RC2-1】本番形で未認証 upload の読まれた octet 数が 0。発行直後の credential の即時 upload が成功する | A の単位が自分の application 以外の credential も受理する | — |
+| O-27 | 【v0.5 2026-10-02 設計レビュー 2 反映 N-11】一定速度の upload の途中 t0 で revoke すると、t0 + 宣言 `authorization_propagation_bound_ms` 以内に既存 code の problem 応答 (§3.4 の再認可の行。または接続終了) となり、object は available にならない (O-13 の upload 側の対) | SI-13、SI-15 (O-13 と同じ) | wire | 応答 code または接続終了の時刻、metadata 取得が `NOT_FOUND`。【v0.5 2026-10-02 再確認 2 反映 RC2-8】「metadata 取得が `NOT_FOUND`」を「偽 provider の状態を読む port の method で available の object が 0、かつ metadata 行に available が無い」に改める (旧文は残す。object_id は client に返らないため) | upload の再認可を外す | — |
 | O-28 | 【v0.5 2026-10-02 設計レビュー 2 反映 N-18】検査順: 段 (4) の 2 つの違反 (例: `Content-Type` 欠落 + `Idempotency-Key` 長さ違反) を含む要求は先の方の field を返す。段 (3) と (4) の同時違反は `CAPABILITY_UNSUPPORTED` (§3.4 の N-18) | SI-05、SI-10 (O-23 と同じ) | wire | problem 応答の code と field | 段 (4) 内の順を入れ替える | — |
+| O-29 | 【v0.5 2026-10-02 再確認 2 反映 RC2-2】`object_metadata_bytes` の N / N+1 (header 値の octet 合計。§6.1) | SI-08 | wire の O-n か `_V2_DRIVERS` の driver (§7.1 の RC2-2) | 合計 N octet は受理、N+1 octet は `LIMIT_EXCEEDED` (`limit_class: object_metadata_bytes`) | 境界 ±1 | — |
+| O-30 | 【v0.5 2026-10-02 再確認 2 反映 RC2-2】`object_requests_per_minute` の N / N+1 (§6.1) | SI-08 | wire の O-n か `_V2_DRIVERS` の driver (§7.1 の RC2-2) | N 件目は受理、N+1 件目は `LIMIT_EXCEEDED` (`limit_class: object_requests_per_minute`) | 境界 ±1 | — |
 
 【v0.3 2026-10-02 再確認反映 RC-18】O-11 の註 (両論): (a) 実装が溜めてよい上限 B octet を契約で固定し、観測は B を超える本文で行う。(b) O-11 を peer-local に移す。SDK の part 長・GCS の chunk 長は未確認。確定は設計レビュー 2。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 RC-18 の見立て】O-11 の註の結論 (監督 2026-10-02): 偽 provider を peer の storage adapter の境界に置き、O-11 は wire のまま残す (client は前半を送り、偽 provider が受け取るまで待ってから残りを送る)。SDK の part 長は peer-local。契約に上限 B の定数は置かない。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 N-18】B-5 の 4 class の N / N+1 境界は、既存 `conformance-tests/CONDITIONS.md` C-05 の `_CAPABILITY_CONDITIONED` (`conformance-tests/test_c05_limit_declaration_agreement.py:84-88`) に object_storage 条件付きで入れる。`conformance-tests/test_contract.py:2372` の limit class 数 17 の pin は改版対象である。(監督 2026-10-02) Q-6 の `object_transfer_ms` も同じ条件付き集合に入れる (object の class は 5 つ。pin は 17 → 22)。
+
+【v0.5 2026-10-02 再確認 2 反映 RC2-2】上の「既存 `conformance-tests/CONDITIONS.md` C-05 の `_CAPABILITY_CONDITIONED` ... に object_storage 条件付きで入れる」を「V1 (e) の必須集合に object_storage 条件付きで入れる (`_CAPABILITY_CONDITIONED` は V1 (e) にだけ効く。`conformance-tests/test_c05_limit_declaration_agreement.py:13-21,:28-35,:84-88,:755-765`)。境界は wire の O-n か `_V2_DRIVERS` の driver で駆動し、enforced と宣言した object の class が全て駆動されたことを assert する」に改める (旧文は残す)。`object_metadata_bytes` と `object_requests_per_minute` の N / N+1 は上の表の O-29・O-30。
 
 ## 8. 運用値・後続 capability の検討事項
 
@@ -655,6 +682,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 【註 2026-10-02】v0.3 の時点で、§11 の Q-0〜Q-5 が依頼者裁定待ちである。下の 1 の timeout・再認可周期は Q-3 / Q-4 の裁定に従う。
 
 1. 初期 deployment の `object_bytes`、`object_metadata_bytes`、`object_requests_per_minute`、`object_transfers`、認証前 byte bound、timeout、再認可周期。
+   【v0.5 2026-10-02 再確認 2 反映 RC2-9】1 に `object_transfer_ms` を足す。
 2. `cleanup_failed` の再試行間隔、監視、alert、保持・法的保全の手順。
 3. object metadata を各 application DB に置く。schema/migration の詳細と、provisioning/control 経路が application bucket/identity をどの DB declaration と結び付けるか。
 4. マルウェア対策を upload 完了前の必須 gate にするか。初版は対象外と明示し、必要なら `pending_scan` 状態を持つ別 capability とする。
@@ -735,6 +763,8 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 設計レビュー 1 回目で挙がった、依頼者決定 A-1〜B-12 と現状の食い違い、または決定の確定後に挙がった露出である。決定は再審議しない。各件は両論のまま置き、v0.3 では確定しない。「推奨」は監督の推奨であり、裁定ではない。
 
 【v0.5 2026-10-02 設計レビュー 2 反映 Q-6〜Q-9】Q-6〜Q-9 は設計レビュー 2 回目で挙がった、依頼者裁定 Q-0〜Q-5 の帰結と現状の食い違いであり、監督の突合で依頼者裁定級とした。形は Q-0〜Q-5 と同じ。各件の末尾の【裁定 2026-10-02】行は、上の依頼者裁定の逐語を本件にも及ぶものとした監督の読みである。
+
+- 【v0.5 2026-10-02 再確認 2 反映 RC2-4 (監督)】Q-6〜Q-9 は依頼者指示「全て監督推奨で進めてください」を本件にも及ぶものと読んで (監督の読み) 推奨で進めたので、契約改版 WP の着手前に依頼者の確認を得る (Q-6 の裁定行の 1 行は Q-7〜Q-9 にも掛かる)。
 
 ### Q-0 着手条件の充足
 
@@ -824,12 +854,14 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 - 決定: Q-3 の裁定 (甲) (`execution_ms` を転送全体に掛ける)。B-5 (4 class)。
 - 現状: `execution_ms` は deployment に 1 つの宣言値であり、query / mutation / schema operation と共有する (`spec/data-service-api.v1.json:929-947`)。契約の例 (`execution_ms` 5000 ms。`spec/data-service-api.v1.json:955`) と §3 の例 (`object_bytes` 50 MiB) を組むと、10 MiB/s 未満の client の upload は必ず `LIMIT_EXCEEDED` になる。仮の起点「受付 = 認証成功時点」(§2、§6.1 の Q-3 の段落) は契約に「仮」と書けず、両 peer の現行の起点 (limit gate 通過時。`RM`:462) とも違う。
 - 食い違い: Q-3 (甲) のままでは実用にならない。
+- 【v0.5 2026-10-02 再確認 2 反映 RC2-4】食い違い (追記): (c) は Q-3 の (乙) のうち全体時間の class に当たり、Q-3 (甲) の「class を増やさない」を改める。
 - 選択肢 (両論):
   - (a) 共有を受け入れ、運用値 (§8) で `execution_ms` を上げる (JSON 経路の bound が緩む)。
   - (b) `execution_ms` を操作別に宣言する (契約の limits の形の変更)。
   - (c) 転送専用の class `object_transfer_ms` を 1 つ足す (B-5 の 4 class を超えるが加算的)。起点 = `object_transfers` 枠の獲得時点、終点 = available への遷移 / 送信完了。台帳 `RM` R-42 と独立。
 - 推奨 (監督の推奨): (c)。agent が必要な最低速度 = `object_bytes` / `object_transfer_ms` を宣言から導けることを契約文に書く。§6.1 に行を足し、§3.4 の `execution_ms` の行を `object_transfer_ms` に改め (旧文は残す)、O-25 を `object_transfer_ms` に改める。実装側の socket timeout は `object_transfer_ms` 以下の運用値とする。
 - 【裁定 2026-10-02】依頼者指示「全て監督推奨で進めてください」(2026-10-02) を本件にも及ぶものと読み (監督の読み)、推奨 (c) で進める。依頼者が覆すときは本行に【訂正】を足す。帰結は §0 の B-5 の註、§2、§3、§3.4 (失敗の表の末尾)、§4 (M-5)、§6 の 5、§6.1 (表と Q-6 の段落)、§7.1 の O-25、§8、§11 の Q-3 の裁定行の後。
+- 【v0.5 2026-10-02 再確認 2 反映 RC2-4】契約改版 WP の着手前に依頼者の確認を得る (監督の読みで進めた件の確認。`docs/work-orders/OPERATING_CONDITIONS.md` §1.7 の 51 との関係)。
 
 ### Q-7 router の SI-00 上の扱いと要件 (N-1)
 
@@ -841,6 +873,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
   - (b) router の要件を列挙して条件にする。
 - 推奨 (監督の推奨): (a)+(b)。要件: router は契約の応答を一切組まない (lookup に失敗した要求は deployment の JSON process へ回し、そこが `AUTH_INVALID` / `AUTH_REQUIRED` を返して監査する)、application logic・bucket 資格情報・DB 書き込み・本文の保存を持たない、保持する状態は「bearer の hash → application_id」の読み取り専用の射影だけ (secret を再構成できない)、本文は転送するだけ、専用単位は自分の 1 application で bearer を再認証する (誤配は `AUTH_INVALID`、O-26)。専用単位は serving set が 1 application でなければ起動しない (fail closed。test 専用の composition root だけが多 application を許す。RC-10 と同形)。capability document を返す process と専用単位の設定値は同じ出所から導き、起動時に一致を検査する (台帳 `RM` P-3)。台帳 `RM` R-30 との関係: 「矛盾しない形で」の文を撤回し、「R-30 は独立に裁定する。(ii) の router は application-facing 実装ではなく前段であり、R-30 のどちらの答えとも両立する。R-30 の裁定時に router の位置づけを確認する」に改める (旧文は残す)。R-30 行への追記は作業機の台帳更新で行う (次の一手)。
 - 【裁定 2026-10-02】依頼者指示「全て監督推奨で進めてください」(2026-10-02) を本件にも及ぶものと読み (監督の読み)、推奨 (a)+(b) で進める。依頼者が覆すときは本行に【訂正】を足す。帰結は §3.1 (Q-7 の段落)、§6.1 (Q-7 の段落)、§9 の新 5、§11 の Q-2 (監督の読みの後)。
+- 【v0.5 2026-10-02 再確認 2 反映 RC2-1 / RC2-3】上の推奨の要件のうち、lookup に失敗した要求の扱い・router が持たないもの・router が保持する状態は §3.1 の Q-7 の段落の RC2-1 / RC2-3 で改めた (推奨と裁定行の本文は変えない)。
 
 ### Q-8 (ii) の `concurrency` の宣言 (N-2)
 
@@ -942,7 +975,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | N-n | 出所 (A2-n、B2-n) | 反映した節 |
 | --- | --- | --- |
 | Q-6 (N-10) | A2-12、B2-1 | §11 の Q-6、§0 の B-5 の註、§2、§3、§3.4 (失敗の表の末尾)、§4 (M-5)、§6 の 5、§6.1 (表と Q-6 の段落)、§7.1 の O-25、§8、§11 の Q-3 の裁定行の後 |
-| Q-7 (N-1) | A2-1、A2-3、B2-9 | §11 の Q-7、§3.1 (Q-7 の段落)、§6.1 (Q-7 の段落)、§9 の新 5、§11 の Q-2 (監督の読みの後) |
+| Q-7 (N-1) | A2-1、A2-3、B2-9 | §11 の Q-7、§3.1 (Q-7 の段落)、§6.1 (Q-7 の段落)、§9 の新 5、§11 の Q-2 (監督の読みの後)、【v0.5 2026-10-02 再確認 2 反映 RC2-14】§7.1 の O-26 |
 | Q-8 (N-2) | A2-2 | §11 の Q-8、§6.1 (Q-8 の段落)、§11.1 の (ii) 行 |
 | Q-9 (N-6 の一部) | A2-10 | §11 の Q-9、§0 の B-3 の註、§2.1 (RC-13 の後)、§3.2、§3.2.1、§7.1 の O-7・O-10 |
 | N-3 | A2-4、B2-6、A2-5、B2-2 の header 部分 | §3 (RC-9 の註の後)、§3.1 (`{object_id}` の註の後)、§3.3 (Q-1 の段落の後)、§7.1 の O-24 |
@@ -952,18 +985,39 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | N-7 | A2-6、A2-7、A2-8、B2-8 の一部 | §3.3 (M-14 の後)、§3.4 (段 (1)、`Content-Length` の 2 行)、§6 の 2・6、§7.1 の O-12・O-16・O-23 |
 | N-8 | A2-9、B2-13 | §3.2.1、§4 (M-7 の後) |
 | N-9 | A2-11 | §3.2.2、§7.1 の O-2 |
-| N-11 | A2-13、B2-8 | §7.1 の O-13、O-27 |
+| N-11 | A2-13、B2-8 | §7.1 の O-13、O-27、【v0.5 2026-10-02 再確認 2 反映 RC2-14】§2.1 |
 | N-12 | A2-14、B2-7 | §7.1 の O-24 |
 | N-13 | A2-16 | §3.4 (検査順の表の後) |
 | N-14 | A2-17 | §3.3 (M-10 の後)、§7.1 の O-10 |
 | N-15 | A2-18、B2-12 | §2 (Q-5 の段落の後)、§8、§9 の新 5 |
 | N-16 | A2-19 | §7.1 の O-6 |
 | N-17 | A2-20、B2-10 | §2.1 |
-| N-18 | B2-8 | §3.4 (検査順の表の後)、§7.1 の O-28 と表の後 |
+| N-18 | B2-8 | §3.4 (検査順の表の後)、§7.1 の O-28 と表の後、【v0.5 2026-10-02 再確認 2 反映 RC2-14】§2.1 |
 | N-19 | B2-9、A2-1 の残り | §3.1 (Q-7 の段落の後)、§3.4 (実行主体の表)、§6.1、§7.1 の前置き |
 | N-20 | B2-11 | §6 の 5 |
 | N-21 | B2-14 | §11 の Q-2 (裁定行の後)、§12 の「v0.4 の帰結の一覧」の Q-2 行 |
 | RC-18 の見立て | A / B 共通 (監督 2026-10-02) | §7.1 (O-11 の註の後) |
+
+### 再確認 2 の反映 (RC2-1〜RC2-14) (番号なし。§12.1 の番号を保つ)
+
+設計レビュー 2 回目の反映 (v0.5) に対する再確認は指定なし 1 起動で行い、指摘 14 件を監督が裁定した (2026-10-02)。全件「直した」であり、v0.5 の中で反映した (版は v0.5 のまま。冒頭の版数表の v0.5 行を改めた)。反映箇所の印は【v0.5 2026-10-02 再確認 2 反映 RC2-n】。
+
+| RC2-n | 反映した節 |
+| --- | --- |
+| RC2-1 | §3.1 (Q-7 の要件 1〜3)、§3.4 (N-19 の実行主体の表の lookup 失敗の行)、§7.1 の O-26 (観測点)、§11 の Q-7 (裁定行の後) |
+| RC2-2 | §7.1 (表の後の N-18 の段落の後)、§7.1 の O-29・O-30 |
+| RC2-3 | §3.1 (Q-7 の要件 1〜3。RC2-1 と同じ印)、§11 の Q-7 (裁定行の後) |
+| RC2-4 | §11 の Q-6 (食い違いの欄の後、裁定行の後) |
+| RC2-5 | §3.1 (N-5 の段落の後)、§3.4 (`field` 定義の註の後)、§7.1 の O-23 |
+| RC2-6 | §3.2.1 (N-8 の行の後)、§7.1 の O-7 |
+| RC2-7 | §7.1 の O-10 |
+| RC2-8 | §7.1 の O-3・O-4b・O-27 |
+| RC2-9 | §3 (Q-6 の段落の後)、§6.1 (表の `object_transfer_ms` 行、Q-6 の段落の後)、§8 の 1 |
+| RC2-10 | §6.1 (Q-8 の段落の後) |
+| RC2-11 | §3 (N-4 の段落の後) |
+| RC2-12 | §0 の B-3 の註、§3.2 (Q-9 の段落の後) |
+| RC2-13 | §3.4 (新語の定義の基準の行の後) |
+| RC2-14 | §2.1 (表の監督追記の行)、§3.4 (N-13 の段落の後)、§7.1 の O-26 (Evidence)、§12 の「設計レビュー 2 の反映の一覧」(Q-7・N-11・N-18 の行) |
 
 ### 12.1 観察 (台帳には載せない)
 
