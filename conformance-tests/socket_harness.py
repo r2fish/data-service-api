@@ -270,7 +270,7 @@ def find_nginx_binary() -> str:
 # and the surface's declared base URL carries a non-default port, so with
 # `$host` a client that followed the upstream's own trailing-slash redirect
 # would be sent to the scheme's default port -- another service than the
-# one it dialed. Measured over both socket plugs and both `location`s by
+# one it dialed. Pinned over both socket plugs and both `location`s by
 # `test_wire_entry.py::test_socket_redirect_location_keeps_the_declared_authority`.
 _NGINX_CONF_TEMPLATE = """\
 pid {pid_path};
