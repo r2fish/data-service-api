@@ -20,7 +20,9 @@ suite's own territory (C-22 runs against both registered MitateDB plugs);
 this file instead pins the narrower, cheaper unit fact the HTTP path
 itself depends on -- `http.py::_problem_for_exception`'s own code/status/
 message mapping for `errors.PreconditionFailedError` -- without spinning
-up a real ASGI/PostgreSQL stack for it.
+up a real ASGI/PostgreSQL stack for it. One test below
+(`test_in_process_and_http_plan_tokens_differ_for_the_same_single_entity_batch`)
+IS the exception: it alone uses the PostgreSQL stack of `test_http.app_a_stack`.
 
 Non-vacuity (常設規律 1): every test below asserts a real, directly
 observed outcome (a real row that was or was not written, a real audit
@@ -29,6 +31,7 @@ bare pass-through.
 """
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -44,6 +47,11 @@ from mitatedb_api.config import FoundationConfig
 from mitatedb_api.errors import (AuthorizationError, DestructiveConfirmationRequired,
                                  PreconditionFailedError)
 from mitatedb_api.http import _mutation_digest_item, _mutation_item, _problem_for_exception
+
+# E-5 below drives a real HTTP stack: fixture reuse from `test_http.py` /
+# `test_postgres.py` (same transitive set `test_threadpool_offload.py` imports).
+from .test_http import _create_entity, _post, app_a_stack  # noqa: F401
+from .test_postgres import app_a, platform  # noqa: F401
 
 # ===========================================================================
 # Fixtures -- mirrors test_constraints_declaration.py's own WP-3a precedent.
@@ -991,3 +999,80 @@ def test_dry_run_transact_succeeds_without_a_default_hook_because_filters_never_
     )
     assert dry[-1]["committed"] is False
     assert isinstance(dry[-1]["plan"], str) and dry[-1]["plan"], dry[-1]
+
+
+# ===========================================================================
+# R-33 (docs/design/R33_DIGEST_MATERIAL_READING_V0_1.md section 4, E-1 and
+# E-5): the first test pins the signature after the dead `destructive`
+# argument was removed (`docs/work-orders/WORK_ORDER_R33_DIGEST_MATERIAL_V1.md`
+# D-1 (a), D-4); the second records what the code does with the
+# HTTP-vs-in-process digest material (the disclosed structure, same work
+# order D-2).
+# ===========================================================================
+
+
+def test_create_collection_has_no_destructive_parameter(sessions) -> None:
+    """R-33 D-1 (a): `ApplicationCell.create_collection` takes no
+    `destructive` argument. It was read nowhere in the body, so a caller who
+    passed it positionally got no effect and the plan digest ignored it.
+    The signature pin: `destructive` is not a parameter, every parameter
+    after `principal, name, fields` is keyword-only, and a call with a 4th
+    positional argument is a `TypeError`."""
+    dev, _runtime = sessions
+    cell = dev._ApplicationRuntime__cell  # noqa: SLF001 -- direct cell call: the in-process facade has no `destructive` parameter
+    principal = dev._ApplicationRuntime__principal  # noqa: SLF001
+
+    parameters = inspect.signature(cell.create_collection).parameters
+    names = list(parameters)
+    assert "destructive" not in parameters, names
+    assert names[:3] == ["principal", "name", "fields"], names
+    keyword_only = [name for name in names[3:] if parameters[name].kind is not inspect.Parameter.KEYWORD_ONLY]
+    assert len(names) > 3 and not keyword_only, (names, keyword_only)
+
+    with pytest.raises(TypeError):
+        cell.create_collection(principal, "r33_a1_entity", {"label": "text"}, True, dry_run=True)
+
+
+def test_in_process_and_http_plan_tokens_differ_for_the_same_single_entity_batch(sessions, app_a_stack) -> None:
+    """E-5: the same logical single-entity insert batch, dry-run through the
+    in-process facade (SQLite `sessions`) and through the HTTP per-entity
+    mutation endpoint (PostgreSQL `app_a_stack`), is expected to carry
+    DIFFERENT plan tokens -- the in-process path rebuilds the digest
+    operations from the internal item shape (`entity` inside each
+    operation), the HTTP path keeps the contract shape (`entity` at the
+    top level). The token is `<sha256hex>.<schema_revision>`; both halves
+    are compared so a revision-only difference cannot pass for a digest
+    difference.
+
+    This pins a KNOWN GAP, not contract behaviour. Spec
+    `structured_operations.dry_run.plan` (`spec/data-service-api.v1.json`)
+    makes the token a function of the contract-level request object, so the
+    same logical request should give the same token through both entries.
+    The gap is disclosed in the docstring of
+    `cell.py::_reconstruct_digest_operation`. A change set that closes it
+    flips this test and this docstring together
+    (`docs/work-orders/WORK_ORDER_R33_DIGEST_MATERIAL_V1.md` D-2); a red here
+    after such a fix is that flip, not a regression to revert."""
+    dev, runtime = sessions
+    entity = "r33_e5_entity"
+    dev.create_entity(entity, fields={"label": "text"}, field_types={"label": "string"})
+    in_process = runtime.transact(
+        [{"type": "insert", "collection": entity, "values": {"label": "r33-e5-row"}}], dry_run=True,
+    )
+    in_process_token = in_process[-1]["plan"]
+
+    _create_entity(app_a_stack, entity, fields=["label"])
+    http_response = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"label": "r33-e5-row"}}], "dry_run": True},
+    )
+    assert http_response.status_code == 200, http_response.text
+    http_token = http_response.json()["plan"]
+
+    assert isinstance(in_process_token, str) and in_process_token, in_process
+    assert isinstance(http_token, str) and http_token, http_response.text
+    in_process_digest, _, in_process_revision = in_process_token.partition(".")
+    http_digest, _, http_revision = http_token.partition(".")
+    assert in_process_digest and in_process_revision and http_digest and http_revision, (in_process_token, http_token)
+    assert in_process_token != http_token, (in_process_token, http_token)
+    assert in_process_digest != http_digest, (in_process_token, http_token)
