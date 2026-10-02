@@ -1,4 +1,4 @@
-# オブジェクトストレージ・バイナリ API 設計指示書（候補 v0.3）
+# オブジェクトストレージ・バイナリ API 設計指示書（候補 v0.4）
 
 ## 版数・位置づけ (番号なし。§0〜§9 は v0.2 の番号を保つ)
 
@@ -7,12 +7,14 @@
 | v0.1 | 2026-09-11 以前 | 推薦案を含む初稿。推薦案と退けた選択肢の記録は repository に無い (観察。復元しない。§12.1) |
 | v0.2 | 2026-09-11 | 依頼者決定 A-1〜B-12 を反映 (下の 2 行と §0 確定した設計判断の表) |
 | v0.3 | 2026-10-02 | 設計レビュー 1 回目 (観点 A / B の並列 2 起動) と再確認 (指定なし 1 起動) を反映。依頼者裁定待ち Q-0〜Q-5 (§11)。設計レビュー 2 回目は裁定反映後。現状との突き合わせは §10、反映の一覧は §12 |
+| v0.4 | 2026-10-02 | 依頼者裁定 Q-0〜Q-5 の反映 (裁定の逐語は §11 の冒頭、帰結の一覧は §12 の「v0.4 の帰結の一覧」)。設計レビュー 2 回目の対象版 |
 
 - 位置づけ: 台帳 `RM` R-36 の設計文書。状態は候補のまま (未実装・未宣言・非正本) で、v0.3 でも変えない。
 - v0.3 の印: 設計レビュー 1 の反映箇所には【v0.3 2026-10-02 設計レビュー 1 反映 M-n】(S-n は §10 の行) を、依頼者決定と現状の食い違いには【註 2026-10-02】を付す。v0.2 の行は消さず、判定を変える箇所は旧文の後に新文と根拠を続ける。
 - 再確認の印: 再確認 (指定なし 1 起動) の反映箇所には【v0.3 2026-10-02 再確認反映 RC-n】を付す。RC-n は本文書の局所 ID であり、一覧は §12 の「再確認の反映 (RC-1〜RC-21)」。判定を変える箇所は旧文を残し、印を付けた新文を続ける。
 - ID の出所: 本文書の SI-N は `security/SECURITY_INVARIANTS_V1.md`、C-N は `conformance-tests/CONDITIONS.md`、R-N と P-N は台帳 `RM` の ID である。M-n・S-n・Q-n・O-n は本文書の局所 ID (§10〜§12、§7.1)。O-n は仮番号であり、conformance 条件の正式 ID は契約確定時に `conformance-tests/CONDITIONS.md` で採番する。
 - provider (Cloudflare R2 / GCS / Cloud Run) と RFC の挙動に依る記述は、v0.3 の時点で公式文書を読めていないため全て「未確認」である (§12.1)。
+- v0.4 の印: 依頼者裁定 (2026-10-02。逐語は §11 の冒頭) の帰結の反映箇所には【v0.4 2026-10-02 依頼者裁定の帰結 Q-n】を、§11 の各 Q の末尾には【裁定 2026-10-02】を付す。判定を変える箇所は旧文を残し、印を付けた新文を続ける。状態は v0.4 でも候補のまま (契約・conformance・実装はまだ。Q-0 の帰結)。provider と RFC の挙動は v0.4 でも未確認である。
 
 - 状態: **候補**。依頼者・設計レビューで確定するまで、共通契約・conformance tests・実装の正本ではない。
 - 対象: `r2db-api` と `MitateDB-api` が共有する Data Service API。
@@ -21,6 +23,7 @@
 - **A-1 決定（依頼者、2026-09-11）**: security 強度を最優先し、object storage は application ごとの private bucket、application 専用 provider identity、application 専用の object-capable 実行単位で隔離する。application-facing 実行単位は他 application の bucket 資格情報、広い親資格情報、他 application 用の downscoped credential を発行できる資格情報のいずれも保持してはならない。
 - **A-2〜B-12 決定（依頼者、2026-09-11）**: §0 の全推薦案を採用する。
 - 【註 2026-10-02】A-1 は台帳 `RM` R-30 (SI-00 の境界と、1 process が複数 Application の DSN を保持する構成の関係。未着手・依頼者裁定待ち) の一方の答え (serving set を 1 Application に限る) を object-capable 実行単位に先取りしている (§10 の S-13)。1 つの data base URL の背後で application 専用の実行単位へ要求を届ける経路は設計に無く、§11 の Q-2 で依頼者裁定待ちである。
+- 【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】到達経路は案 (ii) に確定した (§3.1 の Q-2 の段落)。JSON 経路の serving set は台帳 `RM` R-30 の裁定に委ねる。
 
 ## 0. 確定した設計判断
 
@@ -48,7 +51,10 @@
 - B-2: `destructive_confirmation.applies_to` (`spec/data-service-api.v1.json:678-683`) は閉じた列挙であり、object 削除の追加は契約の改版になる。本文の形式は継承できる (§10 の S-6)。
 - B-3: spec に `X-Request-Id` は無い。`request_id` は body の field (`spec/data-service-api.v1.json:871` 等) と audit の field である。両 peer の http.py は実装として `x-request-id` 応答 header を返す (§10 の S-8)。B-3 は peer 実装の header を契約へ昇格させる決定になる。bytes 応答には body の `request_id` が置けないので、header が唯一の経路である。
 - B-5: `limits.classes` は閉じた語彙 17 (`spec/data-service-api.v1.json:929-947`。`:323` は語彙外の key を非適合とする) であり、4 class の追加は `limits.classes` の拡張 (契約の版上げ) になる (§10 の S-4)。class ごとの定義は §6.1。時間の bound は §11 の Q-3、総量の bound は §11 の Q-5 で依頼者裁定待ち。
+  - 【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】時間の bound は `execution_ms` が表す (class を増やさない。§2、§6.1)。
+  - 【v0.4 2026-10-02 依頼者裁定の帰結 Q-5】総量の bound の class は足さず、§8 の運用値に置く (§2)。
 - B-7: 両 peer が宣言する `authorization_propagation_bound_ms` は 0 である。B-7 との関係は §11 の Q-4 で依頼者裁定待ち。
+  - 【v0.4 2026-10-02 依頼者裁定の帰結 Q-4】(a)。object_storage を提供する deployment は正の bound を宣言する (§6 の 5)。
 - B-12: audit の operations / target_kinds は実装が `capabilities().audit_query.operations / .target_kinds` で宣言する語彙で、契約は固定 enum を持たない (`spec/data-service-api.v1.json:1011-1012`)。B-12 は「契約の語彙に追加」ではなく「両 peer が宣言に加え、conformance が宣言と実挙動の一致を見る」形になる (§10 の S-5、§7.1 の O-20)。`get_object_metadata` の追加は §3 の M-14 の註。
 
 ## 1. 問題と範囲
@@ -67,6 +73,8 @@
 
 【v0.3 2026-10-02 設計レビュー 1 反映 S-16】実需: 台帳 `RM` §3.2 の突合表 (`RM`:274) は R-36 を「部分的」とする (Mitate `docs/remaining-work-index.md` §将来設計・保留「添付ファイル・画像 — F2 とは別工程として保留」、`docs/design/agent-entry-record.md` §6.1)。data-service-api への具体的な要件は未確定であり、本文書は推測で実需を足さない。着手条件の充足は §11 の Q-0 で依頼者裁定待ち。
 
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-0】依頼者裁定 (2026-10-02、§11 の冒頭) を、監督の読みで Q-0 の (a) (充足とみなし設計レビュー 2 回目へ進む) と読む (§11 の Q-0)。状態は候補のまま。
+
 ## 2. 守るべき安全性
 
 既存 Security Invariants の適用結果を以下に固定する。必要ならレビュー時に新しい invariant の要否を判断するが、現時点では既存の認証・認可・有限資源・非開示・監査の原則で表せる。
@@ -83,7 +91,13 @@
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-22】「コンテンツの扱い」行の「ブラウザ向け取得応答」は「全ての download 応答」と改める (B-11 は download の `Content-Disposition: attachment` を一律に生成する。行は残す)。download 応答の `Content-Type` を client がどう分類するかは §11 の Q-1 で依頼者裁定待ち。
 
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-1】download 応答の分類は (甲)+(乙) に確定した (分類規則は §3.3 の Q-1、upload の拒否は §3.2 の Q-1)。
+
 【註 2026-10-02】「有限資源」行の「ストリーム読み書き時間」を B-5 の 4 class のどれが表すかは未決であり、§11 の Q-3 で依頼者裁定待ち。総保存量・object 数の上限は §11 の Q-5 で依頼者裁定待ち。
+
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】「有限資源」行の「ストリーム読み書き時間」は `execution_ms` が表す (受付から available / 送信完了まで)。超過は `LIMIT_EXCEEDED` (`limit_class: execution_ms`)。download で header 送出後なら接続の異常終了 (§3.3 の M-6)。計測開始と待ち (slot / 枠の待ち) の扱いは台帳 `RM` R-42 の裁定に従う。R-42 が決まるまで、本設計は「受付 = 認証成功時点」を仮の起点とする (仮)。定義は §6.1 の Q-3 の段落。
+
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-5】「有限資源」行の総保存量・object 数の根拠: SI-08 (`security/SECURITY_INVARIANTS_V1.md`) の「object creation rate or count」を rate (`object_requests_per_minute`) で満たす (台帳 `RM` P-5)。class は足さず、provider 側 quota / 予算 alert と object 数・総容量の監視を §8 の運用値に置く。
 
 ### 2.1 SI と conformance 条件の対応
 
@@ -99,6 +113,8 @@
 | 失敗時の後始末 | SI-11、SI-14 (`cleanup_failed` は security-control failure として監査)。【v0.3 2026-10-02 再確認反映 RC-12】SI-11 は atomic と宣言する upload / delete に掛かる | O-9、O-14、O-19。【v0.3 2026-10-02 再確認反映 RC-2】O-19b |
 | 監査・非開示 | SI-14、SI-10 | O-10、O-20 |
 | 削除 (B-2) | SI-09 | O-8 |
+
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-1 / Q-3】§7.1 に足した条件の対応: O-24 は「コンテンツの扱い」(SI-05)、O-25 は「有限資源」(SI-08) に加える (上の表の行は残す)。
 
 【v0.3 2026-10-02 再確認反映 RC-13】下の案は非網羅の例示。確定時に §7.1 の O-n 全件と 1 対 1 で対応させる。B-3 (X-Request-Id) が全成功応答に掛かるなら unconditional に置く。
 
@@ -176,6 +192,16 @@
 
 【註 2026-10-02】`endpoint_fields_note.path` (`spec/data-service-api.v1.json:651`) の placeholder は `{entity}`、`{application_id}`、`{credential_id}` だけである。`{object_id}` の埋め方 (構文・percent-encoding) を契約に足す必要がある (§10 の S-3)。
 
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】到達経路を案 (ii) に確定する (§11 の Q-2、§11.1)。
+
+- data base URL は 1 つ。前段 router が credential から application を引き、当該 application 専用の object-capable 単位へ振り分ける。
+- router は bucket 資格情報を持たず、bytes を保存しない。router の認証状態は「credential → application の対応」の読み取りだけである。
+- 各単位は bearer を自分の 1 application に対して再認証し、誤配は `AUTH_INVALID` で閉じる (fail closed)。
+- router は multi-application 部品であり、SI-00 (`security/SECURITY_INVARIANTS_V1.md`) の対象である (router の欠陥は越境の対象になり得る)。その検証は peer-local / deployment evidence とする。
+- 「router + 専用単位」は object-capable endpoint だけの構成である。JSON 経路の serving set (`*_SERVE_APPS`) は台帳 `RM` R-30 の裁定に委ね、本設計は R-30 の一方の答えを先取りしない。
+- 監督の読み: R-30 の裁定は (ii) (router は multi-application 部品、各 application 専用単位は 1 application だけを serve) と矛盾しない形で別途行う。
+- `concurrency` / `object_transfers` の `limit_enforcement` の帰結は §6.1 の Q-2 の段落。配備の分割は §9 の Q-2 の段落。
+
 ### 3.2 アップロード要求
 
 `POST /v1/objects` の本文は raw bytes とする。`multipart/form-data` は用いない。メタデータは次の HTTP ヘッダーで与える。
@@ -191,6 +217,8 @@
 | `Expect` | 【v0.3 2026-10-02 設計レビュー 1 反映 M-6】`100-continue` を受けたときは、認証と `Content-Length` の検査が済むまで 100 を返さない (§3.2.4)。 |
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-6 / M-19 / M-7 / M-8】上の表の `Content-Length` 行は §3.2.4、`Content-Digest` 行は §3.2.3、`Idempotency-Key` 行は §3.2.1、`Content-Disposition` 行は §3.2.2 で詳細を定める。`Content-Disposition` 行の「制御文字・パス区切りを拒否」は、B-11 (正規化して保存) に揃えて §3.2.2 の「`_` に置換」に改める (行は残す)。
+
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-1】`Content-Type` 行に足す: media type が `errors.content_type` (`application/problem+json`。`spec/data-service-api.v1.json:866`。type・subtype は大小無視、parameter は無視して比較) に一致する upload は `VALIDATION_FAILED` (`content_type`、`header/content-type`。§3.4)。upload_object の request media type は `media_type` に限らず、構文が妥当な単一の media type (`errors.content_type` を除く) を受け付ける (§3.3 の Q-1)。
 
 成功時の `ObjectDescriptor` は次である。
 
@@ -273,6 +301,14 @@
 
 【註 2026-10-02】download の成功応答の `Content-Type` は送信者が upload 時に与えた値であり、契約 1.14.0 の応答分類 (`spec/data-service-api.v1.json:895`) とは両立しない。分類の規則は §11 の Q-1 で依頼者裁定待ち。
 
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-1】(甲)+(乙)。
+
+- download_object の応答の分類規則を、契約 `errors.response_classification` (`spec/data-service-api.v1.json:895`) への操作別の例外として足す確定案とする: 「download_object の応答は HTTP status で分類する。2xx は bytes の成功であり、media type を問わず response schema と照合しない。2xx 以外で media type が errors.content_type なら失敗 (code で読む)。それ以外は解釈しない失敗」。
+- upload_object は request media type を `media_type` (`spec/data-service-api.v1.json:7`) に限らない (構文が妥当な単一の media type。`errors.content_type` を除く。§3.2 の Q-1)。
+- `media_type_note` / `external_standards` (`spec/data-service-api.v1.json:8`、`:9`) に「endpoint が request_media_type / response_media_type を宣言する操作はそれに従う」の 1 文を足す案 (§3 の S-10 の `request_media_type` / `response_media_type` と対応)。
+- 契約版は minor (1.x.0) と読む (§11 の Q-1 の RC-19 の論証)。契約の確定文は契約改版の WP で書く (本設計は案)。
+- reference client (`conformance-tests/CONDITIONS.md` C-35) への影響は契約改版の WP で見る (§7.1 の O-24)。
+
 削除は「利用可能なオブジェクトを取得不能にする」ことを成功条件とする。最初の confirmation 不足 request は既存形式の `DESTRUCTIVE_CONFIRMATION_REQUIRED` を返し、次の request が `destructive: true` と返された phrase を JSON で echo したときだけ実行する。オブジェクトストレージの物理削除とメタデータ更新の原子的な分散トランザクションは期待できないため、状態機械（`pending`、`available`、`deleting`、`deleted`、`cleanup_failed`）を実装側に持つ。クライアントに見せるのは `available` だけである。削除済みまたは他 application の ID は、ともに `NOT_FOUND` に正規化する。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-9】
@@ -337,6 +373,8 @@
 | 正規化後に空の filename | `VALIDATION_FAILED` | `filename` | `header/content-disposition` | 【v0.3 2026-10-02 再確認反映 RC-8】、§3.2.2 の RC-5 |
 | `Content-Length` の値が不正 | `VALIDATION_FAILED` | `request_schema` | `header/content-length` | 【v0.3 2026-10-02 再確認反映 RC-8】 |
 | `filename*` の charset が UTF-8 以外 | `VALIDATION_FAILED` | `filename` | `header/content-disposition` | §3.2.2 の RC-5 (監督 2026-10-02 に失敗の表へ写した) |
+| upload の media type が `errors.content_type` (`application/problem+json`。type・subtype は大小無視、parameter は無視して比較) に一致 | `VALIDATION_FAILED` | `content_type` | `header/content-type` | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-1】、§3.2 |
+| 転送が宣言 `execution_ms` を超える (upload、または download の header 送出前) | `LIMIT_EXCEEDED` (`limit_class: execution_ms`)。download の header 送出後は「download の header 送出後の失敗」の行 (接続の異常終了、M-6) | — | — | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】、§6.1 |
 
 ## 4. 保存モデル
 
@@ -356,6 +394,7 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 4. バイト数と任意の `Content-Digest` を検証し、authorization propagation bound 以内の周期で再認可する。
    【v0.3 2026-10-02 設計レビュー 1 反映 M-11】4 の再認可を「転送の間、周期 P で再認可する (§6 の 5)。完了時にも 1 回再認可する」に改める (§11 の Q-4 の案を問わない)。再認可で `AUTH_STATE_UNAVAILABLE` なら中断する (fail closed)。P と宣言 `authorization_propagation_bound_ms` の関係は Q-4 で依頼者裁定待ち。
    【v0.3 2026-10-02 再確認反映 RC-16】上の「(§11 の Q-4 の案を問わない)」を「Q-4 の (a)(b) のいずれでも。(c) を採るなら本項を見直す」に改める。
+   【v0.4 2026-10-02 依頼者裁定の帰結 Q-4】Q-4 は (a) を採った (RC-16 の「(c) を採るなら本項を見直す」に当たらない)。P と宣言 `authorization_propagation_bound_ms` の関係は §6 の 5 の Q-4 の段落。
 5. `available` メタデータを永続化して成功応答を返す。
 
 3〜5 に失敗した場合、provider object を削除してから問題応答を返す。削除に失敗した場合は `cleanup_failed` を永続化し、公開されない cleanup worker が再試行する。
@@ -369,6 +408,8 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 【v0.3 2026-10-02 設計レビュー 1 反映 M-4】cleanup worker は application ごとに、当該 application の provider identity だけで動く (A-1 の制約を application-facing でない worker にも及ぼす)。provider key は metadata 行の provider_key から読まず、worker 自身の設定 (bucket) と object_id から上の論理構造で再計算する。行の provider_key は照合にだけ使い、一致しなければ削除せず security-control failure (SI-14、`security/SECURITY_INVARIANTS_V1.md`) として監査する。検証の形 (peer-local): application A の DB に application B の provider key を持つ `cleanup_failed` 行を書き、B の bucket に何も起きないことを実測する (§7.1 の O-18)。
 
 【v0.3 2026-10-02 設計レビュー 1 反映 M-5】process 喪失・強制終了で 3〜5 の途中に止まった upload は `pending` のまま残る。`pending` のうち作成から (転送の全体時間上限 + 余裕) を過ぎたものは cleanup 対象とする。provider 側の未完了 multipart upload (R2) / resumable session (GCS) も対象に含め、その操作に要る provider 権限を §5.1 / §5.2 に列挙する (provider の挙動は未確認)。cleanup の成功・失敗を監査する (event_class は実装の宣言。`cleanup_failed` は security-control failure)。検証の形 (peer-local): upload 中に process を SIGKILL し、再起動後に `pending` が期限で回収され provider object が残らない (§7.1 の O-19)。転送の全体時間上限は §11 の Q-3 の裁定に従う。
+
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】上の「転送の全体時間上限」は宣言 `execution_ms` である (§2 の Q-3 の段落、§6.1)。
 
 【v0.3 2026-10-02 再確認反映 RC-2】上の M-5 の回収対象に「`deleting` のまま一定時間 (削除の全体時間上限 + 余裕) を過ぎた行」を足す。検証の形 (peer-local): 確認済み削除の途中で SIGKILL すると、再起動後に回収され provider object が残らない (§7.1 の O-19b)。
 
@@ -422,6 +463,8 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 4. JSON endpoint の既存 `request_bytes` 挙動は変更しない。
 5. HTTP client と provider SDK の接続・読取・全体時間には有限 timeout を設ける。同期 provider SDK の stream read/write は event loop 上で実行せず threadpool に offload する。転送中も authorization propagation bound 以内に再認可する。
    【v0.3 2026-10-02 設計レビュー 1 反映 M-11】再認可で `AUTH_STATE_UNAVAILABLE` のときは転送を中断する (fail closed)。再認可周期 P と宣言 `authorization_propagation_bound_ms` の関係は §11 の Q-4 で依頼者裁定待ち。転送時間の bound をどの limit class が表すかは §11 の Q-3 で依頼者裁定待ち。
+   【v0.4 2026-10-02 依頼者裁定の帰結 Q-4】(a)。object_storage を提供する deployment は `authorization_propagation_bound_ms` を正の値で宣言し、その値は「失効の伝搬遅延 + 再認可周期 P」を含む。両 peer の現行宣言 0 (§11 の Q-4) は、object_storage を宣言する版で変える (宣言値の変更 = 台帳 `RM` §9 の 8 で最低 Class C。台帳 `RM` P-3)。周期 P は配備値 (§8)。再認可で失効 / `APPLICATION_DISABLED` / `AUTH_STATE_UNAVAILABLE` を観測したら中断する (fail closed): upload は応答前なら既存 code (§3.4)、download は接続の異常終了 (§3.3 の M-6)。
+   【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】転送時間の bound は `execution_ms` が表す (§6.1 の Q-3 の段落)。
 6. 【v0.3 2026-10-02 設計レビュー 1 反映 M-10】経路の手前の全ての本文上限 (proxy・platform) は、`/v1/objects` に限り `object_bytes` 以上かつ request buffering 無効に設定し、宣言する `object_bytes` は経路上で最も小さい上限以下とする (台帳 `RM` P-3)。現状の例: r2db の nginx 例は `client_max_body_size 1100k` (`r2db-api/deploy/nginx/r2dbsvc-api-8443.conf.example:93`)、socket harness は `{client_max_body_size}` (`conformance-tests/socket_harness.py:290`)。Cloud Run の本文上限は未確認。
 
 ### 6.1 limit class の定義
@@ -436,6 +479,10 @@ applications/<server-derived-application-id>/objects/<server-generated-object-id
 | `object_transfers` | 同時に本文を読み書きしている要求数 | N 本の同時転送は受理、N+1 本目を拒否 | `object_transfers` | application 単位。host 共有の OS flock slot。1 host 内の複数 worker は共有の範囲内、複数 host は `deployment_required` |
 
 【v0.3 2026-10-02 再確認反映 RC-6】持ち替えるのは `upload_object` / `download_object` だけ。`get_object_metadata` / `delete_object` は既存の JSON 経路と同じく concurrency slot を要求全体で保持する (本文が小さく短い)。`object_requests_per_minute` の鍵は credential_id (既存 `requests_per_minute` と同じ鍵。`r2db-api/src/r2db_api/http.py` の WP-8c の註)。`object_transfers` の鍵は application。
+
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】転送時間は `execution_ms` が表す (受付から available / 送信完了まで)。class は増やさない。超過は `LIMIT_EXCEEDED` (`limit_class: execution_ms`)。download で header 送出後なら接続の異常終了 (§3.3 の M-6)。計測開始と待ち (slot / 枠の待ち) の扱いは台帳 `RM` R-42 の裁定に従う。R-42 が決まるまで、本設計は「受付 = 認証成功時点」を仮の起点とする (仮)。宣言しない運用値の timeout は置かない (§8)。超過した upload の `object_transfers` 枠は解放される (§7.1 の O-25)。
+
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】案 (ii) (§3.1 の Q-2 の段落) の `limit_enforcement` の帰結 (§11.1 の (ii) 行から): `concurrency` は、router と全ての専用単位が base URL を serve する 1 host (1 composition root の worker 群。`MULTI_PROCESS_WORKER_V0_1.md` 裁定 10 の slot 共有の範囲) の process なら `enforced` のまま、別 host (Cloud Run の別 service 等) なら `deployment_required`。`object_transfers` は、専用単位が 1 instance のとき `enforced`、複数 instance なら `deployment_required`。宣言は台帳 `RM` P-3 (真であり検査される) に従う。Cloud Run の挙動は未確認。
 
 ## 7. conformance tests の候補
 
@@ -484,7 +531,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | O-10 | download 応答は `Content-Length`、`Content-Digest`、`Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-transform`、`X-Request-Id` (body の `request_id` があれば同値) を持ち、provider URL・provider key・credential を含まない | SI-10 | wire | 応答 header と本文の走査 | `Cache-Control: no-transform` を外す | 10 |
 | O-11 | upload 本文を全量メモリにバッファしない (【v0.3 2026-10-02 再確認反映 RC-18】両論の註は表の後) | SI-08 | wire | 偽 provider が最後の chunk の前に先頭 bytes を受け取っている | 本文を読み切ってから provider に渡す | 11 |
 | O-12 | 未認証要求は小さい byte bound を超えて本文を読まず、本文を読まずに拒否したときは `Connection: close` で接続を閉じる | SI-08、SI-15 | wire | 読まれた octet 数、接続の終了 | 認証前に object 経路の大きい bound を適用する | 11 |
-| O-13 | 一定速度の download の途中 t0 で revoke すると、t0 + 宣言 `authorization_propagation_bound_ms` 以内に接続が終わる。再認可で `AUTH_STATE_UNAVAILABLE` なら中断する (§11 の Q-4 の裁定に依存) | SI-13、SI-15 | wire | 接続終了の時刻 | 転送中の再認可を外す (完了時だけにする) | 11 |
+| O-13 | 一定速度の download の途中 t0 で revoke すると、t0 + 宣言 `authorization_propagation_bound_ms` 以内に接続が終わる。再認可で `AUTH_STATE_UNAVAILABLE` なら中断する (§11 の Q-4 の裁定に依存)。【v0.4 2026-10-02 依頼者裁定の帰結 Q-4】条件の形に確定する: 一定速度で読む download の途中 t0 で revoke → t0 + 宣言 bound 以内に接続が終わる (受信長 < `Content-Length`)。Q-4 は (a) (§6 の 5 の Q-4 の段落) | SI-13、SI-15 | wire | 接続終了の時刻。【v0.4 2026-10-02 依頼者裁定の帰結 Q-4】受信長と `Content-Length` | 転送中の再認可を外す (完了時だけにする) | 11 |
 | O-14 | provider 読み出しを N byte 後に失敗させると、受信長 < `Content-Length` で接続が終わり、chunked の正常終端が無い | SI-11 | wire (socket) | 受信長と接続終了 | 失敗時に正常終端を送る | 11 |
 | O-15 | `Content-Length` > `object_bytes` は本文を読む前に `LIMIT_EXCEEDED`。`Expect: 100-continue` には認証と検査の前に 100 を返さない | SI-08 | wire | 100 の送出時点、読まれた octet 数 | 100 を即時に返す | — |
 | O-16 | `object_transfers` の枯渇は `LIMIT_EXCEEDED` (`object_transfers`)。切断・例外の後に枠が戻る。object 経路のうち upload / download は持ち替え後に `requests_per_minute` / `concurrency` を消費しない (metadata / delete は RC-6 のとおり concurrency を要求全体で保持する。監督 2026-10-02) | SI-08 | wire | 直後の upload が枠を取れること、JSON 経路の枠の残量 | 切断時に枠を解放しない | 11 |
@@ -496,6 +543,9 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | O-21 | 同期 provider SDK の呼出しが event loop 上で走らない (threadpool offload) | SI-08 | peer-local | event loop の占有の観測 (形は peer が定める) | offload を外す | 11 |
 | O-22 | download で provider が保存値と異なる bytes を返すと本文が切られ (O-14 と同じ観測)、security-control failure が監査される | SI-11、SI-14 | wire | 受信長と接続終了、監査 event | download 側の digest 照合を外す | — |
 | O-23 | §3.4 の失敗の表の各行の入力に、表のとおりの code / violated_declaration / field を返す (「未定」の欄は 2026-10-02 の監督裁定で埋めた) | SI-05、SI-10 | 6 adapter (header の行は wire) | problem 応答の各 field | 行ごとに該当する検査を外す | — |
+| O-24 | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-1】`Content-Type: application/json` で upload した、errors.shape を満たす本文の object (乙により problem+json では保存できないので、観測は `application/json` で行う。監督 2026-10-02) を契約だけで組む client で download すると、bytes の成功に分類される (2xx は media type を問わず response schema と照合しない。§3.3 の Q-1)。upload 時に media type が `errors.content_type` に一致する要求は `VALIDATION_FAILED` (`content_type`、`header/content-type`) | SI-05 | wire (契約だけで組む client。`conformance-tests/CONDITIONS.md` C-35 への影響は契約改版の WP で見る) | download の分類結果、upload の problem 応答の各 field | (download) 2xx でも media type が errors.content_type なら失敗に分類する。(upload) errors.content_type の拒否を外す | — |
+| O-25 | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-3】1 byte/秒の upload が宣言 `execution_ms` で `LIMIT_EXCEEDED` (`limit_class: execution_ms`) になり、`object_transfers` 枠が解放される (直後の upload が枠を取れる) | SI-08 | wire | 応答 code と limit_class、拒否までの時間、直後の upload が枠を取れること | upload の転送に `execution_ms` の期限を掛けない | — |
+| O-26 | 【v0.4 2026-10-02 依頼者裁定の帰結 Q-2 (監督 2026-10-02)】誤配の観測: application B の credential を application A の専用単位へ直接送ると `AUTH_INVALID` で閉じ、bytes は保存されず、認証拒否の audit event が残る (router を経ない直接送信で観測する) | SI-00、SI-06、SI-14 | peer-local / deployment evidence (共通 conformance の 6 adapter では router と専用単位を立てないため対象外) | A の単位の応答 code、A の bucket と metadata に変化が無いこと、audit の denial | A の単位が自分の application 以外の credential も受理する | — |
 
 【v0.3 2026-10-02 再確認反映 RC-18】O-11 の註 (両論): (a) 実装が溜めてよい上限 B octet を契約で固定し、観測は B を超える本文で行う。(b) O-11 を peer-local に移す。SDK の part 長・GCS の chunk 長は未確認。確定は設計レビュー 2。
 
@@ -510,9 +560,16 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 3. object metadata を各 application DB に置く。schema/migration の詳細と、provisioning/control 経路が application bucket/identity をどの DB declaration と結び付けるか。
 4. マルウェア対策を upload 完了前の必須 gate にするか。初版は対象外と明示し、必要なら `pending_scan` 状態を持つ別 capability とする。
 
+【v0.4 2026-10-02 依頼者裁定の帰結 Q-0〜Q-5】上の【註 2026-10-02】の裁定待ちは、2026-10-02 の依頼者裁定で解けた (§11)。運用値に次を足す。
+
+- Q-3: 宣言しない運用値の timeout は置かない。実装側の socket timeout は宣言 `execution_ms` 以下に設定する運用値とする (v0.2 §6 の 5 の「接続・読取・全体時間の有限 timeout」はこの運用値を指し、別の宣言しない bound ではない。宣言される bound は `execution_ms` だけ。監督 2026-10-02)。
+- Q-4: 再認可周期 P は配備値。宣言 `authorization_propagation_bound_ms` は「失効の伝搬遅延 + P」を含む正の値とする (§6 の 5)。
+- Q-5: provider 側 quota / 予算 alert、object 数と総容量の監視。class は足さない。
+
 ## 9. 実施順序
 
 1. A-1 の provider 側分離を前提に、既存の複数 application を一 process で serve する配備を、object-capable endpoint では application 専用の実行単位へ分割する provisioning/deployment 設計を確定する。各 peer-local integration test で provider 自身が越境を拒否することを実測する。
+   【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】1 を案 (ii) に合わせて次に改める (旧文は残す)。object-capable endpoint について、1 つの data base URL の前段に router を置き、credential から application を引いて当該 application 専用の object-capable 単位へ振り分ける provisioning/deployment 設計を確定する (§3.1 の Q-2 の段落)。router の欠陥による越境 (SI-00、`security/SECURITY_INVARIANTS_V1.md`) の検証と、provider 自身が越境を拒否することの実測は peer-local integration test と deployment evidence で行う。JSON 経路の serving set (`*_SERVE_APPS`) の分割はここに含めず、台帳 `RM` R-30 の裁定に委ねる。
 2. §8 の配備値・運用手順をレビューし、実行環境ごとに確定する。
 3. 該当する Security Invariants と threat model の適用を確定する。
 4. 共通契約、capability/limit、エラー、操作カタログを更新する。
@@ -528,6 +585,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 2. 共通契約 (capability / limit class / エラー / 操作カタログ / media type / idempotency header / destructive の applies_to) の更新。旧 4。
 3. conformance tests (§7.1) を追加し、実装前に失敗することを確認する。旧 5。
 4. peer ごとの実装と provisioning (r2db-api と MitateDB-api。A-1 の application 専用実行単位を含む。到達経路は §11 の Q-2 と台帳 `RM` R-30 の裁定に従う)。conformance tests、各 peer の unit / integration tests、公開リポジトリ秘密検査を実行する。旧 1、6、7、8。
+   【v0.4 2026-10-02 依頼者裁定の帰結 Q-2】到達経路は案 (ii) に確定した (§3.1 の Q-2 の段落)。台帳 `RM` R-30 の裁定は JSON 経路の serving set に委ねる。
 5. `security/CONTROL_MAPPING.md` の行と deployment evidence (provider 自身が越境を拒否することの実測を含む)。旧 1 の後半、9。
 6. 配備値と運用手順 (§8) の確定。旧 2。
 
@@ -566,6 +624,12 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 
 ## 11. 依頼者裁定待ち (2026-10-02)
 
+【裁定 2026-10-02】依頼者の裁定 (Q-0〜Q-5 に対する裁定。引き継ぎ書 `HANDOVER_20261002_R36_FABLE.md` §4 の提示に対する返答。逐語):
+
+> 全て監督推奨で進めてください
+
+依頼者裁定は逐語で記録し、再審議しない (`docs/work-orders/OPERATING_CONDITIONS.md` §1.7 の 51)。裁定文に書かれていないことは「監督の読み」と明記する。各 Q の末尾に【裁定 2026-10-02】行を置き、両論の本文は残す。下の段落の「v0.3 では確定しない」は v0.3 の記録として残す。
+
 設計レビュー 1 回目で挙がった、依頼者決定 A-1〜B-12 と現状の食い違い、または決定の確定後に挙がった露出である。決定は再審議しない。各件は両論のまま置き、v0.3 では確定しない。「推奨」は監督の推奨であり、裁定ではない。
 
 ### Q-0 着手条件の充足
@@ -577,6 +641,8 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 - 食い違い: 設計レビュー 1 回目は 2026-10-02 に行ったが、契約・conformance・実装へ進む着手条件の充足は依頼者裁定である。
 - 選択肢 (両論): (a) 充足とみなし、設計レビュー 2 回目へ進む。(b) 実需の記録を待つ (候補のまま保留)。
 - 推奨: 監督は判断しない (依頼者事項)。
+- 【裁定 2026-10-02】依頼者「全て監督推奨で進めてください」→ (a) 充足とみなし、設計レビュー 2 回目へ進む (監督の読み)。帰結は冒頭の版数表 (v0.4 行)、冒頭の v0.4 の印の行、§1。
+- 監督の読み: 監督は Q-0 に推奨を置かなかった (上の「監督は判断しない」)。「進めてください」を、着手条件 (設計レビュー。充足は依頼者裁定) の充足 = 選択肢 (a)「充足とみなし設計レビュー 2 回目へ進む」と読む。依頼者がこの読みを覆すときは本節に【訂正】を足す。
 
 ### Q-1 download 応答の分類
 
@@ -590,6 +656,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
   - いずれも契約の `media_type_note` / `response_classification` / `external_standards` の改版 (1.x.0、従属判断 19 の例外) になる。
   - 【v0.3 2026-10-02 再確認反映 RC-19】`spec/data-service-api.v1.json:36` では additive な capability は minor。object_storage は common_baseline の外の新 capability で、既存の要求・応答の意味は変えない。media_type_note / response_classification の改版は新しい操作にだけ掛かる例外の追加であり、既存操作の分類は不変。したがって minor (1.x.0) と読む。semantic change と読む余地があれば major であり、その判断は依頼者。
 - 推奨 (監督の推奨): (甲) + (乙)。
+- 【裁定 2026-10-02】依頼者「全て監督推奨で進めてください」→ (甲) + (乙)。帰結は §2、§3.2、§3.3、§3.4、§7.1 の O-24 (§2.1 の対応を含む)。
 
 ### Q-2 A-1 の application 専用実行単位への到達経路
 
@@ -598,6 +665,8 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 - 食い違い: 1 つの data base URL の背後に application ごとの実行単位を置く経路が設計に無い。v0.2 の §9 の 1 は deployment 設計に回しているが、契約の問題である。
 - 選択肢 (両論): §11.1 の表の (i)〜(iii)。
 - 推奨 (監督の推奨): (ii) を台帳 `RM` R-30 の裁定と同時に決める。各案の `concurrency` / `object_transfers` の `limit_enforcement` の帰結を表 (§11.1) で併記する。
+- 【裁定 2026-10-02】依頼者「全て監督推奨で進めてください」→ (ii)。帰結は冒頭の A-1 の註、§3.1、§6.1、§9 (旧 1 と新 4)。下の §11.1 の表は両論の記録として残す。
+- 監督の読み: 推奨の「台帳 `RM` R-30 の裁定と同時に」の部分について、R-30 は台帳の別行 (Class D、専用の裁定) であり v0.4 では触れない。object 経路の到達経路としては (ii) を確定し、R-30 の裁定は (ii) (router は multi-application 部品、各 application 専用単位は 1 application だけを serve) と矛盾しない形で別途行う。
 
 #### 11.1 到達経路の選択肢
 
@@ -618,6 +687,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
   - (甲) `execution_ms` を転送全体 (受付から available / 送信完了まで) に掛け、台帳 `RM` R-42 の裁定に従う。class を増やさない。1 byte/秒の upload は宣言時間で `LIMIT_EXCEEDED` になり、枠が解放される。
   - (乙) 転送の全体時間と最低速度 (idle) の class を足す (B-5 を超える)。
 - 推奨 (監督の推奨): (甲)。宣言しない運用値の timeout は置かない (台帳 `RM` P-3 / P-5)。
+- 【裁定 2026-10-02】依頼者「全て監督推奨で進めてください」→ (甲)。台帳 `RM` R-42 の裁定 (execution_ms の計測開始と待ちの扱い) に従う。帰結は §0 の B-5 の註、§2、§3.4、§4 (M-5)、§6 の 5、§6.1、§7.1 の O-25、§8。
 
 ### Q-4 B-7 と両 peer の宣言値 0
 
@@ -629,6 +699,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
   - (b) chunk ごとに再認可し、0 を保つ (認証 DB の負荷)。
   - (c) SI-13 を受付時と available 直前 (commit) に適用し、転送中は再認可しない (B-7 の本文と食い違うため推奨しない。記録のみ)。
 - 推奨 (監督の推奨): (a)。どの案でも、再認可で `AUTH_STATE_UNAVAILABLE` なら中断する (fail closed)。download の中断は接続の異常終了で client に伝え、client は「受信長 = `Content-Length` かつ `Content-Digest` 一致」を成功条件とする (§3.3 の M-6 の反映と同じ)。
+- 【裁定 2026-10-02】依頼者「全て監督推奨で進めてください」→ (a)。帰結は §0 の B-7 の註、§4 の 4、§6 の 5、§7.1 の O-13、§8。
 
 ### Q-5 総保存量・object 数の上限
 
@@ -639,6 +710,7 @@ provider を実際に使う認証設定の検証は peer-local integration test 
   - (a) 初版は class を足さず、§8 の運用値に provider 側の quota / 予算 alert を置く。
   - (b) `object_count` / `object_total_bytes` の class を足す (B-5 を超える)。
 - 推奨 (監督の推奨): (a)。
+- 【裁定 2026-10-02】依頼者「全て監督推奨で進めてください」→ (a)。帰結は §0 の B-5 の註、§2、§8。
 
 ## 12. 設計レビュー 1 の反映の一覧 (2026-10-02)
 
@@ -696,6 +768,19 @@ provider を実際に使う認証設定の検証は peer-local integration test 
 | RC-19 | §11 の Q-1 |
 | RC-20 | §3.4 |
 | RC-21 | §7.1 の O-18 |
+
+### v0.4 の帰結の一覧 (番号なし。§12.1 の番号を保つ)
+
+依頼者裁定 (2026-10-02。逐語は §11 の冒頭) の帰結を v0.4 で反映した。反映箇所の印は【v0.4 2026-10-02 依頼者裁定の帰結 Q-n】。上の M-n の表で「依頼者裁定待ち」「一部裁定待ち」とした M-1・M-2・M-3・M-11・M-13 は、この裁定で解けた (表の行は残す)。
+
+| Q-n | 採った案 | 反映した節 |
+| --- | --- | --- |
+| Q-0 | (a) (監督の読み) | 冒頭の版数表 (v0.4 行) と v0.4 の印の行、§1、§11 の Q-0 |
+| Q-1 | (甲) + (乙) | §2、§2.1、§3.2、§3.3、§3.4 (表の末尾から 2 行目)、§7.1 の O-24、§11 の Q-1 |
+| Q-2 | (ii) (R-30 の部分は監督の読み) | 冒頭の A-1 の註、§3.1、§6.1、§9 (旧 1 と新 4)、§11 の Q-2 |
+| Q-3 | (甲) | §0 の B-5 の註、§2、§2.1、§3.4 (表の末尾)、§4 (M-5)、§6 の 5、§6.1、§7.1 の O-25、§8、§11 の Q-3 |
+| Q-4 | (a) | §0 の B-7 の註、§4 の 4、§6 の 5、§7.1 の O-13、§8、§11 の Q-4 |
+| Q-5 | (a) | §0 の B-5 の註、§2、§8、§11 の Q-5 |
 
 ### 12.1 観察 (台帳には載せない)
 
