@@ -87,7 +87,7 @@ versus what remains unevidenced.
   covers 11 of these, every one except `audit_query` --
   `src/r2db_api/control_http.py`'s route table has 13 `Route(...)` entries
   because `audit_query` is registered twice, at its canonical
-  `/control/v1/audit/query` path and, for one further minor version, also
+  `/control/v1/audit/query` path and, for the whole of this major version, also
   at the `/v1/audit/query` alias (contract `endpoints.audit_query.
   deprecation_note`; same handler) -- served by a distinct ASGI app
   (`src/r2db_api/control_http.py`, assembled by `src/r2db_api/control_main.py`)
@@ -211,7 +211,7 @@ detail per invariant).
   **Update, phase 4 WP-2(b): `audit_query` itself is implemented, on the
   control host.** `POST /control/v1/audit/query` (canonical, contract 1.4.0
   classifies it under `control_endpoints`) and `POST /v1/audit/query` (the
-  same handler, kept as an alias for one further minor version) read the
+  same handler, kept as an alias for the whole of this major version) read the
   UNION of
   `control_audit` and `application_audit` as the SELECT-only
   `r2dbsvc_auditreader` role, in a total order of

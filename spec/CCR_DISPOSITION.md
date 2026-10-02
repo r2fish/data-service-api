@@ -143,7 +143,7 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
    **(d) 依頼者裁定の参照**: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §5 P4-D4 (旧 U-4(a))。判断根拠は同文書§2末尾の依頼者設計原則(1. 今やれることは今のうちにやる、2. シンプルに、3. 制約・制限で回避しない、4. 誇れる成果物であること)。却下した側 (次の束まで繰延べ) とその理由は同節に記録済み — 原則1に反すること、項目7を繰延べると「契約上application endpointなのにcontrolホストにある」という説明しづらい状態が続くこと、項目8を繰延べると監査ポーリングとbreak-glassの相互作用がrunbookの注意書きだけで運用されること (原則3に抵触) の3点。
 
-   **再検討条件**: 項目6は特になし (実装事実の文書化のみ)。項目7の alias は1 minor経過後 (1.5.0以降) に`endpoints.audit_query`を除去するかどうかを別途裁定する。項目8の窓サイズ設計はWP-4のrunbookが監査エージェント数×ポーリング頻度を根拠に定める。その他は本記録(a)に記した根拠が覆らない限り再検討しない。
+   **再検討条件**: 項目6は特になし (実装事実の文書化のみ)。項目7の alias は1 minor経過後 (1.5.0以降) に`endpoints.audit_query`を除去するかどうかを別途裁定する。**→ 2026-10-03 に決着 (従属判断 20、契約 1.15.0): 保持し、撤去は major 版でのみ行いうる (時期は定めない)。**項目8の窓サイズ設計はWP-4のrunbookが監査エージェント数×ポーリング頻度を根拠に定める。その他は本記録(a)に記した根拠が覆らない限り再検討しない。
 
    **実施記録 (2026-09-03、フェーズ4 完了)**: 契約 1.4.0 は WP-1 (`09233dd`) で公開し、両 peer が挙動出荷と同一コミットで `contract_version` を flip した (r2db = WP-2(b) `a1a1409`、MitateDB = WP-3(b) `a3571dc`) — **1.4.0 の version_binding 義務は全数出荷完了**。8 件のうち実装義務を伴うものはすべて実測で固定されている: 項目1/2 は不透明 keyset cursor と `(recorded_at, plane, event_id)` の全順序 (両 peer の `tests/test_audit_query.py`)、項目3 の `plane` は行の出所テーブルからの導出値であって書き手が指定できる列ではない、項目4 の宣言語彙は AST 走査で実 emit 集合の上位集合であることを両 peer で固定、項目5 の audit role 受理は両 peer の control 面で実測、**項目6 は文書化にとどまらず「entity 識別子を受け取るあらゆる位置で `audit_events` を予約する」実装義務**として確定した (WP-2(b) 受け入れ監査 C。設計 §5.1 P4-D10)、項目7 は両パスを同一ハンドラで両建て、項目8 は既定 60 の専用 pre-auth 窓として両 peer で `enforced` 宣言済み。**受理レンジは契約が定めておらず、実装裁量として peer で異なる** — MitateDB は既存 3 クラスと同じ `[1, 200]` を掛け、r2db は「正の整数」のみを検査して上限を持たない (開示済みの非対称。設計 §11.1 L4-4 / L4-7、`security/CONTROL_MAPPING.md` SI-08 行)。窓サイズ設計は `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15 と `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2c に算式として記載し、MitateDB 側には 200 の天井が既定より先に効く条件も書いた。 **【訂正注記 2026-09-04】この段落の受理レンジに関する記述 (MitateDB が `[1, 200]` を掛ける / 200 の天井が既定より先に効く) は、フェーズ5 WP-4 (依頼者裁定 2026-09-03 Q3 = 案 A) により偽になった** — MitateDB の 4 クラス一律の上限は撤廃され、**両 peer とも「正の整数であること」のみを検査する** (エラー文言も `must be a positive integer` で同一)。契約は依然として受理レンジを宣言しておらず本項目の裁定自体は変わらないが、**開示済み非対称として記録した受理レンジの差は解消済み**である (実施設計 `docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md` §3 D-3、実施記録 同 §10.5、台帳 `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.1 L4-4 / L4-7(iii) は CLOSED)。原文は当時の記述として残す。実施記録の正本は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (v1.5) §9.4。
 
@@ -363,6 +363,30 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
     > その案で良いです
 
     **版数の扱い**: 12 文はどれも `versioning.compatibility` の「removal or semantic change requires a new major version」に当たらない (設計 §9.2)。実装の挙動を変える義務 (成功応答の Content-Type、capability document の `role`、組む URL 以外の catalog URL を credential 無しで配ること) は、`contract_version` が 1.14.0 以上の宣言にだけ掛かり、旧版を宣言する実装を遡って縛らない。両 peer は (a) と (b) を既に満たす (4 つの wire plug での実測。作業指示書 `docs/work-orders/WORK_ORDER_R108_REFERENCE_CLIENT_V1.md` §5.5 の表 1)。(c) の掛かる URL を宣言する plug は無い (設計 §9.2 の静的な読解)。実装の挙動は変えず、両 peer の `contract_version` は契約の文言と同一の変更セットで 1.14.0 にする。minor 版 (1.14.0) とする。
+
+20. **契約 1.15.0 (`endpoints.audit_query` の alias の保持期限の文言を現物に合わせる) への裁定 (2026-10-03、依頼者裁定、監督起票 R-118)。** 新規 CCR ではなく、契約の保持期限の句 3 箇所を、実装の現物と契約自身の規則 (`versioning.compatibility`) に合わせる文言変更として採用する。義務は足さない。規模 S のため作業指示書は無く、台帳 (`docs/design/ROADMAP_POST_PHASE7_V1.md`) の R-118 の行が指示書である。裁定資料は `docs/design/REQUESTER_RULINGS_R30_R118_R120_V0_1.md` v0.2 §2。
+
+    **発端**: 契約 1.4.0 (従属判断 9 の項目 7) は alias `POST /v1/audit/query` を "for one further minor version after 1.4.0" 保持すると書いたが、契約は 1.14.0 まで版を重ねて alias は残っている (本書 :146 が予定した「1.5.0 以降に除去するかの別途裁定」は行われていない)。`versioning.compatibility` は removal を major 版に限り、1.4.0 の注記自身も "removal would be a non-additive contract change" と書くので、minor 版での撤去は契約の規則に反する。契約だけを読む client は、alias が在るのか・いつ消えるのかを文から決められない。
+
+    **本文 — 1.15.0 で書き直す 3 箇所** (句の置換。前後の文は変えない):
+
+    - `endpoints.audit_query.deprecation_note`: "for one further minor version after 1.4.0, resolving to" → "for the whole of this major version (no minor version removes it; only a new major version may, per versioning.compatibility, and none is scheduled), resolving to"
+    - `control_endpoints.audit_query.semantics`: "for one further minor version after 1.4.0 (endpoints.audit_query.deprecation_note)" → "for the whole of this major version (no minor version removes it; only a new major version may, per versioning.compatibility, and none is scheduled -- endpoints.audit_query.deprecation_note)"
+    - `versioning.version_binding` の 1.4.0 の列挙の (c): "retained as an alias of the identical operation for one further minor version." → "retained as an alias of the identical operation for the whole of this major version (no minor version removes it; only a new major version may, per versioning.compatibility, and none is scheduled)."
+
+    **`versioning.version_binding` に足す 1 文** (1.14.0 の段落の後、version-flip の文の前):
+
+    > 1.15.0 introduces no obligation (subordinate ruling 20): it rewrites the retention clause of the endpoints.audit_query alias in endpoints.audit_query.deprecation_note, control_endpoints.audit_query.semantics and item (c) of the 1.4.0 list above from one further minor version after 1.4.0 to the whole of this major version -- the earlier clause had lapsed at 1.5.0 while the alias stayed, and versioning.compatibility already reserves a removal to a new major version -- so the alias, both of its paths and every implementation's behavior are unchanged, and an implementation conforming to 1.14.0 conforms to 1.15.0 without a behavior change.
+
+    `versioning.obligations` に 1.15.0 の entry は足さない (義務が無い)。alias、両 path、両 peer の control 面の route と data 面の stub、実装の挙動は変わらない。`versioning.url_composition` と `definitions.OperationCatalogEntry.description` の alias の句 (1.14.0) も変わらない。
+
+    **依頼者裁定 (逐語、2026-10-03)**:
+
+    > (i) 書き直し minor 1.15.0 (推奨)
+
+    監督の問い「R-118: (i) alias の期限句 3 箇所を『保持し、撤去は major 版でのみ行う』の文に書き直す minor 版 (1.15.0。alias と両 peer の route・stub は残す) にするか、(ii) 今 alias を撤去する major 版 (2.0.0) にするか」への回答であり、(i) は裁定資料 §2.3 の案 A の主案 (撤去の時期は定めない) を指す。「(推奨)」は選択肢に付した印である。(ii) の撤去と、(i) の強い変種 (次の major 版で撤去する) は採らない。
+
+    **版数の扱い**: 義務を足さず、どの実装の挙動も変えない記述の変更であるため minor 版 (1.15.0) とする (先例: 1.12.0、従属判断 17)。`versioning.compatibility` の「removal or semantic change requires a new major version」には当たらない: alias は残り、client が計画に使える保証 (alias は minor 版で消えない、canonical は `control_endpoints.audit_query`) は強まるだけである。両 peer の `contract_version` は、挙動変更が無いので契約文と同じ commit で 1.15.0 に動かす (1.12.0 と同じ扱い)。
 
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 

@@ -390,7 +390,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
     # commit as this host's own `process_ceilings` mapping (design D-5
     # (v)).
-    assert document["contract_version"] == "1.14.0"
+    assert document["contract_version"] == "1.15.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 
@@ -1883,3 +1883,61 @@ def test_problem_response_never_leaks_the_underlying_exception_message():
     body = json.loads(response.body)
     assert marker not in body["message"]
     assert marker not in json.dumps(body)
+
+
+# ---------------------------------------------------------------------------
+# R-33 (docs/design/R33_DIGEST_MATERIAL_READING_V0_1.md section 4, E-2..E-4):
+# what the CURRENT HTTP schema path does with a body `destructive` on
+# `create_entity`. The digest question is ruled (D-1 (a) in
+# `docs/work-orders/WORK_ORDER_R33_DIGEST_MATERIAL_V1.md`): E-2 and E-3 pin
+# behaviour that spec `structured_operations.dry_run.plan` requires; E-4 pins
+# current behaviour recorded as an observation (same work order, D-3).
+# ---------------------------------------------------------------------------
+
+
+def _r33_schema_dry_run_plan(stack, entity, **extra):
+    body = {"operation": "create_entity", "entity": entity, "fields": ["label"], "dry_run": True}
+    body.update(extra)
+    response = _post(stack, "/v1/schema/operations", bearer=stack.developer_bearer, json_body=body)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["committed"] is False, payload
+    assert isinstance(payload.get("plan"), str) and payload["plan"], payload
+    return payload["plan"]
+
+
+def test_http_create_entity_plan_digest_commits_to_destructive(app_a_stack):
+    """E-2: a `create_entity` dry run carrying `destructive: true` gets a
+    DIFFERENT plan token than the same request without it."""
+    entity = "r33_http_e2_entity"
+    plain = _r33_schema_dry_run_plan(app_a_stack, entity)
+    with_destructive = _r33_schema_dry_run_plan(app_a_stack, entity, destructive=True)
+    assert with_destructive != plain, (plain, with_destructive)
+
+
+def test_http_create_entity_plan_digest_differs_between_omitted_and_explicit_false_destructive(app_a_stack):
+    """E-3: an explicit `destructive: false` and an omitted `destructive`
+    are two different requests as presented, so two different tokens."""
+    entity = "r33_http_e3_entity"
+    omitted = _r33_schema_dry_run_plan(app_a_stack, entity)
+    explicit_false = _r33_schema_dry_run_plan(app_a_stack, entity, destructive=False)
+    assert explicit_false != omitted, (omitted, explicit_false)
+
+
+def test_http_create_entity_accepts_and_ignores_destructive(app_a_stack):
+    """E-4: a real `create_entity` carrying `destructive: true` is not
+    refused: it passes the shape check, the cell never reads it, and the
+    entity is created. Accept-and-ignore is the current behaviour recorded
+    as an observation (work order D-3), not a contract requirement; a change
+    set that rejects it (as `field_type` is rejected above, M-3) flips this
+    test."""
+    entity = "r33_http_e4_entity"
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "create_entity", "entity": entity, "fields": ["label"], "destructive": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body.get("committed") is True, body
+    catalog = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
+    assert entity in {e["entity"] for e in catalog["entities"]}, catalog

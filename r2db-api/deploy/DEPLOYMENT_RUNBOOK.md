@@ -312,7 +312,7 @@ traceback names the failing check. A missing/misnamed required environment varia
 platform DSN, `R2DB_SERVE_APPS`, or any served slug's DSN pair) fails
 import with a clear exception naming the missing variable -- this is the
 composition root's intended "fail loudly at startup" behavior, not a bug to
-work around by relaxing a check.
+work around by relaxing a check. Production posture: one slug in `R2DB_SERVE_APPS` per serving process (`security/SECURITY_INVARIANTS_V1.md`, SI-00 Deployment posture); today (no router; ledger R-36) another application is a separate deployment with its own OS user, unit and posture-B `pg_ident` map rows (§3) naming only its own 2 roles (and `r2dbsvc_api`); several processes in one deployment await R-36's router; a multi-slug serving set is a test or development configuration.
 
 ### Step 5 -- add the nginx 8443 listener
 

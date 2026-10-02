@@ -33,6 +33,10 @@ lateral/control-plane tests; CCR-14's control-plane authority boundary is additi
 
 - lateral/control-plane tests;
 
+**Superseded 2026-10-03 (R-30, version 3.17) -- SI-00 / Common / Status, one claim rewritten in place (verbatim original):**
+
+- **No cited evidence for the lateral/control-plane path**: no test is named for that part of this block's controls; version 2.25's uncited wording is in the history file.
+
 ---
 
 ## SI-01
