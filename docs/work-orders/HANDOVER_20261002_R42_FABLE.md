@@ -110,3 +110,31 @@
 | 指摘 | 裁定 | 理由 |
 |---|---|---|
 | レビュー A-1・B-F2 (RV-1 の派生: MitateDB の schema 操作の cancel 分岐に `commit_failed` が無い) | 観察 (起票しない)。監督裁定 2026-10-02 | 作業機の照合で前提が現物と合わなかった。`MitateDB-api/src/mitatedb_api/cell.py:770-789` の `_error_row_once_fired` (R-115 WP-4b) が backend の 4 経路の呼び出しを包み、pre_commit の後の失敗で error 行を書く。`MitateDB-api/tests/test_application_audit.py` の 2 テストが `["allow", "error"]` を固定している。指摘は backend の分岐だけを読んでいた。設計 §1.4 #7・D-3・D-9・§7 の該当記述は次の版で訂正する |
+
+### 7.1 照合と実測 (設計 v0.4)
+
+- 設計を v0.4 にした (作業機の照合と実測 M-1〜M-8 の反映。一覧は設計 §11.3 の W-1〜W-24、実測の逐語は設計 §12)。§3 の 3 は済み。§3 の 2 のうち起票は行っていない (上の表)。
+- 体制: 読解担当 1 起動 (設計が引く file:line の照合)、実装担当 2 起動 (計測専用の worktree に一時の未追跡テストを置き、計測後に削除。M-1・M-7 と M-8)、監督 (throwaway cluster での PostgreSQL 単体の計測 = M-2・M-4・M-6、`tools/perf_baseline.py` = M-3・M-5)、起草担当 1 起動 (v0.4)。製品コード・テスト・`spec/`・`conformance-tests/` は変えていない。完了ゲートは回していない (文書のみの変更セット)。
+- 設計を変えた実測: `statement_timeout` は COMMIT を打ち切らない (M-4)。「COMMIT は文の bound で打ち切られる」を取り下げ、§4 の U-6 の「commit 段」の選択肢と未決の「commit 段の【保留】文」は無くなった。U-8 (a) の文も変わった (設計 §5 が正)。
+- 修正前の挙動 (M-8): MitateDB の PostgreSQL 2 plug は、予算 50 ms を 60 ms 以上過ぎた要求を最後まで実行して commit する (20/20)。r2db の 3 plug と MitateDB の SQLite plug は、応答の code だけなら修正前から期待どおりになる。
+- 測れなかったもの: M-8 の 100/100・vector (i)・完了ゲートの負荷の下の B (新 primitive と実装が要る。conformance の WP の完了条件にする)、配備の PostgreSQL の版 (M-2)、r2db の pool 待ち超過と MitateDB の新規接続・`PoolExhausted` の経路。
+- 次の一手は §3 の 4 から (依頼者裁定 設計 U-1〜U-9 → 設計 §10 に逐語 → 設計レビュー 2 回目 → 作業指示書)。
+- `tools/perf_baseline.py --concurrency 32` は既定の標本数では r2db の rate の bound に当たって止まる。`--n 15 --warmup 3` (`tools/PERF_BASELINE_README.md` の D-16 の形) を使う。
+
+裁定 (`OC` §1.15 の 77。材料は読解担当の照合、実装担当 2 起動の報告、起草担当の疑義):
+
+| 指摘 | 裁定 | 理由 |
+|---|---|---|
+| 読解: 設計の内容の食い違い 6 件・行番号ずれ 5 件 | 直した | 設計 v0.4 (§11.3 の W-6〜W-14)。一次資料 4 か所は監督が直読みで確かめた |
+| 読解: `security/CONTROL_MAPPING.md:1023` の読み方が 2 通りある | 直した | 「pool・lock の待ちの超過」と「到達不能」の 2 句は現物と合うと読む。新規接続の確立が予算を超えた場合がどちらに入るかは設計 U-6 の材料にした |
+| 計測 (M-8): 既存 primitive の stall 点が plug で違い、r2db の実装は port の docstring (「予約を取り終え」) と合わない | 直す (R-42 の port v1.22 の WP) | 新条件は「放した後に発行された文の数」を見るので、stall 点の定義と 4 実装を揃える必要がある。設計 D-7・§6.4。既存の C-27 と plan 検証のテストへの影響は port の設計で確かめる |
+| 計測 (M-8): 応答の code だけでは 4 plug で新条件が修正前から緑になる | 直した | 設計 U-5 (c) と §6.6 に書いた (文の数の観測と peer の単体テストで固定する) |
+| 計測 (M-8): budget なしの dry run の plan は budget 付きの実要求で `PRECONDITION_FAILED` になる | 直した | 設計 D-7・§6.3 ((iii) の dry run は実要求と同じ budget を付ける) |
+| 計測 (M-8): B = 5 ms で r2db の PostgreSQL 2 plug の (ii) が 5/20 だけ拒否される (冷えた pool と推測) | 観察 | 原因は未検証。B は conformance の WP で完了ゲートの中の到達時間から決めるので、そこで現れる |
+| 計測 (M-1): MitateDB の 503 と `SET LOCAL` 自体の cancel は再現しない (0 / 1695) | 直した | 設計 §1.5 を「経路は存在するが再現しなかった」に改めた。写像の修正 (設計 D-9) は残す |
+| 計測 (M-1): 50 ms 待った後の文が 2〜3 倍遅い | 観察 | 計測の副作用で、設計の主張に効かない。原因は未検証 |
+| 計測 (M-7): MitateDB の body の解析の終了から受理点までに約 2.5 ms ある | 観察 | 内訳は未調査。DB の利用者には所要時間としてしか見えず、台帳 R-80 (要求の中の往復) の範囲 |
+| 起草の疑義 1 (残り 0.6 ms の実測は「残り 1 ms 以上」の帯の例にならない) | 直した | 「修正前の揺れの実測」として引いた |
+| 起草の疑義 2 (`audit_dispatch.py` のコメントの開始行) | 直した | `:32` に直した |
+| 起草の疑義 3〜5 (実測の置き場、枠に無い行番号の更新、`perf_baseline.py` の 1 回目の失敗) | 観察 | 置き場は設計 §12、行番号は現物どおり、失敗は標本数によるもので上に書いた |
+
