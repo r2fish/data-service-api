@@ -1,5 +1,6 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.14 (2026-10-02)**: §16 (変更セット 6b: R6-4 の日付の除去) と §17 (変更セット 7: MitateDB cell.py) の manifest を追記し、起草時の疑義と監督裁定を §16.5・§17.5 に置いた。基点は origin/main 4241b55 (cloud session、PostgreSQL 無し)。既存の節は書き換えていない。
 - **v1.13 (2026-09-16)**: §15 の末尾に変更セット 0i の統合の【追記】(統合のコミット、コミット後の `tools/tests`、ゲートの行) を足した。既存の節は書き換えていない。
 - **v1.12 (2026-09-15)**: §15.1 の末尾に訂正註を足した (R-37 WP-3f の監督裁定 W3-18 による `test_q4_real_repo_postgres_unchanged_is_green` の退役と、着手条件 3 の再確認)。既存の節は書き換えていない。
 - **v1.11 (2026-09-15)**: §15 に変更セット 0i (チェッカーの保護参照の拡張、手元のコピーを検査するテストの置き換え、遡った確認の塊の戻し) の manifest を追記し、疑義 Z0i-1〜Z0i-7 と監督裁定を §15.5 に置いた。設計レビュー 1 を反映した。既存の節は書き換えていない。
@@ -3652,3 +3653,788 @@ SUMMARY changed_blocks=52 restored_ok=52 exceptions=3 fail=0
   - `tools/tests`: `420 passed`。コミットした HEAD で `test_0f_both_peers_all_src_rev_vs_itself_is_green` が緑である。これが完了条件 13 (裁定 M4) の緑側である。赤側 (コミット前) はちょうど 52 CH-ID を覆った (§15.4)。
 - root gate (コミット前の最終の作業ツリー): `3399 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の diff 0 (§15.4 の表の行と同じ)。
 - 記録: 設計 (`docs/design/CODE_COMMENT_PROVENANCE_V1.md`) v0.19 §10.6、roadmap (`docs/design/ROADMAP_POST_PHASE7_V1.md`) v1.40 の R-22 行。
+
+## 16. 変更セット 6b — R6-4 で残した日付の除去 (r2db `control_main.py`、MitateDB `backend_postgres.py`)
+
+正本設計は v0.27 (§3、§4.1、§4.2、§6、§9.3)。行番号と実測は origin/main `4241b55` の値。共通の規則は §13・§14 を指し、ここには差分だけを書く。§14.5 の R6-4 が後の変更セットに残した日付の除去を行う。除くのは R6-1 の範囲 (純粋な日付と裁定の日付句) だけである。契約、Security Invariants、実行時挙動を変えない。登録 helper に触れない。
+
+**実施の場** (§16・§17 で共通)
+
+| 場 | 行うもの |
+|---|---|
+| cloud session (branch `claude/loving-lamport-nwcoko`。root コンテナのため initdb が走らず PostgreSQL が無い) | 実測、manifest、コメント整理と受け皿、静的検査 (`--base` / `--register` / `tools/check_doc_refs.py` / `tools/public_value_scan.py` / pre-commit hook / AST 同一性 / `tools/tests` のうち PG 非依存)、CLI の赤を wrapper で観測する変異 (`tools/dev/mutate.py` は wrapper が repo 外にあり root conftest を読まないので PG 無しで回る。実測: wrapper 18 passed)、レビュー、commit と送信、引き継ぎ書 |
+| 作業機 (cloud では行わない) | 両 peer の suite (前後)、`tools/dev/gate.py`、`tools/dev/finalize.py`、pytest suite を要する変異 (行番号 pin、文字列検査)、台帳・設計 §0/§10・COLLECTION_FLOOR の更新 |
+
+### 16.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | 変更セット 0i (`ffd6493`) と R-102 / R-113 (`RM` (= `docs/design/ROADMAP_POST_PHASE7_V1.md`) の台帳の行) が main に統合されている (`4241b55` の祖先。`RM` の R-22 行と §15 の追記) |
+| 2 | 2 module の基点は `4241b55`。CS6 の基点 `80fad55` 以後、R-102 WP-4 (`backend_postgres.py`、`ff408fa`〜`0d8ffd0`) と R-113 WP-3 (`control_main.py`、`69a5359`) が両 module を書き換えたので、§14.2 の行番号は使えない |
+| 3 | 重なり (`RM` §8.1 の未閉止行で両 module に触れうるもの): R-52 (role の CONNECTION LIMIT、進行中、着手条件「本番の読み取りの後」。`control_main.py` の F-16 に関わりうる)、R-101 (tools のみ、Class D)、R-120 (r2db の DML 経路、未着手)。cloud からは作業機の worktree が見えないので、作業機で `git worktree list` により両 module を触る worktree が無いことを確かめる |
+| 4 | `tools/check_comment_provenance.py` の blob は `4241b55` のもの |
+
+### 16.2 選定と実測 (`4241b55`)
+
+explorer の全列挙と監督の直読みによる。clone は shallow (241 commit) で CS6 の基点 `80fad55` が無いので、R6-4 の旧位置は原文の一致で同定した (§16.5 の Y6b-1)。
+
+| 項目 | `control_main.py` | `backend_postgres.py` |
+|---|---|---|
+| 行数 | 796 | 1838 |
+| 塊 (`extract_all_blocks`) | 32 (CH あり 3: CH-0504・CH-0509・CH-0512) | 103 (CH あり 6: CH-0525・0526・0528・0529・0530・0537) |
+| 日付 (`20\d\d-\d\d-\d\d`) を含む行 | 3 (L428・L450・L491) | 2 (L682・L1288) |
+| 日付を含む塊 | 3 (L393-439 docstring、L449-452、L482-524 = CH-0509) | 2 (L682-693、L1288-1318) |
+| うち行末コメント | 0 | 0 |
+| 既存 CH-ID の最大 (両 peer、`--register` と grep) | CH-0550 | 〃 |
+
+**R6-4 の旧位置 (基点 `80fad55`) との対応**
+
+| R6-4 の旧位置 (`80fad55`) | `4241b55` の位置 | 同定の根拠 |
+|---|---|---|
+| `control_main.py` 手順 5b | L428 (`build_control_app` の docstring L393-439) | — |
+| `backend_postgres.py` L406-417 (`field_domains` の `except`) | L682-693 (`PostgresBackend.field_domains`) | 原文 `WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定 6, review F9)` が一致 |
+| `backend_postgres.py` L1006-1036 | L1288-1318 (`PostgresBackend.add_field`) | 原文 `M-6 (監督裁定, WP-3a rework 2, 2026-09-07)` が一致 |
+| `backend_postgres.py` L278-308 (`__init__` の docstring、`requester ruling` の文) | 無し | R-102 WP-4 の書き換えで日付の文が無くなった (`grep -n 'requester ruling\|before this rework'` が 0 件) |
+| 「など」に当たる残り | `control_main.py` L450・L491 の 2 行 | いずれも §14.4 で CH を付けた/欠番にした塊の中 |
+
+監督が基点の別 worktree で判定の枠 (§16.3) のとおりに当てた試行では、塊 1・2・3・5 は `--base` exit 0、塊 4 は句の除去が赤、日付だけなら exit 0 だった (§16.5 の Y6b-2)。
+
+### 16.3 Manifest
+
+**目的**: R6-4 が残した日付 (R6-1 の範囲) を 2 module から除き、除去の残る塊の基点の写しを既存の受け皿へ移す。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/control_main.py`、`MitateDB-api/src/mitatedb_api/backend_postgres.py` (**どちらもコメントと docstring だけ**)、既存の受け皿 `docs/code-history/r2db-api/control_main.md`・`docs/code-history/MitateDB-api/backend_postgres.md` (**節の追記だけ**)、`MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py` (**`_BACKEND_LAYER_ALLOWLIST` の `backend_postgres.py` の行番号だけ**)、本書 §16.4 | §14.3 と同じ (他の `src/`、`tools/`、`tools/tests/`、他の `tests/`、`conformance/`、`conformance-tests/`、`security/`、`docs/code-history/pair.md`、`docs/design/`、roadmap、`_ISOMORPHIC_TARGETS`) |
+
+| 項目 | 内容 |
+|---|---|
+| CH-ID 予約 | **`CH-0551`〜`CH-0555`** (登録済みの最大 `CH-0550` の次。新 ID は最大 4 塊 (CH-0509 は再編集)、余りは欠番) |
+| `--base` | `4241b55` (2 module とも) |
+| 変更クラス・規模 | **B** (`tools/change_class.py` の下限 B、登録 helper 0 塊)。規模 L (`RM` の台帳行) |
+| レビュー | 1 巡目は観点 A / B の 2 起動 (`OPERATING_CONDITIONS.md` §1.7 の 50a) |
+| 必須の規律 | §13.3 の「必須の規律」「保護文 (0d) と訂正 (0g)」「改行」と同じ。加えて下の 6 行 (実装担当のプロンプトに逐語で入れる。§14.3 の規律にも加える) |
+| 判定表の置き場所 | §16.4 の本文 |
+| 参照行の形 | docstring の `History: CH-NNNN` 行と comment の `# history: CH-NNNN` 行 (設計 D-2 の 2 形だけ) |
+| 受け皿の節の形 | `docs/code-history/README.md` の形 (moved from / parent commit `4241b55` / kind / fenced block = 基点の塊の dedent 後の逐語) |
+| 40b | `_BACKEND_LAYER_ALLOWLIST` の `backend_postgres.py` 20 行 (test の L347-366、値 585〜1814)。`# history:` 行の挿入により L694 以降が +1、L1319 以降が +2 になる見込み。実測で更新し、`git diff` の前後を §16.4 に記録する。test の実行は作業機 (`tools/dev/pt.py -C <WT> -- MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py -q`)。cloud では `--noconftest` の非公式な実行 (基点で 12 passed) を参考値として記録してよいが、完了条件の証拠にはしない |
+| `control_main.py` の行番号 pin | r2db の L1 scan に無し。`r2db-api/tests/test_ops_declarations.py:1137` の `grep -rn removesuffix` (`not in` の向き) は文字列検査として残る (完了条件 13) |
+
+**必須の規律** (加える 6 行。逐語)
+
+- 最小の区間編集だけ。スクリプトでの一括適用と塊全体の折り返し直しをしない。
+- チェッカーが許す除去でも、除去後の文が読めて事実のままかを 1 件ずつ判定する。
+- F-ID、実在パス (peer 相対を含む)、条項 ID、WP の位置指定、塊やファイルが参照し続ける ID を残す。
+- 除去の残らない塊は基点のバイト列に戻し、CH-ID を付けない。戻した後に再走査する。
+- R6-4 で除くのは純粋な日付と裁定の日付句だけ (R6-1)。
+- 今は事実でない文が表に出たら黙って直さず、受け皿の訂正記録 (0g) で直す。
+
+却下した代替案: 塊全体の折り返し直しと、スクリプトでの一括適用 (設計 §10.5 の教訓)。
+
+**監督の判定の枠** (実装担当は塊ごとに文面を読み、除去後の文が読めて事実のままかを判定して §16.4 に確定する。チェッカーが拒めば基点のバイト列に戻し CH-ID を付けない)
+
+| # | 塊 (基点行 / qualname / 種別) | CH | 日付の形 | 除くもの (R6-1) | 除去後 | 残すもの |
+|---|---|---|---|---|---|---|
+| 1 | `control_main.py` L393-439 / `build_control_app` / docstring (手順 5b = L428) | 新 | 裁定の日付句 `supervisor ruling 2026-09-09` | `, supervisor ruling 2026-09-09` | `5b. (Phase 10 WP-4g) F-16, on the same` | `Phase 10 WP-4g`、F-16、他の全文 |
+| 2 | `control_main.py` L449-452 / `build_control_app` / comment | 新 | 純粋な日付 `2026-09-05` | ` 2026-09-05` | `(design amendment, N-7)` | `N-7` (R6-3 と同じく基準のまま) |
+| 3 | `control_main.py` L482-524 / `build_control_app` / comment | **CH-0509 (再編集の経路、設計 §9.3)** | 純粋な日付 `2026-09-10` | ` 2026-09-10` | `L-3 correction, WP-4 integration review)` | 実在パス 2 つ、`L-3 correction`、CH-0509 の参照行。受け皿の節は書き換えない (訂正記録は不要: 許容操作 (4) の範囲) |
+| 4 | `backend_postgres.py` L682-693 / `PostgresBackend.field_domains` / comment | 新 | 裁定の日付句 `supervisor ruling 2026-09-04` のうち日付だけ (句ごとの除去はチェッカーが拒む。Y6b-2) | ` 2026-09-04` | `# WP-3 差し戻し 最終ラウンド (supervisor ruling,` + 2 行目 `# 裁定 6, review F9): ...` | `supervisor ruling` の語 (日付無し)、`裁定 6`、`review F9`、`Before this fix` の文 (0d: 契約の語彙 `VALIDATION_FAILED` の文は監査一覧) |
+| 5 | `backend_postgres.py` L1288-1318 / `PostgresBackend.add_field` / comment | 新 | 純粋な日付 `2026-09-07` | `, 2026-09-07` | `# M-6 (監督裁定, WP-3a rework 2): mirrors` | `監督裁定` の語 (R6-1 は日付だけ)、M-6、WP-3a rework 2 |
+
+**完了条件 ↔ 変異** (P = `check_comment_provenance.py --base 4241b55 <2 module>`、R = `--register`、D = `check_doc_refs.py`。CLI の赤は下の wrapper `$SP/cs6b_cli_red.py` の node `test_cli_red[c<id>]` で観測する。変異の `old` は実装後に実装担当が選び §16.4 に記録する)
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 1 | コード不変 | 2 module: コード行の literal を 1 文字変える | P (1) → c1 |
+| 2 | 移した塊が逐語 | `control_main.md` の新しい節の fence から 1 文消す | P (2) → c2 |
+| 3 | CH の無い塊を変えていない | `backend_postgres.py`: CH を付けずに 1 塊から 1 文消す | P (2) → c3 |
+| 4 | 文区間の削除だけ | 新 CH 塊で (a) 否定語を落とす (b) 2 文を並べ替える (c) 1 語足す (d) 折返し行を 1 行消す | P (3) → c4a〜c4d |
+| 5 | 保護参照を含む文は丸ごと消せない (0d) | 新 CH 塊の、実在パス又は F-ID を含む文を 1 つ丸ごと消す (塊 1 の `F-16` の文、又は塊 4 の `credential_store_postgres.py` の文) | P (3) → c5 |
+| 6 | 経緯を足していない | 追加行に `WP-` 又は `supervisor ruling` を含める | P (5) → c6 |
+| 7 | 再編集の経路 (CH-0509) が許容操作だけ | 塊 3 の残す文を 1 語言い換える | P (3) → c7 |
+| 8 | 改行の壊れ 0 件 (0e/0f) | (a) `/` の直後の改行を空白 1 つでつなぐ (b) backtick の中の折返しを空白でつなぐ (対象行は実装担当が選ぶ。無ければ該当なしを監査照合で記録) | P (§9e) → c8a・c8b |
+| 9 | 受け皿が原文の写しとして完全 | (a) 新しい節の fence の末尾を 1 語切り詰める (b) fence の中の実在パスを含むラベルをパスの後半ごと削る | P (2) → c9a、P (3) → c9b |
+| 10 | ID の解決・孤児・全体一意 | コード側 1 件を `CH-0999` にする / 他 peer の受け皿に同じ番号の節を足す | R (§4.2 1 / 2) → c10a・c10b |
+| 11 | docstring 依存の新設なし | `control_main.py` に `__doc__` の読出しを 1 行足す | R (§4.2 5) → c11 |
+| 12 | 受け皿の ID が `check_doc_refs` で解決 | 新しい節の fence に roadmap に無い R 番号 (999 番) を足す | D → c12 |
+| 13 | 文字列検査が効いたまま (設計 §5(b)) | `control_main.py` の対象の塊に `removesuffix` を含むコメントを 1 行足す | `r2db-api/tests/test_ops_declarations.py::test_no_naming_convention_role_derivation_remains_in_composition_roots` (**作業機**) |
+| 14 | 行番号 pin が実測と一致 (40b) | 更新で値が変わった `_BACKEND_LAYER_ALLOWLIST` の 1 行を更新前の値に戻す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_allowlist_entries_match_real_bare_call_sites` (**作業機**) |
+| 15 | 除いたのは日付と裁定の日付句だけ (R6-1)、内容の除去が 0 の塊に CH が無い | **監査照合** (固定スクリプト `$SP/cs6b_removed_dates.py`、全文は下): `REMOVED` 行の class が `date` / `ruling-word` だけ、`WS-ONLY`・`UNPAIRED`・`OTHER` 0、exit 0。出力を §16.4 に逐語で貼る。変異: 新 CH 塊の日付以外の語 1 つを除く → `OTHER` 行で exit 1 (手で当てて戻す。`mutate.py` の対象外なので sha256 の照合を記録する) | `cs6b_removed_dates.py` exit 1 (`OTHER` 行) |
+| 16 | 指示語・定冠詞・副詞の参照先を消していない | **監査照合**: §16.4 の判定表の点検語の欄 (日付の除去では文を消さないので候補 0 を確認する) | — |
+| 17 | 集計行と経緯トークン数の前後 | **監査照合**: 経緯トークン数 (§2.3 末尾の数え方) の前後を §16.4 に記録。両 peer の suite の集計行は作業機 (40a: 前 = `4241b55`、後 = commit) | — |
+| 18 | root gate を通過し、コミット後の HEAD で `tools/tests` が緑 | **監査照合** (作業機): `tools/dev/gate.py -C <WT> --label r22-cs6b` と `tools/tests`。cloud では `tools/tests` のうち PG 非依存の部分を実測 (基点: 786 passed、3 failed = `test_testpg.py` 2 件 (PG) + `test_r89_real_commit_0d0f8c9_reproduction` (shallow clone)) | — |
+| 19 | 対応の無い行が無い | **監査照合** (`OPERATING_CONDITIONS.md` §1.5 の 40) | — |
+
+**CLI の赤の wrapper** (`$SP/cs6b_cli_red.py` に下の本文のとおり作り、変えない)
+
+- 仕組みは §14.3 の `cs6_cli_red.py` と同じ (CLI exit 0 = 緑、exit 1 と接頭辞 = 赤、それ以外 = pytest の exit 3)。wrapper は repo の外にあるので root の conftest (使い捨ての PostgreSQL) を読まず、PostgreSQL 無しで回る。
+- 変異の前に、変異を当てない状態で `18 passed` であること (起草時に `4241b55` の作業ツリーで実測)。
+- spec の `tests` には `$SP` を展開した絶対パスを書く (JSON は `$SP` を展開しない)。変異 2・9a・9b・10b・12 の `file` は受け皿。
+
+```python
+"""cs6b_cli_red.py -- change set 6b (R6-4 dates): CLI red signals as pytest (work order §16, Y6-5 form).
+
+tools/dev/mutate.py runs `python -m pytest` with cwd = the worktree, so each
+condition whose red signal is a non-zero exit of a CLI checker is wrapped here.
+  * CLI exit 0                         -> test passes  (green: not triggered)
+  * CLI exit 1 + the expected prefix   -> test fails   (red: the named check fired)
+  * anything else (exit 1 without the prefix, other exit codes)
+                                       -> pytest exit 3 (mutate.py: got=error(3), NG)
+This file lives outside the repository, so the repository-root conftest.py (its
+throwaway PostgreSQL cluster) is never loaded: the wrapper needs no PostgreSQL.
+Node ids: "$SP/cs6b_cli_red.py::test_cli_red[c5]" etc.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+BASE = "4241b55"
+MODULES = [
+    "r2db-api/src/r2db_api/control_main.py",
+    "MitateDB-api/src/mitatedb_api/backend_postgres.py",
+]
+P = ["tools/check_comment_provenance.py", "--base", BASE, *MODULES]
+R = ["tools/check_comment_provenance.py", "--register"]
+D = ["tools/check_doc_refs.py"]
+
+# case id -> (command, expected line prefix of the red signal)
+CASES = {
+    "c1": (P, "FAIL (§4.1 (1))"),
+    "c2": (P, "FAIL (§4.1 (2))"),
+    "c3": (P, "FAIL (§4.1 (2))"),
+    "c4a": (P, "FAIL (§4.1 (3))"),
+    "c4b": (P, "FAIL (§4.1 (3))"),
+    "c4c": (P, "FAIL (§4.1 (3))"),
+    "c4d": (P, "FAIL (§4.1 (3))"),
+    "c5": (P, "FAIL (§4.1 (3))"),
+    "c6": (P, "FAIL (§4.1 (5))"),
+    "c7": (P, "FAIL (§4.1 (3))"),   # re-edit path (CH-0509): a reworded retained sentence
+    "c8a": (P, "FAIL (§9e)"),
+    "c8b": (P, "FAIL (§9e)"),
+    "c9a": (P, "FAIL (§4.1 (2))"),
+    "c9b": (P, "FAIL (§4.1 (3))"),
+    "c10a": (R, "FAIL (§4.2 1)"),
+    "c10b": (R, "FAIL (§4.2 2)"),
+    "c11": (R, "FAIL (§4.2 5)"),
+    "c12": (D, "check_doc_refs FAILED:"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_cli_red(case: str) -> None:
+    argv, prefix = CASES[case]
+    proc = subprocess.run([sys.executable, *argv], cwd=Path.cwd(), capture_output=True, text=True)
+    lines = (proc.stdout + proc.stderr).splitlines()
+    if proc.returncode == 0:
+        return
+    hits = [line for line in lines if line.startswith(prefix)]
+    if proc.returncode == 1 and hits:
+        pytest.fail(f"{case}: red as expected: {hits[0]}", pytrace=False)
+    tail = lines[-1] if lines else ""
+    pytest.exit(f"{case}: exit {proc.returncode} without {prefix!r} (last line: {tail!r})", returncode=3)
+```
+
+**監査スクリプト (完了条件 15)** (`$SP/cs6b_removed_dates.py` に下の本文のとおり作り、変えない)
+
+- `$SP` に置いて走らせる: コミット前は `python3 "$SP/cs6b_removed_dates.py" -C "$WT" --base 4241b55`、コミット後は `--head HEAD` を足す。`--base` は必須。
+- CH-ID の塊ごとに、基点の塊と組む: 基点に同じ CH-ID があればそれと (再編集の経路。CH-0509)、無ければ受け皿の fenced block とバイト一致する同じ scope の塊と (初めての移動)。基点にすでに CH-ID があり、バイト一致の塊は `unchanged` と数えて出さない。空白を無視して比べ、除いた語を `date` / `ruling-word` / `OTHER` に分ける。
+- 出力は §16.4 の「監査スクリプトの出力」に逐語で貼る。基点のバイト列に戻す裁定をしたら、そのたびに再実行して貼り直す。
+- 変異 15 は `mutate.py` の形に乗らないので手で当てて戻し、sha256 を 2 回照合して §16.4 に記録する (§16.5 の Y6b-6)。
+
+```python
+"""cs6b_removed_dates.py -- change set 6b (R6-4) audit: only dates and ruling-date words were removed.
+
+For every block carrying a CH-ID in the new text, pairs it with its basis block
+at --base: first by the same CH-ID at the base (re-edit path, e.g. CH-0509), else
+by byte-equality with the companion's fenced block (first move). Compares basis
+and new text with whitespace ignored and prints:
+  WS-ONLY  file  Ls-e  CH-ID                      (must be 0 rows: no CH-ID without a real removal;
+                                                   a block that already carried its CH-ID at --base and is
+                                                   byte-identical is counted as unchanged, not printed)
+  REMOVED  file  Ls-e  CH-ID  class  token  xN    (class: date | ruling-word | OTHER)
+  UNPAIRED file  Ln    CH-ID                      (no basis block; must be 0 rows)
+Exit 0 only when WS-ONLY, UNPAIRED and OTHER rows are all 0 (R6-1: dates and the
+words of a ruling-date phrase only).
+Usage: python3 "$SP/cs6b_removed_dates.py" -C "$WT" --base REV [--head REV] [PATH ...]
+  --head omitted = working tree (before the commit); --head HEAD after it.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+DEFAULT_PATHS = [
+    "r2db-api/src/r2db_api/control_main.py",
+    "MitateDB-api/src/mitatedb_api/backend_postgres.py",
+]
+_STRIP = "`'\"()[]{}<>,;:!?*"
+_DATE = re.compile(r"^20\d\d-\d\d-\d\d$")
+_RULING_WORDS = frozenset({"supervisor", "ruling", "requester", "監督裁定", "裁定"})
+
+
+def git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout
+
+
+def words(text: str) -> Counter:
+    found: Counter = Counter()
+    for raw in " ".join(text.split()).split(" "):
+        word = raw.strip(_STRIP).rstrip(".")
+        if word:
+            found[word] += 1
+    return found
+
+
+def classify(word: str) -> str:
+    if _DATE.match(word):
+        return "date"
+    if word in _RULING_WORDS:
+        return "ruling-word"
+    return "OTHER"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-C", dest="wt", required=True)
+    ap.add_argument("--base", required=True)
+    ap.add_argument("--head", default=None)
+    ap.add_argument("paths", nargs="*")
+    ns = ap.parse_args()
+    wt = Path(ns.wt).resolve()
+    sys.path.insert(0, str(wt / "tools"))
+    import check_comment_provenance as cp  # noqa: E402
+
+    idset = cp._tracked_identifier_set(wt, ns.base)
+    ws_only = removed = unpaired = other = ch_blocks = unchanged = 0
+    print(f"BASE {ns.base} HEAD {ns.head or 'worktree'}")
+    for rel in ns.paths or DEFAULT_PATHS:
+        old_src = git(wt, "show", f"{ns.base}:{rel}")
+        new_src = git(wt, "show", f"{ns.head}:{rel}") if ns.head else (wt / rel).read_text(encoding="utf-8")
+        old_blocks, new_blocks = cp.extract_all_blocks(old_src), cp.extract_all_blocks(new_src)
+        old_pos, new_pos = cp._block_positions(old_src, old_blocks), cp._block_positions(new_src, new_blocks)
+        companions = cp._load_companion_lookup(wt, Path(rel).parts[0])
+        used = [False] * len(old_blocks)
+        for j, nb in enumerate(new_blocks):
+            if nb.history_id is None:
+                continue
+            ch_blocks += 1
+            idx = next((i for i, ob in enumerate(old_blocks) if not used[i] and ob.history_id == nb.history_id), None)
+            if idx is None:
+                comp = companions.get(nb.history_id)
+                idx = next((i for i, ob in enumerate(old_blocks) if not used[i] and comp is not None
+                            and ob.dedented == comp and old_pos[i][0] == new_pos[j][0]), None)
+            if idx is None:
+                unpaired += 1
+                print(f"UNPAIRED\t{rel}\tL{nb.start_line}\t{nb.history_id}")
+                continue
+            used[idx] = True
+            ob = old_blocks[idx]
+            where = f"{rel}\tL{ob.start_line}-{ob.end_line}\t{nb.history_id}"
+            if ob.history_id == nb.history_id and ob.dedented == nb.dedented:
+                unchanged += 1   # a block registered by an earlier change set and untouched here
+                continue
+            old_text = ob.retained_text if ob.history_id is not None else ob.dedented
+            old_flat = " ".join(cp._flatten(ob.kind, old_text, idset).split()) if old_text else ""
+            new_flat = " ".join(cp._flatten(nb.kind, nb.retained_text, idset).split()) if nb.retained_text else ""
+            if old_flat == new_flat:
+                ws_only += 1
+                print(f"WS-ONLY\t{where}")
+                continue
+            gone = words(old_flat) - words(new_flat)
+            for tok, n in sorted(gone.items()):
+                cls = classify(tok)
+                removed += 1
+                other += cls == "OTHER"
+                print(f"REMOVED\t{where}\t{cls}\t{tok}\tx{n}")
+    print(f"SUMMARY ch_blocks={ch_blocks} unchanged={unchanged} ws_only={ws_only} unpaired={unpaired} removed_rows={removed} other={other}")
+    return 0 if ws_only == 0 and unpaired == 0 and other == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+**検証コマンドと期待形** (`WT` は割り当てられた worktree、Bash の timeout 600000)
+
+```bash
+# cloud で回すもの
+python3 tools/check_comment_provenance.py --base 4241b55 r2db-api/src/r2db_api/control_main.py MitateDB-api/src/mitatedb_api/backend_postgres.py   # exit 0 (P (1) が AST 同一性 = docstring を除く ast.dump の一致を検査する)
+python3 tools/check_comment_provenance.py --register   # exit 0
+python3 tools/check_doc_refs.py                        # exit 0
+python3 tools/public_value_scan.py <触ったファイル>     # total_flagged=0
+python3 "$SP/cs6b_removed_dates.py" -C "$WT" --base 4241b55   # exit 0。出力を §16.4 に逐語で貼る
+.venv/bin/python -m pytest "$SP/cs6b_cli_red.py" -q    # 変異の前: 18 passed
+tools/dev/mutate.py "$SP/cs6b-mutations.json" -C "$WT"  # 変異 1 行につき 1 件、expect: red
+tools/dev/pt.py -C "$WT" -- tools/tests -q             # PG 非依存の部分 (基点の値は完了条件 18)
+# 作業機で回すもの
+tools/dev/pt.py -C "$WT" -- r2db-api/tests -q          # 40a: 前 = 4241b55、後。failed/skipped/xfailed 0、前後で passed 数一致
+tools/dev/pt.py -C "$WT" -- MitateDB-api/tests -q      # 同上 (L1 scan を含む)
+tools/dev/pt.py -C "$WT" -- conformance-tests -q       # 同上
+# 変異 13・14 (spec は引き継ぎ書に JSON 全文で渡す。§16.5 の Y6b-5)
+tools/dev/gate.py -C "$WT" --label r22-cs6b
+tools/dev/finalize.py -C "$WT" --branch <branch> --allow 'r2db-api/src/r2db_api/control_main.py' --allow 'MitateDB-api/src/mitatedb_api/backend_postgres.py' --allow 'MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py' --allow 'docs/code-history/r2db-api/control_main.md' --allow 'docs/code-history/MitateDB-api/backend_postgres.md' --allow 'docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md' -m "$SP/msg-cs6b.txt" --tools-tests   # gate の通過後。台帳の版上げと R-22 行の【追記】、設計 §10 の実施記録も作業機
+```
+
+**使用テンプレート**: **2** (implementer、model は opus に上書き) → **5** (reviewer A / B 並列、再確認は指定なしの 1 起動) → **6** (evidence-auditor。規模 L。cloud では起動せず、作業機の suite・gate の後に 1 回)。**変更クラス**: **B**。
+
+### 16.4 判定表・監査・記録 (実装担当が埋め、監督がコミット前に確定する)
+
+実装担当 (cloud session、branch `claude/loving-lamport-nwcoko`、基点 `4241b55`)。5 塊とも `--base` が除去を許したので欠番の塊は無い。新しい CH-ID は `CH-0551`〜`CH-0554` の 4 つ。予約の余り `CH-0555` は使わず欠番。時刻は UTC。
+
+**判定表**
+
+| # | 塊 (基点行 / qualname / 種別) | CH-ID | HEAD の状態 (除いた文字列を逐語) | 判定 (§3) | 根拠 | 点検語 |
+|---|---|---|---|---|---|---|
+| 1 | `control_main.py` L393-439 / `build_control_app` / docstring | CH-0551 (新、作業ツリー L393-441) | L428 から `, supervisor ruling 2026-09-09` を除いた。末尾に空行と `History: CH-0551` (L439-440) | 移す (経緯トークン: 裁定の日付句) | `5b. (Phase 10 WP-4g) F-16, on the same borrowed connection: ...` は手順 5b の見出しとして読め、F-16 の検査 (`check_role_connection_limits`、L228 の import) は今もこのとおり。`Phase 10 WP-4g`・F-16 と他の全文は基点のまま | 候補 0 (文を消していない)。`the same borrowed connection` の指す先 (手順 4 の `a connection BORROWED FROM THAT SINK'S OWN POOL`) は残る |
+| 2 | `control_main.py` L449-452 / `build_control_app` / comment | CH-0552 (新、作業ツリー L451-455) | L450 から ` 2026-09-05` を除いた。末尾に `# history: CH-0552` (L455) | 移す (経緯トークン: 日付) | `... so F-2's own message can name the REAL configured schema (design amendment, N-7) rather than this module's DEFAULT_SCHEMA ...` は読め、`schema` の解決が手順 2 の `reject_removed_surface_env(..., schema=schema)` より前にある事実は変わらない。`N-7` は基点のまま (R6-3)。§14.4 D4 / §14.5 R6-3 で CH-0508 として拒まれたのは `2026-09-05,` (読点ごと) の除去で、本変更セットは読点を残す形 (`(design amendment, N-7)`)。`--base` exit 0 (§16.2 末尾の監督の試行と同じ)。CH-0508 は欠番のまま (レビュー B-3) | 候補 0。`F-2's own message` の指す先 (同じ関数の手順 2) と `moving it earlier` の `it` (同じ文の `schema` の解決) は残る |
+| 3 | `control_main.py` L482-524 / `build_control_app` / comment | CH-0509 (再編集の経路、作業ツリー L485-527) | L491 から ` 2026-09-10` を除いた (作業ツリー L494 `# review) has since raised this to 20 -- see that`)。参照行と受け皿の節は変えていない | 移す (経緯トークン: 日付。既存 CH の再編集、許容操作 (4)) | `(\`0013_role_connection_limits.sql\`, L-3 correction, WP-4 integration review) has since raised this to 20` は読め、`r2db-api/migrations/0013_role_connection_limits.sql` は実在し CONNECTION LIMIT を上げる migration のまま。実在パス 2 つ (`0006_control_plane_http.sql`、`0013_role_connection_limits.sql`) と `L-3 correction` は基点のまま | 候補 0。`that migration's own header` の指す先 (同じ文の `0013_role_connection_limits.sql`) と `this measurement` は残る |
+| 4 | `backend_postgres.py` L682-693 / `PostgresBackend.field_domains` / comment | CH-0553 (新、作業ツリー L682-694) | L682 から ` 2026-09-04` だけを除いた (`# WP-3 差し戻し 最終ラウンド (supervisor ruling,` + 2 行目 `# 裁定 6, review F9): ...`)。末尾に `# history: CH-0553` (L694) | 移す (経緯トークン: 日付。Y6b-2 により日付だけ) | `(supervisor ruling, 裁定 6, review F9)` は日付の無い出所の括弧として読める。`StorageConfigurationError` (`errors.py:166`) と `credential_store_postgres.py` は実在し、`http.py` の分類表で `SERVICE_UNAVAILABLE` に写る (L93) ので事実のまま。`Before this fix` の文 (0d、`VALIDATION_FAILED`) は基点のまま | 候補 0。`Before this fix` の `this fix` の指す先 (同じ塊の `StorageConfigurationError` への写像の文) は残る |
+| 5 | `backend_postgres.py` L1288-1318 / `PostgresBackend.add_field` / comment | CH-0554 (新、作業ツリー L1289-1320) | L1288 から `, 2026-09-07` を除いた (作業ツリー L1289 `# M-6 (監督裁定, WP-3a rework 2): mirrors`)。末尾に `# history: CH-0554` (L1320) | 移す (経緯トークン: 日付。`監督裁定` の語は Y6b-3 により残す) | `M-6 (監督裁定, WP-3a rework 2): mirrors \`alter_field_constraints\`'s own existing-row rule ...` は読め、`alter_field_constraints` の行検査と、その下の `scope.main.rollback()` (作業ツリー L1371 ほか) は今もある。M-6・WP-3a rework 2・第 2 段落 (`R-35 ...`) は基点のまま | 候補 0。`the same way`・`above` (`the scan property above`) の指す先 (`alter_field_constraints`'s own existing-row rule と第 1 段落の scan) は残る |
+
+**監査スクリプトの出力** (`cs6b_removed_dates.py`)
+
+実行 1 (最初、2026-10-02T08:49:39Z、`--head` 無し = 作業ツリー):
+
+```
+BASE 4241b55 HEAD worktree
+REMOVED	r2db-api/src/r2db_api/control_main.py	L393-439	CH-0551	date	2026-09-09	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L393-439	CH-0551	ruling-word	ruling	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L393-439	CH-0551	ruling-word	supervisor	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L449-452	CH-0552	date	2026-09-05	x1
+REMOVED	r2db-api/src/r2db_api/control_main.py	L482-524	CH-0509	date	2026-09-10	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L682-693	CH-0553	date	2026-09-04	x1
+REMOVED	MitateDB-api/src/mitatedb_api/backend_postgres.py	L1288-1318	CH-0554	date	2026-09-07	x1
+SUMMARY ch_blocks=13 unchanged=8 ws_only=0 unpaired=0 removed_rows=7 other=0
+```
+
+exit 0。
+
+実行 2 (変異の後の再確認、2026-10-02T08:58:39Z、`--head` 無し = 作業ツリー): 出力は実行 1 と同一 (7 行の `REMOVED` と `SUMMARY ch_blocks=13 unchanged=8 ws_only=0 unpaired=0 removed_rows=7 other=0`)、exit 0。基点のバイト列に戻した塊は無いので、戻しによる再実行は無い。
+
+(参考: 編集前の作業ツリーでは `SUMMARY ch_blocks=9 unchanged=9 ws_only=0 unpaired=0 removed_rows=0 other=0`、exit 0。)
+
+**40b の更新** (`_BACKEND_LAYER_ALLOWLIST` の `backend_postgres.py`。`git diff` の前後。test の L347-365 の 19 件で、L366 は閉じ `})`。19 件は test の R-102 のコメント `Entry count 18 -> 19` と一致する。各値は `git show 4241b55:...backend_postgres.py` の行と作業ツリーの行を突き合わせ、行の中身が同一 (`raise ValidationError("storage backend rejected the request") from exc`) であることを確かめた)
+
+| # | test の行 | 前 (`4241b55`) | 後 |
+|---|---|---|---|
+| 1 | L347 | 585 | 585 (変わらず) |
+| 2 | L348 | 645 | 645 (変わらず) |
+| 3 | L349 | 701 | 702 |
+| 4 | L350 | 749 | 750 |
+| 5 | L351 | 775 | 776 |
+| 6 | L352 | 831 | 832 |
+| 7 | L353 | 888 | 889 |
+| 8 | L354 | 912 | 913 |
+| 9 | L355 | 1089 | 1090 |
+| 10 | L356 | 1108 | 1109 |
+| 11 | L357 | 1246 | 1247 |
+| 12 | L358 | 1402 | 1404 |
+| 13 | L359 | 1491 | 1493 |
+| 14 | L360 | 1524 | 1526 |
+| 15 | L361 | 1551 | 1553 |
+| 16 | L362 | 1629 | 1631 |
+| 17 | L363 | 1666 | 1668 |
+| 18 | L364 | 1783 | 1785 |
+| 19 | L365 | 1814 | 1816 |
+
+`--noconftest` の参考値 (完了条件の証拠にはしない): 非公式 (--noconftest) `.venv/bin/python -m pytest --noconftest -p no:cacheprovider MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py -q` → `12 passed in 0.84s`
+
+**変異の記録**
+
+- 変異の前の wrapper: `.venv/bin/python -m pytest "$SP/cs6b_cli_red.py" -q -p no:cacheprovider` → `18 passed in 22.04s`。
+- `tools/dev/mutate.py "$SP/cs6b-mutations.json" -C <WT>` の変異表 (逐語、exit 0。ログは `$SP/dev-logs/` の下の mutate の実行ディレクトリ (実行時刻 `20261002-085607`)。1 回目の実行 (同じ結果、ログが `$SP` の外の一時ディレクトリに出た) は `$SP/dev-logs/run1-dev-logs-hdhyklze` に移した):
+
+```
+c1-r2db  expect=red   got=red       OK  | 1 failed in 1.29s | restore=ok
+c1-mdb   expect=red   got=red       OK  | 1 failed in 1.44s | restore=ok
+c2       expect=red   got=red       OK  | 1 failed in 1.35s | restore=ok
+c3       expect=red   got=red       OK  | 1 failed in 1.41s | restore=ok
+c4a      expect=red   got=red       OK  | 1 failed in 1.21s | restore=ok
+c4b      expect=red   got=red       OK  | 1 failed in 1.23s | restore=ok
+c4c      expect=red   got=red       OK  | 1 failed in 1.30s | restore=ok
+c4d      expect=red   got=red       OK  | 1 failed in 1.49s | restore=ok
+c5       expect=red   got=red       OK  | 1 failed in 1.45s | restore=ok
+c6       expect=red   got=red       OK  | 1 failed in 1.31s | restore=ok
+c7       expect=red   got=red       OK  | 1 failed in 1.41s | restore=ok
+c8a      expect=red   got=red       OK  | 1 failed in 1.35s | restore=ok
+c8b      expect=red   got=red       OK  | 1 failed in 1.28s | restore=ok
+c9a      expect=red   got=red       OK  | 1 failed in 1.33s | restore=ok
+c9b      expect=red   got=red       OK  | 1 failed in 1.23s | restore=ok
+c10a     expect=red   got=red       OK  | 1 failed in 0.64s | restore=ok
+c10b     expect=red   got=red       OK  | 1 failed in 0.66s | restore=ok
+c11      expect=red   got=red       OK  | 1 failed in 0.67s | restore=ok
+c12      expect=red   got=red       OK  | 1 failed in 2.00s | restore=ok
+mutate: 19 mutations, 19 as expected, restores verified 4/4 files (sha256 x2), grep counts unchanged (n/a for 5 edits whose lines all exist in the pristine file) | logs=$SP/dev-logs/<mutate の実行ディレクトリ>
+```
+
+(最終行の `logs=` は実際には `$SP` を展開した絶対パスと実行ディレクトリ名で出た。公開リポジトリの規律 (`OPERATING_CONDITIONS.md` §1.9) と `tools/public_value_scan.py` の R3 の誤検出を避けるため、`$SP` と `<mutate の実行ディレクトリ>` (実行時刻 `20261002-085607`) に置き換えて貼った。)
+
+| 変異 id | 完了条件 | 変異 (`file`: 操作) | node | log の赤の行 (先頭、逐語) |
+|---|---|---|---|---|
+| c1-r2db | 1 | `control_main.py`: `"R2DB_PLATFORM_POOL_SIZE", 4)` → `5)` | c1 | `FAIL (§4.1 (1)) r2db-api/src/r2db_api/control_main.py:428 code changed (AST differs, docstrings excluded)` |
+| c1-mdb | 1 | `backend_postgres.py`: literal `... already holds rows "` → `... holds row "` | c1 | `FAIL (§4.1 (1)) MitateDB-api/src/mitatedb_api/backend_postgres.py:682 code changed (AST differs, docstrings excluded)` |
+| c2 | 2 | `control_main.md` CH-0551 の fence から第 1 文 `Assemble the control-plane ASGI app ...` を消す | c2 | `FAIL (§4.1 (2)) r2db-api/src/r2db_api/control_main.py:393 companion CH-0551 does not byte-match any (remaining) original block in the same scope ('build_control_app')` |
+| c3 | 3 | `backend_postgres.py`: CH の無い `field_domains` の docstring から `Raises \`errors.NotFoundError\` ...` の文を消す | c3 | `FAIL (§4.1 (2)) MitateDB-api/src/mitatedb_api/backend_postgres.py:649 scope/anchor ('PostgresBackend.field_domains', 'stmt#1'): the sequence of CH-ID-less blocks changed ...` |
+| c4a | 4(a) | CH-0553: `never a client mistake` の `never` を落とす | c4a | `FAIL (§4.1 (3)) MitateDB-api/src/mitatedb_api/backend_postgres.py:682 cannot delete a whole sentence carrying a protected reference: ...` |
+| c4b | 4(b) | CH-0553: `Before this fix ...` の文と `\`StorageConfigurationError\` is ...` の文を入れ替える | c4b | `FAIL (§4.1 (3)) MitateDB-api/src/mitatedb_api/backend_postgres.py:682 retained text has no order-preserving match in the original block for: ...` |
+| c4c | 4(c) | CH-0552: `REAL configured schema` → `REAL configured database schema` | c4c | `FAIL (§4.1 (3)) r2db-api/src/r2db_api/control_main.py:451 cannot delete a whole sentence carrying a protected reference: ...` |
+| c4d | 4(d) | CH-0554: 折返し行 `# holding \`null\` in it (there being no earlier value` を消す | c4d | `FAIL (§4.1 (3)) MitateDB-api/src/mitatedb_api/backend_postgres.py:1289 retained text has no order-preserving match in the original block for: ...` |
+| c5 | 5 | CH-0553: `credential_store_postgres.py` を含む文 (`\`StorageConfigurationError\` is ... instead.`) を丸ごと消す | c5 | `FAIL (§4.1 (3)) MitateDB-api/src/mitatedb_api/backend_postgres.py:682 cannot delete a whole sentence carrying a protected reference: ...` |
+| c6 | 6 | `control_main.py`: `pool_size = ...` の行末に `# WP-77 default` を足す | c6 | `FAIL (§4.1 (5)) r2db-api/src/r2db_api/control_main.py:528 added line carries a history token ...` |
+| c7 | 7 | CH-0509: `has since raised this to 20` → `has since lifted this to 20` | c7 | `FAIL (§4.1 (3)) r2db-api/src/r2db_api/control_main.py:485 cannot delete a whole sentence carrying a protected reference: ...` |
+| c8a | 8(a) | CH-0551: `(F-7/` + 改行 + `F-9/F-10/F-11);` を空白 1 つでつなぐ | c8a | `FAIL (§9e) r2db-api/src/r2db_api/control_main.py:393 broken line-wrap join for CH-0551: '(F-7/ F-9/F-10/F-11);' should be '(F-7/F-9/F-10/F-11);' (zero space)` |
+| c8b | 8(b) | CH-0554: backtick の中の `scope.main.` + 改行 + `rollback()` を空白 1 つでつなぐ | c8b | `FAIL (§9e) MitateDB-api/src/mitatedb_api/backend_postgres.py:1289 broken line-wrap join for CH-0554: 'scope.main. rollback()\`' should be 'scope.main.rollback()\`' (zero space)` |
+| c9a | 9(a) | `control_main.md` CH-0552 の fence の末尾の `design.` を切り詰める | c9a | `FAIL (§4.1 (2)) r2db-api/src/r2db_api/control_main.py:451 companion CH-0552 does not byte-match any (remaining) original block in the same scope ('build_control_app')` |
+| c9b | 9(b) | `backend_postgres.md` CH-0553 の fence のラベル `(\`credential_store_postgres.py\`'s identical ...` を `(\`credential_store_\`'s identical ...` に削る | **c9a** (逸脱、下記) | `FAIL (§4.1 (2)) MitateDB-api/src/mitatedb_api/backend_postgres.py:682 companion CH-0553 does not byte-match any (remaining) original block in the same scope ('PostgresBackend.field_domains')` |
+| c10a | 10 | `control_main.py`: `# history: CH-0552` → 999 番 | c10a | `FAIL (§4.2 1) r2db-api: CH-0999 referenced in src/ but has no companion section` |
+| c10b | 10 | `backend_postgres.md` (他 peer の受け皿) の末尾に `## CH-0551` の節を足す | c10b | `FAIL (§4.2 2) CH-0551 heading appears more than once: docs/code-history/r2db-api/control_main.md, docs/code-history/MitateDB-api/backend_postgres.md` |
+| c11 | 11 | `control_main.py`: `_ = build_control_app.__doc__` を 1 行足す | c11 | `FAIL (§4.2 5) unexpected docstring-dependent construct in r2db-api/src/r2db_api/control_main.py` |
+| c12 | 12 | `control_main.md` CH-0552 の fence の `N-7)` を roadmap に無い 999 番の R 番号を足した形にする | c12 | `check_doc_refs FAILED: 1 dangling reference(s)` |
+
+**c9b の逸脱**: wrapper の `c9b` は接頭辞 `FAIL (§4.1 (3))` を待つが、受け皿 (fence) だけを変える変異では、checker は初めての移動でも再編集の経路でも `FAIL (§4.1 (2))` しか出さない (fence が基点の塊とバイト一致しない時点で (3) の照合に進まない。`tools/check_comment_provenance.py` の `same_scope` の分岐と、再編集の経路の `basis block ... is not derivable` が (2) の接頭辞)。`$SP` の写しで試した結果: CH-0553 の fence → `FAIL (§4.1 (2)) ... companion CH-0553 does not byte-match ...`、CH-0509 の fence (`0006_control_plane_` + 改行 + `http.sql` の後半を削る) → `FAIL (§4.1 (2)) ... basis block for CH-0509 is not derivable from the existing companion section: ...`。いずれも `test_cli_red[c9b]` では exit 3 (got=error(3)) になる。wrapper は「変えない」ので、変異 9b は接頭辞 (2) を待つ node `test_cli_red[c9a]` で観測した。
+
+- 変異 15 (手作業、`$SP/cs6b_m15.sh`):
+
+| 当てた変異 | 出力 (逐語) | 戻した後の sha256 (1 回目 / 2 回目) |
+|---|---|---|
+| CH-0552 (`control_main.py` L452) の `can name the REAL configured schema` から日付以外の語 `REAL` を除く | `REMOVED	r2db-api/src/r2db_api/control_main.py	L449-452	CH-0552	OTHER	REAL	x1` / `SUMMARY ch_blocks=13 unchanged=8 ws_only=0 unpaired=0 removed_rows=8 other=1` / exit 1 | 変異前 `b762c1fa004c48025e725e06cab834a30644b3110fa7e6df76dc652f218fc969`。`sleep 3` の後 1 回目 `b762c1fa004c48025e725e06cab834a30644b3110fa7e6df76dc652f218fc969` / 2 回目 `b762c1fa004c48025e725e06cab834a30644b3110fa7e6df76dc652f218fc969` (一致)。`grep -c 'can name the REAL configured schema'` = 1 |
+
+- 作業機に残す変異 13・14 (spec は `$SP/cs6b-mutations-workmachine.json`。`old` は作業ツリーで各 1 回を確認済み。cloud では実行していない):
+
+| # | 変異 | 渡し先 (引き継ぎ書) | 結果 |
+|---|---|---|---|
+| 13 | `control_main.py` CH-0552 の `# history: CH-0552` の前に `# never via removesuffix` を 1 行足す → `r2db-api/tests/test_ops_declarations.py::test_no_naming_convention_role_derivation_remains_in_composition_roots` | 監督が引き継ぎ書に JSON 全文で渡す | 未実行 (作業機) |
+| 14 | `test_l1_details_vocabulary_ast_scan.py` L349 の `702` を更新前の `701` に戻す → `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_allowlist_entries_match_real_bare_call_sites` | 同上 | 未実行 (作業機) |
+
+**経緯トークン数の前後** (§2.3 末尾の数え方。`_HISTORY_TOKEN_PATTERNS` を全文に `findall` した合計)
+
+| module | 前 (`4241b55`) | 後 |
+|---|---|---|
+| `r2db-api/src/r2db_api/control_main.py` | 50 | 46 |
+| `MitateDB-api/src/mitatedb_api/backend_postgres.py` | 117 | 115 |
+
+**位置参照のずれ** (レビュー B-1。参照行の挿入 (`control_main.py` の L439-440・L455、`backend_postgres.py` の L694・L1320) で、`security/CONTROL_MAPPING.md` の証拠の位置参照のうち基点で正しかった 6 件が別の行を指すようになった。R-88 の検査は範囲内なら緑。設計 §3 の「別件 (対象外)」(直すと Class D) に当たるので本変更セットでは直さず、監督裁定は §16.5 の Y6b-11。残る 20 参照は L682 より前で変わらない)
+
+| `security/CONTROL_MAPPING.md` の行 | 参照 | 指していたもの | 現在の行 |
+|---|---|---|---|
+| :731 | `control_main.py:573` | `if workers > ... process_ceilings.control` | L576 |
+| :852 | `backend_postgres.py:1687-1696` | `_set_timeouts` | L1689-1698 |
+| :872 | `backend_postgres.py:1681` | `_timeout_ms` | L1683 |
+| :1020 | `backend_postgres.py:1766` | idempotency の `_acquire_advisory` | L1768 |
+| :1020 | `backend_postgres.py:1803` | 〃 | L1805 |
+| :1545 | `backend_postgres.py:1421` | `encode_value` | L1423 |
+
+**記録**
+
+| 照合コマンド / suite | 結果 (出力の行を逐語) |
+|---|---|
+| `python3 tools/check_comment_provenance.py --base 4241b55 r2db-api/src/r2db_api/control_main.py MitateDB-api/src/mitatedb_api/backend_postgres.py` (除去のたびと最後) | `comment provenance OK: 135 blocks checked` (exit 0。5 回の除去のどれでも exit 0) |
+| `python3 tools/check_comment_provenance.py --register` | `comment provenance register OK: 95 files scanned, 418 CH-IDs` (exit 0) |
+| `python3 tools/check_doc_refs.py` | `check_doc_refs OK: 0 dangling references` (exit 0) |
+| `python3 tools/public_value_scan.py` (src 2・受け皿 2・L1 scan の test) | `# mode=tree files_scanned=5 total_flagged=0` (exit 0) |
+| `python3 tools/public_value_scan.py` (本書) | `# mode=tree files_scanned=1 total_flagged=0` (exit 0。最初の走査は `$SP` の下の mutate の実行ディレクトリ名 2 行を `R3_project_id` で拾ったので、その名を実行時刻だけの形に書き換えて再走査した) |
+| `python3 "$SP/cs6b_removed_dates.py" -C <WT> --base 4241b55` | `SUMMARY ch_blocks=13 unchanged=8 ws_only=0 unpaired=0 removed_rows=7 other=0` (exit 0。`REMOVED` の class は `date` 5 行・`ruling-word` 2 行だけ) |
+| 両 peer の suite・conformance・`tools/tests`・`gate.py` | 未実行 (作業機。cloud に PostgreSQL が無い) |
+
+### 16.5 起草時の疑義と監督裁定
+
+| # | 疑義 | 裁定 |
+|---|---|---|
+| Y6b-1 | clone が shallow で CS6 の基点 `80fad55` が無い | 基点は `4241b55`。R6-4 の旧位置は原文の一致で同定し、§16.2 に書く |
+| Y6b-2 | 塊 4 の括弧 `(supervisor ruling 2026-09-04, 裁定 6, review F9)` は出所を持たず、`裁定 6` が消せる語でないので、句 `supervisor ruling 2026-09-04, ` の除去を `--base` が拒む (監督の試行: `FAIL (§4.1 (3)) ... :682 cannot delete a whole sentence carrying a protected reference` の赤。日付だけの除去は exit 0) | 日付 `2026-09-04` だけを除き、`supervisor ruling,` の語は残す (R6-1 の「純粋な日付」。CH-0509 の塊で `review 2026-09-10` から日付だけ除くのと同じ形)。折り返し直しはしない |
+| Y6b-3 | 塊 5 の `監督裁定` の語 | 残す。R6-1 は日付と裁定の日付句だけで、日付の付かない `監督裁定` は経緯トークンだが本変更セットの範囲外 |
+| Y6b-4 | 塊 3 (CH-0509) の再編集 | 設計 §9.3 の再編集の経路。許容操作 (4) の範囲なので受け皿への訂正記録は要らない。`--base` が拒めば基点のバイト列に戻す |
+| Y6b-5 | 変異 13・14 は pytest suite を要する | 作業機に残す。spec は引き継ぎ書に JSON 全文で渡す |
+| Y6b-6 | 変異 15 (監査スクリプトの赤) は mutate.py の pytest の形に乗らない | 手で当てて戻し、sha256 を 2 回照合して §16.4 に記録する (`OPERATING_CONDITIONS.md` §1.4 の 30) |
+| Y6b-7 | cloud の commit の経路。`CLAUDE.md` は commit を `finalize.py` で行うとし、§16.3 は `finalize.py` を作業機に置いていた | cloud では `tools/dev/finalize.py -C <checkout> --branch claude/loving-lamport-nwcoko --no-merge` で commit する (identity・allowlist・空 `.md`・doc-refs・公開値の検査は同じ。`--tools-tests` は PG 依存の赤が出るので付けず、`tools/dev/pt.py -- tools/tests -q` を別に回す)。main への merge は作業機の監督が gate の後に `--no-ff` で行う |
+| Y6b-8 | 完了条件 9 (b) (受け皿の fence の中の実在パスを含むラベルをパスの後半ごと削る) の赤は、実測では (3) ではなく (2) で出る (fence が一致しない時点で (3) の照合に進まない。実装報告 5(a)、レビュー B-2 (i)) | 9 (b) の赤は `FAIL (§4.1 (2))` とし、wrapper の node `c9a` で観測した記録を正とする。`c9b` (接頭辞 (3)) は未使用。§16.3 の表の「P (3) → c9b」は本裁定で読み替える (本文は書き換えない。`OPERATING_CONDITIONS.md` §1.8 の 57) |
+| Y6b-9 | 塊 4 に日付の無い `supervisor ruling,` が残る (実装報告 6) | 残す。R6-1 の範囲は日付だけで、`supervisor ruling` は経緯トークンとして後の変更セットの対象 (設計 §3 の判定で (4) により括弧ごと消せるかを判定する)。本変更セットでは触らない |
+| Y6b-10 | 40b の pin は 20 行ではなく 19 件 (test の L347-365。実装報告 5(c)、レビュー B-2 (ii)) | 19 件 (値が変わったのは 17 件、585 と 645 は不変) を正とし、§16.3 の「20 行 (L347-366)」は本裁定で読み替える (本文は書き換えない) |
+| Y6b-11 | `security/CONTROL_MAPPING.md` の位置参照 6 件が本変更セットでずれる (レビュー B-1。§16.4 の「位置参照のずれ」の表) | 観察 (`OPERATING_CONDITIONS.md` §1.15 の 77: 検査器の穴を通って製品の欠陥がゲートを抜けることは無く、DB の利用者は気づかない)。本変更セットでは直さない (直すと Class D。設計 §3 の別件)。6 件の前後を §16.4 に記録し、引き継ぎ書で作業機へ渡す: `security/CONTROL_MAPPING.md` の次の版上げ (R-28 の是正と同じ変更セットでよい) で取り直す。以後の provenance の変更セットは §x.2 に `` git grep -nE '<module>\.py`?:[0-9]+' security/CONTROL_MAPPING.md `` の参照表を置く (起草済みの変更セット 7 は §17.2 を書き換えず §17.4 に置く。§17.5 の Y7-8) |
+
+## 17. 変更セット 7 — MitateDB `cell.py`
+
+正本設計は v0.27 (§3、§4.1、§4.2、§6、§9.3)。行番号と実測は origin/main `4241b55` の値。1 peer 1 module。共通の規則は §13・§14・§16 を指し、ここには差分だけを書く。実施の場 (cloud session / 作業機) の線引きは §16 の冒頭の表と同じ。契約、Security Invariants、実行時挙動を変えない。登録 helper に触れない。
+
+### 17.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | 変更セット 6b が同じ branch に commit されている (別 commit) |
+| 2 | R-37 (`RM` (= `docs/design/ROADMAP_POST_PHASE7_V1.md`) の台帳の行) は閉止済み (2026-09-16)。抽出 WP は無い。設計 §6 の優先 1 の module のうち未整理は MitateDB `cell.py` と r2db `structured.py` だけ |
+| 3 | 重なり (`RM` の台帳の行): R-33 (cell 経路と HTTP 経路の digest、未着手、フェーズ11)、R-80/R-81/R-82 (往復数、未着手/進行中、着手条件あり)、R-101 (tools のみ)、R-120 (r2db)。R-102 (`cell.py` の大改修) は閉止・統合済み (`c3e5ca7` まで)。作業機で `git worktree list` により `cell.py` を触る worktree が無いことを着手時に確かめる (cloud からは見えない) |
+| 4 | `cell.py` の blob は `4241b55` のもの。変わっていれば §17.2 を取り直す |
+
+### 17.2 選定と実測 (`4241b55`)
+
+**選定**: 設計 §6 の優先 1 の残りを 10 行以上の塊 (CH なし) の行数順に並べると、MitateDB `cell.py` 82 塊 / 1714 行、r2db `structured.py` 24 塊 / 366 行。変更セット 7 は **MitateDB `cell.py`** (1 peer 1 module)。次の候補 (変更セット 8) は r2db `structured.py`。優先 2 の先頭は r2db `platform_declarations.py` (18 / 474)、MitateDB `control_plane.py` (27 / 443)。
+
+却下した代替案: 変更セット 7 に r2db `structured.py` を選ぶ (設計 §6 の行数順に反する。変更セット 8 とする。§17.5 の Y7-1)。
+
+**census** (両 peer の `src/` 97 module、`$SP/explore-cs7-census.md`。数え方は §14.2 と同じ `extract_all_blocks`、10 行以上 = end-start+1 ≥ 10、CH ありは別)
+
+| peer / module | 行数 | 全塊 | CH あり | 10 行以上 (CH なし) | 合計行 | 経緯トークン | 済 | helper | companion |
+|---|---|---|---|---|---|---|---|---|---|
+| MitateDB `cell.py` | 3908 | 211 | 1 (CH-0548) | 82 | 1714 | 415 | — | ✓ | ✓ |
+| MitateDB `backend_postgres.py` | 1838 | 103 | 6 | 26 | 485 | 117 | ✓ (6) | — | ✓ |
+| MitateDB `ops.py` | 3631 | 124 | 26 | 25 | 483 | 83 | ✓ (5) | ✓ | ✓ |
+| r2db `platform_declarations.py` | 1737 | 67 | 0 | 18 | 474 | 48 | — | ✓ | — |
+| MitateDB `control_plane.py` | 2274 | 85 | 1 | 27 | 443 | 150 | — | ✓ | ✓ |
+| r2db `credential_store.py` | 1916 | 76 | 18 | 22 | 437 | 61 | ✓ (5) | ✓ | ✓ |
+| MitateDB `platform_declarations.py` | 1713 | 67 | 1 | 19 | 415 | 42 | — | ✓ | ✓ |
+| r2db `structured.py` | 1859 | 121 | 0 | 24 | 366 | 123 | — | ✓ | — |
+| MitateDB `backend.py` | 593 | 41 | 0 | 16 | 342 | 60 | — | — | — |
+| r2db `postgres.py` | 2727 | 176 | 92 | 22 | 335 | 40 | ✓ (1・2) | ✓ | ✓ |
+
+**`cell.py` の実測**
+
+| 項目 | `cell.py` |
+|---|---|
+| 行数 | 3908 |
+| 塊 (`extract_all_blocks`) | 211 (docstring 56 / comment 155) |
+| 既存の CH-ID | 1 (CH-0548、`ApplicationCell.prepared_stats` の docstring、受け皿 `docs/code-history/MitateDB-api/cell.md`) |
+| うち登録 helper の中 (対象外) | 4 塊 (docstring L83-116・L122-134・L140-163・L169-176)。`r2db-api/tests/test_audit_query.py:2762-2805` の `_ISOMORPHIC_TARGETS` に `src/mitatedb_api/cell.py` 側として 4 symbol (`normalize_request_for_plan` L82-118、`compute_plan_token` L121-136、`normalize_request_for_idempotency` L139-165、`idempotency_digest` L168-177)。設計 §6 の最後の変更セット |
+| 対象の塊 | **207** (CH-0548 を含む) |
+| 10 行以上の塊 (CH なし) | 82 塊 / 1714 行 (census の表の値は helper を含む)。登録 helper の docstring 3 塊 (L83-116・L122-134・L140-163、71 行) を除くと **79 塊 / 1643 行** |
+| 経緯トークン (§2.3 末尾の数え方、全文) | **415** |
+| 目印一覧 (設計 §3) に当たる文 / 塊 | 95 / 69 |
+| 経緯トークンを含む文 | 203 (うち安全の語 46 文、位置の語 120 文。§14.2 の正規表現) |
+
+**10 行以上の塊** (82 塊。種別の書いていない塊は comment。`(helper、対象外)` は登録 helper の docstring)
+
+- `cell.py`: L1-21 (docstring)、L83-116 (docstring) (helper、対象外)、L122-134 (docstring) (helper、対象外)、L140-163 (docstring) (helper、対象外)、L181-190 (docstring)、L201-261 (docstring)、L285-314、L321-360 (docstring)、L413-423、L452-474 (docstring)、L526-535、L554-563、L565-578、L616-685 (docstring)、L751-762 (docstring)、L773-783 (docstring)、L829-839 (docstring)、L848-909 (docstring)、L960-977 (docstring)、L994-1019 (docstring)、L1039-1058、L1067-1076、L1084-1096、L1124-1137、L1174-1185、L1250-1266、L1270-1279、L1319-1344 (docstring)、L1372-1414 (docstring)、L1551-1560、L1590-1600、L1609-1655 (docstring)、L1673-1682、L1842-1883 (docstring)、L1889-1905 (docstring)、L1910-1927 (docstring)、L1960-1989、L2024-2051 (docstring)、L2065-2076、L2137-2151 (docstring)、L2162-2175、L2192-2214 (docstring)、L2232-2241、L2274-2303 (docstring)、L2404-2440 (docstring)、L2458-2467、L2546-2571 (docstring)、L2582-2627 (docstring)、L2637-2653、L2662-2675、L2687-2699、L2727-2736、L2751-2765、L2783-2795、L2849-2863、L2867-2891、L2894-2906、L2921-2973、L2983-2995、L2998-3007、L3014-3036、L3094-3106 (docstring)、L3119-3132、L3136-3145、L3188-3219 (docstring)、L3251-3271、L3300-3318、L3339-3353、L3358-3370、L3379-3402 (docstring)、L3483-3493、L3526-3535、L3538-3552、L3621-3638 (docstring)、L3648-3658、L3664-3683 (docstring)、L3717-3742、L3748-3769 (docstring)、L3776-3787 (docstring)、L3818-3834、L3844-3853、L3863-3897 (docstring)
+
+**目印一覧に当たる塊** (69 塊 / 95 文。塊 (件数))
+
+- `cell.py`: L1-21 (1)、L285-314 (2)、L321-360 (1)、L413-423 (1)、L526-535 (1)、L537-545 (2)、L554-563 (1)、L565-578 (1)、L616-685 (3)、L829-839 (1)、L848-909 (1)、L1026-1033 (1)、L1039-1058 (1)、L1084-1096 (1)、L1124-1137 (1)、L1147-1151 (1)、L1174-1185 (1)、L1226-1232 (1)、L1250-1266 (1)、L1270-1279 (1)、L1319-1344 (1)、L1346-1349 (1)、L1372-1414 (1)、L1421-1426 (1)、L1443-1450 (1)、L1500-1507 (1)、L1551-1560 (1)、L1590-1600 (1)、L1609-1655 (4)、L1673-1682 (1)、L1692-1698 (1)、L1749-1757 (1)、L1795-1803 (1)、L1842-1883 (1)、L1889-1905 (1)、L1960-1989 (2)、L2024-2051 (1)、L2065-2076 (1)、L2192-2214 (1)、L2217-2224 (1)、L2258-2262 (1)、L2304-2310 (1)、L2404-2440 (3)、L2476-2484 (2)、L2582-2627 (3)、L2662-2675 (1)、L2687-2699 (1)、L2751-2765 (1)、L2799-2807 (1)、L2821-2824 (1)、L2849-2863 (1)、L2921-2973 (2)、L3014-3036 (1)、L3119-3132 (1)、L3188-3219 (3)、L3251-3271 (1)、L3300-3318 (1)、L3339-3353 (2)、L3379-3402 (2)、L3526-3535 (1)、L3538-3552 (1)、L3621-3638 (1)、L3648-3658 (2)、L3664-3683 (1)、L3717-3742 (2)、L3748-3769 (1)、L3818-3834 (3)、L3844-3853 (2)、L3863-3897 (4)
+
+**静的テストの注記**
+
+| 箇所 | 扱い |
+|---|---|
+| 行番号 pin (L1 scan) | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py` は `cell.py` を `SCANNED_MODULES` に持ち、件数 pin `"cell.py": 44` (AST の件数でコメントに依らない)。行番号 allowlist は `backend_postgres.py` / `backend_sqlite.py` だけで `cell.py` に無い → 40b の行番号更新は非該当 (監査照合: 件数 pin の差分 0) |
+| 文字列の検査 (設計 §5(b)) | `MitateDB-api/tests/test_application_audit.py:1322-1324` が `cell.py` の全文 (コメントを含む) に `source.count("def _validate_delete_confirmation(") == 1`・`source.count("self._validate_delete_confirmation(") == 2` を掛ける (基点のコメントにこの文字列は 0 件 → コメントに足さない) |
+| AST・module 名だけの検査 | `MitateDB-api/tests/test_r102_request_scope.py:150-163` は AST (コメント非依存)。`tools/tests/test_sql_statement_safety_scan.py:257`・`tools/tests/test_leaf_import_direction.py:173` は module 名だけ |
+| 他文書の行番号参照 | `conformance-tests/test_c24_request_budget.py:36` の `cell.py:834-837`、`conformance-tests/test_c05_limit_declaration_agreement.py:890` の `cell.py:1491`、`MitateDB-api/tests/test_dry_run_and_plan.py:362` の `cell.py:1784`、`MitateDB-api/tests/test_foundation.py:1661` の `cell.py:3370`、`security/CONTROL_MAPPING.md` の `cell.py:NNN` は設計 §3 の「別件 (対象外)」(直すと Class C / D)。R-95 の検査は範囲内なら緑、内容は見ない (既知の限界)。引き継ぎ書に一覧を残す (§17.5 の Y7-4) |
+
+**塊をまたぐ参照先**: 両 peer の `src/`・`tests/`・`conformance/`、`conformance-tests/`、`security/`、README への `cell.py` の参照は 296 行 (下の grep)。表は着手時に実装担当が同じ grep で作り §17.4 に置く (参照先の文は「残す」と固定)。
+
+```bash
+grep -rnE "cell\.py'?s own|\`cell\.py\`|ApplicationCell\`?'s own|cell\.py::"
+```
+
+**受け皿**: 既存 `docs/code-history/MitateDB-api/cell.md` に追記 (parent commit は着手時の基点)。
+
+### 17.3 Manifest
+
+**目的**: §13.3 と同じ (`cell.py` の経緯を受け皿へ移し、コードに現在の理由と `CH-NNNN` を残す)。
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/cell.py` (**コメントと docstring だけ**。登録 helper 4 symbol の docstring を除く)、既存の受け皿 `docs/code-history/MitateDB-api/cell.md` (**節の追記**)、本書 §17.4 | §14.3 と同じ。加えて `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py` (行番号 pin が無いので触らない)、登録 helper 4 symbol の docstring |
+
+| 項目 | 内容 |
+|---|---|
+| CH-ID 予約 | **`CH-0556`〜`CH-0762`** (207 塊が上限。6b の予約 `CH-0551`〜`CH-0555` の次) |
+| `--base` | `4241b55` (6b の commit の後も `cell.py` の blob は変わらないので同じ rev でよい。変わっていれば取り直す) |
+| 変更クラス・規模 | **B** (登録 helper に触れない)。規模 L |
+| 必須の規律 | §13.3 の「必須の規律」「保護文 (0d) と訂正 (0g)」「改行」と、§16.3 の加える 6 行 (逐語) と同じ。加えて: 塊ごとに Opus の担当が文面を判定する (差し戻しの文面判定も Opus)。R6-1 の「日付だけ」の縛りは変更セット 7 には掛からず、設計 §3 の判定 (移す / 残す / 対象外) と §4.1 (3)(4)(6)・§9 の許容操作で進める |
+| 既存の CH-0548 | 再編集しない限り触らない。再編集するなら設計 §9.3 の経路で、受け皿に訂正記録 (§17.5 の Y7-3) |
+| 登録 helper | 4 symbol の docstring は対象外 (設計 §6 の最後の変更セット、§7 Q-1)。触れる必要が出たら止めて監督へ (§17.5 の Y7-5)。登録 helper の Class C の変更セットの証拠は本変更セットの範囲外 |
+| 判定表の置き場所 | §17.4 の本文に 1 本 |
+| 復元・欠番の裁定の後・内容の除去が 0 の塊・意味や出所を落とす除去 | §14.3 の同じ行と同じ (監査スクリプトは下の `cs7_removed_tokens.py`、走査は `cell.py` の全塊) |
+| 40b | 非該当 (`cell.py` に行番号 allowlist は無い)。件数 pin `"cell.py": 44` は AST。監査照合で差分 0 (§17.5 の Y7-6) |
+| 文字列検査 | コメントに `_validate_delete_confirmation(` を足さない。完了条件 21 の変異は作業機 (§17.5 の Y7-7) |
+| 統合 | §14.3 と同じ (root gate と、コミット後の HEAD の `tools/tests`。作業機) |
+| 手順 | 設計 §6「手順」。40a は両 peer の suite を前後 2 回 (作業機) |
+
+却下した代替案: `cell.py` の塊全体の折り返し直しと、スクリプトでの一括適用 (設計 §10.5 の教訓)。
+
+**WP の分割** (1 module を 4 つの直列 WP で進める。塊の境界で区切る。判定表は 1 本、commit は 1 つ。途中の状態を commit するときは wip と明記し「完了」と書かない (§17.5 の Y7-2))
+
+| WP | 範囲 (基点の行) | 触るファイル | 並行 |
+|---|---|---|---|
+| 7a | L1-1000 | `MitateDB-api/src/mitatedb_api/cell.py`、`docs/code-history/MitateDB-api/cell.md`、本書 §17.4 | しない (同一ファイル。7a → 7b → 7c → 7d の順) |
+| 7b | L1001-2000 | 〃 | 〃 |
+| 7c | L2001-3000 | 〃 | 〃 |
+| 7d | L3001-3908 | 〃 | 〃 |
+
+各 WP の完了条件と対応:
+
+| # | WP の完了条件 | 変異 / 監査照合 |
+|---|---|---|
+| W1 | WP の終わりに `--base 4241b55` を `cell.py` の全体に掛けて exit 0 | 変異は下の完了条件 1〜8・10・12・13 と同じ (wrapper `cs7_cli_red.py`)。WP ごとの出力は **監査照合**: §17.4 の WP の進捗の欄に `--base` の出力の行を逐語で記録する |
+| W2 | 判定表の WP の範囲の行を §17.4 に足した | **監査照合**: §17.4 の WP の進捗の欄と判定表の行の範囲 |
+| W3 | 対応の無い行が無い | **監査照合** (`OPERATING_CONDITIONS.md` §1.5 の 40) |
+
+**完了条件 ↔ 変異** (§14.3 の 1〜30 を `cell.py` に当て直す。P = `check_comment_provenance.py --base 4241b55 MitateDB-api/src/mitatedb_api/cell.py`、R = `--register`。変異は `tools/dev/mutate.py` で実コードに当てる。変異の行は着手時に決め、§17.4 に記録する。赤が P・R・`check_doc_refs.py` の exit 1 の行は、下の wrapper `$SP/cs7_cli_red.py` の node `test_cli_red[c<行><枝>]` で観測する)
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 1 | コード不変 | `cell.py`: コード行の literal を 1 文字変える | P exit 1 (1) → c1 |
+| 2 | 移した塊が逐語 | `cell.md`: 本変更セットの 1 節から 1 文消す | P exit 1 (2) → c2 |
+| 3 | CH の無い塊を変えていない | `cell.py`: CH を付けずに 1 塊から 1 文消す | P exit 1 (2) → c3 |
+| 4 | 文区間の削除だけ | `cell.py`: §14.3 の行 4 の (a)〜(d) | P exit 1 (3)、4 種それぞれ → c4a〜c4d |
+| 5 | 保護参照を含む文は丸ごと消せない (0d) | §14.3 の行 5 と同じ (文は着手時に選び、§17.4 の「変異 5・8 の対象文」に記録する) | P exit 1 (§4.1 (3)) → c5 |
+| 6 | ラベル削除が規則どおり (設計 §8) | §14.3 の行 6 と同じ | P exit 1 (§4.1 (3)) → c6 |
+| 7 | 経緯を足していない | 追加行に `WP-` 又は `Supervisor ruling` を含める | P exit 1 (5) → c7 |
+| 8 | 版数付き文書名は残る | §14.3 の行 8 と同じ (文は §17.4 の「変異 5・8 の対象文」に記録する) | P exit 1 (§4.1 (3)) → c8 |
+| 9 | 登録 helper に触れていない | **監査照合**: 4 symbol の docstring 4 塊 (L83-116・L122-134・L140-163・L169-176) の差分 0 と、`_ISOMORPHIC_TARGETS` の差分 0 | — |
+| 10 | 訂正の記録が規則どおり (0g) | 事実と異なる保護文があれば受け皿の節に訂正記録。§14.3 の行 10 の (a)(b)。CH-0548 を再編集するときは設計 §9.3 の経路 | (a)(b) P exit 1 → c10a・c10b。記録が無ければ該当なしを監査照合で記録する |
+| 11 | `#:` の行を保つ (0g) | **監査照合**: `#:` の行を基点と HEAD で数え、差分 0 | — |
+| 12 | 改行の壊れが 0 件 | `find_broken_line_wrap_joins` を `cell.py` に流す。変異は §14.3 の行 12 の (a)〜(c) (対象行は着手時に選び §17.4 に記録する) | 0 件であること。(a) P exit 1 (§4.1 (3)) → c12a、(b)(c) P exit 1 (§9 0e の検出) → c12b・c12c |
+| 13 | 受け皿が原文の写しとして完全 | (a) `cell.md` の fenced block の末尾を 1 語切り詰める (b) §14.3 の行 13 の (b) | (a) P exit 1 (§4.1 (2)) → c13a、(b) P exit 1 → c13b |
+| 14 | 指示語・定冠詞・副詞の参照先を消していない | 残す文の点検語が参照する文を削除する | 機械では赤にならない — **監査照合**: §17.4 の候補一覧とコードレビュー |
+| 15 | 安全上の理由と同居する文を残している | 安全の語に当たる文 (§17.2 の 46 文) を文ごと削除する | 機械では赤にならない — **監査照合**: 判定表の根拠とレビュー |
+| 16 | 塊をまたぐ参照先の文を残している | §17.4 の参照先一覧の文を削除する | 機械では赤にならない — **監査照合**: grep の結果と §17.4 の参照先一覧 |
+| 17 | ID の解決・孤児・全体一意 | コード側 1 件を `CH-0999` にする / 他の受け皿と同じ番号の節を足す | R exit 1 (§4.2-1 / -2) → c17a・c17b |
+| 18 | docstring 依存の新設なし | `cell.py` に `__doc__` の読出しを 1 行 | R exit 1 (§4.2-5) → c18 |
+| 19 | 受け皿の ID が `check_doc_refs` で解決 | `cell.md` の fenced block に roadmap に無い 2 桁の R 番号を 1 つ足す | `check_doc_refs.py` exit 1 → c19 |
+| 20 | 行番号 pin | 非該当 (`cell.py` に行番号 allowlist は無い) — **監査照合**: 件数 pin `"cell.py": 44` の差分 0 | — |
+| 21 | 文字列検査が効いたまま (設計 §5(b)) | `cell.py` の対象の塊に `self._validate_delete_confirmation(` を含むコメントを 1 行足す | `MitateDB-api/tests/test_application_audit.py` の当該 test (**作業機**) |
+| 22 | 判定表が対象を覆い、本書の本文にある (設計 §10.4) | **監査照合**: 目印一覧に当たる 95 文以上が §17.4 にあり、根拠・点検語の欄に空欄なし。対象 207 塊を読んだことを記録する。表が本書の外にしか無ければ未達 | — |
+| 23 | 内容の除去が 0 の塊に CH-ID が無い (設計 §10.4) | CH-ID を付けた塊の 1 つを空白だけの差にする (P は緑) | **監査照合 (固定スクリプト)**: `cs7_removed_tokens.py` の出力に `WS-ONLY` 行が 1 行でもある、又は exit 1 なら赤。出力は §17.4 に逐語で貼る |
+| 24 | 復元・欠番の裁定の後に全ファイルを走査した (設計 §10.4) | 1 塊で戻した除去と同じ種類の除去を、`cell.py` の別の塊に 1 つ残す | **監査照合 (固定スクリプト)**: 裁定のたびに `cs7_removed_tokens.py` を再実行した出力が §17.4 にあり、残した除去が `REMOVED` 行として出て判定表で扱われている。再実行の出力が無い裁定は赤 |
+| 25 | 意味や出所を落とす除去が無い (A5・B5) | 実在ファイル名又は WP の位置指定を括弧から除く (許可に当たれば P は緑) | **監査照合 (固定スクリプト)**: 最後の `cs7_removed_tokens.py` の出力の `REMOVED` 行と §17.4 の除いた語の一覧が 1 行ずつ一致し (不一致は赤)、各行に意味と出所が残る根拠がある |
+| 26 | HTTP の status・error code を含む削除文 | 3 桁のステータス番号又はエラーコード語彙を含む文を 1 つ消す | **監査照合**: §17.4 の監査一覧の各行が判定表で根拠付きで「経緯だけの文」と判定されている |
+| 27 | 変えた docstring の backslash (設計 §10.2) | 変えた docstring の `\` を 1 つ落とす (AST 比較は docstring を除くので P は緑) | **監査照合**: 変えた docstring を基準と 1 文字ずつ照合する |
+| 28 | 集計行と経緯トークン数の前後 | **監査照合** (§17.4 の記録と実行ログ。数え方は §2.3 末尾。suite の集計行は作業機) | — |
+| 29 | root gate を通過し、コミット後の HEAD で `tools/tests` が緑 | **監査照合** (作業機): `gate.py` と `finalize.py --tools-tests` の出力の行 | — |
+| 30 | 対応の無い行が無い | **監査照合** (`OPERATING_CONDITIONS.md` §1.5 の 40) | — |
+
+**CLI の赤の wrapper** (`$SP/cs7_cli_red.py`。全文は置かない。§14.3 の `cs6_cli_red.py` との差分だけを書く。作ったら変えない)
+
+| 名前 | `cs7_cli_red.py` の値 (§14.3 の `cs6_cli_red.py` との差分) |
+|---|---|
+| `BASE` | `"4241b55"` (§14.3 は `"80fad55"`) |
+| `MODULES` | `["MitateDB-api/src/mitatedb_api/cell.py"]` の 1 つ (§14.3 は 2 module。§16.3 の `cs6b_cli_red.py` の `MODULES` をこの 1 つにしたものと同じ) |
+| `CASES` | §14.3 の c1〜c19 の形と同じ (c6 = ラベル削除の規則、c8 = 版数付き文書名、c10 = 0g、c12 = 改行、c13 = 受け皿、c17〜c19)。§16.3 の `cs6b_cli_red.py` の CASES (c6 = 経緯の追加、c7 = 再編集の経路 ほか) は使わない |
+
+- 仕組み・spec の書き方は §14.3 と同じ。変異の前に、変異を当てない状態で CASES の全件が passed であること。変異 2・13(a)・17(b)・19 の `file` は受け皿。
+
+**監査スクリプト (完了条件 23〜25)** (`$SP/cs7_removed_tokens.py`。全文は置かない。§14.3 の `cs6_removed_tokens.py` との差分だけを書く。作ったら変えない)
+
+| 名前 | `cs7_removed_tokens.py` の値 (§14.3 の `cs6_removed_tokens.py` との差分) |
+|---|---|
+| `DEFAULT_PATHS` | `["MitateDB-api/src/mitatedb_api/cell.py"]` の 1 つ (§14.3 は 2 module) |
+| `--base` の既定 | `"4241b55"` (§14.3 は `"80fad55"`) |
+| 対の取り方 | 既に同じ CH-ID を基点に持つ塊は (受け皿との byte 一致ではなく) その CH-ID で対にし、byte 一致なら unchanged として数えて飛ばす (再編集の経路。`cs6b_removed_dates.py` と同じ規則。SUMMARY に `unchanged=` を足す) |
+
+- 走らせ方・出力の貼り方は §14.3 と同じ (`--head` 省略 = 作業ツリー、コミット後は `--head HEAD`)。復元又は欠番を裁定したら、そのたびに `cell.py` に再実行して出力を貼り直す。
+
+**検証コマンドと期待形** (40a: 前後の 2 回。`WT` は割り当てられた worktree、Bash の timeout 600000)
+
+```bash
+# cloud で回すもの
+.venv/bin/python -m pytest "$SP/cs7_cli_red.py" -q    # 変異の前: CASES の全件 passed
+tools/dev/mutate.py "$SP/cs7-mutations.json" -C "$WT"  # 変異 1 行につき 1 件、expect: red
+python3 "$SP/cs7_removed_tokens.py" -C "$WT"          # exit 0、WS-ONLY・UNPAIRED 0 行。出力を §17.4 に逐語で貼る
+python3 tools/check_comment_provenance.py --base 4241b55 MitateDB-api/src/mitatedb_api/cell.py   # exit 0 (WP 7a〜7d の終わりごとにも)
+python3 tools/check_comment_provenance.py --register   # exit 0
+python3 tools/check_doc_refs.py                        # exit 0
+python3 tools/public_value_scan.py <触ったファイル>     # total_flagged=0
+tools/dev/pt.py -C "$WT" -- tools/tests -q             # PG 非依存の部分
+# 作業機で回すもの
+tools/dev/pt.py -C "$WT" -- r2db-api/tests -q          # failed/skipped/xfailed 0、前後で passed 数一致
+tools/dev/pt.py -C "$WT" -- MitateDB-api/tests -q      # 同上 (L1 scan と test_application_audit.py を含む)
+tools/dev/pt.py -C "$WT" -- conformance-tests -q       # 同上
+tools/dev/gate.py -C "$WT" --label r22-cs7             # 監督。run_in_background
+tools/dev/finalize.py -C "$WT" --branch <branch> --allow 'MitateDB-api/src/mitatedb_api/cell.py' --allow 'docs/code-history/MitateDB-api/cell.md' --allow 'docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md' -m "$SP/msg-cs7.txt" --tools-tests   # 監督。gate の通過後
+```
+
+**使用テンプレート**: **2** (implementer、model は opus に上書き) → **5** (reviewer A / B 並列) → **6** (evidence-auditor、Class B でも規模 L なので起動)。**変更クラス**: **B** (登録 helper に触れない)。
+
+### 17.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
+
+範囲・数え方・区分・「HEAD の状態」の書き方は §13.4 と同じ。
+
+**WP の進捗** (WP 7a〜7d を 1 行ずつ)
+
+| WP | 範囲 (基点の行) | `--base` の出力 (逐語) | 足した判定表の行 | 状態 |
+|---|---|---|---|---|
+
+**変異 5・8 の対象文** (着手時に選ぶ。CH-ID を付けた塊の文)
+
+| 変異 | ファイル / 塊 (基準の行) | CH-ID | 文 (先頭の数語) | 保護参照 |
+|---|---|---|---|---|
+
+**監査スクリプトの出力** (`cs7_removed_tokens.py`。実行ごとに「実行 N (最初 / 裁定 #n の後、実行時刻、`--head`)」の 1 行と、出力全体を逐語で入れたコードブロックを順に足す)
+
+**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
+|---|---|---|---|---|---|---|
+
+**塊をまたぐ参照先一覧** (行番号は基準 `4241b55`。「残っているか」は HEAD の実物。§17.2 の grep の全行)
+
+| # | 参照元 (`file:line`) | 参照の語 | 参照先 (`file:line`) | 参照先の文 (先頭の数語) | 残っているか |
+|---|---|---|---|---|---|
+
+**HTTP の status・error code を含む削除文の監査一覧**
+
+| # | ファイル / 塊 | 削除した文 (先頭の数語) | 含む語 | 判定表の根拠 |
+|---|---|---|---|---|
+
+**0d の保護参照があるために残った、経緯だけの文**
+
+| # | ファイル / 塊 (行) | 文 (先頭の数語) | 保護参照 | HEAD の状態 |
+|---|---|---|---|---|
+
+**訂正の記録 (0g)**
+
+| # | ファイル:行 (CH-ID) | 旧文 (先頭の数語) | 新文 (先頭の数語) | 今のコードとの食い違い (根拠 `file:line`) |
+|---|---|---|---|---|
+
+**除いた語の一覧** (実在ファイル名・条項 ID・WP の位置指定。完了条件 25。最後の `cs7_removed_tokens.py` の出力の `REMOVED` 行と、同じ順で 1 行ずつ一致させる。不一致は赤)
+
+| # | ファイル / 塊 (基準の行) | CH-ID | 種類 | 除いた語 | 回数 | 意味と出所が残る根拠 |
+|---|---|---|---|---|---|---|
+
+**判定表** (1 本。目印一覧に当たる 95 文を含む。完了条件 22)
+
+| # | ファイル / 塊 (基準の行) | CH-ID | 拾った理由 | 文 (先頭の数語) | HEAD の状態 | 判定 (§3) | 根拠 | 点検語 |
+|---|---|---|---|---|---|---|---|---|
+
+**復元・欠番の裁定と全ファイルの再走査** (完了条件 24)
+
+| # | 裁定 (塊、内容) | 走査の基準 | 走査した範囲 | 結果 | 再実行の `SUMMARY` 行 (逐語) |
+|---|---|---|---|---|---|
+
+**内容の除去が 0 の塊の検査** (完了条件 23)
+
+| CH-ID の塊 (出力の `ch_blocks`) | 差が空白だけの塊 (`WS-ONLY` 行の数) | `SUMMARY` 行 (逐語) |
+|---|---|---|
+
+**変異の記録** (`tools/dev/mutate.py`。ログは実行時刻とファイル名で書く。作業機に残す変異 21 も行に含める)
+
+| # | 変異 | 期待 | ログ (実行時刻 / ファイル) | ログの行 (逐語) |
+|---|---|---|---|---|
+
+**記録**
+
+| 項目 | `cell.py` |
+|---|---|
+
+| 照合コマンド / suite | 結果 (出力の行を逐語) |
+|---|---|
+
+### 17.5 起草時の疑義と監督裁定
+
+| # | 疑義 | 裁定 |
+|---|---|---|
+| Y7-1 | 優先 1 の残り 2 module のどちらか | 設計 §6 の「10 行以上の塊の行数が多い順」のとおり `cell.py`。`structured.py` は変更セット 8 |
+| Y7-2 | 207 塊を 1 変更セットで扱う規模 | 1 module 1 変更セットは変えない。実装を 4 つの直列 WP (行範囲) に分け、判定表は 1 本、commit は 1 つ (途中の状態を commit するときは wip と明記し「完了」と書かない) |
+| Y7-3 | CH-0548 (既存) | 再編集しない限り触らない。再編集するなら §9.3 の経路で、受け皿に訂正記録 |
+| Y7-4 | 他文書の `cell.py:NNN` 参照のずれ | 設計 §3 の別件 (対象外)。引き継ぎ書に一覧を残す |
+| Y7-5 | 登録 helper 4 symbol の docstring | 対象外 (設計 §6 の最後の変更セット、§7 Q-1)。触れる必要が出たら止めて監督へ |
+| Y7-6 | 行番号 pin | `cell.py` に行番号 allowlist は無い (40b 非該当)。件数 pin 44 は AST。監査照合で差分 0 |
+| Y7-7 | 文字列検査 `_validate_delete_confirmation(` | コメントにこの文字列を足さない。完了条件 21 の変異は作業機 |
+| Y7-8 | `security/CONTROL_MAPPING.md` の `cell.py:NNN` の位置参照 (変更セット 6b のレビュー B-1 と Y6b-11) | 着手時に `` git grep -nE 'cell\.py`?:[0-9]+' security/CONTROL_MAPPING.md `` の参照表 (行 / 参照 / 指しているもの) を §17.4 に置き、終わりに前後の表を足す。直すのは別の変更セット (Class D) |

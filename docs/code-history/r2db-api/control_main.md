@@ -276,3 +276,71 @@ already uses for `r2db_api.main` (see `test_control_http.py`'s own
 # all). Run on this same borrowed connection (login role = the
 # real `r2dbsvc_controlplane` writer role).
 ```
+
+## CH-0551
+
+- moved from: `src/r2db_api/control_main.py` (`build_control_app`)
+- parent commit: `4241b55`
+- kind: docstring
+
+```
+Assemble the control-plane ASGI app from `env` (defaults to `os.environ`).
+
+Factored out of a module-level `app = build_control_app()` (design SS8
+m-10 -- deliberately not placed in this file yet, see this module's own
+header) so this repository's own tests can exercise the full
+environment-validation and assembly logic -- including the required-env
+and pepper-separation failure paths -- against a real, throwaway-
+provisioned local PostgreSQL platform database.
+
+Q4 phase WP-1 rework round (rulings-q4-wp12-rework.md sec.2): runs the
+DB-side declaration read (F-8/F-3/F-3c/F-4/F-4b) and the writer-role
+dual check (F-13/F-7/F-9/F-10/F-11) SYNCHRONOUSLY, right here, in this
+exact order, before `service` is ever constructed -- NOT deferred to
+ASGI lifespan startup (the previous round's shape, rejected by the
+supervisor). This mirrors `r2db_api.main.build_app`'s own startup
+sequence (design SS3.7 control-plane 1-8):
+
+1. required env reads;
+2. reject the four removed env vars (F-1/F-2), whatever their value;
+3. read `platform_declarations` (F-8/F-3/F-4/F-4b/F-5, and, Phase 10
+   WP-6a, F-15 for `process_ceilings`), then require `surfaces.control`
+   unconditionally (F-3c: this process, by definition, always has a
+   control surface to declare -- unlike the data-plane process, whose
+   equivalent requirement is conditional on `R2DB_CONTROL_PLANE_
+   STATUS`, F-6, `r2db_api.main`-only);
+4. construct the `control_audit` writer sink, then run the writer-role
+   dual check on a connection BORROWED FROM THAT SINK'S OWN POOL (login
+   role = the actual writer role, design D-1(c)) -- self-role inclusion
+   (F-13) first, then this role's own catalog/effective check (F-7/
+   F-9/F-10/F-11);
+5. read EVERY declared `audit_writer_roles` role's catalog (not only
+   this process' own) to derive `visibility_lag_ms` -- UNCONDITIONALLY
+   (rulings-q4-wp12-rework.md sec.2: "control の sibling role catalog
+   検査は audit_reader の有無に依らず無条件"), regardless of whether
+   `R2DB_AUDIT_DSN` is even configured on this process;
+5b. (Phase 10 WP-4g, supervisor ruling 2026-09-09) F-16, on the same
+   borrowed connection: this process' own `r2dbsvc_controlplane` role
+   (plus `r2dbsvc_auditreader` too when `R2DB_AUDIT_DSN` is
+   configured) must have a real `CONNECTION LIMIT` of `-1` or at
+   least its own pool-composition floor -- scoped to exactly the
+   role(s) THIS process pools connections against, never the sibling
+   data-plane process' own role or any application's;
+6. assemble the rest of the stack via `assemble_control_stack(...)`,
+   passing the already-built audit sink and the fully-resolved
+   `surfaces`/`audit_visibility_lag_ms`/`audit_coalescing_window_ms` as
+   constructor arguments -- never mutated onto `service` afterward.
+```
+
+## CH-0552
+
+- moved from: `src/r2db_api/control_main.py` (`build_control_app`)
+- parent commit: `4241b55`
+- kind: comment
+
+```
+# Resolved before step 2 (not just before step 3) so F-2's own message
+# can name the REAL configured schema (design amendment 2026-09-05,
+# N-7) rather than this module's `DEFAULT_SCHEMA` -- zero-network, so
+# moving it earlier changes nothing about the startup-sequence design.
+```

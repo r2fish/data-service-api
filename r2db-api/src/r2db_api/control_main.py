@@ -425,7 +425,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
        (rulings-q4-wp12-rework.md sec.2: "control の sibling role catalog
        検査は audit_reader の有無に依らず無条件"), regardless of whether
        `R2DB_AUDIT_DSN` is even configured on this process;
-    5b. (Phase 10 WP-4g, supervisor ruling 2026-09-09) F-16, on the same
+    5b. (Phase 10 WP-4g) F-16, on the same
        borrowed connection: this process' own `r2dbsvc_controlplane` role
        (plus `r2dbsvc_auditreader` too when `R2DB_AUDIT_DSN` is
        configured) must have a real `CONNECTION LIMIT` of `-1` or at
@@ -436,6 +436,8 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
        passing the already-built audit sink and the fully-resolved
        `surfaces`/`audit_visibility_lag_ms`/`audit_coalescing_window_ms` as
        constructor arguments -- never mutated onto `service` afterward.
+
+    History: CH-0551
     """
     env = env if env is not None else os.environ
 
@@ -447,9 +449,10 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     app_pepper = _require(env, "R2DB_CREDENTIAL_PEPPER")
 
     # Resolved before step 2 (not just before step 3) so F-2's own message
-    # can name the REAL configured schema (design amendment 2026-09-05,
+    # can name the REAL configured schema (design amendment,
     # N-7) rather than this module's `DEFAULT_SCHEMA` -- zero-network, so
     # moving it earlier changes nothing about the startup-sequence design.
+    # history: CH-0552
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
     # design D-1: always explicit, always `1` in a real
     # deployment -- compared below, once `process_ceilings.control` is
@@ -488,7 +491,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # LIMIT` -- 10 at the time of this measurement (`0006_control_plane_
     # http.sql`'s own shipped value); WP-4f's own later migration
     # (`0013_role_connection_limits.sql`, L-3 correction, WP-4 integration
-    # review 2026-09-10) has since raised this to 20 -- see that
+    # review) has since raised this to 20 -- see that
     # migration's own header for why (4 stores x this same fixed
     # `pool_size` 4 = 16, already exceeding the pre-0013 limit of 10 with
     # a SINGLE process, no test harness involved). The conclusion below
