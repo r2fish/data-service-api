@@ -4,7 +4,7 @@
 
 ## 1. 現在地
 
-- local main `a0872b2` (台帳 v1.156、設計 v0.10) + 本変更セット (本書と、v1.151 の版数行の archive への回転の完了。前の変更セットでは監督の script が途中で止まり、台帳から外した行が archive に入らず本書も作られないまま commit された — 監督の取りこぼし。本変更セットで補った)。worktree `.claude/worktrees/r42` (branch `r42`)。main は未送信 (`OC` §2 の 20、Mitate 経由の送信)。
+- local main `dcdfc50` (台帳 v1.156、設計 v0.10、作業指示書 `docs/work-orders/WORK_ORDER_R42_EXPIRED_REQUEST_SEMANTICS_V1.md` v1。R-118 の merge `6ba25ba` を含む)。本書の前の版の変更セットは (本書と、v1.151 の版数行の archive への回転の完了。前の変更セットでは監督の script が途中で止まり、台帳から外した行が archive に入らず本書も作られないまま commit された — 監督の取りこぼし。本変更セットで補った)。worktree `.claude/worktrees/r42` (branch `r42`)。main は未送信 (`OC` §2 の 20、Mitate 経由の送信)。
 - 済んだこと: 設計 v0.4 (作業機の照合と実測 M-1〜M-8)、v0.5 (依頼者裁定 U-1〜U-9、全件 (a))、v0.6〜v0.9 (設計レビュー 2 回目: 1 巡目 A / B 並列 → 再確認 → 再々確認 → §9 の最終確認。依頼者裁定 V-1〜V-3)、v0.10 (契約文の依頼者確定)。設計レビューは契約を触るので 2 回 (`OC` §1.7 の 50) で、2 回とも済み。
 - 契約の版: merge 順の帰結で **minor 1.16.0・従属判断 21** (台帳 R-118 が 1.15.0・従属判断 20 を先に使う)。確定文の「1.15.0」「subordinate ruling 20」「1.14.0」は契約 WP で「1.16.0」「21」「1.15.0」に置き換える (設計 v0.10 の版数行)。R-118 の merge 後に r42 へ main を取り込むと、`spec/` の version_binding の末尾 (1.14.0 の段落の後に 1.15.0 の 1 文、その後に version-flip の文) が変わっている。R-42 の段落は 1.15.0 の文の後・version-flip の文の前。
 - 触っていないもの: `spec/`、`security/`、`conformance-tests/`、両 peer の製品コード。完了ゲートは回していない (文書だけの変更セット)。
@@ -12,6 +12,7 @@
 
 ## 2. 次の一手
 
+0. 【追記】作業指示書は書いて main に入れた (`dcdfc50`)。次のチャットは §2.1 の WP-1 から始める (発注は作業指示書 §2.0 の道具の引数と役割の形。WP-1 の worktree は `r42-wp1`、同 §1.1 の 10 (d))。R-118 は merge 済みなので main の取り込みは済んでいる (worktree `r42` = main)。
 1. 作業指示書 `docs/work-orders/WORK_ORDER_R42_EXPIRED_REQUEST_SEMANTICS_V1.md` (Change Set Manifest。`drafter`)。WP の順: 契約 1.16.0 (確定文の逐語複製と pin、設計 D-6 の pin と記録の列挙) → conformance (port v1.22 の新 primitive と handle、stall 点の統一、新条件 = C-35 の次の番号を見込む (番号は conformance の WP で採番)、version gate と非空振りの guard、C-05 / C-24 / `security/CONTROL_MAPPING.md` の書き換え。設計 D-7、§6) → r2db (設計 D-9) → MitateDB (設計 D-9。SQLite の文の bound を含む) → 版の flip と新条件を統合 branch 上の同じ 1 commit に (設計 D-6 (B)) → 完了ゲート (`tools/dev/gate.py`。契約ファイルを触るので root suite の完走と性能差分) → 受け入れ監査 (`evidence-auditor` 1 回) → 台帳の閉止。完了条件番号 → 変異の対応表は設計 §6.6 と、レビュー B の変異案 (scratchpad に残したもの。次のチャットからは読めないので作業指示書に写す) から確定する。
 2. R-118 の merge を待ち、r42 に main を取り込んでから契約 WP に入る。
 3. 設計 §11.7 の範囲外の観察 (`limit_enforcement.execution_ms` の値 `reference_wall_clock` に契約の定義文が無い) を契約 WP で扱う。
