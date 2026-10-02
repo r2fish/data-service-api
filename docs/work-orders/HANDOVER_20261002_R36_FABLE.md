@@ -28,9 +28,9 @@
   - 本書の更新の commit (監督が起草後に積む。hash は `git log -1 -- docs/work-orders/HANDOVER_20261002_R36_FABLE.md`)。
 - 【更新 2026-10-02】push: `4befd27` までの 3 commit と `1b258ec`、`3064a77`、`dfd6f26` は push 済み (origin の同名 branch)。main への merge・送信はしていない。
 - 【更新 2026-10-02】設計の状態は「候補」のまま。契約・conformance・実装は未着手 (作業機の完了ゲートが要る)。`1b258ec`・`3064a77`・`dfd6f26` が触ったのは設計 1 ファイルだけである。
-- 【追記 2026-10-02 作業機】取り込み: worktree `.claude/worktrees/r36` を branch `claude/sweet-heisenberg-nqoica` から作った。7 commit (`48470d5`〜`15b0a5e`) の author / committer は r2fish の noreply のみ、触れているのは設計と本書の 2 ファイルだけと確かめた。作業機の local main は `05a60c0` (R-121 の閉止、台帳 v1.150) に進んでいたので、main を branch に merge してから (`137850d`) 完了ゲートと台帳の更新を行った。
-- 【追記 2026-10-02 作業機】完了ゲート (監督が単独実行、`-C .claude/worktrees/r36`): `gate: 5019 passed, 2 subtests passed in 465.18s (0:07:45)`、judge=PASS、pg_database/pg_roles diff 0、label r36-design-v05。件数は main `05a60c0` の 5019 と同じ (`COLLECTION_FLOOR` 5019 のまま)。main との差分は `.md` だけなので性能は計測していない (`OC` §1.3 の 27)。
-- 【追記 2026-10-02 作業機】台帳 v1.151: `RM` R-36 行を「進行中」(着手条件の欄は `-`) にして【追記】、`RM` R-30 行と R-42 行に【追記】、版数ログの v1.146 の行を archive へ回転した。`tools/dev/ledger.py --check` は GREEN (open=26)。
+- 【追記 2026-10-02 作業機】取り込み: worktree `.claude/worktrees/r36` を branch `claude/sweet-heisenberg-nqoica` から作った。7 commit (`48470d5`〜`15b0a5e`) の author / committer は r2fish の noreply のみ、触れているのは設計と本書の 2 ファイルだけと確かめた。作業機の local main は `05a60c0` (R-121 の閉止、台帳 v1.150) に進んでいたので、main を branch に merge してから (`137850d`) 完了ゲートと台帳の更新を行った。その commit (`a597857`) を main へ merge する時点で、並行する別のチャットが R-42 の取り込み (main `557cdd2`、台帳 v1.151、`docs/work-orders/HANDOVER_20261002_R42_FABLE.md`) を main へ入れていたので merge は衝突して中止され (main は無傷)、main をもう一度 branch に merge して台帳の版を v1.152 に付け直し、完了ゲートを取り直した。
+- 【追記 2026-10-02 作業機】完了ゲート (監督が単独実行、`-C .claude/worktrees/r36`、label r36-design-v05): 1 回目 (main `05a60c0` を merge した木) `gate: 5019 passed, 2 subtests passed in 465.18s (0:07:45)`、judge=PASS。2 回目 (main `557cdd2` を merge した最終の木) `gate: 5019 passed, 2 subtests passed in 470.09s (0:07:50)`、judge=PASS、pg_database/pg_roles diff 0。件数は main の 5019 と同じ (`COLLECTION_FLOOR` 5019 のまま)。main との差分は `.md` だけなので性能は計測していない (`OC` §1.3 の 27)。
+- 【追記 2026-10-02 作業機】台帳 v1.152: `RM` R-36 行を「進行中」(着手条件の欄は `-`) にして【追記】、`RM` R-30 行と R-42 行に【追記】、版数ログの v1.147 の行を archive へ回転した。`tools/dev/ledger.py --check` は GREEN (open=26)。
 - 【追記 2026-10-02 作業機】main への merge: 本追記を含む commit を `tools/dev/finalize.py` が local main へ `--no-ff` で merge する (merge commit の hash は main の `git log --merges -1`。本追記の時点では未確定)。main の送信は従前どおり (`docs/work-orders/HANDOVER_20261001_R108_FABLE.md` §3 の 4)。
 
 ## 2. 本チャットで閉じたもの
@@ -77,7 +77,7 @@
 8. 契約改版の作業指示書 (Class C/D。CLAUDE.md の開発順序: 共通契約 (media_type の操作別例外・version_binding (a)・OperationCatalogEntry の request/response media type と headers・field 定義・violated_declaration 14 語・limits.classes +5・destructive applies_to・Idempotency-Key header・X-Request-Id・{object_id}・authorization_propagation_bound_ms の正の宣言) → conformance (port v1.22 以降、設計 §7.1 の O-n → C-n) → 両 peer の実装 → CONTROL_MAPPING (SI-00 の router 残余、SI-08 の総量残余) → 配備値)。設計レビューの回数は済み (2 回)。実装 WP は規模 L の手順。
 9. 設計 §12.1 の観察 (v0.1 の不在、未確認事項) はそのまま。
 
-【追記 2026-10-02 作業機】上の【更新 2026-10-02】の 1〜6 は済み (1 は本書 §4 の【追記】、2〜4・6 は本書 §1 の【追記】)。5 の `docs/work-orders/HANDOVER_20261001_R102_FABLE.md` は R-121 の取り込み (`03ef01c`) で archive へ移動済みだったので、本変更セットでは最新 2 通 (`docs/work-orders/HANDOVER_20261002_R121_FABLE.md` と本書) から外れる `docs/work-orders/HANDOVER_20261001_R108_FABLE.md` を `docs/archive/docs/work-orders/` へ移した (`OC` §1.16 の 78。依頼者確認 2026-10-02)。7 は本書 §7。残りは 8 (契約改版の作業指示書。別の変更セット) と worktree の畳み込み (`tools/dev/fold.py`)。
+【追記 2026-10-02 作業機】上の【更新 2026-10-02】の 1〜6 は済み (1 は本書 §4 の【追記】、2〜4・6 は本書 §1 の【追記】)。5 の `docs/work-orders/HANDOVER_20261001_R102_FABLE.md` は R-121 の取り込み (`03ef01c`) で archive へ移動済みだった。依頼者確認 2026-10-02 のとおり `docs/work-orders/HANDOVER_20261001_R108_FABLE.md` を `docs/archive/docs/work-orders/` へ移し (並行する R-42 の取り込み main `9674ab9` も同じ移動をしていた)、R-42 の引き継ぎ書が main に入ったので、最新 2 通 (`docs/work-orders/HANDOVER_20261002_R42_FABLE.md` と本書) から外れる `docs/work-orders/HANDOVER_20261002_R121_FABLE.md` も同じ変更セットで移した (`OC` §1.16 の 78。監督の適用であり、依頼者に確認したのは R108 の 1 通)。7 は本書 §7。残りは 8 (契約改版の作業指示書。別の変更セット) と worktree の畳み込み (`tools/dev/fold.py`)。
 
 ## 4. 依頼者判断待ち・未決
 
