@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.12 (2026-10-03、作業機)。** §10 に実施中の監督裁定の依頼者による事後確認 (逐語) を足した。他は変えていない。
 - **v0.11 (2026-10-03、作業機)。** 実施の記録 (行は消さない)。(1) 番号の割当: 契約 **1.16.0・従属判断 21** (R-118 が 1.15.0・20 を先に使った)、新条件 **C-36**、port **v1.22** (`docs/design/CONFORMANCE_ADAPTER_V1.md` §32)、`security/CONTROL_MAPPING.md` **3.19**。(2) M-8 の【実測】: B = **500 ms** (保持 600 ms)。受理点から stall 点までの到達は (ii)(iii) 6 plug 4800 回すべて予算内、最大 239.4 ms (人工高負荷 load 11〜26)、gate 相当の負荷 (load 中央 15) で最大 84.5 ms、B の下の (iii) の dry run の最大 27.6 ms (positive control の dry run (宣言の予算) の最大は 138.1 ms)。(i)(ii)(iii) と positive control は 6 plug で **100/100** ((i)(ii) は in-memory apply_schema の operation 前の検査を足す前の測定、(iii) は足した後の再測。`CA` §32.2)。(3) 実装の現物 (D-9 の実現): r2db の検査は `_run` と `_transaction` (外側・入れ子) に統合し単独点 0 件、in-memory backend は query・transact は operation ごと、apply_schema は入口 (idempotency 照会の前) と operation の直前 (plan 照合の後) の 2 点 (D-2 (c))。MitateDB の検査は `_execute` に統合 (最初の `SET LOCAL` が通る)、単独点は `_timeout_ms` の拒否だけ。両 peer の pool 待ち・接続確立の写像は時計の判定 1 本 (V-3)。schema 3 経路は store → pre_commit → COMMIT に揃え、store の psycopg 例外は batch 側と同じ写像 (予算 → `LIMIT_EXCEEDED`、他 → 503。pre_commit の前なので audit 行 0 件)。SQLite backend の文の bound は progress handler (1000 命令ごとに時計を見る。文の実行中だけ張り、打ち切った文の rollback の前に外す)。(4) §1.4 #7 と台帳 R-42 行が引く MitateDB の test (store の cancel の後に allow + error の 2 行) は、順序の変更で事実が変わり、`MitateDB-api/tests/test_application_audit.py` で「COMMIT の cancel で 2 行」「store の cancel で audit 0 行」の 2 本に改めた。(5) 記号名の変更: `conformance-tests/test_contract.py` の `_PRE_1_8_0_LIMITS_KEYS` は `_LIMITS_KEYS_1_16_0` に改名 (D-6 の記述は旧名のまま読み替え)。`conformance-tests/adapter.py` の :1000 以降の行は port v1.22 で動いた (本書の `file:line` は基点のもの)。(6) 観測の算式 (D-7): handle は pool の `execute_count` の差だけでは (ii)(iii) で正しくならない (保持中の要求の接続が checkout 中) ので、放した時点で要求の接続の計数を基準に足す。enter 側の計数は両 peer の `psycopg_counting.py` の `txn_open_count` (byte 一致)。(7) 範囲外の観察 (§11.7): `reference_wall_clock` の定義文は契約に無いまま (確定文の外。依頼者へ上げる)。
 - **v0.10 (2026-10-03、作業機)。** 契約文 (§9) を依頼者が確定した (逐語は §10 の末尾)。版の番号の読み替えを記録した: 台帳 R-118 が契約 1.15.0 (従属判断 20) を先に使う (台帳 v1.154 の R-118 行の【追記】) ので、R-42 の契約は merge 順の帰結として **minor 1.16.0・従属判断 21** になり、§9 の「1.15.0」「subordinate ruling 20」「1.14.0」は契約 WP で「1.16.0」「21」「1.15.0」に置き換える (U-4 の裁定の要点は minor であること。番号は merge 順で振る)。§9.2 の段落の置き場は 1.15.0 の文の後・version-flip の文の前。設計の本文の「1.15.0」「ruling 20」は読み替えとし、書き換えない。
 - **v0.9 (2026-10-03、作業機)。** §9 の最終確認 (FC-1〜FC-6、全件直す) を反映: 文の定義にデータを読む文を入れ (閉じた列挙にしない)、義務 (c) を接続ごとの形にし (MitateDB は 2 接続)、in-memory の storage の操作は義務 (b) にだけ数える (FC-3 は (A'))、「budget」の語を要求のフィールドと区別した。一覧は §11.8。この版の §9 を依頼者に提示する。
@@ -457,6 +458,10 @@ v0.6 との差は §11.6 の N-1・N-2・N-5・N-8・N-10・N-11・N-12。
 「上の差 2 点」= 提示時に監督が明示した、依頼者裁定の説明文と確定文の差: (1) V-1 の説明文「予算が尽きた時に実行中の文は…打ち切る」に対し、確定文の (c) は「接続ごとに、BEGIN と bound の設定より前に bound を設定し、以後の各文は算出時の残りを超えない bound の下で走る。bound に届いた文は打ち切る」(U-2 (a) では尽きた時点で実行中の文は bound に届く前に完了し得る)。(2) U-2 (a) の説明文「scope 入口 (と lock 待ちの後) で設定」に対し、r2db は lock 待ちの後に再設定しない (時計の再検査だけ。§11.5 RW-10)。
 
 確定文は scratchpad の確定文ファイルから契約へ逐語で複製し (運用条件 §1.5 の 35)、版の番号 (1.15.0 → 1.16.0、ruling 20 → 21、1.14.0 → 1.15.0) だけを契約 WP で置き換える (v0.10 の版数行)。
+
+### 実施中の監督裁定の事後確認 (2026-10-03)
+
+依頼者指示 2026-10-03 (逐語)「裁定事項が出た場合は、監督推奨で進めて、後から確認」により、WP-1〜WP-5 の実施中に出た裁定事項 (`reference_wall_clock` の定義文は足さない、in-memory apply_schema は入口と operation 直前の 2 点で検査、schema 経路の store の例外写像を batch 側に揃える、`hold_after_plan_verification` の docstring に `LIMIT_EXCEEDED` の場合を足す、`txn_open_count` を製品 `psycopg_counting.py` に置く、SQLite の progress handler は 1000 命令ごと、ほか。全件は引き継ぎ書 `docs/work-orders/HANDOVER_20261003_R42_CLOSE_FABLE.md` の「裁定」節) は監督推奨で進めた。依頼者の事後確認 (2026-10-03、逐語): 「裁定内容を了承します」。再審議しない (運用条件 §1.7 の 51)。
 
 ## 11. 設計レビュー
 
