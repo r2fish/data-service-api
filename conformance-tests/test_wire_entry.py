@@ -239,30 +239,30 @@ def test_socket_redirect_location_keeps_the_declared_authority(
     send a client that followed the redirect to the scheme's default port,
     another service than the one it dialed (ledger R-121).
 
-    The data URL is the isolated surface's own declared one (the entry's
-    `base_url`); the control URL is the one the registered plug's control
-    surface declares in its own capability document, read through the port
-    (`adapter.control_capabilities()`, the order C-19's control dial uses):
-    that is the control surface the isolated copy's own control calls go
-    through on both socket plugs -- the MitateDB socket plug's isolated copy
-    declares a control URL it reserves but never serves (ledger R-122) --
-    and obtaining the control credential and reading the document through
-    the port (`adapter.control_credential()`, then
-    `adapter.control_capabilities()`) is what makes the MitateDB socket plug,
-    which starts a surface on that surface's first request through the port,
-    serve the declared URL before it is dialed (dialed without those calls,
-    the reserved port accepts the connection and never answers). The request
+    Both URLs are the isolated surface's own declared ones: the data URL is
+    the entry's `base_url`, the control URL is the `surfaces.control.base_url`
+    of the isolated surface's own capability document
+    (`iso.capability_document()`). On both socket plugs the isolated copy
+    borrows the registered plug's control surface, so that is the surface
+    the URL names (ledger R-122: the MitateDB socket plug's isolated copy
+    used to declare a control port it reserved and never served). Obtaining
+    the control credential and reading the control document through the port
+    first (`iso.control_credential()`, then `iso.control_capabilities()`, the
+    order C-19's control dial uses) is what makes a socket plug, which starts
+    a surface on that surface's first request through the port, serve the
+    declared URL before it is dialed (dialed without those calls, the
+    reserved port accepts the connection and never answers). The request
     is a plain, bounded `httpx` request that follows no redirect: the
     property is the proxy's, not the send function's
     (`test_send_does_not_follow_a_redirect` above covers that one), and a
     surface that never answers fails this test instead of holding the run."""
     _assert_own_group(request)
-    _iso, entry = wire
+    iso, entry = wire
     if surface == "data":
         declared_base_url, base_path, capabilities_path = entry.base_url, _BASE_PATH, _CAPABILITIES_PATH
     else:
-        control_document = adapter.control_capabilities(adapter.control_credential())
-        declared_base_url = control_document["surfaces"]["control"]["base_url"]
+        iso.control_capabilities(iso.control_credential())
+        declared_base_url = iso.capability_document()["surfaces"]["control"]["base_url"]
         base_path, capabilities_path = _CONTROL_BASE_PATH, _CONTROL_CAPABILITIES_PATH
     assert isinstance(declared_base_url, str) and declared_base_url.endswith(base_path), (
         f"{adapter.name}: declared {surface} base URL {declared_base_url!r} does not end with {base_path!r}"
