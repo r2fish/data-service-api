@@ -129,6 +129,18 @@ through the completion gate is recorded here and not filed in the ledger):
        green; met in ledger R-115 and R-102, pinned by
        `test_known_gap_8_verbatim_move_of_removed_code_history_is_red`
        in `tools/tests/test_comment_provenance.py`).
+    9. not detected as anything but a red: deleting the statement that
+       FOLLOWS a run of CH-ID-less blocks (a check removed from the end of
+       an if/elif chain, say) moves every one of those blocks' key to the
+       next statement, so section 4.1 (2) reports the whole run as a changed
+       sequence (`old N, new 0` / `old 1, new N+1`) although no block moved.
+       why: a CH-ID-less block's key is the old index of the first statement
+       after it that has a counterpart; the R-89 re-pairing only rescues a
+       `replace` span, never a deleted statement.
+       caught by: nothing needs to catch it -- it is a false red, not a
+       false green; the change set resolves it by giving the blocks CH-IDs
+       and moving them verbatim into the companion (ledger R-42 did so for
+       `r2db-api/src/r2db_api/structured.py`, CH-0552..CH-0564).
 """
 from __future__ import annotations
 
