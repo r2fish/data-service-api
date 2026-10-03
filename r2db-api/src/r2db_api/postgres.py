@@ -87,6 +87,7 @@ History: CH-0001
 """
 from __future__ import annotations
 
+import math
 import os
 import queue
 import threading
@@ -235,6 +236,47 @@ _DEFAULT_CONNECT_TIMEOUT_S = 5
 _DEFAULT_ACQUIRE_TIMEOUT_S = 10.0
 
 
+class _RequestBudget:
+    """One request's execution budget as the pool and the statement helpers see it: the request's `limits`, the deadline fixed when the request was accepted, and the clock that deadline is read against. A connection serving a request carries it as `request_budget` for as long as the request holds that connection, so `_run` and `_transaction` can refuse the next statement of a spent budget without being passed anything. A connection that serves no request (credential, audit and platform work, pool maintenance) carries none and is never checked.
+
+    A pool wait or a connection attempt that fails is judged by the clock alone (`check`): a request whose budget is spent by then is `LIMIT_EXCEEDED` / `execution_ms`, any other failure keeps the failure it had. `PostgresCell._timeout_ms` reads the same budget when it computes the bound of the request's statements: it refuses a remaining budget under 1 ms instead of returning a bound of `0`, and the bound it returns never exceeds what remained when it was computed."""
+
+    __slots__ = ("limits", "deadline", "clock")
+
+    def __init__(self, limits: ResourceLimits, deadline: float, clock: Callable[[], float]) -> None:
+        self.limits = limits
+        self.deadline = deadline
+        self.clock = clock
+
+    def check(self) -> None:
+        """Refuses with `LIMIT_EXCEEDED` / `execution_ms` when less than 1 ms of the budget remains (`ResourceLimits.check_deadline`); a clock comparison, never a database round trip."""
+        self.limits.check_deadline(self.deadline, self.clock)
+
+    def remaining_s(self) -> float:
+        return max(0.0, self.deadline - self.clock())
+
+    def wait_s(self, constructed: float) -> float:
+        """How long a pool wait may last: the pool's constructed wait, or what remains of the budget when that is smaller."""
+        return min(constructed, self.remaining_s())
+
+    def connect_timeout_s(self, constructed: int) -> int:
+        """The `connect_timeout` of a connection opened for this request: the constructed one, or the remaining budget rounded up to whole seconds (at least 1, libpq's unit) when that is smaller. psycopg raises a value under 2 to 2, so a connection attempt can last 2 s."""
+        return min(constructed, max(1, math.ceil(self.remaining_s())))
+
+
+def _request_budget(limits: ResourceLimits, deadline: float | None, clock: Callable[[], float] | None) -> _RequestBudget | None:
+    """The budget a request hands to its pool checkout, or `None` for a call that carries no deadline (`catalog`)."""
+    if deadline is None or clock is None:
+        return None
+    return _RequestBudget(limits, deadline, clock)
+
+
+def _check_request_budget(conn: "psycopg.Connection[Any]") -> None:
+    budget = getattr(conn, "request_budget", None)
+    if budget is not None:
+        budget.check()
+
+
 def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] = ()) -> None:
     """The single execution choke point. Typed to accept only a composed psycopg SQL object -- never `str` -- so a raw string cannot reach the database from anywhere in this file, as a checked property rather than a convention.
 
@@ -242,7 +284,14 @@ def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, param
     """
     if not isinstance(statement, (sql.Composed, sql.SQL)):
         raise TypeError("PostgresCell only executes psycopg.sql.Composed/SQL objects, never str")
+    _check_request_budget(cursor.connection)
     cursor.execute(statement, list(params))
+
+
+def _transaction(conn: "psycopg.Connection[Any]") -> Any:
+    """`conn.transaction()` preceded by the request budget check: the `BEGIN` of an outermost transaction and the `SAVEPOINT` of a nested one are statements the request sends, so a request whose budget is spent never sends either."""
+    _check_request_budget(conn)
+    return conn.transaction()
 
 
 # design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-4: the
@@ -368,7 +417,7 @@ class _RolePool:
         self._closed_txn_count = 0
         self._closed_db_calls = 0
 
-    def _connect(self) -> "psycopg.Connection[Any]":
+    def _connect(self, connect_timeout: int | None = None) -> "psycopg.Connection[Any]":
         # `connect_timeout` (a real libpq connection parameter, merged into
         # `self._dsn`'s already-parsed conninfo by `psycopg.connect`'s own
         # kwargs-override-conninfo behaviour) bounds how long a single
@@ -381,7 +430,7 @@ class _RolePool:
         # own comment on why `_connect()` is never called under the lock).
         connect_start = time.monotonic()
         conn = CountingConnection.connect(
-            self._dsn, autocommit=False, connect_timeout=self._connect_timeout,
+            self._dsn, autocommit=False, connect_timeout=self._connect_timeout if connect_timeout is None else connect_timeout,
             **_application_name_connect_kwargs(),
         )
         connect_wall_ms = (time.monotonic() - connect_start) * 1000.0
@@ -409,7 +458,17 @@ class _RolePool:
             self._closed_txn_count += txn_count
             self._closed_db_calls += db_calls
 
-    def _acquire(self) -> "psycopg.Connection[Any]":
+    def _connect_within(self, budget: _RequestBudget | None) -> "psycopg.Connection[Any]":
+        """Opens one new connection for a request that carries `budget` (or for no request, with `budget` `None`). The attempt's `connect_timeout` is the smaller of the constructed one and the remaining budget (`_RequestBudget.connect_timeout_s`). A failed attempt is judged by the clock alone: when the budget is spent by then it raises `LIMIT_EXCEEDED` / `execution_ms` (`_RequestBudget.check`), and any other failure -- an immediate refusal included -- propagates unchanged and ends as `SERVICE_UNAVAILABLE`."""
+        if budget is None:
+            return self._connect()
+        try:
+            return self._connect(connect_timeout=budget.connect_timeout_s(self._connect_timeout))
+        except Exception:
+            budget.check()
+            raise
+
+    def _acquire(self, budget: _RequestBudget | None = None) -> "psycopg.Connection[Any]":
         try:
             conn = self._queue.get_nowait()
         except queue.Empty:
@@ -437,7 +496,7 @@ class _RolePool:
                 reserved = True
         if reserved:
             try:
-                conn = self._connect()
+                conn = self._connect_within(budget)
             except Exception:
                 with self._lock:
                     self._created = max(0, self._created - 1)
@@ -456,9 +515,11 @@ class _RolePool:
         # silent hang).
         try:
             wait_start = time.monotonic()
-            conn = self._queue.get(timeout=self._acquire_timeout)
+            conn = self._queue.get(timeout=self._acquire_timeout if budget is None else budget.wait_s(self._acquire_timeout))
         except queue.Empty:
             self._record_wait((time.monotonic() - wait_start) * 1000.0)
+            if budget is not None:
+                budget.check()
             raise psycopg.OperationalError(
                 f"timed out after {self._acquire_timeout}s waiting for an available pooled connection (pool exhausted at maxconn={self._maxconn})"
             )
@@ -635,8 +696,8 @@ class _RolePool:
             return False
 
     @contextmanager
-    def connection(self) -> Iterator["psycopg.Connection[Any]"]:
-        conn = self._acquire()
+    def connection(self, budget: _RequestBudget | None = None) -> Iterator["psycopg.Connection[Any]"]:
+        conn = self._acquire(budget)
         # `already_folded_conn` names whichever object this method itself
         # has ALREADY folded (and, for the `conn.closed` branch, closed)
         # before attempting a replacement `_connect()` -- so the `finally`
@@ -656,12 +717,14 @@ class _RolePool:
                 # a window that lost time it should never lose.
                 self._fold_closed_connection_stats(conn)
                 already_folded_conn = conn
-                conn = self._connect()
+                conn = self._connect_within(budget)
             elif not self._liveness_check(conn):
                 # `_liveness_check`'s own `except` branch already folded
                 # and closed `conn` before reporting `False` here.
                 already_folded_conn = conn
-                conn = self._connect()
+                conn = self._connect_within(budget)
+            if budget is not None:
+                conn.request_budget = budget
             yield conn
         finally:
             # No `return` (or any other flow-control statement) anywhere in
@@ -674,6 +737,8 @@ class _RolePool:
             # an exception from the `try` block always continues propagating
             # once this `finally` finishes.
             keep = True
+            if budget is not None:
+                conn.request_budget = None
             try:
                 if conn.closed:
                     keep = False
@@ -929,9 +994,9 @@ class _PoolHandle:
         self._maxconn = maxconn
 
     @contextmanager
-    def connection(self) -> Iterator["psycopg.Connection[Any]"]:
+    def connection(self, budget: _RequestBudget | None = None) -> Iterator["psycopg.Connection[Any]"]:
         pool = self._manager.get_pool(self._key, self._dsn, schema=self._schema, maxconn=self._maxconn)
-        with pool.connection() as conn:
+        with pool.connection(budget) as conn:
             yield conn
 
     def close(self) -> None:
@@ -1262,7 +1327,7 @@ class PostgresCell:
         """
         result: dict[str, dict[str, FieldConstraints]] = {}
         try:
-            with conn.transaction():
+            with _transaction(conn):
                 with conn.cursor() as cur:
                     _run(cur, sql.SQL("SELECT entity_name, field_name, nullable, enum_values FROM public.{}").format(sql.Identifier(_FIELD_CONSTRAINTS_TABLE)))
                     rows = cur.fetchall()
@@ -1318,7 +1383,7 @@ class PostgresCell:
         History: CH-0014
         """
         try:
-            with conn.transaction():
+            with _transaction(conn):
                 with conn.cursor() as cur:
                     _run(
                         cur,
@@ -1436,7 +1501,7 @@ class PostgresCell:
 
     def _idempotency_lookup(self, conn: "psycopg.Connection[Any]", key: str) -> tuple[str, str, dict[str, Any]] | None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
-        with conn.transaction():
+        with _transaction(conn):
             with conn.cursor() as cur:
                 _run(cur, sql.SQL("DELETE FROM public.{table} WHERE expires_at <= now()").format(table=table))
             with conn.cursor() as cur:
@@ -1452,7 +1517,7 @@ class PostgresCell:
         # the lazy-reclaim DELETE this method used to also issue here is dropped -- `_idempotency_lookup`, this same transaction, always runs first on this path and already reclaimed every expired record moments earlier; a second DELETE here was always a 0-row no-op (measured closure: `_run` count for a keyed write drops from 11 to 10; a replay never reaches this method at all and stays at 4).
         # history: CH-0018
         try:
-            with conn.transaction():
+            with _transaction(conn):
                 with conn.cursor() as cur:
                     # Phase 10 WP-6a (design docs/design/
                     # PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) region
@@ -1514,15 +1579,13 @@ class PostgresCell:
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
     ) -> QueryOutcome:
-        if deadline is not None and clock is not None:
-            limits.check_deadline(deadline, clock)
         validate_identifier(entity, field="entity")
         _reject_reserved_entity_name(entity, field="entity")  # WP-2(b) fix round 2, item C
         validate_page_size(page_size, limits)
-        with self._runtime.connection() as conn:
+        with self._runtime.connection(_request_budget(limits, deadline, clock)) as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
-                with conn.transaction():
+                with _transaction(conn):
                     self._set_timeouts(conn, timeout_ms)
                     # `query` never reads `table_info.constraints` (D-2 (2): predicates are not bound by `enum`/`nullable`) -- skip the side-table read.
                     # history: CH-0021
@@ -1570,8 +1633,6 @@ class PostgresCell:
         # `rows` was fetched with `LIMIT page_size + 1` (the look-ahead row, if present, is never returned to the caller -- it only signals `has_more`); `min(len(rows), page_size)` therefore equals `page_size` whenever at least `page_size` rows matched, or the true (smaller) match count otherwise -- exactly the quantity `ApplicationCell.query`'s own equivalent check computes from its full (unbounded) in-memory match list, before it slices to a window.
         # history: CH-0025
         limits.check("result_items", min(len(rows), page_size))
-        if deadline is not None and clock is not None:
-            limits.check_deadline(deadline, clock)
         has_more = len(rows) > page_size
         page_rows = rows[:page_size]
         # Every row was selected as `read_columns ++ [_r2db_revision::text]`
@@ -1629,8 +1690,6 @@ class PostgresCell:
 
         History: CH-0027
         """
-        if deadline is not None and clock is not None:
-            limits.check_deadline(deadline, clock)
         validate_identifier(entity, field="entity")
         _reject_reserved_entity_name(entity, field="entity")  # WP-2(b) fix round 2, item C
         if not operations:
@@ -1651,10 +1710,10 @@ class PostgresCell:
         # (D-2's error-row case) apart from every other psycopg failure.
         hook_fired = False
         idempotency_digest_value: str | None = None
-        with self._runtime.connection() as conn:
+        with self._runtime.connection(_request_budget(limits, deadline, clock)) as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
-                with conn.transaction():
+                with _transaction(conn):
                     self._set_timeouts(conn, timeout_ms)
                     # Contract 1.7.0 (addendum 2 S-b, ruling): the idempotency lookup -- see `ApplicationCell.transact`'s identical comment for the ordering rationale (after bounds, before target existence). A `dry_run` never consults or writes a record (ruling).
                     # history: CH-0028
@@ -1707,11 +1766,9 @@ class PostgresCell:
                         if plan_request is not None and (dry_run or plan is not None)
                         else None
                     )
+                    # the deadline is checked before each statement of each operation (in `_run`), not once for the whole batch.
+                    # history: CH-0035
                     for operation_index, operation in enumerate(operations):
-                        if deadline is not None and clock is not None:
-                            # per-operation deadline check, not only before/after the whole batch.
-                            # history: CH-0035
-                            limits.check_deadline(deadline, clock)
                         # this operation's own position in the request's `operations` list -- `_apply` composes `details.field` as a request-internal path from it.
                         # history: CH-0036
                         count, address, op_destructive = self._apply(conn, entity, operation, table_info, operation_index)
@@ -1720,8 +1777,6 @@ class PostgresCell:
                         if address is not None:
                             assigned_addresses.append(address)
                         limits.check("result_items", affected)
-                    if deadline is not None and clock is not None:
-                        limits.check_deadline(deadline, clock)
                     # Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single
                     # tx-exit point -- plan validity, then commit vs
                     # rollback (dry_run) vs real commit. Reached only once
@@ -2135,10 +2190,10 @@ class PostgresCell:
         outcome_descriptor: dict[str, Any] | None = None
         outcome_plan: str | None = None
         idempotency_digest_value: str | None = None
-        with self._developer.connection() as conn:
+        with self._developer.connection(_request_budget(limits, deadline, clock)) as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
-                with conn.transaction():
+                with _transaction(conn):
                     self._set_timeouts(conn, timeout_ms)
                     # Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling
                     # I-3, WP-2c): the idempotency lookup -- as early as
@@ -2222,8 +2277,6 @@ class PostgresCell:
                     else:  # drop_index
                         projected = current_objects - 1
                     limits.check("schema_objects", projected)
-                    if deadline is not None and clock is not None:
-                        limits.check_deadline(deadline, clock)
                     if bound.operation == "create_entity":
                         # defense-in-depth -- `bind_schema_operation` above already rejects this exact name (structured.py's own `_reject_reserved_entity_name`, the real, load-bearing check for BOTH cell implementations), but this backend's own physical-DDL layer re-checks it directly too, mirroring MitateDB's per-backend `check_reserved` redundancy rather than relying solely on the shared caller never being bypassed.
                         # history: CH-0067
@@ -2673,9 +2726,11 @@ class PostgresCell:
     def _timeout_ms(self, limits: ResourceLimits, deadline: float | None, clock: "Callable[[], float] | None") -> int:
         budget_ms = limits.execution_ms
         if deadline is not None and clock is not None:
-            remaining_ms = max(0.0, (deadline - clock()) * 1000)
-            budget_ms = min(budget_ms, max(1, int(remaining_ms)))
-        return max(1, int(budget_ms))
+            remaining_ms = (deadline - clock()) * 1000
+            if remaining_ms < 1:
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
+            budget_ms = min(budget_ms, int(remaining_ms))
+        return int(budget_ms)
 
     def _set_timeouts(self, conn: "psycopg.Connection[Any]", timeout_ms: int) -> None:
         """One request = one transaction: `statement_timeout` and `lock_timeout` are set with `SET LOCAL`, so they apply only to the current transaction and are automatically discarded on commit or rollback -- never leaking onto the next transaction this pooled connection is reused for. The timeout value passed here is always a

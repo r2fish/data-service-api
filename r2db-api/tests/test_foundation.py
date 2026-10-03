@@ -249,7 +249,7 @@ def test_data_plane_capabilities_declares_contract_1_6_0(service):
     ships -- function name kept, same precedent."""
     runtime = service.authenticate("cred-a.secret-a")
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.15.0"
+    assert document["contract_version"] == "1.16.0"
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
@@ -596,16 +596,17 @@ def test_rate_limit_is_atomic_for_concurrent_requests():
     assert denied and denied[-1]["reason_code"] == "LIMIT_EXCEEDED"
 
 
-def test_schema_deadline_failure_rolls_back_entity_catalog_and_revision():
-    clock_values = iter([0.0, 0.0, 0.0, 0.01])
-    service, context = _limited(execution_ms=1)
+def test_schema_request_spent_before_its_operation_leaves_no_entity():
+    # the third clock read is the check at the schema operation's entry (rate window, deadline, check): a request whose budget is spent there is refused before the operation applies and leaves no entity behind. The follow-up query reads a frozen clock, so its own 2 ms budget is never spent by the real time between two reads.
+    clock_values = iter([0.0, 0.0, 0.01])
+    service, context = _limited(execution_ms=2)
     ControlAuthority(service).issue_credential("schema-dev", "limit-app", "developer", "schema-dev-secret")
     developer = service.authenticate("schema-dev.schema-dev-secret")
     service._clock = lambda: next(clock_values)
     with pytest.raises(FoundationError) as error:
         service.schema(developer, {"operation": "create_entity", "entity": "deadline_entity", "fields": ["value"]})
     assert error.value.code == "LIMIT_EXCEEDED"
-    service._clock = time.monotonic
+    service._clock = lambda: 0.0
     with pytest.raises(FoundationError) as absent:
         service.query(context, "deadline_entity", select=["value"])
     assert absent.value.code == "NOT_FOUND"
@@ -2493,7 +2494,7 @@ def test_capabilities_document_is_built_only_from_explicit_arguments():
 
     developer_doc = build_capabilities_document(role="developer", application_id="app-x", **common)
     assert developer_doc == {
-        "contract_version": "1.15.0",
+        "contract_version": "1.16.0",
         "capabilities": {
             **expected_capabilities,
             "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"], "unsupported": ["jobs"]},
@@ -2508,7 +2509,7 @@ def test_capabilities_document_is_built_only_from_explicit_arguments():
 
     runtime_doc = build_capabilities_document(role="runtime", application_id="app-x", **common)
     assert runtime_doc == {
-        "contract_version": "1.15.0",
+        "contract_version": "1.16.0",
         "capabilities": {
             **expected_capabilities,
             "schema_operations": {"status": "partial", "operations": [], "unsupported": ["jobs"]},
@@ -2556,7 +2557,7 @@ def test_data_service_capabilities_passes_deployment_values_to_the_document():
     runtime = service.authenticate("wp3b-user.wp3b-user-secret")
 
     assert service.capabilities(developer) == {
-        "contract_version": "1.15.0",
+        "contract_version": "1.16.0",
         "capabilities": {
             "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
@@ -2591,7 +2592,7 @@ def test_data_service_capabilities_passes_deployment_values_to_the_document():
     }
 
     assert service.capabilities(runtime) == {
-        "contract_version": "1.15.0",
+        "contract_version": "1.16.0",
         "capabilities": {
             "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
             "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},

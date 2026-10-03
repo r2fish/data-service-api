@@ -388,6 +388,44 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     **版数の扱い**: 義務を足さず、どの実装の挙動も変えない記述の変更であるため minor 版 (1.15.0) とする (先例: 1.12.0、従属判断 17)。`versioning.compatibility` の「removal or semantic change requires a new major version」には当たらない: alias は残り、client が計画に使える保証 (alias は minor 版で消えない、canonical は `control_endpoints.audit_query`) は強まるだけである。両 peer の `contract_version` は、挙動変更が無いので契約文と同じ commit で 1.15.0 に動かす (1.12.0 と同じ扱い)。
 
+21. **契約 1.16.0 (`limits.execution_ms` の意味: 期限を使い切った要求は次の文を発行する前に拒否し、拒否・打ち切られた要求は何も commit していない) への裁定 (2026-10-03、依頼者確定、台帳 R-42)。** 新規 CCR ではなく、契約が未定義だった「`execution_ms` の予算は何を数え、使い切った要求はどう扱われるか」を定義する変更として採用する。設計は `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` (問題 §1、決定 §3 の D-6、契約文 §9、依頼者裁定 §10)、作業指示書は `docs/work-orders/WORK_ORDER_R42_EXPIRED_REQUEST_SEMANTICS_V1.md` である。
+
+    **発端**: 契約は `limits.request_budget` が `execution_ms` の適用先 (query、単一 / cross-entity の mutation、schema 操作) を挙げるが、予算が何を数え、いつ始まり、使い切った要求が何を発行してよいかを述べなかった。`execution_ms` を使い切った要求が次の文を発行し、commit まで進む実装を、契約は非適合と言えなかった。
+
+    **本文**: 4 箇所を足す。`limits.execution_ms` の英文は長いので本節は写さず、契約の値がその全文である (`conformance-tests/test_contract.py` が逐語で pin する)。他の 3 箇所の英文は確定文で、逐語は次のとおりである。
+
+    - `limits.execution_ms` (新 key。依頼者裁定 U-9 (a)): 範囲、始点 (遅くとも rate・concurrency の bound と `execution_ms` が確定した点)、commit の開始までの待ちと文の算入、1 page = 1 要求、dry run は別の予算、文の定義、「使い切った要求は次の文の前で LIMIT_EXCEEDED で拒否する」、残り 1 ms 未満は使い切り、文ごとの bound、拒否・打ち切られた要求は commit していないこと、audit evidence は縛らないこと、要求が `execution_ms` より遅く終わりうること。
+
+    **`versioning.version_binding` に足す 1 段落** (1 文を足す 1.15.0 の後、version-flip の文の前):
+
+    > Only an implementation declaring 1.16.0 or higher additionally claims conformance to the obligations 1.16.0 introduces (subordinate ruling 21). Those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.16.0, independent of any capability's own status -- and each concerns only the requests limits.execution_ms names (a query, a single-entity or cross-entity mutation and a schema operation, dry runs included): (a) execution_ms counts every wait and every statement of such a request from no later than the point limits.execution_ms names until the request begins to commit; (b) such a request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and details.limit_class: execution_ms before it issues its next statement, and is not refused for execution_ms by a clock check once every statement its work requires has completed; (c) such a request, on each connection it holds for the request, sets its per-statement bound before any statement there other than the one that begins its transaction there and those that set the bound, every statement it issues there after that runs under the most recent bound set there, which is no longer than what remained of execution_ms when the implementation computed it, and a statement that reaches its bound is terminated; and (d) such a request refused or terminated for exhausting execution_ms has committed nothing of the atomic unit it was executing, and that unit leaves no row, no catalog entry, no schema revision and no idempotency record. limits.execution_ms states these four in full, with the terms they use; the sentence 1.16.0 adds to structured_operations.dry_run.decision holds an implementation to no behavior beyond them. 1.16.0 changes no request shape: a request valid under 1.15.0 stays valid, and the only request 1.16.0 newly requires an implementation to refuse is one whose execution_ms is exhausted -- a request that was never guaranteed to succeed under 1.15.0. 1.7.0's obligation (3) -- that a dry run receives the decision the identical request without it would receive -- does not extend to execution_ms in either direction, because a dry run and the real request issue different statements: neither one's success nor its execution_ms refusal predicts the other's. An implementation still declaring 1.15.0 is not held to any 1.16.0-only obligation retroactively.
+
+    **`versioning.obligations` に足す entry** (末尾。無条件 4 件、条件付き 0 件):
+
+    > {"version": "1.16.0", "subordinate_ruling": 21, "unconditional": ["execution_ms_counts_waits_until_commit", "exhausted_execution_ms_refused_before_next_statement", "statements_run_under_per_statement_bound", "execution_ms_refusal_commits_nothing"], "conditional": []}
+
+    **`structured_operations.dry_run.decision` の末尾に足す 1 文**:
+
+    > Of the limit refusals named above, an execution_ms refusal is the exception: a dry run and the real request issue different statements, so neither one's success nor its execution_ms refusal predicts the other's (limits.execution_ms).
+
+    **既存の義務 1.7.0 (3) を狭める**: dry run が同一の要求の real と同じ決定を受けるという 1.7.0 の義務 (3) は、`execution_ms` には両方向で及ばない。dry run と real は異なる文を発行するので、一方の成功も `execution_ms` の拒否も他方を予告しない。1.7.0 の文と、それを保持する pin は変わらない。
+
+    **依頼者裁定 (逐語、設計 `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §10「契約文の確定 (2026-10-03)」の表)**:
+
+    > 確定する
+
+    監督の問い (逐語):
+
+    > 契約文の候補 (設計 v0.9 §9.1〜§9.4、main fb9c32f) を確定してよいですか? 確定後はこの文を逐語で契約 1.15.0 に入れ、pin のテストを置きます。
+
+    選ばれた選択肢の説明 (監督が提示した文、逐語):
+
+    > §9.1 (limits.execution_ms)、§9.2 (version_binding の 1.15.0 の段落、4 義務)、§9.3 (obligations[] の entry)、§9.4 (dry_run.decision への追記) をこのまま確定。上の差 2 点も了承。
+
+    「確定する」は設計 v0.9 §9.1〜§9.4 の確定である。「上の差 2 点」は、設計 §10 の同じ節がこの表の次の段で定義する (依頼者裁定の説明文と確定文の差 2 点)。これより前の依頼者裁定 U-1〜U-9 (2026-10-02、全件 (a)。U-5 の観測は「文の数を返す (Recommended)」) と V-1〜V-3 (2026-10-03) の逐語は設計 §10 にある。確定の問いは「契約 1.15.0」と書き、確定文は 1.15.0・従属判断 20・1.14.0 と書いていた。台帳 R-118 が 1.15.0 (従属判断 20) を先に使ったので、本契約は merge 順の帰結として **1.16.0・従属判断 21** とし、確定文の「1.15.0」「subordinate ruling 20」「1.14.0」を「1.16.0」「21」「1.15.0」に置き換えた (設計 v0.10 の版数行。上の引用は置き換え後の文である)。置き換えるのは版と従属判断の番号だけで、U-4 の裁定の要点は minor 版であることである。
+
+    **版数の扱い**: 義務を足す minor 版 (1.16.0)。義務は `contract_version` が 1.16.0 以上の宣言にだけ掛かり、1.15.0 を宣言する実装を遡って縛らない。要求の形は変えない: 1.15.0 で valid な要求は valid のままで、1.16.0 が新たに拒否を要求するのは `execution_ms` を使い切った要求だけであり、それは 1.15.0 でも成功が保証されていなかった。契約の文言、派生 catalog、両 peer の契約の同梱コピー、両 peer の挙動と `contract_version` は、統合 branch 上の最後の 1 つの変更セットで同時に動かす (設計 D-6 (B))。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**

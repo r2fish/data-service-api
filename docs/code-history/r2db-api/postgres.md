@@ -819,6 +819,20 @@ the single tx-exit point sits before the idempotency record and the pre-commit h
 # check, not only before/after the whole batch.
 ```
 
+### correction: 2026-10-03
+
+- reason: R-42 WP-3 -- the per-operation `check_deadline` call of `PostgresCell.transact` is gone: every statement of an operation is checked in `_run` before it is sent, and there is no check after the last operation, so the pointer now says where the check lives
+
+old:
+```
+per-operation deadline check, not only before/after the whole batch.
+```
+
+new:
+```
+the deadline is checked before each statement of each operation (in `_run`), not once for the whole batch.
+```
+
 ## CH-0036
 
 - moved from: `src/r2db_api/postgres.py` (`PostgresCell.transact`)

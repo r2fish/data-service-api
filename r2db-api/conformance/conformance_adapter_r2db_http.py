@@ -82,6 +82,7 @@ from adapter import (  # noqa: E402
     ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    AdmissionHold,
     BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
@@ -860,6 +861,76 @@ def _hold_in_flight_via_http_requests(
         raise errors[0]
 
 
+# port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
+# section 6.4): the statement count the three `hold_after_*` handles of this
+# HTTP plug return from `statements_after_release()`. It counts the
+# statements the Application's own two pools (`_runtime`, `_developer`)
+# carried for the held request after the `with` block released it:
+#
+#   per pool: the `execute()` / `executemany()` calls its connections have
+#   made (`CountingConnection.execute_count` + `executemany_count`, which a
+#   connection that was closed since keeps in the pool's own
+#   `_closed_db_calls`), plus the transactions and savepoints its
+#   connections have opened (`CountingConnection.txn_open_count`, the enter
+#   side of `transaction()` only -- its exit, a `commit()` and a
+#   `rollback()` are not statements the request issued), minus the
+#   statements the pool sends on its own account: one `SELECT 1` per
+#   checkout (`_RolePool._liveness_check`) and one `SET search_path` per
+#   connection it opens (`_RolePool._connect`), which `acquire_count` and
+#   `sessions` count one for one.
+#
+# The figure is taken twice: at the release, and when the caller reads the
+# handle. The release-time figure adds the counters of the connection(s) the
+# held request still has checked out -- a connection that is checked out is
+# in neither the idle queue nor the closed totals, so a request held in the
+# middle of its transaction would otherwise have its earlier statements
+# counted as later ones. The stalled wrappers below hand over the
+# connection they were given. Reading a pool's idle queue takes a snapshot
+# under the queue's own mutex and drains nothing, so a request that checks a
+# connection out at the same moment is never starved of one. A request that
+# was already running on these pools when the hold was released is not
+# attributable and is outside what the figure means; the conformance
+# vectors that read it run exactly one request.
+
+
+class _RolePoolStatementMeter:
+    def __init__(self, cell_obj: object) -> None:
+        self._handles = (cell_obj._runtime, cell_obj._developer)  # noqa: SLF001 -- adapter-internal plumbing, read-only.
+        self._base: int | None = None
+        self._base_error: BaseException | None = None
+
+    def _pools(self) -> list[Any]:
+        return [
+            handle._manager.get_pool(handle._key, handle._dsn, schema=handle._schema, maxconn=handle._maxconn)  # noqa: SLF001
+            for handle in self._handles
+        ]
+
+    def _statements(self, held: Sequence[Any] = ()) -> int:
+        total = 0
+        for pool in self._pools():
+            with pool._queue.mutex:  # noqa: SLF001
+                idle = list(pool._queue.queue)  # noqa: SLF001
+            with pool._stats_lock:  # noqa: SLF001
+                total += pool._closed_db_calls - pool._acquire_count - pool._sessions  # noqa: SLF001
+            for conn in idle:
+                total += conn.execute_count + conn.executemany_count + conn.txn_open_count
+        for conn in held:
+            total += conn.execute_count + conn.executemany_count + conn.txn_open_count
+        return total
+
+    def mark_release(self, held: Sequence[Any]) -> None:
+        try:
+            self._base = self._statements(held)
+        except BaseException as exc:  # noqa: BLE001 -- kept and raised by `statements_after_release`, never lost; the release itself must still happen.
+            self._base_error = exc
+
+    def statements_after_release(self) -> int:
+        if self._base_error is not None:
+            raise AssertionError("the statement count could not be taken at the release") from self._base_error
+        assert self._base is not None, "statements_after_release was read before the hold was released"
+        return self._statements() - self._base
+
+
 # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
 # WP-6d-ii): `hold_after_idempotency_lookup` realization for this HTTP
 # plug. `PostgresCell._idempotency_key_lock` (`postgres.py:1566`/`:2264`)
@@ -883,6 +954,8 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
     entered = threading.Semaphore(0)
     release = threading.Event()
     armed = threading.local()
+    held: list[Any] = []
+    meter = _RolePoolStatementMeter(cell_obj)
 
     def _lookup(conn: Any, key: str):
         record = original_lookup(conn, key)
@@ -891,11 +964,17 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
         return record
 
     def _reserve(conn: Any, limits: Any):
-        if getattr(armed, "hold", False):
-            armed.hold = False
+        # The arming is consumed before the reservation runs, so a
+        # reservation that itself refuses (the count bound) never leaves
+        # it set for a later, unrelated call on this thread.
+        hold = getattr(armed, "hold", False)
+        armed.hold = False
+        result = original_reserve(conn, limits)
+        if hold:
+            held.append(conn)
             entered.release()
             release.wait()
-        return original_reserve(conn, limits)
+        return result
 
     setattr(cell_obj, "_idempotency_lookup", _lookup)
     setattr(cell_obj, "_idempotency_reserve", _reserve)
@@ -910,11 +989,14 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
         return 1
 
     try:
-        yield IdempotencyHold(_wait_until_held)
+        yield IdempotencyHold(_wait_until_held, meter.statements_after_release)
     finally:
-        release.set()
-        setattr(cell_obj, "_idempotency_lookup", original_lookup)
-        setattr(cell_obj, "_idempotency_reserve", original_reserve)
+        try:
+            meter.mark_release(held)
+        finally:
+            release.set()
+            setattr(cell_obj, "_idempotency_lookup", original_lookup)
+            setattr(cell_obj, "_idempotency_reserve", original_reserve)
 
 
 # port v1.20 (docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md
@@ -949,6 +1031,8 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
     entered = threading.Semaphore(0)
     release = threading.Event()
     marked = threading.local()
+    held: list[Any] = []
+    meter = _RolePoolStatementMeter(cell_obj)
 
     def _apply_schema(*args: Any, **kwargs: Any):
         marked.schema_operation = kwargs.get("plan") is not None or bool(kwargs.get("dry_run"))
@@ -960,6 +1044,7 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
     def _read(conn: Any):
         revision = original_read(conn)
         if getattr(marked, "schema_operation", False) and claimed.acquire(blocking=False):
+            held.append(conn)
             entered.release()
             release.wait()
         return revision
@@ -978,11 +1063,73 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
         return 1
 
     try:
-        yield PlanVerificationHold(_wait_until_held)
+        yield PlanVerificationHold(_wait_until_held, meter.statements_after_release)
     finally:
-        release.set()
-        setattr(cell_obj, "_read_schema_revision", original_read)
-        setattr(cell_obj, "apply_schema", original_apply_schema)
+        try:
+            meter.mark_release(held)
+        finally:
+            release.set()
+            setattr(cell_obj, "_read_schema_revision", original_read)
+            setattr(cell_obj, "apply_schema", original_apply_schema)
+
+
+# port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
+# section 6.4): `hold_after_admission` realization for this HTTP plug.
+# `DataService` resolves the request's bounds -- the rate and concurrency
+# gates, the request-size and depth checks, the narrowing by `budget` -- and
+# computes the deadline from them, and only then calls the Application's
+# `PostgresCell`: `query`, `transact` or `apply_schema` (`service.py`, the
+# `_query_outcome` and `_mutate_outcome` bodies and the schema operation's
+# own body). Each of those opens the request's first connection, so the
+# entry of the three is the point after the bounds are fixed and before
+# the first connection acquisition. A catalog read never calls them and
+# passes through. The wrap replaces the three methods on the cell instance
+# and restores them on exit; no product source changes. The first caller
+# to reach any of them claims the stall (a `threading.Lock` nobody
+# releases), every later call goes through, so exactly ONE request is held.
+# The request holds no connection at the stall point, so the statement
+# count (`_RolePoolStatementMeter`) has nothing to add to its release-time figure.
+
+
+@contextmanager
+def _hold_after_admission_via_stalled_cell_entries(cell_obj: object) -> Iterator[AdmissionHold]:
+    names = ("query", "transact", "apply_schema")
+    originals = {name: getattr(cell_obj, name) for name in names}
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    meter = _RolePoolStatementMeter(cell_obj)
+
+    def _stalling(original):
+        def _stalled(*args: Any, **kwargs: Any):
+            if claimed.acquire(blocking=False):
+                entered.release()
+                release.wait()
+            return original(*args, **kwargs)
+
+        return _stalled
+
+    for name, original in originals.items():
+        setattr(cell_obj, name, _stalling(original))
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_admission: no request reached the entry of the cell's query / transact / "
+                f"apply_schema within {timeout_s}s (expected the next query, mutation or schema operation on "
+                "this Application to stall there -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield AdmissionHold(_wait_until_held, meter.statements_after_release)
+    finally:
+        try:
+            meter.mark_release([])
+        finally:
+            release.set()
+            for name, original in originals.items():
+                setattr(cell_obj, name, original)
 
 
 def _stringify_for_path(payload: Any) -> str:
@@ -2715,6 +2862,21 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         app_id = self.scope_of(session).application_id
         cell = self._service._cells[app_id]  # noqa: SLF001
         return _hold_after_plan_verification_via_stalled_cell_methods(cell)
+
+    # port v1.22: wraps this SAME per-application `PostgresCell`'s `query` / `transact` /
+    # `apply_schema` -- see `_hold_after_admission_via_stalled_cell_entries`'s own module comment
+    # for why the entry of those three is the point after the bounds are fixed and before the
+    # first connection acquisition.
+    def hold_after_admission(self, session):
+        """See `ConformanceAdapter.hold_after_admission`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point is documented on
+        `_hold_after_admission_via_stalled_cell_entries` and the comment
+        immediately above it."""
+        assert isinstance(session, _Session)
+        app_id = self.scope_of(session).application_id
+        cell = self._service._cells[app_id]  # noqa: SLF001
+        return _hold_after_admission_via_stalled_cell_entries(cell)
 
     def wire_entry(self, application_id: str) -> WireEntry:
         """See `ConformanceAdapter.wire_entry`'s own docstring

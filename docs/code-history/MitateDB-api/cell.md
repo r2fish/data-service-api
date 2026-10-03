@@ -54,3 +54,37 @@ new:
 ```
 One call is one backend probe and takes no lock of the cell's own (the cell holds none). `tools/perf_baseline.py` calls it (via the conformance adapter's own `prepared_stats()`) once before and once after each measured (plug, op) window, and once more before the warmup under `--roundtrip`; `tools/PERF_BASELINE_README.md` says what each call adds to the `POOL` rows.
 ```
+
+## CH-0566
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._error_row_once_fired`)
+- parent commit: `62136cd`
+- kind: docstring
+
+```
+Guarantees the `error` row of D-2's rule for a backend method
+that takes the hook itself (`create_collection`/`add_field`/
+`alter_field_constraints`/`delete`): once `hook.pre_commit()` has
+recorded the `allow` row, EVERY failure that leaves the method
+without committing writes the `error` row -- a cancelled or
+lock-timed-out COMMIT and a failure of the idempotency record
+included, whichever branch of the backend's own handling they
+pass through. The response and its class are unchanged (the
+original exception propagates); a backend that already wrote the
+row itself does not write a second (`commit_failed()` records at
+most once per hook).
+```
+
+### correction: 2026-10-03
+
+- reason: R-42 -- the schema operations write the idempotency record before the pre-commit row, so a failure of the record write comes before the `allow` row and never reaches this guarantee
+
+old:
+```
+a cancelled or lock-timed-out COMMIT and a failure of the idempotency record included, whichever branch of the backend's own handling they pass through
+```
+
+new:
+```
+a cancelled or lock-timed-out COMMIT included, whichever branch of the backend's own handling it passes through
+```

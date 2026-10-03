@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.1 (2026-10-03)。** 実施の記録 (§5) と訂正註 (§6) を足した。本文は書き換えていない。
 - **v1.0 (2026-10-03)。** 起草。未発注・未 commit。
 - 設計の正本は `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` **v0.10** (以下「設計」)。本書は設計の問題設定 (§1)・制約 (§2)・決定 (§3 の D-1〜D-9)・却下案 (§4)・裁定 (§5・§10) を写さず節番号で指す (`RM` §9 の 9)。逐語は付録の確定文ファイル (設計 §9 から機械的に抜き出したもの) と §1.2 の変異案の写しだけ。
 - 台帳 `RM` §8.1 の **R-42** (`RM`:461)。**規模 L** (`OC` §1.13 の 74)。**変更クラス D** (`security/`、契約、conformance)。WP ごとのクラスは各 WP に書く。
@@ -300,27 +301,85 @@ worktree を cwd にして: `python3 tools/check_comment_provenance.py --base <W
 
 | WP | worktree (branch) | commit |
 |---|---|---|
-| WP-1 | (§2.0) | (WP-5 の commit に含む) |
-| WP-2 | `r42` | |
-| WP-3 | `r42` | |
-| WP-4 | `r42` | |
-| WP-5 | `r42` | |
+| WP-1 | session worktree、branch `r42-wp1` (記号名 `r42-wp1`) | WIP 7f23864・2809400・29976a2 (内容として WP-5 の commit に含む。main の履歴に入れない) |
+| WP-2 | `r42` (port の部) / `r42-wp1` (新条件の部 WIP 2187190) | a0b5d1d、c14faea、e332c34 |
+| WP-3 | `r42` | 5ef1fe1、7b6aced、62136cd (in-memory apply_schema の operation 前の検査は flip の commit) |
+| WP-4 | `r42` | d510122、b2658e6、2910a5c |
+| WP-5 | `r42` | flip 9d68964、閉止は `finalize.py` の commit (本書 §5 と台帳 v1.161) |
 
 ### 5.2 完了ゲート
 
-(候補の commit、集計行、judge、label、日時、`COLLECTION_FLOOR` の前後)
+候補 9d68964 (branch `r42`)、`tools/dev/gate.py -C <session worktree> --label r42`、2026-10-03: **gate: 5231 passed, 2 subtests passed in 509.14s (0:08:29), judge=PASS, label r42, pg_database/pg_roles diff 0**。`COLLECTION_FLOOR` 5029 → 5231。
 
 ### 5.3 計測 (§3)
 
-(PERF 行の基準と実装後、load average)
+基準 = local main 662d58a (detached worktree `r42-perfbase`)、実装後 = 2910a5c + flip の内容 (`PERFRUN commit=2910a5c-dirty`。9d68964 との差は flip 候補の再確認 1〜5 のコメント・文書だけで、コードは同一)、同日・同引数 (`--n 100 --warmup 10 --concurrency 1`、`--n 15 --warmup 3 --concurrency 32`)。K=1 の p50 の最大 +11.7%・p95 の最大 +8.4%、K=32 の p50 の最大 +4.1%・p95 の最大 +3.2% (閾値 p50 +40% / p95 +50%)、backend_calls 不変。開始時の load average は基準 2.95 / 候補 2.6 台 (1 分)。各 run の開始時に `ps` で他の pytest が 0 件、harness は排他の suite lock を取る。K=1 の p50 の最大 +11.7% は in-process MitateDB query 0.128 → 0.143 ms、backend_calls は全 plug・全 op で不変。訂正註 8。全表 (`PERF` 行の p50 / p95、K=1 は `--n 100`、K=32 は `--n 15`):
+
+| plug | op | K | p50 ms 基準 → 実装後 (差) | p95 ms 基準 → 実装後 (差) | backend_calls |
+|---|---|---|---|---|---|
+| MitateDB-api | batch | 1 | 0.166 → 0.177 (+6.6%) | 0.179 → 0.194 (+8.4%) | 39.00 → 39.00 |
+| MitateDB-api | cross_entity | 1 | 0.124 → 0.133 (+7.3%) | 0.142 → 0.143 (+0.7%) | 18.00 → 18.00 |
+| MitateDB-api | mutate | 1 | 0.100 → 0.104 (+4.0%) | 0.125 → 0.115 (-8.0%) | 11.00 → 11.00 |
+| MitateDB-api | query | 1 | 0.128 → 0.143 (+11.7%) | 0.158 → 0.153 (-3.2%) | 12.00 → 12.00 |
+| MitateDB-api-http | batch | 1 | 2.281 → 2.120 (-7.1%) | 2.396 → 2.303 (-3.9%) | 34.00 → 34.00 |
+| MitateDB-api-http | cross_entity | 1 | 1.612 → 1.391 (-13.7%) | 1.720 → 1.554 (-9.7%) | 19.00 → 19.00 |
+| MitateDB-api-http | mutate | 1 | 1.254 → 1.177 (-6.1%) | 1.463 → 1.290 (-11.8%) | 14.00 → 14.00 |
+| MitateDB-api-http | query | 1 | 1.528 → 1.392 (-8.9%) | 1.659 → 1.495 (-9.9%) | 17.00 → 17.00 |
+| MitateDB-api-socket | batch | 1 | 5.993 → 5.498 (-8.3%) | 7.008 → 6.420 (-8.4%) | 34.00 → 34.00 |
+| MitateDB-api-socket | cross_entity | 1 | 5.294 → 4.878 (-7.9%) | 6.428 → 5.751 (-10.5%) | 19.00 → 19.00 |
+| MitateDB-api-socket | mutate | 1 | 5.349 → 4.628 (-13.5%) | 6.683 → 5.455 (-18.4%) | 14.00 → 14.00 |
+| MitateDB-api-socket | query | 1 | 5.412 → 4.893 (-9.6%) | 7.354 → 6.318 (-14.1%) | 17.00 → 17.00 |
+| r2db-api | batch | 1 | 0.518 → 0.518 (+0.0%) | 0.709 → 0.701 (-1.1%) | 1.00 → 1.00 |
+| r2db-api | mutate | 1 | 0.166 → 0.166 (+0.0%) | 0.209 → 0.209 (+0.0%) | 1.00 → 1.00 |
+| r2db-api | query | 1 | 0.113 → 0.116 (+2.7%) | 0.133 → 0.123 (-7.5%) | 1.00 → 1.00 |
+| r2db-api-http | batch | 1 | 2.117 → 1.993 (-5.9%) | 2.226 → 2.412 (+8.4%) | 24.00 → 24.00 |
+| r2db-api-http | mutate | 1 | 1.931 → 1.826 (-5.4%) | 2.178 → 2.046 (-6.1%) | 20.00 → 20.00 |
+| r2db-api-http | query | 1 | 1.856 → 1.700 (-8.4%) | 2.067 → 1.838 (-11.1%) | 18.00 → 18.00 |
+| r2db-api-socket | batch | 1 | 5.890 → 5.470 (-7.1%) | 6.141 → 5.596 (-8.9%) | 24.00 → 24.00 |
+| r2db-api-socket | mutate | 1 | 5.689 → 5.302 (-6.8%) | 5.922 → 5.464 (-7.7%) | 20.00 → 20.00 |
+| r2db-api-socket | query | 1 | 5.738 → 5.158 (-10.1%) | 5.994 → 5.316 (-11.3%) | 18.00 → 18.00 |
+| MitateDB-api | batch | 32 | 3.444 → 3.407 (-1.1%) | 3.550 → 3.583 (+0.9%) | 39.00 → 39.00 |
+| MitateDB-api | cross_entity | 32 | 1.938 → 2.018 (+4.1%) | 2.491 → 2.164 (-13.1%) | 18.00 → 18.00 |
+| MitateDB-api | mutate | 32 | 1.251 → 1.213 (-3.0%) | 1.382 → 1.331 (-3.7%) | 11.00 → 11.00 |
+| MitateDB-api | query | 32 | 2.146 → 2.047 (-4.6%) | 2.312 → 2.182 (-5.6%) | 12.00 → 12.00 |
+| MitateDB-api-http | batch | 32 | 53.091 → 49.176 (-7.4%) | 57.420 → 51.700 (-10.0%) | 34.00 → 34.00 |
+| MitateDB-api-http | cross_entity | 32 | 39.645 → 35.524 (-10.4%) | 45.956 → 38.361 (-16.5%) | 19.00 → 19.00 |
+| MitateDB-api-http | mutate | 32 | 34.767 → 31.720 (-8.8%) | 38.102 → 34.121 (-10.4%) | 14.00 → 14.00 |
+| MitateDB-api-http | query | 32 | 36.133 → 34.518 (-4.5%) | 40.546 → 41.848 (+3.2%) | 17.00 → 17.00 |
+| MitateDB-api-socket | batch | 32 | 174.719 → 161.099 (-7.8%) | 188.941 → 164.021 (-13.2%) | 34.00 → 34.00 |
+| MitateDB-api-socket | cross_entity | 32 | 156.344 → 143.109 (-8.5%) | 167.762 → 151.375 (-9.8%) | 19.00 → 19.00 |
+| MitateDB-api-socket | mutate | 32 | 149.189 → 137.472 (-7.9%) | 153.747 → 144.701 (-5.9%) | 14.00 → 14.00 |
+| MitateDB-api-socket | query | 32 | 154.661 → 142.038 (-8.2%) | 164.524 → 146.156 (-11.2%) | 17.00 → 17.00 |
+| r2db-api | batch | 32 | 68.054 → 62.992 (-7.4%) | 97.652 → 89.724 (-8.1%) | 1.00 → 1.00 |
+| r2db-api | mutate | 32 | 11.363 → 10.734 (-5.5%) | 17.332 → 16.102 (-7.1%) | 1.00 → 1.00 |
+| r2db-api | query | 32 | 1.554 → 1.541 (-0.8%) | 1.714 → 1.763 (+2.9%) | 1.00 → 1.00 |
+| r2db-api-http | batch | 32 | 48.641 → 44.765 (-8.0%) | 52.453 → 47.507 (-9.4%) | 24.00 → 24.00 |
+| r2db-api-http | mutate | 32 | 43.621 → 39.322 (-9.9%) | 47.024 → 41.381 (-12.0%) | 20.00 → 20.00 |
+| r2db-api-http | query | 32 | 41.323 → 37.725 (-8.7%) | 51.162 → 40.538 (-20.8%) | 18.00 → 18.00 |
+| r2db-api-socket | batch | 32 | 166.255 → 154.746 (-6.9%) | 174.473 → 158.078 (-9.4%) | 24.00 → 24.00 |
+| r2db-api-socket | mutate | 32 | 159.431 → 148.367 (-6.9%) | 167.419 → 155.397 (-7.2%) | 20.00 → 20.00 |
+| r2db-api-socket | query | 32 | 155.715 → 146.377 (-6.0%) | 165.176 → 156.195 (-5.4%) | 18.00 → 18.00 |
 
 ### 5.4 受け入れ監査と閉止
 
-(判定の集計、指摘の裁定)
+受け入れ監査 (`evidence-auditor`、2026-10-03、対象 9d68964 + 閉止の記録): 完了条件 85 件中 充足 82・未充足 1 (75: flip の commit に WP-3 の訂正 (in-memory apply_schema の operation 前の検査) が入る — 訂正註 10 で読み替え)・証拠不足 2 (81・84 — 下の逐語で充足)。主張と実測の差 4 件 (A1〜A4) と観察 1 件は引き継ぎ書 `docs/work-orders/HANDOVER_20261003_R42_CLOSE_FABLE.md` の「裁定」節。
+
+- 81: `tools/dev/ledger.py --check` → `ledger --check: GREEN rows(8.1)=24 rows(8.2)=98 archive_sections=98`
+- 84 (変更セット 71 パス = `git diff --name-only 662d58a` + 作業ツリー): `check_doc_refs OK: 0 dangling references` / `# mode=tree files_scanned=71 total_flagged=0` / `class=D conformance_required=true`
+- 閉止の commit は `tools/dev/finalize.py` (`--tools-tests`) で行い、main へ `--no-ff` で merge した (SHA は `git log` が正)。
 
 ## 6. 訂正註 (本文は書き換えない。`OC` §1.8 の 57)
 
-(なし)
+1. **【訂正註 2026-10-03 (WP-1〜WP-5 の実施)】worktree の名。** §1.1 の 10 (d) と §2.0 の `.claude/worktrees/r42-wp1` / `.claude/worktrees/r42` は記号名として扱った。実体は作業チャットの session worktree (`.claude/worktrees/` 配下) で branch `r42-wp1` と `r42` を切り替えた (subagent の他 worktree への書き込みが harness に拒否されるため。`.claude/worktrees/r42` は 662d58a で畳み、branch は残した)。
+2. **【訂正註 2026-10-03】番号と版。** 新条件 = **C-36**、`CA` の新節 = **§32 (v1.22)**、`CM` の版 = **3.19** (§0 の見込み 3.17 は R-30・R-120 が先に使った)。WP-2 の port の部の commit (`a0b5d1d`) では `CA` が C-36 を名指すと `tools/check_doc_refs.py` が CONDITIONS の行の無い中間 commit で赤になるため「C-35 の次。番号は版の flip の commit で付く」と書き、flip の commit で C-36 に戻した (設計 D-7 が番号を書かないのと同じ理由)。
+3. **【訂正註 2026-10-03】WP-1 の取り込み方。** §1.1 の 10 (d) の「WIP commit を WP-5 の最後の 1 commit で統合する」は、merge commit ではなく内容として取り込む (`git diff 2fdc894 r42-wp1 | git apply`)。merge で取り込むと、挙動の無い状態で版を flip した commit が main から到達可能になり §1.1 の 3 と完了条件 75 が字義どおり成り立たない (WP-1 レビュー A-1)。`r42-wp1` の 4 commit (7f23864・2809400・29976a2・2187190) は main の履歴に入らない。
+4. **【訂正註 2026-10-03】触ってよいパスの拡張 (監督裁定)。** WP-2: 両 peer の `tests/test_r79_prepared_stats.py` (`txn_open_count` を単独で殺す単体テスト。§1.5 の 33)。WP-3: `docs/code-history/r2db-api/` (companion。`structured.md` 新設 CH-0552〜CH-0564)、`RT/test_foundation.py`・`RT/test_l1_details_vocabulary_ast_scan.py` (追随。§1.5 の 40b)。WP-4: `MT/test_application_audit.py`・`MT/test_l1_details_vocabulary_ast_scan.py`・`MT/test_limit_class_vocabulary.py` (追随)、`M/audit_hook.py` (docstring のみ。CH-0567)、`docs/code-history/MitateDB-api/` (CH-0565〜0567、CH-0337 の訂正)。
+5. **【訂正註 2026-10-03】完了条件 51 の列挙漏れ。** in-memory backend の「最後の operation の後の検査」は `R/structured.py` の query・transact の 2 点に加え apply_schema にもあり (基点 :1788)、3 点とも外した。apply_schema は入口 (idempotency の照会の前) と operation の直前 (plan 照合の後) の 2 点で検査する (D-2 (c)。変異 V51g〜V51j)。
+6. **【訂正註 2026-10-03】V28 / V31 の注入。** 「検査を外す」は「その経路で最初の文の前にある検査すべて」と読む: r2db は `_timeout_ms` の拒否 + 外側 `_transaction` 3 点 + `_run` の検査、MitateDB は `_execute` の `_check_budget` + `_timeout_ms` の拒否 (V28b)。V30 / V31 は helper の検査だけで足りる (WP-2 レビュー A F2)。V28a2 / V28b2 (bound を残して文の数で赤) を足した。
+7. **【訂正註 2026-10-03】完了条件 27・38 の「緑」。** `CT/test_conditions_register.py::test_every_executable_condition_has_a_marked_test` は一部の file だけを集める呼び出しでは構造上赤になる (基点 main でも同じ)。27・38 の「緑」は完了ゲート (root suite) で示す。
+8. **【訂正註 2026-10-03】§3 の基準。** 性能差分の基準は flip 直前の統合 branch の commit (2910a5c) ではなく local main (662d58a。R-42 の挙動が入る前) を同じ日・同じ引数で測った値とした。2910a5c は WP-3・WP-4 の挙動を既に含み、flip の commit は契約文・宣言・conformance だけなので、2910a5c との差分は挙動の差を測らない。
+9. **【訂正註 2026-10-03】M-8 の 100/100 の取り方。** 完了ゲートの中では 1 回しか走らないので、完了条件 34・35 は実測の起動が scratchpad の loop (6 plug × 100 回、burner で負荷を掛ける) で測った (`CA` §32.2)。(i)(ii) は in-memory apply_schema の operation 前の検査を足す前の測定、(iii) は足した後の再測。
+10. **【訂正註 2026-10-03】flip の commit の中身 (完了条件 75、§1.1 の 3)。** flip の commit (9d68964) には §2.5 の表の内容に加え、WP-3 の訂正 (in-memory `apply_schema` の operation 直前の期限検査: `r2db-api/src/r2db_api/structured.py`、`r2db-api/tests/test_expired_request_checks.py`、`docs/code-history/r2db-api/structured.md`) が入る。この訂正は flip の内容 (C-36 の (iii) が in-process plug に束縛される状態) を載せて初めて測れた実測 (M-8 の (iii) r2db-api 0/100) で見つかり、同じ commit で直した。D-6 (B) の目的 (挙動の無い 1.16.0 の宣言が main から到達できない) は保たれる (662d58a〜2910a5c の 10 commit は 3 部とも 1.15.0 で C-36 の file も無い)。版に依らない挙動なので別 commit にもできたが、分けなかった (受け入れ監査 75、監督裁定)。
 
 ## 付録 — 確定文の抜き出し script
 

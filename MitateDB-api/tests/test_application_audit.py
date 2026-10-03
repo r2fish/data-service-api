@@ -3010,15 +3010,50 @@ def test_a_hook_that_could_not_record_its_row_is_not_marked_fired() -> None:
     assert hook.fired is True
 
 
-def test_a_cancelled_schema_record_write_after_the_pre_commit_row_writes_an_error_row_and_keeps_the_response(
+def test_a_cancelled_schema_commit_after_the_pre_commit_row_writes_an_error_row_and_keeps_the_response(
     platform: types.SimpleNamespace, app_a: types.SimpleNamespace,
 ) -> None:
     """The backend's own handling of a cancelled or lock-timed-out statement
     does not know the `allow` row is already durable; the cell records the
-    `error` row for it, and the response class does not change.
+    `error` row for it, and the response class does not change. The
+    statement whose cancel this drives is the schema operation's COMMIT, the
+    one statement that follows the pre-commit row.
 
     mutation (`cell.py`, `_error_row_once_fired`): drop the
     `hook.commit_failed()` call -- only the `allow` row is there."""
+    clean_application_audit(platform)
+    durable = PostgresApplicationAuditSink(platform.provision_dsn, schema=platform.schema)
+    router = make_router(durable)
+    backend = make_backend(app_a)
+    try:
+        cell = ApplicationCell(app_a.app_id, FoundationConfig(), backend=backend, audit_router=router)
+        developer = make_developer(cell, app_a.app_id)
+        request_id = "req-" + uuid.uuid4().hex
+        with commits_failing(backend, "developer", psycopg.errors.QueryCanceled("simulated cancel")):
+            with pytest.raises(FoundationError) as exc:
+                developer.create_entity("things", {"id": "integer"}, idempotency_key="k-cancel", request_id=request_id)
+        assert type(exc.value).__name__ == "ResourceLimitError"
+        outcomes = [
+            row[APPLICATION_AUDIT_FIELDS.index("outcome")] for row in durable.events()
+            if row[APPLICATION_AUDIT_FIELDS.index("request_id")] == request_id
+        ]
+        assert outcomes == ["allow", "error"]
+    finally:
+        backend.close()
+        clean_application_audit(platform)
+
+
+def test_a_cancelled_schema_record_write_leaves_no_audit_row_because_it_comes_before_the_pre_commit_row(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace,
+) -> None:
+    """The schema operation writes its idempotency record before the
+    pre-commit audit row, so a record write that is cancelled never reaches
+    the audit sink: no row, `allow` or `error`, for a request whose data
+    did not commit. The response class is the same `LIMIT_EXCEEDED`.
+
+    mutation (`backend_postgres.py`, the three schema operations): write
+    the record after `audit_hook.pre_commit()` again -- the `allow` row and
+    an `error` row are there."""
     clean_application_audit(platform)
     durable = PostgresApplicationAuditSink(platform.provision_dsn, schema=platform.schema)
     router = make_router(durable)
@@ -3035,7 +3070,37 @@ def test_a_cancelled_schema_record_write_after_the_pre_commit_row_writes_an_erro
             row[APPLICATION_AUDIT_FIELDS.index("outcome")] for row in durable.events()
             if row[APPLICATION_AUDIT_FIELDS.index("request_id")] == request_id
         ]
-        assert outcomes == ["allow", "error"]
+        assert outcomes == []
+    finally:
+        backend.close()
+        clean_application_audit(platform)
+
+
+def test_a_failed_schema_record_write_that_is_not_a_cancel_is_a_storage_failure_and_leaves_no_audit_row(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace,
+) -> None:
+    """The record write is translated the way a batch's is: a driver error
+    that is not a cancel is a retryable storage failure
+    (`SERVICE_UNAVAILABLE`), not a refusal of the request's own content, and
+    since the write comes before the pre-commit audit row there is no row,
+    `allow` or `error`, for a request whose data did not commit."""
+    clean_application_audit(platform)
+    durable = PostgresApplicationAuditSink(platform.provision_dsn, schema=platform.schema)
+    router = make_router(durable)
+    backend = make_backend(app_a)
+    try:
+        cell = ApplicationCell(app_a.app_id, FoundationConfig(), backend=backend, audit_router=router)
+        developer = make_developer(cell, app_a.app_id)
+        request_id = "req-" + uuid.uuid4().hex
+        with patch.object(backend, "_write_idempotency_row", side_effect=psycopg.errors.DiskFull("simulated disk full")):
+            with pytest.raises(FoundationError) as exc:
+                developer.create_entity("things", {"id": "integer"}, idempotency_key="k-disk-full", request_id=request_id)
+        assert type(exc.value).__name__ == "StorageTransientError"
+        outcomes = [
+            row[APPLICATION_AUDIT_FIELDS.index("outcome")] for row in durable.events()
+            if row[APPLICATION_AUDIT_FIELDS.index("request_id")] == request_id
+        ]
+        assert outcomes == []
     finally:
         backend.close()
         clean_application_audit(platform)

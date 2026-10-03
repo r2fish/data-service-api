@@ -49,6 +49,7 @@ from adapter import (  # noqa: E402
     ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    AdmissionHold,
     BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
@@ -639,6 +640,88 @@ def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerification
             setattr(backend, name, original)
         for name, original in cell_originals.items():
             setattr(cell_obj, name, original)
+
+
+# port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
+# section 6.4): `hold_after_admission` realization for this in-process
+# plug. `ApplicationCell._limit_gate` is where a request's rate and
+# concurrency gates run, its request-size and depth checks run, its `budget`
+# narrows the bounds and the deadline is computed from them; it yields that
+# deadline, and the caller opens the backend's request scope -- the
+# request's first connection -- only after that. A stall just after the
+# gate has yielded is therefore the point after the bounds are fixed and
+# before the first connection acquisition, and holds the request's
+# concurrency slot as the contract point requires. The gate is entered by
+# every kind of request; the three the primitive holds -- a query, a
+# mutation and a schema operation -- are exactly the ones whose caller
+# names an `endpoint_kind` (`query`, `mutate`, `schema`) so that `budget`
+# narrows for them, and a request that names none (a catalog read, a
+# single-row write) passes through. The wrap replaces the gate on the cell
+# instance and restores it on exit, like `_hold_in_flight_via_stalled_gate`
+# above; no product source changes. The first caller to reach the stall
+# claims it (a `threading.Lock` nobody releases), every later call goes
+# through, so exactly ONE request is held. This plug's backend is SQLite
+# and issues no PostgreSQL statement, so the yielded handle keeps
+# `AdmissionHold`'s default `statements_after_release` (`None`).
+
+
+class _AdmissionGateContextManager:
+    """The per-call context-manager object `_hold_after_admission_via_
+    stalled_gate` returns for a request that names an `endpoint_kind`:
+    delegates to the REAL `_limit_gate` context manager it wraps, and
+    inside `__enter__`, after the real gate has run and returned its
+    `deadline`, the first such request to arrive claims the stall and
+    blocks on a shared `threading.Event` before the value reaches the
+    caller."""
+
+    __slots__ = ("_inner", "_claimed", "_entered", "_release")
+
+    def __init__(self, inner_cm, claimed: threading.Lock, entered: threading.Semaphore, release: threading.Event) -> None:
+        self._inner = inner_cm
+        self._claimed = claimed
+        self._entered = entered
+        self._release = release
+
+    def __enter__(self):
+        value = self._inner.__enter__()
+        if self._claimed.acquire(blocking=False):
+            self._entered.release()
+            self._release.wait()
+        return value
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._inner.__exit__(exc_type, exc, tb)
+
+
+@contextmanager
+def _hold_after_admission_via_stalled_gate(cell_obj: object) -> Iterator[AdmissionHold]:
+    original_gate = cell_obj._limit_gate  # noqa: SLF001 -- adapter-internal plumbing, same convention `_hold_in_flight_via_stalled_gate` above uses.
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+
+    def _admission_limit_gate(*args, **kwargs):
+        inner = original_gate(*args, **kwargs)
+        if kwargs.get("endpoint_kind") is None:
+            return inner
+        return _AdmissionGateContextManager(inner, claimed, entered, release)
+
+    cell_obj._limit_gate = _admission_limit_gate  # noqa: SLF001
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_admission: no request reached the stalled `_limit_gate` within {timeout_s}s "
+                "(expected the next query, mutation or schema operation on this Application to stall just "
+                "after the gate yielded its deadline -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield AdmissionHold(_wait_until_held)
+    finally:
+        release.set()
+        cell_obj._limit_gate = original_gate  # noqa: SLF001
 
 
 class MitateDBConformanceAdapter(ConformanceAdapter):
@@ -1284,6 +1367,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         it."""
         cell = self._control.cells[session.principal.application_id]
         return _hold_after_plan_verification(cell)
+
+    # port v1.22: wraps this cell's own `_limit_gate` -- see `_hold_after_admission_via_stalled_gate`'s
+    # own module comment for why the point just after the gate yields is the point after the bounds
+    # are fixed and before the first connection acquisition.
+    def hold_after_admission(self, session):
+        """See `ConformanceAdapter.hold_after_admission`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point is documented on
+        `_hold_after_admission_via_stalled_gate` and the comment
+        immediately above it."""
+        cell = self._control.cells[session.principal.application_id]
+        return _hold_after_admission_via_stalled_gate(cell)
 
     def wire_entry(self, application_id: str) -> WireEntry:
         """See `ConformanceAdapter.wire_entry`'s own docstring

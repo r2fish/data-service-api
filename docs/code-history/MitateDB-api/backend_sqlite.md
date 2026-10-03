@@ -41,6 +41,20 @@ repository's own tests) skips the check entirely, mirroring `backend_
 postgres.py`'s identical `None`-means-unbounded convention.
 ```
 
+### correction: 2026-10-03
+
+- reason: R-42 -- the backend bounds a running statement with a progress handler and checks the clock before every statement, not only at the entry of a method; the docstring no longer says `sqlite3` offers no way to bound a statement
+
+old:
+```
+this backend has no native query-timeout API (`sqlite3` offers none) -- unlike `backend_postgres.py`'s own real `SET LOCAL statement_timeout`/`lock_timeout`, this is the app-side wall-clock check
+```
+
+new:
+```
+this backend has no `statement_timeout`/`lock_timeout` of its own (unlike `backend_postgres.py`'s `SET LOCAL`): a statement already running is bounded by the progress handler `SQLiteBackend._execute_statement` arms, and this is the app-side wall-clock check (made before each statement; it refuses a request with less than 1 ms of its budget left)
+```
+
 ## CH-0338
 
 - moved from: `src/mitatedb_api/backend_sqlite.py` (`<module>`)

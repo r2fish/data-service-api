@@ -141,3 +141,39 @@ new:
 the `execution_ms` mapping -- not rolled back here (same B-1 (ii) reasoning
 ```
 
+
+## CH-0565
+
+- moved from: `src/mitatedb_api/backend_postgres.py` (`PostgresBackend.create_collection`)
+- parent commit: `62136cd`
+- kind: comment
+
+```
+# Phase 9 WP-3c (design D-5, I-1/I-8): the idempotency
+# record is written as the LAST statement before this
+# backend's own commit -- same connection, same
+# transaction as the DDL above, exactly like `audit_hook.
+# pre_commit()` immediately above it. `new_revision` was
+# already read back for real, inside this SAME
+# transaction, above -- unlike `backend_sqlite.
+# SQLiteBackend`'s own in-process counterpart, nothing
+# here is a prediction. The stored response mirrors this
+# method's own final `return` below verbatim (same
+# `name`/`fields`/`field_types`/`resolved_constraints`
+# locals), so a later replay is byte-identical to what an
+# uncached call would have returned.
+```
+
+### correction: 2026-10-03
+
+- reason: R-42 -- the idempotency record is now written before the pre-commit audit hook (store, then hook, then commit), so the hook is not above the record write
+
+old:
+```
+exactly like `audit_hook.pre_commit()` immediately above it
+```
+
+new:
+```
+before `audit_hook.pre_commit()` (which follows it and sends nothing on this connection)
+```

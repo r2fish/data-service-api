@@ -37,8 +37,10 @@ returned (`MitateDB-api/src/mitatedb_api/cell.py:834-837`), which does not
 compose into one recipe both peers satisfy the same way. `batch_items`
 alone carries this row's own non-vacuity requirement (L8-15: an adapter
 that silently drops `budget` turns vector (1) red on every plug).
-`execution_ms` is not driven at all (same reason C-05 V2 excludes it: no
-deterministic N/N+1 exists under `reference_wall_clock`, phase 8 D-1).
+`execution_ms` is not driven at its own N/N+1 boundary here (same reason
+C-05 V2 excludes it: no deterministic N/N+1 exists under
+`reference_wall_clock`, phase 8 D-1); a request whose `execution_ms` budget
+is already spent is driven by C-36 (`test_c36_execution_budget_spent.py`).
 
 **Overlaps C-05**: the same limit classes, a different proposition (C-05
 fixes the deployment's own declared bound; this row fixes one request's

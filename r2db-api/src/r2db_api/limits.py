@@ -97,7 +97,8 @@ class ResourceLimits:
                 fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit_class": "request_bytes", "limit": bound})
 
     def check_deadline(self, deadline: float, clock: Callable[[], float]) -> None:
-        if clock() > deadline:
+        """Refuses with `LIMIT_EXCEEDED` / `execution_ms` once less than 1 ms of the request's budget remains, reading the clock once and never touching the database. The threshold is the smallest remaining budget a whole-millisecond statement bound can express."""
+        if (deadline - clock()) * 1000 < 1:
             fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": self.execution_ms})
 
     def check_depth(self, value: Any) -> None:

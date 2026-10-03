@@ -47,6 +47,7 @@ from adapter import (  # noqa: E402
     ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    AdmissionHold,
     BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
@@ -337,11 +338,16 @@ def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, id
         return record
 
     def _reserve(limits, *, now: float):
-        if getattr(armed, "hold", False):
-            armed.hold = False
+        # The arming is consumed before the reservation runs, so a
+        # reservation that itself refuses (the count bound) never leaves
+        # it set for a later, unrelated call on this thread.
+        hold = getattr(armed, "hold", False)
+        armed.hold = False
+        result = original_reserve(limits, now=now)
+        if hold:
             entered.release()
             release.wait()
-        return original_reserve(limits, now=now)
+        return result
 
     setattr(cell_obj, "_idempotency_lookup", _lookup)
     setattr(cell_obj, "_idempotency_reserve", _reserve)
@@ -433,6 +439,63 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
         release.set()
         structured.compute_plan_token = original_token
         setattr(cell_obj, "apply_schema", original_apply_schema)
+
+
+# port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
+# section 6.4): `hold_after_admission` realization for this in-process plug.
+# `DataService` resolves the request's bounds -- the rate and concurrency
+# gates, the request-size and depth checks, the narrowing by `budget` -- and
+# computes the deadline from them, and only then calls the Application's
+# cell: `query`, `transact` or `apply_schema` (`service.py`, the
+# `_query_outcome` and `_mutate_outcome` bodies and the schema operation's own body).
+# The entry of those three cell methods is therefore the point after the
+# bounds are fixed and before the request has touched anything the cell
+# owns; this plug's cell is the in-memory `structured.ApplicationCell`, which has no
+# connection at all, so the point is "before the cell has done anything".
+# A catalog read never calls them and passes through. The wrap replaces the
+# three methods on the cell instance and restores them on exit; no product
+# source changes. The first caller to reach any of them claims the stall
+# (a `threading.Lock` nobody releases), every later call goes through, so
+# exactly ONE request is held. This plug has no statement to count, so the
+# yielded handle keeps `AdmissionHold`'s default `statements_after_release`
+# (`None`).
+
+
+@contextmanager
+def _hold_after_admission_via_stalled_cell_entries(cell_obj: object) -> Iterator[AdmissionHold]:
+    names = ("query", "transact", "apply_schema")
+    originals = {name: getattr(cell_obj, name) for name in names}
+    claimed = threading.Lock()
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+
+    def _stalling(original):
+        def _stalled(*args: Any, **kwargs: Any):
+            if claimed.acquire(blocking=False):
+                entered.release()
+                release.wait()
+            return original(*args, **kwargs)
+
+        return _stalled
+
+    for name, original in originals.items():
+        setattr(cell_obj, name, _stalling(original))
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_admission: no request reached the entry of the cell's query / transact / "
+                f"apply_schema within {timeout_s}s (expected the next query, mutation or schema operation on "
+                "this Application to stall there -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield AdmissionHold(_wait_until_held)
+    finally:
+        release.set()
+        for name, original in originals.items():
+            setattr(cell_obj, name, original)
 
 
 class R2DBConformanceAdapter(ConformanceAdapter):
@@ -990,6 +1053,18 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         comment immediately above it."""
         cell = self._service._cells[session.application_id]  # noqa: SLF001
         return _hold_after_plan_verification_via_stalled_cell_methods(cell)
+
+    # port v1.22: wraps this Application's own cell's `query` / `transact` /
+    # `apply_schema` -- see `_hold_after_admission_via_stalled_cell_entries`'s own module comment
+    # for why the entry of those three is the point after the bounds are fixed.
+    def hold_after_admission(self, session):
+        """See `ConformanceAdapter.hold_after_admission`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point is documented on
+        `_hold_after_admission_via_stalled_cell_entries` and the comment
+        immediately above it."""
+        cell = self._service._cells[session.application_id]  # noqa: SLF001
+        return _hold_after_admission_via_stalled_cell_entries(cell)
 
     def wire_entry(self, application_id: str) -> WireEntry:
         """See `ConformanceAdapter.wire_entry`'s own docstring

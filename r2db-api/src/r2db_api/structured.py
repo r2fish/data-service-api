@@ -934,8 +934,6 @@ class ApplicationCell:
         # (unpaged) order, which page.size alone may have already left
         # behind a cursor.
         limits.check("result_items", min(len(rows), page_size))
-        if deadline is not None and clock is not None:
-            limits.check_deadline(deadline, clock)
         window = rows[: page_size + 1]
         has_more = len(window) > page_size
         page_rows = window[:page_size]
@@ -1158,8 +1156,6 @@ class ApplicationCell:
                 if address is not None:
                     assigned_addresses.append(address)
                 limits.check("result_items", affected)
-            if deadline is not None and clock is not None:
-                limits.check_deadline(deadline, clock)
             # Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit
             # point -- plan validity, then commit vs rollback. Reached
             # only once every operation above has tentatively succeeded
@@ -1504,6 +1500,8 @@ class ApplicationCell:
         result itself to an `int`.
         """
         bound = bind_schema_operation(operation, developer=developer)
+        if deadline is not None and clock is not None:
+            limits.check_deadline(deadline, clock)
         # Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling I-3, WP-2c):
         # the idempotency lookup sits HERE -- as early as possible after
         # binding the request's own shape, before ANY operation-specific
@@ -1566,8 +1564,6 @@ class ApplicationCell:
         else:  # drop_index
             projected_objects = current_objects - 1
         limits.check("schema_objects", projected_objects)
-        if deadline is not None and clock is not None:
-            limits.check_deadline(deadline, clock)
         before_entities = deepcopy(self.entities)
         before_schema = deepcopy(self.schema)
         before_indexes = deepcopy(self.indexes)
@@ -1596,6 +1592,11 @@ class ApplicationCell:
             self.field_constraints = before_field_constraints
             self.schema_revision = before_revision
 
+        # The operation is the next storage action: a budget spent since the
+        # entry check refuses it here, before it changes anything. Nothing
+        # is checked after the operation.
+        if deadline is not None and clock is not None:
+            limits.check_deadline(deadline, clock)
         if bound.operation == "create_entity":
             if bound.entity in self.entities:
                 fail("CONFLICT", "Entity already exists.", status=409)
@@ -1603,23 +1604,28 @@ class ApplicationCell:
             # checked BEFORE any mutation below (limits.enum_members's own
             # text: "before anything is created or altered") -- `fail()`
             # raised from inside this method is not caught by anything
-            # short of unwinding the whole call (only the LATER deadline-
-            # check/audit-hook points below restore `before_*`), so this
-            # must run first, not merely "before `schema_revision`
-            # advances".
+            # short of unwinding the whole call (only the plan, dry-run and
+            # audit-hook points below restore `before_*`; the deadline is
+            # checked at entry, before the idempotency lookup, and again just
+            # before the operation, after the snapshot, and never after the
+            # operation), so this must run first, not merely "before
+            # `schema_revision` advances".
+            # history: CH-0552
             for constraints in bound.field_constraints.values():
                 if constraints.enum is not None:
                     limits.check("enum_members", len(constraints.enum))
             self.entities[bound.entity] = []
-            # Phase 6 WP-2 (design D-3(iv)): a name present in `bound.
+            # a name present in `bound.
             # field_types` gets its declared type; every other name in
             # `bound.fields` keeps the pre-WP-2 default (`None` == `json`,
             # decision (ii)) via `dict.get`'s own implicit fallback.
+            # history: CH-0553
             self.schema[bound.entity] = {name: bound.field_types.get(name) for name in bound.fields}
             self.schema[bound.entity]["id"] = "integer"
             self.indexes[bound.entity] = {}
             # Only fields the request itself gave a `field_constraints`
             # spec ever touch the registry (D-2 (1): "省略 = 制約なし").
+            # history: CH-0554
             for field_name, constraints in bound.field_constraints.items():
                 if constraints.is_declared:
                     self.field_constraints.setdefault(bound.entity, {})[field_name] = constraints
@@ -1637,14 +1643,16 @@ class ApplicationCell:
             self.entities.pop(bound.entity, None)
             self.schema.pop(bound.entity, None)
             self.indexes.pop(bound.entity, None)
-            # R-1: address_reuse is scoped to one entity's lifetime; a drop
+            # address_reuse is scoped to one entity's lifetime; a drop
             # ends that lifetime, so a later create_entity of the same name
             # is a new entity and its addresses start at 1 again.
+            # history: CH-0555
             self._next_id.pop(bound.entity, None)
-            # Contract 1.7.0 (D-2 (4), WP-2a): the registry is scoped to
+            # Contract 1.7.0 (D-2 (4)): the registry is scoped to
             # the entity's own lifetime too, symmetric with `schema`/
             # `indexes`/`_next_id` above -- a later `create_entity` of the
             # same name is a new entity with no inherited constraints.
+            # history: CH-0556
             self.field_constraints.pop(bound.entity, None)
         elif bound.operation == "add_field":
             if bound.entity not in self.entities:
@@ -1656,10 +1664,10 @@ class ApplicationCell:
             # members check above -- checked BEFORE the mutation just
             # below (`bound.constraints` is `None` when the request never
             # carried `enum`/`nullable` at all).
+            # history: CH-0557
             if bound.constraints is not None and bound.constraints.enum is not None:
                 limits.check("enum_members", len(bound.constraints.enum))
-            # Monitor ruling M-6 (rulings-wp2a-review.md, contract
-            # corrigendum): "An add_field declaring nullable: false on an
+            # "An add_field declaring nullable: false on an
             # entity that already holds rows is refused with CONFLICT on
             # the same rule, because every existing row would hold null in
             # the new field" -- the SAME rule `alter_field`'s own existing-
@@ -1667,6 +1675,7 @@ class ApplicationCell:
             # field with no default always starts every existing row at
             # `null`. Checked BEFORE the field is created (fail-closed:
             # nothing has been mutated yet at this point).
+            # history: CH-0558
             if bound.constraints is not None and not bound.constraints.nullable and self.entities[bound.entity]:
                 fail(
                     "CONFLICT",
@@ -1682,6 +1691,7 @@ class ApplicationCell:
             # constraints of one existing field" -- both the entity and
             # the field must already exist (`field_type` redeclaration is
             # rejected earlier, at bind time, `bind_schema_operation`).
+            # history: CH-0559
             if bound.entity not in self.entities:
                 fail("NOT_FOUND", "Entity was not found.", status=404)
             if bound.field not in self.schema.get(bound.entity, {}):
@@ -1689,13 +1699,13 @@ class ApplicationCell:
             declared_type = self.schema[bound.entity][bound.field]
             patch = bound.constraint_patch
             assert patch is not None  # bind_schema_operation always sets this for alter_field
-            # Monitor ruling A/B-2 (rulings-wp3a-review.md, rulings-wp2a-
-            # review.md): compose the request's PATCH against the field's
+            # compose the request's PATCH against the field's
             # EXISTING declared constraints -- only known here, never at
             # bind time (addendum R-b/R-c, D-2 (3)). `enum` omitted/
             # `nullable` omitted each LEAVE the existing value as it is;
             # `enum: null` CLEARS it; an explicit list is fully validated
             # against the field's real declared type now.
+            # history: CH-0560
             existing_constraints = self.field_constraints.get(bound.entity, {}).get(bound.field, FieldConstraints())
             new_nullable = existing_constraints.nullable if patch.nullable_omitted else patch.nullable
             if patch.enum_clear:
@@ -1731,6 +1741,7 @@ class ApplicationCell:
             # row between this scan and `entity_registry[...]` below), so
             # the scan-then-write sequence is already atomic by
             # construction.
+            # history: CH-0561
             violated_declaration: str | None = None
             for row in self.entities[bound.entity]:
                 value = row.get(bound.field)
@@ -1764,9 +1775,10 @@ class ApplicationCell:
             if bound.index in self.indexes.get(bound.entity, {}):
                 fail("CONFLICT", "Index already exists.", status=409)
             if bound.unique and self._existing_duplicate(bound.entity, bound.index_fields):
-                # WP-2 review M-1: unify with every other CONFLICT in this
+                # unify with every other CONFLICT in this
                 # module at HTTP 409 (this one previously fell through to
                 # `fail`'s 400 default).
+                # history: CH-0562
                 fail("CONFLICT", "Existing data violates the requested uniqueness.", status=409)
             self.indexes.setdefault(bound.entity, {})[bound.index] = {"fields": bound.index_fields, "unique": bound.unique}
         else:  # drop_index
@@ -1774,10 +1786,11 @@ class ApplicationCell:
                 fail("NOT_FOUND", "Entity was not found.", status=404)
             if bound.index not in self.indexes.get(bound.entity, {}):
                 fail("NOT_FOUND", "Index was not found.", status=404)
-            # R-5, corrigendum M-6: dropping a unique index removes a
+            # dropping a unique index removes a
             # guardrail (uniqueness) and can silently re-enable upsert's
             # CAPABILITY_UNSUPPORTED gate to flip -- SI-09 destructive
             # confirmation applies exactly like drop_entity.
+            # history: CH-0563
             require_destructive_confirmation(
                 bound.destructive, bound.confirmation,
                 drop_index_confirmation_phrase(bound.entity, bound.index, self.schema_revision),
@@ -1787,12 +1800,6 @@ class ApplicationCell:
                 recovery="create_index with the same definition restores it -- an index carries no data of its own, so this fully restores a non-unique index; recreating a UNIQUE index re-validates existing rows against that uniqueness and can instead fail with CONFLICT if data written after the drop now violates it.",
             )
             del self.indexes[bound.entity][bound.index]
-        if deadline is not None and clock is not None:
-            try:
-                limits.check_deadline(deadline, clock)
-            except Exception:
-                _restore_before_snapshot()
-                raise
         # Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit point --
         # plan validity, then commit vs rollback. Reached only once the
         # operation branch above has already tentatively succeeded (a
@@ -1821,15 +1828,16 @@ class ApplicationCell:
             descriptor = self._describe_entity(bound.entity) if bound.entity in self.entities else None
             _restore_before_snapshot()
             return SchemaOutcome(committed=False, revision=before_revision, descriptor=descriptor, plan=expected_plan, request_id=request_id)
-        # Phase 4 (design D-2, item 2): every schema operation is
+        # every schema operation is
         # fail-closed class, unconditionally (unlike `transact`, there is
         # no non-destructive schema operation) -- the pre-commit hook is
         # called as the last thing this method does before its own commit
         # point (here: `schema_revision += 1` and returning). A raise here
         # restores every piece of state this method may have mutated,
-        # using the same `before_*` snapshots the deadline-check branch
-        # above already relies on, and propagates -- fail-closed by
+        # using the same `before_*` snapshots the dry-run and plan-mismatch
+        # branches above use, and propagates -- fail-closed by
         # construction, no separate rollback path needed.
+        # history: CH-0564
         if audit_hook is not None:
             try:
                 audit_hook.pre_commit()
