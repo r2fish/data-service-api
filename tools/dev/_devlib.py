@@ -46,8 +46,8 @@ JOURNAL_NAME = "dev-mutate-journal.json"
 
 # Exit codes kept clear of pytest's own 0-5.
 RESTORE_FAILED = 70  # a mutated file could not be verified as restored
-REFUSED = 75         # refused to start: unfinished mutation journal, or (gate.py/perf_baseline.py)
-                     # the exclusive suite lock timed out (dsa_testpg.TestPgError)
+REFUSED = 75         # refused to start: unfinished mutation journal, or (gate.py/perf_baseline.py/
+                     # fold.py --apply) the suite lock could not be had (dsa_testpg.SuiteLockUnavailable)
 PARTIAL = 76         # finalize: committed, but not (fully) merged
 ERROR = 78           # precondition / usage error
 
@@ -129,9 +129,10 @@ def journal_blocker(root: Path) -> str | None:
 # from a real breakage by exit code alone. Detected here by the launcher's
 # own, fixed error text (never a DSN or password -- `tools/testpg/
 # dsa_testpg.py`'s own module docstring) rather than re-deriving the
-# condition from `dsa_testpg.gate_running()`, which only reports "right
-# now", not "at the moment this subprocess's own conftest.py actually
-# tried" -- a real race window a pre-check cannot close.
+# condition from `dsa_testpg.gate_running()`, which only reports "right now"
+# (R-44 WP-4: a live gate intent, or a refused shared attempt on suite.lock),
+# not "at the moment this subprocess's own conftest.py
+# actually tried" -- a real race window a pre-check cannot close.
 #
 # The marker text alone is NOT enough (found the hard way, running this
 # tool's own WP-2 mutation spec against tools/tests/test_testpg.py: a

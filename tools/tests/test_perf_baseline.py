@@ -642,6 +642,72 @@ def test_perf_baseline_restores_the_environment_when_run_raises(tmp_path, monkey
     assert observed == len(_FAKE_CLUSTER_ENV) + 1
 
 
+def _perf_registry(tmp_path):
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"adapters": []}), encoding="utf-8")
+    return registry
+
+
+def test_perf_baseline_cluster_startup_failure_exits_78(tmp_path, monkeypatch, capsys):
+    """R-44 WP-4 (work order §5.1 (b) 2): a cluster that will not start
+    (`dsa_testpg.cluster()` raising `TestPgError`) is a wrong precondition,
+    exit 78, not the 1 it used to be; and the exclusive lock is released on
+    the way out.
+
+    mutation (`tools/perf_baseline.py`): narrow the 78 to the lock stage
+    (`return ERROR if stage == "lock" else 1`, i.e. `stage in ("lock",
+    "cluster")` -> `stage == "lock"`) -- this test goes red because a
+    cluster start-up failure then exits 1."""
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+
+    @contextlib.contextmanager
+    def failing_cluster():
+        raise pb.dsa_testpg.TestPgError("cluster start-up failed (simulated)")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(pb.dsa_testpg, "cluster", failing_cluster)
+    code = pb.main(["--registry", str(_perf_registry(tmp_path))])
+    assert code == 78
+    assert "cluster start-up failed (simulated)" in capsys.readouterr().err
+    pb.dsa_testpg._acquire_suite_lock(exclusive=True, wait=1.0, base=base).release()
+
+
+def test_perf_baseline_lock_refusal_stays_75_and_base_dir_failure_is_78(tmp_path, monkeypatch, capsys):
+    """R-44 WP-4 (work order §5.1 (b) 2, 4): another live gate's
+    `gate.intent` is the lock being unavailable -- 75, as before -- while a
+    base directory that fails `_base_dir()`'s own symlink check is a wrong
+    precondition, 78. The cluster is never reached in either case.
+
+    mutation (`tools/perf_baseline.py`): make the REFUSED branch catch the
+    plain `dsa_testpg.TestPgError` (`except dsa_testpg.SuiteLockUnavailable`
+    -> `except dsa_testpg.TestPgError`) -- the 78 half goes red because the
+    symlinked base dir then exits 75."""
+    real = pb.dsa_testpg._base_dir  # before the patch below
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: base)
+    monkeypatch.setattr(pb.dsa_testpg, "cluster", lambda: pytest.fail("the cluster must not be reached"))
+    registry = _perf_registry(tmp_path)
+
+    other = pb.dsa_testpg._acquire_suite_lock(exclusive=True, wait=1.0, base=base)  # a live other gate
+    try:
+        assert pb.main(["--registry", str(registry)]) == 75
+    finally:
+        other.release()
+    assert "gate intent already present" in capsys.readouterr().err
+
+    tmp_root = tmp_path / "tmp-root"
+    tmp_root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_root / f"dsa-testpg-{os.getuid()}").symlink_to(elsewhere)
+    monkeypatch.setattr(pb.dsa_testpg, "_base_dir", lambda *a, **k: real(tmp_root=tmp_root))
+    assert pb.main(["--registry", str(registry)]) == 78
+    assert "symlink" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------
 # R-80 -- ROUNDTRIP lines (WO §1.2 D-1, §2.2).
 # ---------------------------------------------------------------------

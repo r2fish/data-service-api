@@ -71,6 +71,17 @@ class TestPgError(Exception):
     contain a DSN or a password (work order §2.1)."""
 
 
+class SuiteLockUnavailable(TestPgError):
+    """The suite lock could not be taken: the wait ran out, or another LIVE
+    gate already holds `gate.intent`. R-44 WP-4 (work order §5.1 (b) 4):
+    split out of `TestPgError` so the tools that take the exclusive lock
+    (`gate.py`, `perf_baseline.py`, `fold.py --apply`) can answer 75 (refused
+    to start, try later) for this and only this, and 78 (a precondition is
+    wrong: a symlinked or foreign-owned base dir, a cluster that will not
+    start) for every other `TestPgError`. A subclass, so every existing
+    `except TestPgError` and `pytest.raises(TestPgError)` still matches."""
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -293,10 +304,12 @@ def _acquire_suite_lock(exclusive: bool, wait: float, base: Path | None = None) 
     then flocks `LOCK_EX` on `suite.lock`. Shared: waits for the intent to
     stop being LIVE (`_intent_is_live()`, not mere existence), then flocks
     `LOCK_SH`. Either flock acquisition polls `LOCK_NB` at `_LOCK_POLL`
-    (`fcntl.flock` has no native timeout) and raises `TestPgError` past the
-    deadline, cleaning up whatever this call itself created (the intent
-    file/flock, the open fd) before re-raising -- never leaves a stray
-    `gate.intent` or leaks an fd on a timeout."""
+    (`fcntl.flock` has no native timeout) and raises `SuiteLockUnavailable`
+    (a `TestPgError` subclass; R-44 WP-4: a bad base dir from `_base_dir()`
+    stays a plain `TestPgError`) past the deadline, cleaning up whatever this
+    call itself created (the intent file/flock, the open fd) before
+    re-raising -- never leaves a stray `gate.intent` or leaks an fd on a
+    timeout."""
     base = _base_dir() if base is None else base
     deadline = time.monotonic() + wait
     intent = _intent_path(base)
@@ -307,7 +320,7 @@ def _acquire_suite_lock(exclusive: bool, wait: float, base: Path | None = None) 
             fcntl.flock(intent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(intent_fd)
-            raise TestPgError(f"gate intent already present (another gate running?): {intent}")
+            raise SuiteLockUnavailable(f"gate intent already present (another gate running?): {intent}")
         # Own the flock now (freshly created, or reclaimed from a stale leftover either way) --
         # record OUR pid so a future stale-check has something meaningful to have overwritten.
         os.ftruncate(intent_fd, 0)
@@ -315,7 +328,7 @@ def _acquire_suite_lock(exclusive: bool, wait: float, base: Path | None = None) 
     else:
         while _intent_is_live(intent):
             if time.monotonic() >= deadline:
-                raise TestPgError(f"timed out after {wait}s waiting for gate intent to clear: {intent}")
+                raise SuiteLockUnavailable(f"timed out after {wait}s waiting for gate intent to clear: {intent}")
             time.sleep(_LOCK_POLL)
     lock_path = _suite_lock_path(base)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -327,7 +340,7 @@ def _acquire_suite_lock(exclusive: bool, wait: float, base: Path | None = None) 
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise TestPgError(
+                    raise SuiteLockUnavailable(
                         f"timed out after {wait}s waiting for the "
                         f"{'exclusive' if exclusive else 'shared'} suite lock: {lock_path}"
                     )
@@ -384,15 +397,21 @@ def gate_running(base: Path | None = None) -> tuple[bool, str]:
     absent" pair with this single check). True when `gate.intent` is LIVE
     (review M-1: verified via `_intent_is_live()`, not mere existence -- a
     stale intent from a crashed gate is cleaned up as a side effect and
-    correctly reported as "not running"), or when the exclusive lock cannot
-    be taken without blocking -- which is also true whenever ANY owned-mode
-    pytest run currently holds the shared lock, so this one check subsumes
-    both of the checks it replaces. Never blocks, never waits, and (review
-    MINOR-4) never CREATES the base dir or the lock file when neither
-    already exists: a failed `LOCK_NB` attempt returns immediately, and a
-    successful one is released immediately, so this probe itself can never
-    delay or starve a real waiter, or materialize state that was never
-    there."""
+    correctly reported as "not running"), or when `suite.lock` exists and a
+    SHARED lock attempt on it (`LOCK_SH|LOCK_NB`) is refused, which only an
+    EXCLUSIVE holder can cause. R-44 WP-4 (work order §5.1 (b) 1, §4.1;
+    code review 1): the probe is a SHARED attempt, not the old exclusive
+    one, because an exclusive attempt also fails whenever any ordinary
+    owned-mode pytest run holds the shared side, which made a plain test
+    run block a handover (measured 2026-09-16); a shared holder alone is
+    therefore `(False, "")`. The lock attempt is kept next to the intent
+    check because the intent alone is not proof: a gate's intent file can be
+    unlinked by a racing release or a racing stale-reclaim while that gate
+    still holds `suite.lock` exclusively (reviewer reproduction, WP-4; the
+    unlink race itself is left as an observation). Never blocks, never
+    waits, and (review MINOR-4) never CREATES the base dir or any file, so
+    this probe can neither delay a real waiter nor materialize state that
+    was never there; a successful attempt is released immediately."""
     if base is None:
         base = _resolve_base_dir_readonly()
         if base is None:
@@ -407,9 +426,9 @@ def gate_running(base: Path | None = None) -> tuple[bool, str]:
         return False, ""
     fd = os.open(lock_path, os.O_RDONLY)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
-        return True, f"suite lock held: {lock_path}"
+        return True, f"exclusive suite lock held: {lock_path}"
     else:
         fcntl.flock(fd, fcntl.LOCK_UN)
         return False, ""
@@ -890,7 +909,9 @@ def _wait_ready(bindir: Path, socket_dir: Path, postmaster: subprocess.Popen, lo
 
 _MODE_DOC = """Decision table for DSA_TEST_PG (work order §2.1):
 
-  DSA_TEST_PG=external          -> both DSNs must already be set, or fail
+  DSA_TEST_PG=external          -> both DSNs + PGHOST + PGPORT must already be set, or fail;
+                                   each DSN's host= must be present and equal PGHOST, its port=
+                                   (when written) equal PGPORT, else fail (names, never values)
   DSA_TEST_PG=owned:...         -> both DSNs + PGPASSFILE must be set; do not start
   this process is really an
     xdist worker, DSA_TEST_PG
@@ -931,7 +952,17 @@ def ensure_for_pytest() -> None:
     mode = os.environ.get(ENV_MODE)
 
     if mode == "external":
-        _require_env(_DSN_NAMES, "DSA_TEST_PG=external")
+        # R-44 WP-4 (work order §5.1 (b) 5, §4.1 R-10): PGHOST and PGPORT too.
+        # A connection that writes no host of its own falls through to PGHOST;
+        # without it that connection would reach libpq's default socket, i.e.
+        # whatever cluster the machine happens to serve there. gate.py,
+        # perf_baseline.py and `_cli_run` already pass both via `Cluster.env()`.
+        _require_env((*_DSN_NAMES, "PGHOST", "PGPORT"), "DSA_TEST_PG=external")
+        # Code review 1: being SET is not enough -- a shell that still exports
+        # PGHOST / PGPORT of the shared cluster while the DSNs name another
+        # one would pass, and a connection that writes no host reaches the
+        # shared cluster. So each DSN's own host= / port= must agree with them.
+        _check_external_dsns_agree_with_pghost()
         # Work order §3.1 (a): never take the shared lock here. This is the
         # mode gate.py itself launches its own child pytest with, WHILE
         # already holding the exclusive lock -- flock(2)'s per-open-file-
@@ -999,6 +1030,42 @@ def ensure_for_pytest() -> None:
         return
 
     raise TestPgError(f"unrecognized {ENV_MODE}={mode!r}")
+
+
+_CONNINFO_PAIR = re.compile(r"(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S*)")
+
+
+def _conninfo_values(dsn: str) -> dict[str, str] | None:
+    """The `key=value` pairs of a libpq key/value conninfo string (a
+    single-quoted value loses its quotes and backslash escapes); None for a
+    URI-form DSN, which this repository never uses and `external` refuses."""
+    if dsn.lstrip().lower().startswith(("postgres://", "postgresql://")):
+        return None
+    out: dict[str, str] = {}
+    for key, raw in _CONNINFO_PAIR.findall(dsn):
+        if len(raw) >= 2 and raw[0] == raw[-1] == "'":
+            raw = re.sub(r"\\(.)", r"\1", raw[1:-1])
+        out[key] = raw
+    return out
+
+
+def _check_external_dsns_agree_with_pghost() -> None:
+    """R-44 WP-4 code review 1 (work order §5.1 (b) 5): in `external` mode
+    each DSN's `host=` must be present and equal `PGHOST`, and its `port=`,
+    when written, must equal `PGPORT`. A mismatch fails naming the two
+    variables only -- never a value (a DSN can carry a password). A DSN
+    with no `host=` is refused (a host-less connection in `external` falls
+    through to PGHOST/libpq's default socket); a URI-form DSN is refused."""
+    for name in _DSN_NAMES:
+        pairs = _conninfo_values(os.environ[name])
+        if pairs is None:
+            raise TestPgError(f"DSA_TEST_PG=external: {name} is not in key=value form (URI-form DSNs are refused)")
+        if "host" not in pairs:
+            raise TestPgError(f"DSA_TEST_PG=external: {name} writes no host= (a host-less DSN would fall through to PGHOST)")
+        if pairs["host"] != os.environ["PGHOST"]:
+            raise TestPgError(f"DSA_TEST_PG=external: the host= of {name} does not match PGHOST")
+        if "port" in pairs and pairs["port"] != os.environ["PGPORT"]:
+            raise TestPgError(f"DSA_TEST_PG=external: the port= of {name} does not match PGPORT")
 
 
 def _require_env(names, context: str) -> None:

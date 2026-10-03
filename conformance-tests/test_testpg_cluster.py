@@ -185,8 +185,9 @@ def test_cluster_context_manager_tears_down_and_has_a_distinct_identity():
     """Review B-1: compares two INDEPENDENTLY-STARTED nested clusters
     against each other, never the ambient session/suite DSN -- reading
     `os.environ[R2DB_DSN]`/`PGPASSFILE` directly would `KeyError` under CI
-    (`DSA_TEST_PG=external` sets only the two DSNs, no `PGPASSFILE`: the
-    container is TCP + password-in-DSN) and, worse, would connect straight
+    (`DSA_TEST_PG=external` sets the two DSNs and, since R-44 WP-4,
+    `PGHOST`/`PGPORT`, but no `PGPASSFILE`: the container is TCP +
+    password-in-DSN) and, worse, would connect straight
     to the SHARED cluster under any `external` that happens to name one --
     exactly what work order §1 forbids at every stage of implementation or
     testing."""

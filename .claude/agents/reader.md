@@ -25,7 +25,7 @@ tools: Read, Grep, Glob, Bash, Write
 ## 禁止事項
 
 - **読み取り専用。** repository のファイルを一切変更しない。git の状態を変えるコマンド(add / commit / checkout / stash / reset / merge 等)を実行しない。
-- **pytest を実行しない**(`--collect-only` も含む。PostgreSQL と全 DSN 環境変数を要し、完了ゲートと競合する。`OPERATING_CONDITIONS` §1.3 の 20、§2 の 12)。
+- **pytest を実行しない**(`--collect-only` も含む。使い捨ての PostgreSQL を起動して suite lock の共有側を取り、完了ゲートと性能計測を待たせる。`OPERATING_CONDITIONS` §1.3 の 20、§2 の 12)。
 - 書き込みは scratchpad 配下の読解ノートだけ。`/tmp` 直下や repository 内に一時ファイルを置かない。
 - 下請けの Agent を起動しない(§1.7 の 47)。
 - **広い探索をしない。** 渡された範囲から参照をたどる読みは行うが、所在が分からないものを探し回らない。足りない所在は「所在が必要: …」と報告する(監督が `explorer` に出す)。

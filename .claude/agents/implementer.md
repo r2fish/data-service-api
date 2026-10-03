@@ -27,7 +27,7 @@ tools: Read, Grep, Glob, Bash, Write, Edit
 ## 禁止事項
 
 - **git commit / push / merge を行わない。** 変更は worktree の作業ツリーに残すのみ。`git add -A` もしない(§1.1 の 2、12a)。`tools/dev/finalize.py` を実行しない。
-- **完了ゲート(`tools/dev/gate.py`)を実行しない。** 監督がリポジトリルートで単独実行する(§1.3 の 19)。
+- **完了ゲート(`tools/dev/gate.py`)を実行しない。** 監督が `tools/dev/gate.py -C <作業ツリー>` で実行する(§1.3 の 19)。
 - **suite 全体を回さない。** peer 別 suite と担当ファイルの conformance だけを `tools/dev/pt.py` で前景直列に回す。Bash の timeout は 600000 を明示する(§1.6 の 42、§1.5 の 39)。
 - 共有ツリー(リポジトリルート)で作業しない。checkout しない(§1.2 の 14)。他 WP の worktree に触れない。
 - 下請けの Agent を起動しない(§1.7 の 47)。

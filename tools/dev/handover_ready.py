@@ -18,11 +18,14 @@ Usage:
 Checks: the statement above; gate not running (WP-2, docs/work-orders/
 WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1 (c): replaces the former "no
 pytest process" + "gate-hold flag absent" pair with `dsa_testpg.gate_running()`
--- true when `gate.intent` is present or the exclusive suite lock cannot be
-taken without blocking, which also covers "some pytest run is still active"
-since every owned-mode run holds that lock's shared side); the main checkout
-on main and clean; no unfinished mutation journal in any worktree; each
---worktree clean and merged; the handover document committed on main.
+-- true while a LIVE `gate.intent` exists or a shared attempt on
+`suite.lock` is refused, i.e. while an exclusive suite-lock holder (gate.py /
+perf_baseline.py / fold.py --apply) is running. R-44 WP-4, work order §5.1
+(b) 1: an ordinary pytest run holds only the lock's shared side, which does
+not refuse a shared attempt, so it cannot block a handover); the
+main checkout on main and clean; no unfinished mutation journal in any
+worktree; each --worktree clean and merged; the handover document committed
+on main.
 Output: one line per check, then READY or NOT READY; with --handover and READY,
 the continuation prompt between BEGIN/END lines.
 Exit: 0 READY; 1 NOT READY; 78 precondition error.
@@ -82,7 +85,7 @@ def check(cwd: Path, running_agents_denied: bool, own_worktrees: list[str],
     results: list[tuple[bool, str]] = []
     results.append((running_agents_denied, "no running subagents / background tasks (stated by the chat)"))
     running, reason = dsa_testpg.gate_running()
-    results.append((not running, "gate not running (no intent, exclusive lock free)" + (f" -- {reason}" if running else "")))
+    results.append((not running, "gate not running (no live gate intent, no exclusive suite lock)" + (f" -- {reason}" if running else "")))
     branch = dl.git(main_root, "branch", "--show-current").strip()
     dirty = dl.git(main_root, "status", "--porcelain", "--untracked-files=all").strip()
     results.append((branch == "main" and not dirty, f"main checkout on main and clean (branch={branch}, dirty={len(dirty.splitlines())})"))

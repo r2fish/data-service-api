@@ -88,16 +88,16 @@ judgement, comparing the SAME (peer, plug, op) row across a `--concurrency
   the shared `.venv` -- they run entirely in memory (r2db) or against a
   throwaway SQLite `:memory:` database (MitateDB), exactly like the
   conformance suite's own in-process plugs.
-- **HTTP plugs** (`r2db-api-http`, `MitateDB-api-http`) need a **real,
-  reachable local PostgreSQL** -- the same one the conformance suite and
-  `pytest` already require. Each reads its own admin DSN from an
-  environment variable, defaulting to a local Unix-socket connection if
-  unset:
-  - `R2DB_TEST_ADMIN_DSN` (default `host=/tmp port=5432 dbname=postgres`)
-  - `MITATEDB_TEST_ADMIN_DSN` (default `host=/tmp port=5432 dbname=postgres`)
+- **HTTP plugs** (`r2db-api-http`, `MitateDB-api-http`) need a **real
+  PostgreSQL 16**, which this tool starts itself: `main()` takes the
+  exclusive suite lock (`tools/testpg/dsa_testpg.py`; `gate.py` takes the
+  same one, so a perf run never overlaps a gate or another perf run; exit
+  75 when the wait runs out or a gate is live), starts a throwaway cluster
+  and points `R2DB_TEST_ADMIN_DSN`, `MITATEDB_TEST_ADMIN_DSN`, `PGHOST` and
+  `PGPORT` at it for the run, restoring the caller's environment after.
 
-  If neither variable is set and no local PostgreSQL answers on that
-  socket, building the two HTTP-plug adapters fails and the whole run
+  There is no default DSN and no shared server: if the cluster cannot start
+  (no PostgreSQL 16 binaries, a bad base directory; exit 78), the run
   fails loudly (registry entries are all `"required": true` -- this tool
   never silently skips a required plug, mirroring `conformance-tests/
   conftest.py`'s own discovery discipline).

@@ -17,8 +17,8 @@ runbook's own §8 only points there, it does not repeat that material).
 
 **Evidence honesty (R-1, WP-6)**: everything this repository's own test
 suite exercises (`tests/test_postgres.py`, the `MitateDB-api-http`
-conformance adapter) runs against a local PostgreSQL 16 cluster (Homebrew,
-`host=/tmp port=5432`) -- **no step in this runbook has yet been executed
+conformance adapter) runs against a local PostgreSQL 16 cluster (a
+throwaway one per run, R-44) -- **no step in this runbook has yet been executed
 against a real Cloud SQL instance or a real Cloud Run deployment**. This
 document is deploy-time procedure, not deploy-time evidence; `security/
 CONTROL_MAPPING.md`'s own MitateDB column records `production_platform_

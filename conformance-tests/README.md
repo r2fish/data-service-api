@@ -130,10 +130,10 @@ through a superuser-equivalent DSN, one environment variable per peer:
 - `R2DB_TEST_ADMIN_DSN` (shared with `r2db-api/tests/test_postgres.py`)
 - `MITATEDB_TEST_ADMIN_DSN` (shared with `MitateDB-api/tests/test_postgres.py`)
 
-Both default to a local unix-socket DSN (`host=/tmp port=5432 dbname=postgres`)
-when unset. That default does not reach a server started in a container on a
-published loopback port -- set both variables explicitly to a loopback TCP
-DSN whenever PostgreSQL is not reachable over `/tmp`.
+Locally nothing is set by hand: each pytest run's `conftest.py` starts a
+throwaway PostgreSQL 16 of its own (`tools/testpg/dsa_testpg.py`) and injects
+both DSNs and `PGHOST` / `PGPORT`; there is no default DSN. To use a server
+you started yourself (CI), set `DSA_TEST_PG=external` plus both DSNs, `PGHOST`, `PGPORT`.
 
 The server must be started with `max_connections=300`. The completion gate
 runs the suite with `-n 5 --dist loadgroup` (see `conftest.py`'s
@@ -154,7 +154,7 @@ package before running the gate. Install the peers themselves with
 (each extras argument is quoted so zsh does not treat `[test]` as a glob).
 
 The completion gate command is `python -m pytest -q -n 5 --dist loadgroup`,
-run solo (no other pytest process concurrently against the same server).
+run by `tools/dev/gate.py` on its own cluster, holding the exclusive suite lock.
 CI (`.github/workflows/ci.yml`) runs this identical command against a
 `postgres:16` container started with `-c max_connections=300` and DSNs
 overridden to that container's loopback address; CI's Python 3.11 job's
@@ -175,8 +175,8 @@ branch runs only the 3.11 job -- see the workflow's file header),
 after PostgreSQL is up and dependencies are installed but before the
 conformance gate itself -- `--collect-only` builds all four adapters at
 collection time (`conftest.py`'s `_discover_and_build`) and performs
-connection verification against PostgreSQL, so this step needs the same
-PostgreSQL server and DSN environment variables as the gate proper. It
+connection verification against PostgreSQL, so this step needs a server too:
+CI's container and variables, or locally the run's own throwaway cluster. It
 does not provision disposable databases (measured: 0 diff in
 `pg_database` / `pg_roles` before and after a `--collect-only` run). This
 is accepted as a known price of measuring the floor from outside pytest

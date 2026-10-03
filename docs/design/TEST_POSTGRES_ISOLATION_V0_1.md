@@ -2,7 +2,7 @@
 
 - 状態: **依頼者裁定済み（2026-09-16、§6 の Q-1〜Q-9 はすべて推奨を採用）**。作業は作業指示書 `docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md` で行う。台帳は計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §8 の **R-44**。
 - 起票: 2026-09-16。契機は §1.1 の 3 件。設計レビュー 1 回（同日、§9）の指摘を反映済み。
-- 改版: v0.1（2026-09-16）起票。v0.2（2026-09-16）§6 に依頼者裁定を、§3.4 に起動の試走結果を、D-2 に `LC_ALL` の必要性を追記した。 v0.3（2026-09-16）§10 に WP-3 の実施記録（F-16 spike の実測、D-7 からの逸脱、完了ゲート、§7 の分担、並列 2 本 × 3 回、監査照合、WP-4 への積み残し）を追記した。
+- 改版: v0.1（2026-09-16）起票。v0.2（2026-09-16）§6 に依頼者裁定を、§3.4 に起動の試走結果を、D-2 に `LC_ALL` の必要性を追記した。 v0.3（2026-09-16）§10 に WP-3 の実施記録（F-16 spike の実測、D-7 からの逸脱、完了ゲート、§7 の分担、並列 2 本 × 3 回、監査照合、WP-4 への積み残し）を追記した。 v0.4（2026-10-04）§11 に WP-4 の実施記録（§7 の完了条件 3・4 の実行記録、性能の基準値、積み残しの裁定、完了ゲート）を追記した。
 - 公開規律: 実 DSN・パスワードを置かない（`docs/work-orders/OPERATING_CONDITIONS.md` §2 の 13）。DSN は形だけを書く。
 
 ## 1. 問題
@@ -275,3 +275,108 @@ WP-2 では実施されないまま残っていた（引き継ぎ書 `HANDOVER_2
 - nginx の bind 再試行は `start_nginx_with_bind_retry` の 1 経路にしか掛かっていない。素の `start_nginx()` を直呼びする 4 経路（両 peer の `conformance/real_server_*.py` と `conformance/conformance_adapter_*_socket.py`）は listen ポートを宣言済み URL に焼いてから起動するので、別ポートでの再試行には `declare-surfaces` のやり直しという設計判断が要る。
 - `tools/testpg/dsa_testpg.py` の `external` 分岐は DSN 2 本しか要求せず `PGHOST` を要求しない。host を書かない接続は `external` では共有クラスタへ届く（CI は libpq 既定のソケットに何も無いので失敗して露見する。黙るのは手元で `DSA_TEST_PG=external` に DSN だけを渡した場合である）。
 - `handover_ready.py` の判定が広すぎる件と WP-2 で残した軽微な 3 件（§4.1 の既存項目）。
+
+## 11. WP-4 の実施記録（2026-10-04、v0.4 追記）
+
+作業指示書 `docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md` §5.1（manifest v1.4）。基点は main `01efa56`。着手は依頼者指示 2026-10-04（逐語）: 「R-44 の印を外して WP-4 に着手するチップを出してください」。変更クラスは C（下限。`conformance-tests/README.md` に触れる）、契約の版は変えていない。
+
+### 11.1 §7 の完了条件 3・4 の実行記録（監査照合）
+
+DSN と `DSA_TEST_PG`・`PGHOST` ほかを外した環境で 7 つの形を順に起動し、実行中のプロセス表から「その起動の子孫である `postgres -D <基底>/run-*`」を数えた。pytest の形は、`pytest.main` が戻った後の controller の環境変数も出した（`mode` は `DSA_TEST_PG` の `:` より前、`pghost` は基底からの相対。6・7 の行は、道具の生の出力では `pghost=<base>/None`（`PGHOST` が未設定）であり、path と読み違えないよう `pghost=unset` に書き換えて載せた）。1〜5 が完了条件 3、6・7 が完了条件 4 である。1〜3 は 1 ファイルに絞って起動した（設定の根は 1・2・4 がリポジトリ直下、3 が `MitateDB-api/`、6・7 が `tools/tests/`）。
+
+```
+== 1 root: pytest <one file>
+   exit=0 own_postmasters_seen=1 run_dirs=['run-sy2ur46d'] left_after_exit=[]
+   LF mode=owned pghost=<base>/run-sy2ur46d/s r2db_dsn_set=True mitate_dsn_set=True rc=0
+   4 passed in 0.21s
+== 2 root: pytest r2db-api/tests/<one file>
+   exit=0 own_postmasters_seen=1 run_dirs=['run-v6rg4evc'] left_after_exit=[]
+   LF mode=owned pghost=<base>/run-v6rg4evc/s r2db_dsn_set=True mitate_dsn_set=True rc=0
+   223 passed in 33.72s
+== 3 cd MitateDB-api && pytest tests/<one file>
+   exit=0 own_postmasters_seen=1 run_dirs=['run-6q7vc54d'] left_after_exit=[]
+   LF mode=owned pghost=<base>/run-6q7vc54d/s r2db_dsn_set=True mitate_dsn_set=True rc=0
+   97 passed in 8.58s
+== 4 root: pytest --collect-only -q
+   exit=0 own_postmasters_seen=1 run_dirs=['run-hv_psmt7'] left_after_exit=[]
+   LF mode=owned pghost=<base>/run-hv_psmt7/s r2db_dsn_set=True mitate_dsn_set=True rc=0
+   MitateDB-api/tests/test_sqlite_version_floor.py::test_sqlite_version_meets_the_nulls_first_last_floor
+   5232 tests collected in 5.57s
+== 5 tools/check_collection_floor.py
+   exit=0 own_postmasters_seen=1 run_dirs=['run-xtiiuy9d'] left_after_exit=[]
+   COLLECTION_FLOOR check OK: measured=5232 floor=5232 diff=0
+== 6 pytest tools/tests --collect-only -q
+   exit=0 own_postmasters_seen=0 run_dirs=[] left_after_exit=[]
+   LF mode=unset pghost=unset r2db_dsn_set=False mitate_dsn_set=False rc=0
+   test_dev_tools.py::test_gate_judge[3294 passed, 1 error in 90s-1-False]
+   799 tests collected in 0.48s
+== 7 pytest tools/tests/test_change_class.py
+   exit=0 own_postmasters_seen=0 run_dirs=[] left_after_exit=[]
+   LF mode=unset pghost=unset r2db_dsn_set=False mitate_dsn_set=False rc=0
+   14 passed in 0.01s
+```
+
+- **完了条件 3（起動の形 5 種で専用クラスタが使われる）= 充足。** 1〜5 のすべてで、その起動の子孫の postmaster が 1 つ、実行ごとに別の実行ディレクトリで起動し、終了後に実行ディレクトリは残っていない。1〜4 では DSN 2 本が注入され、`PGHOST` はその実行ディレクトリの socket を指す。DSN は未設定で起動しており、未設定は fail する（WP-3）ので、接続先はその実行のクラスタだけである。
+- **完了条件 4（`pytest tools/tests` がクラスタを起動しない）= 充足。** 6（収集だけ）と 7（PostgreSQL を使わない 1 ファイル）で postmaster は 0、`DSA_TEST_PG` は未設定のまま、DSN は注入されない。`tools/tests` のうちクラスタを自分で起動するテスト（起動部品のテスト）は、テスト本体が起動するものであり、conftest による起動ではない。
+
+### 11.2 性能の基準値（裁定 Q-9）
+
+`tools/perf_baseline.py --warmup 20 --n 200`（K=1。台帳 §0.1.4 の 1 の形）。道具が排他の suite lock を取り、自分の使い捨てクラスタで測った。load average は開始時 5.15 / 8.94 / 13.15、終了時 4.60 / 8.63 / 12.96（直前まで他チャットの完了ゲートが走っていた。計測中は排他ロックにより gate と実行ごとのクラスタを使う pytest は走っていない）。作業ツリーは WP-4 の未コミットの変更を含む（`-dirty`。両 peer の `src` は `01efa56` と同じ）。終了コード 0。
+
+```
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=01efa56-dirty date=2026-10-04
+PERF peer=r2db-api plug=r2db-api transport=in-process op=query n=200 p50_ms=0.119 p95_ms=0.132 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=mutate n=200 p50_ms=0.225 p95_ms=0.300 backend_calls=1.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api transport=in-process op=batch n=200 p50_ms=0.870 p95_ms=1.252 backend_calls=1.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=query n=200 p50_ms=0.140 p95_ms=0.161 backend_calls=12.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=mutate n=200 p50_ms=0.109 p95_ms=0.128 backend_calls=11.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=batch n=200 p50_ms=0.190 p95_ms=0.206 backend_calls=39.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api transport=in-process op=cross_entity n=200 p50_ms=0.145 p95_ms=0.154 backend_calls=18.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=query n=200 p50_ms=1.820 p95_ms=2.045 backend_calls=18.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=mutate n=200 p50_ms=1.895 p95_ms=2.191 backend_calls=20.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-http transport=asgi-inprocess op=batch n=200 p50_ms=2.081 p95_ms=2.262 backend_calls=24.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=query n=200 p50_ms=1.482 p95_ms=1.612 backend_calls=17.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=mutate n=200 p50_ms=1.189 p95_ms=1.426 backend_calls=14.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=batch n=200 p50_ms=2.275 p95_ms=2.626 backend_calls=34.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-http transport=asgi-inprocess op=cross_entity n=200 p50_ms=1.382 p95_ms=1.608 backend_calls=19.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=query n=200 p50_ms=5.354 p95_ms=5.743 backend_calls=18.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=mutate n=200 p50_ms=5.573 p95_ms=6.594 backend_calls=20.00 concurrency=1
+PERF peer=r2db-api plug=r2db-api-socket transport=socket op=batch n=200 p50_ms=5.741 p95_ms=6.758 backend_calls=24.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=query n=200 p50_ms=4.925 p95_ms=6.235 backend_calls=17.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=mutate n=200 p50_ms=5.247 p95_ms=7.299 backend_calls=14.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=batch n=200 p50_ms=8.181 p95_ms=11.316 backend_calls=34.00 concurrency=1
+PERF peer=MitateDB-api plug=MitateDB-api-socket transport=socket op=cross_entity n=200 p50_ms=7.207 p95_ms=12.516 backend_calls=19.00 concurrency=1
+```
+
+- 専用クラスタでの計測は WP-2（main `8568ca3`、2026-09-16）から道具の既定である（`tools/perf_baseline.py` は自分のクラスタを起動する）。したがって同日より後にこの道具で取った値は専用クラスタ上の値であり、各項目の性能差分は同日・同引数の前後比較で取る運用になっている（例: `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §12.5）。上の表は、裁定 Q-9 の「専用クラスタで 1 回取り直す」を `--warmup 20 --n 200` の形で記録として残すものである。フェーズ8〜10 の設計の表（共有クラスタ上の値）とは比べない。
+- 閾値との突合はしていない（`--n` の違う run は比べられない — `tools/PERF_BASELINE_README.md`。直近の記録 `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §12.5 は `--n 100 --warmup 10`）。本変更は両 peer の `src` に触れないので、前後の差分は取っていない。
+
+### 11.3 積み残し（§10.7、作業指示書 §4.1）の裁定
+
+| 項目 | 裁定（監督 2026-10-04。依頼者の事後確認の対象） |
+|---|---|
+| `handover_ready.py` の判定が広すぎる | 直した。`gate_running()` は、生きた `gate.intent` があるか、`suite.lock` への `LOCK_SH` の非ブロッキング試行が拒まれる（排他の保持者がいる）ときに真を返す。共有の保持者だけなら偽。intent の unlink の競合（走っている gate の intent が消えうる）は直さない（観察。`suite.lock` の排他は保たれ、判定は `LOCK_SH` の試行が受け止める。作業指示書 §5.1 (d)(ii)） |
+| WP-2 の軽微な 3 件 | 3 件とも直した。排他ロックの待ち切れと他の gate の生きた intent だけが 75、基底ディレクトリの検査失敗とクラスタの起動失敗は 78、`expect: "error"` は終了コード 2〜4 |
+| `external` が `PGHOST` を要求しない（R-10） | 要求する形にした（`PGHOST`・`PGPORT`。2 本の DSN の `host=`・`port=` との一致まで見る。DSN の `hostaddr=` と環境の `PGHOSTADDR`・`PGSERVICE` は見ない — 観察。このリポジトリの DSN は `hostaddr=` を使わない。残っていた場合の挙動は試していない）。CI の `env:` に 2 行を足した。CI では host を書かない接続は元から届く先が無く失敗していたので、緑の経路の挙動は変わらない見込みだが、手元では検証できない |
+| nginx の bind 再試行が 4 経路に掛かっていない（R-7） | 足さない（観察）。4 経路のポートは起動前に `surfaces` の宣言値として確定しており、別ポートでの再試行は宣言と実体を食い違わせる。競争に負けた実行は赤で止まり、偽の緑にはならない。2026-09-16 以降の引き継ぎ書に発生の記録は無い |
+| CI の TimeZone（Q-6） | `docker run` に `-c TimeZone=Asia/Tokyo` を足した。手元では検証できない |
+
+§8 の未確認の点のうち「`postgres:16` イメージの既定の TimeZone」は、明示したので既定値に依らなくなった。「専用クラスタで性能の値が変わるか」は 11.2 のとおり、比べる相手を専用クラスタ上の値に統一済みである。
+
+### 11.4 変異・完了ゲート・レビュー
+
+- 変異（`tools/dev/mutate.py`、16 件すべて `expect=red got=red`、復元は 5 ファイルとも sha256 2 回照合）: 完了条件 1 = M1（`LOCK_SH` の試行を外す）・M1b・M1c（`LOCK_SH` を `LOCK_EX` に変える。共有ロックだけで真になる）、2 = M2、3 = M3・M3b、4 = M4-gate・M4-fold・M4-perf・M4-intent・M4-symlink、5 = M5-host・M5-port（要求の一覧から外す）・M6-host・M6-port・M6-nohost（DSN との照合を外す）。`tools/tests` は `808 passed`。
+- 完了ゲート（監督。main `11e0568` を取り込んだ作業ツリー、`tools/dev/gate.py --label r44wp4 -C <worktree>`）:
+
+```
+gate: 5232 passed, 2 subtests passed in 1181.43s (0:19:41)
+gate: judge=PASS
+gate: pg_database/pg_roles diff 0
+gate: info=shared pg_database/pg_roles diff 0
+```
+
+  1 回目（main `01efa56` の上、`5232 passed, 2 subtests passed in 1045.66s (0:17:25)`、judge=PASS）は、実行中に並行チャットが main を進めた（台帳 R-122 の閉止）ので正本にしない。開始時の load average は 15.25 / 27.35 / 28.36 で（直前の 1 回目のゲートの負荷が残っていた。排他ロックにより他の gate と実行ごとのクラスタを使う pytest は走っていない）、所要は通常の 2 倍を超えた。ゲートの開始後に変えたのは文書（記録の追記、`docs/work-orders/OPERATING_CONDITIONS.md` §4 の 28、r2db の runbook の 2 行）だけであり、その後 `tools/tests` を回し直した（`finalize.py --tools-tests`）。性能差分（`OC` §1.3 の 27）は添えていない — 両 peer の `src` を変えておらず、11.2 が同じ作業ツリーの値である。
+- レビュー: コード 1 回、文書 1 回、修正後の再確認 1 回。指摘の全件と裁定は引き継ぎ書 `docs/work-orders/HANDOVER_20261004_R44_WP4_FABLE.md` の「裁定」節。
+- 受け入れ監査: `evidence-auditor` 1 回。作業指示書 §5.1 (b) の 1〜8 と設計 §7 の 3・4、性能の基準値の記録、運用条件の書式規約、行数不変は充足。9 (記録の書き換えの開示) と 10 (変異の対応の記録、`tools/tests` の回し直し) の不足と、§1.6 の 41 の旧条項の扱いは同じ変更セットで補った。
+- **§7 の完了条件 1〜5 はすべて充足した（1・2・5 は §10.4、3・4 は 11.1）。R-44 を閉じる。**
+
