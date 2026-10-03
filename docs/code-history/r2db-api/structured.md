@@ -33,6 +33,20 @@ new:
 (only the plan, dry-run and audit-hook points below restore `before_*`; the deadline is checked once at entry, before anything is snapshotted, and never after the operation)
 ```
 
+### correction: 2026-10-03
+
+- reason: R-42 -- the in-memory schema operation's entry deadline check now sits before the idempotency lookup, reply and reservation (an idempotency record read is a storage operation, and the next operation is refused once the budget is spent), so the comment names that point
+
+old:
+```
+the deadline is checked once at entry, before anything is snapshotted
+```
+
+new:
+```
+the deadline is checked once at entry, before the idempotency lookup and before anything is snapshotted
+```
+
 ## CH-0553
 
 - moved from: `src/r2db_api/structured.py` (`ApplicationCell._apply_schema_locked`)

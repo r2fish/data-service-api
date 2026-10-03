@@ -723,6 +723,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - request budget, the connection -- `r2db-api/tests/test_expired_request_checks.py::test_a_failed_connection_attempt_after_the_budget_is_spent_is_limit_exceeded`, `::test_a_replacement_connection_that_fails_after_the_budget_is_spent_is_limit_exceeded`.
 - request budget, where it starts -- `r2db-api/tests/test_expired_request_checks.py::test_the_wait_for_a_pooled_connection_counts_against_the_budget`.
 - request budget, in memory -- `r2db-api/tests/test_expired_request_checks.py::test_the_in_memory_mutation_checks_before_each_operation_and_not_after_the_last`, `::test_the_in_memory_schema_operation_checks_before_its_operation_and_not_after`.
+- request budget, in memory, before the idempotency lookup -- `r2db-api/tests/test_expired_request_checks.py::test_the_in_memory_schema_operation_refuses_a_replay_whose_budget_is_spent`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_upgrade_applications_without_lock_timeout_is_a_usage_error`, `::test_upgrade_applications_without_lock_timeout_is_a_usage_error_with_dry_run`, `::test_upgrade_applications_rejects_an_ill_formed_lock_timeout_through_the_cli`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_validate_lock_timeout_value_accepts_well_formed_values`, `::test_validate_lock_timeout_value_rejects_ill_formed_values`, `::test_upgrade_applications_cli_lock_timeout_value_reaches_pgoptions`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_run_upgrade_script_keeps_the_dsns_own_pgoptions_alongside_lock_timeout`.
@@ -736,7 +737,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **F-17 judges the DECLARATION, not the effective value inside a running process**: what a reader connection actually carries is read only by the Evidence tests above, never by the check itself.
 - **Disclosed difference between the peers**: MitateDB-api's `0013_role_statement_timeouts.sql` puts a role-level `statement_timeout` on its application runtime/developer roles as well, while r2db-api leaves those two roles without one.
 - **A request can end later than its `execution_ms`**: the pool's checkout ping, a connect (libpq's own lower bound applies), the audit write and the `COMMIT` are not bound by it, and a host that never answers fails at its connect timeout, so it can answer 413 where an unreachable one answers 503.
-- **The deadline checks are measured by removing them**: each check, the threshold, the mapping and the bound turn their named test red (39 mutations, 39 red).
+- **The deadline checks are measured by removing them**: each check, the threshold, the mapping and the bound turn their named test red (41 mutations, 41 red).
 - **Only the lock WAIT is bounded on the provisioning path**: once a lock is granted, how long the statement holds it is deliberately left unbounded; the ground for accepting that is that no client can reach that role, not that `lock_timeout` would bound it.
 - **`r2dbsvc_control` carries no role-level `statement_timeout`** (decision R-66): it applies the migration files and the per-application upgrade scripts, whose DDL may legitimately run long -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md`.
 - a role setting cannot be scoped to one file, so a bound on that role would cut a migration off part-way and leave it half applied -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md`.
@@ -1179,11 +1180,11 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1790`.
+- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1791`.
 - **CCR-13** treats dropping a declared unique index as schema deletion like `drop_entity`, since it is effectively irreversible once duplicate data has entered (R-5) -- `r2db-api/src/r2db_api/structured.py:568`.
-- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1801`.
+- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1802`.
 - `structured.py` defines phrase construction exactly once for 4 of the 5 gated surfaces, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- `r2db-api/src/r2db_api/structured.py:22`.
-- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1778`.
+- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1779`.
 - the 5th gated surface, the ritual CLI's `deprovision`, keeps its own phrase (`_deprovision_confirmation_phrase`, `ops.py`) beside its caller -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase`'s material (`r2dbsvc_registry.applications.provisioned_at`) is a registry value `structured.py`'s own cell-layer phrase functions never read -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase` is held isomorphic to MitateDB-api's own same-named function by `_ISOMORPHIC_TARGETS` -- `r2db-api/src/r2db_api/ops.py:2056`.

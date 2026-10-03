@@ -260,7 +260,7 @@ class _RequestBudget:
         return min(constructed, self.remaining_s())
 
     def connect_timeout_s(self, constructed: int) -> int:
-        """The `connect_timeout` of a connection opened for this request: the constructed one, or the remaining budget rounded up to whole seconds (at least 1, libpq's unit) when that is smaller."""
+        """The `connect_timeout` of a connection opened for this request: the constructed one, or the remaining budget rounded up to whole seconds (at least 1, libpq's unit) when that is smaller. psycopg raises a value under 2 to 2, so a connection attempt can last 2 s."""
         return min(constructed, max(1, math.ceil(self.remaining_s())))
 
 

@@ -1500,6 +1500,8 @@ class ApplicationCell:
         result itself to an `int`.
         """
         bound = bind_schema_operation(operation, developer=developer)
+        if deadline is not None and clock is not None:
+            limits.check_deadline(deadline, clock)
         # Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling I-3, WP-2c):
         # the idempotency lookup sits HERE -- as early as possible after
         # binding the request's own shape, before ANY operation-specific
@@ -1562,8 +1564,6 @@ class ApplicationCell:
         else:  # drop_index
             projected_objects = current_objects - 1
         limits.check("schema_objects", projected_objects)
-        if deadline is not None and clock is not None:
-            limits.check_deadline(deadline, clock)
         before_entities = deepcopy(self.entities)
         before_schema = deepcopy(self.schema)
         before_indexes = deepcopy(self.indexes)
@@ -1601,9 +1601,10 @@ class ApplicationCell:
             # raised from inside this method is not caught by anything
             # short of unwinding the whole call (only the plan, dry-run and
             # audit-hook points below restore `before_*`; the deadline is
-            # checked once at entry, before anything is snapshotted, and
-            # never after the operation), so this must run first, not merely
-            # "before `schema_revision` advances".
+            # checked once at entry, before the idempotency lookup and before
+            # anything is snapshotted, and never after the operation), so
+            # this must run first, not merely "before `schema_revision`
+            # advances".
             # history: CH-0552
             for constraints in bound.field_constraints.values():
                 if constraints.enum is not None:

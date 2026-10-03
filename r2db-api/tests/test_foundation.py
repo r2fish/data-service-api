@@ -596,8 +596,8 @@ def test_rate_limit_is_atomic_for_concurrent_requests():
     assert denied and denied[-1]["reason_code"] == "LIMIT_EXCEEDED"
 
 
-def test_schema_deadline_failure_rolls_back_entity_catalog_and_revision():
-    # the third clock read is the check before the operation applies (rate window, deadline, check): a request whose budget is spent there leaves no entity behind. The follow-up query reads a frozen clock, so its own 2 ms budget is never spent by the real time between two reads.
+def test_schema_request_spent_before_its_operation_leaves_no_entity():
+    # the third clock read is the check at the schema operation's entry (rate window, deadline, check): a request whose budget is spent there is refused before the operation applies and leaves no entity behind. The follow-up query reads a frozen clock, so its own 2 ms budget is never spent by the real time between two reads.
     clock_values = iter([0.0, 0.0, 0.01])
     service, context = _limited(execution_ms=2)
     ControlAuthority(service).issue_credential("schema-dev", "limit-app", "developer", "schema-dev-secret")
