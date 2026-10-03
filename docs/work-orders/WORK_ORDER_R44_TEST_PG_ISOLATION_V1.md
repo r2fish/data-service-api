@@ -524,6 +524,51 @@ gate: info=shared pg_database/pg_roles diff 0
 - 性能の基準値を専用クラスタで取り直す (Q-9)。
 - 設計 §7 の完了条件 (起動の形 5 種、`tools/tests`、並列 2 本 × 3 回) を満たしたことを記録する。
 
+### 5.1 WP-4 manifest (v1.4、2026-10-04 追記。§5 の枠は書き換えない)
+
+基点は main `01efa56`。着手は依頼者指示 2026-10-04 (逐語): 「R-44 の印を外して WP-4 に着手するチップを出してください」。規模 M、変更クラスは **C** (`tools/change_class.py` の下限。`conformance-tests/README.md` に触れるため。契約 JSON・`spec/`・`security/` には触れず、契約の版は変えない)。枠は 2026-09-16 のものなので、着手時に実物と突き合わせた (下の (a))。
+
+**(a) 突き合わせ (2026-10-04、main `01efa56`)。** 「済み」はやり直さない。
+
+| # | 項目 (出所) | 判定 |
+|---|---|---|
+| 1 | `tools/dev/_devlib.py`・`gate.py`・`pt.py`・`mutate.py`・`finalize.py` の hold flag と `ps` の排他 (設計 §5 コード) | 済み (WP-2、`8568ca3`) |
+| 2 | 23 ファイルの既定値、`socket_harness.py`・`real_server_*.py` の起動経路 (設計 §5 コード) | 済み (WP-3、`2fc9128`) |
+| 3 | `tools/dev/README.md` (設計 §5 文書) | 済み (WP-2、`8568ca3`)。残りは gate の例と `gate.py` の docstring の `-C` (レビュー指摘 F3)、Rules 欄の番号で、今回直す |
+| 4 | `docs/work-orders/ROLE_PROMPT_TEMPLATES.md`・`.claude/agents/implementer.md` の `--hold` (§3.2 (e)) | 済み (WP-2、`8568ca3`)。残りは下の 13 |
+| 5 | superuser 名 (Q-7) | 済み (WP-1、`41e1beb`。CI は元から `postgres`) |
+| 6 | `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §8 (設計 §5 文書)、`MitateDB-api/docs/cloud-run-cloud-sql.md` の冒頭 (設計 §5 の一覧に無い同種の記述) | **実施** (監督。当初「対象なし」としたのは誤りで、レビュー指摘 F1 で改めた。§8 が既定値と「変数 1 つの上書き」を述べていた。どちらも行数を変えない) |
+| 7 | `docs/work-orders/OPERATING_CONDITIONS.md` の正式な改訂 (設計 §5、§3.2 (g) の訂正註) | **実施** (監督)。書き換えは §1.3 の 19〜21・23、§1.5 の 39、§1.6 の 41、§1.10 の 64 と訂正註、§2 の 3〜5・12・18・19・21、§3 の 3・10、§5 の鍵。新設は §1.3 の 20a・24a、§3 の 14。設計 §5 の一覧のうち §1.3 の 24、§1.10 の 66 (文面が 75 の原因に依らない)、§2 の 13 (文書に実 DSN を置かない規律は変わらない) は変えない |
+| 8 | `conformance-tests/README.md`・`MitateDB-api/README.md`・`tools/PERF_BASELINE_README.md` の既定値と「run solo」の記述 (設計 §5 文書) | **実施** |
+| 9 | CI の TimeZone の明示 (Q-6) と env のコメント (WP-3 の追記が「正式な改訂は WP-4」と残す) | **実施**。手元では検証できない |
+| 10 | `handover_ready.py` の gate 判定が広すぎる (§4.1) | **実施** |
+| 11 | WP-2 の軽微な 3 件 (§3.2 (i)) | **実施** (3 件とも直す。監督裁定: 1 行〜数行で直り、既知の穴として残す理由が無い) |
+| 12 | `external` が `PGHOST` を要求しない (§4.1、裁定 R-10) | **実施** (監督裁定: `PGHOST`・`PGPORT` を要求する。host を書かない接続が既定の socket に届く経路を external でも閉じる。CI の env に 2 行を足す) |
+| 13 | `ROLE_PROMPT_TEMPLATES.md` と `.claude/agents/` の 5 定義 (`evidence-auditor`・`explorer`・`implementer`・`reader`・`reviewer`) の gate と pytest の記述 (「リポジトリルートで単独実行」「他の pytest が 0 件」「全 DSN 環境変数を要し」) | **実施** (監督。7 と同じ変更) |
+| 14 | nginx の bind 再試行が 4 経路に掛かっていない (§4.1、裁定 R-7) | **実施しない** (監督裁定: 観察)。4 経路のポートは起動前に `surfaces` の宣言値として確定しており、別ポートでの再試行は宣言と実体を食い違わせる (理由は各経路のコメントにある)。競争に負けた実行は赤で止まり、偽の緑にはならない。2026-09-16 以降の引き継ぎ書に発生の記録は無い |
+| 15 | 設計 §7 の完了条件 3・4 の記録 | **実施** (監督。設計 §11) |
+| 16 | 性能の基準値の取り直し (Q-9) | **実施** (監督。設計 §11) |
+
+**(b) 完了条件と変異。**
+
+| # | 完了条件 | 変異 / 照合 |
+|---|---|---|
+| 1 | `dsa_testpg.gate_running()` は、共有ロックだけが保持されている間は `(False, "")` を返し、生きた `gate.intent` がある間は真を返す。`handover_ready.py` の説明と出力の文言が実装と合う | M1: 排他ロックの試行を戻す → 赤 |
+| 2 | `tools/perf_baseline.py` はクラスタの起動失敗で 78 を返す (ロックの待ち切れは 75 のまま) | M2: 78 を 1 に戻す → 赤 |
+| 3 | `tools/dev/mutate.py` の `expect: "error"` は終了コード 2〜4 だけに一致し、5 (収集 0 件) は不一致 | M3: 5 を受ける形に戻す → 赤 |
+| 4 | 排他ロックを取る道具 (`gate.py`・`perf_baseline.py`・`fold.py --apply`) は、基底ディレクトリの検査失敗を 78、ロックの待ち切れと他の gate の生きた intent を 75 で返す | M4: 区別を潰す → 赤 |
+| 5 | `DSA_TEST_PG=external` は 2 本の DSN に加えて `PGHOST`・`PGPORT` を要求し、欠ければ変数名を挙げて fail する | M5: 要求の一覧から外す → 赤 |
+| 6 | `.github/workflows/ci.yml`: `docker run` に `-c TimeZone=Asia/Tokyo`、workflow の `env:` に `PGHOST`・`PGPORT`、env のコメントが現物と合う。総行数と 106 行目以降の行番号が変わらない (`OPERATING_CONDITIONS.md` §3 の `CI`:行番号を保つ) | 監査照合 (`wc -l`、`git diff --stat`、diff の hunk 位置) |
+| 7 | (a) の 8 の 3 文書から「未設定なら共有クラスタの既定値」「run solo = 他の pytest が無い」の記述が無くなり、現物 (実行ごとのクラスタ、suite lock) を述べる。`conformance-tests/README.md` と `tools/PERF_BASELINE_README.md` は総行数を変えない (他文書が行番号で引く) | 監査照合 (`wc -l`、diff) |
+| 8 | (a) の 7・13 の改訂が書式規約 (1 行 = 1 条件、失効は §4 へ、改版履歴、§5 の鍵) に従う | 監査照合 (レビュー担当) |
+| 9 | 設計 §7 の完了条件 3・4 の実行記録と性能の基準値が設計 §11 にある | 監査照合 (コマンドと出力行) |
+| 10 | `tools/tests` が緑、完了ゲートが `judge=PASS`、1〜5 の各行に変異の赤がある | `tools/dev/pt.py`、`tools/dev/mutate.py`、`tools/dev/gate.py --label r44wp4 -C <worktree>` |
+
+**(c) 触ってよいパス。** 実装担当: `tools/testpg/dsa_testpg.py`、`tools/dev/handover_ready.py`、`tools/dev/_devlib.py`、`tools/dev/gate.py`、`tools/dev/fold.py`、`tools/dev/mutate.py`、`tools/perf_baseline.py`、`tools/dev/README.md`、`tools/tests/` の該当テスト、`.github/workflows/ci.yml`、`conformance-tests/README.md`、`MitateDB-api/README.md`、`tools/PERF_BASELINE_README.md`。監督: `docs/work-orders/OPERATING_CONDITIONS.md`、`docs/work-orders/ROLE_PROMPT_TEMPLATES.md`、`.claude/agents/` の 5 定義 (frontmatter は変えない)、本書、設計メモ、台帳と記録ファイル、引き継ぎ書。両 peer の `src`・`tests`・`conformance`、`spec/`、`security/`、`conformance-tests/` の `.py` には触れない。
+
+**(d) 訂正註 (2026-10-04、実施中。(a)〜(c) の本文は上の 2 行を除き書き換えない)。** (i) 監督の触るパスに `conformance-tests/test_testpg_cluster.py` (docstring 1 箇所だけ。「external は DSN 2 本だけを設定する」が完了条件 5 で偽になった)、`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`、`MitateDB-api/docs/cloud-run-cloud-sql.md` を加える。(ii) コードレビュー 1 回目の裁定: `gate_running()` は intent に加えて `suite.lock` への `LOCK_SH` の非ブロッキング試行で排他の保持者を見る (intent の unlink の競合で intent が消えても真を返す。共有の保持者は妨げない)。完了条件 5 は、DSN の `host=`・`port=` と `PGHOST`・`PGPORT` の一致まで要求する (設定の有無だけでは、共有クラスタ向けの `PGHOST` が残ったシェルで検査が通る)。intent の unlink の競合そのものは直さない (観察: `suite.lock` の排他は保たれ、影響は引き継ぎ判定だけで、それも `LOCK_SH` の試行が受け止める)。 (iii) 変異の対応 ((b) の表の補い): 完了条件 1 = M1 (`LOCK_SH` の試行を外す → 赤)・M1b・M1c (`LOCK_SH` を `LOCK_EX` に変える → 赤)、完了条件 5 = M5-host・M5-port に加えて M6-host・M6-port・M6-nohost (DSN との照合を外す → 赤)。16 件の変異表と完了ゲートの集計行は設計 §11.4。(iv) コードレビューの再確認の裁定: DSN の `hostaddr=` と環境の `PGHOSTADDR`・`PGSERVICE` は検査しない (観察)。
+
 ## 6. 未確認 (push 停止中)
 
 - CI の `conformance` job で `postgresql-16` のバイナリと `LC_ALL=en_US.UTF-8` が使えること、`tools-tests` job が `tools/tests/pytest.ini` の下で通ること。push の再開後に最初の run で確かめる。
+- 【追記 2026-10-04、WP-4】`postgres:16` の image が `-c TimeZone=Asia/Tokyo` を受けて起動すること、workflow の `env:` の `PGHOST`・`PGPORT` を継承した各 job が緑であること。WP-4 の後の最初の送信の run で確かめる。

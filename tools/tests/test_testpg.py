@@ -152,10 +152,23 @@ def _isolated_state(monkeypatch):
 # ensure_for_pytest() decision table
 # ---------------------------------------------------------------------------
 
-def test_external_with_both_dsns_is_accepted_and_does_not_start(monkeypatch):
+def _set_external(monkeypatch, **drop: bool) -> None:
+    """DSA_TEST_PG=external with everything it now requires (R-44 WP-4:
+    both DSNs and PGHOST/PGPORT); a name passed as `name=True` is left out."""
+    values = {
+        dsa.R2DB_DSN: "host=/x port=5432 dbname=postgres user=postgres",
+        dsa.MITATEDB_DSN: "host=/x port=5432 dbname=postgres user=postgres",
+        "PGHOST": "/x",
+        "PGPORT": "5432",
+    }
     monkeypatch.setenv(dsa.ENV_MODE, "external")
-    monkeypatch.setenv(dsa.R2DB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
-    monkeypatch.setenv(dsa.MITATEDB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
+    for name, value in values.items():
+        if not drop.get(name):
+            monkeypatch.setenv(name, value)
+
+
+def test_external_with_both_dsns_and_pghost_pgport_is_accepted_and_does_not_start(monkeypatch):
+    _set_external(monkeypatch)
     monkeypatch.setattr(dsa, "start", lambda: pytest.fail("must not start a cluster"))
     dsa.ensure_for_pytest()  # does not raise
     assert dsa._owned_cluster is None
@@ -173,18 +186,113 @@ def test_external_mode_takes_no_lock(monkeypatch):
     mutation (`dsa_testpg.py`): make external ALSO take the lock -- this
     test goes red because `_acquire_suite_lock` would then be called at all.
     """
-    monkeypatch.setenv(dsa.ENV_MODE, "external")
-    monkeypatch.setenv(dsa.R2DB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
-    monkeypatch.setenv(dsa.MITATEDB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
+    _set_external(monkeypatch)
     monkeypatch.setattr(dsa, "_acquire_suite_lock", lambda *a, **k: pytest.fail("must not take any lock in external mode"))
     dsa.ensure_for_pytest()  # does not raise
 
 
 def test_external_missing_a_dsn_fails(monkeypatch):
-    monkeypatch.setenv(dsa.ENV_MODE, "external")
-    monkeypatch.setenv(dsa.R2DB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
+    _set_external(monkeypatch, **{dsa.MITATEDB_DSN: True})
     with pytest.raises(dsa.TestPgError, match=dsa.MITATEDB_DSN):
         dsa.ensure_for_pytest()
+
+
+@pytest.mark.parametrize("missing", ["PGHOST", "PGPORT"])
+def test_external_requires_pghost_and_pgport_and_names_the_missing_one(monkeypatch, missing):
+    """R-44 WP-4 (work order §5.1 (b) 5): `external` with both DSNs but
+    without `PGHOST` / `PGPORT` must fail naming the variable -- a
+    connection that writes no host of its own would otherwise fall through
+    to libpq's default socket (whatever cluster the machine serves there).
+
+    mutation (`dsa_testpg.py`): drop `PGHOST` / `PGPORT` from the tuple
+    `ensure_for_pytest()` hands `_require_env` in its `external` branch --
+    the case run first goes red (measured: the agreement check then raises
+    `KeyError`, not the named `TestPgError`; `mutate.py` stops at the first failure)."""
+    _set_external(monkeypatch, **{missing: True})
+    with pytest.raises(dsa.TestPgError, match=missing) as excinfo:
+        dsa.ensure_for_pytest()
+    assert "DSA_TEST_PG=external" in str(excinfo.value)
+
+
+def _external_with(monkeypatch, dsn: str, pghost: str, pgport: str, which: str) -> None:
+    """`external` with both DSNs agreeing with PGHOST/PGPORT, except that the
+    DSN named by `which` is replaced by `dsn` and PGHOST/PGPORT by the given values."""
+    _set_external(monkeypatch)
+    monkeypatch.setenv(which, dsn)
+    monkeypatch.setenv("PGHOST", pghost)
+    monkeypatch.setenv("PGPORT", pgport)
+
+
+@pytest.mark.parametrize("which", [dsa.R2DB_DSN, dsa.MITATEDB_DSN])
+def test_external_fails_when_a_dsn_host_differs_from_pghost(monkeypatch, which):
+    """R-44 WP-4 code review 1: a shell exporting the shared cluster's
+    PGHOST while the DSN names another cluster must fail, naming both
+    variables and neither value.
+
+    mutation (`dsa_testpg.py`): drop the `host` comparison in
+    `_check_external_dsns_agree_with_pghost` -- the case run first goes red."""
+    _external_with(monkeypatch, "host=/other port=5432 dbname=postgres user=postgres", "/x", "5432", which)
+    with pytest.raises(dsa.TestPgError, match="host=") as excinfo:
+        dsa.ensure_for_pytest()
+    msg = str(excinfo.value)
+    assert which in msg and "PGHOST" in msg
+    assert "/other" not in msg
+
+
+@pytest.mark.parametrize("which", [dsa.R2DB_DSN, dsa.MITATEDB_DSN])
+def test_external_fails_when_a_dsn_port_differs_from_pgport(monkeypatch, which):
+    """R-44 WP-4 code review 1: same for `port=` against PGPORT.
+
+    mutation (`dsa_testpg.py`): drop the `port` comparison in
+    `_check_external_dsns_agree_with_pghost` -- the case run first goes red."""
+    _external_with(monkeypatch, "host=/x port=5999 dbname=postgres user=postgres", "/x", "5432", which)
+    with pytest.raises(dsa.TestPgError, match="port=") as excinfo:
+        dsa.ensure_for_pytest()
+    msg = str(excinfo.value)
+    assert which in msg and "PGPORT" in msg
+    assert "5999" not in msg
+
+
+@pytest.mark.parametrize("dsn", [
+    " ".join(["user=postgres", "=".join(["dbname", "postgres"])]),  # built, not a literal: test_no_shared_cluster_defaults flags a host-less DSN literal
+    "postgresql://postgres@x:5432/postgres",
+])
+def test_external_fails_when_a_dsn_writes_no_host_or_is_a_uri(monkeypatch, dsn):
+    """R-44 WP-4 code review 1: a host-less DSN falls through to PGHOST or
+    libpq's default socket; a URI-form DSN is outside the supported form."""
+    _external_with(monkeypatch, dsn, "/x", "5432", dsa.R2DB_DSN)
+    with pytest.raises(dsa.TestPgError, match=dsa.R2DB_DSN):
+        dsa.ensure_for_pytest()
+
+
+def test_external_accepts_a_dsn_without_port_and_a_quoted_host(monkeypatch):
+    """`port=` is compared only when written; a quoted `host='...'` is
+    unquoted before the comparison."""
+    _external_with(monkeypatch, "host='/x' dbname=postgres user=postgres", "/x", "5432", dsa.R2DB_DSN)
+    dsa.ensure_for_pytest()  # does not raise
+
+
+def test_external_accepts_what_cluster_env_and_ci_produce(monkeypatch, tmp_path):
+    """The two real producers of an `external` environment must pass the
+    check: `Cluster.env()` (gate.py, perf_baseline.py, `_cli_run`) and CI's
+    workflow `env:` (DSNs `host=127.0.0.1 port=5432`, PGHOST / PGPORT)."""
+    c = dsa.Cluster(
+        run_dir=tmp_path, socket_dir=tmp_path / "s", password="x",
+        postmaster_pid=1, _watchdog=None, _pipe_w=-1, _lock_fd=-1,
+    )
+    monkeypatch.setenv(dsa.ENV_MODE, "external")
+    for name, value in c.env().items():
+        monkeypatch.setenv(name, value)
+    dsa.ensure_for_pytest()
+
+    ci = {
+        dsa.R2DB_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=synthetic",
+        dsa.MITATEDB_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=synthetic",
+        "PGHOST": "127.0.0.1", "PGPORT": "5432",
+    }
+    for name, value in ci.items():
+        monkeypatch.setenv(name, value)
+    dsa.ensure_for_pytest()
 
 
 def test_owned_with_both_dsns_and_pgpassfile_is_accepted_and_does_not_start(monkeypatch):
@@ -216,9 +324,7 @@ def test_xdist_worker_without_external_or_owned_fails(monkeypatch):
 
 def test_xdist_worker_with_external_is_fine(monkeypatch):
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
-    monkeypatch.setenv(dsa.ENV_MODE, "external")
-    monkeypatch.setenv(dsa.R2DB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
-    monkeypatch.setenv(dsa.MITATEDB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
+    _set_external(monkeypatch)
     dsa.ensure_for_pytest()  # does not raise
 
 
@@ -417,9 +523,7 @@ def test_unset_mode_with_no_dsn_writes_the_report_file_when_requested(monkeypatc
 def test_owned_and_external_do_not_write_the_report_file(monkeypatch, tmp_path):
     report = tmp_path / "report.txt"
     monkeypatch.setenv(dsa.ENV_REPORT, str(report))
-    monkeypatch.setenv(dsa.ENV_MODE, "external")
-    monkeypatch.setenv(dsa.R2DB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
-    monkeypatch.setenv(dsa.MITATEDB_DSN, "host=/x port=5432 dbname=postgres user=postgres")
+    _set_external(monkeypatch)
     dsa.ensure_for_pytest()
     assert not report.exists()
 
@@ -828,7 +932,14 @@ def test_stale_gate_intent_does_not_refuse_a_new_gate(tmp_path):
     assert not intent.exists()
 
 
-def test_gate_running_detects_a_live_intent_and_a_live_lock(tmp_path):
+def test_gate_running_detects_a_live_intent_and_ignores_a_shared_lock(tmp_path):
+    """R-44 WP-4 (work order §5.1 (b) 1, §4.1): a LIVE `gate.intent` makes
+    `gate_running()` true; an ordinary owned-mode pytest run, which holds the
+    suite lock SHARED, must not (it used to, and blocked `handover_ready.py`).
+
+    mutation (`dsa_testpg.py`): make the lock attempt in `gate_running()`
+    exclusive (`LOCK_EX|LOCK_NB` instead of `LOCK_SH|LOCK_NB`) -- the
+    shared-lock assertion below goes red."""
     base = tmp_path / "base"
     base.mkdir()
     assert dsa.gate_running(base=base) == (False, "")
@@ -842,12 +953,37 @@ def test_gate_running_detects_a_live_intent_and_a_live_lock(tmp_path):
         handle.release()
     assert dsa.gate_running(base=base) == (False, "")
 
+    # R-44 WP-4: a shared holder (any owned-mode pytest run) is not a gate.
+    shared = _real_acquire_suite_lock(exclusive=False, wait=1.0, base=base)
+    try:
+        assert dsa._suite_lock_path(base).exists(), "the shared hold must really exist (no vacuous pass)"
+        assert not dsa._intent_path(base).exists()
+        assert dsa.gate_running(base=base) == (False, "")
+    finally:
+        shared.release()
+    assert dsa.gate_running(base=base) == (False, "")
+
+
+def test_gate_running_detects_an_exclusive_lock_holder_whose_intent_is_gone(tmp_path):
+    """R-44 WP-4 code review 1: a gate whose `gate.intent` was unlinked by a
+    racing release / stale-reclaim still holds `suite.lock` exclusively, and
+    `gate_running()` must say so (it returned `(False, "")` there, while an
+    exclusive holder was running). Here the exclusive holder is a plain
+    `LOCK_EX` on `suite.lock` with no intent file at all; a shared holder
+    next to it is still not a gate.
+
+    mutation (`dsa_testpg.py`): drop the `LOCK_SH|LOCK_NB` attempt from
+    `gate_running()` (return `(False, "")` after the intent check) -- this
+    test goes red on the first assertion."""
+    base = tmp_path / "base"
+    base.mkdir()
     lock_path = dsa._suite_lock_path(base)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
+        assert not dsa._intent_path(base).exists(), "the intent must be absent (no vacuous pass)"
         running, reason = dsa.gate_running(base=base)
-        assert running and "suite lock held" in reason
+        assert running and "exclusive suite lock held" in reason
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)

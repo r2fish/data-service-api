@@ -31,8 +31,8 @@
 # / `env` / `ports` / `volumes` / `options` -- there is no key that passes
 # command-line arguments to the container's entrypoint, so `max_connections`
 # would stay at Postgres's default of 100 and the gate's `-n 5` concurrent
-# adapters would exhaust connections. `docker run` passes `-c
-# max_connections=300` directly as a command argument to `postgres:16`.
+# adapters would exhaust connections. `docker run` passes `-c max_connections=300`
+# and `-c TimeZone=Asia/Tokyo` (design Q-6) directly as arguments to `postgres:16`.
 #
 # Change-class gating (design docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md
 # D-4): the `change-class` job below classifies this push's changed paths
@@ -82,27 +82,27 @@ concurrency:
 # a sibling key defined in the same `env:` mapping.
 env:
   CI_SYNTHETIC_PG_PASSWORD: "ci-only-ephemeral-not-a-real-secret"
-  # Both variables default to a unix-socket DSN (host=/tmp) when unset,
-  # which does not reach a server published on a loopback TCP port --
-  # both must be overridden here (design D-3; conformance-tests/
-  # README.md "Running against real PostgreSQL").
-  # 【追記 2026-09-16、R-44 WP-3】上の「デフォルトは unix-socket DSN」は
-  # WP-3 の統合により偽になった -- 既定値は追跡 .py から削除され、未設定は
-  # fail になる(tools/tests/test_no_shared_cluster_defaults.py)。この env
-  # ブロックの値そのもの(job の構成含む)は WP-3 では変えていない -- 正式
-  # な改訂は WP-4。
+  # The two DSN variables have no default: R-44 WP-3 removed every one from
+  # tracked .py files, and an unset one fails by name
+  # (tools/tests/test_no_shared_cluster_defaults.py). This job runs against
+  # its own already-started server, so it sets both here (design D-3;
+  # conformance-tests/README.md "Running against real PostgreSQL").
   R2DB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
   MITATEDB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
   # tools/testpg/dsa_testpg.py (work order docs/work-orders/WORK_ORDER_R44_
-  # TEST_PG_ISOLATION_V1.md WP-1, design docs/design/
-  # TEST_POSTGRES_ISOLATION_V0_1.md v0.2 D-4): with both DSNs above already
-  # set, `external` tells every conftest.py's `ensure_for_pytest()` to use
-  # THIS job's own already-running `docker run postgres:16` container
-  # (below) instead of starting a throwaway cluster of its own -- the
-  # `tools-tests` job also inherits this (and the two DSNs), which is fine:
-  # `tools/tests/pytest.ini` keeps it from loading any conftest.py at all,
-  # so `ensure_for_pytest()` never runs there regardless.
+  # TEST_PG_ISOLATION_V1.md WP-1 and WP-4, design docs/design/
+  # TEST_POSTGRES_ISOLATION_V0_1.md D-4): `external` tells every conftest.py's
+  # `ensure_for_pytest()` to use THIS job's own already-running
+  # `docker run postgres:16` container instead of starting a throwaway
+  # cluster, and requires both DSNs above plus PGHOST and PGPORT (a missing
+  # one fails by name; each DSN's host=/port= must equal them). The
+  # `tools-tests` job inherits all of this but `tools/tests/pytest.ini` keeps
+  # it from loading any conftest.py, so nothing reads it there.
   DSA_TEST_PG: "external"
+  # PGHOST and PGPORT: the loopback address and port the `docker run` step
+  # below publishes; a connection that names no host falls through to them.
+  PGHOST: "127.0.0.1"
+  PGPORT: "5432"
 
 jobs:
   change-class:
@@ -193,7 +193,7 @@ jobs:
           docker run -d --name pg16 \
             -e POSTGRES_PASSWORD="$CI_SYNTHETIC_PG_PASSWORD" \
             -p 127.0.0.1:5432:5432 \
-            postgres:16 -c max_connections=300
+            postgres:16 -c max_connections=300 -c TimeZone=Asia/Tokyo
 
       - name: Wait for PostgreSQL to accept connections
         run: |

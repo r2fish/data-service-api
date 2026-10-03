@@ -77,8 +77,10 @@ NAME [reason]`. SKIP lines are counted (one reason-breakdown line) but
 not printed individually unless --verbose. Final summary line: `fold:
 dry-run|applied worktrees=N branches=N prunable=N skipped=N failed=N`.
 Exit: 0 no FAIL; 1 at least one FAIL (dry-run or --apply alike); 75
---apply could not get the exclusive suite lock within --wait (nothing
-changed); 78 precondition error before any item was even looked at.
+--apply could not get the exclusive suite lock within --wait, or another live
+gate holds `gate.intent` (nothing changed); 78 precondition error before any
+item was even looked at, including --apply finding the suite lock's base
+directory a symlink or owned by another user (R-44 WP-4).
 
 Safety notes:
     (a) The guardrails above (merged, clean-or-only-artifact-ignored, no
@@ -452,9 +454,15 @@ def fold(root: Path, apply: bool, includes: list[str], min_age_hours: float, mai
     try:
         with dsa_testpg.suite_lock(exclusive=True, wait=wait):
             return _run(root, apply, includes, min_age_hours, main_branch, out, verbose, now)
-    except dsa_testpg.TestPgError as exc:
+    except dsa_testpg.SuiteLockUnavailable as exc:
+        # R-44 WP-4 (work order §5.1 (b) 4): the lock wait running out or another live
+        # gate's intent is a refusal (75); any other TestPgError (a symlinked or
+        # foreign-owned base dir) is a wrong precondition (78).
         print(f"fold: REFUSED -- {exc}", file=out)
         return dl.REFUSED
+    except dsa_testpg.TestPgError as exc:
+        print(f"fold: ERROR -- {exc}", file=out)
+        return dl.ERROR
 
 
 def main(argv: list[str] | None = None) -> int:

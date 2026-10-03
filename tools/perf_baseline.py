@@ -70,9 +70,12 @@ measurement runs against this tool's own throwaway PostgreSQL cluster
 (`tools/testpg/dsa_testpg.py`'s own `cluster()`), started only after taking
 the exclusive suite lock (`dsa_testpg.suite_lock`) -- the same lock
 `tools/dev/gate.py` takes, so a perf run and a gate run (or two perf runs)
-can never overlap. `main()` returns exit 75 when that lock times out (never
-silently degrades to measuring against whatever PostgreSQL happens to be
-reachable).
+can never overlap. `main()` returns exit 75 when that lock times out or
+another live gate holds `gate.intent` (never silently degrades to measuring
+against whatever PostgreSQL happens to be reachable), and 78 when anything
+else in `dsa_testpg` refuses before the measurement starts -- a symlinked or
+foreign-owned base directory, a cluster that will not start (R-44 WP-4, work
+order §5.1 (b) 2 and 4).
 
 Standard library only, at the top of this file (tools/ convention, see
 `tools/public_value_scan.py`'s own module docstring) -- everything this
@@ -136,6 +139,7 @@ import dsa_testpg  # noqa: E402  (WP-2, docs/work-orders/WORK_ORDER_R44_TEST_PG_
 REFUSED = 75  # matches tools/dev/_devlib.py's own REFUSED; this file stays
 # standard-library only at the top (module docstring) and does not import
 # tools/dev, so this is a local literal, not an import of dl.REFUSED.
+ERROR = 78  # likewise dl.ERROR (R-44 WP-4: a cluster that will not start, or a bad base dir)
 
 _BATCH_OPS = 5  # design D-6 decision 1: batch op count is fixed at 5.
 _CROSS_ENTITY_OPS = 2  # not fixed by design; this tool's own choice -- see
@@ -2700,9 +2704,17 @@ def main(argv: list[str] | None = None) -> int:
                             os.environ.pop(name, None)
                         else:
                             os.environ[name] = value
+    except dsa_testpg.SuiteLockUnavailable as exc:
+        # R-44 WP-4 (work order §5.1 (b) 2, 4): the lock wait running out, or another live
+        # gate's intent, is a refusal (75); any other TestPgError before the measurement
+        # starts -- a symlinked or foreign-owned base dir (stage "lock"), a cluster that
+        # will not start (stage "cluster") -- is a wrong precondition (78). One raised
+        # from the measurement itself keeps 1.
+        print(f"perf_baseline: {exc}", file=sys.stderr)
+        return REFUSED
     except dsa_testpg.TestPgError as exc:
         print(f"perf_baseline: {exc}", file=sys.stderr)
-        return REFUSED if stage == "lock" else 1
+        return ERROR if stage in ("lock", "cluster") else 1
 
 
 if __name__ == "__main__":

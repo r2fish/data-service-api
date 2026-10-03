@@ -675,8 +675,8 @@ code, per §5.3 C-3. Before/alongside running `0001`, confirm on the target
 host:
 
 - `postgresql.conf`'s `listen_addresses` does not bind a public interface
-  (loopback / Unix socket only, matching how this runbook's own local
-  development and test setup connects via `host=/tmp` / `localhost`).
+  (loopback / Unix socket only, matching how the test setup connects: a
+  per-run throwaway server over a Unix socket, CI over loopback -- §8).
 - `pg_hba.conf` restricts each `r2dbsvc_*` role to the expected local
   socket/loopback method, and does not grant it (or `PUBLIC`) a broader
   `host` line reachable from outside.
@@ -695,12 +695,12 @@ local PostgreSQL server, entirely under a random-per-run throwaway prefix
 created -- including its own throwaway control-plane bootstrap and every
 per-application database it provisioned -- in a fixture teardown that runs
 even on failure. It takes its admin/bootstrap DSN from
-`R2DB_TEST_ADMIN_DSN` (default: `host=/tmp port=5432 dbname=postgres`,
-matching a typical local Homebrew/Postgres.app socket setup), so the same
-test file can run against a differently-configured server (including,
-eventually, the VPS's own PostgreSQL instance, once §5.3's connection
-constraints allow reaching it for a controlled test run) by overriding that
-one variable -- never by editing the test file.
+`R2DB_TEST_ADMIN_DSN`, which has no default: a local pytest run starts its
+own throwaway PostgreSQL 16 and sets the variable itself
+(`tools/testpg/dsa_testpg.py`, ledger R-44). To run the same test file
+against an already-running server instead, set `DSA_TEST_PG=external`, both
+`*_TEST_ADMIN_DSN` variables, and `PGHOST`/`PGPORT` naming that same server
+-- never by editing the test file.
 
 If PostgreSQL is not reachable, these tests fail with a message naming the
 DSN that failed; they do not skip (§5.3 C-5).

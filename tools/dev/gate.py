@@ -18,7 +18,7 @@ line and never affects PASS/FAIL. Exclusivity is a real flock
 Usage:
     tools/dev/gate.py [-C DIR] [--label LABEL] [--wait SECONDS] [--python PY]
 
-    -C DIR      where to run (default: current directory; normally the repository root)
+    -C DIR      where to run (default: current directory; pass the worktree to measure -- OPERATING_CONDITIONS 1.3-19)
     --wait      longest wait for the exclusive suite lock (default 1800)
 
 Command run: `<main checkout>/.venv/bin/python -m pytest -q -n 5 --dist loadgroup`,
@@ -37,8 +37,10 @@ line per non-empty added / removed list comes before the last line (at most
 STDOUT_NAMES names each); the log ends with a section naming every added /
 removed database and role, sorted.
 The suite outlasts the Bash timeout: run it with run_in_background.
-Exit: 0 PASS; 1 FAIL; 75 refused (the exclusive suite lock timed out); 78
-precondition error (cluster start-up failed, or psql/pytest itself errored).
+Exit: 0 PASS; 1 FAIL; 75 refused (the exclusive suite lock timed out, or another live
+gate holds `gate.intent`); 78 precondition error (the suite lock's base
+directory failed its symlink / ownership check, cluster start-up failed, or
+psql/pytest itself errored -- R-44 WP-4).
 The pytest child runs with `DSA_TEST_PG_LOCK_HELD=1` (review B-1) so an
 owned-mode pytest the suite spawns as a genuine nested subprocess (e.g.
 conformance-tests/test_testpg_cluster.py's own nested-controller tests)
@@ -234,12 +236,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"gate: ERROR -- {exc}")
         return dl.ERROR
 
-    stage = "lock"
     try:
         with dsa_testpg.suite_lock(exclusive=True, wait=ns.wait):
-            stage = "cluster"
             with dsa_testpg.cluster() as c:
-                stage = "run"
                 # review B-1: DSA_TEST_PG_LOCK_HELD tells any owned-mode pytest THIS suite run
                 # itself spawns (e.g. conformance-tests/test_testpg_cluster.py's own nested-
                 # controller tests) that an ancestor (this gate) already holds the suite lock
@@ -258,10 +257,13 @@ def main(argv: list[str] | None = None) -> int:
     except dl.DevError as exc:
         print(f"gate: ERROR -- {exc}")
         return dl.ERROR
+    except dsa_testpg.SuiteLockUnavailable as exc:
+        # R-44 WP-4 (work order §5.1 (b) 4): only the lock wait running out, or another
+        # live gate's intent, is a refusal (75); any other TestPgError -- a symlinked or
+        # foreign-owned base dir, a cluster that will not start -- is a wrong precondition (78).
+        print(f"gate: REFUSED -- {exc}")
+        return dl.REFUSED
     except dsa_testpg.TestPgError as exc:
-        if stage == "lock":
-            print(f"gate: REFUSED -- {exc}")
-            return dl.REFUSED
         print(f"gate: ERROR -- {exc}")
         return dl.ERROR
 

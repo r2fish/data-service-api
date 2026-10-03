@@ -51,9 +51,9 @@ Run the local test suite with:
 cd MitateDB-api && ../.venv/bin/python -m pytest tests/ -q
 ```
 
-(a real local PostgreSQL 16 server is required -- `host=/tmp port=5432` by
-default, `MITATEDB_TEST_ADMIN_DSN` to override; these tests do not skip
-when PostgreSQL is unreachable, they fail loudly).
+(PostgreSQL 16 binaries are required: each run's `conftest.py` starts its own throwaway server
+and sets `MITATEDB_TEST_ADMIN_DSN`; there is no default DSN, and `DSA_TEST_PG=external` (your own
+server) also needs `PGHOST`/`PGPORT`; these tests fail loudly, never skip, when PostgreSQL is unavailable).
 
 ### What exists
 

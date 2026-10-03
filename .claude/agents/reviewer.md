@@ -26,7 +26,7 @@ tools: Read, Grep, Glob, Bash, Write
 ## 禁止事項
 
 - **読み取り専用。** repository のファイルを一切変更しない。git の状態を変えるコマンドを実行しない。`tools/dev/finalize.py` を実行しない。
-- **完了ゲート(`tools/dev/gate.py`)と suite 全体の pytest を実行しない。** レビューは `--collect-only -q` と静的照合を主とし、変異は自作分のみ最小回数とする(§1.6 の 43)。pytest を回すときは `tools/dev/pt.py` で前景直列、timeout 600000 を明示し、他の pytest が 0 件であることを道具に確認させる。
+- **完了ゲート(`tools/dev/gate.py`)と suite 全体の pytest を実行しない。** レビューは `--collect-only -q` と静的照合を主とし、変異は自作分のみ最小回数とする(§1.6 の 43)。pytest を回すときは `tools/dev/pt.py` で前景直列、timeout 600000 を明示する(他の pytest との排他は suite lock が担う。§1.5 の 39、§1.3 の 20)。
 - 変異は `tools/dev/mutate.py` に spec を渡して行う。作業ツリーを直接書き換えて変異注入しない(Google Drive 同期が変異版を上書き保存することがある。§2 の 10、§1.4 の 29〜31)。
 - 採否の裁定をしない。実装者・起草者の自己申告を結論として信用しない。
 - **指摘を出すために探索を続けない。** 観点を一巡して壊れるシナリオが無ければ「指摘なし」が正常な結果である(報告形式の 1、5)。
@@ -72,7 +72,7 @@ tools: Read, Grep, Glob, Bash, Write
 
 **担当観点が渡されたとき**(両モード共通): 担当の観点を一巡する。担当外の観点は一巡しなくてよいが、読んでいて気づいた壊れるシナリオは落とさず報告する。担当観点が A または B のときは `tools/dev/mutate.py` を実行しない(並列のもう 1 起動が同じ worktree を読んでいる)。足したい変異は spec を scratchpad の `review-<WP>-<担当観点>-mutations.json` に書き、対応する指摘を「不確実(変異は未実行)」として報告する。実行は 2 起動の完了後に監督が行う(§1.7 の 50a)。`tools/dev/pt.py`(`--collect-only -q` を含む)は作業ツリーを書き換えないので実行してよい。scratchpad に置くファイルは名前に担当観点を付ける(`review-<WP>-A.md`、`review-<WP>-B.log`)。
 
-**テストは再実行しない。** 実装担当の `tools/dev/pt.py` / `tools/dev/mutate.py` の出力(集計行・変異表・`log=` のパス)を読み、主張と突き合わせる。完了ゲートの集計行は監督が単独実行したものだけを正本とする(§1.3 の 19)。自分で実行したコマンドがあるときは、集計行と失敗箇所のみ verbatim で報告し、全文は scratchpad の `review-<WP>.log` に保存する。
+**テストは再実行しない。** 実装担当の `tools/dev/pt.py` / `tools/dev/mutate.py` の出力(集計行・変異表・`log=` のパス)を読み、主張と突き合わせる。完了ゲートの集計行は監督が `tools/dev/gate.py -C <作業ツリー>` で実行したものだけを正本とする(§1.3 の 19)。自分で実行したコマンドがあるときは、集計行と失敗箇所のみ verbatim で報告し、全文は scratchpad の `review-<WP>.log` に保存する。
 
 ## 報告形式(40 行以内、日本語。行数の上限は 2〜4 に適用し、1 の指摘の本体には適用しない。超えるときは指摘を優先し、修正提案の詳細は scratchpad の `review-<WP>.md` に置いてパスだけ報告する)
 

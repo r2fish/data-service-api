@@ -23,14 +23,16 @@ SPEC.json:
 
 Each `old` must occur exactly once in the pristine file. Every mutation
 starts from the pristine backup. `expect` is "red" (pytest exit code exactly
-1, run with -x), "green" (exit code exactly 0), or "error" (exit code 2-5:
-interrupted, internal error, usage error, or no tests collected -- something
-broke the run itself rather than merely failing a test, e.g. a mutation that
-keeps a conftest.py from starting its own cluster at all). The printed
-`got=` field still shows pytest's own more specific outcome (`red` / `green`
-/ `no-tests` / `error(N)`, unchanged); `expect: "error"` is satisfied by any
-of exit codes 2-5, i.e. a `no-tests` (5) outcome counts as "error" too --
-only `expect: "red"` requires exactly 1 and only `expect: "green"` requires
+1, run with -x), "green" (exit code exactly 0), or "error" (exit code 2-4:
+interrupted, internal error, or usage error -- something broke the run itself
+rather than merely failing a test, e.g. a mutation that keeps a conftest.py
+from starting its own cluster at all). The printed `got=` field still shows
+pytest's own more specific outcome (`red` / `green` / `no-tests` /
+`error(N)`, unchanged); `expect: "error"` is satisfied by exit codes 2-4
+only. Exit 5 (`no-tests`, nothing collected) satisfies none of the three: a
+mutation that leaves the test unable to be found is a wrong spec, not an
+intended break, and must read NG (R-44 WP-4, work order §5.1 (b) 3). Only
+`expect: "red"` requires exactly 1 and only `expect: "green"` requires
 exactly 0 (WP-2, docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md
 §3.1, following up on WP-1's `M13-no-lc-all`, whose exit 4 was reported as a
 mismatch against `expect: "red"` even though it failed for exactly the
@@ -164,13 +166,15 @@ def classify(code: int) -> str:
     return {0: "green", 1: "red", 5: "no-tests"}.get(code, f"error({code})")
 
 
-_ERROR_CODES = (2, 3, 4, 5)  # pytest: interrupted, internal error, usage error, no tests collected
+# pytest: interrupted, internal error, usage error. 5 (no tests collected) is deliberately NOT
+# here (R-44 WP-4, work order §5.1 (b) 3, WP-2 §3.2 (i)): it means the named test was never found.
+_ERROR_CODES = (2, 3, 4)
 
 
 def matches(code: int, expect: str) -> bool:
     """Whether pytest's own exit `code` satisfies `expect`. `"red"` requires
     EXACTLY 1 and `"green"` EXACTLY 0 (never widened); `"error"` accepts any
-    of `_ERROR_CODES` (2-5) -- a mutation that breaks the run itself (e.g.
+    of `_ERROR_CODES` (2-4, not 5) -- a mutation that breaks the run itself (e.g.
     keeps a conftest.py from starting its own cluster at all, WP-1's `M13-
     no-lc-all`) is a real, intended "red" of a different shape than a failed
     test, and must not be reported as a mismatch just because pytest's own
@@ -274,7 +278,7 @@ def run(spec: dict, root: Path, python: str, out=sys.stdout,
             if dl.lock_timeout_detected(combined, dl.tally_line(proc.stdout)):
                 # review M-3: an environmental refusal (gate.py held the exclusive lock past
                 # this mutation's own --wait budget) is not a mutation OUTCOME at all -- scoring
-                # it under any `expect` (including the new "error" bucket, which a raw pytest
+                # it under any `expect` (including the "error" bucket, which a raw pytest
                 # exit 2-4 would otherwise satisfy) would misreport an infrastructure timeout as
                 # the mutation's own effect. Stop here, after this mutation's own restore, and
                 # before every later mutation's file is ever touched (still pristine).

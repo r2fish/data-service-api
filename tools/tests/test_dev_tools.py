@@ -41,6 +41,8 @@ def _load(name: str):
 
 dl = importlib.import_module("_devlib")  # the same module object the scripts import
 dsa_testpg = importlib.import_module("dsa_testpg")  # the same module object gate.py / pt.py / mutate.py / handover_ready.py import
+_REAL_BASE_DIR = dsa_testpg._base_dir  # captured before any test monkeypatches it
+_REAL_GATE_RUNNING = dsa_testpg.gate_running  # likewise (the handover tests fake it)
 pt = _load("pt")
 mutate = _load("mutate")
 section = _load("section")
@@ -441,14 +443,17 @@ def test_mutate_leftover_mutation_line_fails_final_grep(isolated_git, tmp_path, 
 @pytest.mark.parametrize("code,expect,ok", [
     (0, "green", True), (1, "green", False), (2, "green", False),
     (1, "red", True), (0, "red", False), (2, "red", False), (5, "red", False),
-    (2, "error", True), (3, "error", True), (4, "error", True), (5, "error", True),
+    (2, "error", True), (3, "error", True), (4, "error", True),
+    (5, "error", False),
     (0, "error", False), (1, "error", False), (6, "error", False),
 ])
 def test_mutate_matches_pins_red_green_and_error(code, expect, ok):
     """WP-2 (docs/work-orders/WORK_ORDER_R44_TEST_PG_ISOLATION_V1.md §3.1,
     follow-up to WP-1's `M13-no-lc-all`): `expect: "error"` must accept
-    every pytest exit code 2-5 (interrupted / internal error / usage error /
-    no tests collected) as satisfying it, while `"red"`/`"green"` stay exact
+    every pytest exit code 2-4 (interrupted / internal error / usage error)
+    as satisfying it and must NOT accept 5 (no tests collected -- the named
+    test was never found; R-44 WP-4, work order §5.1 (b) 3), while
+    `"red"`/`"green"` stay exact
     (1/0 only) -- a mutation that breaks the run itself before collecting
     anything (e.g. a conftest.py that can no longer start its own cluster)
     is a real, intended "red" of a different shape than a failed test, not
@@ -458,7 +463,9 @@ def test_mutate_matches_pins_red_green_and_error(code, expect, ok):
     mutation (`tools/dev/mutate.py`): widen `_ERROR_CODES` (or `matches()`'s
     own `"error"` branch) to also accept code 1 -- this test goes red on the
     `(1, "error", False)` case, exactly the WP-2 supervisor's own example of
-    a genuinely-red mutation wrongly satisfying an "error" expectation."""
+    a genuinely-red mutation wrongly satisfying an "error" expectation. The
+    (5, "error", False) case goes red under the WP-4 mutation that puts 5
+    back into `_ERROR_CODES`."""
     assert mutate.matches(code, expect) is ok
 
 
@@ -474,6 +481,24 @@ def test_mutate_error_expect_accepts_a_pre_collection_failure(isolated_git, tmp_
     code, text = _mutate(proj, spec, tmp_path)
     assert code == 0, text
     assert "M1       expect=error got=error(4)" in text
+
+
+def test_mutate_error_expect_rejects_a_no_tests_collected_run(isolated_git, tmp_path, monkeypatch):
+    """R-44 WP-4 (work order §5.1 (b) 3): a mutation whose pytest subprocess
+    exits 5 (nothing collected: the named test was never found) is NG under
+    `expect: "error"`, the printed `got=` is `no-tests`, and the whole run
+    exits 1 -- it is a wrong spec, not an intended break.
+
+    mutation (`tools/dev/mutate.py`): put 5 back into `_ERROR_CODES`
+    (`(2, 3, 4, 5)`) -- this test goes red because the line reads OK and
+    the run exits 0."""
+    proj = _calc_project(tmp_path)
+    _intercept_pytest(monkeypatch, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 5, stdout="no tests ran in 0.01s\n", stderr=""))
+    spec = {"pytest": ["-q"], "mutations": [
+        {"id": "M1", "file": "calc.py", "old": "return a + b", "new": "return 0  # MUT", "expect": "error"}]}
+    code, text = _mutate(proj, spec, tmp_path)
+    assert code == 1, text
+    assert "M1       expect=error got=no-tests  NG" in text
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +764,54 @@ def test_gate_refused_when_the_exclusive_lock_times_out(tmp_path, monkeypatch, c
     assert code == dl.REFUSED
     out = capsys.readouterr().out
     assert "REFUSED" in out
+
+
+def _symlinked_base_dir(monkeypatch, tmp_path) -> None:
+    """Makes the REAL `dsa_testpg._base_dir()` (the one every exclusive-lock
+    tool calls first) see a symlink where the per-uid base directory should
+    be, so it raises its plain `TestPgError` ("base dir is a symlink") --
+    only the tmp root it looks under is redirected, never its checks."""
+    real = _REAL_BASE_DIR
+    tmp_root = tmp_path / "tmp-root"
+    tmp_root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_root / f"dsa-testpg-{os.getuid()}").symlink_to(elsewhere)
+    monkeypatch.setattr(dsa_testpg, "_base_dir", lambda *a, **k: real(tmp_root=tmp_root))
+
+
+def test_gate_refused_when_another_gate_holds_a_live_intent(tmp_path, monkeypatch, capsys):
+    """R-44 WP-4 (work order §5.1 (b) 4): another gate's live `gate.intent`
+    is the lock being unavailable -- REFUSED (75), like a lock wait that ran
+    out. (Pairs with `test_gate_base_dir_failure_is_error_not_refused`.)"""
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(gate.dsa_testpg, "_base_dir", lambda *a, **k: base)
+    other = dsa_testpg._acquire_suite_lock(exclusive=True, wait=1.0, base=base)  # a live other gate
+    try:
+        code = gate.main(["--python", sys.executable, "-C", str(tmp_path), "--wait", "0.3"])
+    finally:
+        other.release()
+    assert code == dl.REFUSED
+    out = capsys.readouterr().out
+    assert "gate: REFUSED" in out and "gate intent already present" in out
+
+
+def test_gate_base_dir_failure_is_error_not_refused(tmp_path, monkeypatch, capsys):
+    """R-44 WP-4 (work order §5.1 (b) 4): a base directory that fails
+    `_base_dir()`'s own symlink check is a wrong precondition -- ERROR (78),
+    never the REFUSED (75) of a lock wait that ran out.
+
+    mutation (`tools/dev/gate.py`): catch the plain `dsa_testpg.TestPgError`
+    where the REFUSED branch catches `SuiteLockUnavailable` (collapse the two
+    branches into one that returns REFUSED) -- this test goes red because the
+    symlinked base would then come back as 75."""
+    _symlinked_base_dir(monkeypatch, tmp_path)
+    monkeypatch.setenv("SP", str(tmp_path / "sp"))
+    code = gate.main(["--python", sys.executable, "-C", str(tmp_path), "--wait", "0.3"])
+    out = capsys.readouterr().out
+    assert code == dl.ERROR, out
+    assert "gate: ERROR" in out and "symlink" in out
 
 
 def test_gate_cluster_startup_failure_is_error_and_releases_the_lock(tmp_path, monkeypatch, capsys):
@@ -1421,6 +1494,34 @@ def test_fold_refuses_when_the_exclusive_lock_times_out(isolated_git, tmp_path, 
     assert _branch_exists(main_root, "locked-out")
 
 
+def test_fold_apply_refuses_75_on_a_live_gate_intent_and_errors_78_on_a_bad_base_dir(isolated_git, tmp_path, monkeypatch):
+    """R-44 WP-4 (work order §5.1 (b) 4): `fold --apply` answers 75 when
+    another live gate holds `gate.intent` and 78 when the suite lock's base
+    directory fails its symlink check; in both cases nothing is folded.
+
+    mutation (`tools/dev/fold.py`): make the `except` that returns REFUSED
+    catch the plain `dsa_testpg.TestPgError` (and drop the ERROR branch) --
+    the 78 half goes red because the symlinked base would come back as 75."""
+    main_root = _fold_main_repo(tmp_path)
+    wt = _add_worktree(main_root, tmp_path, "kept")
+    _age_worktree(main_root, wt, "kept", 48)
+    base = _isolate_fold_lock(monkeypatch, tmp_path)
+    other = dsa_testpg._acquire_suite_lock(exclusive=True, wait=1.0, base=base)  # a live other gate
+    try:
+        code, text = _fold(main_root, apply=True, wait=0.3)
+    finally:
+        other.release()
+    assert code == dl.REFUSED, text
+    assert "fold: REFUSED --" in text and "gate intent already present" in text
+
+    _symlinked_base_dir(monkeypatch, tmp_path)
+    code, text = _fold(main_root, apply=True, wait=0.3)
+    assert code == dl.ERROR, text
+    assert "fold: ERROR --" in text and "symlink" in text
+    assert str(wt) in _worktrees(main_root)
+    assert _branch_exists(main_root, "kept")
+
+
 # ---------------------------------------------------------------------------
 # turn_budget_hook
 # ---------------------------------------------------------------------------
@@ -1542,6 +1643,42 @@ def test_handover_not_ready_while_gate_runs(isolated_git, tmp_path, monkeypatch)
     assert ready.check(wt, True, [str(wt)], "docs/HANDOVER_X.md", out=buf) == 1
     text = buf.getvalue()
     assert "NG  gate not running" in text and "NOT READY" in text and "BEGIN CONTINUATION" not in text
+
+
+def test_handover_ready_ignores_a_shared_lock_but_not_a_live_gate_intent(isolated_git, tmp_path, monkeypatch):
+    """R-44 WP-4 (work order §5.1 (b) 1, §4.1): through the REAL
+    `gate_running()` (only the base directory is redirected to a tmp one),
+    an ordinary pytest run's shared suite lock leaves the gate line `ok` and
+    carries the new wording; a live `gate.intent` makes it `NG`.
+
+    mutation (`tools/testpg/dsa_testpg.py`): make the lock attempt in
+    `gate_running()` exclusive (`LOCK_SH` -> `LOCK_EX`) -- the shared-lock
+    half goes red (the line reads NG)."""
+    main_root, wt = _ready_repo(tmp_path, monkeypatch)
+    base = tmp_path / "gate-base"
+    base.mkdir()
+    monkeypatch.setattr(dsa_testpg, "gate_running", _REAL_GATE_RUNNING)
+    monkeypatch.setattr(dsa_testpg, "_resolve_base_dir_readonly", lambda *a, **k: base)
+
+    shared = dsa_testpg._acquire_suite_lock(exclusive=False, wait=1.0, base=base)  # a plain pytest run
+    try:
+        buf = io.StringIO()
+        code = ready.check(wt, True, [str(wt)], "docs/HANDOVER_X.md", out=buf)
+    finally:
+        shared.release()
+    text = buf.getvalue()
+    assert code == 0, text
+    assert "ok  gate not running (no live gate intent, no exclusive suite lock)" in text
+
+    live = dsa_testpg._acquire_suite_lock(exclusive=True, wait=1.0, base=base)  # a gate
+    try:
+        buf = io.StringIO()
+        code = ready.check(wt, True, [str(wt)], "docs/HANDOVER_X.md", out=buf)
+    finally:
+        live.release()
+    text = buf.getvalue()
+    assert code == 1, text
+    assert "NG  gate not running (no live gate intent, no exclusive suite lock) -- gate intent present" in text
 
 
 @pytest.mark.parametrize("case,needle", [
