@@ -107,7 +107,7 @@ env:
 jobs:
   change-class:
     name: change class (design DEVELOPMENT_PROCESS_HYGIENE_V1.md D-4)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with the conformance job's runner (see its comment)
     outputs:
       class: ${{ steps.classify.outputs.class }}
       conformance_required: ${{ steps.classify.outputs.conformance_required }}
@@ -159,7 +159,7 @@ jobs:
     name: conformance (Python ${{ matrix.python-version }})
     needs: change-class
     if: needs.change-class.outputs.conformance_required == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 2026-10-19, and this job installs postgresql-16 and nginx from this release's apt (DSA_TEST_PG_BINDIR below names its path); run 37126080963 was green on this image
     # Phase 8 WP-1 review finding 3: a broken hold_in_flight premise hangs
     # rather than fails; bound the whole job so the hang surfaces as red.
     timeout-minutes: 30
@@ -438,7 +438,7 @@ jobs:
     # `main` only (requester ruling 2026-09-08, file header): on any other
     # branch the matrix has no 3.12 entry, so there is no tally to compare.
     if: needs.change-class.outputs.conformance_required == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with the conformance job's runner (see its comment)
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -501,7 +501,7 @@ jobs:
     # Python-version matrix entry, and skipped along with the rest of that
     # job whenever conformance is not required).
     name: doc-refs (document ID reference check)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with the conformance job's runner (see its comment)
     steps:
       - uses: actions/checkout@v4
       - name: Check document ID references (design DEVELOPMENT_PROCESS_HYGIENE_V1.md D-2)
@@ -520,7 +520,7 @@ jobs:
     # tools/perf_baseline.py and the MitateDB-api module that test imports
     # both import it -- no PostgreSQL connection is opened).
     name: tools-tests (self-tests of the gating scripts)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with the conformance job's runner (see its comment)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -539,7 +539,7 @@ jobs:
 
   scanner:
     name: public-value scan (tree mode)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with the conformance job's runner (see its comment)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -554,7 +554,7 @@ jobs:
     # (`r2db-api/deploy/scripts/lint_deploy_assets.sh`) and the assets it
     # lints are WP-3's own, now merged to main and used here unmodified.
     name: deploy assets lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with the conformance job's runner (see its comment)
     steps:
       - uses: actions/checkout@v4
       - name: Install nginx and systemd tooling
@@ -574,7 +574,7 @@ jobs:
     # baked into it, and diffs that freeze against `constraints.txt` with
     # `tools/check_image_pins.py` (Phase 10 WP-2).
     name: image pins match constraints.txt (R-19)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with the conformance job's runner (see its comment)
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
