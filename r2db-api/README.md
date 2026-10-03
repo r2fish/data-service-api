@@ -16,6 +16,17 @@ Public behavior should conform to `../spec/` and `../conformance-tests/`. VPS-sp
 
 ## Foundation
 
+> **Dated record (note added 2026-10-04, ledger R-28).** This section was written phase by
+> phase and each paragraph is true as of the phase it names. Counts and
+> versions in it (registered adapters, registered conditions,
+> `contract_version`) are the values of that phase, not current values.
+> Read current values from their own sources: `contract_version` in
+> `spec/data-service-api.v1.json`, the adapters in
+> `conformance-tests/registry.json`, the conditions in
+> `conformance-tests/CONDITIONS.md`. Where the release state is read from
+> (versions, open ledger rows, deployment acceptance) is listed in
+> `docs/work-orders/OPERATING_CONDITIONS.md` section 1.8 item 55a.
+
 `src/r2db_api` models server-bound credentials, application-scoped
 structured operations, finite limits, canonical audit events, and the
 authority topology. `config/authority-topology.yaml` is a deployment

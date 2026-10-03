@@ -20,6 +20,17 @@ public contract.
 
 ## Status
 
+> **Dated record (note added 2026-10-04, ledger R-28).** This section was written phase by
+> phase and each paragraph is true as of the phase it names. Counts and
+> versions in it (registered adapters, registered conditions,
+> `contract_version`) are the values of that phase, not current values.
+> Read current values from their own sources: `contract_version` in
+> `spec/data-service-api.v1.json`, the adapters in
+> `conformance-tests/registry.json`, the conditions in
+> `conformance-tests/CONDITIONS.md`. Where the release state is read from
+> (versions, open ledger rows, deployment acceptance) is listed in
+> `docs/work-orders/OPERATING_CONDITIONS.md` section 1.8 item 55a.
+
 Phase 3 (`docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md`) is complete:
 the common contract's application-plane HTTP surface (`/v1/*`) and the
 control plane (`/control/v1`, 12 distinct endpoints + the out-of-band
