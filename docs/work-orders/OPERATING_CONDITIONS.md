@@ -221,18 +221,18 @@
 
 ## 3. CI の条件
 
-1. Python matrix は 3.11 / 3.12 で、両 job とも required である (`continue-on-error` を持たない)。(`CI`:8-16、69-72)
-2. 3.11 job の集計行が正本であり、3.12 job が同一の 4 数を再現することを `tally-consistency` job が担保する (collect 件数は突合対象に足さない)。(`CI`:13-16、213-248、`CT-README`:160-162)
-3. PostgreSQL 16 は `docker run` で起動し `-c max_connections=300` を渡す。(`CI`:18-24、80-85)
-4. `conformance` job に `timeout-minutes: 30` が入っている。(`CI`:66-68、`H0907F`:161)
-5. `concurrency` は workflow + ref ごとに 1 run で `cancel-in-progress: true` である。「赤になった」と「cancel された」を取り違えない。(`CI`:31-36、`H0906F`:120)
+1. Python matrix は 3.11 / 3.12 で、両 job とも required である (`continue-on-error` を持たない)。(`CI`:8-16、177-181)
+2. 3.11 job の集計行が正本であり、3.12 job が同一の 4 数を再現することを `tally-consistency` job が担保する (collect 件数は突合対象に足さない)。(`CI`:13-16、431-495、`CT-README`:160-162)
+3. PostgreSQL 16 は `docker run` で起動し `-c max_connections=300` を渡す。(`CI`:29-35、191-196)
+4. `conformance` job に `timeout-minutes: 30` が入っている。(`CI`:163-165、`H0907F`:161)
+5. `concurrency` は workflow + ref ごとに 1 run で `cancel-in-progress: true` である。「赤になった」と「cancel された」を取り違えない。(`CI`:54-59、`H0906F`:120)
 6. main の run は docs-only push のたびに cancel されるので、ゲートは最終 push の run で読む。(`H0907F`:29)
 7. trigger は `main` への `push` と `workflow_dispatch` のみで、`pull_request` は意図的に使わない。branch の push では CI は走らず、branch の受け入れは手元の完了ゲート (§1.3) で行う。(依頼者裁定 2026-10-01、`CI` の `"on":` とその直前のコメント。旧条項は §4 の 12)
-8. `tools/check_collection_floor.py` を 3.11 / 3.12 の両 job が pytest の前段で走らせる。step は PG 起動と依存導入の後に置く。(`CI`:106-107、`CT-README`:171-177)
-9. CI のゲートは `python -m pytest -q -n 5 --dist loadgroup` を `pytest-output.log` に tee し、そこから集計行を抽出する。(`CI`:110-112)
+8. `tools/check_collection_floor.py` を 3.11 / 3.12 の両 job が pytest の前段で走らせる。step は PG 起動と依存導入の後に置く。(`CI`:225-226、`CT-README`:171-177)
+9. CI のゲートは `python -m pytest -q -n 5 --dist loadgroup` を `pytest-output.log` に tee し、そこから集計行を抽出する。(`CI`:228-231)
 10. perf harness は基準値としては CI で回さない。完了ゲート後に監督がローカルで単独実行する。(`PERF-README`:8-19、`H0907F`:160)
-11. `tools-tests` job (`tools/tests` の自己検査) は常時実行であり、変更クラスに関わらず走る。(`CI`:470-490)
-12. `image-pins` job は本番 image の `pip freeze` が `constraints.txt` と一致することを検査する。**docker を要求するので開発機では走らず、証拠の場は CI だけである。** (`CI`:516-540、`RM` §8 R-19、`DP10` §10.2 の **L10-6**)
+11. `tools-tests` job (`tools/tests` の自己検査) は常時実行であり、変更クラスに関わらず走る。(`CI`:510-538)
+12. `image-pins` job は本番 image の `pip freeze` が `constraints.txt` と一致することを検査する。**docker を要求するので開発機では走らず、証拠の場は CI だけである。** (`CI`:565-586、`RM` §8 R-19、`DP10` §10.2 の **L10-6**)
 
 ---
 
@@ -267,7 +267,7 @@
 | §1.2-14 | `WO-P8`:21 | `WO-P8`:1133 / `WO-P9`:1626 |
 | §1.2-16 | `WO-P8`:22 | `H0904F2`:65、:67 / `H0905F`:110 / `H0906F`:121 / `H0907F`:157 |
 | §1.3-19、§1.3-20 | `WO-P8`:1101 | `H0901F`:36 / `H0903F`:86 / `H0903F2`:107 / `H0904F`:137 / `H0904F2`:67 / `H0905F`:109 / `H0906F`:122 / `H0907F`:25 |
-| §1.3-21 | `WO-P8`:1106 | `RM`:258 / `H0904F2`:65 / `CI`:110-112 |
+| §1.3-21 | `WO-P8`:1106 | `RM`:258 / `H0904F2`:65 / `CI`:228-231 |
 | §1.3-24 | `H0828`:208 | `H0828F`:40 / `H0907F`:163、:25 |
 | §1.3-26 | `H0828`:206 | `H0828`:52 / `H0828F`:39 / `H0829F`:44 |
 | §1.4-28 | `H0829F`:47 | `H0828`:207 / `WO-P8`:29 |
@@ -290,7 +290,7 @@
 | §2-6 | `H0906F`:116 | `H0904F2`:103 / `H0905F`:115 / `WO-P8`:48、:1143 / `PRECOMMIT`:11-13 |
 | §2-10 | `H0904F2`:121 | `H0905F`:113 / `H0906F`:129 / `WO-P8`:48 |
 | §3-1、§3-2 | `CI`:8-16 | `CT-README`:160-162 / `H0904F2`:103 / `H0907F`:29 |
-| §3-8 | `CI`:106-107 | `CT-README`:164-197 / `RM`:243 (R-9) / `H0907F`:159 |
+| §3-8 | `CI`:225-226 | `CT-README`:164-197 / `RM`:243 (R-9) / `H0907F`:159 |
 | §3-10 | `PERF-README`:8-19 | `H0907F`:160 / `RM`:246 (R-12) |
 
 ### 註
@@ -303,6 +303,7 @@
 
 | 日付 | 変更 | 根拠 |
 |---|---|---|
+| 2026-10-03 | **§3 の 1〜5・8・9・11・12** と **§5** の該当 2 行 (§1.3-21、§3-8) の出所 `CI`:行番号を、現行の `.github/workflows/ci.yml` の行に付け替えた (matrix 177-181、`tally-consistency` 431-495、PostgreSQL の起動 29-35 / 191-196、`timeout-minutes` 163-165、`concurrency` 54-59、`check_collection_floor` 225-226、ゲートの実行 228-231、`tools-tests` 510-538、`image-pins` 565-586。`CI`:8-16 と `CI`:13-16 は現行のまま)。**条件の本文は変えていない。** | 依頼者指示 2026-10-03 (逐語: 「§3 の CI 行番号の出所も直してください」)。行番号は 2026-09-07 の照合の後、`ci.yml` への追加 (変更クラスの判定、trigger の変更、`tools-tests` の依存と checkout ほか) でずれていた。付け替えは main `ccb21c6` の `ci.yml` (586 行) を読んで行った |
 | 2026-10-03 | **§2 の 20** を現行の送信ルール (送信は Mitate リポジトリの送信用スクリプトだけを通し、依頼者の明示の指示があるときに監督が行う / `main` だけ、無料枠の配分と凍結期間で判定、先に `--dry-run` / `--use-reserve` は明示の指示があるときだけ / 送る前に main の先頭 commit の件名に `[skip ci]` が無いことを確かめる / 1 日 1 回を基本) に書き換え、旧条項を **§4 の 13** へ移した。**§1 と §3 は変えていない。** | 依頼者指示 2026-10-03 (逐語: 「§2 の 20 を現行の送信ルールに書き換えてください」)。送信の統制は 2026-10-01 に Mitate 側で入った (正本は Mitate リポジトリの `docs/development/github-push-control.md`)。同日、依頼者の指示で main `a5e994b` を 1 回送り、run 37126080963 が全 job 成功した |
 | 2026-10-01 | **§3 の 7** を「trigger は `main` への `push` と `workflow_dispatch` のみ」に改め、旧条項を **§4 の 12** へ移した。同じ変更セットで `.github/workflows/ci.yml` の `"on":` に `branches: [main]` を足し、直前のコメントを書き換えた。**§1 と §2 は変えていない。** | 依頼者裁定 2026-10-01 (逐語: 「CI は main だけに絞ってください」)。背景: 2026-09 の GitHub Actions の消費は本 workflow が 3,637.7 分 (月の無料枠は約 2,000 分) で、branch の push が大半を占めた。2026-09-09 以降は push を止め (§2 の 20)、受け入れは手元の完了ゲートで進んでいる。設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` v1.7 の D-4 の訂正 |
 | 2026-09-30 | **§1.1 の 1** に役割 `reader` (読解) を足した。**§1 の他の条項は変えていない。** `.claude/agents/reader.md` を新設し (sonnet 固定)、`.claude/agents/explorer.md` (所在特定、haiku 固定) と `ROLES` の役割表・共通運用ルール 2・全クラス共通の手順・テンプレ 1 / 1b に反映した。 | 依頼者指示 2026-09-30 (逐語: 「explorerはHaikuを使うようにしてください。」「読解の行き先: 意味の読解は、explorer が指名した file:line をSonnet の別役割に出す形にしてください。」)。直近 8 チャットの `explorer` 8 起動がすべて起動時の `model` 上書き (sonnet 7、opus 1) だった。依頼者確認 (§1 の変更、`RM` §9 の 8) は同指示をもって充足 |
