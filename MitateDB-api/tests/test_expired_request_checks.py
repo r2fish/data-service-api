@@ -2,11 +2,11 @@
 
 A request carries one deadline, fixed when the request is accepted. `PostgresBackend` checks it with a clock comparison (no database round trip) before every statement it sends: the connections a request holds carry its deadline for as long as it holds them, and the one statement helper, `_execute`, refuses a spent budget before `cursor.execute` (`SET LOCAL` included). `_timeout_ms` refuses a remaining budget under 1 ms and never returns a bound of 0. It does not check after the last statement, because the next thing the request does is commit and a commit is never refused for time. A failed connection attempt is judged by the clock alone: a spent budget is `LIMIT_EXCEEDED` / `execution_ms`, anything else, an immediate refusal included, stays a storage failure. `SQLiteBackend` checks the same way before every statement (`_execute_statement`), and a progress handler stops a statement that is still running once the budget is spent; the handler is armed for one statement and never covers a commit or a rollback.
 
-Every test here that moves time drives a clock the test owns (`clock`): `time` in `backend_postgres`, `backend_sqlite` and `cell` is replaced by a stand-in whose `monotonic` is that clock, so a PostgreSQL round trip need not land on a chosen side of a real deadline; the statements sent after the clock moves are read off `backend_postgres._execute` (`_Trace`) and off the idle connections' own counters. The one exception is the progress-handler test, which uses the real clock because the handler runs inside SQLite's own statement. Nothing in the product code is there for the tests.
+Every test here that moves time drives a clock the test owns (`clock`): `time` in `backend_postgres`, `backend_sqlite` and `cell` is replaced by a stand-in whose `monotonic` is that clock, so a PostgreSQL round trip need not land on a chosen side of a real deadline; the statements sent after the clock moves are read off `backend_postgres._execute` (`_Trace`) and off the idle connections' own counters. The exceptions are the SQLite progress-handler tests (`test_sqlite_stops_a_statement_that_is_still_running_when_the_budget_ends`, `test_sqlite_rolls_back_the_transaction_of_a_stopped_statement_with_the_handler_already_removed`, `test_sqlite_lets_a_statement_that_finishes_within_its_budget_finish` and `test_sqlite_removes_the_bound_when_a_statement_ends_so_the_next_request_is_not_cut`), which use the real clock because the handler runs inside SQLite's own statement. Nothing in the product code is there for the tests.
 
 Real PostgreSQL for the `PostgresBackend` tests that take `backend` or `cell`; the tests that take `offline_backend` open no connection, and the SQLite tests need none.
 
-Measured by mutation (54 mutations in the change that put these checks in, each turns the test it names red, every restore verified). Removing `_execute`'s check together with `_timeout_ms`'s refusal turns red `test_a_request_with_a_spent_budget_sends_no_statement_after_the_pool_checkout[dml]` and both lock-wait tests that expect no statement after the wait; removing `_execute`'s check alone turns red `test_the_set_local_that_opens_a_request_is_checked_by_the_statement_helper`, `test_the_bound_set_again_after_a_lock_wait_is_checked_by_the_statement_helper` and the four between-statement tests (the select after the catalog read, the second operation, the idempotency store, the statement after the DDL). Not putting the deadline on the connections turns red the select test, and leaving it there after the request turns red `test_a_pooled_connection_carries_a_request_deadline_only_while_that_request_holds_it`. Replacing the refusal in `_timeout_ms` by `max(1, ...)` or testing `<= 0` there turns red the under-one-millisecond case of `test_timeout_ms_refuses_under_one_millisecond_remaining_and_never_returns_a_zero_bound`; testing `<= 0` in `_budget_spent` turns red `test_the_statement_helper_refuses_a_request_with_less_than_a_millisecond_left`; returning the constructed bound or one millisecond too many turns red the bound tests. Computing the deadline again after the pool wait turns red `test_the_wait_for_a_connection_counts_against_the_budget`, and not setting the bound again after a lock wait turns red `test_the_wait_for_a_lock_shortens_the_bound_of_the_statements_that_follow`. Dropping the cancel mapping of the opening `SET LOCAL`, of the `SET LOCAL` after a lock wait, or of the batch's record write (and, separately, the `LockNotAvailable` half of each, and the record write's other-driver-error clause) turns red the matching mapping test. Dropping the clock judgment of a failed connection attempt, applying it to every failure, mapping `PoolExhausted` to a storage failure, or asking the pool to wait for the constructed time turns red the matching connection or pool test. Putting the record write after `audit_hook.pre_commit()` again in any of the three schema operations turns red its order test and its cancelled-store test, and for `create_collection` also `test_application_audit.py::test_a_cancelled_schema_record_write_leaves_no_audit_row_because_it_comes_before_the_pre_commit_row`. Putting a check after the select or before the commit turns red the two "even if the budget ends right after" tests. SQLite: removing the check before a statement turns red the between-statements, DDL and first-statement tests; a strict `>` threshold, leaving the refused request's transaction open and forgetting the outer deadline when a nested scope ends each turn red their test; removing the progress handler turns red `test_sqlite_stops_a_statement_that_is_still_running_when_the_budget_ends` (the statement then runs to the end, about 5.6 s in that run); arming the handler for the commit or for the rollback, or leaving it armed after a statement (finished or stopped), turns red the matching test.
+Measured by mutation (61 mutations in the change that put these checks in, each turns the test it names red, every restore verified; 56 name a test in this file, 2 name one in `test_r102_request_scope.py` and 3 one in `test_application_audit.py`). Removing `_execute`'s check together with `_timeout_ms`'s refusal turns red `test_a_request_with_a_spent_budget_sends_no_statement_after_the_pool_checkout[dml]` and both lock-wait tests that expect no statement after the wait; removing `_execute`'s check alone turns red `test_the_set_local_that_opens_a_request_is_checked_by_the_statement_helper`, `test_the_bound_set_again_after_a_lock_wait_is_checked_by_the_statement_helper` and the four between-statement tests (the select after the catalog read, the second operation, the idempotency store, the statement after the DDL). Not putting the deadline on the connections turns red the select test, and leaving it there after the request turns red `test_a_pooled_connection_carries_a_request_deadline_only_while_that_request_holds_it`. Replacing the refusal in `_timeout_ms` by `max(1, ...)` or testing `<= 0` there turns red the under-one-millisecond case of `test_timeout_ms_refuses_under_one_millisecond_remaining_and_never_returns_a_zero_bound`; testing `<= 0` in `_budget_spent` turns red `test_the_statement_helper_refuses_a_request_with_less_than_a_millisecond_left`; returning the constructed bound or one millisecond too many turns red the bound tests. Computing the deadline again after the pool wait turns red `test_the_wait_for_a_connection_counts_against_the_budget`, and not setting the bound again after a lock wait turns red `test_the_wait_for_a_lock_shortens_the_bound_of_the_statements_that_follow`. Dropping the cancel mapping of the opening `SET LOCAL`, of the `SET LOCAL` after a lock wait, or of the batch's record write (and, separately, the `LockNotAvailable` half of each, and the record write's other-driver-error clause) turns red the matching mapping test. Dropping the clock judgment of a failed connection attempt, applying it to every failure, mapping `PoolExhausted` to a storage failure, or asking the pool to wait for the constructed time turns red the matching connection or pool test. Putting the record write after `audit_hook.pre_commit()` again in any of the three schema operations turns red its order test and its cancelled-store test, and for `create_collection` also `test_application_audit.py::test_a_cancelled_schema_record_write_leaves_no_audit_row_because_it_comes_before_the_pre_commit_row`. Calling the untranslated record write in a schema operation turns red its test for a driver error that is not a cancel (and, for all three together, `test_application_audit.py::test_a_failed_schema_record_write_that_is_not_a_cancel_is_a_storage_failure_and_leaves_no_audit_row`). Putting a check after the select or before the commit turns red the two "even if the budget ends right after" tests. SQLite: removing the check before a statement turns red the between-statements, DDL and first-statement tests; a strict `>` threshold, leaving the refused request's transaction open and forgetting the outer deadline when a nested scope ends each turn red their test; removing the progress handler turns red `test_sqlite_stops_a_statement_that_is_still_running_when_the_budget_ends` (the statement then runs to the end, about 5.4 s in that run); arming the handler for the commit or for the rollback, or leaving it armed after a statement (finished or stopped), turns red the matching test. Dropping the rollback of a stopped statement turns red `test_sqlite_stops_a_statement_that_is_still_running_when_the_budget_ends` and `test_sqlite_rolls_back_the_transaction_of_a_stopped_statement_with_the_handler_already_removed`; removing the handler after that rollback instead of before it turns red the second.
 """
 from __future__ import annotations
 
@@ -647,6 +647,19 @@ def test_a_cancelled_idempotency_record_write_of_a_schema_operation_never_reache
     assert _left_nothing(kind, backend)
 
 
+@pytest.mark.parametrize("failure", [psycopg.errors.DiskFull("synthetic disk full"), psycopg.errors.OperationalError("synthetic connection loss")], ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize("kind", _SCHEMA_OPERATIONS)
+def test_any_other_failure_of_an_idempotency_record_write_of_a_schema_operation_is_a_storage_failure_and_never_reaches_the_audit_hook(backend: PostgresBackend, monkeypatch: pytest.MonkeyPatch, kind: str, failure: BaseException) -> None:
+    events: list[str] = []
+    operation = _schema_operation(kind, backend, _Hook(events))
+    monkeypatch.setattr(backend, "_write_idempotency_row", lambda *args: (_ for _ in ()).throw(failure))
+    with pytest.raises(StorageTransientError):
+        with backend.request_scope("schema") as scope:
+            operation(scope)
+    assert events == []
+    assert _left_nothing(kind, backend)
+
+
 # ---- SQLite -------------------------------------------------------------------
 
 
@@ -750,17 +763,36 @@ def test_sqlite_answers_a_read_whose_budget_ends_after_its_last_statement(clock:
 _LONG_STATEMENT = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 80000000) SELECT count(*) FROM c"
 
 
-def test_sqlite_stops_a_statement_that_is_still_running_when_the_budget_ends() -> None:
-    """Real clock: eighty million rows of a recursive query take seconds, the request has a quarter of a second. The statement is stopped, the request refused, its transaction rolled back, and the stop takes about the budget, not the statement's own time."""
+def _stop_a_long_statement_inside_a_transaction(budget_s: float) -> tuple[SQLiteBackend, ResourceLimitError, float]:
+    """Real clock: a request opens a transaction, inserts a row, then sends a statement that outlasts its budget. Returns the backend, the refusal and how long the stop took, after the request's scope ended."""
     backend = _sqlite_with_widgets()
-    with backend.request_scope("query", deadline=time.monotonic() + 0.25) as scope:
+    with backend.request_scope("dml", deadline=time.monotonic() + budget_s) as scope:
+        backend.begin(scope=scope)
+        backend.insert_in_transaction("widgets", ["label"], ["a"], scope=scope)
+        assert backend._db.in_transaction and _sqlite_rows(backend) == 1, "the request has no open transaction with a row in it (空振り)"
         started = time.monotonic()
         with pytest.raises(ResourceLimitError) as exc:
             backend._execute_statement(_LONG_STATEMENT, fetch=True)
         elapsed = time.monotonic() - started
-        assert exc.value.details == _LIMIT
-        assert elapsed < 3.0, elapsed
-        assert not backend._db.in_transaction
+    return backend, exc.value, elapsed
+
+
+def test_sqlite_stops_a_statement_that_is_still_running_when_the_budget_ends() -> None:
+    """Real clock: eighty million rows of a recursive query take seconds, the request has a quarter of a second. The statement is stopped, the request refused, the transaction the request had open is rolled back (the row it inserted is gone), and the stop takes about the budget, not the statement's own time."""
+    backend, refusal, elapsed = _stop_a_long_statement_inside_a_transaction(0.25)
+    assert refusal.details == _LIMIT
+    assert elapsed < 3.0, elapsed
+    assert not backend._db.in_transaction
+    assert _sqlite_rows(backend) == 0
+
+
+def test_sqlite_rolls_back_the_transaction_of_a_stopped_statement_with_the_handler_already_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The interval is 1, so the handler looks at the clock on every instruction and would stop the rollback too if it were still armed when the rollback ran: the statement would end in SQLite's own interrupt error and the transaction would stay open. It ends in the refusal, and the transaction is closed."""
+    monkeypatch.setattr(sqlite_module, "_PROGRESS_INTERVAL_OPS", 1)
+    backend, refusal, _ = _stop_a_long_statement_inside_a_transaction(0.2)
+    assert refusal.details == _LIMIT
+    assert not backend._db.in_transaction
+    assert _sqlite_rows(backend) == 0
 
 
 def test_sqlite_lets_a_statement_that_finishes_within_its_budget_finish() -> None:

@@ -1101,7 +1101,7 @@ class PostgresBackend:
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
                         "request_id": req_id,
                     })
-                    self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                    self._write_request_idempotency_row(scope.main, key, digest, response_json, now_ms)
                 if audit_hook is not None:
                     audit_hook.pre_commit()
                     hook_fired = True
@@ -1263,7 +1263,7 @@ class PostgresBackend:
                         },
                         "request_id": req_id,
                     })
-                    self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                    self._write_request_idempotency_row(scope.main, key, digest, response_json, now_ms)
                 if audit_hook is not None:
                     audit_hook.pre_commit()
                     hook_fired = True
@@ -1416,7 +1416,7 @@ class PostgresBackend:
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
                         "request_id": req_id,
                     })
-                    self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                    self._write_request_idempotency_row(scope.main, key, digest, response_json, now_ms)
                 if audit_hook is not None:
                     audit_hook.pre_commit()
                     hook_fired = True
@@ -1867,15 +1867,13 @@ class PostgresBackend:
         self._write_request_idempotency_row(scope.main, key, digest, response_json, now_ms)
 
     def _write_request_idempotency_row(self, conn, key, digest, response_json, now_ms):
-        """`_write_idempotency_row` for the single-batch path, which has no `except` of its own around the write: a statement cancelled by its bound is `LIMIT_EXCEEDED` / `execution_ms`, a deadlock or serialization failure is a retryable storage failure and any other driver error is the storage backend not serving the request. The key the record carries was already bound by the lookup that preceded it, so a driver error here is never a refusal of the request's own content."""
+        """`_write_idempotency_row` for a caller with no `except` of its own around the write that answers the request's own failures (the single batch path and the three schema operations): a statement cancelled by its bound is `LIMIT_EXCEEDED` / `execution_ms` and any other driver error is a retryable storage failure (`SERVICE_UNAVAILABLE`). The key the record carries was already bound by the lookup that preceded it, so a driver error here is never a refusal of the request's own content. Every caller writes the record before `audit_hook.pre_commit()`, so a failure here leaves no audit row."""
         try:
             self._write_idempotency_row(conn, key, digest, response_json, now_ms)
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable) as exc:
             raise _budget_exhausted() from exc
-        except _TRANSIENT_ERRORS as exc:
-            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
-            raise StorageTransientError("the storage backend could not be reached") from exc
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
 
     def idempotency_discard_pending(self, key):
         """Phase 9 WP-3cd closure (K-5, N-8): a real no-op HERE -- unlike

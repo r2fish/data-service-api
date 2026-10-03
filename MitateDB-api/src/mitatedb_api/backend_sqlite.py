@@ -163,7 +163,7 @@ class SQLiteBackend:
     def _execute_statement(self, statement, params=(), *, fetch=False):
         """Sends one statement and returns its cursor, or all its rows when `fetch` (a statement that returns rows runs while they are fetched, so the bound below covers the fetch too).
 
-        A request with a deadline is checked before the statement is sent (`_check_deadline`) and, while the statement runs, by a progress handler that stops it once less than 1 ms of the budget remains: the statement fails with `LIMIT_EXCEEDED` / `execution_ms` and the request's open transaction is rolled back. The handler is armed for the statement alone and is removed whichever way it ends, so a commit or a rollback that follows is never interrupted by it. A statement of a request with no deadline is neither checked nor bounded."""
+        A request with a deadline is checked before the statement is sent (`_check_deadline`) and, while the statement runs, by a progress handler that stops it once less than 1 ms of the budget remains: the statement fails with `LIMIT_EXCEEDED` / `execution_ms` and the request's open transaction is rolled back. The handler is armed for the statement alone and is removed whichever way it ends, before anything else is done, so a commit or a rollback that follows (the rollback of a stopped statement included) is never interrupted by it. A statement of a request with no deadline is neither checked nor bounded."""
         deadline = self._deadline
         if deadline is None:
             cursor = self._db.execute(statement, params)
@@ -183,15 +183,16 @@ class SQLiteBackend:
 
         self._db.set_progress_handler(bound, _PROGRESS_INTERVAL_OPS)
         try:
-            cursor = self._db.execute(statement, params)
-            return cursor.fetchall() if fetch else cursor
+            try:
+                cursor = self._db.execute(statement, params)
+                return cursor.fetchall() if fetch else cursor
+            finally:
+                self._db.set_progress_handler(None, 0)
         except sqlite3.OperationalError as exc:
             if stopped:
                 self._abandon()
                 raise _budget_exhausted() from exc
             raise
-        finally:
-            self._db.set_progress_handler(None, 0)
 
     def lock_schema(self, *, scope):
         """No-op: the scope already serializes every request."""
