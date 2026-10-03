@@ -645,7 +645,7 @@ def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerification
 # port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
 # section 6.4): `hold_after_admission` realization for this in-process
 # plug. `ApplicationCell._limit_gate` is where a request's rate and
-# concurrency gates run, its request-shape checks run, its `budget`
+# concurrency gates run, its request-size and depth checks run, its `budget`
 # narrows the bounds and the deadline is computed from them; it yields that
 # deadline, and the caller opens the backend's request scope -- the
 # request's first connection -- only after that. A stall just after the

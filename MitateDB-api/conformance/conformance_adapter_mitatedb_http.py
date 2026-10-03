@@ -1070,7 +1070,7 @@ def _hold_after_plan_verification(cell_obj: object) -> Iterator[PlanVerification
 # `_hold_after_idempotency_check` above reaches it). See
 # `conformance_adapter_mitatedb.py`'s identically named helper for the full
 # rationale: `ApplicationCell._limit_gate` yields the request's deadline
-# after the rate and concurrency gates, the request-shape checks and the
+# after the rate and concurrency gates, the request-size and depth checks and the
 # narrowing by `budget`, and the caller opens the backend's request scope
 # -- the first connection -- only after that, so a stall just after the
 # gate yields is the point the contract names. The wrap replaces the gate on

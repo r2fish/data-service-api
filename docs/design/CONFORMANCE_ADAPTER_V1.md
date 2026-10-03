@@ -3742,7 +3742,7 @@ docstring unparaphrased):
 
 「`session` 上で次に到着する、`plan` または `dry_run` を提示する schema 操作を 1 件だけ、その要求自身が plan の照合に使う現在の revision を読み終え、その読みが取った lock をすべて保持したまま、DDL をまだ 1 文も実行していない地点で停止させたまま保持する。保持中に同じ Application への 2 件目の schema 操作を出すと、2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。`with` を抜けると先着は解放される。」
 
-**【追記 2026-10-03 (port v1.22, design `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4)】** Of the quoted text above, the sentence 「2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。」 (its part after 「保持中に同じ Application への 2 件目の schema 操作を出すと、」) is revised by port v1.22 (§32); `conformance-tests/adapter.py`'s docstring carries the revised sentence, and the rest of the quotation is unchanged:
+**【追記 2026-10-03 (port v1.22, design `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4)】** Of the quoted text above, the sentence 「2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` で拒否され何も実行しない。」 (its part after 「保持中に同じ Application への 2 件目の schema 操作を出すと、」) is revised by port v1.22 (§32); `conformance-tests/adapter.py`'s docstring carries the revised sentence, and the rest of the quotation is unchanged. The handle `PlanVerificationHold` below also gains a second method in port v1.22, `statements_after_release()` (§32.1):
 
 「2 件目は先着が解放されて commit した後にはじめて答えを返すか、または先着が `PRECONDITION_FAILED` か `LIMIT_EXCEEDED` (`limit_class: execution_ms`) で拒否され何も実行しない。」
 
@@ -4062,10 +4062,28 @@ primitive's contract text that promise what follows the release are revised
 into three (§25.1, 【追記】), and one sentence of
 `hold_after_plan_verification`'s contract text is revised (§30.1, 【追記】).
 
-Measured: recorded here once the implementations are measured (design M-8:
-the three vectors and their positive controls on the six plugs, and the
-statement count against an independent count of the statements the Application's
-connections sent).
+Measured, once, in the change set that added the port: the statement count of
+each handle is not a constant 0 on a PostgreSQL plug. Replacing the count by
+`lambda: 0` turns the wiring test of `hold_after_admission` (V21a on the r2db
+http plug, V21b on the MitateDB http plug) and the wiring tests of
+`hold_after_idempotency_lookup` and `hold_after_plan_verification` (V22a-d, the
+two peers) red on the http plugs, and the same six entries red on the two socket
+plugs, which inherit the http plug's code. Dropping the `txn_open_count`
+increment from either peer's `psycopg_counting.py` turns
+`test_txn_open_count_counts_only_the_enter_of_transaction` red in that peer
+(V-txn-a, V-txn-b). The r2db http plug's figure was also checked against an
+independent count: a scratch probe recorded every `execute()` and `transaction()`
+on the Application's database after the release, and the positive controls of
+vectors (i), (ii) and (iii) sent 9, 6 and 2 statements, equal to the figure
+(the checkout's `SELECT 1` and `SET search_path` excluded, the two
+`transaction()` entries of (i) included). The probe is not kept, so repeating
+that check needs the probe to be written again; the MitateDB plugs were not
+measured against an independent count.
+
+Not yet measured: the three vectors and their positive controls on the six
+plugs, and the 100/100 repetition under the completion gate's load (design M-8).
+They are recorded here by the measurement run that follows the implementations'
+declaration of the version.
 
 ### 32.3 Disclosed limits
 
@@ -4075,7 +4093,13 @@ connections sent).
    outside the count.
 2. **The enter side of a transaction is counted per connection; a connection
    that is closed loses its `txn_open_count`.** Its `execute()` count is kept in
-   the pool's closed totals, its enter count is not.
+   the pool's closed totals, its enter count is not. The figure can therefore be
+   below 0: r2db's fold of a closed connection does not fold `txn_open_count`
+   (`postgres.py`, `_fold_closed_connection_stats`), the branch that dequeues a
+   connection already closed adds one to `acquire_count` without sending the
+   checkout's `SELECT 1`, and MitateDB's `release()` discards a closed
+   connection without folding it (`pool.py`). Each case turns a negative
+   example (`== 0`) into a false red; none turns one into a false green.
 3. **A request that was running on the pools when the hold was released is not
    attributable.** The conformance vectors that read the figure run exactly one
    request on the Application.

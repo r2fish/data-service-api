@@ -1076,7 +1076,7 @@ def _hold_after_plan_verification_via_stalled_cell_methods(cell_obj: object) -> 
 # port v1.22 (design docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md D-7 and
 # section 6.4): `hold_after_admission` realization for this HTTP plug.
 # `DataService` resolves the request's bounds -- the rate and concurrency
-# gates, the request-shape checks, the narrowing by `budget` -- and
+# gates, the request-size and depth checks, the narrowing by `budget` -- and
 # computes the deadline from them, and only then calls the Application's
 # `PostgresCell`: `query`, `transact` or `apply_schema` (`service.py`, the
 # `_query_outcome` and `_mutate_outcome` bodies and the schema operation's

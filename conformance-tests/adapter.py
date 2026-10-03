@@ -2111,7 +2111,7 @@ class ConformanceAdapter(ABC):
         already establish.
 
         What "the point" is. The request has passed authentication, its
-        rate and concurrency gates, its request-shape checks, and the
+        rate and concurrency gates, its request-size and depth checks, and the
         narrowing of its bounds by its own `budget`, and the deadline that
         `budget.execution_ms` (or the deployment's own `execution_ms`)
         defines has therefore been computed; it has not yet taken a
