@@ -282,7 +282,15 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: `_fail_client_value`'s own single `fail()` call. Re-verified against the
 #: current file via `_fail_call_sites`. Entry count and site identity
 #: unchanged (1).
-    ("postgres.py", 1828),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+#: Request budget: line shift only (1828 -> 1883) -- the budget helpers
+#: (`_RequestBudget`, `_request_budget`, `_check_request_budget`,
+#: `_transaction`) and `_RolePool._connect_within` sit ABOVE
+#: `_fail_client_value`'s own single `fail()` call, net +55 lines after the
+#: entry, per-operation and after-last-statement `check_deadline` calls in
+#: `query` / `transact` / `apply_schema` came out. Re-verified against the
+#: current file via `_fail_call_sites`. Entry count and site identity
+#: unchanged (1).
+    ("postgres.py", 1883),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

@@ -597,15 +597,16 @@ def test_rate_limit_is_atomic_for_concurrent_requests():
 
 
 def test_schema_deadline_failure_rolls_back_entity_catalog_and_revision():
-    clock_values = iter([0.0, 0.0, 0.0, 0.01])
-    service, context = _limited(execution_ms=1)
+    # the third clock read is the check before the operation applies (rate window, deadline, check): a request whose budget is spent there leaves no entity behind. The follow-up query reads a frozen clock, so its own 2 ms budget is never spent by the real time between two reads.
+    clock_values = iter([0.0, 0.0, 0.01])
+    service, context = _limited(execution_ms=2)
     ControlAuthority(service).issue_credential("schema-dev", "limit-app", "developer", "schema-dev-secret")
     developer = service.authenticate("schema-dev.schema-dev-secret")
     service._clock = lambda: next(clock_values)
     with pytest.raises(FoundationError) as error:
         service.schema(developer, {"operation": "create_entity", "entity": "deadline_entity", "fields": ["value"]})
     assert error.value.code == "LIMIT_EXCEEDED"
-    service._clock = time.monotonic
+    service._clock = lambda: 0.0
     with pytest.raises(FoundationError) as absent:
         service.query(context, "deadline_entity", select=["value"])
     assert absent.value.code == "NOT_FOUND"

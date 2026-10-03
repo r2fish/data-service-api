@@ -226,9 +226,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Control
 
 - Cell resolution reads `AuthContext.application_id` alone, never a client-supplied value -- `r2db-api/src/r2db_api/service.py`:314.
-- `PostgresCell` confines each application to its own PostgreSQL database, whose name the control plane assigns and never derives from client input (architecture §8 "D-3 改訂", database-per-application) -- `r2db-api/src/r2db_api/postgres.py`:986.
-- `PostgresCell` only ever connects over that application's own `runtime`/`developer` DSNs -- `r2db-api/src/r2db_api/postgres.py`:1010-1014.
-- `PostgresCell` verifies every identifier against that database's live `information_schema` catalog (`_load_catalog`) before composing SQL, so a name collision reaches no other application's tables -- `r2db-api/src/r2db_api/postgres.py`:1132.
+- `PostgresCell` confines each application to its own PostgreSQL database, whose name the control plane assigns and never derives from client input (architecture §8 "D-3 改訂", database-per-application) -- `r2db-api/src/r2db_api/postgres.py`:1051.
+- `PostgresCell` only ever connects over that application's own `runtime`/`developer` DSNs -- `r2db-api/src/r2db_api/postgres.py`:1075-1079.
+- `PostgresCell` verifies every identifier against that database's live `information_schema` catalog (`_load_catalog`) before composing SQL, so a name collision reaches no other application's tables -- `r2db-api/src/r2db_api/postgres.py`:1197.
 
 #### Evidence
 
@@ -294,7 +294,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `AuthorityTopology` denies application/developer reachability to control/provisioning -- `r2db-api/src/r2db_api/topology.py:46-48`.
 - `0001_bootstrap_control_plane.sql` creates the provisioning authority `r2dbsvc_control` as a distinct `NOSUPERUSER`/`NOINHERIT` role only an operator holds a credential for -- `0001_bootstrap_control_plane.sql`.
 - That role deliberately carries `CREATEDB`/`CREATEROLE` for database-per-application provisioning (§5.3 C-2) -- exactly why the API process never holds it -- `r2db-api/migrations/0001_bootstrap_control_plane.sql`.
-- `PostgresCell` never embeds a control-plane DSN, and only ever opens connections as an application's already-provisioned `runtime`/`developer` role -- `r2db-api/src/r2db_api/postgres.py:962`.
+- `PostgresCell` never embeds a control-plane DSN, and only ever opens connections as an application's already-provisioned `runtime`/`developer` role -- `r2db-api/src/r2db_api/postgres.py:1027`.
 - CCR-14's `/control/v1` surface carries the same 3 isolation points as SI-00's block: separate stores, distinct login roles, its own topology node -- `r2db-api/src/r2db_api/control_http.py:446-463`.
 - Within the control plane, `role="control"` is separated from `role="audit"` (read-only) structurally -- `r2db-api/src/r2db_api/control_plane.py:132`.
 - That separation is fail-closed by enumeration: every one of the 8 remaining operations refuses an `audit` principal with `FORBIDDEN` -- `r2db-api/src/r2db_api/control_plane.py:1272`.
@@ -365,7 +365,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `ApplicationCell.apply_schema` requires developer context -- `r2db-api/src/r2db_api/backend.py:125-129`, `r2db-api/src/r2db_api/structured.py:178-179`.
 - The schema catalog rejects unknown runtime entity/fields -- `r2db-api/src/r2db_api/structured.py:884`.
 - The topology has distinct data and development planes -- `r2db-api/src/r2db_api/topology.py:27-28`.
-- `PostgresCell.apply_schema` checks the same `developer: bool` flag and executes every schema-changing statement only over the `developer_dsn` connection pool -- `r2db-api/src/r2db_api/postgres.py`:2104-2138.
+- `PostgresCell.apply_schema` checks the same `developer: bool` flag and executes every schema-changing statement only over the `developer_dsn` connection pool -- `r2db-api/src/r2db_api/postgres.py`:2159-2193.
 - The DML-only `runtime` role has no `CREATE` grant on the schema at all: `REVOKE ALL ON SCHEMA public FROM PUBLIC`, a `USAGE`-only grant to it, and `ALTER DEFAULT PRIVILEGES` -- `migrations/0003_provision_application.sql`.
 - Those grants are a second, DB-enforced layer under the application-level `developer: bool` check -- `migrations/0003_provision_application.sql`.
 
@@ -419,8 +419,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Control
 
 - `structured.py` exposes only enumerated operations and no native command API -- `r2db-api/src/r2db_api/structured.py`.
-- `_run` is the single execution choke point every statement passes through, typed to accept only `psycopg.sql.Composed`/`psycopg.sql.SQL` and raising `TypeError` on any `str` -- `r2db-api/src/r2db_api/postgres.py`:238-244.
-- `PostgresCell` has no method, public or private, that can pass a raw command string to PostgreSQL -- `r2db-api/src/r2db_api/postgres.py`:238.
+- `_run` is the single execution choke point every statement passes through, typed to accept only `psycopg.sql.Composed`/`psycopg.sql.SQL` and raising `TypeError` on any `str` -- `r2db-api/src/r2db_api/postgres.py`:280-286.
+- `PostgresCell` has no method, public or private, that can pass a raw command string to PostgreSQL -- `r2db-api/src/r2db_api/postgres.py`:280.
 
 #### Evidence
 
@@ -468,9 +468,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Control
 
 - `validate_identifier` and the operator allowlist bound every structured request, together with the typed mutation shape and the service checks -- `r2db-api/src/r2db_api/structured.py`, `r2db-api/src/r2db_api/identifier_rules.py:50`.
-- `r2db-api/src/r2db_api/postgres.py` composes identifiers only via `psycopg.sql.Identifier` -- `r2db-api/src/r2db_api/postgres.py`:1920.
-- That composition runs after both the shared `structured.py` syntax allowlist and a second check against the schema's live `information_schema` catalog (`_load_catalog`) -- `r2db-api/src/r2db_api/postgres.py`:1132.
-- `PostgresCell` binds every value as a server-side parameter (`psycopg.sql.Placeholder`/`Jsonb`) rather than string interpolation -- `r2db-api/src/r2db_api/postgres.py`:1927.
+- `r2db-api/src/r2db_api/postgres.py` composes identifiers only via `psycopg.sql.Identifier` -- `r2db-api/src/r2db_api/postgres.py`:1975.
+- That composition runs after both the shared `structured.py` syntax allowlist and a second check against the schema's live `information_schema` catalog (`_load_catalog`) -- `r2db-api/src/r2db_api/postgres.py`:1197.
+- `PostgresCell` binds every value as a server-side parameter (`psycopg.sql.Placeholder`/`Jsonb`) rather than string interpolation -- `r2db-api/src/r2db_api/postgres.py`:1982.
 - CCR-13 (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-7) extends validation from identifiers/shapes to value domains -- `r2db-api/src/r2db_api/value_types.py:69`.
 - Typed-column values (`bigint`/`double precision`/`boolean`/`text`) are checked against the declared type and bound natively -- `r2db-api/src/r2db_api/value_types.py:69`.
 - A shared range/NUL-byte check runs ahead of execution, so a value PostgreSQL would reject at runtime fails deterministically instead -- `r2db-api/src/r2db_api/value_nul.py:7`.
@@ -670,14 +670,19 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `ResourceLimits` declares a finite bound for every required class -- atomic credential-rate window, iterative request/depth checks, structured batch/result/schema checks, wall-clock deadline -- `r2db-api/src/r2db_api/limits.py:11`.
 - the served data plane counts `requests_per_minute` in `0015`'s row under its row lock; the in-memory window runs only where no rate row is wired -- `r2db-api/src/r2db_api/service.py:656`, `r2db-api/src/r2db_api/main.py:693`.
 - `RequestByteBoundMiddleware` bounds `request_bytes` in the ASGI receive loop from bytes actually received, not `Content-Length`, before Starlette parses -- `r2db-api/src/r2db_api/http.py:247`.
-- `postgres.py`'s `_set_timeouts` maps `execution_ms` onto PostgreSQL's own `statement_timeout`/`lock_timeout` (`SET LOCAL`, per transaction), a real second enforcement layer -- `r2db-api/src/r2db_api/postgres.py:2680`.
-- both peers' `SET LOCAL` sets `statement_timeout` and `lock_timeout` alike, and r2db-api's application runtime/developer roles rely on that per-transaction call alone -- `r2db-api/src/r2db_api/postgres.py:2680-2694`.
+- `postgres.py`'s `_set_timeouts` maps `execution_ms` onto PostgreSQL's own `statement_timeout`/`lock_timeout` (`SET LOCAL`, per transaction), a real second enforcement layer -- `r2db-api/src/r2db_api/postgres.py:2735`.
+- both peers' `SET LOCAL` sets `statement_timeout` and `lock_timeout` alike, and r2db-api's application runtime/developer roles rely on that per-transaction call alone -- `r2db-api/src/r2db_api/postgres.py:2735-2749`.
+- the deadline fixed at acceptance goes to the pool checkout of `query`, `transact` and `apply_schema` and is never recomputed, so a pool wait and a new connection count against `execution_ms` -- `r2db-api/src/r2db_api/postgres.py:239`, `:267`.
+- `_run` checks the deadline before each statement and `_transaction` before each `BEGIN` or `SAVEPOINT`, by a clock comparison with no database round trip; nothing checks after the last statement -- `r2db-api/src/r2db_api/postgres.py:280`, `:291`.
+- `_timeout_ms` refuses a remaining budget under 1 ms with `LIMIT_EXCEEDED` (`execution_ms`), never returns a bound of 0, and returns no bound above what remained when it was computed -- `r2db-api/src/r2db_api/postgres.py:2726`.
+- a pool wait or a connection attempt (new, or replacing a closed or dead one) that ends with the budget spent is `LIMIT_EXCEEDED` (`execution_ms`) by one clock judgment, any other failure stays 503 -- `r2db-api/src/r2db_api/postgres.py:461`, `:518`.
+- `ResourceLimits.check_deadline` refuses under 1 ms remaining; the in-memory `ApplicationCell` shares it and checks before each operation, not after the last -- `r2db-api/src/r2db_api/limits.py:99`, `r2db-api/src/r2db_api/structured.py:1145`.
 - **CCR-14** `ControlPlaneService` bounds the control-plane classes `applications` and `credentials_per_application`, where revoked rows never count, and publishes both `enforced` -- `r2db-api/src/r2db_api/control_plane.py:766`.
 - `control_requests_per_minute` is a third control-plane class, one global sliding 60s window rather than a per-credential one, published `enforced` -- `r2db-api/src/r2db_api/control_plane.py:1409`.
 - `_check_rate` runs before authentication and before any durable audit write, so a flood cannot generate unbounded audit rows -- `r2db-api/src/r2db_api/control_plane.py:1409`.
 - `request_bytes` is declared in two layers: the service layer alone declares `unavailable`, `control_http.py` overrides it to `enforced` once the middleware mounts, both reading the SAME limits source -- `r2db-api/src/r2db_api/control_http.py:231`.
-- **`audit_requests_per_minute`** is a 5th control-plane class, default 60, env-overridable, published `enforced` -- `r2db-api/src/r2db_api/limits.py:398`.
-- `ControlPlaneLimits.__post_init__` accepts any positive integer for a control-plane class and sets no upper bound, matching MitateDB-api -- `r2db-api/src/r2db_api/limits.py:400`.
+- **`audit_requests_per_minute`** is a 5th control-plane class, default 60, env-overridable, published `enforced` -- `r2db-api/src/r2db_api/limits.py:399`.
+- `ControlPlaneLimits.__post_init__` accepts any positive integer for a control-plane class and sets no upper bound, matching MitateDB-api -- `r2db-api/src/r2db_api/limits.py:401`.
 - `audit_query` (canonical path plus the `/v1/audit/query` alias) consumes only that window, a separate counter and never a renamed view of `control_requests_per_minute` -- `r2db-api/src/r2db_api/control_http.py:463`.
 - `_check_audit_rate` is charged pre-auth like the control window, so an unauthenticated flood adds no audit rows and polling for evidence cannot exhaust the window `revoke_credential` depends on -- `r2db-api/src/r2db_api/control_plane.py:1432`.
 - the audit window's overage is `LIMIT_EXCEEDED` with `limit_class=="audit_requests_per_minute"` -- `r2db-api/src/r2db_api/control_plane.py:1444`.
@@ -687,9 +692,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `PostgresAuditQueryStore.query`'s own `except psycopg.Error` answers a `QueryCanceled` with 503 `SERVICE_UNAVAILABLE`, without the backend's own message, and hands the connection back to the pool -- `r2db-api/src/r2db_api/credential_store.py`.
 - **F-17** in `ops verify-declarations` (exit code 16) requires a positive role-level `statement_timeout` with no per-database row overriding that same key -- `r2db-api/src/r2db_api/platform_declarations.py:1168`.
 - **F-17** identifies its target roles by their real SELECT grants on both audit tables, never by name -- `r2db-api/src/r2db_api/platform_declarations.py:1152`.
-- `PostgresCell`'s four client-reachable operations -- `query`, `transact`, `apply_schema` and `catalog` -- issue that call inside their own transaction -- `r2db-api/src/r2db_api/postgres.py` `:1114-1130`.
-- `catalog` takes its bound from the `ResourceLimits` it is passed and falls back to the default `ResourceLimits()` when called without one, so the bound never depends on the caller -- `r2db-api/src/r2db_api/postgres.py` `:1114-1130`.
-- `catalog` maps a cancelled statement or a lock timeout to the same `LIMIT_EXCEEDED` the other three operations return -- `r2db-api/src/r2db_api/postgres.py` `:1114-1130`.
+- `PostgresCell`'s four client-reachable operations -- `query`, `transact`, `apply_schema` and `catalog` -- issue that call inside their own transaction -- `r2db-api/src/r2db_api/postgres.py` `:1179-1195`.
+- `catalog` takes its bound from the `ResourceLimits` it is passed and falls back to the default `ResourceLimits()` when called without one, so the bound never depends on the caller -- `r2db-api/src/r2db_api/postgres.py` `:1179-1195`.
+- `catalog` maps a cancelled statement or a lock timeout to the same `LIMIT_EXCEEDED` the other three operations return -- `r2db-api/src/r2db_api/postgres.py` `:1179-1195`.
 - `ops upgrade-applications` requires `--lock-timeout` with no default, `--dry-run` included -- `r2db-api/src/r2db_api/ops.py:2412`.
 - `_validate_lock_timeout_value` validates that value before any connection is opened -- a positive integer with an optional `ms`/`s`/`min`, so `0` is refused and the refused value is never echoed -- `r2db-api/src/r2db_api/ops.py:1501`.
 - `_run_upgrade_script` hands the value to each `psql` child as `-c lock_timeout=<value>` appended to `PGOPTIONS`, alongside any `options` the DSN itself carried -- `r2db-api/src/r2db_api/ops.py:1617`.
@@ -709,6 +714,15 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `catalog` limits -- `r2db-api/tests/test_postgres.py::test_catalog_wires_statement_and_lock_timeout_to_the_passed_resource_limits`, `::test_catalog_without_an_explicit_limits_argument_uses_default_resource_limits`, `::test_catalog_set_local_timeouts_do_not_leak_to_the_next_transaction`.
 - `catalog` limits -- `r2db-api/tests/test_postgres.py::test_catalog_maps_timeout_and_lock_conflicts_to_limit_exceeded`, `r2db-api/tests/test_foundation.py::test_data_service_catalog_passes_only_its_own_limits_to_the_cell`.
 - `catalog` limits -- `r2db-api/tests/test_foundation.py::test_data_service_catalog_denial_is_audited_with_the_limit_exceeded_reason`.
+- request budget, the checks -- `r2db-api/tests/test_expired_request_checks.py::test_a_request_with_a_spent_budget_sends_no_statement_after_the_pool_checkout`, `::test_the_check_before_the_outermost_begin_is_its_own_check`, `::test_a_nested_transaction_is_not_opened_once_the_budget_is_spent`.
+- request budget, between statements and the lock wait -- `r2db-api/tests/test_expired_request_checks.py::test_a_keyed_mutation_whose_budget_ends_after_its_last_operation_does_not_send_the_idempotency_store`, `::test_the_wait_for_a_lock_is_followed_by_a_clock_check_and_no_second_bound`.
+- request budget, no check after the last statement -- `r2db-api/tests/test_expired_request_checks.py::test_a_query_whose_budget_ends_after_its_select_still_succeeds`, `::test_a_mutation_without_a_key_whose_budget_ends_after_its_last_operation_commits`.
+- request budget, the bound -- `r2db-api/tests/test_expired_request_checks.py::test_the_statement_bound_is_the_smaller_of_execution_ms_and_the_whole_milliseconds_remaining`, `::test_a_remaining_budget_under_one_millisecond_is_refused_and_never_becomes_a_bound_of_zero`.
+- request budget, the threshold -- `r2db-api/tests/test_expired_request_checks.py::test_the_deadline_check_refuses_under_one_millisecond_remaining`, `::test_the_in_memory_backend_refuses_under_one_millisecond_remaining`.
+- request budget, the pool wait -- `r2db-api/tests/test_expired_request_checks.py::test_a_pool_wait_that_ends_with_the_budget_spent_is_limit_exceeded_and_is_bounded_by_the_budget`, `::test_a_pool_wait_that_times_out_with_budget_left_stays_the_pool_failure`.
+- request budget, the connection -- `r2db-api/tests/test_expired_request_checks.py::test_a_failed_connection_attempt_after_the_budget_is_spent_is_limit_exceeded`, `::test_a_replacement_connection_that_fails_after_the_budget_is_spent_is_limit_exceeded`.
+- request budget, where it starts -- `r2db-api/tests/test_expired_request_checks.py::test_the_wait_for_a_pooled_connection_counts_against_the_budget`.
+- request budget, in memory -- `r2db-api/tests/test_expired_request_checks.py::test_the_in_memory_mutation_checks_before_each_operation_and_not_after_the_last`, `::test_the_in_memory_schema_operation_checks_before_its_operation_and_not_after`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_upgrade_applications_without_lock_timeout_is_a_usage_error`, `::test_upgrade_applications_without_lock_timeout_is_a_usage_error_with_dry_run`, `::test_upgrade_applications_rejects_an_ill_formed_lock_timeout_through_the_cli`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_validate_lock_timeout_value_accepts_well_formed_values`, `::test_validate_lock_timeout_value_rejects_ill_formed_values`, `::test_upgrade_applications_cli_lock_timeout_value_reaches_pgoptions`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_run_upgrade_script_keeps_the_dsns_own_pgoptions_alongside_lock_timeout`.
@@ -721,6 +735,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Rate-limit denials are not durably audited**: the rate-limit denial is the one denial category never durably audited (SI-14) -- `r2db-api/src/r2db_api/control_plane.py:1397`.
 - **F-17 judges the DECLARATION, not the effective value inside a running process**: what a reader connection actually carries is read only by the Evidence tests above, never by the check itself.
 - **Disclosed difference between the peers**: MitateDB-api's `0013_role_statement_timeouts.sql` puts a role-level `statement_timeout` on its application runtime/developer roles as well, while r2db-api leaves those two roles without one.
+- **A request can end later than its `execution_ms`**: the pool's checkout ping, a connect (libpq's own lower bound applies), the audit write and the `COMMIT` are not bound by it, and a host that never answers fails at its connect timeout, so it can answer 413 where an unreachable one answers 503.
+- **The deadline checks are measured by removing them**: each check, the threshold, the mapping and the bound turn their named test red (39 mutations, 39 red).
 - **Only the lock WAIT is bounded on the provisioning path**: once a lock is granted, how long the statement holds it is deliberately left unbounded; the ground for accepting that is that no client can reach that role, not that `lock_timeout` would bound it.
 - **`r2dbsvc_control` carries no role-level `statement_timeout`** (decision R-66): it applies the migration files and the per-application upgrade scripts, whose DDL may legitimately run long -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md`.
 - a role setting cannot be scoped to one file, so a bound on that role would cut a migration off part-way and leave it half applied -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md`.
@@ -747,7 +763,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the `ExecStartPre=` preflight runs `build_app` once and exits non-zero on any startup check, before uvicorn starts a worker -- `r2db-api/src/r2db_api/main.py:769`, `r2db-api/deploy/systemd/r2dbsvc-api.service:69`.
 - `_take_bound_advisory_lock` takes `pg_advisory_xact_lock(hashtext('<schema>.<table>'))` in the same transaction as the count-then-insert -- `r2db-api/src/r2db_api/credential_store.py`.
 - `applications` and `credentials_per_application` are therefore bounded in the DATABASE rather than in the process, so two concurrent writers cannot both pass a bound -- `r2db-api/src/r2db_api/credential_store.py`.
-- `role_pool_size(thread_limit)`, the thread limit plus 2, sizes every served application's runtime/developer pool and both platform pools, never the declared `concurrency` -- `r2db-api/src/r2db_api/limits.py:159`.
+- `role_pool_size(thread_limit)`, the thread limit plus 2, sizes every served application's runtime/developer pool and both platform pools, never the declared `concurrency` -- `r2db-api/src/r2db_api/limits.py:160`.
 - `r2db-api/migrations/0013_role_connection_limits.sql` raises each role's PostgreSQL `CONNECTION LIMIT` to its own pool composition plus a 4-connection operator margin.
 - **F-16** `check_role_connection_limits` identifies roles by their REAL grants and never by name, and takes the floor as the maximum over every matching role class -- `r2db-api/src/r2db_api/platform_declarations.py:1031`.
 - **F-16** excludes the schema owner and skips register-only applications whose role names are NULL -- `r2db-api/src/r2db_api/platform_declarations.py:1031`.
@@ -776,7 +792,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `part1a_check_max_connections.sh` runs before `0005`, reads `max_connections` and `superuser_reserved_connections` over the control DSN, and refuses to proceed unless their difference covers the declared demand.
 - the covered figure is `98 + 72 x (provisioned applications + 1)`, the sum of the `CONNECTION LIMIT`s this deployment holds once `0013` is applied -- `r2db-api/deploy/scripts/part1a_check_max_connections.sh`.
 - `R2DBSVC_EXPECTED_PEAK_CONNECTIONS` replaces that default with the operator's own positive integer, and an empty or malformed value is refused, never defaulted -- `part1a_check_max_connections.sh`.
-- `apply_schema` checks `schema_objects` against the catalog it loads under the application-wide schema lock, so two concurrent creates cannot both pass the bound -- `r2db-api/src/r2db_api/postgres.py:2224`, `:2180`.
+- `apply_schema` checks `schema_objects` against the catalog it loads under the application-wide schema lock, so two concurrent creates cannot both pass the bound -- `r2db-api/src/r2db_api/postgres.py:2279`, `:2235`.
 
 #### Evidence
 
@@ -1163,11 +1179,11 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1783`.
+- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1790`.
 - **CCR-13** treats dropping a declared unique index as schema deletion like `drop_entity`, since it is effectively irreversible once duplicate data has entered (R-5) -- `r2db-api/src/r2db_api/structured.py:568`.
-- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1800`.
+- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1801`.
 - `structured.py` defines phrase construction exactly once for 4 of the 5 gated surfaces, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- `r2db-api/src/r2db_api/structured.py:22`.
-- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1772`.
+- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1778`.
 - the 5th gated surface, the ritual CLI's `deprovision`, keeps its own phrase (`_deprovision_confirmation_phrase`, `ops.py`) beside its caller -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase`'s material (`r2dbsvc_registry.applications.provisioned_at`) is a registry value `structured.py`'s own cell-layer phrase functions never read -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase` is held isomorphic to MitateDB-api's own same-named function by `_ISOMORPHIC_TARGETS` -- `r2db-api/src/r2db_api/ops.py:2056`.
@@ -1195,7 +1211,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the confirmation phrase is fingerprinted on `r2dbsvc_registry.applications.provisioned_at`, peer-isomorphic to MitateDB-api's own phrase fingerprinted on `registered_at` -- `r2db-api/src/r2db_api/ops.py:2056`.
 - deprovisioning a slug and re-provisioning it changes `provisioned_at`, so a stale echoed phrase is refused -- `r2db-api/src/r2db_api/ops.py:2056`.
 - the AST-derived set of subcommands that flow a migration file through psql is exactly the set whose own `--lock-timeout` is required with no default -- `r2db-api/src/r2db_api/ops.py:2395`.
-- `apply_schema` reads the revision a drop confirmation phrase binds under the application-wide schema lock, so a concurrent schema operation cannot advance it between the check and the drop -- `r2db-api/src/r2db_api/postgres.py:2258`, `:2180`.
+- `apply_schema` reads the revision a drop confirmation phrase binds under the application-wide schema lock, so a concurrent schema operation cannot advance it between the check and the drop -- `r2db-api/src/r2db_api/postgres.py:2311`, `:2235`.
 
 #### Evidence
 
@@ -1382,9 +1398,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `_generic_service_unavailable` collapses any uncaught exception, from Starlette routing or a `PostgresCell`/psycopg failure, to a generic `SERVICE_UNAVAILABLE` with a static message -- `r2db-api/src/r2db_api/http.py:348`.
 - that collapse deliberately discards the real exception rather than interpolating or logging it at this layer -- `r2db-api/src/r2db_api/http.py:348`.
 - `r2db-api/src/r2db_api/postgres.py` itself maps `psycopg.Error` to that same generic denial rather than letting a driver error or message reach the caller.
-- exactly one fail-fast message reaches a client under the Q4 design, and it carries no configuration state -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §3.8, `r2db-api/src/r2db_api/postgres.py:1030`.
+- exactly one fail-fast message reaches a client under the Q4 design, and it carries no configuration state -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §3.8, `r2db-api/src/r2db_api/postgres.py:1095`.
 - F-1..F-11/F-3c/F-13 are startup-time output only, so they are never copied onto a readiness or health surface, though they may quote a declared value, a role name or a DSN env-var NAME -- `r2db-api/src/r2db_api/platform_declarations.py`.
-- **F-12** alone is raised at cell-open time and becomes an API response, `PostgresCell.verify_platform_upgrades_applied` re-raising `platform_upgrades.PlatformUpgradeError` as a `FoundationError` -- `r2db-api/src/r2db_api/postgres.py:1030`.
+- **F-12** alone is raised at cell-open time and becomes an API response, `PostgresCell.verify_platform_upgrades_applied` re-raising `platform_upgrades.PlatformUpgradeError` as a `FoundationError` -- `r2db-api/src/r2db_api/postgres.py:1095`.
 - `platform_upgrades._f12_message` is built from the missing upgrade numbers, the application id and the `ops upgrade-applications` command only -- no DSN, credential or hostname -- `r2db-api/src/r2db_api/platform_upgrades.py:167`.
 - the out-of-band `ops` CLI's `cmd_verify_declarations` never prints a raw exception string on a connection or database failure, only the caught exception's own type name plus a fixed message -- `r2db-api/src/r2db_api/ops.py:1317`.
 - the CLI's top-level `main()` applies the same rule -- `r2db-api/src/r2db_api/ops.py:2428`.
@@ -1523,16 +1539,16 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `ApplicationCell.transact` snapshots and restores on failure -- `r2db-api/src/r2db_api/structured.py:997`.
+- `ApplicationCell.transact` snapshots and restores on failure -- `r2db-api/src/r2db_api/structured.py:995`.
 - `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell.transact` maps one HTTP request to one real PostgreSQL transaction (design D-5).
-- every operation in a batch runs inside a single `conn.transaction()` block -- `r2db-api/src/r2db_api/postgres.py:1606`.
-- `PostgresCell.transact` rolls the whole batch back via PostgreSQL itself on any exception, including a `FoundationError` raised by a later operation in the batch, rather than an in-memory snapshot -- `r2db-api/src/r2db_api/postgres.py:1606`.
+- every operation in a batch runs inside a single `conn.transaction()` block -- `r2db-api/src/r2db_api/postgres.py:1667`.
+- `PostgresCell.transact` rolls the whole batch back via PostgreSQL itself on any exception, including a `FoundationError` raised by a later operation in the batch, rather than an in-memory snapshot -- `r2db-api/src/r2db_api/postgres.py:1667`.
 - **CCR-13** additionally makes an `expected_revision` precondition part of the same atomic unit (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-4) -- `r2db-api/src/r2db_api/postgres_sql.py:138`.
 - the predicate and the revision comparison are folded into one `WHERE` clause of the single `UPDATE`/`DELETE` statement (`_r2db_revision::text = $expected`) -- `r2db-api/src/r2db_api/postgres_sql.py:138`.
 - that is never a separate read followed by a conditional write, so the compare-and-swap cannot race with a concurrent mutation of the same row -- `r2db-api/src/r2db_api/postgres_sql.py:138`.
-- `PostgresCell.apply_schema` takes the application-wide `pg_advisory_xact_lock(761761763)` before `_load_catalog`, so a `plan` is checked against the revision read under that lock -- `r2db-api/src/r2db_api/postgres.py:2180`, `:2190`.
-- its lock order is per-key, schema lock (schema operations only), entity lock, count lock, `_load_catalog`, and a replay answers from its record before the schema lock -- `r2db-api/src/r2db_api/postgres.py:1409`, `:1687`, `:2181`.
-- `transact` holds a shared entity lock, every `apply_schema` an exclusive one, so no schema operation commits between a write's validation and its write (not taken by a dry run, which writes nothing) -- `r2db-api/src/r2db_api/postgres.py:1427`.
+- `PostgresCell.apply_schema` takes the application-wide `pg_advisory_xact_lock(761761763)` before `_load_catalog`, so a `plan` is checked against the revision read under that lock -- `r2db-api/src/r2db_api/postgres.py:2235`, `:2245`.
+- its lock order is per-key, schema lock (schema operations only), entity lock, count lock, `_load_catalog`, and a replay answers from its record before the schema lock -- `r2db-api/src/r2db_api/postgres.py:1474`, `:1746`, `:2236`.
+- `transact` holds a shared entity lock, every `apply_schema` an exclusive one, so no schema operation commits between a write's validation and its write (not taken by a dry run, which writes nothing) -- `r2db-api/src/r2db_api/postgres.py:1492`.
 
 #### Evidence
 
@@ -1581,7 +1597,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- C-34 plan precondition -- a schema operation presenting a `plan` reads the revision it checks and runs its DDL under one application-wide lock (`r2db-api/src/r2db_api/postgres.py:2180`, `MitateDB-api/src/mitatedb_api/cell.py:1241`).
+- C-34 plan precondition -- a schema operation presenting a `plan` reads the revision it checks and runs its DDL under one application-wide lock (`r2db-api/src/r2db_api/postgres.py:2235`, `MitateDB-api/src/mitatedb_api/cell.py:1241`).
 
 #### Evidence
 
@@ -2016,9 +2032,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 - `CredentialStore` rejects an unavailable, unknown, disabled or revoked state -- `r2db-api/src/r2db_api/credential_store.py:443`.
 - `DataService._check` applies the same rejection on every operation -- `r2db-api/src/r2db_api/service.py:638`.
-- **CCR-13**'s declaration-completeness guard is the same fail-closed shape applied to capability declarations rather than credential state (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-1) -- `r2db-api/src/r2db_api/postgres.py:1132`.
-- `PostgresCell._load_catalog` fails the whole call closed with `SERVICE_UNAVAILABLE` if one entity lacks the `id`/`_r2db_revision` columns its declaration requires -- `r2db-api/src/r2db_api/postgres.py:1132`.
-- that is instead of silently publishing a false declaration for that entity -- `r2db-api/src/r2db_api/postgres.py:1132`.
+- **CCR-13**'s declaration-completeness guard is the same fail-closed shape applied to capability declarations rather than credential state (`docs/design/R2DB_CCR13_STORAGE_V1.md` R-1) -- `r2db-api/src/r2db_api/postgres.py:1197`.
+- `PostgresCell._load_catalog` fails the whole call closed with `SERVICE_UNAVAILABLE` if one entity lacks the `id`/`_r2db_revision` columns its declaration requires -- `r2db-api/src/r2db_api/postgres.py:1197`.
+- that is instead of silently publishing a false declaration for that entity -- `r2db-api/src/r2db_api/postgres.py:1197`.
 - `_authorize_role` refuses `FORBIDDEN` to an `audit` credential attempting any of the 8 write control operations -- `r2db-api/src/r2db_api/control_plane.py:1272`.
 - the same assertion durably audits that denial, rather than merely failing closed with no trace -- `r2db-api/src/r2db_api/control_plane.py:1272`.
 - `_AUDIT_ROLE_ALLOWED_OPERATIONS` is the read-only allow-list that refusal is judged against -- `r2db-api/src/r2db_api/control_plane.py:132`.
