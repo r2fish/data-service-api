@@ -4093,13 +4093,16 @@ declaration of the version.
    outside the count.
 2. **The enter side of a transaction is counted per connection; a connection
    that is closed loses its `txn_open_count`.** Its `execute()` count is kept in
-   the pool's closed totals, its enter count is not. The figure can therefore be
+   the pool's closed totals (except on MitateDB's `release()` closed branch,
+   below), its enter count is not. The figure can therefore be
    below 0: r2db's fold of a closed connection does not fold `txn_open_count`
    (`postgres.py`, `_fold_closed_connection_stats`), the branch that dequeues a
    connection already closed adds one to `acquire_count` without sending the
    checkout's `SELECT 1`, and MitateDB's `release()` discards a closed
-   connection without folding it (`pool.py`). Each case turns a negative
-   example (`== 0`) into a false red; none turns one into a false green.
+   connection without folding it (`pool.py`). Each case lowers the figure. A
+   request that issued no statement then reads as a false red. A request that
+   did issue statements reads as a false green only when the count lost equals
+   the number it issued; the vectors do not construct that situation.
 3. **A request that was running on the pools when the hold was released is not
    attributable.** The conformance vectors that read the figure run exactly one
    request on the Application.
