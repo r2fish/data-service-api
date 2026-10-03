@@ -298,7 +298,7 @@
 | §1.6-42、§1.7-46 | `H0905F`:112 | `H0904F2`:67 / `H0905F`:109 / `H0906F`:122 / `H0907F`:155 |
 | §1.6-44a | 依頼者 2026-09-24 (台帳 R-86。改版履歴の同日の行) | `tools/dev/gate.py` の `GATE_ARGS` / `slowest_lines()`、`tools/tests/test_dev_tools.py` |
 | §1.7-50a、§1.7-50b | 依頼者 2026-09-30 (改版履歴の同日の行) | `.claude/agents/reviewer.md` の担当観点・観点の節・報告形式の 6 / `ROLES` のテンプレ 4・5、Class B の手順 2、Class C・D の手順 2 |
-| §1.8-55a | 監督裁定 2026-10-04 (改版履歴の同日の行) | `RM` v1.163 の版数行、§1 の見出し直下の 1 行、R-28 の閉止行 (記録ファイル) / `MitateDB-api/README.md` の Status 節と `r2db-api/README.md` の Foundation 節の冒頭の註 |
+| §1.8-55a | 監督裁定 2026-10-04 (改版履歴の同日の行) | `RM` v1.164 の版数行、§1 の見出し直下の 1 行、R-28 の閉止行 (記録ファイル) / `MitateDB-api/README.md` の Status 節と `r2db-api/README.md` の Foundation 節の冒頭の註 |
 | §1.9-60 | `H0828`:209 | `CLAUDE.md` Public Repository Security Gate 節 / `PRECOMMIT`:4-13 / `H0904F2`:103 / `docs/security/public-repository-policy.md` |
 | §1.12-71、§1.12-72 | 依頼者 2026-09-23 (改版履歴の同日の行) | `DEVTOOLS` の Known gaps 節 / `RM` §8 の R-46・R-73・R-74・R-77・R-96・R-98・R-100 の【追記 2026-09-23】 |
 | §1.13-73〜§1.13-75 | 依頼者 2026-09-23 (改版履歴の同日の行) | `ROLES` 全クラス共通の 1a / `RM` §9 の 12、§8 の未閉止行の規模の【追記 2026-09-23】 |
