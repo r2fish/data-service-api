@@ -623,7 +623,7 @@ def test_sweep_signals_and_removes_a_dead_run_whose_pid_still_matches(tmp_path):
     data_dir = run_dir / "data"
     # The fake "postmaster"'s own argv carries the data dir path, exactly like
     # a real `postgres -D <data_dir> ...` would -- this is what
-    # `_looks_like_our_postmaster` actually greps `ps` output for.
+    # `_looks_like_our_postmaster` actually looks for in the argv it reads.
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", str(data_dir)])
     try:
         (run_dir / "meta.json").write_text(json.dumps({"pid": proc.pid}), encoding="utf-8")
@@ -673,12 +673,29 @@ def test_looks_like_our_postmaster(tmp_path):
     marker = tmp_path / "marker-data-dir"
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", str(marker)])
     try:
-        assert dsa._looks_like_our_postmaster(proc.pid, marker) is True
+        assert dsa._looks_like_our_postmaster(proc.pid, marker) is True, f"read argv: {dsa._ps_args(proc.pid)!r}"
         assert dsa._looks_like_our_postmaster(proc.pid, tmp_path / "other-dir") is False
     finally:
         proc.kill()
         proc.wait(timeout=10)
     assert dsa._looks_like_our_postmaster(proc.pid, marker) is False  # dead now
+
+
+def test_ps_args_reads_the_full_argv_from_a_proc_tree(tmp_path):
+    """Where a `/proc`-shaped tree exists, `_ps_args` reads `<pid>/cmdline`
+    itself: the NUL-separated argv comes back joined with spaces and whole
+    (a long last argument is not cut), and a missing pid or an empty
+    `cmdline` (a zombie's) reads as None. Driven with a fake tree so it
+    runs the same on a machine with no `/proc`."""
+    proc_root = tmp_path / "proc"
+    long_arg = "/data/" + "x" * 400
+    (proc_root / "4242").mkdir(parents=True)
+    (proc_root / "4242" / "cmdline").write_bytes(b"postgres\x00-D\x00" + long_arg.encode() + b"\x00")
+    (proc_root / "4343").mkdir()
+    (proc_root / "4343" / "cmdline").write_bytes(b"")
+    assert dsa._ps_args(4242, proc_root) == f"postgres -D {long_arg}"
+    assert dsa._ps_args(4343, proc_root) is None
+    assert dsa._ps_args(4444, proc_root) is None
 
 
 # ---------------------------------------------------------------------------

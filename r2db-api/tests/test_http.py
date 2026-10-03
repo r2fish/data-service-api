@@ -150,6 +150,70 @@ async def test_declared_content_length_smaller_than_actual_body_is_still_bounded
     assert headers[b"x-request-id"].decode() == problem["request_id"]
 
 
+async def test_over_limit_request_body_is_fully_drained_before_the_response_is_sent():
+    """The byte-bound middleware calls `receive()` until the client's body
+    is exhausted, even after it has already decided to reject the request
+    -- a response sent with unread request bytes still on the connection
+    risks a real ASGI server (uvicorn) closing it while a reverse proxy is
+    still sending (observed once on CI: the socket plug's oversized request
+    got nginx's own non-problem response instead of this 413).
+    Same hand-built scope/receive approach as the test above; this one
+    asserts every chunk handed to `receive()` was consumed by the time
+    the middleware returns, and that the 413 goes out only after the last
+    chunk was read."""
+    service, _control = _build_service(request_bytes=50)
+    app = create_app(service)
+
+    chunks = [b"a" * 30 for _ in range(10)]  # 300 real bytes; the bound tips on the 2nd chunk
+    remaining = list(chunks)
+    receive_calls = 0
+    remaining_when_response_started: list[int] = []
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        if remaining:
+            chunk = remaining.pop(0)
+            return {"type": "http.request", "body": chunk, "more_body": bool(remaining)}
+        return {"type": "http.disconnect"}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            remaining_when_response_started.append(len(remaining))
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/data/notes/mutations",
+        "raw_path": b"/v1/data/notes/mutations",
+        "query_string": b"",
+        "headers": [
+            (b"authorization", b"Bearer secret-a"),
+            (b"content-type", b"application/json"),
+        ],
+        "server": ("r2db.example.invalid", 443),
+        "client": ("198.51.100.10", 12345),
+        "scheme": "https",
+        "http_version": "1.1",
+    }
+
+    await app(scope, receive, send)
+
+    starts = [m for m in sent if m["type"] == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    body = b"".join(m["body"] for m in sent if m["type"] == "http.response.body")
+    assert json.loads(body)["details"]["limit_class"] == "request_bytes"
+    assert remaining == [], "the middleware returned a response without draining the rest of the client's body"
+    assert remaining_when_response_started == [0], "the response started before the body was drained"
+    # Every chunk was handed to `receive()` exactly once (bounds the drain
+    # loop's own call count, so a loop that spins past the end is red too).
+    assert receive_calls == len(chunks)
+
+
 # --------------------------------------------------------------------------
 # SI-06: scope is server-bound; body content cannot switch or elevate it.
 # --------------------------------------------------------------------------

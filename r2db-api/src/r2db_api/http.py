@@ -256,6 +256,10 @@ class RequestByteBoundMiddleware:
                 break
 
         if exceeded:
+            still_more = bool(message.get("more_body", False))  # the chunk that tipped the bound
+            while still_more:
+                message = await receive()
+                still_more = message.get("type") == "http.request" and bool(message.get("more_body", False))
             error = FoundationError(
                 "LIMIT_EXCEEDED",
                 "Request body exceeds the configured resource limit.",
