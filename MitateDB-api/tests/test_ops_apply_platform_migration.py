@@ -446,9 +446,13 @@ def test_apply_platform_migration_rejects_a_leftover_ambient_connection_variable
     """A connection-setting variable in THIS process' own
     environment, not overridden by the DSN, is refused by name (never its
     value) before the migration file is applied (a `psql --version`
-    check may still run first)."""
-    _clear_ambient_pg_connection_env_vars(monkeypatch)
-    monkeypatch.setenv("PGSSLMODE", "verify-full")
+    check may still run first).
+
+    The leftover variable lives only for the one `ops.main` call (a
+    scoped `monkeypatch.context()`): the `platform` fixture's own
+    teardown connects after this test body, and over a TCP connection
+    to a server without TLS it would itself be refused by a
+    `PGSSLMODE` still in the environment."""
     calls = []
 
     def _fake_run(argv, **kwargs):
@@ -457,8 +461,11 @@ def test_apply_platform_migration_rejects_a_leftover_ambient_connection_variable
         calls.append((argv, kwargs))
         pytest.fail("psql started")
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-    rc = _run_apply(monkeypatch, platform, "0011_process_ceilings.sql", clear_ambient=False)
+    with monkeypatch.context() as scoped:
+        _clear_ambient_pg_connection_env_vars(scoped)
+        scoped.setenv("PGSSLMODE", "verify-full")
+        scoped.setattr(subprocess, "run", _fake_run)
+        rc = _run_apply(scoped, platform, "0011_process_ceilings.sql", clear_ambient=False)
     assert rc == 2
     assert calls == []
     captured = capsys.readouterr()

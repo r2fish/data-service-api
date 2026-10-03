@@ -514,17 +514,26 @@ jobs:
     # so the self-tests of check_doc_refs / check_image_pins / change_class /
     # rewrite_hash_refs only ever ran on a developer machine. Always runs
     # (independent of change-class, like doc-refs): these scripts gate every
-    # push, so their own tests must too. pytest is the only dependency; the
-    # scripts themselves are standard-library-only.
+    # push, so their own tests must too. The gating scripts themselves are
+    # standard-library-only; the dependencies installed below are the ones
+    # tools/tests/test_perf_baseline.py needs (httpx, and psycopg because
+    # tools/perf_baseline.py and the MitateDB-api module that test imports
+    # both import it -- no PostgreSQL connection is opened).
     name: tools-tests (self-tests of the gating scripts)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history is required: tools/tests/test_comment_provenance.py
+          # reproduces a past regression from its real commit (`git cat-file
+          # -e <sha>` against this checkout) and fails, never skips, when
+          # that commit is absent -- a depth-1 checkout does not have it.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install pytest and httpx (pinned via constraints.txt; tools/tests/test_perf_baseline.py imports httpx)
-        run: pip install -c constraints.txt pytest httpx
+      - name: Install pytest, httpx and psycopg (pinned via constraints.txt; tools/tests/test_perf_baseline.py imports httpx and psycopg)
+        run: pip install -c constraints.txt pytest httpx "psycopg[binary]"
       - name: Run tools/tests
         run: python -m pytest tools/tests -q
 

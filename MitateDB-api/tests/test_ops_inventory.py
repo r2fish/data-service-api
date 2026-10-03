@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import socket
 import subprocess
 import tempfile
 import types
@@ -270,8 +271,31 @@ def _provision_app(platform: types.SimpleNamespace, app_id: str, *, script: "Pat
     return f"{platform.prefix}_app_{app_id}"
 
 
-def _run_inventory(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], platform: types.SimpleNamespace, **cli_kwargs) -> tuple:
-    monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
+def _socket_shaped_provision_dsn(platform: types.SimpleNamespace) -> "tuple[str, str]":
+    """`(dsn, connection_name)` for the tests that need item (1) to be
+    judged at all: `_inventory_connection_comparison` judges only a DSN
+    whose `host` is a unix socket path, and reports `unknown` for a TCP
+    one. When this run's own cluster is reached over a unix socket the
+    platform's own DSN already has that shape. When it is reached over
+    TCP (the CI job's own container on a loopback port), `host` is
+    replaced by a synthetic socket-directory path and `hostaddr` carries
+    the real address: libpq connects to `hostaddr` and never opens
+    `host`, while the conninfo `inventory` reads still names a socket
+    directory."""
+    params = conninfo_to_dict(platform.provision_dsn)
+    host = params["host"]
+    if host.startswith("/"):
+        return platform.provision_dsn, Path(host).name
+    connection_name = "synthetic-project:synthetic-region:synthetic-instance"
+    hostaddr = params.get("hostaddr") or socket.gethostbyname(host)
+    return _dsn_with(platform.provision_dsn, host=f"/cloudsql/{connection_name}", hostaddr=hostaddr), connection_name
+
+
+def _run_inventory(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], platform: types.SimpleNamespace,
+    *, provision_dsn: "str | None" = None, **cli_kwargs,
+) -> tuple:
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", provision_dsn or platform.provision_dsn)
     monkeypatch.setenv("MITATEDB_PLATFORM_SCHEMA", platform.schema)
     argv = ["inventory"]
     for flag, value in cli_kwargs.items():
@@ -336,10 +360,9 @@ def test_inventory_exit_code_is_0_when_every_judged_item_is_confirmed(monkeypatc
     confirmed and the exit code is exactly 0."""
     _declare_golden_path(monkeypatch, platform)
     _declare_role_lock_timeouts(platform)
-    host = conninfo_to_dict(platform.provision_dsn)["host"]
-    connection_name = Path(host).name
+    dsn, connection_name = _socket_shaped_provision_dsn(platform)
     rc, report, out, err = _run_inventory(
-        monkeypatch, capsys, platform, cloud_sql_connection_name=connection_name, **_HEADROOM_OK)
+        monkeypatch, capsys, platform, provision_dsn=dsn, cloud_sql_connection_name=connection_name, **_HEADROOM_OK)
     assert report is not None, f"out={out!r} err={err!r}"
     assert report["connection"]["comparison"] == "match"
     assert report["ddl_lock"]["judgment"] == "confirmed"
@@ -421,9 +444,9 @@ def test_inventory_exit_code_is_2_when_any_item_is_not_confirmed(monkeypatch, ca
     code must be exactly 2 (not 0, not 1)."""
     _declare_golden_path(monkeypatch, platform)
     _reset_role_statement_timeout(platform.admin_dsn, f"{platform.prefix}svc_auditreader")
-    host = conninfo_to_dict(platform.provision_dsn)["host"]
-    connection_name = Path(host).name
-    rc, report, _out, _err = _run_inventory(monkeypatch, capsys, platform, cloud_sql_connection_name=connection_name, **_HEADROOM_OK)
+    dsn, connection_name = _socket_shaped_provision_dsn(platform)
+    rc, report, _out, _err = _run_inventory(
+        monkeypatch, capsys, platform, provision_dsn=dsn, cloud_sql_connection_name=connection_name, **_HEADROOM_OK)
     assert report["connection"]["comparison"] == "match"
     assert report["ddl_lock"]["judgment"] == "unknown"
     assert rc == 2
@@ -450,8 +473,9 @@ def test_inventory_connection_judgment_drives_the_exit_code(monkeypatch, capsys,
     rc, report, _out, _err = _run_inventory(monkeypatch, capsys, platform, **_HEADROOM_OK)
     assert report["connection"] == {"comparison": "unknown", "judgment": "unknown"}
     assert rc == 2
+    dsn, _connection_name = _socket_shaped_provision_dsn(platform)
     rc2, report2, _out2, _err2 = _run_inventory(
-        monkeypatch, capsys, platform, cloud_sql_connection_name="not-the-real-socket-name", **_HEADROOM_OK)
+        monkeypatch, capsys, platform, provision_dsn=dsn, cloud_sql_connection_name="not-the-real-socket-name", **_HEADROOM_OK)
     assert report2["connection"] == {"comparison": "mismatch", "judgment": "blocked"}
     assert rc2 == 2
 

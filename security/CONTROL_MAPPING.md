@@ -2,6 +2,7 @@
 
 Status: **Implementation mapping template**
 
+Version: **3.20** (2026-10-03; CI correction -- SI-08 r2db-api: `RequestByteBoundMiddleware` reads and discards the rest of an over-bound body before it sends the 413 (MitateDB-api's middleware already did), with the proxy's `client_max_body_size` disclosed as the bound on what is read; r2db-api's position references into that module (SI-00, SI-08, SI-10) follow the four inserted lines.)
 Version: **3.19** (2026-10-03; R-42 -- SI-08 r2db-api, SI-08 MitateDB-api, SI-08 Common, SI-11 r2db-api, SI-11 MitateDB-api, SI-11 Common: C-36 drives a request whose `execution_ms` is spent through three holds and is cited as evidence on both peers; MitateDB-api's `SET LOCAL` reference points at `_set_timeouts` again, the claim that only this peer leaves `LIMIT_EXCEEDED` unaudited is corrected (neither peer audits it durably), the failed-connect mapping states the clock test, and `execution_ms` is no longer disclosed as never driven.)
 Version: **3.18** (2026-10-03; R-120 -- SI-11 r2db-api: the DML-validation / schema-commit window is closed by an entity-level advisory lock (shared in `transact`, exclusive in every `apply_schema` operation, taken after the application schema lock and before the count lock), the open disclosure is replaced by the closed control with its two-cell reproduction tests and the global lock order, and the postgres.py line references that moved with the insertion are re-pulled.)
 Version: **3.17** (2026-10-03; R-30 -- SI-00 r2db-api, SI-00 MitateDB-api, SI-00 Common: the production deployment posture of one Application per serving process is declared in the SI-00 note (requester ruling 2026-10-03 (ii)), with the env example, both runbooks and the deployment records as its controls and evidence, and the shared-OS-user reach under peer authentication, the absence of a JSON router behind one data base URL, the two-Application test fixtures and the un-reread deployment counts disclosed.)
@@ -96,10 +97,10 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - (b) `r2dbsvc_api` has no grant on `control_credentials`/`control_audit` and only `INSERT` on `application_audit` (no SELECT/UPDATE/DELETE) -- `r2db-api/migrations/0007_application_audit.sql:179`.
 - A third SELECT-only `r2dbsvc_auditreader` role reads both audit tables and nothing else -- `r2db-api/migrations/0007_application_audit.sql:207-208`.
 - (c) `AuthorityTopology` registers the control-plane HTTP process as its own node with a structural unreachability check -- `r2db-api/src/r2db_api/topology.py:52-70`.
-- The `/v1/audit/query` alias fails `AUTH_INVALID` for any control/audit credential on a data-plane host that declares `control_plane: enabled` with no control-credential store -- `r2db-api/src/r2db_api/http.py:766`.
+- The `/v1/audit/query` alias fails `AUTH_INVALID` for any control/audit credential on a data-plane host that declares `control_plane: enabled` with no control-credential store -- `r2db-api/src/r2db_api/http.py:770`.
 - `/control/v1/audit/query` is the endpoint the contract's `audit_query` obligation binds, not that data-host alias (also recorded on SI-14) -- `r2db-api/src/r2db_api/control_http.py:462`.
 - **Realization**: the data-plane composition root neither constructs nor imports the control-credential store -- `r2db-api/src/r2db_api/main.py`.
-- That alias answers `AUTH_INVALID` because no verifier exists at all, never `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/5xx (all non-conforming) -- `r2db-api/src/r2db_api/http.py:718`.
+- That alias answers `AUTH_INVALID` because no verifier exists at all, never `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/5xx (all non-conforming) -- `r2db-api/src/r2db_api/http.py:722`.
 - `0004_deprovision_application.sql` closes out an application's own live backends while taking no cluster-wide privilege at all (R-54, design `docs/design/DEPROVISION_FORCED_DROP_V0_1.md` v1.0 D-1/D-2R).
 - No `GRANT` of a predefined role (`pg_signal_backend`, `pg_read_all_stats` or any other) appears anywhere in this peer's migration set -- `0004_deprovision_application.sql`.
 - This peer's migration set names `pg_signal_backend` only inside comments and never names `pg_read_all_stats` -- `r2db-api/migrations/0004_deprovision_application.sql`.
@@ -671,6 +672,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `ResourceLimits` declares a finite bound for every required class -- atomic credential-rate window, iterative request/depth checks, structured batch/result/schema checks, wall-clock deadline -- `r2db-api/src/r2db_api/limits.py:11`.
 - the served data plane counts `requests_per_minute` in `0015`'s row under its row lock; the in-memory window runs only where no rate row is wired -- `r2db-api/src/r2db_api/service.py:656`, `r2db-api/src/r2db_api/main.py:693`.
 - `RequestByteBoundMiddleware` bounds `request_bytes` in the ASGI receive loop from bytes actually received, not `Content-Length`, before Starlette parses -- `r2db-api/src/r2db_api/http.py:247`.
+- an over-bound body's remainder is read and discarded before the 413 is sent; the proxy's `client_max_body_size` bounds what is read -- `r2db-api/src/r2db_api/http.py:261`, `r2db-api/deploy/nginx/r2dbsvc-api-8443.conf.example:93`.
 - `postgres.py`'s `_set_timeouts` maps `execution_ms` onto PostgreSQL's own `statement_timeout`/`lock_timeout` (`SET LOCAL`, per transaction), a real second enforcement layer -- `r2db-api/src/r2db_api/postgres.py:2735`.
 - both peers' `SET LOCAL` sets `statement_timeout` and `lock_timeout` alike, and r2db-api's application runtime/developer roles rely on that per-transaction call alone -- `r2db-api/src/r2db_api/postgres.py:2735-2749`.
 - the deadline fixed at acceptance goes to the pool checkout of `query`, `transact` and `apply_schema` and is never recomputed, so a pool wait and a new connection count against `execution_ms` -- `r2db-api/src/r2db_api/postgres.py:239`, `:267`.
@@ -782,11 +784,11 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **F-18** is pinned in `_ISOMORPHIC_TARGETS` together with `_count_registered_applications`, `_read_connection_headroom_settings` and `HeadroomReport` -- `r2db-api/src/r2db_api/platform_declarations.py:1260`.
 - `ops verify-declarations` exits 17 on that shortfall, and both composition roots refuse to start on the same unscoped judgment -- `r2db-api/src/r2db_api/ops.py:1021`.
 - the data plane's startup also requires `credential_request_rate_admit(text, integer)` to exist and be EXECUTE-able by its own role, naming `0015` otherwise -- `r2db-api/src/r2db_api/platform_declarations.py:1515`.
-- the deployment-wide `concurrency` slot is taken BEFORE authentication on the HTTP plane, so an unauthenticated flood is bounded before it reaches the credential store -- `r2db-api/src/r2db_api/http.py:492`.
-- this surface's order is BYTE BOUND -> CONCURRENCY SLOT -> AUTHENTICATION -> body -> rate/business -- `r2db-api/src/r2db_api/http.py:456`.
-- the per-credential `requests_per_minute` window stays reachable only after authentication succeeds, so a both-exhausted request is denied `concurrency` here, an explicit HTTP-plane ruling -- `r2db-api/src/r2db_api/http.py:456`.
+- the deployment-wide `concurrency` slot is taken BEFORE authentication on the HTTP plane, so an unauthenticated flood is bounded before it reaches the credential store -- `r2db-api/src/r2db_api/http.py:496`.
+- this surface's order is BYTE BOUND -> CONCURRENCY SLOT -> AUTHENTICATION -> body -> rate/business -- `r2db-api/src/r2db_api/http.py:460`.
+- the per-credential `requests_per_minute` window stays reachable only after authentication succeeds, so a both-exhausted request is denied `concurrency` here, an explicit HTTP-plane ruling -- `r2db-api/src/r2db_api/http.py:460`.
 - `acquire_concurrency_slot` holds the slot across authentication and dispatch and releases it on every exit path -- `r2db-api/src/r2db_api/service.py:587`.
-- async handlers delegate their synchronous section to the threadpool, so more than one request is genuinely in flight and these bounds are exercised under real parallelism -- `r2db-api/src/r2db_api/http.py:492`.
+- async handlers delegate their synchronous section to the threadpool, so more than one request is genuinely in flight and these bounds are exercised under real parallelism -- `r2db-api/src/r2db_api/http.py:496`.
 - the limiter state and the pools are lock-guarded, pinned lexically by source shape rather than by a race -- `r2db-api/src/r2db_api/service.py:587`.
 - `HostSharedConcurrencySlots` bounds `concurrency` across every worker on the host: a request `flock`s one of L `slot-<i>` files without waiting, scanning them under the exclusive `scan` lock -- `r2db-api/src/r2db_api/concurrency_slots.py:296`.
 - each request opens and closes its own slot fd, so a killed worker's slot returns via the kernel; an unexpected errno or a `scan` wait over 1 s is a 503 -- `r2db-api/src/r2db_api/concurrency_slots.py:256`, `r2db-api/src/r2db_api/service.py:625`.
@@ -1451,8 +1453,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 - `FoundationError` emits a safe problem shape, and no internal exception is serialized -- `r2db-api/src/r2db_api/errors.py`.
 - `r2db-api/src/r2db_api/http.py` renders every `FoundationError` as `application/problem+json`.
-- `_generic_service_unavailable` collapses any uncaught exception, from Starlette routing or a `PostgresCell`/psycopg failure, to a generic `SERVICE_UNAVAILABLE` with a static message -- `r2db-api/src/r2db_api/http.py:348`.
-- that collapse deliberately discards the real exception rather than interpolating or logging it at this layer -- `r2db-api/src/r2db_api/http.py:348`.
+- `_generic_service_unavailable` collapses any uncaught exception, from Starlette routing or a `PostgresCell`/psycopg failure, to a generic `SERVICE_UNAVAILABLE` with a static message -- `r2db-api/src/r2db_api/http.py:352`.
+- that collapse deliberately discards the real exception rather than interpolating or logging it at this layer -- `r2db-api/src/r2db_api/http.py:352`.
 - `r2db-api/src/r2db_api/postgres.py` itself maps `psycopg.Error` to that same generic denial rather than letting a driver error or message reach the caller.
 - exactly one fail-fast message reaches a client under the Q4 design, and it carries no configuration state -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §3.8, `r2db-api/src/r2db_api/postgres.py:1095`.
 - F-1..F-11/F-3c/F-13 are startup-time output only, so they are never copied onto a readiness or health surface, though they may quote a declared value, a role name or a DSN env-var NAME -- `r2db-api/src/r2db_api/platform_declarations.py`.

@@ -515,15 +515,33 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _ps_args(pid: int) -> str | None:
-    proc = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
+_PROC_ROOT = Path("/proc")
+
+
+def _ps_args(pid: int, proc_root: Path = _PROC_ROOT) -> str | None:
+    """`pid`'s full command line as one string, or None when it cannot be
+    read (no such process, or a zombie, whose argv is gone). Where
+    `proc_root` exists (Linux), reads `<proc_root>/<pid>/cmdline` -- the
+    NUL-separated argv, joined with spaces -- the same form
+    `conformance-tests/socket_harness.py` reads (on the Linux CI runner
+    the earlier `ps -o args=` form reported a live process as not ours;
+    why was not measured). Elsewhere (macOS, which has no `/proc`):
+    `ps -ww -o args= -p <pid>`, `-ww` so the line is never cut to a
+    terminal width."""
+    if proc_root.is_dir():
+        try:
+            raw = (proc_root / str(pid) / "cmdline").read_bytes()
+        except OSError:
+            return None
+        return raw.replace(b"\x00", b" ").decode(errors="replace").strip() or None
+    proc = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
     out = proc.stdout.strip()
     return out or None
 
 
 def _looks_like_our_postmaster(pid: int, data_dir: Path) -> bool:
     """Guards every signal this module sends to a pid it did not just fork
-    itself: `ps`'s own argv must still name THIS run's data directory, so a
+    itself: its argv (`_ps_args`) must still name THIS run's data directory, so a
     pid recycled by an unrelated process after the real postmaster already
     exited is never signalled (work order §2.1: "pid 再利用の防止")."""
     if not _pid_alive(pid):
@@ -542,7 +560,7 @@ def _signal_and_wait(pid: int, sig: int, timeout: float, alive=_pid_alive) -> bo
     parent (the process that forked it, design D-2 -- never this function's
     own caller) has not reaped it yet, and `kill(pid, 0)` on a zombie still
     succeeds -- a bare liveness poll would then burn this function's full
-    `timeout` on every single clean stop. `ps`'s own argv on a zombie no
+    `timeout` on every single clean stop. The argv read for a zombie no
     longer names the data directory, so `_looks_like_our_postmaster`
     correctly reports it as gone immediately instead."""
     if not alive(pid):
@@ -692,7 +710,7 @@ def _watchdog_main(run_dir: Path) -> int:
         # identity, not bare liveness (review M-1): after a signal the
         # postmaster becomes a zombie until the STARTING process (this
         # watchdog's own sibling, never this watchdog itself) reaps it, and
-        # a zombie still answers kill(pid, 0) -- `ps`'s own argv on a
+        # a zombie still answers kill(pid, 0) -- the argv read for a
         # zombie no longer names the data directory, so the identity check
         # reports it gone immediately instead of burning the full timeout
         # on every single clean stop.
