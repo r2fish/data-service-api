@@ -354,6 +354,12 @@ class MitateDBSocketConformanceAdapter(MitateDBHttpConformanceAdapter):
     # reverse proxy (`conformance-tests/socket_harness.py`).
     transport_kind = "socket"
 
+    # Class-level default (ledger R-122): the registered instance reserves
+    # the control port on its first `_surfaces_value()` call, and an
+    # isolated copy keeps that reservation (`_reset_surface_state` leaves
+    # it alone).
+    _control_listen_reservation: Optional["sh.ReservedPort"] = None
+
     # ------------------------------------------------------------------
     # hooks (design D-1 (A) 6 / WP-3)
     # ------------------------------------------------------------------
@@ -376,6 +382,12 @@ class MitateDBSocketConformanceAdapter(MitateDBHttpConformanceAdapter):
         tests/socket_harness.py`'s own `RealSocketSurface` (whose listen
         port is chosen internally, only once IT starts) to expose a way to
         pre-commit an externally-chosen listen port.
+
+        【追記 2026-10-04、台帳 R-122】`isolated_application_surface()`
+        calls this on the isolated copy too. There only the data port is
+        reserved afresh: the copy keeps the parent's control reservation
+        (`_reset_surface_state`), so the control URL returned is the
+        parent's.
         """
         self._ensure_socket_registry()
         data_port = self._reserve_named_port("_data_listen_reservation")
@@ -464,11 +476,33 @@ class MitateDBSocketConformanceAdapter(MitateDBHttpConformanceAdapter):
         empty state here is what forces `iso`'s own subsequent `_surfaces_
         value()`/`_build_client()` calls to reserve and start a dedicated
         uvicorn+nginx pair of their own instead.
+
+        【追記 2026-10-04、台帳 R-122】The paragraph above holds for the
+        data plane only. `_control_listen_reservation` is no longer reset
+        here: `isolated_application_surface()` never rebuilds the control
+        plane (the isolated copy keeps the parent's `_control_app` and
+        `_control_client`), so a control port reserved afresh for the copy
+        was declared in the copy's own capability document and served by
+        nothing -- a dial to it was accepted by the reservation's listening
+        socket and never answered. The copy now keeps the parent's control
+        reservation, and its document declares the parent's control URL,
+        the surface its own control calls already go through (the same
+        shape as `conformance_adapter_r2db_socket.py`, whose isolated copy
+        keeps the parent's `_control_surface`). The copy never closes that
+        reservation: `close()` runs on the registered instance only. The
+        parent's surface object for `_control_app` is carried into the
+        copy's own registry for the same reason: a `_build_client(self.
+        _control_app, ...)` call on the copy then reuses the parent's
+        control surface instead of building a second one on the parent's
+        port (no inherited call site does this today).
         """
+        inherited = getattr(self, "_socket_surfaces", None) or {}
+        control_key = id(getattr(self, "_control_app", None))
         self._socket_lock = threading.Lock()
-        self._socket_surfaces: Dict[int, _AppSocketSurface] = {}
+        self._socket_surfaces: Dict[int, _AppSocketSurface] = (
+            {control_key: inherited[control_key]} if control_key in inherited else {}
+        )
         self._data_listen_reservation: Optional["sh.ReservedPort"] = None
-        self._control_listen_reservation: Optional["sh.ReservedPort"] = None
 
     # ------------------------------------------------------------------
     # adapter-internal plumbing (never port-visible)
