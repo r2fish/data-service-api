@@ -775,12 +775,15 @@ class ApplicationCell:
         `alter_field_constraints`/`delete`): once `hook.pre_commit()` has
         recorded the `allow` row, EVERY failure that leaves the method
         without committing writes the `error` row -- a cancelled or
-        lock-timed-out COMMIT and a failure of the idempotency record
-        included, whichever branch of the backend's own handling they
-        pass through. The response and its class are unchanged (the
+        lock-timed-out COMMIT included, whichever branch of the
+        backend's own handling it passes through. The response and its
+        class are unchanged (the
         original exception propagates); a backend that already wrote the
         row itself does not write a second (`commit_failed()` records at
-        most once per hook)."""
+        most once per hook).
+
+        History: CH-0566
+        """
         try:
             yield
         except Exception:

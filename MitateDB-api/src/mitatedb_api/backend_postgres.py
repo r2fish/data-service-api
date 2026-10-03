@@ -292,6 +292,33 @@ _BOOKKEEPING_TABLES = (_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE, _PLATFORM_UPG
 _ROW_ORDER_COLUMN = "_mdb_row"
 
 
+def _budget_exhausted():
+    """The refusal of a request whose `execution_ms` is spent: `LIMIT_EXCEEDED` with `limit_class: execution_ms`."""
+    return ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+
+
+def _remaining_ms(deadline):
+    """What remains of a request's budget, in milliseconds, read from the clock once.
+
+    `PostgresBackend._timeout_ms` returns the whole milliseconds of this as the bound of the statements a request sends from now on: never more than what remains, so a statement cannot outlast the budget the request has left. Less than 1 ms is refused there (`_budget_exhausted`), not rounded up: a bound of 0 would disable `statement_timeout`."""
+    return (deadline - time.monotonic()) * 1000
+
+
+def _budget_spent(deadline):
+    """True when less than 1 ms of the budget remains. A bound of 0 ms would disable `statement_timeout`, so a whole-millisecond bound cannot express a smaller remainder.
+
+    A failed connection attempt is judged by this alone (`PostgresBackend._borrow`): a request whose budget is spent by then ran out of time, any other failure, an immediate refusal included, is the database not being reachable."""
+    return _remaining_ms(deadline) < 1
+
+
+def _check_budget(deadline):
+    """Refuses the request (`_budget_exhausted`) when `_budget_spent`. A clock comparison; no database round trip.
+
+    `_execute` calls it before every statement of a request: a connection serving a request carries that request's deadline as `request_deadline` (`PostgresBackend.request_scope` sets it once both connections are borrowed and clears it before they go back to their pools), so the next statement of a request whose budget is spent is not sent, whichever of the request's statements it is, `SET LOCAL` included. A connection serving no request carries none and is not checked. Nothing is checked after a request's last statement: the next thing it does is commit, and a commit is not refused for time."""
+    if _budget_spent(deadline):
+        raise _budget_exhausted()
+
+
 def _execute(cursor, statement, params=()):
     """R-2 choke point. The ONLY call to `cursor.execute` in this module."""
     if not isinstance(statement, (sql.SQL, sql.Composed)):
@@ -300,6 +327,9 @@ def _execute(cursor, statement, params=()):
             "Composed objects may reach the database (R-2 choke point)"
             % (type(statement).__name__,)
         )
+    deadline = getattr(getattr(cursor, "connection", None), "request_deadline", None)
+    if deadline is not None:
+        _check_budget(deadline)
     cursor.execute(statement, params)
     return cursor
 
@@ -461,6 +491,8 @@ class PostgresBackend:
         except PoolExhausted as exc:
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms") from exc
         except PoolConnectFailed as exc:
+            if deadline is not None and _budget_spent(deadline):
+                raise _budget_exhausted() from exc
             raise StorageTransientError("the storage backend could not be reached") from exc
 
     @contextmanager
@@ -489,6 +521,9 @@ class PostgresBackend:
             else:
                 main = self._borrow(self._runtime_pool, deadline)
                 held.append((self._runtime_pool, main))
+            if deadline is not None:
+                for _pool, conn in held:
+                    conn.request_deadline = deadline
             timeout_ms = self._timeout_ms(deadline)
             if timeout_ms is None:
                 timeout_ms = self._default_timeout_ms
@@ -496,6 +531,8 @@ class PostgresBackend:
                 try:
                     with conn.cursor() as cur:
                         self._set_timeouts(cur, timeout_ms)
+                except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable) as exc:
+                    raise _budget_exhausted() from exc
                 except psycopg.Error as exc:
                     raise StorageTransientError("the storage backend could not be reached") from exc
             scope = RequestScope(kind, deadline, backend=self, main=main, developer=developer)
@@ -503,6 +540,7 @@ class PostgresBackend:
             self._end_reads(scope)
         finally:
             for pool, conn in reversed(held):
+                conn.request_deadline = None
                 pool.release(conn)
 
     def _end_reads(self, scope):
@@ -538,8 +576,6 @@ class PostgresBackend:
         used the whole budget ends the request."""
         if scope.deadline is None:
             return
-        if scope.deadline - time.monotonic() <= 0:
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         timeout_ms = self._timeout_ms(scope.deadline)
         seen = set()
         for conn in (scope.main, scope.developer):
@@ -549,6 +585,8 @@ class PostgresBackend:
             try:
                 with conn.cursor() as cur:
                     self._set_timeouts(cur, timeout_ms)
+            except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable) as exc:
+                raise _budget_exhausted() from exc
             except psycopg.Error as exc:
                 raise StorageTransientError("the storage backend could not be reached") from exc
 
@@ -1054,9 +1092,6 @@ class PostgresBackend:
             if dry_run:
                 scope.main.rollback()
             else:
-                if audit_hook is not None:
-                    audit_hook.pre_commit()
-                    hook_fired = True
                 # Phase 9 WP-3c (design D-5, I-1/I-8): `new_revision` was
                 # already read back for real, inside this SAME
                 # transaction, above.
@@ -1067,6 +1102,9 @@ class PostgresBackend:
                         "request_id": req_id,
                     })
                     self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                    hook_fired = True
                 scope.main.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             scope.main.rollback()
@@ -1200,14 +1238,12 @@ class PostgresBackend:
             if dry_run:
                 scope.main.rollback()
             else:
-                if audit_hook is not None:
-                    audit_hook.pre_commit()
-                    hook_fired = True
                 # Phase 9 WP-3c (design D-5, I-1/I-8): the idempotency
                 # record is written as the LAST statement before this
                 # backend's own commit -- same connection, same
-                # transaction as the DDL above, exactly like `audit_hook.
-                # pre_commit()` immediately above it. `new_revision` was
+                # transaction as the DDL above, before `audit_hook.
+                # pre_commit()` (which follows it and sends nothing on
+                # this connection). `new_revision` was
                 # already read back for real, inside this SAME
                 # transaction, above -- unlike `backend_sqlite.
                 # SQLiteBackend`'s own in-process counterpart, nothing
@@ -1216,6 +1252,7 @@ class PostgresBackend:
                 # `name`/`fields`/`field_types`/`resolved_constraints`
                 # locals), so a later replay is byte-identical to what an
                 # uncached call would have returned.
+                # history: CH-0565
                 if idempotency_record is not None:
                     key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
@@ -1227,6 +1264,9 @@ class PostgresBackend:
                         "request_id": req_id,
                     })
                     self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                    hook_fired = True
                 scope.main.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             scope.main.rollback()
@@ -1368,9 +1408,6 @@ class PostgresBackend:
             if dry_run:
                 scope.main.rollback()
             else:
-                if audit_hook is not None:
-                    audit_hook.pre_commit()
-                    hook_fired = True
                 # Phase 9 WP-3c (design D-5, I-1/I-8): see `create_
                 # collection`'s own identical comment above.
                 if idempotency_record is not None:
@@ -1380,6 +1417,9 @@ class PostgresBackend:
                         "request_id": req_id,
                     })
                     self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                    hook_fired = True
                 scope.main.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             scope.main.rollback()
@@ -1681,8 +1721,10 @@ class PostgresBackend:
     def _timeout_ms(self, deadline):
         if deadline is None:
             return None
-        remaining_ms = max(0.0, (deadline - time.monotonic()) * 1000)
-        return max(1, int(remaining_ms))
+        remaining_ms = _remaining_ms(deadline)
+        if remaining_ms < 1:
+            raise _budget_exhausted()
+        return int(remaining_ms)
 
     def _set_timeouts(self, cur, timeout_ms):
         """`SET LOCAL` (not session-wide `SET`): scoped to the current
@@ -1822,7 +1864,18 @@ class PostgresBackend:
         reaches this line (the caller's own execution loop raises first,
         never calling this method), so this write and the batch's own
         commit share the identical fate."""
-        self._write_idempotency_row(scope.main, key, digest, response_json, now_ms)
+        self._write_request_idempotency_row(scope.main, key, digest, response_json, now_ms)
+
+    def _write_request_idempotency_row(self, conn, key, digest, response_json, now_ms):
+        """`_write_idempotency_row` for the single-batch path, which has no `except` of its own around the write: a statement cancelled by its bound is `LIMIT_EXCEEDED` / `execution_ms`, a deadlock or serialization failure is a retryable storage failure and any other driver error is the storage backend not serving the request. The key the record carries was already bound by the lookup that preceded it, so a driver error here is never a refusal of the request's own content."""
+        try:
+            self._write_idempotency_row(conn, key, digest, response_json, now_ms)
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable) as exc:
+            raise _budget_exhausted() from exc
+        except _TRANSIENT_ERRORS as exc:
+            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
+        except psycopg.Error as exc:
+            raise StorageTransientError("the storage backend could not be reached") from exc
 
     def idempotency_discard_pending(self, key):
         """Phase 9 WP-3cd closure (K-5, N-8): a real no-op HERE -- unlike

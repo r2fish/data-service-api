@@ -250,7 +250,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `PostgresBackend` confines each application to its own PostgreSQL database, named and allocated by the control plane and never derived from client input (design R-1) -- `MitateDB-api/src/mitatedb_api/backend_postgres.py`:326.
 - `MitateDB-api/migrations/0003_provision_application.sql` issues `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` and grants `CONNECT` only to that application's own `runtime`/`developer` roles.
 - `0004_deprovision_application.sql` reverses that grant -- `MitateDB-api/migrations/0004_deprovision_application.sql`.
-- each served application's `PostgresBackend` builds and owns its own runtime and developer pool; no process-wide registry hands out a pool by key -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:331`, `:332`.
+- each served application's `PostgresBackend` builds and owns its own runtime and developer pool; no process-wide registry hands out a pool by key -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:361`, `:362`.
 - the process-wide weak set of live pools is read only by the idle sweep, which closes stale idle connections and never looks a pool up -- `MitateDB-api/src/mitatedb_api/pool.py:87`, `:438`.
 
 #### Evidence
@@ -435,7 +435,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Control
 
 - `ApplicationCell` exposes structured-only methods -- `MitateDB-api/src/mitatedb_api/cell.py`:508.
-- No command-text execution method exists on the PostgreSQL backend; only `Composed` objects reach the database -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:295`.
+- No command-text execution method exists on the PostgreSQL backend; only `Composed` objects reach the database -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:322`.
 
 #### Evidence
 
@@ -893,14 +893,22 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - that option is appended to, never overwriting, the DSN's own `options` value, so each invocation's catalog-lock wait has an upper bound -- `MitateDB-api/src/mitatedb_api/ops.py:750`.
 - the CLI rejects both a missing value and one that is not a positive integer optionally followed by `ms`/`s`/`min`, before any psql subprocess starts -- `MitateDB-api/src/mitatedb_api/ops.py:638`.
 - **Developer-connection catalog reads**: `backend_postgres.py` runs 8 of them -- `schema_count`, `field_domains`, `field_types`, `all_field_types`, `field_constraints`, `field_types_and_constraints`, `all_field_constraints`, `schema_revision`.
-- each of those reads maps a `statement_timeout`/`lock_timeout` cancel to `LIMIT_EXCEEDED` (`limit_class` `execution_ms`) -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:640-641`.
-- that mapping is not the `VALIDATION_FAILED` the catch-all backstop gives an unclassified `psycopg.Error`, so a client is not told to reshape a request that was cut off for time -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:640-641`.
-- each of the 8 reads runs on the request scope's developer connection inside its transaction, committing nothing and setting no timeout of its own -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:634`.
-- a scope that ends without an exception COMMITs a read-only transaction it still has open (a rollback discards psycopg's prepared statements), one that ends with an exception rolls back -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:508`.
-- `request_scope` sets `statement_timeout`/`lock_timeout` by `SET LOCAL` on each connection it borrows, from the request's deadline, or the constructed value for a scope without one -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:467`.
-- after a lock wait the scope sets them again from what remains of the deadline, and a wait that used the whole budget is `LIMIT_EXCEEDED` (`execution_ms`) -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:532`, `:555`.
+- each of those reads maps a `statement_timeout`/`lock_timeout` cancel to `LIMIT_EXCEEDED` (`limit_class` `execution_ms`) -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:678-679`.
+- that mapping is not the `VALIDATION_FAILED` the catch-all backstop gives an unclassified `psycopg.Error`, so a client is not told to reshape a request that was cut off for time -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:678-679`.
+- each of the 8 reads runs on the request scope's developer connection inside its transaction, committing nothing and setting no timeout of its own -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:672`.
+- a scope that ends without an exception COMMITs a read-only transaction it still has open (a rollback discards psycopg's prepared statements), one that ends with an exception rolls back -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:546`.
+- `request_scope` sets `statement_timeout`/`lock_timeout` by `SET LOCAL` on each connection it borrows, from the request's deadline, or the constructed value for a scope without one -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:499`.
+- after a lock wait the scope sets them again from what remains of the deadline, and a wait that used the whole budget is `LIMIT_EXCEEDED` (`execution_ms`) -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:570`, `:593`.
 - `main.py` passes `config.max_execution_ms` (`MITATEDB_MAX_EXECUTION_MS`), the number the capabilities document declares as `execution_ms`; a bare construction uses the default 5000 -- `MitateDB-api/src/mitatedb_api/main.py:264`.
-- that bound applies to each statement and is what remains of the request's deadline when it is set, so a request-level `budget` narrows it -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1681`.
+- that bound applies to each statement and is what remains of the request's deadline when it is set, so a request-level `budget` narrows it -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1721`.
+- the deadline fixed at acceptance goes to every pool wait and is never computed again, so a pool wait and a new connection count against `execution_ms` -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:482`, `:499`.
+- `_execute` refuses a request whose budget is spent before `cursor.execute`, `SET LOCAL` and the idempotency write included; a clock comparison, no round trip -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:314`, `:322`.
+- no check follows a request's last statement, and a schema operation writes its idempotency record before `pre_commit`, so no statement follows the audit row -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:956`, `:1156`, `:1302`.
+- `_timeout_ms` refuses a remaining budget under 1 ms with `LIMIT_EXCEEDED` (`execution_ms`), never returns a bound of 0, and never returns more than what remained when it ran -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1721`.
+- a connection attempt that fails with the budget spent is `LIMIT_EXCEEDED` (`execution_ms`) by one clock judgment, a pool wait that runs out always is, any other failure is 503 -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:482`.
+- a cancelled `SET LOCAL` at scope entry or after a lock wait, and a cancelled idempotency record write of a batch, are `LIMIT_EXCEEDED` (`execution_ms`) -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:499`, `:570`, `:1859`.
+- the SQLite backend checks the budget before each statement, and a progress handler stops a running statement once under 1 ms remains; it covers one statement, never a commit or a rollback -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py:163`.
+- a SQLite refusal rolls the request's open transaction back, and the deadline is held per thread inside the request's `RLock`, restored when a nested scope ends -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py:141`, `:158`.
 - the role-level `statement_timeout` of `0013_role_statement_timeouts.sql` (5000ms) remains in force only for a developer-connection statement outside a request scope -- `MitateDB-api/migrations/0013_role_statement_timeouts.sql`.
 - `0007_platform_declarations.sql` and `0013_role_statement_timeouts.sql` put the role-level bound on the api, controlplane, auditreader, runtime and developer roles and leave that one out -- `MitateDB-api/migrations/0007_platform_declarations.sql`.
 - the per-invocation `--lock-timeout` bounds the WAIT for a lock on this path, since a role setting is copied into every session at login and would cut a migration off part-way -- `MitateDB-api/src/mitatedb_api/ops.py:638`.
@@ -917,6 +925,29 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_blocked_catalog_read_is_bounded_by_the_constructed_value_not_the_role_value`.
 - the scope's timeouts and the reads inside it -- `MitateDB-api/tests/test_r102_request_scope.py::test_catalog_reads_run_inside_the_scope_transaction_without_committing_or_setting_timeouts`, `::test_the_scope_sets_its_timeouts_from_the_deadline_not_the_constructed_value`.
 - timeouts after a lock wait -- `MitateDB-api/tests/test_r102_request_scope.py::test_a_lock_wait_shortens_the_timeouts_of_the_statements_that_follow`, `::test_an_uncontended_request_sets_its_timeouts_once_per_connection`.
+- request budget, the checks -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_request_with_a_spent_budget_sends_no_statement_after_the_pool_checkout`, `::test_the_set_local_that_opens_a_request_is_checked_by_the_statement_helper`.
+- request budget, between statements -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_query_whose_budget_ends_after_the_catalog_read_does_not_send_the_select`, `::test_a_mutation_whose_budget_ends_after_its_first_operation_does_not_send_the_second`.
+- request budget, the idempotency store -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_keyed_mutation_whose_budget_ends_after_its_last_operation_does_not_send_the_idempotency_store`.
+- request budget, the DDL -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_schema_operation_whose_budget_ends_after_its_ddl_sends_no_further_statement_and_leaves_nothing`.
+- request budget, nothing after the last statement -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_query_that_finishes_its_last_statement_is_answered_even_if_the_budget_ends_right_after`.
+- request budget, nothing after the last statement -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_mutation_that_finishes_its_last_operation_commits_even_if_the_budget_ends_right_after`.
+- request budget, the bound -- `MitateDB-api/tests/test_expired_request_checks.py::test_timeout_ms_refuses_under_one_millisecond_remaining_and_never_returns_a_zero_bound`, `::test_timeout_ms_returns_the_whole_milliseconds_that_remain_and_never_more`.
+- request budget, the bound on the connections -- `MitateDB-api/tests/test_expired_request_checks.py::test_the_scope_sets_a_bound_no_longer_than_what_remained_when_it_opened`.
+- request budget, the waits -- `MitateDB-api/tests/test_expired_request_checks.py::test_the_wait_for_a_connection_counts_against_the_budget`, `::test_a_real_wait_for_a_lock_that_spends_the_budget_is_followed_by_no_statement`.
+- request budget, after a lock wait -- `MitateDB-api/tests/test_expired_request_checks.py::test_the_wait_for_a_lock_shortens_the_bound_of_the_statements_that_follow`.
+- request budget, the mappings -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_cancelled_set_local_when_a_request_opens_is_execution_ms`, `::test_a_cancelled_set_local_after_a_lock_wait_is_execution_ms`.
+- request budget, the batch's record write -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_cancelled_idempotency_record_write_of_a_batch_is_execution_ms`.
+- request budget, the connection -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_connection_attempt_that_fails_after_the_budget_is_spent_is_execution_ms`, `::test_a_database_that_refuses_the_connection_at_once_is_a_storage_failure_not_a_spent_budget`.
+- request budget, the pool wait -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_pool_wait_that_ran_out_is_execution_ms_whatever_the_clock_says`.
+- schema operations, record before the audit row -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_schema_operation_stores_its_idempotency_record_before_the_pre_commit_row`.
+- schema operations, a cancelled record write -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_cancelled_idempotency_record_write_of_a_schema_operation_never_reaches_the_audit_hook`.
+- schema operations, audit rows -- `MitateDB-api/tests/test_application_audit.py::test_a_cancelled_schema_record_write_leaves_no_audit_row_because_it_comes_before_the_pre_commit_row`.
+- schema operations, audit rows -- `MitateDB-api/tests/test_application_audit.py::test_a_cancelled_schema_commit_after_the_pre_commit_row_writes_an_error_row_and_keeps_the_response`.
+- SQLite, the checks -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_refuses_the_next_statement_of_a_request_whose_budget_ends_between_two_statements`.
+- SQLite, the DDL -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_refuses_the_ddl_of_a_request_whose_budget_ends_after_its_begin`.
+- SQLite, the bound -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_stops_a_statement_that_is_still_running_when_the_budget_ends`.
+- SQLite, the bound is not on the commit -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_commits_a_request_whose_budget_ended_right_after_its_last_statement`.
+- SQLite, the bound is removed with the statement -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_removes_the_bound_when_a_statement_ends_so_the_next_request_is_not_cut`.
 - read-only transactions end in a COMMIT, so prepared statements survive on the pooled connections -- `MitateDB-api/tests/test_r102_request_scope.py::test_read_only_transactions_end_in_a_commit_so_prepared_statements_survive`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_bare_construction_uses_the_foundation_config_default_execution_ms`, `::test_build_app_passes_the_declared_execution_ms_to_the_constructed_backend`.
 - the developer connection -- `MitateDB-api/tests/test_application_audit.py::test_developer_connection_used_by_the_catalog_path_carries_the_role_level_statement_timeout`.
@@ -937,6 +968,10 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **A deployment declaring `execution_ms` above 5000 also raises the catalog-read bound above 5000**, since inside those 8 transactions the constructed value wins over the role-level one.
 - **Only the lock WAIT is bounded on the provisioning path**: once a lock is granted, how long the statement holds it is deliberately left unbounded, and the ground for accepting that is that no client can reach that role.
 - **`mitatedbsvc_provision` carries no role-level `statement_timeout`** (decision R-66): it applies the migration files and the per-application scripts, whose DDL may legitimately run long -- `MitateDB-api/src/mitatedb_api/ops.py:1773`.
+- **A request can end later than its `execution_ms`**: a statement already running ends when it completes or its bound stops it, a connection attempt can last psycopg's 2 s floor, and the audit write before the commit and the COMMIT are not bound by it.
+- **A host that never answers can answer 413 where an unreachable one answers 503**: the clock alone decides a failed connection attempt, so a connect that timed out with the budget spent is `LIMIT_EXCEEDED`; either way nothing is left and a resend is safe.
+- **No common vector drives the lock-wait recheck, the pool and connection mappings, the threshold or the SQLite bound**: this peer's unit tests pin them with a clock of their own, and 54 mutations of them were all red -- `MitateDB-api/tests/test_expired_request_checks.py`.
+- **The SQLite bound is a progress handler read every 1000 virtual-machine instructions**, so a statement shorter than that is never stopped while it runs; it is refused only before the next statement.
 
 ### MitateDB-api -- ops inventory
 
@@ -1027,7 +1062,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the same-named `_take_bound_advisory_lock` helper bounds `applications` and `credentials_per_application` in the database, by the same `pg_advisory_xact_lock` derivation -- `MitateDB-api/src/mitatedb_api/control_plane.py`.
 - that helper is pinned textually isomorphic to r2db-api's own by `_ISOMORPHIC_TARGETS` -- `MitateDB-api/src/mitatedb_api/control_plane.py:409`.
 - `role_pool_size(thread_limit)`, the thread limit plus 2, is the platform pool's default in `main.build_app`, never the declared `max_concurrency` -- `MitateDB-api/src/mitatedb_api/config.py:335`.
-- each served application's `PostgresBackend` holds a runtime and a developer pool of `role_pool_size(thread_limit)` connections, opened lazily -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:331`, `MitateDB-api/src/mitatedb_api/main.py:553`.
+- each served application's `PostgresBackend` holds a runtime and a developer pool of `role_pool_size(thread_limit)` connections, opened lazily -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:361`, `MitateDB-api/src/mitatedb_api/main.py:553`.
 - any pool's acquire closes every pool's connections idle for more than 300 s, at most once a second per process -- `MitateDB-api/src/mitatedb_api/pool.py:78`, `MitateDB-api/src/mitatedb_api/pool.py:423`.
 - `MitateDB-api/migrations/0012_role_connection_limits.sql` sets each role's ceiling to that role's own pool composition plus one 4-connection operator margin, the same control as r2db-api's own `0013_role_connection_limits.sql`.
 - **F-16** takes each role's per-process pool times its own plane's `process_ceilings` value as that role's floor on both peers, with exit code 15 and startup fail-fast -- `MitateDB-api/src/mitatedb_api/platform_declarations.py:1005`.
@@ -1047,12 +1082,12 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - the same pre-authentication `concurrency` slot holds here, in the same HTTP-plane order (byte bound -> concurrency slot -> authentication -> body -> rate/business) -- `MitateDB-api/src/mitatedb_api/http.py:547`.
 - `HttpService` is fail-closed: its constructor raises unless BOTH the shared `_LimitStateHolder` and the declared `max_concurrency` are supplied, the former no-op branch being removed -- `MitateDB-api/src/mitatedb_api/http.py`.
 - one holder is shared by every application in the process, so the bound is deployment-wide rather than per-application -- `MitateDB-api/src/mitatedb_api/cell.py:364`.
-- handlers delegate the synchronous section to the threadpool, and each request opens a request scope that borrows its own connections, developer before runtime, before any lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:467`.
-- one request is one transaction on its scope's main connection, and the idempotency per-key and count locks are `pg_advisory_xact_lock`s inside it -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1766`, `:1803`.
+- handlers delegate the synchronous section to the threadpool, and each request opens a request scope that borrows its own connections, developer before runtime, before any lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:499`.
+- one request is one transaction on its scope's main connection, and the idempotency per-key and count locks are `pg_advisory_xact_lock`s inside it -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1808`, `:1845`.
 - a schema operation takes the application-wide `pg_advisory_xact_lock(761761763)`, then its entity's exclusive entity lock, before its first catalog read -- `MitateDB-api/src/mitatedb_api/cell.py:1241`.
-- a data write takes each entity it touches as a shared entity lock, sorted, in one statement before pass 1; a query takes neither lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:609`, `MitateDB-api/src/mitatedb_api/cell.py:2749`.
-- a pool or lock wait past the deadline is `LIMIT_EXCEEDED` (`execution_ms`), and a 40P01/40001 or an unreachable database is `SERVICE_UNAVAILABLE` -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:452`, `:271`.
-- the in-process SQLite backend holds one `RLock` for the whole request scope, so one request per cell runs at a time there -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py:126`.
+- a data write takes each entity it touches as a shared entity lock, sorted, in one statement before pass 1; a query takes neither lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:647`, `MitateDB-api/src/mitatedb_api/cell.py:2749`.
+- a pool or lock wait past the deadline is `LIMIT_EXCEEDED` (`execution_ms`), and a 40P01/40001 or an unreachable database is `SERVICE_UNAVAILABLE` -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:482`, `:271`.
+- the in-process SQLite backend holds one `RLock` for the whole request scope, so one request per cell runs at a time there -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py:141`.
 - the same `HostSharedConcurrencySlots` as r2db-api's own, held identical by `_ISOMORPHIC_TARGETS`, bounds `concurrency` across the instance's workers, scanning under the `scan` lock -- `MitateDB-api/src/mitatedb_api/concurrency_slots.py:296`.
 - `build_app` refuses to start unless `MITATEDB_SLOT_DIR` is an existing mode-0700 directory owned by this process -- `MitateDB-api/src/mitatedb_api/main.py:311`, `MitateDB-api/src/mitatedb_api/concurrency_slots.py:177`.
 - it also refuses to start unless that directory's `selfcheck` file refuses a second `flock` from the same process -- `MitateDB-api/src/mitatedb_api/concurrency_slots.py:200`.
@@ -1504,7 +1539,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Disclosed gap**: production log/observability handling of the discarded exception is not yet defined or evidenced for either plane.
 - **Intended operational visibility, not a disclosure gap**: `list_credentials` is readable by the strictly weaker `audit` role (SI-02/SI-06), so a distributable, ceremony-issued `audit` credential can enumerate `must_rotate`/`enabled`/`revoked` state for every control credential, not only its own.
 - That is deliberate: `CredentialsResult` never returns secrets or verifiers regardless of role, and the point of a weaker distributable role is observing rotation state without being able to change anything.
-- **A refusing cell refuses at its scope's entry**: with an upgrade pending, a defect checked inside the scope (identifiers, vocabulary, declarations) answers 503, not `VALIDATION_FAILED`; HTTP body-shape checks still answer 400 -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:481-482`.
+- **A refusing cell refuses at its scope's entry**: with an upgrade pending, a defect checked inside the scope (identifiers, vocabulary, declarations) answers 503, not `VALIDATION_FAILED`; HTTP body-shape checks still answer 400 -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:513-514`.
 
 ### Common
 
@@ -1578,7 +1613,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - a later operation's validation failure therefore voids every earlier operation's effect too -- `MitateDB-api/src/mitatedb_api/cell.py:2403`.
 - that choke is shared by both the single-entity and the cross-entity call path, with no second implementation -- `MitateDB-api/src/mitatedb_api/cell.py:2580`.
 - rollback on a pass-2 failure is unconditional regardless of exception type -- `MitateDB-api/src/mitatedb_api/cell.py:2580`.
-- `encode_value` rejects lone UTF-16 surrogates deterministically before execution on both backends, the same treatment as the pre-existing NUL-byte rejection -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1421`.
+- `encode_value` rejects lone UTF-16 surrogates deterministically before execution on both backends, the same treatment as the pre-existing NUL-byte rejection -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1461`.
 - pass 1 and pass 2 of one batch run under the shared entity locks of every entity it names, so an API schema operation on those entities waits for the batch -- `MitateDB-api/src/mitatedb_api/cell.py:2749`.
 
 #### Evidence
@@ -1650,7 +1685,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Control
 
 - `cell.py`, `backend.py`, `backend_postgres.py` and `backend_sqlite.py` expose only the structured operation set, and no method returns a raw connection, DSN, or credential/verifier value -- `MitateDB-api/src/mitatedb_api/cell.py`.
-- the single execution choke point `_execute` (R-2) is typed to reject any `str` statement with `TypeError` -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:295`.
+- the single execution choke point `_execute` (R-2) is typed to reject any `str` statement with `TypeError` -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:322`.
 - `/control/v1`'s own responses never echo a DSN, pepper, or another credential's secret -- `MitateDB-api/src/mitatedb_api/control_http.py:139`.
 - `list_credentials`/`list_applications` return only `credential_id`/`application_id`/`role`/`enabled`/`revoked` -- `MitateDB-api/src/mitatedb_api/control_plane.py:990`.
 - `platform_declarations` (migration `0007`) sits in the platform database with `SELECT` for both service roles and writes only through `MITATEDB_PROVISION_DSN` -- `MitateDB-api/migrations/0007_platform_declarations.sql`.
@@ -1931,7 +1966,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - a runtime credential's schema operation refused by the HTTP layer is counted in the refusal window too -- `MitateDB-api/src/mitatedb_api/http.py:1038`.
 - **MitateDB-specific**: the legacy 6-field in-memory sink's rounding, which silently maps out-of-vocabulary values to `"unclassified"`/`"unspecified"`, never reaches the durable path -- `MitateDB-api/src/mitatedb_api/audit.py:48`.
 - a separate 13-column emitter is used on the durable path instead -- `MitateDB-api/src/mitatedb_api/audit_dispatch.py`.
-- **`commit()` runs inside `try`**: `backend_postgres`'s `create_collection`/`add_field`/`delete` commit inside the classified block, so a commit raise is never left unclassified -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:295`.
+- **`commit()` runs inside `try`**: `backend_postgres`'s `create_collection`/`add_field`/`delete` commit inside the classified block, so a commit raise is never left unclassified -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:322`.
 - that holds on both backends, SQLite's DDL running under an explicit pseudo-transaction -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py`.
 - query, insert and update successes are written durably before the response, like r2db-api's own -- `MitateDB-api/src/mitatedb_api/audit_dispatch.py:196`, `MitateDB-api/src/mitatedb_api/cell.py:791`, `:2581`.
 - `request_id` is threaded from HTTP through auth, cell and backends, so the wire id matches the durable row's id -- `MitateDB-api/src/mitatedb_api/http.py:559`.

@@ -19,13 +19,27 @@ from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
 
 
+# How many virtual-machine instructions of a statement pass between two looks at the clock by its progress handler (`SQLiteBackend._execute_statement`).
+_PROGRESS_INTERVAL_OPS = 1000
+
+
+def _budget_exhausted():
+    """The refusal of a request whose `execution_ms` is spent: `LIMIT_EXCEEDED` with `limit_class: execution_ms`."""
+    return ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+
+
+def _budget_spent(deadline):
+    """True when less than 1 ms of the request's budget remains, read from the clock once: the same threshold the PostgreSQL backend refuses at, because a whole-millisecond statement bound cannot express a smaller remainder."""
+    return (deadline - time.monotonic()) * 1000 < 1
+
+
 def _check_deadline(deadline):
-    """"変更はapp側deadline検査の呼び出しのみ"): this backend has no native query-timeout API (`sqlite3` offers none) -- unlike `backend_postgres.py`'s own real `SET LOCAL statement_timeout`/`lock_timeout`, this is the app-side wall-clock check `cell.ApplicationCell._limit_gate`'s own computed `deadline` (`time.monotonic()` seconds) is handed to. `deadline=None` (a direct caller of this backend that supplies no deadline -- this repository's own tests) skips the check entirely, mirroring `backend_postgres.py`'s identical `None`-means-unbounded convention.
+    """"変更はapp側deadline検査の呼び出しのみ"): this backend has no `statement_timeout`/`lock_timeout` of its own (unlike `backend_postgres.py`'s `SET LOCAL`): a statement already running is bounded by the progress handler `SQLiteBackend._execute_statement` arms, and this is the app-side wall-clock check (made before each statement; it refuses a request with less than 1 ms of its budget left) `cell.ApplicationCell._limit_gate`'s own computed `deadline` (`time.monotonic()` seconds) is handed to. `deadline=None` (a direct caller of this backend that supplies no deadline -- this repository's own tests) skips the check entirely, mirroring `backend_postgres.py`'s identical `None`-means-unbounded convention.
 
     History: CH-0337
     """
-    if deadline is not None and time.monotonic() > deadline:
-        raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+    if deadline is not None and _budget_spent(deadline):
+        raise _budget_exhausted()
 
 # R-3 (design v1.1 m-7): this set is backend-specific, unlike the shared syntax allowlist in identifiers.py. `sqlite_sequence` is a real SQLite-internal table name (created automatically by an AUTOINCREMENT column); `audit_events` is reserved defensively against a future local audit-table name collision on this backend specifically.
 # history: CH-0338
@@ -94,6 +108,7 @@ class SQLiteBackend:
 
     def __init__(self):
         self._request_lock = threading.RLock()
+        self._request_state = threading.local()
         self._db = sqlite3.connect(":memory:", check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         # In-memory only, matching this backend's own already-non-durable
@@ -128,7 +143,55 @@ class SQLiteBackend:
         no connections (this backend has one, which every method below
         uses directly)."""
         with self._request_lock:
-            yield RequestScope(kind, deadline, backend=self)
+            outer = self._deadline
+            self._request_state.deadline = deadline
+            try:
+                yield RequestScope(kind, deadline, backend=self)
+            finally:
+                self._request_state.deadline = outer
+
+    @property
+    def _deadline(self):
+        """The deadline of the request the calling thread is serving (`request_scope`), `None` outside one."""
+        return getattr(self._request_state, "deadline", None)
+
+    def _abandon(self):
+        """Rolls back the transaction a refused request left open, so nothing it changed is visible to the next one."""
+        if self._db.in_transaction:
+            self._db.rollback()
+
+    def _execute_statement(self, statement, params=(), *, fetch=False):
+        """Sends one statement and returns its cursor, or all its rows when `fetch` (a statement that returns rows runs while they are fetched, so the bound below covers the fetch too).
+
+        A request with a deadline is checked before the statement is sent (`_check_deadline`) and, while the statement runs, by a progress handler that stops it once less than 1 ms of the budget remains: the statement fails with `LIMIT_EXCEEDED` / `execution_ms` and the request's open transaction is rolled back. The handler is armed for the statement alone and is removed whichever way it ends, so a commit or a rollback that follows is never interrupted by it. A statement of a request with no deadline is neither checked nor bounded."""
+        deadline = self._deadline
+        if deadline is None:
+            cursor = self._db.execute(statement, params)
+            return cursor.fetchall() if fetch else cursor
+        try:
+            _check_deadline(deadline)
+        except ResourceLimitError:
+            self._abandon()
+            raise
+        stopped = []
+
+        def bound():
+            if _budget_spent(deadline):
+                stopped.append(True)
+                return True
+            return False
+
+        self._db.set_progress_handler(bound, _PROGRESS_INTERVAL_OPS)
+        try:
+            cursor = self._db.execute(statement, params)
+            return cursor.fetchall() if fetch else cursor
+        except sqlite3.OperationalError as exc:
+            if stopped:
+                self._abandon()
+                raise _budget_exhausted() from exc
+            raise
+        finally:
+            self._db.set_progress_handler(None, 0)
 
     def lock_schema(self, *, scope):
         """No-op: the scope already serializes every request."""
@@ -146,10 +209,10 @@ class SQLiteBackend:
             )
 
     def schema_count(self, *, scope=None):
-        row = self._db.execute(
+        (row,) = self._execute_statement(
             "SELECT count(*) AS count FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite_%'"
-        ).fetchone()
+            "AND name NOT LIKE 'sqlite_%'", fetch=True
+        )
         return row["count"]
 
     def schema_revision(self, *, scope=None):
@@ -160,7 +223,7 @@ class SQLiteBackend:
         # history: CH-0345
         name = validate_identifier(collection, "entity")
         try:
-            rows = self._db.execute("PRAGMA table_info(" + quote_identifier(name) + ")").fetchall()
+            rows = self._execute_statement("PRAGMA table_info(" + quote_identifier(name) + ")", fetch=True)
         except sqlite3.DatabaseError:
             raise NotFoundError("collection not found")
         if not rows:
@@ -174,11 +237,10 @@ class SQLiteBackend:
         """
         if self._db.in_transaction:
             self._db.rollback()
-        self._db.execute("BEGIN")
+        self._execute_statement("BEGIN")
 
     def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
                           deadline=None, dry_run=False, idempotency_record=None, scope=None):
-        _check_deadline(deadline)
         definitions = []
         for field, field_type in fields.items():
             definitions.append(quote_identifier(field) + " " + _TYPES[field_type])
@@ -197,7 +259,7 @@ class SQLiteBackend:
             ", ".join(definitions) + ")"
         self._begin_pseudo_tx()
         try:
-            self._db.execute(statement)
+            self._execute_statement(statement)
         except sqlite3.DatabaseError:
             self._db.rollback()
             raise ConflictError("collection already exists")
@@ -277,15 +339,14 @@ class SQLiteBackend:
 
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
                   audit_hook=None, deadline=None, dry_run=False, idempotency_record=None, scope=None):
-        _check_deadline(deadline)
         resolved_nullable = True if nullable is None else nullable
         if resolved_nullable is False:
             # mirrors `alter_field_constraints`'s own existing-row rule, for a NEW field instead of an existing one -- an `add_field` declaring `nullable: false` on an entity that already holds rows is refused with `CONFLICT`, because every one of those rows would hold `null` in the new field (there being no earlier value for it to have held). Checked BEFORE the DDL below (this backend has no separate tx step for it to share -- see `alter_field_constraints`'s own identical comment for why no lock is needed on this single-threaded, in-process backend), so a conflicting call changes NOTHING.
             # history: CH-0351
             try:
-                (existing_rows,) = self._db.execute(
-                    "SELECT count(*) FROM " + quote_identifier(collection)
-                ).fetchone()
+                ((existing_rows,),) = self._execute_statement(
+                    "SELECT count(*) FROM " + quote_identifier(collection), fetch=True
+                )
             except sqlite3.DatabaseError:
                 raise NotFoundError("collection not found")
             if existing_rows > 0:
@@ -299,7 +360,7 @@ class SQLiteBackend:
             quote_identifier(field) + " " + _TYPES[field_type]
         self._begin_pseudo_tx()
         try:
-            self._db.execute(statement)
+            self._execute_statement(statement)
         except sqlite3.OperationalError as exc:
             self._db.rollback()
             # sqlite3 reports both "no such table" and "duplicate column
@@ -431,7 +492,6 @@ class SQLiteBackend:
 
         History: CH-0359
         """
-        _check_deadline(deadline)
         if field not in self.field_domains(collection):  # NotFoundError if `collection` does not exist
             raise NotFoundError("field not found")
         current = dict(self._declared_constraints.get(collection, {}).get(field) or {"nullable": True})
@@ -447,9 +507,9 @@ class SQLiteBackend:
         declared_type = self._declared_types.get(collection, {}).get(field)
         self._begin_pseudo_tx()
         try:
-            rows = self._db.execute(
-                "SELECT " + quote_identifier(field) + " FROM " + quote_identifier(collection)
-            ).fetchall()
+            rows = self._execute_statement(
+                "SELECT " + quote_identifier(field) + " FROM " + quote_identifier(collection), fetch=True
+            )
         except sqlite3.DatabaseError:
             self._db.rollback()
             raise NotFoundError("collection not found")
@@ -560,7 +620,7 @@ class SQLiteBackend:
             quote_identifier(field) for field in fields) + ") VALUES (" + \
             ", ".join("?" for _ in fields) + ")"
         try:
-            cursor = self._db.execute(statement, params)
+            cursor = self._execute_statement(statement, params)
         except sqlite3.IntegrityError:
             raise ConflictError("write conflicts with a constraint")
         except sqlite3.DatabaseError:
@@ -575,7 +635,7 @@ class SQLiteBackend:
         statement = "UPDATE " + table + " SET " + ", ".join(
             quote_identifier(field) + " = ?" for field in fields) + where
         try:
-            cursor = self._db.execute(statement, list(params) + where_params)
+            cursor = self._execute_statement(statement, list(params) + where_params)
         except sqlite3.DatabaseError:
             raise NotFoundError("collection not found")
         return {"updated": cursor.rowcount}
@@ -587,7 +647,7 @@ class SQLiteBackend:
         where, params = self._where_sql(filters)
         statement = "DELETE FROM " + table + where
         try:
-            cursor = self._db.execute(statement, params)
+            cursor = self._execute_statement(statement, params)
         except sqlite3.DatabaseError:
             raise NotFoundError("collection not found")
         return {"deleted": cursor.rowcount}
@@ -643,7 +703,6 @@ class SQLiteBackend:
         return "(" + " OR ".join(clauses) + ")", params
 
     def read(self, collection, selected, filters, order_by, limit, *, cursor_values=None, deadline=None, scope=None):
-        _check_deadline(deadline)
         table = quote_identifier(collection)
         statement = "SELECT " + ", ".join(_quote_column(x) for x in selected) + " FROM " + table
         where, params = self._where_sql(filters)
@@ -682,18 +741,17 @@ class SQLiteBackend:
         statement += " LIMIT ?"
         params = list(params) + [limit]
         try:
-            rows = self._db.execute(statement, params).fetchall()
+            rows = self._execute_statement(statement, params, fetch=True)
         except sqlite3.DatabaseError:
             raise NotFoundError("collection not found")
         return [dict(row) for row in rows]
 
     def delete(self, collection, filters, audit_hook=None, *, deadline=None, scope=None):
-        _check_deadline(deadline)
         table = quote_identifier(collection)
         where, params = self._where_sql(filters)
         statement = "DELETE FROM " + table + where
         try:
-            cursor = self._db.execute(statement, params)
+            cursor = self._execute_statement(statement, params)
         except sqlite3.DatabaseError:
             raise NotFoundError("collection not found")
         # same pre-commit-hook structure as `create_collection` above -- `cell.ApplicationCell.delete` has already run this request through `_validate_delete_confirmation` before this is ever called.
@@ -708,12 +766,11 @@ class SQLiteBackend:
         return {"deleted": cursor.rowcount}
 
     def begin(self, *, deadline=None, scope=None):
-        _check_deadline(deadline)
         # defense in depth against ANY future case (not just the `OverflowError` this same round's fix closes off at `encode_value`) that raises an exception `cell.py::transact`'s own `except (...)` tuple does not list, leaving an earlier `BEGIN` transaction open on this connection -- `sqlite3.Connection.execute("BEGIN")` on a connection that ALREADY has an open transaction raises `sqlite3.OperationalError: cannot start a transaction within a transaction`, permanently wedging every future `transact()` call on this cell. Rolling back any stray open transaction FIRST makes starting a fresh one always safe, regardless of what left the previous one open.
         # history: CH-0374
         if self._db.in_transaction:
             self._db.rollback()
-        self._db.execute("BEGIN")
+        self._execute_statement("BEGIN")
 
     def commit(self, *, scope=None):
         self._db.commit()
