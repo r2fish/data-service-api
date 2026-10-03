@@ -47,6 +47,20 @@ new:
 the deadline is checked once at entry, before the idempotency lookup and before anything is snapshotted
 ```
 
+### correction: 2026-10-03
+
+- reason: R-42 -- the in-memory schema operation also checks its deadline just before the operation, after the snapshot, so the comment names both points
+
+old:
+```
+the deadline is checked once at entry, before the idempotency lookup and before anything is snapshotted
+```
+
+new:
+```
+the deadline is checked at entry, before the idempotency lookup, and again just before the operation, after the snapshot
+```
+
 ## CH-0553
 
 - moved from: `src/r2db_api/structured.py` (`ApplicationCell._apply_schema_locked`)

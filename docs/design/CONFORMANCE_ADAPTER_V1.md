@@ -2,7 +2,7 @@
 
 ## 文書情報
 
-- 版数: 1.22 (§32 を新設。port v1.22: 台帳 R-42 (design `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4・D-7) 由来の coordinated revision -- 1 新規 abstract method `hold_after_admission(session)` (新条件 -- C-35 の次。番号は版の flip の commit で付く。rate・concurrency・budget の bound が確定した後、最初の接続取得の前で要求を止める primitive) と、非 normative の handle `AdmissionHold` を追加し、既存の handle `IdempotencyHold`・`PlanVerificationHold` に `statements_after_release()` (放した後に要求のために発行された文の数。PostgreSQL の 4 plug は整数、in-process の 2 plug は `None`) を足す。削除は無い。`hold_after_idempotency_lookup` の契約文の 2 文を 3 文に改め (§25.1 に【追記】)、`hold_after_plan_verification` の契約文の 1 文を改め (§30.1 に【追記】)、r2db の 2 plug の stall 点を予約の後へ移す。詳細は §32)
+- 版数: 1.22 (§32 を新設。port v1.22: 台帳 R-42 (design `docs/design/EXPIRED_REQUEST_SEMANTICS_V0_1.md` §6.4・D-7) 由来の coordinated revision -- 1 新規 abstract method `hold_after_admission(session)` (新条件 -- C-36。rate・concurrency・budget の bound が確定した後、最初の接続取得の前で要求を止める primitive) と、非 normative の handle `AdmissionHold` を追加し、既存の handle `IdempotencyHold`・`PlanVerificationHold` に `statements_after_release()` (放した後に要求のために発行された文の数。PostgreSQL の 4 plug は整数、in-process の 2 plug は `None`) を足す。削除は無い。`hold_after_idempotency_lookup` の契約文の 2 文を 3 文に改め (§25.1 に【追記】)、`hold_after_plan_verification` の契約文の 1 文を改め (§30.1 に【追記】)、r2db の 2 plug の stall 点を予約の後へ移す。詳細は §32)
 - 版数: 1.21 (§31 を新設。port v1.21: 台帳 R-108 (design `docs/design/REFERENCE_CLIENT_V0_1.md` §6・D-2a・D-4) 由来の coordinated revision -- 1 新規 abstract method `wire_entry(application_id)` (参照クライアントの条件 C-35 が使う。wire への入口: 面が宣言する data の base URL、要求 1 件を渡されたとおり運ぶ送信関数、runtime と developer の bearer secret) と、非 normative の値型 `WireEntry` を追加する。削除は無い。in-process の 2 plug は `AssertionError` を上げ、wire の 4 plug が実現する。詳細は §31)
 - 版数: 1.20 (§30 を新設。port v1.20: 台帳 R-102 (design `docs/design/MITATEDB_APPLICATION_SERIALIZATION_V0_1.md` §9・§11.1 Q-5) 由来の coordinated revision -- 1 新規 abstract method `hold_after_plan_verification(session)` (新条件 C-34。plan の前提条件を並行する schema 操作の下で決定的に観測させる primitive) と、非 normative の handle `PlanVerificationHold` を追加する。削除は無い。§22.1 の開示 2 と §25.2・§25.3 の `MitateDB-api` の記述に R-102 による覆しの註を足した。詳細は §30)
 - 版数: 1.19 (§29 を新設。port v1.19: 台帳 R-115 (design `docs/design/AUDIT_PROCESS_LOSS_V0_1.md` §4・§5) 由来の coordinated revision -- port v1.8 の abstract method `flush_audit_buffer` を削除する。追加は無い。詳細は §29)
@@ -3939,7 +3939,7 @@ Ledger R-42 fixes what a request does whose `execution_ms` budget is already
 spent when it reaches the point where its next statement would be issued
 (contract 1.16.0, `limits.execution_ms`): it issues no statement and ends
 `LIMIT_EXCEEDED` / `execution_ms`. The common suite needs a deterministic way
-to DRIVE that -- the new condition, C-35's successor, numbered in the version-flip commit -- at three points: before the request's
+to DRIVE that -- the new condition, C-36 -- at three points: before the request's
 first connection, between two statements of a multi-statement request, and
 before a schema operation's first DDL statement. The last two points are the
 stall points of `hold_after_idempotency_lookup` (§25.1) and
@@ -4080,10 +4080,65 @@ vectors (i), (ii) and (iii) sent 9, 6 and 2 statements, equal to the figure
 that check needs the probe to be written again; the MitateDB plugs were not
 measured against an independent count.
 
-Not yet measured: the three vectors and their positive controls on the six
-plugs, and the 100/100 repetition under the completion gate's load (design M-8).
-They are recorded here by the measurement run that follows the implementations'
-declaration of the version.
+Measured with the version declared (contract 1.16.0 on all six plugs), by a
+throwaway pytest file that called the C-36 tests, and the C-36 vector functions
+with the stall wait wrapped in a timer, 100 times per plug; it is not kept.
+*Reach* is the time from issuing the held request to the return of the hold's
+wait, *dry run* the (iii) dry run taken under budget B before the hold is armed.
+
+| run | 1-minute load average at the samples | longest reach, (ii) and (iii), six plugs | longest dry run |
+|---|---|---|---|
+| (a) `conformance-tests` and `r2db-api/tests` together under `-n 5 --dist loadgroup`, the C-36 iterations running first, 100 per vector per plug | 2.3 to 20.7 (median 15.4) | 84.5 ms (MitateDB-api-socket) | 79.9 ms (r2db-api-socket) |
+| (b) the same 100 iterations alone at `-n 6` with 14 CPU-burning processes added | 11.1 to 26.0 (median 23.5) | 239.4 ms (r2db-api-socket) | 96.2 ms (r2db-api-socket) |
+| (c) inside the M-8 repetitions below, 10 CPU-burning processes added | 15.0 to 28.1 (median 20.7) | 137.1 ms (r2db-api-socket) | 27.6 ms (r2db-api-socket) |
+
+In (c) the longest dry run of the positive control, whose budget is the declared
+`execution_ms` and not B, was 138.1 ms (MitateDB-api-socket); it is not a dry
+run under B and is not in the column.
+
+B stays at its initial 500 ms, the hold after the stall signal at
+B + B / 5 = 600 ms. All 4800 reach measurements of (ii) and (iii) (1200 + 1200
++ 2400) arrived before the budget ended; the longest, 239.4 ms under the
+heaviest load, is 48 % of B, and under the gate-like load (a) the longest is
+17 % of B. A request refused before its stall point ends the test at once:
+`_B_MS = 1` fails (ii) with "completed before it reached the stall point" in 0.20
+s to 1.57 s per test on five plugs; the MitateDB-api in-process plug reaches its
+stall point inside 1 ms and passes.
+
+M-8, the repetition (10 CPU-burning processes added, `-n 6`, one plug per
+worker, 100 iterations of each test per plug, a fresh isolated surface each
+time): the negative and the positive control of (i), (ii) and (iii) are 100/100
+on every plug, except the (iii) negative on `r2db-api` (in-process), which was
+0/100 in the first measurement. At that time the in-memory cell checked its
+deadline once in `apply_schema`, at its entry and before the idempotency lookup,
+and the hold stalls after that, at `compute_plan_token`; nothing was checked
+again before the operation, so the schema operation released after its budget
+ended succeeded. The in-memory `apply_schema` now also checks its deadline
+before the operation, after the plan token is computed (`compute_plan_token`,
+the hold's stall point) and before the operation chain (the entry check stays;
+the plan comparison stays at the exit point after the operation; nothing is
+checked after the operation). With that check, (iii)
+and its positive control were repeated on all six plugs (the same method: 10
+CPU-burning processes, `-n 6`, 100 iterations per plug, a fresh isolated surface
+each time): 100/100 on every plug, `pt: 1200 passed in 308.21s`. The other four
+vectors (i), (ii) and their positive controls were measured before that check
+and were not repeated.
+
+Removing the checks, measured after the declaration. The checks in front of an
+r2db request's first statement (`_timeout_ms`'s refusal, `_transaction`'s check
+at the three outermost sites, `_run`'s check) turn the (i), (ii) and (iii)
+negatives red on both r2db wire plugs when removed together (V28a, V30a, V31a);
+with a positive bound left in place the (i) negative is red by the statement
+count, 5 statements after the release (V28a2). A check that always refuses turns
+the (i) positive control red (V29). On MitateDB, `_execute`'s check removed alone
+turns the (ii) and (iii) negatives red (V30b, V31b); with `_timeout_ms`'s refusal
+as well the (i) negative is red (V28b, V28b2, the latter by the statement count,
+6 statements on the http plug). Each entry names one test on one wire plug;
+26 entries with V21 to V33, all red. The review's variants are red too: counting
+the exit side of a transaction instead of the enter side in the r2db meter
+(RA-2a, 1 statement after the release) and in the MitateDB meter (RA-2b, 2),
+dropping the r2db meter's pool-maintenance subtraction (RA-2c, 2), and an empty
+set in the guard's version check (RB-V33-guard-set-empty).
 
 ### 32.3 Disclosed limits
 

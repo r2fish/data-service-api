@@ -1592,6 +1592,11 @@ class ApplicationCell:
             self.field_constraints = before_field_constraints
             self.schema_revision = before_revision
 
+        # The operation is the next storage action: a budget spent since the
+        # entry check refuses it here, before it changes anything. Nothing
+        # is checked after the operation.
+        if deadline is not None and clock is not None:
+            limits.check_deadline(deadline, clock)
         if bound.operation == "create_entity":
             if bound.entity in self.entities:
                 fail("CONFLICT", "Entity already exists.", status=409)
@@ -1601,10 +1606,10 @@ class ApplicationCell:
             # raised from inside this method is not caught by anything
             # short of unwinding the whole call (only the plan, dry-run and
             # audit-hook points below restore `before_*`; the deadline is
-            # checked once at entry, before the idempotency lookup and before
-            # anything is snapshotted, and never after the operation), so
-            # this must run first, not merely "before `schema_revision`
-            # advances".
+            # checked at entry, before the idempotency lookup, and again just
+            # before the operation, after the snapshot, and never after the
+            # operation), so this must run first, not merely "before
+            # `schema_revision` advances".
             # history: CH-0552
             for constraints in bound.field_constraints.values():
                 if constraints.enum is not None:

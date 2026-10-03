@@ -6,7 +6,7 @@ Every test that carries a deadline, except the two pool-wait tests, drives a clo
 
 Real PostgreSQL for the `PostgresCell` and `_RolePool` tests; the `ApplicationCell` tests need none.
 
-Measured by mutation (41 mutations, each turns its named test red; every restore verified). Replacing `_transaction(conn)` with `conn.transaction()` at one of the three outermost `BEGIN` sites turns `test_the_check_before_the_outermost_begin_is_its_own_check` red for that method alone, and at one of the four `SAVEPOINT` sites turns `test_a_nested_transaction_is_not_opened_once_the_budget_is_spent` red for that site alone. Removing the check from `_run` turns red the three tests that expect no statement after the clock moves (`..._does_not_send_the_select`, `..._does_not_send_its_write`, `..._does_not_send_the_idempotency_store`) and the lock-wait test; not attaching the budget to the connection, or leaving it there after the checkout, turns red `..._does_not_send_the_select` and `test_a_pooled_connection_carries_a_request_budget_only_while_that_request_holds_it`. Removing `_timeout_ms`'s refusal (and flooring its bound at 1) turns the under-one-millisecond test red, and returning the full `execution_ms` as the bound turns the bound test red. Restoring the old threshold (`clock() > deadline`) turns red the `0.5` case of `test_the_deadline_check_refuses_under_one_millisecond_remaining` and the in-memory one-millisecond test; putting a check back after the select, after the last operation of a mutation without a key, or after the last operation of an in-memory query, mutation or schema operation turns the matching "still succeeds" or "not after the last" test red. Taking the pool wait's budget judgment out, letting the wait ignore the remaining budget, judging every failed attempt as `LIMIT_EXCEEDED`, or dropping the judgment from any of the three connection sites (a new connection, a closed one, a dead one) turns the matching pool or connection test red. Computing the deadline again after the pool checkout in `query`, `transact` or `apply_schema` turns `test_the_wait_for_a_pooled_connection_counts_against_the_budget` red for that method. Removing the in-memory `ApplicationCell.apply_schema` check before its operation turns `test_the_in_memory_backend_refuses_under_one_millisecond_remaining[apply_schema]` red, and moving it behind the idempotency lookup turns `test_the_in_memory_schema_operation_refuses_a_replay_whose_budget_is_spent` red. Setting the timeouts again after the wait for an entity lock turns `test_the_wait_for_a_lock_is_followed_by_a_clock_check_and_no_second_bound` red.
+Measured by mutation (42 mutations, each turns its named test red; every restore verified). Replacing `_transaction(conn)` with `conn.transaction()` at one of the three outermost `BEGIN` sites turns `test_the_check_before_the_outermost_begin_is_its_own_check` red for that method alone, and at one of the four `SAVEPOINT` sites turns `test_a_nested_transaction_is_not_opened_once_the_budget_is_spent` red for that site alone. Removing the check from `_run` turns red the three tests that expect no statement after the clock moves (`..._does_not_send_the_select`, `..._does_not_send_its_write`, `..._does_not_send_the_idempotency_store`) and the lock-wait test; not attaching the budget to the connection, or leaving it there after the checkout, turns red `..._does_not_send_the_select` and `test_a_pooled_connection_carries_a_request_budget_only_while_that_request_holds_it`. Removing `_timeout_ms`'s refusal (and flooring its bound at 1) turns the under-one-millisecond test red, and returning the full `execution_ms` as the bound turns the bound test red. Restoring the old threshold (`clock() > deadline`) turns red the `0.5` case of `test_the_deadline_check_refuses_under_one_millisecond_remaining` and the in-memory one-millisecond test; putting a check back after the select, after the last operation of a mutation without a key, or after the last operation of an in-memory query, mutation or schema operation turns the matching "still succeeds" or "not after the last" test red. Taking the pool wait's budget judgment out, letting the wait ignore the remaining budget, judging every failed attempt as `LIMIT_EXCEEDED`, or dropping the judgment from any of the three connection sites (a new connection, a closed one, a dead one) turns the matching pool or connection test red. Computing the deadline again after the pool checkout in `query`, `transact` or `apply_schema` turns `test_the_wait_for_a_pooled_connection_counts_against_the_budget` red for that method. Removing the in-memory `ApplicationCell.apply_schema` entry check turns `test_the_in_memory_schema_operation_refuses_a_spent_budget_before_any_other_limit_is_read` red, moving it behind the idempotency lookup turns `test_the_in_memory_schema_operation_refuses_a_replay_whose_budget_is_spent` red, and removing the check before its operation turns `test_the_in_memory_schema_operation_refuses_when_the_budget_is_spent_after_the_entry_check` red. Setting the timeouts again after the wait for an entity lock turns `test_the_wait_for_a_lock_is_followed_by_a_clock_check_and_no_second_bound` red.
 """
 from __future__ import annotations
 
@@ -600,11 +600,24 @@ def test_the_in_memory_mutation_checks_before_each_operation_and_not_after_the_l
 
 def test_the_in_memory_schema_operation_checks_before_its_operation_and_not_after() -> None:
     memory = _memory_cell()
-    clock = _ReadsThenExpired(ok_reads=1)
+    clock = _ReadsThenExpired(ok_reads=2)
     outcome = memory.apply_schema({"operation": "add_field", "entity": "widgets", "field": "extra"}, developer=True, limits=LIMITS, deadline=_MEMORY_DEADLINE, clock=clock)
     assert outcome.committed is True
     assert "extra" in memory.schema["widgets"], "the operation took effect"
-    assert clock.reads == 1, "one check, before the operation; nothing after it"
+    assert clock.reads == 2, "the entry and the one operation; nothing after it"
+
+
+def test_the_in_memory_schema_operation_refuses_when_the_budget_is_spent_after_the_entry_check() -> None:
+    """The entry check passes (one read inside the budget), the clock then runs out, and the operation is refused before it changes anything."""
+    memory = _memory_cell()
+    revision = memory.schema_revision
+    clock = _ReadsThenExpired(ok_reads=1)
+    with pytest.raises(FoundationError) as exc:
+        memory.apply_schema({"operation": "create_entity", "entity": "gadgets", "fields": ["label"]}, developer=True, limits=LIMITS, deadline=_MEMORY_DEADLINE, clock=clock)
+    assert _is_budget_refusal(exc.value)
+    assert clock.reads == 2, "the entry check passed and the operation check refused"
+    assert memory.schema_revision == revision, "the schema revision did not move"
+    assert "gadgets" not in memory.entities and "gadgets" not in memory.schema, "no entity remains"
 
 
 def test_the_in_memory_mutation_refuses_the_operation_that_would_start_after_the_budget_is_spent() -> None:
@@ -642,6 +655,18 @@ def test_the_in_memory_schema_operation_refuses_a_replay_whose_budget_is_spent()
     with pytest.raises(FoundationError) as exc:
         memory.apply_schema(operation, developer=True, limits=LIMITS, deadline=0.0005, clock=lambda: 0.0, plan_request=plan_request, idempotency_key="k-schema-replay", request_id="request-3")
     assert _is_budget_refusal(exc.value)
+
+
+def test_the_in_memory_schema_operation_refuses_a_spent_budget_before_any_other_limit_is_read() -> None:
+    """The entry check comes first: a spent request that would also break `schema_objects` is refused for its budget."""
+    memory = _memory_cell()
+    tight = ResourceLimits(schema_objects=1)
+    with pytest.raises(FoundationError) as exc:
+        memory.apply_schema({"operation": "add_field", "entity": "widgets", "field": "extra"}, developer=True, limits=tight, deadline=0.0005, clock=lambda: 0.0)
+    assert _is_budget_refusal(exc.value)
+    with pytest.raises(FoundationError) as other:
+        memory.apply_schema({"operation": "add_field", "entity": "widgets", "field": "extra"}, developer=True, limits=tight)
+    assert other.value.code == "LIMIT_EXCEEDED" and other.value.details["resource"] == "schema_objects", "without the spent budget the same request is refused for schema_objects"
 
 
 @pytest.mark.parametrize("method", _METHODS)

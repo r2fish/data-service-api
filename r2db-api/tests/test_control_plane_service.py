@@ -1805,7 +1805,7 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         # (5)). Phase 10 WP-6a/pair-closing: re-flipped again to 1.8.0 in
         # the same commit as the `process_ceilings` mapping this WP ships
         # (design D-5 (v)).
-        assert caps["contract_version"] == "1.15.0"
+        assert caps["contract_version"] == "1.16.0"
         assert caps["capabilities"]["control_plane"]["status"] == "enabled"
         # This harness's `ControlPlaneService` is built with no `audit_
         # reader` (AUDIT DSN unconfigured) -- `audit_query` stays declared

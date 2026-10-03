@@ -2,6 +2,7 @@
 
 Status: **Implementation mapping template**
 
+Version: **3.19** (2026-10-03; R-42 -- SI-08 r2db-api, SI-08 MitateDB-api, SI-08 Common, SI-11 r2db-api, SI-11 MitateDB-api, SI-11 Common: C-36 drives a request whose `execution_ms` is spent through three holds and is cited as evidence on both peers; MitateDB-api's `SET LOCAL` reference points at `_set_timeouts` again, the claim that only this peer leaves `LIMIT_EXCEEDED` unaudited is corrected (neither peer audits it durably), the failed-connect mapping states the clock test, and `execution_ms` is no longer disclosed as never driven.)
 Version: **3.18** (2026-10-03; R-120 -- SI-11 r2db-api: the DML-validation / schema-commit window is closed by an entity-level advisory lock (shared in `transact`, exclusive in every `apply_schema` operation, taken after the application schema lock and before the count lock), the open disclosure is replaced by the closed control with its two-cell reproduction tests and the global lock order, and the postgres.py line references that moved with the insertion are re-pulled.)
 Version: **3.17** (2026-10-03; R-30 -- SI-00 r2db-api, SI-00 MitateDB-api, SI-00 Common: the production deployment posture of one Application per serving process is declared in the SI-00 note (requester ruling 2026-10-03 (ii)), with the env example, both runbooks and the deployment records as its controls and evidence, and the shared-OS-user reach under peer authentication, the absence of a JSON router behind one data base URL, the two-Application test fixtures and the un-reread deployment counts disclosed.)
 Version: **3.16** (2026-10-01; R-108 -- SI-05 Common, SI-06 Common, SI-09 Common, SI-10 Common, SI-11 Common, SI-14 Common: C-35 drives C-28's 12 steps through a reference client that composes every request from the contract, on the four wire plugs, and C-19 reads the `role` of every adapter's capability document; both peers' operation-catalog override documentation states contract 1.14.0's obligation, and the line references into MitateDB-api's runbook that lie after the inserted lines are re-pulled.)
@@ -676,7 +677,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `_run` checks the deadline before each statement and `_transaction` before each `BEGIN` or `SAVEPOINT`, by a clock comparison with no database round trip; nothing checks after the last statement -- `r2db-api/src/r2db_api/postgres.py:280`, `:291`.
 - `_timeout_ms` refuses a remaining budget under 1 ms with `LIMIT_EXCEEDED` (`execution_ms`), never returns a bound of 0, and returns no bound above what remained when it was computed -- `r2db-api/src/r2db_api/postgres.py:2726`.
 - a pool wait or a connection attempt (new, or replacing a closed or dead one) that ends with the budget spent is `LIMIT_EXCEEDED` (`execution_ms`) by one clock judgment, any other failure stays 503 -- `r2db-api/src/r2db_api/postgres.py:461`, `:518`.
-- `ResourceLimits.check_deadline` refuses under 1 ms remaining; the in-memory `ApplicationCell` shares it and checks before each operation, not after the last -- `r2db-api/src/r2db_api/limits.py:99`, `r2db-api/src/r2db_api/structured.py:1145`.
+- `ResourceLimits.check_deadline` refuses under 1 ms remaining; the in-memory `ApplicationCell` shares it, checking before each operation and not after -- `r2db-api/src/r2db_api/limits.py:99`, `r2db-api/src/r2db_api/structured.py:1145`, `:1599`.
 - **CCR-14** `ControlPlaneService` bounds the control-plane classes `applications` and `credentials_per_application`, where revoked rows never count, and publishes both `enforced` -- `r2db-api/src/r2db_api/control_plane.py:766`.
 - `control_requests_per_minute` is a third control-plane class, one global sliding 60s window rather than a per-credential one, published `enforced` -- `r2db-api/src/r2db_api/control_plane.py:1409`.
 - `_check_rate` runs before authentication and before any durable audit write, so a flood cannot generate unbounded audit rows -- `r2db-api/src/r2db_api/control_plane.py:1409`.
@@ -723,7 +724,11 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - request budget, the connection -- `r2db-api/tests/test_expired_request_checks.py::test_a_failed_connection_attempt_after_the_budget_is_spent_is_limit_exceeded`, `::test_a_replacement_connection_that_fails_after_the_budget_is_spent_is_limit_exceeded`.
 - request budget, where it starts -- `r2db-api/tests/test_expired_request_checks.py::test_the_wait_for_a_pooled_connection_counts_against_the_budget`.
 - request budget, in memory -- `r2db-api/tests/test_expired_request_checks.py::test_the_in_memory_mutation_checks_before_each_operation_and_not_after_the_last`, `::test_the_in_memory_schema_operation_checks_before_its_operation_and_not_after`.
-- request budget, in memory, before the idempotency lookup -- `r2db-api/tests/test_expired_request_checks.py::test_the_in_memory_schema_operation_refuses_a_replay_whose_budget_is_spent`.
+- request budget, in memory, before the idempotency lookup -- `r2db-api/tests/test_expired_request_checks.py::test_the_in_memory_schema_operation_refuses_a_replay_whose_budget_is_spent`, `::test_the_in_memory_schema_operation_refuses_a_spent_budget_before_any_other_limit_is_read`.
+- request budget, in memory, before the schema operation -- `r2db-api/tests/test_expired_request_checks.py::test_the_in_memory_schema_operation_refuses_when_the_budget_is_spent_after_the_entry_check`.
+- C-36, `r2db-api-http` and `r2db-api-socket`: a request refused for `execution_ms` issues no statement after its release at the first connection -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_i_budget_spent_before_the_first_connection_issues_no_statement`.
+- C-36, `r2db-api-http`/`r2db-api-socket`: no statement after the release between two statements of a refused request -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_ii_budget_spent_between_statements_leaves_nothing`.
+- C-36, `r2db-api-http`/`r2db-api-socket`: no statement after the release before a refused schema operation's first DDL -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_iii_budget_spent_before_the_first_ddl_moves_no_revision`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_upgrade_applications_without_lock_timeout_is_a_usage_error`, `::test_upgrade_applications_without_lock_timeout_is_a_usage_error_with_dry_run`, `::test_upgrade_applications_rejects_an_ill_formed_lock_timeout_through_the_cli`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_validate_lock_timeout_value_accepts_well_formed_values`, `::test_validate_lock_timeout_value_rejects_ill_formed_values`, `::test_upgrade_applications_cli_lock_timeout_value_reaches_pgoptions`.
 - `--lock-timeout` -- `r2db-api/tests/test_ops_upgrade.py::test_run_upgrade_script_keeps_the_dsns_own_pgoptions_alongside_lock_timeout`.
@@ -737,7 +742,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **F-17 judges the DECLARATION, not the effective value inside a running process**: what a reader connection actually carries is read only by the Evidence tests above, never by the check itself.
 - **Disclosed difference between the peers**: MitateDB-api's `0013_role_statement_timeouts.sql` puts a role-level `statement_timeout` on its application runtime/developer roles as well, while r2db-api leaves those two roles without one.
 - **A request can end later than its `execution_ms`**: the pool's checkout ping, a connect (libpq's own lower bound applies), the audit write and the `COMMIT` are not bound by it, and a host that never answers fails at its connect timeout, so it can answer 413 where an unreachable one answers 503.
-- **The deadline checks are measured by removing them**: each check, the threshold, the mapping and the bound turn their named test red (41 mutations, 41 red).
+- **The deadline checks are measured by removing them**: each check, the threshold, the mapping and the bound turn their named test red (42 mutations, 42 red).
+- **The C-36 vectors are measured by removing the checks**: removing every check in front of the first statement (with and without a positive bound left) or refusing always turns them red on both wire plugs (10 mutations, 10 red) -- `conformance-tests/test_c36_execution_budget_spent.py`.
 - **Only the lock WAIT is bounded on the provisioning path**: once a lock is granted, how long the statement holds it is deliberately left unbounded; the ground for accepting that is that no client can reach that role, not that `lock_timeout` would bound it.
 - **`r2dbsvc_control` carries no role-level `statement_timeout`** (decision R-66): it applies the migration files and the per-application upgrade scripts, whose DDL may legitimately run long -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md`.
 - a role setting cannot be scoped to one file, so a bound on that role would cut a migration off part-way and leave it half applied -- `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md`.
@@ -880,7 +886,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Application-plane resource bounds**: `_LimitStateHolder.acquire_rate`/`.concurrency_slot` bound `requests_per_minute` and `concurrency`, through the PostgreSQL rate row and the host-shared slots once wired (`cell.py:320`, `:393`, `:412`).
 - those two classes are declared in `build_capabilities_document`'s `limit_enforcement` dict through `resolve_limit_enforcement` (`capabilities_document.py:60`, dict at `:308`; entries `:354`, `:361`).
 - `execution_ms` is declared `reference_wall_clock`, not `enforced` (`capabilities_document.py:338`) -- a wall-clock deadline (`time.monotonic() + max_execution_ms`) handed to the backend.
-- `backend_postgres.py` converts that deadline into a real `SET LOCAL statement_timeout`/`lock_timeout` (`backend_postgres.py:1687-1696`), matching r2db-api's own identical declaration.
+- `backend_postgres.py` sets `statement_timeout`/`lock_timeout` by `SET LOCAL` from what remains of that deadline (`_set_timeouts`: `MitateDB-api/src/mitatedb_api/backend_postgres.py:1729`, `:1737-1740`), matching r2db-api's own declaration.
 - **`batch_entities`** is a 4th enforced class bounding the distinct entity names a `cross_entity_mutation` unit may name; repeats do not count twice -- `MitateDB-api/src/mitatedb_api/config.py:32`.
 - `batch_items` stays the separate total-operation-count bound -- `MitateDB-api/src/mitatedb_api/config.py:22`.
 - `batch_entities` defaults to 10 and is counted before any operation executes, published `enforced` -- `MitateDB-api/src/mitatedb_api/config.py:32`.
@@ -953,6 +959,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - SQLite, the rollback of a stopped statement -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_rolls_back_the_transaction_of_a_stopped_statement_with_the_handler_already_removed`.
 - SQLite, the bound is not on the commit -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_commits_a_request_whose_budget_ended_right_after_its_last_statement`.
 - SQLite, the bound is removed with the statement -- `MitateDB-api/tests/test_expired_request_checks.py::test_sqlite_removes_the_bound_when_a_statement_ends_so_the_next_request_is_not_cut`.
+- C-36, `MitateDB-api-http` and `MitateDB-api-socket`: a request refused for `execution_ms` issues no statement after its release at the first connection -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_i_budget_spent_before_the_first_connection_issues_no_statement`.
+- C-36, `MitateDB-api-http`/`MitateDB-api-socket`: no statement after the release between two statements of a refused request -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_ii_budget_spent_between_statements_leaves_nothing`.
+- C-36, `MitateDB-api-http`/`MitateDB-api-socket`: no statement after the release before a refused schema operation's first DDL -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_iii_budget_spent_before_the_first_ddl_moves_no_revision`.
 - read-only transactions end in a COMMIT, so prepared statements survive on the pooled connections -- `MitateDB-api/tests/test_r102_request_scope.py::test_read_only_transactions_end_in_a_commit_so_prepared_statements_survive`.
 - catalog-read timeouts -- `MitateDB-api/tests/test_r87_catalog_read_execution_ms.py::test_bare_construction_uses_the_foundation_config_default_execution_ms`, `::test_build_app_passes_the_declared_execution_ms_to_the_constructed_backend`.
 - the developer connection -- `MitateDB-api/tests/test_application_audit.py::test_developer_connection_used_by_the_catalog_path_carries_the_role_level_statement_timeout`.
@@ -969,7 +978,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Deployment caveat**: like `control_requests_per_minute`, this is an in-process counter, inheriting the `--max-instances=1` requirement on the control service.
 - The application plane's own durable-denial writes are NOT governed by this window (SI-14 point 6).
 - **`field_constraints` has no caller in `src/` today**, so one of the 8 developer-connection catalog reads is covered only by the tests above.
-- **This peer does not durably audit a `LIMIT_EXCEEDED` denial**, unlike r2db-api's own data plane.
+- **Neither peer durably audits a `LIMIT_EXCEEDED` denial**: it is outside both durable-denial code sets, so a request refused for `execution_ms` leaves no durable audit row -- `MitateDB-api/src/mitatedb_api/audit_dispatch.py:61`, `r2db-api/src/r2db_api/service.py:49`.
 - **A deployment declaring `execution_ms` above 5000 also raises the catalog-read bound above 5000**, since inside those 8 transactions the constructed value wins over the role-level one.
 - **Only the lock WAIT is bounded on the provisioning path**: once a lock is granted, how long the statement holds it is deliberately left unbounded, and the ground for accepting that is that no client can reach that role.
 - **`mitatedbsvc_provision` carries no role-level `statement_timeout`** (decision R-66): it applies the migration files and the per-application scripts, whose DDL may legitimately run long -- `MitateDB-api/src/mitatedb_api/ops.py:1773`.
@@ -977,6 +986,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **A host that never answers can answer 413 where an unreachable one answers 503**: the clock alone decides a failed connection attempt, so a connect that timed out with the budget spent is `LIMIT_EXCEEDED`; either way nothing is left and a resend is safe.
 - **No common vector drives the lock-wait recheck, the pool and connection mappings, the threshold or the SQLite bound**: this peer's unit tests pin them with a clock of their own, and the real clock for the SQLite bound -- `MitateDB-api/tests/test_expired_request_checks.py`.
 - 61 mutations of those checks were all red: 56 name a test in `MitateDB-api/tests/test_expired_request_checks.py`, 2 one in `MitateDB-api/tests/test_r102_request_scope.py` and 3 one in `MitateDB-api/tests/test_application_audit.py`.
+- **The C-36 vectors are measured by removing the checks**: removing `_execute`'s check (with and without the `_timeout_ms` refusal, a positive bound kept or not) turns them red on both wire plugs (8 mutations, 8 red) -- `conformance-tests/test_c36_execution_budget_spent.py`.
 - **The SQLite bound is a progress handler read every 1000 virtual-machine instructions**, so a statement shorter than that is never stopped while it runs; it is refused only before the next statement.
 
 ### MitateDB-api -- ops inventory
@@ -1092,7 +1102,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - one request is one transaction on its scope's main connection, and the idempotency per-key and count locks are `pg_advisory_xact_lock`s inside it -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1808`, `:1845`.
 - a schema operation takes the application-wide `pg_advisory_xact_lock(761761763)`, then its entity's exclusive entity lock, before its first catalog read -- `MitateDB-api/src/mitatedb_api/cell.py:1244`.
 - a data write takes each entity it touches as a shared entity lock, sorted, in one statement before pass 1; a query takes neither lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:647`, `MitateDB-api/src/mitatedb_api/cell.py:2752`.
-- a pool or lock wait past the deadline is `LIMIT_EXCEEDED` (`execution_ms`), and a 40P01/40001 or an unreachable database is `SERVICE_UNAVAILABLE` -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:482`, `:271`.
+- a pool or lock wait past the deadline is `LIMIT_EXCEEDED`, a 40P01/40001 is `SERVICE_UNAVAILABLE`, a failed connect is `LIMIT_EXCEEDED` only once the budget is spent -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:482`, `:271`.
 - the in-process SQLite backend holds one `RLock` for the whole request scope, so one request per cell runs at a time there -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py:141`.
 - the same `HostSharedConcurrencySlots` as r2db-api's own, held identical by `_ISOMORPHIC_TARGETS`, bounds `concurrency` across the instance's workers, scanning under the `scan` lock -- `MitateDB-api/src/mitatedb_api/concurrency_slots.py:296`.
 - `build_app` refuses to start unless `MITATEDB_SLOT_DIR` is an existing mode-0700 directory owned by this process -- `MitateDB-api/src/mitatedb_api/main.py:311`, `MitateDB-api/src/mitatedb_api/concurrency_slots.py:177`.
@@ -1204,13 +1214,17 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `concurrency` across two workers (C-32) -- `conformance-tests/test_c32_shared_limits.py::test_c32_concurrency_in_flight_count_matches_declared_bound`, `::test_c32_concurrency_lock_waiters_span_2_or_more_workers`.
 - `requests_per_minute` across two workers (C-32) -- `conformance-tests/test_c32_shared_limits.py::test_c32_requests_per_minute_200_count_matches_declared_bound`, `::test_c32_requests_per_minute_429_count_matches_declared_bound`.
 - `requests_per_minute` across two workers (C-32) -- `conformance-tests/test_c32_shared_limits.py::test_c32_requests_per_minute_200_pids_span_2_or_more_workers`.
+- C-36 (i), on all six adapters: a request whose `execution_ms` is spent before its first connection is refused `LIMIT_EXCEEDED` / `execution_ms` -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_i_budget_spent_before_the_first_connection_issues_no_statement`.
+- C-36 (ii), on all six adapters: a request whose `execution_ms` is spent between two statements is refused `LIMIT_EXCEEDED` / `execution_ms` -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_ii_budget_spent_between_statements_leaves_nothing`.
+- C-36 (iii), on the four wire adapters: a schema operation presenting a plan from a dry run under the same budget is refused after its hold and issues no statement -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_iii_budget_spent_before_the_first_ddl_moves_no_revision`.
+- C-36, each vector's positive control: the same hold under a budget that is not spent completes and its effect stays -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_ii_positive_control_same_hold_under_a_budget_that_is_not_spent`.
 
 #### Status
 
 - Statelessness itself is not observable from the port: no registered plug spans more than one process, so a server-side cursor table keyed by a deterministic token would pass both tests above; it is enforced by both peers' paging module holding no state.
 - **No cited evidence for the common SI-08 resource bounds**: no test is named for this block's blanket resource-boundary claim beyond C-05, C-14, C-16, C-26 and C-32; version 2.25's uncited wording is in the history file.
 - **Disclosed limits, carried from the C-05 and C-26 rows of `conformance-tests/CONDITIONS.md`**: this suite still cannot distinguish a deployment-wide counter from a credential-scoped one.
-- `execution_ms` and `idempotency_retention_ms` are never driven by this suite.
+- `idempotency_retention_ms` is never driven by this suite; `execution_ms` is driven by C-36's three holds on all six adapters, its statement count only on the four PostgreSQL ones -- `conformance-tests/test_c36_execution_budget_spent.py`.
 - C-26 and C-32 start each declared base URL on one host; every preflight and worker checks workers against the declared ceiling, but no check reads how many hosts serve that URL, which rests on the one-host runbook rule and the post-deployment check.
 
 ## SI-09 Controlled Destructive Operations
@@ -1221,11 +1235,11 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1791`.
+- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1796`.
 - **CCR-13** treats dropping a declared unique index as schema deletion like `drop_entity`, since it is effectively irreversible once duplicate data has entered (R-5) -- `r2db-api/src/r2db_api/structured.py:568`.
-- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1802`.
+- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1807`.
 - `structured.py` defines phrase construction exactly once for 4 of the 5 gated surfaces, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- `r2db-api/src/r2db_api/structured.py:22`.
-- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1779`.
+- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1784`.
 - the 5th gated surface, the ritual CLI's `deprovision`, keeps its own phrase (`_deprovision_confirmation_phrase`, `ops.py`) beside its caller -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase`'s material (`r2dbsvc_registry.applications.provisioned_at`) is a registry value `structured.py`'s own cell-layer phrase functions never read -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase` is held isomorphic to MitateDB-api's own same-named function by `_ISOMORPHIC_TARGETS` -- `r2db-api/src/r2db_api/ops.py:2056`.
@@ -1602,6 +1616,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `alter_field` narrowing an `enum` waits for a data write stopped before its insert, then is refused with CONFLICT; red without the lock call -- `r2db-api/tests/test_r120_entity_lock.py::test_a_narrowing_alter_field_cannot_commit_between_a_data_operations_validation_and_its_write`.
 - `add_field` with `nullable: false`, the same window, is refused with CONFLICT after the write; red without the lock call -- `r2db-api/tests/test_r120_entity_lock.py::test_an_add_field_nullable_false_cannot_commit_between_a_data_operations_validation_and_its_write`.
 - every request takes its advisory locks in one order, read off its statements; red with the shared entity lock after the count lock -- `r2db-api/tests/test_r120_entity_lock.py::test_every_request_takes_its_advisory_locks_in_the_one_global_order`.
+- a keyed mutation refused for `execution_ms` after its last operation sends no idempotency-record write; its key resent is a new attempt -- `r2db-api/tests/test_expired_request_checks.py::test_a_keyed_mutation_whose_budget_ends_after_its_last_operation_does_not_send_the_idempotency_store`.
+- C-36 (ii), `r2db-api-http` and `r2db-api-socket`: the refused keyed mutation leaves no row and no record -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_ii_budget_spent_between_statements_leaves_nothing`.
 
 #### Status
 
@@ -1629,6 +1645,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - a table dropped at the pass 1 / pass 2 boundary (`begin()`) from a separate connection that takes no advisory lock -- `test_transact_pass_boundary_schema_change_window_yields_not_found_and_sibling_entity_unchanged`.
 - the C-16 unit -- `test_c16_v1_two_entity_insert_commits_as_one_unit`, `test_c16_v2_invalid_operation_on_one_entity_voids_the_whole_unit`.
 - an `alter_field` from another cell waits for a batch validated against the old constraint -- `MitateDB-api/tests/test_r102_cross_cell_windows.py::test_window3_data_write_validated_before_an_alter_is_not_committed_against_the_new_constraint`.
+- a batch refused for `execution_ms` between two operations commits neither -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_mutation_whose_budget_ends_after_its_first_operation_does_not_send_the_second`.
+- a schema operation refused for `execution_ms` after its DDL sends no further statement and leaves no table -- `MitateDB-api/tests/test_expired_request_checks.py::test_a_schema_operation_whose_budget_ends_after_its_ddl_sends_no_further_statement_and_leaves_nothing`.
+- C-36 (ii), `MitateDB-api-http` and `MitateDB-api-socket`: the refused keyed mutation leaves no row and no record -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_ii_budget_spent_between_statements_leaves_nothing`.
 
 #### Status
 
@@ -1649,6 +1668,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - C-28, on all six adapters: a dry run under the real send's idempotency key leaves no row, the real send presenting that plan commits one row, and a same-key resend adds none -- `conformance-tests/test_c28_baseline_turn.py::test_c28_baseline_turn`.
 - C-35, on the four wire adapters: a dry run under the real send's idempotency key leaves no row, the real send presenting that plan commits one, and a same-key resend adds none -- `conformance-tests/test_c35_reference_client_turn.py::test_c35_reference_client_turn`.
 - C-34, on all six adapters: with a `plan`-presenting schema operation held after its revision read, a second one on another entity answers only after the first commits -- `conformance-tests/test_c34_concurrent_plan_precondition.py::test_c34_concurrent_schema_operation_keeps_plan_precondition`.
+- C-36 (ii), on all six adapters: a keyed mutation refused for `execution_ms` leaves no row and no record, and its key resent without the budget executes as a new request -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_ii_budget_spent_between_statements_leaves_nothing`.
+- C-36 (iii), on the four wire adapters: a schema operation refused for `execution_ms` issues no DDL and moves no revision -- `conformance-tests/test_c36_execution_budget_spent.py::test_c36_iii_budget_spent_before_the_first_ddl_moves_no_revision`.
 
 #### Status
 

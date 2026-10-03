@@ -75,8 +75,8 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_15_0():
-    # CCR_DISPOSITION.md subordinate ruling 20: the version bump itself,
+def test_contract_declares_1_16_0():
+    # CCR_DISPOSITION.md subordinate ruling 21: the version bump itself,
     # pinned so a future revert of just this one line is caught here rather
     # than only by whichever other test happens to touch contract_version.
     # This file carries one "declares" pin, for the version the contract
@@ -86,11 +86,11 @@ def test_contract_declares_1_15_0():
     # `control_plane.py`) moves in the commit that lands the real behavior,
     # not in the commit that changes the contract text
     # (`versioning.version_binding`: a version-flip "must land in the same
-    # commit as the real behavior change it claims"). 1.15.0 changes no
-    # behavior, so both peers' declaration moves in the same commit as the
-    # contract text.
+    # commit as the real behavior change it claims"). 1.16.0's behavior
+    # (the execution_ms refusal) is the real behavior change, so the contract
+    # text, both peers' declaration and that behavior land in one commit.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.15.0"
+    assert contract["contract_version"] == "1.16.0"
 
 
 # ---------------------------------------------------------------------------
@@ -133,15 +133,17 @@ FIXED_1_8_0_OBLIGATIONS_ENTRY = {
     ],
 }
 
-# The full key set of `limits` BEFORE 1.8.0 (phase 9 state) -- completion
-# condition 2 requires (2) to land inside the EXISTING `profile` string,
-# never as a new sibling key; this snapshot is what makes "no new key"
-# mechanically checkable rather than merely eyeballed.
-_PRE_1_8_0_LIMITS_KEYS = frozenset({
+# The full key set of `limits`: the keys it carried before 1.8.0 (completion condition 2 of that
+# version required its sentence to land inside the EXISTING `profile` string, never as a new
+# sibling key) plus `execution_ms`, the one new key contract 1.16.0 adds; this snapshot is what
+# makes "no further key" mechanically checkable rather than merely eyeballed. The ruling that
+# admits `execution_ms` is stated in the docstring of the test that compares against it.
+_LIMITS_KEYS_1_16_0 = frozenset({
     "audit_requests_per_minute_note",
     "classes",
     "enum_members",
     "example_profile",
+    "execution_ms",
     "finite_required",
     "profile",
     "request_budget",
@@ -153,7 +155,11 @@ def test_contract_pins_the_1_8_0_ruling_sentences_verbatim():
     monitor-finalized 1.8.0 pieces land at their designated contract
     locations, byte-for-byte -- (1) as `capability_status.rules`' 5th
     (index 4) array element, (2) appended to the END of `limits.profile`'s
-    existing string (condition 2: never a new key), and (3) as
+    existing string (condition 2: the 1.8.0 ruling that the sentence never
+    becomes a new key holds through 1.16.0, whose `execution_ms` is the one
+    sibling key added, by the ruling in docs/design/
+    EXPIRED_REQUEST_SEMANTICS_V0_1.md section 10, U-9 (a); any other new key
+    is still refused), and (3) as
     `versioning.obligations`' 1.8.0 entry, carrying exactly the same 4
     keys every other entry in that array carries (condition 3).
 
@@ -179,10 +185,11 @@ def test_contract_pins_the_1_8_0_ruling_sentences_verbatim():
     assert limits["profile"].endswith(FIXED_1_8_0_LIMITS_PROFILE_SUFFIX), (
         f"limits.profile does not end with the monitor-finalized 1.8.0 sentence verbatim: {limits['profile']!r}"
     )
-    key_diff = set(limits.keys()) ^ _PRE_1_8_0_LIMITS_KEYS
+    key_diff = set(limits.keys()) ^ _LIMITS_KEYS_1_16_0
     assert not key_diff, (
         f"limits gained/lost a key -- 1.8.0's (2) must land inside the existing `profile` STRING, "
-        f"never as a new sibling key: {sorted(key_diff)}"
+        f"never as a new sibling key, and `execution_ms` is the only sibling key added since: "
+        f"{sorted(key_diff)}"
     )
 
     # (3) versioning.obligations -- condition 3. Phase 11 WP-1 (design
@@ -1671,23 +1678,197 @@ def test_contract_pins_the_1_15_0_alias_retention_clauses_verbatim():
 
 def test_contract_pins_the_1_15_0_version_binding_sentence_verbatim():
     """The 1.15.0 sentence occupies EXACTLY the text between the end of the 1.14.0 paragraph and
-    the version-flip sentence, and 1.15.0 adds no `versioning.obligations` entry (it introduces no
-    obligation)."""
+    the start of the 1.16.0 paragraph, and 1.15.0 adds no `versioning.obligations` entry (it
+    introduces no obligation): the entries are the thirteen up to and including 1.16.0's own, none
+    of them labelled 1.15.0. Right edge follows contract 1.16.0 (subordinate ruling 21): its
+    paragraph sits between the 1.15.0 sentence and the version-flip sentence; the 1.15.0
+    sentence's own text is unchanged."""
     contract = _contract()
     version_binding = contract["versioning"]["version_binding"]
     idx_1_14_0_end = version_binding.index(PIN_1_14_0_VERSION_BINDING_PARAGRAPH) + len(
         PIN_1_14_0_VERSION_BINDING_PARAGRAPH
     )
-    idx_version_flip = version_binding.index("A peer's version-flip")
-    between = version_binding[idx_1_14_0_end:idx_version_flip]
+    idx_1_16_0_paragraph = version_binding.index("Only an implementation declaring 1.16.0 or higher")
+    between = version_binding[idx_1_14_0_end:idx_1_16_0_paragraph]
     assert between == " " + PIN_1_15_0_VERSION_BINDING_SENTENCE + " ", (
-        "the text between the 1.14.0 paragraph and the version-flip sentence is not exactly "
+        "the text between the 1.14.0 paragraph and the start of the 1.16.0 paragraph is not exactly "
         f"the 1.15.0 sentence (surrounded by one space on each side): {between!r}"
     )
     versions = [entry["version"] for entry in contract["versioning"]["obligations"]]
     assert "1.15.0" not in versions
     assert versions[11] == "1.14.0"
-    assert len(versions) == 12
+    assert versions[-1] == "1.16.0"
+    assert len(versions) == 13
+
+
+# Contract 1.16.0 (CCR_DISPOSITION.md subordinate ruling 21): what execution_ms means for the
+# requests it names. The texts are copied verbatim from the confirmed fixed-text files, never
+# paraphrased: `limits.execution_ms` (its two paragraphs joined by one space), the
+# `versioning.version_binding` paragraph, the `versioning.obligations` entry and the sentence
+# appended to `structured_operations.dry_run.decision`.
+PIN_1_16_0_EXECUTION_MS = (
+    "execution_ms is one request's own wall-clock budget. It applies to the requests "
+    "limits.request_budget names for execution_ms -- a query, a single-entity or cross-entity "
+    "mutation and a schema operation, dry runs included; whether or how execution_ms bounds any "
+    "other request, audit_query included, is not defined in this version. The budget starts no later "
+    "than the point at which the request has passed this deployment's request-rate and concurrency "
+    "bounds and the execution_ms in force for it (limits.request_budget) is fixed; an implementation "
+    "may start it earlier, never later. Everything between that point and the point at which the "
+    "request begins to commit counts against it: waiting for a database connection, waiting for a "
+    "lock and executing statements. Once every statement its work requires has completed, a request "
+    "is not refused for execution_ms by a clock check, and a request that has begun to commit is "
+    "neither refused nor terminated for execution_ms. Each request has its own budget: each page of "
+    "a query is one request, and a dry run has a budget of its own, of the same execution_ms as the "
+    "request it previews, because it executes statements as well. A dry run and the real request "
+    "issue different statements, so neither one's success nor its execution_ms refusal predicts the "
+    "other's. A statement here is any one the implementation sends to its storage on behalf of the "
+    "request, on any connection it holds for the request, including the statement that begins each "
+    "of the request's transactions or savepoints, the statements that set its per-statement bound, "
+    "and those that read the catalog, take locks, read or write idempotency records, or read or "
+    "change the request's own data or schema. A statement that ends a transaction or savepoint and a "
+    "statement that maintains a connection pool are not statements in this sense, nor is audit "
+    "evidence recorded on a separate connection; where the implementation's storage takes no "
+    "statements, each storage operation it performs for the request counts as one statement for "
+    "refusing the request before its next one, and the per-statement bound concerns only statements "
+    "its storage takes. A request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and "
+    "details.limit_class: execution_ms before it issues its next statement. A remaining budget "
+    "shorter than one millisecond is exhausted. A request whose execution_ms is exhausted while it "
+    "waits for a database connection, or while one is being established for it, is refused in the "
+    "same way. On each connection it holds for the request, a request sets its per-statement bound "
+    "before any statement there other than the one that begins its transaction there and those that "
+    "set the bound, and every statement it issues there after that runs under the most recent bound "
+    "set there, which is no longer than what remained of execution_ms when the implementation "
+    "computed it; a statement that reaches its bound is terminated and the request refused in the "
+    "same way, while a statement still executing when execution_ms is exhausted may instead complete "
+    "within its bound, after which the request is refused before its next statement or, if it needs "
+    "none, proceeds to commit. A request refused or terminated this way has committed nothing of the "
+    "atomic unit it was executing: that unit leaves no row, no catalog entry, no schema revision and "
+    "no idempotency record. That list does not govern audit evidence: transactions.atomic and "
+    "structured_operations.dry_run.external_effects are unchanged. What an earlier request with the "
+    "same idempotency_key left is governed by structured_operations.idempotency.record, whose digest "
+    "includes the request's budget field. A request can end later than its execution_ms: a statement "
+    "already executing runs until it completes or its own bound terminates it, establishing a "
+    "database connection can outlast what remained, and maintaining the connection pool, recording "
+    "audit evidence before the commit and the commit itself are not bounded by it."
+)
+
+PIN_1_16_0_VERSION_BINDING_PARAGRAPH = (
+    "Only an implementation declaring 1.16.0 or higher additionally claims conformance to the "
+    "obligations 1.16.0 introduces (subordinate ruling 21). Those obligations are unconditional in "
+    "the same sense as every obligation enumerated above -- they bind simply by declaring 1.16.0, "
+    "independent of any capability's own status -- and each concerns only the requests "
+    "limits.execution_ms names (a query, a single-entity or cross-entity mutation and a schema "
+    "operation, dry runs included): (a) execution_ms counts every wait and every statement of such a "
+    "request from no later than the point limits.execution_ms names until the request begins to "
+    "commit; (b) such a request whose execution_ms is exhausted is refused with LIMIT_EXCEEDED and "
+    "details.limit_class: execution_ms before it issues its next statement, and is not refused for "
+    "execution_ms by a clock check once every statement its work requires has completed; (c) such a "
+    "request, on each connection it holds for the request, sets its per-statement bound before any "
+    "statement there other than the one that begins its transaction there and those that set the "
+    "bound, every statement it issues there after that runs under the most recent bound set there, "
+    "which is no longer than what remained of execution_ms when the implementation computed it, and "
+    "a statement that reaches its bound is terminated; and (d) such a request refused or terminated "
+    "for exhausting execution_ms has committed nothing of the atomic unit it was executing, and that "
+    "unit leaves no row, no catalog entry, no schema revision and no idempotency record. "
+    "limits.execution_ms states these four in full, with the terms they use; the sentence 1.16.0 "
+    "adds to structured_operations.dry_run.decision holds an implementation to no behavior beyond "
+    "them. 1.16.0 changes no request shape: a request valid under 1.15.0 stays valid, and the only "
+    "request 1.16.0 newly requires an implementation to refuse is one whose execution_ms is "
+    "exhausted -- a request that was never guaranteed to succeed under 1.15.0. 1.7.0's obligation "
+    "(3) -- that a dry run receives the decision the identical request without it would receive -- "
+    "does not extend to execution_ms in either direction, because a dry run and the real request "
+    "issue different statements: neither one's success nor its execution_ms refusal predicts the "
+    "other's. An implementation still declaring 1.15.0 is not held to any 1.16.0-only obligation "
+    "retroactively."
+)
+
+FIXED_1_16_0_OBLIGATIONS_ENTRY = {
+    "version": "1.16.0",
+    "subordinate_ruling": 21,
+    "unconditional": [
+        "execution_ms_counts_waits_until_commit",
+        "exhausted_execution_ms_refused_before_next_statement",
+        "statements_run_under_per_statement_bound",
+        "execution_ms_refusal_commits_nothing",
+    ],
+    "conditional": [],
+}
+
+PIN_1_16_0_DRY_RUN_DECISION_SENTENCE = (
+    "Of the limit refusals named above, an execution_ms refusal is the exception: a dry run and the "
+    "real request issue different statements, so neither one's success nor its execution_ms refusal "
+    "predicts the other's (limits.execution_ms)."
+)
+
+
+def test_contract_pins_the_1_16_0_execution_ms_statement_verbatim():
+    """`limits.execution_ms` byte-matches the confirmed statement, and the copy is not empty."""
+    value = _contract()["limits"]["execution_ms"]
+    assert value == PIN_1_16_0_EXECUTION_MS, f"limits.execution_ms does not byte-match the confirmed text: {value!r}"
+    assert PIN_1_16_0_EXECUTION_MS.startswith("execution_ms is one request's own wall-clock budget."), (
+        "the pinned statement is not the execution_ms statement"
+    )
+
+
+def test_contract_pins_the_1_16_0_version_binding_paragraph_verbatim():
+    """The confirmed 1.16.0 paragraph occupies EXACTLY the text between the end of the 1.15.0
+    sentence and the version-flip sentence (an equality check, so a further sentence slipped in
+    on either side is caught here too)."""
+    version_binding = _contract()["versioning"]["version_binding"]
+    idx_1_15_0_end = version_binding.index(PIN_1_15_0_VERSION_BINDING_SENTENCE) + len(
+        PIN_1_15_0_VERSION_BINDING_SENTENCE
+    )
+    idx_version_flip = version_binding.index("A peer's version-flip")
+    between = version_binding[idx_1_15_0_end:idx_version_flip]
+    assert between == " " + PIN_1_16_0_VERSION_BINDING_PARAGRAPH + " ", (
+        "the text between the 1.15.0 sentence and the version-flip sentence is not exactly "
+        f"the confirmed 1.16.0 paragraph (surrounded by one space on each side): {between!r}"
+    )
+
+
+def test_contract_pins_the_1_16_0_obligations_entry_verbatim():
+    """`versioning.obligations` ends with the 1.16.0 entry, byte-matching the confirmed entry --
+    4 unconditional obligations, 0 conditional."""
+    obligations = _contract()["versioning"]["obligations"]
+    # Pinned by an index fixed to its 1.16.0-era position (obligations[12], after 1.14.0's own
+    # entry at [11]) -- the same form the earlier entries' pins use, so a later version appending
+    # its own entry leaves this pin untouched.
+    assert obligations[12] == FIXED_1_16_0_OBLIGATIONS_ENTRY, (
+        f"versioning.obligations[12] does not byte-match the confirmed 1.16.0 entry: {obligations[12]!r}"
+    )
+    assert set(obligations[12]) == {"version", "subordinate_ruling", "unconditional", "conditional"}
+    assert len(obligations[12]["unconditional"]) == 4
+
+
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+
+
+def test_contract_1_16_0_prose_count_of_obligations_matches_the_entry():
+    """The paragraph says "limits.execution_ms states these four in full": the count it names is the
+    number of `unconditional` obligations the 1.16.0 entry lists. The register's own count check
+    (test_operation_catalog_register.py, _UNCONDITIONAL_COUNT_RE) matches only the phrase "Those
+    obligations are unconditional", which this paragraph does not use before its own list, so the
+    prose count and the entry are compared here."""
+    contract = _contract()
+    paragraph = contract["versioning"]["version_binding"]
+    counts = re.findall(r"states these (\w+) in full", paragraph)
+    assert counts == ["four"], f"expected exactly one 'states these <n> in full' in version_binding: {counts!r}"
+    entry = contract["versioning"]["obligations"][12]
+    assert entry["version"] == "1.16.0"
+    assert _NUMBER_WORDS[counts[0]] == len(entry["unconditional"]), (
+        f"the prose names {counts[0]} obligations, the entry lists {len(entry['unconditional'])}"
+    )
+
+
+def test_contract_pins_the_1_16_0_dry_run_decision_sentence_verbatim():
+    """`structured_operations.dry_run.decision` ends with one space and the confirmed sentence; the
+    text before it is the 1.7.0 decision (PIN_1_7_0_DRY_RUN_DECISION, pinned by inclusion
+    elsewhere) and is not touched here."""
+    decision = _contract()["structured_operations"]["dry_run"]["decision"]
+    tail = " " + PIN_1_16_0_DRY_RUN_DECISION_SENTENCE
+    assert decision.endswith(tail), f"dry_run.decision does not end with the confirmed 1.16.0 sentence: {decision[-400:]!r}"
+    assert not decision[: -len(tail)].endswith(" "), "more than one space precedes the 1.16.0 sentence"
+    assert len(decision) > len(tail), "dry_run.decision is only the 1.16.0 sentence"
 
 
 def test_audit_requests_per_minute_is_a_declared_limit_class():
