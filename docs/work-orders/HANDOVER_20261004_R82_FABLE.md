@@ -36,6 +36,8 @@
 8. 時間の前後は、負荷の高い間の値を判定に使わず、完了ゲートの後に取り直した値で読む。
 9. `tools/check_comment_provenance.py --base main` の赤 7 行は正当な赤とする (作業指示書 §6.4)。
 
+**【追記 2026-10-04】依頼者の事後確認 (逐語): 「裁定は了承します」 — 上の 9 件の全件。台帳 v1.172 に記録した。** なお §1 の「その上の 1 commit と merge commit」は、実際には 2 commit (`706c6ff`、`071f997`) と merge commit `092db20` である。
+
 手元で未検証:
 
 - 実際の配備先 (Cloud SQL ほか) で runtime / developer role が `pg_database` を読めること (PostgreSQL の既定では読める。使い捨てクラスタでは確かめた)。
