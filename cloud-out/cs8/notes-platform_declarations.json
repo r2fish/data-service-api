@@ -1,0 +1,195 @@
+{
+ "_wp": "8",
+ "_preamble": "対象 32 塊 (基点 `092e1a1`、67 塊のうち登録 helper の中 35 を除く。既存の CH-ID 0)。spec は `cs8-spec-platform_declarations.json` (7 塊、CH-0860〜CH-0866、編集 11)。削除した文 0。判定は設計 §3、作業指示書 §16.5 の Y7-3・Y7-4 と、§10.9 の教訓 (i)〜(iii) による。「作業ツリーの状態」は spec を当てて検査器を通した時点の状態で、作業ツリーは照合後に基点へ戻した。",
+ "_referenced_blocks": [
+  [
+   1,
+   60
+  ],
+  [
+   909,
+   952
+  ],
+  [
+   1037,
+   1089
+  ],
+  [
+   960,
+   964
+  ]
+ ],
+ "1": {
+  "judge": "移す (括弧内の経緯トークン・裁定の日付句の機械除去)。残りは残す",
+  "reason": "除いたのは (a) `Phase 10 WP-6a, ` (process_ceilings の括弧。追加時期で、残る文は WP-6a を指さない。L94-99 の塊が自分で `Phase 10 WP-6a` を持つ)、(b) `supervisor ruling 2026-09-05, ` (Reference-implementation module の括弧。裁定の日付句。`{scratchpad}/rulings-q4-wp12-rework.md` sec.1 は実在しない作業ノート名で経緯トークンだが、`sec.1` が断片として残るので括弧ごとは消さない)、(c) `, requester ruling 2026-09-03` (Peer-local の括弧。`no cross-peer sharing` は否定語を含む内容語なので括弧ごとは消えない)。第 1 段落の括弧の日付 `2026-09-05` は検査器が拒んだ (下の一覧)。ラベル `Q4 phase (design docs/…, work order docs/… WP-1; …):` は実在パスを含み除外 2。`WP-1` は work order の位置指定。L36-38 の「the previous (pre-rework) round … was rejected」は現在の理由 (production-only の規約を使わない) と同じ文で残す。`(D-1(b))`・`(D-2(h))`・`design §3.8`・`(F-12, D-3(f))` は設計名付きの第 1 文に寄りかかる参照で、第 1 文は残るので (i) に当たらない",
+  "pre_delete": "削除した文 0。点検語 `this`/`that`/`exactly`/`instead` は、除いた括弧の中身を指さない (`that convention` = string-rewrite convention、`this table` = platform_declarations)",
+  "after": "除去後の文を読んだ: `(`surfaces`, …; `process_ceilings`, migration `0012`)`、`Reference-implementation module (`{scratchpad}/rulings-q4-wp12-rework.md` sec.1): every name, …`、`Peer-local, independently maintained (no cross-peer sharing) -- this module's …` で文法と意味が保たれる。行の切り直しは除去に接する 2 行ずつ (L14-15、L56-57)",
+  "C": "同居文は消さない。SI-10・F-12・`PlatformDeclarationError` の fail-fast の文、`check_writer_role_timeouts` の同一接続の理由、実在パス 2 本は逐語で残る"
+ },
+ "75": {
+  "reason": "`#:` の塊。`(no cross-peer sharing, requester ruling 2026-09-03)` から `, requester ruling 2026-09-03` だけを除いた (括弧の `no cross-peer sharing` は否定語を含む内容語)。`design §3.8` は基準から設計名が無く、本件の除去で失う参照ではない。`#:` の行頭記号は残り、3 行 → 2 行 + 参照行",
+  "after": "除去後の文を読んだ: `Peer-local (no cross-peer sharing).` で文法と意味が保たれる。`#:` の行は 3 → 2 (折り返しの 2 行目ごと消えた)"
+ },
+ "94": {
+  "reason": "ラベル `Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii), Q4 D-2(a)):` は実在パスを含み除外 2。括弧の `D-5(ii)`・`D-2(a)` は同じ括弧の実在パスで出所付き (§9.2 規則 4)。`Phase 10 WP-6a` は括弧の外のラベル本体で単独では消せない。経緯トークン 2 はそのまま残る"
+ },
+ "123": {
+  "reason": "目印 `previously`。文は「the literal env var name was previously baked … -- this constant closes that the same way `PROVISION_DSN_ENV` already does」で、経緯と現在の理由 (定数を置く理由) が同居。括弧の `rulings-q4-wp12-rework.md` は実在しない作業ノート名 (経緯トークン) だが、除くと `sec.1` が断片として残る。基準のまま"
+ },
+ "132": {
+  "reason": "`(rulings-q4-wp12-rework.md sec.1: \"peer 名を含む定数は対応表に載せない\")` は実在しない作業ノート名 + 引用文。ノート名だけ除くと `sec.1: …` が断片として残る。文は現在の規則 (os.environ ではなく渡された env mapping を見る、同型性の対応表に載せない) を述べる。基準のまま"
+ },
+ "420": {
+  "reason": "F-15 は保護 ID (F-ID) でラベルは除外 2。括弧 `(Phase 10 WP-6a, design D-5(ii))` に出所語は無く (`design` は種類語)、`Phase 10 WP-6a, ` だけを除いた。残る文は `work order WP-6a's own §3 D-5(ii) reading` と自分で位置を指すので、ラベルの `WP-6a` に寄りかからない (Y7-3 (b))。`design D-5(ii)` は残した",
+  "after": "除去後の文を読んだ: `# F-15 (design D-5(ii)): the `process_ceilings` row -- one combined check …` で文法と意味が保たれる"
+ },
+ "685": {
+  "reason": "`(design D-1(c) amendment 2026-09-05)` から純粋な日付だけを除いた (Y7-3 (a))。`amendment` は内容語で残る。同じ塊の `design §1.5 finding 6`・`F-11's own per-database override` は基準のまま",
+  "after": "除去後の文を読んだ: `(design D-1(c) amendment), never every database on the cluster.` で文法と意味が保たれる"
+ },
+ "790": {
+  "reason": "ラベル `Contract 1.7.0 (design docs/design/PHASE9_…_V1.md D-1/D-6/D-5, work order §2 WP-2e F-3, `{scratchpad}/rulings-r3-r7-flip.md` F-3, WP-2e rework `{scratchpad}/audit-wp2e.md` D-2, ruling L-2 = (A)):` は版数付き文書名と実在パスを含み除外 2。括弧の `WP-2e` は `work order §2 WP-2e F-3` の位置指定で、`{scratchpad}/…` (実在しない) を除くと `F-3`・`D-2` が断片として残る。第 2 段落 (`The pre-rework … had exactly that flaw (audit finding D-2)`) は経緯の叙述だが、F-14 が死んだ検査だった理由 = 今の 3 検査の形の理由で、`PlatformDeclarationError(code=\"F-14\")` (F-ID) を含み 0d で丸ごと消せない。`(b) M-7 (`{scratchpad}/audit-wp2e-2.md` R-7)` も同じ。基準のまま",
+  "C": "安全 (fail-closed per-application) と保護参照 (版数付き文書名、実在パス、F-14) は基準のまま"
+ },
+ "909": {
+  "reason": "F-16 は保護 ID でラベルは除外 2。括弧 `(Phase 10 WP-4f, supervisor ruling 2026-09-09, following the WP-4e conformance investigation's own finding -- see that WP's report)` から `Phase 10 WP-4f, supervisor ruling 2026-09-09, ` を除いた (CS6 CH-0512 と同じ裁定の日付句 + 追加時の WP)。残る `WP-4e` は `WP-4e's own measured … finding`・`see that WP's report` が指すので残す。`(measured 2026-09-10, WP-4 integration review M-1)` は日付だけ除くと `measured,` が宙に残るので基準のまま (CS6 A3 の `L-3 correction, WP-4 integration review 2026-09-10` と同じ扱い)。`(rulings-q4-writer-roles.md, rejected alternative (a))` のノート名は `(a)` の指す先なので除かない",
+  "after": "除去後の文を読んだ: `# F-16 (following the WP-4e conformance investigation's own finding -- see # that WP's report): every PostgreSQL role …` で文法と意味が保たれる。切り直しは除去に接する 2 行",
+  "C": "安全 (`CONNECTION LIMIT`、role の識別を文字列書き換えで行わない理由、`r2dbsvc_control` の明示除外) と `0007/0006` の実在ファイル名は逐語で残る"
+ },
+ "960": {
+  "reason": "`(WP-4e's own investigated-and-reverted default, `build_control_app`'s own comment)` は所有格の位置指定で `control_main.py` の塊 (CS6 CH-0509) を指す。括弧は内容語を含み、`WP-4e` を除くと指す先を失う (Y7-3 (b))。基準のまま"
+ },
+ "1037": {
+  "reason": "3 編集: (a) 第 2 段落のラベル `design D-3 (5): ` (設計名の無い裸の ID。CS7 CH-0600 `design D-3 (1): ` と同形。残る段落は `role_pool_size` と `rolconnlimit` の乗算の理由を自分で述べ、`D-3` を名指ししない)、(b) `, Phase 10 WP-8a` (floor の括弧。追加時期)、(c) `(supervisor ruling 2026-09-09)` (括弧ごと。CS6 CH-0509 と同形)。第 4 段落のラベル `Phase 10 WP-4g` は残す: 同じ段落の `(added this WP)` が指す (i)。`0013_role_connection_limits.sql` は実在パスで残る。MitateDB の対の docstring (CH-0550) は `design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (5):` と設計名付きで、こちらには設計名が無い点を 17.5 に挙げた",
+  "pre_delete": "削除した文 0。点検語 `this`/`that`/`exactly`/`also` は除いたラベル・括弧を指さない (`this function`、`this check`、`ITS OWN`)",
+  "after": "除去後の文を読んだ: 第 2 段落は `` `role_pool_size(thread_limit)` sizes ONE process' own pool; … `` で始まり文法と意味が保たれる。`(floor = `pool_size * process_ceilings.data`, one store each).`、`Phase 10 WP-4g: `role_classes`/`application_slugs` let a caller …` も同じ",
+  "C": "安全 (`CONNECTION LIMIT`、role 識別、floor の乗算) と F-16 は逐語で残る"
+ },
+ "1093": {
+  "reason": "`M-1 (WP-4 integration review 2026-09-10)` から純粋な日付だけを除いた。ラベル `M-1 (WP-4 integration review)` は残す: module header (L909-952) の `(measured 2026-09-10, WP-4 integration review M-1)` が同じ指摘を名指しする",
+  "after": "除去後の文を読んだ: `# M-1 (WP-4 integration review): a role can legitimately match MORE than one …` で文法と意味が保たれる",
+  "C": "安全 (`_table_owner` の除外、owner ACL) は逐語で残る"
+ },
+ "_refs_external": [
+  [
+   "`r2db-api/conformance/real_server_r2db.py:528`",
+   "below `check_role_connection_limits`'s own floor of 64",
+   "L1037-1089 (CH-0865)",
+   "`F-16: raises `PlatformDeclarationError(code=\"F-16\")` for the FIRST role …` (floor の説明)",
+   "はい (ラベル・括弧・日付句の除去のみ。floor の文は逐語)"
+  ],
+  [
+   "`r2db-api/tests/test_application_audit.py:2848`",
+   "claim `check_writer_role_timeouts`'s own docstring makes (design D-1(c))",
+   "L761-777 (登録 helper の中。対象外)",
+   "`check_writer_role_timeouts` の docstring",
+   "はい (触らない)"
+  ],
+  [
+   "`r2db-api/src/r2db_api/credential_store.py:1387`",
+   "`r2db_api.platform_declarations.check_writer_role_timeouts`",
+   "L761-777 (登録 helper。関数を指し、コメントではない)",
+   "—",
+   "はい (触らない)"
+  ],
+  [
+   "`r2db-api/tests/test_process_ceilings_declaration.py:839-840`",
+   "`inspect.getsource(getattr(pd, name))` に `\"os.environ\" not in`・`\"getenv\" not in`",
+   "`validate_process_ceilings_value` (L466-485)・`read_platform_declarations` (L500-535)。登録 helper の中 (対象外)",
+   "文字列検査 (`not in`)。設計 §5 (b)",
+   "はい (触らない。完了条件 10 (a) の変異先)"
+  ],
+  [
+   "`security/CONTROL_MAPPING.md:700/701/766/773/781-788/790/1872/1874/1960-1964`",
+   "位置参照 20 件 + 続きの形 2 件 (`:1369`・`:1346`)",
+   "L1168、L1152、L499、L465、L1031、L1108、L1260、L1369、L1346、L1515、L1584、L748 (コード行)",
+   "—",
+   "引き直す対象 (repull.py: `changed 22, unresolved 0`)"
+  ],
+  [
+   "(逆向き) L80-84・L960-964・L1037-1089 → `r2db-api/src/r2db_api/control_main.py`",
+   "`r2db_api.control_main`'s own `R2DB_PLATFORM_SCHEMA`、`build_control_app`'s own comment、`control_main`'s own startup fail-fast calls",
+   "CS6 §14.2 の参照表 (L1-194、L442-483、L561-573 を指す)",
+   "本 module から出る参照で、文は逐語で残る",
+   "はい"
+  ]
+ ],
+ "_rejected": [
+  [
+   "L1-60 (CH-0860)",
+   "`rework round, supervisor rulings 2026-09-05 -- rulings-q4-wp12-rework.md` → `rework round, supervisor rulings -- rulings-q4-wp12-rework.md` (第 1 段落の括弧の日付)",
+   "`FAIL (§4.1 (3)) r2db-api/src/r2db_api/platform_declarations.py:1 cannot delete a whole sentence carrying a protected reference: 'Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, …):'`",
+   "spec から外し、第 1 段落は基準のまま (日付 1 つが残る)。実在パスを持つ括弧の中で ` -- ` に接する日付の除去を (4) が導けないため"
+  ]
+ ],
+ "_skipped": [
+  [
+   "L1-60",
+   "`Reference-implementation module (…)` のラベルごとの除去 (条件 1〜3 は満たしうる)",
+   "(iii)",
+   "ラベルの内容語 `Reference-implementation module` が塊の主題。括弧の日付句だけを除いた"
+  ],
+  [
+   "L94-99",
+   "なし (除ける語が無い)",
+   "—",
+   "実在パスの括弧 (§9.2 規則 4)"
+  ],
+  [
+   "L123-129",
+   "`rulings-q4-wp12-rework.md` (実在しない作業ノート名)",
+   "断片",
+   "`sec.1` が残る"
+  ],
+  [
+   "L420-432",
+   "`(design D-5(ii))` の括弧ごと (規則 3 で導けうる)",
+   "(i)",
+   "残る文の `work order WP-6a's own §3 D-5(ii) reading` が同じ条項を引く。設計の手掛かりを残した"
+  ],
+  [
+   "L909-952",
+   "`(measured 2026-09-10, WP-4 integration review M-1)` の日付",
+   "断片",
+   "`measured,` が宙に残る (CS6 A3 と同じ扱い)"
+  ],
+  [
+   "L909-952",
+   "`rulings-q4-writer-roles.md` (実在しない作業ノート名)",
+   "指示先",
+   "`rejected alternative (a)` の `(a)` の指す先"
+  ],
+  [
+   "L960-964",
+   "`WP-4e's own …`",
+   "Y7-3 (b)",
+   "所有格の位置指定 (control_main.py の塊を指す)"
+  ],
+  [
+   "L1037-1089",
+   "ラベル `Phase 10 WP-4g` (第 4 段落)",
+   "(i)",
+   "同じ段落の `(added this WP)` が指す"
+  ],
+  [
+   "L1093-1101",
+   "ラベル `M-1 (WP-4 integration review): ` ごと",
+   "(iii)/参照",
+   "module header が `WP-4 integration review M-1` と名指しする"
+  ]
+ ],
+ "_protected_history": [
+  [
+   "L1-60 (第 1 段落)",
+   "`Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work order docs/… WP-1; rework round, supervisor rulings 2026-09-05 -- rulings-q4-wp12-rework.md sec.1, …):`",
+   "実在パス 2 本",
+   "基準のまま (日付 2026-09-05 の除去は検査器が拒んだ)"
+  ],
+  [
+   "L790-835 (第 1 文)",
+   "`Contract 1.7.0 (design docs/design/PHASE9_…_V1.md D-1/D-6/D-5, work order §2 WP-2e F-3, …): a new `ops verify-declarations` check …`",
+   "版数付き文書名、実在パス、F-3",
+   "基準のまま"
+  ]
+ ]
+}

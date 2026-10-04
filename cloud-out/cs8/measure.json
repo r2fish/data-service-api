@@ -1,0 +1,4306 @@
+{
+ "r2db-api/src/r2db_api/platform_declarations.py": {
+  "module": "r2db-api/src/r2db_api/platform_declarations.py",
+  "base": "092e1a1",
+  "lines": 1737,
+  "blocks": 67,
+  "kinds": {
+   "docstring": 38,
+   "comment": 29
+  },
+  "block_lines": 723,
+  "registered_symbols": [
+   "HeadroomReport",
+   "PlatformDeclarationError",
+   "PlatformDeclarations",
+   "ProcessCeilings",
+   "RoleTimeoutCatalog",
+   "Surfaces",
+   "_API_ROLE_STORE_COUNT",
+   "_AUDITREADER_ROLE_POOL_FLOOR",
+   "_CONTROLPLANE_ROLE_POOL_FLOOR",
+   "_ROLE_CLASSES",
+   "_count_registered_applications",
+   "_f10_message",
+   "_f11_message",
+   "_f13_message",
+   "_f15_shape_message",
+   "_f15_value_message",
+   "_f16_message",
+   "_f17_message",
+   "_f18_message",
+   "_f19_message",
+   "_f1_message",
+   "_f21_acl_holders",
+   "_f21_message",
+   "_f2_message",
+   "_f3_message",
+   "_f3c_message",
+   "_f4_message",
+   "_f4b_window_message",
+   "_f4b_writer_roles_message",
+   "_f5_message",
+   "_f6_forward_message",
+   "_f6_reverse_message",
+   "_f7_message",
+   "_f8_message",
+   "_f9_message",
+   "_read_connection_headroom_settings",
+   "_roles_with_table_privilege",
+   "_table_owner",
+   "check_application_collations",
+   "check_auditreader_statement_timeout",
+   "check_contract_170_declarations",
+   "check_control_surface_consistency",
+   "check_denial_window_function",
+   "check_max_connections_headroom",
+   "check_request_rate_function",
+   "check_writer_role_timeouts",
+   "derive_visibility_lag_ms",
+   "headroom_lower_bound",
+   "ops_module_hint",
+   "read_declared_role_timeouts",
+   "read_effective_timeouts_ms",
+   "read_platform_declarations",
+   "reject_removed_surface_env",
+   "reject_removed_timeout_env",
+   "require_control_surface_declared",
+   "validate_audit_writer_roles_value",
+   "validate_coalescing_window_value",
+   "validate_process_ceilings_value",
+   "validate_surfaces_value"
+  ],
+  "registered_symbols_found": {
+   "HeadroomReport": [
+    1334,
+    1343
+   ],
+   "PlatformDeclarationError": [
+    152,
+    168
+   ],
+   "PlatformDeclarations": [
+    194,
+    200
+   ],
+   "ProcessCeilings": [
+    179,
+    190
+   ],
+   "RoleTimeoutCatalog": [
+    204,
+    210
+   ],
+   "Surfaces": [
+    172,
+    175
+   ],
+   "_API_ROLE_STORE_COUNT": [
+    958,
+    958
+   ],
+   "_AUDITREADER_ROLE_POOL_FLOOR": [
+    971,
+    971
+   ],
+   "_CONTROLPLANE_ROLE_POOL_FLOOR": [
+    965,
+    965
+   ],
+   "_ROLE_CLASSES": [
+    1028,
+    1028
+   ],
+   "_count_registered_applications": [
+    1288,
+    1298
+   ],
+   "_f10_message": [
+    642,
+    649
+   ],
+   "_f11_message": [
+    652,
+    659
+   ],
+   "_f13_message": [
+    662,
+    675
+   ],
+   "_f15_shape_message": [
+    444,
+    452
+   ],
+   "_f15_value_message": [
+    455,
+    462
+   ],
+   "_f16_message": [
+    1014,
+    1022
+   ],
+   "_f17_message": [
+    1152,
+    1165
+   ],
+   "_f18_message": [
+    1346,
+    1366
+   ],
+   "_f19_message": [
+    1431,
+    1456
+   ],
+   "_f1_message": [
+    219,
+    228
+   ],
+   "_f21_acl_holders": [
+    1567,
+    1581
+   ],
+   "_f21_message": [
+    1558,
+    1564
+   ],
+   "_f2_message": [
+    231,
+    238
+   ],
+   "_f3_message": [
+    270,
+    275
+   ],
+   "_f3c_message": [
+    278,
+    290
+   ],
+   "_f4_message": [
+    293,
+    298
+   ],
+   "_f4b_window_message": [
+    301,
+    308
+   ],
+   "_f4b_writer_roles_message": [
+    311,
+    318
+   ],
+   "_f5_message": [
+    321,
+    326
+   ],
+   "_f6_forward_message": [
+    572,
+    581
+   ],
+   "_f6_reverse_message": [
+    584,
+    592
+   ],
+   "_f7_message": [
+    618,
+    626
+   ],
+   "_f8_message": [
+    329,
+    334
+   ],
+   "_f9_message": [
+    629,
+    639
+   ],
+   "_read_connection_headroom_settings": [
+    1304,
+    1330
+   ],
+   "_roles_with_table_privilege": [
+    974,
+    986
+   ],
+   "_table_owner": [
+    989,
+    1011
+   ],
+   "check_application_collations": [
+    1459,
+    1512
+   ],
+   "check_auditreader_statement_timeout": [
+    1168,
+    1221
+   ],
+   "check_contract_170_declarations": [
+    836,
+    897
+   ],
+   "check_control_surface_consistency": [
+    595,
+    604
+   ],
+   "check_denial_window_function": [
+    1584,
+    1684
+   ],
+   "check_max_connections_headroom": [
+    1369,
+    1428
+   ],
+   "check_request_rate_function": [
+    1515,
+    1544
+   ],
+   "check_writer_role_timeouts": [
+    758,
+    787
+   ],
+   "derive_visibility_lag_ms": [
+    748,
+    755
+   ],
+   "headroom_lower_bound": [
+    1260,
+    1285
+   ],
+   "ops_module_hint": [
+    1687,
+    1693
+   ],
+   "read_declared_role_timeouts": [
+    703,
+    734
+   ],
+   "read_effective_timeouts_ms": [
+    737,
+    745
+   ],
+   "read_platform_declarations": [
+    499,
+    548
+   ],
+   "reject_removed_surface_env": [
+    252,
+    259
+   ],
+   "reject_removed_timeout_env": [
+    241,
+    249
+   ],
+   "require_control_surface_declared": [
+    551,
+    558
+   ],
+   "validate_audit_writer_roles_value": [
+    398,
+    417
+   ],
+   "validate_coalescing_window_value": [
+    385,
+    395
+   ],
+   "validate_process_ceilings_value": [
+    465,
+    496
+   ],
+   "validate_surfaces_value": [
+    364,
+    382
+   ]
+  },
+  "registered_symbols_missing": [],
+  "existing_ch": [],
+  "helper_blocks": [
+   [
+    153,
+    164,
+    "docstring",
+    "PlatformDeclarationError"
+   ],
+   [
+    173,
+    173,
+    "docstring",
+    "Surfaces"
+   ],
+   [
+    180,
+    188,
+    "docstring",
+    "ProcessCeilings"
+   ],
+   [
+    195,
+    196,
+    "docstring",
+    "PlatformDeclarations"
+   ],
+   [
+    205,
+    207,
+    "docstring",
+    "RoleTimeoutCatalog"
+   ],
+   [
+    242,
+    246,
+    "docstring",
+    "reject_removed_timeout_env"
+   ],
+   [
+    253,
+    256,
+    "docstring",
+    "reject_removed_surface_env"
+   ],
+   [
+    279,
+    284,
+    "docstring",
+    "_f3c_message"
+   ],
+   [
+    365,
+    370,
+    "docstring",
+    "validate_surfaces_value"
+   ],
+   [
+    386,
+    392,
+    "docstring",
+    "validate_coalescing_window_value"
+   ],
+   [
+    399,
+    407,
+    "docstring",
+    "validate_audit_writer_roles_value"
+   ],
+   [
+    466,
+    485,
+    "docstring",
+    "validate_process_ceilings_value"
+   ],
+   [
+    500,
+    513,
+    "docstring",
+    "read_platform_declarations"
+   ],
+   [
+    529,
+    535,
+    "comment",
+    "read_platform_declarations"
+   ],
+   [
+    552,
+    556,
+    "docstring",
+    "require_control_surface_declared"
+   ],
+   [
+    596,
+    599,
+    "docstring",
+    "check_control_surface_consistency"
+   ],
+   [
+    704,
+    710,
+    "docstring",
+    "read_declared_role_timeouts"
+   ],
+   [
+    738,
+    741,
+    "docstring",
+    "read_effective_timeouts_ms"
+   ],
+   [
+    749,
+    754,
+    "docstring",
+    "derive_visibility_lag_ms"
+   ],
+   [
+    761,
+    777,
+    "docstring",
+    "check_writer_role_timeouts"
+   ],
+   [
+    841,
+    867,
+    "docstring",
+    "check_contract_170_declarations"
+   ],
+   [
+    975,
+    979,
+    "docstring",
+    "_roles_with_table_privilege"
+   ],
+   [
+    990,
+    1007,
+    "docstring",
+    "_table_owner"
+   ],
+   [
+    1169,
+    1194,
+    "docstring",
+    "check_auditreader_statement_timeout"
+   ],
+   [
+    1269,
+    1283,
+    "docstring",
+    "headroom_lower_bound"
+   ],
+   [
+    1289,
+    1294,
+    "docstring",
+    "_count_registered_applications"
+   ],
+   [
+    1305,
+    1312,
+    "docstring",
+    "_read_connection_headroom_settings"
+   ],
+   [
+    1335,
+    1338,
+    "docstring",
+    "HeadroomReport"
+   ],
+   [
+    1355,
+    1359,
+    "docstring",
+    "_f18_message"
+   ],
+   [
+    1373,
+    1391,
+    "docstring",
+    "check_max_connections_headroom"
+   ],
+   [
+    1460,
+    1483,
+    "docstring",
+    "check_application_collations"
+   ],
+   [
+    1516,
+    1525,
+    "docstring",
+    "check_request_rate_function"
+   ],
+   [
+    1568,
+    1572,
+    "docstring",
+    "_f21_acl_holders"
+   ],
+   [
+    1585,
+    1606,
+    "docstring",
+    "check_denial_window_function"
+   ],
+   [
+    1688,
+    1692,
+    "docstring",
+    "ops_module_hint"
+   ]
+  ],
+  "helper_block_lines": 347,
+  "target_blocks": 32,
+  "target_kinds": {
+   "docstring": 4,
+   "comment": 28
+  },
+  "target_lines": 376,
+  "tokens_file": 48,
+  "tokens_in_targets": 35,
+  "target_blocks_with_tokens": 10,
+  "target_blocks_with_tokens_lines": 247,
+  "tokens_all_blocks": 48,
+  "date_lines": [
+   3,
+   14,
+   57,
+   77,
+   254,
+   279,
+   690,
+   709,
+   910,
+   950,
+   997,
+   1073,
+   1093
+  ],
+  "colon_hash_lines": [
+   75,
+   76,
+   77,
+   80,
+   81,
+   82,
+   83,
+   84,
+   88,
+   89,
+   90,
+   94,
+   95,
+   96,
+   97,
+   98,
+   99,
+   103,
+   104,
+   105,
+   108,
+   109,
+   110,
+   111,
+   114,
+   115,
+   118,
+   119,
+   120,
+   123,
+   124,
+   125,
+   126,
+   127,
+   128,
+   129,
+   132,
+   133,
+   134,
+   135,
+   136,
+   137,
+   145,
+   146,
+   147,
+   148,
+   900,
+   901,
+   904,
+   905,
+   954,
+   955,
+   956,
+   957,
+   960,
+   961,
+   962,
+   963,
+   964,
+   967,
+   968,
+   969,
+   970,
+   1025,
+   1026,
+   1027,
+   1547,
+   1548,
+   1549,
+   1550
+  ],
+  "long_blocks_no_ch": [
+   [
+    1,
+    60
+   ],
+   [
+    153,
+    164
+   ],
+   [
+    420,
+    432
+   ],
+   [
+    466,
+    485
+   ],
+   [
+    500,
+    513
+   ],
+   [
+    761,
+    777
+   ],
+   [
+    790,
+    835
+   ],
+   [
+    841,
+    867
+   ],
+   [
+    909,
+    952
+   ],
+   [
+    990,
+    1007
+   ],
+   [
+    1037,
+    1089
+   ],
+   [
+    1169,
+    1194
+   ],
+   [
+    1224,
+    1257
+   ],
+   [
+    1269,
+    1283
+   ],
+   [
+    1373,
+    1391
+   ],
+   [
+    1460,
+    1483
+   ],
+   [
+    1516,
+    1525
+   ],
+   [
+    1585,
+    1606
+   ]
+  ],
+  "long_blocks_targets": [
+   [
+    1,
+    60
+   ],
+   [
+    420,
+    432
+   ],
+   [
+    790,
+    835
+   ],
+   [
+    909,
+    952
+   ],
+   [
+    1037,
+    1089
+   ],
+   [
+    1224,
+    1257
+   ]
+  ],
+  "long_blocks_targets_lines": 250,
+  "longest_target_block": 60,
+  "marker_sentences": 7,
+  "marker_blocks": 5,
+  "marker_rows": [
+   [
+    1,
+    60,
+    [
+     [
+      "Reference-implementation module (supervisor ruling 2026-09-05, `{scratchpad}/rulings-q4-wp12-rework.md` sec.1): every name, signature and re",
+      [
+       "supervisor ruling"
+      ]
+     ],
+     [
+      "`current_user`-based role identification, NOT naming-convention-derived role names (rulings-q4-writer-roles.md, rejected alternative (a)): w",
+      [
+       "was rejected"
+      ]
+     ],
+     [
+      "Peer-local, independently maintained (no cross-peer sharing, requester ruling 2026-09-03) -- this module's read/validate/derive/check helper",
+      [
+       "requester ruling"
+      ]
+     ]
+    ]
+   ],
+   [
+    75,
+    77,
+    [
+     [
+      "Peer-local (no cross-peer sharing, requester ruling 2026-09-03).",
+      [
+       "requester ruling"
+      ]
+     ]
+    ]
+   ],
+   [
+    123,
+    129,
+    [
+     [
+      "F-6's own env var name -- referenced by bare name from `_f6_forward_message`/`_f6_reverse_message` only (Agent C isomorphism convergence, ru",
+      [
+       "previously"
+      ]
+     ]
+    ]
+   ],
+   [
+    909,
+    952,
+    [
+     [
+      "--------------------------------------------------------------------------- F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09, following th",
+      [
+       "supervisor ruling"
+      ]
+     ]
+    ]
+   ],
+   [
+    1037,
+    1089,
+    [
+     [
+      "Phase 10 WP-4g (supervisor ruling 2026-09-09): `role_classes`/`application_slugs` let a caller narrow this check to exactly the role(s) ITS ",
+      [
+       "this WP",
+       "supervisor ruling"
+      ]
+     ]
+    ]
+   ]
+  ],
+  "ref_sentences": 17,
+  "ref_rows": [
+   [
+    1,
+    60,
+    [
+     "below"
+    ],
+    "Reference-implementation module (supervisor ruling 2026-09-05, `{scratchpad}/rulings-q4-wp12-rework.md` sec.1): every name, signature and return type below is s"
+   ],
+   [
+    1,
+    60,
+    [
+     "below"
+    ],
+    "A handful of message-building helpers below (`_f1_message`/`_f2_message`/`_f8_message`/`_f13_message`'s own `schema` mention, `_f6_forward_message`/`_f6_reverse"
+   ],
+   [
+    94,
+    99,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii), Q4 D-2(a)): the platform single-shot migration that widens `platform_declarations_"
+   ],
+   [
+    262,
+    267,
+    [
+     "below"
+    ],
+    "Both write (`ops declare-*`) and read paths call the SAME `validate_*` functions below (design D-2(d): \"検証は書き込み時と読み出し時の両方で行い、両方が同じ Python の検証関数を通る\")."
+   ],
+   [
+    420,
+    432,
+    [
+     "below"
+    ],
+    "The row-existence check (inlined directly in `read_platform_declarations` below, as `\"process_ceilings\" not in rows` -- there is no standalone `require_process_"
+   ],
+   [
+    561,
+    569,
+    [
+     "above"
+    ],
+    "Data-plane only -- the control-plane process has no such env var to cross-check against (it uses `require_control_surface_declared`/F-3c above instead)."
+   ],
+   [
+    790,
+    835,
+    [
+     "above"
+    ],
+    "`check_contract_170_declarations` replaces it with three checks, only the third of which is genuinely reachable through a real deployment's own state (the other"
+   ],
+   [
+    909,
+    952,
+    [
+     "above"
+    ],
+    "Runtime/developer role names, unlike the platform-plane roles above, ARE read directly off `<schema>.applications` -- also real stored data, not a derived name."
+   ],
+   [
+    909,
+    952,
+    [
+     "below"
+    ],
+    "This is an EXPLICIT exclusion (`_table_owner`, below), not merely \"no grants match its identity\" -- `r2dbsvc_control` is the role every migration in this set ru"
+   ],
+   [
+    960,
+    964,
+    [
+     "above",
+     "own comment"
+    ],
+    "`r2db_api.control_main`'s own 4 platform-plane stores (`applications`/`credentials`/`control_credentials`/`audit`), each a FIXED `pool_size` of 4 (WP-4e's own i"
+   ],
+   [
+    1025,
+    1027,
+    [
+     "below"
+    ],
+    "The three platform-plane role classes `check_role_connection_limits` knows how to identify -- a caller narrowing `role_classes` below passes any subset of this "
+   ],
+   [
+    1037,
+    1089,
+    [
+     "below"
+    ],
+    "F-16: raises `PlatformDeclarationError(code=\"F-16\")` for the FIRST role (in the deterministic order built below) whose `pg_roles.rolconnlimit` is neither `-1` n"
+   ],
+   [
+    1037,
+    1089,
+    [
+     "above"
+    ],
+    "Checks exactly the role classes `0013_role_connection_limits.sql` (this peer) / the sibling peer's own same-numbered migration raises: the platform-plane `<...>"
+   ],
+   [
+    1037,
+    1089,
+    [
+     "above"
+    ],
+    "A role with no grants matching any of the three platform-plane shapes above (identity unknown to this check) is silently skipped, never flagged -- this check on"
+   ],
+   [
+    1093,
+    1101,
+    [
+     "below"
+    ],
+    "M-1 (WP-4 integration review 2026-09-10): a role can legitimately match MORE than one platform-plane class below (a role granted INSERT on both audit tables, or"
+   ],
+   [
+    1093,
+    1101,
+    [
+     "above"
+    ],
+    "`_table_owner` exclusion keeps the table-owning operator role (`r2dbsvc_control`, never a real pooled role -- see the module header above) from being misidentif"
+   ],
+   [
+    1224,
+    1257,
+    [
+     "above"
+    ],
+    "--------------------------------------------------------------------------- F-18 (R-91, work order docs/work-orders/WORK_ORDER_R91_MAX_CONNECTIONS_HEADROOM_CHEC"
+   ]
+  ],
+  "token_sentences": 15,
+  "safety_rows": [
+   [
+    1,
+    60,
+    [
+     "role",
+     "timeout"
+    ],
+    "Reads and validates the platform database's DB-side declarations -- `r2dbsvc_registry.platform_declarations` (`surfaces`, `audit_coalescing_window_ms`, `audit_w"
+   ],
+   [
+    909,
+    952,
+    [
+     "role"
+    ],
+    "--------------------------------------------------------------------------- F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09, following the WP-4e conformance "
+   ],
+   [
+    909,
+    952,
+    [
+     "role"
+    ],
+    "This is an EXPLICIT exclusion (`_table_owner`, below), not merely \"no grants match its identity\" -- `r2dbsvc_control` is the role every migration in this set ru"
+   ],
+   [
+    960,
+    964,
+    [
+     "credentials"
+    ],
+    "`r2db_api.control_main`'s own 4 platform-plane stores (`applications`/`credentials`/`control_credentials`/`audit`), each a FIXED `pool_size` of 4 (WP-4e's own i"
+   ],
+   [
+    1037,
+    1089,
+    [
+     "role"
+    ],
+    "Checks exactly the role classes `0013_role_connection_limits.sql` (this peer) / the sibling peer's own same-numbered migration raises: the platform-plane `<...>"
+   ],
+   [
+    1037,
+    1089,
+    [
+     "role"
+    ],
+    "Phase 10 WP-4g (supervisor ruling 2026-09-09): `role_classes`/`application_slugs` let a caller narrow this check to exactly the role(s) ITS OWN process pools co"
+   ],
+   [
+    1093,
+    1101,
+    [
+     "role"
+    ],
+    "M-1 (WP-4 integration review 2026-09-10): a role can legitimately match MORE than one platform-plane class below (a role granted INSERT on both audit tables, or"
+   ]
+  ],
+  "protected_rows": [
+   [
+    1,
+    60,
+    "Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md WP-1; rework round, sup"
+   ],
+   [
+    1,
+    60,
+    "Peer-local, independently maintained (no cross-peer sharing, requester ruling 2026-09-03) -- this module's read/validate/derive/check helpers are pinned isomorp"
+   ],
+   [
+    94,
+    99,
+    "Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii), Q4 D-2(a)): the platform single-shot migration that widens `platform_declarations_"
+   ],
+   [
+    420,
+    432,
+    "--------------------------------------------------------------------------- F-15 (Phase 10 WP-6a, design D-5(ii)): the `process_ceilings` row -- one combined ch"
+   ],
+   [
+    685,
+    692,
+    "Every `pg_db_role_setting` row for `role_name` that is either database-independent (`setdatabase = 0`, the declaration itself, design §1.5 finding 6) or scoped "
+   ],
+   [
+    790,
+    835,
+    "Contract 1.7.0 (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1/D-6/D-5, work order §2 WP-2e F-3, `{scratchpad}/rulings-r3-r7-flip"
+   ],
+   [
+    909,
+    952,
+    "--------------------------------------------------------------------------- F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09, following the WP-4e conformance "
+   ],
+   [
+    1037,
+    1089,
+    "Checks exactly the role classes `0013_role_connection_limits.sql` (this peer) / the sibling peer's own same-numbered migration raises: the platform-plane `<...>"
+   ]
+  ],
+  "position_rows": [
+   [
+    1,
+    60,
+    [
+     "below"
+    ],
+    "Reference-implementation module (supervisor ruling 2026-09-05, `{scratchpad}/rulings-q4-wp12-rework.md` sec.1): every name, signature and return type below is s"
+   ],
+   [
+    94,
+    99,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii), Q4 D-2(a)): the platform single-shot migration that widens `platform_declarations_"
+   ],
+   [
+    909,
+    952,
+    [
+     "below"
+    ],
+    "This is an EXPLICIT exclusion (`_table_owner`, below), not merely \"no grants match its identity\" -- `r2dbsvc_control` is the role every migration in this set ru"
+   ],
+   [
+    960,
+    964,
+    [
+     "above"
+    ],
+    "`r2db_api.control_main`'s own 4 platform-plane stores (`applications`/`credentials`/`control_credentials`/`audit`), each a FIXED `pool_size` of 4 (WP-4e's own i"
+   ],
+   [
+    1037,
+    1089,
+    [
+     "above"
+    ],
+    "Checks exactly the role classes `0013_role_connection_limits.sql` (this peer) / the sibling peer's own same-numbered migration raises: the platform-plane `<...>"
+   ],
+   [
+    1093,
+    1101,
+    [
+     "below"
+    ],
+    "M-1 (WP-4 integration review 2026-09-10): a role can legitimately match MORE than one platform-plane class below (a role granted INSERT on both audit tables, or"
+   ]
+  ],
+  "safety_blocks": [
+   [
+    1,
+    60
+   ],
+   [
+    909,
+    952
+   ],
+   [
+    960,
+    964
+   ],
+   [
+    1037,
+    1089
+   ],
+   [
+    1093,
+    1101
+   ]
+  ],
+  "protected_blocks": [
+   [
+    1,
+    60
+   ],
+   [
+    94,
+    99
+   ],
+   [
+    420,
+    432
+   ],
+   [
+    685,
+    692
+   ],
+   [
+    790,
+    835
+   ],
+   [
+    909,
+    952
+   ],
+   [
+    1037,
+    1089
+   ]
+  ],
+  "position_blocks": [
+   [
+    1,
+    60
+   ],
+   [
+    94,
+    99
+   ],
+   [
+    909,
+    952
+   ],
+   [
+    960,
+    964
+   ],
+   [
+    1037,
+    1089
+   ],
+   [
+    1093,
+    1101
+   ]
+  ],
+  "per_block": [
+   {
+    "start": 1,
+    "end": 60,
+    "kind": "docstring",
+    "qualname": "<module>",
+    "lines": 60,
+    "tokens": 7,
+    "sentences": 10,
+    "markers": 3,
+    "dates": 3
+   },
+   {
+    "start": 75,
+    "end": 77,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 3,
+    "tokens": 1,
+    "sentences": 2,
+    "markers": 1,
+    "dates": 1
+   },
+   {
+    "start": 80,
+    "end": 84,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 88,
+    "end": 90,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 94,
+    "end": 99,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 6,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 103,
+    "end": 105,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 108,
+    "end": 111,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 114,
+    "end": 115,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 2,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 118,
+    "end": 120,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 123,
+    "end": 129,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 7,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 132,
+    "end": 137,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 6,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 145,
+    "end": 148,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 213,
+    "end": 216,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 262,
+    "end": 267,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 6,
+    "tokens": 0,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 338,
+    "end": 342,
+    "kind": "docstring",
+    "qualname": "_validate_base_url",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 351,
+    "end": 356,
+    "kind": "comment",
+    "qualname": "_validate_base_url",
+    "lines": 6,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 420,
+    "end": 432,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 13,
+    "tokens": 3,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 561,
+    "end": 569,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 9,
+    "tokens": 0,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 607,
+    "end": 615,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 9,
+    "tokens": 0,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 685,
+    "end": 692,
+    "kind": "docstring",
+    "qualname": "_role_setting_rows",
+    "lines": 8,
+    "tokens": 1,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 1
+   },
+   {
+    "start": 790,
+    "end": 835,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 46,
+    "tokens": 2,
+    "sentences": 7,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 900,
+    "end": 901,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 2,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 904,
+    "end": 905,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 2,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 909,
+    "end": 952,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 44,
+    "tokens": 9,
+    "sentences": 7,
+    "markers": 1,
+    "dates": 2
+   },
+   {
+    "start": 954,
+    "end": 957,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 960,
+    "end": 964,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 5,
+    "tokens": 1,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 967,
+    "end": 970,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1025,
+    "end": 1027,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1037,
+    "end": 1089,
+    "kind": "docstring",
+    "qualname": "check_role_connection_limits",
+    "lines": 53,
+    "tokens": 6,
+    "sentences": 9,
+    "markers": 2,
+    "dates": 1
+   },
+   {
+    "start": 1093,
+    "end": 1101,
+    "kind": "comment",
+    "qualname": "check_role_connection_limits",
+    "lines": 9,
+    "tokens": 3,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 1
+   },
+   {
+    "start": 1224,
+    "end": 1257,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 34,
+    "tokens": 0,
+    "sentences": 5,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1547,
+    "end": 1550,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   }
+  ]
+ },
+ "MitateDB-api/src/mitatedb_api/control_plane.py": {
+  "module": "MitateDB-api/src/mitatedb_api/control_plane.py",
+  "base": "092e1a1",
+  "lines": 2274,
+  "blocks": 85,
+  "kinds": {
+   "docstring": 35,
+   "comment": 50
+  },
+  "block_lines": 758,
+  "registered_symbols": [
+   "_take_bound_advisory_lock"
+  ],
+  "registered_symbols_found": {
+   "_take_bound_advisory_lock": [
+    409,
+    441
+   ]
+  },
+  "registered_symbols_missing": [],
+  "existing_ch": [
+   [
+    1586,
+    1616,
+    "CH-0543"
+   ]
+  ],
+  "helper_blocks": [
+   [
+    410,
+    440,
+    "docstring",
+    "_take_bound_advisory_lock"
+   ]
+  ],
+  "helper_block_lines": 31,
+  "target_blocks": 83,
+  "target_kinds": {
+   "docstring": 34,
+   "comment": 49
+  },
+  "target_lines": 696,
+  "tokens_file": 150,
+  "tokens_in_targets": 133,
+  "target_blocks_with_tokens": 52,
+  "target_blocks_with_tokens_lines": 551,
+  "tokens_all_blocks": 150,
+  "date_lines": [
+   363,
+   878,
+   1391,
+   1832,
+   2195
+  ],
+  "colon_hash_lines": [],
+  "long_blocks_no_ch": [
+   [
+    1,
+    37
+   ],
+   [
+    82,
+    93
+   ],
+   [
+    128,
+    148
+   ],
+   [
+    238,
+    248
+   ],
+   [
+    346,
+    369
+   ],
+   [
+    410,
+    440
+   ],
+   [
+    502,
+    523
+   ],
+   [
+    711,
+    727
+   ],
+   [
+    868,
+    882
+   ],
+   [
+    1024,
+    1035
+   ],
+   [
+    1051,
+    1063
+   ],
+   [
+    1189,
+    1198
+   ],
+   [
+    1225,
+    1234
+   ],
+   [
+    1266,
+    1277
+   ],
+   [
+    1311,
+    1320
+   ],
+   [
+    1367,
+    1377
+   ],
+   [
+    1391,
+    1400
+   ],
+   [
+    1418,
+    1451
+   ],
+   [
+    1464,
+    1482
+   ],
+   [
+    1564,
+    1576
+   ],
+   [
+    1709,
+    1724
+   ],
+   [
+    1856,
+    1868
+   ],
+   [
+    1885,
+    1894
+   ],
+   [
+    1967,
+    1979
+   ],
+   [
+    2052,
+    2062
+   ],
+   [
+    2195,
+    2204
+   ],
+   [
+    2219,
+    2244
+   ]
+  ],
+  "long_blocks_targets": [
+   [
+    1,
+    37
+   ],
+   [
+    82,
+    93
+   ],
+   [
+    128,
+    148
+   ],
+   [
+    238,
+    248
+   ],
+   [
+    346,
+    369
+   ],
+   [
+    502,
+    523
+   ],
+   [
+    711,
+    727
+   ],
+   [
+    868,
+    882
+   ],
+   [
+    1024,
+    1035
+   ],
+   [
+    1051,
+    1063
+   ],
+   [
+    1189,
+    1198
+   ],
+   [
+    1225,
+    1234
+   ],
+   [
+    1266,
+    1277
+   ],
+   [
+    1311,
+    1320
+   ],
+   [
+    1367,
+    1377
+   ],
+   [
+    1391,
+    1400
+   ],
+   [
+    1418,
+    1451
+   ],
+   [
+    1464,
+    1482
+   ],
+   [
+    1564,
+    1576
+   ],
+   [
+    1709,
+    1724
+   ],
+   [
+    1856,
+    1868
+   ],
+   [
+    1885,
+    1894
+   ],
+   [
+    1967,
+    1979
+   ],
+   [
+    2052,
+    2062
+   ],
+   [
+    2195,
+    2204
+   ],
+   [
+    2219,
+    2244
+   ]
+  ],
+  "long_blocks_targets_lines": 412,
+  "longest_target_block": 37,
+  "marker_sentences": 16,
+  "marker_blocks": 15,
+  "marker_rows": [
+   [
+    1,
+    37,
+    [
+     [
+      "Implements the 11 `/control/v1` operations' logic (contract `control_endpoints`, `spec/data-service-api.v1.json`) as plain Python methods, t",
+      [
+       "this WP"
+      ]
+     ]
+    ]
+   ],
+   [
+    346,
+    369,
+    [
+     [
+      "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- this method is this registry's own si",
+      [
+       "supervisor ruling",
+       "差し戻し"
+      ]
+     ]
+    ]
+   ],
+   [
+    502,
+    523,
+    [
+     [
+      "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see that function's own docstring for the full rat",
+      [
+       "was replaced",
+       "pre-WP"
+      ]
+     ]
+    ]
+   ],
+   [
+    711,
+    727,
+    [
+     [
+      "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see that function's own docstring for the full rat",
+      [
+       "was replaced"
+      ]
+     ]
+    ]
+   ],
+   [
+    868,
+    882,
+    [
+     [
+      "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- splits via `split_bearer_locator` exa",
+      [
+       "supervisor ruling",
+       "差し戻し"
+      ]
+     ]
+    ]
+   ],
+   [
+    1051,
+    1063,
+    [
+     [
+      "Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B): the two writer timeouts this connection (the ONE that writes `control_audit`, inside `u",
+      [
+       "used to"
+      ]
+     ]
+    ]
+   ],
+   [
+    1179,
+    1183,
+    [
+     [
+      "State-fingerprinted (phrase_construction rule): the digest reflects exactly which control credentials are currently active, so any change to",
+      [
+       "previously"
+      ]
+     ]
+    ]
+   ],
+   [
+    1189,
+    1198,
+    [
+     [
+      "The original wording (\"every in-band control-plane credential becomes unusable\") was true before this WP (every row in `control_credentials`",
+      [
+       "no longer",
+       "this WP"
+      ]
+     ]
+    ]
+   ],
+   [
+    1391,
+    1400,
+    [
+     [
+      "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- this peer's own `control_http.py` HTT",
+      [
+       "supervisor ruling",
+       "差し戻し"
+      ]
+     ]
+    ]
+   ],
+   [
+    1506,
+    1512,
+    [
+     [
+      "Phase 3.5 WP-5 (design §4/§1-E, P35-D6/D13): `FORBIDDEN` -- the contract's own chosen code for this refusal (no existing application-disable",
+      [
+       "was rejected"
+      ]
+     ]
+    ]
+   ],
+   [
+    1709,
+    1724,
+    [
+     [
+      "Before this WP, the count ran on its own, already-committed connection, entirely outside this transaction -- two concurrent `register_applic",
+      [
+       "this WP"
+      ]
+     ]
+    ]
+   ],
+   [
+    1832,
+    1838,
+    [
+     [
+      "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): composed HERE, at this in-band issuance point's own response -- `control_http.",
+      [
+       "supervisor ruling"
+      ]
+     ]
+    ]
+   ],
+   [
+    1856,
+    1868,
+    [
+     [
+      "Phase 3.5 WP-5 (§4/§1-B, P35-D7 reversal of the original §8 m-9 omission): `must_rotate` is now exposed here with its real value for every c",
+      [
+       "no longer"
+      ]
+     ]
+    ]
+   ],
+   [
+    2195,
+    2204,
+    [
+     [
+      "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): `.issue()` now returns the COMPOSED bearer as its second element (`credential_",
+      [
+       "supervisor ruling"
+      ]
+     ],
+     [
+      "Before this fix, the discarded return value meant `reset`'s own CLI/HTTP callers received a raw secret while `bootstrap`'s identical pattern",
+      [
+       "Before this fix",
+       "this WP"
+      ]
+     ]
+    ]
+   ],
+   [
+    2219,
+    2244,
+    [
+     [
+      "Same extraction rationale as `bootstrap_control_credential`/`reset_control_credentials` above (reusable product code, not hand-rolled per ca",
+      [
+       "this WP"
+      ]
+     ]
+    ]
+   ]
+  ],
+  "ref_sentences": 44,
+  "ref_rows": [
+   [
+    1,
+    37,
+    [
+     "below"
+    ],
+    "Independent implementation (R-2's closing paragraph: no code sharing between peers; r2db-api's own `control_plane.py`/`control_main.py` were read only as a refe"
+   ],
+   [
+    82,
+    93,
+    [
+     "own docstring"
+    ],
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- \"An audit credential is "
+   ],
+   [
+    128,
+    148,
+    [
+     "below"
+    ],
+    "`request_bytes` is a separate byte bound, checked independently below (also positive-integer only, no upper bound), declared for parity with R-6's \"request_byte"
+   ],
+   [
+    154,
+    159,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-5, work order WP-3(b) / P4-D4 item 8): `audit_query`'s own pre-auth window -- a SEPARATE c"
+   ],
+   [
+    238,
+    248,
+    [
+     "above"
+    ],
+    "Phase 3.5 WP-5 (§4/§1-E, P35-D6): follows the SAME `work.on_rollback(...)` undo-log convention `set_enabled` above uses -- this is what structurally closes the "
+   ],
+   [
+    346,
+    369,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design D-5): a READ-ONLY probe against THIS registry's own application-credential rows -- reuses the SAME digest `issue`/`rotate` above already"
+   ],
+   [
+    383,
+    387,
+    [
+     "above"
+    ],
+    "WP-3(b) (mirrors `control_auth._DUMMY_DIGEST`'s own rationale, applied to this registry's own credential kind): a fixed-length, never-matching stand-in digest s"
+   ],
+   [
+    502,
+    523,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count` above, used exclusively by `C"
+   ],
+   [
+    502,
+    523,
+    [
+     "own docstring",
+     "see that function's own docstring"
+    ],
+    "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see that function's own docstring for the full rationale; `LOCK TABLE "
+   ],
+   [
+    629,
+    632,
+    [
+     "above"
+    ],
+    "Phase 3.5 WP-5 (§4/§1-E, P35-D6): CLI-only, non-destructive (mirrors `set_enabled` above -- no declare-and-echo confirmation gate, same class as disable-applica"
+   ],
+   [
+    711,
+    727,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count_active_for_application` above,"
+   ],
+   [
+    711,
+    727,
+    [
+     "own docstring",
+     "see that function's own docstring"
+    ],
+    "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see that function's own docstring for the full rationale, including wh"
+   ],
+   [
+    868,
+    882,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design D-5): the PostgreSQL twin of `InMemory CredentialRegistry.authenticate` above -- identical contract (`(application_id, role)` or `None`,"
+   ],
+   [
+    950,
+    958,
+    [
+     "above",
+     "below"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii) region (iii)): this backend has no real store/lock to take -- `unit_of_work()` above already holds `self._lock` (a process-wide "
+   ],
+   [
+    984,
+    986,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b: same reasoning as `applications_count_locked` above -- no real lock to take for a single-process, in-memory backend."
+   ],
+   [
+    1051,
+    1063,
+    [
+     "below"
+    ],
+    "Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B): the two writer timeouts this connection (the ONE that writes `control_audit`, inside `unit_of_work` below, "
+   ],
+   [
+    1091,
+    1095,
+    [
+     "own docstring",
+     "see that method's own docstring"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii)/(iii)): forwards to `PostgresApplicationRegistry.count_locked` -- see that method's own docstring for the full rationale (table-"
+   ],
+   [
+    1120,
+    1121,
+    [
+     "above"
+    ],
+    "The `credentials_per_application` counterpart of `applications_count_locked` above."
+   ],
+   [
+    1158,
+    1161,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b): identical rationale to `InMemoryControlBackend.authenticate_application` above -- `self._credentials` is the SAME `PostgresCredentialRegistry` "
+   ],
+   [
+    1225,
+    1234,
+    [
+     "below"
+    ],
+    "Evaluation order (design R-6, fixed at every one of the 9 methods below): rate-limit (pre-authentication) -> authenticate -> audit-role authorization gate (Phas"
+   ],
+   [
+    1255,
+    1260,
+    [
+     "above"
+    ],
+    "The control surface's own `CapabilityDocument` carries the SAME `operation_catalog_url` value the data surface's own document carries -- constructor-injected, s"
+   ],
+   [
+    1266,
+    1277,
+    [
+     "below"
+    ],
+    "`audit_reader is None` is this instance's true, complete posture for \"AUDIT DSN not configured\" (D-5 M-4) -- `control_capabilities` below declares `audit_query:"
+   ],
+   [
+    1266,
+    1277,
+    [
+     "above"
+    ],
+    "A SEPARATE pre-auth rate window from `_rate_window` above (`_audit_rate_window`) -- `audit_query`'s own window must never share a counter with `control_requests"
+   ],
+   [
+    1336,
+    1342,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design D-5, `check_rate`'s own public-wrapper precedent above): lets `control_http.py` charge `audit_query`'s own window before it even reads a"
+   ],
+   [
+    1346,
+    1354,
+    [
+     "above"
+    ],
+    "`audit_requests_per_minute` -- a SEPARATE global window from `_check_rate`'s `control_requests_per_minute` above (own lock, own list, own limit field), reusing "
+   ],
+   [
+    1391,
+    1400,
+    [
+     "below"
+    ],
+    "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- this peer's own `control_http.py` HTTP boundary passes th"
+   ],
+   [
+    1418,
+    1451,
+    [
+     "below"
+    ],
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- an `audit`-role principa"
+   ],
+   [
+    1418,
+    1451,
+    [
+     "below"
+    ],
+    "The ROLE check (`principal.role == \"audit\"` below) is, accurately, a deny-list: it gates only the one specific role value `\"audit\"`, and any OTHER role value wo"
+   ],
+   [
+    1418,
+    1451,
+    [
+     "below",
+     "own docstring",
+     "see `_gate_must_rotate`'s own docstring"
+    ],
+    "Called at every one of the 9 public operations below, BEFORE `_gate_must_rotate` -- both gates ultimately agree that a rotate-pending audit principal may reach "
+   ],
+   [
+    1464,
+    1482,
+    [
+     "above"
+    ],
+    "Phase 3.5 WP-5 (design §4 M-1): a `role=\"audit\"` principal's own allow-list while `must_rotate` is true is `control_capabilities` ONLY -- self-rotate is deliber"
+   ],
+   [
+    1464,
+    1482,
+    [
+     "below"
+    ],
+    "This is not a dead end: the out-of-band audit-credential issuance ceremony (`issue_audit_credential_ceremony` below) issues AND rotates the credential in the sa"
+   ],
+   [
+    1564,
+    1576,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii)): region (ii) of the 3-region map -- `control_requests_per_minute`/`audit_requests_per_minute` are bound in this process' own in"
+   ],
+   [
+    1564,
+    1576,
+    [
+     "above",
+     "below"
+    ],
+    "`applications`/`credentials_per_application` (region (iii), DB-side-bound) are UNAFFECTED -- they stay `enforced` above regardless of ceiling (see `applications"
+   ],
+   [
+    1634,
+    1640,
+    [
+     "below"
+    ],
+    "AUDIT DSN unconfigured (`self._audit_reader is None`) keeps the declaration at exactly `{\"status\": \"unavailable\"}` (D-5 M-4) -- every other key below is publish"
+   ],
+   [
+    1647,
+    1653,
+    [
+     "above"
+    ],
+    "Phase 5 WP-3 (design D-1, contract 1.5.0 subordinate ruling 10 item 1, conditional on `audit_query` being provided): the `operation`/`target_kind` vocabulary th"
+   ],
+   [
+    1794,
+    1799,
+    [
+     "below"
+    ],
+    "Capability denial BEFORE target resolution/freeze/limit (C-14 vector 3; Phase 3.5 §1-E/M-8 extends the same precedence to the freeze refusal below): must refuse"
+   ],
+   [
+    1816,
+    1820,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii)/(iii)): the capacity check now runs INSIDE the SAME transaction that performs the write, via `credentials_active_count_locked` -"
+   ],
+   [
+    1907,
+    1908,
+    [
+     "above"
+    ],
+    "Phase 6 WP-3 追補 (brief item A): composed HERE, same single-point discipline `issue_credential` above follows."
+   ],
+   [
+    1930,
+    1933,
+    [
+     "below"
+    ],
+    "Shape-validate `destructive`/`confirmation` unconditionally (contract: these fields are ordinary, schema-validated optional fields regardless of whether this pa"
+   ],
+   [
+    2052,
+    2062,
+    [
+     "own docstring",
+     "see `_deny_application_credential_on_audit_query`'s own docstring"
+    ],
+    "Processing order: `audit_requests_per_minute` (its OWN window, never `control_requests_per_minute`) -> application-credential probe (identified FORBIDDEN, BEFOR"
+   ],
+   [
+    2066,
+    2073,
+    [
+     "below"
+    ],
+    "If this bearer genuinely authenticates there, deny it here -- attributed, `FORBIDDEN` -- without ever presenting it to `self._authenticate` below (which would o"
+   ],
+   [
+    2097,
+    2102,
+    [
+     "own docstring",
+     "see `audit_query`'s own docstring"
+    ],
+    "Contract `control_endpoints.audit_query.semantics`: \"Application credentials are denied.\" Always attributed (`app_match` -- a `(credential_id, application_id, r"
+   ],
+   [
+    2195,
+    2204,
+    [
+     "below"
+    ],
+    "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): `.issue()` now returns the COMPOSED bearer as its second element (`credential_id`, unchanged, is i"
+   ],
+   [
+    2219,
+    2244,
+    [
+     "above"
+    ],
+    "Same extraction rationale as `bootstrap_control_credential`/`reset_control_credentials` above (reusable product code, not hand-rolled per caller -- `ops.py cmd_"
+   ]
+  ],
+  "token_sentences": 61,
+  "safety_rows": [
+   [
+    1,
+    37,
+    [
+     "CredentialStore",
+     "credential",
+     "credential_store_postgres",
+     "credentials",
+     "transaction"
+    ],
+    "Independent implementation (R-2's closing paragraph: no code sharing between peers; r2db-api's own `control_plane.py`/`control_main.py` were read only as a refe"
+   ],
+   [
+    82,
+    93,
+    [
+     "credential"
+    ],
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- \"An audit credential is "
+   ],
+   [
+    82,
+    93,
+    [
+     "role"
+    ],
+    "Phase 4 WP-3(b) (design D-5, work order P4-D4 item 5, contract 1.4.0 subordinate ruling 9(b)): `audit_query` joins this allow-list -- an `audit`-role principal "
+   ],
+   [
+    117,
+    123,
+    [
+     "commit"
+    ],
+    "=========================================================================== Bounds (R-6: 3 finite resource classes + the request_bytes byte bound the control-di"
+   ],
+   [
+    128,
+    148,
+    [
+     "credentials_per_application"
+    ],
+    "R-6 numeric constraints (WP-0 M-5; upper bound removed Phase 5 D-3, Q3 案A, WP-4): `applications`/`credentials_per_application`/`control_requests_per_minute`/`au"
+   ],
+   [
+    238,
+    248,
+    [
+     "rollback"
+    ],
+    "Phase 3.5 WP-5 (§4/§1-E, P35-D6): follows the SAME `work.on_rollback(...)` undo-log convention `set_enabled` above uses -- this is what structurally closes the "
+   ],
+   [
+    269,
+    275,
+    [
+     "CredentialStore",
+     "credential"
+    ],
+    "Uses the SAME digest algorithm (HMAC-SHA256 with `MITATEDB_CREDENTIAL_PEPPER`) as `auth.CredentialStore`, so a credential minted here is, in principle, verifiab"
+   ],
+   [
+    346,
+    369,
+    [
+     "CredentialStore",
+     "credential"
+    ],
+    "Phase 4 WP-3(b) (design D-5): a READ-ONLY probe against THIS registry's own application-credential rows -- reuses the SAME digest `issue`/`rotate` above already"
+   ],
+   [
+    346,
+    369,
+    [
+     "secret"
+    ],
+    "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- this method is this registry's own single receiving bound"
+   ],
+   [
+    383,
+    387,
+    [
+     "compare_digest",
+     "credential",
+     "credential_id"
+    ],
+    "WP-3(b) (mirrors `control_auth._DUMMY_DIGEST`'s own rationale, applied to this registry's own credential kind): a fixed-length, never-matching stand-in digest s"
+   ],
+   [
+    502,
+    523,
+    [
+     "locking"
+    ],
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count` above, used exclusively by `C"
+   ],
+   [
+    502,
+    523,
+    [
+     "LOCK",
+     "TOCTOU",
+     "commits",
+     "committed",
+     "transaction"
+    ],
+    "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see that function's own docstring for the full rationale; `LOCK TABLE "
+   ],
+   [
+    606,
+    611,
+    [
+     "role"
+    ],
+    "Phase 3.5 WP-5 (design §4/§1-E, P35-D6): `ControlPlaneService.issue_credential`'s own read of this flag, evaluated only after the `role=control` capability refu"
+   ],
+   [
+    711,
+    727,
+    [
+     "credentials_per_application",
+     "locking"
+    ],
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count_active_for_application` above,"
+   ],
+   [
+    711,
+    727,
+    [
+     "LOCK",
+     "commits",
+     "transaction"
+    ],
+    "Takes `_take_bound_advisory_lock` (a table-scoped constant-key `pg_advisory_xact_lock` -- see that function's own docstring for the full rationale, including wh"
+   ],
+   [
+    868,
+    882,
+    [
+     "CredentialRegistry",
+     "role"
+    ],
+    "Phase 4 WP-3(b) (design D-5): the PostgreSQL twin of `InMemory CredentialRegistry.authenticate` above -- identical contract (`(application_id, role)` or `None`,"
+   ],
+   [
+    868,
+    882,
+    [
+     "secret"
+    ],
+    "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- splits via `split_bearer_locator` exactly ONCE, HERE, sam"
+   ],
+   [
+    950,
+    958,
+    [
+     "TOCTOU",
+     "advisory",
+     "lock"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii) region (iii)): this backend has no real store/lock to take -- `unit_of_work()` above already holds `self._lock` (a process-wide "
+   ],
+   [
+    984,
+    986,
+    [
+     "lock"
+    ],
+    "Phase 10 WP-6b: same reasoning as `applications_count_locked` above -- no real lock to take for a single-process, in-memory backend."
+   ],
+   [
+    1024,
+    1035,
+    [
+     "credential",
+     "credential_id",
+     "credentials",
+     "secret"
+    ],
+    "Phase 4 WP-3(b) (design D-5): a SEPARATE probe against the APPLICATION-credential universe (`self._credentials`, never `self._control_credentials`) -- `audit_qu"
+   ],
+   [
+    1051,
+    1063,
+    [
+     "ROLE",
+     "role",
+     "timeouts",
+     "transaction"
+    ],
+    "Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B): the two writer timeouts this connection (the ONE that writes `control_audit`, inside `unit_of_work` below, "
+   ],
+   [
+    1189,
+    1198,
+    [
+     "credential",
+     "credentials",
+     "revoke",
+     "role"
+    ],
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-D, WP-4 m-1 symmetry): narrowed to MANAGEMENT credentials -- an active `rol"
+   ],
+   [
+    1225,
+    1234,
+    [
+     "credential",
+     "revoke_credential",
+     "role",
+     "transaction"
+    ],
+    "Evaluation order (design R-6, fixed at every one of the 9 methods below): rate-limit (pre-authentication) -> authenticate -> audit-role authorization gate (Phas"
+   ],
+   [
+    1367,
+    1377,
+    [
+     "credential_id"
+    ],
+    "Phase 3.5 WP-5 (§1-C/§4): `target_id` -- the single target credential_id/application_id this denial concerns, when the caller supplied one."
+   ],
+   [
+    1391,
+    1400,
+    [
+     "secret"
+    ],
+    "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- this peer's own `control_http.py` HTTP boundary passes th"
+   ],
+   [
+    1418,
+    1451,
+    [
+     "role"
+    ],
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- an `audit`-role principa"
+   ],
+   [
+    1464,
+    1482,
+    [
+     "credential",
+     "role"
+    ],
+    "Phase 3.5 WP-5 (design §4 M-1): a `role=\"audit\"` principal's own allow-list while `must_rotate` is true is `control_capabilities` ONLY -- self-rotate is deliber"
+   ],
+   [
+    1627,
+    1629,
+    [
+     "role"
+    ],
+    "Phase 3.5 WP-5 (design §4, review m-6): the real, authenticated principal's own role -- never a hardcoded `\"control\"` literal (a `role=\"audit\"` principal reache"
+   ],
+   [
+    1647,
+    1653,
+    [
+     "atomic_mutation"
+    ],
+    "Phase 5 WP-3 (design D-1, contract 1.5.0 subordinate ruling 10 item 1, conditional on `audit_query` being provided): the `operation`/`target_kind` vocabulary th"
+   ],
+   [
+    1709,
+    1724,
+    [
+     "commits",
+     "transaction"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii)/(iii)): the capacity check now runs INSIDE the SAME transaction that performs the write, via `applications_count_locked` -- for "
+   ],
+   [
+    1794,
+    1799,
+    [
+     "credential",
+     "role"
+    ],
+    "Capability denial BEFORE target resolution/freeze/limit (C-14 vector 3; Phase 3.5 §1-E/M-8 extends the same precedence to the freeze refusal below): must refuse"
+   ],
+   [
+    1816,
+    1820,
+    [
+     "credentials_active_count",
+     "credentials_active_count_locked",
+     "transaction"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii)/(iii)): the capacity check now runs INSIDE the SAME transaction that performs the write, via `credentials_active_count_locked` -"
+   ],
+   [
+    1967,
+    1979,
+    [
+     "credential",
+     "role"
+    ],
+    "Phase 3.5 WP-5: filtered to `role == \"control\"` rows only -- the destructive-confirmation gate exists to protect the LAST remaining active CONTROL credential (t"
+   ],
+   [
+    2195,
+    2204,
+    [
+     "credential_id",
+     "secret"
+    ],
+    "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): `.issue()` now returns the COMPOSED bearer as its second element (`credential_id`, unchanged, is i"
+   ],
+   [
+    2219,
+    2244,
+    [
+     "credential"
+    ],
+    "Phase 3.5 WP-5 out-of-band audit-credential issuance ceremony (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-D, P35-D12/M-1)."
+   ]
+  ],
+  "protected_rows": [
+   [
+    1,
+    37,
+    "`ControlPlaneService`: the control-plane semantics layer (design v1.2 R-6/R-7, WP-4)."
+   ],
+   [
+    1,
+    37,
+    "Implements the 11 `/control/v1` operations' logic (contract `control_endpoints`, `spec/data-service-api.v1.json`) as plain Python methods, tested directly (WP-4"
+   ],
+   [
+    1,
+    37,
+    "Independent implementation (R-2's closing paragraph: no code sharing between peers; r2db-api's own `control_plane.py`/`control_main.py` were read only as a refe"
+   ],
+   [
+    82,
+    93,
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- \"An audit credential is "
+   ],
+   [
+    82,
+    93,
+    "Phase 4 WP-3(b) (design D-5, work order P4-D4 item 5, contract 1.4.0 subordinate ruling 9(b)): `audit_query` joins this allow-list -- an `audit`-role principal "
+   ],
+   [
+    128,
+    148,
+    "R-6 numeric constraints (WP-0 M-5; upper bound removed Phase 5 D-3, Q3 案A, WP-4): `applications`/`credentials_per_application`/`control_requests_per_minute`/`au"
+   ],
+   [
+    154,
+    159,
+    "Phase 4 WP-3(b) (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-5, work order WP-3(b) / P4-D4 item 8): `audit_query`'s own pre-auth window -- a SEPARATE c"
+   ],
+   [
+    195,
+    200,
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-E, P35-D6): per-application issuance freeze."
+   ],
+   [
+    502,
+    523,
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count` above, used exclusively by `C"
+   ],
+   [
+    711,
+    727,
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count_active_for_application` above,"
+   ],
+   [
+    1051,
+    1063,
+    "Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B): the two writer timeouts this connection (the ONE that writes `control_audit`, inside `unit_of_work` below, "
+   ],
+   [
+    1189,
+    1198,
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-D, WP-4 m-1 symmetry): narrowed to MANAGEMENT credentials -- an active `rol"
+   ],
+   [
+    1336,
+    1342,
+    "Phase 4 WP-3(b) (design D-5, `check_rate`'s own public-wrapper precedent above): lets `control_http.py` charge `audit_query`'s own window before it even reads a"
+   ],
+   [
+    1391,
+    1400,
+    "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- this peer's own `control_http.py` HTTP boundary passes th"
+   ],
+   [
+    1418,
+    1451,
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- an `audit`-role principa"
+   ],
+   [
+    1464,
+    1482,
+    "`FORBIDDEN` (WP-0 m-4: C-15 requires this exact code, not `CAPABILITY_UNSUPPORTED`)."
+   ],
+   [
+    1560,
+    1562,
+    "R-7: the HTTP-layer enforcement fact (`control_http.py`, WP-5 mount) is added on top of this service-layer default -- this process alone cannot enforce a byte b"
+   ],
+   [
+    1647,
+    1653,
+    "Phase 5 WP-3 (design D-1, contract 1.5.0 subordinate ruling 10 item 1, conditional on `audit_query` being provided): the `operation`/`target_kind` vocabulary th"
+   ],
+   [
+    1794,
+    1799,
+    "Capability denial BEFORE target resolution/freeze/limit (C-14 vector 3; Phase 3.5 §1-E/M-8 extends the same precedence to the freeze refusal below): must refuse"
+   ],
+   [
+    1832,
+    1838,
+    "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): composed HERE, at this in-band issuance point's own response -- `control_http.py`'s HTTP boundary "
+   ],
+   [
+    1856,
+    1868,
+    "Phase 3.5 WP-5 (§4/§1-B, P35-D7 reversal of the original §8 m-9 omission): `must_rotate` is now exposed here with its real value for every control-table row (co"
+   ],
+   [
+    2195,
+    2204,
+    "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): `.issue()` now returns the COMPOSED bearer as its second element (`credential_id`, unchanged, is i"
+   ],
+   [
+    2219,
+    2244,
+    "Phase 3.5 WP-5 out-of-band audit-credential issuance ceremony (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-D, P35-D12/M-1)."
+   ],
+   [
+    2268,
+    2272,
+    "WP-6 (design v1.2 R-6 identifiers rule): exported so `ops.py`'s own break-glass `deprovision` subcommand validates an operator-supplied application_id against t"
+   ]
+  ],
+  "position_rows": [
+   [
+    1,
+    37,
+    [
+     "`control_http.py`'s"
+    ],
+    "Implements the 11 `/control/v1` operations' logic (contract `control_endpoints`, `spec/data-service-api.v1.json`) as plain Python methods, tested directly (WP-4"
+   ],
+   [
+    1,
+    37,
+    [
+     "below"
+    ],
+    "Independent implementation (R-2's closing paragraph: no code sharing between peers; r2db-api's own `control_plane.py`/`control_main.py` were read only as a refe"
+   ],
+   [
+    128,
+    148,
+    [
+     "here"
+    ],
+    "R-6 numeric constraints (WP-0 M-5; upper bound removed Phase 5 D-3, Q3 案A, WP-4): `applications`/`credentials_per_application`/`control_requests_per_minute`/`au"
+   ],
+   [
+    154,
+    159,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-5, work order WP-3(b) / P4-D4 item 8): `audit_query`'s own pre-auth window -- a SEPARATE c"
+   ],
+   [
+    238,
+    248,
+    [
+     "above",
+     "here"
+    ],
+    "Phase 3.5 WP-5 (§4/§1-E, P35-D6): follows the SAME `work.on_rollback(...)` undo-log convention `set_enabled` above uses -- this is what structurally closes the "
+   ],
+   [
+    269,
+    275,
+    [
+     "here"
+    ],
+    "Uses the SAME digest algorithm (HMAC-SHA256 with `MITATEDB_CREDENTIAL_PEPPER`) as `auth.CredentialStore`, so a credential minted here is, in principle, verifiab"
+   ],
+   [
+    346,
+    369,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design D-5): a READ-ONLY probe against THIS registry's own application-credential rows -- reuses the SAME digest `issue`/`rotate` above already"
+   ],
+   [
+    383,
+    387,
+    [
+     "above"
+    ],
+    "WP-3(b) (mirrors `control_auth._DUMMY_DIGEST`'s own rationale, applied to this registry's own credential kind): a fixed-length, never-matching stand-in digest s"
+   ],
+   [
+    502,
+    523,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count` above, used exclusively by `C"
+   ],
+   [
+    629,
+    632,
+    [
+     "above"
+    ],
+    "Phase 3.5 WP-5 (§4/§1-E, P35-D6): CLI-only, non-destructive (mirrors `set_enabled` above -- no declare-and-echo confirmation gate, same class as disable-applica"
+   ],
+   [
+    711,
+    727,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count_active_for_application` above,"
+   ],
+   [
+    868,
+    882,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design D-5): the PostgreSQL twin of `InMemory CredentialRegistry.authenticate` above -- identical contract (`(application_id, role)` or `None`,"
+   ],
+   [
+    950,
+    958,
+    [
+     "above",
+     "below",
+     "here"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii) region (iii)): this backend has no real store/lock to take -- `unit_of_work()` above already holds `self._lock` (a process-wide "
+   ],
+   [
+    984,
+    986,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b: same reasoning as `applications_count_locked` above -- no real lock to take for a single-process, in-memory backend."
+   ],
+   [
+    1051,
+    1063,
+    [
+     "below"
+    ],
+    "Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B): the two writer timeouts this connection (the ONE that writes `control_audit`, inside `unit_of_work` below, "
+   ],
+   [
+    1158,
+    1161,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b): identical rationale to `InMemoryControlBackend.authenticate_application` above -- `self._credentials` is the SAME `PostgresCredentialRegistry` "
+   ],
+   [
+    1225,
+    1234,
+    [
+     "below"
+    ],
+    "Evaluation order (design R-6, fixed at every one of the 9 methods below): rate-limit (pre-authentication) -> authenticate -> audit-role authorization gate (Phas"
+   ],
+   [
+    1247,
+    1253,
+    [
+     "here"
+    ],
+    "Phase 6 WP-3 (design D-2): single source of truth for this control-plane process' own `CapabilityDocument.surfaces` -- composition-root-injected (`control_compo"
+   ],
+   [
+    1336,
+    1342,
+    [
+     "above"
+    ],
+    "Phase 4 WP-3(b) (design D-5, `check_rate`'s own public-wrapper precedent above): lets `control_http.py` charge `audit_query`'s own window before it even reads a"
+   ],
+   [
+    1391,
+    1400,
+    [
+     "below",
+     "here"
+    ],
+    "Phase 6 WP-3 差し戻し最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `secret` is the FULL presented bearer -- this peer's own `control_http.py` HTTP boundary passes th"
+   ],
+   [
+    1418,
+    1451,
+    [
+     "below"
+    ],
+    "Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- an `audit`-role principa"
+   ],
+   [
+    1464,
+    1482,
+    [
+     "above"
+    ],
+    "Phase 3.5 WP-5 (design §4 M-1): a `role=\"audit\"` principal's own allow-list while `must_rotate` is true is `control_capabilities` ONLY -- self-rotate is deliber"
+   ],
+   [
+    1564,
+    1576,
+    [
+     "above"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii)): region (ii) of the 3-region map -- `control_requests_per_minute`/`audit_requests_per_minute` are bound in this process' own in"
+   ],
+   [
+    1647,
+    1653,
+    [
+     "above"
+    ],
+    "Phase 5 WP-3 (design D-1, contract 1.5.0 subordinate ruling 10 item 1, conditional on `audit_query` being provided): the `operation`/`target_kind` vocabulary th"
+   ],
+   [
+    1794,
+    1799,
+    [
+     "below"
+    ],
+    "Capability denial BEFORE target resolution/freeze/limit (C-14 vector 3; Phase 3.5 §1-E/M-8 extends the same precedence to the freeze refusal below): must refuse"
+   ],
+   [
+    1816,
+    1820,
+    [
+     "above",
+     "here"
+    ],
+    "Phase 10 WP-6b (design D-5 (ii)/(iii)): the capacity check now runs INSIDE the SAME transaction that performs the write, via `credentials_active_count_locked` -"
+   ],
+   [
+    1832,
+    1838,
+    [
+     "`control_http.py`'s"
+    ],
+    "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): composed HERE, at this in-band issuance point's own response -- `control_http.py`'s HTTP boundary "
+   ],
+   [
+    1856,
+    1868,
+    [
+     "here"
+    ],
+    "Phase 3.5 WP-5 (§4/§1-B, P35-D7 reversal of the original §8 m-9 omission): `must_rotate` is now exposed here with its real value for every control-table row (co"
+   ],
+   [
+    1907,
+    1908,
+    [
+     "above"
+    ],
+    "Phase 6 WP-3 追補 (brief item A): composed HERE, same single-point discipline `issue_credential` above follows."
+   ],
+   [
+    2195,
+    2204,
+    [
+     "`ops.py`'s",
+     "below",
+     "here"
+    ],
+    "Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): `.issue()` now returns the COMPOSED bearer as its second element (`credential_id`, unchanged, is i"
+   ],
+   [
+    2268,
+    2272,
+    [
+     "`ops.py`'s"
+    ],
+    "WP-6 (design v1.2 R-6 identifiers rule): exported so `ops.py`'s own break-glass `deprovision` subcommand validates an operator-supplied application_id against t"
+   ]
+  ],
+  "safety_blocks": [
+   [
+    1,
+    37
+   ],
+   [
+    82,
+    93
+   ],
+   [
+    117,
+    123
+   ],
+   [
+    128,
+    148
+   ],
+   [
+    238,
+    248
+   ],
+   [
+    269,
+    275
+   ],
+   [
+    346,
+    369
+   ],
+   [
+    383,
+    387
+   ],
+   [
+    502,
+    523
+   ],
+   [
+    606,
+    611
+   ],
+   [
+    711,
+    727
+   ],
+   [
+    868,
+    882
+   ],
+   [
+    950,
+    958
+   ],
+   [
+    984,
+    986
+   ],
+   [
+    1024,
+    1035
+   ],
+   [
+    1051,
+    1063
+   ],
+   [
+    1189,
+    1198
+   ],
+   [
+    1225,
+    1234
+   ],
+   [
+    1367,
+    1377
+   ],
+   [
+    1391,
+    1400
+   ],
+   [
+    1418,
+    1451
+   ],
+   [
+    1464,
+    1482
+   ],
+   [
+    1627,
+    1629
+   ],
+   [
+    1647,
+    1653
+   ],
+   [
+    1709,
+    1724
+   ],
+   [
+    1794,
+    1799
+   ],
+   [
+    1816,
+    1820
+   ],
+   [
+    1967,
+    1979
+   ],
+   [
+    2195,
+    2204
+   ],
+   [
+    2219,
+    2244
+   ]
+  ],
+  "protected_blocks": [
+   [
+    1,
+    37
+   ],
+   [
+    82,
+    93
+   ],
+   [
+    128,
+    148
+   ],
+   [
+    154,
+    159
+   ],
+   [
+    195,
+    200
+   ],
+   [
+    502,
+    523
+   ],
+   [
+    711,
+    727
+   ],
+   [
+    1051,
+    1063
+   ],
+   [
+    1189,
+    1198
+   ],
+   [
+    1336,
+    1342
+   ],
+   [
+    1391,
+    1400
+   ],
+   [
+    1418,
+    1451
+   ],
+   [
+    1464,
+    1482
+   ],
+   [
+    1560,
+    1562
+   ],
+   [
+    1647,
+    1653
+   ],
+   [
+    1794,
+    1799
+   ],
+   [
+    1832,
+    1838
+   ],
+   [
+    1856,
+    1868
+   ],
+   [
+    2195,
+    2204
+   ],
+   [
+    2219,
+    2244
+   ],
+   [
+    2268,
+    2272
+   ]
+  ],
+  "position_blocks": [
+   [
+    1,
+    37
+   ],
+   [
+    128,
+    148
+   ],
+   [
+    154,
+    159
+   ],
+   [
+    238,
+    248
+   ],
+   [
+    269,
+    275
+   ],
+   [
+    346,
+    369
+   ],
+   [
+    383,
+    387
+   ],
+   [
+    502,
+    523
+   ],
+   [
+    629,
+    632
+   ],
+   [
+    711,
+    727
+   ],
+   [
+    868,
+    882
+   ],
+   [
+    950,
+    958
+   ],
+   [
+    984,
+    986
+   ],
+   [
+    1051,
+    1063
+   ],
+   [
+    1158,
+    1161
+   ],
+   [
+    1225,
+    1234
+   ],
+   [
+    1247,
+    1253
+   ],
+   [
+    1336,
+    1342
+   ],
+   [
+    1391,
+    1400
+   ],
+   [
+    1418,
+    1451
+   ],
+   [
+    1464,
+    1482
+   ],
+   [
+    1564,
+    1576
+   ],
+   [
+    1647,
+    1653
+   ],
+   [
+    1794,
+    1799
+   ],
+   [
+    1816,
+    1820
+   ],
+   [
+    1832,
+    1838
+   ],
+   [
+    1856,
+    1868
+   ],
+   [
+    1907,
+    1908
+   ],
+   [
+    2195,
+    2204
+   ],
+   [
+    2268,
+    2272
+   ]
+  ],
+  "per_block": [
+   {
+    "start": 1,
+    "end": 37,
+    "kind": "docstring",
+    "qualname": "<module>",
+    "lines": 37,
+    "tokens": 6,
+    "sentences": 5,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 75,
+    "end": 77,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 82,
+    "end": 93,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 12,
+    "tokens": 4,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 96,
+    "end": 99,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 117,
+    "end": 123,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 7,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 128,
+    "end": 148,
+    "kind": "docstring",
+    "qualname": "ControlPlaneLimits",
+    "lines": 21,
+    "tokens": 3,
+    "sentences": 4,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 154,
+    "end": 159,
+    "kind": "comment",
+    "qualname": "ControlPlaneLimits",
+    "lines": 6,
+    "tokens": 3,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 185,
+    "end": 189,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 195,
+    "end": 200,
+    "kind": "comment",
+    "qualname": "InMemoryApplicationRegistry.__init__",
+    "lines": 6,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 238,
+    "end": 248,
+    "kind": "docstring",
+    "qualname": "InMemoryApplicationRegistry.set_issuance_frozen",
+    "lines": 11,
+    "tokens": 4,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 269,
+    "end": 275,
+    "kind": "docstring",
+    "qualname": "InMemoryCredentialRegistry",
+    "lines": 7,
+    "tokens": 3,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 346,
+    "end": 369,
+    "kind": "docstring",
+    "qualname": "InMemoryCredentialRegistry.authenticate",
+    "lines": 24,
+    "tokens": 7,
+    "sentences": 6,
+    "markers": 2,
+    "dates": 1
+   },
+   {
+    "start": 383,
+    "end": 387,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 5,
+    "tokens": 1,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 391,
+    "end": 395,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 399,
+    "end": 399,
+    "kind": "docstring",
+    "qualname": "_execute",
+    "lines": 1,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 502,
+    "end": 523,
+    "kind": "docstring",
+    "qualname": "PostgresApplicationRegistry.count_locked",
+    "lines": 22,
+    "tokens": 4,
+    "sentences": 2,
+    "markers": 2,
+    "dates": 0
+   },
+   {
+    "start": 606,
+    "end": 611,
+    "kind": "docstring",
+    "qualname": "PostgresApplicationRegistry.issuance_frozen",
+    "lines": 6,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 629,
+    "end": 632,
+    "kind": "docstring",
+    "qualname": "PostgresApplicationRegistry.set_issuance_frozen",
+    "lines": 4,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 711,
+    "end": 727,
+    "kind": "docstring",
+    "qualname": "PostgresCredentialRegistry.count_active_for_application_locked",
+    "lines": 17,
+    "tokens": 3,
+    "sentences": 2,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 868,
+    "end": 882,
+    "kind": "docstring",
+    "qualname": "PostgresCredentialRegistry.authenticate",
+    "lines": 15,
+    "tokens": 7,
+    "sentences": 4,
+    "markers": 2,
+    "dates": 1
+   },
+   {
+    "start": 909,
+    "end": 914,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 6,
+    "tokens": 0,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 950,
+    "end": 958,
+    "kind": "comment",
+    "qualname": "InMemoryControlBackend.applications_count_locked",
+    "lines": 9,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 984,
+    "end": 986,
+    "kind": "comment",
+    "qualname": "InMemoryControlBackend.credentials_active_count_locked",
+    "lines": 3,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1024,
+    "end": 1035,
+    "kind": "docstring",
+    "qualname": "InMemoryControlBackend.authenticate_application",
+    "lines": 12,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1051,
+    "end": 1063,
+    "kind": "comment",
+    "qualname": "PostgresControlBackend",
+    "lines": 13,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 1091,
+    "end": 1095,
+    "kind": "docstring",
+    "qualname": "PostgresControlBackend.applications_count_locked",
+    "lines": 5,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1120,
+    "end": 1121,
+    "kind": "docstring",
+    "qualname": "PostgresControlBackend.credentials_active_count_locked",
+    "lines": 2,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1158,
+    "end": 1161,
+    "kind": "docstring",
+    "qualname": "PostgresControlBackend.authenticate_application",
+    "lines": 4,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1168,
+    "end": 1171,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1179,
+    "end": 1183,
+    "kind": "docstring",
+    "qualname": "_reset_confirmation_phrase",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 1189,
+    "end": 1198,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 10,
+    "tokens": 3,
+    "sentences": 2,
+    "markers": 2,
+    "dates": 0
+   },
+   {
+    "start": 1219,
+    "end": 1221,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1225,
+    "end": 1234,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService",
+    "lines": 10,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1247,
+    "end": 1253,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.__init__",
+    "lines": 7,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1255,
+    "end": 1260,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.__init__",
+    "lines": 6,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1266,
+    "end": 1277,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.__init__",
+    "lines": 12,
+    "tokens": 2,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1288,
+    "end": 1296,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.__init__",
+    "lines": 9,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1301,
+    "end": 1305,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService.limits",
+    "lines": 5,
+    "tokens": 1,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1308,
+    "end": 1308,
+    "kind": "comment",
+    "qualname": "ControlPlaneService",
+    "lines": 1,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1311,
+    "end": 1320,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService.check_rate",
+    "lines": 10,
+    "tokens": 0,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1324,
+    "end": 1326,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._check_rate",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1336,
+    "end": 1342,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService.check_audit_rate",
+    "lines": 7,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1346,
+    "end": 1354,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._check_audit_rate",
+    "lines": 9,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1367,
+    "end": 1377,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._deny_audit",
+    "lines": 11,
+    "tokens": 2,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1391,
+    "end": 1400,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._authenticate",
+    "lines": 10,
+    "tokens": 5,
+    "sentences": 2,
+    "markers": 2,
+    "dates": 1
+   },
+   {
+    "start": 1408,
+    "end": 1409,
+    "kind": "comment",
+    "qualname": "ControlPlaneService._authenticate",
+    "lines": 2,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1418,
+    "end": 1451,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._authorize_role",
+    "lines": 34,
+    "tokens": 2,
+    "sentences": 6,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1464,
+    "end": 1482,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._gate_must_rotate",
+    "lines": 19,
+    "tokens": 3,
+    "sentences": 4,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1506,
+    "end": 1512,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._deny_issuance_frozen",
+    "lines": 7,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 1523,
+    "end": 1529,
+    "kind": "comment",
+    "qualname": "ControlPlaneService._validate_application_id",
+    "lines": 7,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1549,
+    "end": 1549,
+    "kind": "comment",
+    "qualname": "ControlPlaneService",
+    "lines": 1,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1560,
+    "end": 1562,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.control_capabilities",
+    "lines": 3,
+    "tokens": 1,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1564,
+    "end": 1576,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.control_capabilities",
+    "lines": 13,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1578,
+    "end": 1582,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.control_capabilities",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1627,
+    "end": 1629,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.control_capabilities",
+    "lines": 3,
+    "tokens": 3,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1634,
+    "end": 1640,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._audit_capability_declaration",
+    "lines": 7,
+    "tokens": 2,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1647,
+    "end": 1653,
+    "kind": "comment",
+    "qualname": "ControlPlaneService._audit_capability_declaration",
+    "lines": 7,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1658,
+    "end": 1660,
+    "kind": "comment",
+    "qualname": "ControlPlaneService._audit_capability_declaration",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1679,
+    "end": 1681,
+    "kind": "comment",
+    "qualname": "ControlPlaneService._audit_capability_declaration",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1687,
+    "end": 1692,
+    "kind": "comment",
+    "qualname": "ControlPlaneService._audit_capability_declaration",
+    "lines": 6,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1709,
+    "end": 1724,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.register_application",
+    "lines": 16,
+    "tokens": 2,
+    "sentences": 3,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 1785,
+    "end": 1788,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.issue_credential",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1794,
+    "end": 1799,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.issue_credential",
+    "lines": 6,
+    "tokens": 1,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1804,
+    "end": 1810,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.issue_credential",
+    "lines": 7,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1816,
+    "end": 1820,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.issue_credential",
+    "lines": 5,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1832,
+    "end": 1838,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.issue_credential",
+    "lines": 7,
+    "tokens": 4,
+    "sentences": 1,
+    "markers": 1,
+    "dates": 1
+   },
+   {
+    "start": 1851,
+    "end": 1853,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.list_credentials",
+    "lines": 3,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1856,
+    "end": 1868,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.list_credentials",
+    "lines": 13,
+    "tokens": 2,
+    "sentences": 4,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 1885,
+    "end": 1894,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.rotate_credential",
+    "lines": 10,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1907,
+    "end": 1908,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.rotate_credential",
+    "lines": 2,
+    "tokens": 2,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1930,
+    "end": 1933,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.revoke_credential",
+    "lines": 4,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1949,
+    "end": 1950,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.revoke_credential",
+    "lines": 2,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 1967,
+    "end": 1979,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.revoke_credential",
+    "lines": 13,
+    "tokens": 2,
+    "sentences": 3,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2052,
+    "end": 2062,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService.audit_query",
+    "lines": 11,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2066,
+    "end": 2073,
+    "kind": "comment",
+    "qualname": "ControlPlaneService.audit_query",
+    "lines": 8,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2097,
+    "end": 2102,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._deny_application_credential_on_audit_query",
+    "lines": 6,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2114,
+    "end": 2118,
+    "kind": "docstring",
+    "qualname": "ControlPlaneService._deny_audit_capability_unsupported",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2130,
+    "end": 2135,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 6,
+    "tokens": 2,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2141,
+    "end": 2145,
+    "kind": "docstring",
+    "qualname": "bootstrap_control_credential",
+    "lines": 5,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2161,
+    "end": 2168,
+    "kind": "docstring",
+    "qualname": "reset_control_credentials",
+    "lines": 8,
+    "tokens": 0,
+    "sentences": 2,
+    "markers": 0,
+    "dates": 0
+   },
+   {
+    "start": 2195,
+    "end": 2204,
+    "kind": "comment",
+    "qualname": "reset_control_credentials",
+    "lines": 10,
+    "tokens": 4,
+    "sentences": 2,
+    "markers": 3,
+    "dates": 1
+   },
+   {
+    "start": 2219,
+    "end": 2244,
+    "kind": "docstring",
+    "qualname": "issue_audit_credential_ceremony",
+    "lines": 26,
+    "tokens": 2,
+    "sentences": 6,
+    "markers": 1,
+    "dates": 0
+   },
+   {
+    "start": 2268,
+    "end": 2272,
+    "kind": "comment",
+    "qualname": "<module>",
+    "lines": 5,
+    "tokens": 1,
+    "sentences": 1,
+    "markers": 0,
+    "dates": 0
+   }
+  ]
+ }
+}

@@ -1,0 +1,163 @@
+{
+ "base": "092e1a1",
+ "parent": "092e1a1",
+ "module": "r2db-api/src/r2db_api/platform_declarations.py",
+ "companion": "docs/code-history/r2db-api/platform_declarations.md",
+ "excluded_symbols": [
+  "HeadroomReport",
+  "PlatformDeclarationError",
+  "PlatformDeclarations",
+  "ProcessCeilings",
+  "RoleTimeoutCatalog",
+  "Surfaces",
+  "_API_ROLE_STORE_COUNT",
+  "_AUDITREADER_ROLE_POOL_FLOOR",
+  "_CONTROLPLANE_ROLE_POOL_FLOOR",
+  "_ROLE_CLASSES",
+  "_count_registered_applications",
+  "_f10_message",
+  "_f11_message",
+  "_f13_message",
+  "_f15_shape_message",
+  "_f15_value_message",
+  "_f16_message",
+  "_f17_message",
+  "_f18_message",
+  "_f19_message",
+  "_f1_message",
+  "_f21_acl_holders",
+  "_f21_message",
+  "_f2_message",
+  "_f3_message",
+  "_f3c_message",
+  "_f4_message",
+  "_f4b_window_message",
+  "_f4b_writer_roles_message",
+  "_f5_message",
+  "_f6_forward_message",
+  "_f6_reverse_message",
+  "_f7_message",
+  "_f8_message",
+  "_f9_message",
+  "_read_connection_headroom_settings",
+  "_roles_with_table_privilege",
+  "_table_owner",
+  "check_application_collations",
+  "check_auditreader_statement_timeout",
+  "check_contract_170_declarations",
+  "check_control_surface_consistency",
+  "check_denial_window_function",
+  "check_max_connections_headroom",
+  "check_request_rate_function",
+  "check_writer_role_timeouts",
+  "derive_visibility_lag_ms",
+  "headroom_lower_bound",
+  "ops_module_hint",
+  "read_declared_role_timeouts",
+  "read_effective_timeouts_ms",
+  "read_platform_declarations",
+  "reject_removed_surface_env",
+  "reject_removed_timeout_env",
+  "require_control_surface_declared",
+  "validate_audit_writer_roles_value",
+  "validate_coalescing_window_value",
+  "validate_process_ceilings_value",
+  "validate_surfaces_value"
+ ],
+ "line_range": [
+  1,
+  1737
+ ],
+ "ch_range": [
+  "CH-0860",
+  "CH-0924"
+ ],
+ "blocks": [
+  {
+   "ch": "CH-0860",
+   "line": 1,
+   "edits": [
+    {
+     "old": "`process_ceilings`, Phase 10 WP-6a, migration `0012`)",
+     "new": "`process_ceilings`, migration `0012`)"
+    },
+    {
+     "old": "Reference-implementation module (supervisor ruling 2026-09-05,\n`{scratchpad}/rulings-q4-wp12-rework.md` sec.1): every name, signature and\n",
+     "new": "Reference-implementation module (`{scratchpad}/rulings-q4-wp12-rework.md`\nsec.1): every name, signature and\n"
+    },
+    {
+     "old": "Peer-local, independently maintained (no cross-peer sharing, requester\nruling 2026-09-03) -- this module's read/validate/derive/check helpers are\n",
+     "new": "Peer-local, independently maintained (no cross-peer sharing) -- this module's\nread/validate/derive/check helpers are\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0861",
+   "line": 75,
+   "edits": [
+    {
+     "old": "Peer-local (no cross-peer sharing, requester\n#: ruling 2026-09-03).\n",
+     "new": "Peer-local (no cross-peer sharing).\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0862",
+   "line": 420,
+   "edits": [
+    {
+     "old": "# F-15 (Phase 10 WP-6a, design D-5(ii)):",
+     "new": "# F-15 (design D-5(ii)):"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0863",
+   "line": 685,
+   "edits": [
+    {
+     "old": "(design D-1(c) amendment 2026-09-05)",
+     "new": "(design D-1(c) amendment)"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0864",
+   "line": 909,
+   "edits": [
+    {
+     "old": "# F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09, following the WP-4e\n# conformance investigation's own finding -- see that WP's report): every\n",
+     "new": "# F-16 (following the WP-4e conformance investigation's own finding -- see\n# that WP's report): every\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0865",
+   "line": 1037,
+   "edits": [
+    {
+     "old": "    design D-3 (5): `role_pool_size(thread_limit)`\n",
+     "new": "    `role_pool_size(thread_limit)`\n"
+    },
+    {
+     "old": "`pool_size * process_ceilings.data`, one store each, Phase 10 WP-8a).",
+     "new": "`pool_size * process_ceilings.data`, one store each)."
+    },
+    {
+     "old": "    Phase 10 WP-4g (supervisor ruling 2026-09-09): `role_classes`/\n",
+     "new": "    Phase 10 WP-4g: `role_classes`/\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0866",
+   "line": 1093,
+   "edits": [
+    {
+     "old": "# M-1 (WP-4 integration review 2026-09-10): a role",
+     "new": "# M-1 (WP-4 integration review): a role"
+    }
+   ]
+  }
+ ]
+}

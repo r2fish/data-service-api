@@ -1,0 +1,219 @@
+{
+ "base": "092e1a1",
+ "parent": "092e1a1",
+ "module": "MitateDB-api/src/mitatedb_api/control_plane.py",
+ "companion": "docs/code-history/MitateDB-api/control_plane.md",
+ "excluded_symbols": [
+  "_take_bound_advisory_lock"
+ ],
+ "line_range": [
+  1,
+  2274
+ ],
+ "ch_range": [
+  "CH-0925",
+  "CH-0989"
+ ],
+ "blocks": [
+  {
+   "ch": "CH-0925",
+   "line": 1,
+   "edits": [
+    {
+     "old": "layer (design v1.2\nR-6/R-7, WP-4).",
+     "new": "layer (design v1.2\nR-6/R-7)."
+    }
+   ]
+  },
+  {
+   "ch": "CH-0926",
+   "line": 96,
+   "edits": [
+    {
+     "old": "# Phase 4 WP-3(b) (design D-5): `audit_query`'s own default/maximum page",
+     "new": "# `audit_query`'s own default/maximum page"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0927",
+   "line": 128,
+   "edits": [
+    {
+     "old": "    \"\"\"R-6 numeric constraints (WP-0 M-5; upper bound removed Phase 5 D-3,\n    Q3 案A, WP-4): `applications`/`credentials_per_application`/`control_\n",
+     "new": "    \"\"\"R-6 numeric constraints (upper bound removed Phase 5 D-3, Q3 案A):\n    `applications`/`credentials_per_application`/`control_\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0928",
+   "line": 346,
+   "edits": [
+    {
+     "old": "        Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,\n        裁定 1): `secret` is the FULL presented bearer -- this method is\n",
+     "new": "        Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `secret` is the FULL\n        presented bearer -- this method is\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0929",
+   "line": 868,
+   "edits": [
+    {
+     "old": "        Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,\n        裁定 1): `secret` is the FULL presented bearer -- splits via\n",
+     "new": "        Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `secret` is the FULL\n        presented bearer -- splits via\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0930",
+   "line": 950,
+   "edits": [
+    {
+     "old": "        # Phase 10 WP-6b (design D-5 (ii) region (iii)): this backend has\n",
+     "new": "        # this backend has\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0931",
+   "line": 984,
+   "edits": [
+    {
+     "old": "        # Phase 10 WP-6b: same reasoning as",
+     "new": "        # same reasoning as"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0932",
+   "line": 1024,
+   "edits": [
+    {
+     "old": "\"\"\"Phase 4 WP-3(b) (design D-5): a SEPARATE probe against the",
+     "new": "\"\"\"a SEPARATE probe against the"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0933",
+   "line": 1051,
+   "edits": [
+    {
+     "old": "# SESSION` (Phase 4 D-6/N-3) are now",
+     "new": "# SESSION` are now"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0934",
+   "line": 1158,
+   "edits": [
+    {
+     "old": "\"\"\"Phase 4 WP-3(b): identical rationale to",
+     "new": "\"\"\"identical rationale to"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0935",
+   "line": 1247,
+   "edits": [
+    {
+     "old": "        # Phase 6 WP-3 (design D-2): single source of truth for this",
+     "new": "        # single source of truth for this"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0936",
+   "line": 1288,
+   "edits": [
+    {
+     "old": "        # Phase 10 WP-6b (design D-5 (ii)): the deployer's own declared",
+     "new": "        # the deployer's own declared"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0937",
+   "line": 1301,
+   "edits": [
+    {
+     "old": "\"\"\"WP-5: a public read accessor",
+     "new": "\"\"\"a public read accessor"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0938",
+   "line": 1391,
+   "edits": [
+    {
+     "old": "\"\"\"Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,\n        裁定 1): `secret` is the FULL presented bearer -- this peer's own\n",
+     "new": "\"\"\"`secret` is the FULL presented bearer -- this peer's own\n"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0939",
+   "line": 1464,
+   "edits": [
+    {
+     "old": "        Phase 3.5 WP-5 (design §4 M-1): a `role=\"audit\"` principal's own",
+     "new": "        a `role=\"audit\"` principal's own"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0940",
+   "line": 1523,
+   "edits": [
+    {
+     "old": "            # 追補 4 O-1: not an identifier the shared",
+     "new": "            # not an identifier the shared"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0941",
+   "line": 1578,
+   "edits": [
+    {
+     "old": "        # design D-3 (4): routed through the SAME 2-strategy helper the",
+     "new": "        # routed through the SAME 2-strategy helper the"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0942",
+   "line": 1832,
+   "edits": [
+    {
+     "old": "        # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):",
+     "new": "        # Phase 6 WP-3 追補 (brief item A):"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0943",
+   "line": 1967,
+   "edits": [
+    {
+     "old": "            # Phase 3.5 WP-5: filtered to `role == \"control\"` rows only --",
+     "new": "            # filtered to `role == \"control\"` rows only --"
+    }
+   ]
+  },
+  {
+   "ch": "CH-0944",
+   "line": 2195,
+   "edits": [
+    {
+     "old": "    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):",
+     "new": "    # Phase 6 WP-3 追補 (brief item A):"
+    }
+   ]
+  }
+ ]
+}
