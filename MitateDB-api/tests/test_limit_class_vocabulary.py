@@ -122,8 +122,8 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 48, (
-        f"expected exactly 48 ResourceLimitError(...) call sites -- cell.py's `_LimitStateHolder` carries 3 for its "
+    assert len(findings) == 46, (
+        f"expected exactly 46 ResourceLimitError(...) call sites -- cell.py's `_LimitStateHolder` carries 3 for its "
         f"host-shared strategies (design docs/design/MULTI_PROCESS_WORKER_V0_1.md D-3 (1)/(2)): `acquire_rate`'s "
         f"PostgreSQL-backed branch (`requests_per_minute`) and `concurrency_slot`/`acquire_concurrency_slot`'s "
         f"slot-directory branches mapping `concurrency_slots.LimitExceeded` (`concurrency`); 42 + 3 = 45, plus R-102's 3 in backend_postgres.py -- `_borrow` (a connection wait that outlasts the request's deadline) and `_acquire_advisory` (a schema-lock or entity-lock wait that outlasts it), both `execution_ms`, and `_budget_exhausted` (the one refusal of a spent budget, raised by `_execute`, `_timeout_ms`, `_borrow`, `request_scope`, `_retime` and the batch's record write), also `execution_ms`; 45 + 3 = 48. The 42 "
@@ -170,6 +170,7 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
         f"SAME `QueryCanceled`/`LockNotAvailable` -> `execution_ms` mapping `create_collection`/`add_field` "
         f"already have, on this new schema-mutating method. 28 + 3 + 1 = 32, 32 + 1 (WP-3c) = 33, "
         f"33 + 2 (WP-6d-i F2) = 35, 35 + 1 (WP-8c) = 36, 36 + 8 (R-71 WP-1) = 44, found {len(findings)}: {findings!r} -- "
+        f"(R-82: the four per-collection catalog readers' own `QueryCanceled`/`LockNotAvailable` mappings are replaced by the two of the shared snapshot path, `_catalog_token` and `_load_collection_snapshot`: 48 - 4 + 2 = 46) -- "
         f"if a new call site was added or removed intentionally, update this count in the same commit"
     )
 

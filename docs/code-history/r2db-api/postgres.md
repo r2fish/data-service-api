@@ -119,6 +119,20 @@ new:
 built anywhere below (and in `postgres_sql.py`) that carries a client-supplied identifier/operator/value
 ```
 
+### correction: 2026-10-04
+
+- reason: R-82 -- `query`, `transact` and `catalog` take the catalog from a process copy (`PostgresCell._catalog`) while the schema revision it was read under is current; only `_load_catalog` reads live every time
+
+old:
+```
+*live* PostgreSQL catalog (`information_schema`), via `_load_catalog`
+```
+
+new:
+```
+PostgreSQL catalog (`information_schema`), read live by `_load_catalog` and kept as a process copy by `_catalog` while the schema revision is unchanged
+```
+
 ## CH-0002
 
 - moved from: `src/r2db_api/postgres.py` (`<module>`)
@@ -219,6 +233,20 @@ index `PostgresCell.apply_schema`'s own `create_index` has created on
 this table (both unique and non-unique -- SI-08/R-5: both count toward
 `schema_objects`), excluding the primary key on `id` (R-1/§2: an
 address, not a domain uniqueness declaration).
+```
+
+### correction: 2026-10-04
+
+- reason: R-82 -- `PostgresCell._catalog` keeps a read-only copy of what `_load_catalog` returned while the schema revision it was read under is current, so the shape is no longer never cached across calls
+
+old:
+```
+(never cached across calls, never trusted as a standing assumption --
+```
+
+new:
+```
+(`_load_catalog` itself caches nothing and trusts nothing as a standing assumption; `PostgresCell._catalog` keeps a read-only copy of its result while the schema revision it was read under is current --
 ```
 
 ## CH-0007

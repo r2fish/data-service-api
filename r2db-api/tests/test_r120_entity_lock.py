@@ -207,6 +207,7 @@ class _LockTrace:
         self.events: list[str] = []
         real_run = postgres_module._run
         real_catalog = PostgresCell._load_catalog
+        real_token = PostgresCell._read_catalog_token
         trace = self
 
         def _run(cursor: Any, statement: Any, params: Any = ()) -> None:
@@ -236,11 +237,22 @@ class _LockTrace:
             return real_catalog(self, *args, **kwargs)
 
         monkeypatch.setattr(postgres_module, "_run", _run)
+        def _token(self: PostgresCell, *args: Any, **kwargs: Any) -> Any:
+            trace.events.append("catalog")
+            return real_token(self, *args, **kwargs)
+
         monkeypatch.setattr(PostgresCell, "_load_catalog", _catalog)
+        # R-82: a data operation reads the catalog through `_catalog`, which reads the (database oid, schema revision) token first and the live catalog only when its copy is not current -- both are catalog reads for the lock order, labelled "catalog" and folded into one by `take`. A schema operation reads the live catalog directly.
+        monkeypatch.setattr(PostgresCell, "_read_catalog_token", _token)
 
     def take(self) -> list[str]:
         events, self.events = self.events, []
-        return events
+        folded: list[str] = []
+        for event in events:
+            if event == "catalog" and folded and folded[-1] == "catalog":
+                continue
+            folded.append(event)
+        return folded
 
 
 def test_every_request_takes_its_advisory_locks_in_the_one_global_order(

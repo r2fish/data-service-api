@@ -856,7 +856,8 @@ def test_postgres_keyed_write_round_trip_count_after_removing_the_redundant_dele
         # (non-replay) keyed write. Measured directly (13), matching J-6's
         # own "measure the delta, do not guess" convention.
         # R-120: +1 over WP-6d's 13 -- `_lock_entities` (the entity lock, SHARED), one `pg_advisory_xact_lock_shared` dispatch for the one entity, between the lookup and the count lock. Measured directly (14).
-        assert counts["n"] == 14, f"keyed write round trips: {counts['n']} (expected 14 after WP-6d's own 2 advisory-lock dispatches and R-120's entity-lock dispatch; 11 before them, per J-6)"
+        # R-82: +1 over R-120's 14 -- the catalog token read (`_read_catalog_token`), one dispatch on this first request of the cell (an empty catalog cache: the live catalog is read as before). Measured directly (15).
+        assert counts["n"] == 15, f"keyed write round trips: {counts['n']} (expected 15 after WP-6d's own 2 advisory-lock dispatches, R-120's entity-lock dispatch and R-82's catalog token read; 11 before them, per J-6)"
 
         counts["n"] = 0
         replay = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1", request_id="rid-rt-2")

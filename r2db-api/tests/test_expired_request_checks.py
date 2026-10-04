@@ -215,6 +215,8 @@ def test_a_mutation_whose_budget_ends_after_the_catalog_read_does_not_send_its_w
     before = _row_count(cell)
     meter = _Meter(cell, monkeypatch)
     request = _Request(meter)
+    # R-82: a warm cache would answer without a live catalog read, so the read this test stops the clock after is made on an empty one.
+    cell._catalog_cache = postgres_module._RevisionKeyedCache()
     _wrap(monkeypatch, cell, "_load_catalog", after=request.expire)
     with pytest.raises(FoundationError) as exc:
         _call(cell, "transact", request)
@@ -303,6 +305,8 @@ def test_a_nested_transaction_is_not_opened_once_the_budget_is_spent(cell: Postg
     drop_phrase = _drop_entity_phrase(cell, "widgets") if site == "_clear_field_constraints" else None
     meter = _Meter(cell, monkeypatch)
     request = _Request(meter)
+    # R-82: `_load_field_constraints` is reached through the live catalog read, which a warm cache would skip.
+    cell._catalog_cache = postgres_module._RevisionKeyedCache()
     _wrap(monkeypatch, cell, site, before=request.expire)
     with pytest.raises(FoundationError) as exc:
         if drop_phrase is not None:

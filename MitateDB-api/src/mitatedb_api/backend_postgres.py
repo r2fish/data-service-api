@@ -8,7 +8,7 @@ and keeps this file's own safety property self-contained rather than
 depending entirely on the caller having done it) and, for every identifier
 that names something ALREADY EXPECTED TO EXIST (a collection/field a
 read/write/filter references), additionally checked against this
-database's own live catalog by ``field_domains`` before it is ever used --
+database's own catalog (a live read, kept as a process copy while the schema revision is unchanged) by ``field_domains`` before it is ever used --
 only *new* names (``create_collection``/``add_field``) skip that second
 stage, for the obvious reason that a name being created cannot already be
 in the catalog; PostgreSQL's own ``DuplicateTable``/``DuplicateColumn``
@@ -40,7 +40,7 @@ review's own two-layer split:
 (i) ``field_domains`` reports each column's own DOMAIN category (`"text"`/
 `"int32"`/`"int64"`/`"float"`, derived from this backend's own `_TYPES`
 mapping via a live `information_schema.columns.data_type` query -- the
-SAME live-catalog query `field_domains` already performs for stage-2
+SAME live-catalog query `field_domains` already answers (from a process copy of its live read while the schema revision is unchanged) for stage-2
 identifier validation, now also answering "what domain does this column
 accept" in the same round trip). `encode_value(value, domain=...)`
 deterministically rejects a value outside its target column's domain
@@ -85,6 +85,8 @@ transaction, and nothing one request set on a connection reaches the next.
 Requests on the same application run concurrently; what PostgreSQL
 serializes for them is named at each lock (``lock_schema``,
 ``lock_entities``, the two idempotency locks).
+
+History: CH-0569
 """
 
 import json
@@ -270,6 +272,10 @@ _ENTITY_LOCK_EXCLUSIVE = (
 # the client's doing; nothing was applied.
 _TRANSIENT_ERRORS = (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure)
 
+_CATALOG_TOKEN_STATEMENT = sql.SQL(
+    "SELECT (SELECT oid FROM pg_database WHERE datname = current_database()), revision FROM {} WHERE id = TRUE"
+).format(sql.Identifier(_SCHEMA_REVISION_TABLE))
+
 # m-1 (independent review correction, extended Q4 phase WP-4; Phase 9
 # WP-3c adds `_IDEMPOTENCY_TABLE`): the full set of this package's own
 # bookkeeping table names `schema_count()` excludes from its
@@ -334,6 +340,35 @@ def _execute(cursor, statement, params=()):
     return cursor
 
 
+class _RevisionKeyedCache:
+    """Process-local copy of one application's catalog reads, valid for ONE token: the database's own `pg_database.oid` together with its schema revision, read from the database inside the request's own transaction (docs/work-orders/WORK_ORDER_R82_SCHEMA_CACHE_V1.md D-1, D-2).
+
+    `get(token, key)` answers only when `token` is the token the contents were stored under. `put(token, key, value)` under any other token discards every value stored under the previous token and takes that token over, whatever its revision or oid, and a value is returned only for the token it was read under. The token cannot tell a database written back in place (its revision returns to a value it had before) from the database the contents were read under, so the process must be restarted after such a write-back (docs/work-orders/WORK_ORDER_R82_SCHEMA_CACHE_V1.md D-9). `None` never matches (a database whose revision row is missing has no token and is read live every time).
+
+    One instance per backend object, set in its constructor -- never a class attribute or a module variable -- so two applications never share one. The lock guards the two fields and is held for dictionary operations only.
+
+    Each peer carries its own copy, pinned equal by the `_RevisionKeyedCache` row of `_ISOMORPHIC_TARGETS` (`tests/test_audit_query.py`). Measured by `tools/dev/mutate.py`, each mutation turning its own test red on both peers: `get` always answering `None` turns `test_a_warm_cache_serves_query_transact_and_catalog_from_the_token_alone` (r2db-api) and `test_a_warm_cache_serves_a_read_and_a_write_from_the_token_alone` (MitateDB-api) red; `get` not comparing the token turns `test_a_definition_another_cell_changed_is_used_by_the_next_request` and `test_a_definition_another_backend_changed_is_used_by_the_next_request` red; keeping the previous values when `put` takes another token over (`self._values = {}` removed) turns `test_a_put_under_another_token_discards_what_the_previous_token_stored` red; one word changed on one peer turns `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` red.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._token = None
+        self._values = {}
+
+    def get(self, token, key):
+        with self._lock:
+            if token is None or token != self._token:
+                return None
+            return self._values.get(key)
+
+    def put(self, token, key, value):
+        with self._lock:
+            if token != self._token:
+                self._token = token
+                self._values = {}
+            self._values[key] = value
+
+
 class PostgresBackend:
     """One application's PostgreSQL storage: a bounded pool per role.
 
@@ -388,6 +423,7 @@ class PostgresBackend:
         # did not get the lock and the call had to block for it.
         self._schema_lock_stats_lock = threading.Lock()
         self._schema_lock_stats = {"acquire_count": 0, "wait_count": 0, "wait_total_ms": 0.0, "wait_max_ms": 0.0}
+        self._catalog_cache = _RevisionKeyedCache()
 
     def verify_platform_upgrades(self):
         """F-12 (design §3.8): borrows one runtime connection, checks that
@@ -635,6 +671,7 @@ class PostgresBackend:
                         self._schema_lock_stats["wait_total_ms"] += waited_ms
                         if waited_ms > self._schema_lock_stats["wait_max_ms"]:
                             self._schema_lock_stats["wait_max_ms"] = waited_ms
+        scope.catalog_token = None
         if count:
             with self._schema_lock_stats_lock:
                 self._schema_lock_stats["acquire_count"] += 1
@@ -684,7 +721,7 @@ class PostgresBackend:
         return count
 
     def field_domains(self, collection, *, scope):
-        """Live catalog lookup (R-2 stage 2) doubling as the value-domain
+        """Catalog lookup (R-2 stage 2; a live read, kept as a process copy while the schema revision is unchanged) doubling as the value-domain
         source B-1 (i) needs: for every column of `collection`, this
         database's own `information_schema.columns.data_type` is mapped
         back to a domain category `encode_value` can validate a bound
@@ -703,19 +740,12 @@ class PostgresBackend:
         collection`/`add_field` created after this WP -- see
         `create_collection`'s own registry-write below) degrades to
         `"string"`, never a crash.
+
+        History: CH-0568
         """
         validate_identifier(collection, "entity")
         try:
-            with scope.developer.cursor() as cur:
-                _execute(cur, sql.SQL(
-                    "SELECT column_name, data_type FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = %s "
-                    "ORDER BY ordinal_position"
-                ), [collection])
-                rows = cur.fetchall()
-                declared = self._field_types_locked(cur, collection) if rows else {}
-        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+            domains, _types, _constraints = self._collection_snapshot(collection, scope=scope)
         except psycopg.errors.UndefinedTable as exc:
             # WP-3 差し戻し 最終ラウンド (裁定 6, review F9):
             # `_mdb_field_types` missing entirely means
@@ -734,28 +764,85 @@ class PostgresBackend:
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
+        return dict(domains)
+
+    def _catalog_token(self, scope):
+        """The cache token `(pg_database.oid of the current database, _mdb_schema_revision.revision)`, one statement on the scope's developer connection (the runtime role has no privilege on the revision table). It is remembered on the scope (`RequestScope.catalog_token`) so one request reads it once, and `_acquire_advisory` forgets it whenever a lock is taken: a read made before the lock is not the one a schema operation's commit during the wait leaves current. `()` when the revision row is missing; the callers then read live and keep nothing. The oid makes a database dropped and created again under the same name a different token. Measured by `tools/dev/mutate.py`: a statement that returns the constant `0` for the oid turns `test_each_backend_keeps_its_own_cache_and_the_token_is_the_databases_oid_and_revision` red, and not forgetting the token in `_acquire_advisory` turns `test_a_request_that_took_its_entity_lock_after_a_catalog_read_validates_against_what_was_committed_meanwhile` red."""
+        token = scope.catalog_token
+        if token is None:
+            try:
+                with scope.developer.cursor() as cur:
+                    _execute(cur, _CATALOG_TOKEN_STATEMENT)
+                    row = cur.fetchone()
+            except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+                raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+            except _TRANSIENT_ERRORS as exc:
+                raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
+            except psycopg.Error as exc:
+                raise ValidationError("storage backend rejected the request") from exc
+            token = (int(row[0]), int(row[1])) if row is not None else ()
+            scope.catalog_token = token
+        return token
+
+    def _collection_snapshot(self, collection, *, scope):
+        """`(domains, declared types, constraints)` of one collection: this backend's copy when the scope's token is the one the copy was stored under, else `_load_collection_snapshot`'s live read, stored under that token. The token is read before the live catalog, never after it (READ COMMITTED: the other order can store an older snapshot under a newer token). A `schema`-kind scope neither reads the copy nor stores into it: its reads can see its own uncommitted DDL (a dry run's included) and a snapshot of that must not outlive the transaction; `test_a_dry_run_and_a_schema_kind_scope_leave_the_cache_as_it_was` turns red without the exclusion. The caller gets the stored objects and must copy before handing them on."""
+        token = () if scope.kind == "schema" else self._catalog_token(scope)
+        if token:
+            cached = self._catalog_cache.get(token, collection)
+            if cached is not None:
+                return cached
+        snapshot = self._load_collection_snapshot(collection, scope=scope)
+        if token:
+            self._catalog_cache.put(token, collection, snapshot)
+        return snapshot
+
+    def _load_collection_snapshot(self, collection, *, scope):
+        """One collection's live catalog read: the column list of `information_schema.columns`, then (when the collection exists) every row of the declared-field-type registry with its `enum_json` and `nullable` columns -- two statements for what `field_domains`, `field_types`, `field_constraints` and `field_types_and_constraints` used to read separately, each reader keeping the exception mapping it had: a timeout, a deadlock or serialization failure and any other database error are mapped here, a missing registry (`UndefinedTable`) is left to the reader that called, which maps it to `StorageConfigurationError` itself. A collection with no columns raises `NotFoundError` and is not stored. The registry's `enum_json`/`nullable` columns come from upgrade 0009, which every database a process serves has applied (F-12)."""
+        try:
+            with scope.developer.cursor() as cur:
+                _execute(cur, sql.SQL(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = %s "
+                    "ORDER BY ordinal_position"
+                ), [collection])
+                rows = cur.fetchall()
+                if rows:
+                    _execute(cur, sql.SQL("SELECT field, declared_type, enum_json, nullable FROM {} WHERE entity = %s")
+                              .format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
+                    registry_rows = cur.fetchall()
+                else:
+                    registry_rows = []
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        except psycopg.errors.UndefinedTable:
+            # the four readers map a missing registry themselves, each at its own entry
+            raise
         except _TRANSIENT_ERRORS as exc:
             raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
         except psycopg.Error as exc:
             raise ValidationError("storage backend rejected the request") from exc
         if not rows:
             raise NotFoundError("collection not found")
+        declared = {field: declared_type for field, declared_type, _enum_json, _nullable in registry_rows}
         domains = {}
         for name, data_type in rows:
             if data_type in _DOMAIN_BY_DATA_TYPE:
                 domains[name] = _DOMAIN_BY_DATA_TYPE[data_type]
             else:
                 domains[name] = _TEXT_DOMAIN_BY_DECLARED_TYPE.get(declared.get(name), "string")
-        return domains
+        constraints = {
+            field: self._decode_constraint_row(enum_json, nullable_value)
+            for field, _declared_type, enum_json, nullable_value in registry_rows
+        }
+        return domains, declared, constraints
 
-    def _field_types_locked(self, cur, collection):
-        """Reads `_mdb_field_types` over an ALREADY-OPEN cursor (shares
-        the caller's own transaction/commit-or-rollback, `field_domains`/
-        `field_types` alike -- never a second, independent connection
-        round trip)."""
-        _execute(cur, sql.SQL("SELECT field, declared_type FROM {} WHERE entity = %s")
-                  .format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
-        return {field: declared_type for field, declared_type in cur.fetchall()}
+    @staticmethod
+    def _copy_constraints(constraints):
+        """A copy of a constraints snapshot a caller may write to: each field's dict and its `enum` list are new objects, so the stored snapshot stays as it was read. Measured by `tools/dev/mutate.py`: handing out the stored entries (`copied[field] = entry`) turns `test_writing_to_what_a_catalog_read_returned_does_not_change_the_next_read` red."""
+        copied = {}
+        for field, entry in constraints.items():
+            copied[field] = {key: (list(value) if key == "enum" else value) for key, value in entry.items()}
+        return copied
 
     def field_types(self, collection, *, scope):
         """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.
@@ -766,15 +853,7 @@ class PostgresBackend:
         no columns at all cannot exist on this backend)."""
         validate_identifier(collection, "entity")
         try:
-            with scope.developer.cursor() as cur:
-                _execute(cur, sql.SQL(
-                    "SELECT count(*) FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = %s"
-                ), [collection])
-                (exists,) = cur.fetchone()
-                declared = self._field_types_locked(cur, collection) if exists else {}
-        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+            _domains, types, _constraints = self._collection_snapshot(collection, scope=scope)
         except psycopg.errors.UndefinedTable as exc:
             # See `field_domains`'s own identical rework above -- same
             # operator/deployment-fault attribution, same class.
@@ -782,13 +861,7 @@ class PostgresBackend:
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
-        except _TRANSIENT_ERRORS as exc:
-            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
-        except psycopg.Error as exc:
-            raise ValidationError("storage backend rejected the request") from exc
-        if not exists:
-            raise NotFoundError("collection not found")
-        return declared
+        return dict(types)
 
     def all_field_types(self, *, scope):
         """Phase 6 WP-3 (design D-3): see `backend_sqlite.SQLiteBackend.
@@ -831,17 +904,6 @@ class PostgresBackend:
             constraints["enum"] = json.loads(enum_json)
         return constraints
 
-    def _field_constraints_locked(self, cur, collection):
-        """Reads `_mdb_field_types.enum_json`/`.nullable` over an
-        ALREADY-OPEN cursor -- same sharing discipline as
-        `_field_types_locked` immediately above."""
-        _execute(cur, sql.SQL("SELECT field, enum_json, nullable FROM {} WHERE entity = %s")
-                  .format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
-        return {
-            field: self._decode_constraint_row(enum_json, nullable_value)
-            for field, enum_json, nullable_value in cur.fetchall()
-        }
-
     def field_constraints(self, collection, *, scope):
         """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend.
         StorageBackend.field_constraints`'s own contract -- the single
@@ -850,27 +912,13 @@ class PostgresBackend:
         Existence-checked the same way `field_types` is."""
         validate_identifier(collection, "entity")
         try:
-            with scope.developer.cursor() as cur:
-                _execute(cur, sql.SQL(
-                    "SELECT count(*) FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = %s"
-                ), [collection])
-                (exists,) = cur.fetchone()
-                declared = self._field_constraints_locked(cur, collection) if exists else {}
-        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+            _domains, _types, constraints = self._collection_snapshot(collection, scope=scope)
         except psycopg.errors.UndefinedTable as exc:
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
-        except _TRANSIENT_ERRORS as exc:
-            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
-        except psycopg.Error as exc:
-            raise ValidationError("storage backend rejected the request") from exc
-        if not exists:
-            raise NotFoundError("collection not found")
-        return declared
+        return self._copy_constraints(constraints)
 
     def _field_types_and_constraints_locked(self, cur, collection):
         """Code review §2 C / 監督裁定 C: `field_types`'s own
@@ -896,8 +944,8 @@ class PostgresBackend:
         """Code review §2 C / 監督裁定 C (P-8/G-4 performance
         finding): see `backend.StorageBackend.field_types_and_
         constraints`'s own contract -- `field_types` and `field_
-        constraints` merged into the single query `_field_types_and_
-        constraints_locked` above makes. `cell.py::_prepare_values` (and,
+        constraints` answered from the collection snapshot `_collection_snapshot` returns (the DDL methods read the single query `_field_types_and_
+        constraints_locked` above makes). `cell.py::_prepare_values` (and,
         via the pair it returns, `_check_missing_required_fields`) is
         the sole caller -- every other reader of `field_types`/`field_
         constraints` keeps calling one of those two on their own,
@@ -907,27 +955,13 @@ class PostgresBackend:
         """
         validate_identifier(collection, "entity")
         try:
-            with scope.developer.cursor() as cur:
-                _execute(cur, sql.SQL(
-                    "SELECT count(*) FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = %s"
-                ), [collection])
-                (exists,) = cur.fetchone()
-                types, constraints = self._field_types_and_constraints_locked(cur, collection) if exists else ({}, {})
-        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
-            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+            _domains, types, constraints = self._collection_snapshot(collection, scope=scope)
         except psycopg.errors.UndefinedTable as exc:
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
             ) from exc
-        except _TRANSIENT_ERRORS as exc:
-            raise StorageTransientError("the storage backend could not serve this request, retry it") from exc
-        except psycopg.Error as exc:
-            raise ValidationError("storage backend rejected the request") from exc
-        if not exists:
-            raise NotFoundError("collection not found")
-        return types, constraints
+        return dict(types), self._copy_constraints(constraints)
 
     def all_field_constraints(self, *, scope):
         """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend_sqlite.

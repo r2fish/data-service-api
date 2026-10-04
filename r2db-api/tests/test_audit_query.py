@@ -2444,7 +2444,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_208_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_209_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -3074,10 +3074,15 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "wire_entry"),
     ("conformance/conformance_adapter_r2db.py", "conformance/conformance_adapter_mitatedb.py", "wire_entry"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_wire_transport_factory"),
+    # R-82: the process-local cache keyed by (database oid, schema revision) that both
+    # peers keep their catalog reads in. Written twice, independently (one class in each
+    # peer's PostgreSQL module, no shared import), so the pin below is what keeps the two
+    # bodies the same; verified normalize-and-diff equal before adding.
+    ("src/r2db_api/postgres.py", "src/mitatedb_api/backend_postgres.py", "_RevisionKeyedCache"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_208_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_209_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -3179,6 +3184,10 @@ def test_isomorphic_target_table_is_pinned_to_its_current_208_rows() -> None:
     Widened a nineteenth time by the wire entry (`wire_entry` on the http pair
     and on the in-process pair, and the http pair's `_wire_transport_factory`,
     the last 3 rows), each verified normalize-and-diff equal before adding.
+    Widened a twentieth time by R-82: `_RevisionKeyedCache` (the cache both
+    peers keep their catalog reads in, keyed by the database's oid and its
+    schema revision; `postgres.py` on r2db-api, `backend_postgres.py` on this
+    peer, the last row), verified normalize-and-diff equal before adding.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -3202,7 +3211,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_208_rows() -> None:
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_208_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_209_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3517,8 +3526,9 @@ def test_isomorphic_target_table_is_pinned_to_its_current_208_rows() -> None:
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "wire_entry"),
         ("conformance/conformance_adapter_r2db.py", "conformance/conformance_adapter_mitatedb.py", "wire_entry"),
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_wire_transport_factory"),
+        ("src/r2db_api/postgres.py", "src/mitatedb_api/backend_postgres.py", "_RevisionKeyedCache"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 208
+    assert len(_ISOMORPHIC_TARGETS) == 209
 
 
 _ISOMORPHIC_PARSE_CACHE: dict[Path, tuple[str, _ast.Module]] = {}

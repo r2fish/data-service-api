@@ -3264,6 +3264,11 @@ def test_migration_0006_backfills_declared_types_for_a_pre_1_6_0_style_database(
             conn.close()
         assert declared_type == "object"
 
+        # R-82: the backend's catalog loader reads the registry's `enum_json`/`nullable` columns together with `declared_type` (one statement for every `field_*` read), so the `0009` retrofit of those two columns is applied before the read-back below -- a database a process serves has every upgrade applied (F-12).
+        rewritten_0009 = rewritten_dir / "0009_field_constraints_upgrade.sql"
+        rewritten_0009.write_text((MIGRATIONS_DIR / "0009_field_constraints_upgrade.sql").read_text().replace("mitatedb", platform.prefix))
+        _run_psql(platform.provision_dsn, rewritten_0009, {"app_id": "upgrade_probe"})
+
         # And the backend can actually read it back through the normal API.
         cell = make_cell(app)
         try:

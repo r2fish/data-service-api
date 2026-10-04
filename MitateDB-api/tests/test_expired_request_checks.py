@@ -247,6 +247,8 @@ def _idle_deadlines(backend: PostgresBackend) -> list[Any]:
 
 def test_a_query_whose_budget_ends_after_the_catalog_read_does_not_send_the_select(cell: Any, monkeypatch: pytest.MonkeyPatch, clock: _Clock) -> None:
     trace = _Trace(monkeypatch, clock)
+    # R-82: a warm cache would answer without a live catalog read, so the read this test stops the clock after is made on an empty one.
+    cell.cell._backend._catalog_cache = bp_module._RevisionKeyedCache()
     trace.expire_after('FROM "_mdb_field_types"')
     with pytest.raises(ResourceLimitError) as exc:
         cell.runtime.read("widgets")

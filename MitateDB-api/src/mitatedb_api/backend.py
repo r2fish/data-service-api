@@ -85,7 +85,7 @@ class RequestScope:
     backend whose scope already serializes the whole request implements
     both as no-ops."""
 
-    __slots__ = ("kind", "deadline", "main", "developer", "_backend")
+    __slots__ = ("kind", "deadline", "main", "developer", "catalog_token", "_backend")
 
     def __init__(self, kind, deadline, *, backend, main=None, developer=None):
         if kind not in SCOPE_KINDS:
@@ -94,6 +94,7 @@ class RequestScope:
         self.deadline = deadline
         self.main = main
         self.developer = developer
+        self.catalog_token = None
         self._backend = backend
 
     def lock_schema(self):
