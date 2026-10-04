@@ -1,5 +1,6 @@
 # 作業指示書 — コード内経緯コメントの移動 変更セット 0 / 1
 
+- **v1.14 (2026-10-04)**: §16 に変更セット 7 (MitateDB `cell.py`。WP-7a・WP-7b に分ける) の manifest と、監督裁定 Y7-1〜Y7-16 (§16.5。依頼者の方針 2026-10-03 により推奨で進め、事後確認を取る) を追記した。設計レビュー (観点 A / B の並列 1 回と再確認 1 回) の指摘は全件反映した。既存の節は書き換えていない。
 - **v1.13 (2026-09-16)**: §15 の末尾に変更セット 0i の統合の【追記】(統合のコミット、コミット後の `tools/tests`、ゲートの行) を足した。既存の節は書き換えていない。
 - **v1.12 (2026-09-15)**: §15.1 の末尾に訂正註を足した (R-37 WP-3f の監督裁定 W3-18 による `test_q4_real_repo_postgres_unchanged_is_green` の退役と、着手条件 3 の再確認)。既存の節は書き換えていない。
 - **v1.11 (2026-09-15)**: §15 に変更セット 0i (チェッカーの保護参照の拡張、手元のコピーを検査するテストの置き換え、遡った確認の塊の戻し) の manifest を追記し、疑義 Z0i-1〜Z0i-7 と監督裁定を §15.5 に置いた。設計レビュー 1 を反映した。既存の節は書き換えていない。
@@ -3652,3 +3653,885 @@ SUMMARY changed_blocks=52 restored_ok=52 exceptions=3 fail=0
   - `tools/tests`: `420 passed`。コミットした HEAD で `test_0f_both_peers_all_src_rev_vs_itself_is_green` が緑である。これが完了条件 13 (裁定 M4) の緑側である。赤側 (コミット前) はちょうど 52 CH-ID を覆った (§15.4)。
 - root gate (コミット前の最終の作業ツリー): `3399 passed, 2 subtests passed`、`judge=PASS`、pg_database / pg_roles の diff 0 (§15.4 の表の行と同じ)。
 - 記録: 設計 (`docs/design/CODE_COMMENT_PROVENANCE_V1.md`) v0.19 §10.6、roadmap (`docs/design/ROADMAP_POST_PHASE7_V1.md`) v1.40 の R-22 行。
+
+## 16. 変更セット 7 — MitateDB `cell.py`
+
+正本設計は v0.28 (§3、§4、§5、§6、§8、§9 (0d〜0h)、§9.2、§10.4〜§10.6)。行番号と実測は `9a65cbc` の値 (`cell.py` の blob は `<BASE>` と同じであることを着手条件 2 で確かめる)。共通の規則は §13.3・§14.3 を指し、ここには差分だけを書く。WP は 2 つ (Y7-1) で、順に行う。
+
+### 16.1 着手条件
+
+| # | 条件 |
+|---|---|
+| 1 | §14.5 R6-4 の残りの日付除去 (設計 §10.8) が main に統合されている。その main の先頭を WP-7a の基点 `<BASE>` とする |
+| 2 | `MitateDB-api/src/mitatedb_api/cell.py` の blob が `9a65cbc` と `<BASE>` で同じ (`git rev-parse 9a65cbc:<path> <BASE>:<path>`)。違えば §16.2 の実測、境界の行、spec の `line_range` を `<BASE>` で取り直す |
+| 3 | 着手時に、並行 branch・worktree (`git worktree list`、`tools/dev/ledger.py --open` の進行中の行) と台帳 R-37 の残件 (台帳 R-37 で `cell.py` から出たファイルの後続) が、本節の触るファイル (`cell.py`、`docs/code-history/MitateDB-api/cell.md`、`security/CONTROL_MAPPING.md`) に触れないことを取り直す。重なりがあれば実装前に監督へ上げる (§1.2 の 16) |
+| 4 | 着手時に設計 §5 (b) の grep と §16.2 の静的テストの注記を取り直す |
+| 5 | WP-7b は WP-7a の commit・完了ゲート・main への merge の後に着手する。基点 `<BASE_B>` は WP-7a 統合後の main。境界の行 (`ApplicationCell.insert` の `def` 行) と WP-7b の実測は `<BASE_B>` で取り直す |
+
+### 16.2 選定と実測 (`9a65cbc`)
+
+境界は `ApplicationCell.insert` の `def` 行 (`9a65cbc` では L1954)。塊は開始行で振り分ける (境界をまたぐ塊は 0)。数え方は §13.2・§14.2 と同じ (経緯トークンは §2.3 末尾、目印は設計 §3 の叙述の目印、参照の語は §13.2 の正規表現、安全 / 保護参照 / 位置は §14.2 の正規表現と母集団)。計測は `$SP/cs7_measure.py` (`check_comment_provenance` を import して `9a65cbc` の blob に当てた)。
+
+| 項目 | WP-7a (L1–L1953) | WP-7b (L1954–L3911) | 計 |
+|---|---|---|---|
+| 塊 (`extract_all_blocks`) | — | — | 211 (docstring 56 / comment 155)、3,911 行 |
+| 対象外: 登録 helper の中 | 4 (L83-116、L122-134、L140-163、L169-176。すべて docstring、79 行) | 0 | 4 |
+| 対象外: 既存の CH-ID | 2 (L596 CH-0548、L773 CH-0566) | 0 | 2 |
+| **対象の塊** | **102** (docstring 29 / comment 73、1,126 行) | **103** (docstring 21 / comment 82、1,197 行) | **205** |
+| 経緯トークン (範囲の行全体) | 199 | 216 | 415 |
+| うち対象の塊の中 / トークンを含む対象の塊 | 185 / 69 塊 (948 行) | 216 / 73 塊 (998 行) | 401 / 142 塊 (全塊では 146 塊 / 2,025 行) |
+| 日付を含む行 | 10 | 15 | 25 |
+| 目印一覧に当たる文 / 塊 (対象の塊だけ) | 42 / 35 | 53 / 34 | 95 / 69 |
+| 塊をまたぐ参照の語を含む文 | 66 | 98 | 164 |
+| 経緯トークンを含む文のうち 安全 / 保護参照 / 位置 | 21 / 27 / 48 文 (53 塊) | 25 / 28 / 72 文 (59 塊) | — |
+| `#:` の行 | 12 (L71-73、L76-78、L954-959) | 8 (L2003-2010) | 20 |
+| 10 行以上の塊 (CH なし、設計 §10.3 の数え方) | 32 塊 / 749 行 (最長 70) | 46 塊 / 883 行 (最長 53) | 78 / 1,632 (登録 helper を含む全塊で 81 / 1,703) |
+
+- `--register`: §14.5 R6-4 の残りの日付除去を当てた作業ツリーで `comment provenance register OK: 95 files scanned, 434 CH-IDs` (起草時の実測)。`9a65cbc` では 431 (監督実測)。
+- `--base 9a65cbc MitateDB-api/src/mitatedb_api/cell.py` (無変更): `comment provenance OK: 211 blocks checked` (exit 0)。
+- 受け皿は既存の `docs/code-history/MitateDB-api/cell.md` (`9a65cbc` で 2 節) に追記する (Y7-6)。
+
+**10 行以上の塊**
+
+- WP-7a: L1-21、L181-190、L201-261、L285-314、L321-360、L413-423、L452-474、L526-535、L554-563、L565-578、L616-685、L751-762、L832-842、L851-912、L963-980、L997-1022、L1042-1061、L1070-1079、L1087-1099、L1127-1140、L1177-1188、L1253-1269、L1273-1282、L1322-1347、L1375-1417、L1554-1563、L1593-1603、L1612-1658、L1676-1685、L1845-1886、L1892-1908、L1913-1930
+- WP-7b: L1963-1992、L2027-2054、L2068-2079、L2140-2154、L2165-2178、L2195-2217、L2235-2244、L2277-2306、L2407-2443、L2461-2470、L2549-2574、L2585-2630、L2640-2656、L2665-2678、L2690-2702、L2730-2739、L2754-2768、L2786-2798、L2852-2866、L2870-2894、L2897-2909、L2924-2976、L2986-2998、L3001-3010、L3017-3039、L3097-3109、L3122-3135、L3139-3148、L3191-3222、L3254-3274、L3303-3321、L3342-3356、L3361-3373、L3382-3405、L3486-3496、L3529-3538、L3541-3555、L3624-3641、L3651-3661、L3667-3686、L3720-3745、L3751-3772、L3779-3790、L3821-3837、L3847-3856、L3866-3900
+
+**目印一覧に当たる文を持つ塊** (文ごとの目印は §16.4 B に実装担当が展開する。多いのは `this WP` の類、`監督裁定`、`used to`、`no longer`、`pre-WP`)
+
+- WP-7a (42 文 / 35 塊): L1-21、L285-314、L321-360、L413-423、L526-535、L537-545、L554-563、L565-578、L616-685、L832-842、L851-912、L1029-1036、L1042-1061、L1087-1099、L1127-1140、L1150-1154、L1177-1188、L1229-1235、L1253-1269、L1273-1282、L1322-1347、L1349-1352、L1375-1417、L1424-1429、L1446-1453、L1503-1510、L1554-1563、L1593-1603、L1612-1658、L1676-1685、L1695-1701、L1752-1760、L1798-1806、L1845-1886、L1892-1908
+- WP-7b (53 文 / 34 塊): L1963-1992、L2027-2054、L2068-2079、L2195-2217、L2220-2227、L2261-2265、L2307-2313、L2407-2443、L2479-2487、L2585-2630、L2665-2678、L2690-2702、L2754-2768、L2802-2810、L2824-2827、L2852-2866、L2924-2976、L3017-3039、L3122-3135、L3191-3222、L3254-3274、L3303-3321、L3342-3356、L3382-3405、L3529-3538、L3541-3555、L3624-3641、L3651-3661、L3667-3686、L3720-3745、L3751-3772、L3821-3837、L3847-3856、L3866-3900
+
+**経緯と同じ文にある安全上の理由 (先に一覧にする)**: 経緯トークンを含む文のうち §14.2 の安全の語に当たる文を持つ塊 (39 塊)。文は消さない (Y7-3 (c))。経緯トークンだけの除去は Y7-3 (b) の条件で許す。保護参照・位置の語だけの塊 (WP-7a 34 塊、WP-7b 39 塊) は §16.4 C に実装担当が同じ正規表現で展開する。
+
+| WP | 塊 (語) |
+|---|---|
+| 7a | L1-21 (identifier)、L201-261 (commits)、L526-535 (credential)、L708-712 (commit)、L832-842 (SI-14、commit、fail-closed)、L943-949 (identifier)、L1087-1099 (IDENTIFIER、injection)、L1177-1188 (commits)、L1285-1290 (commit、fail-closed)、L1295-1301 (committed)、L1375-1417 (commit)、L1566-1568 (commit、fail-closed)、L1573-1579 (committed)、L1593-1603 (committed)、L1612-1658 (commits、identifier、transaction)、L1809-1811 (commit、fail-closed)、L1816-1822 (committed)、L1845-1886 (SI-08、credential)、L1913-1930 (commit) |
+| 7b | L2334-2340 (identifier)、L2391-2394 (commit、fail-closed)、L2585-2630 (atomically)、L2631-2637 (commit)、L2730-2739 (SI-14、committed)、L2802-2810 (transaction)、L2829-2837 (commit、rollback)、L2852-2866 (commit、fail-closed、rollback)、L2897-2909 (commit、transaction)、L2924-2976 (atomicity、rollback)、L2986-2998 (commit、rollback、transactional)、L3001-3010 (commit)、L3017-3039 (commit)、L3303-3321 (IDENTIFIER、injection)、L3529-3538 (credential)、L3541-3555 (SI-00、credential)、L3651-3661 (commit)、L3720-3745 (commit)、L3821-3837 (commit)、L3866-3900 (commit) |
+
+**塊をまたぐ参照先** (両 peer の `src/`・`tests/`・`conformance/`、`conformance-tests/`、`security/`、README を grep した。参照先の文は「残す」と固定し、§16.4 の参照先一覧に載せる。「確定」は §16.4 で塊を確定する行) 設計レビューで、§13.2 の正規表現に当たらない参照 (`'s identical comment`、`<名前> below`) の漏れが 2 件見つかり足した。実装担当は着手時に、この 2 つの形を足した grep で WP の範囲を取り直し、見つけた行を §16.4 の参照先一覧に足す。
+
+| 参照元 | 参照の語 | 参照先の塊 (WP) |
+|---|---|---|
+| `cell.py` L616-685 | each of those three methods' own docstrings | 3 method の docstring (7a。確定) |
+| `cell.py` L1177-1188 / L1273-1282 | plan-precondition block's own historical comment below / that hoisted block's own comment | L1253-1269 / L1177-1188 (7a) |
+| `cell.py` L1229-1235、L1492-1495、L1738-1741 | `_idempotency_check`'s own docstring | L851-912 (7a) |
+| `cell.py` L1424-1429、L1457-1461、L1544-1550、L1705-1709、L1789-1794 (7a)、L2786-2798 (7b) | `create_collection`'s own identical comment (module-level H-4) | L1029-1036・L1042-1061 の範囲 (7a。確定) |
+| `cell.py` L1554-1563、L1798-1806 | that hoisted block's own comment | 同じ method の hoist の塊 (7a。確定) |
+| `cell.py` L1845-1886 | `ApplicationRuntime._post_schema_revision`'s own docstring | L3624-3641 (**7b**。7a から指される) |
+| `cell.py` L1845-1886 | see `_schema_revision_uncounted` below … for why that separate, ungated internal accessor exists | L1892-1908 (7a) |
+| `cell.py` L1913-1930 | `schema_revision`'s own docstring immediately above | L1845-1886 (7a) |
+| `cell.py` L2479-2487 | `_check_missing_required_fields`'s own docstring | L3191-3222 (7b) |
+| `cell.py` L2924-2976 | this method's own docstring | L2585-2630 (7b) |
+| `cell.py` L3694-3699 | `ApplicationCell.read_page`, whose own docstring | L2027-2054 (7b) |
+| `cell.py` L3720-3745 | `ApplicationCell.transact`'s own identical-purpose comment | `transact` の中の塊 (7b。確定) |
+| `cell.py` L3720-3745、L3821-3837 | `ApplicationRuntime.read`'s identical comment (for the full reasoning) | L3651-3661 (7b) |
+| `cell.py` L3751-3772 | `ApplicationCell.catalog`/`.schema_revision` (those methods' own docstrings) | L1913-1930・L1845-1886 (**7a**。7b から指される) |
+| `cell.py` L3847-3856、L3902-3906 | `create_entity`'s own identical comment | L3821-3837 (7b) |
+| `cell.py` L3866-3900 | `alter_field`'s own docstring on `ApplicationCell` | L1612-1658 (**7a**。7b から指される) |
+| MitateDB `conformance/conformance_adapter_mitatedb.py:424-426` | `ApplicationCell._limit_gate`'s own docstring lists every caller | L616-685 (7a) |
+| 同 `:1333-1334` | `ApplicationCell.catalog`'s own … comment | L1913-1930 又は L1939-1945 (7a。確定) |
+| MitateDB `conformance/conformance_adapter_mitatedb_http.py:2395-2396` | `cell.py`'s own comment on those two methods (`read`/`catalog`) | 7a / 7b (確定) |
+| MitateDB `src/mitatedb_api/backend.py:200` | `cell.py`'s own delete-confirmation-phrase comment | L1845-1886 (7a)、又は `request_vocabulary.py` の `_DELETE_CONSEQUENCE` の注記 (`cell.py` から出たもの。触らない)。確定 |
+| MitateDB `src/mitatedb_api/backend_sqlite.py:431`、`tests/test_foundation.py:1045` | `add_field`'s own comment (at its call site) | `add_field` の中の塊 (7a。確定) |
+| MitateDB `src/mitatedb_api/capabilities_document.py:413`、`tests/test_postgres.py:529`、`src/mitatedb_api/http.py:867` | `transact` の pre-existing comment / own comment / own docstring | L2585-2630 ほか (7b。確定) |
+| MitateDB `tests/test_denial_details_and_request_id.py:420` | `ApplicationCell.read`'s own docstring | L2015-2019 (7b) |
+| MitateDB `tests/test_http.py:123` | `ApplicationCell.__init__`'s own docstring | **無い** (`__init__` に docstring が無い。移動前からの穴) |
+| `conformance-tests/test_c04_unsupported_and_safe_errors.py:67` | `cell.py` comment above `"operation_depth": "enforced"` | **`cell.py` に無い** (`capabilities_document.py` にある。触らない) |
+
+**静的テストの注記** (Y7-10)
+
+| 箇所 | 扱い |
+|---|---|
+| 行番号 pin (L1 scan) | MitateDB `tests/test_l1_details_vocabulary_ast_scan.py` に `cell.py` の `(module, lineno)` pin は 0 件 (`_BACKEND_LAYER_ALLOWLIST` は `backend_postgres.py`・`backend_sqlite.py` に限られる。`test_backend_layer_allowlist_is_confined_to_backend_modules`)。件数 pin `"cell.py": 44` は `ast.walk` の呼出しの数でコメントに依らない。40b は非該当 |
+| 文字列の検査 (設計 §5 (b)) | `MitateDB-api/tests/test_application_audit.py:1322` は `read_text` の全文 (コメント・docstring を含む) に `count("self._validate_delete_confirmation(") == 2` 等を掛ける (`count` の向き。基準のコメントに当たる文字列は無い)。`MitateDB-api/tests/test_r102_request_scope.py:150` は `ast.parse` の名前の集合と、`ast.unparse(tree)` に `"isinstance(self._backend" not in` を掛ける。`ast.unparse` は docstring を残し `#` コメントを落とすので、docstring に対して `not in` の向き (test の docstring の「comments and docstrings excluded」は docstring について実物と合わない) |
+| ほかに `cell.py` を文字列として読む検査 | 両 peer の `tests/`・`conformance/`、`conformance-tests/`、`tools/tests/` を `read_text`・`.count(`・`getsource`・`__doc__` の正規表現 (設計 §5 (b)) で grep して 0 件 (`ast.parse` を通すものを除く。`MitateDB-api/tests/test_r113_multi_process_wiring.py:435` は `getsource(ApplicationCell._limit_gate)` を取るが `ast.parse` に通すので除いた) |
+| 同型性の表 | 登録 helper 4 個 (`normalize_request_for_plan`、`compute_plan_token`、`normalize_request_for_idempotency`、`idempotency_digest`) の中の塊 4 は対象外 (Y7-5)。`_ISOMORPHIC_TARGETS` に触れない |
+
+**`cell.py` を指す位置参照の所在** (`9a65cbc`。パス又はファイル名 `cell.py` の直後にコロンと行番号が続く形)
+
+| 所在 | 件数 | 扱い |
+|---|---|---|
+| `security/CONTROL_MAPPING.md` | 23 (指す `cell.py` の行: 320、364、508、794、1244×2、2191、2366×5、2406×2、2583×3、2752×3、3557、3573、3593)。ほかに前の参照の続きの形 `` `:393` ``・`` `:412` `` (`CONTROL_MAPPING.md` の行 888、`cell.py:320` の続き) と `` `:2584` `` (同 2000、`cell.py:794` の続き) が 3 件ある (`repull.py` は続きの形も同じ行の直前のパスを継いで引き直す) | 引き直す (Y7-2) |
+| `conformance-tests/` (`test_c05_limit_declaration_agreement.py` 6、`test_c24_request_budget.py` 1、`CONDITIONS.md` 1) | 8。最大は `cell.py:1875-1926` (行数の範囲内) | 触らない。範囲内に留まることを完了条件 34 で確かめる |
+| `MitateDB-api/README.md` / `MitateDB-api/docs/` | 5 (`cell.py:4044`・`:4051` は行数 3,911 を超える) / 1 | 触らない |
+| MitateDB `conformance/` / `tests/` | 4 / 4 | 触らない |
+| `cell.py` 自身 (L2479-2487 の塊の `cell.py:1034-1046`、L342 の「`cell.py`'s own pre-existing `:308-318`」) | 2 | 触らない (直すと §4.1 (3) で赤) |
+| `docs/` (設計・作業指示書・archive の記録) / `security/CONTROL_MAPPING_HISTORY.md` | 347 / 10 (どちらも出現数) | 触らない (記録) |
+
+**起草時の確認**: §14.3 の本文から基点と module だけを置き換えた監査スクリプトは、`9a65cbc` の作業ツリーで既存の CH-0548 (L596)・CH-0566 (L773) を `UNPAIRED` にして exit 1 になった。Y7-12 により、基点が既に持つ CH-ID の塊を読み飛ばす 2 行を足した (§16.3 の全文)。足した後の `9a65cbc` の作業ツリーでは `SUMMARY ch_blocks=0 ws_only=0 unpaired=0 removed_rows=0` (exit 0)。
+
+### 16.3 Manifest
+
+**目的**: §13.3 と同じ (`cell.py` の経緯を受け皿へ移し、コードに現在の理由と `CH-NNNN` を残す)。範囲は Y7-3、対象外は Y7-5。
+
+**2 つの WP の違い** (同じ内容は下に 1 回だけ書く)
+
+| 項目 | WP-7a | WP-7b |
+|---|---|---|
+| 基点 (`--base`、spec の `base`/`parent`、2 つの script の `BASE`) | `<BASE>` (着手条件 1) | `<BASE_B>` (WP-7a 統合後の main) |
+| 範囲 (spec の `line_range`) | `[1, <BASE> の insert の def 行 − 1]` (`9a65cbc` では `[1, 1953]`) | `[<BASE_B> の insert の def 行, <BASE_B> の末尾行]` |
+| 対象の塊 / 判定表が最低限覆う範囲 | 102 / 目印 42 文 + 安全 19 塊 | 103 / 目印 53 文 + 安全 20 塊 |
+| CH-ID 予約 (Y7-6。spec の `ch_range`) | `CH-0600`〜`CH-0729` | `CH-0730`〜`CH-0859` |
+| spec / 変異 spec | `$SP/cs7a-spec.json` / `$SP/cs7a-mutations.json` | `$SP/cs7b-spec.json` / `$SP/cs7b-mutations.json` |
+| 完了ゲート | `tools/dev/gate.py --label cs7a -C "$WT"` | `tools/dev/gate.py --label cs7b -C "$WT"` |
+| `security/CONTROL_MAPPING.md` | 版を 1 つ上げる (主張の文は変えない) | 同じ (WP-7a の版の次) |
+| 受け入れ監査 | なし | レビュー完了後に `evidence-auditor` 1 回 (Y7-11)。監査担当は `cs7_removed_tokens.py -C "$WT"` を 2 回実行して WP-7a と WP-7b の全 CH-ID を覆う: `--base <BASE> --head <WP-7a の commit>` と `--base <BASE_B> --head HEAD` (1 回にまとめると、2 つの WP の間に main へ入った他件の CH-ID をこの変更セットの塊として数える)。統合済みの WP-7a の塊に欠陥が見つかったら、設計 §9.3 (0j) の訂正の記録か、塊を基点の文へ戻す再編集で直す |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/cell.py` (**コメントと docstring だけ**。WP の範囲の対象の塊だけ)、`docs/code-history/MitateDB-api/cell.md` (追記だけ)、`security/CONTROL_MAPPING.md` (`cell.py` への位置参照の行番号と先頭の `Version:` の行だけ)、本書 §16.4 | 他の `src/` 全部、`tools/`、`tools/tests/`、両 peer の `tests/` (L1 scan を含む)、両 peer の `conformance/`、`conformance-tests/`、`README.md`・`MitateDB-api/docs/`、`security/` の他のファイル、他の受け皿、`docs/code-history/pair.md`、`docs/design/`、台帳、`_ISOMORPHIC_TARGETS` |
+
+| 項目 | 内容 |
+|---|---|
+| 変更クラス・規模 | `cell.py` の整理は Class B。`security/CONTROL_MAPPING.md` の位置参照を引き直すので経路により **Class D** (Y7-2)。規模 **L** (§1.13 の 74)。Class D の証拠 (台帳 `docs/design/ROADMAP_POST_PHASE7_V1.md` §9 の 8) は次のとおり扱う (Y7-2): 設計文書 = 設計 `docs/design/CODE_COMMENT_PROVENANCE_V1.md` v0.28 (§3「別件」への訂正註と §6 への註で、変更セットが自分で動かした `security/CONTROL_MAPPING.md` の位置参照を同じ変更セットで引き直すことを定める)。契約版数 = 据え置き (`spec/` 不変、主張の文は不変)。設計レビュー = 規模 L の 1 回 (契約を触らない。§1.13 の 74、§1.7 の 50・50a)。完了ゲート = WP ごとに全部。依頼者裁定の逐語記録 = 依頼者の方針 2026-10-03 (監督の推奨で進めて記録し、事後に確認を取る) による事後確認を台帳 R-22 行に逐語で記録する。版付きの決定 = `security/CONTROL_MAPPING.md` の `Version:` の行 |
+| 必須の規律 | §13.3 の「必須の規律」「保護文 (0d) と訂正 (0g)」「改行」と、§14.3 の「判定表の置き場所」「復元・欠番の裁定の後」「内容の除去が 0 の塊」「意味や出所を落とす除去」と同じ。範囲・除去の条件は Y7-3、折り返しは Y7-4 |
+| 編集の道具 (Y7-7) | `$SP/cs7_apply.py -C "$WT" --spec <spec>` (全文は下)。spec の 1 塊と §16.4 の判定表の 1 行を対応させる。`excluded_symbols` は登録 helper 4 個 |
+| 位置参照の引き直し (Y7-2) | `cs7_apply.py` を当てた後、worktree の根を cwd にして `python3 "$SP/repull.py" <基点> security/CONTROL_MAPPING.md -- MitateDB-api/src/mitatedb_api/cell.py` (全文は下)。出力 (書き換えた参照ごとの行と `security/CONTROL_MAPPING.md: changed N, unresolved 0`) を §16.4 に逐語で貼る |
+| 統合 | root gate を通し、コミットした後の HEAD で `tools/tests` を流してから統合する (設計 §10.2) |
+| 手順 | 設計 §6「手順」。40a は両 peer の suite と下の conformance 2 ファイルを前後 2 回 (実装担当)。`conformance-tests/` の全体は監督の完了ゲートが回す (Y7-14) |
+
+**完了条件 ↔ 変異** (P = `check_comment_provenance.py --base <基点> MitateDB-api/src/mitatedb_api/cell.py`、R = `--register`、D = `check_doc_refs.py`。変異は `tools/dev/mutate.py` で実コードに当てる (設計 §10.2)。変異の対象行は WP ごとに着手時に選び §16.4 に記録する (Y7-8)。赤が P・R・D の行は wrapper `$SP/cs7_cli_red.py` の node `test_cli_red[c<行><枝>]` を mutate の `tests` に書く。1 項目に test は 1 つ。1〜13 は設計 §6 の表の逐語)
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になるもの |
+|---|---|---|---|
+| 1 | コード不変 | `cell.py`: コード 1 行の literal を 1 文字変える | §4.1 (1) — `c1` |
+| 2 | 移した塊が逐語で在る | `cell.md`: 受け皿の節から 1 文を消す | §4.1 (2) — `c2` |
+| 3 | 文区間の削除だけ | `cell.py`: (a) 残した文から否定語を落とす (b) 残した 2 文を並べ替える (c) 1 語足す (d) 残した文の途中の折返し行を 1 行消す | §4.1 (3) — `c3a`〜`c3d` (4 種それぞれ) |
+| 4 | 括弧内の削除が規則どおり | `cell.py`: 括弧内の現行正本の参照 (例: SI-) を消す | §4.1 (4) — `c4` (checker は (4) の違反を (3) の行で出す) |
+| 5 | 経緯を足していない | `cell.py`: 追加行に `WP-` を含める | §4.1 (5) — `c5` |
+| 6 | ID の解決と孤児 | (a) `cell.py`: コード側 ID を存在しない番号にする (b) `cell.md`: 参照されない節を足す | §4.2 の 1 — `c6a`・`c6b` |
+| 7 | ID の全体一意 | 他 peer の companion (`docs/code-history/r2db-api/` の 1 ファイル) に同じ番号の節を足す | §4.2 の 2 — `c7` |
+| 8 | docstring 依存の新設なし | `src/` に `__doc__` の読み出しを 1 行足す | §4.2 の 5 — `c8` |
+| 9 | 行番号 pin が実測と一致 | 非該当 (`cell.py` の pin 0 件。§16.2) — **監査照合**: L1 scan の `cell.py` の `(module, lineno)` 0 件と `"cell.py": 44` の不変を HEAD で確認 | — |
+| 10 | 文字列検査が効いたまま (該当時) | (a) `count` の向き: WP の範囲の対象の塊に `self._validate_delete_confirmation(` を含むコメントを 1 行足す (b) `not in` の向き: WP の範囲の docstring に `isinstance(self._backend` を足す | (a) `MitateDB-api/tests/test_application_audit.py::test_dispatch_point_is_the_destructive_confirmation_choke` (b) `MitateDB-api/tests/test_r102_request_scope.py::test_cell_py_code_names_no_lock_and_no_concrete_backend` |
+| 11 | 登録 helper が同形 (最後の変更セット) | 非該当 (「最後の変更セット」限り) | — |
+| 12 | 非空虚 (変更セット 1) | 非該当 (「変更セット 1」限り) | — |
+| 13 | suite 集計と経緯トークン数の前後 | 監査照合 (両 peer の集計行とトークン数を manifest に残す) | — |
+| 14 | 対象外の塊に触れていない (登録 helper 4、既存 CH-ID 2。Y7-5) | **監査照合**: `git diff <基点> -- cell.py` に 6 塊の行が無く、`_ISOMORPHIC_TARGETS` の差分 0 | — |
+| 15 | CH の無い塊を変えていない | `cell.py`: CH を付けずに 1 塊から 1 文消す | P exit 1 (§4.1 (2)) — `c15` |
+| 16 | 保護参照を含む文は丸ごと消せない (0d) | CH-ID を付けた塊にある保護参照を含む文を 1 つ丸ごと消す (文は §16.4 に記録) | P exit 1 (§4.1 (3)) — `c16` |
+| 17 | ラベル削除が規則どおり (§8) | ラベルを消し、区切りの後ろの先頭文字を小文字化する | P exit 1 (§4.1 (3)) — `c17` |
+| 18 | 版数付き文書名は残る | CH-ID を付けた塊から版数付き文書名の版数を消す (文は §16.4 に記録) | P exit 1 (§4.1 (3)) — `c18` |
+| 19 | 訂正の記録が規則どおり (0g) | (a) 記録の旧文を基準に無い文にする (b) 新文から保護参照を 1 つ消す | (a)(b) P exit 1 (§9f) — `c19a`・`c19b`。記録が無ければ該当なしを監査照合で記録する |
+| 20 | `#:` の行を保つ (0g) | CH-ID を付けた `#:` の塊があれば、その `#:` を `#` にする | P exit 1 (§9f) — `c20`。該当の塊が無ければ非該当 — **監査照合**: HEAD の `#:` の行 20 |
+| 21 | 改行の壊れが 0 件 | `find_broken_line_wrap_joins` を流す。変異: (a) `id ASC` 型をつなぐ (b) `/` の直後の改行を空白 1 つでつなぐ (c) backtick の span の中の折返しを空白 1 つでつなぐ | 0 件であること。(a) P exit 1 (§4.1 (3)) — `c21a`、(b)(c) P exit 1 (§9e) — `c21b`・`c21c` |
+| 22 | 受け皿が原文の写しとして完全 | (a) `cell.md` の fenced block の末尾を 1 語切り詰める (b) 折り返しで割れた実在パスを含むラベルを、パスの後半ごと削る | (a) P exit 1 (§4.1 (2)) — `c22a`、(b) P exit 1 (§4.1 (3)) — `c22b` |
+| 23 | 受け皿の ID が `check_doc_refs` で解決 | `cell.md` の fenced block に台帳に無い R 番号を 1 つ足す (2 桁は全て定義済みなので 3 桁で選ぶ。選んだ番号そのものは本書に書かない — `check_doc_refs` は本書も走査する) | D exit 1 — `c23` |
+| 24 | 指示語・定冠詞・副詞の参照先を消していない | 残す文の点検語が参照する文を削除する | 機械では赤にならない — **監査照合**: §16.4 の候補一覧とコードレビュー |
+| 25 | 安全上の理由と同居する文を残している | §16.2 の一覧の文を文ごと削除する | 機械では赤にならない — **監査照合**: 判定表の根拠とレビュー |
+| 26 | 塊をまたぐ参照先の文を残している | §16.2 の参照先 (例: L1845-1886、L3624-3641) の文を削除する | 機械では赤にならない — **監査照合**: grep の結果と §16.4 の参照先一覧 |
+| 27 | 判定表が対象を覆い、本書の本文にある (§10.4) | **監査照合**: WP の対象の塊の全件が §16.4 の判定表に 1 塊 1 行であり、目印一覧に当たる文 (7a 42 / 7b 53) と §16.2 の安全上の理由の塊 (7a 19 / 7b 20) が根拠・点検語の欄に空欄なく載る。表が本書の外にしか無ければ未達 | — |
+| 28 | 内容の除去が 0 の塊に CH-ID が無い (§10.4) | この WP で CH-ID を付けた塊の 1 つを空白だけの差にする (基点が既に持つ CH-ID の塊は監査スクリプトが読み飛ばすので対象にしない。Y7-12) (P は緑) | **監査照合 (固定スクリプト)**: `cs7_removed_tokens.py` の出力に `WS-ONLY` 行が 1 行でもある、又は exit 1 なら赤。出力は §16.4 に逐語で貼る |
+| 29 | 復元・欠番の裁定の後に WP の範囲を走査した (§10.4) | 1 塊で戻した除去と同じ種類の除去を、範囲の別の塊に 1 つ残す | **監査照合 (固定スクリプト)**: 裁定のたびに `cs7_removed_tokens.py` を再実行した出力が §16.4 にあり、残した除去が `REMOVED` 行として出て判定表で扱われている。再実行の出力が無い裁定は赤 |
+| 30 | 意味や出所を落とす除去が無い (A5・B5) | 実在ファイル名又は WP の位置指定を括弧から除く (許可に当たれば P は緑) | **監査照合 (固定スクリプト)**: 最後の `cs7_removed_tokens.py` の出力の `REMOVED` 行と §16.4 の除いた語の一覧が 1 行ずつ一致し (不一致は赤)、各行に意味と出所が残る根拠がある |
+| 31 | HTTP の status・error code を含む削除文 | 3 桁のステータス番号又はエラーコード語彙を含む文を 1 つ消す | **監査照合**: §16.4 の監査一覧の各行が判定表で根拠付きで「経緯だけの文」と判定されている |
+| 32 | 変えた docstring の backslash (§10.2) | 非該当 (`9a65cbc` の `cell.py` の docstring 56 個に `\` は 0 件) | — **監査照合**: 変えた docstring に `\` が無いことを HEAD で確かめる |
+| 33 | `security/CONTROL_MAPPING.md` の `cell.py` への位置参照を引き直した (Y7-2) | 引き直した 1 件を基準の値に戻す | 機械では赤にならない — **監査照合**: `repull.py` の出力 (`unresolved 0`、exit 0) を §16.4 に逐語で貼り、引き直した各行について基準の行と HEAD の行の内容が一致し、主張の文の差分が 0 で、版が 1 つ上がっている |
+| 34 | conformance の docstring の `cell.py` 参照が行数の範囲内 (Y7-2) | `conformance-tests/test_c05_limit_declaration_agreement.py` の `cell.py:1875-1926` の 1 つを行数の外 (例: `cell.py:1875-9926`) にする | `conformance-tests/test_conformance_docstring_position_refs.py::test_every_real_conformance_tests_position_reference_resolves_or_is_allowlisted` |
+| 35 | root gate を通過し、コミット後の HEAD で `tools/tests` が緑 | **監査照合**: `gate.py` と `finalize.py --tools-tests` の出力の行、コミット後の `pt.py … tools/tests` の集計行 | — |
+| 36 | 対応の無い行が無い | **監査照合** (§1.5 の 40) | — |
+
+**編集の道具** (Y7-7。`$SP/cs7_apply.py` に下の本文のとおり作り、変えない)
+
+- spec の例 (WP-7a): `{"base": "<BASE>", "parent": "<BASE の 7 桁>", "module": "MitateDB-api/src/mitatedb_api/cell.py", "companion": "docs/code-history/MitateDB-api/cell.md", "excluded_symbols": ["normalize_request_for_plan", "compute_plan_token", "normalize_request_for_idempotency", "idempotency_digest"], "line_range": [1, 1953], "ch_range": ["CH-0600", "CH-0729"], "blocks": [{"ch": "CH-0600", "line": <基点の開始行>, "edits": [{"old": "…", "new": "…"}]}]}`
+- 毎回基点から作り直すので、spec を直して何度でも当て直せる。`--dry-run` で書かずに検査だけをする。
+
+```python
+"""cs7_apply.py -- change set 7: apply a block-edit spec to one module, from the base revision.
+
+Every run rebuilds the module and its companion from the base revision, so a
+run is repeatable and the spec is the single record of what was removed.
+Edits are exact-string replacements inside one block's own source lines;
+nothing is re-wrapped.
+
+usage: cs7_apply.py -C WORKTREE --spec SPEC.json [--dry-run]
+
+SPEC.json:
+  {"base": "<rev>", "parent": "<7-hex sha written into the companion>",
+   "module": "MitateDB-api/src/mitatedb_api/cell.py",
+   "companion": "docs/code-history/MitateDB-api/cell.md",
+   "excluded_symbols": ["normalize_request_for_plan", ...],
+   "line_range": [first, last],          # base line numbers this spec may touch (inclusive)
+   "ch_range": ["CH-0600", "CH-0729"],   # the CH-IDs reserved for this work package (inclusive)
+   "blocks": [
+     {"ch": "CH-0600", "line": <base start line of the block>,
+      "edits": [{"old": "...", "new": "..."}, ...]}
+   ]}
+
+Rules enforced here (exit 1 with a message naming the block):
+  * `line` is the start line of a block `extract_all_blocks` finds in the base source;
+  * the block has no CH-ID in the base, lies inside `line_range`, and is not
+    inside an excluded symbol;
+  * every `old` occurs exactly once in the block's own lines (as left by the
+    earlier edits of the same block) and differs from `new`;
+  * at least one edit per block; CH-IDs are unique, inside `ch_range`, and
+    absent from the base module and the base companion (their order is free).
+The comment-provenance checker (`--base`) is still the judge of whether an
+edit is an allowed removal; this tool only applies edits and writes sections.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _git_show(wt: Path, rev: str, rel: str) -> str:
+    return subprocess.run(["git", "-C", str(wt), "show", f"{rev}:{rel}"], capture_output=True, text=True, check=True).stdout
+
+
+def _qualname(tree: ast.Module, line: int) -> str:
+    best = "<module>"
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        nonlocal best
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{prefix}.{child.name}" if prefix else child.name
+                first = min([child.lineno] + [d.lineno for d in child.decorator_list])
+                if first <= line <= child.end_lineno:
+                    best = name
+                    walk(child, name)
+
+    walk(tree, "")
+    return best
+
+
+def _die(msg: str) -> None:
+    print(f"cs7_apply: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-C", dest="wt", required=True)
+    ap.add_argument("--spec", required=True)
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+    wt = Path(args.wt).resolve()
+    sys.path.insert(0, str(wt / "tools"))
+    import check_comment_provenance as ccp  # noqa: E402  (the worktree's own checker)
+
+    spec = json.loads(Path(args.spec).read_text())
+    base, parent, module, companion = spec["base"], spec["parent"], spec["module"], spec["companion"]
+    first, last = spec["line_range"]
+    excluded = set(spec.get("excluded_symbols", []))
+    ch_lo, ch_hi = spec["ch_range"]
+    base_src = _git_show(wt, base, module)
+    try:
+        base_comp = _git_show(wt, base, companion)
+    except subprocess.CalledProcessError:
+        base_comp = ""
+    if base_comp and not base_comp.endswith("\n"):
+        _die("base companion does not end with a newline")
+    tree = ast.parse(base_src)
+    by_line = {b.start_line: b for b in ccp.extract_all_blocks(base_src)}
+    lines = base_src.splitlines(keepends=True)
+    rel = module.split("/", 1)[1]
+
+    seen: set[str] = set()
+    prev_line = 0
+    sections: list[str] = []
+    # apply from the bottom up so earlier base line numbers stay valid
+    plan = []
+    for entry in spec["blocks"]:
+        ch, line, edits = entry["ch"], entry["line"], entry["edits"]
+        if not re.fullmatch(r"CH-\d{4}", ch):
+            _die(f"{ch}: not a CH-NNNN id")
+        if ch in seen:
+            _die(f"{ch}: listed twice")
+        if not (ch_lo <= ch <= ch_hi):
+            _die(f"{ch}: outside ch_range {ch_lo}..{ch_hi}")
+        if ch in base_src or f"## {ch}\n" in base_comp:
+            _die(f"{ch}: already present at the base")
+        seen.add(ch)
+        if line <= prev_line:
+            _die(f"{ch}: blocks must be listed in ascending base line order")
+        prev_line = line
+        blk = by_line.get(line)
+        if blk is None:
+            _die(f"{ch}: no block starts at base line {line}")
+        if blk.history_id is not None:
+            _die(f"{ch}: base block at line {line} already carries {blk.history_id}")
+        if not (first <= blk.start_line and blk.end_line <= last):
+            _die(f"{ch}: block {blk.start_line}-{blk.end_line} is outside line_range {first}-{last}")
+        qual = _qualname(tree, blk.start_line)
+        if any(part in excluded for part in qual.split(".")):
+            _die(f"{ch}: block at line {line} is inside the excluded symbol {qual}")
+        if not edits:
+            _die(f"{ch}: no edits (a block with nothing removed keeps its base bytes and gets no CH-ID)")
+        plan.append((ch, blk, edits, qual))
+
+    for ch, blk, edits, qual in sorted(plan, key=lambda item: -item[1].start_line):
+        region = "".join(lines[blk.start_line - 1 : blk.end_line])
+        for n, edit in enumerate(edits, 1):
+            old, new = edit["old"], edit["new"]
+            if old == new:
+                _die(f"{ch}: edit {n} changes nothing")
+            if region.count(old) != 1:
+                _die(f"{ch}: edit {n}: `old` occurs {region.count(old)} times in the block (need exactly 1)")
+            region = region.replace(old, new)
+        if not region.endswith("\n"):
+            _die(f"{ch}: the block no longer ends with a newline")
+        region_lines = region.splitlines(keepends=True)
+        tail = region_lines[-1]
+        indent = tail[: len(tail) - len(tail.lstrip())]
+        if blk.kind == "comment":
+            if not all(l.strip().startswith("#") for l in region_lines):
+                _die(f"{ch}: a comment block line no longer starts with '#'")
+            region = region + f"{indent}# history: {ch}\n"
+        else:
+            m = re.search(r'("""|\'\'\')[ \t]*\n\Z', region)
+            if m is None:
+                _die(f"{ch}: the docstring's closing quotes are not at the end of its last line")
+            quote = m.group(1)
+            body = region[: m.start()]
+            pre = body.rstrip(" \t")
+            if pre.endswith("\n") and pre.strip():
+                # closing quotes on their own line: that line keeps its base bytes
+                region = pre + f"\n{indent}History: {ch}\n" + region[len(pre):]
+            else:
+                # text."""  -> text.\n\n<indent>History: CH\n<indent>"""
+                first_line = lines[blk.start_line - 1]
+                doc_indent = first_line[: len(first_line) - len(first_line.lstrip())]
+                region = body.rstrip(" \t") + f"\n\n{doc_indent}History: {ch}\n{doc_indent}{quote}\n"
+        lines[blk.start_line - 1 : blk.end_line] = [region]
+        fence = "```"
+        while fence in blk.dedented:
+            fence += "`"
+        sections.append((blk.start_line, (
+            f"\n## {ch}\n\n- moved from: `{rel}` (`{qual}`)\n- parent commit: `{parent}`\n- kind: {blk.kind}\n\n"
+            f"{fence}\n{blk.dedented}\n{fence}\n"
+        )))
+        print(f"{ch} {blk.kind} base L{blk.start_line}-{blk.end_line} {qual} edits={len(edits)}")
+
+    new_src = "".join(lines)
+    try:
+        ast.parse(new_src)
+    except (SyntaxError, ValueError) as exc:  # ValueError: e.g. a lone surrogate written unescaped in the spec
+        _die(f"the edited module does not parse: {exc!r}")
+    new_comp = base_comp + "".join(text for _, text in sorted(sections))
+    if not base_comp:
+        new_comp = new_comp.lstrip("\n")
+    print(f"blocks={len(plan)} module_lines {len(base_src.splitlines())} -> {len(new_src.splitlines())}")
+    if args.dry_run:
+        return 0
+    (wt / module).write_text(new_src)
+    (wt / companion).parent.mkdir(parents=True, exist_ok=True)
+    (wt / companion).write_text(new_comp)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+**位置参照の引き直し** (Y7-2。`$SP/repull.py` に下の本文のとおり作り、変えない。worktree の根を cwd にして走らせる。基点の文書を毎回読み直し、作業ツリーの行は `cell.py` への参照の行番号を伏せた形で基点の行と突き合わせるので、spec を直して当て直した後も繰り返し実行できる。基点と新しい `cell.py` で内容の一致する行だけを対応させ、同じ行の直前のパスを継ぐ続きの形 (`` `:N` ``) も引き直す。対応の無い参照は `unresolved` に出して書き換えず、exit 1。`--dry-run` で書かずに出力だけを見る)
+
+```python
+"""repull.py -- re-pull `file:line` references that moved with comment-only edits.
+
+usage: repull.py [--dry-run] BASE DOC -- SRC [SRC ...]      (cwd = the worktree root)
+
+BASE must be the commit the working tree is based on: DOC at HEAD and DOC at
+BASE must be the same text (exit 2 otherwise), so every difference between
+BASE's DOC and the working tree's DOC is this change set's own.
+
+For every line of DOC as it is at BASE, walks the position references in order:
+a path-shaped token (optionally followed by `:N` / `:N-M`, the colon inside or
+just outside the closing backtick) names the current file; a bare `:N` / `:N-M`
+whose preceding character is not alphanumeric inherits the nearest earlier path
+on the same line. A reference into one of SRC is rewritten to the line that
+holds the same text now (difflib over BASE's SRC and the working tree's SRC).
+A cited line that no longer exists unchanged is reported as `unresolved` and
+left alone (exit 1). References into other files are never rewritten.
+
+Writing: a working-tree line is replaced by its rewritten BASE line where the
+two are equal once every line number of a reference into SRC is masked -- so
+the BASE line itself, the rewritten line, and a line an earlier run re-pulled
+against an earlier edit of SRC are all brought to the rewritten line, and a
+second run changes nothing. A BASE line whose reference moved but which has no
+such working-tree line is reported as `not applied` (exit 1) and left alone.
+Lines the working tree added (a new version line) and every other edit of a
+line are kept.
+"""
+import difflib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+dry = bool(args) and args[0] == "--dry-run"
+if dry:
+    args = args[1:]
+base, doc = args[0], args[1]
+srcs = args[args.index("--") + 1:]
+
+
+def show(rev, path):
+    return subprocess.run(["git", "show", f"{rev}:{path}"], capture_output=True, text=True, check=True).stdout
+
+
+if show("HEAD", doc) != show(base, doc):
+    print(f"repull: {doc} differs between HEAD and {base}; pass the commit this working tree is based on")
+    sys.exit(2)
+maps = {}
+for p in srcs:
+    o = show(base, p).splitlines()
+    n = Path(p).read_text().splitlines()
+    m = {}
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, o, n, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                m[i1 + k + 1] = j1 + k + 1
+    maps[p] = m
+EXT = r"(?:py|md|sql|json|toml|yaml|yml|sh|txt|conf|tsv|cfg|ini)"
+TOKEN = re.compile(
+    rf"(?P<path>(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.{EXT})(?![A-Za-z0-9_/])(?P<q>`?)(?::(?P<a>\d+)(?:-(?P<b>\d+))?)?"
+    rf"|(?<![A-Za-z0-9])(?P<bq>`?):(?P<ca>\d+)(?:-(?P<cb>\d+))?(?![A-Za-z0-9])"
+)
+
+
+def owner(path):
+    hits = [s for s in srcs if s == path or s.endswith("/" + path)]
+    return hits[0] if len(hits) == 1 else None
+
+
+changed = 0
+unresolved = []
+
+
+def fix_line(line, lineno, mask=False):
+    cur = None
+
+    def rep(mm):
+        global changed
+        nonlocal cur
+        if mm.group("path"):
+            cur = owner(mm.group("path"))
+            a, b, head = mm.group("a"), mm.group("b"), mm.group("path") + mm.group("q")
+        else:
+            a, b, head = mm.group("ca"), mm.group("cb"), mm.group("bq")
+        if cur is None or a is None:
+            return mm.group(0)
+        if mask:
+            return f"{head}:#"
+        m = maps[cur]
+        ia = int(a)
+        ib = int(b) if b else None
+        if ia not in m or (ib is not None and ib not in m):
+            unresolved.append(f"{doc}:{lineno}: {mm.group(0)}")
+            return mm.group(0)
+        na, nb = m[ia], (m[ib] if ib is not None else None)
+        if (na, nb) == (ia, ib):
+            return mm.group(0)
+        changed += 1
+        print(f"{doc}:{lineno}: {Path(cur).name} :{a}{'-' + b if b else ''} -> :{na}{'-' + str(nb) if nb else ''}")
+        return f"{head}:{na}" + (f"-{nb}" if nb is not None else "")
+
+    return TOKEN.sub(rep, line)
+
+
+base_doc = show(base, doc).splitlines(keepends=True)
+out = [fix_line(line, i + 1) for i, line in enumerate(base_doc)]
+cur_lines = Path(doc).read_text().splitlines(keepends=True)
+res = list(cur_lines)
+moved = {i for i in range(len(base_doc)) if out[i] != base_doc[i]}
+done = set()
+masked_base = [fix_line(line, 0, mask=True) for line in base_doc]
+masked_cur = [fix_line(line, 0, mask=True) for line in cur_lines]
+sm = difflib.SequenceMatcher(None, masked_base, masked_cur, autojunk=False)
+for tag, i1, i2, j1, j2 in sm.get_opcodes():
+    if tag == "equal":
+        for k in range(i2 - i1):
+            if masked_base[i1 + k] != base_doc[i1 + k]:  # the line cites SRC by line number
+                done.add(i1 + k)
+                res[j1 + k] = out[i1 + k]  # also brings back a line an earlier run moved further
+not_applied = [f"{doc}:{i + 1}" for i in sorted(moved - done)]
+print(f"{doc}: changed {changed}, unresolved {len(unresolved)}, not applied {len(not_applied)}")
+for u in unresolved:
+    print("unresolved", u)
+for u in not_applied:
+    print("not applied (no working-tree line equals this base line with its SRC line numbers masked)", u)
+if not dry:
+    Path(doc).write_text("".join(res))
+sys.exit(1 if unresolved or not_applied else 0)
+```
+
+**CLI の赤の wrapper** (Y7-8。`$SP/cs7_cli_red.py` に下の本文のとおり作り、`BASE` を WP の基点に置き換える以外は変えない)
+
+- 仕組みは §14.3 の wrapper と同じ (CLI が exit 0 なら緑、exit 1 で接頭辞の行があれば赤、それ以外は pytest exit 3)。
+- 変異の前に、変異を当てない状態で `25 passed` であること。
+- spec の `tests` には `$SP` を展開した絶対パスを書く。変異 2・6b・22(a)・23 の `file` は受け皿、変異 7 の `file` は r2db の受け皿。
+
+```python
+"""cs7_cli_red.py -- change set 7: CLI red signals as pytest (work order §16.3, Y7-8).
+
+tools/dev/mutate.py runs `python -m pytest` with cwd = the worktree, so each
+condition whose red signal is a non-zero exit of a CLI checker is wrapped here.
+  * CLI exit 0                         -> test passes  (green: not triggered)
+  * CLI exit 1 + the expected prefix   -> test fails   (red: the named check fired)
+  * anything else (exit 1 without the prefix, other exit codes)
+                                       -> pytest exit 3 (mutate.py: got=error(3), NG)
+Node ids: "$SP/cs7_cli_red.py::test_cli_red[c16]" etc.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+BASE = "<BASE>"
+MODULES = [
+    "MitateDB-api/src/mitatedb_api/cell.py",
+]
+P = ["tools/check_comment_provenance.py", "--base", BASE, *MODULES]
+R = ["tools/check_comment_provenance.py", "--register"]
+D = ["tools/check_doc_refs.py"]
+
+# case id -> (command, expected line prefix of the red signal)
+CASES = {
+    "c1": (P, "FAIL (§4.1 (1))"),
+    "c2": (P, "FAIL (§4.1 (2))"),
+    "c3a": (P, "FAIL (§4.1 (3))"),
+    "c3b": (P, "FAIL (§4.1 (3))"),
+    "c3c": (P, "FAIL (§4.1 (3))"),
+    "c3d": (P, "FAIL (§4.1 (3))"),
+    "c4": (P, "FAIL (§4.1 (3))"),   # the checker reports (4) violations under (3)
+    "c5": (P, "FAIL (§4.1 (5))"),
+    "c6a": (R, "FAIL (§4.2 1)"),
+    "c6b": (R, "FAIL (§4.2 1)"),
+    "c7": (R, "FAIL (§4.2 2)"),
+    "c8": (R, "FAIL (§4.2 5)"),
+    "c15": (P, "FAIL (§4.1 (2))"),
+    "c16": (P, "FAIL (§4.1 (3))"),
+    "c17": (P, "FAIL (§4.1 (3))"),  # the checker reports (6) violations under (3)
+    "c18": (P, "FAIL (§4.1 (3))"),
+    "c19a": (P, "FAIL (§9f)"),
+    "c19b": (P, "FAIL (§9f)"),
+    "c20": (P, "FAIL (§9f)"),
+    "c21a": (P, "FAIL (§4.1 (3))"),
+    "c21b": (P, "FAIL (§9e)"),
+    "c21c": (P, "FAIL (§9e)"),
+    "c22a": (P, "FAIL (§4.1 (2))"),
+    "c22b": (P, "FAIL (§4.1 (3))"),
+    "c23": (D, "check_doc_refs FAILED:"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_cli_red(case: str) -> None:
+    argv, prefix = CASES[case]
+    proc = subprocess.run([sys.executable, *argv], cwd=Path.cwd(), capture_output=True, text=True)
+    lines = (proc.stdout + proc.stderr).splitlines()
+    if proc.returncode == 0:
+        return
+    hits = [line for line in lines if line.startswith(prefix)]
+    if proc.returncode == 1 and hits:
+        pytest.fail(f"{case}: red as expected: {hits[0]}", pytrace=False)
+    tail = lines[-1] if lines else ""
+    pytest.exit(f"{case}: exit {proc.returncode} without {prefix!r} (last line: {tail!r})", returncode=3)
+```
+
+**監査スクリプト (完了条件 28〜30)** (Y7-8。`$SP/cs7_removed_tokens.py` に下の本文のとおり作り、`--base` の既定を WP の基点に置き換える以外は変えない)
+
+- 走らせ方・照合の仕方は §14.3 の監査スクリプトと同じ。コミット前は `python3 "$SP/cs7_removed_tokens.py" -C "$WT"`、コミット後は `--head HEAD` を足す。出力は §16.4 に逐語で貼る。
+- 起草時の確認は §16.2 の末尾。
+
+```python
+"""cs7_removed_tokens.py -- change set 7 audit for conditions 28-30 (work order §16.3, Y7-8).
+
+For every block carrying a CH-ID, pairs it with its basis block at --base (same
+scope, byte-equal to the companion's fenced block -- the checker's own first-move
+rule) and compares basis and new text with whitespace ignored. Prints:
+  WS-ONLY  file  Ls-e  CH-ID                      (condition 28: must be 0 rows)
+  REMOVED  file  Ls-e  CH-ID  class  token  xN    (condition 30: one §16.4 row each)
+  UNPAIRED file  Ln    CH-ID                      (no basis block; must be 0 rows)
+classes: path (a real path/directory or file basename in the --base tree),
+         id (a bare clause/decision ID: M-1, D-4, R-6, m-7, L4-10, WP-n, §n),
+         wp-locator ("work order WP-n" / "作業指示書 WP-n" / "work order §n").
+Line numbers are the basis's. Exit 0 only when WS-ONLY and UNPAIRED are 0.
+Usage: python3 "$SP/cs7_removed_tokens.py" -C "$WT" [--base REV] [--head REV] [PATH ...]
+  --head omitted = working tree (before the commit); --head HEAD after it.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+DEFAULT_PATHS = [
+    "MitateDB-api/src/mitatedb_api/cell.py",
+]
+_STRIP = "`'\"()[]{}<>,;:!?*"
+_EXT = re.compile(r"\w\.[A-Za-z0-9]+$")
+_ID_OR_LOCATOR = re.compile(
+    r"(?P<loc>(?:work order|作業指示書)\s*(?:WP-[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*|§\s?[0-9]+(?:\.[0-9]+)*))"
+    r"|(?P<id>(?<![\w\-])(?:WP-[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*|(?:[A-Z]{1,6}[0-9]*|[a-z])-[0-9]+[a-z]?"
+    r"|§\s?[0-9]+(?:\.[0-9]+)*)(?![\w]))"
+)
+
+
+def git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout
+
+
+def tokens(text: str, names: frozenset[str]) -> Counter:
+    flat = " ".join(text.split())
+    found: Counter = Counter()
+    kept = []
+    for raw in flat.split(" "):
+        word = raw.strip(_STRIP).rstrip(".")
+        if word.endswith("'s"):
+            word = word[:-2]
+        word = word.split(":", 1)[0].removeprefix("./").rstrip("/")
+        if word in names and ("/" in word or _EXT.search(word)):
+            found[("path", word)] += 1
+            kept.append(" ")
+        else:
+            kept.append(raw)
+    for m in _ID_OR_LOCATOR.finditer(" ".join(kept)):
+        cls = "wp-locator" if m.group("loc") else "id"
+        found[(cls, " ".join(m.group(0).split()))] += 1
+    return found
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-C", dest="wt", required=True)
+    ap.add_argument("--base", default="<BASE>")
+    ap.add_argument("--head", default=None)
+    ap.add_argument("paths", nargs="*")
+    ns = ap.parse_args()
+    wt = Path(ns.wt).resolve()
+    sys.path.insert(0, str(wt / "tools"))
+    import check_comment_provenance as cp  # noqa: E402
+
+    tree = cp._tree_paths(wt, ns.base)
+    names = set(tree)
+    for p in tree:
+        parts = p.split("/")
+        names.add(parts[-1])
+        names.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    names = frozenset(names)
+    idset = cp._tracked_identifier_set(wt, ns.base)
+    ws_only = removed = unpaired = ch_blocks = 0
+    print(f"BASE {ns.base} HEAD {ns.head or 'worktree'}")
+    for rel in ns.paths or DEFAULT_PATHS:
+        old_src = git(wt, "show", f"{ns.base}:{rel}")
+        new_src = git(wt, "show", f"{ns.head}:{rel}") if ns.head else (wt / rel).read_text(encoding="utf-8")
+        old_blocks, new_blocks = cp.extract_all_blocks(old_src), cp.extract_all_blocks(new_src)
+        old_pos, new_pos = cp._block_positions(old_src, old_blocks), cp._block_positions(new_src, new_blocks)
+        companions = cp._load_companion_lookup(wt, Path(rel).parts[0])
+        used = [False] * len(old_blocks)
+        base_ids = {ob.history_id for ob in old_blocks if ob.history_id is not None}
+        for j, nb in enumerate(new_blocks):
+            if nb.history_id is None or nb.history_id in base_ids:
+                continue  # a CH-ID the base already carries is another change set's block (Y7-12)
+            ch_blocks += 1
+            comp = companions.get(nb.history_id)
+            idx = next((i for i, ob in enumerate(old_blocks) if not used[i] and comp is not None
+                        and ob.dedented == comp and old_pos[i][0] == new_pos[j][0]), None)
+            if idx is None:
+                unpaired += 1
+                print(f"UNPAIRED\t{rel}\tL{nb.start_line}\t{nb.history_id}")
+                continue
+            used[idx] = True
+            ob = old_blocks[idx]
+            where = f"{rel}\tL{ob.start_line}-{ob.end_line}\t{nb.history_id}"
+            old_flat = " ".join(cp._flatten(ob.kind, ob.dedented, idset).split())
+            new_flat = " ".join(cp._flatten(nb.kind, nb.retained_text, idset).split()) if nb.retained_text else ""
+            if old_flat == new_flat:
+                ws_only += 1
+                print(f"WS-ONLY\t{where}")
+                continue
+            gone = tokens(old_flat, names) - tokens(new_flat, names)
+            for (cls, tok), n in sorted(gone.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+                removed += 1
+                print(f"REMOVED\t{where}\t{cls}\t{tok}\tx{n}")
+    print(f"SUMMARY ch_blocks={ch_blocks} ws_only={ws_only} unpaired={unpaired} removed_rows={removed}")
+    return 0 if ws_only == 0 and unpaired == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+**検証コマンドと期待形** (`WT` は監督が割り当てる worktree、`<基点>` は WP の基点。Bash の timeout 600000、前景で直列)
+
+```bash
+tools/dev/pt.py -C "$WT" -- r2db-api/tests -q              # 前と後 (40a)。failed/skipped/xfailed 0、前後で passed 数一致
+tools/dev/pt.py -C "$WT" -- MitateDB-api/tests -q          # 前と後 (40a)。failed/skipped/xfailed 0、前後で passed 数一致
+tools/dev/pt.py -C "$WT" -- conformance-tests/test_control_mapping_register.py conformance-tests/test_conformance_docstring_position_refs.py -q   # 前と後。同上
+tools/dev/pt.py -C "$WT" -- tools/tests -q                 # failed 0
+python3 "$SP/cs7_apply.py" -C "$WT" --spec "$SP/cs7a-spec.json"            # WP-7b は cs7b-spec.json
+python3 "$SP/repull.py" <基点> security/CONTROL_MAPPING.md -- MitateDB-api/src/mitatedb_api/cell.py   # cwd = $WT。exit 0、unresolved 0
+tools/dev/pt.py -C "$WT" -- "$SP/cs7_cli_red.py" -q        # apply と repull の後、変異の前: 25 passed
+tools/dev/mutate.py "$SP/cs7a-mutations.json" -C "$WT"     # 変異 1 項目に test 1 つ、expect: red
+python3 "$SP/cs7_removed_tokens.py" -C "$WT"               # exit 0、WS-ONLY・UNPAIRED 0 行。出力を §16.4 に逐語で貼る
+python3 tools/check_comment_provenance.py --base <基点> MitateDB-api/src/mitatedb_api/cell.py   # exit 0
+python3 tools/check_comment_provenance.py --register       # exit 0
+python3 tools/check_doc_refs.py                            # exit 0
+python3 tools/public_value_scan.py <触ったファイル>         # total_flagged=0
+tools/dev/gate.py --label cs7a -C "$WT"                    # 監督。run_in_background。WP-7b は cs7b
+tools/dev/finalize.py -C "$WT" --branch <branch> --allow 'MitateDB-api/src/mitatedb_api/cell.py' --allow 'docs/code-history/MitateDB-api/cell.md' --allow 'security/CONTROL_MAPPING.md' --allow 'docs/work-orders/WORK_ORDER_CODE_COMMENT_PROVENANCE_CS1.md' -m "$SP/msg-cs7a.txt" --tools-tests   # 監督。gate の通過後
+tools/dev/pt.py -C <統合後の main の worktree> -- tools/tests -q   # 監督。コミット後の HEAD (Y7-11)
+```
+
+**実装担当への注意**
+
+- 下請けの Agent を使わない (§1.7 の 47)。commit・merge・`gate.py`・`finalize.py` は監督が行う。suite 全体を回さない (§1.6 の 42。回すのは上の `pt.py` の行だけ)。
+- Edit / Write が拒否されたら、Bash の python heredoc で、上の「触るファイル」だけを編集する。
+- スクリプトで折り返しを付け直さない (Y7-4)。`cell.py` の編集は `cs7_apply.py` の spec だけで行い、除去に接する行の手での切り直しも spec の `old`/`new` に書く。
+- `cs7_apply.py` を当て直すたびに `repull.py` を続けて実行し、最後の出力を §16.4 に貼る。`repull.py` に渡す基点は worktree の基点 (HEAD) と同じ commit にする (違えば exit 2 で止まる)。
+- spec は JSON なので、コメントの中の `\` は `\\` と書く (L2924-2976 の塊は `"\ud800"` を含む。エスケープしないと道具が止まる)。
+- 迷った塊は基準のまま残し、判定表の根拠欄にその旨を書く (設計 §3)。
+- 報告には道具の出力行 (集計行・変異表・`log=` のパス・`repull.py` と監査スクリプトの出力) をそのまま貼る。
+
+**使用テンプレート**: **2** → **5** → **6** (WP ごと)。**変更クラス**: **D** (`cell.py` の整理は B、`security/CONTROL_MAPPING.md` の経路で D)。**規模**: **L** (コードレビューは WP ごとに 1 巡目を観点 A / B の 2 起動並列。§1.7 の 50a、Y7-9)。
+
+### 16.4 候補一覧・判定表・記録 (実装担当が埋め、監督がコミット前に確定する)
+
+範囲・数え方・区分・「HEAD の状態」の書き方は §13.4・§14.4 と同じ。各表の「WP」列に `7a` / `7b` を書く。
+
+**変異の対象** (着手時に選ぶ。Y7-8)
+
+| WP | 変異 (完了条件) | ファイル / 塊 (基点の行) | CH-ID | 当てる文字列 (先頭の数語) |
+|---|---|---|---|---|
+
+**監査スクリプトの出力** (`cs7_removed_tokens.py`。実行ごとに「実行 N (WP、最初 / 裁定 #n の後、実行時刻、`--head`)」の 1 行と、出力全体を逐語で入れたコードブロックを順に足す)
+
+**位置参照の引き直しの出力** (`repull.py`。WP ごとに出力全体を逐語で。続けて引き直した各行の「基点の行の内容 = HEAD の行の内容」の照合)
+
+| WP | `CONTROL_MAPPING.md` の行 (基点の行番号。`repull.py` の出力と同じ) | 基点の参照 | 新しい参照 | 内容一致 |
+|---|---|---|---|---|
+
+**指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
+
+| # | WP | 塊 (基点の行) | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
+|---|---|---|---|---|---|---|---|
+
+**塊をまたぐ参照先一覧** (行番号は基点。「残っているか」は HEAD の実物。§16.2 の参照表の全行と、「確定」の行の確定先)
+
+| # | WP | 参照元 (`file:line`) | 参照の語 | 参照先 (`file:line`) | 参照先の文 (先頭の数語) | 残っているか |
+|---|---|---|---|---|---|---|
+
+**HTTP の status・error code を含む削除文の監査一覧**
+
+| # | WP | 塊 | 削除した文 (先頭の数語) | 含む語 | 判定表の根拠 |
+|---|---|---|---|---|---|
+
+**0d の保護参照があるために残った、経緯だけの文**
+
+| # | WP | 塊 (行) | 文 (先頭の数語) | 保護参照 | HEAD の状態 |
+|---|---|---|---|---|---|
+
+**訂正の記録 (0g)**
+
+| # | WP | ファイル:行 (CH-ID) | 旧文 (先頭の数語) | 新文 (先頭の数語) | 今のコードとの食い違い (根拠 `file:line`) |
+|---|---|---|---|---|---|
+
+**除いた語の一覧** (完了条件 30。最後の監査スクリプトの出力の `REMOVED` 行と同じ順で 1 行ずつ一致させる)
+
+| # | WP | 塊 (基点の行) | CH-ID | 種類 | 除いた語 | 回数 | 意味と出所が残る根拠 |
+|---|---|---|---|---|---|---|---|
+
+**判定表** (A. 全塊。対象の塊 1 つにつき 1 行。spec の `blocks` の各項目が 1 行に対応し、spec に無い行は「基準のまま」。CH-ID の無い塊も「基準のまま」で載せる)
+
+| # | WP | 塊 (基点の行) | qualname | 種別 | 拾った理由 (目印 / 安全 / 保護参照 / 位置 / 参照先) | spec の CH-ID | 除いた語句 (spec の `old` → `new`) | HEAD の状態 | 判定 (§3) | 根拠 | 削除前の確認 (指示語・副詞・直後の 2 文。設計 §3) | 除去後の文を読んだ判定 | 点検語 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+B. 目印一覧に当たる文 (7a 42 文、7b 53 文。完了条件 27)
+
+| # | WP | 塊 (基点の行) | CH-ID | 目印 | 文 (先頭の数語) | HEAD の状態 | 判定 (§3) | 根拠 | 点検語 | A の行 |
+|---|---|---|---|---|---|---|---|---|---|---|
+
+C. 経緯と同じ文にある安全上の理由・保護参照・位置 (§16.2 の 39 塊と、保護参照・位置だけの塊)
+
+| # | WP | 塊 | CH-ID | 種別 | HEAD の状態 | 判定 (§3) | 根拠 (その塊の安全上の理由・保護参照が残ること) | 点検語 | A の行 |
+|---|---|---|---|---|---|---|---|---|---|
+
+D. 復元・欠番にした塊 (CH-ID を外し、受け皿の節を消した。番号は詰めない)
+
+| # | WP | 塊 (基点の行) | 旧 CH-ID | 前回の除去 | 戻した根拠 | HEAD の状態 |
+|---|---|---|---|---|---|---|
+
+**復元・欠番の裁定と範囲の再走査** (完了条件 29)
+
+| # | WP | 裁定 (塊、内容) | 走査の基準 | 走査した範囲 | 結果 | 再実行の `SUMMARY` 行 (逐語) |
+|---|---|---|---|---|---|---|
+
+**内容の除去が 0 の塊の検査** (完了条件 28)
+
+| WP | CH-ID の塊 (`ch_blocks`) | `WS-ONLY` 行の数 | `SUMMARY` 行 (逐語) |
+|---|---|---|---|
+
+**変異の記録** (`tools/dev/mutate.py`。実行時刻とログのファイル名で書く)
+
+| # | WP | 変異 (完了条件) | 期待 | ログ (実行時刻 / ファイル) | ログの行 (逐語) |
+|---|---|---|---|---|---|
+
+**記録**
+
+| 項目 | WP-7a | WP-7b |
+|---|---|---|
+| CH-ID を付けた塊 / 対象の塊 | / 102 | / 103 |
+| 使った CH-ID と欠番 | | |
+| 経緯トークン (前 → 後、`_HISTORY_TOKEN_PATTERNS` を `cell.py` 全文に当てた数) | 415 → | → |
+| 削除した文 | | |
+| `cell.py` の行数 (前 → 後) | 3,911 → | → |
+| `CONTROL_MAPPING.md` の版と引き直した参照の数 | | |
+
+| 照合コマンド / suite | WP-7a (出力の行を逐語) | WP-7b (出力の行を逐語) |
+|---|---|---|
+| `pt.py … r2db-api/tests -q` 前 / 後 | | |
+| `pt.py … MitateDB-api/tests -q` 前 / 後 | | |
+| `pt.py … conformance-tests/test_control_mapping_register.py conformance-tests/test_conformance_docstring_position_refs.py -q` 前 / 後 | | |
+| `pt.py … tools/tests -q` (コミット前 / コミット後の HEAD) | | |
+| `pt.py … cs7_cli_red.py -q` (変異の前) | | |
+| `tools/dev/mutate.py …` | | |
+| `check_comment_provenance.py --base <基点> …` | | |
+| `check_comment_provenance.py --register` | | |
+| `check_doc_refs.py` | | |
+| `public_value_scan.py <触ったファイル>` | | |
+| `gate.py --label cs7a` / `cs7b` | 監督が実行 | 監督が実行 |
+
+### 16.5 監督裁定 (2026-10-04。依頼者の方針 2026-10-03 により監督の推奨で進め、事後確認を取る)
+
+| # | 論点 | 裁定 |
+|---|---|---|
+| Y7-1 | 分割 | `cell.py` の対象 205 塊を 2 つの WP に分け、順に行う (それぞれ commit・完了ゲート・main への merge を持つ)。WP-7a = 基点で `ApplicationCell.insert` の `def` 行 (`9a65cbc` では L1954) より前に始まる塊 (102)、WP-7b = それ以降に始まる塊 (103)。境界は schema 操作と catalog の後、data 操作の前。WP-7b の基点は WP-7a を統合した後の main。理由: 変更セット 3〜5 の平均 117 塊の 1.8 倍あり、変更セット 5 は 123 塊でレビュー 4 回・修正 3 回、変更セット 6 は 113 塊で最初の実装パスを全て戻した |
+| Y7-2 | 変更クラス | `cell.py` の整理は Class B (設計 §6)。ただし行番号の移動で `security/CONTROL_MAPPING.md` の `cell.py` への位置参照 (`9a65cbc` で 23 件) を同じ変更セットで引き直すので、経路により Class D になる (版を 1 つ上げる。主張の文は変えない)。前例は §14.5 R6-4 の残りの日付除去 (設計 §10.8。参照行の挿入で動いた `security/CONTROL_MAPPING.md` の位置参照 14 件を同じ変更セットで引き直した)、台帳 R-120、台帳 R-108。引き直しは、基準の行と新しい行の内容一致を assert する script (`$SP/repull.py`。全文を §16.3 に置く) で行う。`conformance-tests/` の docstring と `CONDITIONS.md`、`MitateDB-api/README.md`、`MitateDB-api/docs/` の `cell.py` への位置参照は、基準の時点で既に指す先がずれている (例: README の `cell.py:4051` は行数 3,911 を超える) ので触らない (設計 §3「別件」。触ると Class C)。ただし conformance の docstring の参照 (最大 `cell.py:1875-1926`) が行数の範囲内に留まることを確かめる (`conformance-tests/test_conformance_docstring_position_refs.py`) |
+| Y7-3 | 除く範囲 | 設計 §3 の区分どおり。変更セット 5・6 の教訓を条件にする。(4)(6) の機械的な除去は許可であって義務ではない (設計 §3 の v0.14)。(a) 純粋な日付と裁定の日付句 (§14.5 R6-1) は、(b) の条件の下で、検査器が許す限り除く。(b) 除去は、除いた後の文を読んで文法と意味が保たれる場合だけ当てる。除いてよいのは、経緯トークン (設計 §4.1 (5) の語) と、出所を持たない裸の局所 ID のうち、括弧ごと又はラベルごと消え、残る文と同じ塊の他の文がその ID を名指しも指示語でも指さないもの。除かないのは、出所付きの ID、設計 §9.2 (0i) の保護参照 (F-ID、実在パス、版数付き文書名と同じ括弧の条項 ID)、WP の位置指定のうち残る文がそれで場所を指しているもの (例: 「WP-3a の検査」が今ある検査を指す)、除くと括弧に種類語や断片だけが残るもの。迷えば基準のまま残し、判定表の根拠欄にその旨を書く。(c) 文の削除 (3) は経緯だけの文に限り、設計 §3 の「削除前の確認」(指示語・副詞・直後の 2 文) を判定表の列で確かめる。安全上の理由 (lock / transaction / timeout の順序、fail-closed の理由) と同居する文は消さない。(d) 内容の除去が 0 の塊は基準のバイト列のままにし、CH-ID を付けない |
+| Y7-4 | 折り返し | スクリプトでの折り返しの付け直しは禁止。編集は塊の中の逐語の置換だけで行い (`$SP/cs7_apply.py`)、除去に接する行だけを手で切り直してよい。それ以外の行は基準のバイト列のまま |
+| Y7-5 | 対象外 | 登録 helper 4 個の中の塊 4、既存の CH-ID 2 塊 (他件。0j の経路になる)、行末コメント、台帳 R-37 で `cell.py` から出たファイル (後続の変更セット)。`_ISOMORPHIC_TARGETS` の集合の増減は起こさない (起きたら Class D で停止し報告) |
+| Y7-6 | CH-ID の予約 | WP-7a は CH-0600〜CH-0729、WP-7b は CH-0730〜CH-0859 (§14.5 R6-4 の残りの日付除去は CH-0580〜CH-0582 を使った。CH-0568〜CH-0579 は並行する台帳 R-82 の worktree が CH-0568〜CH-0570 を未コミットで使っているので空けておく。CH-0583〜CH-0599 は欠番。使わない番号は欠番で、詰めない)。受け皿は既存の `docs/code-history/MitateDB-api/cell.md` に追記 |
+| Y7-7 | 編集の道具 | 実装担当は塊ごとの編集を spec (JSON) に書き、`$SP/cs7_apply.py -C <worktree> --spec <spec>` で当てる (全文を §16.3 に置く。基点から毎回作り直すので繰り返し実行できる。`old` は塊の中にちょうど 1 回、塊は基点の開始行で指す、対象外の symbol と範囲外の塊は拒む、受け皿の節を基点の塊から生成する)。判定表 (§16.4) と spec は 1 塊 1 行で対応させる。Edit / Write が拒否される環境でも使える |
+| Y7-8 | 完了条件と変異 | 設計 §6 の完了条件 1〜13 と変異を逐語で取り、完了条件 1 つにつき変異 1 つを対応させる (11・12 は該当しない旨を書く。12 は「変更セット 1」限り、11 は「最後の変更セット」限り)。§14.3 が足した条件 (0d の保護参照、0e・0f の述語 B、0g の `#:`、文字列検査、監査スクリプト Y6-6 の 23〜25 など) は §14.3 から同じ形で取り、基点と module を置き換える。CLI の赤は §14.3 の wrapper と同じ形の `$SP/cs7_cli_red.py`、監査は `$SP/cs7_removed_tokens.py` (どちらも §14.3 の本文を基点と module だけ置き換える)。`mutate.py` は最初の失敗で止まるので、1 つの変異の項目には test を 1 つだけ書く。変異の対象行は WP ごとに実装担当が着手時に選び §16.4 に記録する |
+| Y7-9 | レビューの観点 | 検査器が通ることと、残った文が読めることは別。コードレビュー (規模 L、1 巡目は観点 A / B の 2 起動並列、WP ごと) は、CH-ID の付いた全塊について、残した文を読んで意味が通るか、保護参照が落ちていないかを見る |
+| Y7-10 | 行番号 pin と文字列検査 | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py` に `cell.py` の `(module, lineno)` pin があるか、`"cell.py": 44` の件数 pin が行数に依るかを実測して §16.2 に書く。`MitateDB-api/tests/test_application_audit.py` (`cell.py` の `read_text`、L1322 付近) と `MitateDB-api/tests/test_r102_request_scope.py` (L150 付近) は設計 §5 (b) の向きを判定し、完了条件 10 の変異を対応させる。ほかの `cell.py` を文字列として読む検査を grep で取り直す |
+| Y7-11 | ゲートと記録 | WP ごとに `tools/dev/gate.py --label cs7a` / `cs7b` `-C <worktree>`、`pytest tools/tests -q` (finalize の `--tools-tests`)、`--register`、`--base <BASE> MitateDB-api/src/mitatedb_api/cell.py`。コミット後の HEAD でも `tools/tests` を流す (設計 §10.2 の教訓)。記録は設計 §10 に節を足し、台帳 R-22 行に追記する (監督が行う)。受け入れ監査 (`evidence-auditor`) は WP-7b のレビュー完了後に 1 回 |
+| Y7-12 | 監査スクリプトと既存の CH-ID | `cs7_removed_tokens.py` は、基点が既に持つ CH-ID の塊 (WP-7a では CH-0548・CH-0566、WP-7b では加えて WP-7a の全 CH-ID) を読み飛ばす。§14.3 の本文のままでは、これらが `UNPAIRED` になり完了条件 28〜30 を満たせない (起草担当の実測) |
+| Y7-13 | 並行する台帳 R-82 の worktree | 別チャットの worktree (台帳 R-82、未コミット、基点 `9a65cbc`) が `cell.py` (2 か所、6 行)・`docs/code-history/MitateDB-api/cell.md`・`security/CONTROL_MAPPING.md` (版 3.21 を名乗る)・CH-0568〜CH-0570 に触れている (レビュー担当の実測 2026-10-04)。本変更セットは止めずに進める。先に main へ入った側が正で、後から入る側が基点を取り直す: 本変更セットが後なら、spec の `line` を新しい基点の行に対応させ直し (内容の一致する行の対応で機械的に)、R-82 が CH-ID を付けた塊は既存の CH-ID として対象外にし、spec の `base`・`parent`・`line_range` (`insert` の `def` 行と末尾行を新しい基点で取る)、`cs7_cli_red.py` の `BASE`、`cs7_removed_tokens.py` の `--base` の既定を新しい基点に替え、`--base`・`repull.py`・監査スクリプト・変異を新しい基点でやり直す。`security/CONTROL_MAPPING.md` の版は finalize の直前に `git log -1 main` と main の版数行を見て決める |
+| Y7-14 | 40a の範囲 | 実装担当は両 peer の suite と位置参照の conformance 2 ファイルを前後で回す (設計 §6「手順」、完了条件 13)。`conformance-tests/` の全体は実装担当には回させず、監督の完了ゲートの集計行で代える (§1.6 の 42。約 9 分かかり、コメントだけの変更で前後 2 回回す利益が無い) |
+| Y7-15 | `repull.py` が `unresolved` を出したとき | `security/CONTROL_MAPPING.md` が指す `cell.py` の行そのものを WP が変えた場合 (docstring の行を指す参照は `9a65cbc` で L3593 の 1 件) に起きる。実装担当は書き換えずに止めて報告し、監督がその主張が指すべき行を決める |
+| Y7-16 | CH-ID の順序 | spec の CH-ID は予約範囲の中で一意であればよく、行の順に昇順である必要は無い (レビューの後で、基準のまま残していた塊に除去を足すときに、後ろの番号を振り直さないため。既存の module にも逆転がある)。`cs7_apply.py` は範囲と重複だけを検査する |
+
+**却下した代替案**
+
+| 案 | 却下の理由 |
+|---|---|
+| 1 変更セットで 205 塊 | レビューで戻しが出たときの手戻りが全塊に及ぶ (変更セット 6) |
+| 2 つの WP を別 worktree で並行 | 同じファイルと受け皿、行番号 pin、CONTROL_MAPPING の引き直しが衝突する |
+| 変更セット 6 と同じく日付だけに絞る | 0i でチェッカーが F-ID・peer 相対パス・入れ子の条項 ID を保護するようになった後であり、問い 3 の目的 (コードに現在の理由だけを残す) を果たせない |
+| 位置参照を引き直さない | form 3.0 の Control 主張は実施箇所の `path:line` を持ち、ずれは主張の誤りになる |
