@@ -392,11 +392,12 @@ class _LimitStateHolder:
 
     def acquire_rate(self, credential_id, bound):
         if self._rate is not None:
-            # design D-3 (1): every worker this deployment runs shares
+            # every worker this deployment runs shares
             # ONE credential-keyed count. Reached from `ApplicationCell.
             # _limit_gate` after `_require_data`'s own `assert_active`
             # borrow has returned its connection -- sequential, never
             # nested.
+            # history: CH-0600
             if not self._rate.record_rate_and_check(credential_id, bound):
                 raise ResourceLimitError("request rate limit exceeded", limit_class="requests_per_minute")
             return
@@ -424,9 +425,10 @@ class _LimitStateHolder:
         if _CONCURRENCY_RESERVED.get():
             yield
             return
-        # design D-3 (2): a wired host-shared slot directory admits this
+        # a wired host-shared slot directory admits this
         # non-reserved caller through the SAME mechanism the pre-
         # authentication entry below uses, never the in-memory counter.
+        # history: CH-0601
         if self._concurrency_slots is not None:
             try:
                 with self._concurrency_slots.acquire(bound):
@@ -449,7 +451,7 @@ class _LimitStateHolder:
 
     @contextmanager
     def acquire_concurrency_slot(self, bound):
-        """Phase 10 WP-8c (design D-8 (3), review F-2): pre-authentication
+        """pre-authentication
         concurrency admission -- the entry point `http.py` calls BEFORE
         `_authenticate`, mirroring r2db `service.py::DataService.
         acquire_concurrency_slot`'s own identical purpose and this peer's
@@ -471,13 +473,17 @@ class _LimitStateHolder:
         `except FoundationError`-equivalent handling with no `_event`/
         durable-audit call in between, so this denial is never durably
         audited (there is no authenticated principal to attribute it to
-        yet, in any case)."""
-        # design D-3 (2): a wired host-shared slot directory holds ONE
+        yet, in any case).
+
+        History: CH-0602
+        """
+        # a wired host-shared slot directory holds ONE
         # `slot-<i>` file for the whole request and sets the SAME
         # `_CONCURRENCY_RESERVED` marker, so the nested `concurrency_slot`
         # call never takes a second one. A slot backend failure maps to
         # `StorageConfigurationError` (`SERVICE_UNAVAILABLE`, 503), never
         # to a refusal and never to an admission.
+        # history: CH-0603
         if self._concurrency_slots is not None:
             try:
                 with self._concurrency_slots.acquire(bound):
@@ -510,9 +516,11 @@ class ApplicationCell:
 
     The default backend (`backend_sqlite.SQLiteBackend`) is used only as a
     deterministic local foundation backend. `backend_postgres.
-    PostgresBackend` is the production-shaped Cloud SQL adapter (WP-1);
+    PostgresBackend` is the production-shaped Cloud SQL adapter;
     both keep this class's own authority shape identical, never exposing a
     raw database connection to Application code.
+
+    History: CH-0604
     """
 
     def __init__(self, application_id, config=None, audit=None, guard=None, backend=None,
@@ -551,7 +559,7 @@ class ApplicationCell:
         # the backend at the points where the public methods below take its
         # schema, entity and idempotency locks.
 
-        # Phase 8 WP-1a (design D-1): `None` (every pre-WP-1a caller --
+        # Phase 8 WP-1a: `None` (every pre-WP-1a caller --
         # this repository's own tests, any direct construction) gets a
         # PRIVATE, unshared holder -- exactly like `audit_router=None`
         # already defaults to a private `AuditRouter()` two lines above --
@@ -561,6 +569,7 @@ class ApplicationCell:
         # see `main.py`/`service.py`/both conformance adapters, which all
         # construct exactly one holder and pass it to every cell they
         # build).
+        # history: CH-0605
         self.__limit_holder = limit_holder if limit_holder is not None else _LimitStateHolder()
         # Phase 10 WP-6b (design D-5 (ii)): the deployer's OWN declared
         # `process_ceilings.data` (default 1 -- every pre-existing direct
@@ -613,7 +622,7 @@ class ApplicationCell:
 
     @contextmanager
     def _limit_gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
-        """Phase 8 WP-1a rework 1 (裁定 5, 監督裁定 2026-09-06; design D-1
+        """Phase 8 WP-1a rework 1 (裁定 5; design D-1
         "順序"/"実装の形"): the single choke every application-plane
         operation below (`insert`/`read`/`update`/`delete`/`transact`,
         `catalog`/`schema_revision` immediately above, `ApplicationRuntime.
@@ -682,7 +691,10 @@ class ApplicationCell:
         again, once past this gate's `__enter__` -- a second call to the
         SAME pure function, already proven not to raise by this gate's
         own successful entry, never a second, independently-drifting
-        computation."""
+        computation.
+
+        History: CH-0606
+        """
         self.__limit_holder.acquire_rate(principal.credential_id, self.config.max_requests_per_minute)
         with self.__limit_holder.concurrency_slot(self.config.max_concurrency):
             if request is not None:
@@ -705,11 +717,14 @@ class ApplicationCell:
             principal, request, request_id=request_id, budget=budget, endpoint_kind=endpoint_kind)
 
     def _make_audit_hook(self, principal, *, event_class, operation, target_kind, target_id=None, request_id=None):
-        """Phase 4 (design D-2): builds the `audit_hook.ApplicationAuditHook`
+        """builds the `audit_hook.ApplicationAuditHook`
         a backend method (or `transact` below) calls itself, immediately
         before its own commit point. Every field the durable row needs is
         already resolved here -- the backend/batch loop supplies none of
-        it, only the moment."""
+        it, only the moment.
+
+        History: CH-0607
+        """
         return self.__audit_router.make_pre_commit_hook(
             event_class=event_class, request_id=request_id, application_id=self.application_id,
             actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
@@ -759,7 +774,10 @@ class ApplicationCell:
         replay request's own id (never the original's -- correlation with
         the original is the RESPONSE's own `request_id`, contract
         `idempotency.correlation`). `outcome="replayed"` -- never `key`,
-        which never reaches this call at all (I-11)."""
+        which never reaches this call at all.
+
+        History: CH-0608
+        """
         self.__audit_router.write_replayed_fail_closed_event(
             event_class="data_operation", request_id=request_id, application_id=self.application_id,
             actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
@@ -838,8 +856,10 @@ class ApplicationCell:
         replayed_fail_closed_event`, raises `errors.AuditSinkUnavailable`
         if the durable sink cannot record it, rather than silently
         answering the replay with zero evidence). `request_id` is THIS
-        replay request's own id, never the original's; never `key`
-        (I-11)."""
+        replay request's own id, never the original's; never `key`.
+
+        History: CH-0609
+        """
         self.__audit_router.write_replayed_fail_closed_event(
             event_class="schema_change", request_id=request_id, application_id=self.application_id,
             actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
@@ -1015,15 +1035,19 @@ class ApplicationCell:
         A name in `field_constraints` that is not in `fields` fails
         `VALIDATION_FAILED` -- none of it is silently ignored.
 
-        Phase 9 WP-3b (design D-4): `dry_run`/`plan` -- see `add_field`'s
+        `dry_run`/`plan` -- see `add_field`'s
         own identical paragraph immediately below for the full contract;
         this method follows it exactly, with `create_collection` itself
         as the schema operation each `dry_run`/`plan` behavior applies
-        to."""
-        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, before
+        to.
+
+        History: CH-0610
+        """
+        # resolved here, before
         # anything else -- the audit events below and this method's
         # own returned `SchemaOperationResult.request_id` (added to
         # `result` further below) both read this SAME resolved value.
+        # history: CH-0611
         request_id = request_id or uuid.uuid4().hex
         self._require_developer(principal, request_id=request_id)
         # Phase 9 WP-3b: unchanged from before this WP -- `_limit_gate`'s
@@ -1072,11 +1096,12 @@ class ApplicationCell:
                     # single collection DEFINITION may name in one `create_
                     # collection` call -- a one-time shape bound on the request
                     # itself, not a repeated, finite-resource consumption class.
-                    # WP-3e rework T1 (追補 L-1): `request_schema`, mirroring
+                    # `request_schema`, mirroring
                     # r2db-api's own "Mutation contains too many fields"
                     # treatment for the SAME `maxProperties`-style shape
                     # bound -- `field` names the container the bound applies
                     # to, not any one entry inside it.
+                    # history: CH-0612
                     raise ValidationError(
                         "field limit exceeded",
                         details=violation("request_schema", field="fields"),
@@ -1099,7 +1124,7 @@ class ApplicationCell:
                     # (`"fields"`), never `f"fields/{field}"`.
                     field = self._identifier(field, "fields")
                     if field_type not in _FIELD_TYPE_VOCABULARY:
-                        # WP-3e rework T1 (追補 L-1): `enum` -- the declared
+                        # `enum` -- the declared
                         # type name itself must be a member of the closed
                         # foundation-type vocabulary; mirrors r2db-api's own
                         # `field_types/<name>` "Unsupported field type"
@@ -1107,6 +1132,7 @@ class ApplicationCell:
                         # `declared_type: "string"`, no `observed_type` --
                         # the violation is about the vocabulary MEMBERSHIP of
                         # the declared name, not about a value's type).
+                        # history: CH-0613
                         raise ValidationError(
                             "unsupported field type",
                             details=violation("enum", field=f"fields/{field}", declared_type="string"),
@@ -1124,8 +1150,7 @@ class ApplicationCell:
                 # (7)'s own contract text for `enum_members`).
                 if field_constraints is not None:
                     if not isinstance(field_constraints, dict):
-                        # 監督裁定 N-2 (2026-09-07, wp3a-closure2): a
-                        # non-object `field_constraints` is a request-shape
+                        # a non-object `field_constraints` is a request-shape
                         # violation about the top-level `field_constraints`
                         # key's own type -- the same `request_schema` shape
                         # `create_entity`'s sibling "field_constraints without
@@ -1138,6 +1163,7 @@ class ApplicationCell:
                         # a VALUE, and `field_constraints` at this position is
                         # a container the request declares, not a value being
                         # checked against a field's own declared type.
+                        # history: CH-0614
                         raise ValidationError(
                             "field_constraints must be an object",
                             details={
@@ -1147,11 +1173,11 @@ class ApplicationCell:
                         )
                     unknown = set(field_constraints) - set(validated_fields)
                     if unknown:
-                        # WP-3a rework 2 (監督裁定 m-1, 2026-09-07): "a
-                        # declaration naming a field the request does not
+                        # "a declaration naming a field the request does not
                         # create" -- the 4th `constraint_declaration` case.
                         # No `declared_type` (the named field is never
                         # created by this request, so it has none).
+                        # history: CH-0615
                         bad_field = sorted(unknown)[0]
                         # 追補 4 O-3 (版フリップ監査 §4/§16): `bad_field` is a
                         # RAW, unvalidated dict key -- it may be syntax-valid
@@ -1278,16 +1304,18 @@ class ApplicationCell:
                     # `digest_extra`/`idempotency_key`, unchanged from the
                     # pre-hoist version this replaces). `compute_plan_token`
                     # excludes only `plan`/`dry_run`, so an `idempotency_key`
-                    # this object carries (I-13) is part of what THIS token
+                    # this object carries is part of what THIS token
                     # commits to too.
+                    # history: CH-0617
                     expected_token = compute_plan_token(digest_request, current_revision)
                     check_plan_precondition(plan, expected_token)
-                # Phase 4 (design D-2 item 2): every schema operation is
+                # every schema operation is
                 # unconditionally fail-closed class -- the hook's own `pre_commit()`
                 # is called by `self._backend.create_collection` itself, as the
                 # last thing it does before its own commit point. Phase 9 WP-3b
                 # (design D-4 (4), §5 U-2 = (A)): NOT built at all for a dry
                 # run -- no audit hook, no audit event, not even an attempt.
+                # history: CH-0618
                 hook = None if dry_run else self._make_audit_hook(
                     principal, event_class="schema_change", operation="create_collection",
                     target_kind="collection", target_id=name, request_id=request_id,
@@ -1346,10 +1374,11 @@ class ApplicationCell:
         is not.
         """
         if field_constraints is not None and fields is None:
-            # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): D-3 details
+            # WP-3a closure (audit §3 G3): D-3 details
             # -- this is a missing-key request-shape violation, not one
             # about a value's own type, so `declared_type`/`observed_type`
             # are omitted per D-3 (3).
+            # history: CH-0619
             raise ValidationError(
                 "field_constraints requires fields to be present",
                 details={
@@ -1380,7 +1409,7 @@ class ApplicationCell:
         CONSEQUENCE` for why this is also what makes a schema-revision
         fingerprint necessary in the `delete` confirmation phrase.
 
-        Phase 6 WP-3 (design D-3): `contract_type`, when given, is the
+        `contract_type`, when given, is the
         7-word contract vocabulary type this call records in the
         registry for `field` (`http.py`'s own `add_field` handler always
         supplies it -- `SchemaOperationRequest.field_type` is required
@@ -1388,7 +1417,7 @@ class ApplicationCell:
         from `field_type` via the same backfill rule `create_collection`
         uses.
 
-        Phase 9 WP-3a (design D-2 (1)): `enum`/`nullable`, when given,
+        `enum`/`nullable`, when given,
         are this one new field's own `field_constraints` declaration --
         validated (`field_types.validate_enum_declaration`, `enum_members`)
         and written to the constraint registry BEFORE anything is
@@ -1414,11 +1443,15 @@ class ApplicationCell:
         the actual, measured behavior -- `result["plan"]` is only ever
         set inside `if dry_run:` below, never on the real-call path;
         there is nothing left to preview once a real call has already
-        committed)."""
-        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, before
+        committed).
+
+        History: CH-0620
+        """
+        # resolved here, before
         # anything else -- the audit events below and this method's
         # own returned `SchemaOperationResult.request_id` (added to
         # `result` further below) both read this SAME resolved value.
+        # history: CH-0621
         request_id = request_id or uuid.uuid4().hex
         self._require_developer(principal, request_id=request_id)
         # Phase 9 WP-3b: unchanged from before this WP -- see `create_
@@ -1433,11 +1466,12 @@ class ApplicationCell:
                 collection = self._identifier(collection, "entity")
                 field = self._identifier(field, "field")
                 if field_type not in _FIELD_TYPE_VOCABULARY:
-                    # WP-3e rework T1 (追補 L-1): mirrors `create_collection`'s
+                    # mirrors `create_collection`'s
                     # own identical per-field check above -- `add_field`'s
                     # single scalar `field_type` key is its own request
                     # position (matches r2db-api's own `add_field` site,
                     # `field="field_type"`).
+                    # history: CH-0622
                     raise ValidationError(
                         "unsupported field type",
                         details=violation("enum", field="field_type", declared_type="string"),
@@ -1468,9 +1502,10 @@ class ApplicationCell:
                     if nullable is not None:
                         digest_request["nullable"] = nullable
                     if budget is not None:
-                        # WP-1c ext -- see `create_collection`'s identical
+                        # see `create_collection`'s identical
                         # comment for the rationale (契約 1.7.0 idempotency.
                         # record).
+                        # history: CH-0623
                         digest_request["budget"] = budget
                     if digest_extra:
                         digest_request.update(digest_extra)
@@ -1479,9 +1514,10 @@ class ApplicationCell:
                 idempotency_response_digest = None
                 idempotency_now_ms = None
                 if idempotency_key is not None and not dry_run:
-                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                    # checked before
                     # `field_domains` immediately below -- this method's own
                     # target-existence check.
+                    # history: CH-0624
                     replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
                         idempotency_key, digest_request, scope=scope)
                     if replay is not None:
@@ -1510,11 +1546,12 @@ class ApplicationCell:
                 # `ResourceLimitError` call-site count unaffected by this WP).
                 current = self._visible_field_domains(collection, scope=scope)  # NotFoundError if `collection` does not exist
                 if len(current) >= self.config.max_fields:
-                    # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
+                    # `request_schema`, `field`
                     # names the request key this bound is about -- `add_field`
                     # has no plural container to point at (unlike `create_
                     # collection`'s own `fields`), so this points at the one
                     # new field name the request itself carries.
+                    # history: CH-0625
                     raise ValidationError(
                         "field limit exceeded",
                         details=violation("request_schema", field="field"),
@@ -1559,13 +1596,15 @@ class ApplicationCell:
                     # argument, never the resolved `declared_type` -- H-3 (a),
                     # unchanged by this hoist). `compute_plan_token` excludes
                     # only `plan`/`dry_run`, so an `idempotency_key` this
-                    # object carries (I-13) is part of what THIS token commits
+                    # object carries is part of what THIS token commits
                     # to too.
+                    # history: CH-0626
                     expected_token = compute_plan_token(digest_request, current_revision)
                     check_plan_precondition(plan, expected_token)
-                # Phase 4 (design D-2 item 2): same unconditional fail-closed
-                # pre-commit hook as `create_collection` above. Phase 9 WP-3b:
+                # same unconditional fail-closed
+                # pre-commit hook as `create_collection` above.
                 # not built at all for a dry run.
+                # history: CH-0627
                 hook = None if dry_run else self._make_audit_hook(
                     principal, event_class="schema_change", operation="add_field",
                     target_kind="collection", target_id=collection, request_id=request_id,
@@ -1619,7 +1658,7 @@ class ApplicationCell:
         under one type into another is not defined by this version",
         §4 A-2) -- `alter_field` never redeclares a field's own type.
 
-        Code review §2 A / 監督裁定 A (2026-09-07): `enum` is tri-state --
+        Code review §2 A / 監督裁定 A: `enum` is tri-state --
         the sentinel default `backend.UNCHANGED` (the request omitted
         `enum` entirely) leaves the field's current `enum` exactly as it
         is; an explicit `enum: null` (`enum=None`, distinguishable from
@@ -1636,7 +1675,7 @@ class ApplicationCell:
         -- every direct/in-process caller expresses it the identical way,
         by omitting the keyword or passing `enum=None` explicitly.
 
-        Code review §2 H / 監督裁定 H (2026-09-07): the `field_type`
+        Code review §2 H / 監督裁定 H: the `field_type`
         rejection below now runs INSIDE `_limit_gate` (rate/concurrency/
         request_bytes/operation_depth), at the same validation stage
         every other `alter_field` check (identifier syntax, `nullable`'s
@@ -1655,11 +1694,15 @@ class ApplicationCell:
         happen inside ONE transaction on the backend (`alter_field_
         constraints`), never a separate pre-flight scan in a different
         transaction from the one that commits the change (design D-2
-        実装の形 4, F-6, 監督裁定 S-g)."""
-        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, before
+        実装の形 4, F-6, 監督裁定 S-g).
+
+        History: CH-0629
+        """
+        # resolved here, before
         # anything else -- the audit events below and this method's
         # own returned `SchemaOperationResult.request_id` (added to
         # `result` further below) both read this SAME resolved value.
+        # history: CH-0630
         request_id = request_id or uuid.uuid4().hex
         self._require_developer(principal, request_id=request_id)
         request = {"collection": collection, "field": field, "nullable": nullable, "field_type": field_type}
@@ -1673,7 +1716,7 @@ class ApplicationCell:
                         details={"violated_declaration": "unsupported_field", "field": "field_type"},
                     )
                 if enum is UNCHANGED and nullable is None:
-                    # 監督裁定 N-1 (2026-09-07, wp3a-closure2): an alter_field
+                    # an alter_field
                     # carrying neither enum nor nullable declares nothing --
                     # refused with VALIDATION_FAILED before the schema is
                     # touched (no collection/field lookup above this line, so
@@ -1683,6 +1726,7 @@ class ApplicationCell:
                     # "operation" (design D-3 (2)'s request-relative path):
                     # the missing declaration is a defect of the operation as
                     # a whole, not of any single top-level key.
+                    # history: CH-0631
                     raise ValidationError(
                         "alter_field must redeclare enum and/or nullable",
                         details={
@@ -1714,9 +1758,10 @@ class ApplicationCell:
                     if enum is not UNCHANGED:
                         digest_request["enum"] = enum
                     if budget is not None:
-                        # WP-1c ext -- see `create_collection`'s identical
+                        # see `create_collection`'s identical
                         # comment for the rationale (契約 1.7.0 idempotency.
                         # record).
+                        # history: CH-0632
                         digest_request["budget"] = budget
                     if digest_extra:
                         digest_request.update(digest_extra)
@@ -1725,9 +1770,10 @@ class ApplicationCell:
                 idempotency_response_digest = None
                 idempotency_now_ms = None
                 if idempotency_key is not None and not dry_run:
-                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                    # checked before
                     # `field_domains` immediately below -- this method's own
                     # target-existence check.
+                    # history: CH-0633
                     replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
                         idempotency_key, digest_request, scope=scope)
                     if replay is not None:
@@ -1749,7 +1795,7 @@ class ApplicationCell:
                 scope.lock_entities([collection], shared=False)
                 available = self._visible_field_domains(collection, scope=scope)  # NotFoundError if `collection` does not exist
                 if field not in available:
-                    # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
+                    # WP-3a closure (audit §3 G3): the
                     # request NAMES a field the entity does not have -- a
                     # constraint-declaration violation (`errors.details_
                     # vocabulary.violated_declaration_vocabulary`'s own
@@ -1758,6 +1804,7 @@ class ApplicationCell:
                     # shape one; `field` echoes the request's own top-level
                     # `field` key (design D-3 (2)), never a type pair (D-3
                     # (3): this is not a violation about a value's own type).
+                    # history: CH-0634
                     raise ValidationError(
                         "unknown field",
                         details={
@@ -1802,13 +1849,15 @@ class ApplicationCell:
                     # never included -- the `field_type is not None` check
                     # above always refuses first, unchanged by this hoist).
                     # `compute_plan_token` excludes only `plan`/`dry_run`, so
-                    # an `idempotency_key` this object carries (I-13) is part
+                    # an `idempotency_key` this object carries is part
                     # of what THIS token commits to too.
+                    # history: CH-0635
                     expected_token = compute_plan_token(digest_request, current_revision)
                     check_plan_precondition(plan, expected_token)
-                # Phase 4 (design D-2 item 2): same unconditional fail-closed
+                # same unconditional fail-closed
                 # pre-commit hook as `create_collection`/`add_field` above.
-                # Phase 9 WP-3b: not built at all for a dry run.
+                # not built at all for a dry run.
+                # history: CH-0636
                 hook = None if dry_run else self._make_audit_hook(
                     principal, event_class="schema_change", operation="alter_field",
                     target_kind="collection", target_id=collection, request_id=request_id,
@@ -1842,7 +1891,7 @@ class ApplicationCell:
         return result
 
     def schema_revision(self, principal, *, request_id=None):
-        """m-2 (independent WP-3 review): the SAME monotonically-increasing
+        """the SAME monotonically-increasing
         counter `_validate_delete_confirmation` already reads to fingerprint
         a delete confirmation phrase (`_delete_confirmation_phrase`), now
         also exposed as a read-only, authorized query -- so the HTTP
@@ -1854,7 +1903,7 @@ class ApplicationCell:
         value, and always returning the same literal after every schema
         change is not honest about what the peer just did).
 
-        Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): WRAPPED by
+        Phase 8 WP-1a rework 1 (裁定 3): WRAPPED by
         `_limit_gate` (rate/concurrency only -- `request=None`, exactly
         like `catalog` immediately below and r2db's own `catalog()`/
         `schema()`, which wrap `_slot` but never call `check_request`/
@@ -1883,7 +1932,10 @@ class ApplicationCell:
         all -- the SAME asymmetry finding the WP-1a report already made,
         just resolved the other way: gate the real client-facing query,
         exempt the internal wire-formatting readback, rather than
-        exempting both)."""
+        exempting both).
+
+        History: CH-0637
+        """
         self._require_data(principal, request_id=request_id)
         with self._limit_gate(principal, None, request_id=request_id) as deadline:
             return self._schema_revision_uncounted(deadline=deadline)
