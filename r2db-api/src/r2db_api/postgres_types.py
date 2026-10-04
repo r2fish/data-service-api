@@ -81,9 +81,9 @@ _SQL_TYPE_TO_DECLARED: dict[str, str] = {
 }
 
 
-@dataclass
+@dataclass(frozen=True)
 class _TableInfo:
-    """One entity table's live shape, as re-derived from PostgreSQL's own catalog by `PostgresCell._load_catalog` on every call (never cached across calls, never trusted as a standing assumption --).
+    """One entity table's live shape, as re-derived from PostgreSQL's own catalog by `PostgresCell._load_catalog` on every call (`_load_catalog` itself caches nothing and trusts nothing as a standing assumption; `PostgresCell._catalog` keeps a read-only copy of its result while the schema revision it was read under is current --).
 
     `columns`: declared field name -> declared type in the shared
     `r2db_api.structured` vocabulary (`"string"`/`"integer"`/`"number"`/

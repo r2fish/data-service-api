@@ -350,25 +350,29 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # (the schema-lock and entity-lock acquisition) adds one site of the same
     # generic driver-exception translation. Every line below re-verified via
     # `_fail_call_sites`, not hand-shifted. Entry count 18 -> 19.
-    ("backend_postgres.py", 623),   # _acquire_advisory: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 683),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 740),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 788),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 814),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 870),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 927),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 951),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 1128),  # alter_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 1147),  # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1287),  # create_collection: generic driver-exception translation
-    ("backend_postgres.py", 1444),  # add_field: generic driver-exception translation
-    ("backend_postgres.py", 1533),  # insert_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1566),  # update_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1593),  # delete_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1671),  # read: generic driver-exception translation
-    ("backend_postgres.py", 1708),  # delete: generic driver-exception translation
-    ("backend_postgres.py", 1827),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1858),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    # R-82: the four per-collection catalog readers' own generic driver-exception
+    # translations (`field_domains`, `field_types`, `field_constraints`,
+    # `field_types_and_constraints`) are replaced by the two of the shared
+    # snapshot path, `_catalog_token` and `_load_collection_snapshot`; every line
+    # below re-verified via `_fail_call_sites`, not hand-shifted. Entry count
+    # 19 -> 17.
+    ("backend_postgres.py", 659),   # _acquire_advisory: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 720),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 782),   # _catalog_token: generic driver-exception translation
+    ("backend_postgres.py", 823),   # _load_collection_snapshot: generic driver-exception translation
+    ("backend_postgres.py", 887),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 985),  # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1162),  # alter_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1181),  # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1321),  # create_collection: generic driver-exception translation
+    ("backend_postgres.py", 1478),  # add_field: generic driver-exception translation
+    ("backend_postgres.py", 1567),  # insert_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1600),  # update_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1627),  # delete_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1705),  # read: generic driver-exception translation
+    ("backend_postgres.py", 1742),  # delete: generic driver-exception translation
+    ("backend_postgres.py", 1861),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1892),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
@@ -658,7 +662,9 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # (one generic driver-exception `ValidationError` each) are removed (21 -> 19).
         # R-102: +1 -- `_acquire_advisory`'s generic driver-exception translation
         # (the schema-lock / entity-lock acquisition) (19 -> 20).
-        "backend_postgres.py": 20,
+        # R-82: -2 -- the four per-collection catalog readers' generic translations
+        # are replaced by the two of the shared snapshot path (20 -> 18).
+        "backend_postgres.py": 18,
         "backend_sqlite.py": 4,
         # R-37 WP-1 leaf extraction (2026-09-14): the 4 sites `_check_
         # domain` carried in `backend_postgres.py` before the move,

@@ -1447,7 +1447,7 @@ def test_pg_query_never_reads_the_field_constraints_side_table(app_a: types.Simp
     skipped entirely on the read-only `query` path -- pinned by counting
     calls to it directly -- while `transact`/`catalog` (which DO need
     `table_info.constraints`) still read it exactly once per call."""
-    from r2db_api.postgres import PostgresCell
+    from r2db_api.postgres import PostgresCell, _RevisionKeyedCache
 
     cell = make_cell(app_a)
     try:
@@ -1463,12 +1463,16 @@ def test_pg_query_never_reads_the_field_constraints_side_table(app_a: types.Simp
 
         monkeypatch.setattr(PostgresCell, "_load_field_constraints", spy)
 
+        cell._catalog_cache = _RevisionKeyedCache()
         cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS)
         assert calls["n"] == 0, "query() must not read the field_constraints side table (M-4)"
 
+        # R-82: the catalog a warm cache holds is not read again, so each call below starts from an empty cache -- what this test pins is which paths read the side table when they read the live catalog.
+        cell._catalog_cache = _RevisionKeyedCache()
         cell.transact("widgets", [{"operation": "insert", "values": {"label": "y", "status": "draft"}}], LIMITS)
         assert calls["n"] == 1, "transact() (a write path) must still read it"
 
+        cell._catalog_cache = _RevisionKeyedCache()
         cell.catalog()
         assert calls["n"] == 2, "catalog() must still read it"
     finally:

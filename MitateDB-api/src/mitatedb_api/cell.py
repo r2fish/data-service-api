@@ -3360,7 +3360,8 @@ class ApplicationCell:
                 raise
             # B-1 (independent review round 2): `available[field]` is this
             # field's own value-domain category from the active backend's
-            # live catalog (`None` on SQLite -- domain validation skipped
+            # catalog (a live read kept as a process copy while the schema
+            # revision is unchanged; `None` on SQLite -- domain validation skipped
             # there, matching its own unchanged external behavior) --
             # passed through so a type-mismatched value (e.g. a string for
             # a declared-`integer` column) is rejected deterministically
@@ -3371,6 +3372,7 @@ class ApplicationCell:
             # above attaches) and contract-vocabulary declared type, so a
             # backend-layer value-domain denial (NUL/lone surrogate/
             # out-of-range) carries the same D-3 (4) 4-key form.
+            # history: CH-0570
             params.append(self._backend.encode_value(
                 self._normalize_value_for_storage(value, declared_type), domain=available[field],
                 field=f"{path_prefix}/{field}", declared_type=declared_type))

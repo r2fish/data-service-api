@@ -35,6 +35,20 @@ constraints` keeps calling one of those two on their own,
 unchanged. Existence-checked the same way both are.
 ```
 
+### correction: 2026-10-04
+
+- reason: R-82 -- `field_types_and_constraints` no longer reads the single query itself: it answers from the collection snapshot (`_collection_snapshot`); only the DDL methods still read `_field_types_and_constraints_locked`
+
+old:
+```
+merged into the single query `_field_types_and_constraints_locked` above makes
+```
+
+new:
+```
+answered from the collection snapshot `_collection_snapshot` returns (the DDL methods read the single query `_field_types_and_constraints_locked` above makes)
+```
+
 ## CH-0528
 
 - moved from: `src/mitatedb_api/backend_postgres.py` (`PostgresBackend.alter_field_constraints`)
@@ -237,4 +251,170 @@ before `audit_hook.pre_commit()` (which follows it and sends nothing on this con
 # still excludes concurrent row writers (ROW
 # EXCLUSIVE) exactly as plain SHARE did, so the scan
 # property above is unchanged.
+```
+
+## CH-0568
+
+- moved from: `src/mitatedb_api/backend_postgres.py` (`PostgresBackend.field_domains`)
+- parent commit: `9a65cbc`
+- kind: docstring
+
+```
+Live catalog lookup (R-2 stage 2) doubling as the value-domain
+source B-1 (i) needs: for every column of `collection`, this
+database's own `information_schema.columns.data_type` is mapped
+back to a domain category `encode_value` can validate a bound
+value against. Raises `errors.NotFoundError` if `collection` does
+not exist -- the same existence-check role the pre-B-1
+`field_names` method played.
+
+Phase 6 WP-3 (design D-3, L6-1 (v)): a physical `text` column's
+own domain is no longer a single shared `"text"` bucket
+(`_DOMAIN_BY_DATA_TYPE`'s own corrected comment above) (in `postgres_types.py`) -- it is
+looked up in the declared-type REGISTRY instead
+(`_TEXT_DOMAIN_BY_DECLARED_TYPE`), which is the only place that
+can recover which of `string`/`object`/`array`/`json` the column
+actually is. A `text`-physical column absent from the registry
+(should not occur for any field this peer's own `create_
+collection`/`add_field` created after this WP -- see
+`create_collection`'s own registry-write below) degrades to
+`"string"`, never a crash.
+```
+
+### correction: 2026-10-04
+
+- reason: R-82 -- the four per-collection catalog reads are answered from a process copy of the live read while the schema revision is unchanged, so the lookup is no longer a live read on every call
+
+old:
+```
+Live catalog lookup (R-2 stage 2)
+```
+
+new:
+```
+Catalog lookup (R-2 stage 2; a live read, kept as a process copy while the schema revision is unchanged)
+```
+
+## CH-0569
+
+- moved from: `src/mitatedb_api/backend_postgres.py` (`<module>`)
+- parent commit: `9a65cbc`
+- kind: docstring
+
+```
+PostgreSQL storage backend (R-2/R-3).
+
+R-2 choke point: values are always bound as psycopg parameters, never
+string-interpolated into SQL text. Identifiers reach this module already
+syntax-checked by the shared allowlist (``identifiers.validate_identifier``,
+re-applied here defensively as this module's own first gate too -- cheap,
+and keeps this file's own safety property self-contained rather than
+depending entirely on the caller having done it) and, for every identifier
+that names something ALREADY EXPECTED TO EXIST (a collection/field a
+read/write/filter references), additionally checked against this
+database's own live catalog by ``field_domains`` before it is ever used --
+only *new* names (``create_collection``/``add_field``) skip that second
+stage, for the obvious reason that a name being created cannot already be
+in the catalog; PostgreSQL's own ``DuplicateTable``/``DuplicateColumn``
+still catches a collision there. Every identifier is composed into a
+statement exclusively via ``psycopg.sql.Identifier`` -- this module never
+builds a statement by embedding a name into a plain Python string.
+
+Execution itself is centralized in ``_execute``, the ONLY function in this
+module allowed to call ``cursor.execute`` directly: it rejects (``TypeError``,
+at runtime, not merely by convention) anything that is not already a
+``psycopg.sql.SQL``/``psycopg.sql.Composed`` object -- a bare Python
+``str`` in particular -- so no method anywhere in this file has a route to
+execute raw, string-interpolated SQL even by future accident.
+
+WP-1 independent review B-1 (blocker): a value whose Python-level SHAPE
+was acceptable (`cell.ApplicationCell._normalize_value`'s own
+str/int/float/bool/None/dict/list check) can still MISMATCH the declared
+PostgreSQL column type it is bound against (e.g. a string bound to a
+`BIGINT` column, or an out-of-range integer bound to one) -- PostgreSQL
+then raises a driver-level error (`InvalidTextRepresentation`,
+`NumericValueOutOfRange`, ...) that used to escape this module's own
+`errors.FoundationError` boundary entirely, AND left the connection in
+PostgreSQL's own aborted-transaction state (every subsequent statement on
+that connection failing with `InFailedSqlTransaction` until an explicit
+`ROLLBACK`) because only the narrower `UniqueViolation`/`UndefinedTable`
+handlers called `rollback()`. Fixed with two independent layers, per the
+review's own two-layer split:
+
+(i) ``field_domains`` reports each column's own DOMAIN category (`"text"`/
+`"int32"`/`"int64"`/`"float"`, derived from this backend's own `_TYPES`
+mapping via a live `information_schema.columns.data_type` query -- the
+SAME live-catalog query `field_domains` already performs for stage-2
+identifier validation, now also answering "what domain does this column
+accept" in the same round trip). `encode_value(value, domain=...)`
+deterministically rejects a value outside its target column's domain
+BEFORE any statement reaches the database -- the SQLite backend's own
+`encode_value` ignores `domain` entirely (matching WP-1 P3 round 2
+instruction #1's own precedent: SQLite's more permissive behavior for the
+embedded-NUL case stays UNCHANGED here too; SQLite's column affinity is
+dynamic, so there is no equivalent mismatch to detect there).
+
+(ii) every DML/DDL method below now has a FINAL, catch-all
+``except psycopg.Error`` (after any more specific handler) that always
+calls the correct connection's own `rollback()` before re-raising a
+classified `errors.ValidationError` -- so a genuinely unanticipated
+PostgreSQL-level rejection (anything layer (i) did not already catch)
+still (a) never leaves a connection aborted for the next call on the same
+cell, and (b) never leaks a raw `psycopg.Error` past this module's own
+boundary. This is a deliberately conservative, defensive backstop, not a
+precise error classification -- by the time layer (i) is in place, this
+branch should be effectively unreachable for realistic client input; it
+exists only so an unanticipated case still fails safely (connection
+recovers, caller gets a classified exception) rather than poisoning the
+connection for every future call.
+
+This is not a port of r2db-api's own ``postgres.py`` (R-2's closing
+paragraph: "the peer implementations are never shared" -- two independent
+implementations of the same safety property is what gives the common
+conformance suite its own detection power). Notable, deliberate
+differences from that peer's own design: no row
+addressability (``row_addressability`` stays declared ``unavailable`` --
+see ``insert_in_transaction``'s own comment for why its ``rowid`` return value uses
+PostgreSQL's ``ctid`` rather than a stable published address), and no Row
+Level Security (this foundation's primary isolation wall is
+database-per-application, R-1 -- RLS as an additional layer is future-work,
+design v1.1 §7, not this WP's own containment boundary).
+
+Connections and requests: each application has one bounded pool per role
+(runtime, developer). A request borrows what it needs once, at its start
+(``request_scope``), runs as ONE transaction on its main connection and
+returns the connections when it ends, rolling back whatever is
+uncommitted -- so no two requests ever share a connection or a
+transaction, and nothing one request set on a connection reaches the next.
+Requests on the same application run concurrently; what PostgreSQL
+serializes for them is named at each lock (``lock_schema``,
+``lock_entities``, the two idempotency locks).
+```
+
+### correction: 2026-10-04
+
+- reason: R-82 -- the identifier check against the catalog uses a process copy of the live read while the schema revision is unchanged
+
+old:
+```
+database's own live catalog by ``field_domains``
+```
+
+new:
+```
+database's own catalog (a live read, kept as a process copy while the schema revision is unchanged) by ``field_domains``
+```
+
+### correction: 2026-10-04
+
+- reason: R-82 -- `field_domains` answers from a process copy of its live read while the schema revision is unchanged
+
+old:
+```
+the SAME live-catalog query `field_domains` already performs
+```
+
+new:
+```
+the SAME live-catalog query `field_domains` already answers (from a process copy of its live read while the schema revision is unchanged)
 ```

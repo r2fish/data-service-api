@@ -9,7 +9,7 @@ Design constraints this file is written to satisfy:
 - Identifiers (table/column names) are composed only with `psycopg.sql.
   Identifier`, and only after (a) the shared syntax allowlist in
   `r2db_api.structured` and (b) verification against this application's
-  *live* PostgreSQL catalog (`information_schema`), via `_load_catalog`.
+  PostgreSQL catalog (`information_schema`), read live by `_load_catalog` and kept as a process copy by `_catalog` while the schema revision is unchanged.
   Syntax validation alone would still admit a well-formed but unknown
   identifier; the catalog check is what closes that gap.
 - Operators and sort directions map to a fixed table of `sql.SQL` literals
@@ -94,7 +94,8 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Sequence
+from types import MappingProxyType
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import psycopg
 from psycopg import sql
@@ -1012,6 +1013,47 @@ class _PoolHandle:
 default_pool_manager = SharedPoolManager()
 
 
+class _RevisionKeyedCache:
+    """Process-local copy of one application's catalog reads, valid for ONE token: the database's own `pg_database.oid` together with its schema revision, read from the database inside the request's own transaction (docs/work-orders/WORK_ORDER_R82_SCHEMA_CACHE_V1.md D-1, D-2).
+
+    `get(token, key)` answers only when `token` is the token the contents were stored under. `put(token, key, value)` under any other token discards every value stored under the previous token and takes that token over, whatever its revision or oid, and a value is returned only for the token it was read under. The token cannot tell a database written back in place (its revision returns to a value it had before) from the database the contents were read under, so the process must be restarted after such a write-back (docs/work-orders/WORK_ORDER_R82_SCHEMA_CACHE_V1.md D-9). `None` never matches (a database whose revision row is missing has no token and is read live every time).
+
+    One instance per backend object, set in its constructor -- never a class attribute or a module variable -- so two applications never share one. The lock guards the two fields and is held for dictionary operations only.
+
+    Each peer carries its own copy, pinned equal by the `_RevisionKeyedCache` row of `_ISOMORPHIC_TARGETS` (`tests/test_audit_query.py`). Measured by `tools/dev/mutate.py`, each mutation turning its own test red on both peers: `get` always answering `None` turns `test_a_warm_cache_serves_query_transact_and_catalog_from_the_token_alone` (r2db-api) and `test_a_warm_cache_serves_a_read_and_a_write_from_the_token_alone` (MitateDB-api) red; `get` not comparing the token turns `test_a_definition_another_cell_changed_is_used_by_the_next_request` and `test_a_definition_another_backend_changed_is_used_by_the_next_request` red; keeping the previous values when `put` takes another token over (`self._values = {}` removed) turns `test_a_put_under_another_token_discards_what_the_previous_token_stored` red; one word changed on one peer turns `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` red.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._token = None
+        self._values = {}
+
+    def get(self, token, key):
+        with self._lock:
+            if token is None or token != self._token:
+                return None
+            return self._values.get(key)
+
+    def put(self, token, key, value):
+        with self._lock:
+            if token != self._token:
+                self._token = token
+                self._values = {}
+            self._values[key] = value
+
+
+def _freeze_catalog(catalog: dict[str, "_TableInfo"]) -> "MappingProxyType[str, _TableInfo]":
+    """A read-only copy of what `_load_catalog` returned: the entity map, the three maps of each `_TableInfo` (`columns`, `indexes`, `constraints`) and each index entry are `MappingProxyType`s over copies, so a caller handed the cached catalog cannot change what the next request is validated against. `FieldConstraints` is frozen and an index entry's `fields` is a tuple, so nothing below those maps is writable either. Measured by `tools/dev/mutate.py`: returning the live dicts in its place (`frozen = live` in `_catalog`) turns `test_what_the_cache_hands_out_cannot_be_written_to` red."""
+    return MappingProxyType({
+        name: _TableInfo(
+            columns=MappingProxyType(dict(info.columns)),
+            indexes=MappingProxyType({index_name: MappingProxyType(dict(entry)) for index_name, entry in info.indexes.items()}),
+            constraints=MappingProxyType(dict(info.constraints)),
+        )
+        for name, info in catalog.items()
+    })
+
+
 class PostgresCell:
     """A `StorageBackend` over one application's own PostgreSQL database
     (architecture §8, "D-3 改訂": database-per-application, not
@@ -1077,6 +1119,7 @@ class PostgresCell:
         self._pool_manager = manager
         self._runtime = _PoolHandle(manager, (application_id, "runtime"), runtime_dsn, schema, pool_size)
         self._developer = _PoolHandle(manager, (application_id, "developer"), developer_dsn, schema, pool_size)
+        self._catalog_cache = _RevisionKeyedCache()
 
     def close(self) -> None:
         """Release this cell's own two pools back to the shared manager
@@ -1185,7 +1228,7 @@ class PostgresCell:
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
-                    info = self._load_catalog(conn)
+                    info = self._catalog(conn)
             except psycopg.errors.QueryCanceled:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
@@ -1193,6 +1236,28 @@ class PostgresCell:
             except psycopg.Error:
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         return [self._describe_table(name, info[name]) for name in sorted(info)]
+
+    def _read_catalog_token(self, conn: "psycopg.Connection[Any]") -> tuple[int, int] | None:
+        """The cache token: `(pg_database.oid of the current database, _r2db_schema_revision.revision)`, one statement in the caller's own transaction on the runtime connection (the revision table's RLS policy admits the runtime role; `pg_database` is readable by every role). The oid makes a database dropped and created again under the same name -- whose revision starts over at 0 -- a different token. `None` when the revision table holds no row; the caller then reads live and keeps nothing. Measured by `tools/dev/mutate.py`: a statement that returns the constant `0` for the oid turns `test_each_cell_keeps_its_own_cache_and_the_token_is_the_databases_oid_and_revision` red."""
+        statement = sql.SQL("SELECT (SELECT oid FROM pg_database WHERE datname = current_database()), revision FROM {table}").format(table=sql.Identifier(_REVISION_TABLE))
+        with conn.cursor() as cur:
+            _run(cur, statement)
+            row = cur.fetchone()
+        return (int(row[0]), int(row[1])) if row is not None else None
+
+    def _catalog(self, conn: "psycopg.Connection[Any]", *, with_constraints: bool = True) -> Mapping[str, _TableInfo]:
+        """The catalog `catalog`, `query` and `transact` validate against: this cell's read-only copy when the token read in THIS transaction is the one the copy was stored under, else `_load_catalog`'s live read, stored under that token. The token is read before the live catalog, never after it: under READ COMMITTED a schema operation can commit between the two reads, and the token read first can only make the stored copy newer than its token (the next request finds the token moved and reads again), where the other order could store an older catalog under a newer token. Callers take the entity lock before this call (`_lock_entities`); a token read before the lock would be the one a schema operation's commit moves while the caller waits, and `test_a_data_operation_that_waited_for_a_schema_operation_validates_against_what_it_committed` turns red with the catalog read moved before the lock. `with_constraints` is part of the key: `query` never reads the registry. `apply_schema` does not call this method -- it reads `_load_catalog` directly, so an uncommitted DDL, a dry run and a refused operation put nothing in the copy (`test_a_dry_run_and_a_refused_schema_operation_leave_the_cache_as_it_was` turns red when the dry run's own re-read goes through here). After one request of each kind a warm cache reads the token and nothing else (`test_a_warm_cache_serves_query_transact_and_catalog_from_the_token_alone`)."""
+        token = self._read_catalog_token(conn)
+        if token is not None:
+            cached = self._catalog_cache.get(token, with_constraints)
+            if cached is not None:
+                return cached
+        live = self._load_catalog(conn, with_constraints=with_constraints)
+        if token is None:
+            return live
+        frozen = _freeze_catalog(live)
+        self._catalog_cache.put(token, with_constraints, frozen)
+        return frozen
 
     def _load_catalog(self, conn: "psycopg.Connection[Any]", *, with_constraints: bool = True) -> dict[str, "_TableInfo"]:
         """The catalog-verification step D-4 requires before any client
@@ -1589,7 +1654,7 @@ class PostgresCell:
                     self._set_timeouts(conn, timeout_ms)
                     # `query` never reads `table_info.constraints` (D-2 (2): predicates are not bound by `enum`/`nullable`) -- skip the side-table read.
                     # history: CH-0021
-                    catalog = self._load_catalog(conn, with_constraints=False)
+                    catalog = self._catalog(conn, with_constraints=False)
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
                     table_info = catalog[entity]
@@ -1749,7 +1814,7 @@ class PostgresCell:
                         # history: CH-0033
                         self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
-                    catalog = self._load_catalog(conn)
+                    catalog = self._catalog(conn)
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
                     table_info = catalog[entity]

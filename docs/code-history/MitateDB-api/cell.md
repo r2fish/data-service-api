@@ -88,3 +88,39 @@ new:
 ```
 a cancelled or lock-timed-out COMMIT included, whichever branch of the backend's own handling it passes through
 ```
+
+## CH-0570
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._prepare_values`)
+- parent commit: `9a65cbc`
+- kind: comment
+
+```
+# B-1 (independent review round 2): `available[field]` is this
+# field's own value-domain category from the active backend's
+# live catalog (`None` on SQLite -- domain validation skipped
+# there, matching its own unchanged external behavior) --
+# passed through so a type-mismatched value (e.g. a string for
+# a declared-`integer` column) is rejected deterministically
+# here, before any statement reaches PostgreSQL. 追補 4 O-2:
+# `field`/`declared_type` are this value's own request-
+# internal path (`_prepare_values`'s own path prefix, the
+# SAME position `check_declared_value`'s own `except` clause
+# above attaches) and contract-vocabulary declared type, so a
+# backend-layer value-domain denial (NUL/lone surrogate/
+# out-of-range) carries the same D-3 (4) 4-key form.
+```
+
+### correction: 2026-10-04
+
+- reason: R-82 -- the backend's catalog read behind `available[field]` is answered from a process copy of the live read while the schema revision is unchanged
+
+old:
+```
+live catalog (`None` on SQLite
+```
+
+new:
+```
+catalog (a live read kept as a process copy while the schema revision is unchanged; `None` on SQLite
+```

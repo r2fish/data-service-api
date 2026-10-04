@@ -290,7 +290,12 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
 #: `query` / `transact` / `apply_schema` came out. Re-verified against the
 #: current file via `_fail_call_sites`. Entry count and site identity
 #: unchanged (1).
-    ("postgres.py", 1883),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+#: R-82: line shift only (1883 -> 1948) -- `_RevisionKeyedCache`, `_freeze_catalog`,
+#: `PostgresCell._read_catalog_token` and `PostgresCell._catalog` (net +65 lines)
+#: sit ABOVE `_fail_client_value`'s own single `fail()` call. Re-verified against
+#: the current file via `_fail_call_sites`. Entry count and site identity
+#: unchanged (1).
+    ("postgres.py", 1948),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
