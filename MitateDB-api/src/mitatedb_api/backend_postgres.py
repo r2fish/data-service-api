@@ -717,8 +717,8 @@ class PostgresBackend:
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable as exc:
-            # WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
-            # 裁定 6, review F9): `_mdb_field_types` missing entirely means
+            # WP-3 差し戻し 最終ラウンド (裁定 6, review F9):
+            # `_mdb_field_types` missing entirely means
             # migration 0006 was never applied to this application DB -- an
             # OPERATOR/DEPLOYMENT defect, never a client mistake. Before
             # this fix every read/write on an un-migrated DB surfaced as
@@ -729,6 +729,7 @@ class PostgresBackend:
             # class (`credential_store_postgres.py`'s identical `
             # InsufficientPrivilege` precedent), mapping to `SERVICE_
             # UNAVAILABLE` at the HTTP boundary instead.
+            # history: CH-0581
             raise StorageConfigurationError(
                 "the storage backend refused this read due to a missing declared-field-type registry "
                 "(migration 0006 not applied to this application database)"
@@ -1325,7 +1326,7 @@ class PostgresBackend:
         try:
             with scope.main.cursor() as cur:
                 if resolved_nullable is False:
-                    # M-6 (監督裁定, WP-3a rework 2, 2026-09-07): mirrors
+                    # M-6 (監督裁定, WP-3a rework 2): mirrors
                     # `alter_field_constraints`'s own existing-row rule
                     # (LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE, inside
                     # this SAME transaction, before the scan), for a NEW
@@ -1356,6 +1357,7 @@ class PostgresBackend:
                     # still excludes concurrent row writers (ROW
                     # EXCLUSIVE) exactly as plain SHARE did, so the scan
                     # property above is unchanged.
+                    # history: CH-0582
                     _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE").format(sql.Identifier(collection)))
                     _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(collection)))
                     (existing_rows,) = cur.fetchone()

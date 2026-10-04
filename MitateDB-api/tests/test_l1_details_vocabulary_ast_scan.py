@@ -352,23 +352,23 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # `_fail_call_sites`, not hand-shifted. Entry count 18 -> 19.
     ("backend_postgres.py", 623),   # _acquire_advisory: except psycopg.Error -- generic driver-exception translation
     ("backend_postgres.py", 683),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 739),   # field_domains: generic driver-exception translation
-    ("backend_postgres.py", 787),   # field_types: generic driver-exception translation
-    ("backend_postgres.py", 813),   # all_field_types: generic driver-exception translation
-    ("backend_postgres.py", 869),   # field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 926),   # field_types_and_constraints: generic driver-exception translation
-    ("backend_postgres.py", 950),   # all_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 1127),  # alter_field_constraints: generic driver-exception translation
-    ("backend_postgres.py", 1146),  # schema_revision: generic driver-exception translation
-    ("backend_postgres.py", 1286),  # create_collection: generic driver-exception translation
-    ("backend_postgres.py", 1442),  # add_field: generic driver-exception translation
-    ("backend_postgres.py", 1531),  # insert_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1564),  # update_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1591),  # delete_in_transaction: generic driver-exception translation
-    ("backend_postgres.py", 1669),  # read: generic driver-exception translation
-    ("backend_postgres.py", 1706),  # delete: generic driver-exception translation
-    ("backend_postgres.py", 1825),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 1856),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 740),   # field_domains: generic driver-exception translation
+    ("backend_postgres.py", 788),   # field_types: generic driver-exception translation
+    ("backend_postgres.py", 814),   # all_field_types: generic driver-exception translation
+    ("backend_postgres.py", 870),   # field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 927),   # field_types_and_constraints: generic driver-exception translation
+    ("backend_postgres.py", 951),   # all_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1128),  # alter_field_constraints: generic driver-exception translation
+    ("backend_postgres.py", 1147),  # schema_revision: generic driver-exception translation
+    ("backend_postgres.py", 1287),  # create_collection: generic driver-exception translation
+    ("backend_postgres.py", 1444),  # add_field: generic driver-exception translation
+    ("backend_postgres.py", 1533),  # insert_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1566),  # update_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1593),  # delete_in_transaction: generic driver-exception translation
+    ("backend_postgres.py", 1671),  # read: generic driver-exception translation
+    ("backend_postgres.py", 1708),  # delete: generic driver-exception translation
+    ("backend_postgres.py", 1827),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1858),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
