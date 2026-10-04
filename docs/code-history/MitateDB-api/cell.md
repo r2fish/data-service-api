@@ -893,3 +893,984 @@ just resolved the other way: gate the real client-facing query,
 exempt the internal wire-formatting readback, rather than
 exempting both).
 ```
+
+## CH-0730
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.insert`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3a (design D-2 (3), "検査順序は欠落検査 -> 値検査"):
+# a `nullable: false` field this insert simply does not name is
+# never handed to `check_declared_value` at all (that choke
+# point only ever sees VALUES actually present) -- checked
+# here, immediately before `_prepare_values`, on this peer's
+# own direct single-operation insert entry point (the in-
+# process conformance adapter's own `attempt_mutation`
+# dispatches "insert" here, never through `_plan_operation`
+# below -- WP-3a report discloses this second insert entry
+# point; design D-2 (3)'s own file:line names only `_plan_
+# operation`'s insert branch).
+# Code review §2 C / 監督裁定 C (2026-09-07): the ONE fetch
+# `_check_missing_required_fields` makes is reused by
+# `_prepare_values` immediately below (`prefetched=`) --
+# this insert makes one backend round trip for declared
+# types/constraints, not two.
+# Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08):
+# `path_prefix` is `"operations/0/values"`, not the bare
+# `"values"` this used before -- N-4 requires every VALUE-
+# position `details.field` to read `operations/<i>/values/
+# <field>` UNCONDITIONALLY (rulings-r2-closure.md; mirrors
+# r2db-api's own `structured.py::_apply`, whose `values_path`
+# is `f"operations/{operation_index}/values/"` for every
+# mutation, including a solo one -- there is no wire shape
+# that omits the `operations` envelope: `http.py::post_mutate`
+# always builds `{"operations": [...]}`, so this direct,
+# single-operation in-process entry point occupies the SAME
+# request-internal position (`operations/0/...`) a real client
+# submitting one operation would, even though this method's
+# own Python-level `values` argument carries no such envelope.
+```
+
+## CH-0731
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.read_page`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, once, so the
+# audit event below and this call's own caller (who already holds
+# the SAME value when it is `http.py`'s own per-request id, and
+# generates a fresh one itself otherwise -- `read()` has no
+# return-shape room of its own to echo a self-generated value
+# back through, unlike `transact()`/the schema methods below,
+# whose dict/list-shaped returns do) always agree.
+```
+
+## CH-0732
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.read_page`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3cd closure (K-1): `narrow_limits_by_budget` is
+# no longer called at the facade layer, before this gate --
+# `self._gate` above already validated `budget` (raising
+# VALIDATION_FAILED there, AFTER rate/concurrency/request_
+# bytes/operation_depth, if it is invalid) and used it to size
+# its own `deadline`. This second call is the SAME pure
+# function, on the SAME inputs, already proven not to raise by
+# the gate's own successful entry -- it resolves `limits`, the
+# ONE narrowing point `result_items` reads through below (the
+# check itself is unchanged in SHAPE, still driven by the
+# REQUESTED `limit` value, never the row count actually
+# returned, L9-11).
+```
+
+## CH-0733
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._validate_update`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+m-1 (independent review, P3-D2 follow-up): the single choke
+BOTH `ApplicationCell.update` below AND `transact()`'s own
+batch-embedded update branch (`_plan_operation`, since P35 WP-2's
+two-pass restructuring) pass through -- identical four-step validation (non-empty `filters`
+shape check -> `_prepare_values` -> non-empty `fields` check ->
+`_bind_filters`), so a batch-embedded update is held to exactly
+the same mass-operation guard as the dedicated method, never a
+looser one. Mirrors `_validate_delete_confirmation`'s own role for
+`delete` -- there is no second definition of this validation
+anywhere in this file.
+
+`path_prefix` (code review §2 D, 監督裁定 D 2026-09-07): forwarded
+to `_prepare_values` verbatim -- `"operations/0/values"` for a
+direct `update()` call, `"operations/<i>/values"` for one batch
+item (N-4's "no wire shape omits the operations envelope"
+convention).
+
+Returns `(collection, fields, values_params, bound_filters)` on
+success. Does not execute the update itself and does not touch the
+backend's transaction state beyond its catalog reads on `scope` --
+callers own both, same division of responsibility as
+`_validate_delete_confirmation`.
+```
+
+## CH-0734
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._validate_update`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3e (design D-3 (2)): `where`'s own request-
+# relative path is `path_prefix`'s own sibling -- `"operations/
+# 0/where"` for a direct `update()` call, `"operations/<i>/
+# where"` for one batch item. WP-3e rework T2 (追補 L-3/M-4):
+# the wire contract's own predicate container is named
+# `where` (`ScopedMutation.where`/`Mutation.where`), never
+# `filters` (this module's own internal Python parameter name
+# only) -- the label this raise used to carry was wrong.
+```
+
+## CH-0735
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._validate_update`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# WP-3e rework T1 (追補 L-1): unreachable in practice --
+# `_prepare_values` above already guarantees a non-empty
+# `fields` whenever it returns without raising (every key of
+# its own non-empty `values` argument either raises or is
+# appended) -- kept as a defensive `request_schema` guard
+# rather than removed (matching this module's own pre-
+# existing defensive style, `field_types.check_declared_
+# value`'s "unknown declared field type" branch), now with
+# the same `details` its unreachable-in-practice sibling
+# sites carry.
+```
+
+## CH-0736
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._validate_delete_confirmation`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+P3-D2 (design v1.2 R-5, WP-1.5): the single choke BOTH
+`ApplicationCell.delete` below AND `transact()`'s own
+batch-embedded delete branch (`_plan_operation`, since P35 WP-2's
+two-pass restructuring) pass through -- identical shape checks, identical schema-revision-
+fingerprinted phrase construction (`_delete_confirmation_phrase`),
+identical exact-match comparison, identical four-key `details`
+shape on failure. A batch-embedded delete is therefore held to
+EXACTLY the same declare-and-echo requirement as the dedicated
+method, never a looser one -- there is no second, batch-specific
+copy of this logic anywhere in this file.
+
+`destructive` missing is equivalent to `False` (contract
+`valid_confirmation`); a valid confirmation requires BOTH
+`destructive is True` AND `confirm` to exactly equal the server's
+own currently-recomputed `required_confirmation` for this exact
+request (Unicode code point sequence, no normalization -- a plain
+`!=` string comparison already has this property). A non-bool
+`destructive`/non-str `confirm` is a shape defect
+(`ValidationError`), not a confirmation mismatch -- truthy
+acceptance of either is exactly the defect WP-0/WP-3's own B-1
+finding (r2db-api) forbids, applied here identically (WP-5 R-5).
+
+Returns `(collection, bound_filters)` on success; raises
+`DestructiveConfirmationRequired` otherwise. Does not execute the
+delete itself and does not touch the backend's transaction state
+beyond its catalog reads on `scope` (the request's own scope, with
+the entity's shared lock already taken) -- callers own both. It runs
+from `_plan_operation` during pass 1 of `transact()`, and from
+`delete()` before the delete itself.
+```
+
+## CH-0737
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._validate_delete_confirmation`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# B-3 (WP-0/WP-5): identifier + filter-shape validation (which,
+# via `_bind_filters`'s own `field_domains` call, also performs the
+# contract's own "target-existence checks" step) must complete
+# BEFORE the confirmation check below -- a phrase must never
+# reflect an unvalidated client-supplied collection name back to
+# the client, and evaluation_order requires target existence to be
+# settled before confirmation validity is evaluated.
+```
+
+## CH-0738
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.delete`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 4 (design D-3): `DESTRUCTIVE_CONFIRMATION_REQUIRED` is
+# a durable-range denial code -- routed (coalesced) before
+# re-raising, unchanged, to the caller.
+```
+
+## CH-0739
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.delete`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 4 (design D-2 item 1): delete is fail-closed class only
+# once it has passed the confirmation choke (this point) -- the
+# hook's own `pre_commit()` is called by `self._backend.delete`
+# itself, as the last thing it does before its own commit point.
+```
+
+## CH-0740
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._plan_operation`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_
+CONTRACT_130_V1.md §2): builds one fully-bound, side-effect-free
+plan step for a single `transact()` operation-dict -- identical
+shape/capability checks and identical validation chokes
+(`_prepare_values`/`_validate_update`/`_validate_delete_
+confirmation`, the pre-existing `_TRANSACT_*_KEYS` excess-key
+checks) as before this WP, just no longer interleaved with any
+OTHER operation's own execution. Never touches the DML
+(`_runtime`) transaction state (no `begin`/`commit`/`rollback`,
+no `..._in_transaction` call): the read-only catalog calls this
+method makes (`field_domains`/`schema_revision`, via `_prepare_
+values`/`_bind_filters`/`_validate_delete_confirmation`) run on
+`scope`'s developer connection, a separate transaction from the
+runtime connection's that pass 2 alone writes in, and commit
+nothing.
+
+Returns `("insert" | "update" | "delete", payload)` on success,
+`payload` a plain tuple of exactly the arguments the matching
+backend `..._in_transaction` method needs. Raises the identical
+`FoundationError` subclass, for the identical reason, that the
+pre-WP-2 in-loop branch below used to raise for this same
+operation shape -- this is a relocation of that logic, not a
+second copy of it (the module's own `_TRANSACT_INSERT_KEYS`/
+`_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS`/
+`_CONTRACT_MUTATION_VOCABULARY` constants (now in `request_vocabulary.py`) are unchanged, and
+`_prepare_values`/`_validate_update`/`_validate_delete_
+confirmation` are the exact same single chokes `insert`/`update`/
+`delete` above also use.
+
+`index` (code review §2 D, 監督裁定 D 2026-09-07): this
+operation's own position in `transact()`'s `operations` list --
+used only to build the request-relative `path_prefix`
+(`f"operations/{index}/values"`) a `_prepare_values`/`_check_
+missing_required_fields` violation's own `details.field` is
+joined onto (design D-3 (2): `field` names a POSITION IN THE
+REQUEST, and only this method's own caller, `transact()`'s pass-1
+loop, knows which list position `operation` came from).
+```
+
+## CH-0741
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._plan_operation`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Only "upsert" ever reaches here -- P3-D2 (WP-1.5) converged
+# `update`/`delete` to real execution above. Per
+# `capability_status.rules` ("optional target operations ...
+# must fail with CAPABILITY_UNSUPPORTED"), this is a
+# capability gap, not a malformed request.
+```
+
+## CH-0742
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._distinct_batch_entities`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+P35 WP-2 (R-2): the set of DISTINCT `collection` names named
+across the raw, not-yet-validated operation dicts -- the same
+entity may repeat across multiple operations without counting
+twice (contract `endpoints.cross_entity_mutate.semantics`:
+"batch_entities bounds the number of distinct entity names
+referenced across operations[] ... the same entity may appear in
+more than one operation, and total operation count remains
+bounded by batch_items independently"). Deliberately reads the
+RAW dicts (a non-dict operation is simply skipped here -- its own
+malformed shape is a `_plan_operation` concern, reached
+immediately after this check) rather than the validated plan, so
+this whole-batch shape bound is evaluated symmetrically with the
+`batch_items` check immediately above it in `transact()`: both
+are checked before any single operation's own validation begins.
+
+Independent review B-1 (WP-2 follow-up): a `collection` value
+that is present but not itself a string (e.g. `["t"]`, `{}`) must
+be SKIPPED here too, not added to the set -- adding an unhashable
+value would raise a bare `TypeError` out of this whole-batch
+pre-check, before `_plan_operation` ever gets a chance to
+classify that same malformed operation as an ordinary
+`ValidationError` (its own proper job). This mirrors the
+non-dict-operation skip immediately above: a shape defect at
+THIS layer is deferred to `_plan_operation`, never raised here as
+an unclassified exception.
+```
+
+## CH-0743
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all
+execute for real here, atomically with everything else in the
+same batch -- converging this entry point's real behavior onto
+the existing `atomic_mutation.operations` declaration (unchanged
+by this WP). `upsert` alone remains a real capability gap: no
+execution path for it exists anywhere on this peer.
+
+The whole batch commits or rolls back as one unit (contract "A
+batch is atomic unless explicitly declared best_effort" --
+`best_effort_transactions: unavailable`, unchanged): a mid-batch
+failure of ANY kind (a shape defect, a missing/wrong destructive
+confirmation, a unique-constraint conflict, a collection that does
+not exist) discards every write already performed earlier in the
+SAME batch, insert included -- `self._backend.rollback()` in the
+`except` clause below is the one and only rollback point for the
+whole batch, reached from every operation type's own failure path.
+
+P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_
+CONTRACT_130_V1.md §2, P35-D9/P35-D10/P35-D11): two-pass as of
+this WP -- ALL operations across ALL entities are validated first
+(`self._plan_operation`, side-effect-free, building a fully-bound
+execution plan), and `self._backend.begin()` is never called at
+all until that whole-batch validation pass has succeeded end to
+end. Only then does the second pass execute the plan inside the
+begin/commit/rollback envelope below. This entry point is shared
+by both the single-entity HTTP path (`http.py::post_mutate`) and
+the cross-entity one (`http.py::post_cross_entity_mutate`) --
+neither is a second copy of this method, so both are two-pass by
+construction. Atomicity itself (all-or-nothing) is UNCHANGED by
+this restructuring; the one externally-observable consequence
+(P35-D9) is that a batch mixing an operation that would have
+failed at BACKEND EXECUTION time with a LATER operation that
+fails VALIDATION now surfaces the validation error (previously,
+the earlier operation's execution-time error could surface first,
+after already having reached the backend, since the old single
+pass validated-then-executed each operation in strict order
+before ever looking at the next one's own type) -- the validation
+error winning is the contract-required priority
+(`transactions.cross_entity`), adopted deliberately (M-7). The
+internal ordering itself (validate-all, then execute-all) is not
+black-box observable and is not a conformance-suite concern
+(P35-D10) -- it is pinned locally, structurally, by this
+package's own tests (a wrapped/monkeypatched backend proving zero
+`..._in_transaction`/`begin` calls happen when a later operation
+fails validation).
+```
+
+## CH-0744
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3e (design D-7 (3), Q-1): resolved ONCE, here, before
+# anything else -- every audit event this method emits below
+# already takes `request_id=request_id` (unchanged), and the
+# commit-path envelope folded into `results[-1]` (below) echoes
+# this SAME resolved value, so the response `MutationResult.
+# request_id` a caller reads back is provably the one this
+# request's own audit evidence carries too.
+```
+
+## CH-0745
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3c (design D-5, I-1/I-3): `idempotency_key` has two
+# entry points into this method -- this KEYWORD (`http.py::
+# post_mutate`/`post_cross_entity_mutate` already hold the single
+# request-level `MutationRequest.idempotency_key`/`ScopedMutation
+# Request.idempotency_key` value and pass it here directly), or
+# folded onto EVERY operation dict (the port's own `fold_batch_
+# idempotency_key`, `conformance-tests/adapter.py` -- every
+# in-process caller reaches this method this way, never via the
+# keyword). When the keyword is `None`, the first operation
+# carrying a non-`None` `idempotency_key` supplies it -- the
+# adapter's own fold already guarantees every operation in one
+# batch carries the IDENTICAL value (or none at all), so reading
+# just the first is sufficient; `_TRANSACT_INSERT_KEYS`/`_UPDATE_
+# KEYS`/`_DELETE_KEYS` above (now in `request_vocabulary.py`) all list this key so it is never
+# rejected as an unread capability-shaped field, and `_plan_
+# operation` never reads it into any execution payload (every
+# branch extracts fields by explicit name, never `**operation`).
+```
+
+## CH-0746
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3cd closure (K-1, design D-6, B-2): `narrow_
+# limits_by_budget` is no longer called at the facade layer,
+# before this gate -- `self._gate` above already validated
+# `budget` (raising VALIDATION_FAILED there, AFTER rate/
+# concurrency/request_bytes/operation_depth, if it is
+# invalid) and used it to size its own `deadline`. This
+# second call is the SAME pure function, on the SAME inputs,
+# already proven not to raise by the gate's own successful
+# entry -- it resolves `limits`, the ONE point the COUNT-
+# valued checks below (`batch_items`/`batch_entities`) and
+# `_plan_operation`'s own `_bind_filters` `in`-filter check
+# (K-3) read instead of `self.config` directly. A caller that
+# never presented a `budget` gets `self.config` back
+# unchanged (identity-shaped narrowing).
+```
+
+## CH-0747
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# I-7: a dry run never records or consults an idempotency
+# record, regardless of whether `idempotency_key` was
+# presented -- the `not dry_run` guard above is this
+# method's only such check.
+```
+
+## CH-0748
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# I-3/I-8: answered from the record, before target
+# existence/confirmation/precondition/execution are
+# ever reached -- the exact `results` object this
+# method itself returned when the original request
+# committed. J-4 (SI-14): a replayed mutation response
+# earns its own durable row before it is ever
+# returned -- otherwise a confirmed destructive
+# delete's own resend would return `committed: true`
+# while leaving zero evidence this Application was
+# touched at time T (WP-2cd/WP-3cd audit N-5).
+```
+
+## CH-0749
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Pass 1: validate every operation, across every entity, before
+# any execution begins (P35-D9/P35-D10 above). Nothing below this
+# line has written through `self._backend` yet.
+# Phase 4 (design D-3): `_plan_operation`'s own delete branch may
+# raise `DestructiveConfirmationRequired` (via `_validate_delete_
+# confirmation`, the same choke `delete()` uses) -- routed
+# (coalesced) here, at the one call site with `principal` in
+# scope, mirroring `delete()`'s own identical wrapping.
+# Phase 9 WP-3b (design D-4 (7)): the LOCAL execution plan
+# `_plan_operation` builds is renamed `execution_plan` here
+# (it was `plan` before this WP) -- this method's own new
+# `plan` PARAMETER (the caller-presented token) needs the
+# name `add_field`/`alter_field`/`create_collection` above
+# already use for the identical concept; keeping both names
+# `plan` in one scope would shadow one with the other.
+```
+
+## CH-0750
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# `digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c
+# rework, I-13): built ONCE, above (before pass 1), not
+# here -- see this method's own idempotency-lookup block
+# for the full construction rationale (entity/budget/
+# transaction/idempotency_key handling unchanged from the
+# pre-WP-3c version this replaces). Reused verbatim here:
+# `compute_plan_token` excludes only `plan`/`dry_run`, so
+# an `idempotency_key` this object carries (I-13) is part
+# of what THIS token commits to too.
+```
+
+## CH-0751
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
+# "the durable pre-commit write itself failed" (nothing was
+# committed to correct -- the batch is simply refused) from
+# "the durable write succeeded but this backend's own commit
+# then failed" (D-2's error-row case) -- mirrors `backend_
+# postgres.PostgresBackend`'s identical single-operation
+# pattern, here at the batch level since `transact`'s own
+# begin/commit/rollback envelope lives in `cell.py`, not
+# either backend module.
+```
+
+## CH-0753
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3c (design D-5, I-1): the idempotency
+# record is written as the LAST thing before this
+# backend's own commit -- a failure anywhere above
+# (including the execution loop itself) never
+# reaches this line, so a failed attempt leaves no
+# record (the `except Exception` below rolls the
+# whole transaction back, this write included, on
+# the PostgreSQL backend; the SQLite/in-memory
+# backend never applies it either, since this
+# statement itself never ran). `idempotency_
+# response_digest`/`idempotency_key` are only both
+# non-`None` when this method's own earlier lookup
+# block found no matching record to replay.
+```
+
+## CH-0754
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3cd closure (K-5, N-8): undoes a `record_
+# idempotency` write that turned out NOT to share the
+# data's own fate -- e.g. `record_idempotency` itself
+# succeeded but `self._backend.commit()` immediately
+# after it then raised (reaching THIS handler with the
+# `SQLiteBackend`/in-memory backend's own private,
+# non-transactional dict already holding a record for
+# data `self.rollback()` above just discarded). A no-op
+# when there is nothing pending to discard (the far
+# more common case: some EARLIER step failed, before
+# `record_idempotency` was ever reached) -- mirrors the
+# 3 schema-mutating DDL methods' own identical `except
+# Exception:` cleanup one-for-one.
+```
+
+## CH-0756
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 4 (design D-10): the pre-existing 6-field-sink record
+# is unconditional and unchanged -- it fires for a
+# batch-embedded delete exactly as it did before this WP,
+# now safely AFTER `self._backend.commit()` has actually
+# succeeded (no `pending_audit` deferral needed any more: the
+# hook above already gave the durable trail its own, separate,
+# PRE-commit guarantee, so this post-commit legacy record
+# never needs to claim a write a later operation rolled back
+# -- if we are here at all, `self._backend.commit()` already
+# succeeded for the whole batch).
+# Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): NEITHER
+# audit path below runs for a dry run -- rolled back
+# above, nothing to record. `results` itself is still the
+# real per-item outcome each write produced before the
+# rollback undid it (`affected` "is the count if it had
+# executed", D-4 (3)) -- a trailing envelope dict is
+# appended (only for a dry run) carrying `committed`/
+# `plan`/`request_id`, the same convention `attempt_
+# mutation_with_result`'s own port docstring documents
+# (`results[-1]`, `conformance-tests/adapter.py`); `zip`
+# against `items` (this method's own callers, `http.py`/
+# the port) truncates to `len(items)`, so this extra
+# entry never perturbs `affected`'s own per-item sum.
+```
+
+## CH-0758
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._check_missing_required_fields`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+Phase 9 WP-3a (design D-2 (3)): the insert-only 欠落検査 --
+`declared_non_nullable - set(values)`. Placed BEFORE `_prepare_
+values` at every real insert entry point (this method's own two
+callers: `insert` above and `_plan_operation`'s "insert" branch
+below) rather than inside the choke point itself (`field_types.
+check_declared_value`), because a field this operation omits is
+never handed to that choke point at all -- there is no value for
+it to check. Silently returns (deferring to `_prepare_values`'s
+own, pre-existing shape errors) when `collection`/`values` are
+not even the right Python shape to look field constraints up
+for -- this check's own job is the CONTENT of a well-shaped
+`values` dict, not `values`' own shape.
+
+Code review §2 D / 監督裁定 D (2026-09-07): `field` names a
+POSITION IN THE REQUEST (design D-3 (2)), never a bare entity
+field name -- `path_prefix` (this insert's own `values` object,
+`"values"` for a direct `insert()`/`update()` call or
+`"operations/<i>/values"` for one batch item, the caller's own
+job to supply) is joined with the missing field's own name.
+
+Code review §2 C / 監督裁定 C (2026-09-07, P-8/G-4 performance
+finding): returns the `(declared_types, declared_constraints)`
+pair `self._backend.field_types_and_constraints(collection)`
+fetched along the way, on success -- `_prepare_values` (this
+insert's own very next call) reuses that SAME pair instead of
+re-fetching it from the backend, cutting a plain insert's own
+backend round trips (previously: `field_types_and_constraints`'s
+two now-merged predecessors were each fetched TWICE per insert,
+once here and once in `_prepare_values`). Returns `None` when it
+could not fetch one (wrong Python shape, or `collection` does not
+exist) -- `_prepare_values` falls back to fetching its own,
+unchanged from before this rework.
+```
+
+## CH-0759
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._prepare_values`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 6 WP-3 (design D-3, G3): the PRIMARY, backend-independent
+# declared-type choke point -- `field_types.check_declared_value`
+# runs BEFORE `encode_value` on every backend (sqlite included,
+# where `field_domains` alone enforces nothing at all, `available`
+# above being all-`None` there). Backend domain validation stays
+# underneath this as defence-in-depth (`encode_value` itself),
+# never a substitute for it.
+#
+# Phase 9 WP-3a (design D-2 (3), 追補 2 S-k) rework (code review
+# §2 C, 監督裁定 C 2026-09-07): `declared_types`/`declared_
+# constraints` -- the write-side `enum`/`nullable` registry
+# passed to `check_declared_value` below for every field this
+# loop checks -- are ONE merged backend read now
+# (`field_types_and_constraints`, `field_types`+`field_
+# constraints`'s own single-query replacement), reused verbatim
+# when `prefetched` (an insert's own `_check_missing_required_
+# fields` call, immediately before this one) already fetched it
+# for the SAME collection. `_bind_filters` below still reads
+# `field_types` alone, the identical way it always has, and
+# NEVER calls `field_constraints`/passes `constraints` (D-2 (2):
+# "query の predicate 値は enum を検査しない").
+```
+
+## CH-0761
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._prepare_values`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3a (design D-3 (2)): `field` names "a position
+# in the request" -- `check_declared_value` itself has no
+# request-path context (design D-2 (3)'s own fixed new
+# signature adds only `constraints`, never a field/path
+# argument), so the ONE caller that DOES know which field
+# this value belongs to adds it here. A no-op for every
+# PRE-EXISTING `ValidationError` this choke point already
+# raised before this WP (no `details` attribute at all --
+# `getattr(exc, "details", None)` below returns `None`,
+# `dict is not None` is `False`) -- this WP's own two NEW
+# denials (`enum`/`nullable`) are the only ones that carry
+# `details` here to enrich. Code review §2 D / 監督裁定 D
+# (2026-09-07): the value written is `path_prefix`'s own
+# request position joined with `field`, never the bare
+# entity field name (design D-3 (2)).
+```
+
+## CH-0762
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._bind_filters`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 6 WP-3 (design D-3, G3): same choke point `_prepare_values`
+# above uses.
+```
+
+## CH-0763
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._bind_filters`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# WP-3e rework T1 (追補 L-1): unreachable through the
+# HTTP surface (`http.py`'s own `_parse_filter` always
+# constructs a `Filter` before this method is ever
+# called) -- a defensive internal-shape guard against a
+# direct caller passing the wrong Python type, kept
+# `request_schema` with the list index it can still
+# attribute, same treatment as this method's own
+# unreachable-in-practice siblings above.
+```
+
+## CH-0764
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._bind_filters`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# WP-3e rework T2 (追補 M-3): an empty (or non-list)
+# `in` value is a defect of the VALUE this predicate
+# carries, not of the field name it names -- `field`
+# is `where/<i>/value`, unconditionally refused on
+# both backends (this is the ONE choke point either
+# backend's own `transact`/`read` path reaches before
+# a SQL `IN (...)` clause is ever built).
+```
+
+## CH-0765
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._bind_filters`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# B-1: every element compares against the SAME column, so
+# they all share that column's own domain.
+```
+
+## CH-0766
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._bind_filters`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# 追補 4 O-2: `field`/`declared_type` mirror `_check_
+# predicate_value`'s own path immediately above (`where/
+# <i>/value`) -- the value being checked, not the field
+# position, exactly M-4's "述語値系は要求内パス" rule.
+```
+
+## CH-0767
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._require_data`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Review M-2 (major, supervisor ruling 2026-09-03, "完全案"):
+# `guard` is always `auth.CredentialStore.assert_active` or
+# `credential_store_postgres.PostgresCredentialStore.
+# assert_active` in every real construction of this class
+# (`main.py`/`service.py` -- the only two call sites that ever
+# pass a non-`None` guard, verified by source inspection),
+# both of which accept this same `request_id` keyword after
+# this WP's changes -- so a session re-check failure's own
+# durable denial row carries the SAME request_id as the
+# operation that triggered the re-check.
+```
+
+## CH-0768
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationCell._require_data`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Review M-3 (major, supervisor ruling 2026-09-03): this is
+# SI-00's own application-boundary check ("this credential's
+# own `application_id` does not match the cell it is being
+# used against") -- the single most evidence-worthy `FORBIDDEN`
+# this peer can produce, and previously recorded on NO audit
+# surface at all (neither the 6-field sink nor the durable
+# one). `FORBIDDEN` is in D-3's own inclusion table
+# unconditionally; routed (coalesced) here, the one choke
+# point every public data-operation method (`insert`/`read`/
+# `update`/`delete`/`transact`/`schema_revision`, and `_require_
+# developer` itself) already passes through. (Scoped to the
+# durable D-3 path only, per review M-3's own literal
+# instruction -- the pre-existing 6-field sink's own
+# `_SAFE_DETAILS` vocabulary has no accurate label for a
+# generic access denial, so this does not invent one there.)
+```
+
+## CH-0769
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationRuntime._post_schema_revision`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): the
+UNGATED counterpart of `schema_revision` above, for exactly one
+caller -- `http.py::post_schema`'s own post-op revision readback,
+immediately after a `create_entity`/`add_field` call that has
+ALREADY passed through `_limit_gate` earlier in this SAME wire
+request. That readback is not itself a second client request (no
+`GET .../schema-revision` endpoint exists; nothing on the wire
+asks for it independently of the schema-mutation call it reports
+the consequence of) -- routing it through the now-gated
+`schema_revision()` above would silently double the effective
+`requests_per_minute`/`concurrency` cost of every HTTP schema
+operation relative to the in-process surface, whose own
+`create_entity`/`add_field` never make this extra call at all
+(the asymmetry the original WP-1a report measured; 裁定 3 resolves
+it by gating the real client-facing query and exempting only
+this one internal wire-formatting readback, rather than exempting
+both, since `catalog`/`schema_revision` themselves ARE real,
+independently client-callable queries r2db bounds too).
+```
+
+## CH-0770
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationRuntime.read`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3d (design D-6, B-4): `request_budget` is `enabled`
+# as of this SAME commit (`__build_capabilities_document` below) (body now in `capabilities_document.py`)
+# -- the present-denial gate is removed. Phase 9 WP-3cd closure
+# (K-1): `budget` now reaches `ApplicationCell.read` RAW/
+# unvalidated -- `narrow_limits_by_budget` moved from here into
+# `ApplicationCell._limit_gate` itself (`endpoint_kind="query"`),
+# so an invalid `budget` is refused AFTER rate/concurrency/
+# request_bytes/operation_depth, matching r2db's own gate order
+# (audit-wp3cd.md §3 N-3: this facade-layer call used to refuse
+# an invalid `budget` BEFORE any of those four bounds, an
+# observable peer asymmetry this closure fixes).
+```
+
+## CH-0771
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationRuntime.transact`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3b (design D-1 (4), P-3): `dry_run`/`plan` gate
+# removed -- `dry_run` flips to `enabled` in this SAME commit
+# (`__build_capabilities_document` below) (body now in `capabilities_document.py`). Phase 9 WP-3c/WP-3d:
+# `idempotency_key`/`budget` are UNGATED as of this SAME commit
+# too -- both `idempotency`/`request_budget` flip to `enabled`
+# below (now in `capabilities_document.py`). Phase 9 WP-3cd closure (K-1): `budget` now reaches
+# `ApplicationCell.transact` RAW/unvalidated -- `narrow_limits_by_
+# budget` (`endpoint_kind="mutate"`, shared by the single-entity
+# and cross-entity callers alike, both of which route through
+# this one method) moved from here into `ApplicationCell.
+# _limit_gate` itself, so an invalid `budget` is refused AFTER
+# rate/concurrency/request_bytes/operation_depth, matching r2db's
+# own gate order (see `ApplicationRuntime.read`'s identical
+# comment immediately above). `transaction` (rework, M-4/G-1) is
+# NOT gated -- unlike `budget` it names no capability of its own
+# (this peer's own `http.py::post_mutate` already accepts and
+# validates `MutationRequest.transaction` today, refusing
+# anything but `"atomic"` before this method is ever reached); it
+# is forwarded so `ApplicationCell.transact`'s own digest can
+# commit to it (`MutationRequest`'s contract-required 4th non-
+# `plan`/`dry_run` field, alongside `operations`/`idempotency_
+# key`/`budget`). `entity`/`digest_operations` (WP-3b closure,
+# H-1/H-2): passed straight through, unexamined -- see
+# `ApplicationCell.transact`'s own identical-purpose comment for
+# the full reasoning. Neither names a capability this peer gates;
+# both are pure digest-construction inputs.
+```
+
+## CH-0772
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationRuntime.capabilities`)
+- parent commit: `987b004`
+- kind: docstring
+
+```
+Minimal capability/discovery document, per this session's own
+server-bound scope. Statuses reflect what this foundation actually
+executes today, not the common contract's peer-target surface: an
+operation this foundation cannot run is never advertised "enabled"
+(spec `capability_status.rules`).
+
+This is the single source of truth for this peer's declared
+capability document (R-3): both the SQLite-backed in-process
+composition and the PostgreSQL-backed composition
+(`tests/test_postgres.py`) share this exact method -- there is no
+second copy anywhere that could drift out of agreement with it.
+
+Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): WRAPPED by
+`_limit_gate` (rate/concurrency only -- `request=None`) for the
+SAME reason as `ApplicationCell.catalog`/`.schema_revision`
+(those methods' own docstrings carry the full trace): r2db bounds
+its own `capabilities()` this way too (`service.py:877` inside
+`_slot`), and this is a real, client-callable, authenticated
+query, not a discovery-time exemption -- the pre-rework version
+left it entirely outside the gate (measured, pre-rework:
+`rpm=50` with 500 consecutive `capabilities()` calls, zero
+denials).
+```
+
+## CH-0773
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationDeveloper.create_entity`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3a (design D-1 (4), P-3): `field_constraints` no
+# longer gates -- `constraint_declarations` is `enabled` as of
+# that commit, same commit as the real enforcement below. Phase 9
+# WP-3b: `dry_run`/`plan` no longer gate either -- `dry_run` is
+# `enabled` as of THIS commit, same commit as `cell.py::
+# ApplicationCell.create_entity`'s own real dry_run/plan
+# behavior. Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` are
+# UNGATED as of THIS commit too -- both `idempotency`/`request_
+# budget` flip to `enabled` below. Phase 9 WP-3cd closure (K-1):
+# `budget` now reaches `ApplicationCell.create_entity` RAW/
+# unvalidated -- `narrow_limits_by_budget` (`endpoint_kind=
+# "schema"`) moved from here into `ApplicationCell._limit_gate`
+# itself, so an invalid `budget` is refused AFTER rate/
+# concurrency/request_bytes/operation_depth (see `ApplicationRuntime.
+# read`'s identical comment for the full reasoning).
+# `digest_extra` (WP-3b closure, H-3 (b)): pure digest-
+# construction pass-through, unexamined here.
+```
+
+## CH-0774
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationDeveloper.add_field`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3a: `enum`/`nullable` no longer gate -- see
+# `create_entity`'s own identical comment immediately above.
+# Phase 9 WP-3b: `dry_run`/`plan` no longer gate either -- same
+# reasoning as `create_entity`'s own identical comment. Phase 9
+# WP-3c/WP-3d: `idempotency_key`/`budget` ungated too, same
+# reasoning. Phase 9 WP-3cd closure (K-1): `budget` now reaches
+# `ApplicationCell.add_field` RAW/unvalidated -- see `create_
+# entity`'s own identical comment immediately above.
+# `digest_extra` (WP-3b closure, H-3 (b)): pure digest-construction
+# pass-through, unexamined here.
+```
+
+## CH-0775
+
+- moved from: `src/mitatedb_api/cell.py` (`ApplicationDeveloper.alter_field`)
+- parent commit: `987b004`
+- kind: comment
+
+```
+# Phase 9 WP-3cd closure (K-1): `budget` now reaches
+# `ApplicationCell.alter_field` RAW/unvalidated -- see `create_
+# entity`'s own identical comment above.
+# `digest_extra` (WP-3b closure, H-3 (b)): pure digest-construction
+# pass-through, unexamined here.
+```
