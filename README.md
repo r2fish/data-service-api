@@ -49,3 +49,9 @@ This repository is intentionally public-by-design. Implementation details may be
 - Complete `docs/security/public-repository-policy.md` before the first public push.
 - Real API keys, passwords, PostgreSQL/Cloud SQL credentials, service-account keys, SSH keys, production `.env`, backups, dumps, logs and real application/user data are prohibited from Git.
 - `.env.example` contains placeholders only. Runtime secrets belong outside Git.
+
+## License
+
+Copyright (c) 2026 r2fish. All rights reserved.
+
+No license is granted while the project is under development; see `LICENSE`. The third-party open-source software used by the product's four repositories, with their licenses, is listed in the `Mitate` repository's `THIRD_PARTY_LICENSES.md`.
