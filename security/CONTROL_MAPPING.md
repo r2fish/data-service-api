@@ -2,6 +2,7 @@
 
 Status: **Implementation mapping template**
 
+Version: **3.23** (2026-10-04; R-22 -- SI-03 MitateDB-api, SI-04 MitateDB-api, SI-08 MitateDB-api, SI-09 MitateDB-api, SI-10 Common, SI-11 r2db-api, SI-11 MitateDB-api, SI-11 Common, SI-14 MitateDB-api: the position references into `MitateDB-api/src/mitatedb_api/cell.py` follow the lines that the move of 36 comment blocks' history to `docs/code-history/MitateDB-api/cell.md` inserted and removed in the first half of that module; no claim's statement changes.)
 Version: **3.22** (2026-10-04; R-82 -- SI-01 r2db-api, SI-05 r2db-api, SI-08 MitateDB-api, SI-11 r2db-api, SI-11 MitateDB-api: catalog reads are answered from a process copy while the (database oid, schema revision) read in the same transaction matches it, schema operations always read live, and the token is read after the entity lock; MitateDB-api's catalog reads are counted as 6; position references moved with the inserted lines.)
 Version: **3.21** (2026-10-04; R-22 -- SI-08 r2db-api, SI-08 MitateDB-api, SI-11 MitateDB-api: the position references into `r2db-api/src/r2db_api/control_main.py` and `MitateDB-api/src/mitatedb_api/backend_postgres.py` follow the three history-reference lines and one blank line that the removal of three leftover dates from their comments inserted; no claim's statement changes.)
 Version: **3.20** (2026-10-03; CI correction -- SI-08 r2db-api: `RequestByteBoundMiddleware` reads and discards the rest of an over-bound body before it sends the 413 (MitateDB-api's middleware already did), with the proxy's `client_max_body_size` disclosed as the bound on what is read; r2db-api's position references into that module (SI-00, SI-08, SI-10) follow the four inserted lines.)
@@ -387,8 +388,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `ApplicationRuntime` has no schema-mutation method -- `MitateDB-api/src/mitatedb_api/cell.py`:3595.
-- `ApplicationCell._require_developer` gates every schema-changing call -- `MitateDB-api/src/mitatedb_api/cell.py`:3575.
+- `ApplicationRuntime` has no schema-mutation method -- `MitateDB-api/src/mitatedb_api/cell.py`:3647.
+- `ApplicationCell._require_developer` gates every schema-changing call -- `MitateDB-api/src/mitatedb_api/cell.py`:3627.
 
 #### Evidence
 
@@ -438,7 +439,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `ApplicationCell` exposes structured-only methods -- `MitateDB-api/src/mitatedb_api/cell.py`:508.
+- `ApplicationCell` exposes structured-only methods -- `MitateDB-api/src/mitatedb_api/cell.py`:514.
 - No command-text execution method exists on the PostgreSQL backend; only `Composed` objects reach the database -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:328`.
 
 #### Evidence
@@ -887,7 +888,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - **Control-plane's own 3 classes** (`applications`/`credentials_per_application`/`control_requests_per_minute`) are enforced by `ControlPlaneService`, published `enforced` -- `MitateDB-api/src/mitatedb_api/control_plane.py:1728`.
 - the control plane carries its own `request_bytes` bound as well, published `enforced` -- `MitateDB-api/src/mitatedb_api/control_plane.py:153`.
 - `credentials_per_application` excludes revoked rows, matching r2db-api's identical pre-auth and never-audited rule -- `MitateDB-api/src/mitatedb_api/control_plane.py:1119`.
-- **Application-plane resource bounds**: `_LimitStateHolder.acquire_rate`/`.concurrency_slot` bound `requests_per_minute` and `concurrency`, through the PostgreSQL rate row and the host-shared slots once wired (`cell.py:320`, `:393`, `:412`).
+- **Application-plane resource bounds**: `_LimitStateHolder.acquire_rate`/`.concurrency_slot` bound `requests_per_minute` and `concurrency`, through the PostgreSQL rate row and the host-shared slots once wired (`cell.py:320`, `:393`, `:413`).
 - those two classes are declared in `build_capabilities_document`'s `limit_enforcement` dict through `resolve_limit_enforcement` (`capabilities_document.py:60`, dict at `:308`; entries `:354`, `:361`).
 - `execution_ms` is declared `reference_wall_clock`, not `enforced` (`capabilities_document.py:338`) -- a wall-clock deadline (`time.monotonic() + max_execution_ms`) handed to the backend.
 - `backend_postgres.py` sets `statement_timeout`/`lock_timeout` by `SET LOCAL` from what remains of that deadline (`_set_timeouts`: `MitateDB-api/src/mitatedb_api/backend_postgres.py:1765`, `:1773-1776`), matching r2db-api's own declaration.
@@ -1104,8 +1105,8 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - one holder is shared by every application in the process, so the bound is deployment-wide rather than per-application -- `MitateDB-api/src/mitatedb_api/cell.py:364`.
 - handlers delegate the synchronous section to the threadpool, and each request opens a request scope that borrows its own connections, developer before runtime, before any lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:535`.
 - one request is one transaction on its scope's main connection, and the idempotency per-key and count locks are `pg_advisory_xact_lock`s inside it -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1844`, `:1881`.
-- a schema operation takes the application-wide `pg_advisory_xact_lock(761761763)`, then its entity's exclusive entity lock, before its first catalog read -- `MitateDB-api/src/mitatedb_api/cell.py:1244`.
-- a data write takes each entity it touches as a shared entity lock, sorted, in one statement before pass 1; a query takes neither lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:684`, `MitateDB-api/src/mitatedb_api/cell.py:2752`.
+- a schema operation takes the application-wide `pg_advisory_xact_lock(761761763)`, then its entity's exclusive entity lock, before its first catalog read -- `MitateDB-api/src/mitatedb_api/cell.py:1270`.
+- a data write takes each entity it touches as a shared entity lock, sorted, in one statement before pass 1; a query takes neither lock -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:684`, `MitateDB-api/src/mitatedb_api/cell.py:2804`.
 - a pool or lock wait past the deadline is `LIMIT_EXCEEDED`, a 40P01/40001 is `SERVICE_UNAVAILABLE`, a failed connect is `LIMIT_EXCEEDED` only once the budget is spent -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:518`, `:273`.
 - the in-process SQLite backend holds one `RLock` for the whole request scope, so one request per cell runs at a time there -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py:141`.
 - the same `HostSharedConcurrencySlots` as r2db-api's own, held identical by `_ISOMORPHIC_TARGETS`, bounds `concurrency` across the instance's workers, scanning under the `scan` lock -- `MitateDB-api/src/mitatedb_api/concurrency_slots.py:296`.
@@ -1301,12 +1302,12 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `ApplicationCell.delete` implements contract 1.2.0 declare-and-echo, the peer declaring `contract_version=1.3.0` and unaffected by the later additive flip -- `MitateDB-api/src/mitatedb_api/cell.py:2366`.
-- a valid confirmation requires `destructive is True` AND `confirm` to equal exactly the server's recomputed `DELETE <collection> @where=<digest16>` phrase -- `MitateDB-api/src/mitatedb_api/cell.py:2366`.
-- the `@where=<digest16>` digest is the SHA-256 of the canonically-serialized filter list, no state fingerprint being needed since this peer has no drop/recreate path -- `MitateDB-api/src/mitatedb_api/cell.py:2366`.
-- a non-bool `destructive` or non-str `confirm` is refused as a shape defect, never truthy-accepted -- `MitateDB-api/src/mitatedb_api/cell.py:2366`.
+- `ApplicationCell.delete` implements contract 1.2.0 declare-and-echo, the peer declaring `contract_version=1.3.0` and unaffected by the later additive flip -- `MitateDB-api/src/mitatedb_api/cell.py:2418`.
+- a valid confirmation requires `destructive is True` AND `confirm` to equal exactly the server's recomputed `DELETE <collection> @where=<digest16>` phrase -- `MitateDB-api/src/mitatedb_api/cell.py:2418`.
+- the `@where=<digest16>` digest is the SHA-256 of the canonically-serialized filter list, no state fingerprint being needed since this peer has no drop/recreate path -- `MitateDB-api/src/mitatedb_api/cell.py:2418`.
+- a non-bool `destructive` or non-str `confirm` is refused as a shape defect, never truthy-accepted -- `MitateDB-api/src/mitatedb_api/cell.py:2418`.
 - `DestructiveConfirmationRequired` carries the contract's 4 keys with `reversible_alternative`/`recovery` both null, mirroring r2db-api -- `MitateDB-api/src/mitatedb_api/errors.py`.
-- the `delete` phrase carries an `@schema_revision=<n>` fingerprint alongside `@where=<digest16>`, so a drop-then-recreate under the same name cannot leave a stale phrase valid -- `MitateDB-api/src/mitatedb_api/cell.py:2366`.
+- the `delete` phrase carries an `@schema_revision=<n>` fingerprint alongside `@where=<digest16>`, so a drop-then-recreate under the same name cannot leave a stale phrase valid -- `MitateDB-api/src/mitatedb_api/cell.py:2418`.
 - the control-plane `revoke_credential` last-active gate performs its target-set scan and state change inside the SAME transaction, closing the TOCTOU window exactly as r2db-api's does -- `MitateDB-api/src/mitatedb_api/control_plane.py:1921`.
 - the break-glass CLI's `revoke-credential` reuses that SAME gate rather than reimplementing it -- `MitateDB-api/src/mitatedb_api/ops.py:454`.
 - `deprovision <application_id>` is this peer's own second genuinely destructive CLI subcommand, provisioning-level, against `MITATEDB_PROVISION_DSN` -- `MitateDB-api/src/mitatedb_api/ops.py:769`.
@@ -1569,7 +1570,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- C-30 cursor refusal details -- an unusable cursor is refused with only request_schema/page/cursor, whether malformed, foreign, or bound to a stale where/order_by (`r2db-api/src/r2db_api/paging.py`, `MitateDB-api/src/mitatedb_api/cell.py:2191`).
+- C-30 cursor refusal details -- an unusable cursor is refused with only request_schema/page/cursor, whether malformed, foreign, or bound to a stale where/order_by (`r2db-api/src/r2db_api/paging.py`, `MitateDB-api/src/mitatedb_api/cell.py:2243`).
 
 #### Evidence
 
@@ -1631,20 +1632,20 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 - no production evidence.
 - r2db's own `cross_entity_mutation` remains `unavailable` (P35-D1, `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §0) -- no cross-entity atomic unit exists on this peer to evidence.
-- the peers take the entity lock at different places: r2db-api before its count lock, MitateDB-api after it; neither order is a common condition; MitateDB takes the shared lock on a dry run too (`MitateDB-api/src/mitatedb_api/cell.py:2752`), r2db does not.
+- the peers take the entity lock at different places: r2db-api before its count lock, MitateDB-api after it; neither order is a common condition; MitateDB takes the shared lock on a dry run too (`MitateDB-api/src/mitatedb_api/cell.py:2804`), r2db does not.
 - no common condition drives a stop in the middle of a transaction, so each peer's own two-cell test is the evidence: `r2db-api/tests/test_r120_entity_lock.py` here, `MitateDB-api/tests/test_r102_cross_cell_windows.py` on the other peer.
 
 ### MitateDB-api
 
 #### Control
 
-- `ApplicationCell.transact` uses one local transaction with rollback on a rejected operation -- `MitateDB-api/src/mitatedb_api/cell.py:2583`.
-- `transact()` is a two-pass choke for the cross-entity atomic unit (design §2 R-1): pass 1 (`_plan_operation`, side-effect-free) validates the WHOLE unit before pass 2 executes any of it -- `MitateDB-api/src/mitatedb_api/cell.py:2406`.
-- a later operation's validation failure therefore voids every earlier operation's effect too -- `MitateDB-api/src/mitatedb_api/cell.py:2406`.
-- that choke is shared by both the single-entity and the cross-entity call path, with no second implementation -- `MitateDB-api/src/mitatedb_api/cell.py:2583`.
-- rollback on a pass-2 failure is unconditional regardless of exception type -- `MitateDB-api/src/mitatedb_api/cell.py:2583`.
+- `ApplicationCell.transact` uses one local transaction with rollback on a rejected operation -- `MitateDB-api/src/mitatedb_api/cell.py:2635`.
+- `transact()` is a two-pass choke for the cross-entity atomic unit (design §2 R-1): pass 1 (`_plan_operation`, side-effect-free) validates the WHOLE unit before pass 2 executes any of it -- `MitateDB-api/src/mitatedb_api/cell.py:2458`.
+- a later operation's validation failure therefore voids every earlier operation's effect too -- `MitateDB-api/src/mitatedb_api/cell.py:2458`.
+- that choke is shared by both the single-entity and the cross-entity call path, with no second implementation -- `MitateDB-api/src/mitatedb_api/cell.py:2635`.
+- rollback on a pass-2 failure is unconditional regardless of exception type -- `MitateDB-api/src/mitatedb_api/cell.py:2635`.
 - `encode_value` rejects lone UTF-16 surrogates deterministically before execution on both backends, the same treatment as the pre-existing NUL-byte rejection -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:1497`.
-- pass 1 and pass 2 of one batch run under the shared entity locks of every entity it names, so an API schema operation on those entities waits for the batch -- `MitateDB-api/src/mitatedb_api/cell.py:2752`.
+- pass 1 and pass 2 of one batch run under the shared entity locks of every entity it names, so an API schema operation on those entities waits for the batch -- `MitateDB-api/src/mitatedb_api/cell.py:2804`.
 - a data request validates against the catalog whose (oid, schema revision) token it read after its entity lock; taking any advisory lock drops the token it had read -- `MitateDB-api/src/mitatedb_api/backend_postgres.py`:674.
 
 #### Evidence
@@ -1670,7 +1671,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- C-34 plan precondition -- a schema operation presenting a `plan` reads the revision it checks and runs its DDL under one application-wide lock (`r2db-api/src/r2db_api/postgres.py:2300`, `MitateDB-api/src/mitatedb_api/cell.py:1244`).
+- C-34 plan precondition -- a schema operation presenting a `plan` reads the revision it checks and runs its DDL under one application-wide lock (`r2db-api/src/r2db_api/postgres.py:2300`, `MitateDB-api/src/mitatedb_api/cell.py:1270`).
 
 #### Evidence
 
@@ -2007,9 +2008,9 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - a separate 13-column emitter is used on the durable path instead -- `MitateDB-api/src/mitatedb_api/audit_dispatch.py`.
 - **`commit()` runs inside `try`**: `backend_postgres`'s `create_collection`/`add_field`/`delete` commit inside the classified block, so a commit raise is never left unclassified -- `MitateDB-api/src/mitatedb_api/backend_postgres.py:328`.
 - that holds on both backends, SQLite's DDL running under an explicit pseudo-transaction -- `MitateDB-api/src/mitatedb_api/backend_sqlite.py`.
-- query, insert and update successes are written durably before the response, like r2db-api's own -- `MitateDB-api/src/mitatedb_api/audit_dispatch.py:196`, `MitateDB-api/src/mitatedb_api/cell.py:794`, `:2584`.
+- query, insert and update successes are written durably before the response, like r2db-api's own -- `MitateDB-api/src/mitatedb_api/audit_dispatch.py:196`, `MitateDB-api/src/mitatedb_api/cell.py:812`, `:2636`.
 - `request_id` is threaded from HTTP through auth, cell and backends, so the wire id matches the durable row's id -- `MitateDB-api/src/mitatedb_api/http.py:559`.
-- a `FORBIDDEN` row's `application_id` is the TARGET cell's own id, the victim side, never caller-declared -- `MitateDB-api/src/mitatedb_api/cell.py:3559`.
+- a `FORBIDDEN` row's `application_id` is the TARGET cell's own id, the victim side, never caller-declared -- `MitateDB-api/src/mitatedb_api/cell.py:3611`.
 - `audit_query` is served on the control host at both paths with one handler, reader `mitatedbsvc_auditreader`, `plane` from the source table -- `MitateDB-api/src/mitatedb_api/control_http.py:432`.
 - its order is `(recorded_at, plane, event_id)`, its cursor opaque and its `visibility_lag_ms` derived -- `MitateDB-api/src/mitatedb_api/audit_query.py:379`, `:191`, `MitateDB-api/src/mitatedb_api/platform_declarations.py:719`.
 - the two-process `visibility_lag_ms` premise is grounded the same way as r2db-api's cell: one shared catalog (`pg_db_role_setting`) grounds both the declaration and the effective value -- `MitateDB-api/src/mitatedb_api/platform_declarations.py`.
