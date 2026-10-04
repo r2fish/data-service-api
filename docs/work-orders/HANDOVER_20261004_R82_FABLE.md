@@ -40,6 +40,7 @@
 
 - 実際の配備先 (Cloud SQL ほか) で runtime / developer role が `pg_database` を読めること (PostgreSQL の既定では読める。使い捨てクラスタでは確かめた)。
 - CI (Linux、Python 3.12)。本変更は未送信である。
+- 完了ゲートの後に `r2db-api/src/r2db_api/postgres.py` の `_catalog` の戻り値の注釈の引用符を外した (`tools/tests` の `test_string_annotation_only_readers_match_pin` が commit `706c6ff` の後に赤を出した。`from __future__ import annotations` の下で注釈は評価されない)。この 1 行の後は `tools/tests` 808 passed と r2db の関連テスト 154 passed を確かめ、完了ゲートは取り直していない。
 - `test_r120_entity_lock.py` の lock 順序のテストは trace の畳み方を変えた (token の読みを catalog と同じ印にした)。変更後に R-120 の変異 M3 は取り直していない。
 - 載せ直しの前に取った `--roundtrip` の事後の値 (作業指示書 §6.1) は、載せ直しの後には取り直していない (載せ直しで変わったのは並行チャットのコメントの変更だけである)。
 
