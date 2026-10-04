@@ -425,7 +425,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
        (rulings-q4-wp12-rework.md sec.2: "control の sibling role catalog
        検査は audit_reader の有無に依らず無条件"), regardless of whether
        `R2DB_AUDIT_DSN` is even configured on this process;
-    5b. (Phase 10 WP-4g, supervisor ruling 2026-09-09) F-16, on the same
+    5b. (Phase 10 WP-4g) F-16, on the same
        borrowed connection: this process' own `r2dbsvc_controlplane` role
        (plus `r2dbsvc_auditreader` too when `R2DB_AUDIT_DSN` is
        configured) must have a real `CONNECTION LIMIT` of `-1` or at
@@ -436,6 +436,8 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
        passing the already-built audit sink and the fully-resolved
        `surfaces`/`audit_visibility_lag_ms`/`audit_coalescing_window_ms` as
        constructor arguments -- never mutated onto `service` afterward.
+
+    History: CH-0580
     """
     env = env if env is not None else os.environ
 
