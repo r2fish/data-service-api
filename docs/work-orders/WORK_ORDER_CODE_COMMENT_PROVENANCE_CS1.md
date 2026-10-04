@@ -4438,8 +4438,297 @@ tools/dev/pt.py -C <統合後の main の worktree> -- tools/tests -q   # 監督
 | 7a | c29 (29) | `MitateDB-api/src/mitatedb_api/cell.py` / L554-563 | CH-0605 | `# Phase 8 WP-1a: `None` (every pre-WP-1a caller --…` |
 | 7a | c30 (30) | `MitateDB-api/src/mitatedb_api/cell.py` / L1375-1417 の第 1 文 | CH-0620 | `(design v1.1 §0 exception, WP-1)…` |
 | 7a | c34 (34) | `conformance-tests/test_c05_limit_declaration_agreement.py` / `conformance-tests` の docstring の参照 (L932) | — | ``cell.py:1875-1926` (now in…` |
+| 7b | c1 (1) | `MitateDB-api/src/mitatedb_api/cell.py` / `ApplicationCell.transact` のコード (L2740、塊の外) | — | `raise ResourceLimitError("batch entity limit excee…` |
+| 7b | c2 (2) | `docs/code-history/MitateDB-api/cell.md` / CH-0744 の節 (base L2683-2689) | CH-0744 | `# request_id` a caller reads back is provably the …` |
+| 7b | c3a (3) | `MitateDB-api/src/mitatedb_api/cell.py` / L2577-2581 (CH-0741) | CH-0741 | `capability gap, not a malformed request.…` |
+| 7b | c3b (3) | `MitateDB-api/src/mitatedb_api/cell.py` / L2601-2626 の第 2 段落 (CH-0742。保護参照を含まない残した 2 文を入れ替える) | CH-0742 | `a `collection` value that is present but not itsel…` |
+| 7b | c3c (3) | `MitateDB-api/src/mitatedb_api/cell.py` / L2386-2392 (CH-0737) | CH-0737 | `BEFORE the confirmation check below…` |
+| 7b | c3d (3) | `MitateDB-api/src/mitatedb_api/cell.py` / L2443-2446 (CH-0739) | CH-0739 | `# once it has passed the confirmation choke (this …` |
+| 7b | c4 (4) | `MitateDB-api/src/mitatedb_api/cell.py` / L2782-2791 (CH-0748) | CH-0748 | `J-4 (SI-14): a replayed mutation response…` |
+| 7b | c5 (5) | `MitateDB-api/src/mitatedb_api/cell.py` / L2015-2044 (CH-0730) | CH-0730 | `# history: CH-0730…` |
+| 7b | c6a (6) | `MitateDB-api/src/mitatedb_api/cell.py` / L2015-2044 (CH-0730) | CH-0730 | `# history: CH-0730…` |
+| 7b | c6b (6) | `docs/code-history/MitateDB-api/cell.md` / CH-0775 の節の前 (孤児の節を足す) | CH-0997 (足す) | `## CH-0775…` |
+| 7b | c7 (7) | `docs/code-history/r2db-api/control_main.md` / r2db の受け皿 (CH-0504 の節の前に CH-0730 を足す) | CH-0730 (重複) | `## CH-0504…` |
+| 7b | c8 (8) | `MitateDB-api/src/mitatedb_api/cell.py` / モジュール先頭 (L69 の次) | — | `_logger = logging.getLogger(__name__)…` |
+| 7b | c10a (10) | `MitateDB-api/src/mitatedb_api/cell.py` / L2010-2013 (CH なしの塊に足す) | — | `# write commits.…` |
+| 7b | c10b (10) | `MitateDB-api/src/mitatedb_api/cell.py` / L2067-2071 の docstring (CH なし) | なし | `caller of it are unchanged."""…` |
+| 7b | c15 (15) | `MitateDB-api/src/mitatedb_api/cell.py` / L3660-3666 (`ApplicationRuntime._require_developer_authority` の docstring。CH なし) | なし | `The HTTP schema endpoint calls this for a session …` |
+| 7b | c16 (16) | `MitateDB-api/src/mitatedb_api/cell.py` / L2782-2791 の第 2 文 (CH-0748。`J-4 (SI-14): …` を丸ごと消す) | CH-0748 | `J-4 (SI-14): a replayed mutation response # earns …` |
+| 7b | c17 (17) | `MitateDB-api/src/mitatedb_api/cell.py` / L2683-2689 (ラベル削除後の先頭。CH-0744) | CH-0744 | `# resolved ONCE, here, before…` |
+| 7b | c18 (18) | `MitateDB-api/src/mitatedb_api/cell.py` / L2637-2682 の第 1 文 (CH-0743) | CH-0743 | `design v1.2 R-5, WP-1.5): `insert`…` |
+| 7b | c21a (21) | `MitateDB-api/src/mitatedb_api/cell.py` / L3038-3050 (CH-0754) | CH-0754 | `NOT to share the # data's own fate…` |
+| 7b | c21b (21) | `MitateDB-api/src/mitatedb_api/cell.py` / L2717-2730 (CH-0746) | CH-0746 | `AFTER rate/ # concurrency/request_bytes/operation_…` |
+| 7b | c21c (21) | `MitateDB-api/src/mitatedb_api/cell.py` / L2717-2730 (CH-0746) | CH-0746 | ``narrow_ # limits_by_budget`…` |
+| 7b | c22a (22) | `docs/code-history/MitateDB-api/cell.md` / CH-0744 の節の fenced block の末尾 | CH-0744 | `request's own audit evidence carries too. ```…` |
+| 7b | c22b (22) | `MitateDB-api/src/mitatedb_api/cell.py` / L2637-2682 の第 3 段落のラベル (折り返しで割れた実在パス `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` を含む。CH-0743) | CH-0743 | `P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_EN…` |
+| 7b | c22b-latter-half (22) | `MitateDB-api/src/mitatedb_api/cell.py` / 同じラベルの実在パスの後半 (`CONTRACT_130_V1.md`) だけを削る (CH-0743) | CH-0743 | `docs/design/PHASE35_CROSS_ENTITY_AND_ CONTRACT_130…` |
+| 7b | c23 (23) | `docs/code-history/MitateDB-api/cell.md` / CH-0744 の節の fenced block | CH-0744 | `# Phase 9 WP-3e (design D-7 (3), Q-1): resolved ON…` |
+| 7b | c28 (28) | `MitateDB-api/src/mitatedb_api/cell.py` / L2577-2581 (CH-0741) | CH-0741 | `P3-D2 converged…` |
+| 7b | c29 (29) | `MitateDB-api/src/mitatedb_api/cell.py` / L2806-2820 (CH-0749) | CH-0749 | `# Phase 9 WP-3b: the LOCAL execution plan…` |
+| 7b | c30 (30) | `MitateDB-api/src/mitatedb_api/cell.py` / L2782-2791 の括弧 (CH-0748。WP の位置指定 `WP-2cd` を括弧から除く) | CH-0748 | `(WP-2cd/WP-3cd audit N-5)…` |
+| 7b | c34 (34) | `conformance-tests/test_c05_limit_declaration_agreement.py` / `conformance-tests` の docstring の参照 (L932) | — | ``cell.py:1875-1926` (now in…` |
 
 **監査スクリプトの出力** (`cs7_removed_tokens.py`。実行ごとに「実行 N (WP、最初 / 裁定 #n の後、実行時刻、`--head`)」の 1 行と、出力全体を逐語で入れたコードブロックを順に足す)
+
+実行 4 (WP-7b、最初の実装、**基点 987b004**、コミット前 `--head` 省略 = 作業ツリー。**履歴**: CH-0752・CH-0755 を含み、CH-0758 の編集 1・CH-0771 の編集 2・CH-0773 の編集 2 を持つ 46 塊の状態。差し戻し 1 の後は実行 5、差し戻し 2 の後は実行 6 が正):
+
+```text
+BASE 987b004 HEAD worktree
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	D-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	Q-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2120-2131	CH-0732	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2120-2131	CH-0732	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2272-2279	CH-0734	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2272-2279	CH-0734	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2287-2296	CH-0735	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2287-2296	CH-0735	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2329-2358	CH-0736	id	R-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2329-2358	CH-0736	id	WP-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	B-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	WP-0	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	WP-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2438-2440	CH-0738	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2443-2446	CH-0739	id	D-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2577-2581	CH-0741	id	WP-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	B-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	R-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	WP-2	x2
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2637-2682	CH-0743	id	M-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	D-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	Q-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	I-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	I-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	B-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	D-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	K-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2775-2778	CH-0747	id	I-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2782-2791	CH-0748	id	I-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2782-2791	CH-0748	id	I-8	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2806-2820	CH-0749	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2806-2820	CH-0749	id	D-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2854-2862	CH-0750	id	I-13	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2881-2889	CH-0751	id	M-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2904-2918	CH-0752	id	D-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2904-2918	CH-0752	id	WP-3b	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	I-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	K-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	N-8	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3053-3062	CH-0755	id	D-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3069-3091	CH-0756	id	D-10	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3110-3114	CH-0757	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3110-3114	CH-0757	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3243-3274	CH-0758	id	D-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3243-3274	CH-0758	id	WP-3a	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3306-3326	CH-0759	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3306-3326	CH-0759	id	WP-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3341-3347	CH-0760	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3341-3347	CH-0760	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3394-3408	CH-0761	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3470-3471	CH-0762	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3470-3471	CH-0762	id	WP-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3477-3484	CH-0763	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3477-3484	CH-0763	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3528-3534	CH-0764	id	M-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3528-3534	CH-0764	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3552-3553	CH-0765	id	B-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3558-3561	CH-0766	id	O-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	B-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	D-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	D-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	P-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3805-3826	CH-0772	id	R-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	D-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	P-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3a	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3b	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3d	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3956-3960	CH-0775	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3956-3960	CH-0775	id	WP-3cd	x1
+SUMMARY ch_blocks=46 ws_only=0 unpaired=0 removed_rows=87
+```
+
+実行 5 (WP-7b、差し戻し 1 の裁定 (CH-0758 の編集 1・CH-0771 の編集 2・CH-0773 の編集 2 を外し、CH-0752・CH-0755 を欠番にした) の後、**基点 987b004**、コミット前 `--head` 省略 = 作業ツリー。**履歴**: CH-0757・CH-0760 を持つ 44 塊の状態。差し戻し 2 の後は下の実行 6 が正):
+
+```text
+BASE 987b004 HEAD worktree
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	D-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	Q-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2120-2131	CH-0732	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2120-2131	CH-0732	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2272-2279	CH-0734	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2272-2279	CH-0734	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2287-2296	CH-0735	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2287-2296	CH-0735	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2329-2358	CH-0736	id	R-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2329-2358	CH-0736	id	WP-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	B-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	WP-0	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	WP-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2438-2440	CH-0738	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2443-2446	CH-0739	id	D-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2577-2581	CH-0741	id	WP-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	B-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	R-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	WP-2	x2
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2637-2682	CH-0743	id	M-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	D-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	Q-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	I-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	I-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	B-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	D-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	K-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2775-2778	CH-0747	id	I-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2782-2791	CH-0748	id	I-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2782-2791	CH-0748	id	I-8	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2806-2820	CH-0749	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2806-2820	CH-0749	id	D-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2854-2862	CH-0750	id	I-13	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2881-2889	CH-0751	id	M-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	I-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	K-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	N-8	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3069-3091	CH-0756	id	D-10	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3110-3114	CH-0757	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3110-3114	CH-0757	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3306-3326	CH-0759	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3306-3326	CH-0759	id	WP-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3341-3347	CH-0760	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3341-3347	CH-0760	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3394-3408	CH-0761	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3470-3471	CH-0762	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3470-3471	CH-0762	id	WP-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3477-3484	CH-0763	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3477-3484	CH-0763	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3528-3534	CH-0764	id	M-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3528-3534	CH-0764	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3552-3553	CH-0765	id	B-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3558-3561	CH-0766	id	O-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	B-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	D-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	D-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	P-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3805-3826	CH-0772	id	R-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	D-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	P-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3a	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3b	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3d	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3956-3960	CH-0775	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3956-3960	CH-0775	id	WP-3cd	x1
+SUMMARY ch_blocks=44 ws_only=0 unpaired=0 removed_rows=78
+```
+
+実行 6 (WP-7b、差し戻し 2 の裁定 (CH-0757・CH-0760 を外して欠番にした) の後、**基点 987b004**、コミット前 `--head` 省略 = 作業ツリー。**今の状態**。実行 1〜3 は WP-7a のもの):
+
+```text
+BASE 987b004 HEAD worktree
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	D-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	Q-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2107-2113	CH-0731	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2120-2131	CH-0732	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2120-2131	CH-0732	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2272-2279	CH-0734	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2272-2279	CH-0734	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2287-2296	CH-0735	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2287-2296	CH-0735	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2329-2358	CH-0736	id	R-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2329-2358	CH-0736	id	WP-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	B-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	WP-0	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2386-2392	CH-0737	id	WP-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2438-2440	CH-0738	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2443-2446	CH-0739	id	D-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2577-2581	CH-0741	id	WP-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	B-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	R-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2601-2626	CH-0742	id	WP-2	x2
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2637-2682	CH-0743	id	M-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	D-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	Q-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2683-2689	CH-0744	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	I-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	I-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2692-2708	CH-0745	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	B-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	D-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	K-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2717-2730	CH-0746	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2775-2778	CH-0747	id	I-7	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2782-2791	CH-0748	id	I-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2782-2791	CH-0748	id	I-8	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2806-2820	CH-0749	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2806-2820	CH-0749	id	D-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2854-2862	CH-0750	id	I-13	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2881-2889	CH-0751	id	M-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	D-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	I-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L2949-2961	CH-0753	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	K-5	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	N-8	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3038-3050	CH-0754	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3069-3091	CH-0756	id	D-10	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3306-3326	CH-0759	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3306-3326	CH-0759	id	WP-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3394-3408	CH-0761	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3470-3471	CH-0762	id	D-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3470-3471	CH-0762	id	WP-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3477-3484	CH-0763	id	L-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3477-3484	CH-0763	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3528-3534	CH-0764	id	M-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3528-3534	CH-0764	id	WP-3e	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3552-3553	CH-0765	id	B-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3558-3561	CH-0766	id	O-2	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	B-4	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	D-6	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3705-3715	CH-0770	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	D-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3774-3799	CH-0771	id	P-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3805-3826	CH-0772	id	R-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	D-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3875-3891	CH-0773	id	P-3	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3a	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3b	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3c	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3cd	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3901-3910	CH-0774	id	WP-3d	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3956-3960	CH-0775	id	K-1	x1
+REMOVED	MitateDB-api/src/mitatedb_api/cell.py	L3956-3960	CH-0775	id	WP-3cd	x1
+SUMMARY ch_blocks=42 ws_only=0 unpaired=0 removed_rows=74
+```
 
 実行 1 (WP-7a、最初、**基点 b378989**、2026-10-04 16:47、コミット前 `--head` 省略 = 作業ツリー。**履歴**: CH-0628 (L1593-1603 の最後の文の削除) を戻す前の状態。裁定 #1 の後は下の実行 2 が正):
 
@@ -4655,6 +4944,32 @@ SUMMARY ch_blocks=36 ws_only=0 unpaired=0 removed_rows=58
 
 **位置参照の引き直しの出力** (`repull.py`。WP ごとに出力全体を逐語で。続けて引き直した各行の「基点の行の内容 = HEAD の行の内容」の照合)
 
+WP-7b の `repull.py` の出力 (`python3 "$SP/repull.py" 987b004 security/CONTROL_MAPPING.md -- MitateDB-api/src/mitatedb_api/cell.py`、exit 0):
+
+```text
+security/CONTROL_MAPPING.md:391: cell.py :3647 -> :3690
+security/CONTROL_MAPPING.md:392: cell.py :3627 -> :3670
+security/CONTROL_MAPPING.md:1109: cell.py :2804 -> :2829
+security/CONTROL_MAPPING.md:1305: cell.py :2418 -> :2428
+security/CONTROL_MAPPING.md:1306: cell.py :2418 -> :2428
+security/CONTROL_MAPPING.md:1307: cell.py :2418 -> :2428
+security/CONTROL_MAPPING.md:1308: cell.py :2418 -> :2428
+security/CONTROL_MAPPING.md:1310: cell.py :2418 -> :2428
+security/CONTROL_MAPPING.md:1573: cell.py :2243 -> :2246
+security/CONTROL_MAPPING.md:1635: cell.py :2804 -> :2829
+security/CONTROL_MAPPING.md:1642: cell.py :2635 -> :2653
+security/CONTROL_MAPPING.md:1643: cell.py :2458 -> :2470
+security/CONTROL_MAPPING.md:1644: cell.py :2458 -> :2470
+security/CONTROL_MAPPING.md:1645: cell.py :2635 -> :2653
+security/CONTROL_MAPPING.md:1646: cell.py :2635 -> :2653
+security/CONTROL_MAPPING.md:1648: cell.py :2804 -> :2829
+security/CONTROL_MAPPING.md:2011: cell.py :2636 -> :2654
+security/CONTROL_MAPPING.md:2013: cell.py :3611 -> :3654
+security/CONTROL_MAPPING.md: changed 18, unresolved 0, not applied 0
+```
+
+下の表の WP-7b の行は上の各行の「基点の行の内容 = HEAD の行の内容」の照合 (基点の `cell.py` の行と作業ツリーの `cell.py` の行を文字列で比べた。範囲の参照は両端)。WP-7a の `repull.py` の出力 (WP-7a の基点 6635064) は上にある。`security/CONTROL_MAPPING.md` の `Version:` の行は、監督が足した。
+
 WP-7a の `repull.py` の出力 (`python3 "$SP/repull.py" 6635064 security/CONTROL_MAPPING.md -- MitateDB-api/src/mitatedb_api/cell.py`、exit 0):
 
 ```text
@@ -4711,14 +5026,35 @@ security/CONTROL_MAPPING.md: changed 23, unresolved 0, not applied 0
 | 7a | 2010 | `cell.py:794` | `cell.py:812` | 一致: `def _write_row_before_commit(self, principal, *, operation, collection` |
 | 7a | 2010 | `cell.py:2584` | `cell.py:2636` | 一致: `transaction=None, entity=None, digest_operations=None, idempotency_key` |
 | 7a | 2012 | `cell.py:3559` | `cell.py:3611` | 一致: `reason_code="FORBIDDEN", event_class="authorization_denied", request_i` |
+| 7b | 391 | `cell.py:3647` | `cell.py:3690` | 一致: `"""Runtime data authority; schema mutation is intentionally absent."""` |
+| 7b | 392 | `cell.py:3627` | `cell.py:3670` | 一致: `self._require_data(principal, request_id=request_id)` |
+| 7b | 1109 | `cell.py:2804` | `cell.py:2829` | 一致: `scope.lock_entities(self._entity_lock_names(self._distinct_batch_entit` |
+| 7b | 1305 | `cell.py:2418` | `cell.py:2428` | 一致: `def delete(self, principal, collection, filters, *, destructive=False,` |
+| 7b | 1306 | `cell.py:2418` | `cell.py:2428` | 一致: `def delete(self, principal, collection, filters, *, destructive=False,` |
+| 7b | 1307 | `cell.py:2418` | `cell.py:2428` | 一致: `def delete(self, principal, collection, filters, *, destructive=False,` |
+| 7b | 1308 | `cell.py:2418` | `cell.py:2428` | 一致: `def delete(self, principal, collection, filters, *, destructive=False,` |
+| 7b | 1310 | `cell.py:2418` | `cell.py:2428` | 一致: `def delete(self, principal, collection, filters, *, destructive=False,` |
+| 7b | 1573 | `cell.py:2243` | `cell.py:2246` | 一致: `details=violation("request_schema", field="page/cursor"),` |
+| 7b | 1635 | `cell.py:2804` | `cell.py:2829` | 一致: `scope.lock_entities(self._entity_lock_names(self._distinct_batch_entit` |
+| 7b | 1642 | `cell.py:2635` | `cell.py:2653` | 一致: `def transact(self, principal, operations, *, request_id=None, dry_run=` |
+| 7b | 1643 | `cell.py:2458` | `cell.py:2470` | 一致: `def _plan_operation(self, operation, index, limits=None, *, scope):` |
+| 7b | 1644 | `cell.py:2458` | `cell.py:2470` | 一致: `def _plan_operation(self, operation, index, limits=None, *, scope):` |
+| 7b | 1645 | `cell.py:2635` | `cell.py:2653` | 一致: `def transact(self, principal, operations, *, request_id=None, dry_run=` |
+| 7b | 1646 | `cell.py:2635` | `cell.py:2653` | 一致: `def transact(self, principal, operations, *, request_id=None, dry_run=` |
+| 7b | 1648 | `cell.py:2804` | `cell.py:2829` | 一致: `scope.lock_entities(self._entity_lock_names(self._distinct_batch_entit` |
+| 7b | 2011 | `cell.py:2636` | `cell.py:2654` | 一致: `transaction=None, entity=None, digest_operations=None, idempotency_key` |
+| 7b | 2013 | `cell.py:3611` | `cell.py:3654` | 一致: `reason_code="FORBIDDEN", event_class="authorization_denied", request_i` |
 
 **指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
+
+WP-7b も HEAD で操作 (3) により削除した文は 0 文。除いたラベル・括弧を指す点検語 (`this WP`・`same commit`・`this closure`・`before this`・名指しの `D-n`・`V-6`) は除去前に塊ごとに確かめ、指す塊は見送った (A 表の根拠欄。見送りは A 表の「検査器が許す候補が在るが……見送った」の 10 塊 (うち L2904・L3053 は差し戻し 1、L3110・L3341 は差し戻し 2 で戻した) と「除去を試したが検査器が受け付けない」の 5 塊)。
 
 HEAD で操作 (3) により削除した文は 0 文。途中のパスで 1 文を削除したが (上の行)、戻した。
 
 | # | WP | 塊 (基点の行) | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 点検語の参照 | 結果 |
 |---|---|---|---|---|---|---|---|
 | 1 | 7a | L1593-1603 (CH-0628、欠番) | `Phase 9 WP-3b: `descriptor`/`committed`/`plan` (dry_run only) added.` | (塊の最後の文。直後に残す文なし) | (なし) | `added` は前の文を指さず、`Phase 9 WP-3b` はラベルのみ | **戻した** (HEAD は基準のバイト列)。経緯だけの文だが、`committed` (戻り値のキー名) を含み §16.2 が安全の語の塊に挙げるので、迷って削除しない。HEAD の削除した文は 0 |
+| — | 7b | (該当なし) | WP-7b は文を 1 つも削除していない (実装中も削除は当てていない)。除去は文頭ラベル・括弧・日付だけ | — | — | — | — |
 
 **塊をまたぐ参照先一覧** (行番号は基点。「残っているか」は HEAD の実物。§16.2 の参照表の全行と、「確定」の行の確定先)
 
@@ -4753,24 +5089,49 @@ HEAD で操作 (3) により削除した文は 0 文。途中のパスで 1 文�
 | 27 | 7a | MitateDB `tests/test_denial_details_and_request_id.py:420` | `ApplicationCell.read`'s own docstring | L2015-2019 (**7b**) | 7b で確認する | 7b で確認する |
 | 28 | 7a | MitateDB `tests/test_http.py:123` | `ApplicationCell.__init__`'s own docstring | **無い** (`__init__` に docstring が無い。移動前からの穴) | (該当なし) | 該当なし (移動前からの穴) |
 | 29 | 7a | `conformance-tests/test_c04_unsupported_and_safe_errors.py:67` | `cell.py` comment above `"operation_depth": "enforced"` | **`cell.py` に無い** (`capabilities_document.py` にある。触らない) | (該当なし) | 該当なし (移動前からの穴) |
+| 30 | 7b | `cell.py` L2419-2426 | See `_validate_delete_confirmation` above for the actual confirmation semantics | L2329-2358 (7b。CH-0736 は `(WP-5 R-5)` だけ除去) | `the single choke BOTH `ApplicationCell.delete` below AND `transact()`'s own batch-embedded delete branch ... pass through` | はい |
+| 31 | 7b | `cell.py` L2531-2539 (7a 行 13 の確定) | `_check_missing_required_fields`'s own docstring | L3243-3274 (7b。CH-0758) | `Phase 9 WP-3a (design D-2 (3)): the insert-only 欠落検査 -- `declared_non_nullable - set(values)`. Placed BEFORE `_prepare_values` at every real insert entry point` (日付括弧だけ除去。ラベルは基準のまま) | はい |
+| 32 | 7b | `cell.py` L2395-2397 | `_validate_update`'s own identical check above now carries | L2272-2279 (7b。CH-0734 は第 1 文のラベルだけ除去) | `the wire contract's own predicate container is named `where` ..., never `filters`` | はい |
+| 33 | 7b | `cell.py` L2838-2850 | `create_collection`'s own identical comment explains why | 7a 行 5 の確定先 (`create_collection` の plan 事前条件の塊。基準のバイト列) | `Only computed at all when there is a `plan` to check or a fresh one to return` | はい |
+| 34 | 7b | `cell.py` L2854-2862 (CH-0750) | this method's own idempotency-lookup block | L2742-2754 (7b。基準のバイト列) | `the idempotency lookup/write-prep choke -- built and consulted HERE, after every bound check above ...` | はい |
+| 35 | 7b | `cell.py` L2976-3028 (7a 行 14 の確定) | this method's own docstring promises | L2637-2682 (7b。CH-0743) | `The whole batch commits or rolls back as one unit` (`(M-7)` だけ除去) | はい |
+| 36 | 7b | `cell.py` L3132-3140、L3512-3515 | `_prepare_values`'s identical "this entity has no field by this name" treatment | L3376-3384 (7b。基準のバイト列) | `this entity has no field by this name -- an unrecognized-field `request_schema` violation` | はい |
+| 37 | 7b | `cell.py` L3470-3471 (CH-0762) | same choke point `_prepare_values` above uses | L3306-3326 (7b。CH-0759) | `the PRIMARY, backend-independent declared-type choke point -- `field_types.check_declared_value` runs BEFORE `encode_value` on every backend` | はい |
+| 38 | 7b | `cell.py` L3748-3753 (7a 行 15 の確定) | `ApplicationCell.read_page`, whose own docstring states this method's full contract | L2079-2106 (7b。基準のバイト列) | `Cursor-carrying read, returning `(items, next_page)`` | はい |
+| 39 | 7b | `cell.py` L3774-3799 (7a 行 16 の確定) | `ApplicationCell.transact`'s own identical-purpose comment | L2742-2754 (7b。`transact` の idempotency lookup・`digest_request` の塊。基準のバイト列。`entity`/`digest_operations` を digest に入れる理由はここの `digest_request` の説明にまとまる) | `digest_request` is built whenever EITHER an idempotency digest OR a plan token will need it | はい |
+| 40 | 7b | `cell.py` L3774-3799、L3875-3891 (7a 行 17 の確定) | `ApplicationRuntime.read`'s identical comment (for the full reasoning) | L3705-3715 (7b。CH-0770 は括弧だけ除去) | `budget` now reaches `ApplicationCell.read` RAW/unvalidated -- `narrow_limits_by_budget` moved from here into `ApplicationCell._limit_gate` itself | はい |
+| 41 | 7b | `cell.py` L3805-3826 | `ApplicationCell.catalog`/`.schema_revision` (those methods' own docstrings) | L1913-1930・L1845-1886 (7a。7a 行 18 と同じ) | `WRAPPED by `_limit_gate` (rate/concurrency only ...` ほか (7a の確認済み) | はい |
+| 42 | 7b | `cell.py` L3901-3910、L3956-3960 (7a 行 19 の確定) | `create_entity`'s own identical comment | L3875-3891 (7b。CH-0773) | `field_constraints` no longer gates ... / `idempotency_key`/`budget` are UNGATED as of THIS commit too ... (括弧だけ除去。`Phase 9 WP-3cd closure (K-1):` のラベルは基準のまま) | はい |
+| 43 | 7b | `cell.py` L3920-3954 | `cell.ApplicationCell.alter_field`'s own docstring / `alter_field`'s own docstring on `ApplicationCell` above | L1612-1658 (7a。7a 行 20 と同じ) | `redeclares `field`'s own `enum`/`nullable` constraints` と `changing NOTHING` (7a の確認済み) | はい |
+| 44 | 7b | `cell.py` L1845-1886 (7a 行 10 の確定) | `ApplicationRuntime._post_schema_revision`'s own docstring | L3678-3695 (7b。CH-0769 は `監督裁定 2026-09-06` だけ除去) | `the UNGATED counterpart of `schema_revision` above, for exactly one caller` | はい |
+| 45 | 7b | MitateDB `src/mitatedb_api/capabilities_document.py:413` (7a 行 26 の確定) | this module's own (in `cell.py`) pre-existing comment on that dispatcher | L2513-2522 (7b。基準のバイト列。`expected_revision` を能力の欠如として拒む理由) | `A well-formed "insert" carrying an extra, unrecognized key (e.g. `expected_revision`) is a capability gap, not a malformed request` | はい |
+| 46 | 7b | MitateDB `tests/test_postgres.py:529` (7a 行 26 の確定) | see that method's own comment for why (`request_id` を最後の項目の dict に折り込む理由) | L2922-2946 (7b。基準のバイト列) | `request_id` is folded INTO the last operation's own per-item result dict, IN PLACE -- never appended as a new trailing list entry | はい |
+| 47 | 7b | MitateDB `src/mitatedb_api/http.py:867` (7a 行 26 の確定) | `cell.py::ApplicationCell.transact`'s own docstring for why both entry points converge correctly | L2692-2708 (7b。CH-0745 はラベルだけ除去)。参照元は docstring と書くが、収束の理由は comment にある (移動前からの食い違い。触らない) | `idempotency_key` has two entry points into this method -- this KEYWORD (...) or folded onto EVERY operation dict | はい |
+| 48 | 7b | MitateDB `tests/test_denial_details_and_request_id.py:420` (7a 行 27 の確定) | `ApplicationCell.read`'s own docstring | L2067-2071 (7b。基準のバイト列) | `Delegates to `read_page` below with `cursor=None`, returning only its own `rows` half ... (a bare `list[dict]`, no `next_page`)` | はい |
+| 49 | 7b | MitateDB `conformance/conformance_adapter_mitatedb_http.py:2395-2396` (7a 行 23 の 7b 部の確定) | `cell.py`'s own comment on those two methods (`schema_revision`/`catalog`) | **該当なし** (参照元の文が指すのは `schema_revision`・`catalog` だけで、7b の `read` を指す語は無い。7a の確認が全部) | (該当なし) | 該当なし |
 
 **HTTP の status・error code を含む削除文の監査一覧**
 
 | # | WP | 塊 | 削除した文 (先頭の数語) | 含む語 | 判定表の根拠 |
 |---|---|---|---|---|---|
 | — | 7a | (該当なし) | HEAD で削除した文は 0 文のため、3 桁のステータス番号・エラーコード語彙を含む削除文は 0。途中で削除して戻した 1 文 (CH-0628) に該当の語は無い | — | — |
+| — | 7b | (該当なし) | HEAD で削除した文は 0 文のため、3 桁のステータス番号・エラーコード語彙を含む削除文は 0 | — | — |
 
 **0d の保護参照があるために残った、経緯だけの文**
 
 | # | WP | 塊 (行) | 文 (先頭の数語) | 保護参照 | HEAD の状態 |
 |---|---|---|---|---|---|
 | 1 | 7a | L1375-1417 (第 1 文) | `P3-D1 (design v1.1 §0 exception, WP-1): the one capability-envelope addition this phase makes -- ... (declaration and implementation land in this same commit).` | 版数付き文書名 `design v1.1` | 基準のバイト列。文は経緯の性格が強いが `schema_operations.add_field` が developer-only で両 backend に在るという現在の事実を同居させ、版数付き文書名を含むので丸ごと消せない。括弧の `WP-1` は、同じ文の `land in this same commit` が指す位置指定なので、機械除去が許す語だが残した (Y7-3 (b)。除去すると変異 c30 の型になる) |
+| 2 | 7b | L2459-2495 (第 1 文) | `P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2): builds one fully-bound, side-effect-free plan step for a single `transact()` operation-dict -- ... as before this WP, just no longer interleaved with any OTHER operation's own execution.` | 実在パス `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` | 基準のバイト列 (CH-0740 は日付だけ除去)。文は経緯の性格が強いが、2 段階 (検査してから実行) の現在の構造と、`transact()` の pass 1 が副作用を持たない現在の保証を同じ文で述べる |
+| 3 | 7b | L2637-2682 (第 3 段落の第 1 文) | `P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2, P35-D9/P35-D10/P35-D11): two-pass as of this WP -- ALL operations across ALL entities are validated first ...` | 実在パス (折り返しで割れる) | 基準のバイト列 (CH-0743 は `(M-7)` だけ除去)。完了条件 22 (b) の変異の対象 |
+| 4 | 7b | L3174-3187 (第 1 文) | `WP-3 (design docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md v1.2 R-5/§2): the HTTP `/v1/data/{entity}/query` endpoint maps contract `QueryRequest.order_by` ... onto this seam.` | 実在パスと版数付き文書名 `v1.2` | 基準のバイト列 (CH なし)。`order_by` を 3 つの形で受ける現在の仕様と同じ文 |
 
 **訂正の記録 (0g)**
 
 | # | WP | ファイル:行 (CH-ID) | 旧文 (先頭の数語) | 新文 (先頭の数語) | 今のコードとの食い違い (根拠 `file:line`) |
 |---|---|---|---|---|---|
 | — | 7a | (該当なし) | `docs/code-history/MitateDB-api/cell.md` の `### correction:` は基点も HEAD も 3 件 (CH-0548・CH-0566 の既存の記録)。WP-7a は記録を足していない | — | 今のコードとの食い違いを直す訂正は WP-7a の範囲に無い |
+| — | 7b | (該当なし) | `docs/code-history/MitateDB-api/cell.md` の `### correction:` は基点も HEAD も 4 件 (既存の記録。WP-7b は記録を足していない) | — | 今のコードとの食い違いを直す訂正は WP-7b の範囲に無い |
 
 **除いた語の一覧** (完了条件 30。最後の監査スクリプトの出力の `REMOVED` 行と同じ順で 1 行ずつ一致させる)
 
@@ -4834,6 +5195,80 @@ HEAD で操作 (3) により削除した文は 0 文。途中のパスで 1 文�
 | 56 | 7a | L1809-1811 | CH-0636 | id | `WP-3b` | 1 | WP の位置指定 `WP-3b` はラベル又は括弧の中だけにあった。CH-0636 の残る文は `this WP`・`pre-WP`・`WP-` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
 | 57 | 7a | L1845-1886 | CH-0637 | id | `WP-3` | 1 | WP の位置指定 `WP-3` はラベル又は括弧の中だけにあった。CH-0637 の残る文は `this WP`・`pre-WP`・`WP-` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
 | 58 | 7a | L1845-1886 | CH-0637 | id | `m-2` | 1 | 独立レビューの指摘番号 `m-2` (出所なし)。ラベルごと除去し、残る文は名指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 59 | 7b | L2107-2113 | CH-0731 | id | `D-7` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-7`。出所を持たず、CH-0731 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 60 | 7b | L2107-2113 | CH-0731 | id | `Q-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `Q-1`。出所を持たず、CH-0731 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 61 | 7b | L2107-2113 | CH-0731 | id | `WP-3e` | 1 | WP の位置指定 `WP-3e` はラベル又は括弧の中だけにあった。CH-0731 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 62 | 7b | L2120-2131 | CH-0732 | id | `K-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `K-1`。出所を持たず、CH-0732 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 63 | 7b | L2120-2131 | CH-0732 | id | `WP-3cd` | 1 | WP の位置指定 `WP-3cd` はラベル又は括弧の中だけにあった。CH-0732 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 64 | 7b | L2272-2279 | CH-0734 | id | `D-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-3`。出所を持たず、CH-0734 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 65 | 7b | L2272-2279 | CH-0734 | id | `WP-3e` | 1 | WP の位置指定 `WP-3e` はラベル又は括弧の中だけにあった。CH-0734 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 66 | 7b | L2287-2296 | CH-0735 | id | `L-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `L-1`。出所を持たず、CH-0735 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 67 | 7b | L2287-2296 | CH-0735 | id | `WP-3e` | 1 | WP の位置指定 `WP-3e` はラベル又は括弧の中だけにあった。CH-0735 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 68 | 7b | L2329-2358 | CH-0736 | id | `R-5` | 1 | 括弧 `(WP-5 R-5)` の中の ID。同じ docstring の第 1 段落のラベル `design v1.2 R-5` (版数付き文書名と同じ括弧) は基準のまま残るので、`R-5` の出所は落ちない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 69 | 7b | L2329-2358 | CH-0736 | id | `WP-5` | 1 | WP の位置指定 `WP-5` はラベル又は括弧の中だけにあった。CH-0736 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 70 | 7b | L2386-2392 | CH-0737 | id | `B-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `B-3`。出所を持たず、CH-0737 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 71 | 7b | L2386-2392 | CH-0737 | id | `WP-0` | 1 | WP の位置指定 `WP-0` はラベル又は括弧の中だけにあった。CH-0737 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 72 | 7b | L2386-2392 | CH-0737 | id | `WP-5` | 1 | WP の位置指定 `WP-5` はラベル又は括弧の中だけにあった。CH-0737 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 73 | 7b | L2438-2440 | CH-0738 | id | `D-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-3`。出所を持たず、CH-0738 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 74 | 7b | L2443-2446 | CH-0739 | id | `D-2` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-2`。出所を持たず、CH-0739 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 75 | 7b | L2577-2581 | CH-0741 | id | `WP-1` | 1 | WP の位置指定 `WP-1` はラベル又は括弧の中だけにあった。CH-0741 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 76 | 7b | L2601-2626 | CH-0742 | id | `B-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `B-1`。出所を持たず、CH-0742 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 77 | 7b | L2601-2626 | CH-0742 | id | `R-2` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `R-2`。出所を持たず、CH-0742 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 78 | 7b | L2601-2626 | CH-0742 | id | `WP-2` | 2 | WP の位置指定 `WP-2` はラベル又は括弧の中だけにあった。CH-0742 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 79 | 7b | L2637-2682 | CH-0743 | id | `M-7` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `M-7`。出所を持たず、CH-0743 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 80 | 7b | L2683-2689 | CH-0744 | id | `D-7` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-7`。出所を持たず、CH-0744 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 81 | 7b | L2683-2689 | CH-0744 | id | `Q-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `Q-1`。出所を持たず、CH-0744 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 82 | 7b | L2683-2689 | CH-0744 | id | `WP-3e` | 1 | WP の位置指定 `WP-3e` はラベル又は括弧の中だけにあった。CH-0744 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 83 | 7b | L2692-2708 | CH-0745 | id | `D-5` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-5`。出所を持たず、CH-0745 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 84 | 7b | L2692-2708 | CH-0745 | id | `I-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `I-1`。出所を持たず、CH-0745 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 85 | 7b | L2692-2708 | CH-0745 | id | `I-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `I-3`。出所を持たず、CH-0745 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 86 | 7b | L2692-2708 | CH-0745 | id | `WP-3c` | 1 | WP の位置指定 `WP-3c` はラベル又は括弧の中だけにあった。CH-0745 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 87 | 7b | L2717-2730 | CH-0746 | id | `B-2` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `B-2`。出所を持たず、CH-0746 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 88 | 7b | L2717-2730 | CH-0746 | id | `D-6` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-6`。出所を持たず、CH-0746 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 89 | 7b | L2717-2730 | CH-0746 | id | `K-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `K-1`。出所を持たず、CH-0746 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 90 | 7b | L2717-2730 | CH-0746 | id | `K-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `K-3`。出所を持たず、CH-0746 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 91 | 7b | L2717-2730 | CH-0746 | id | `WP-3cd` | 1 | WP の位置指定 `WP-3cd` はラベル又は括弧の中だけにあった。CH-0746 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 92 | 7b | L2775-2778 | CH-0747 | id | `I-7` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `I-7`。出所を持たず、CH-0747 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 93 | 7b | L2782-2791 | CH-0748 | id | `I-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `I-3`。出所を持たず、CH-0748 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 94 | 7b | L2782-2791 | CH-0748 | id | `I-8` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `I-8`。出所を持たず、CH-0748 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 95 | 7b | L2806-2820 | CH-0749 | id | `D-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-3`。出所を持たず、CH-0749 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 96 | 7b | L2806-2820 | CH-0749 | id | `D-4` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-4`。出所を持たず、CH-0749 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 97 | 7b | L2854-2862 | CH-0750 | id | `I-13` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `I-13`。出所を持たず、CH-0750 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 98 | 7b | L2881-2889 | CH-0751 | id | `M-6` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `M-6`。出所を持たず、CH-0751 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 99 | 7b | L2949-2961 | CH-0753 | id | `D-5` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-5`。出所を持たず、CH-0753 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 100 | 7b | L2949-2961 | CH-0753 | id | `I-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `I-1`。出所を持たず、CH-0753 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 101 | 7b | L2949-2961 | CH-0753 | id | `WP-3c` | 1 | WP の位置指定 `WP-3c` はラベル又は括弧の中だけにあった。CH-0753 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 102 | 7b | L3038-3050 | CH-0754 | id | `K-5` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `K-5`。出所を持たず、CH-0754 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 103 | 7b | L3038-3050 | CH-0754 | id | `N-8` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `N-8`。出所を持たず、CH-0754 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 104 | 7b | L3038-3050 | CH-0754 | id | `WP-3cd` | 1 | WP の位置指定 `WP-3cd` はラベル又は括弧の中だけにあった。CH-0754 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 105 | 7b | L3069-3091 | CH-0756 | id | `D-10` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-10`。出所を持たず、CH-0756 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 106 | 7b | L3306-3326 | CH-0759 | id | `D-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-3`。出所を持たず、CH-0759 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 107 | 7b | L3306-3326 | CH-0759 | id | `WP-3` | 1 | WP の位置指定 `WP-3` はラベル又は括弧の中だけにあった。CH-0759 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 108 | 7b | L3394-3408 | CH-0761 | id | `D-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-3`。出所を持たず、CH-0761 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 109 | 7b | L3470-3471 | CH-0762 | id | `D-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-3`。出所を持たず、CH-0762 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 110 | 7b | L3470-3471 | CH-0762 | id | `WP-3` | 1 | WP の位置指定 `WP-3` はラベル又は括弧の中だけにあった。CH-0762 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 111 | 7b | L3477-3484 | CH-0763 | id | `L-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `L-1`。出所を持たず、CH-0763 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 112 | 7b | L3477-3484 | CH-0763 | id | `WP-3e` | 1 | WP の位置指定 `WP-3e` はラベル又は括弧の中だけにあった。CH-0763 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 113 | 7b | L3528-3534 | CH-0764 | id | `M-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `M-3`。出所を持たず、CH-0764 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 114 | 7b | L3528-3534 | CH-0764 | id | `WP-3e` | 1 | WP の位置指定 `WP-3e` はラベル又は括弧の中だけにあった。CH-0764 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 115 | 7b | L3552-3553 | CH-0765 | id | `B-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `B-1`。出所を持たず、CH-0765 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 116 | 7b | L3558-3561 | CH-0766 | id | `O-2` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `O-2`。出所を持たず、CH-0766 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 117 | 7b | L3705-3715 | CH-0770 | id | `B-4` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `B-4`。出所を持たず、CH-0770 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 118 | 7b | L3705-3715 | CH-0770 | id | `D-6` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-6`。出所を持たず、CH-0770 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 119 | 7b | L3705-3715 | CH-0770 | id | `K-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `K-1`。出所を持たず、CH-0770 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 120 | 7b | L3774-3799 | CH-0771 | id | `D-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-1`。出所を持たず、CH-0771 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 121 | 7b | L3774-3799 | CH-0771 | id | `P-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `P-3`。出所を持たず、CH-0771 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 122 | 7b | L3805-3826 | CH-0772 | id | `R-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `R-3`。出所を持たず、CH-0772 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 123 | 7b | L3875-3891 | CH-0773 | id | `D-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `D-1`。出所を持たず、CH-0773 の残る文は名指しも指示語でも指さない (残る `D-n` は自分の括弧・ラベルで名指しされている)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 124 | 7b | L3875-3891 | CH-0773 | id | `P-3` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `P-3`。出所を持たず、CH-0773 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 125 | 7b | L3901-3910 | CH-0774 | id | `K-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `K-1`。出所を持たず、CH-0774 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 126 | 7b | L3901-3910 | CH-0774 | id | `WP-3a` | 1 | WP の位置指定 `WP-3a` はラベル又は括弧の中だけにあった。CH-0774 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 127 | 7b | L3901-3910 | CH-0774 | id | `WP-3b` | 1 | WP の位置指定 `WP-3b` はラベル又は括弧の中だけにあった。CH-0774 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 128 | 7b | L3901-3910 | CH-0774 | id | `WP-3c` | 1 | WP の位置指定 `WP-3c` はラベル又は括弧の中だけにあった。CH-0774 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 129 | 7b | L3901-3910 | CH-0774 | id | `WP-3cd` | 1 | WP の位置指定 `WP-3cd` はラベル又は括弧の中だけにあった。CH-0774 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 130 | 7b | L3901-3910 | CH-0774 | id | `WP-3d` | 1 | WP の位置指定 `WP-3d` はラベル又は括弧の中だけにあった。CH-0774 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 131 | 7b | L3956-3960 | CH-0775 | id | `K-1` | 1 | 設計名 (ファイル名・版数) の付かない裸の局所 ID `K-1`。出所を持たず、CH-0775 の残る文は名指しも指示語でも指さない。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
+| 132 | 7b | L3956-3960 | CH-0775 | id | `WP-3cd` | 1 | WP の位置指定 `WP-3cd` はラベル又は括弧の中だけにあった。CH-0775 の残る文は `this WP`・`pre-WP`・`same commit` でこの WP を指さない (点検済み)。意味と出所が残る根拠: 残る文は現在の理由を述べ、保護参照 (SI-・F-ID・実在パス・版数付き文書名) は変わらない (`--base` exit 0) |
 
 **判定表** (A. 全塊。対象の塊 1 つにつき 1 行。spec の `blocks` の各項目が 1 行に対応し、spec に無い行は「基準のまま」。CH-ID の無い塊も「基準のまま」で載せる)
 
@@ -4941,6 +5376,108 @@ HEAD で操作 (3) により削除した文は 0 文。途中のパスで 1 文�
 | 100 | 7a | L1892-1908 | `ApplicationCell._schema_revision_uncounted` | docstring | 目印 1 文、保護参照、位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 8 WP-1a rework 1 (裁定 3)` は `rework 1` が内容語で条件 3 を満たさない。`originally called only by` は無ゲートの内部 accessor が在る現在の理由と同居 | 文の削除 0 | 除去なし (基準のまま) | `that`、`this`、`those` |
 | 101 | 7a | L1913-1930 | `ApplicationCell.catalog` | docstring | 安全、保護参照、位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 差し戻し 1 の裁定 (レビュー A-1): ラベル `Phase 6 WP-3 (design D-3): ` を除くと、同じ塊に残る `design §1.5 finding 4`・`same commit` がどの設計を指すか分からなくなる (参照先は `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`)。検査器は許すが基準のまま戻した (CH-0638 は欠番) | 文の削除 0 | 除去なし (基準のまま) | `this` |
 | 102 | 7a | L1939-1945 | `ApplicationCell.catalog` | comment | 位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | ラベルは出所付きの contract 参照 (`contract EntityDescriptor.field_constraints.description`) を含み、除くと契約上の根拠を落とす。迷ったので基準のまま (Y7-3 (b)) | 文の削除 0 | 除去なし (基準のまま) | `still`、`this` |
+| 103 | 7b | L2010-2013 | `ApplicationCell.insert` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 104 | 7b | L2015-2044 | `ApplicationCell.insert` | comment | 目印 2 文、保護参照、位置 | CH-0730 | ` (2026-09-07)` → (空) | `# history: CH-0730` (HEAD L2015-2045) | 移す (日付の機械除去)。残りは残す | 日付 (又は `監督裁定 <日付>` の語句) だけを除去 (Y7-3 (a))。条項 ID・`裁定 n` は残す。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `such`、`that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`C-21`、`D-2`、`N-4`、`Phase 9`、`WP-3a`、`WP-3e`、`§2`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後 `Code review §2 C / 監督裁定 C: the ONE fetch ...` は日付の括弧だけが消え、ラベルは基準のまま。読める | `such`、`that`、`this` |
+| 105 | 7b | L2055-2062 | `ApplicationCell` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 106 | 7b | L2067-2071 | `ApplicationCell.read` | docstring | 参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 107 | 7b | L2079-2106 | `ApplicationCell.read_page` | docstring | 目印 1 文、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 108 | 7b | L2107-2113 | `ApplicationCell.read_page` | comment | 保護参照、位置 | CH-0731 | `Phase 9 WP-3e (design D-7 (3), Q-1): resolved` → `resolved` | `# history: CH-0731` (HEAD L2108-2115) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-7、Q-1、WP-3e)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `otherwise`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後 `resolved here, once, so the audit event below ...` は基準でもラベルの後ろで同じ省略形 (CH-0611 の前例と同じ形)。読める | `otherwise`、`this` |
+| 109 | 7b | L2120-2131 | `ApplicationCell.read_page` | comment | 目印 1 文、位置 | CH-0732 | `Phase 9 WP-3cd closure (K-1): `narrow_limits_by_budget` is` → ``narrow_limits_by_budget` is` | `# history: CH-0732` (HEAD L2122-2134) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (K-1、WP-3cd)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `still`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`before this`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の先頭は `` `narrow_ `` で終わる短い行 (基準の折り返しの位置のまま。バッククォートの span は次の行に続く)。読める | `still`、`this` |
+| 110 | 7b | L2150-2157 | `ApplicationCell.read_page` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `that`、`this` |
+| 111 | 7b | L2164-2168 | `ApplicationCell.read_page` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 112 | 7b | L2178-2180 | `ApplicationCell.read_page` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d))。`design D-n` は現行の設計 (同じ module の隣の塊が `docs/design/PHASE11_KEYSET_PAGING_V1.md` を文書名付きで引く) の条項への参照で、ラベルでも括弧でもなく、検査器の候補にも出ない | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 113 | 7b | L2183-2187 | `ApplicationCell.read_page` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 114 | 7b | L2192-2206 | `ApplicationCell._decode_and_check_page_cursor` | docstring | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d))。`design D-n` は現行の設計 (同じ module の隣の塊が `docs/design/PHASE11_KEYSET_PAGING_V1.md` を文書名付きで引く) の条項への参照で、ラベルでも括弧でもなく、検査器の候補にも出ない | 文の削除 0 | 除去なし (基準のまま) | `otherwise`、`then`、`this` |
+| 115 | 7b | L2217-2230 | `ApplicationCell._decode_and_check_page_cursor` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d))。`design D-n` は現行の設計 (同じ module の隣の塊が `docs/design/PHASE11_KEYSET_PAGING_V1.md` を文書名付きで引く) の条項への参照で、ラベルでも括弧でもなく、検査器の候補にも出ない | 文の削除 0 | 除去なし (基準のまま) | `instead`、`this` |
+| 116 | 7b | L2247-2269 | `ApplicationCell._validate_update` | docstring | 目印 1 文、位置 | CH-0733 | ` 2026-09-07)` → `)` | `History: CH-0733` (HEAD L2250-2274) | 移す (日付の機械除去)。残りは残す | 日付 (又は `監督裁定 <日付>` の語句) だけを除去 (Y7-3 (a))。条項 ID・`裁定 n` は残す。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`N-4`、`WP-2`、`m-1`、`§2`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `m-1 (independent review, P3-D2 follow-up): the single choke …` で文法と意味が保たれる | `this` |
+| 117 | 7b | L2272-2279 | `ApplicationCell._validate_update` | comment | 目印 1 文、参照先 | CH-0734 | `Phase 9 WP-3e (design D-3 (2)): `where`'s` → ``where`'s` | `# history: CH-0734` (HEAD L2277-2285) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-3、WP-3e)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`L-3`、`M-4`、`WP-3e`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# `where`'s own request- # relative path is `path_prefix`'s …` で文法と意味が保たれる | `this` |
+| 118 | 7b | L2287-2296 | `ApplicationCell._validate_update` | comment | 位置 | CH-0735 | `WP-3e rework T1 (追補 L-1): unreachable` → `unreachable` | `# history: CH-0735` (HEAD L2293-2303) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (L-1、WP-3e)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# unreachable in practice -- # `_prepare_values` above alrea…` で文法と意味が保たれる | `this` |
+| 119 | 7b | L2310-2311 | `ApplicationCell.update` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 120 | 7b | L2313-2317 | `ApplicationCell.update` | comment | 目印 1 文、保護参照、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。除去を試したが検査器が受け付けない (`--base` で赤を実測)。基準のまま) | 日付 `2026-09-08` は入れ子の括弧 `(裁定 C-21 (B)/監督裁定 N-4, 2026-09-08)` の中にあり、日付だけの除去を検査器が受け付けない (`--base` で赤を実測)。ラベルは内容語を含み (6) の対象外。CH-ID を付ける除去が無い | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 121 | 7b | L2329-2358 | `ApplicationCell._validate_delete_confirmation` | docstring | 保護参照、位置、参照先 | CH-0736 | ` (WP-5 R-5)` → (空) | `History: CH-0736` (HEAD L2336-2367) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (R-5、WP-5)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `otherwise`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`B-1`、`R-5`、`WP-0`、`WP-1`、`WP-2`、`WP-3`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `P3-D2 (design v1.2 R-5, WP-1.5): the single choke BOTH `Appl…` で文法と意味が保たれる | `otherwise`、`this` |
+| 122 | 7b | L2359-2365 | `ApplicationCell._validate_delete_confirmation` | comment | 目印 1 文、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。除去を試したが検査器が受け付けない (`--base` で赤を実測)。基準のまま) | ラベル `WP-3e rework T2 (追補 L-3/M-4)` は検査器の候補に出ない (括弧の中に `/` の枝)。`closing the "known limitation" this comment used to disclose` は batch の index が常に反映される現在の理由と同居 | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 123 | 7b | L2368-2370 | `ApplicationCell._validate_delete_confirmation` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。除去を試したが検査器が受け付けない (`--base` で赤を実測)。基準のまま) | 括弧 `(design D-3 (2)/(4))` の除去を検査器が受け付けない (`--base` で赤を実測)。ラベルは `/` の枝を含み (6) に当たらない | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 124 | 7b | L2386-2392 | `ApplicationCell._validate_delete_confirmation` | comment | 安全、位置 | CH-0737 | `B-3 (WP-0/WP-5): identifier` → `identifier` | `# history: CH-0737` (HEAD L2395-2402) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (B-3、WP-0、WP-5)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `also` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# identifier + filter-shape validation (which, # via `_bind_…` で文法と意味が保たれる | `also` |
+| 125 | 7b | L2395-2397 | `ApplicationCell._validate_delete_confirmation` | comment | 位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `WP-3e rework T2 (追補 L-3/M-4)` は検査器の候補に出ない。`same wire-contract-name correction ... now carries` は `where` を使う現在の理由と同居 | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 126 | 7b | L2419-2426 | `ApplicationCell.delete` | docstring | 位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン `WP-1` は括弧 `(P3-D2, WP-1.5)` の中にあり検査器の候補に出ない (`P3-D2` は ID として扱われない)。委譲先 (`_validate_delete_confirmation`) の説明と同居 | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 127 | 7b | L2431-2432 | `ApplicationCell.delete` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 128 | 7b | L2438-2440 | `ApplicationCell.delete` | comment | 全塊走査 (拾った理由なし) | CH-0738 | `Phase 4 (design D-3): `DESTRUCTIVE_CONFIRMATION_REQUIRED` is` → ``DESTRUCTIVE_CONFIRMATION_REQUIRED` is` | `# history: CH-0738` (HEAD L2448-2451) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-3)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語なし。除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# `DESTRUCTIVE_CONFIRMATION_REQUIRED` is # a durable-range d…` で文法と意味が保たれる | なし |
+| 129 | 7b | L2443-2446 | `ApplicationCell.delete` | comment | 安全 | CH-0739 | `Phase 4 (design D-2 item 1): delete is fail-closed` → `delete is fail-closed` | `# history: CH-0739` (HEAD L2454-2458) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-2)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# delete is fail-closed class only # once it has passed the …` で文法と意味が保たれる | `this` |
+| 130 | 7b | L2459-2495 | `ApplicationCell._plan_operation` | docstring | 目印 3 文、保護参照、位置 | CH-0740 | ` 2026-09-07)` → `)` | `History: CH-0740` (HEAD L2471-2510) | 移す (日付の機械除去)。残りは残す | 日付 (又は `監督裁定 <日付>` の語句) だけを除去 (Y7-3 (a))。条項 ID・`裁定 n` は残す。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `also`、`that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`D-3`、`R-1`、`WP-2`、`before this`、`pre-WP`、`§2`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_ …` で文法と意味が保たれる | `also`、`that`、`this` |
+| 131 | 7b | L2497-2502 | `ApplicationCell._plan_operation` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3e (design D-3 (2)/(4))` は `/` の枝で (6) に当たらない。残る文の `D-3 (2)` が名指す (除くと出所が落ちる) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 132 | 7b | L2513-2522 | `ApplicationCell._plan_operation` | comment | 位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 候補 (`Phase 9 WP-3e (design D-3 (2)): ` の除去) は検査器が許すが、残る文の `V-6's "複数なら field を省く" rule` が同じ設計の規則 ID を名指し、除くと V-6 の出所 (設計の名指し) が落ちるので基準のまま (Y7-3 (b)。迷えば残す) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 133 | 7b | L2531-2539 | `ApplicationCell._plan_operation` | comment | 目印 2 文、保護参照、位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベルは実在ファイル参照 `cell.py:1034-1046` (保護参照) を含む。`Code review §2 C (監督裁定 C)` の括弧は内容語を含み (4) で括弧ごとは消えない | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 134 | 7b | L2577-2581 | `ApplicationCell._plan_operation` | comment | 位置 | CH-0741 | ` (WP-1.5)` → (空) | `# history: CH-0741` (HEAD L2592-2597) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (WP-1)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# Only "upsert" ever reaches here -- P3-D2 converged # `upda…` で文法と意味が保たれる | `this` |
+| 135 | 7b | L2586-2593 | `ApplicationCell._plan_operation` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3e (design D-3 (2)/(4))` は `/` の枝で (6) に当たらない。残る文の `(design distinguishes ...)` が設計を指す | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 136 | 7b | L2601-2626 | `ApplicationCell._distinct_batch_entities` | docstring | 位置 | CH-0742 | `P35 WP-2 (R-2): the set` → `the set`; `Independent review B-1 (WP-2 follow-up): a `collection`` → `a `collection`` | `History: CH-0742` (HEAD L2617-2644) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (B-1、R-2、WP-2)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後 docstring の先頭は `the set of DISTINCT ...` (小文字始まり、基準は `P35 WP-2 (R-2): the set ...`)。第 2 段落は `a `collection` value that is present ...` で始まる。読める | `that`、`this` |
+| 137 | 7b | L2637-2682 | `ApplicationCell.transact` | docstring | 目印 3 文、安全、保護参照、位置、参照先 | CH-0743 | ` (M-7)` → (空) | `History: CH-0743` (HEAD L2655-2702) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (M-7)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `that`、`then`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`R-1`、`R-5`、`WP-1`、`WP-2`、`this WP`、`§2`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` …` で文法と意味が保たれる | `that`、`then`、`this` |
+| 138 | 7b | L2683-2689 | `ApplicationCell.transact` | comment | 安全、位置 | CH-0744 | `Phase 9 WP-3e (design D-7 (3), Q-1): resolved ONCE` → `resolved ONCE` | `# history: CH-0744` (HEAD L2703-2710) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-7、Q-1、WP-3e)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# resolved ONCE, here, before # anything else -- every audit…` で文法と意味が保たれる | `this` |
+| 139 | 7b | L2692-2708 | `ApplicationCell.transact` | comment | 保護参照、位置、参照先 | CH-0745 | `Phase 9 WP-3c (design D-5, I-1/I-3): `idempotency_key` has` → ``idempotency_key` has` | `# history: CH-0745` (HEAD L2713-2730) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-5、I-1、I-3、WP-3c)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# `idempotency_key` has two # entry points into this method …` で文法と意味が保たれる | `this` |
+| 140 | 7b | L2717-2730 | `ApplicationCell.transact` | comment | 目印 1 文、位置 | CH-0746 | `Phase 9 WP-3cd closure (K-1, design D-6, B-2): `narrow_` → ``narrow_`; `(K-3) read instead` → `read instead` | `# history: CH-0746` (HEAD L2739-2753) | 移す (括弧ごと・文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (B-2、D-6、K-1、K-3、WP-3cd)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `instead`、`that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`before this`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の先頭は `` `narrow_ `` で終わる短い行 (基準の折り返しの位置のまま)。`(K-3)` を除いた後 `` `in`-filter check read instead of `self.config` directly `` と読める | `instead`、`that`、`this` |
+| 141 | 7b | L2742-2754 | `ApplicationCell.transact` | comment | 目印 1 文、位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベルは実在ファイル参照 `rulings-r5-r6.md` (保護参照) を含み除けない。`I-13` を同じ塊の次の文が名指す。idempotency lookup の置き場所 (現在の理由) と同居 | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 142 | 7b | L2775-2778 | `ApplicationCell.transact` | comment | 全塊走査 (拾った理由なし) | CH-0747 | `I-7: a dry run` → `a dry run` | `# history: CH-0747` (HEAD L2798-2802) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (I-7)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `such`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# a dry run never records or consults an idempotency # recor…` で文法と意味が保たれる | `such`、`this` |
+| 143 | 7b | L2782-2791 | `ApplicationCell.transact` | comment | 安全、保護参照 | CH-0748 | `I-3/I-8: answered` → `answered` | `# history: CH-0748` (HEAD L2806-2816) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (I-3、I-8)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `otherwise`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`J-4`、`N-5`、`WP-2cd`、`WP-3cd`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# answered from the record, before target # existence/confir…` で文法と意味が保たれる | `otherwise`、`this` |
+| 144 | 7b | L2796-2803 | `ApplicationCell.transact` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this`、`those` |
+| 145 | 7b | L2806-2820 | `ApplicationCell.transact` | comment | 目印 1 文、位置 | CH-0749 | `Phase 4 (design D-3): `_plan_operation`'s own delete` → ``_plan_operation`'s own delete`; ` (design D-4 (7))` → (空) | `# history: CH-0749` (HEAD L2831-2846) | 移す (括弧ごと・文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-3、D-4)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`Phase 9`、`WP-3b`、`before this`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# Pass 1: validate every operation, across every entity, bef…` で文法と意味が保たれる | `this` |
+| 146 | 7b | L2830-2836 | `ApplicationCell.transact` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 147 | 7b | L2838-2850 | `ApplicationCell.transact` | comment | 参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3b (design D-4 (2)/(7), destructive_confirmation. evaluation_order)` は内容語を含み (6) に当たらない。`D-4 (2)'s own ordering example` を同じ文が名指す。plan 事前条件の順序 (現在の理由) と同居 | 文の削除 0 | 除去なし (基準のまま) | `that`、`this` |
+| 148 | 7b | L2854-2862 | `ApplicationCell.transact` | comment | 目印 1 文、安全、位置、参照先 | CH-0750 | `carries (I-13) is part` → `carries is part` | `# history: CH-0750` (HEAD L2880-2889) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (I-13)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`H-1`、`H-2`、`I-13`、`Phase 9`、`WP-3b`、`WP-3c`、`pre-WP`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# `digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c # …` で文法と意味が保たれる | `this` |
+| 149 | 7b | L2866-2867 | `ApplicationCell.transact` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A))` は断片 `§5 U-2 = (A)` を含み (6) に当たらない | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 150 | 7b | L2876-2879 | `ApplicationCell.transact` | comment | 目印 1 文 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `instead`、`this` |
+| 151 | 7b | L2881-2889 | `ApplicationCell.transact` | comment | 安全、保護参照、位置 | CH-0751 | `, review M-6)` → `)` | `# history: CH-0751` (HEAD L2908-2917) | 移す (括弧内の語の機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (M-6)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `then`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`D-2`、`Phase 4`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# Phase 4 (design D-2): `hook_fired` distinguishes # "the du…` で文法と意味が保たれる | `then`、`this` |
+| 152 | 7b | L2904-2918 | `ApplicationCell.transact` | comment | 目印 1 文、安全、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 差し戻し 1 の裁定 (レビュー A-3): 候補 (`Phase 9 WP-3b (design D-4 (4)): ` のラベル除去) は検査器が許したが、除くと `the commit-vs-rollback decision is made at this ONE point ...` が前に残る `Phase 4 (design D-2/D-10):` の段落の続きに読め、別の Phase の変更に見える。迷う場合は基準のまま (Y7-3 (b))。戻した (CH-0752 は欠番)。commit・rollback の安全上の理由と同居 | 文の削除 0 | 除去なし (基準のまま) | `that`、`this` |
+| 153 | 7b | L2922-2946 | `ApplicationCell.transact` | comment | 保護参照、位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-4)` は `/` の枝で (6) に当たらない。`Q-4` を後ろの文が引用する。`len(results)` が他で依存される現在の理由と同居 | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 154 | 7b | L2949-2961 | `ApplicationCell.transact` | comment | 安全、位置 | CH-0753 | `Phase 9 WP-3c (design D-5, I-1): the idempotency` → `the idempotency` | `# history: CH-0753` (HEAD L2977-2990) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-5、I-1、WP-3c)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`before this`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# the idempotency # record is written as the LAST thing befo…` で文法と意味が保たれる | `this` |
+| 155 | 7b | L2965-2970 | `ApplicationCell.transact` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `still`、`that`、`this` |
+| 156 | 7b | L2976-3028 | `ApplicationCell.transact` | comment | 目印 2 文、安全、位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 候補 `Independent review B-2 (WP-2 follow-up -- ` はラベルが ` -- ` で割れ、除くと `the atomicity hole, largest safety fix of that review):` の閉じ括弧だけが残り括弧が壊れるので当てない。`B-2(ii)` を同じ塊が名指す。rollback・commit の安全上の理由 (全例外で rollback) と同居 (Y7-3 (c))。`(WP-1.5)` の除去も、`P3-D2 / m-2 (WP-2 review correction)` が断片になるので見送った | 文の削除 0 | 除去なし (基準のまま) | `exactly as`、`instead`、`that`、`this` |
+| 157 | 7b | L3032-3034 | `ApplicationCell.transact` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `still`、`that` |
+| 158 | 7b | L3038-3050 | `ApplicationCell.transact` | comment | 安全、位置 | CH-0754 | `Phase 9 WP-3cd closure (K-5, N-8): undoes` → `undoes` | `# history: CH-0754` (HEAD L3067-3080) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (K-5、N-8、WP-3cd)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `that`、`then`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# undoes a `record_ # idempotency` write that turned out NOT…` で文法と意味が保たれる | `that`、`then`、`this` |
+| 159 | 7b | L3053-3062 | `ApplicationCell.transact` | comment | 安全、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 差し戻し 1 の裁定 (レビュー A-4): 候補 (`Phase 4 (design D-2, error-row rule): ` のラベル除去) は検査器が許したが、内容語 `error-row rule` もラベルと一緒に消え、CH-0751 が `(D-2's error-row case)` と名指す規則の実装箇所から規則の名前が消える。戻した (CH-0755 は欠番)。fail-closed・commit の安全上の理由と同居 | 文の削除 0 | 除去なし (基準のまま) | `still`、`that`、`this` |
+| 160 | 7b | L3069-3091 | `ApplicationCell.transact` | comment | 目印 1 文、安全、位置 | CH-0756 | ` (design D-10)` → (空) | `# history: CH-0756` (HEAD L3099-3122) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-10)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `exactly as`、`still`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`D-4`、`Phase 4`、`Phase 9`、`U-2`、`WP-3b`、`before this`、`§5`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# Phase 4: the pre-existing 6-field-sink record # is uncondi…` で文法と意味が保たれる | `exactly as`、`still`、`this` |
+| 161 | 7b | L3110-3114 | `ApplicationCell._select_fields` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 差し戻し 2 の裁定 (再確認 1): ラベル `WP-3e rework T1 (追補 L-1): ` を除くと、直前に残る `Q1-D11 (design v1.5 §7): read-projection width is a shape bound ...` (版数付き文書名のラベル) の段落の続きに読め、`request_schema`/`field` の文が Q1-D11 の内容に見える (差し戻し 1 の A-3 と同じ型)。検査器は許すが戻した (CH-0757 は欠番) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 162 | 7b | L3121-3129 | `ApplicationCell._select_fields` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 括弧に実在しない作業用ディレクトリ配下のファイル名 (`rulings-r3-r7-flip.md`) を含み、ラベルは検査器の候補に出ない。`pre-audit choice` は r2db-api と同形にする現在の理由と同居。[観察] 基準から在る作業用ディレクトリの参照 (§1.9 の 62)。本 WP では触らない (除去は試していない。検査器は許す見込み (レビュー A のメモリ上の照合)。両 peer の src・tests と conformance-tests にある基準からの問題で、後続の変更セットがファイルごとに扱う。監督裁定) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 163 | 7b | L3132-3140 | `ApplicationCell._select_fields` | comment | 位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 候補は `(`select/<i>`)` だけで経緯トークンの除去ではないので当てない。ラベル `Phase 9 WP-3e (design D-3 (2)/(4))` は `/` の枝で (6) に当たらない | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 164 | 7b | L3149-3161 | `ApplicationCell._decode_rows` | docstring | 保護参照、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。除去を試したが検査器が受け付けない (`--base` で赤を実測)。基準のまま) | ラベル `Phase 6 WP-3 (design D-3, F2/F3)` は括弧に `F2/F3` を含み、括弧ごとの除去を検査器が受け付けない (`--base` で赤を実測) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 165 | 7b | L3174-3187 | `ApplicationCell` | comment | 目印 1 文、保護参照、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベルは実在パスと版数付き文書名 (`docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md v1.2`) を含む (保護参照)。`the pre-WP-3 shape`・`in the same commit` が位置を指す | 文の削除 0 | 除去なし (基準のまま) | `such`、`this` |
+| 166 | 7b | L3191-3200 | `ApplicationCell._bind_order_by` | comment | 位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `WP-3e rework T1 (追補 L-1/M-2)` は検査器の候補に出ない (括弧の中に `/` の枝) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 167 | 7b | L3223-3226 | `ApplicationCell._bind_order_by` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `WP-3e rework T2 (追補 L-3), corrected 追補 4 O-3` は内容語を含み (6) に当たらない | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 168 | 7b | L3243-3274 | `ApplicationCell._check_missing_required_fields` | docstring | 目印 3 文、位置、参照先 | CH-0758 | ` 監督裁定 D (2026-09-07)` → ` 監督裁定 D`; `(2026-09-07, P-8/G-4` → `(P-8/G-4` | `History: CH-0758` (HEAD L3274-3308) | 移す (日付の機械除去)。残りは残す | 日付 (又は `監督裁定 <日付>` の語句) だけを除去 (Y7-3 (a))。条項 ID・`裁定 n` は残す。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0)。差し戻し 1 の裁定 (レビュー A-1): 最初の実装は先頭のラベル `Phase 9 WP-3a (design D-2 (3)): ` も除いていたが、同じ docstring に残る `(design D-3 (2))`・`Code review §2 C/D`・`監督裁定 C/D` がどの設計・WP を指すか分からなくなるので戻した (日付の 2 編集だけ残る) | 削除した文 0。点検語 `instead`、`that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`D-2`、`D-3`、`G-4`、`P-8`、`Phase 9`、`WP-3a`、`before this`、`§2`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後、日付の括弧は 2 か所消えて `Code review §2 D / 監督裁定 D: `field` names ...`・`(P-8/G-4 performance finding)` と読める。docstring の先頭のラベル `Phase 9 WP-3a (design D-2 (3)): ` は基準のまま (差し戻し 1) | `instead`、`that`、`this` |
+| 169 | 7b | L3295-3302 | `ApplicationCell._prepare_values` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `WP-3e rework T2 (追補 L-3/M-4)` は検査器の候補に出ない (括弧の中に `/` の枝) | 文の削除 0 | 除去なし (基準のまま) | `that`、`this` |
+| 170 | 7b | L3306-3326 | `ApplicationCell._prepare_values` | comment | 目印 1 文、位置、参照先 | CH-0759 | `Phase 6 WP-3 (design D-3, G3): the PRIMARY` → `the PRIMARY`; ` 2026-09-07)` → `)` | `# history: CH-0759` (HEAD L3340-3361) | 移す (文頭ラベル・日付の機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-3、WP-3)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0)。日付だけの除去も含む (Y7-3 (a)) | 削除した文 0。点検語 `still`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`D-2`、`Phase 9`、`WP-3a`、`before this`、`§2`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# the PRIMARY, backend-independent # declared-type choke poi…` で文法と意味が保たれる | `still`、`this` |
+| 171 | 7b | L3332-3335 | `ApplicationCell._prepare_values` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3e (design D-3 (2)/(4))` は `/` の枝で (6) に当たらない | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 172 | 7b | L3341-3347 | `ApplicationCell._prepare_values` | comment | 位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 差し戻し 2 の裁定 (再確認 1): ラベル `WP-3e rework T1 (追補 L-1): ` を除くと、直前に残る `Q1-D11 (design v1.5 §7): write-payload width ... mirrors contract `Mutation.values.maxProperties: 100` directly.` (版数付き文書名のラベル) の段落の続きに読め、`request_schema`/`field = path_prefix` の文が Q1-D11 の内容に見える (差し戻し 1 の A-3 と同じ型)。検査器は許すが戻した (CH-0760 は欠番) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 173 | 7b | L3355-3373 | `ApplicationCell._prepare_values` | comment | 目印 1 文、安全、保護参照、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `WP-3e rework T2 (追補 L-3, corrected against a real C-03 failure this WP's own first draft produced -- ...)` は内容語を含み (6) に当たらない。`this WP's own first draft` が位置を指す。識別子検証の安全上の理由 (未検証の raw key を `field` に入れない) と同居 | 文の削除 0 | 除去なし (基準のまま) | `still`、`this` |
+| 174 | 7b | L3376-3384 | `ApplicationCell._prepare_values` | comment | 保護参照、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3e (design D-3 (2)/(4), V-6)` は `/` の枝で (6) に当たらない | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 175 | 7b | L3394-3408 | `ApplicationCell._prepare_values` | comment | 目印 2 文、位置 | CH-0761 | `Phase 9 WP-3a (design D-3 (2)): `field`` → `Phase 9 WP-3a: `field``; `監督裁定 D ⏎                 # (2026-09-07): the value` → `監督裁定 D: ⏎                 # the value` | `# history: CH-0761` (HEAD L3429-3444) | 移す (括弧ごと・日付の機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-3)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0)。日付だけの除去も含む (Y7-3 (a)) | 削除した文 0。点検語 `that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`D-2`、`D-3`、`Phase 9`、`WP-3a`、`before this`、`this WP`、`§2`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後 `Phase 9 WP-3a: `field` names "a position in the request" ...` は括弧だけ消えてラベルは残る (`before this WP` が指す)。`Code review §2 D / 監督裁定 D:` は行の終わりに置き直した (折り返しの切り直しは除去に接する 2 行だけ。Y7-4)。読める | `that`、`this` |
+| 176 | 7b | L3436-3459 | `ApplicationCell._bind_filters` | docstring | 目印 2 文、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 括弧は実在ファイル参照 `rulings-r5-r6.md` (保護参照) を含み除けない。`D-6 (2)'s own three-class table` を同じ文が名指す | 文の削除 0 | 除去なし (基準のまま) | `that`、`this` |
+| 177 | 7b | L3464-3467 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 178 | 7b | L3470-3471 | `ApplicationCell._bind_filters` | comment | 位置、参照先 | CH-0762 | `Phase 6 WP-3 (design D-3, G3): same` → `same` | `# history: CH-0762` (HEAD L3506-3508) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-3、WP-3)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語なし。除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# same choke point `_prepare_values` # above uses.…` で文法と意味が保たれる | なし |
+| 179 | 7b | L3477-3484 | `ApplicationCell._bind_filters` | comment | 保護参照、位置 | CH-0763 | `WP-3e rework T1 (追補 L-1): unreachable` → `unreachable` | `# history: CH-0763` (HEAD L3514-3522) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (L-1、WP-3e)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `still`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`before this`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# unreachable through the # HTTP surface (`http.py`'s own `_…` で文法と意味が保たれる | `still`、`this` |
+| 180 | 7b | L3489-3496 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 候補 `追補 4 O-3: ` の除去は検査器が許すが、残る文の `O-3 scopes only the identifier-syntax container` が `O-3` を名指すので除けない (Y7-3 (b)) | 文の削除 0 | 除去なし (基準のまま) | `this`、`those` |
+| 181 | 7b | L3499-3506 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 182 | 7b | L3512-3515 | `ApplicationCell._bind_filters` | comment | 参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | ラベル `Phase 9 WP-3e (design D-3 (2)/(4), V-6)` は `/` の枝で (6) に当たらない | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 183 | 7b | L3520-3523 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `instead`、`this` |
+| 184 | 7b | L3528-3534 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | CH-0764 | `WP-3e rework T2 (追補 M-3): an empty` → `an empty` | `# history: CH-0764` (HEAD L3566-3573) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (M-3、WP-3e)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# an empty (or non-list) # `in` value is a defect of the VAL…` で文法と意味が保たれる | `this` |
+| 185 | 7b | L3540-3550 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 候補 `K-3: ` の除去は検査器が許すが、除くと `bound). reads the budget-narrowed ...` が主語を失い、文頭が小文字の断片になって読めない。基準のまま (除去後の文を読んで見送った。Y7-3 (b)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 186 | 7b | L3552-3553 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | CH-0765 | `B-1: every` → `every` | `# history: CH-0765` (HEAD L3591-3593) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (B-1)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `that` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る文に `design §`・`D-n`・`this WP`・`same commit`・`finding n` の類は 0 (除去前に確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# every element compares against the SAME column, so # they …` で文法と意味が保たれる | `that` |
+| 187 | 7b | L3558-3561 | `ApplicationCell._bind_filters` | comment | 全塊走査 (拾った理由なし) | CH-0766 | `追補 4 O-2: `field`` → ``field`` | `# history: CH-0766` (HEAD L3598-3602) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (O-2)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語なし。除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る `M-4` は基準でもこの塊では出所が名指されていない (出所は `追補 L-3/M-4` で、基点 L3446 の同じ method の docstring `path_prefix` の段落にある)。除いた `追補 4 O-2` は `M-4` の出所ではない (差し戻し 2 の再確認 3) | 除去後の文を読んだ: 先頭 `# `field`/`declared_type` mirror `_check_ # predicate_value`…` で文法と意味が保たれる | なし |
+| 188 | 7b | L3583-3592 | `ApplicationCell._require_data` | comment | 目印 1 文、安全、保護参照 | CH-0767 | ` 2026-09-03,` → `,` | `# history: CH-0767` (HEAD L3624-3634) | 移す (日付の機械除去)。残りは残す | 日付 (又は `監督裁定 <日付>` の語句) だけを除去 (Y7-3 (a))。条項 ID・`裁定 n` は残す。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`M-2`、`this WP`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# Review M-2 (major, supervisor ruling, "完全案"): # `guard` is…` で文法と意味が保たれる | `that`、`this` |
+| 189 | 7b | L3595-3609 | `ApplicationCell._require_data` | comment | 目印 1 文、安全、保護参照 | CH-0768 | ` 2026-09-03)` → `)` | `# history: CH-0768` (HEAD L3637-3652) | 移す (日付の機械除去)。残りは残す | 日付 (又は `監督裁定 <日付>` の語句) だけを除去 (Y7-3 (a))。条項 ID・`裁定 n` は残す。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`D-3`、`M-3`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# Review M-3 (major, supervisor ruling): this is # SI-00's o…` で文法と意味が保たれる | `this` |
+| 190 | 7b | L3632-3635 | `ApplicationCell._require_developer` | comment | 位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 候補 (`Phase 4 (design D-3): ` 又は括弧 `(design D-3)` の除去) は検査器が許すが、残る `D-10: this sink's own behaviour ...` が同じ設計の ID を裸で名指し、設計名が落ちる (Y7-3 (b)。迷えば残す) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 191 | 7b | L3647-3647 | `ApplicationRuntime` | docstring | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 192 | 7b | L3660-3666 | `ApplicationRuntime._require_developer_authority` | docstring | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `instead`、`that`、`this` |
+| 193 | 7b | L3678-3695 | `ApplicationRuntime._post_schema_revision` | docstring | 目印 1 文、保護参照、位置、参照先 | CH-0769 | `, 監督裁定 2026-09-06)` → `)` | `History: CH-0769` (HEAD L3721-3741) | 移す (裁定の日付句の機械除去)。残りは残す | 日付 (又は `監督裁定 <日付>` の語句) だけを除去 (Y7-3 (a))。条項 ID・`裁定 n` は残す。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`Phase 8`、`WP-1a`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `Phase 8 WP-1a rework 1 (裁定 3): the UNGATED counterpart of `s…` で文法と意味が保たれる | `that`、`this` |
+| 194 | 7b | L3705-3715 | `ApplicationRuntime.read` | comment | 目印 2 文、安全、保護参照、位置、参照先 | CH-0770 | ` (design D-6, B-4)` → (空); `closure ⏎         # (K-1): `budget`` → `closure: ⏎         # `budget`` | `# history: CH-0770` (HEAD L3751-3762) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (B-4、D-6、K-1)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `this`、`those` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`N-3`、`Phase 9`、`WP-3cd`、`WP-3d`、`this SAME commit`、`this closure`、`§3`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後 `Phase 9 WP-3d: `request_budget` is `enabled` as of this SAME commit ...` と `Phase 9 WP-3cd closure:` / `` `budget` now reaches ... `` は括弧だけ消えてラベルは残る。読める | `this`、`those` |
+| 195 | 7b | L3721-3740 | `ApplicationRuntime.read_with_result` | docstring | 目印 1 文、保護参照、位置 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。除去を試したが検査器が受け付けない (`--base` で赤を実測)。基準のまま) | ラベル `Phase 9 WP-3e rework (裁定 C-25 (A), 監督裁定 2026-09-08)` の日付句の除去を、入れ子の括弧 `C-25 (A)` のため検査器が受け付けない (`--base` で赤を実測) | 文の削除 0 | 除去なし (基準のまま) | `that`、`this` |
+| 196 | 7b | L3748-3753 | `ApplicationRuntime.read_page` | docstring | 参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 197 | 7b | L3774-3799 | `ApplicationRuntime.transact` | comment | 目印 2 文、安全、保護参照、位置、参照先 | CH-0771 | ` (design D-1 (4), P-3)` → (空) | `# history: CH-0771` (HEAD L3821-3847) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-1、P-3)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0)。差し戻し 1 の裁定 (レビュー A-3): 最初の実装は `Phase 9 WP-3cd closure (K-1): ` のラベルも除いていたが、前の `Phase 9 WP-3c/WP-3d: … as of this SAME commit` の段落の続きに読めるので戻した (括弧 1 編集だけ残る) | 削除した文 0。点検語 `this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`G-1`、`H-1`、`H-2`、`K-1`、`M-4`、`Phase 9`、`WP-3b`、`WP-3c`、`WP-3cd`、`WP-3d`、`before this`、`this SAME commit`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後 `Phase 9 WP-3b: ...` は括弧だけ消えてラベルは残る (`in this SAME commit` が指す)。`Phase 9 WP-3cd closure (K-1):` のラベルは基準のまま (差し戻し 1)。読める | `this` |
+| 198 | 7b | L3805-3826 | `ApplicationRuntime.capabilities` | docstring | 目印 1 文、保護参照、位置、参照先 | CH-0772 | ` (R-3)` → (空); `, 監督裁定 2026-09-06)` → `)` | `History: CH-0772` (HEAD L3853-3877) | 移す (括弧ごと・裁定の日付句の機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (R-3)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語 `that`、`this`、`those` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`Phase 8`、`WP-1a`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `Minimal capability/discovery document, per this session's ow…` で文法と意味が保たれる | `that`、`this`、`those` |
+| 199 | 7b | L3833-3844 | `ApplicationRuntime.operation_catalog` | docstring | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | `this` |
+| 200 | 7b | L3864-3864 | `ApplicationDeveloper` | docstring | 全塊走査 (拾った理由なし) | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。条件を満たさない又は除くものが無い) | 経緯トークン 0。除去の対象になる語が無く、経緯だけの文も無い (全文を読んだ。§3 残す)。内容の除去が 0 なので CH-ID を付けない (Y7-3 (d)) | 文の削除 0 | 除去なし (基準のまま) | なし |
+| 201 | 7b | L3875-3891 | `ApplicationDeveloper.create_entity` | comment | 目印 3 文、安全、保護参照、位置、参照先 | CH-0773 | ` (design D-1 (4), P-3)` → (空) | `# history: CH-0773` (HEAD L3926-3943) | 移す (括弧ごとの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (D-1、P-3)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0)。差し戻し 1 の裁定 (レビュー A-3): 最初の実装は `Phase 9 WP-3cd closure (K-1): ` のラベルも除いていたが、前の段落の続きに読めるので戻した (括弧 1 編集だけ残る) | 削除した文 0。点検語 `that`、`this` は、除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`H-3`、`K-1`、`Phase 9`、`THIS commit`、`WP-3a`、`WP-3b`、`WP-3c`、`WP-3cd`、`WP-3d`、`same commit`、`that commit`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後 `Phase 9 WP-3a: ...` は括弧だけ消えてラベルは残る (`as of that commit` が指す)。`Phase 9 WP-3cd closure (K-1):` のラベルは基準のまま (差し戻し 1)。読める | `that`、`this` |
+| 202 | 7b | L3901-3910 | `ApplicationDeveloper.add_field` | comment | 目印 2 文、位置、参照先 | CH-0774 | `Phase 9 WP-3a: `enum`` → ``enum``; `Phase 9 WP-3b: `dry_run`` → ``dry_run``; ` Phase 9 ⏎         # WP-3c/WP-3d: ` → ` ⏎         # `; `reasoning. Phase 9 WP-3cd closure (K-1): `budget`` → `reasoning. `budget`` | `# history: CH-0774` (HEAD L3953-3963) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (K-1、WP-3a、WP-3b、WP-3c、WP-3cd、WP-3d)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語なし。除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`H-3`、`WP-3b`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の各文頭 (`` `enum`/`nullable` no longer gate ``、`` `dry_run`/`plan` no longer gate either ``、`` `idempotency_key`/`budget` ungated too ``、`` `budget` now reaches ``) は、基準でもラベルの後ろで同じ形。直前の文を受ける `either`・`too` は直前の文が残るので指す先を失わない。読める | なし |
+| 203 | 7b | L3920-3954 | `ApplicationDeveloper.alter_field` | docstring | 目印 4 文、安全、位置、参照先 | なし | (除去なし) | 基準のバイト列 (CH なし) | 残す (§3。検査器が許す候補が在るが Y7-3 (b) の条件を満たさず見送った。迷えば基準のまま) | 候補 `Phase 9 WP-3c/WP-3d: ` の除去は検査器が許すが、残る `are ungated as of this commit` が WP を指す。`WP-3a rework 2 (2026-09-07 -- ` はラベルが ` -- ` で割れ括弧が壊れる。`(design D-2 (5)/(6))` の括弧の除去は検査器が受け付けない (`--base` で、次の文が削除と判定されて赤を実測) | 文の削除 0 | 除去なし (基準のまま) | `still`、`that`、`this` |
+| 204 | 7b | L3956-3960 | `ApplicationDeveloper.alter_field` | comment | 位置、参照先 | CH-0775 | `Phase 9 WP-3cd closure (K-1): `budget`` → ``budget`` | `# history: CH-0775` (HEAD L4009-4014) | 移す (文頭ラベルの機械除去)。残りは残す | 経緯トークンと出所の無い局所 ID だけを除去 (K-1、WP-3cd)。括弧又はラベルごと消え、残る文と同じ塊の他の文はその ID を名指しも指示語でも指さない。保護参照 (F-ID・実在パス・版数付き文書名・SI-) は触れない (検査器 `--base` exit 0) | 削除した文 0。点検語なし。除いたラベル・括弧を指さない (指す先は残る文・同じ塊)。残る参照語 (`H-3`、`WP-3b`) は残るラベル・括弧で名指しされている (除去前に `design §`・`D-n`・`this WP`・`same commit`・`finding n` を残る文で確認、`cs7b_rescan.py`) | 除去後の文を読んだ: 先頭 `# `budget` now reaches # `ApplicationCell.alter_field` RAW/u…` で文法と意味が保たれる | なし |
 
 B. 目印一覧に当たる文 (7a 42 文、7b 53 文。完了条件 27)
 
@@ -4988,6 +5525,59 @@ B. 目印一覧に当たる文 (7a 42 文、7b 53 文。完了条件 27)
 | 40 | 7a | L1798-1806 | CH-0635 | `監督裁定` | ``digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c rework): built ABOVE, before this…` | 基準のまま (同じ塊の別の文は CH-0635) | 残す | 括弧 `(rework, 監督裁定 G-1; Phase 9 WP-3c rework)` は内容語を含み括弧ごとは消えない。同じ塊の次の文の `(I-13)` だけ CH-0635 で除去 | `that` | 95 |
 | 41 | 7a | L1845-1886 | CH-0637 | `this (WP|commit|change set|round)`、`監督裁定` | `Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): WRAPPED by `_limit_gate`…` | CH-0637 で除去 | 移す | CH-0637: 裁定の日付句 `監督裁定 2026-09-06` だけ除去 (`裁定 3` は残す)。`this WP back` は現在の理由 (ゲートで数える理由) と同居するので残す | `this` | 99 |
 | 42 | 7a | L1892-1908 | なし | `originally` | `Phase 8 WP-1a rework 1 (裁定 3): the actual backend read `schema_revision`…` | 基準のまま | 残す | `originally called only by` は無ゲートの内部 accessor が在る現在の理由と同居。ラベルは内容語 `rework` を含む | `this` | 100 |
+| 43 | 7b | L2015-2044 | CH-0730 | `監督裁定` | `Code review §2 C / 監督裁定 C (2026-09-07): the ONE fetch `_check_missing_required_fields`…` | CH-0730 で除去 | 移す | CH-0730: 日付 `(2026-09-07)` だけ除去 (Y7-3 (a))。`Code review §2 C`・`監督裁定 C` は残す。`_prepare_values` が同じ fetch を再利用する現在の理由 (backend の round trip を 1 回にする) と同居 | `the ONE` | 104 |
+| 44 | 7b | L2015-2044 | CH-0730 | `監督裁定` | `Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08): `path_prefix` is `"operations/0/values"`,…` | 基準のまま (同じ塊の別の文は CH-0730) | 残す | `2026-09-08` は入れ子の括弧 `(裁定 C-21 (B)/監督裁定 N-4, 2026-09-08)` の中にあり、日付だけの除去を検査器が受け付けない (`--base` で赤を実測)。`N-4` を同じ文が名指す。値の `path_prefix` の現在の規則と同居 | `this`、`SAME` | 104 |
+| 45 | 7b | L2079-2106 | なし | `used to` | `A non-`None` `cursor` is decoded against this request's own binding hash (`paging.canonical_page_binding`,…` | 基準のまま | 残す | `used to build a keyset predicate` は cursor を使う現在の手順の説明で、経緯ではない (`used to` の別義) | `it` | 107 |
+| 46 | 7b | L2120-2131 | CH-0732 | `no longer` | `Phase 9 WP-3cd closure (K-1): `narrow_limits_by_budget` is no longer called at the…` | CH-0732 で除去 | 移す | CH-0732: 文頭ラベル `Phase 9 WP-3cd closure (K-1): ` を除去。`no longer called at the facade layer` は gate の中で narrow する現在の構成の説明と同居するので文は残す。`before this gate` は gate を指し WP ではない | `this gate` | 109 |
+| 47 | 7b | L2247-2269 | CH-0733 | `監督裁定` | ``path_prefix` (code review §2 D, 監督裁定 D 2026-09-07): forwarded to `_prepare_values` verbatim…` | CH-0733 で除去 | 移す | CH-0733: 日付 `2026-09-07` だけ除去 (`code review §2 D, 監督裁定 D` は残す)。`path_prefix` を `_prepare_values` へ渡す現在の規則と同居 | `verbatim` | 116 |
+| 48 | 7b | L2272-2279 | CH-0734 | `used to` | `WP-3e rework T2 (追補 L-3/M-4): the wire contract's own predicate container is…` | 基準のまま (同じ塊の別の文は CH-0734) | 残す | ラベル `WP-3e rework T2 (追補 L-3/M-4)` は検査器の候補に出ない (括弧の中に `/` の枝)。`the label this raise used to carry was wrong` は `where` を使う現在の理由と同居。同じ塊の第 1 文のラベルだけ CH-0734 で除去 | `the label` | 117 |
+| 49 | 7b | L2313-2317 | なし | `監督裁定` | `Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08): `path_prefix="operations/0/values"` -- same…` | 基準のまま | 残す | 日付 `2026-09-08` は入れ子の括弧 `(裁定 C-21 (B)/監督裁定 N-4, 2026-09-08)` の中で、日付だけの除去を検査器が受け付けない (実測)。CH-ID を付ける除去が無い | `same` | 120 |
+| 50 | 7b | L2359-2365 | なし | `used to` | `WP-3e rework T2 (追補 L-3/M-4): every `field` this method raises is derived…` | 基準のまま | 残す | ラベル `WP-3e rework T2 (追補 L-3/M-4)` の除去は検査器の候補に出ない。`closing the "known limitation" this comment used to disclose` は batch の index が常に反映される現在の理由と同居 | `this comment` | 122 |
+| 51 | 7b | L2459-2495 | CH-0740 | `no longer`、`this (WP\|commit\|change set\|round)` | `P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2): builds one fully-bound, side-effect-free plan step…` | 基準のまま (同じ塊の別の文は CH-0740) | 残す | ラベルは実在パス `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (保護参照) を含む。`before this WP`・`no longer interleaved` は `transact()` の 2 段階の現在の構造の説明と同居。同じ塊の別の文は CH-0740 (日付だけ除去) | `this WP`、`just` | 130 |
+| 52 | 7b | L2459-2495 | CH-0740 | `used to`、`pre-(WP\|Phase)` | `Raises the identical `FoundationError` subclass, for the identical reason, that the pre-WP-2…` | 基準のまま (同じ塊の別の文は CH-0740) | 残す | `the pre-WP-2 in-loop branch below used to raise` は、今の関数が同じ例外を同じ理由で返すという現在の保証の説明 (`this is a relocation of that logic` と同居) | `this`、`that` | 130 |
+| 53 | 7b | L2459-2495 | CH-0740 | `監督裁定` | ``index` (code review §2 D, 監督裁定 D 2026-09-07): this operation's own position…` | CH-0740 で除去 | 移す | CH-0740: 日付 `2026-09-07` だけ除去。`index` の使い方 (`path_prefix` の構築) の現在の理由と同居 | `only` | 130 |
+| 54 | 7b | L2531-2539 | なし | `pre-(WP\|Phase)` | `Phase 9 WP-3a (design D-2 (3), file:line `cell.py:1034-1046` in the design's own…` | 基準のまま | 残す | ラベルは実在ファイル参照 `cell.py:1034-1046` (保護参照) を含む。`pre-WP line numbering` は位置の注記。欠落検査の置き場所 (現在の理由) と同居 | `this` | 133 |
+| 55 | 7b | L2531-2539 | なし | `監督裁定` | `Code review §2 C (監督裁定 C): the SAME shared-fetch reuse `insert()` applies…` | 基準のまま | 残す | `Code review §2 C (監督裁定 C)` の括弧は内容語を含み (4) で括弧ごとは消えない。`insert()` と同じ shared-fetch の再利用という現在の理由と同居 | `the SAME` | 133 |
+| 56 | 7b | L2637-2682 | CH-0743 | `this (WP\|commit\|change set\|round)` | `P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all execute for real here, atomically…` | 基準のまま (同じ塊の別の文は CH-0743) | 残す | ラベル `P3-D2 (design v1.2 R-5, WP-1.5)` は版数付き文書名 `design v1.2` を含む (保護参照)。`unchanged by this WP` が `WP-1.5` を指す。同じ塊の別の文は CH-0743 (`(M-7)` だけ除去) | `this WP`、`alone` | 137 |
+| 57 | 7b | L2637-2682 | CH-0743 | `this (WP\|commit\|change set\|round)` | `P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2, P35-D9/P35-D10/P35-D11): two-pass as of this WP…` | 基準のまま (同じ塊の別の文は CH-0743) | 残す | ラベルは実在パス `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (保護参照。折り返しで割れる) を含み丸ごと消せない。`as of this WP` が `P35 WP-2` を指す。検査してから実行する 2 段階の現在の構造の説明と同居 (完了条件 22 (b) の変異の対象) | `this WP`、`then` | 137 |
+| 58 | 7b | L2637-2682 | CH-0743 | `previously` | `Atomicity itself (all-or-nothing) is UNCHANGED by this restructuring; the one externally-observable consequence…` | CH-0743 で除去 | 移す | CH-0743: `(M-7)` の括弧だけ除去 (出所の無い ID。残る文は名指さない)。`previously` の叙述は、検証エラーが先に出る現在の契約上の優先順位 (`transactions.cross_entity`) の説明と同居するので文は残す | `now`、`deliberately` | 137 |
+| 59 | 7b | L2717-2730 | CH-0746 | `no longer` | `Phase 9 WP-3cd closure (K-1, design D-6, B-2): `narrow_limits_by_budget` is no longer…` | CH-0746 で除去 | 移す | CH-0746: 文頭ラベル `Phase 9 WP-3cd closure (K-1, design D-6, B-2): ` を除去。`no longer called at the facade layer` は gate の中で narrow する現在の構成と同居するので文は残す | `this gate`、`instead` | 140 |
+| 60 | 7b | L2742-2754 | なし | `監督裁定` | `Phase 9 WP-3c (design D-5, 追補 2 S-b; 監督裁定集約 rulings-r5-r6.md I-3): the…` | 基準のまま | 残す | ラベルは実在ファイル参照 `rulings-r5-r6.md` (保護参照) を含む。`I-13` の説明 (同じ塊の次の文) と idempotency lookup の置き場所 (現在の理由) と同居 | `HERE`、`BEFORE` | 141 |
+| 61 | 7b | L2806-2820 | CH-0749 | `this (WP\|commit\|change set\|round)` | `Phase 9 WP-3b (design D-4 (7)): the LOCAL execution plan `_plan_operation` builds…` | 基準のまま (同じ塊の別の文は CH-0749) | 残す | ラベルの `Phase 9 WP-3b` を `before this WP` が指すのでラベルは除けない。括弧 `(design D-4 (7))` だけ除去 (CH-0749) | `this WP`、`here` | 145 |
+| 62 | 7b | L2854-2862 | CH-0750 | `pre-(WP\|Phase)` | ``digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c rework, I-13): built ONCE, above…` | 基準のまま (同じ塊の別の文は CH-0750) | 残す | ラベル括弧 `(WP-3b closure, H-1/H-2; Phase 9 WP-3c rework, I-13)` は内容語を含み括弧ごとは消えない。`pre-WP-3c version this replaces` が位置を指す。同じ塊の次の文の `(I-13)` だけ CH-0750 で除去 | `this`、`too` | 148 |
+| 63 | 7b | L2876-2879 | なし | `this (WP\|commit\|change set\|round)`、`unchanged from before` | `Pass 2: execute the fully-bound plan inside the begin/commit/rollback envelope -- unchanged…` | 基準のまま | 残す | `unchanged from before this WP` は位置を指す (どの WP かこの塊に名指しが無く、CH 化しても指す先を持てない)。ラベルは無く、内容の除去が 0 なので CH-ID を付けない | `this`、`other than` | 150 |
+| 64 | 7b | L2904-2918 | なし | `this (WP\|commit\|change set\|round)` | `The pre-existing 6-field-sink `destructive_data_operation` record (below, post-commit) is unaffected either way (D-10:…` | 基準のまま | 残す | `unchanged by this WP` が `Phase 4` のラベルを指すのでそのラベルは除けない (`D-10` を名指す)。第 3 の段落のラベル `Phase 9 WP-3b (design D-4 (4)): ` の除去は検査器が許したが、差し戻し 1 の裁定 (レビュー A-3) で戻した (CH-0752 は欠番。CH なし) | `this WP`、`either way` | 152 |
+| 65 | 7b | L2976-3028 | なし | `used to` | `The pre-fix `except` tuple listed only `errors.FoundationError` subclasses; a non-`FoundationError` exception reaching…` | 基準のまま | 残す | `The pre-fix except tuple listed only FoundationError subclasses` は rollback を無条件にした現在の理由 (全例外で rollback する安全上の理由) と同居 (Y7-3 (c))。安全の語 (rollback・commit・atomicity) を含む塊は基準のまま | `entirely` | 156 |
+| 66 | 7b | L2976-3028 | なし | `no longer` | `P3-D2 (WP-1.5) / m-2 (WP-2 review correction): `DestructiveConfirmationRequired` is not actually reachable…` | 基準のまま | 残す | `P3-D2 (WP-1.5) / m-2 (WP-2 review correction)` の括弧は内容語を含む。`DestructiveConfirmationRequired` が pass 2 から到達しない現在の理由と同居。安全の語を含む塊は基準のまま | `not`、`only` | 156 |
+| 67 | 7b | L3069-3091 | CH-0756 | `this (WP\|commit\|change set\|round)` | `Phase 4 (design D-10): the pre-existing 6-field-sink record is unconditional and unchanged…` | CH-0756 で除去 | 移す | CH-0756: 括弧 `(design D-10)` だけ除去 (`Phase 4` のラベルは `exactly as it did before this WP` が指すので残す) | `this WP`、`now` | 160 |
+| 68 | 7b | L3174-3187 | なし | `pre-(WP\|Phase)` | ``_bind_order_by` therefore accepts three shapes and always returns either `None` or a…` | 基準のまま | 残す | `the pre-WP-3 shape` と `in the same commit` が位置を指す。ラベルは実在パスと版数付き文書名を含む | `this`、`every other` | 165 |
+| 69 | 7b | L3243-3274 | CH-0758 | `監督裁定` | `Code review §2 D / 監督裁定 D (2026-09-07): `field` names a POSITION…` | CH-0758 で除去 | 移す | CH-0758: 日付 `(2026-09-07)` だけ除去 (`Code review §2 D / 監督裁定 D` は残す) | `never` | 168 |
+| 70 | 7b | L3243-3274 | CH-0758 | `previously`、`監督裁定` | `Code review §2 C / 監督裁定 C (2026-09-07, P-8/G-4 performance finding): returns…` | CH-0758 で除去 | 移す | CH-0758: 日付 `2026-09-07` だけ除去 (括弧は `(P-8/G-4 performance finding)` になる。`Code review §2 C / 監督裁定 C` は残す)。`previously: ... were each fetched TWICE` は round trip を減らした現在の理由と同居するので文は残す | `SAME`、`instead` | 168 |
+| 71 | 7b | L3243-3274 | CH-0758 | `before (this\|the) (fix\|change\|ruling\|rework\|review)`、`unchanged from before` | `Returns `None` when it could not fetch one (wrong Python shape, or…` | 基準のまま (同じ塊の別の文は CH-0758) | 残す | `unchanged from before this rework` は同じ塊の `Code review §2 C / 監督裁定 C` の段落 (rework) を指す。`_prepare_values` が自分で fetch し直す現在の挙動と同居 | `its own` | 168 |
+| 72 | 7b | L3306-3326 | CH-0759 | `監督裁定` | `Phase 9 WP-3a (design D-2 (3), 追補 2 S-k) rework (code review…` | CH-0759 で除去 | 移す | CH-0759: 日付 `2026-09-07` だけ除去 (`code review §2 C, 監督裁定 C` は残す)。merged read を 1 回にする現在の理由と同居 | `ONE` | 170 |
+| 73 | 7b | L3355-3373 | なし | `this (WP\|commit\|change set\|round)` | `WP-3e rework T2 (追補 L-3, corrected against a real C-03 failure this…` | 基準のまま | 残す | `this WP's own first draft` が `WP-3e rework T2` を指す。ラベルは内容語を含み (6) に当たらない。識別子検証の安全上の理由 (未検証の raw key を `field` に入れない) と同居 | `this WP` | 173 |
+| 74 | 7b | L3394-3408 | CH-0761 | `this (WP\|commit\|change set\|round)` | `A no-op for every PRE-EXISTING `ValidationError` this choke point already raised before…` | 基準のまま (同じ塊の別の文は CH-0761) | 残す | `before this WP`・`this WP's own two NEW denials` が `Phase 9 WP-3a` を指すのでそのラベルは除けない。括弧 `(design D-3 (2))` だけ除去 (CH-0761) | `this WP` | 175 |
+| 75 | 7b | L3394-3408 | CH-0761 | `監督裁定` | `Code review §2 D / 監督裁定 D (2026-09-07): the value written is…` | CH-0761 で除去 | 移す | CH-0761: 日付 `(2026-09-07)` だけ除去 (`Code review §2 D / 監督裁定 D` は残す) | `never` | 175 |
+| 76 | 7b | L3436-3459 | なし | `監督裁定` | ``limits` (Phase 9 WP-3cd closure, 監督裁定集約 rulings-r5-r6.md K-3/B-2): the `in`-filter `batch_items` check…` | 基準のまま | 残す | 括弧は実在ファイル参照 `rulings-r5-r6.md` (保護参照) を含み除けない。`D-6 (2)'s own three-class table` を同じ文が名指す | `one` | 176 |
+| 77 | 7b | L3436-3459 | なし | `used to` | `Every `field`/`value` position this method raises for is `f"{path_prefix}where/{i}/..."`, replacing the WRONG…` | 基準のまま | 残す | `the WRONG ... labels this method used to emit` は `where` を使う現在の理由 (wire の名前) と同居 | `WRONG` | 176 |
+| 78 | 7b | L3583-3592 | CH-0767 | `this (WP\|commit\|change set\|round)`、`(supervisor\|supervisory\|monitor\|requester) ruling` | `Review M-2 (major, supervisor ruling 2026-09-03, "完全案"): `guard` is always `auth.CredentialStore.assert_active` or…` | CH-0767 で除去 | 移す | CH-0767: 日付 `2026-09-03` だけ除去 (`Review M-2 (major, supervisor ruling, "完全案")` のラベルは `this WP's changes` が指すので残す) | `this WP`、`same` | 188 |
+| 79 | 7b | L3595-3609 | CH-0768 | `previously`、`(supervisor\|supervisory\|monitor\|requester) ruling` | `Review M-3 (major, supervisor ruling 2026-09-03): this is SI-00's own application-boundary check…` | CH-0768 で除去 | 移す | CH-0768: 日付 `2026-09-03` だけ除去 (ラベルは `review M-3's own literal instruction` が名指すので残す)。`previously recorded on NO audit surface` は FORBIDDEN を audit に流す現在の理由と同居 | `this` | 189 |
+| 80 | 7b | L3678-3695 | CH-0769 | `監督裁定` | `Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): the UNGATED counterpart…` | CH-0769 で除去 | 移す | CH-0769: 裁定の日付句 `監督裁定 2026-09-06` だけ除去 (`裁定 3` は後ろの文が名指すので残す) | `the` | 193 |
+| 81 | 7b | L3705-3715 | CH-0770 | `this same commit` | `Phase 9 WP-3d (design D-6, B-4): `request_budget` is `enabled` as of this…` | CH-0770 で除去 | 移す | CH-0770: 括弧 `(design D-6, B-4)` だけ除去 (`Phase 9 WP-3d` は `as of this SAME commit` が指すので残す) | `this SAME commit` | 194 |
+| 82 | 7b | L3705-3715 | CH-0770 | `used to` | `Phase 9 WP-3cd closure (K-1): `budget` now reaches `ApplicationCell.read` RAW/unvalidated -- `narrow_limits_by_budget`…` | CH-0770 で除去 | 移す | CH-0770: 括弧 `(K-1)` だけ除去 (`Phase 9 WP-3cd closure` は `this closure fixes` が指すので残す)。`this facade-layer call used to refuse an invalid budget BEFORE any of those four bounds` は gate の順序を r2db に合わせる現在の理由と同居 | `this closure` | 194 |
+| 83 | 7b | L3721-3740 | なし | `監督裁定` | `Phase 9 WP-3e rework (裁定 C-25 (A), 監督裁定 2026-09-08): the in-process counterpart…` | 基準のまま | 残す | 日付 `2026-09-08` は入れ子の括弧 `(裁定 C-25 (A), 監督裁定 2026-09-08)` の中で、日付句の除去を検査器が受け付けない (`--base` で赤を実測) | `this`、`ADDITIONAL` | 195 |
+| 84 | 7b | L3774-3799 | CH-0771 | `in this same commit`、`this same commit` | `Phase 9 WP-3b (design D-1 (4), P-3): `dry_run`/`plan` gate removed -- `dry_run`…` | CH-0771 で除去 | 移す | CH-0771: 括弧 `(design D-1 (4), P-3)` だけ除去。ラベルの `Phase 9 WP-3b` は `in this SAME commit` が指すので残す。同じ塊の `Phase 9 WP-3cd closure (K-1):` のラベル除去は差し戻し 1 (レビュー A-3) で戻した | `this SAME commit` | 197 |
+| 85 | 7b | L3774-3799 | CH-0771 | `this same commit` | `Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` are UNGATED as of this SAME commit too…` | 基準のまま (同じ塊の別の文は CH-0771) | 残す | ラベル `Phase 9 WP-3c/WP-3d` を `as of this SAME commit too` が指す。同じ塊の `Phase 9 WP-3cd closure (K-1):` のラベル除去は差し戻し 1 (レビュー A-3) で戻した | `this SAME commit`、`too` | 197 |
+| 86 | 7b | L3805-3826 | CH-0772 | `監督裁定` | `Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): WRAPPED by `_limit_gate`…` | CH-0772 で除去 | 移す | CH-0772: 裁定の日付句 `監督裁定 2026-09-06` だけ除去 (`裁定 3` は残す) | `this` | 198 |
+| 87 | 7b | L3875-3891 | CH-0773 | `no longer` | `Phase 9 WP-3a (design D-1 (4), P-3): `field_constraints` no longer gates --…` | CH-0773 で除去 | 移す | CH-0773: 括弧 `(design D-1 (4), P-3)` だけ除去。ラベルの `Phase 9 WP-3a` は `as of that commit, same commit as the real enforcement` が指すので残す | `that commit` | 201 |
+| 88 | 7b | L3875-3891 | CH-0773 | `no longer`、`this (WP\|commit\|change set\|round)` | `Phase 9 WP-3b: `dry_run`/`plan` no longer gate either -- `dry_run` is `enabled`…` | 基準のまま (同じ塊の別の文は CH-0773) | 残す | ラベル `Phase 9 WP-3b` を `as of THIS commit` が指す | `THIS commit` | 201 |
+| 89 | 7b | L3875-3891 | CH-0773 | `this (WP\|commit\|change set\|round)` | `Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` are UNGATED as of THIS commit too --…` | 基準のまま (同じ塊の別の文は CH-0773) | 残す | ラベル `Phase 9 WP-3c/WP-3d` を `as of THIS commit too` が指す | `THIS commit`、`too` | 201 |
+| 90 | 7b | L3901-3910 | CH-0774 | `no longer` | `Phase 9 WP-3a: `enum`/`nullable` no longer gate -- see `create_entity`'s own identical…` | CH-0774 で除去 | 移す | CH-0774: 文頭ラベル `Phase 9 WP-3a: ` を除去 (`no longer gate` は `create_entity` の comment と同じ現在の状態の説明で、文は残す。`see ... immediately above` は `create_entity` の comment が残るので指す先を失わない) | `see` | 202 |
+| 91 | 7b | L3901-3910 | CH-0774 | `no longer` | `Phase 9 WP-3b: `dry_run`/`plan` no longer gate either -- same reasoning as…` | CH-0774 で除去 | 移す | CH-0774: 文頭ラベル `Phase 9 WP-3b: ` を除去 (`same reasoning` は `create_entity` の comment の現在の理由を指す。`either` は直前の文が残るので指す先を失わない) | `either`、`same reasoning` | 202 |
+| 92 | 7b | L3920-3954 | なし | `this (WP\|commit\|change set\|round)` | `Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` are ungated as of this commit, exactly like…` | 基準のまま | 残す | ラベル `Phase 9 WP-3c/WP-3d` を `as of this commit` が指す (検査器が許す候補があるが指す先を失う) | `this commit` | 203 |
+| 93 | 7b | L3920-3954 | なし | `no longer` | ``dry_run`/`plan` no longer gate (Phase 9 WP-3b, same commit as `dry_run` flipping…` | 基準のまま | 残す | `(Phase 9 WP-3b, same commit as dry_run flipping to enabled)` は括弧に内容語を含み、同じ括弧の `same commit` が位置を指す | `either` | 203 |
+| 94 | 7b | L3920-3954 | なし | `used to` | `WP-3a rework 2 (2026-09-07 -- real, measured bug, not a ruling item…` | 基準のまま | 残す | ラベル `WP-3a rework 2 (2026-09-07 -- real, measured bug, ...)` は ` -- ` で割れて括弧が壊れる (候補の除去が不可)。`this method's own default used to be a plain enum=None` は現在の理由 (`UNCHANGED` が既定) と同居 | `this` | 203 |
+| 95 | 7b | L3920-3954 | なし | `used to` | `Every direct in-process caller of THIS method that omits `enum` -- e.g.…` | 基準のまま | 残す | `used to have that omission silently collapse into enum=None` は現在の挙動 (`UNCHANGED` が既定) の理由と同居 | `this` | 203 |
 
 C. 経緯と同じ文にある安全上の理由・保護参照・位置 (§16.2 の 39 塊と、保護参照・位置だけの塊)
 
@@ -5046,6 +5636,64 @@ C. 経緯と同じ文にある安全上の理由・保護参照・位置 (§16.2
 | 51 | 7a | L1892-1908 | なし | 保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 100 |
 | 52 | 7a | L1913-1930 | なし | 安全・保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 安全の語 (commit) 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 101 |
 | 53 | 7a | L1939-1945 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 102 |
+| 54 | 7b | L2015-2044 | CH-0730 | 保護参照・位置 | CH-0730 (HEAD L2015-2045) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 3 文のうち 逐語 2・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 104 |
+| 55 | 7b | L2107-2113 | CH-0731 | 保護参照・位置 | CH-0731 (HEAD L2108-2115) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 108 |
+| 56 | 7b | L2120-2131 | CH-0732 | 位置 | CH-0732 (HEAD L2122-2134) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 109 |
+| 57 | 7b | L2247-2269 | CH-0733 | 位置 | CH-0733 (HEAD L2250-2274) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 1・経緯トークンだけ除去 0・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 116 |
+| 58 | 7b | L2287-2296 | CH-0735 | 位置 | CH-0735 (HEAD L2293-2303) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 118 |
+| 59 | 7b | L2313-2317 | なし | 保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 120 |
+| 60 | 7b | L2329-2358 | CH-0736 | 保護参照・位置 | CH-0736 (HEAD L2336-2367) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 1・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 121 |
+| 61 | 7b | L2359-2365 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 122 |
+| 62 | 7b | L2386-2392 | CH-0737 | 安全・位置 | CH-0737 (HEAD L2395-2402) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (identifier) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 124 |
+| 63 | 7b | L2395-2397 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 125 |
+| 64 | 7b | L2419-2426 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 126 |
+| 65 | 7b | L2443-2446 | CH-0739 | 安全 | CH-0739 (HEAD L2454-2458) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (commit、fail-closed) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 129 |
+| 66 | 7b | L2459-2495 | CH-0740 | 保護参照・位置 | CH-0740 (HEAD L2471-2510) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 2・経緯トークンだけ除去 0・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 130 |
+| 67 | 7b | L2513-2522 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 132 |
+| 68 | 7b | L2531-2539 | なし | 保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 133 |
+| 69 | 7b | L2577-2581 | CH-0741 | 位置 | CH-0741 (HEAD L2592-2597) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 134 |
+| 70 | 7b | L2601-2626 | CH-0742 | 位置 | CH-0742 (HEAD L2617-2644) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 136 |
+| 71 | 7b | L2637-2682 | CH-0743 | 安全・保護参照・位置 | CH-0743 (HEAD L2655-2702) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 2・経緯トークンだけ除去 0・削除 0。安全の語 (atomic_mutation、atomically) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 137 |
+| 72 | 7b | L2683-2689 | CH-0744 | 安全・位置 | CH-0744 (HEAD L2703-2710) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (commit) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 138 |
+| 73 | 7b | L2692-2708 | CH-0745 | 保護参照・位置 | CH-0745 (HEAD L2713-2730) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 139 |
+| 74 | 7b | L2717-2730 | CH-0746 | 位置 | CH-0746 (HEAD L2739-2753) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 140 |
+| 75 | 7b | L2742-2754 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 141 |
+| 76 | 7b | L2782-2791 | CH-0748 | 安全・保護参照 | CH-0748 (HEAD L2806-2816) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 1・経緯トークンだけ除去 0・削除 0。安全の語 (committed、si-14) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 143 |
+| 77 | 7b | L2806-2820 | CH-0749 | 位置 | CH-0749 (HEAD L2831-2846) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 0・経緯トークンだけ除去 2・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 145 |
+| 78 | 7b | L2854-2862 | CH-0750 | 安全・位置 | CH-0750 (HEAD L2880-2889) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 1・経緯トークンだけ除去 0・削除 0。安全の語 (transaction) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 148 |
+| 79 | 7b | L2881-2889 | CH-0751 | 安全・保護参照・位置 | CH-0751 (HEAD L2908-2917) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (commit、committed、rollback) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 151 |
+| 80 | 7b | L2904-2918 | なし | 安全・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 安全の語 (commit、fail-closed、rollback) 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 152 |
+| 81 | 7b | L2922-2946 | なし | 保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 153 |
+| 82 | 7b | L2949-2961 | CH-0753 | 安全・位置 | CH-0753 (HEAD L2977-2990) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (commit、transaction) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 154 |
+| 83 | 7b | L2976-3028 | なし | 安全・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 安全の語 (atomicity、rollback) 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 156 |
+| 84 | 7b | L3038-3050 | CH-0754 | 安全・位置 | CH-0754 (HEAD L3067-3080) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (commit、rollback、transactional) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 158 |
+| 85 | 7b | L3053-3062 | なし | 安全・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 安全の語 (commit、committed) 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 159 |
+| 86 | 7b | L3069-3091 | CH-0756 | 安全・位置 | CH-0756 (HEAD L3099-3122) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 1・経緯トークンだけ除去 1・削除 0。安全の語 (commit) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 160 |
+| 87 | 7b | L3132-3140 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 163 |
+| 88 | 7b | L3149-3161 | なし | 保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 164 |
+| 89 | 7b | L3174-3187 | なし | 保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 165 |
+| 90 | 7b | L3191-3200 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 166 |
+| 91 | 7b | L3243-3274 | CH-0758 | 位置 | CH-0758 (HEAD L3274-3308) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 168 |
+| 92 | 7b | L3306-3326 | CH-0759 | 位置 | CH-0759 (HEAD L3340-3361) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 0・経緯トークンだけ除去 2・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 170 |
+| 93 | 7b | L3341-3347 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 172 |
+| 94 | 7b | L3355-3373 | なし | 安全・保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 安全の語 (identifier、injection) 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 173 |
+| 95 | 7b | L3376-3384 | なし | 保護参照 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 174 |
+| 96 | 7b | L3394-3408 | CH-0761 | 位置 | CH-0761 (HEAD L3429-3444) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 175 |
+| 97 | 7b | L3436-3459 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 176 |
+| 98 | 7b | L3470-3471 | CH-0762 | 位置 | CH-0762 (HEAD L3506-3508) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 178 |
+| 99 | 7b | L3477-3484 | CH-0763 | 保護参照・位置 | CH-0763 (HEAD L3514-3522) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 179 |
+| 100 | 7b | L3583-3592 | CH-0767 | 安全・保護参照 | CH-0767 (HEAD L3624-3634) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (credential_store_postgres、credentialstore) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 188 |
+| 101 | 7b | L3595-3609 | CH-0768 | 安全・保護参照 | CH-0768 (HEAD L3637-3652) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。安全の語 (credential、si-00) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 189 |
+| 102 | 7b | L3632-3635 | なし | 位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 190 |
+| 103 | 7b | L3678-3695 | CH-0769 | 保護参照・位置 | CH-0769 (HEAD L3721-3741) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 1・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 193 |
+| 104 | 7b | L3705-3715 | CH-0770 | 安全・保護参照・位置 | CH-0770 (HEAD L3751-3762) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 0・経緯トークンだけ除去 2・削除 0。安全の語 (commit) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 194 |
+| 105 | 7b | L3721-3740 | なし | 保護参照・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 195 |
+| 106 | 7b | L3774-3799 | CH-0771 | 安全・保護参照・位置 | CH-0771 (HEAD L3821-3847) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 3 文のうち 逐語 2・経緯トークンだけ除去 1・削除 0。安全の語 (commit) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 197 |
+| 107 | 7b | L3805-3826 | CH-0772 | 保護参照・位置 | CH-0772 (HEAD L3853-3877) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 1 文のうち 逐語 0・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 198 |
+| 108 | 7b | L3875-3891 | CH-0773 | 安全・保護参照・位置 | CH-0773 (HEAD L3926-3943) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 5 文のうち 逐語 4・経緯トークンだけ除去 1・削除 0。安全の語 (commit) を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 201 |
+| 109 | 7b | L3901-3910 | CH-0774 | 位置 | CH-0774 (HEAD L3953-3963) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 3 文のうち 逐語 1・経緯トークンだけ除去 2・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 202 |
+| 110 | 7b | L3920-3954 | なし | 安全・位置 | 基準のバイト列 (CH なし) | 残す (基準のまま) | 安全の語 (commit) 保護参照・位置の語を含む文は基準のまま (除去なし)。同居文は残す (§3) | 同居文は消さない。点検語は A の行の欄 | 203 |
+| 111 | 7b | L3956-3960 | CH-0775 | 位置 | CH-0775 (HEAD L4009-4014) | 残す (文は削除しない。除去は経緯トークンの機械除去だけ) | 該当の 2 文のうち 逐語 1・経緯トークンだけ除去 1・削除 0。を含む文は消していない | 同居文は消さない。点検語は A の行の欄 | 204 |
 
 D. 復元・欠番にした塊 (CH-ID を外し、受け皿の節を消した。番号は詰めない)
 
@@ -5055,6 +5703,13 @@ D. 復元・欠番にした塊 (CH-ID を外し、受け皿の節を消した。
 | 2 | 7a | L997-1022 (編集 1 のみ) | CH-0610 の編集 1 | ラベル `Phase 6 WP-3 (design D-3): ` の除去 (編集 2 `Phase 9 WP-3b (design D-4): ` の除去は残す) | 差し戻し 1 の裁定 (レビュー A-1): 同じ塊に残る `(design §1.5 finding 2a)` がどの設計を指すか分からなくなる (参照先は `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`) | CH-0610 は編集 2 だけ。第 1 段落は基準のバイト列 |
 | 3 | 7a | L1214-1221 | CH-0616 | ラベル `Phase 9 WP-3c (design D-5, I-3/I-7): ` の除去 | 差し戻し 1 の裁定 (レビュー A-4): 残る `D-3's `ConflictError`` の設計の文脈が消える。迷えば基準のまま (Y7-3 (b)) | 基準のバイト列 (CH なし。番号 CH-0616 は欠番で詰めない) |
 | 4 | 7a | L1913-1930 | CH-0638 | ラベル `Phase 6 WP-3 (design D-3): ` の除去 | 差し戻し 1 の裁定 (レビュー A-1): 同じ塊に残る `design §1.5 finding 4`・`same commit` がどの設計を指すか分からなくなる | 基準のバイト列 (CH なし。番号 CH-0638 は欠番で詰めない) |
+| 5 | 7b | L2904-2918 | CH-0752 | ラベル `Phase 9 WP-3b (design D-4 (4)): ` の除去 | 差し戻し 1 の裁定 (レビュー A-3、両論): 除いた後の文が、前に残る `Phase 4 (design D-2/D-10):` の段落の続きに読め、別の Phase の変更に見える。迷う場合は基準のまま (Y7-3 (b))。除去が 0 になるので CH-ID を外した | 基準のバイト列 (CH なし。番号 CH-0752 は欠番で詰めない) |
+| 6 | 7b | L3053-3062 | CH-0755 | ラベル `Phase 4 (design D-2, error-row rule): ` の除去 | 差し戻し 1 の裁定 (レビュー A-4、両論): 内容語 `error-row rule` もラベルと一緒に消え、CH-0751 が `(D-2's error-row case)` と名指す規則の実装箇所から規則の名前が消える。除去が 0 になるので CH-ID を外した | 基準のバイト列 (CH なし。番号 CH-0755 は欠番で詰めない) |
+| 7 | 7b | L3243-3274 (編集 1 のみ) | CH-0758 の編集 1 | ラベル `Phase 9 WP-3a (design D-2 (3)): ` の除去 (日付の 2 編集は残す) | 差し戻し 1 の裁定 (レビュー A-1): 同じ docstring に残る `(design D-3 (2))`・`Code review §2 C/D`・`監督裁定 C/D` がどの設計・WP を指すか分からなくなる (設計 §10.9 の WP-7a で戻した型) | CH-0758 は日付の 2 編集だけ。先頭のラベルは基準のバイト列 |
+| 8 | 7b | L3774-3799 (編集 2 のみ) | CH-0771 の編集 2 | ラベル `Phase 9 WP-3cd closure (K-1): ` の除去 (編集 1 の括弧の除去は残す) | 差し戻し 1 の裁定 (レビュー A-3、両論): 除いた後の文が、前に残る `Phase 9 WP-3c/WP-3d: … as of this SAME commit` の段落の続きに読め、別の WP の変更に見える | CH-0771 は括弧 1 編集だけ。ラベルは基準のバイト列 |
+| 9 | 7b | L3875-3891 (編集 2 のみ) | CH-0773 の編集 2 | ラベル `Phase 9 WP-3cd closure (K-1): ` の除去 (編集 1 の括弧の除去は残す) | 差し戻し 1 の裁定 (レビュー A-3、両論): 前の段落の続きに読め、別の WP の変更に見える | CH-0773 は括弧 1 編集だけ。ラベルは基準のバイト列 |
+| 10 | 7b | L3110-3114 | CH-0757 | ラベル `WP-3e rework T1 (追補 L-1): ` の除去 | 差し戻し 2 の裁定 (再確認 1): 直前に残る `Q1-D11 (design v1.5 §7): …` (版数付き文書名) の段落の続きに読め、`request_schema`/`field` の文が Q1-D11 の内容に見える (差し戻し 1 の A-3 と同じ型)。除去が 0 になるので CH-ID を外した | 基準のバイト列 (CH なし。番号 CH-0757 は欠番で詰めない) |
+| 11 | 7b | L3341-3347 | CH-0760 | ラベル `WP-3e rework T1 (追補 L-1): ` の除去 | 差し戻し 2 の裁定 (再確認 1): 同上 (直前の段落は `Q1-D11 (design v1.5 §7): write-payload width …`)。除去が 0 になるので CH-ID を外した | 基準のバイト列 (CH なし。番号 CH-0760 は欠番で詰めない) |
 
 **復元・欠番の裁定と範囲の再走査** (完了条件 29)
 
@@ -5062,14 +5717,33 @@ D. 復元・欠番にした塊 (CH-ID を外し、受け皿の節を消した。
 |---|---|---|---|---|---|---|
 | 1 | 7a | L1593-1603 の CH-0628 を戻して欠番にした (実装担当の自己裁定。監督の確定を待つ) | 範囲の `cell.py` 全塊を同じ基準 (経緯だけの 1 文の削除が、安全の語を含む塊に残っていないか) で走査し直した。文の削除は他に 0 (`new` が空の編集は CH-0627 の 1 件で、文頭ラベルの除去であり文の削除ではない) | WP-7a の対象 102 塊 | 同じ種類の除去 (文の削除) は残っていない。監査スクリプトを再実行した (上の実行 2) | `SUMMARY ch_blocks=38 ws_only=0 unpaired=0 removed_rows=66` (基点 b378989。実行 2) |
 | 2 | 7a | 差し戻し 1 の裁定 (監督): CH-0610 の編集 1 (L997-1022)・CH-0616 (L1214-1221)・CH-0638 (L1913-1930) を spec から外した (A-1・A-4)。基点を b378989 から 6635064 に取り直した (Y7-13) | 同じ種類の除去 = 残る文が設計を名指しせずに `design §…` や裸の `D-n` を引く塊のラベル除去。範囲の CH 塊 36 の各編集で、除いたラベル・括弧が `design`・`WP-` を含む塊について、残る文の `design §`・`D-n`・`§n`・`this WP`・`same commit`・`finding n` を `cs7a-rescan` で列挙した | WP-7a の CH 塊 36 (対象 102 塊の範囲 L1-L1953) | 該当 0。CH-0606 (日付句だけ)・CH-0610 (残る `design §1.5 finding 2a` は同じ塊の第 1 段落の `Phase 6 WP-3 (design D-3)` ラベルが基準のまま残る)・CH-0618 (`design D-4 (4), §5` は自分の括弧で設計を名指す)・CH-0620 (`design v1.1 §0 exception`、`§5 U-2` は `design D-4` のラベルが残る段落の中)・CH-0637 (`this WP` は残る `Phase 8 WP-1a` を指す)・CH-0612 (`design v1.5 §7` は自分の括弧で名指す) は残る参照が名指しされている。それ以外の塊は残る参照が 0。spec は変えていない | `SUMMARY ch_blocks=36 ws_only=0 unpaired=0 removed_rows=58` (基点 6635064。上の実行 3) |
+| 3 | 7b | L2513-2522 のラベル `Phase 9 WP-3e (design D-3 (2)): ` の除去を spec から外した (実装担当の自己裁定。CH-ID を付ける前。差し戻し 1 で監督が確定した)。検査器は許した | 同じ種類の除去 = 残る文が設計の名指しに寄りかかる塊のラベル除去。範囲の CH 塊 46 の各編集で、除いたラベル・括弧が `design`・`WP-`・`Phase` を含む塊について、残る文の `design §`・`D-n`・`§n`・`this WP`・`same commit`・`this closure`・`finding n` を `cs7b_rescan.py` で列挙した | WP-7b の CH 塊 46 (対象 102 塊の範囲 L2006-L3965) | L2513-2522 は残る文の `V-6's "複数なら field を省く" rule` が設計の名指し (`design D-3 (2)`) に寄りかかるので基準のまま。ほかの塊の残る参照語は、残るラベル・括弧 (自分の `Phase n WP-x`・`design D-n`) で名指しされているか 0 (上の A 表の「削除前の確認」の欄に塊ごとに記録)。再実行の出力は上の実行 4 | `SUMMARY ch_blocks=46 ws_only=0 unpaired=0 removed_rows=87` |
+| 4 | 7b | L3540-3550 の `K-3: ` の除去を spec から外した (実装担当の自己裁定。CH-ID を付ける前。差し戻し 1 で監督が確定した) | 除くと `bound). reads the budget-narrowed ...` が主語を失い、文頭が小文字の断片になって読めない (検査器は許した)。ラベルを残すのではなく塊ごと基準のまま。同じ種類 = 除去後に文が読めなくなる除去。範囲の CH 塊 46 の除去後の文を全部読み直した | WP-7b の CH 塊 46 (最初の実装) | 該当 0 (除去後の先頭が小文字の断片になる塊は、基準でも同じ省略形 (ラベルの後ろ) だった。A 表の「除去後の文を読んだ判定」の欄) | `SUMMARY ch_blocks=46 ws_only=0 unpaired=0 removed_rows=87` (実行 4。最初の実装) |
+| 5 | 7b | 差し戻し 1 の裁定 (監督): CH-0758 の編集 1 (L3243-3274)・CH-0771 の編集 2 (L3774-3799)・CH-0773 の編集 2 (L3875-3891) を spec から外し、CH-0752 (L2904-2918)・CH-0755 (L3053-3062) を欠番にした (A-1・A-3・A-4)。基点は 987b004 のまま | 同じ種類の除去 = (i) ラベル除去で、同じ塊に残る設計名の無い `design §n`・裸の `D-n`・`Code review §n`・`監督裁定 X` の拠り所が消えるもの、(ii) ラベル除去で、後ろの文が前に残ったラベルの段落の続きに読めるもの、(iii) ラベルの中の内容語が一緒に消えるもの。残り 44 塊の 55 編集について `cs7b_rescan.py`・`cs7b_rescan2.py` で、除いた語に `design`・`Phase`・`WP-` を含む塊の残る文の参照語、ラベル除去の位置 (文頭でない除去の前に残るラベル)、除いた語句の内容語を列挙した | WP-7b の CH 塊 44 (対象 102 塊の範囲 L2006-L3965) | (i) 該当 0: 残る `D-n`・`Code review §n`・`監督裁定 X`・`this WP`・`same commit`・`this closure` は、いずれも残るラベル・括弧 (自分の `Phase n WP-x`・`design D-n`・`code review §2 C, 監督裁定 C`) で名指しされている。(ii) 該当 0 とした (**誤り**: 走査の正規表現が `Q1-D11 (design v1.5 §7):` のようなラベルに当たらず、CH-0757・CH-0760 を見落とした。差し戻し 2 の再確認 1 で分かり、裁定 6 でやり直した)。(iii) 該当 1: CH-0742 の `Independent review B-1 (WP-2 follow-up): ` の `Independent` が消えるが、`review` の修飾で審査の属性という経緯の語であり、残る文は名指さない。ほかは内容語を含むラベルを除いていない (コード span の抽出は列挙の副産物) | `SUMMARY ch_blocks=44 ws_only=0 unpaired=0 removed_rows=78` (実行 5) |
+| 6 | 7b | 差し戻し 2 の裁定 (監督): CH-0757 (L3110-3114)・CH-0760 (L3341-3347) を spec から外し、欠番にした (再確認 1)。欠番は CH-0752・CH-0755・CH-0757・CH-0760 の 4。CH-0749 (`Pass 1: …` の段落の後の `Phase 4 (design D-3): ` の除去) は、`Pass 1:` が WP・設計のラベルではないので (ii) に当たらず、残す (観察) | (ii) をやり直し: ラベルの形を `WP-`・`Phase` に限らず (`Q1-D11` のような ID で始まるラベル、`Pass n:` のような見出しを含め)、残り 42 塊の 53 編集から、**文頭でない位置のラベル除去の全件**を、塊の基準の本文で除去の位置の前に何が在るかを手で読んで列挙した (下の表。列挙の補助に除去の位置の前の本文を出す script を使い、判定は手で行った) | WP-7b の CH 塊 42 (対象 102 塊の範囲 L2006-L3965) | 文頭でない位置のラベル除去は 5 件 (CH-0742 に 1、CH-0749 に 1、CH-0774 に 3)。同じ型 (前に残るラベル・見出しの段落の続きに読める除去) は 0: CH-0742 と CH-0774 は前の段落・文のラベルも除いてあり、前に残るラベルが無い。CH-0749 は直前が `Pass 1:` の見出しで、監督が観察として残すと裁定した。(i)(iii) は差し戻し 1 の結果のまま (CH-0757・CH-0760 の編集は `WP-3e rework T1 (追補 L-1): ` の文頭ラベルで、除いたので (i)(iii) の対象も減った) | `SUMMARY ch_blocks=42 ws_only=0 unpaired=0 removed_rows=74` (実行 6) |
+
+**文頭でない位置のラベル除去の全件 (完了条件 29、差し戻し 2 の再走査 (ii)。塊の基準の本文で除去の位置の前を手で読んだ)**
+
+| # | WP | 塊 (CH-ID、基点の行) | 除去したラベル | 除去の位置 | 直前に残る段落・文のラベル・見出し | 判定 |
+|---|---|---|---|---|---|---|
+| 1 | 7b | CH-0742 (L2601-2626) | `Independent review B-1 (WP-2 follow-up): ` | docstring の第 2 段落の先頭 | 第 1 段落は `P35 WP-2 (R-2): ` を除いた後の `the set of DISTINCT ...` で始まり、ラベル・見出しは無い (どちらも除去) | 前に残るラベル・見出しが無い。(ii) に当たらない |
+| 2 | 7b | CH-0749 (L2806-2820) | `Phase 4 (design D-3): ` | 第 2 段落の先頭 | `Pass 1: validate every operation, across every entity, before any execution begins (P35-D9/P35-D10 above). Nothing below this line has written through `self._backend` yet.` (見出し `Pass 1:`。WP・設計のラベルではない) | 監督の裁定 (差し戻し 2): (ii) に当たらない。残す (観察)。続く段落のラベル `Phase 9 WP-3b: ` は基準のまま |
+| 3 | 7b | CH-0774 (L3901-3910) | `Phase 9 WP-3b: ` | 第 2 文の先頭 | 第 1 文は `Phase 9 WP-3a: ` を除いた後の `` `enum`/`nullable` no longer gate -- see `create_entity`'s own identical comment immediately above. `` で、ラベル・見出しは無い | 前に残るラベル・見出しが無い。(ii) に当たらない |
+| 4 | 7b | CH-0774 (L3901-3910) | `Phase 9 WP-3c/WP-3d: ` (`Phase 9` と `WP-3c/WP-3d: ` が折り返しで割れる) | 第 3 文の先頭 | 第 1・第 2 文のラベルは除去済み。ラベル・見出しは無い | 前に残るラベル・見出しが無い。(ii) に当たらない |
+| 5 | 7b | CH-0774 (L3901-3910) | `Phase 9 WP-3cd closure (K-1): ` | 第 4 文の先頭 | 第 1〜3 文のラベルは除去済み。ラベル・見出しは無い | 前に残るラベル・見出しが無い。(ii) に当たらない |
+
+文頭の位置のラベル除去 (塊の先頭で、前に何も無いもの) は上の表に入れない。ほかの塊の文頭でない編集は日付又は括弧で、ラベルは基準のまま残っている。
 
 **内容の除去が 0 の塊の検査** (完了条件 28)
 
 | WP | CH-ID の塊 (`ch_blocks`) | `WS-ONLY` 行の数 | `SUMMARY` 行 (逐語) |
 |---|---|---|---|
 | 7a | 36 | 0 | `SUMMARY ch_blocks=36 ws_only=0 unpaired=0 removed_rows=58` |
+| 7b | 42 | 0 | `SUMMARY ch_blocks=42 ws_only=0 unpaired=0 removed_rows=74` |
 
 **変異の記録** (`tools/dev/mutate.py`。実行時刻とログのファイル名で書く)
+
+WP-7b: `tools/dev/mutate.py "$SP/cs7b-mutations.json" -C "$WT"` の最後の行: `mutate: 29 mutations, 29 as expected, restores verified 4/4 files (sha256 x2), grep counts unchanged (n/a for 5 edits whose lines all exist in the pristine file)` (`logs=` の出力先は作業機の一時ディレクトリで、本書には書かない)。変異前の確認 (変異なしで緑): `pt: 25 passed in 14.29s`; `pt: 4 passed in 3.60s`; `pt: 1 passed in 0.61s`。c22b は検査器が引用する文まで固定した wrapper (`cs7b_c22b_red.py`) で確かめ、実在パスの後半だけを削る `c22b-latter-half` を足した (WP-7a の再確認レビューの教訓)。赤の理由の行は各 `.log` にある。
 
 `tools/dev/mutate.py "$SP/cs7a-mutations.json" -C "$WT"` の最後の行: `mutate: 28 mutations, 28 as expected, restores verified 4/4 files (sha256 x2), grep counts unchanged (n/a for 6 edits whose lines all exist in the pristine file)` (`logs=` の出力先は作業機の一時ディレクトリで、本書には書かない)。赤の理由の行 (各ログの 11 行目前後。例: c1 `FAIL (§4.1 (1))`、c28 `WS-ONLY`、c29・c30 `REMOVED rows differ from the table`) は各 `.log` にある。変異前の確認: `pt.py -- cs7_cli_red.py -q` は `pt: 25 passed in 20.94s`、`pt.py -- cs7a_audit_red.py -q` は `pt: 4 passed in 4.15s` (どちらも変異なしで緑)。
 
@@ -5103,31 +5777,60 @@ D. 復元・欠番にした塊 (CH-ID を外し、受け皿の節を消した。
 | 26 | 7a | c29 (完了条件 29) | red | 2026-10-04 17:29:55 / `logs=` 配下の c29.log | `c29 expect=red got=red OK \| 1 failed in 0.79s \| restore=ok` |
 | 27 | 7a | c30 (完了条件 30) | red | 2026-10-04 17:29:55 / `logs=` 配下の c30.log | `c30 expect=red got=red OK \| 1 failed in 0.80s \| restore=ok` |
 | 28 | 7a | c34 (完了条件 34) | red | 2026-10-04 17:29:55 / `logs=` 配下の c34.log | `c34 expect=red got=red OK \| 1 failed in 0.90s \| restore=ok` |
+| 29 | 7b | c1 (完了条件 1) | red | 2026-10-04 23:02:32 / `logs=` 配下の c1.log | `c1 expect=red got=red OK \| 1 failed in 0.64s \| restore=ok` |
+| 30 | 7b | c2 (完了条件 2) | red | 2026-10-04 23:02:32 / `logs=` 配下の c2.log | `c2 expect=red got=red OK \| 1 failed in 0.64s \| restore=ok` |
+| 31 | 7b | c3a (完了条件 3) | red | 2026-10-04 23:02:32 / `logs=` 配下の c3a.log | `c3a expect=red got=red OK \| 1 failed in 0.63s \| restore=ok` |
+| 32 | 7b | c3b (完了条件 3) | red | 2026-10-04 23:02:32 / `logs=` 配下の c3b.log | `c3b expect=red got=red OK \| 1 failed in 0.61s \| restore=ok` |
+| 33 | 7b | c3c (完了条件 3) | red | 2026-10-04 23:02:32 / `logs=` 配下の c3c.log | `c3c expect=red got=red OK \| 1 failed in 0.63s \| restore=ok` |
+| 34 | 7b | c3d (完了条件 3) | red | 2026-10-04 23:02:32 / `logs=` 配下の c3d.log | `c3d expect=red got=red OK \| 1 failed in 0.60s \| restore=ok` |
+| 35 | 7b | c4 (完了条件 4) | red | 2026-10-04 23:02:32 / `logs=` 配下の c4.log | `c4 expect=red got=red OK \| 1 failed in 0.63s \| restore=ok` |
+| 36 | 7b | c5 (完了条件 5) | red | 2026-10-04 23:02:32 / `logs=` 配下の c5.log | `c5 expect=red got=red OK \| 1 failed in 0.65s \| restore=ok` |
+| 37 | 7b | c6a (完了条件 6) | red | 2026-10-04 23:02:32 / `logs=` 配下の c6a.log | `c6a expect=red got=red OK \| 1 failed in 0.30s \| restore=ok` |
+| 38 | 7b | c6b (完了条件 6) | red | 2026-10-04 23:02:32 / `logs=` 配下の c6b.log | `c6b expect=red got=red OK \| 1 failed in 0.28s \| restore=ok` |
+| 39 | 7b | c7 (完了条件 7) | red | 2026-10-04 23:02:32 / `logs=` 配下の c7.log | `c7 expect=red got=red OK \| 1 failed in 0.28s \| restore=ok` |
+| 40 | 7b | c8 (完了条件 8) | red | 2026-10-04 23:02:32 / `logs=` 配下の c8.log | `c8 expect=red got=red OK \| 1 failed in 0.28s \| restore=ok` |
+| 41 | 7b | c10a (完了条件 10) | red | 2026-10-04 23:02:32 / `logs=` 配下の c10a.log | `c10a expect=red got=red OK \| 1 failed in 0.19s \| restore=ok` |
+| 42 | 7b | c10b (完了条件 10) | red | 2026-10-04 23:02:32 / `logs=` 配下の c10b.log | `c10b expect=red got=red OK \| 1 failed in 0.19s \| restore=ok` |
+| 43 | 7b | c15 (完了条件 15) | red | 2026-10-04 23:02:32 / `logs=` 配下の c15.log | `c15 expect=red got=red OK \| 1 failed in 0.67s \| restore=ok` |
+| 44 | 7b | c16 (完了条件 16) | red | 2026-10-04 23:02:32 / `logs=` 配下の c16.log | `c16 expect=red got=red OK \| 1 failed in 0.64s \| restore=ok` |
+| 45 | 7b | c17 (完了条件 17) | red | 2026-10-04 23:02:32 / `logs=` 配下の c17.log | `c17 expect=red got=red OK \| 1 failed in 0.62s \| restore=ok` |
+| 46 | 7b | c18 (完了条件 18) | red | 2026-10-04 23:02:32 / `logs=` 配下の c18.log | `c18 expect=red got=red OK \| 1 failed in 0.61s \| restore=ok` |
+| 47 | 7b | c21a (完了条件 21) | red | 2026-10-04 23:02:32 / `logs=` 配下の c21a.log | `c21a expect=red got=red OK \| 1 failed in 0.67s \| restore=ok` |
+| 48 | 7b | c21b (完了条件 21) | red | 2026-10-04 23:02:32 / `logs=` 配下の c21b.log | `c21b expect=red got=red OK \| 1 failed in 0.62s \| restore=ok` |
+| 49 | 7b | c21c (完了条件 21) | red | 2026-10-04 23:02:32 / `logs=` 配下の c21c.log | `c21c expect=red got=red OK \| 1 failed in 0.61s \| restore=ok` |
+| 50 | 7b | c22a (完了条件 22) | red | 2026-10-04 23:02:32 / `logs=` 配下の c22a.log | `c22a expect=red got=red OK \| 1 failed in 0.60s \| restore=ok` |
+| 51 | 7b | c22b (完了条件 22) | red | 2026-10-04 23:02:32 / `logs=` 配下の c22b.log | `c22b expect=red got=red OK \| 1 failed in 0.66s \| restore=ok` |
+| 52 | 7b | c22b-latter-half (完了条件 22) | red | 2026-10-04 23:02:32 / `logs=` 配下の c22b-latter-half.log | `c22b-latter-half expect=red got=red OK \| 1 failed in 0.62s \| restore=ok` |
+| 53 | 7b | c23 (完了条件 23) | red | 2026-10-04 23:02:32 / `logs=` 配下の c23.log | `c23 expect=red got=red OK \| 1 failed in 0.95s \| restore=ok` |
+| 54 | 7b | c28 (完了条件 28) | red | 2026-10-04 23:02:32 / `logs=` 配下の c28.log | `c28 expect=red got=red OK \| 1 failed in 0.88s \| restore=ok` |
+| 55 | 7b | c29 (完了条件 29) | red | 2026-10-04 23:02:32 / `logs=` 配下の c29.log | `c29 expect=red got=red OK \| 1 failed in 0.89s \| restore=ok` |
+| 56 | 7b | c30 (完了条件 30) | red | 2026-10-04 23:02:32 / `logs=` 配下の c30.log | `c30 expect=red got=red OK \| 1 failed in 0.89s \| restore=ok` |
+| 57 | 7b | c34 (完了条件 34) | red | 2026-10-04 23:02:32 / `logs=` 配下の c34.log | `c34 expect=red got=red OK \| 1 failed in 0.93s \| restore=ok` |
 
 **記録**
 
 | 項目 | WP-7a | WP-7b |
 |---|---|---|
-| CH-ID を付けた塊 / 対象の塊 | 36 / 102 | / 103 |
-| 使った CH-ID と欠番 | `CH-0600`〜`CH-0615`、`CH-0617`〜`CH-0627`、`CH-0629`〜`CH-0637` の 36 個。欠番 `CH-0616`・`CH-0628`・`CH-0638` (除去を当てて戻した。D 表)。`CH-0639`〜`CH-0729` は未使用の予約 | |
-| 経緯トークン (前 → 後、`_HISTORY_TOKEN_PATTERNS` を `cell.py` 全文に当てた数) | 415 → 361 (WP-7a の範囲 199 → 145。基点 6635064 と作業ツリーで測り直した値)。日付を含む行 25 → 16 (範囲 10 → 1。残る 1 行は基点 L1051 (作業ツリー L1075) の入れ子の括弧の日付) | → |
-| 削除した文 | 0 (削除した文は 0。`new` が空の編集は CH-0627 の `' Phase 9 WP-3b:'` → `''` の 1 件だが、これは文頭ラベルの除去で文の削除ではない。途中で CH-0628 の 1 文を削除して戻した)。除いたのは文頭ラベル 28 個・括弧 7 個・裁定の日付句 6 個の語句だけ (計 41 編集。除いた語 58 行) | |
-| `cell.py` の行数 (前 → 後) | 3,913 → 3,965 (+52。基点 6635064。CH-ID の参照 36 本 = コメント 26 (`# history:` 1 行) と docstring 10 (空行・`History:`・閉じの引用符の 3 行) の追加 56 行、除去に接する行の切り直しで -4) | → |
-| `CONTROL_MAPPING.md` の版と引き直した参照の数 | 版 3.22 → 3.23 (`Version:` の行は監督が足した。主張の文の差分 0)。引き直した参照 23 件 (22 行。基点 6635064 で `changed 23, unresolved 0, not applied 0`)。基準の行と HEAD の行の内容は 23 件とも一致 | |
+| CH-ID を付けた塊 / 対象の塊 | 36 / 102 | 42 / 102 (基点 987b004 の実測。§16.2 の 103 のうち R-82 の CH-0570 の塊 1 は既存の CH-ID として対象外) |
+| 使った CH-ID と欠番 | `CH-0600`〜`CH-0615`、`CH-0617`〜`CH-0627`、`CH-0629`〜`CH-0637` の 36 個。欠番 `CH-0616`・`CH-0628`・`CH-0638` (除去を当てて戻した。D 表)。`CH-0639`〜`CH-0729` は未使用の予約 | `CH-0730`〜`CH-0751`、`CH-0753`・`CH-0754`、`CH-0756`、`CH-0758`・`CH-0759`、`CH-0761`〜`CH-0775` の 42 個。欠番 `CH-0752`・`CH-0755` (差し戻し 1)・`CH-0757`・`CH-0760` (差し戻し 2) の 4 (除去を当てて戻した。D 表)。`CH-0776`〜`CH-0859` は未使用の予約 |
+| 経緯トークン (前 → 後、`_HISTORY_TOKEN_PATTERNS` を `cell.py` 全文に当てた数) | 415 → 361 (WP-7a の範囲 199 → 145。基点 6635064 と作業ツリーで測り直した値)。日付を含む行 25 → 16 (範囲 10 → 1。残る 1 行は基点 L1051 (作業ツリー L1075) の入れ子の括弧の日付) | 361 → 303 (WP-7b の範囲 216 → 158。基点 987b004 と作業ツリーで測り直した値)。日付を含む行 16 → 5 (範囲 15 → 4。残る 4 行はいずれも検査器が日付だけの除去を受け付けない形: 入れ子の括弧の日付 3 (`(裁定 C-21 (B)/監督裁定 N-4, 2026-09-08)` 2 か所と `(裁定 C-25 (A), 監督裁定 2026-09-08)`)、` -- ` で割れたラベルの日付 1 (`WP-3a rework 2 (2026-09-07 -- real, measured bug, ...)`)) |
+| 削除した文 | 0 (削除した文は 0。`new` が空の編集は CH-0627 の `' Phase 9 WP-3b:'` → `''` の 1 件だが、これは文頭ラベルの除去で文の削除ではない。途中で CH-0628 の 1 文を削除して戻した)。除いたのは文頭ラベル 28 個・括弧 7 個・裁定の日付句 6 個の語句だけ (計 41 編集。除いた語 58 行) | 0 (削除した文は 0)。除いたのは文頭ラベル 28 個・括弧 13 個・括弧内の語 1 個・日付 9 個・裁定の日付句 2 個の語句だけ (計 53 編集。除いた語 74 行)。`new` が空の編集があるが、いずれもラベル・括弧・日付の除去で文の削除ではない |
+| `cell.py` の行数 (前 → 後) | 3,913 → 3,965 (+52。基点 6635064。CH-ID の参照 36 本 = コメント 26 (`# history:` 1 行) と docstring 10 (空行・`History:`・閉じの引用符の 3 行) の追加 56 行、除去に接する行の切り直しで -4) | 3,965 → 4,019 (+54。基点 987b004。CH-ID の参照 42 本 = コメント 34 (`# history:` 1 行) と docstring 8 (空行・`History:`・閉じの引用符の 3 行) の追加 58 行、除去に接する行の切り直しで -4)。変えた docstring は 8 個 |
+| `CONTROL_MAPPING.md` の版と引き直した参照の数 | 版 3.22 → 3.23 (`Version:` の行は監督が足した。主張の文の差分 0)。引き直した参照 23 件 (22 行。基点 6635064 で `changed 23, unresolved 0, not applied 0`)。基準の行と HEAD の行の内容は 23 件とも一致 | 版 3.23 → 3.24 (`Version:` の行は監督が足した。主張の文の差分 0)。引き直した参照 18 件 (基点 987b004 で `changed 18, unresolved 0, not applied 0`)。基準の行と HEAD の行の内容は 18 件とも一致 (上の表の WP-7b の行) |
 
 | 照合コマンド / suite | WP-7a (出力の行を逐語) | WP-7b (出力の行を逐語) |
 |---|---|---|
-| `pt.py … r2db-api/tests -q` 前 / 後 | 前 (基点 b378989) `pt: 1776 passed in 170.89s (0:02:50)` / 後 (基点 6635064) `pt: 1784 passed in 177.40s (0:02:57)`。差 +8 は R-82 の統合 (b378989..6635064) が足した `r2db-api/tests/test_r82_catalog_cache.py` の 8 件 | |
-| `pt.py … MitateDB-api/tests -q` 前 / 後 | 前 (基点 b378989) `pt: 1929 passed, 2 subtests passed in 238.63s (0:03:58)` / 後 (基点 6635064) `pt: 1937 passed, 2 subtests passed in 346.73s (0:05:46)`。差 +8 は R-82 の統合が足した `MitateDB-api/tests/test_r82_catalog_cache.py` の 8 件 (`git diff b378989 6635064 --stat` で両ファイルは新規) | |
-| `pt.py … conformance-tests/test_control_mapping_register.py conformance-tests/test_conformance_docstring_position_refs.py -q` 前 / 後 | 前 (基点 b378989) `pt: 83 passed in 4.44s` / 後 (基点 6635064) `pt: 83 passed in 5.44s` | |
-| `pt.py … tools/tests -q` (コミット前 / コミット後の HEAD) | 作業前 (基点 b378989) `pt: 808 passed in 101.78s (0:01:41)` / コミット前 (作業ツリー、基点 6635064) `pt: 808 passed in 103.40s (0:01:43)` / コミット後の HEAD は監督が実行 | |
-| `pt.py … cs7_cli_red.py -q` (変異の前) | `pt: 25 passed in 20.94s` (基点 6635064)。`cs7a_audit_red.py` は `pt: 4 passed in 4.15s` | |
-| `tools/dev/mutate.py …` | `mutate: 28 mutations, 28 as expected, restores verified 4/4 files (sha256 x2), grep counts unchanged (n/a for 6 edits whose lines all exist in the pristine file)` | |
-| `check_comment_provenance.py --base <基点> …` | `comment provenance OK: 211 blocks checked` (exit 0) | |
-| `check_comment_provenance.py --register` | `comment provenance register OK: 95 files scanned, 473 CH-IDs` (exit 0) | |
-| `check_doc_refs.py` | `check_doc_refs OK: 0 dangling references` (exit 0) | |
-| `public_value_scan.py <触ったファイル>` | `# mode=tree files_scanned=4 total_flagged=0` | |
-| `gate.py --label cs7a` / `cs7b` | `gate: 5248 passed, 2 subtests passed in 791.79s (0:13:11)` / `gate: judge=PASS` | 監督が実行 |
+| `pt.py … r2db-api/tests -q` 前 / 後 | 前 (基点 b378989) `pt: 1776 passed in 170.89s (0:02:50)` / 後 (基点 6635064) `pt: 1784 passed in 177.40s (0:02:57)`。差 +8 は R-82 の統合 (b378989..6635064) が足した `r2db-api/tests/test_r82_catalog_cache.py` の 8 件 | 前 (基点 987b004) `pt: 1784 passed in 202.17s (0:03:22)` / 後 (差し戻し 2 の後) `pt: 1784 passed in 161.60s (0:02:41)` / `pt: exit=0 log=<書かない>` (`log=` は作業機の一時ディレクトリの絶対パスなので書かない。運用条件 §1.9 の 60。以下の行も同じ) |
+| `pt.py … MitateDB-api/tests -q` 前 / 後 | 前 (基点 b378989) `pt: 1929 passed, 2 subtests passed in 238.63s (0:03:58)` / 後 (基点 6635064) `pt: 1937 passed, 2 subtests passed in 346.73s (0:05:46)`。差 +8 は R-82 の統合が足した `MitateDB-api/tests/test_r82_catalog_cache.py` の 8 件 (`git diff b378989 6635064 --stat` で両ファイルは新規) | 前 (基点 987b004) `pt: 1937 passed, 2 subtests passed in 543.00s (0:09:02)` / 後 (差し戻し 2 の後) `pt: 1937 passed, 2 subtests passed in 243.90s (0:04:03)` / `pt: exit=0 log=<書かない>`。前後で passed 数一致 |
+| `pt.py … conformance-tests/test_control_mapping_register.py conformance-tests/test_conformance_docstring_position_refs.py -q` 前 / 後 | 前 (基点 b378989) `pt: 83 passed in 4.44s` / 後 (基点 6635064) `pt: 83 passed in 5.44s` | 前 (基点 987b004) `pt: 83 passed in 19.37s` / 後 (差し戻し 2 の後) `pt: 83 passed in 4.56s` / `pt: exit=0 log=<書かない>` |
+| `pt.py … tools/tests -q` (コミット前 / コミット後の HEAD) | 作業前 (基点 b378989) `pt: 808 passed in 101.78s (0:01:41)` / コミット前 (作業ツリー、基点 6635064) `pt: 808 passed in 103.40s (0:01:43)` / コミット後の HEAD は監督が実行 | 作業前 (基点 987b004) `pt: 808 passed in 115.34s (0:01:55)` / コミット前 (作業ツリー、差し戻し 2 の後) `pt: 808 passed in 94.86s (0:01:34)` / `pt: exit=0 log=<書かない>` / コミット後の HEAD は監督が実行 |
+| `pt.py … cs7_cli_red.py -q` (変異の前) | `pt: 25 passed in 20.94s` (基点 6635064)。`cs7a_audit_red.py` は `pt: 4 passed in 4.15s` | `pt: 25 passed in 14.29s` (基点 987b004、差し戻し 2 の後)。`cs7b_audit_red.py` は `pt: 4 passed in 3.60s`、`cs7b_c22b_red.py` は `pt: 1 passed in 0.61s` |
+| `tools/dev/mutate.py …` | `mutate: 28 mutations, 28 as expected, restores verified 4/4 files (sha256 x2), grep counts unchanged (n/a for 6 edits whose lines all exist in the pristine file)` | `mutate: 29 mutations, 29 as expected, restores verified 4/4 files (sha256 x2), grep counts unchanged (n/a for 5 edits whose lines all exist in the pristine file)` |
+| `check_comment_provenance.py --base <基点> …` | `comment provenance OK: 211 blocks checked` (exit 0) | `comment provenance OK: 211 blocks checked` (exit 0) |
+| `check_comment_provenance.py --register` | `comment provenance register OK: 95 files scanned, 473 CH-IDs` (exit 0) | `comment provenance register OK: 95 files scanned, 515 CH-IDs` (exit 0) |
+| `check_doc_refs.py` | `check_doc_refs OK: 0 dangling references` (exit 0) | `check_doc_refs OK: 0 dangling references` (exit 0) |
+| `public_value_scan.py <触ったファイル>` | `# mode=tree files_scanned=4 total_flagged=0` | `# mode=tree files_scanned=4 total_flagged=0` |
+| `gate.py --label cs7a` / `cs7b` | `gate: 5248 passed, 2 subtests passed in 791.79s (0:13:11)` / `gate: judge=PASS` | `gate: 5248 passed, 2 subtests passed in 565.28s (0:09:25)` / `gate: judge=PASS` (label `cs7b2`。差し戻し 2 の後の木。差し戻し 2 の前の木の label `cs7b` も `5248 passed`、`judge=PASS`) |
 
 **完了条件ごとの結果 (WP-7a、実装担当)** (§16.3 の「完了条件 ↔ 変異」の 36 項目。変異の行は上の変異の記録)
 
@@ -5169,6 +5872,47 @@ D. 復元・欠番にした塊 (CH-ID を外し、受け皿の節を消した。
 | 34 | c34 | red (`cell.py:1875-9926 (line 9926 beyond EOF 3965)`)。HEAD は範囲内 (`pt: 83 passed`)。EOF は 3965 |
 | 35 | 監督 | `gate.py --label cs7a`: `gate: 5248 passed, 2 subtests passed in 791.79s (0:13:11)`、`gate: judge=PASS`、`gate: pg_database/pg_roles diff 0` (基点 6635064 の作業ツリー)。`finalize.py --tools-tests` とコミット後の `tools/tests` の行は設計 §10.9 に記録する |
 | 36 | 監査照合 | `cell.py` の差分は `cs7_apply.py` が spec から作った行だけ (手編集 0)。`security/CONTROL_MAPPING.md` の差分は `repull.py` が書いた 22 行と、監督が足した `Version:` の 1 行だけ。受け皿は `cs7_apply.py` が追記した節だけ |
+
+**完了条件ごとの結果 (WP-7b、実装担当。差し戻し 2 の後の状態)** (§16.3 の「完了条件 ↔ 変異」の 36 項目。変異の行は上の変異の記録)
+
+| 完了条件 | 変異 / 照合 | 結果 |
+|---|---|---|
+| 1 | c1 | `cs7_cli_red.py::test_cli_red[c1]` red (`FAIL (§4.1 (1))`) |
+| 2 | c2 | `c2` red (`FAIL (§4.1 (2))`) |
+| 3 | c3a〜c3d | 4 種とも red (`FAIL (§4.1 (3))`。c3b は CH-0742 の第 2 段落の保護参照を含まない 2 文の入れ替えで、赤の理由はログで `retained text has no order-preserving match` (並べ替えの検出。保護文の削除の分岐ではない)) |
+| 4 | c4 | red (`FAIL (§4.1 (3))`。`J-4 (SI-14)` → `J-4`) |
+| 5 | c5 | red (`FAIL (§4.1 (5))`) |
+| 6 | c6a・c6b | red (`FAIL (§4.2 1)`、孤児は `orphan`) |
+| 7 | c7 | red (`FAIL (§4.2 2)`) |
+| 8 | c8 | red (`FAIL (§4.2 5)`) |
+| 9 | 監査照合 | 非該当。`MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py` に `cell.py` の `(module, lineno)` pin は 0 件、`"cell.py": 44` は `ast.walk` の件数で不変 (`git diff 987b004 --stat -- MitateDB-api/tests` は空。`pt.py MitateDB-api/tests` は後も件数 pin のテストを含めて緑 (`1937 passed, 2 subtests passed`)) |
+| 10 | c10a・c10b | red (c10a `assert 3 == 2`、c10b `'isinstance(self._backend' not in ...`) |
+| 11 | 非該当 | 「最後の変更セット」限り |
+| 12 | 非該当 | 「変更セット 1」限り |
+| 13 | 監査照合 | 両 peer の集計行と経緯トークン数 361 → 303 は上の記録の表 |
+| 14 | 監査照合 | `git diff -U0 987b004 -- cell.py` の hunk は旧 L2026 以降 (差し戻し 1 の後も)で、登録 helper 4 (L82-177) と既存の CH-ID の塊 (CH-0570 の旧 L3413-3427 を含む。7a の CH-ID は L2006 より前) の行と重ならない。`git diff --stat 987b004 -- MitateDB-api/tests tools conformance-tests r2db-api` は空 (`_ISOMORPHIC_TARGETS` の差分 0) |
+| 15 | c15 | red (`FAIL (§4.1 (2))`) |
+| 16 | c16 | red (`FAIL (§4.1 (3))`。CH-0748 の第 2 文 `J-4 (SI-14): a replayed mutation response ...` を丸ごと消した) |
+| 17 | c17 | red (`FAIL (§4.1 (3))`。**逸脱** (WP-7a と同じ): WP-7b の CH 塊でラベルの後ろの先頭が大文字の文は無く (文頭ラベル 28 個の除去で 0 件)、小文字化の代わりに大文字化 `resolved` → `Resolved` を当てた) |
+| 18 | c18 | red (`FAIL (§4.1 (3))`。CH-0743 の `design v1.2 R-5` → `design R-5`) |
+| 19 | 監査照合 | 非該当。記録 (`### correction:`) は基点も HEAD も 4 件 (既存)。WP-7b は足していない |
+| 20 | 監査照合 | 非該当。`#:` の行は範囲に 8 行 (L2055-2062 の 1 塊) あり、この塊は CH-ID を付けていない (HEAD の `#:` の行 20、範囲 8) |
+| 21 | c21a・c21b・c21c | `find_broken_line_wrap_joins` は `--base` の中で全 CH 塊に流れ 0 件 (exit 0)。変異 3 種とも red (c21a `FAIL (§4.1 (3))` (CH-0754 の折り返しを空白なしでつなぐ)、c21b・c21c `FAIL (§9e)`) |
+| 22 | c22a・c22b | red (c22a `FAIL (§4.1 (2))`、c22b `FAIL (§4.1 (3))`)。c22b は CH-0743 (基点 L2637-2682) の第 3 段落のラベル `P35 WP-2 (R-1, design docs/design/ ⏎ PHASE35_CROSS_ENTITY_AND_ ⏎ CONTRACT_130_V1.md §2, P35-D9/P35-D10/P35-D11): ` (折り返しで割れた実在パス) を削る変異で、WP-7a の再確認の教訓どおり、赤を検査器が引用する文 (`cell.py:2655`、割れたパスをつないだ形 `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` で出る) まで固定する wrapper `cs7b_c22b_red.py` で確かめた。パスの後半 `CONTRACT_130_V1.md` だけを削る `c22b-latter-half` も同じ引用文で red。どちらも `expect=red got=red OK`、`restore=ok` |
+| 23 | c23 | red (`check_doc_refs FAILED: 1 dangling reference(s)`) |
+| 24 | 監査照合 | 削除した文は 0 のため候補一覧は空。除いたラベル・括弧を指す点検語 (`this WP`・`same commit`・`this closure`・`before this`・名指しの `D-n`・`V-6`) は除去前に塊ごとに確かめ、指す塊は見送った (A 表の根拠欄。検査器が許す候補を見送った 10 塊 (うち L2904・L3053 は差し戻し 1、L3110・L3341 は差し戻し 2 で戻した) と、除去を試して検査器が受け付けなかった 5 塊) |
+| 25 | 監査照合 | 安全上の理由と同居する文は 1 文も削除していない (削除した文 0)。C 表の 58 塊 (安全の語の 20 塊を含む) は逐語又は経緯トークンだけの除去。差し戻し 1 で commit・fail-closed の塊 (L2904・L3053) の除去は戻した (差し戻し 2 で L3110・L3341 も戻した) |
+| 26 | 監査照合 | 参照先一覧のうち 7b の参照先と WP-7a が「7b で確認する」とした 9 行の確定 (WP-7b の 20 行) は HEAD に「はい」(1 行は該当なし)。7a の参照先は WP-7a の記録のまま |
+| 27 | 監査照合 | 判定表 A 102 行 (対象の全塊)、B 53 行 (目印に当たる 53 文)、C 58 行 (安全の語の 20 塊を含む)。表は本書の本文にある。差し戻し 2 の後の実物 (CH-ID 42 塊) に合わせて書き直した |
+| 28 | c28 | red (`audit red: WS-ONLY ... CH-0741`)。実測の出力は上の `内容の除去が 0 の塊の検査` と監査スクリプトの出力 (WS-ONLY 0) |
+| 29 | c29 | red (`REMOVED rows differ from the table: extra=[(CH-0749, id, WP-3b)]`)。WP-7b の復元・欠番の裁定 (D 表 5〜11、差し戻し 1・2) と、CH-ID を付ける前に外した 2 件 (裁定 3・4) の後に範囲を再走査した結果が上の裁定 5・6 の行と実行 6。c29 は c30 と同じ型の赤で、「同じ種類の除去」を直接は示さない (完了条件 29 は監査照合) |
+| 30 | c30 | red (`extra=[(CH-0748, id, WP-2cd)]`)。最後の監査 (実行 6) の出力 `REMOVED` 74 行と除いた語の一覧 74 行は、順序つきで (塊の範囲・CH-ID・種類・語・回数の列まで) 1 行ずつ一致することを別に確かめた (74/74)。`cs7b_audit_red.py::test_audit[base]` が緑なのは集合の一致だけを見るため (順序と行の列は見ない)。最初に選んだ変異 (CH-0750 の `WP-3b closure` を括弧から除く) は `--base` が exit 1 で (許可に当たらず)、pytest exit 3 になったので、許可に当たる WP の位置指定 (`WP-2cd/`) の除去に替えた |
+| 31 | 監査照合 | 該当 0 (削除した文 0) |
+| 32 | 監査照合 | 非該当。変えた docstring 8 個 (CH-0733・CH-0736・CH-0740・CH-0742・CH-0743・CH-0758・CH-0769・CH-0772) に `\` は 0 件 (基点の範囲の docstring 21 個にも 0 件) |
+| 33 | 監査照合 | `repull.py` の出力 (`changed 18, unresolved 0, not applied 0`、exit 0) と 18 件の内容一致は上の表。版は監督が 3.24 に上げた |
+| 34 | c34 | red (`cell.py:1875-9926 (line 9926 beyond EOF 4019)`)。HEAD は範囲内 (`pt: 83 passed`)。EOF は 4019 |
+| 35 | 監督 | `gate.py --label cs7b2`: `gate: 5248 passed, 2 subtests passed in 565.28s (0:09:25)`、`gate: judge=PASS`、`gate: pg_database/pg_roles diff 0` (基点 987b004 の作業ツリー、差し戻し 2 の後)。`finalize.py --tools-tests` とコミット後の `tools/tests` の行は設計 §10.10 に記録する |
+| 36 | 監査照合 | `cell.py` の差分は `cs7_apply.py` が spec から作った行だけ (手編集 0)。`security/CONTROL_MAPPING.md` の差分は `repull.py` が書いた 18 行と、監督が足した `Version:` の 1 行だけ。受け皿は `cs7_apply.py` が追記した節だけ |
 
 ### 16.5 監督裁定 (2026-10-04。依頼者の方針 2026-10-03 により監督の推奨で進め、事後確認を取る)
 
