@@ -192,11 +192,12 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
     # position" line rather than only the `create_entity` creation path.
     _reject_reserved_entity_name(entity, field="entity")
     if "revision" in operation:
-        # WP-2 review minor (e): `revision` was previously an accepted-but-
+        # `revision` was previously an accepted-but-
         # unused key (schema-level optimistic locking has no implementation
         # here) -- silently accepting and ignoring it is exactly the kind
         # of gap `field_type`'s own precedent below closes, so stop
         # tolerating it instead of leaving it a silent no-op.
+        # history: CH-0990
         fail("CAPABILITY_UNSUPPORTED", "Schema operation optimistic locking is not available.", details=violation("capability", field="revision"))
     if name != "add_field" and "field_type" in operation:
         # R-2 (corrigendum m-1): `field_type` is accepted only by
@@ -218,32 +219,36 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
             )
         fail("VALIDATION_FAILED", "field_type is only supported by add_field.", details=violation("unsupported_field", field="field_type"))
     if name != "create_entity" and "field_types" in operation:
-        # Phase 6 WP-2 (design D-3(iv)): `field_types` (the per-field map)
+        # `field_types` (the per-field map)
         # is accepted only by `create_entity` -- symmetric with `field_
         # type`'s (the scalar) `add_field`-only rule immediately above.
+        # history: CH-0991
         fail("VALIDATION_FAILED", "field_types is only supported by create_entity.", details=violation("unsupported_field", field="field_types"))
     if name != "create_entity" and "field_constraints" in operation:
-        # Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` (the
+        # Contract 1.7.0 (D-2 (1)): `field_constraints` (the
         # per-field map) is accepted only by `create_entity` -- symmetric
         # with `field_types` immediately above.
+        # history: CH-0992
         fail("VALIDATION_FAILED", "field_constraints is only supported by create_entity.", details=violation("unsupported_field", field="field_constraints"))
     if name not in ("add_field", "alter_field") and ("enum" in operation or "nullable" in operation):
-        # Contract 1.7.0 (D-2 (1), WP-2a): the scalar `enum`/`nullable`
+        # Contract 1.7.0 (D-2 (1)): the scalar `enum`/`nullable`
         # pair is accepted only by `add_field`/`alter_field` -- symmetric
         # with `field_type`'s own `add_field`-only rule above.
+        # history: CH-0993
         fail("VALIDATION_FAILED", "enum/nullable are only supported by add_field/alter_field.", details=violation("unsupported_field", field="enum" if "enum" in operation else "nullable"))
     if name != "create_index":
-        # WP-2 review M-3: `index`/`unique` are meaningful only to
+        # `index`/`unique` are meaningful only to
         # `create_index` (`drop_index` additionally accepts `index` as the
         # name to drop, but never `unique`) -- the same "don't silently
         # tolerate a key this operation does not use" principle as
         # `field_type` above, applied to this pair.
+        # history: CH-0994
         if "unique" in operation:
             fail("VALIDATION_FAILED", "unique is only supported by create_index.", details=violation("unsupported_field", field="unique"))
         if "index" in operation and name != "drop_index":
             fail("VALIDATION_FAILED", "index is only supported by create_index/drop_index.", details=violation("unsupported_field", field="index"))
     if "destructive" in operation and not isinstance(operation["destructive"], bool):
-        # Review blocker B-1: symmetric with `bind_mutation`'s identical
+        # symmetric with `bind_mutation`'s identical
         # check above (now in `mutation_binding.py`) -- a non-boolean truthy `destructive` (a string, an
         # int, an object) must never be silently coerced into `True` by a
         # loose `bool(...)` cast downstream. This is a shape check (contract
@@ -251,6 +256,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # runs here, before the destructive-confirmation gate itself, per
         # contract `evaluation_order` (shape validation precedes
         # confirmation evaluation).
+        # history: CH-0995
         fail("VALIDATION_FAILED", "Destructive flag must be boolean.", details=violation("request_schema", field="destructive", declared_type="boolean", observed_type=observed_type_of(operation["destructive"])))
     fields: tuple[str, ...] = ()
     field_name: str | None = None
@@ -307,7 +313,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 if declared_field not in fields:
                     fail("VALIDATION_FAILED", "field_types names a field that is not present in fields.", details=violation("unsupported_field", field="field_types/" + declared_field))
                 # (b) a value outside the 7-word vocabulary. `isinstance`
-                # checked FIRST (coordinator F2, 2026-09-04 review): `in`
+                # checked FIRST (coordinator F2): `in`
                 # against `FIELD_TYPES` (a `set`) raises `TypeError` for an
                 # unhashable value (a list/dict) rather than returning
                 # `False`, and `_endpoint` (http.py) maps an uncaught
@@ -317,6 +323,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 # matches), so a list/dict/int/bool/null value reaches this
                 # line from real HTTP input, not merely from a
                 # bind_schema_operation direct call.
+                # history: CH-0996
                 if not isinstance(declared_type, str) or declared_type not in FIELD_TYPES:
                     fail("VALIDATION_FAILED", "Unsupported field type.", details=violation("enum", field="field_types/" + declared_field, declared_type="string"))
                 # Decision (v1.3 G11): an explicitly declared `json` is the
@@ -325,7 +332,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 # (NUL-check inclusion, JSONB-default DDL).
                 declared_types[declared_field] = None if declared_type == "json" else declared_type
             field_types = declared_types
-        # Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` is an
+        # Contract 1.7.0 (D-2 (1)): `field_constraints` is an
         # OPTIONAL, never-required key -- a `create_entity` carrying no
         # `field_constraints` at all stays valid unchanged (every field it
         # creates gets no `enum`, `nullable: true`, D-2 (2)'s own default).
@@ -333,13 +340,14 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # type (`field_types.get(name)`, `None`/json if that field was
         # never given one) is already resolved for `validate_enum_
         # declaration` below.
+        # history: CH-0997
         if "field_constraints" in operation:
             if "fields" not in operation:
                 # Mirrors `field_types`'s identical "sent without fields"
-                # check above. Monitor ruling N-2 (rulings-r2-closure.md,
-                # WP-2a closure): `field` names the request-internal key
+                # check above. `field` names the request-internal key
                 # this whole clause hangs off, mirrors the adjacent
                 # per-entry branches below which already load this key.
+                # history: CH-0998
                 fail(
                     "VALIDATION_FAILED",
                     "field_constraints requires fields.",
@@ -347,8 +355,9 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 )
             raw_field_constraints = operation["field_constraints"]
             if not isinstance(raw_field_constraints, dict):
-                # Monitor ruling N-2 (rulings-r2-closure.md): same key,
+                # same key,
                 # same reason as the "requires fields" branch above.
+                # history: CH-0999
                 fail(
                     "VALIDATION_FAILED",
                     "field_constraints must be an object.",
@@ -441,11 +450,12 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 # Decision (v1.3 G11): same json->None translation as
                 # create_entity's `field_types` values above.
                 field_type = None
-        # Contract 1.7.0 (D-2 (1), WP-2a): `add_field`'s own single-field
+        # Contract 1.7.0 (D-2 (1)): `add_field`'s own single-field
         # `enum`/`nullable`, validated against THIS SAME request's own
         # `field_type` (already resolved above -- `add_field` declares a
         # brand new field, so there is no "existing declared type" to
         # defer to, unlike `alter_field` below).
+        # history: CH-1001
         if "enum" in operation or "nullable" in operation:
             raw_nullable = operation.get("nullable", True)
             if not isinstance(raw_nullable, bool):
@@ -467,7 +477,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                     _fail_constraint_declaration("enum", field_type, exc)
             constraints = FieldConstraints(enum=enum_tuple, nullable=raw_nullable)
     elif name == "alter_field":
-        # Contract 1.7.0 (D-2 (5), WP-2a; monitor ruling A/B-2): `alter_
+        # Contract 1.7.0 (D-2 (5); monitor ruling A/B-2): `alter_
         # field` redeclares one EXISTING field's `enum`/`nullable` as a
         # PATCH, never a wholesale replace -- omitting `enum` LEAVES it as
         # it is, `enum: null` CLEARS it, omitting `nullable` LEAVES it as
@@ -482,6 +492,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # the `enum_members` bound, and the omitted/clear/value COMPOSITION
         # against the field's existing constraints are all deferred to
         # `apply_schema` (addendum R-b/R-c, D-2 (3)) -- see `ConstraintPatch`.
+        # history: CH-1002
         field_name = validate_identifier(operation.get("field", ""), field="field")
         _reject_reserved_field(field_name, field="field")
         if "nullable" not in operation and "enum" not in operation:
@@ -511,7 +522,8 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         if not enum_omitted:
             raw_enum = operation["enum"]
             if raw_enum is None:
-                # Monitor ruling A: `enum: null` clears the field's enum.
+                # `enum: null` clears the field's enum.
+                # history: CH-1003
                 enum_clear = True
             else:
                 if not isinstance(raw_enum, list) or not raw_enum:
@@ -576,13 +588,14 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
     )
 
 
-# --- contract 1.7.0 dry_run/plan (D-4, WP-2b) --------------------------------
+# --- contract 1.7.0 dry_run/plan (D-4) --------------------------------
 #
 # Peer symmetry (work order §2 WP-2b "同型性テストの対象"): MitateDB-api
 # places its own same-named, same-signature pair in `field_types.py`
 # (the module its own D-2 constraint helpers already live in) -- no code
 # is shared between the two peers (依頼者裁定 2026-09-03 案(a)); only the
 # two names/signatures/behaviour are pinned isomorphic.
+# history: CH-1004
 
 
 def normalize_request_for_plan(request: dict[str, Any]) -> bytes:
@@ -754,7 +767,7 @@ class ApplicationCell:
     # entity -> client index name -> {"fields": (...), "unique": bool}
     # (R-5). Declared uniqueness keys are exactly the unique=True entries.
     indexes: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
-    # Contract 1.7.0 (D-2 (4), WP-2a): entity -> field_name -> FieldConstraints
+    # Contract 1.7.0 (D-2 (4)): entity -> field_name -> FieldConstraints
     # -- the in-memory backend's own declaration registry ("プロセス内参照
     # cell の構造", no upgrade script needed, unlike Postgres's side table).
     # A field name is present here ONLY when SOMETHING was declared for it
@@ -763,6 +776,7 @@ class ApplicationCell:
     # "省略 = json" convention. Never read/written directly by anything
     # outside this class; `catalog()`/`_apply`/`_apply_upsert`/`apply_
     # schema` below are its only callers.
+    # history: CH-1007
     field_constraints: dict[str, dict[str, "FieldConstraints"]] = field(default_factory=dict)
     schema_revision: int = 0
     # entity -> highest `id` ever assigned. Monotonic, never decremented by
@@ -824,7 +838,8 @@ class ApplicationCell:
             for seed in seed_rows:
                 self._insert_row(entity, dict(seed))
 
-    # ---- idempotency (contract 1.7.0 D-5, WP-2c) --------------------------
+    # ---- idempotency (contract 1.7.0 D-5) --------------------------
+    # history: CH-1009
 
     def _idempotency_reclaim(self, *, now: float) -> None:
         """Ruling I-6: an elapsed record is "treated as absent"; deletion
@@ -888,11 +903,12 @@ class ApplicationCell:
         validate_projection(select, known_fields)
         validate_predicates(where, known_fields)
         order_spec = _resolve_order_by(order_by, known_fields)
-        # WP-2 review minor (c): order_by clauses count toward query
+        # order_by clauses count toward query
         # complexity like select/where terms already do (the raw, caller-
         # supplied count -- not the implicit trailing `id asc` `
         # _resolve_order_by` may have appended, which is bookkeeping this
         # engine adds, not complexity the caller asked for).
+        # history: CH-1010
         order_by_count = len(order_by) if order_by else 0
         limits.check("query_complexity", len(where) + len(select) + order_by_count)
         # R-7, corrigendum M-9: validate every predicate's value type before
@@ -948,11 +964,14 @@ class ApplicationCell:
 
     def _describe_entity(self, name: str) -> dict[str, Any]:
         """One entity's `EntityDescriptor` (contract shape) -- factored out
-        of `catalog()` below (WP-2b) so `apply_schema`'s own `dry_run`
+        of `catalog()` below so `apply_schema`'s own `dry_run`
         response can build the identical descriptor for the ONE entity a
         schema operation targets (D-4 (3): "schema なら変更後の
         EntityDescriptor を descriptor に載せる"), without duplicating this
-        construction logic a second time."""
+        construction logic a second time.
+
+        History: CH-1011
+        """
         fields = sorted(self.schema.get(name, {}).keys())
         unique_keys = [
             {"name": index_name, "fields": list(info["fields"])}
@@ -964,12 +983,13 @@ class ApplicationCell:
         # `self.schema[name]`'s internal `None` (untyped) reports as
         # `json`, decision (ii)'s own default, never left un-translated.
         declared_field_types = self.schema.get(name, {})
-        # Contract 1.7.0 (D-2 (1), WP-2a): total over `fields` --
+        # Contract 1.7.0 (D-2 (1)): total over `fields` --
         # `nullable` always present, `enum` only for a field the
         # registry (`self.field_constraints`) actually carries a row
         # for. Read from the registry itself, never re-derived from
         # any physical/stored value (D-2 (4): "catalog は...宣言
         # registry から報告する").
+        # history: CH-1012
         declared_constraints = self.field_constraints.get(name, {})
         field_constraints_out: dict[str, Any] = {}
         for field_name in fields:
@@ -1007,12 +1027,14 @@ class ApplicationCell:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> MutationOutcome:
-        """Ruling U-7 (WP-6d): thin lock wrapper -- `self._idempotency_lock`
+        """thin lock wrapper -- `self._idempotency_lock`
         is held for this call's entire duration, so a concurrent thread
         calling `transact`/`apply_schema` on this SAME cell cannot
         interleave with this one's own idempotency lookup -> execute ->
         store window (see `_idempotency_lock`'s own field comment above).
         All actual behavior lives in `_transact_locked` below, unchanged.
+
+        History: CH-1013
         """
         with self._idempotency_lock:
             return self._transact_locked(
@@ -1036,7 +1058,7 @@ class ApplicationCell:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> MutationOutcome:
-        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4):
         `dry_run` walks every gate a real request would (no early-out
         anywhere above or inside this method) and this method's own
         SINGLE tx-exit point -- after the per-operation loop below, before
@@ -1060,12 +1082,14 @@ class ApplicationCell:
         it was going to, before this point is ever reached -- and before
         this method's own commit).
 
-        Review round F-5 (`{scratchpad}/rulings-r4.md`): `service.py`
+        Review round F-5: `service.py`
         builds `plan_request` unconditionally for every mutation, so the
         digest below is only computed when it is actually consumed --
         `dry_run`'s own response, or a caller-presented `plan` to verify
         -- never for the ordinary apply that carries neither. A plain
         apply pays no `json.dumps`/`sha256` cost it never uses.
+
+        History: CH-1014
         """
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
@@ -1074,7 +1098,7 @@ class ApplicationCell:
         if not operations:
             fail("VALIDATION_FAILED", "At least one mutation is required.", details=violation("request_schema", field="operations"))
         limits.check("batch_items", len(operations))
-        # Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3, WP-2c): the
+        # Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3): the
         # idempotency lookup sits HERE -- after every bound this method's
         # own caller (`service.py`) and the batch-size bound just above
         # have already checked, before the entity-existence check right
@@ -1083,6 +1107,7 @@ class ApplicationCell:
         # `dry_run` never consults or writes a record at all (ruling I-7 /
         # D-4): the guard below is `idempotency_key is not None and not
         # dry_run`, never merely `idempotency_key is not None`.
+        # history: CH-1015
         idempotency_digest_value: str | None = None
         idempotency_now: float = 0.0
         if idempotency_key is not None and not dry_run:
@@ -1106,10 +1131,11 @@ class ApplicationCell:
                 return MutationOutcome(
                     affected=payload["affected"], assigned_addresses=payload["assigned_addresses"],
                     destructive=False, committed=True, plan=None, replayed=True,
-                    # Contract 1.7.0 (D-7 (3), WP-2e): the ORIGINAL
+                    # Contract 1.7.0 (D-7 (3)): the ORIGINAL
                     # execution's own `request_id` -- read back from the
                     # record's own payload (guaranteed present, M-6: no
                     # fallback to this resend's own request_id).
+                    # history: CH-1016
                     request_id=payload["request_id"],
                 )
             # Ruling I-6/D-5 (5): capacity is checked BEFORE this request
@@ -1126,30 +1152,32 @@ class ApplicationCell:
         try:
             affected = 0
             assigned_addresses: list[dict[str, Any]] = []
-            # Phase 4 (design D-2): whether this batch passed through the
+            # whether this batch passed through the
             # DESTRUCTIVE_CONFIRMATION_V1 choke -- what
             # `MutationOutcome.destructive` reports. Tracked here (not re-derived
             # from `operations` after the fact) because it is `_apply`'s
             # own successful pass through `require_destructive_
             # confirmation` that establishes it, not merely the presence
             # of a `delete` key in the request.
+            # history: CH-1017
             destructive = False
             for operation_index, operation in enumerate(operations):
                 if deadline is not None and clock is not None:
-                    # WP-2 review M-2: per-operation deadline check, not
+                    # per-operation deadline check, not
                     # only before/after the whole batch -- a unique-index
                     # write check is O(rows) per operation, so an O(N^2)-ish
                     # batch (many operations against a large, uniquely-
                     # indexed entity) could otherwise run well past the
                     # execution budget before the next checkpoint.
+                    # history: CH-1018
                     limits.check_deadline(deadline, clock)
-                # Monitor ruling M-3/D (rulings-wp2a-review.md, rulings-
-                # wp3a-review.md D): `operation_index` is this operation's
+                # `operation_index` is this operation's
                 # own position in the request's `operations` list --
                 # `_apply` below uses it to compose `details.field` as a
                 # request-internal path (`operations/<i>/values/<field>`,
                 # D-3 (2)) for any VALIDATION_FAILED it raises validating
                 # this operation's own `values`.
+                # history: CH-1019
                 count, address, op_destructive = self._apply(entity, operation, operation_index)
                 affected += count
                 destructive = destructive or op_destructive
@@ -1180,7 +1208,7 @@ class ApplicationCell:
                     affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
                     committed=False, plan=expected_plan, request_id=request_id,
                 )
-            # Phase 4 (design D-2/D-10): the pre-commit hook is called for
+            # the pre-commit hook is called for
             # every real batch, not only a destructive one, as the LAST
             # thing this method does before its own commit point (here:
             # returning normally -- this in-memory backend has no separate
@@ -1190,6 +1218,7 @@ class ApplicationCell:
             # caught by the `except Exception` below, exactly like any
             # other mid-batch failure -- restoring `before` and propagating
             # (fail-closed by construction, no special-casing needed).
+            # history: CH-1020
             if audit_hook is not None:
                 audit_hook.pre_commit()
             # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded
@@ -1206,10 +1235,11 @@ class ApplicationCell:
             if idempotency_key is not None and idempotency_digest_value is not None:
                 self._idempotency_store(
                     idempotency_key, digest=idempotency_digest_value, kind="mutation",
-                    # Contract 1.7.0 (D-7 (3), WP-2e): `request_id` rides
+                    # Contract 1.7.0 (D-7 (3)): `request_id` rides
                     # in the same payload the replay branch above reads
                     # back from -- so a future replay returns THIS
                     # execution's own `request_id`, not a fresh one.
+                    # history: CH-1022
                     payload={"affected": affected, "assigned_addresses": assigned_addresses, "request_id": request_id},
                     now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
                 )
@@ -1222,19 +1252,21 @@ class ApplicationCell:
         field_types = self.schema.get(entity, {})
         known_fields = set(field_types.keys())
         bound = bind_mutation(operation, known_fields, operation_index=operation_index)
-        # Contract 1.7.0 (D-2 (4), WP-2a): the registry's own entry for
+        # Contract 1.7.0 (D-2 (4)): the registry's own entry for
         # this entity -- addendum 2 S-k's 6 write call sites (3 here, 3 in
         # `postgres.py`) all pass THIS through to `_check_type`; the 2
         # predicate call sites (`_validate_predicate_types`, below and in
         # `query`) never do (D-2 (2): a query predicate is not bound by
         # `enum`/`nullable`).
+        # history: CH-1023
         entity_constraints = self.field_constraints.get(entity, {})
-        # Monitor ruling M-3/D (rulings-wp2a-review.md, D-3 (2)): every
+        # every
         # `details.field` this method raises for a VALUE-position defect
         # in `bound.values` names the request-internal PATH to that value
         # (`operations/<operation_index>/values/<field>`), never the bare
         # entity field name -- mirrors the contract text's own example
         # verbatim ("operations/0/values/label").
+        # history: CH-1024
         values_path = f"operations/{operation_index}/values/"
 
         if bound.operation == "insert":
@@ -1298,10 +1330,11 @@ class ApplicationCell:
                 reversible_alternative=None,
                 recovery=None,
             )
-            # Phase 4 (design D-2): reaching this point means `require_
+            # reaching this point means `require_
             # destructive_confirmation` above did not raise -- this
             # operation is confirmed-destructive, the fail-closed dispatch
             # signal `transact` aggregates across the whole batch.
+            # history: CH-1025
             if bound.expected_revision is not None:
                 target = [row for row in matches if row["_r2db_revision"] == bound.expected_revision]
                 if not target:
@@ -1458,10 +1491,12 @@ class ApplicationCell:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> "SchemaOutcome":
-        """Ruling U-7 (WP-6d): thin lock wrapper -- see `transact`'s
+        """thin lock wrapper -- see `transact`'s
         identical wrapper above and `_idempotency_lock`'s own field
         comment. All actual behavior lives in `_apply_schema_locked`
         below, unchanged.
+
+        History: CH-1026
         """
         with self._idempotency_lock:
             return self._apply_schema_locked(
@@ -1485,12 +1520,11 @@ class ApplicationCell:
         idempotency_key: str | None = None,
         request_id: str | None = None,
     ) -> "SchemaOutcome":
-        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4):
         identical single tx-exit-point discipline to `transact` above,
         adapted to this method's own pre-existing `before_*`-snapshot
         restore machinery (5 pieces of state, not one `deepcopy`d dict).
-        Always returns `SchemaOutcome` -- review round F-8 (`{scratchpad}/
-        rulings-r4.md`): a bare `int` for one request and a `SchemaOutcome`
+        Always returns `SchemaOutcome` -- review round F-8: a bare `int` for one request and a `SchemaOutcome`
         for the structurally identical request differing only in whether
         it happened to carry `plan` was two shapes for the same call, not
         a backward-compatibility rule. `DataService.schema` (`service.py`)
@@ -1498,6 +1532,8 @@ class ApplicationCell:
         always returns `SchemaOutcome` too -- its own pre-1.7.0-shaped
         direct callers read `.revision` off it instead of comparing the
         result itself to an `int`.
+
+        History: CH-1027
         """
         bound = bind_schema_operation(operation, developer=developer)
         if deadline is not None and clock is not None:
@@ -1540,10 +1576,11 @@ class ApplicationCell:
                     request_id=payload["request_id"],
                 )
             self._idempotency_reserve(limits, now=idempotency_now)
-        # WP-2 review M-2: indexes count toward `schema_objects` too, like
+        # indexes count toward `schema_objects` too, like
         # entities/fields already did (SI-08: an index is a real resource,
         # and every write against a uniquely-indexed entity pays a
         # per-index scan cost proportional to the index count).
+        # history: CH-1029
         current_objects = sum(len(fields) + 1 for fields in self.schema.values()) + sum(len(idx) for idx in self.indexes.values())
         if bound.operation == "create_entity":
             projected_objects = current_objects + 1 + len(bound.fields)
@@ -1853,15 +1890,17 @@ class ApplicationCell:
         if idempotency_key is not None and idempotency_digest_value is not None:
             self._idempotency_store(
                 idempotency_key, digest=idempotency_digest_value, kind="schema",
-                # Contract 1.7.0 (D-7 (3), WP-2e): see `transact`'s
+                # Contract 1.7.0 (D-7 (3)): see `transact`'s
                 # identical comment -- `request_id` rides in the payload a
                 # future replay reads back.
+                # history: CH-1033
                 payload={"revision": self.schema_revision, "request_id": request_id},
                 now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
             )
-        # Review round F-8: always `SchemaOutcome`, plan or no plan --
+        # always `SchemaOutcome`, plan or no plan --
         # every pre-1.7.0 direct caller of this method (`test_constraints_
         # declaration.py`'s many `cell.apply_schema(...)` call sites among
         # them) now reads `.revision` off the result instead of comparing
         # the result itself to an `int`.
+        # history: CH-1034
         return SchemaOutcome(committed=True, revision=self.schema_revision, request_id=request_id)

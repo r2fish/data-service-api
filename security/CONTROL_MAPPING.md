@@ -2,6 +2,7 @@
 
 Status: **Implementation mapping template**
 
+Version: **3.26** (2026-10-05; R-22 -- SI-03 r2db-api, SI-08 r2db-api, SI-09 r2db-api, SI-11 r2db-api: the position references into `r2db-api/src/r2db_api/structured.py` follow the lines that the move of 36 comment blocks' history to `docs/code-history/r2db-api/structured.md` inserted and removed in that module; no claim's statement changes.)
 Version: **3.25** (2026-10-05; R-22 -- SI-02 MitateDB-api, SI-06 MitateDB-api, SI-07 MitateDB-api, SI-08 r2db-api, SI-08 MitateDB-api, SI-09 MitateDB-api, SI-12 MitateDB-api, SI-13 MitateDB-api, SI-14 r2db-api, SI-14 MitateDB-api, SI-15 MitateDB-api: the position references into `r2db-api/src/r2db_api/platform_declarations.py` and `MitateDB-api/src/mitatedb_api/control_plane.py` follow the lines that the move of 26 comment blocks' history to `docs/code-history/` inserted and removed in those two modules; no claim's statement changes.)
 Version: **3.24** (2026-10-04; R-22 -- SI-03 MitateDB-api, SI-08 MitateDB-api, SI-09 MitateDB-api, SI-10 Common, SI-11 r2db-api, SI-11 MitateDB-api, SI-14 MitateDB-api: the position references into `MitateDB-api/src/mitatedb_api/cell.py` follow the lines that the move of 42 comment blocks' history to `docs/code-history/MitateDB-api/cell.md` inserted and removed in the second half of that module; no claim's statement changes.)
 Version: **3.23** (2026-10-04; R-22 -- SI-03 MitateDB-api, SI-04 MitateDB-api, SI-08 MitateDB-api, SI-09 MitateDB-api, SI-10 Common, SI-11 r2db-api, SI-11 MitateDB-api, SI-11 Common, SI-14 MitateDB-api: the position references into `MitateDB-api/src/mitatedb_api/cell.py` follow the lines that the move of 36 comment blocks' history to `docs/code-history/MitateDB-api/cell.md` inserted and removed in the first half of that module; no claim's statement changes.)
@@ -370,7 +371,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 #### Control
 
 - `ApplicationCell.apply_schema` requires developer context -- `r2db-api/src/r2db_api/backend.py:125-129`, `r2db-api/src/r2db_api/structured.py:178-179`.
-- The schema catalog rejects unknown runtime entity/fields -- `r2db-api/src/r2db_api/structured.py:884`.
+- The schema catalog rejects unknown runtime entity/fields -- `r2db-api/src/r2db_api/structured.py:899`.
 - The topology has distinct data and development planes -- `r2db-api/src/r2db_api/topology.py:27-28`.
 - `PostgresCell.apply_schema` checks the same `developer: bool` flag and executes every schema-changing statement only over the `developer_dsn` connection pool -- `r2db-api/src/r2db_api/postgres.py`:2224-2258.
 - The DML-only `runtime` role has no `CREATE` grant on the schema at all: `REVOKE ALL ON SCHEMA public FROM PUBLIC`, a `USAGE`-only grant to it, and `ALTER DEFAULT PRIVILEGES` -- `migrations/0003_provision_application.sql`.
@@ -684,7 +685,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 - `_run` checks the deadline before each statement and `_transaction` before each `BEGIN` or `SAVEPOINT`, by a clock comparison with no database round trip; nothing checks after the last statement -- `r2db-api/src/r2db_api/postgres.py:281`, `:292`.
 - `_timeout_ms` refuses a remaining budget under 1 ms with `LIMIT_EXCEEDED` (`execution_ms`), never returns a bound of 0, and returns no bound above what remained when it was computed -- `r2db-api/src/r2db_api/postgres.py:2791`.
 - a pool wait or a connection attempt (new, or replacing a closed or dead one) that ends with the budget spent is `LIMIT_EXCEEDED` (`execution_ms`) by one clock judgment, any other failure stays 503 -- `r2db-api/src/r2db_api/postgres.py:462`, `:519`.
-- `ResourceLimits.check_deadline` refuses under 1 ms remaining; the in-memory `ApplicationCell` shares it, checking before each operation and not after -- `r2db-api/src/r2db_api/limits.py:99`, `r2db-api/src/r2db_api/structured.py:1145`, `:1599`.
+- `ResourceLimits.check_deadline` refuses under 1 ms remaining; the in-memory `ApplicationCell` shares it, checking before each operation and not after -- `r2db-api/src/r2db_api/limits.py:99`, `r2db-api/src/r2db_api/structured.py:1173`, `:1636`.
 - **CCR-14** `ControlPlaneService` bounds the control-plane classes `applications` and `credentials_per_application`, where revoked rows never count, and publishes both `enforced` -- `r2db-api/src/r2db_api/control_plane.py:766`.
 - `control_requests_per_minute` is a third control-plane class, one global sliding 60s window rather than a per-credential one, published `enforced` -- `r2db-api/src/r2db_api/control_plane.py:1409`.
 - `_check_rate` runs before authentication and before any durable audit write, so a flood cannot generate unbounded audit rows -- `r2db-api/src/r2db_api/control_plane.py:1409`.
@@ -1242,11 +1243,11 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1796`.
-- **CCR-13** treats dropping a declared unique index as schema deletion like `drop_entity`, since it is effectively irreversible once duplicate data has entered (R-5) -- `r2db-api/src/r2db_api/structured.py:568`.
-- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1807`.
+- `structured.py` requires operation-specific confirmation for delete and drop, `drop_index` included -- `r2db-api/src/r2db_api/structured.py:1833`.
+- **CCR-13** treats dropping a declared unique index as schema deletion like `drop_entity`, since it is effectively irreversible once duplicate data has entered (R-5) -- `r2db-api/src/r2db_api/structured.py:580`.
+- the check runs before any revision-precondition evaluation on `update`/`delete`, failure before execution (R-4) -- `r2db-api/src/r2db_api/structured.py:1844`.
 - `structured.py` defines phrase construction exactly once for 4 of the 5 gated surfaces, imported by both `control_plane.py` and `ops.py` rather than reimplemented -- `r2db-api/src/r2db_api/structured.py:22`.
-- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1784`.
+- the 4 surfaces sharing that module are `delete`/`drop_entity`/`drop_index`, `revoke_credential`'s last-control-credential gate, and the ritual CLI's `reset`/`delete-credential` -- `r2db-api/src/r2db_api/structured.py:1821`.
 - the 5th gated surface, the ritual CLI's `deprovision`, keeps its own phrase (`_deprovision_confirmation_phrase`, `ops.py`) beside its caller -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase`'s material (`r2dbsvc_registry.applications.provisioned_at`) is a registry value `structured.py`'s own cell-layer phrase functions never read -- `r2db-api/src/r2db_api/ops.py:2056`.
 - `_deprovision_confirmation_phrase` is held isomorphic to MitateDB-api's own same-named function by `_ISOMORPHIC_TARGETS` -- `r2db-api/src/r2db_api/ops.py:2056`.
@@ -1602,7 +1603,7 @@ spaces." (Form 3.0 removed the rewritten form of sentence (2) together with the 
 
 #### Control
 
-- `ApplicationCell.transact` snapshots and restores on failure -- `r2db-api/src/r2db_api/structured.py:995`.
+- `ApplicationCell.transact` snapshots and restores on failure -- `r2db-api/src/r2db_api/structured.py:1015`.
 - `r2db-api/src/r2db_api/postgres.py`'s `PostgresCell.transact` maps one HTTP request to one real PostgreSQL transaction (design D-5).
 - every operation in a batch runs inside a single `conn.transaction()` block -- `r2db-api/src/r2db_api/postgres.py:1732`.
 - `PostgresCell.transact` rolls the whole batch back via PostgreSQL itself on any exception, including a `FoundationError` raised by a later operation in the batch, rather than an in-memory snapshot -- `r2db-api/src/r2db_api/postgres.py:1732`.
