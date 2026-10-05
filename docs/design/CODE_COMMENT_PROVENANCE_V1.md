@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v0.32 (2026-10-05)**: §10.12 に変更セット 9 (r2db `structured.py`) の実施記録、起動検査の fingerprint に入る module の扱い、教訓 3 行、次の候補を追記した。§10.11 は書き換えていない。
 - **v0.31 (2026-10-05)**: §10.11 に変更セット 8 (r2db `platform_declarations.py` と MitateDB `control_plane.py`) の実施記録、クラウドセッションの下準備の取り込みの記録、教訓 3 行、次の候補を追記した。§10.10 は書き換えていない。
 - **v0.30 (2026-10-05)**: §10.10 に変更セット 7 の WP-7b (MitateDB `cell.py` の後半) の実施記録、受け入れ監査の結果、教訓 3 行、次の候補を追記した。§10.9 は書き換えていない。
 - **v0.29 (2026-10-04)**: §10.9 に変更セット 7 の WP-7a (MitateDB `cell.py` の前半) の実施記録、教訓 3 行、次の候補を追記した。§10.8 は書き換えていない。
@@ -733,3 +734,27 @@
 - §6 の優先 2 (未着手の module、CH-ID の無い 10 行以上の塊の行数順): MitateDB `platform_declarations.py`、MitateDB `backend.py`、MitateDB `credential_store_postgres.py`、r2db `auth.py`。
 - 日付の残りと、検査器が日付だけの除去・作業ノートの参照の除去を受け付けない形 (§10.10 の次の候補と同じ)。
 - CH-ID は CH-0990 から取る (CH-0868〜CH-0924 と CH-0946〜CH-0989 は変更セット 8 の予約の未使用分で欠番)。
+
+### 10.12 実施記録 (2026-10-05、v0.32 追記)
+
+| 変更セット | 内容 | commit (merge) | 主な結果 |
+|---|---|---|---|
+| 9 | r2db `structured.py` (対象 103 塊)。1 WP (作業指示書 §18、裁定 Y9-1〜Y9-15) | `27c0ea9` (`5a41b97`) | 103 塊中 36 塊に CH-ID (CH-0990〜CH-1034 のうち。CH-0990〜CH-1039 の範囲で欠番 14)。編集 38 件 (文頭ラベル 17、文頭でないラベル 1、括弧内トークン 17、日付句 1、作業ノートの括弧 2)、文の削除 0。経緯トークン 112 → 65、日付を含む行 3 → 2、作業ノートの参照の行 9 → 7。登録 541 → 577 ID。変異 25 件がすべて赤。`--base ff76b35` = `comment provenance OK: 122 blocks checked`。完了ゲート `5248 passed, 2 subtests passed` (`judge=PASS`、label `cs9c`)、統合時の `tools/tests` `808 passed in 105.76s (0:01:45)`。`security/CONTROL_MAPPING.md` 3.26 (位置参照 8 件の引き直しだけ) |
+
+- **クラウドセッションの下準備**: 変更セット 8 と同じ分担 (branch `claude/funny-rubin-fbl2sx` の commit `bdc6886` の `cloud-out/cs9/`。main には入れていない)。クラウドの環境の既定の identity が r2fish の noreply でなかったので、クラウドは commit せずに止まり、依頼者の指示で identity をその commit にだけ渡して branch に置いた。
+- **MitateDB `platform_declarations.py` を外した** (Y9-14): クラウドの草案は 2 module を対象にしていた。設計レビュー (観点 A) が、この module の blob id が運用の起動検査 (`MitateDB-api/src/mitatedb_api/startup_checks.py` の `KNOWN_FINGERPRINTS`) に入り、コメントだけの編集でも `test_working_tree_*_fingerprint_is_the_current_generation_row` が赤になることを実測で示した。直すには現行世代の行 (plane ごとに 1 行) の追加と、行の件数を固定する test の更新が要る。それは挙動に関わる表の変更なので、コメント整理の変更セットに混ぜない。設計 §5 (b) の grep (`read_text|\.count\(|getsource|__doc__`) は blob id の比較を拾わない。
+- **fingerprint に入るもの** (`ff76b35` の `startup_checks.py`、再確認レビューの実測): blob id で入る (コメント 1 文字でも変わる) のは MitateDB `platform_declarations.py`・`config.py`・`main.py`・`control_composition.py`。`http.py` は `DEFAULT_THREAD_LIMIT` の代入文の範囲だけ。MitateDB `src` のその他の `.py` は AST の名前参照と文字列定数だけが入り、コメントだけの編集では変わらない。r2db に起動検査の fingerprint は無い。
+- **設計レビュー** (作業指示書 §18、観点 A / B の並列 1 回と再確認 1 回): 上の fingerprint、監査用 wrapper の列の読み方が記録の枠と合わず変異が空振りになる、完了条件 19 は訂正の記録を足さない変更セットでは非該当、変異の対象の誤り、作業ノートの参照の除去規律の引き継ぎ漏れ、古い値。全件を反映した。
+- **コードレビュー** (観点 A / B の並列 1 回と再確認 1 回): 観点 A は CH-ID を付けた 41 塊を全部読んだ。戻したのは 5 塊で、どれも作業ノートの参照の除去である: 括弧・ラベルの中の path だけを除くと、残った位置指定 (`addendum 2`・`追補4`・`U-7`) が同じ module で別の設計文書を指す同じ語と重なる (CH-1035〜CH-1037)。括弧ごと除くと、残った裸の `M-2:` が同じ module の別の裁定 `R-4, corrigendum M-2:` と同じ語になる (CH-1038・CH-1039。再確認で確定した)。ファイル名だけを残す形は検査器が拒む。
+- **受け入れ監査** (1 回): 着手条件と完了条件 1〜36 は未充足 0・証拠不足 0。基点から spec と `repull.py` を当て直した結果がコミットと sha256 で一致した。記録の文言の不一致 2 件は作業指示書 §18 の末尾の訂正註で直した。
+
+**教訓**:
+- 対象の module を選ぶ前に、その path が blob id で何かの識別に使われていないかを確かめる (起動検査の fingerprint)。文字列検査の grep では見つからない。
+- 作業ノートの参照を除くときは、除いた後に残る位置指定や裸の ID を module 全体で grep し、別の文書・別の裁定の同じ語と重ならないことを確かめる。重なるなら基準のまま残す。
+- 監査用 wrapper は、記録の表の列の並びに依存する。枠を変えたら、変異の前に wrapper が緑であることを確かめる (空振りの赤を変異の赤と取り違えない)。
+
+**次の候補** (§6 の優先順。2026-10-05、main `5a41b97`):
+- 台帳 R-37 で `cell.py` から出たファイル (§6 の優先 1 の残り)。
+- §6 の優先 2 (未着手の module): MitateDB `backend.py`、MitateDB `credential_store_postgres.py`、r2db `auth.py`。fingerprint に blob id で入る 4 module (MitateDB `platform_declarations.py`・`config.py`・`main.py`・`control_composition.py`) は、fingerprint の行の追加と同じ変更セットで行うかを先に裁定する。
+- 検査器が受け付けない形 (日付だけの除去、`/`・`=` を含む版数付き括弧の中の WP の位置指定、作業ノートのファイル名だけを残す形) の許可を広げるか。
+- CH-ID は CH-1130 から取る (CH-1040〜CH-1059 は変更セット 9 の予約の未使用分、CH-1060〜CH-1129 は外した MitateDB `platform_declarations.py` のための予約で、どちらも欠番)。
