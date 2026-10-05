@@ -72,6 +72,10 @@
 - **未決** (§4 の未決に続く): fingerprint に blob id で入る MitateDB の 4 module (`platform_declarations.py`・`config.py`・`main.py`・`control_composition.py`) のコメント整理を、fingerprint の行の追加と同じ変更セットで行うか、対象から外すか。検査器が受け付けない形の許可を広げるか (来歴設計 §10.12 の次の候補)。
 - **次の一手**: 依頼者の事後確認。GitHub への送信 (翌日以降、(b)(c) を済ませてから)。worktree と branch を畳む。origin の branch `claude/compassionate-allen-tmpnju`・`claude/funny-rubin-fbl2sx` (クラウドの成果物) の扱いを依頼者に確認する。次の変更セットは新しいチャットで行う (本チャットはモデル呼び出しが 300 回に近い。`OPERATING_CONDITIONS.md` §1.10 の 67)。CH-ID は CH-1130 から。
 
+## 6c. 追記 — 依頼者の事後確認 (2026-10-05)
+
+依頼者 (逐語): 「事後確認は了承します」。対象は §4 の 1〜8、§6 の 9〜14、§6b の 15〜18 の監督裁定 18 件。台帳 v1.179 の R-22 行に記録した。§4 と §6b の未決 (fingerprint に入る MitateDB の 4 module の扱い、検査器が受け付けない形の許可、origin のクラウドの branch 2 本の扱い、GitHub への送信) は確認の対象ではなく、残る。
+
 ## 7. 裁定
 
 | 指摘 | 裁定 | 理由 |
